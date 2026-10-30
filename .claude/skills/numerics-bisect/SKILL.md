@@ -1,6 +1,6 @@
 ---
 name: numerics-bisect
-description: Outputs differ between two paths that should agree - chunk sizes, prefill vs decode, prefix-cache resend, imp vs llama.cpp vs HF, two builds/kernels, "first token differs", "logprobs moved", "which layer diverges", near-tie. Not loops/garbage (check-degeneration), new arch (add-model-arch), perf (benchmark-cuda).
+description: Outputs differ between two paths that should agree - chunk sizes, prefill vs decode, prefix-cache resend, imp vs vLLM vs HF, two builds/kernels, "first token differs", "logprobs moved", "which layer diverges", near-tie. Not loops/garbage (check-degeneration), new arch (add-model-arch), perf (benchmark-cuda).
 ---
 
 # Numerics bisect - imp
@@ -13,8 +13,8 @@ Order is fixed: ids, logprobs, hidden states, reference. Each rung is cheaper th
 |---|---|---|---|
 | 1 | Compare token ids of both prompts first | `imp-cli` / server token ids vs the other path | ids differ = tokenizer or template bug (add-model-arch step 5), stop here |
 | 2 | Logprob grid over the axis (chunk size, engine, build) | first-token logprobs per arm; chunk axis via `--prefill-chunk-size <n>` (`runtime.prefill_chunk_size`); raw logits via `diagnostics.dump_logits_dir` | a spread across the axis is the signal; greedy-text equality alone amplifies near-ties |
-| 3 | Hidden-state dumps per layer | `diagnostics.dump_hidden_dir` + `tools/analysis/layer_ab_diff.py` (two imp runs) or `tools/analysis/layer_diff.py` (vs llama.cpp) | first block with non-zero added divergence (rel@out - rel@in) owns the bug |
-| 4 | Reference arbitration | HF transformers fp32 (GGUF: `from_pretrained(..., gguf_file=...)`, dequantized) plus llama.cpp with `-fa off` | the arm that matches both references is right |
+| 3 | Hidden-state dumps per layer | `diagnostics.dump_hidden_dir` + `tools/analysis/layer_ab_diff.py` (two imp runs) | first block with non-zero added divergence (rel@out - rel@in) owns the bug |
+| 4 | Reference arbitration | HF transformers fp32 (GGUF: `from_pretrained(..., gguf_file=...)`, dequantized) plus vLLM on the same SafeTensors checkpoint | the arm that matches both references is right |
 | 5 | Judge near-tie tokens by multi-token NLL | `imp-cli --perplexity tools/analysis/ppl_corpus_45k.txt` (rebuild with `tools/analysis/make_ppl_corpus.sh`), `--set runtime.deterministic=true` both arms | never by one token: llama.cpp FA on vs off alone moved a near-tie token by 0.082 |
 
 ## Dump traps

@@ -2,7 +2,7 @@
 layer: L0
 audience: newcomers
 verified: 2026-10-30
-commit: 4967c34e
+commit: 4666a109
 -->
 
 <p align="center">
@@ -24,25 +24,23 @@ RTX 5050 to 5090 · RTX PRO 2000 to 6000 · one <code>docker run</code> · OpenA
 
 ### Measured on one RTX 5090
 
-| Qwen3.8-27B, tokens/s | **imp** | vLLM 0.31.0 | llama.cpp |
-| --- | ---: | ---: | ---: |
-| one user | **96.3** | 69.9 | |
-| 32 users at once (total) | **1979.1** | 1414.2 | |
-| one user, same Q4_K_M GGUF file | **77.1** | | 62.9 |
-| 32 users at once, same GGUF file | **1365.2** | | 178.7 |
+| Qwen3.8-27B NVFP4, tokens/s | **imp** | vLLM 0.31.0 |
+| --- | ---: | ---: |
+| one user | **96.3** | 69.9 |
+| 32 users at once (total) | **1979.1** | 1414.2 |
 
-<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (imp, llama.cpp: ggml-org GGUF) cuda=13.4.3 path=server-api
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (Qwen3.8-27B-NVFP4-vllm on both) cuda=13.4.3 path=server-api
        cmd=`tools/analysis/engine3_conc.sh` n=3 trials x 3 waves note=imp ghcr v0.59.0; one-user imp row speculative.mtp_k=0 ngram=false; MTP k=2 on both: `tools/analysis/mtp_vs_vllm.sh` 3 starts x 12 chat requests; docs/audit/launch_2026_10_27/] -->
 
-Server API, 300-token greedy answers to short prompts, median of 3 fresh-server trials, each engine on its defaults; imp and vLLM read the same NVFP4 checkpoint, imp and llama.cpp the same GGUF file. No speculative decoding in the one-user rows (imp NVFP4: switched off; imp GGUF: its default drafts nothing, 77.7 with all of it forced off). With the model's own MTP draft head on in both engines (imp: `--max-batch 1`), 6 real chat prompts: imp **126.49**, vLLM 116.84; on short template completions the two are within noise. Ranges, commands, raw logs: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#qwen38-27b-three-engines). **tokens/s** = how fast the answer appears (a token is about ¾ of a word).
+Server API, 300-token greedy answers to short prompts, median of 3 fresh-server trials, each engine on its defaults, both reading the same NVFP4 checkpoint. No speculative decoding in the one-user rows (imp: switched off). With the model's own MTP draft head on in both engines (imp: `--max-batch 1`), 6 real chat prompts: imp **126.49**, vLLM 116.84; on short template completions the two are within noise. Ranges, commands, raw logs: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#qwen38-27b-imp-vs-vllm). **tokens/s** = how fast the answer appears (a token is about ¾ of a word).
 
 **Bigger than the card:** the 123.6 GiB **Qwen3.8-Flash-Next** answers at **92.1 tokens/s** for one user on a 32 GB RTX 5090, its experts in host RAM ([how](#models-larger-than-vram)).
 <!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts] -->
 
 ### Where imp loses, and what it is not
 
-- **One chip.** Tested on the RTX 5090; every other `sm_120a` card (RTX 5050 to 5090 D V2, RTX PRO 2000 to 6000 Blackwell) runs the same kernels, VRAM decides the model ([which card](docs/QUICKSTART.md#which-card)). No multi-GPU, no CPU, no other GPU: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs.
-- **Dense models under heavy load:** vLLM led Qwen3-14B at 32 users (-7.6 %, 2026-09-02); prompt reading on dense GGUF is level with llama.cpp, not ahead ([`BENCHMARKS.md`](docs/BENCHMARKS.md)).
+- **One chip.** Tested on the RTX 5090; every other `sm_120a` card (RTX 5050 to 5090 D V2, RTX PRO 2000 to 6000 Blackwell) runs the same kernels, VRAM decides the model ([which card](docs/QUICKSTART.md#which-card)). No multi-GPU, no CPU, no other GPU: use [vLLM](https://github.com/vllm-project/vllm) for those.
+- **Dense models under heavy load:** vLLM led Qwen3-14B at 32 users (-7.6 %, 2026-09-02, [`BENCHMARKS.md`](docs/BENCHMARKS.md)).
 - **Models bigger than the card** depend on host RAM, PCIe and how often the topic changes the set of busy experts.
 - **One maintainer, no GPU in CI:** every GPU test and benchmark runs on the maintainer's RTX 5090; issues are welcome, answers are not guaranteed. Every gap with its number: [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
@@ -60,7 +58,7 @@ Server API, 300-token greedy answers to short prompts, median of 3 fresh-server 
 
 **Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (8 GB on an RTX 5060 up to 96 GB on an RTX PRO 6000, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
-**File format: SafeTensors.** A **SafeTensors directory** in NVFP4 or FP8 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`) is what imp is optimised for. Your own BF16 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md). **GGUF files** (as used by llama.cpp) still load, but are legacy: no new speedups ([why](docs/DESIGN_DECISIONS.md)).
+**File format: SafeTensors.** A **SafeTensors directory** in NVFP4 or FP8 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`) is what imp is optimised for. Your own BF16 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md). **GGUF files** still load, but are legacy: no new speedups ([why](docs/DESIGN_DECISIONS.md)).
 
 ## Install
 

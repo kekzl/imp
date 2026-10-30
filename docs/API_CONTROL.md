@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-15
-commit: c0211fea
+verified: 2026-10-30
+commit: 4666a109
 -->
 
 # API: controlling a running request
@@ -11,7 +11,7 @@ Endpoint list and shared error rules: [`API.md`](API.md).
 
 ## Ending a think block
 
-`POST /v1/requests/{id}/end_thinking` (#2420, llama.cpp #23971): the next engine step forces the closer the think budget forces; the answer continues on the same KV.
+`POST /v1/requests/{id}/end_thinking` (#2420): the next engine step forces the closer the think budget forces; the answer continues on the same KV.
 
 | item | behaviour |
 |---|---|

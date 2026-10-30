@@ -3,12 +3,12 @@
 
 Runs imp-cli --bench for various model/prompt configurations,
 computes hardware efficiency metrics, and optionally compares
-against llama.cpp baseline results.
+against an earlier imp results JSON (A/B of two builds).
 
 Usage:
     python bench.py                          # Run all configs
     python bench.py --model qwen3-8b         # Single model
-    python bench.py --compare llamacpp       # Compare with llama.cpp results
+    python bench.py --compare old.json       # Compare with an earlier run
     python bench.py --imp-bin /path/imp-cli  # Custom binary path
 
 Requires: imp-cli binary (built with --bench support)
@@ -311,10 +311,10 @@ def print_results_table(results: list, title: str = "imp Benchmark Results"):
 
 
 def compare_with_baseline(imp_results: list, baseline_path: str):
-    """Compare imp results with llama.cpp (or other) baseline."""
+    """Compare imp results with an earlier imp results JSON."""
     if not os.path.exists(baseline_path):
         print(f"\n  No baseline found at {baseline_path}")
-        print(f"  Run: python bench.py --engine llamacpp --output {baseline_path}")
+        print(f"  Run: python bench.py --output {baseline_path} on the baseline build")
         return
 
     with open(baseline_path) as f:
@@ -326,10 +326,10 @@ def compare_with_baseline(imp_results: list, baseline_path: str):
         baseline_map[key] = r
 
     print(f"\n{'=' * 110}")
-    print(f"  Gap Analysis: imp vs llama.cpp")
+    print(f"  Gap Analysis: this run vs baseline")
     print(f"{'=' * 110}")
-    print(f"{'Model':<16} {'Config':<12} {'imp TG':>9} {'lcp TG':>9} "
-          f"{'Gap':>7} {'imp PP':>9} {'lcp PP':>9} {'Gap':>7} {'Winner':<8}")
+    print(f"{'Model':<16} {'Config':<12} {'imp TG':>9} {'base TG':>9} "
+          f"{'Gap':>7} {'imp PP':>9} {'base PP':>9} {'Gap':>7} {'Winner':<8}")
     print("-" * 110)
 
     for r in imp_results:
@@ -343,9 +343,7 @@ def compare_with_baseline(imp_results: list, baseline_path: str):
         tg_gap = r.tg_toks_per_sec / b["tg_toks_per_sec"] if b["tg_toks_per_sec"] > 0 else 0
         pp_gap = r.pp_toks_per_sec / b["pp_toks_per_sec"] if b["pp_toks_per_sec"] > 0 else 0
 
-        tg_winner = "imp" if tg_gap >= 1.0 else "llamacpp"
-        pp_winner = "imp" if pp_gap >= 1.0 else "llamacpp"
-        overall = "imp" if (tg_gap + pp_gap) >= 2.0 else "llamacpp"
+        overall = "this" if (tg_gap + pp_gap) >= 2.0 else "base"
 
         config = f"pp{r.pp_tokens}/tg{r.tg_tokens}"
         print(f"{r.model_id:<16} {config:<12} "
@@ -371,77 +369,16 @@ def save_results(results: list, output_path: str, engine: str = "imp"):
     print(f"\n  Results saved to: {output_path}")
 
 
-def run_llamacpp_bench(llamacpp_bin: str, model_path: str, pp: int, tg: int,
-                       reps: int = 3) -> tuple:
-    """Run llama-bench and parse output.
-
-    llama-bench output format:
-    | model | ... | pp ... | tg ... | pp t/s | tg t/s |
-    """
-    cmd = [
-        llamacpp_bin,
-        "-m", model_path,
-        "-p", str(pp),
-        "-n", str(tg),
-        "-r", str(reps),
-        "-ngl", "999",
-        "-fa",
-        "-t", "1",
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        output = result.stdout + result.stderr
-
-        # llama-bench outputs a markdown table with pp t/s and tg t/s columns
-        # Look for lines with actual numbers
-        pp_toks = 0
-        tg_toks = 0
-        for line in output.split("\n"):
-            if "|" in line and "model" not in line.lower() and "---" not in line:
-                cols = [c.strip() for c in line.split("|")]
-                # Last two numeric columns are typically pp t/s and tg t/s
-                nums = []
-                for c in reversed(cols):
-                    try:
-                        nums.append(float(c.replace(",", "")))
-                    except ValueError:
-                        continue
-                    if len(nums) >= 2:
-                        break
-                if len(nums) >= 2:
-                    tg_toks = nums[0]
-                    pp_toks = nums[1]
-
-        if pp_toks > 0 and tg_toks > 0:
-            pp_ms = (pp / pp_toks) * 1000.0
-            tg_ms = (tg / tg_toks) * 1000.0
-            return pp_ms, pp_toks, tg_ms, tg_toks, ""
-
-        return 0, 0, 0, 0, f"Parse error. Output:\n{output[-500:]}"
-
-    except subprocess.TimeoutExpired:
-        return 0, 0, 0, 0, "Timeout (600s)"
-    except FileNotFoundError:
-        return 0, 0, 0, 0, f"Binary not found: {llamacpp_bin}"
-    except Exception as e:
-        return 0, 0, 0, 0, str(e)
-
-
 def main():
     parser = argparse.ArgumentParser(description="imp benchmark suite")
     parser.add_argument("--imp-bin", default="./build/imp-cli",
                         help="Path to imp-cli binary")
-    parser.add_argument("--llamacpp-bin", default="llama-bench",
-                        help="Path to llama-bench binary")
     parser.add_argument("--models-dir", default="./models",
                         help="Directory containing model files")
     parser.add_argument("--model", default=None,
                         help="Run only this model ID")
     parser.add_argument("--reps", type=int, default=3,
                         help="Benchmark repetitions")
-    parser.add_argument("--engine", choices=["imp", "llamacpp"], default="imp",
-                        help="Which engine to benchmark")
     parser.add_argument("--output", default=None,
                         help="Output JSON path (auto-generated if not set)")
     parser.add_argument("--compare", default=None,
@@ -461,66 +398,23 @@ def main():
     # Default output paths
     results_dir = os.path.join(os.path.dirname(__file__), "results")
     if args.output is None:
-        args.output = os.path.join(results_dir, f"{args.engine}_baseline.json")
+        args.output = os.path.join(results_dir, "imp_baseline.json")
 
     print(f"imp Benchmark Suite")
-    print(f"  Engine:     {args.engine}")
     print(f"  Models dir: {args.models_dir}")
     print(f"  Configs:    {len(configs)}")
     print(f"  Reps:       {args.reps}")
     print()
 
-    if args.engine == "imp":
-        results = run_benchmarks(args.imp_bin, args.models_dir, configs, args.reps)
-    else:
-        # llama.cpp benchmarks
-        results = []
-        hw = RTX5090
-        for model_id, pp, tg, desc in configs:
-            info = MODEL_INFO.get(model_id)
-            if not info:
-                continue
-            model_path = os.path.join(args.models_dir, info["file"])
-            if not os.path.exists(model_path):
-                print(f"  SKIP {model_id}: {info['file']} not found")
-                continue
-
-            print(f"  Running: {model_id} pp={pp} tg={tg} ({desc})...")
-            pp_ms, pp_toks, tg_ms, tg_toks, error = run_llamacpp_bench(
-                args.llamacpp_bin, model_path, pp, tg, args.reps
-            )
-
-            r = BenchResult(
-                model_id=model_id, model_file=info["file"], quant=info["quant"],
-                pp_tokens=pp, tg_tokens=tg, description=desc,
-                pp_avg_ms=pp_ms, tg_avg_ms=tg_ms,
-                pp_toks_per_sec=pp_toks, tg_toks_per_sec=tg_toks, error=error,
-            )
-            if not error:
-                model_bytes = compute_model_size_bytes(info)
-                r.model_size_gb = model_bytes / 1e9
-                r.ttft_ms = pp_ms
-                r.tbt_ms = (tg_ms / tg) if tg > 0 else 0
-                r.mbu_pct, r.achieved_bw_gbps = compute_mbu(
-                    model_bytes, tg_toks, hw["mem_bw_gbps"]
-                )
-                r.mfu_pct, r.achieved_tflops = compute_mfu(
-                    info["params_b"], pp, pp_toks, hw["fp16_tflops"]
-                )
-            results.append(r)
+    results = run_benchmarks(args.imp_bin, args.models_dir, configs, args.reps)
 
     # Output
-    print_results_table(results, f"{args.engine} Benchmark Results")
-    save_results(results, args.output, args.engine)
+    print_results_table(results, "imp Benchmark Results")
+    save_results(results, args.output)
 
     # Compare if requested
     if args.compare:
         compare_with_baseline(results, args.compare)
-    elif args.engine == "imp":
-        baseline_path = os.path.join(results_dir, "llamacpp_baseline.json")
-        if os.path.exists(baseline_path):
-            compare_with_baseline(results, baseline_path)
-
 
 if __name__ == "__main__":
     main()

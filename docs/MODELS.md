@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4967c34e
+commit: 4666a109
 -->
 
 # Supported models
@@ -25,7 +25,7 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | Model | Quant | VRAM | Decode `tg256` | Format |
 |---|---:|---:|---:|---|
 | [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) | Q8_0 | 0.2 GB | embeddings (`/v1/embeddings`, HF-oracle cos ≥ 0.999), bidirectional, no KV, mean-pooled | GGUF |
-| [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`; top-1 agrees with llama.cpp on the same GGUF, median score delta 0.0014) | GGUF |
+| [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`) | GGUF |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
 | [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | gate pin (tg128): [`PERF.md`](PERF.md) | GGUF |
@@ -137,7 +137,7 @@ Image tokens cost VRAM in the encoder workspace, sized by `runtime.vision_max_pa
 
 ## Format notes
 
-- **GGUF** - standard llama.cpp format. `Q*_K`, `Q8_0`, `Q*_0`, MXFP4 (imp-proprietary tensor type 31). Loaded directly from a single file. Most quants come from [unsloth](https://huggingface.co/unsloth) or [bartowski](https://huggingface.co/bartowski).
+- **GGUF** - legacy format. `Q*_K`, `Q8_0`, `Q*_0`, MXFP4 (imp-proprietary tensor type 31). Loaded directly from a single file. Most quants come from [unsloth](https://huggingface.co/unsloth) or [bartowski](https://huggingface.co/bartowski).
 - **SafeTensors NVFP4 prequant** - produced by [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) or [llm-compressor](https://github.com/vllm-project/llm-compressor). Loaded from a directory with `config.json` + sharded `*.safetensors`. The Modelopt path is more thoroughly tested; llm-compressor degenerates past ~30 tokens on several models (see [roadmap](ROADMAP.md)).
 
 For the underlying quantization formats and when each one is used internally, see [`QUANTIZATION.md`](QUANTIZATION.md).

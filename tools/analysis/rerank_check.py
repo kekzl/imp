@@ -13,7 +13,7 @@ a cross-encoder reranker loaded:
              arithmetic. Ordering is unaffected.
 
 Optionally cross-checks against another OpenAI/Cohere-style reranking server
-(llama.cpp `--reranking` serves /rerank with the same shape) on the SAME model
+(vLLM serves /v1/rerank with the same shape) on the SAME model
 file, which is the only way to tell "our scores are self-consistent" from "our
 scores are right".
 
@@ -161,7 +161,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--compare", default="",
-                    help="optional reference reranking server (e.g. llama.cpp --reranking)")
+                    help="optional reference reranking server (e.g. vLLM /v1/rerank)")
     args = ap.parse_args()
     try:
         urllib.request.urlopen(args.url + "/health", timeout=30).read()

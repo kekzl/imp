@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-27
-commit: 6f1395b8
+verified: 2026-10-30
+commit: 4666a109
 -->
 
 # Limitations
@@ -29,8 +29,8 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Aliases onto the LLaMA path, no checkpoint of its own in a gate | Phi-4 | none | #1680 |
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |
 | Dequant paths with no gate reading such a checkpoint (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K do have one) | GGUF Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K | none | #1680 |
-| **Q8_1** (GGUF wire type 9, llama.cpp's activation format) has no weight path at all | GGUF loader | refused at parse | - |
-| Cross-check vs llama.cpp is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
+| **Q8_1** (GGUF wire type 9, an activation format) has no weight path at all | GGUF loader | refused at parse | - |
+| Cross-check against a reference reranker is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
 | Implemented, ungated | `/admin/suspend`, `/admin/resume`, `server.model_swap` | none | #1680 |
 | SSE frames, usage accounting, `finish_reason`, tool-call streaming: CI's `Real API contract (model-less)` job deselects every token-producing test, no GPU runner | server generation contract | run `make test-server` on a carded machine | #1600, #1559 |
 | Perf gate benches `imp-cli`, which never enters the SSE writer, tool-argument filter or per-chunk JSON serialisation | `tools/imp-server/` per-request cost | `scripts/verify.sh` server gate since 2026-10-05: 8 streamed 128-token chats on the baseline model, 8 % under the pin in `tests/perf_baseline.json`; tool-argument filter and multi-turn not driven | #1685 |
@@ -49,7 +49,6 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 
 | limitation | affected | workaround | issue |
 |---|---|---|---|
-| Perplexity on a shared GGUF reads higher than llama.cpp | Qwen3.8-27B Q4_K_M (ggml-org) | ppl_corpus_45k 4.4623 vs 4.3308 (+3.0 %) [PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M path=gguf cmd=`imp-cli --perplexity` vs `llama-perplexity` on ppl_corpus_45k n=1 note=CHANGELOG [0.52.0] entry of #2687; the window settings of the two tools are not recorded, like-for-like unverified] | `kv_cache.dtype=fp16` (imp default is NVFP4 KV on this family, measured at <= +0.35 % PPL) | #2687 |
 | One LoRA adapter at a time: engine-global (executor pointer, decode graphs) | LoRA serving | batching worker serializes by adapter (a request naming a different one waits for in-flight requests, then switches, never batched with them); prefix cache is keyed by adapter, so a shared system prompt prefills once per adapter; C API `imp_lora_set` has no such guard, swap between requests only | AUDIT_ARCH_2026 E-1 |
 | GGUF batched decode rows read the 4-bit overlay with 4-bit activations | batched decode (2-32 rows) on a GGUF source | small-M NVFP4 GEMM runs on the NVFP4 decode overlay (`smallm_weight_`, `src/exec/executor_gemm_smallm.cpp`); single-stream decode reads the same overlay with FP16 activations, prompt rows keep the full-precision dequant route; batched output not byte-identical to single-stream at temperature 0; numbers in [`PERF.md`](PERF.md) "Serving KPIs" | #1897, #1766 |
 | `server.green_contexts=true` gives no green contexts on this chip | sm_120 decode scheduling | `cudaDevResourceGenerateDesc` fails for the decode partition; fallback is priority streams with distinct memSyncDomains, `has_green_contexts()` stays false; dynamic SM reconfiguration in `step_schedule()` is gated on the flag and never runs [PROV: date=2026-08-22 hw=RTX5090, 170 SMs, 80/20 split, 99/1 retry] | reconfigure race #1656 is real code, unreachable on sm_120 |
@@ -92,7 +91,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | cc 12.1 has no image in the default build: the `compute_120f` PTX is opt-in (`IMP_DISABLE_120F_FALLBACK=OFF`, C-012) and lacks 26 kernels there (dense NVFP4 decode GEMVs, Q4_K / Q5_1 / Q5_K / Q6_K IMMA raw kernels, the `-rdc` TUs) | cc 12.1 devices (GB10, DGX Spark), untested; RTX 5090 / 5080 / 5070 Ti (cc 12.0) load `sm_120a` and are not affected | build with `IMP_DISABLE_120F_FALLBACK=OFF`; dropping `-rdc` costs -5.83 % decode on RTX 5090 ([`SM120.md`](internals/SM120.md)) | #1651 |
 | Audio is blocked on weights, not on work | Gemma-4 | declares the modality, imp says so at load; Gemma-4-12B-NVFP4 ships exactly one audio tensor (`model.embed_audio.embedding_projection.weight`, BF16 [3840, 640], 4.69 MiB), the bridge into the LM, nothing that produces those 640 dims from a waveform; `audio_config` describes no encoder either (`architectures: null`, no layer or head count, no mel parameters, only `audio_embed_dim`, `rms_norm_eps` and `PretrainedConfig` defaults); the same export carries 10 `model.embed_vision.*` tensors and zero `model.vision_tower.*` (vs 355 tower tensors in Gemma-4-26B-A4B-it-NVFP4), so this quantisation dropped both towers; needs a checkpoint carrying the audio tower, the way `--mmproj` supplies the vision one; imp downloads nothing itself (`scripts/stage-model.sh`) | roadmap Open 8, #1929 |
 | Qwen3.5-27B MXFP4 blocked on a checkpoint imp can decode | Qwen3.5-27B | no MXFP4 SafeTensors decode path exists outside gpt-oss; not a bug | - |
-| Gemma-4 on the FP8-KV quality gate: baseline perplexity on the gate corpus is broken | Gemma-4-it | scores text only inside its own turn framing; raw prose after BOS reads 19312 (imp) / 20066 (llama.cpp, same GGUF); the same prose plus its turn framing (below) reads 18.16 (UD-Q4_K_M), 26.06 (NVFP4 export), 26.99 (imp-quantize NVFP4), 704 tokens; stays FP16 KV unless opted in; gate corpus `tools/analysis/ppl_corpus_gemma4_turn.txt` | #2044 |
+| Gemma-4 on the FP8-KV quality gate: baseline perplexity on the gate corpus is broken | Gemma-4-it | scores text only inside its own turn framing; raw prose after BOS reads 19312; the same prose plus its turn framing (below) reads 18.16 (UD-Q4_K_M), 26.06 (NVFP4 export), 26.99 (imp-quantize NVFP4), 704 tokens; stays FP16 KV unless opted in; gate corpus `tools/analysis/ppl_corpus_gemma4_turn.txt` | #2044 |
 | Declares no FP8 KV hint | Qwen3.6-35B, Qwen3.5 | FP16 KV by default | - |
 | Quantised KV is a default only for QWEN35 and QWEN36_MOE, and it is a trade | Qwen3.8-27B-NVFP4, Qwen3.5-4B-mxfp4, Qwen3.6-35B-A3B-NVFP4 | `kv_cache.dtype=auto` resolves to NVFP4 for those families: +0.29..0.35 % PPL (Qwen3.8-27B), +0.15..0.18 % (Qwen3.5-4B mxfp4), for `max_model_len` 48512 -> 131072 tokens on a 32 GB card [PROV: commit=982cd43 date=2026-08-24]; Qwen3.6-35B +0.09 % (6.7939 -> 6.7998, 45k deterministic) for a 112336 -> 358176-token KV ceiling, tg128 -1.2 % at 512 / +1.5 % at 16384 context, NIAH 9/9 to 52417 tokens (#2415); QWEN4_EXP (+0.47 %) and QWEN3_NEXT (ceiling +12 %) stay FP16; opt out `kv_cache.dtype=fp16`, opt in elsewhere `=nvfp4` | #2415 |
 | GDN-hybrid concurrency fixed 2026-08-24; table is the OLD behaviour, kept because the fix is one release old | GDN models, concurrent decode | before: one sequence per GDN decode step, 32 streams delivered 81.5 tok/s aggregate vs 1427 for a dense model; `runtime.gdn_batched_decode` (default on) batches them: **474.9 tok/s aggregate at 32-way, 5.8x** [PROV: commit=ce77a94 date=2026-08-24 model=Qwen3.8-27B-NVFP4]; `runtime.gdn_batched_decode=false` for the old rotation | - |

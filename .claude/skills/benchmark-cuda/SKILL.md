@@ -64,8 +64,8 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 | Per-kernel metrics, stalls | `ncu` (below); wrapper `tools/bench/profile.sh` |
 | Timeline, launch gaps, graphs | `nsys` (below) |
 | Full roofline sweep | `make roofline-measure` (`tools/roofline/`, README there); pin `make roofline-pin`, `roofline-regress`; history `tools/roofline/history/` |
-| imp vs vLLM (the reference, same SafeTensors checkpoint) | `tools/analysis/engine3_conc.sh` (1 and 32 streams), `tools/analysis/mtp_vs_vllm.sh` (MTP k=2 on both) |
-| imp vs llama.cpp (legacy GGUF heroes, release bar 2 until the vLLM sweep replaces it) | `make bench-competitive` (`scripts/bench_competitive.sh`, writes `/tmp/bench_competitive.tsv`) |
+| imp vs vLLM, release bar 2 (SafeTensors heroes, 1 stream) | `make bench-competitive` (`scripts/bench_competitive.sh`, writes `/tmp/bench_competitive.tsv`) |
+| imp vs vLLM, 1 and 32 streams / MTP k=2 on both | `tools/analysis/engine3_conc.sh`, `tools/analysis/mtp_vs_vllm.sh` |
 | Hero scoreboard | `bash scripts/scoreboard.sh` |
 
 Phantom: gemma-3-12b `--bench` prints bogus tok/s (#514); trust its PPL only.
