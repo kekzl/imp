@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-23
-commit: 9cbb8004
+verified: 2026-10-30
+commit: a4070e6a
 -->
 
 # docs
@@ -21,6 +21,8 @@ Gate: `scripts/docs_lint.py` (frontmatter, links, anchors, provenance, prose rul
 | Doc | Answers |
 |---|---|
 | [`QUICKSTART.md`](QUICKSTART.md) | from nothing to an answered completion |
+| [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) | how imp works, in six points |
+| [`BIG_MODELS.md`](BIG_MODELS.md) | models larger than the card: experts in host RAM, Qwen3.8-Flash-Next |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | compose, auth, reverse proxy, health, capacity |
 | [`CONFIG.md`](CONFIG.md) | `imp.conf` keys, `imp-cli` and `imp-server` flags, C API |
 | [`API.md`](API.md) | HTTP endpoints, request fields, errors |
