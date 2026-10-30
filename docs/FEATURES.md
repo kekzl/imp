@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: a4070e6a
+commit: ff42a9f5
 -->
 
 # Feature matrix
@@ -54,7 +54,7 @@ GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10
 | Anthropic `/v1/messages`, `/v1/messages/count_tokens` | ✅ | native, no shim |
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
-| `/v1/embeddings` | ✅ | |
+| `/v1/embeddings` | 🟡 | the only gated embedder (nomic-embed GGUF) left the test host with the GGUF checkpoints (2026-10-30); `tests/test_encoder_embed.cpp` skips without it |
 | `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the cross-check against a reference reranker is opt-in behind `COMPARE_URL=` (`Makefile:433 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |

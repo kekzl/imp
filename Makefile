@@ -302,9 +302,9 @@ test-quantize: build
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.
 # Set IMP_VISION_GOLDEN_DUMP=1 to regenerate goldens instead of asserting.
 test-vision: build
+	@# VisionGolden needs IMP_TEST_MMPROJ / IMP_TEST_MMPROJ_GEMMA4 (mmproj GGUFs, deleted
+	@# 2026-10-30): it skips here; pass them with -e to run it against your own files.
 	$(GPU_DOCKER) -v $(HOME)/models:/models -v $(PWD)/tests/fixtures:/fixtures \
-		-e IMP_TEST_MMPROJ=/models/gemma-3-4b-vl/mmproj-F16.gguf \
-		-e IMP_TEST_MMPROJ_GEMMA4=/models/gemma-3-4b-vl/mmproj-gemma4-26b-bf16.gguf \
 		-e IMP_VISION_TEST_IMAGE=/fixtures/vision_test_64.png \
 		-e IMP_VISION_GOLDEN_DUMP=$(IMP_VISION_GOLDEN_DUMP) \
 		$(DOCKER_IMG) imp-tests --gtest_filter="VisionGolden.*"
@@ -416,8 +416,10 @@ test-agents: build check-gpu
 # /v1/rerank contract, semantics (the relevant document wins) and stability.
 # Pass COMPARE_URL=http://host:port to also diff against a reference reranking
 # server (vLLM /v1/rerank) running the SAME model.
-RERANK_MODEL ?= qwen3-reranker-0.6b-q8_0.gguf
+# No default checkpoint: the only one was a GGUF, deleted 2026-10-30 (SafeTensors only).
+RERANK_MODEL ?=
 test-rerank: build check-gpu
+	@test -n "$(RERANK_MODEL)" || { echo "test-rerank: set RERANK_MODEL=<reranker under ~/models>"; exit 1; }
 	@docker rm -f imp-rerank >/dev/null 2>&1 || true
 	@docker run -d --name imp-rerank --gpus all -p 8080:8080 \
 		-v $(HOME)/models:/models $(DOCKER_IMG) \
