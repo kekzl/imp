@@ -445,6 +445,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/jump_draft.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_embed.cpp
     src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp

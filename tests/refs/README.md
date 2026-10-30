@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-08-23
-commit: 36a5a4fb
+verified: 2026-10-30
+commit: edd4d4ac
 -->
 
 # tests/refs/ — independent reference goldens
@@ -55,6 +55,7 @@ Generators:
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
 | `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |
+| `gen_qwen3_embedding_ref.py` | `qwen3_embedding_ref.json` | `tools/analysis/embed_check.py` (`make test-embed`) |
 | `tests/test_vision_golden.cu` (dump mode = its own generator) | `vision_encoder_golden.h` | `tests/test_vision_golden.cu` |
 | `gen_reference.py` | — (none committed) | **dormant** (TEST_AUDIT (retired) §7) — HF layer-by-layer dump infra for future use; no test consumes it |
 

@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: a4070e6a
+commit: edd4d4ac
 -->
 
 # Supported models
@@ -26,6 +26,8 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 |---|---:|---:|---:|---|
 | [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) | Q8_0 | 0.2 GB | embeddings (`/v1/embeddings`, HF-oracle cos ≥ 0.999), bidirectional, no KV, mean-pooled | GGUF |
 | [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`) | GGUF |
+| [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) | bf16 | 1.2 GB | embeddings (`/v1/embeddings`, last-token pooling, `make test-embed` cos >= 0.9999 vs HF) | SafeTensors |
+| [Qwen3-Reranker-0.6B](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B) | bf16 | 1.2 GB | reranking (`/v1/rerank`, `make test-rerank` default) | SafeTensors |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
 | [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | - | GGUF |

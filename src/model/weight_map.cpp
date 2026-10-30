@@ -389,6 +389,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
             name = strip_wrapper_lm_prefix(name);
         }
+        base_model_canonical_name(name);
 
         // Nemotron-H uses backbone.embeddings/norm_f top-level and backbone.layers.N.mixer.<sub>
         // for ALL per-layer weights (Mamba2, Attention, MoE share the mixer namespace). Translated

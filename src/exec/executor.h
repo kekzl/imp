@@ -153,6 +153,9 @@ public:
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
     // holds it; engine accumulates chunk sums host-side for full-input pooling.
     void pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream);
+    // Last-token pooling (ModelConfig::embed_last_token_pool): final RMSNorm of hidden_[n_tokens-1]
+    // into d_out[d_model] fp32, the HF last_hidden_state row sentence-transformers pools.
+    void pool_hidden_last(int n_tokens, float* d_out, cudaStream_t stream);
 
     // Greedy verify for n-gram speculative decoding: applies the tier-aware LM
     // head to hidden_[0..n_rows-1] (same logits as production greedy, incl.

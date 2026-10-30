@@ -482,28 +482,6 @@ void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t str
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 }
 
-void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream) {
-    const int d_model = static_cast<int>(model_->config().d_model);
-    if (!d_embed_pool_scratch_) {
-        d_embed_pool_scratch_ = static_cast<float*>(
-            vram_alloc_.allocate(static_cast<size_t>(d_model) * sizeof(float), "embed_pool_scratch"));
-        if (!d_embed_pool_scratch_) {
-            IMP_LOG_ERROR("VRAMAllocator failed for embed pool scratch (%d floats)", d_model);
-            return;
-        }
-    }
-    executor_->pool_hidden_sum(chunk_len, d_embed_pool_scratch_, stream);
-    std::vector<float> partial(d_model);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(partial.data(), d_embed_pool_scratch_,
-                                       static_cast<size_t>(d_model) * sizeof(float), cudaMemcpyDeviceToHost,
-                                       stream));
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    if (req.embedding_out.empty())
-        req.embedding_out.assign(d_model, 0.0f);
-    for (int d = 0; d < d_model; d++)
-        req.embedding_out[d] += partial[d];
-}
-
 void Engine::ensure_constraints_(const std::shared_ptr<Request>& req) {
     const bool tool_enforced = !req->tool_constraint_tools.empty();
     const bool regex_enforced = !req->regex_pattern.empty();
@@ -1049,6 +1027,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         // integer, no Request - the mapping is published once here instead.
         if (!req->trace_id.empty())
             IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
+        embed_prepare_(*req);
         // Logit lens rides the logprobs path: eager decode, no ragged prefill, no speculation.
         if (req->logit_lens > 0) {
             if (logit_lens_supported())

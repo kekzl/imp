@@ -895,8 +895,10 @@ private:
     void score_capture_(Request& req, const Tensor& logits, cudaStream_t stream);
 
     // and accumulate into req.embedding_out (host, fp32). Synchronizes the
-    // stream (one ~20KB D2H per chunk).
-    void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream);
+    // stream (one ~20KB D2H per chunk). Last-token models write only on the last chunk.
+    void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream, bool last_chunk);
+    void embed_prepare_(Request& req) const;  // engine_embed.cpp: append the end token
+    void embed_finish_(Request& req) const;   // mean pool: divide by the token count
 
     // Prompt logprobs (#2207) for the chunk hidden_ holds, rows [offset, offset+chunk_len) of the
     // prompt, into req.prompt_lp (host). Call after every read of the chunk's logits; synchronizes.
