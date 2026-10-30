@@ -328,6 +328,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_h_final, hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_logits, vocab_size * sizeof(__half));
     ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
+    ok &= alloc(&ws.d_q8_1, sizeof(block_q8_1) * ((hidden_dim + 31) / 32));
+    ok &= alloc(&ws.d_d8, sizeof(float) * ((hidden_dim + 31) / 32));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), sizeof(float) * kMtpTopWBlocks * kMtpMaxTopW);
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), sizeof(int) * kMtpTopWBlocks * kMtpMaxTopW);
@@ -480,6 +482,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_h_final);
     frfn(ws.d_logits);
     frfn(ws.d_logits_f32);
+    frfn(ws.d_q8_1);
+    frfn(ws.d_d8);
     if (ws.d_topk) {
         IMP_CUDA_CHECK_LOG(cudaFree(ws.d_topk));
         ws.d_topk = nullptr;
@@ -717,11 +721,37 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     return true;
 }
 
-// lm_head GEMV of ws.d_h_final: FP8 -> d_logits_f32, NVFP4 -> d_logits_f32, else FP16 -> d_logits.
-// False (ERROR logged) when the FP8 GEMV refuses its shape: the logits were never written.
-static bool mtp_lm_head_logits(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
-                               cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4, const void* lm_head_fp8,
-                               const float* lm_head_fp8_scales, bool fp8_lm, bool f32_lm) {
+// GGUF lm_head types gemv_dp4a_fp32_batched serves (Q8_0 is its default arm).
+static bool mtp_dp4a_lm_head(QType q) {
+    switch (q) {
+        case QType::Q8_0:
+        case QType::Q6_K:
+        case QType::Q5_K:
+        case QType::Q4_K:
+        case QType::Q4_0:
+        case QType::Q3_K:
+        case QType::Q2_K:
+        case QType::IQ4_NL:
+        case QType::IQ4_XS:
+        case QType::IQ3_S:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// lm_head GEMV of ws.d_h_final: FP8 / NVFP4 / GGUF dp4a -> d_logits_f32, FP16 / BF16 -> d_logits.
+// False (ERROR logged) when the FP8 GEMV refuses its shape or the head has no route: the logits were never
+// written. A Q6_K head without an NVFP4 cache entry went to gemm(), which refused it, and the argmax of the
+// stale logits fed an out-of-range token to the next draft (illegal address, Qwen3.8-27B-UD-Q4_K_M).
+static bool mtp_lm_head_logits(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim,
+                               int vocab_size, cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4,
+                               const void* lm_head_fp8, const float* lm_head_fp8_scales, bool& f32_lm) {
+    const bool fp8_lm = lm_head_fp8 != nullptr && lm_head_fp8_scales != nullptr && ws.d_logits_f32 != nullptr;
+    const bool nvfp4_lm = !fp8_lm && lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr;
+    const bool dp4a_lm = !fp8_lm && !nvfp4_lm && ws.d_logits_f32 != nullptr && ws.d_q8_1 != nullptr &&
+                         hidden_dim % 32 == 0 && mtp_dp4a_lm_head(main_lm_head.qtype);
+    f32_lm = fp8_lm || nvfp4_lm || dp4a_lm;
     if (fp8_lm) {
         if (gemv_fp8_rowscale_fp32(lm_head_fp8, lm_head_fp8_scales, static_cast<const half*>(ws.d_h_final),
                                    static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, 1, stream))
@@ -729,10 +759,24 @@ static bool mtp_lm_head_logits(MtpDraftWorkspace& ws, const Tensor& main_lm_head
         IMP_LOG_ERROR("mtp: FP8 lm_head GEMV refused its shape (vocab=%d hidden=%d)", vocab_size, hidden_dim);
         return false;
     }
-    if (f32_lm) {
+    if (nvfp4_lm) {
         gemv_nvfp4_kpar_fp32(*lm_head_nvfp4, static_cast<const half*>(ws.d_h_final),
                              static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, stream);
         return true;
+    }
+    if (dp4a_lm) {
+        auto* q8 = static_cast<block_q8_1*>(ws.d_q8_1);
+        auto* d8 = static_cast<float*>(ws.d_d8);
+        quantize_fp16_to_q8_1(static_cast<const half*>(ws.d_h_final), q8, d8, hidden_dim, stream);
+        gemv_dp4a_fp32_batched(main_lm_head.qtype, main_lm_head.data, q8, d8,
+                               static_cast<float*>(ws.d_logits_f32), vocab_size, hidden_dim, 1,
+                               hidden_dim / 32, stream);
+        return true;
+    }
+    if (main_lm_head.qtype != QType::F16 && main_lm_head.qtype != QType::BF16) {
+        IMP_LOG_ERROR("mtp: lm_head %s has no draft GEMV (no NVFP4 / FP8 form, no dp4a kernel)",
+                      qtype_name(main_lm_head.qtype));
+        return false;
     }
     int64_t h_final_shape[2] = {1, hidden_dim};
     int64_t logits_shape[2] = {1, vocab_size};
@@ -756,10 +800,9 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
     // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
     // FP8 head (gemm.nvfp4_lm_head=fp8) first: its source head may be freed after load.
-    const bool fp8_lm = lm_head_fp8 != nullptr && lm_head_fp8_scales != nullptr && ws.d_logits_f32 != nullptr;
-    const bool f32_lm = fp8_lm || (lm_head_nvfp4 != nullptr && ws.d_logits_f32 != nullptr);
+    bool f32_lm = false;
     if (!mtp_lm_head_logits(ws, main_lm_head, hidden_dim, vocab_size, stream, lm_head_nvfp4, lm_head_fp8,
-                            lm_head_fp8_scales, fp8_lm, f32_lm))
+                            lm_head_fp8_scales, f32_lm))
         return false;
 
     // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
