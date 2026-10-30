@@ -408,7 +408,6 @@ set(IMP_COMPUTE_SOURCES
 )
 
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
-list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
@@ -1354,10 +1353,9 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemv_gdn_input.cu
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
-        tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_grouped_nvfp4_args.cu
         tests/test_gemm_grouped_nvfp4_tile.cu
-        tests/test_cutlass_grouped_tile_bench.cu
-        tests/test_cutlass_grouped_ref.cu
+        tests/test_grouped_nvfp4_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
         tests/test_cutlass_nvfp4_streamk.cu
         tests/test_mxfp8_gemm.cu
@@ -1418,12 +1416,6 @@ if(IMP_BUILD_TESTS)
     target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
     set_target_properties(imp_test_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(test-quant PRIVATE imp_test_kernels)
-    # test_cutlass_grouped_tile_bench.cu instantiates CUTLASS grouped GEMMs
-    # of its own (tile-shape A/B against the shipped kernel).
-    target_include_directories(test-quant PRIVATE
-        ${cutlass_SOURCE_DIR}/include
-        ${cutlass_SOURCE_DIR}/tools/util/include
-    )
     # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU and cuSOLVER.
     target_sources(test-quant PRIVATE tools/imp-quantize/gptq.cu tests/test_gptq_nvfp4.cu)
     target_include_directories(test-quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-quantize)

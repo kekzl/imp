@@ -34,7 +34,7 @@
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
 #include "compute/gemm_capture_fp16_sm120.h"
-#include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/attention_cublas.h"
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
@@ -790,9 +790,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         mmq_q8_imma_preallocate(imma.rows, imma.k);
     }
     if (model_->profile().is_moe) {
-        gemm_grouped_3x_nvfp4_prewarm();
+        gemm_grouped_nvfp4_prewarm();
     } else {
-        IMP_LOG_INFO("grouped-3x NVFP4 prewarm skipped: model has no experts");
+        IMP_LOG_INFO("grouped NVFP4 prewarm skipped: model has no experts");
     }
     // Two different values are called max_batch_size (#1637):
     // EngineConfig::max_batch_size caps ADMISSION here, runtime.max_batch_size

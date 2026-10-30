@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-24
+verified: 2026-10-30
 commit: 28185525
 -->
 
@@ -22,7 +22,7 @@ Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only.
 - `attention_fmha_sm120.cu`: register-resident FA2, default prefill
 - `attention_paged_*.cu`: paged decode, one per KV dtype
 - `gemm.cpp`: generic dispatch, packed-weight guard
-- `gemm_cutlass_grouped_3x.cu`: MoE prefill, primary NVFP4 GEMM
+- `gemm_grouped_nvfp4_tile.cu`: MoE prefill, grouped NVFP4 GEMM (device- and host-args)
 - `gdn_scan.cu`, `gdn_scan_tc.cu`: Gated DeltaNet scans
 - Decode-attention selection: `src/exec/executor_attention_decode.cpp` (`dispatch_record::set_attn_decode`); prefill gate: `src/exec/executor_attention_prefill.cpp`
 

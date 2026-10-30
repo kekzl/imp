@@ -8,7 +8,7 @@
 namespace imp {
 
 // Hand-rolled persistent NVFP4 grouped GEMM for SM120. Drop-in alternative to
-// gemm_grouped_cutlass_3x_nvfp4 with M-aware tile selection (16/32/64/128). Reads native
+// gemm_grouped_nvfp4_host_args with M-aware tile selection (16/32/64/128). Reads native
 // row-major UE4M3 scales directly from cache_moe_native_nvfp4's nvfp4_moe_ms_native buffer.
 //   A_i [M_i,K] packed NVFP4, K/2 bytes/row; SFA_i [M_i,K/16] UE4M3 native row-major
 //   B_i [N,K] packed NVFP4; SFB_i [N,K/16] UE4M3 native row-major

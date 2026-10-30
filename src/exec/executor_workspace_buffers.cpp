@@ -17,7 +17,7 @@
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/mxfp4_sfatom.h"
-#include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
@@ -48,10 +48,8 @@ static_assert(kExecCublasWorkspaceBytes == kGemmCublasWorkspaceBytes,
               "exec_t2_demand's cuBLASLt workspace drifted from compute/gemm.h");
 static_assert(kExecBenchScratchBytes == kGemmBenchScratchBytes,
               "exec_t2_demand's algo-bench scratch drifted from compute/gemm.h");
-static_assert(kExecGrouped3xStagingBytes == kGrouped3xStagingBytes,
-              "exec_t2_demand's grouped-3x staging drifted from gemm_cutlass_grouped_3x.h");
-static_assert(kExecGrouped3xWorkspaceBytes == kGrouped3xWorkspaceBytes,
-              "exec_t2_demand's grouped-3x workspace drifted from gemm_cutlass_grouped_3x.h");
+static_assert(kExecGroupedStagingBytes == kGroupedNvfp4StagingBytes,
+              "exec_t2_demand's grouped staging drifted from gemm_grouped_nvfp4_tile.h");
 
 namespace {
 struct HostStageGeometry {
@@ -833,7 +831,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         moe_.imma_serves_all = serve.imma_all;
         if (serve.cutlass_fp4 || serve.imma_all) {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (%s serves every expert tensor)",
-                         serve.cutlass_fp4 ? "CUTLASS grouped NVFP4" : "MoE IMMA prefill");
+                         serve.cutlass_fp4 ? "grouped NVFP4 GEMM" : "MoE IMMA prefill");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
         } else
@@ -1808,7 +1806,7 @@ bool GraphExecutor::chunk_capture_supported() const {
             return true;  // per-row device expert cache path; the engine caps the chunk rows
         if (dispatch_policy().moe.no_cutlass3x || !dispatch_policy().moe.nvfp4_device_args)
             return false;
-        if (!cutlass_grouped_3x_nvfp4_available())
+        if (!gemm_grouped_nvfp4_moe_supports(cfg.n_experts, cfg.d_model, max_expert_eff_))
             return false;
         const int ne = cfg.n_experts;
         if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf || !moe_.d_M_per ||

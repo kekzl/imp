@@ -99,10 +99,8 @@ constexpr size_t kExecBlockQ81Bytes = 48;  // sizeof(block_q8_1), compute/gemm.h
 // kGemmCublasWorkspaceBytes + kGemmBenchScratchBytes, compute/gemm.h.
 constexpr size_t kExecCublasWorkspaceBytes = 64ull << 20;
 constexpr size_t kExecBenchScratchBytes = 32ull << 20;
-// kGrouped3xStagingBytes + kGrouped3xWorkspaceBytes,
-// compute/gemm_cutlass_grouped_3x.h.
-constexpr size_t kExecGrouped3xStagingBytes = 1ull << 20;
-constexpr size_t kExecGrouped3xWorkspaceBytes = 1ull << 20;
+// kGroupedNvfp4StagingBytes, compute/gemm_grouped_nvfp4_tile.h.
+constexpr size_t kExecGroupedStagingBytes = 64ull << 10;
 // mmq_q8_imma.cu's split-K partial slices: a BOUND, not a measurement. The path needs
 // M*N*used floats, runs only when M<=32, and its tile guard (n_tiles*S < 256, kBN=128)
 // caps N*used at 512*128, so the buffer cannot exceed 32*65536*4 B.
@@ -145,10 +143,9 @@ struct ExecT2Demand {
     // its heuristic, not a shape-derived size. Charged unconditionally: gemm_init() runs for
     // every model, encoder-only included.
     size_t cublas_workspace = 0;
-    // CUTLASS 3.x grouped-GEMM staging + workspace, taken by
-    // gemm_grouped_3x_nvfp4_prewarm(). MoE models only: engine.cpp gates the prewarm on
-    // profile().is_moe, and a model without experts cannot reach the grouped path at all.
-    size_t grouped3x = 0;
+    // Grouped NVFP4 host-args staging, taken by gemm_grouped_nvfp4_prewarm(). MoE models only:
+    // engine.cpp gates the prewarm on profile().is_moe.
+    size_t grouped_staging = 0;
     // IMMA prefill activation scratch + its split-K partials (mmq_q8_imma.cu).
     // Charged whenever the model carries weights the IMMA routes can take;
     // zero on native-NVFP4 models, which never enter them.
@@ -177,9 +174,9 @@ struct ExecT2Demand {
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
-               quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
-               imma_scratch + chunk_capture + smallm_scratch + parallel_block + ra2_scratch + apa_scratch +
-               apa_kv_states;
+               quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace +
+               grouped_staging + imma_scratch + chunk_capture + smallm_scratch + parallel_block +
+               ra2_scratch + apa_scratch + apa_kv_states;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

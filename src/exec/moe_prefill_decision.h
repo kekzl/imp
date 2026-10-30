@@ -19,8 +19,8 @@ namespace imp {
 // and selection falls through to the next tier.
 struct MoePrefillWorkspace {
     // try_run_moe_cutlass3x_nvfp4_prefill_ returns false (whole-function LEGACY) unless the
-    // CUTLASS 3.x grouped path is available AND packed/scale workspace + per-expert NVFP4
-    // tier coverage are all present. Collapses cutlass_grouped_3x_nvfp4_available() +
+    // grouped NVFP4 GEMM serves the layer shapes AND packed/scale workspace + per-expert NVFP4
+    // tier coverage are all present. Collapses gemm_grouped_nvfp4_moe_supports() +
     // cutlass3x_packed/sf + covers_ids(), checked before device-args, gating it too.
     bool grouped_available = false;
     bool device_args_ready = false;  // cutlass3x device-args buffers all populated
