@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Release bar 2 (`make bench-competitive`) measures imp vs vLLM 0.31.0 on 8 SafeTensors heroes, one stream, speculation off: imp leads 7 by +23.3 % to +81.7 %, vLLM cannot start Nemotron-3-Nano. The llama.cpp sweep, arms and comparison tables are gone (old numbers: `docs/archive/BENCHMARKS_GGUF.md`).
 - GGUF is legacy: GGUF files keep loading (one warning at load), new speedups go to SafeTensors NVFP4 / FP8 only, and vLLM on the same SafeTensors checkpoint replaces llama.cpp as the reference engine (`docs/DESIGN_DECISIONS.md`, `docs/GOAL.md`).
 - GGUF decode also runs attention q / k / v and FFN gate / up of mixed quant types as one dp4a launch each (`gdn.m1_dp4a`): Qwen3.8-27B-UD-Q4_K_M tg128 87.6 -> 89.2 tok/s without the NVFP4 decode cache, 94.8 -> 95.6 with it.
 - GGUF GDN hybrids decode in_proj, gate and alpha/beta of mixed quant types in one dp4a GEMV launch on one activation quantize (`gdn.m1_dp4a`, bit-equal to the single GEMVs): Qwen3.8-27B-UD-Q4_K_M tg128 79.9-80.1 -> 85.0-85.3 tok/s without the NVFP4 decode cache, 85.9-86.4 -> 89.2-91.2 with it; Q4_K_M 78.3 -> 83.2-83.7.

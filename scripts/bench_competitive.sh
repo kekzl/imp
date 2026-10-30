@@ -108,7 +108,9 @@ serve_tg() {
 }
 
 # 20 s cooldown between arms: right after a large model unloads the card isn't settled yet.
-# The default/spec-off pair shows what speculation adds on imp; the bar reads the default column.
+# The bar reads the spec-off column against vLLM (no speculation by default either): greedy answers
+# with ignore_eos can fall into a loop that imp's n-gram drafter accepts wholesale (Qwen3-8B FP8:
+# 2415 tok/s default vs 173.6 spec-off, 2026-10-30), so the default column is reported, not gated.
 check_gpu
 : > "$OUT"
 printf 'model\timp_default\timp_spec_off\tvllm\thero\n' >> "$OUT"
@@ -130,7 +132,7 @@ while IFS=$'\t' read -r name rel tier; do
 done <<< "$MATRIX"
 
 awk -F'\t' 'NR>1 {
-    lead = ($4 ~ /^[0-9.]+$/ && $2 ~ /^[0-9.]+$/) ? sprintf("%+.1f%%", 100*($2/$4-1)) : "n/a"
+    lead = ($4 ~ /^[0-9.]+$/ && $3 ~ /^[0-9.]+$/) ? sprintf("%+.1f%%", 100*($3/$4-1)) : "n/a"
     printf "%-34s %10s %10s %10s %8s %8s\n", $1, $2, $3, $4, $5, lead
 }' "$OUT"
 
@@ -160,10 +162,10 @@ if [ "$RELEASE_BAR" != "1" ]; then
 fi
 
 # GOAL.md release bar 2: decode must lead vLLM by >= HERO_LEAD_PCT on every hero vLLM serves.
-# Evaluated on the DEFAULT column, which is what a user gets.
+# Evaluated on the SPEC-OFF column (see the note above the sweep loop).
 echo
 BREACH=$(awk -F'\t' -v bar="$HERO_LEAD_PCT" 'NR>1 && $5=="hero" && $4 ~ /^[0-9.]+$/ {
-    lead = 100*($2/$4-1)
+    lead = 100*($3/$4-1)
     if (lead < bar) printf "%s: %+.1f%% (bar +%d%%)\n", $1, lead, bar
 }' "$OUT")
 if [ -n "$BREACH" ] || [ -n "$MISSING" ]; then

@@ -59,7 +59,7 @@ Leading on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b clo
 
 The GGUF forms formerly in this set (Qwen3-4B/8B Q8_0, Qwen3-14B Q6_K, Qwen3.8-27B Q4_K_M, the UD-Q4_K_M MoE files, gpt-oss MXFP4 GGUF) are legacy since 2026-10-30.
 
-`check-release.sh` stage `make bench-competitive (release bar 2)` runs it with `RELEASE_BAR=1`: imp and vLLM serve each SafeTensors hero from a fresh container, one stream, 300-token greedy answers; it fails any hero imp leads by < 5 %.
+`check-release.sh` stage `make bench-competitive (release bar 2)` runs it with `RELEASE_BAR=1`: imp and vLLM serve each SafeTensors hero from a fresh container, one stream, 300-token greedy answers, speculation off on both (imp's default column is reported, not gated); it fails any hero imp leads by < 5 %.
 
 - A hero vLLM cannot serve on this card, or one not staged (gpt-oss-20b SafeTensors), is printed as not contested, never dropped; the gate prints `N/9 heroes contested`.
 - Before 2026-08-21 enforced over 2 only (`perf_baseline.json`, `perf_baseline_north_star.json`); `docs/audit/DEBT_LEDGER_2026_08_21.md` (h).
@@ -114,7 +114,7 @@ Methodology: pp512 + tg128 at minimum, plus pp8192/tg512 @ 16k ctx; same machine
    | `gemm.nvfp4_lm_head` | auto = FP8 per-row head from a 16-bit head (#2166), 8-bit GGUF head (Q8_0) at source precision (#2224); `"on"` = NVFP4, `"off"` = source | FP8 vs NVFP4 PPL 45k: Qwen3-8B 11.1108 -> 10.7623, 30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873 at -4.7 / -3.0 % tg128. Fallback for FP8-ineligible heads = NVFP4 net rule: ON native BF16/F16 + small dense GGUF heads (d_model<=4096): +6-16 % decode/+2.2-3.8 % PPL. OFF larger/MoE GGUF (reverse sign, `is_dense=false` arm; `is_gdn_hybrid` escapes to ON). Gemma-4-26B-A4B priced 2026-08-21: +7.4 % decode/+9.0 % PPL (245.31->263.44 tok/s, 251.23->273.90 PPL, 6465-token corpus), losing by its own rule; gpt-oss-20b MXFP4 same day: +10.2 %/+18.2 % (413.02->455.24 tok/s, 105.86->125.12 PPL), losing worse. Gemma-4 measured 258.96 before `63df2d30`, 245.24 after (this trade, not a regression) | #982 |
    | `gemm.fp8_attn_proj` gpt-oss | auto | +12.1 % decode (349.7->392.1); decode-only GEMV (M=1), not a PPL trade by construction, an nsys-verified `--perplexity` run executes zero FP8 kernels; opt-out `"off"`, `"qo"` middle mode | #984 |
 
-2. Decode tok/s leads vLLM by >= 5 % on every SafeTensors hero vLLM serves on this card (`make bench-competitive`).
+2. Decode tok/s, speculation off, leads vLLM by >= 5 % on every SafeTensors hero vLLM serves on this card (`make bench-competitive`).
 3. Prefill tok/s >= vLLM single-seq on every dense SafeTensors hero. GGUF legacy (no bar).
 4. Prefill tok/s >= 70 % of vLLM single-seq on every MoE hero - exceeded: +4-27 % (2026-06-13, re-verified 07-22, Coder-30B pp512 ~19.4k). #558 closed, `docs/ROADMAP.md`.
 5. No host syncs on the decode hot path (CI-enforced).
