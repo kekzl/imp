@@ -1,9 +1,9 @@
-// gemm_mxfp8_tile (own MXFP8 prefill GEMM, ROADMAP row 123) against CUTLASS MXFP8 on the same operand
-// bytes, plain SfAtom weights and the FP8 row-scale view, plus a timing table on the Qwen3.6-35B GDN
-// projection shapes (informational).
+// gemm_mxfp8_tile (own MXFP8 prefill GEMM, ROADMAP row 123) against a host double reference decoded from the
+// same operand bytes, plain SfAtom weights and the FP8 row-scale view, plus a timing table on the
+// Qwen3.6-35B GDN projection shapes (informational).
 
-#include "compute/gemm_cutlass_mxfp8_sm120.h"
 #include "quant/fp8_quant.h"
+#include "quant/mxfp8_sfatom.h"
 #include "quant/nvfp4_gemm_tile.h"
 
 #include <gtest/gtest.h>
@@ -37,7 +37,6 @@ struct Operands {
     float* row_scales = nullptr;
     void* ws = nullptr;
     size_t ws_bytes = 0;
-    half* y_ref = nullptr;
     half* y_own = nullptr;
 };
 
@@ -71,10 +70,8 @@ void make_operands(Operands& o, int M, int N, int K, bool rows, cudaStream_t s) 
     ASSERT_EQ(cudaMalloc(&o.act, size_t(M) * K), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.act_sf, cutlass_mxfp8_sf_size(M, K)), cudaSuccess);
     quantize_fp16_to_mxfp8_cutlass(x, o.act, o.act_sf, M, K, s);
-    // Max of the CUTLASS workspace and the stream-K need (4 KiB flags + 170 x 64 KiB partials).
-    o.ws_bytes = std::max<size_t>(gemm_mxfp8_cutlass_sm120_workspace(M, N, K), 4096 + (size_t(170) << 16));
+    o.ws_bytes = gemm_tile_streamk_workspace_bytes();
     ASSERT_EQ(cudaMalloc(&o.ws, o.ws_bytes), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&o.y_ref, size_t(M) * N * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.y_own, size_t(M) * N * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
     cudaFree(w);
@@ -83,9 +80,50 @@ void make_operands(Operands& o, int M, int N, int K, bool rows, cudaStream_t s) 
 
 void free_operands(Operands& o) {
     for (void* p : {o.cw.data, o.cw.scale_factors, static_cast<void*>(const_cast<float*>(o.cw.col_scale)),
-                    static_cast<void*>(o.row_scales), o.act, o.act_sf, o.ws, static_cast<void*>(o.y_ref),
-                    static_cast<void*>(o.y_own)})
+                    static_cast<void*>(o.row_scales), o.act, o.act_sf, o.ws, static_cast<void*>(o.y_own)})
         cudaFree(p);
+}
+
+float e4m3_to_float(uint8_t b) {
+    const int e = (b >> 3) & 0xF, m = b & 7;
+    const float v = e == 0 ? std::ldexp(m / 8.0f, -6) : std::ldexp(1.0f + m / 8.0f, e - 7);
+    return (b & 0x80) ? -v : v;
+}
+
+// E4M3 [rows, K] + SfAtom UE8M0 (128 rows x 4 K-groups per 512-byte atom) -> float rows on the host.
+std::vector<float> decode_mx8(const void* data, const void* sf, int rows, int K) {
+    std::vector<uint8_t> q(size_t(rows) * K), e(cutlass_mxfp8_sf_size(rows, K));
+    cudaMemcpy(q.data(), data, q.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(e.data(), sf, e.size(), cudaMemcpyDeviceToHost);
+    const int n_k_tiles = (K + 127) / 128;
+    std::vector<float> out(q.size());
+    for (int r = 0; r < rows; ++r)
+        for (int k = 0; k < K; ++k) {
+            const int g = k / 32, rl = r % 128;
+            const int off = ((r / 128) * n_k_tiles + g / 4) * 512 + (rl % 32) * 16 + (rl / 32) * 4 + g % 4;
+            out[size_t(r) * K + k] = e4m3_to_float(q[size_t(r) * K + k]) * std::ldexp(1.0f, e[off] - 127);
+        }
+    return out;
+}
+
+// D = A W^T (times col_scale) in double from the decoded operand bytes.
+std::vector<double> host_reference(const Operands& o) {
+    const std::vector<float> a = decode_mx8(o.act, o.act_sf, o.M, o.K);
+    const std::vector<float> w = decode_mx8(o.cw.data, o.cw.scale_factors, o.N, o.K);
+    std::vector<float> col(o.N, 1.0f);
+    if (o.cw.col_scale)
+        cudaMemcpy(col.data(), o.cw.col_scale, col.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    std::vector<double> ref(size_t(o.M) * o.N);
+    for (int m = 0; m < o.M; ++m)
+        for (int n = 0; n < o.N; ++n) {
+            const float* ar = &a[size_t(m) * o.K];
+            const float* wr = &w[size_t(n) * o.K];
+            double acc = 0.0;
+            for (int k = 0; k < o.K; ++k)
+                acc += double(ar[k]) * wr[k];
+            ref[size_t(m) * o.N + n] = acc * col[n];
+        }
+    return ref;
 }
 
 constexpr int kVariants = 5;  // 0 128x128 PW, 1 128x256, 2 sync, 3 stream-K, then -1 (auto)
@@ -100,15 +138,13 @@ protected:
 
 }  // namespace
 
-// Same operand bytes, fp32 accumulate in both: outputs agree to fp16 rounding plus accumulation order.
-TEST_P(Mxfp8GemmTileTest, MatchesCutlass) {
+// Exact products of the operand bytes, fp32 accumulate in the kernel: fp16 rounding plus accumulation order.
+TEST_P(Mxfp8GemmTileTest, MatchesHostReference) {
     const auto [M, N, K, rows] = GetParam();
     Operands o;
     make_operands(o, M, N, K, rows, s_);
-    ASSERT_TRUE(gemm_mxfp8_cutlass_sm120(o.act, o.act_sf, o.cw, o.y_ref, M, N, K, o.ws, o.ws_bytes, s_));
-    std::vector<half> ref(size_t(M) * N), own(size_t(M) * N);
-    ASSERT_EQ(cudaMemcpy(ref.data(), o.y_ref, ref.size() * sizeof(half), cudaMemcpyDeviceToHost),
-              cudaSuccess);
+    const std::vector<double> ref = host_reference(o);
+    std::vector<half> own(size_t(M) * N);
     for (int v = 0; v < kVariants; ++v) {
         if (K % kVariantBk[v] != 0)
             continue;
@@ -120,7 +156,7 @@ TEST_P(Mxfp8GemmTileTest, MatchesCutlass) {
         double max_ref = 0.0, max_diff = 0.0;
         size_t bad = 0;
         for (size_t i = 0; i < ref.size(); ++i) {
-            const double r = __half2float(ref[i]);
+            const double r = ref[i];
             const double x = __half2float(own[i]);
             if (!std::isfinite(x))
                 ++bad;
@@ -145,14 +181,14 @@ INSTANTIATE_TEST_SUITE_P(
                       std::make_tuple(1536, 2304, 512, true)));  // 216 tiles: hybrid stream-K
 
 // Timing on the Qwen3.6-35B GDN projections (qkv, z, out) in the FP8 row-scale view, the prefill
-// default: CUTLASS + its column-scale pass vs the own kernel; 4 weight copies rotate out of L2.
-TEST(Mxfp8GemmTileBench, VsCutlass) {
+// default, per variant; 4 weight copies rotate out of L2.
+TEST(Mxfp8GemmTileBench, Variants) {
     cudaStream_t s;
     cudaStreamCreate(&s);
     const int shapes[][2] = {{8192, 2048}, {4096, 2048}, {2048, 4096}};
     const int ms[] = {512, 2048, 4096};
-    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "t128",
-                 "t256", "sync", "sk", "auto", "auto_TF");
+    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "t128", "t256", "sync", "sk",
+                 "auto", "auto_TF");
     for (const auto& nk : shapes) {
         for (int M : ms) {
             Operands o;
@@ -183,13 +219,6 @@ TEST(Mxfp8GemmTileBench, VsCutlass) {
                 cudaEventDestroy(e1);
                 return 1000.0 * ms_total / kIters;
             };
-            CutlassMxFP8Weight cw = o.cw;
-            const double t_ct = time_us([&](int c) {
-                cw.data = wd[c];
-                cw.scale_factors = wsf[c];
-                (void)gemm_mxfp8_cutlass_sm120(o.act, o.act_sf, cw, o.y_ref, o.M, o.N, o.K, o.ws, o.ws_bytes,
-                                               s);
-            });
             double t_v[kVariants];
             for (int v = 0; v < kVariants; ++v)
                 t_v[v] = time_us([&](int c) {
@@ -198,7 +227,7 @@ TEST(Mxfp8GemmTileBench, VsCutlass) {
                 });
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
             const double tf = 2.0 * o.M * o.N * double(o.K) / (t_v[4] * 1e-6) / 1e12;
-            std::fprintf(stderr, "%6d %6d %6d %8.1f", o.M, o.N, o.K, t_ct);
+            std::fprintf(stderr, "%6d %6d %6d", o.M, o.N, o.K);
             for (double t : t_v)
                 std::fprintf(stderr, " %8.1f", t);
             std::fprintf(stderr, " %7.0f\n", tf);

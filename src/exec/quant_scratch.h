@@ -43,8 +43,6 @@ struct QuantScratch {
     void* mxfp8_act_sf = nullptr;    // SfAtom UE8M0
     size_t mxfp8_act_data_size = 0;
     size_t mxfp8_act_sf_size = 0;
-    void* mxfp8_workspace = nullptr;
-    size_t mxfp8_workspace_size = 0;
 
     // dp4a (MMVQ) scratch for quantized input vector (M=1 decode): sized q8_1_rows x
     // q8_1_max_blocks. Production decode uses row 0 only; the spec-verify batched LM head

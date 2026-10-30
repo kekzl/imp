@@ -33,7 +33,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted | per-SM MMA efficiency only |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile declines | find the decline, then the CUTLASS / Lt fallback goes |
-| 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | refusal fallbacks | cover the refusal shapes in the own kernels, then delete both TUs |
+| 5 | CUTLASS grouped 3.x | 0 launches | refusal fallback (own grouped tile refuses K % 64 != 0, K < 384) | cover the refusal shapes, then delete the TU; CUTLASS MXFP8 removed in step 13 |
 
 ## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
 
@@ -61,3 +61,15 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 
 - pp4096 per shape (M 2048 chunks): k/v 62.2 -> 38.4 ms, gate/up 448.1 -> 430.4 ms, q/o/down 416.1 -> 445.5 ms.
 - Stream-K workspace (10.6 MiB) REFUTED in situ: pp512 GEMM sum 163 -> 155 ms (still behind 131), pp4096 932 -> 963 ms; not wired.
+
+## Step 13: CUTLASS MXFP8 GEMM removed
+
+`src/compute/gemm_cutlass_mxfp8_sm120.cu` deleted; quantizer, FP8 row-scale view and FP16 rebuild moved verbatim to `src/quant/mxfp8_sfatom.cu`; `gemm.mxfp8_tile` removed. The own tile refuses K % 64 != 0 (CUTLASS took K % 32), the projection then keeps its previous route; every local GDN model has K % 128 == 0.
+
+| Qwen3.6-35B-A3B-NVFP4 pp4096, `imp-cli --bench`, 3 pairs, B first | main | step 13 |
+|---|---:|---:|
+| e2e tok/s | 35385-35564 | 35444-35529 |
+| MXFP8 activation scratch | 8.2 MiB | 8.2 MiB |
+
+- A first in each pair read B 35227-35268 vs A 35434-35516: order effect, gone with B first.
+- Tests vs a host double reference from the operand bytes; a mutant that drops `col_scale` on odd columns fails 4/4 row-view cases.
