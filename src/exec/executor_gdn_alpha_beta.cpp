@@ -7,6 +7,9 @@
 
 #include "compute/gemm_f16_narrow_prefill.h"
 #include "compute/gemm_f16_narrow_smallm.h"
+#include "compute/gemm.h"
+#include "compute/gemv_dp4a_multi.h"
+#include "compute/layernorm.h"
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -168,6 +171,101 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
                      (long long)w_in.N, (long long)w_gate.N, (long long)N);
     }
     return ok;
+}
+
+GraphExecutor::GdnInputDone GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h,
+                                                               Tensor& no, Tensor& proj, int inner,
+                                                               int n_heads, float eps,
+                                                               const NvFP4NormFoldIn& in_fold,
+                                                               const GemmContext& ctx, cudaStream_t stream) {
+    const int n = static_cast<int>(no.shape[0]);
+    GdnInputDone d;
+    // Batched-decode sibling pair: in-projection and gate both consume `no`,
+    // and the gate output buffer (ssm_z_buf_) is untouched until
+    // RMSNormGated after the scan, so computing the gate here is a pure
+    // reorder; one smallm v2 launch for both when both route there.
+    int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+    Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
+    // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
+    // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
+    d.m1_fused = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold);
+    if (!d.m1_fused && in_fold.ssq)
+        rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+    // M=1 GGUF (gdn.m1_dp4a): the dp4a-routed projections of mixed qtypes in one launch.
+    if (!d.m1_fused)
+        d.dp4a = try_gdn_input_dp4a_m1_(ly, no, proj, gate_early, n_heads, ctx, stream);
+    bool in_done = d.m1_fused || (d.dp4a & kGdnDp4aIn) != 0;
+    d.gate = d.m1_fused || (d.dp4a & kGdnDp4aGate) != 0;
+    if (!in_done && !d.gate &&
+        try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx))
+        in_done = d.gate = true;
+    if (!in_done)
+        gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
+    return d;
+}
+
+const void* GraphExecutor::dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QType& qtype) const {
+    if (id < 0 || id >= static_cast<TensorID>(registry_.size()))
+        return nullptr;
+    const WeightHandle& h = registry_.handle(id);
+    const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
+    if ((decode != StorageTier::FP16 && decode != StorageTier::Undefined) || h.source_released ||
+        h.source_data == nullptr || h.shape[0] != N || h.shape[1] != K ||
+        !gemv_dp4a_multi_supports(h.source_qtype, static_cast<int>(K)) ||
+        wcache_.nvfp4.contains(h.source_data) || wcache_.fp8.contains(h.source_data))
+        return nullptr;
+    qtype = h.source_qtype;
+    return h.source_data;
+}
+
+int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
+                                          Tensor& gate_out, int n_heads, const GemmContext& ctx,
+                                          cudaStream_t stream) {
+    if (!dispatch_policy().gdn.m1_dp4a || cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 ||
+        ctx.gemm_no_dp4a_gemv || ctx.force_mmvq || input.shape[0] != 1 || input.qtype != QType::F16 ||
+        proj.qtype != QType::F16 || gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
+        ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf == nullptr ||
+        qscratch_.d8_buf == nullptr)
+        return 0;
+    const int64_t K = input.shape[1];
+    if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
+        return 0;
+    Dp4aGemvSeg segs[kDp4aMultiMaxSegs];
+    int n = 0;
+    int done = 0;
+    auto add = [&](TensorID id, int64_t N, half* y, int bit) {
+        QType qt = QType::NONE;
+        if (const void* w = dp4a_m1_source_(id, N, K, qt)) {
+            segs[n++] = {w, qt, y, static_cast<int>(N)};
+            done |= bit;
+        }
+    };
+    add(ly.ssm_in_id, proj.shape[1], static_cast<half*>(proj.data), kGdnDp4aIn);
+    add(ly.gdn_gate_id, gate_out.shape[1], static_cast<half*>(gate_out.data), kGdnDp4aGate);
+    // alpha and beta join together (the scan reads both from one layout) or not at all.
+    QType qa = QType::NONE;
+    QType qb = QType::NONE;
+    if (dp4a_m1_source_(ly.gdn_alpha_id, n_heads, K, qa) != nullptr &&
+        dp4a_m1_source_(ly.gdn_beta_id, n_heads, K, qb) != nullptr) {
+        half* alpha_out = static_cast<half*>(ssm_dt_buf_.data);
+        half* beta_out = reinterpret_cast<half*>(static_cast<char*>(ssm_dt_buf_.data) +
+                                                 exec_gdn_beta_offset(1, n_heads, sizeof(half)));
+        add(ly.gdn_alpha_id, n_heads, alpha_out, kGdnDp4aAb);
+        add(ly.gdn_beta_id, n_heads, beta_out, kGdnDp4aAb);
+    }
+    if (n < 2)
+        return 0;  // nothing to merge: the per-projection route is the same launch count
+    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf, static_cast<int>(K),
+                          stream);
+    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf, static_cast<int>(K), stream))
+        throw std::runtime_error("try_gdn_input_dp4a_m1_: gemv_dp4a_multi refused vetted segments");
+    if (!gdn_m1_dp4a_logged_) {
+        gdn_m1_dp4a_logged_ = true;
+        IMP_LOG_INFO("gdn M=1 dp4a multi input GEMV ACTIVE (K=%lld, %d weights, mask %d)", (long long)K, n,
+                     done);
+    }
+    return done;
 }
 
 bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {

@@ -301,6 +301,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gdn.alpha_beta_smallm", cfg.gdn.alpha_beta_smallm);
     B("gdn.alpha_beta_prefill", cfg.gdn.alpha_beta_prefill);
     B("gdn.m1_fused", cfg.gdn.m1_fused);
+    B("gdn.m1_dp4a", cfg.gdn.m1_dp4a);
 
     // [gemm]
     B("gemm.no_dp4a_gemv", cfg.gemm.no_dp4a_gemv);
