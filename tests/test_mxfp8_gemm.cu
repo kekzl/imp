@@ -1,10 +1,11 @@
-// CUTLASS sm_120 MXFP8 x MXFP8 GEMM (gemm.mxfp8_gdn_proj_prefill): the quantizer's SfAtom
+// MXFP8 x MXFP8 prefill GEMM (gemm.mxfp8_gdn_proj_prefill, own tile kernel): the quantizer's SfAtom
 // scales and E4M3 bytes must reproduce an FP32 reference within the E4M3 budget, at the GDN
 // projection shapes, and stay finite on the case that broke the FP8 SSM_IN attempt (coherent
 // activation against 0.01-magnitude weight rows, docs/plans/2026-08-31-fp8-ssm-prefill.md).
 
-#include "compute/gemm_cutlass_mxfp8_sm120.h"
 #include "quant/fp8_quant.h"
+#include "quant/mxfp8_sfatom.h"
+#include "quant/nvfp4_gemm_tile.h"
 
 #include <gtest/gtest.h>
 
@@ -62,15 +63,12 @@ void run(const Problem& p, std::vector<float>& d, std::vector<float>& ref) {
     ASSERT_EQ(cudaMalloc(&w.data, w.data_bytes), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&w.scale_factors, w.sf_bytes), cudaSuccess);
     quantize_fp16_to_mxfp8_cutlass(d_w, w.data, w.scale_factors, p.N, p.K, stream);
-    void *act, *act_sf, *ws = nullptr;
+    void *act, *act_sf;
     const size_t sf_bytes = cutlass_mxfp8_sf_size(p.M, p.K);
-    const size_t ws_bytes = gemm_mxfp8_cutlass_sm120_workspace(p.M, p.N, p.K);
     ASSERT_EQ(cudaMalloc(&act, static_cast<size_t>(p.M) * p.K), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&act_sf, sf_bytes), cudaSuccess);
-    if (ws_bytes)
-        ASSERT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
     quantize_fp16_to_mxfp8_cutlass(d_a, act, act_sf, p.M, p.K, stream);
-    ASSERT_TRUE(gemm_mxfp8_cutlass_sm120(act, act_sf, w, d_out, p.M, p.N, p.K, ws, ws_bytes, stream));
+    ASSERT_TRUE(gemm_mxfp8_tile(act, act_sf, w.data, w.scale_factors, nullptr, d_out, p.M, p.N, p.K, stream));
     ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
@@ -92,8 +90,6 @@ void run(const Problem& p, std::vector<float>& d, std::vector<float>& ref) {
     cudaFree(w.scale_factors);
     cudaFree(act);
     cudaFree(act_sf);
-    if (ws)
-        cudaFree(ws);
     cudaFree(d_a);
     cudaFree(d_w);
     cudaFree(d_out);
@@ -115,7 +111,7 @@ double rel_rms(const std::vector<float>& d, const std::vector<float>& ref) {
 // Gaussian operands at a GDN in_proj-like shape (M not a tile multiple): E4M3 keeps 3
 // mantissa bits, so a K=2048 dot product reads ~3.7 % relative RMS with both operands E4M3 (E2M1 would read
 // ~15 %).
-TEST(CutlassMxFP8Gemm, MatchesFp32ReferenceWithinE4M3Budget) {
+TEST(Mxfp8Gemm, MatchesFp32ReferenceWithinE4M3Budget) {
     const Problem p = make_problem(/*M=*/200, /*N=*/512, /*K=*/2048, 1.0f, false, 7u);
     std::vector<float> d, ref;
     run(p, d, ref);
@@ -129,7 +125,7 @@ TEST(CutlassMxFP8Gemm, MatchesFp32ReferenceWithinE4M3Budget) {
 // Coherent activation (mean 1.0) against 0.01-magnitude weight rows: the per-block power-of-two
 // scale keeps every intermediate in range, where a per-tensor act scale plus an FP16 rescale
 // of out / row_scale went non-finite (FP8 SSM_IN, 2026-09-01).
-TEST(CutlassMxFP8Gemm, TinyWeightRowsAgainstCoherentActivationStayFinite) {
+TEST(Mxfp8Gemm, TinyWeightRowsAgainstCoherentActivationStayFinite) {
     const Problem p = make_problem(/*M=*/64, /*N=*/256, /*K=*/1024, 0.01f, true, 11u);
     std::vector<float> d, ref;
     run(p, d, ref);
@@ -140,16 +136,31 @@ TEST(CutlassMxFP8Gemm, TinyWeightRowsAgainstCoherentActivationStayFinite) {
     EXPECT_LT(rel_rms(d, ref), 0.05);
 }
 
-// K that is not a multiple of the 128-element SfAtom K tile (K = 5120 = 40 tiles, but the
-// 32-group count per row is not a multiple of 4 for K = 1120): the atom padding must not leak
-// into the product.
-TEST(CutlassMxFP8Gemm, PartialSfAtomKTile) {
-    const Problem p = make_problem(/*M=*/48, /*N=*/128, /*K=*/1120, 1.0f, false, 3u);
+// K that is not a multiple of the 128-element SfAtom K tile (K = 1088: 34 groups of 32, not a multiple
+// of 4): the atom padding must not leak into the product.
+TEST(Mxfp8Gemm, PartialSfAtomKTile) {
+    const Problem p = make_problem(/*M=*/48, /*N=*/128, /*K=*/1088, 1.0f, false, 3u);
     std::vector<float> d, ref;
     run(p, d, ref);
     if (::testing::Test::HasFatalFailure())
         return;
     EXPECT_LT(rel_rms(d, ref), 0.05);
+}
+
+// K % 64 != 0 (K = 1120) is refused, the caller keeps the projection's previous route.
+TEST(Mxfp8Gemm, RefusesKNotMultipleOf64) {
+    constexpr int M = 48, N = 128, K = 1120;
+    void *a = nullptr, *a_sf = nullptr, *w = nullptr, *w_sf = nullptr, *d = nullptr;
+    ASSERT_EQ(cudaMalloc(&a, size_t(M) * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&a_sf, cutlass_mxfp8_sf_size(M, K)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&w, size_t(N) * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&w_sf, cutlass_mxfp8_sf_size(N, K)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d, size_t(M) * N * sizeof(half)), cudaSuccess);
+    EXPECT_FALSE(gemm_mxfp8_tile(a, a_sf, w, w_sf, nullptr, d, M, N, K, nullptr));
+    EXPECT_TRUE(gemm_mxfp8_tile(a, a_sf, w, w_sf, nullptr, d, M, N, K - 32, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (void* q : {a, a_sf, w, w_sf, d})
+        cudaFree(q);
 }
 
 static float e4m3_to_float(uint8_t b) {
@@ -161,13 +172,14 @@ static float e4m3_to_float(uint8_t b) {
 // Same addressing as mx8_sfatom_offset (128 rows x 4 K-groups per 512-byte atom).
 static int sfatom_offset(int row, int k_group, int n_k_tiles) {
     const int row_local = row % 128, k_local = k_group % 4;
-    return ((row / 128) * n_k_tiles + k_group / 4) * 512 + (row_local % 32) * 16 + (row_local / 32) * 4 + k_local;
+    return ((row / 128) * n_k_tiles + k_group / 4) * 512 + (row_local % 32) * 16 + (row_local / 32) * 4 +
+           k_local;
 }
 
 // The rebuild of a freed F16 GDN weight from its MXFP8 copy (released_source_gemm_): every element
 // equals the host decode E4M3(byte) * 2^(scale - 127) bit for bit, and the rebuilt weight stays
 // within E4M3 rounding of the source. Partial atoms in both dimensions (300 x 1120).
-TEST(CutlassMxFP8Gemm, DequantizeMatchesTheHostDecode) {
+TEST(Mxfp8Gemm, DequantizeMatchesTheHostDecode) {
     constexpr int N = 300, K = 1120;
     std::mt19937 rng(5u);
     std::normal_distribution<float> dist(0.0f, 0.05f);
@@ -221,17 +233,16 @@ TEST(CutlassMxFP8Gemm, DequantizeMatchesTheHostDecode) {
 // the sidecar's own E4M3 rows, SFB the row's power of two, col_scale the residual in [1, 2).
 // Coherent activation against 0.01-magnitude rows (the case that broke the FP8 SSM_IN attempt)
 // must stay finite and within the E4M3 budget; the rebuild equals the per-row FP8 decode.
-TEST(CutlassMxFP8Gemm, Fp8RowSidecarViewMatchesReference) {
+TEST(Mxfp8Gemm, Fp8RowSidecarViewMatchesReference) {
     const Problem p = make_problem(/*M=*/96, /*N=*/384, /*K=*/1024, 0.01f, true, 13u);
     std::vector<half> a_h(p.a.size()), w_h(p.w.size());
     for (size_t i = 0; i < p.a.size(); i++)
         a_h[i] = __float2half(p.a[i]);
     for (size_t i = 0; i < p.w.size(); i++)
         w_h[i] = __float2half(p.w[i]);
-    void *d_a, *d_w, *d_out, *d_q, *d_back, *act, *act_sf, *sf, *ws = nullptr;
+    void *d_a, *d_w, *d_out, *d_q, *d_back, *act, *act_sf, *sf;
     float *row_scales, *col_scale;
     const size_t sf_w = cutlass_mxfp8_sf_size(p.N, p.K), sf_a = cutlass_mxfp8_sf_size(p.M, p.K);
-    const size_t ws_bytes = gemm_mxfp8_cutlass_sm120_workspace(p.M, p.N, p.K);
     ASSERT_EQ(cudaMalloc(&d_a, a_h.size() * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_w, w_h.size() * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_back, w_h.size() * sizeof(half)), cudaSuccess);
@@ -242,8 +253,6 @@ TEST(CutlassMxFP8Gemm, Fp8RowSidecarViewMatchesReference) {
     ASSERT_EQ(cudaMalloc(&sf, sf_w), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&row_scales, p.N * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&col_scale, p.N * sizeof(float)), cudaSuccess);
-    if (ws_bytes)
-        ASSERT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
     cudaMemcpy(d_a, a_h.data(), a_h.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_w, w_h.data(), w_h.size() * sizeof(half), cudaMemcpyHostToDevice);
     quantize_fp8_rows_async(d_w, d_q, p.N, p.K, row_scales, nullptr);
@@ -256,7 +265,8 @@ TEST(CutlassMxFP8Gemm, Fp8RowSidecarViewMatchesReference) {
     w.N = p.N;
     w.K = p.K;
     quantize_fp16_to_mxfp8_cutlass(d_a, act, act_sf, p.M, p.K, nullptr);
-    ASSERT_TRUE(gemm_mxfp8_cutlass_sm120(act, act_sf, w, d_out, p.M, p.N, p.K, ws, ws_bytes, nullptr));
+    ASSERT_TRUE(
+        gemm_mxfp8_tile(act, act_sf, w.data, w.scale_factors, w.col_scale, d_out, p.M, p.N, p.K, nullptr));
     dequantize_mxfp8_cutlass_to_fp16(w, d_back, nullptr);
     void* d_rows = nullptr;
     ASSERT_EQ(cudaMalloc(&d_rows, w_h.size() * sizeof(half)), cudaSuccess);
@@ -291,6 +301,4 @@ TEST(CutlassMxFP8Gemm, Fp8RowSidecarViewMatchesReference) {
     for (void* q : {d_a, d_w, d_out, d_q, d_back, d_rows, act, act_sf, sf, static_cast<void*>(row_scales),
                     static_cast<void*>(col_scale)})
         cudaFree(q);
-    if (ws)
-        cudaFree(ws);
 }

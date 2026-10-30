@@ -6,7 +6,7 @@ lock=/tmp/imp-heavy-tu
 for a in "$@"; do
     case "${a##*/}" in
         gemm_cutlass_sm120.cu) exec flock "$lock.A" "$@" ;;
-        gemm_cutlass_grouped_3x.cu | gemm_cutlass_mxfp8_sm120.cu)
+        gemm_cutlass_grouped_3x.cu)
             exec flock "$lock.B" "$@" ;;
         test_cutlass_grouped_tile_bench.cu) exec flock "$lock.A" flock "$lock.B" "$@" ;;
     esac

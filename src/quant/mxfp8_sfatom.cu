@@ -1,9 +1,8 @@
-// CUTLASS sm_120 block-scaled MXFP8 x MXFP8 -> FP16 GEMM (CUTLASS example 79c operand
-// types on the 79b kernel structure). Same cooperative 128x128x128 tile and SfAtom scale
-// layout as MXFP4 (quant/mxfp4_sfatom.cu); the data operand is one E4M3 byte
-// per element instead of a packed nibble pair.
+// MXFP8 operand bytes in the SfAtom layout the own tile GEMM reads (gemm_mxfp8_tile): E4M3 [rows, K]
+// plus UE8M0 per 32 K elements, 128 rows x 4 scales = 512 B per atom, atoms K-major. Quantizer, FP8
+// row-scale view and the FP16 rebuild; the MXFP4 twin is quant/mxfp4_sfatom.cu.
 
-#include "compute/gemm_cutlass_mxfp8_sm120.h"
+#include "quant/mxfp8_sfatom.h"
 
 #include "core/logging.h"
 
@@ -13,61 +12,6 @@
 
 #include <algorithm>
 #include <cstdint>
-
-#include "cutlass/cutlass.h"
-#include "cute/tensor.hpp"
-#include "cutlass/detail/sm100_blockscaled_layout.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/util/packed_stride.hpp"
-
-using namespace cute;
-
-using Mx8ElementA = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
-using Mx8LayoutATag = cutlass::layout::RowMajor;
-constexpr int Mx8AlignmentA = 16;
-using Mx8ElementB = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
-using Mx8LayoutBTag = cutlass::layout::ColumnMajor;
-constexpr int Mx8AlignmentB = 16;
-using Mx8ElementD = cutlass::half_t;
-using Mx8ElementC = cutlass::half_t;
-using Mx8LayoutCTag = cutlass::layout::RowMajor;
-using Mx8LayoutDTag = cutlass::layout::RowMajor;
-constexpr int Mx8AlignmentD = 128 / cutlass::sizeof_bits<Mx8ElementD>::value;
-constexpr int Mx8AlignmentC = 128 / cutlass::sizeof_bits<Mx8ElementC>::value;
-using Mx8ElementAccumulator = float;
-using Mx8ArchTag = cutlass::arch::Sm120;
-using Mx8OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-using Mx8ThreadBlockShape = Shape<_128, _128, _128>;
-using Mx8ClusterShape = Shape<_1, _1, _1>;
-
-using Mx8CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    Mx8ArchTag, Mx8OperatorClass, Mx8ThreadBlockShape, Mx8ClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto, Mx8ElementAccumulator, Mx8ElementAccumulator,
-    Mx8ElementC, Mx8LayoutCTag, Mx8AlignmentC, Mx8ElementD, Mx8LayoutDTag, Mx8AlignmentD,
-    cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
-
-using Mx8CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    Mx8ArchTag, Mx8OperatorClass, Mx8ElementA, Mx8LayoutATag, Mx8AlignmentA, Mx8ElementB, Mx8LayoutBTag,
-    Mx8AlignmentB, Mx8ElementAccumulator, Mx8ThreadBlockShape, Mx8ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-        sizeof(typename Mx8CollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-
-using Mx8GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>, Mx8CollectiveMainloop,
-                                                           Mx8CollectiveEpilogue, void>;
-using Mx8Gemm = cutlass::gemm::device::GemmUniversalAdapter<Mx8GemmKernel>;
-using Mx8StrideA = typename Mx8Gemm::GemmKernel::StrideA;
-using Mx8StrideB = typename Mx8Gemm::GemmKernel::StrideB;
-using Mx8StrideC = typename Mx8Gemm::GemmKernel::StrideC;
-using Mx8StrideD = typename Mx8Gemm::GemmKernel::StrideD;
-using Mx8Sm1xxConfig = typename Mx8Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
-
-static_assert(Mx8Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 32,
-              "CUTLASS SFVecSize mismatch: expected 32 for mx_float8_t");
 
 namespace imp {
 
@@ -218,23 +162,6 @@ void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// D[m, n] *= col_scale[n], 8 halves per thread (N % 8 == 0).
-__global__ void mxfp8_scale_cols_kernel(half* __restrict__ d, const float* __restrict__ col_scale, int M,
-                                        int N) {
-    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    const int64_t n8 = N / 8;
-    if (idx >= static_cast<int64_t>(M) * n8)
-        return;
-    const int n0 = static_cast<int>(idx % n8) * 8;
-    uint4* p = reinterpret_cast<uint4*>(d) + idx;
-    uint4 v = *p;
-    half* h = reinterpret_cast<half*>(&v);
-#pragma unroll
-    for (int j = 0; j < 8; j++)
-        h[j] = __float2half(__half2float(h[j]) * col_scale[n0 + j]);
-    *p = v;
-}
-
 // Inverse of quantize_fp16_mxfp8_cutlass_kernel: one thread per 32-element block.
 __global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__ data,
                                                      const uint8_t* __restrict__ sf,
@@ -282,80 +209,5 @@ void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp1
         static_cast<half*>(dst_fp16), rows, K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();
 }
-
-static typename Mx8Gemm::Arguments mx8_arguments(const void* a_data, const void* a_sf,
-                                                 const CutlassMxFP8Weight& b, void* d_fp16, int M, int N,
-                                                 int K) {
-    auto stride_A = cutlass::make_cute_packed_stride(Mx8StrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(Mx8StrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(Mx8StrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(Mx8StrideD{}, {M, N, 1});
-    auto layout_SFA = Mx8Sm1xxConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
-    auto layout_SFB = Mx8Sm1xxConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
-    auto* a_ptr = reinterpret_cast<const Mx8ElementA::DataType*>(a_data);
-    auto* b_ptr = reinterpret_cast<const Mx8ElementB::DataType*>(b.data);
-    auto* sfa_ptr = reinterpret_cast<const Mx8ElementA::ScaleFactorType*>(a_sf);
-    auto* sfb_ptr = reinterpret_cast<const Mx8ElementB::ScaleFactorType*>(b.scale_factors);
-    auto* d_ptr = reinterpret_cast<Mx8ElementD*>(d_fp16);
-    return typename Mx8Gemm::Arguments{cutlass::gemm::GemmUniversalMode::kGemm,
-                                       {M, N, K, 1},
-                                       {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr,
-                                        layout_SFB},
-                                       {{1.0f, 0.0f}, d_ptr, stride_C, d_ptr, stride_D}};
-}
-
-size_t gemm_mxfp8_cutlass_sm120_workspace(int M, int N, int K) {
-    CutlassMxFP8Weight b;
-    b.N = N;
-    b.K = K;
-    return Mx8Gemm::get_workspace_size(mx8_arguments(nullptr, nullptr, b, nullptr, M, N, K));
-}
-
-bool gemm_mxfp8_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP8Weight& b, void* d_fp16,
-                              int M, int N, int K, void* workspace, size_t workspace_size,
-                              cudaStream_t stream) {
-    {
-        const cudaError_t prior = cudaGetLastError();
-        if (prior != cudaSuccess) {
-            IMP_LOG_ERROR("CUTLASS MXFP8 sm120: prior CUDA error: %s", cudaGetErrorString(prior));
-            return false;
-        }
-    }
-    if (b.col_scale && N % 8 != 0)
-        return false;  // mxfp8_scale_cols_kernel writes 8 halves per thread
-    auto args = mx8_arguments(a_data, a_sf, b, d_fp16, M, N, K);
-    Mx8Gemm gemm;
-    cutlass::Status st = gemm.can_implement(args);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_WARN("CUTLASS MXFP8 sm120: can_implement failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
-        return false;
-    }
-    const size_t needed = Mx8Gemm::get_workspace_size(args);
-    if (needed > workspace_size) {
-        IMP_LOG_WARN("CUTLASS MXFP8 sm120: workspace %zu B < %zu B needed for M=%d N=%d K=%d, refusing",
-                     workspace_size, needed, M, N, K);
-        return false;
-    }
-    st = gemm.initialize(args, workspace, stream);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS MXFP8 sm120: initialize failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
-        return false;
-    }
-    st = gemm.run(stream);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS MXFP8 sm120: run failed (%d)", (int)st);
-        return false;
-    }
-    if (b.col_scale) {
-        const int64_t total = static_cast<int64_t>(M) * (N / 8);
-        const int threads = 256;
-        mxfp8_scale_cols_kernel<<<static_cast<unsigned>((total + threads - 1) / threads), threads, 0,
-                                  stream>>>(static_cast<half*>(d_fp16), b.col_scale, M, N);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-    return true;
-}
-
-bool cutlass_sm120_mxfp8_available() { return true; }
 
 }  // namespace imp

@@ -18,7 +18,7 @@
 #include "core/logging.h"
 #include "core/sm120_limits.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_mxfp8_sm120.h"
+#include "quant/mxfp8_sfatom.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_mxfp4_f16_tile.h"
@@ -195,27 +195,22 @@ static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float bet
         (long long)h.shape[1], M, beta, static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype));
 }
 
-// gemm.mxfp8_tile: own MXFP8 GEMM on the quantized activation (column scale fused), CUTLASS on refusal.
-// Stream-K borrows the larger of the two prefill workspaces (same stream); none under runtime.deterministic.
+// Own MXFP8 GEMM on the quantized activation (column scale fused); false on refusal (N % 8 != 0), the caller
+// keeps the handle's previous route. Stream-K borrows the NVFP4 prefill workspace (same stream); none under
+// runtime.deterministic.
 static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight& cw, void* out, int M, int K,
                                cudaStream_t stream) {
     const int N = static_cast<int>(cw.N);
-    if (process_diag_mxfp8_tile()) {
-        const bool lt = qs.cutlass_workspace_size >= qs.mxfp8_workspace_size;
-        void* ws = process_diag_deterministic() ? nullptr : (lt ? qs.cutlass_workspace : qs.mxfp8_workspace);
-        const size_t ws_bytes = lt ? qs.cutlass_workspace_size : qs.mxfp8_workspace_size;
-        if (gemm_mxfp8_tile(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw.data, cw.scale_factors, cw.col_scale, out,
-                            M, N, K, stream, /*variant=*/-1, ws, ws_bytes)) {
-            static bool logged = false;  // activity proof, once
-            if (!logged) {
-                logged = true;
-                IMP_LOG_INFO("gemm.mxfp8_tile: own MXFP8 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
-            }
-            return true;
-        }
+    void* ws = process_diag_deterministic() ? nullptr : qs.cutlass_workspace;
+    if (!gemm_mxfp8_tile(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw.data, cw.scale_factors, cw.col_scale, out, M,
+                         N, K, stream, /*variant=*/-1, ws, qs.cutlass_workspace_size))
+        return false;
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("MXFP8 prefill: own tile GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
     }
-    return gemm_mxfp8_cutlass_sm120(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw, out, M, N, K, qs.mxfp8_workspace,
-                                    qs.mxfp8_workspace_size, stream);
+    return true;
 }
 
 // Native MXFP4 GEMM with M > 1 (or fp32 rows): W4A16. Each weight is dequantized to FP16 into the load-time

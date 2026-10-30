@@ -2,7 +2,7 @@
 // host-resident experts).
 
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_mxfp8_sm120.h"
+#include "quant/mxfp8_sfatom.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/gemm_dispatch_fallback.h"

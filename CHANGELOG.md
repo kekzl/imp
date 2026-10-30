@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Removed
 - MXFP4 FMHA prefill attention and the materialized MXFP4 attention (REFUTED #868, +10 % NLL at 9k), with `attention.mxfp4`, `mxfp4_blockscale`, `mxfp4_ksmooth`, `mxfp4_pv_fp4`, `mxfp4_promote_budget`, `mxfp4_paged_kv` (this change: 4532 lines out, 452 in).
+- CUTLASS MXFP8 GEMM and `gemm.mxfp8_tile`: GDN MXFP8 prefill copies run only on the own tile GEMM; K % 64 != 0 keeps the F16 route. CUTLASS TUs 3 -> 2. Qwen3.6-35B-A3B-NVFP4 pp4096 35385-35564 -> 35444-35529 tok/s.
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed

@@ -4,7 +4,7 @@
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
 #include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
 #include "quant/cutlass_mxfp4_weight.h"      // CutlassMxFP4Weight
-#include "compute/gemm_cutlass_mxfp8_sm120.h"  // CutlassMxFP8Weight
+#include "quant/mxfp8_sfatom.h"              // CutlassMxFP8Weight
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <unordered_set>
