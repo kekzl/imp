@@ -364,7 +364,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor proj;
     bool gate_paired = false;
     bool m1_fused_input = false;
-    int dp4a_done = 0;  // kGdnDp4a* bits written by try_gdn_input_dp4a_m1_
+    int dp4a_done = 0;  // gdn_unpacked_input_ bits (kGdnDp4a*, kGdnGateDone, kGdnM1Fused)
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
@@ -377,11 +377,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].
         proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        const GdnInputDone d = gdn_unpacked_input_(ly, h, no, proj, inner, n_heads, eps, in_fold, ctx,
-                                                   stream);
-        gate_paired = d.gate;
-        m1_fused_input = d.m1_fused;
-        dp4a_done = d.dp4a;
+        dp4a_done = gdn_unpacked_input_(ly, h, no, proj, inner, n_heads, eps, in_fold, ctx, stream);
+        gate_paired = (dp4a_done & kGdnGateDone) != 0;
+        m1_fused_input = (dp4a_done & kGdnM1Fused) != 0;
     }
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
