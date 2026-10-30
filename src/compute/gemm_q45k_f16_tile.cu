@@ -106,12 +106,12 @@ struct KqDec {
     template <class C>
     static __device__ __forceinline__ void decode(const KqArgs& p, uint32_t bars, uint8_t* smem, int n0,
                                                   int KT) {
-        static_assert(C::kBK == 64 && kUnits<C> <= 4,
-                      "four stages per block; the prefetch holds 2 x 32 regs");
+        static_assert(C::kBK == 64 && kUnits<C> <= 4 && kRowStep<C> % 8 == 0,
+                      "four stages per block, prefetch 2 x 32 regs, decoder_row4 rows");
         constexpr int kU = kUnits<C>;
-        const int dt = decoder_tid();
+        const int dt = decoder_tid<C>();
         const int u = dt & 3;
-        const int r0 = dt >> 2;
+        const int r0 = decoder_row4(dt);
         const int KB = KT / 4;
         KqUnit t[kU];
         KqUnit nx[kU];

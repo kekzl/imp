@@ -17,17 +17,35 @@ namespace imp::wdq_tile {
 using namespace f16_tile;  // NOLINT(google-build-using-namespace): the shared tile core
 
 // Decoder warps per config: 8 where the MMA warps leave the registers (128x128 fp16 acc: 96 regs x 544),
-// else 4 (13 warps cap ptxas at 128 regs: 48 B stack on 256x128; the TMA folded into decoder thread 0
-// removed it but cost +10 % at 2048x17408x5120). 128x128 without decode: 992 us there (cuBLASLt 1011).
+// else 4 (256x128 under kRegSplit; fp32 accumulate 128x128). 128x128 without decode: 992 us at
+// 2048x17408x5120 (cuBLASLt 1011).
 template <class C>
 constexpr int kDecWarps = (C::kBM == 128 && C::kBN == 128 && C::kAcc16) ? 8 : 4;
 template <class C>
 constexpr int kDecThreads = kDecWarps<C> * 32;
+// 256x128: 16 warps as 4 warpgroups (MMA 0-1, producer 2 with 3 parked warps, decoders 3) so setmaxnreg moves
+// registers to the MMA warps; with 13 warps all sat at 128 (5 LDL per stage per MMA warp, 151 MB local
+// loads per 512x17408x5120 Q6_K launch).
 template <class C>
-constexpr int kThreads = kMmaThreads + 32 + kDecThreads<C>;
+constexpr bool kRegSplit = C::kBM == 256;
+template <class C>
+constexpr int kThreads = kRegSplit<C> ? 512 : kMmaThreads + 32 + kDecThreads<C>;
+template <class C>
+constexpr int kDecBase = kRegSplit<C> ? 384 : kMmaThreads + 32;
 
 // Decoder thread index (0 .. kDecThreads - 1).
-__device__ __forceinline__ int decoder_tid() { return static_cast<int>(threadIdx.x) - kMmaThreads - 32; }
+template <class C>
+__device__ __forceinline__ int decoder_tid() {
+    return static_cast<int>(threadIdx.x) - kDecBase<C>;
+}
+
+// First W row of decoder thread dt with 4 threads (dt & 3) per row: a quarter warp takes rows r and r + 4,
+// whose swizzled chunks c ^ (r & 7) are disjoint (rows r, r + 1 shared 4 chunks: 2-way STS.128 conflict,
+// ncu 4.2 excess wavefronts per store). Bijective on 0 .. rows - 1 for rows % 8 == 0.
+__device__ __forceinline__ int decoder_row4(int dt) {
+    const int q = dt >> 3;
+    return (q & 3) + ((q >> 2) * 8) + (((dt >> 2) & 1) * 4);
+}
 
 // Decoder side of stage kt: wait for its slot (free after the MMA warps consumed stage kt - kStages),
 // return the W slot to fill. stage_done() releases it to the MMA warps.
@@ -71,12 +89,17 @@ __global__ void __launch_bounds__(kThreads<C>, 1) gemm_wdq_f16_tile_kernel(
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
-    if (warp > kMmaThreads / 32) {
+    // kRegSplit budget: 256 x 176 (MMA) + 128 x 40 (producer group) + 128 x 120 (decoders) = 65536.
+    if (warp >= kDecBase<C> / 32) {
+        if constexpr (kRegSplit<C>)
+            asm volatile("setmaxnreg.dec.sync.aligned.u32 120;\n" ::: "memory");
         D::template decode<C>(p, bars, smem_raw + pad, n0, KT);
         return;
     }
-    if (warp == kMmaThreads / 32) {  // producer: one lane issues the A tile per stage
-        if (lane == 0)
+    if (warp >= kMmaThreads / 32) {  // producer: one lane issues the A tile per stage
+        if constexpr (kRegSplit<C>)
+            asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+        if (warp == kMmaThreads / 32 && lane == 0)
             for (int kt = 0; kt < KT; ++kt) {
                 const int s = kt % C::kStages;
                 const uint32_t full = bars + s * 8;
@@ -87,6 +110,8 @@ __global__ void __launch_bounds__(kThreads<C>, 1) gemm_wdq_f16_tile_kernel(
             }
         return;
     }
+    if constexpr (kRegSplit<C>)
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 176;\n" ::: "memory");
     const int wm = (warp % C::kWarpsM) * 64;
     const int wn = (warp / C::kWarpsM) * C::kWN;
     Acc<C> acc{};

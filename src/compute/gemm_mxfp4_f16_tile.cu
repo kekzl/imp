@@ -46,7 +46,7 @@ struct Mx4Dec {
         static_assert(C::kBK == 64, "a stage is 32 E2M1 bytes + 2 scale bytes per row");
         constexpr int kStep = kDecThreads<C> / 2;
         constexpr int kT = C::kBN / kStep;
-        const int dt = decoder_tid();
+        const int dt = decoder_tid<C>();
         const int hb = dt & 1;
         const int r0 = dt >> 1;
         const uint8_t* wr[kT];
