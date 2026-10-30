@@ -364,6 +364,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor proj;
     bool gate_paired = false;
     bool m1_fused_input = false;
+    int dp4a_done = 0;  // kGdnDp4a* bits written by try_gdn_input_dp4a_m1_
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
@@ -376,21 +377,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Original path: ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only
         // need [n, conv_channels].
         proj = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-        // Batched-decode sibling pair: in-projection and gate both consume `no`,
-        // and the gate output buffer (ssm_z_buf_) is untouched until
-        // RMSNormGated after the scan, so computing the gate here is a pure
-        // reorder; one smallm v2 launch for both when both route there.
-        int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
-        Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
-        // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
-        // launch; alpha/beta land in the 4-call layout of step 4 below.
-        m1_fused_input = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold);
-        if (!m1_fused_input && in_fold.ssq)
-            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-        gate_paired = m1_fused_input ||
-                      try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx);
-        if (!gate_paired)
-            gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
+        const GdnInputDone d = gdn_unpacked_input_(ly, h, no, proj, inner, n_heads, eps, in_fold, ctx,
+                                                   stream);
+        gate_paired = d.gate;
+        m1_fused_input = d.m1_fused;
+        dp4a_done = d.dp4a;
     }
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
@@ -661,9 +652,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
                 char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) + exec_gdn_beta_offset(n, n_heads, es);
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
-                // m1_fused_input: step 2 already wrote both into this layout.
-                if (!m1_fused_input && !try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no,
-                                                                   alpha_proj_out, beta_proj_out, stream)) {
+                // m1_fused_input / kGdnDp4aAb: step 2 already wrote both into this layout.
+                if (!m1_fused_input && (dp4a_done & kGdnDp4aAb) == 0 &&
+                    !try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no, alpha_proj_out,
+                                                beta_proj_out, stream)) {
                     gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, q8_reuse_ctx);
                     gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, q8_reuse_ctx);
                 }

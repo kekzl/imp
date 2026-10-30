@@ -305,6 +305,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_q6k_f16_tile.cu
     src/compute/gemm_mxfp4_f16_tile.cu
     src/compute/gemm_q45k_f16_tile.cu
+    src/compute/gemv_dp4a_multi.cu
     src/compute/gemm_grouped_nvfp4_tile.cu
     src/compute/attention_fa2_hd512.cu
     src/compute/ffn_sparsity_probe.cu
@@ -1295,6 +1296,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_q6k_f16_tile.cu
         tests/test_gemm_mxfp4_f16_tile.cu
         tests/test_gemm_q45k_f16_tile.cu
+        tests/test_gemv_dp4a_multi.cu
         tests/test_gemm_dp4a.cu
         tests/test_gemm_kernel_registry.cu
         tests/test_fp8_gemm.cu

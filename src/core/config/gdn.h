@@ -55,6 +55,9 @@ struct GDN {
     // beta fused into one GEMV, out-proj adds the residual in its epilogue,
     // gated attention runs q|k|v as one launch. false = per-projection launches.
     bool m1_fused = true;
+    // Single-stream decode (M=1) on GGUF hybrids: in_proj, gate and alpha + beta of mixed qtypes in one dp4a
+    // GEMV launch on one q8_1 quantize (gemv_dp4a_multi). false = one GEMV + quantize per projection.
+    bool m1_dp4a = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };

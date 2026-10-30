@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- GGUF GDN hybrids decode in_proj, gate and alpha/beta of mixed quant types in one dp4a GEMV launch on one activation quantize (`gdn.m1_dp4a`, bit-equal to the single GEMVs): Qwen3.8-27B-UD-Q4_K_M tg128 79.9-80.1 -> 85.0-85.3 tok/s without the NVFP4 decode cache, 85.9-86.4 -> 89.2-91.2 with it; Q4_K_M 78.3 -> 83.2-83.7.
 - Own TMA tile GEMMs issue `cp.async.bulk.tensor` into `.shared::cta` (ptxas guarded `.shared::cluster` with a CALL slow path, 8 B stack in 21 kernels), so the 256x128 weight-decode tiles move registers to the MMA warps via setmaxnreg: Qwen3.8-27B-Q4_K_M pp512 4466-4472 -> 4611-4625, Qwen3-14B-Q6_K pp1536 9383-9393 -> 9550-9581 tok/s, bit-equal.
 - Q4_K / Q5_K prompt GEMMs (fp16 accumulate, M > 32) decode the GGUF blocks in the own FP16 tile instead of the raw IMMA tiles: Qwen3.8-27B-UD-Q4_K_M pp512 4175-4179 -> 4384-4405, pp2048 4368-4374 -> 4772-4776; Q4_K_M pp2048 4276 -> 4923 tok/s; PPL 4.9905 -> 4.9934 / 5.0635 -> 5.0653. `gemm.q45k_tile`.
 - The weight-decode tiles (Q6_K, Q4_K, Q5_K) choose 256x128 by wave count with a per-format cost instead of a fixed 170-tile threshold: Qwen3-14B-Q6_K pp1024 8700-8731 -> 9372-9388 tok/s, pp512 / pp1536 unchanged.
