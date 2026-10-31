@@ -31,7 +31,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 |---|---|---:|---|---|
 | 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted | per-SM MMA efficiency only |
-| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only | N > K and split-K shapes |
+| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | removed (steps 13, 14) | - |
 
@@ -72,6 +72,19 @@ Half last stage alone, before the package:
 | e2e tok/s (data-parallel run) | 43774-43945 | 43790-43837 |
 
 Flushed bench 2048x2816x2112 (us): cuBLASLt 32.0, CUTLASS 35.7, own 128x128 31.8-33.6, 128x256 39.6. 352 tiles = 2.07 waves on 170 SMs for both kernels; the flushed bench moves +-5 % and penalizes stream-K partials (dirty L2), in situ judges.
+
+## MoE router GEMM (F16, N = n_experts): own kernels refuted, cuBLASLt stays (2026-10-31)
+
+After step 15 the Gemma-4 pp4096 cuBLASLt sum is 8.0 ms: the router `in @ gate^T` (M 2048, N 128, K 2816, `hsh 128x112` 542 x 11.7 us + `splitKreduce` 2.6 us); Qwen3-30B-A3B runs it as `hhh 64x128` (K 2048, 8.3 + 2.2 us). Call site `router_logits_cublas` (`src/exec/executor_forward_moe_batch.cu`).
+
+| try (not committed) | Gemma-4 2048x128x2816, us | Qwen3-30B 2048x128x2048, us | verdict |
+|---|---:|---:|---|
+| cuBLASLt (main) | 11.7 + 2.6 | 8.3 + 2.2 | - |
+| `gemm_f16_narrow_prefill` (GDN alpha/beta kernel, split-K + reduce launch), in situ | 18.4 + 4.6 | 18.1 + 7.3 | kernel sum +4..7 / +10..13 ms |
+| 128x128 TMA tile, K split over a cluster of 8, DSMEM reduction | 22.2 | 19.3 | remote `ld.shared::cluster`: reduction 26.8k cycles vs 1.1k for local reads |
+| same, fp32 partials in an L2 workspace, one launch (isolated nsys) | 13.0 (Lt 14.3) | 11.3 (Lt 10.5) | Qwen3.6 4096x256x2048 28.5-28.7 vs 24.9-25.0; M <= 1000 5-7 vs 1.2-4.4 |
+
+Best case 0.08 % of the Gemma-4 kernel sum, loses on the other routers: no in-situ win, the call site stays.
 
 ## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
 
