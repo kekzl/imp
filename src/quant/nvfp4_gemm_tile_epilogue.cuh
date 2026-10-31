@@ -134,8 +134,72 @@ __device__ __forceinline__ uint32_t pack_half2(float a, float b) {
     return *reinterpret_cast<const uint32_t*>(&h);
 }
 
+// FP8 beta != 0: alpha AW^T in fp32 staged in buf, CW columns at a time (rows XOR-swizzled by 8 columns),
+// then 4 columns per thread, D = acc + beta * D in fp32 with one rounding, 8 B loads and stores. Bit-equal to
+// store_direct; M=512 N=4096 K=4096 data-parallel 48.4 -> 40.2 us (cuBLASLt 33.8).
+template <class C, int CW>
+__device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][4], float* buf, const Ring& g,
+                                                  const TileArgs& p) {
+    static_assert(C::kBN % CW == 0 && CW % 64 == 0, "whole 64-column chunks");
+    const int T0 = g.lane & 3;
+    const int T1 = g.lane >> 2;
+#pragma unroll
+    for (int c0 = 0; c0 < C::kBN; c0 += CW) {
+        asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // the ring / the previous chunk is free
+#pragma unroll
+        for (int mf = 0; mf < 4; ++mf)
+#pragma unroll
+            for (int nf = 0; nf < C::kNF; ++nf) {
+                const int col = C::ncol(g.wn, nf) + T0 * 2;
+                if (col < c0 || col >= c0 + CW)
+                    continue;
+                const float2 sc = out_scale<C>(p, g.n0 + col);
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int row = g.wm + mf * 16 + T1 + h * 8;
+                    *reinterpret_cast<float2*>(buf + (row * CW) + ((col - c0) ^ ((row & 7) << 3))) =
+                        make_float2(acc[mf][nf][h * 2] * sc.x, acc[mf][nf][(h * 2) + 1] * sc.y);
+                }
+            }
+        asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
+        for (int i = static_cast<int>(threadIdx.x); i < kBM * (CW / 4); i += kMmaThreads) {
+            const int r = i / (CW / 4);
+            const int c = (i % (CW / 4)) * 4;
+            const int row = g.m0 + r;
+            const int col = g.n0 + c0 + c;
+            if (row >= p.M || col >= p.N)  // N % 8 == 0: col + 3 < N too
+                continue;
+            const float4 v = *reinterpret_cast<const float4*>(buf + (r * CW) + (c ^ ((r & 7) << 3)));
+            uint2* dst = reinterpret_cast<uint2*>(p.d + (static_cast<size_t>(row) * p.ldd) + col);
+            uint2 d = *dst;
+            const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&d.x));
+            const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&d.y));
+            const __half2 o0 = __floats2half2_rn(fmaf(p.beta, lo.x, v.x), fmaf(p.beta, lo.y, v.y));
+            const __half2 o1 = __floats2half2_rn(fmaf(p.beta, hi.x, v.z), fmaf(p.beta, hi.y, v.w));
+            d.x = *reinterpret_cast<const uint32_t*>(&o0);
+            d.y = *reinterpret_cast<const uint32_t*>(&o1);
+            *dst = d;
+        }
+    }
+}
+
+// FP8 beta != 0 in the TMA epilogue: data-parallel tiles stage in the dead ring, stream-K in the buffer
+// behind the barriers (the producer still fills the ring), both in the widest chunk that fits.
+template <class C>
+__device__ __forceinline__ void store_beta(const float (&acc)[4][C::kNF][4], const Ring& g,
+                                           const TileArgs& p) {
+    constexpr int kCap = C::kSk ? 128 + (kBM * C::kOS * 2) - 1024 : C::kStages * C::kStageBytes;
+    constexpr int kCW = (C::kBN >= 128 && kBM * 128 * 4 <= kCap) ? 128 : 64;
+    if constexpr (kBM * kCW * 4 > kCap) {  // 128x64 stream-K: 17.5 KB behind the barriers, per fragment
+        store_direct<C>(acc, p, g.m0, g.n0, g.wm, g.wn, g.lane);
+    } else {
+        float* buf = reinterpret_cast<float*>(g.smem + (C::kSk ? (C::kStages * C::kStageBytes) + 1024 : 0));
+        store_beta_staged<C, kCW>(acc, buf, g, p);
+    }
+}
+
 // TMA epilogue: alpha, fp16, stmatrix into kBN / 64 boxes of 128 rows x 128 B (128B swizzle) in the ring,
-// one TMA store per box; rows / columns past M / N clip in the TMA unit. FP8 beta != 0 stores directly.
+// one TMA store per box; rows / columns past M / N clip in the TMA unit. FP8 beta != 0: store_beta_staged.
 template <class C>
 __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], const Ring& g, const TileArgs& p,
                                           const CUtensorMap* md) {
@@ -146,7 +210,7 @@ __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], cons
     }
     if constexpr (C::kF8)
         if (p.beta != 0.0f) {
-            store_direct<C>(acc, p, g.m0, g.n0, g.wm, g.wn, g.lane);
+            store_beta<C>(acc, g, p);
             return;
         }
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // every warp left the ring

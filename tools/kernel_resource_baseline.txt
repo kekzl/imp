@@ -31,6 +31,7 @@ imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	252	0	0
 void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, false, false>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, true, false>	sm_120a	252	0	0
+void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 64, 3, true, false, false, (imp::nvfp4_tile::Fmt)3> >	sm_120a	251	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
