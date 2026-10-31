@@ -1058,6 +1058,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             gdn_ab_prefill_ws_bytes_ = 0;
         }
     }
+    // MoE router prefill GEMM (gemm_f16_splitk): 8 MiB of fp32 split-K partials, the split shrinks to
+    // fit; nullptr keeps gemm().
+    if (has_moe_ && cfg.n_experts > 0 && cfg.n_experts <= 128 &&
+        cfg.d_model >= 2560) {  // the shapes it takes
+        moe_.router_ws_bytes = size_t(8) << 20;
+        moe_.router_ws = vram_alloc(vram_alloc_, moe_.router_ws_bytes, "moe_router_ws");
+        if (!moe_.router_ws)
+            moe_.router_ws_bytes = 0;
+    }
 
     // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
     if (fp8_act_scratch_needed(*model_, wcache_.use_fp8, dispatch_policy().gemm.fp8_native_prefill)) {
@@ -1426,6 +1435,8 @@ void GraphExecutor::free_buffers() {
     gdn_ab_ws_bytes_ = 0;
     vfree(gdn_ab_prefill_ws_);
     gdn_ab_prefill_ws_bytes_ = 0;
+    vfree(moe_.router_ws);
+    moe_.router_ws_bytes = 0;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {

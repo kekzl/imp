@@ -31,7 +31,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 |---|---|---:|---|---|
 | 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below; 2026-10-31 recheck with the per-grid plan, Qwen3-8B-FP8 pp512 `gemm.fp8_tile_min_m=64`: tile 133.1-133.2 ms (+ 14.5 ms cuBLASLt left) vs cuBLASLt 131.3-131.8, with a stream-K workspace (the FP8 caller passes none) 129.4-130.2, e2e -9..-10 % | M < 2048: FP8 mainloop efficiency on compute-bound shapes. Positional in-situ match (2026-10-31, Qwen3-8B-FP8 pp512, 252 calls per position, us cuBLASLt / own): q 26.8 / 25.9, k/v 14.9-15.7 / 14.1-14.8, o 26.1 / 27.7, gate/up 72.4-73.9 / 86.0-87.6, down 85.8 / 90.0; gate/up alone ~13.6 ms of the gap; 128x64 92, 128x256 100, BK 128 x 3 stages 86 there |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16); CUTLASS removed (step 17) | - |
-| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below; N > K at parity (2026-10-31, Nemotron pp4096, 2 pairs: the 128x256 tile replaces 50.48 ms cuBLASLt by 50.04 ms, 128x128 +4..6 %, e2e 56447-56584 vs 56278-56406 tok/s): stays cuBLASLt | per-SM efficiency |
+| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts): own for the Gemma-4 shape, cuBLASLt for the rest (section below); N > K at parity (2026-10-31, Nemotron pp4096, 2 pairs: the 128x256 tile replaces 50.48 ms cuBLASLt by 50.04 ms, 128x128 +4..6 %, e2e 56447-56584 vs 56278-56406 tok/s): stays cuBLASLt | per-SM efficiency |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8, CUTLASS dense NVFP4 | 0 launches | removed (steps 13, 14, 17): no CUTLASS in the build | - |
 
@@ -107,7 +107,7 @@ Half last stage alone, before the package:
 
 Flushed bench 2048x2816x2112 (us): cuBLASLt 32.0, CUTLASS 35.7, own 128x128 31.8-33.6, 128x256 39.6. 352 tiles = 2.07 waves on 170 SMs for both kernels; the flushed bench moves +-5 % and penalizes stream-K partials (dirty L2), in situ judges.
 
-## MoE router GEMM (F16, N = n_experts): own kernels refuted, cuBLASLt stays (2026-10-31)
+## MoE router GEMM (F16, N = n_experts): own split-K for the Gemma-4 shape, cuBLASLt for the rest (2026-10-31)
 
 After step 15 the Gemma-4 pp4096 cuBLASLt sum is 8.0 ms: the router `in @ gate^T` (M 2048, N 128, K 2816, `hsh 128x112` 542 x 11.7 us + `splitKreduce` 2.6 us); Qwen3-30B-A3B runs it as `hhh 64x128` (K 2048, 8.3 + 2.2 us). Call site `router_logits_cublas` (`src/exec/executor_forward_moe_batch.cu`).
 
@@ -118,7 +118,7 @@ After step 15 the Gemma-4 pp4096 cuBLASLt sum is 8.0 ms: the router `in @ gate^T
 | 128x128 TMA tile, K split over a cluster of 8, DSMEM reduction | 22.2 | 19.3 | remote `ld.shared::cluster`: reduction 26.8k cycles vs 1.1k for local reads |
 | same, fp32 partials in an L2 workspace, one launch (isolated nsys) | 13.0 (Lt 14.3) | 11.3 (Lt 10.5) | Qwen3.6 4096x256x2048 28.5-28.7 vs 24.9-25.0; M <= 1000 5-7 vs 1.2-4.4 |
 
-Best case 0.08 % of the Gemma-4 kernel sum, loses on the other routers: no in-situ win, the call site stays.
+Restricted to the shapes it wins (n >= 1024, d >= 2560, <= 128 experts: Gemma-4), the L2-partials kernel (`gemm_f16_splitk`) ships: pp4096 cuBLASLt sum 8.0 -> 0.22 ms, GEMM kernel sum 957.7-958.5 -> 954.9-957.4 ms, e2e 43548-43723 -> 43703-43864 tok/s (3 pairs); router 7.43 ms own vs 6.33 + ~1.55 ms cuBLASLt + reduce. Qwen3-30B / Qwen3.6 routers (K 2048, 256 experts) stay on cuBLASLt. Deterministic PPL 18.2854 both (deterministic mode keeps the row-invariant router).
 
 ## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
 
