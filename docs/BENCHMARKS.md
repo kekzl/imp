@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-31
-commit: daca1665
+commit: 31ee90c6
 -->
 
 # Benchmarks
@@ -156,10 +156,18 @@ Harness `tools/analysis/vllm_conc_ab.sh`.
 | 6 | dense Qwen3-14B-NVFP4, 8 streams, 36-tok, vLLM 0.27.1 | **1085.4** | 1005.8 | **+7.9%** |
 | 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok, vLLM 0.27.1, imp KV pool 8192 blocks | 1470.6 | **2492.6** | -41.0% |
 | 10 | run 9 with `attention.paged_fp8_multitok=4`, paced serving prefill (#1950-#1952), grouped FP8 decode attention (#1953) | 2491.2 | 2490.9 | +0.0% (2/3 pairs) |
+| 11 | run 5 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31) | **4373.4** (4355.8-4380.5) | 4080.8 (4033.1-4107.9) | **+7.2%** (3/3 pairs) |
+| 12 | run 6 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31) | **1236.5** (1233.7-1238.8) | 1086.5 (1025.8-1116.8) | **+13.8%** (3/3 pairs) |
+| 13 | run 7 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31), 1000-token prompts | 2547.3 (2545.6-2548.9) | **2658.4** (2631.1-2668.2) | -4.2% (0/3 pairs) |
+
+[PROV: commit=e08db9d2 date=2026-10-31 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3 path=server-api
+       cmd=`MODEL_NAME=Qwen3-14B-NVFP4 IMG_VLLM=vllm/vllm-openai:v0.31.0 CONC={32|8|32} PLEN={0|0|1000} KV_BLOCKS={2387|2387|8192} tools/analysis/vllm_conc_ab.sh`
+       n=3-trials-x-3-waves-per-arm note=runs 11-13; imp:test tree 0937bac4 (v0.60.0); harness_md5=1e9b1463 (client moved into imp:toolchain); raw logs docs/audit/launch_2026_10_31/q14_run{5,6,7}.txt]
 
 The GDN-hybrid checkpoint (runs 1-4) leads vLLM at every shape tried; the dense counter-probe
-(runs 5-10) crosses over between 8 and 32 streams, where vLLM's Marlin W4A16 path and larger
-prompts favour vLLM; single-stream imp leads 17-22% on both checkpoints (native FP4 decode vs
+(runs 5-10) crossed over between 8 and 32 streams on 2026-09-02; on v0.60.0 vs vLLM 0.31.0
+(runs 11-13) imp leads at 8 and 32 streams with short prompts and trails only with 1000-token
+prompts at 32 streams (-4.2%); single-stream imp leads 17-22% on both checkpoints (native FP4 decode vs
 vLLM's Marlin dequant-to-BF16 fallback, no native FP4 path on `sm_120`). The 32-stream GDN-hybrid
 aggregate moved 81.5 -> 1807.9 tok/s across this branch's levers; runs 8-9 and the profiling
 breakdown that attributed the gap (GEMM class, GPU idle, launch density):

@@ -2,7 +2,7 @@
 layer: L0
 audience: newcomers
 verified: 2026-10-31
-commit: daca1665
+commit: 31ee90c6
 -->
 
 <p align="center">
@@ -87,7 +87,8 @@ imp is built for models in **SafeTensors** format (NVFP4 or FP8). Which models w
 ## What imp is not
 
 - **Not for other hardware:** one GPU, NVIDIA Blackwell only. No multi-GPU, no CPU, no AMD: use [vLLM](https://github.com/vllm-project/vllm) for those.
-- **Not always ahead:** vLLM was faster on Qwen3-14B with 32 users at once (-7.6 %, 2026-09-02, [`BENCHMARKS.md`](docs/BENCHMARKS.md)). Every known gap: [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+- **Not always ahead:** vLLM is faster on Qwen3-14B with 32 users at once sending long prompts (~1000 tokens each: -4.2 %, 2026-10-31, [`BENCHMARKS.md`](docs/BENCHMARKS.md)); with short prompts imp leads (+7.2 %).
+<!-- [PROV: commit=e08db9d2 date=2026-10-31 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/vllm_conc_ab.sh` CONC=32 PLEN=1000/0 n=3 trials x 3 waves note=vLLM 0.31.0, BENCHMARKS runs 11 and 13] --> Every known gap: [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 - **Not a company product:** one maintainer, tested on one RTX 5090; issues are welcome, answers are not guaranteed.
 
 ## More
