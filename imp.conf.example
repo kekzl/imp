@@ -740,9 +740,6 @@ nvfp4_lm_head        = "auto"
 # NVFP4 head (on, or auto fallback) also on GDN/SSM hybrids (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
-# No effect since the CUTLASS NVFP4 GEMM left (#2938): the own tile plans
-# stream-K per grid (#2934). Still accepted so existing configs load.
-nvfp4_cutlass_streamk = 1
 # cuBLASLt block-scaled NVFP4 GEMM for dense prefill when the own tile refuses,
 # at M >= this (0 = off). Same weight/scale bytes. Measured vs CUTLASS (#2540):
 # pp4096 +4.6..5.2 % Qwen3-14B-NVFP4, +2.5..3.1 % Qwen3.8-27B-NVFP4.

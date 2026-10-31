@@ -92,9 +92,6 @@ struct GEMM {
     // mxf4nvf4 MMA via a producer/consumer cp.async+mbarrier pipeline on the
     // same plain weight bytes the M=1 GEMVs read (zero extra VRAM). Default on.
     bool nvfp4_smallm = true;
-    // No GEMM reads this since the CUTLASS NVFP4 GEMM left (#2938); the own tile plans stream-K
-    // per grid (#2934). Still parsed and copied into process_diag.
-    int nvfp4_cutlass_streamk = 1;
     // cuBLASLt block-scaled NVFP4 (VEC16_UE4M3) for dense prefill when the own tile refuses, at
     // M >= this, 0 = off. Same SfAtom bytes; M=2048 GEMM -5.8..-7.7 % vs CUTLASS (#2540).
     // runtime.deterministic forces 0 (timed algo pick).

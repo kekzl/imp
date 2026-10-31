@@ -63,7 +63,6 @@ struct ProcessDiag {
     int attention_paged_fp8_hpc = 0;        // 0 = auto; -1 = the per-head four-token kernel; tests sweep 1..5
     bool attention_fa2_heavy_first = true;  // matches the config.h default
     bool attention_fp8_qk_scaled = false;
-    int nvfp4_cutlass_streamk = 1;  // matches the config.h default
     int nvfp4_cublaslt_min_m = 2048;     // matches the config.h default
     int nvfp4_tile_min_m = 1;            // matches the config.h default
     bool f16_tile = true;                // matches the config.h default
@@ -171,8 +170,6 @@ int process_diag_fa2_hd256_bkv();  // KV tile rows of the HD=256 instance (atten
 void process_diag_set_fa2_hd256_bkv(int v);
 [[nodiscard]] bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
 void process_diag_set_fp8_qk_scaled(bool v);
-int process_diag_nvfp4_cutlass_streamk();  // gemm.nvfp4_cutlass_streamk: 0 off, 1 sub-2-wave grids, 2 forced
-void process_diag_set_nvfp4_cutlass_streamk(int v);
 int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
 [[nodiscard]] int process_diag_nvfp4_tile_min_m();  // gemm.nvfp4_tile_min_m: 0 off
 [[nodiscard]] bool process_diag_f16_tile();         // gemm.f16_tile

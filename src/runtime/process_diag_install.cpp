@@ -65,8 +65,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_paged_f16_multitok = cfg.attention.paged_f16_multitok;
     d.attention_fa2_heavy_first = cfg.attention.fa2_heavy_first;
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
-    // runtime.deterministic: no stream-K. Picked by tile count (M), it moved chunk-split rows (#2556).
-    d.nvfp4_cutlass_streamk = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cutlass_streamk;
+    // runtime.deterministic: no timed cuBLASLt algo pick.
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
     d.f16_tile = cfg.gemm.f16_tile;
