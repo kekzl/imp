@@ -124,7 +124,7 @@ nsys stats timeline.nsys-rep
 
 ## Step 4: roofline
 
-Peaks: 1792 GB/s DRAM, FP16 838 TFLOPS, FP8 1677, FP4 3354 (datasheet), L2 96 MB. Measured FP4 `mma.sync` = 2019 TOPS (~1/2 datasheet), f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate. Use measured peaks or every FP4 kernel reads falsely bad. Roofline cells (`tools/roofline/config.json`): `q8-dense` Qwen3-8B-Q8_0, `nvfp4-dense` Qwen3-14B-NVFP4, `nvfp4-moe` Qwen3-30B-A3B-NVFP4, `q4k-moe`, `q4k-dense-hd256` gemma-3-12b, `nvfp4-hybrid` = Qwen3.6-35B (NOT Qwen3.8-27B). Pinned baseline `tools/roofline/history/BASELINE` (run 1d5b9230 pinned #1835).
+Peaks: 1792 GB/s DRAM, FP16 838 TFLOPS, FP8 1677, FP4 3354 (datasheet), L2 96 MB. Measured FP4 `mma.sync` = 2019 TOPS (~1/2 datasheet), f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate. Use measured peaks or every FP4 kernel reads falsely bad. Roofline cells (`tools/roofline/config.json`): `q8-dense` Qwen3-8B-Q8_0, `nvfp4-dense` Qwen3-14B-NVFP4, `nvfp4-moe` Qwen3-30B-A3B-NVFP4, `q4k-moe`, `q4k-dense-hd256` gemma-3-12b, `gptoss-moe`; `nvfp4-hybrid` (Qwen3.6-35B) dropped 2026-10-31 with the checkpoint. Pinned baseline `tools/roofline/history/BASELINE` (run 1d5b9230 pinned #1835).
 
 ## Report template
 

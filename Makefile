@@ -227,7 +227,7 @@ test-all: build
 # NOTE: the *DetEvalE2ETest* form is required — it is a TEST_P suite, so
 # `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
 # guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
-MOE_MODEL ?= /models/Qwen3.6-35B-A3B-NVFP4
+MOE_MODEL ?= /models/Gemma-4-26B-A4B-it-NVFP4
 HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \

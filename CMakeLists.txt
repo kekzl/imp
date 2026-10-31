@@ -1466,7 +1466,6 @@ if(IMP_BUILD_TESTS)
         tests/test_vram_budget_reserve.cpp
         tests/test_e2e_llm_compressor.cpp
         tests/test_chunked_prefill.cu
-        tests/test_mtp_forward.cpp
         tests/test_nvfp4_prefill_cache_knob.cpp
         tests/test_gguf_dead_weight_forms.cpp
         tests/test_q8_drop_source_e2e.cpp
