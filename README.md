@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-30
-commit: a4070e6a
+verified: 2026-10-31
+commit: ed4422b7
 -->
 
 <p align="center">
@@ -37,9 +37,11 @@ Both engines read the same model file. A token is about ¾ of a word, so 96 toke
 **Bigger than the card:** the 123.6 GiB Qwen3.8-Flash-Next answers at **92.1 tokens/s** on a 32 GB card, its experts in host RAM ([how](docs/BIG_MODELS.md)).
 <!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts] -->
 
-## Install
+## Quickstart (Docker)
 
-**You need:** an RTX 50 or RTX PRO Blackwell card, Linux or Windows with WSL2, Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+**You need:** an RTX 50 or RTX PRO Blackwell card, Linux or Windows with WSL2, Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). No CUDA toolkit, no Python.
+
+**Qwen3.8-27B**, the default: text and images, fits a 24-32 GB card.
 
 ```bash
 git clone https://github.com/kekzl/imp && cd imp
@@ -51,13 +53,24 @@ docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
 When the log says `Server listening`, open <http://localhost:8080> and chat. On an RTX 5090 this setup answers at **96.5 tokens/s** and uses 19.7 GiB of the card.
 <!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.3 path=server-api cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=5 server starts x 6 prompts note=max_batch_size auto 32, no speculation; VRAM = card peak minus idle] -->
 
-Step by step, without Docker, or with another model: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+**Qwen3.8-Flash-Next**, the biggest: 123.6 GiB on a 32 GB card, needs ~68 GiB free RAM and 124 GiB of disk.
+
+```bash
+STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4
+docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4
+```
+
+Ready after about 40 s. How a model bigger than the card runs: [`docs/BIG_MODELS.md`](docs/BIG_MODELS.md).
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts note=load 38-43 s with the imp-cache volume] -->
+
+Step by step, what the log should say, other models: [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Build the image yourself or run without Docker: [`docs/BUILD.md`](docs/BUILD.md).
 
 ## Which model?
 
 | You want | Take |
 | --- | --- |
-| **not sure** | **Qwen3.8-27B** (the example above): reads text and images, fits a 24-32 GB card |
+| **not sure** | **Qwen3.8-27B** (the first example above): reads text and images, fits a 24-32 GB card |
 | fast answers on a 12-16 GB card | **Qwen3-8B** |
 | code and agents, fast | **Qwen3-Coder-30B-A3B** |
 | the biggest, with ~68 GiB free RAM | **Qwen3.8-Flash-Next** ([how](docs/BIG_MODELS.md)) |
@@ -84,7 +97,8 @@ imp is built for models in **SafeTensors** format (NVFP4 or FP8). Which models w
 | know how it works | [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) |
 | run it behind a proxy, with an API key | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
 | see every setting | [`docs/CONFIG.md`](docs/CONFIG.md) |
-| build from source or contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| build from source | [`docs/BUILD.md`](docs/BUILD.md) |
+| contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | browse all docs | [`docs/README.md`](docs/README.md) |
 
 Every line of imp was written by an AI coding agent (Claude Code); the audit trail is in [`docs/audit/`](docs/audit/).

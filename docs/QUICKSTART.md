@@ -1,15 +1,15 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: a4070e6a
+verified: 2026-10-31
+commit: ed4422b7
 -->
 
 # Quickstart
 
 From nothing to an answered completion. Everything runs in Docker; the host needs a driver, not a CUDA toolkit.
 
-Worked example: **Qwen3.8-27B**, same as the [README](../README.md#install). This page is the long version: what to check first, what the startup log should say, the other ways in.
+Worked example: **Qwen3.8-27B**, same as the [README](../README.md#quickstart-docker). This page is the long version: what to check first, what the startup log should say, the other ways in.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ docker ps
 | --- | --- | --- |
 | 96 GB | RTX PRO 6000 Blackwell (Workstation, Max-Q, Server) | every 32 GB pick with a far longer context |
 | 48 GB | RTX PRO 5000 Blackwell | every 32 GB pick with a longer context |
-| 32 GB | **RTX 5090** (tested), RTX 5090 D, RTX PRO 4500 Blackwell | Qwen3.8-27B NVFP4 (17 GB), Qwen3.6-35B-A3B NVFP4 (18 GB), Nemotron-3-Nano-30B-A3B NVFP4 (18 GB); Qwen3.8-Flash-Next with ~62 GiB host RAM |
+| 32 GB | **RTX 5090** (tested), RTX 5090 D, RTX PRO 4500 Blackwell | Qwen3.8-27B NVFP4 (17 GB), Qwen3-Coder-30B-A3B NVFP4 (17 GB), Nemotron-3-Nano-30B-A3B NVFP4 (18 GB); Qwen3.8-Flash-Next with ~68 GiB host RAM |
 | 24 GB | RTX 5090 D V2, RTX PRO 4000 Blackwell | Qwen3.8-27B NVFP4 (17 GB), Qwen3-30B-A3B NVFP4 (16 GB), short context |
 | 16 GB | RTX 5080, RTX 5070 Ti, RTX 5060 Ti 16 GB, RTX PRO 2000 Blackwell | Qwen3-14B NVFP4 (10 GB), Qwen3-8B Q8_0 (8.2 GB) |
 | 12 GB | RTX 5070 | Qwen3-8B Q8_0 (8.2 GB), Qwen3-8B NVFP4 (5.0 GB) |
@@ -45,7 +45,7 @@ DGX Spark (GB10) is compute capability 12.1: no image in the default build ([`LI
 
 ## 1. Get a model
 
-`stage-model.sh` pulls `ghcr.io/kekzl/imp:latest` when it is missing; after `make build` set `IMP_IMAGE=imp:test` to quantize with your own build. `docker compose build imp-server` produces `imp:latest`.
+`stage-model.sh` pulls `ghcr.io/kekzl/imp:latest` when it is missing. With your own build: [`BUILD.md`](BUILD.md).
 
 ```bash
 scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
@@ -53,8 +53,8 @@ scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-
 
 19.2 GiB, download only: that repo is already NVFP4 (an `imp-quantize --format vllm` export - the same directory also loads in vLLM, verified on 0.27.1), so the script fetches it and stops. imp reads two formats, no conversion step for either:
 
-- a **GGUF file** (`Qwen3-8B-Q8_0.gguf`)
-- a **SafeTensors directory** with NVFP4 weights, as exported by NVIDIA Model Optimizer, llm-compressor, or `imp-quantize`
+- a **SafeTensors directory** with NVFP4 or FP8 weights, as exported by NVIDIA Model Optimizer, llm-compressor, or `imp-quantize`: the format imp is built for
+- a **GGUF file** (`Qwen3-8B-Q8_0.gguf`): legacy, still loads, gets no new speedups
 
 Which checkpoints load, and what each needs: [`MODELS.md`](MODELS.md).
 
@@ -128,7 +128,7 @@ curl -s http://localhost:8080/v1/chat/completions \
       }' | jq -r '.choices[0].message.content'
 ```
 
-Expected: an explanation of Rayleigh scattering, written at the single-stream rate in [README Install](../README.md#install), which carries the PROV (the embedded MTP head is taken automatically on a single-stream run).
+Expected: an explanation of Rayleigh scattering, written at the single-stream rate in [README Quickstart](../README.md#quickstart-docker), which carries the PROV (the embedded MTP head is taken automatically on a single-stream run).
 
 ## 4. Or use the other surfaces
 
@@ -201,7 +201,7 @@ Commands: [`BIG_MODELS.md`](BIG_MODELS.md#run-it). Weights: 25 files from `nvidi
 
 | | |
 |---|---|
-| run it without Docker (release tarball, CUDA libraries bundled) | [`DEPLOYMENT.md`](DEPLOYMENT.md#without-docker) |
+| build it yourself, or run without Docker | [`BUILD.md`](BUILD.md) |
 | put it behind a proxy, with auth | [`DEPLOYMENT.md`](DEPLOYMENT.md) |
 | post your card's numbers | `scripts/bench-community.sh` prints a block for [Discussions](https://github.com/kekzl/imp/discussions) |
 | which API fields actually work | [`API.md`](API.md) |
