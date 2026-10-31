@@ -178,7 +178,8 @@ TEST(GemmF16TileBench, VsCublasLt) {
     cudaStream_t s;
     cudaStreamCreate(&s);
     process_diag_set_cublas_fp16_acc(true);
-    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {5120, 5120}, {1024, 5120}};
+    // {2688, 4096}: Nemotron-3-Nano Mamba out_proj (176 tiles at M 2048, one wave + 6 CTAs).
+    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {5120, 5120}, {1024, 5120}, {2688, 4096}};
     std::fprintf(stderr, "%6s %6s %6s %9s %9s %9s %9s %9s %8s\n", "M", "N", "K", "lt_us", "v0", "v1", "v2",
                  "v3", "best_TF");
     for (const auto& nk : shapes)

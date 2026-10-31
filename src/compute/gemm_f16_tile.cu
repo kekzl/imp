@@ -271,14 +271,17 @@ bool gemm_f16_tile(const void* a, const void* w, void* d, int M, int N, int K, f
 }
 
 // gemm.f16_tile: own fp16-accumulate GEMM (bit-equal to COMPUTE_16F, capture-safe) for deep K
-// (K >= N) once its 128x256 grid fills a wave. In situ Qwen3-14B-Q6_K pp2048: the down proj
-// (2048x5120x17408) wins, the N=17408 gate/up lose 1 %; small grids lose (512x1024 120 vs 30.7 us).
+// (K >= N) once its 128x256 grid fills >= 80 % of its last wave. Wins: 2048x5120x17408 (320 tiles,
+// 94 %); loses: 2048x2688x4096 Nemotron out_proj (176 tiles, 52 %) 220 vs cuBLASLt 122 us in situ.
 bool gemm_f16_tile_route(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                          cudaStream_t stream) {
     const int64_t M = A.shape[0];
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
-    if (!process_diag_f16_tile() || K < N || ((N + 255) / 256) * ((M + 127) / 128) < 170 ||
+    constexpr int64_t kSms = 170;
+    const int64_t tiles = ((N + 255) / 256) * ((M + 127) / 128);
+    const int64_t wave_slots = ((tiles + kSms - 1) / kSms) * kSms;
+    if (!process_diag_f16_tile() || K < N || tiles < kSms || tiles * 5 < wave_slots * 4 ||
         !gemm_f16_tile(A.data, B.data, C.data, static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                        alpha, beta, /*acc_fp16=*/true, stream))
         return false;
