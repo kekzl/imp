@@ -1,0 +1,64 @@
+image imp:test imp@sha256:ac881cce91d2b25f859c8715fec82ed7f78b718e6a6a5f1ba6280deee8188fdd v26.04
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+t1 prose    tokens  400  ttft    520.7 ms  decode   95.49 tok/s
+t1 code     tokens  400  ttft    383.7 ms  decode   91.49 tok/s
+t1 chat     tokens  400  ttft    398.2 ms  decode   92.02 tok/s
+t1 math     tokens  400  ttft    377.4 ms  decode   89.72 tok/s
+t1 debug    tokens  400  ttft    407.2 ms  decode   95.07 tok/s
+t1 summary  tokens  400  ttft    374.5 ms  decode   91.56 tok/s
+t1 MEDIAN decode 91.79 tok/s (min 89.72 max 95.49) ttft 391.0 ms (min 374.5 max 520.7) n=6
+trial 1: load 76 s, host MemAvailable 74.7 -> 8.5 GiB, card VRAM 1233 MiB idle -> 27451 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+t2 prose    tokens  400  ttft    492.1 ms  decode   95.86 tok/s
+t2 code     tokens  400  ttft    380.9 ms  decode   91.91 tok/s
+t2 chat     tokens  400  ttft    394.1 ms  decode   91.72 tok/s
+t2 math     tokens  400  ttft    369.7 ms  decode   89.46 tok/s
+t2 debug    tokens  400  ttft    399.4 ms  decode   94.77 tok/s
+t2 summary  tokens  400  ttft    369.7 ms  decode   92.08 tok/s
+t2 MEDIAN decode 92.00 tok/s (min 89.46 max 95.86) ttft 387.5 ms (min 369.7 max 492.1) n=6
+trial 2: load 50 s, host MemAvailable 75.3 -> 8.7 GiB, card VRAM 1233 MiB idle -> 27451 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+t3 prose    tokens  400  ttft    446.2 ms  decode   95.71 tok/s
+t3 code     tokens  400  ttft    359.9 ms  decode   91.90 tok/s
+t3 chat     tokens  400  ttft    381.1 ms  decode   91.61 tok/s
+t3 math     tokens  400  ttft    368.3 ms  decode   89.61 tok/s
+t3 debug    tokens  400  ttft    389.9 ms  decode   95.02 tok/s
+t3 summary  tokens  400  ttft    373.7 ms  decode   91.50 tok/s
+t3 MEDIAN decode 91.76 tok/s (min 89.61 max 95.71) ttft 377.4 ms (min 359.9 max 446.2) n=6
+trial 3: load 45 s, host MemAvailable 75.9 -> 8.4 GiB, card VRAM 1233 MiB idle -> 27472 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}

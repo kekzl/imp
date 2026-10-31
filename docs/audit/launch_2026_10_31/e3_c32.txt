@@ -1,0 +1,123 @@
+image imp:test imp@sha256:ac881cce91d2b25f859c8715fec82ed7f78b718e6a6a5f1ba6280deee8188fdd
+image vllm/vllm-openai:v0.31.0 vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+== arm imp-nvfp4 conc 32 trial 1 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 4.90s = 1960.6 tok/s aggregate (prompt 47 tok avg)
+wave1: 9600 tok in 4.89s = 1963.7 tok/s aggregate (prompt 47 tok avg)
+wave2: 9600 tok in 4.88s = 1966.6 tok/s aggregate (prompt 47 tok avg)
+MEDIAN 1963.7
+== arm vllm-nvfp4 conc 32 trial 1 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 6.96s = 1380.1 tok/s aggregate (prompt 48 tok avg)
+wave1: 9600 tok in 6.99s = 1374.0 tok/s aggregate (prompt 48 tok avg)
+wave2: 9600 tok in 6.92s = 1387.6 tok/s aggregate (prompt 48 tok avg)
+MEDIAN 1380.1
+== arm vllm-nvfp4 conc 32 trial 2 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 6.92s = 1388.2 tok/s aggregate (prompt 48 tok avg)
+wave1: 9600 tok in 6.87s = 1396.4 tok/s aggregate (prompt 48 tok avg)
+wave2: 9600 tok in 6.88s = 1394.3 tok/s aggregate (prompt 48 tok avg)
+MEDIAN 1394.3
+== arm imp-nvfp4 conc 32 trial 2 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 4.93s = 1948.4 tok/s aggregate (prompt 47 tok avg)
+wave1: 9600 tok in 4.86s = 1976.6 tok/s aggregate (prompt 47 tok avg)
+wave2: 9600 tok in 4.85s = 1980.3 tok/s aggregate (prompt 47 tok avg)
+MEDIAN 1976.6
+== arm imp-nvfp4 conc 32 trial 3 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 4.92s = 1951.6 tok/s aggregate (prompt 47 tok avg)
+wave1: 9600 tok in 4.86s = 1974.8 tok/s aggregate (prompt 47 tok avg)
+wave2: 9600 tok in 4.85s = 1981.2 tok/s aggregate (prompt 47 tok avg)
+MEDIAN 1974.8
+== arm vllm-nvfp4 conc 32 trial 3 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 7.01s = 1370.0 tok/s aggregate (prompt 48 tok avg)
+wave1: 9600 tok in 6.96s = 1378.6 tok/s aggregate (prompt 48 tok avg)
+wave2: 9600 tok in 6.97s = 1378.1 tok/s aggregate (prompt 48 tok avg)
+MEDIAN 1378.1
+=== summary ===
+== arm imp-nvfp4 conc 32 trial 1 ==
+MEDIAN 1963.7
+== arm vllm-nvfp4 conc 32 trial 1 ==
+MEDIAN 1380.1
+== arm vllm-nvfp4 conc 32 trial 2 ==
+MEDIAN 1394.3
+== arm imp-nvfp4 conc 32 trial 2 ==
+MEDIAN 1976.6
+== arm imp-nvfp4 conc 32 trial 3 ==
+MEDIAN 1974.8
+== arm vllm-nvfp4 conc 32 trial 3 ==
+MEDIAN 1378.1
