@@ -413,11 +413,111 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     }
 }
 
-void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight, int n_heads,
-                       int n_kv_heads, int head_dim, float eps, const int* positions, float theta,
-                       float scaling, int rope_dim, bool neox, cudaStream_t stream, float weight_offset,
-                       float ext_factor, float attn_factor, const float* corr_dims,
-                       const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
+// One head, one warp: lane l holds dims l + 32 j; cs = [rope_pairs] cos, [rope_pairs] sin.
+template <int J>
+__device__ __forceinline__ void qknorm_rope_warp_head(__half* __restrict__ head,
+                                                      const __half* __restrict__ norm_w, const float* cs,
+                                                      int lane, float eps, int rope_pairs, bool neox,
+                                                      float weight_offset) {
+    constexpr int kHd = 32 * J;
+    float v[J];
+#pragma unroll
+    for (int j = 0; j < J; ++j)
+        v[j] = __half2float(head[lane + (32 * j)]);
+
+    float part[4];
+#pragma unroll
+    for (int w = 0; w < 4; ++w) {
+        float sum_sq = 0.0f;
+#pragma unroll
+        for (int j = w; j < J; j += 4)
+            sum_sq += v[j] * v[j];
+        part[w] = warp_reduce_sum(sum_sq);
+    }
+    float sum_sq = (part[0] + part[2]) + (part[1] + part[3]);
+    sum_sq = __shfl_sync(0xFFFFFFFF, sum_sq, 0);
+    const float inv_rms = rsqrtf((sum_sq / (float)kHd) + eps);
+
+    float nv[J];
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+        const float w = __half2float(norm_w[lane + (32 * j)]) + weight_offset;
+        nv[j] = v[j] * inv_rms * w;
+    }
+
+    if (neox) {
+        const int rp = rope_pairs >> 5;  // rope_pairs % 32 == 0 (launcher gate)
+#pragma unroll
+        for (int j = 0; j < J; ++j) {
+            if (j < rp) {
+                const float cos_val = cs[lane + (32 * j)];
+                const float sin_val = cs[rope_pairs + lane + (32 * j)];
+                const float q0 = nv[j];
+                const float q1 = nv[j + rp];
+                head[lane + (32 * j)] = __float2half((q0 * cos_val) - (q1 * sin_val));
+                head[lane + (32 * (j + rp))] = __float2half((q0 * sin_val) + (q1 * cos_val));
+            } else if (j >= 2 * rp) {
+                head[lane + (32 * j)] = __float2half(nv[j]);
+            }
+        }
+    } else {
+#pragma unroll
+        for (int j = 0; j < J; ++j) {
+            const float other = __shfl_xor_sync(0xFFFFFFFF, nv[j], 1);
+            const int e = lane + (32 * j);
+            if (e < 2 * rope_pairs) {
+                const float cos_val = cs[e >> 1];
+                const float sin_val = cs[rope_pairs + (e >> 1)];
+                const float q0 = (e & 1) ? other : nv[j];
+                const float q1 = (e & 1) ? nv[j] : other;
+                head[e] = (e & 1) ? __float2half((q0 * sin_val) + (q1 * cos_val))
+                                  : __float2half((q0 * cos_val) - (q1 * sin_val));
+            } else {
+                head[e] = __float2half(nv[j]);
+            }
+        }
+    }
+}
+
+// One CTA per token: cos/sin per rotary pair once in smem, then one warp per head (Q heads, K heads);
+// lane l holds dims l + 32 j. Same per-element arithmetic and sum order as the 128-thread CTA kernel
+// above (bit-identical, QkNormRopeWarp test): lane partials of dims j = w mod 4, 32-lane xor tree,
+// then (p0 + p2) + (p1 + p3).
+template <int J>
+__global__ void qknorm_rope_warp_fp16_kernel(
+    __half* __restrict__ Q, __half* __restrict__ K, const __half* __restrict__ q_norm_w,
+    const __half* __restrict__ k_norm_w, const int* __restrict__ positions, int n_heads, int n_kv_heads,
+    int heads_per_cta, float eps, float theta, float inv_scaling, int rope_pairs, bool neox,
+    float weight_offset, float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
+    const float* __restrict__ longrope_inv_freqs, MRopeParams mrope) {
+    constexpr int kHd = 32 * J;
+    extern __shared__ float cs[];  // [rope_pairs] cos, then [rope_pairs] sin
+    const int lane = threadIdx.x & 31;
+    const int token_idx = blockIdx.x;
+    pdl_wait();  // positions and Q/K are the previous kernels' outputs
+    for (int p = static_cast<int>(threadIdx.x); p < rope_pairs; p += static_cast<int>(blockDim.x))
+        rope_angle(mrope, positions, token_idx, p, theta, inv_scaling, rope_pairs, ext_factor, attn_factor,
+                   corr_dim_0, corr_dim_1, longrope_inv_freqs, cs[p], cs[rope_pairs + p]);
+    __syncthreads();
+    pdl_trigger();  // scheduling only: the KV write that follows waits for this grid to complete
+
+    // grid.y splits the heads (heads_per_cta, cos/sin recomputed per CTA): decode rows spread over
+    // more CTAs, prefill rows keep one CTA per token (2048 rows: 26.4 vs 31.8 us at 8 heads per CTA).
+    const int h_end = min(n_heads + n_kv_heads, static_cast<int>(blockIdx.y + 1) * heads_per_cta);
+    for (int h = (static_cast<int>(blockIdx.y) * heads_per_cta) + static_cast<int>(threadIdx.x >> 5);
+         h < h_end; h += static_cast<int>(blockDim.x >> 5))
+        qknorm_rope_warp_head<J>(
+            h < n_heads ? Q + (((static_cast<int64_t>(token_idx) * n_heads) + h) * kHd)
+                        : K + (((static_cast<int64_t>(token_idx) * n_kv_heads) + (h - n_heads)) * kHd),
+            h < n_heads ? q_norm_w : k_norm_w, cs, lane, eps, rope_pairs, neox, weight_offset);
+}
+
+static void qknorm_rope_launch(bool allow_warp, half* Q, half* K, const half* q_norm_weight,
+                               const half* k_norm_weight, int n_heads, int n_kv_heads, int head_dim,
+                               float eps, const int* positions, float theta, float scaling, int rope_dim,
+                               bool neox, cudaStream_t stream, float weight_offset, float ext_factor,
+                               float attn_factor, const float* corr_dims, const float* longrope_inv_freqs,
+                               MRopeParams mrope, int n_tokens) {
     const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
     if (max_heads == 0 || head_dim == 0 || n_tokens <= 0)
         return;
@@ -432,6 +532,37 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
         cd1 = corr_dims[1];
     }
 
+    // Per-token kernel; the CTA kernel stays for head dims off 64/128/256/512 and neox partial
+    // rotary with rope_pairs % 32 != 0.
+    const bool warp_ok = allow_warp && (!neox || rope_pairs % 32 == 0);
+    auto launch_warp = [&](auto kernel) {
+        const int per_tok = n_heads + n_kv_heads;
+        const int heads_per_cta = n_tokens >= 512 ? per_tok : 8;
+        pdl::launch(kernel,
+                    dim3(static_cast<unsigned>(n_tokens),
+                         static_cast<unsigned>((per_tok + heads_per_cta - 1) / heads_per_cta)),
+                    dim3(256), 2 * rope_pairs * static_cast<int>(sizeof(float)), stream,
+                    reinterpret_cast<__half*>(Q), reinterpret_cast<__half*>(K),
+                    reinterpret_cast<const __half*>(q_norm_weight),
+                    reinterpret_cast<const __half*>(k_norm_weight), positions, n_heads, n_kv_heads,
+                    heads_per_cta, eps, theta, inv_scaling, rope_pairs, neox, weight_offset, ext_factor,
+                    attn_factor, cd0, cd1, longrope_inv_freqs, mrope);
+    };
+    if (warp_ok) {
+        switch (head_dim) {
+            case 64:
+                return launch_warp(qknorm_rope_warp_fp16_kernel<2>);
+            case 128:
+                return launch_warp(qknorm_rope_warp_fp16_kernel<4>);
+            case 256:
+                return launch_warp(qknorm_rope_warp_fp16_kernel<8>);
+            case 512:
+                return launch_warp(qknorm_rope_warp_fp16_kernel<16>);
+            default:
+                break;
+        }
+    }
+
     const int block_size = 128;
     const int smem_bytes = (8 + head_dim) * sizeof(float);
 
@@ -441,6 +572,26 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                 reinterpret_cast<const __half*>(k_norm_weight), positions, n_heads, n_kv_heads, head_dim, eps,
                 theta, inv_scaling, rope_pairs, neox, weight_offset, ext_factor, attn_factor, cd0, cd1,
                 longrope_inv_freqs, mrope);
+}
+
+void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight, int n_heads,
+                       int n_kv_heads, int head_dim, float eps, const int* positions, float theta,
+                       float scaling, int rope_dim, bool neox, cudaStream_t stream, float weight_offset,
+                       float ext_factor, float attn_factor, const float* corr_dims,
+                       const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
+    qknorm_rope_launch(true, Q, K, q_norm_weight, k_norm_weight, n_heads, n_kv_heads, head_dim, eps,
+                       positions, theta, scaling, rope_dim, neox, stream, weight_offset, ext_factor,
+                       attn_factor, corr_dims, longrope_inv_freqs, mrope, n_tokens);
+}
+
+void qknorm_rope_fused_cta(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight,
+                           int n_heads, int n_kv_heads, int head_dim, float eps, const int* positions,
+                           float theta, float scaling, int rope_dim, bool neox, cudaStream_t stream,
+                           float weight_offset, float ext_factor, float attn_factor, const float* corr_dims,
+                           const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
+    qknorm_rope_launch(false, Q, K, q_norm_weight, k_norm_weight, n_heads, n_kv_heads, head_dim, eps,
+                       positions, theta, scaling, rope_dim, neox, stream, weight_offset, ext_factor,
+                       attn_factor, corr_dims, longrope_inv_freqs, mrope, n_tokens);
 }
 
 // --------------------------------------------------------------------------
@@ -467,6 +618,10 @@ void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base, float beta
 void rope_pdl_register() {
     // Only kernels that call pdl_wait() may be registered (core/pdl_device.cuh).
     pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_fused_fp16_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_warp_fp16_kernel<2>));
+    pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_warp_fp16_kernel<4>));
+    pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_warp_fp16_kernel<8>));
+    pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_warp_fp16_kernel<16>));
 }
 
 }  // namespace imp

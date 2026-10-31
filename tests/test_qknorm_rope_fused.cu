@@ -203,4 +203,91 @@ INSTANTIATE_TEST_SUITE_P(RowCounts, QkNormRopeFusedTest,
                              return "n" + std::to_string(i.param.n_tokens);
                          });
 
+// The warp-per-head kernel must reproduce the CTA kernel bit for bit (same per-element math and
+// sum order), on every rotary variant it serves: neox full/partial, interleaved, weight offset,
+// YaRN, precomputed frequencies.
+struct WarpCase {
+    const char* name;
+    int n_tokens, n_heads, n_kv_heads, head_dim, rope_dim;
+    bool neox;
+    float weight_offset, ext_factor;
+    bool longrope;
+};
+
+class QkNormRopeWarpTest : public ::testing::TestWithParam<WarpCase> {};
+
+TEST_P(QkNormRopeWarpTest, BitIdenticalToCtaKernel) {
+    if (!cuda_available())
+        GTEST_SKIP() << "no CUDA device";
+    const WarpCase c = GetParam();
+    const size_t q_count = static_cast<size_t>(c.n_tokens) * c.n_heads * c.head_dim;
+    const size_t k_count = static_cast<size_t>(c.n_tokens) * c.n_kv_heads * c.head_dim;
+    std::vector<float> q_in(q_count), k_in(k_count), qw(c.head_dim), kw(c.head_dim), freqs(c.rope_dim / 2);
+    for (size_t i = 0; i < q_count; ++i)
+        q_in[i] = 3.0f * sample(static_cast<int64_t>(i) * 13);
+    for (size_t i = 0; i < k_count; ++i)
+        k_in[i] = 3.0f * sample(static_cast<int64_t>(i) * 13 + 7919);
+    for (int d = 0; d < c.head_dim; ++d) {
+        qw[d] = 0.8f + 0.4f * sample(d);
+        kw[d] = 1.2f - 0.3f * sample(d + 131);
+    }
+    for (int p = 0; p < c.rope_dim / 2; ++p)
+        freqs[p] = std::pow(1e6f, -2.0f * p / c.rope_dim) / (1.0f + 0.1f * (p % 7));
+    std::vector<int> pos(c.n_tokens);
+    for (int t = 0; t < c.n_tokens; ++t)
+        pos[t] = 37 + 61 * t;
+    const float corr_dims[2] = {4.0f, 40.0f};
+
+    const std::vector<half> q_h = to_half(q_in), k_h = to_half(k_in), qw_h = to_half(qw), kw_h = to_half(kw);
+    void* d_q[2] = {upload(q_h.data(), q_count * sizeof(half)), upload(q_h.data(), q_count * sizeof(half))};
+    void* d_k[2] = {upload(k_h.data(), k_count * sizeof(half)), upload(k_h.data(), k_count * sizeof(half))};
+    void* d_qw = upload(qw_h.data(), qw_h.size() * sizeof(half));
+    void* d_kw = upload(kw_h.data(), kw_h.size() * sizeof(half));
+    void* d_pos = upload(pos.data(), pos.size() * sizeof(int));
+    void* d_freqs = upload(freqs.data(), freqs.size() * sizeof(float));
+    for (void* p : {d_q[0], d_q[1], d_k[0], d_k[1], d_qw, d_kw, d_pos, d_freqs})
+        ASSERT_NE(p, nullptr);
+
+    using Fn = decltype(&qknorm_rope_fused);
+    const Fn fns[2] = {&qknorm_rope_fused_cta, &qknorm_rope_fused};
+    for (int a = 0; a < 2; ++a)
+        fns[a](static_cast<half*>(d_q[a]), static_cast<half*>(d_k[a]), static_cast<const half*>(d_qw),
+               static_cast<const half*>(d_kw), c.n_heads, c.n_kv_heads, c.head_dim, 1e-6f,
+               static_cast<const int*>(d_pos), 1e6f, /*scaling=*/c.ext_factor > 0.0f ? 4.0f : 1.0f,
+               c.rope_dim, c.neox, nullptr, c.weight_offset, c.ext_factor, /*attn_factor=*/1.1f,
+               c.ext_factor > 0.0f ? corr_dims : nullptr,
+               c.longrope ? static_cast<const float*>(d_freqs) : nullptr, MRopeParams{}, c.n_tokens);
+    QK_CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<uint16_t> out[2][2];
+    for (int a = 0; a < 2; ++a) {
+        out[a][0].resize(q_count);
+        out[a][1].resize(k_count);
+        QK_CUDA_CHECK(cudaMemcpy(out[a][0].data(), d_q[a], q_count * 2, cudaMemcpyDeviceToHost));
+        QK_CUDA_CHECK(cudaMemcpy(out[a][1].data(), d_k[a], k_count * 2, cudaMemcpyDeviceToHost));
+    }
+    size_t changed = 0;
+    for (size_t i = 0; i < q_count; ++i) {
+        ASSERT_EQ(out[0][0][i], out[1][0][i]) << c.name << ": Q bits differ at " << i;
+        changed += out[1][0][i] != reinterpret_cast<const uint16_t*>(q_h.data())[i];
+    }
+    for (size_t i = 0; i < k_count; ++i)
+        ASSERT_EQ(out[0][1][i], out[1][1][i]) << c.name << ": K bits differ at " << i;
+    EXPECT_GT(changed, q_count / 2) << c.name << ": both kernels left Q mostly untouched";
+
+    for (void* p : {d_q[0], d_q[1], d_k[0], d_k[1], d_qw, d_kw, d_pos, d_freqs})
+        cudaFree(p);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Variants, QkNormRopeWarpTest,
+    ::testing::Values(WarpCase{"qwen3_decode", 32, 40, 8, 128, 128, true, 0.0f, 0.0f, false},
+                      WarpCase{"qwen3_prefill", 2048, 40, 8, 128, 128, true, 0.0f, 0.0f, false},
+                      WarpCase{"qwen38_partial", 64, 16, 2, 256, 64, true, 0.0f, 0.0f, false},
+                      WarpCase{"interleaved_partial", 33, 8, 4, 64, 32, false, 0.0f, 0.0f, false},
+                      WarpCase{"gemma_offset_longrope", 17, 8, 1, 512, 512, true, 1.0f, 0.0f, true},
+                      WarpCase{"yarn", 9, 12, 4, 128, 128, true, 0.0f, 1.0f, false},
+                      WarpCase{"cta_fallback_hd96", 5, 4, 2, 96, 96, true, 0.0f, 0.0f, false}),
+    [](const ::testing::TestParamInfo<WarpCase>& i) { return std::string(i.param.name); });
+
 }  // namespace
