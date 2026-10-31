@@ -22,7 +22,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 - pp4096: 0.0 % CUTLASS in every cell; dense NVFP4 >= M 2048, grouped MoE and MXFP8 run the own tile kernels.
 - CUTLASS grouped 3.x and CUTLASS MXFP8 GEMM: 0 launches in 27 cells; both are refusal fallbacks only. Qwen3.6-35B runs 90 GDN MXFP8 projections on `gemm.mxfp8_tile` (`quantize_fp16_mxfp8_cutlass_kernel` is own code in the CUTLASS TU).
 - Gemma-4 pp4096 cuBLASLt sum 5.8 ms (29.10.: ~52 ms cuBLAS hd512 attention): the hd512 attention left cuBLAS.
-- Gemma-4 at M 2048 (grid 16x22, N 2816): the own NVFP4 tile declines the shared-MLP down_proj (K 2112, K % 128 = 64) and cuBLASLt block-scaled serves; see "Gemma-4 down_proj K 2112" below.
+- Gemma-4 at M 2048 (grid 16x22, N 2816): the own NVFP4 tile declined the shared-MLP down_proj (K 2112, K % 128 = 64) and cuBLASLt block-scaled served; step 15 below moves it to the own tile.
 - Raw per-cell JSONs are not committed: rerun the harness.
 
 ## Remaining call sites, ordered by share
@@ -32,12 +32,38 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 | 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted | per-SM MMA efficiency only |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only | N > K and split-K shapes |
-| 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile with a half last stage loses in situ (+2.6..3.5 %) | per-SM efficiency, as row 2 |
+| 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | removed (steps 13, 14) | - |
 
-## Gemma-4 down_proj K 2112: own tile refuted, cuBLASLt stays (2026-10-30)
+## Step 15: Gemma-4 down_proj K 2112 on the own tile (2026-10-31)
 
-Decline: `launch_tile` needs `K % kBK == 0` (BK 128 NVFP4); Gemma-4 `intermediate_size` 2112 = 16.5 x 128. Probe (not committed): the grouped kernel's half last stage (#2898: TMA zero-fills past K, the second SfAtom per slab zeroed) in the TMA configs, bit-equal to CUTLASS at 2048x2816x2112 and 200x384x192 (max diff 0; NaN scale mutant red).
+Decline was `launch_tile` needing `K % kBK == 0` (BK 128 NVFP4); Gemma-4 `intermediate_size` 2112 = 16.5 x 128. The package (`src/quant/nvfp4_gemm_tile*.cu*`), bit-equal to CUTLASS at 2048x2816x2112 and 200x384x192, finisher mutant red on 3 shapes:
+
+- partial last stage in every NVFP4 TMA config (TMA zero-fills past K, unused SfAtoms zeroed, `expect_tx` reduced);
+- 4-bit scales packed: W per LDS.128 (fragments 32 columns apart), A per LDS.64; 8-bit keeps contiguous columns (FP8 o_proj +27 % otherwise: split 32 B sectors);
+- epilogue stmatrix + TMA store, also for stream-K tiles (boxes past the barriers, the producer still fills the ring); data-parallel grid M-fastest;
+- auto stream-K pick = hybrid: whole waves data-parallel, the 12 partial-wave tiles of 352 in 3 k-pieces, else uniform stream-K.
+
+| Gemma-4 down_proj 2048x2816x2112 in situ (pp4096, nsys, 2 pairs, us per call) | main (cuBLASLt) | branch |
+|---|---:|---:|
+| hybrid, 3 pieces | 29.06-29.08 | 28.99-29.00 |
+| hybrid, 2 / 4 / 8 pieces | 28.9-30.4 | 29.2-29.7 / 30.0-30.1 / 34.4-34.6 |
+| uniform stream-K | 29.0-29.2 | 30.5-31.0 |
+
+| broad A/B, `build-dev` imp-cli under nsys, 3 pairs, pp tok/s | main 39012c30 | branch |
+|---|---:|---:|
+| Gemma-4-26B-A4B-NVFP4 pp4096 (cuBLASLt sum 23.8 -> 8.0 ms) | 43682-43833 | 44000-44183 |
+| Qwen3.8-27B-NVFP4-vllm pp4096 | 12376-12390 | 12416-12437 |
+| Qwen3-30B-A3B-NVFP4 pp4096 | 42238-42366 | 42406-42726 |
+| Qwen3-30B-A3B-NVFP4 pp512 (rerun) | 31882-32371 | 31915-32328 |
+| Qwen3.6-35B-A3B-NVFP4 pp4096 | 35143-35218 | 35275-35421 |
+| Qwen3-8B-FP8 pp4096 | 26429-26485 | 26828-26864 |
+
+PPL, branch = main: deterministic (no stream-K) Gemma-4 45k turn corpus 18.2854, Qwen3.8-27B 4k 5.2064, Qwen3-8B-FP8 4k 13.0748; Gemma-4 non-deterministic 17.8316 vs 17.8760 (MoE routing noise: main alone moves 2.5 % between modes).
+
+### Refuted on the way (2026-10-30, #2930)
+
+Half last stage alone, before the package:
 
 | Gemma-4-26B-A4B-NVFP4 pp4096, `main` af0e1605 vs probe, `build-dev` imp-cli under nsys, 3 pairs, order flipped per pair | main (cuBLASLt) | probe |
 |---|---:|---:|
@@ -45,7 +71,7 @@ Decline: `launch_tile` needs `K % kBK == 0` (BK 128 NVFP4); Gemma-4 `intermediat
 | with stream-K over the half step: dense NVFP4 sum, ms | 129.60-130.45 | 131.25-131.80 |
 | e2e tok/s (data-parallel run) | 43774-43945 | 43790-43837 |
 
-Flushed bench 2048x2816x2112 (us): cuBLASLt 32.0, CUTLASS 35.7, own 128x128 31.8-33.6, 128x256 39.6. 352 tiles = 2.07 waves on 170 SMs for both kernels; the gap is per-SM efficiency (row 2), not the wave tail.
+Flushed bench 2048x2816x2112 (us): cuBLASLt 32.0, CUTLASS 35.7, own 128x128 31.8-33.6, 128x256 39.6. 352 tiles = 2.07 waves on 170 SMs for both kernels; the flushed bench moves +-5 % and penalizes stream-K partials (dirty L2), in situ judges.
 
 ## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
 

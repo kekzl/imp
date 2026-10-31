@@ -86,8 +86,9 @@ bool run_cutlass(const Operands& o, cudaStream_t s) {
 }
 
 // Variants: 0 TMA 128x128 x4 + producer warp, 1 TMA 128x256 x3, 2 sync 128x128 BK256x2, -1 auto.
-constexpr int kCheckedVariants = 4;  // 3 = stream-K 128x128
-constexpr int kVariantBk[kCheckedVariants] = {128, 128, 256, 128};
+constexpr int kCheckedVariants = 5;  // 3 = stream-K 128x128, 4 = hybrid (3 k-pieces per tail tile)
+// TMA variants take K % 64 (partial last stage).
+constexpr int kVariantBk[kCheckedVariants] = {64, 64, 256, 64, 64};
 
 class Nvfp4GemmTileTest : public ::testing::TestWithParam<std::tuple<int, int, int>> {
 protected:
@@ -140,7 +141,9 @@ INSTANTIATE_TEST_SUITE_P(Shapes, Nvfp4GemmTileTest,
                          ::testing::Values(std::make_tuple(128, 128, 128), std::make_tuple(200, 384, 512),
                                            std::make_tuple(33, 136, 1024), std::make_tuple(512, 1024, 5120),
                                            std::make_tuple(1000, 2056, 256),
-                                           std::make_tuple(1536, 2304, 512)));  // 216 tiles: hybrid stream-K
+                                           std::make_tuple(1536, 2304, 512),     // 216 tiles: hybrid stream-K
+                                           std::make_tuple(200, 384, 192),       // K % 128 = 64
+                                           std::make_tuple(2048, 2816, 2112)));  // Gemma-4 down_proj
 
 // Timing on Qwen3.8-27B projection shapes, operands from DRAM (L2 flushed before each call).
 TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
