@@ -47,7 +47,9 @@ run_arm() {  # $1 = arm name, $2 = extra sets, $3 = trial
         echo "GPU BUSY before $1 - aborting" | tee -a "$LOG"; exit 2; }
     start_server "$2" || exit 3
     echo "== arm $1 trial $3 ==" | tee -a "$LOG"
-    IGNORE_EOS=1 python3 "$HERE/conc_client.py" $PORT $CONC $WAVES "$1$3" 2>&1 | tee -a "$LOG"
+    # Client in python:3.13-slim (stdlib only), never host python3; GEN/MODEL_NAME pass through.
+    docker run --rm --network host -e IGNORE_EOS=1 -e GEN -e MODEL_NAME -v "$HERE":/t:ro python:3.13-slim \
+        python3 /t/conc_client.py $PORT $CONC $WAVES "$1$3" 2>&1 | tee -a "$LOG"
     # Proof the arm ran what it claims: the plan it got and the verify's own
     # counters (drafted per verify step says how many requests really drafted).
     docker stop imp-ab >/dev/null 2>&1

@@ -38,9 +38,10 @@ run_arm() {
     # with drafts. Fired sequentially every step declined 'no_draft_in_batch'
     # and the arms agreed because neither path ran (2026-09-12).
     rm -f "$OUT/$tag."*.part
+    # Parser in python:3.13-slim, never host python3; curl still fires all requests at once.
     for p in $(seq 1 "$NPROMPT"); do
         curl -s http://localhost:8080/v1/completions -H 'Content-Type: application/json' -d "$(printf '{"model":"%s","prompt":"Write a long detailed essay about the history of steam engines, part %d.","max_tokens":400,"temperature":0,"stream":false}' "$MODEL" "$p")" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["text"])' > "$OUT/$tag.$p.part" &
+            | docker run --rm -i python:3.13-slim python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["text"])' > "$OUT/$tag.$p.part" &
     done
     wait
     cat "$OUT/$tag."*.part > "$OUT/$tag.txt"

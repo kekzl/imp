@@ -33,7 +33,9 @@ run_arm() {
     # Positive control: the feature has to actually engage in both arms, and
     # the resolved score has to be the one the arm asked for.
     docker logs "$NAME" 2>&1 | grep -E "Sparse decode attention:" | tail -1
-    python3 tools/analysis/niah_check.py --url http://localhost:8080 --model "$MODEL" \
+    # Client in python:3.13-slim (stdlib only), never host python3 (clean host).
+    docker run --rm --network host -v "$PWD/tools/analysis":/a:ro python:3.13-slim \
+        python3 /a/niah_check.py --url http://localhost:8080 --model "$MODEL" \
         --lengths "$LENGTHS" --depths "$DEPTHS" 2>&1 | tee "$OUT/niah_${tag}_${BUDGET}.log" | tail -14
     # The positive control is a GATE, not a footnote: a 10/10 from an arm whose
     # selection never engaged is a dense run wearing a sparse label. The growable

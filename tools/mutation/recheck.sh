@@ -24,8 +24,11 @@ run() {
     imp:toolchain ./"$BIN" --gtest_filter="$FILTER" 2>&1
 }
 build() { docker run --rm -v "$PWD":/src -w /src imp:toolchain ninja -C /src/build-dev 2>&1; }
+# python:3.13-slim, never host python3; repo and TMPDIR (holds the saved original) at host paths.
+T=${TMPDIR:-/tmp}
+py() { docker run --rm -i -u "$(id -u):$(id -g)" -v "$PWD":"$PWD" -w "$PWD" -v "$T":"$T" -e TMPDIR="$T" python:3.13-slim python3 "$@"; }
 
-python3 - "$MID" <<'PY'
+py - "$MID" <<'PY'
 import json, os, sys, pathlib
 mid = sys.argv[1]
 m = [x for x in json.load(open('tools/mutation/catalogue.json'))['mutants'] if x['id'] == mid][0]
@@ -46,7 +49,7 @@ for i in $(seq 1 "$REPEATS"); do
 done
 cp "$OUT/$MID-mutant-r1.log" "$OUT/$MID-mutant.log"
 
-python3 - "$MID" <<'PY'
+py - "$MID" <<'PY'
 import json, os, sys, pathlib
 mid = sys.argv[1]
 m = [x for x in json.load(open('tools/mutation/catalogue.json'))['mutants'] if x['id'] == mid][0]

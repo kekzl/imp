@@ -33,16 +33,19 @@ for r in $(seq 1 $ROUNDS); do
     grep -q "Weight upload consumed" <<< "$(docker logs recyc 2>&1)" && { echo "# POISONED" >&2; continue; }
     tot=0; ms=0
     for p in "${PROMPTS[@]}"; do
+      # Python in python:3.13-slim, never host python3; the ~0.7 s container start stays outside t0..t1.
+      j=$(docker run --rm python:3.13-slim python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")
       t0=$(date +%s%N)
-      n=$(curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-        -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")}],\"max_tokens\":600,\"temperature\":0,\"top_k\":1,\"stream\":false}" \
-        | python3 -c "import json,sys
+      resp=$(curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
+        -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$j}],\"max_tokens\":600,\"temperature\":0,\"top_k\":1,\"stream\":false}")
+      t1=$(date +%s%N)
+      n=$(printf '%s' "$resp" | docker run --rm -i python:3.13-slim python3 -c "import json,sys
 try: print(json.load(sys.stdin)['usage']['completion_tokens'])
 except Exception: print(0)")
-      t1=$(date +%s%N); tot=$((tot+n)); ms=$((ms+ (t1-t0)/1000000 ))
+      tot=$((tot+n)); ms=$((ms+ (t1-t0)/1000000 ))
     done
     m=$(curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^imp_spec_(drafted|accepted|verify_steps)_total/{printf "%s ", $2}')
-    ts=$(python3 -c "print(f'{$tot/($ms/1000):.2f}' if $ms>0 else 0)")
+    ts=$(docker run --rm python:3.13-slim python3 -c "print(f'{$tot/($ms/1000):.2f}' if $ms>0 else 0)")
     echo "$a,$r,$tot,$ms,$ts,$(echo $m | tr ' ' ',')"
   done
 done

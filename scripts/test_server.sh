@@ -67,10 +67,19 @@ fi
 export IMP_BASE="http://localhost:$PORT" IMP_MODEL="$MODEL"
 export IMP_HOST=localhost IMP_PORT="$PORT" IMP_TEST_MODEL="$MODEL"
 
+# Batteries in python:3.13-slim (stdlib only), never host python3; leading `-e K=V` go to docker.
+py() {
+    local envs=()
+    while [ "${1:-}" = -e ]; do envs+=(-e "$2"); shift 2; done
+    docker run --rm --network host -u "$(id -u):$(id -g)" -v "$ROOT":"$ROOT":ro -w "$ROOT" \
+        -e IMP_BASE -e IMP_MODEL -e IMP_HOST -e IMP_PORT -e IMP_TEST_MODEL -e IMP_OTLP_PORT -e TOPK \
+        "${envs[@]}" python:3.13-slim python3 "$@"
+}
+
 # Web UI defaults first (temp 0.7, no seed, thinking on, 12 turns, ~2 min), fail fast: every
 # battery below runs at temp 0 or seeded and passed the fixed sampler draw of v0.41.0 (#2013).
 echo "== chat probe (web UI defaults) =="
-if ! python3 tools/analysis/chat_probe.py --url "http://localhost:$PORT" --model "$MODEL"; then
+if ! py tools/analysis/chat_probe.py --url "http://localhost:$PORT" --model "$MODEL"; then
     echo "test-server: FAIL - chat probe (web UI defaults), remaining batteries not run"
     exit 1
 fi
@@ -82,28 +91,28 @@ run() {  # run <label> <cmd...>
     if "$@"; then echo "   -> PASS ($label)"; else echo "   -> FAIL ($label)"; fails+=("$label"); fi
 }
 
-run "endpoints smoke"     python3 tests/exercise_all_endpoints.py
-run "robustness (#712)"   python3 tests/test_server_robustness.py
-run "logprobs"            python3 tests/test_server_logprobs.py
-run "ignore_eos"          python3 tests/test_server_ignore_eos.py
-run "messages stream"     python3 tests/test_server_messages_stream.py
-run "thinking toggle"     python3 tests/test_server_thinking_toggle.py
+run "endpoints smoke"     py tests/exercise_all_endpoints.py
+run "robustness (#712)"   py tests/test_server_robustness.py
+run "logprobs"            py tests/test_server_logprobs.py
+run "ignore_eos"          py tests/test_server_ignore_eos.py
+run "messages stream"     py tests/test_server_messages_stream.py
+run "thinking toggle"     py tests/test_server_thinking_toggle.py
 # Budget sweep the toggle test can't see: pins max_tokens 512, the answer-headroom force-close
 # only bites below it. multiturn_deep.py had zero invocation sites (#1573 class).
 # --assert-answered fails an empty reply unless the server labels it reasoning_budget_exhausted.
-run "reasoning budget reaches the answer" python3 tools/analysis/multiturn_deep.py \
+run "reasoning budget reaches the answer" py tools/analysis/multiturn_deep.py \
     --url "http://localhost:$PORT" --model "$MODEL" --max-tokens 200,260,400,600 \
     --assert-answered
-run "tracing (OTLP spans)" python3 tests/test_server_tracing.py
-run "metrics (every path feeds the histograms)" python3 tests/test_server_metrics.py
-run "vision refusal + utf8 (#1197/#1198)" python3 tests/test_server_vision_and_utf8.py
+run "tracing (OTLP spans)" py tests/test_server_tracing.py
+run "metrics (every path feeds the histograms)" py tests/test_server_metrics.py
+run "vision refusal + utf8 (#1197/#1198)" py tests/test_server_vision_and_utf8.py
 run "embed/chat interleave" bash tests/test_server_embed_chat_interleave.sh 15
-run "0-token battery (#710)" env N=8 LOAD=80 FAIL_THRESHOLD=0.10 python3 tests/test_server_0token_battery.py
+run "0-token battery (#710)" py -e N=8 -e LOAD=80 -e FAIL_THRESHOLD=0.10 tests/test_server_0token_battery.py
 # #1573: tools/analysis/degen_suite.py had ZERO invocation sites, 41 checks nothing ever ran.
 # Categories, not --corpus (the ~250-prompt corpus belongs in a longer lane): server-protocol
 # failure classes the C-API GTests structurally cannot see (think-leak, special tokens, stream
 # consistency).
-run "degeneration suite (#1573)" python3 tools/analysis/degen_suite.py --url "http://localhost:$PORT"
+run "degeneration suite (#1573)" py tools/analysis/degen_suite.py --url "http://localhost:$PORT"
 
 echo
 if [ "${#fails[@]}" -ne 0 ]; then

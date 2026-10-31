@@ -60,7 +60,9 @@ for entry in "${MODELS[@]}"; do
   done
   grep -E "moe expert histogram" "$log" | tail -3
   if [ "${#hists[@]}" -gt 0 ]; then
-    python3 tools/analysis/moe_routing_skew.py "${hists[@]}" | tee "$OUT/${name}.report.txt"
+    # python:3.13-slim, never host python3; repo and $OUT at their host paths so the args stay as-is.
+    docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":"$PWD":ro -v "$(cd "$OUT" && pwd)":"$(cd "$OUT" && pwd)":ro \
+      -w "$PWD" python:3.13-slim python3 tools/analysis/moe_routing_skew.py "${hists[@]}" | tee "$OUT/${name}.report.txt"
   else
     echo "  nothing recorded — see $log"
   fi

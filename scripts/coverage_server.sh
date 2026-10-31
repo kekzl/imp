@@ -35,10 +35,12 @@ for i in $(seq 1 90); do
 done
 
 echo "== 3/5 exercise endpoints + manual batteries =="
-IMP_BASE="http://localhost:$PORT" IMP_MODEL="$MODEL" python3 tests/exercise_all_endpoints.py || true
-IMP_HOST=localhost IMP_PORT="$PORT" IMP_MODEL="$MODEL" python3 tests/test_server_robustness.py || true
+# Batteries in python:3.13-slim (stdlib only), never host python3 (clean host).
+py() { docker run --rm --network host -u "$(id -u):$(id -g)" -v "$ROOT":"$ROOT":ro -w "$ROOT" "$@"; }
+py -e IMP_BASE="http://localhost:$PORT" -e IMP_MODEL="$MODEL" python:3.13-slim python3 tests/exercise_all_endpoints.py || true
+py -e IMP_HOST=localhost -e IMP_PORT="$PORT" -e IMP_MODEL="$MODEL" python:3.13-slim python3 tests/test_server_robustness.py || true
 IMP_TEST_MODEL="$MODEL" bash tests/test_server_embed_chat_interleave.sh 15 || true
-IMP_MODEL="$MODEL" N=4 LOAD=40 FAIL_THRESHOLD=0.5 python3 tests/test_server_0token_battery.py || true
+py -e IMP_MODEL="$MODEL" -e N=4 -e LOAD=40 -e FAIL_THRESHOLD=0.5 python:3.13-slim python3 tests/test_server_0token_battery.py || true
 
 echo "== 4/5 stop server (flush gcov) =="
 docker exec "$CTR" bash -c "kill -TERM \$(pgrep imp-server); for i in \$(seq 1 30); do pgrep imp-server >/dev/null || break; sleep 1; done"
