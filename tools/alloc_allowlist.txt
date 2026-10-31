@@ -13,7 +13,7 @@ src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
 src/compute/gemm.cpp  # 4
 src/compute/gemm_batched.cpp  # 2
-src/compute/gemm_cutlass_sm120.cu  # 2
+src/compute/nvfp4_sfatom_quant.cu  # 2
 src/compute/gemm_grouped.cpp  # 3
 src/compute/gemm_grouped_nvfp4_smallM.cu  # 2
 src/compute/gemm_moe_fused_tc.cu  # 2

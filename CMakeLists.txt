@@ -408,6 +408,7 @@ set(IMP_COMPUTE_SOURCES
 )
 
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_sfatom_quant.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
