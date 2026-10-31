@@ -52,7 +52,8 @@ for _ in $(seq 1 120); do
 done
 
 echo "== driving load ($CONC concurrent x $ROUNDS rounds, ctx=$CTX) =="
-python3 "$(dirname "$0")/vram_audit_load.py" \
+# Client in python:3.13-slim (stdlib only), never host python3; exit status passes through docker.
+docker run --rm --network host -v "$(cd "$(dirname "$0")" && pwd)":/t:ro python:3.13-slim python3 /t/vram_audit_load.py \
   --url "http://127.0.0.1:$PORT" --concurrency "$CONC" --ctx "$CTX" --rounds "$ROUNDS" \
   | tee "$OUT_DIR/load.log"
 

@@ -40,14 +40,18 @@ poisoned(){ grep -q "Weight upload consumed" <<< "$(docker logs mtpsweep 2>&1)";
 
 metrics(){ curl -s "http://127.0.0.1:$PORT/metrics" | awk '/^imp_spec_(drafted|accepted|verify_steps)_total/{print $1"="$2}' | tr '\n' ' '; }
 
+# Python in python:3.13-slim, never host python3; the ~0.7 s container start stays outside t0..t1.
+py(){ docker run --rm python:3.13-slim python3 "$@"; }
+
 ask(){ # prompt -> "tokens elapsed_ms"
-  local p="$1" t0 t1
+  local p="$1" t0 t1 j
+  j=$(py -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")
   t0=$(date +%s%N)
   local r
   r=$(curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-      -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")}],\"max_tokens\":700,\"temperature\":0,\"top_k\":1,\"stream\":false}")
+      -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$j}],\"max_tokens\":700,\"temperature\":0,\"top_k\":1,\"stream\":false}")
   t1=$(date +%s%N)
-  python3 -c "
+  py -c "
 import json,sys
 try:
   d=json.loads(sys.argv[1]); print(d['usage']['completion_tokens'], int(($t1-$t0)/1000000))
@@ -77,7 +81,7 @@ for r in $(seq 1 $ROUNDS); do
     d=$(echo "$m" | grep -oP 'drafted_total=\K[0-9.e+]+' || echo 0)
     a=$(echo "$m" | grep -oP 'accepted_total=\K[0-9.e+]+' || echo 0)
     v=$(echo "$m" | grep -oP 'verify_steps_total=\K[0-9.e+]+' || echo 0)
-    ts=$(python3 -c "print(f'{$tot_tok/($tot_ms/1000):.2f}' if $tot_ms>0 else '0')")
+    ts=$(py -c "print(f'{$tot_tok/($tot_ms/1000):.2f}' if $tot_ms>0 else '0')")
     echo "$k,$r,$tot_tok,$tot_ms,$ts,$d,$a,$v"
   done
 done

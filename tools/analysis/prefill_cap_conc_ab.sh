@@ -56,7 +56,10 @@ run_arm() {  # $1 = arm name, $2 = extra sets, $3 = trial, $4 = image
         echo "GPU BUSY before $1 - aborting" | tee -a "$LOG"; exit 2; }
     start_server "$2" "$4" || exit 3
     echo "== arm $1 trial $3 ($4 $2) ==" | tee -a "$LOG"
-    MODEL_NAME=$MODEL_NAME IGNORE_EOS=$IGNORE_EOS LATE_PLEN=${LATE_PLEN:-0} LATE_DELAY=${LATE_DELAY:-2.0} python3 "$HERE/burst_stream_client.py" $PORT $CONC $WAVES "$1$3" $PLEN 2>&1 | tee -a "$LOG"
+    # Client in python:3.13-slim (stdlib only), never host python3; GEN passes through.
+    docker run --rm --network host -e MODEL_NAME="$MODEL_NAME" -e IGNORE_EOS="$IGNORE_EOS" -e LATE_PLEN="${LATE_PLEN:-0}" \
+        -e LATE_DELAY="${LATE_DELAY:-2.0}" -e GEN -v "$HERE":/t:ro python:3.13-slim \
+        python3 /t/burst_stream_client.py $PORT $CONC $WAVES "$1$3" $PLEN 2>&1 | tee -a "$LOG"
     docker rm -f imp-capab >/dev/null 2>&1
     sleep 3
 }

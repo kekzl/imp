@@ -46,8 +46,9 @@ for model in $MODELS; do
             a_vals+=("$(run_one "$IMG_A" "$model" "$ctx")")
             b_vals+=("$(run_one "$IMG_B" "$model" "$ctx")")
         done
+        # Stats in python:3.13-slim, never host python3 (clean host).
         read -r med_a med_b delta spread_a spread_b < <(
-            python3 - "${a_vals[*]}" "${b_vals[*]}" <<'PY'
+            docker run --rm -i python:3.13-slim python3 - "${a_vals[*]}" "${b_vals[*]}" <<'PY'
 import sys, statistics as st
 a = [float(x) for x in sys.argv[1].split()]
 b = [float(x) for x in sys.argv[2].split()]

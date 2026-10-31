@@ -33,7 +33,9 @@ for cap in $CAPS; do
         curl -sf "http://localhost:${PORT}/health" >/dev/null 2>&1 && break
         sleep 2
     done
-    tps=$(MODEL="$MODEL" PORT="$PORT" PROMPT="$PROMPT" python3 - <<'PY'
+    # Client in python:3.13-slim (stdlib only), never host python3 (clean host).
+    tps=$(docker run --rm -i --network host -e MODEL="$MODEL" -e PORT="$PORT" -e PROMPT="$PROMPT" \
+        python:3.13-slim python3 - <<'PY'
 import json, os, time, urllib.request
 U = f"http://localhost:{os.environ['PORT']}"
 def gen(mt=256):

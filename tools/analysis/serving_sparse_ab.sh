@@ -12,6 +12,10 @@ TRIALS=${TRIALS:-3}
 LOG="${TMPDIR:-/tmp}/serving_sparse_ab.log"
 : > "$LOG"
 
+# Client in python:3.13-slim (stdlib only), never host python3; tools/ mounted for its filler.txt.
+lcc() { docker run --rm --network host -e TARGET_CHARS -v "$HERE/..":/tools:ro python:3.13-slim \
+    python3 /tools/analysis/longctx_conc_client.py "$@"; }
+
 start_server() {  # $1 = extra --set args
     docker rm -f imp-sab >/dev/null 2>&1
     # shellcheck disable=SC2086
@@ -42,9 +46,9 @@ run_arm() {  # $1 = arm name, $2 = extra sets, $3 = trial
     docker logs imp-sab 2>&1 | grep -E "Sparse decode attention|KV cache: .* blocks" | tee -a "$LOG"
     echo "== arm $1 trial $3 ==" | tee -a "$LOG"
     # warm wave (graph captures, clocks) - discarded
-    python3 "$HERE/longctx_conc_client.py" $PORT $CONC 8 "$1$3-warm" >> "$LOG" 2>&1
-    python3 "$HERE/longctx_conc_client.py" $PORT $CONC 8 "$1$3-tg8" 2>&1 | tee -a "$LOG"
-    python3 "$HERE/longctx_conc_client.py" $PORT $CONC 520 "$1$3-tg520" 2>&1 | tee -a "$LOG"
+    lcc $PORT $CONC 8 "$1$3-warm" >> "$LOG" 2>&1
+    lcc $PORT $CONC 8 "$1$3-tg8" 2>&1 | tee -a "$LOG"
+    lcc $PORT $CONC 520 "$1$3-tg520" 2>&1 | tee -a "$LOG"
     docker rm -f imp-sab >/dev/null 2>&1
     sleep 3
 }

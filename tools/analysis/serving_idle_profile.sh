@@ -35,7 +35,9 @@ for _ in $(seq 1 240); do
         echo "server died:"; docker logs imp-idle 2>&1 | tail -20; exit 3
     fi
 done
-MODEL_NAME=$(basename "$MODEL") python3 "$ROOT/tools/analysis/conc_client.py" $PORT $CONC $WAVES idle ${PLEN:-0} 2>&1 | tee "$OUT/client.log"
+# Python in python:3.13-slim (stdlib only), never host python3 (clean host).
+docker run --rm --network host -e MODEL_NAME="$(basename "$MODEL")" -e GEN -e IGNORE_EOS -v "$ROOT/tools/analysis":/a:ro \
+    python:3.13-slim python3 /a/conc_client.py $PORT $CONC $WAVES idle ${PLEN:-0} 2>&1 | tee "$OUT/client.log"
 # Graceful stop: nsys must see the process exit to flush the trace.
 docker kill --signal=SIGINT imp-idle >/dev/null 2>&1
 for _ in $(seq 1 60); do
@@ -51,4 +53,5 @@ if [ ! -f "$OUT/serving.nsys-rep" ] && ls "$OUT"/*.qdstrm >/dev/null 2>&1; then
     [ -n "$IMP" ] && "$IMP" -i "$OUT"/serving.qdstrm -o "$OUT/serving.nsys-rep"
 fi
 nsys export --type sqlite --force-overwrite=true -o "$OUT/serving.sqlite" "$OUT/serving.nsys-rep" >/dev/null 2>&1
-python3 "$ROOT/tools/analysis/nsys_gap_attribution.py" "$OUT/serving.sqlite" | tee "$OUT/attribution.txt"
+docker run --rm -u "$(id -u):$(id -g)" -v "$(cd "$OUT" && pwd)":/out -v "$ROOT/tools/analysis":/a:ro \
+    python:3.13-slim python3 /a/nsys_gap_attribution.py /out/serving.sqlite | tee "$OUT/attribution.txt"

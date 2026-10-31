@@ -91,10 +91,11 @@ fi
 # Quick analysis: parse top kernels by time
 echo ""
 echo "=== Quick Kernel Analysis ==="
+# CSV parser in python:3.13-slim, never host python3 (clean host).
 "${NCU}" --import "${OUTPUT}.ncu-rep" \
     --csv \
     --page raw \
-    2>/dev/null | python3 -c "
+    2>/dev/null | docker run --rm -i python:3.13-slim python3 -c "
 import csv
 import sys
 

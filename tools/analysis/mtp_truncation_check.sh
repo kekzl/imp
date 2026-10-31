@@ -17,10 +17,11 @@ docker run -d --name prproc --gpus all -p $PORT:8080 -v "${MODELS_DIR:-$HOME/mod
     --set runtime.deterministic_gemm=true $EXTRA >/dev/null
 for _ in $(seq 1 200); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
   docker ps --format '{{.Names}}'|grep -q '^prproc$' || break; sleep 3; done
+# Python in python:3.13-slim, never host python3; no -i on the encoder, stdin is the prompt list.
 while IFS= read -r p; do
   curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")}],\"max_tokens\":400,\"temperature\":0,\"top_k\":1}" \
-    | python3 -c "
+    -d "{\"model\":\"$(basename $MODEL)\",\"messages\":[{\"role\":\"user\",\"content\":$(docker run --rm python:3.13-slim python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$p")}],\"max_tokens\":400,\"temperature\":0,\"top_k\":1}" \
+    | docker run --rm -i python:3.13-slim python3 -c "
 import json,sys
 d=json.load(sys.stdin); ch=d['choices'][0]; c=ch['message'].get('content') or ''
 bad = ch.get('finish_reason')=='stop' and len(c)<600
