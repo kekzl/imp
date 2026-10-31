@@ -27,6 +27,10 @@ inline constexpr float kDefaultDamp = 10.0f;
                                                                 std::vector<float> H, float tensor_scale,
                                                                 float damp = kDefaultDamp);
 
+// In place on a column-major K x K device matrix: H (symmetric positive definite) -> U, the upper
+// Cholesky factor of H^-1 (H^-1 = U^T U). Only the upper triangle holds U on return.
+[[nodiscard]] std::expected<void, std::string> upper_cholesky_of_inverse(float* d_a, int64_t K);
+
 // Layer index of a checkpoint weight name (".layers.N."), -1 when absent.
 int layer_of(const std::string& name);
 

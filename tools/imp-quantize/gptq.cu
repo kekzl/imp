@@ -1,5 +1,5 @@
 // GPTQ for NVFP4 (roadmap row 101, gptq.h). Device layout: W row-major [N, K] FP32; U = the upper
-// Cholesky factor of H^-1 as cuSOLVER leaves it, column-major, so U(i, j) = U[j * K + i].
+// Cholesky factor of H^-1 (upper_cholesky_of_inverse), column-major, so U(i, j) = U[j * K + i].
 
 #include "gptq.h"
 
@@ -10,11 +10,9 @@
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 
 namespace imp::gptq {
 
@@ -105,14 +103,80 @@ __global__ void residual_kernel(const float* __restrict__ w0, float* __restrict_
         a[i] = w0[i] - a[i];
 }
 
-// Lower triangle (column-major) mirrored into the upper one.
-__global__ void symmetrize_lower_kernel(float* __restrict__ a, int64_t K) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx >= K * K)
+// A -> J A J (J = row reversal): A(i, j) <-> A(K-1-i, K-1-j) is a[p] <-> a[K*K-1-p].
+__global__ void reverse_kernel(float* __restrict__ a, int64_t kk) {
+    const int64_t p = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (p >= kk / 2)
         return;
-    const int64_t i = idx % K, j = idx / K;  // a[j * K + i] = A(i, j)
-    if (i < j)
-        a[j * K + i] = a[i * K + j];
+    const float t = a[p];
+    a[p] = a[kk - 1 - p];
+    a[kk - 1 - p] = t;
+}
+
+constexpr int kDiag = 128;  // diagonal block of the blocked Cholesky / inverse, in shared memory
+constexpr int kDiagThreads = 1024;
+
+// Unblocked lower Cholesky of the b x b diagonal block at (j0, j0); info = first bad pivot, 1-based.
+__global__ void __launch_bounds__(kDiagThreads) potf2_kernel(float* __restrict__ a, int64_t K, int64_t j0,
+                                                             int b, int* __restrict__ info) {
+    extern __shared__ float s[];  // s[c * b + r] = A(j0 + r, j0 + c)
+    for (int e = threadIdx.x; e < b * b; e += blockDim.x)
+        s[e] = a[(j0 + e / b) * K + j0 + e % b];
+    for (int c = 0; c < b; c++) {
+        __syncthreads();
+        const float d = s[c * b + c];
+        if (!(d > 0.0f) || !isfinite(d)) {
+            if (threadIdx.x == 0)
+                atomicCAS(info, 0, static_cast<int>(j0 + c + 1));
+            return;
+        }
+        const float piv = sqrtf(d);
+        __syncthreads();
+        for (int r = c + 1 + threadIdx.x; r < b; r += blockDim.x)
+            s[c * b + r] /= piv;
+        if (threadIdx.x == 0)
+            s[c * b + c] = piv;
+        __syncthreads();
+        const int m = b - c - 1;
+        for (int e = threadIdx.x; e < m * m; e += blockDim.x) {
+            const int r = c + 1 + e % m, cc = c + 1 + e / m;
+            if (cc <= r)
+                s[cc * b + r] -= s[c * b + r] * s[c * b + cc];
+        }
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < b * b; e += blockDim.x)
+        if (e % b >= e / b)
+            a[(j0 + e / b) * K + j0 + e % b] = s[e];
+}
+
+// Unblocked inverse of the lower triangular b x b diagonal block at (j0, j0), in place (LAPACK strti2).
+__global__ void __launch_bounds__(kDiagThreads) trti2_kernel(float* __restrict__ a, int64_t K, int64_t j0,
+                                                             int b) {
+    extern __shared__ float s[];  // b * b block, then b scratch
+    float* y = s + b * b;
+    for (int e = threadIdx.x; e < b * b; e += blockDim.x)
+        s[e] = a[(j0 + e / b) * K + j0 + e % b];
+    for (int c = b - 1; c >= 0; c--) {
+        __syncthreads();
+        const float inv = 1.0f / s[c * b + c];
+        // x = A(c+1:, c); x <- -inv * T x with T = A(c+1:, c+1:) already inverted.
+        for (int r = c + 1 + threadIdx.x; r < b; r += blockDim.x) {
+            float acc = 0.0f;
+            for (int k = c + 1; k <= r; k++)
+                acc += s[k * b + r] * s[c * b + k];
+            y[r] = -inv * acc;
+        }
+        __syncthreads();
+        for (int r = c + 1 + threadIdx.x; r < b; r += blockDim.x)
+            s[c * b + r] = y[r];
+        if (threadIdx.x == 0)
+            s[c * b + c] = inv;
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < b * b; e += blockDim.x)
+        if (e % b >= e / b)
+            a[(j0 + e / b) * K + j0 + e % b] = s[e];
 }
 
 unsigned grid(int64_t n) { return static_cast<unsigned>((n + kThreads - 1) / kThreads); }
@@ -132,6 +196,83 @@ struct Dev {
     Dev& operator=(const Dev&) = delete;
 };
 
+// Recursive halving (block edges on multiples of kDiag) keeps the cuBLAS TRSM / SYRK operands wide:
+// K 17408 in 153 ms vs 441 ms with fixed 128-column panels (cuSOLVER potrf + potri + potrf: 329 ms).
+struct LowerTri {
+    cublasHandle_t h;
+    float* a;
+    int64_t K;
+    int* info;
+    float* at(int64_t i, int64_t j) const { return a + j * K + i; }
+    static int64_t split(int64_t n) { return (n / 2 + kDiag - 1) / kDiag * kDiag; }
+
+    // Lower Cholesky of the n x n block at (j0, j0).
+    bool potrf(int64_t j0, int64_t n) const {
+        if (n <= kDiag) {
+            potf2_kernel<<<1, kDiagThreads, sizeof(float) * kDiag * kDiag>>>(a, K, j0, static_cast<int>(n),
+                                                                             info);
+            return true;
+        }
+        const int64_t n1 = split(n), n2 = n - n1;
+        const float one = 1.0f, minus = -1.0f;
+        const int k = static_cast<int>(K);
+        return potrf(j0, n1) &&
+               cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+                           static_cast<int>(n2), static_cast<int>(n1), &one, at(j0, j0), k, at(j0 + n1, j0),
+                           k) == CUBLAS_STATUS_SUCCESS &&
+               cublasSsyrk(h, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, static_cast<int>(n2), static_cast<int>(n1),
+                           &minus, at(j0 + n1, j0), k, &one, at(j0 + n1, j0 + n1),
+                           k) == CUBLAS_STATUS_SUCCESS &&
+               potrf(j0 + n1, n2);
+    }
+
+    // Inverse of the lower triangular n x n block at (j0, j0): X21 = -L22^-1 L21 L11^-1, then both halves.
+    bool trtri(int64_t j0, int64_t n) const {
+        if (n <= kDiag) {
+            trti2_kernel<<<1, kDiagThreads, sizeof(float) * (kDiag * kDiag + kDiag)>>>(a, K, j0,
+                                                                                       static_cast<int>(n));
+            return true;
+        }
+        const int64_t n1 = split(n), n2 = n - n1;
+        const float one = 1.0f, minus = -1.0f;
+        const int k = static_cast<int>(K);
+        return cublasStrsm(h, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                           static_cast<int>(n2), static_cast<int>(n1), &minus, at(j0 + n1, j0 + n1), k,
+                           at(j0 + n1, j0), k) == CUBLAS_STATUS_SUCCESS &&
+               cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                           static_cast<int>(n2), static_cast<int>(n1), &one, at(j0, j0), k, at(j0 + n1, j0),
+                           k) == CUBLAS_STATUS_SUCCESS &&
+               trtri(j0, n1) && trtri(j0 + n1, n2);
+    }
+};
+
+// H = R R^T with R upper is the lower Cholesky of J H J, mirrored; H^-1 = R^-T R^-1, so U = R^-1.
+// Steps on J H J: potrf (lower), trtri (lower), J back. Upper triangle = U on return.
+std::expected<void, std::string> upper_cholesky_of_inverse_on(cublasHandle_t h, float* a, int64_t K) {
+    const int64_t kk = K * K;
+    Dev<int> dinfo(1);
+    if (!dinfo.p || cudaMemset(dinfo.p, 0, sizeof(int)) != cudaSuccess)
+        return std::unexpected("info buffer allocation failed");
+    if (cudaFuncSetAttribute(potf2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(sizeof(float) * kDiag * kDiag)) != cudaSuccess ||
+        cudaFuncSetAttribute(trti2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(sizeof(float) * (kDiag * kDiag + kDiag))) != cudaSuccess)
+        return std::unexpected("shared memory opt-in failed");
+    const LowerTri t{h, a, K, dinfo.p};
+    reverse_kernel<<<grid(kk / 2), kThreads>>>(a, kk);
+    if (!t.potrf(0, K))
+        return std::unexpected("Cholesky panel update failed");
+    int info = 0;
+    if (cudaMemcpy(&info, dinfo.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess || info != 0)
+        return std::unexpected("Cholesky of H failed (info " + std::to_string(info) + ")");
+    if (!t.trtri(0, K))
+        return std::unexpected("triangular inverse panel update failed");
+    reverse_kernel<<<grid(kk / 2), kThreads>>>(a, kk);
+    if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess)
+        return std::unexpected(std::string("Cholesky kernels failed: ") + cudaGetErrorString(e));
+    return {};
+}
+
 // sum over rows of e_r H e_r^T for the error matrix e [N, K] (row-major), with eh scratch [N, K];
 // negative when cuBLAS fails.
 double quad_loss(cublasHandle_t h, const float* e, const float* H, float* eh, int64_t N, int64_t K) {
@@ -146,6 +287,13 @@ double quad_loss(cublasHandle_t h, const float* e, const float* H, float* eh, in
 }
 
 }  // namespace
+
+std::expected<void, std::string> upper_cholesky_of_inverse(float* d_a, int64_t K) {
+    cublasHandle_t h = cublas_handle_create("imp-quantize::gptq_cholesky", CUBLAS_DEFAULT_MATH);
+    auto r = upper_cholesky_of_inverse_on(h, d_a, K);
+    cublas_handle_destroy(h);
+    return r;
+}
 
 int layer_of(const std::string& name) {
     const size_t p = name.find(".layers.");
@@ -191,9 +339,8 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
     Dev<float> dw(nk), dw0(nk), du(kk), dh0(kk), dq(nk), dsc(static_cast<size_t>(N)),
         derr(static_cast<size_t>(N) * kBlock);
     Dev<uint8_t> dcodes(nk), dmicro(nk / 16), dpacked(nk / 2);
-    Dev<int> dinfo(1);
     if (!dw.p || !dw0.p || !du.p || !dh0.p || !dq.p || !dsc.p || !derr.p || !dcodes.p || !dmicro.p ||
-        !dpacked.p || !dinfo.p)
+        !dpacked.p)
         return std::unexpected("cudaMalloc failed for N = " + std::to_string(N) +
                                ", K = " + std::to_string(K));
     std::vector<float> w0(nk);
@@ -205,39 +352,14 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
         cudaMemcpy(dh0.p, H0.data(), kk * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
         return std::unexpected("H2D copy failed");
 
-    // U = upper Cholesky factor of H^-1: potrf + potri (lower), mirror, potrf (upper).
-    cusolverDnHandle_t sol = nullptr;
-    if (cusolverDnCreate(&sol) != CUSOLVER_STATUS_SUCCESS)
-        return std::unexpected("cuSOLVER handle creation failed");
     cublasHandle_t bl = cublas_handle_create("imp-quantize::gptq", CUBLAS_DEFAULT_MATH);
-    struct Handles {
-        cusolverDnHandle_t s;
+    struct Handle {
         cublasHandle_t b;
-        ~Handles() {
-            if (cusolverDnDestroy(s) != CUSOLVER_STATUS_SUCCESS)
-                std::fprintf(stderr, "gptq: cuSOLVER handle destroy failed\n");
-            cublas_handle_destroy(b);
-        }
-    } handles{sol, bl};
+        ~Handle() { cublas_handle_destroy(b); }
+    } handle{bl};
     const int k = static_cast<int>(K);
-    int lw = 0, lw2 = 0;
-    cusolverDnSpotrf_bufferSize(sol, CUBLAS_FILL_MODE_LOWER, k, du.p, k, &lw);
-    cusolverDnSpotri_bufferSize(sol, CUBLAS_FILL_MODE_LOWER, k, du.p, k, &lw2);
-    lw = std::max(lw, lw2);
-    cusolverDnSpotrf_bufferSize(sol, CUBLAS_FILL_MODE_UPPER, k, du.p, k, &lw2);
-    Dev<float> work(static_cast<size_t>(std::max(lw, lw2)));
-    int info = 0;
-    auto step_ok = [&](cusolverStatus_t st) {
-        return st == CUSOLVER_STATUS_SUCCESS &&
-               cudaMemcpy(&info, dinfo.p, sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess && info == 0;
-    };
-    if (!work.p || !step_ok(cusolverDnSpotrf(sol, CUBLAS_FILL_MODE_LOWER, k, du.p, k, work.p, lw, dinfo.p)) ||
-        !step_ok(cusolverDnSpotri(sol, CUBLAS_FILL_MODE_LOWER, k, du.p, k, work.p, lw, dinfo.p)))
-        return std::unexpected("Cholesky inverse of H failed (info " + std::to_string(info) + ")");
-    symmetrize_lower_kernel<<<grid(static_cast<int64_t>(kk)), kThreads>>>(du.p, K);
-    if (!step_ok(
-            cusolverDnSpotrf(sol, CUBLAS_FILL_MODE_UPPER, k, du.p, k, work.p, std::max(lw, lw2), dinfo.p)))
-        return std::unexpected("Cholesky of H^-1 failed (info " + std::to_string(info) + ")");
+    if (auto u = upper_cholesky_of_inverse_on(bl, du.p, K); !u)
+        return std::unexpected(u.error());
 
     // Blocks of kBlock columns: per-column quantize + in-block update, then one GEMM for the tail.
     for (int64_t b0 = 0; b0 < K; b0 += kBlock) {

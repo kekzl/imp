@@ -4,8 +4,10 @@
 
 #include "core/fp_bits.h"
 
+#include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -94,6 +96,49 @@ TEST(GptqNvfp4, IdentityHessianIsRoundToNearest) {
     auto r = gptq::quantize_nvfp4(c.w16.data(), c.N, c.K, H, c.tensor_scale);
     ASSERT_TRUE(r.has_value()) << r.error();
     EXPECT_NEAR(r->loss_gptq, r->loss_rtn, 1e-6 * r->loss_rtn) << "no correlation, no error feedback";
+}
+
+// U H U^T = I (H^-1 = U^T U), U upper with a positive diagonal. K 300 / 513: partial last 128-block.
+TEST(GptqNvfp4, UpperCholeskyOfInverse) {
+    for (const int K : {300, 513}) {
+        auto H = correlated_hessian(K, 5);
+        double mean_diag = 0.0;
+        for (int i = 0; i < K; i++)
+            mean_diag += H[static_cast<size_t>(i) * K + i] / K;
+        for (int i = 0; i < K; i++)
+            H[static_cast<size_t>(i) * K + i] += static_cast<float>(0.01 * mean_diag);
+        const size_t kk = static_cast<size_t>(K) * K;
+        float* d = nullptr;
+        ASSERT_EQ(cudaMalloc(&d, kk * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d, H.data(), kk * sizeof(float), cudaMemcpyHostToDevice), cudaSuccess);
+        const auto r = gptq::upper_cholesky_of_inverse(d, K);
+        std::vector<float> a(kk);
+        ASSERT_EQ(cudaMemcpy(a.data(), d, kk * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaFree(d), cudaSuccess);
+        ASSERT_TRUE(r.has_value()) << r.error();
+        auto U = [&](int i, int j) {
+            return i <= j ? static_cast<double>(a[static_cast<size_t>(j) * K + i]) : 0.0;
+        };
+        for (int i = 0; i < K; i++)
+            ASSERT_GT(U(i, i), 0.0) << "K " << K << " i " << i;
+        // UH = U * H, then (UH) U^T; H is symmetric, row-major = column-major.
+        std::vector<double> uh(kk, 0.0);
+        for (int i = 0; i < K; i++)
+            for (int k = i; k < K; k++) {
+                const double u = U(i, k);
+                for (int j = 0; j < K; j++)
+                    uh[static_cast<size_t>(i) * K + j] += u * H[static_cast<size_t>(k) * K + j];
+            }
+        double worst = 0.0;
+        for (int i = 0; i < K; i++)
+            for (int j = 0; j < K; j++) {
+                double s = 0.0;
+                for (int k = j; k < K; k++)
+                    s += uh[static_cast<size_t>(i) * K + k] * U(j, k);
+                worst = std::max(worst, std::fabs(s - (i == j ? 1.0 : 0.0)));
+            }
+        EXPECT_LT(worst, 1e-3) << "K " << K;
+    }
 }
 
 TEST(GptqNvfp4, LayerOfName) {
