@@ -28,6 +28,7 @@
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
+#include "exec/gdn_workspace.h"
 #include "exec/moe_workspace.h"
 #include "exec/quant_scratch.h"
 #include "exec/quant_pipeline.h"
@@ -859,23 +860,7 @@ private:
                                  // of the fused GDN input GEMV when ly.gdn_input_packed is
                                  // built; sized only for has_gdn_ models.
 
-    // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): five
-    // per-(chunk,head) strip arrays + FP32 inter-strip state. Engine lifetime,
-    // allocated when the model has GDN layers; nullptr degrades to the fused scan.
-    void* gdn_chunkpar_ws_ = nullptr;
-    size_t gdn_chunkpar_ws_bytes_ = 0;
-
-    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K
-    // partials + per-tile tickets, ~100 KiB, zeroed once at allocation.
-    // nullptr keeps the two cuBLAS calls.
-    void* gdn_ab_ws_ = nullptr;
-    size_t gdn_ab_ws_bytes_ = 0;
-    void* gdn_ab_prefill_ws_ = nullptr;  // split-K partials of the prefill launch (own tickets)
-    size_t gdn_ab_prefill_ws_bytes_ = 0;
-    bool gdn_ab_narrow_logged_ = false;
-    bool gdn_ab_prefill_logged_ = false;
-    bool gdn_m1_input_logged_ = false;
-    bool gdn_m1_out_logged_ = false;
+    GdnWorkspace gdn_ws_;  // GDN scan / alpha-beta workspaces and their log flags (gdn_workspace.h)
     bool attn_m1_qkv_logged_ = false;
 
     // --- Separately allocated buffers (not part of unified workspace) ---
