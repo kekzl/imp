@@ -390,7 +390,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     for (int i = 0; i < M_BATCH * N_OUT; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
-        // Same underlying call (gemm_nvfp4 dequant + cuBLAS), expect identical.
+        // Same underlying call (gemm_nvfp4, batched FP32 GEMV at M=8), expect identical.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "NVFP4 GEMM dispatch mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }

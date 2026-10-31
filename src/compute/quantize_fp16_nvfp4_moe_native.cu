@@ -27,7 +27,7 @@ static constexpr float kNativeFP4E2M1Max = 6.0f;  // max representable in E2M1
 // other rows routed to its expert (#2167). Same range as the CUTLASS MoE quantize (no tensor scale).
 static constexpr float kNativeActTensorScale = 1.0f;
 
-// HW FP4 pair conversion, identical to pack_fp4_pair_hw (gemm_cutlass_sm120.cu) and
+// HW FP4 pair conversion, identical to pack_fp4_pair_hw (nvfp4_sfatom_quant.cu) and
 // nvfp4_pack_pair_hw (nvfp4_quant.cu). Low nibble=v0, high nibble=v1.
 __device__ __forceinline__ uint8_t native_pack_fp4_pair(float v0, float v1) {
 #if __CUDA_ARCH__ >= 1200
@@ -346,7 +346,7 @@ void compact_alpha_active(
 // Exclusive prefix sum of cutlass_nvfp4_sf_size (per-expert SfAtom-padded SFA byte size).
 // Single block, Hillis-Steele scan over int64 in shared memory.
 // Padding constants must stay in lockstep with kAtomRows/kAtomKElems/kAtomSize in
-// src/compute/gemm_cutlass_sm120.cu (CUTLASS SfAtom = 128 rows x 64 K-elems x 512 bytes).
+// src/compute/nvfp4_sfatom_quant.cu (CUTLASS SfAtom = 128 rows x 64 K-elems x 512 bytes).
 // Kept as constexpr here to avoid a host-only include from a device translation unit.
 namespace {
 constexpr int kSfAtomRows   = 128;

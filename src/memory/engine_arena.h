@@ -1,7 +1,7 @@
 #pragma once
 
 // The process-global engine-persistent (T2) arena (MEMORY.md A2/A3.3): executor
-// workspaces, cuBLAS/CUTLASS scratch, graph buffers, per-kernel scratch sized once at
+// workspaces, cuBLASLt/own-GEMM scratch, graph buffers, per-kernel scratch sized once at
 // init. None is individually freed, so a bump arena's failure mode is under-provisioning
 // (visible, reported), never a leak.
 // Process-global rather than an Engine member because its tenants are file-scope statics

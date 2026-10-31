@@ -1,6 +1,6 @@
 // Pre-dequant Phase 0 + 0b: NVFP4 loader-side setup. Phase 0 promotes NVFP4 SafeTensors
-// sidecars (scales, codebooks) to device tensors; Phase 0b registers CUTLASS-NVFP4 weight
-// metadata for the prefill GEMM path. Colocated as both are loader-side concerns.
+// sidecars (scales, codebooks) to device tensors; Phase 0b registers prequant NVFP4 weights in
+// wcache_->nvfp4, from which Phase 3b builds the prefill SfAtom. Colocated as both are loader-side concerns.
 
 #include "core/dispatch_policy.h"
 #include "exec/quant_pipeline.h"
@@ -570,15 +570,15 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
 
     // Phase 0b: register prequant-promoted NVFP4 weights in wcache_->nvfp4 (Phase 0 set
     // qtype=NVFP4 on the Tensor sidecars but didn't build the CUTLASS cache Phase 3b needs).
-    // Without this, prefill falls to gemm_nvfp4 dequant->cuBLAS instead of native CUTLASS
-    // NVFP4xNVFP4, amplifying per-block quant noise on long context.
+    // Without this, prefill falls to gemm_nvfp4 dequant->FP16 gemm() (cuBLASLt) instead of the
+    // native NVFP4xNVFP4 tile GEMM, amplifying per-block quant noise on long context.
     // Applies uniformly to all NVFP4-prequant models: the CUTLASS non-determinism that once
     // required a format-specific skip-guard here is fixed upstream (PR #165); the guard is gone.
     if (cutlass_sm120_nvfp4_available()) {
         int ct_count = 0;
         // Native-NVFP4 checkpoints: in_proj/out_proj (ssm_in/ssm_out) exist ONLY as NVFP4 bytes
         // (no FP16 copy, dequant_gpu has no NVFP4 path), so they MUST be registered here or
-        // decode reads raw NVFP4 through cuBLAS and produces garbage. GGUF-quant hybrids use the
+        // decode hands raw NVFP4 to gemm(), whose packed-weight guard skips it. GGUF-quant hybrids use the
         // gemm.fp8_ssm_proj sidecar instead (phase 2b). Always register.
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)

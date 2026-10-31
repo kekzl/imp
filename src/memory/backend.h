@@ -22,15 +22,15 @@ namespace imp {
 // reported separately). One tag per thing an operator recognizes in the VRAM audit table, not
 // one per allocation site.
 enum class RegionTag {
-    ModelResident,        // T1 arena: weights + the pre-dequant weight caches
-    EnginePersistent,     // T2 arena: workspaces, cuBLAS/CUTLASS, graph buffers
-    KvBlockPool,          // T3: the global paged KV block group
-    SwaBlockPool,         // T3: the dedicated sliding-window block group
-    ResidualRing,         // T3: BitDecoding FP16 residual ring
-    SsmState,             // T3: per-sequence SSM/GDN conv + h state
-    RecurrentSnapshots,   // T3: hybrid prefix-state snapshot store
-    ForwardScratch,       // T4: the LIFO scratch stack
-    HostStaging,          // T5: pinned/pageable host staging (load only)
+    ModelResident,       // T1 arena: weights + the pre-dequant weight caches
+    EnginePersistent,    // T2 arena: workspaces, cuBLASLt/own-GEMM scratch, graph buffers
+    KvBlockPool,         // T3: the global paged KV block group
+    SwaBlockPool,        // T3: the dedicated sliding-window block group
+    ResidualRing,        // T3: BitDecoding FP16 residual ring
+    SsmState,            // T3: per-sequence SSM/GDN conv + h state
+    RecurrentSnapshots,  // T3: hybrid prefix-state snapshot store
+    ForwardScratch,      // T4: the LIFO scratch stack
+    HostStaging,         // T5: pinned/pageable host staging (load only)
     Other,
 };
 

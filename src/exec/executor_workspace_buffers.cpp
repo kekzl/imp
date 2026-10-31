@@ -1,6 +1,6 @@
 // Auxiliary buffer allocation and cleanup — extracted from executor_workspace.cu (RF-004).
 // Handles: dequant scratch, sampling, MMVQ, split-K, attention S-matrix, FMHA,
-// MoE workspace, FP8 activation, CUTLASS NVFP4/MXFP4 activation buffers.
+// MoE workspace, FP8 activation, NVFP4/MXFP4 tile-GEMM activation buffers.
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -56,7 +56,7 @@ namespace {
 struct HostStageGeometry {
     int chunks, experts, slots;
 };
-// Host-expert prefill staging: moe.stage_expert_chunks blocks (CUTLASS path only) hold 2 projection
+// Host-expert prefill staging: moe.stage_expert_chunks blocks (grouped NVFP4 path only) hold 2 projection
 // slots of n_experts/chunks experts; 1 block holds all 3 projections of every expert.
 HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int want_chunks) {
     const int chunks = staged_cutlass ? std::clamp(want_chunks, 1, std::max(1, n_experts)) : 1;
@@ -652,7 +652,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // Only allocated when some experts reside on host (not all fit in VRAM).
         if (max_expert_raw > 0) {
             // gpt-oss exemption: its MXFP4 experts are host-resident here only transiently;
-            // pre_dequant converts them to on-device NVFP4 + CUTLASS-grouped before the first forward.
+            // pre_dequant converts them to on-device NVFP4 (grouped NVFP4 GEMM) before the first forward.
             // Never host-offloaded at runtime, so the LRU cache must not be allocated (would shadow
             // the converted device experts -> garbage output).
             bool has_host_experts = false;
@@ -780,9 +780,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             "%d expert block(s) per layer)",
                             total / (1024.0 * 1024.0), stage_experts, stage_slots, stage_chunks);
 
-                        // SfAtom scales + per-expert pointer arrays, so the staged layer takes the CUTLASS
-                        // device-args path instead of the per-expert dequant fallback. Sized from the largest
-                        // projection (gate/up and down differ).
+                        // SfAtom scales + per-expert pointer arrays, so the staged layer takes the grouped
+                        // NVFP4 device-args path instead of the per-expert dequant fallback. Sized from
+                        // the largest projection (gate/up and down differ).
                         const size_t sf_proj = stage_sf_proj;
                         const size_t sf_total = static_cast<size_t>(stage_slots) * sf_proj;
                         const size_t ptr_count =
@@ -883,7 +883,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 moe_.batch_dequant_buf_size = 0;
             }
 
-        // CUTLASS 3.x NVFP4 grouped activation staging: auto-used for prefill (n > 1) on
+        // Grouped NVFP4 activation staging: auto-used for prefill (n > 1) on
         // NVFP4-prequant MoE models. Decode (n == 1) keeps the legacy per-expert GEMV.
         // max K = d_model, max_expanded = max_tokens * top_k.
         if (cfg.n_experts > 0) {
@@ -1033,7 +1033,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K partials +
     // tickets for N = 2 x n_heads. Kernel resets its tickets, so zeroing here is the whole
-    // init. nullptr keeps the two cuBLAS calls.
+    // init. nullptr keeps the two-GEMM route.
     if (has_gdn_ && dispatch_policy().gdn.alpha_beta_smallm && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_bytes = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
         gdn_ws_.ab = vram_alloc(vram_alloc_, gdn_ws_.ab_bytes, "gdn_ab_ws");
@@ -1046,7 +1046,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
     // Prefill alpha/beta launch (gdn.alpha_beta_prefill): 8 MiB of split-K partials, its own
     // buffer because the narrow kernel's tickets live behind its partials in gdn_ws_.ab. The
-    // split adapts to what fits (split 1 needs none); nullptr keeps the two cuBLAS calls.
+    // split adapts to what fits (split 1 needs none); nullptr keeps the two-GEMM route.
     if (has_gdn_ && dispatch_policy().gdn.alpha_beta_prefill && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_prefill_bytes = size_t(8) << 20;
         gdn_ws_.ab_prefill = vram_alloc(vram_alloc_, gdn_ws_.ab_prefill_bytes, "gdn_ab_prefill_ws");
@@ -1132,7 +1132,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // CUTLASS sm_120 NVFP4 activation buffers: pre-allocate for max prefill dimensions.
+    // NVFP4 tile-GEMM activation buffers (qscratch_.cutlass_*): pre-allocate for max prefill dimensions.
     // Only needed when NVFP4 decode is active and sm_120 is available.
     if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
         int max_k = 0;
@@ -1245,7 +1245,7 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     size_t covered_bytes = 0;     // largest target we will actually cover
     size_t lm_head_bytes = 0;     // the excluded plane, for the log
     // LM head is not a candidate for the fallback this cap guards: at M > 1 it is served by
-    // the smallm v2 kernel, the CUTLASS NVFP4 GEMM, or the batched K-par GEMV, none of which
+    // the smallm v2 kernel, the NVFP4 tile GEMM, or the batched K-par GEMV, none of which
     // dequantizes the weight. Counting it would let one oversized plane disable prefill graph
     // capture for every plane that can use it. See exec/dequant_cap.h.
     const void* lm_head_ptr = model_ ? model_->output_proj().data : nullptr;
@@ -1811,7 +1811,7 @@ bool GraphExecutor::chunk_capture_supported() const {
         return false;
     if (dispatch_policy().attention.fa2_fp16qk == "never")
         return false;
-    // MoE: only the CUTLASS 3.x device-args grouped path records into a graph without
+    // MoE: only the grouped NVFP4 device-args path records into a graph without
     // host-side routing reads; every other MoE prefill path does a D2H+sync per layer to size
     // expert GEMMs (capture-illegal, guarded by moe_host_args_capture_guard). Require static
     // device-args conditions for every MoE layer; models with experts outside the CUTLASS

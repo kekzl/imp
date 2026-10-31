@@ -72,7 +72,7 @@ struct ConcurrencyLimits {
 };
 
 // The fixed charge that is not imp's memory and cannot be planned away: ~3.9 GiB claimed
-// by CUDA/cuBLAS/CUTLASS on the first forward pass, invariant to batch and context
+// by CUDA/cuBLASLt (CUTLASS until 2026-10-31) on the first forward pass, invariant to batch and context
 // (A1.5). Carrying it as an explicit, named input is the difference between a plan and a
 // guess.
 struct LibraryReserve {

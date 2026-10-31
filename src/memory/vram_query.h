@@ -19,7 +19,7 @@ namespace imp {
 // the conservative direction (never overcommit). Frees by this process shrink my_used
 // again.
 // Best-effort hard cap, not an OS limit: allocations bypassing the sizing gates (small
-// fixed buffers, cuBLAS handles) still land outside the budget; leave ~1 GiB of real
+// fixed buffers, cuBLASLt handles) still land outside the budget; leave ~1 GiB of real
 // headroom between the sum of budgets and the card.
 // Not thread-safe against concurrent install; install once from Engine::init
 // (single-engine-per-process is the supported deployment). Budget 0 = uncapped.

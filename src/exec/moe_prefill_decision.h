@@ -4,7 +4,7 @@
 #include "core/dispatch_policy.h"
 
 // Pure host-side model of the MoE-prefill GEMM path selection in
-// executor_forward_moe_cutlass.cu (grouped-GEMM-vs-fallback routing, PR #574/#547), so
+// executor_forward_moe_cutlass.cpp (grouped-GEMM-vs-fallback routing, PR #574/#547), so
 // it's covered by a cheap CPU unit test instead of E2E-only. Only the gates pick which
 // path runs; the caller supplies, per tier, whether that tier's device workspace is populated.
 
@@ -15,7 +15,7 @@ namespace imp {
 // model does — see #1205.
 
 // Workspace-readiness flags, mirroring the device-pointer / packed-tensor
-// conjunctions in the .cu. When false, that tier's preconditions are not met
+// conjunctions in the .cpp. When false, that tier's preconditions are not met
 // and selection falls through to the next tier.
 struct MoePrefillWorkspace {
     // try_run_moe_cutlass3x_nvfp4_prefill_ returns false (whole-function LEGACY) unless the

@@ -1,6 +1,7 @@
 // gemm_grouped_nvfp4_smallM as a DENSE small-M GEMM (n_experts=1): the hand-rolled grouped
-// GEMM ships as MoE-prefill opt-in, while batched decode (n_seq<=32) runs the CUTLASS
-// 128x128 tile (measured 41.4us/19% of weight floor at M=32 N=K=5120). Checks correctness
+// GEMM ships as MoE-prefill opt-in, while batched decode (n_seq<=32) runs gemm_nvfp4_smallm v2
+// (gemm.nvfp4_smallm); the CUTLASS 128x128 tile it replaced measured 41.4us/19% of weight floor
+// at M=32 N=K=5120. Checks correctness
 // vs a host dequant walk and benches the dense shape (DRAM ring: 35.8 us; 92.3 us when the dense
 // path was rejected, CUTLASS 41.4 us not re-measured since).
 

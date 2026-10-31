@@ -638,7 +638,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // (cublasLt status 14, cascading capture failure). Run eager for those models (Qwen3.6-35B pp>=4096).
         // The recurrent-snapshot boundary chunk has a request-dependent odd
         // shape: capturing it churns the graph every request, and the odd-M
-        // cuBLAS call can lazily allocate workspace, illegal under capture. Run eager.
+        // cuBLASLt call can lazily allocate workspace, illegal under capture. Run eager.
         const bool ends_at_snapshot = (snap_end > 0 && offset + chunk_len == snap_end);
         // moe_prefill_uncapturable: legacy host-args MoE prefill (GGUF Q*_K
         // MoE) reads routing on the host - its capture guard throws, wasting a forward per chunk. Run eager

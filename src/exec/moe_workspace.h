@@ -13,8 +13,8 @@ namespace imp {
 class Model;
 
 // Which prefill path serves every on-device expert without batch_dequant_buf.
-// cutlass_fp4: NVFP4/MXFP4 experts (CUTLASS grouped); imma_all: K-quant experts the MoE IMMA
-// kernel takes (Q8_0 excluded: its planes can hit the plane budget at runtime).
+// cutlass_fp4 (name historical): NVFP4/MXFP4 experts (grouped NVFP4 GEMM); imma_all: K-quant experts
+// the MoE IMMA kernel takes (Q8_0 excluded: its planes can hit the plane budget at runtime).
 struct MoeExpertServe {
     bool cutlass_fp4 = false;
     bool imma_all = false;
@@ -103,7 +103,7 @@ struct MoEWorkspace {
     // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
     int32_t* d_na = nullptr;
 
-    // Per-expert SFA byte-offsets into the CUTLASS 3.x SfAtom-padded staging buffer.
+    // Per-expert SFA byte-offsets into the SfAtom-padded grouped-GEMM staging buffer.
     // Exclusive prefix sum of cutlass_nvfp4_sf_size(M_per[e], K), populated each forward by
     // compute_sfa_offsets_device. [n_experts+1] int64.
     int64_t* d_sfa_offsets = nullptr;
@@ -159,7 +159,7 @@ struct MoEWorkspace {
     int layer_stage_slots = 0;            // projection slots: 3 whole-layer, 2 chunked (gate+up, then down)
     int layer_stage_ptr_stride = 0;       // n_experts: per-projection span of the pointer arrays
 
-    // CUTLASS device-args view of the staged layer: grouped NVFP4 GEMM wants SfAtom-ordered
+    // Device-args view of the staged layer: grouped NVFP4 GEMM wants SfAtom-ordered
     // scale factors and device arrays of per-expert pointers; staged bytes carry the native
     // per-16 layout, converted once per staged layer into layer_stage_sf with rebuilt pointer
     // arrays. Lets a host-resident layer take the same prefill path as a resident one.
@@ -193,7 +193,7 @@ struct MoEWorkspace {
     // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
     PinnedBuffer h_routing_readback;
 
-    // CUTLASS 3.x NVFP4 grouped GEMM staging:
+    // Grouped NVFP4 GEMM staging (cutlass3x_* names historical):
     //   packed: [max_expanded, max_K/2] contiguous FP4 activations
     //   sf: per-expert SfAtom slabs, worst-case padded to 128 rows per expert
     //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)
