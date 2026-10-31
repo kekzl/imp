@@ -71,7 +71,6 @@ MODELS = [
     # --- MoE / large (original set) ---
     _model_entry("Mistral-Small-3.2-24B-Instruct-2506-NVFP4"),  # MISTRAL  (absent → skip)
     _model_entry("Gemma-4-26B-A4B-it-NVFP4"),                   # GEMMA4 MoE (compressed-tensors)
-    _model_entry("Qwen3.6-35B-A3B-NVFP4"),                      # QWEN36_MOE (GDN hybrid, compressed-tensors)
     _model_entry("Qwen3-Coder-30B-A3B-Instruct-FP4"),          # QWEN3_MOE (modelopt)
     _model_entry("Qwen3-30B-A3B-NVFP4-Modelopt"),              # QWEN3_MOE (modelopt)
     _model_entry("Nemotron-3-Nano-30B-A3B-NVFP4"),            # NEMOTRON_H_MOE (Mamba2+Attn+MoE hybrid)

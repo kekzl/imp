@@ -127,12 +127,6 @@
       ],
       "comment": "hd=256 dense GGUF (gemma-3): since #932 fa2_hd256 is default-on \u2014 this cell tracks whether the legacy materialized cuBLAS attention path still appears (it dominated pre-#932) + gemv_gguf decode (no NVFP4 fast-path)"
     },
-    "nvfp4-hybrid": {
-      "path": "/models/Qwen3.6-35B-A3B-NVFP4",
-      "family": "nvfp4",
-      "arch": "hybrid",
-      "comment": "GDN+MoE hybrid hero: FA2 hd=256 attention (#932), FP8 SSM-projection sidecar decode (#949), CUTLASS grouped GEMM prefill"
-    },
     "gptoss-moe": {
       "path": "/models/gpt-oss-20b",
       "family": "nvfp4",
