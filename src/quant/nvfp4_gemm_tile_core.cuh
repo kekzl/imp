@@ -49,11 +49,12 @@ struct Cfg {
     // 4-bit formats: fragments 32 columns apart, so the kNF W scales of a k step share a 16 B SfAtom line per
     // 128-row slab (one LDS.128). 8-bit formats keep a warp's columns contiguous: whole 32 B sectors in the
     // per-fragment beta stores (FP8 o_proj 160-170 vs 200-220 us with the 4-bit order).
-    static constexpr bool kPackSf = !kB8;
+    static constexpr bool kPackSf = !kB8 && BN >= 128;  // BN 64: contiguous columns, one LDS.32 per fragment
     __device__ static __forceinline__ int ncol(int wn, int nf) {
         return kPackSf ? (nf * 32) + ((wn / kWN) * 8) : wn + (nf * 8);
     }
-    static_assert(kNF % 4 == 0, "W scale lines hold 4 fragments");
+    static_assert(!kPackSf || kNF % 4 == 0, "W scale lines hold 4 fragments");
+    static constexpr int kWAtoms = (BN + 127) / 128;  // W SF slabs per stage: BN 64 reads half of one
     static constexpr int kChunks = kRB / 16;  // 16 B chunks per row per stage
     // TMA: dense rows, swizzled chunks (64B / 128B mode); sync: rows padded by 16 B. Both put
     // the 8 rows of an ldmatrix on 32 distinct banks.
@@ -80,9 +81,9 @@ struct Cfg {
     static constexpr int kSfA = kATile + kWTile;  // stage offsets of the SF slabs
     static constexpr int kSfW = kSfA + kSfBytes;
     // Rounded to the TMA alignment (MXFP8 128x256: 25.5 KiB of tiles + SF).
-    static constexpr int kStageBytes = TMA ? ((kSfW + (BN / 128) * kSfBytes + 1023) / 1024) * 1024
-                                           : kSfW + (BN / 128) * kSfBytes;
-    static constexpr uint32_t kTxBytes = (kBM + BN) * kRB + (1 + BN / 128) * kSfBytes;
+    static constexpr int kStageBytes = TMA ? ((kSfW + kWAtoms * kSfBytes + 1023) / 1024) * 1024
+                                           : kSfW + kWAtoms * kSfBytes;
+    static constexpr uint32_t kTxBytes = (kBM + BN) * kRB + (1 + kWAtoms) * kSfBytes;
     static constexpr int kOS = BN + 8;   // epilogue staging stride in halves: half2 writes conflict-free
     static constexpr int kAlign = 1024;  // 128B-swizzle atom; stage and tile offsets keep it
     // Stream-K stages the epilogue in its own buffer behind the mbarriers when it fits 99 KiB: the
@@ -136,7 +137,7 @@ struct AFrag {
 // Loads step c of the stage at sa_s / sst. g0: the stage's first MXFP8 K group in its atom.
 template <class C>
 __device__ __forceinline__ void load_a(AFrag<C>& f, uint32_t sa_s, const uint8_t* sst, int wm, int wn,
-                                       int lane, int c, int g0) {
+                                       int lane, int c, int g0, int w_r0 = 0) {
     const int T1 = lane >> 2;
     const int lr = lane & 7;
     const int lm = lane >> 3;
@@ -155,7 +156,7 @@ __device__ __forceinline__ void load_a(AFrag<C>& f, uint32_t sa_s, const uint8_t
     if constexpr (C::kMx8) {
 #pragma unroll
         for (int nf = 0; nf < C::kNF; ++nf)
-            f.sfb[nf] = sf_word<C>(sst + C::kSfW, C::ncol(wn, nf) + T1, c, g0);
+            f.sfb[nf] = sf_word<C>(sst + C::kSfW, w_r0 + C::ncol(wn, nf) + T1, c, g0);
     } else if constexpr (!C::kF8) {
         // 32-bit words: rows r and r + 32 are adjacent in a line, A pairs mf (0, 2) and (1, 3), W all nf.
         const int ca = C::kMx4 ? c >> 1 : c;
@@ -167,14 +168,22 @@ __device__ __forceinline__ void load_a(AFrag<C>& f, uint32_t sa_s, const uint8_t
             f.sfa[hh] = v.x >> sh;
             f.sfa[hh + 2] = v.y >> sh;
         }
+        if constexpr (C::kPackSf) {
 #pragma unroll
-        for (int q = 0; q < C::kNF / 4; ++q) {
-            const uint4 v = *reinterpret_cast<const uint4*>(sst + C::kSfW +
-                                                            sf_off<C>(q * 128 + C::ncol(wn, 0) + T1, ca));
-            f.sfb[q * 4] = v.x >> sh;
-            f.sfb[q * 4 + 1] = v.y >> sh;
-            f.sfb[q * 4 + 2] = v.z >> sh;
-            f.sfb[q * 4 + 3] = v.w >> sh;
+            for (int q = 0; q < C::kNF / 4; ++q) {
+                const uint4 v = *reinterpret_cast<const uint4*>(sst + C::kSfW +
+                                                                sf_off<C>(q * 128 + C::ncol(wn, 0) + T1, ca));
+                f.sfb[q * 4] = v.x >> sh;
+                f.sfb[q * 4 + 1] = v.y >> sh;
+                f.sfb[q * 4 + 2] = v.z >> sh;
+                f.sfb[q * 4 + 3] = v.w >> sh;
+            }
+        } else {  // BN 64: rows w_r0 + [0, 64) of the tile's atom
+#pragma unroll
+            for (int nf = 0; nf < C::kNF; ++nf)
+                f.sfb[nf] = *reinterpret_cast<const uint32_t*>(sst + C::kSfW +
+                                                               sf_off<C>(w_r0 + C::ncol(wn, nf) + T1, ca)) >>
+                            sh;
         }
     }
 }
@@ -215,11 +224,11 @@ __device__ __forceinline__ void mma_from(float (&acc)[4][C::kNF][4], const AFrag
 // One stage of MMAs for a 64 x kWN warp tile: kRB/32 steps; both MMA shapes read 32 bytes of K per row.
 template <class C>
 __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t sa_s, const uint8_t* sst,
-                                          int wm, int wn, int lane, int g0 = 0) {
+                                          int wm, int wn, int lane, int g0 = 0, int w_r0 = 0) {
 #pragma unroll
     for (int c = 0; c < C::kRB / 32; ++c) {
         AFrag<C> f;
-        load_a<C>(f, sa_s, sst, wm, wn, lane, c, g0);
+        load_a<C>(f, sa_s, sst, wm, wn, lane, c, g0, w_r0);
         mma_from<C>(acc, f, sa_s, wn, lane, c);
     }
 }

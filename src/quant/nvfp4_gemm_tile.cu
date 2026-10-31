@@ -15,13 +15,12 @@
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/nvfp4_gemm_tile_core.cuh"
 #include "quant/nvfp4_gemm_tile_epilogue.cuh"
+#include "quant/nvfp4_gemm_tile_plan.h"
 
 #include "core/logging.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 
 namespace imp {
@@ -80,21 +79,21 @@ __device__ __forceinline__ void tma_stage(uint32_t s_base, uint32_t full, const 
         if ((kt + 1) * C::kBK > p.K) {
             sf_bytes = static_cast<uint32_t>((p.K - (kt * C::kBK)) / 64) * 512;
 #pragma unroll
-            for (int j = 0; j <= C::kBN / 128; ++j)
+            for (int j = 0; j <= C::kWAtoms; ++j)
                 for (uint32_t i = sf_bytes; i < C::kSfBytes; i += 16)
                     asm volatile("st.shared.v4.u32 [%0], {%1, %1, %1, %1};" ::"r"(s_base + C::kSfA +
                                                                                   (j * C::kSfBytes) + i),
                                  "r"(0)
                                  : "memory");
         }
-    mbar_expect_tx(full, C::kTxBytes - ((1 + C::kBN / 128) * (C::kSfBytes - sf_bytes)));
+    mbar_expect_tx(full, C::kTxBytes - ((1 + C::kWAtoms) * (C::kSfBytes - sf_bytes)));
     tma_2d(s_base, ma, kt * C::kRB, m0, full);
     tma_2d(s_base + C::kATile, mw, kt * C::kRB, n0, full);
     if constexpr (C::kSfBytes == 0)  // FP8: no SF slabs
         return;
     bulk_1d(s_base + C::kSfA, p.a_sf + (static_cast<size_t>(m0 / kBM) * sf_slab) + sf_k, sf_bytes, full);
 #pragma unroll
-    for (int j = 0; j < C::kBN / 128; ++j)
+    for (int j = 0; j < C::kWAtoms; ++j)
         bulk_1d(s_base + C::kSfW + j * C::kSfBytes,
                 p.w_sf + (static_cast<size_t>(min(n0 / 128 + j, (p.N - 1) / 128)) * sf_slab) + sf_k, sf_bytes,
                 full);
@@ -112,7 +111,7 @@ __device__ __forceinline__ void tma_consume(float (&acc)[4][C::kNF][4], const Ri
     static_assert(kSteps % 2 == 0, "double buffer: step 0 of every stage in f[0]");
     AFrag<C> f[2];
     mbar_wait_sleep(g.bars, 0);
-    load_a<C>(f[0], g.s0, g.smem, g.wm, g.wn, g.lane, 0, C::sf_g0(0));
+    load_a<C>(f[0], g.s0, g.smem, g.wm, g.wn, g.lane, 0, C::sf_g0(0), g.n0 & 127);
     for (int kt = 0; kt < g.KT; ++kt) {
         const int s = kt % C::kStages;
         const uint32_t sa = g.s0 + s * C::kStageBytes;
@@ -121,7 +120,7 @@ __device__ __forceinline__ void tma_consume(float (&acc)[4][C::kNF][4], const Ri
             mma_from<C>(acc, f[c & 1], sa, g.wn, g.lane, c);
             if (c + 1 < kSteps) {
                 load_a<C>(f[(c + 1) & 1], sa, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane, c + 1,
-                          C::sf_g0(kt));
+                          C::sf_g0(kt), g.n0 & 127);
             } else {
                 __syncwarp();
                 if (g.lane == 0)
@@ -130,7 +129,7 @@ __device__ __forceinline__ void tma_consume(float (&acc)[4][C::kNF][4], const Ri
                     const int s1 = (kt + 1) % C::kStages;
                     mbar_wait_sleep(g.bars + s1 * 8, ((kt + 1) / C::kStages) & 1);
                     load_a<C>(f[0], g.s0 + s1 * C::kStageBytes, g.smem + s1 * C::kStageBytes, g.wm, g.wn,
-                              g.lane, 0, C::sf_g0(kt + 1));
+                              g.lane, 0, C::sf_g0(kt + 1), g.n0 & 127);
                 }
             }
         }
@@ -494,51 +493,6 @@ int sm_count() {
     return sms;
 }
 
-// Data-parallel tile by wave cost per column of work (128x256 1.0, 128x128 1.12, isolated
-// full-wave bench; 128x256 only from 3/4 of a wave). Stream-K only when that tile idles >= 15 % of its
-// waves (M=2048 N=6144 132.5 vs 128.5 us data-parallel); then hybrid (4) vs uniform (3) by k-steps per CTA,
-// uniform paying ~5.5 for its fixups: Gemma-4 2048x2816x2112 hybrid 29.0 vs uniform 30.5 us, flushed M=512
-// N=17408 K=5120 110 vs 101.5. Below half a wave the split-only plan (4), else data-parallel (M=512 flushed:
-// N=4096 K=4096 21.5 vs stream-K 31.5 us).
-int pick_variant(int M, int N, int kt, int sms, bool sk_fits) {
-    const int m_tiles = (M + kBM - 1) / kBM;
-    const int t128 = ((N + 127) / 128) * m_tiles;
-    const int t256 = ((N + 255) / 256) * m_tiles;
-    const auto waves = [&](int ctas) {
-        return std::ceil(static_cast<float>(ctas) / static_cast<float>(sms));
-    };
-    const float c256 = waves(t256) * 256.0f;
-    const float c128 = waves(t128) * 128.0f * 1.12f;
-    const bool use256 = 4 * t256 >= 3 * sms && c256 <= c128;
-    const int dp = use256 ? t256 : t128;
-    const float idle = 1.0f - (static_cast<float>(dp) / (waves(dp) * static_cast<float>(sms)));
-    if (sk_fits && 2 * t128 <= sms)
-        return 4;
-    if (sk_fits && idle >= 0.15f && t128 >= sms) {
-        const int hybrid = ((t128 / sms) * kt) + ((kt + 2) / 3);
-        const float uniform = (static_cast<float>(t128 * kt) / static_cast<float>(sms)) + 5.5f;
-        return static_cast<float>(hybrid) <= uniform ? 4 : 3;
-    }
-    return use256 ? 1 : 0;
-}
-
-// Hybrid stream-K plan: whole waves of tiles data-parallel over grid = SMs, each tile of the partial last
-// wave split into 3 k-ranges on as many CTAs; below one wave every tile splits in 2 (grid = tiles x 2;
-// Qwen3-8B 512x1024x4096 in situ 10.9-11.0 us vs 4 pieces 11.5-11.6). Gemma-4 down_proj 2048x2816x2112 in
-// situ, us: pieces 3 29.0 (cuBLASLt 29.1), 2 29.2-29.7, 4 30.0, 8 34.4, uniform stream-K 30.5-31.0.
-bool hybrid_plan(TileArgs& p, int sms, int kt) {
-    const int tiles = ((p.N + 127) / 128) * ((p.M + kBM - 1) / kBM);
-    const int dp = (tiles / sms) * sms;
-    const int tail = tiles - dp;
-    const int pieces = std::min(dp > 0 ? 3 : 2, kt);
-    if (tail == 0 || pieces < 2 || tail * pieces > sms)
-        return false;
-    p.sk_dp = dp;
-    p.sk_split = pieces;
-    p.sk_per = dp > 0 ? sms : tail * pieces;  // the grid
-    return true;
-}
-
 // Shape and operands every config needs: SF slabs for the block-scaled formats, scale scalars for FP8.
 template <Fmt F>
 bool args_ok(const TileArgs& p) {
@@ -578,6 +532,10 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
             break;
         case 2:
             return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
+        case 5:
+            if (launch_tile<Cfg<64, kB1, 4, true, true, false, F>>(p, stream))
+                return true;
+            break;
         case 4: {
             TileArgs h = p;
             if (sk_fits && hybrid_plan(h, sms, (K + Sk::kBK - 1) / Sk::kBK) && launch_tile<Sk>(h, stream))

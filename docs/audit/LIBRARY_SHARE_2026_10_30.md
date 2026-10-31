@@ -30,10 +30,30 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 | # | call site | share | state | next step |
 |---|---|---:|---|---|
 | 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
-| 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted; with the per-grid plan (2026-10-31, sub-wave split 4 then 2) at pp512, `gemm.nvfp4_tile_min_m=64`, tile vs CUTLASS sum: Qwen3.8-27B 209.2-211.1 vs 211.9-217.3 ms, Qwen3-14B 120.5-121.3 vs 119.6-121.8, Qwen3-8B 68.9-69.8 vs 64.9-65.0, Qwen3-30B 16.8-18.0 vs 15.6 | k/v grids N <= 1024 (Qwen3-8B 512x1024x4096 11.0 vs CUTLASS 9.8 us, Qwen3-30B 512x512x2048 8.9 vs 6.2): a 128x64 tile (packed SF needs kNF % 4 == 0) |
+| 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16), CUTLASS 0 launches in 9 cells, refusal fallback only | remove the CUTLASS TU (tests still use it as the reference) |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | removed (steps 13, 14) | - |
+
+## Step 16: dense NVFP4 below M 2048 on the own tile (2026-10-31)
+
+`gemm.nvfp4_tile_min_m` 2048 -> 1 after three plan changes in `src/quant/nvfp4_gemm_tile.cu` (#2934 and this step): grids up to a quarter wave run a 128x64 tile (the W tile reads its half of the 128-row SfAtom, contiguous columns), up to half a wave split every tile in 2 k-pieces, up to one wave data-parallel, above it uniform stream-K below M 2048 and the hybrid / uniform cost model from M 2048. 128x64 and 128x128 data-parallel stay bit-equal to CUTLASS (max diff 0 on 8 shapes); W-row-offset mutant red.
+
+| `main` 4fdc9a77 vs branch, `build-dev` imp-cli under nsys, 3 pairs | main (CUTLASS below 2048) | branch |
+|---|---:|---:|
+| Qwen3-30B-A3B pp512, dense NVFP4 GEMM sum, ms | 15.5-15.6 | 14.2 |
+| Nemotron-3-Nano pp512 | 11.4-11.9 | 10.8-11.1 |
+| Qwen3-14B pp512 | 117.0-119.4 | 116.3-117.4 |
+| Qwen3.8-27B pp512 | 210.3-214.0 | 210.0-210.5 |
+| Qwen3.6-35B pp512 (tile + CUTLASS) | 29.2 | 28.8-28.9 |
+| Gemma-4 pp512 | 22.2-23.3 | 22.4-23.7 |
+| Qwen3-8B-NVFP4 pp512 | 64.1-65.1 | 64.7-67.7 |
+| Qwen3-8B-NVFP4 pp128 (2 pairs, `gemm.nvfp4_tile_min_m=1` vs default) | 42.8-43.3 | 34.8-35.1 |
+| Gemma-4 / Qwen3.8-27B pp4096 | neutral | neutral |
+
+PPL deterministic, main = branch: Qwen3-8B-NVFP4 13.6200, Qwen3.8-27B 5.2064, Qwen3-30B 13.3833 (4k corpus, last chunk below M 2048). Non-deterministic 13.6521 / 5.1705 / 13.3350 vs 13.6144 / 5.1624 / 13.3350.
+
+Per-shape gaps closed on the way (in situ, us): Qwen3-30B k/v 512x512x2048 split 8.9 -> 128x64 at CUTLASS level; Qwen3-8B k/v 512x1024x4096 11.9 -> 9.6 (CUTLASS 9.7); Qwen3-8B gate/up 512x12288x4096 uniform 52.3 vs hybrid 54.2.
 
 ## Step 15: Gemma-4 down_proj K 2112 on the own tile (2026-10-31)
 

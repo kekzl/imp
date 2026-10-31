@@ -103,8 +103,9 @@ struct GEMM {
     int nvfp4_cublaslt_min_m = 2048;
     // Own TMA + mxf4nvf4 dense prefill GEMM (src/quant/nvfp4_gemm_tile.cu) from M >= this, 0 = off;
     // ahead of cuBLASLt, same SfAtom bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM sum
-    // -0.9 % vs cuBLASLt; pp512 +7 % vs CUTLASS stream-K, so M < 2048 stays on CUTLASS.
-    int nvfp4_tile_min_m = 2048;
+    // -0.9 % vs cuBLASLt; from M 1 since the per-grid plan + 128x64 tile: pp128 Qwen3-8B 42.8-43.3 ->
+    // 34.8-35.1 ms vs CUTLASS. CUTLASS only on refusal.
+    int nvfp4_tile_min_m = 1;
     // Own FP16 GEMM (src/compute/gemm_f16_tile.cu) instead of cuBLASLt for F16 x F16 -> F16 with fp16
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
     // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.

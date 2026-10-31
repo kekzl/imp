@@ -86,9 +86,9 @@ bool run_cutlass(const Operands& o, cudaStream_t s) {
 }
 
 // Variants: 0 TMA 128x128 x4 + producer warp, 1 TMA 128x256 x3, 2 sync 128x128 BK256x2, -1 auto.
-constexpr int kCheckedVariants = 5;  // 3 = stream-K 128x128, 4 = hybrid (3 k-pieces per tail tile)
+constexpr int kCheckedVariants = 6;  // 3 = stream-K 128x128, 4 = hybrid / split, 5 = 128x64
 // TMA variants take K % 64 (partial last stage).
-constexpr int kVariantBk[kCheckedVariants] = {64, 64, 256, 64, 64};
+constexpr int kVariantBk[kCheckedVariants] = {64, 64, 256, 64, 64, 64};
 
 class Nvfp4GemmTileTest : public ::testing::TestWithParam<std::tuple<int, int, int>> {
 protected:
@@ -157,9 +157,9 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
     constexpr size_t kFlushBytes = size_t(256) << 20;  // > 2 x the 96 MB L2
     void* flush = nullptr;
     ASSERT_EQ(cudaMalloc(&flush, kFlushBytes), cudaSuccess);
-    constexpr int kVariants = 5;  // variants 0..3, then -1 (auto, the dispatch default)
-    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "lt",
-                 "t128", "t256", "sync", "sk", "auto", "best_TF");
+    constexpr int kVariants = 6;  // variants 0..3, 5 (128x64), then -1 (auto, the dispatch default)
+    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "lt",
+                 "t128", "t256", "sync", "sk", "t64", "auto", "best_TF");
     for (const auto& nk : shapes) {
         for (int M : ms) {
             Operands o;
@@ -218,7 +218,7 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
             for (int v = 0; v < kVariants; ++v)
                 t_v[v] = time_us([&](int c) {
                     (void)gemm_nvfp4_tile(o.act, o.act_sf, wd[c], wsf[c], o.cw.tensor_scale, o.y_own, o.M,
-                                          o.N, o.K, s, v < 4 ? v : -1, o.ws, o.ws_bytes);
+                                          o.N, o.K, s, v < 4 ? v : (v == 4 ? 5 : -1), o.ws, o.ws_bytes);
                 });
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
             double best = 1e30;
