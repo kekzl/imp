@@ -519,7 +519,7 @@ int pick_variant(int M, int N, int sms, bool sk_fits) {
 }
 
 // Hybrid stream-K plan over grid = SMs: whole waves of tiles data-parallel, each tile of the partial last
-// wave split into `pieces` k-ranges on as many CTAs. False when the shape has no partial wave. Gemma-4
+// wave split into `pieces` k-ranges on as many CTAs. False without a whole wave or a partial one. Gemma-4
 // down_proj 2048x2816x2112 in situ, us: pieces 3 29.0 (cuBLASLt 29.1), 2 29.2-29.7, 4 30.0, 8 34.4, uniform
 // stream-K 30.5-31.0.
 bool hybrid_plan(TileArgs& p, int sms, int kt, int pieces) {
@@ -527,7 +527,7 @@ bool hybrid_plan(TileArgs& p, int sms, int kt, int pieces) {
     const int dp = (tiles / sms) * sms;
     const int tail = tiles - dp;
     pieces = std::min(pieces, kt);
-    if (tail == 0 || pieces < 2 || tail * pieces > sms)
+    if (dp == 0 || tail == 0 || pieces < 2 || tail * pieces > sms)  // dp 0 would read as the uniform plan
         return false;
     p.sk_dp = dp;
     p.sk_split = pieces;
