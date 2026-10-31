@@ -53,7 +53,7 @@ TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
 // is dead code, a producer without a registration falls through to gemm_via_handle_ silently.
 TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
     const auto& reg = GemmKernelRegistry::instance();
-    EXPECT_EQ(reg.size(), 10u) << "1 generic dequant + 8 GGUF small-M qtypes + 1 CUTLASS_NVFP4";
+    EXPECT_EQ(reg.size(), 13u) << "1 generic dequant + 11 GGUF small-M qtypes + 1 CUTLASS_NVFP4";
     GemmKernelArgs args{};
     args.stream = stream_;
     // The 9 keys retired with the stalled R5 migration stay unreachable.
