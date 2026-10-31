@@ -1022,12 +1022,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // strip arrays + FP32 inter-strip state, ~42 MiB at 32 value heads. Engine lifetime; on
     // failure the route degrades to the fused scan (dispatch checks nullptr).
     if (has_gdn_ && dispatch_policy().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
-        gdn_chunkpar_ws_bytes_ = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
-        gdn_chunkpar_ws_ = vram_alloc(vram_alloc_, gdn_chunkpar_ws_bytes_, "gdn_chunkpar_ws");
-        if (!gdn_chunkpar_ws_) {
+        gdn_ws_.chunkpar_bytes = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
+        gdn_ws_.chunkpar = vram_alloc(vram_alloc_, gdn_ws_.chunkpar_bytes, "gdn_chunkpar_ws");
+        if (!gdn_ws_.chunkpar) {
             IMP_LOG_WARN("gdn_chunkpar workspace unavailable (%.1f MiB) — fused scan route",
-                         gdn_chunkpar_ws_bytes_ / (1024.0 * 1024.0));
-            gdn_chunkpar_ws_bytes_ = 0;
+                         gdn_ws_.chunkpar_bytes / (1024.0 * 1024.0));
+            gdn_ws_.chunkpar_bytes = 0;
         }
     }
 
@@ -1035,27 +1035,27 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // tickets for N = 2 x n_heads. Kernel resets its tickets, so zeroing here is the whole
     // init. nullptr keeps the two cuBLAS calls.
     if (has_gdn_ && dispatch_policy().gdn.alpha_beta_smallm && cfg.ssm_dt_rank > 0) {
-        gdn_ab_ws_bytes_ = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
-        gdn_ab_ws_ = vram_alloc(vram_alloc_, gdn_ab_ws_bytes_, "gdn_ab_ws");
-        if (gdn_ab_ws_) {
-            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ab_ws_, 0, gdn_ab_ws_bytes_));
+        gdn_ws_.ab_bytes = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
+        gdn_ws_.ab = vram_alloc(vram_alloc_, gdn_ws_.ab_bytes, "gdn_ab_ws");
+        if (gdn_ws_.ab) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab, 0, gdn_ws_.ab_bytes));
         } else {
-            IMP_LOG_WARN("gdn alpha/beta workspace unavailable (%zu B) - two-call route", gdn_ab_ws_bytes_);
-            gdn_ab_ws_bytes_ = 0;
+            IMP_LOG_WARN("gdn alpha/beta workspace unavailable (%zu B) - two-call route", gdn_ws_.ab_bytes);
+            gdn_ws_.ab_bytes = 0;
         }
     }
     // Prefill alpha/beta launch (gdn.alpha_beta_prefill): 8 MiB of split-K partials, its own
-    // buffer because the narrow kernel's tickets live behind its partials in gdn_ab_ws_. The
+    // buffer because the narrow kernel's tickets live behind its partials in gdn_ws_.ab. The
     // split adapts to what fits (split 1 needs none); nullptr keeps the two cuBLAS calls.
     if (has_gdn_ && dispatch_policy().gdn.alpha_beta_prefill && cfg.ssm_dt_rank > 0) {
-        gdn_ab_prefill_ws_bytes_ = size_t(8) << 20;
-        gdn_ab_prefill_ws_ = vram_alloc(vram_alloc_, gdn_ab_prefill_ws_bytes_, "gdn_ab_prefill_ws");
-        if (gdn_ab_prefill_ws_) {
-            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ab_prefill_ws_, 0, gdn_ab_prefill_ws_bytes_));
+        gdn_ws_.ab_prefill_bytes = size_t(8) << 20;
+        gdn_ws_.ab_prefill = vram_alloc(vram_alloc_, gdn_ws_.ab_prefill_bytes, "gdn_ab_prefill_ws");
+        if (gdn_ws_.ab_prefill) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab_prefill, 0, gdn_ws_.ab_prefill_bytes));
         } else {
             IMP_LOG_WARN("gdn alpha/beta prefill workspace unavailable (%zu B) - two-call route",
-                         gdn_ab_prefill_ws_bytes_);
-            gdn_ab_prefill_ws_bytes_ = 0;
+                         gdn_ws_.ab_prefill_bytes);
+            gdn_ws_.ab_prefill_bytes = 0;
         }
     }
     // MoE router prefill GEMM (gemm_f16_splitk): 8 MiB of fp32 split-K partials, the split shrinks to
@@ -1429,12 +1429,12 @@ void GraphExecutor::free_buffers() {
         }
     };
 
-    vfree(gdn_chunkpar_ws_);
-    gdn_chunkpar_ws_bytes_ = 0;
-    vfree(gdn_ab_ws_);
-    gdn_ab_ws_bytes_ = 0;
-    vfree(gdn_ab_prefill_ws_);
-    gdn_ab_prefill_ws_bytes_ = 0;
+    vfree(gdn_ws_.chunkpar);
+    gdn_ws_.chunkpar_bytes = 0;
+    vfree(gdn_ws_.ab);
+    gdn_ws_.ab_bytes = 0;
+    vfree(gdn_ws_.ab_prefill);
+    gdn_ws_.ab_prefill_bytes = 0;
     vfree(moe_.router_ws);
     moe_.router_ws_bytes = 0;
 

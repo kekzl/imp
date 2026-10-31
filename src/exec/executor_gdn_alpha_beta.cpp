@@ -58,8 +58,8 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     // cuBLAS picks its algorithm per M bucket (#2556).
     const bool det_prefill = prefill && process_diag_deterministic();
     if (prefill
-            ? (!det_prefill && (!dispatch_policy().gdn.alpha_beta_prefill || gdn_ab_prefill_ws_ == nullptr))
-            : (!dispatch_policy().gdn.alpha_beta_smallm || gdn_ab_ws_ == nullptr))
+            ? (!det_prefill && (!dispatch_policy().gdn.alpha_beta_prefill || gdn_ws_.ab_prefill == nullptr))
+            : (!dispatch_policy().gdn.alpha_beta_smallm || gdn_ws_.ab == nullptr))
         return false;
     if (alpha_id == kInvalidTensorID || beta_id == kInvalidTensorID)
         return false;
@@ -72,8 +72,8 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     const half* wa = fp16_weight_ptr(wcache_, registry_.handle(alpha_id), N, K);
     const half* wb = fp16_weight_ptr(wcache_, registry_.handle(beta_id), N, K);
     if (!wa || !wb) {
-        if (!gdn_ab_narrow_logged_) {
-            gdn_ab_narrow_logged_ = true;
+        if (!gdn_ws_.ab_narrow_logged) {
+            gdn_ws_.ab_narrow_logged = true;
             const auto& h = registry_.handle(alpha_id);
             IMP_LOG_INFO(
                 "gdn alpha/beta narrow GEMM declined: alpha tier=%d source_qtype=%d shape=[%lld,%lld] "
@@ -88,10 +88,10 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         const bool ok = gemm_f16_narrow_prefill(static_cast<const half*>(input.data), M, static_cast<int>(K),
                                                 wa, static_cast<half*>(alpha_out.data), static_cast<int>(N),
                                                 wb, static_cast<half*>(beta_out.data), static_cast<int>(N),
-                                                det_prefill ? nullptr : gdn_ab_prefill_ws_,
-                                                det_prefill ? 0 : gdn_ab_prefill_ws_bytes_, stream);
-        if (ok && !gdn_ab_prefill_logged_) {
-            gdn_ab_prefill_logged_ = true;
+                                                det_prefill ? nullptr : gdn_ws_.ab_prefill,
+                                                det_prefill ? 0 : gdn_ws_.ab_prefill_bytes, stream);
+        if (ok && !gdn_ws_.ab_prefill_logged) {
+            gdn_ws_.ab_prefill_logged = true;
             IMP_LOG_INFO("gdn alpha/beta prefill GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,
                          (long long)N);
         }
@@ -99,10 +99,10 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     }
     const bool ok = gemm_f16_narrow_smallm(static_cast<const half*>(input.data), M, static_cast<int>(K), wa,
                                            static_cast<half*>(alpha_out.data), static_cast<int>(N), wb,
-                                           static_cast<half*>(beta_out.data), static_cast<int>(N), gdn_ab_ws_,
-                                           gdn_ab_ws_bytes_, stream);
-    if (ok && !gdn_ab_narrow_logged_) {
-        gdn_ab_narrow_logged_ = true;
+                                           static_cast<half*>(beta_out.data), static_cast<int>(N), gdn_ws_.ab,
+                                           gdn_ws_.ab_bytes, stream);
+    if (ok && !gdn_ws_.ab_narrow_logged) {
+        gdn_ws_.ab_narrow_logged = true;
         IMP_LOG_INFO("gdn alpha/beta narrow GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,
                      (long long)N);
     }
@@ -165,8 +165,8 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
                                                static_cast<const half*>(input.data), static_cast<half*>(proj.data),
                                                static_cast<half*>(gate_out.data), alpha_out, beta_out,
                                                static_cast<int>(K), stream, fold);
-    if (ok && !gdn_m1_input_logged_) {
-        gdn_m1_input_logged_ = true;
+    if (ok && !gdn_ws_.m1_input_logged) {
+        gdn_ws_.m1_input_logged = true;
         IMP_LOG_INFO("gdn M=1 fused input GEMV ACTIVE (K=%lld, rows %lld + %lld + 2 x %lld)", (long long)K,
                      (long long)w_in.N, (long long)w_gate.N, (long long)N);
     }
@@ -321,8 +321,8 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
     gemv_nvfp4_residual(w, static_cast<const half*>(y.data), static_cast<half*>(h.data),
                         static_cast<const half*>(h.data), static_cast<int>(w.N), static_cast<int>(w.K), stream,
                         norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)));
-    if (!gdn_m1_out_logged_) {
-        gdn_m1_out_logged_ = true;
+    if (!gdn_ws_.m1_out_logged) {
+        gdn_ws_.m1_out_logged = true;
         IMP_LOG_INFO("gdn M=1 out-projection with residual epilogue ACTIVE (N=%lld, K=%lld)", (long long)w.N,
                      (long long)w.K);
     }

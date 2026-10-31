@@ -782,7 +782,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // together are faster on the one batched launch instead.
             bool ragged_chunkpar = ragged && !grouped && dispatch_policy().gdn.chunkpar_scan &&
                                    state.h_seq_offsets != nullptr && state.h_ssm_slots != nullptr &&
-                                   gdn_chunkpar_ws_ != nullptr && head_dim_ssm == 128 && ssize == 128;
+                                   gdn_ws_.chunkpar != nullptr && head_dim_ssm == 128 && ssize == 128;
             if (ragged_chunkpar) {
                 int n_small = 0, n_big = 0;
                 for (int sq = 0; sq < state.ssm_n_seq; ++sq) {
@@ -815,15 +815,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                             gdn_scan_chunkpar_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
                                                    static_cast<__nv_bfloat16*>(h_s), y_s, rows, n_heads,
                                                    head_dim_ssm, ssize, n_groups, stream, gl,
-                                                   static_cast<float*>(gdn_chunkpar_ws_),
-                                                   gdn_chunkpar_ws_bytes_,
+                                                   static_cast<float*>(gdn_ws_.chunkpar),
+                                                   gdn_ws_.chunkpar_bytes,
                                                    dispatch_policy().gdn.chunkpar_strip);
                         } else {
                             gdn_scan_chunkpar_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
                                                   static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm,
                                                   ssize, n_groups, stream, gl,
-                                                  static_cast<float*>(gdn_chunkpar_ws_),
-                                                  gdn_chunkpar_ws_bytes_,
+                                                  static_cast<float*>(gdn_ws_.chunkpar),
+                                                  gdn_ws_.chunkpar_bytes,
                                                   dispatch_policy().gdn.chunkpar_strip);
                         }
                     } else if (state_bf16) {
@@ -866,7 +866,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // CTAs walking every token. Single-sequence prefill only (n>=128); padded
             // verify chunks and short inputs stay on the routes below. Works for both state dtypes.
             const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
-                                      state.d_chunk_len == nullptr && gdn_chunkpar_ws_ != nullptr &&
+                                      state.d_chunk_len == nullptr && gdn_ws_.chunkpar != nullptr &&
                                       head_dim_ssm == 128 && ssize == 128 && h_snap == nullptr;
             if (use_chunkpar) {
                 if (state_bf16) {
@@ -875,10 +875,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                            static_cast<const half*>(beta_proj_out.data),
                                            static_cast<const float*>(ly.ssm_a.data),
                                            static_cast<const float*>(ly.ssm_dt_b.data),
-                                           static_cast<__nv_bfloat16*>(h_st),
-                                           static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm,
-                                           ssize, n_groups, stream, gl,
-                                           static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
+                                           static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data),
+                                           n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
+                                           static_cast<float*>(gdn_ws_.chunkpar), gdn_ws_.chunkpar_bytes,
                                            dispatch_policy().gdn.chunkpar_strip);
                 } else {
                     gdn_scan_chunkpar_f32(conv_f32, conv_channels,
@@ -888,7 +887,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                           static_cast<const float*>(ly.ssm_dt_b.data),
                                           static_cast<float*>(h_st), static_cast<half*>(y_buf.data), n,
                                           n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
-                                          static_cast<float*>(gdn_chunkpar_ws_), gdn_chunkpar_ws_bytes_,
+                                          static_cast<float*>(gdn_ws_.chunkpar), gdn_ws_.chunkpar_bytes,
                                           dispatch_policy().gdn.chunkpar_strip);
                 }
             } else if (use_chunkwise) {

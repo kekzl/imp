@@ -21,8 +21,8 @@ src/exec/executor_attention_internal.h cudaMemset(k_flat debug  # cuBLAS attenti
 src/exec/executor_attention_internal.h cudaMemset(v_flat debug  # cuBLAS attention debug path
 src/exec/executor_qsa.cpp cudaMemcpy(d_bt debug  # attention.qsa_debug comparison rows
 src/exec/executor_qsa.cpp cudaMemcpy(d_ctx debug  # attention.qsa_debug comparison rows
-src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ab_prefill_ws_ init  # executor init, before the warmup device syncs
-src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ab_ws_ init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab_prefill init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab init  # executor init, before the warmup device syncs
 src/exec/executor_workspace_buffers.cpp cudaMemset(qscratch_.cutlass_act_sf init  # executor init, before the warmup device syncs
 src/exec/executor_workspace.cpp cudaMemcpy(*buf init  # GraphExecutor::init, Gemma-4 V-norm ones
 src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_ init  # GraphExecutor::init
