@@ -2,11 +2,10 @@
 // (FP16 in, FP32 accumulate), written as mean x^T x to an IMPHES01 file.
 
 #include "exec/activation_calibrator.h"
-#include "compute/cublas_handle.h"
+#include "compute/gemm_lt_ex.h"
 #include "core/logging.h"
 #include "quant/calibration_hessian.h"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <vector>
@@ -36,19 +35,13 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
     } else if (it->second.K != K) {
         return;
     }
-    if (!cublas_)
-        cublas_ = cublas_handle_create("calibration_hessian", CUBLAS_DEFAULT_MATH);
-    auto h = static_cast<cublasHandle_t>(cublas_);
-    if (cublasSetStream(h, stream) != CUBLAS_STATUS_SUCCESS)
-        return;
     // Row-major X [rows, K] (ld row_stride) is column-major X^T [K, rows]: H = X^T (X^T)^T.
     const float one = 1.0f;
     const auto ld = static_cast<int>(row_stride);
-    const cublasStatus_t st = cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_T, static_cast<int>(K),
-                                           static_cast<int>(K), static_cast<int>(rows), &one, input.data,
-                                           CUDA_R_16F, ld, input.data, CUDA_R_16F, ld, &one, it->second.d_H,
-                                           CUDA_R_32F, static_cast<int>(K), CUBLAS_COMPUTE_32F,
-                                           CUBLAS_GEMM_DEFAULT);
+    const cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_T, static_cast<int>(K), static_cast<int>(K),
+                                         static_cast<int>(rows), &one, input.data, CUDA_R_16F, ld, input.data,
+                                         CUDA_R_16F, ld, &one, it->second.d_H, CUDA_R_32F,
+                                         static_cast<int>(K), CUBLAS_COMPUTE_32F, stream);
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_WARN("calibration: Hessian GEMM failed (status %d) at layer %d kind %s", static_cast<int>(st),
                      layer, tensor_kind_name(kind));

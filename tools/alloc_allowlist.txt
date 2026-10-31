@@ -7,7 +7,6 @@
 #
 # remaining: 67 files, 358 sites
 
-src/compute/attention_cublas.cu  # 5
 src/compute/attention_fmha_sm120.cu  # 2
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5

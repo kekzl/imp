@@ -539,7 +539,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             for (int e = 0; e < ne; ++e)
                 b_ptrs[e] = buf + (static_cast<size_t>(e) * expert_fp16_sz);
 
-            // Uses cublasGemmGroupedBatchedEx, one call for all experts: h_offsets is
+            // gemm_moe_batched, one cuBLASLt batch per expert M: h_offsets is
             // already available from the D2H sync above, so no need for
             // gemm_moe_device_grouped (which does its own D2H sync + per-expert cublasLtMatmul calls).
             gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,

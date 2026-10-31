@@ -1363,8 +1363,8 @@ private:
     [[nodiscard]] bool try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
-    // Gemma-4 ggml MMVQ per-token prefill: FP16 batch dequant + a single
-    // cublasGemmGroupedBatchedEx per projection (dequants all experts in one
+    // Gemma-4 ggml MMVQ per-token prefill: FP16 batch dequant + gemm_moe_batched
+    // per projection (one cuBLASLt batch per expert M; dequants all experts in one
     // shot). One D2H sync per layer for offsets (unavoidable for the grouped
     // GEMM API). Falls through to scatter; true when the path was taken.
     [[nodiscard]] bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff, int ne,

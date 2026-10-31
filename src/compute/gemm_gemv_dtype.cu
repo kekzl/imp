@@ -1,10 +1,10 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
 #include "compute/gemm_internal_device.cuh"
+#include "compute/gemm_lt_ex.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -18,7 +18,6 @@ namespace imp {
 
 // Bridge to the cuBLAS handle owned by gemm.cu so gemm_try_sgemm stays
 // byte-identical to its original gemm.cu form.
-static inline cublasHandle_t get_cublas_handle() { return gemm_internal_cublas_handle(); }
 
 // --- GEMV fast path for M=1 decode (memory-bandwidth-bound) ---
 // Applies when all operands share the same dtype (excludes LM head: FP16→FP32).
@@ -56,7 +55,7 @@ bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     return true;
 }
 
-// FP32 fast path via cublasSgemm: B[N,K] row-major = [K,N] col-major -> CUBLAS_OP_T; A[M,K]
+// FP32 fast path via cuBLASLt: B[N,K] row-major = [K,N] col-major -> CUBLAS_OP_T; A[M,K]
 // row-major = [K,M] col-major -> CUBLAS_OP_N.
 bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                     cudaStream_t stream) {
@@ -67,22 +66,12 @@ bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, fl
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
 
-    cublasHandle_t handle = get_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
-
-    cublasStatus_t st = cublasSgemm(handle,
-                                    CUBLAS_OP_T,  // transa: transpose B_col [K,N] → [N,K]
-                                    CUBLAS_OP_N,  // transb: A_col [K,M] used as-is
-                                    (int)N,       // m
-                                    (int)M,       // n
-                                    (int)K,       // k
-                                    &alpha, static_cast<const float*>(B.data),
-                                    (int)K,  // lda = K (leading dim of B before transpose)
-                                    static_cast<const float*>(A.data), (int)K,  // ldb = K (leading dim of A)
-                                    &beta, static_cast<float*>(C.data), (int)N  // ldc = N
-    );
+    // TF32, as cublasSgemm under the former CUBLAS_TF32_TENSOR_OP_MATH handle.
+    cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha, B.data,
+                                   CUDA_R_32F, (int)K, A.data, CUDA_R_32F, (int)K, &beta, C.data, CUDA_R_32F,
+                                   (int)N, lt_compute_32f(CUDA_R_32F), stream);
     if (st != CUBLAS_STATUS_SUCCESS) {
-        IMP_LOG_ERROR("imp::gemm: cublasSgemm failed (status %d)", (int)st);
+        IMP_LOG_ERROR("imp::gemm: FP32 GEMM failed (status %d)", (int)st);
     }
     return true;
 }

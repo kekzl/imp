@@ -52,7 +52,7 @@ cp LICENSE THIRD_PARTY_LICENSES.md "$root/share/doc/imp/"
 . /etc/os-release
 cat > "$root/README.txt" <<EOF
 imp $version for Linux x86_64, NVIDIA Blackwell sm_120.
-Needs: NVIDIA driver with CUDA 13 support. glibc, CUDA runtime and cuBLAS are bundled.
+Needs: NVIDIA driver with CUDA 13 support. glibc, CUDA runtime and cuBLASLt are bundled.
 Run: bin/imp-server --model <model> (bin/ launches libexec/ with the bundled loader).
 Bundled libraries: $PRETTY_NAME packages; licenses in share/doc/imp/copyright/.
 EOF

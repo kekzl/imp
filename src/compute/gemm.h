@@ -217,13 +217,13 @@ void gemv_qkv_fused_iq3_s_q8_1(const void* W_q, const void* W_k, const void* W_v
                                const float* d8, half* y_q, half* y_k, half* y_v, int q_rows, int k_rows,
                                int v_rows, int K, cudaStream_t stream = nullptr);
 
-// Batched K/V projection: input @ [wk; wv]^T → k_out, v_out in a single cuBLAS call.
+// Batched K/V projection: input @ [wk; wv]^T → k_out, v_out in a single cuBLASLt batch.
 // weight_kv: [2 * nkv_hd, d_model] — wk at rows [0..nkv_hd), wv at [nkv_hd..2*nkv_hd)
 // k_out, v_out: [n_tokens, nkv_hd] — must be contiguous (v_out = k_out + stride)
 void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out, Tensor& v_out,
                      cudaStream_t stream = nullptr);
 
-// Batched two-way GEMM: input @ [w1; w2]^T → out1, out2 in a single cuBLAS call.
+// Batched two-way GEMM: input @ [w1; w2]^T → out1, out2 in a single cuBLASLt batch.
 // weight_fused: [2 * N, K] — w1 at rows [0..N), w2 at [N..2*N)
 // out1, out2: [M, N] — may have arbitrary memory stride between them.
 void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& out1, Tensor& out2,

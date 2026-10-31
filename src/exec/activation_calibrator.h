@@ -61,7 +61,6 @@ private:
     };
     std::map<uint32_t, HessEntry> hess_;  // same key as entries_
     bool hessian_ = false;
-    void* cublas_ = nullptr;  // cublasHandle_t, created on the first Hessian GEMM
     struct Entry {
         double* d_sum = nullptr;  // [K], FP64 so long corpora do not lose the tail
         int64_t K = 0;

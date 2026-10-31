@@ -354,6 +354,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cpp
+    src/compute/gemm_lt_ex.cpp
     src/compute/mmq_q8_imma_q4k.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
@@ -621,7 +622,6 @@ target_link_libraries(imp
         imp_core
         CUDA::cudart
         CUDA::cuda_driver
-        CUDA::cublas
         CUDA::cublasLt
     PRIVATE
         pthread
@@ -708,7 +708,7 @@ if(IMP_BUILD_TOOLS)
     # Export recipe (#2481): the build's git tree id (build_image.sh), one TU so ccache keeps the rest.
     set(IMP_TREE_ID "" CACHE STRING "git tree id recorded in imp-quantize export recipes")
     set_source_files_properties(tools/imp-quantize/recipe.cpp PROPERTIES COMPILE_DEFINITIONS "IMP_TREE_ID=\"${IMP_TREE_ID}\"")
-    target_link_libraries(imp-quantize PRIVATE imp imp_warnings CUDA::cublas)
+    target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
     target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                    ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
@@ -1255,6 +1255,7 @@ if(IMP_BUILD_TESTS)
     )
 
     imp_add_test_module(test-compute GPU SOURCES
+        tests/test_gemm_lt_ex.cu
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_swiglu_quantize_cutlass.cu
@@ -1398,10 +1399,9 @@ if(IMP_BUILD_TESTS)
     target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
     set_target_properties(imp_test_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(test-quant PRIVATE imp_test_kernels)
-    # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU and cuBLAS.
+    # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU.
     target_sources(test-quant PRIVATE tools/imp-quantize/gptq.cu tests/test_gptq_nvfp4.cu)
     target_include_directories(test-quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-quantize)
-    target_link_libraries(test-quant PRIVATE CUDA::cublas)
 
     imp_add_test_module(test-kv GPU SOURCES
         tests/test_fp8_kv_cache.cu
