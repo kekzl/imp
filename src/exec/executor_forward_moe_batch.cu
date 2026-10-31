@@ -656,14 +656,16 @@ static bool row_invariant_router(QType compute, const Tensor& gate, const Tensor
 // Router GEMM into a compute-dtype scratch (n x ne), widened into the FP32 logits. Prefill rows n >= 1024
 // with d >= 2560 and ne <= 128 (Gemma-4 2048x128x2816: 13.0 vs cuBLASLt 14.3 us) run the own cluster split-K
 // GEMM (fp32 accumulate); K 2048 / ne 256 / small n lose to cuBLASLt (11.3 vs 10.5, 28.6 vs 25.0, 5-7
-// vs 1.2-4.4).
+// vs 1.2-4.4). Only while cuBLASLt would accumulate in fp32: with gemm.cublas_fp16_acc on (Nemotron-H) its
+// full-rate fp16 split-K wins, 4.48 vs 5.83 ms per pp4096 run.
 static void router_logits_gemm(const Tensor& in, const Tensor& gate, void* scratch, QType compute, float* out,
                                int n, int ne, void* ws, size_t ws_bytes, cudaStream_t stream) {
     int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
     Tensor tmp(scratch, compute, 2, gl_shape, true);
     const int d = static_cast<int>(in.shape[1]);
-    const bool own = n >= 1024 && d >= 2560 && ne <= 128 && compute == QType::F16 &&
-                     gate.qtype == QType::F16 && in.stride[0] == d && gate.shape[1] == d &&
+    const bool own = !process_diag_cublas_fp16_acc() && n >= 1024 && d >= 2560 && ne <= 128 &&
+                     compute == QType::F16 && gate.qtype == QType::F16 && in.stride[0] == d &&
+                     gate.shape[1] == d &&
                      gemm_f16_splitk(in.data, gate.data, tmp.data, n, ne, d, 1.0f, ws, ws_bytes, stream);
     if (!own)
         gemm(in, gate, tmp, 1.0f, 0.0f, stream);

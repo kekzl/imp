@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- MoE router GEMM at prefill takes the own split-K kernel only while cuBLASLt would accumulate in fp32 (`gemm.cublas_fp16_acc` off, Gemma-4); Nemotron-3-Nano (fp16 accumulate on) goes back to cuBLASLt: router kernels 5.83 -> 4.48 ms per pp4096 run, e2e pp4096 +0.5 % (3/3 pairs).
+
 ### Removed
 - `gemm.nvfp4_cutlass_streamk`: no GEMM read it since CUTLASS left (#2938); the own tile plans stream-K per grid (#2934). `--set gemm.nvfp4_cutlass_streamk=...` now stops at startup as an unknown key; in `imp.conf` it logs a warning and is ignored.
 
