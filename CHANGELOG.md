@@ -18,6 +18,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Gemma-4 MoE router GEMM at prefill (n >= 1024, d >= 2560, <= 128 experts) runs an own cluster split-K FP16 GEMM instead of cuBLASLt: pp4096 cuBLASLt sum 8.0 -> 0.22 ms, GEMM kernel sum 957.7-958.5 -> 954.9-957.4 ms, e2e 43548-43723 -> 43703-43864 tok/s; deterministic PPL unchanged (18.2854).
 - Own tile GEMM grids up to a quarter wave (k/v projections at prefill) split every 128x64 tile in 2 k-pieces when a stream-K workspace is passed: pp512 GEMM sum Qwen3-30B-A3B 14.02-14.30 -> 13.95 ms, Qwen3-8B-NVFP4 64.9-65.4 -> 64.4-64.7, others neutral; deterministic mode unchanged.
 - NVFP4 LM head GEMM (batched decode above 32 rows, perplexity harness) runs the own tile with an fp32 epilogue instead of CUTLASS: bit-equal logits, 48/64 x 151936 x 4096 242-271 vs 251-272 us; CUTLASS on refusal.
 - Dense NVFP4 prefill runs the own tile GEMM from M 1 (`gemm.nvfp4_tile_min_m`, was 2048), CUTLASS only on refusal; new 128x64 tile for grids up to a quarter wave, uniform stream-K below M 2048. pp512 GEMM sum Qwen3-30B-A3B 15.5-15.6 -> 14.2 ms, Qwen3-14B 117.0-119.4 -> 116.3-117.4; pp128 Qwen3-8B 42.8-43.3 -> 34.8-35.1. PPL unchanged (deterministic).

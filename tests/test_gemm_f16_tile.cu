@@ -116,6 +116,63 @@ INSTANTIATE_TEST_SUITE_P(Shapes, GemmF16TileTest,
                                            std::make_tuple(512, 1024, 5120, true, 0.0f),
                                            std::make_tuple(1000, 2056, 1024, true, 1.0f)));
 
+// gemm_f16_splitk (cluster split-K, fp32 accumulate) against cuBLASLt fp32 accumulate on MoE router shapes
+// (Gemma-4 2048x128x2816, Qwen3-30B 2048x128x2048, Qwen3.6 4096x256x2048) and ragged edges; timing printed.
+TEST(GemmF16SplitK, MatchesCublasLt) {
+    cudaStream_t s;
+    cudaStreamCreate(&s);
+    const int shapes[][3] = {{2048, 128, 2816}, {2048, 128, 2048}, {4096, 256, 2048},
+                             {200, 64, 192},    {33, 8, 64},       {1000, 136, 704}};
+    for (const auto& sh : shapes) {
+        Bufs b;
+        b.alloc(sh[0], sh[1], sh[2], s);
+        b.lib(0.0f, s);
+        const size_t ws_bytes = gemm_f16_splitk_workspace_bytes(b.M, b.N);
+        void* ws = nullptr;
+        cudaMalloc(&ws, ws_bytes);
+        ASSERT_TRUE(gemm_f16_splitk(b.a, b.w, b.own, b.M, b.N, b.K, 1.0f, ws, ws_bytes, s));
+        ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+        std::vector<half> r(size_t(b.M) * b.N), o(size_t(b.M) * b.N);
+        cudaMemcpy(r.data(), b.ref, r.size() * 2, cudaMemcpyDeviceToHost);
+        cudaMemcpy(o.data(), b.own, o.size() * 2, cudaMemcpyDeviceToHost);
+        double max_ref = 0.0, max_diff = 0.0;
+        size_t bad = 0;
+        for (size_t i = 0; i < r.size(); ++i) {
+            const double x = __half2float(r[i]), y = __half2float(o[i]);
+            bad += std::isfinite(y) ? 0 : 1;
+            max_ref = std::max(max_ref, std::fabs(x));
+            max_diff = std::max(max_diff, std::fabs(x - y));
+        }
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0);
+        cudaEventCreate(&e1);
+        float t[2] = {0.0f, 0.0f};
+        for (int k = 0; k < 2; ++k) {
+            for (int i = 0; i < 60; ++i) {
+                if (i == 20)
+                    cudaEventRecord(e0, s);
+                if (k == 0)
+                    b.lib(0.0f, s);
+                else
+                    (void)gemm_f16_splitk(b.a, b.w, b.own, b.M, b.N, b.K, 1.0f, ws, ws_bytes, s);
+            }
+            cudaEventRecord(e1, s);
+            cudaEventSynchronize(e1);
+            cudaEventElapsedTime(&t[k], e0, e1);
+        }
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+        std::fprintf(stderr,
+                     "[f16 splitk] M=%d N=%d K=%d max|ref|=%.4g max|diff|=%.4g lt %.1f us own %.1f us\n", b.M,
+                     b.N, b.K, max_ref, max_diff, 1000.0 * t[0] / 40, 1000.0 * t[1] / 40);
+        EXPECT_EQ(bad, 0u);
+        EXPECT_LE(max_diff, 2e-3 * max_ref + 1e-3) << b.M << "x" << b.N << "x" << b.K;
+        cudaFree(ws);
+        b.release();
+    }
+    cudaStreamDestroy(s);
+}
+
 // Timing vs cuBLASLt gemm() at fp16 accumulate (the default prefill route).
 TEST(GemmF16TileBench, VsCublasLt) {
     cudaStream_t s;

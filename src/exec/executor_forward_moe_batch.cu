@@ -27,6 +27,7 @@
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_f16_tile.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -652,12 +653,20 @@ static bool row_invariant_router(QType compute, const Tensor& gate, const Tensor
            (d & 1) == 0 && in.stride[0] == d;
 }
 
-// cuBLAS router GEMM into a compute-dtype scratch (n x ne), widened into the FP32 logits.
-static void router_logits_cublas(const Tensor& in, const Tensor& gate, void* scratch, QType compute,
-                                 float* out, int n, int ne, cudaStream_t stream) {
+// Router GEMM into a compute-dtype scratch (n x ne), widened into the FP32 logits. Prefill rows n >= 1024
+// with d >= 2560 and ne <= 128 (Gemma-4 2048x128x2816: 13.0 vs cuBLASLt 14.3 us) run the own cluster split-K
+// GEMM (fp32 accumulate); K 2048 / ne 256 / small n lose to cuBLASLt (11.3 vs 10.5, 28.6 vs 25.0, 5-7
+// vs 1.2-4.4).
+static void router_logits_gemm(const Tensor& in, const Tensor& gate, void* scratch, QType compute, float* out,
+                               int n, int ne, void* ws, size_t ws_bytes, cudaStream_t stream) {
     int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
     Tensor tmp(scratch, compute, 2, gl_shape, true);
-    gemm(in, gate, tmp, 1.0f, 0.0f, stream);
+    const int d = static_cast<int>(in.shape[1]);
+    const bool own = n >= 1024 && d >= 2560 && ne <= 128 && compute == QType::F16 &&
+                     gate.qtype == QType::F16 && in.stride[0] == d && gate.shape[1] == d &&
+                     gemm_f16_splitk(in.data, gate.data, tmp.data, n, ne, d, 1.0f, ws, ws_bytes, stream);
+    if (!own)
+        gemm(in, gate, tmp, 1.0f, 0.0f, stream);
     const int64_t numel = static_cast<int64_t>(n) * ne;
     if (compute == QType::F16) {
         const int threads = 256;
@@ -727,8 +736,9 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                 static_cast<const half*>(router_in.data),
                                 static_cast<float*>(gate_logits_f32.data), n, ne, d, stream);
         } else {
-            router_logits_cublas(router_in, ly.moe_gate, moe_.gathered.data, compute_dtype_,
-                                 static_cast<float*>(gate_logits_f32.data), n, ne, stream);
+            router_logits_gemm(router_in, ly.moe_gate, moe_.gathered.data, compute_dtype_,
+                               static_cast<float*>(gate_logits_f32.data), n, ne, moe_.router_ws,
+                               moe_.router_ws_bytes, stream);
         }
 
         if (debug_forward_enabled() && layer == 0)

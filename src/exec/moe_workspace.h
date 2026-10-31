@@ -37,6 +37,8 @@ struct MoEWorkspace {
     Tensor scatter_out;    // [max_tokens, d_model] FP32 (scatter output)
 
     // --- Separately allocated buffers ---
+    void* router_ws = nullptr;  // fp32 split-K partials of the router GEMM (gemm_f16_splitk)
+    size_t router_ws_bytes = 0;
 
     // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
     void* dequant_buf = nullptr;
