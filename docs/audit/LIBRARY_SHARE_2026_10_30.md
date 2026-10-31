@@ -29,9 +29,9 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 
 | # | call site | share | state | next step |
 |---|---|---:|---|---|
-| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
+| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below; 2026-10-31 recheck with the per-grid plan, Qwen3-8B-FP8 pp512 `gemm.fp8_tile_min_m=64`: tile 133.1-133.2 ms (+ 14.5 ms cuBLASLt left) vs cuBLASLt 131.3-131.8, with a stream-K workspace (the FP8 caller passes none) 129.4-130.2, e2e -9..-10 % | M < 2048: per-SM efficiency of the FP8 tiles (gate/up 512x12288x4096 96.9-102.8 us) |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16); CUTLASS removed (step 17) | - |
-| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below | N > K and split-K shapes |
+| 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below; N > K at parity (2026-10-31, Nemotron pp4096, 2 pairs: the 128x256 tile replaces 50.48 ms cuBLASLt by 50.04 ms, 128x128 +4..6 %, e2e 56447-56584 vs 56278-56406 tok/s): stays cuBLASLt | per-SM efficiency |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8, CUTLASS dense NVFP4 | 0 launches | removed (steps 13, 14, 17): no CUTLASS in the build | - |
 
