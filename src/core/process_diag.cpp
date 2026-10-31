@@ -72,8 +72,6 @@ int process_diag_fa2_hd256_bkv() { return slot().attention_fa2_hd256_bkv; }
 void process_diag_set_fa2_hd256_bkv(int v) { slot().attention_fa2_hd256_bkv = v; }
 bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
 void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
-int process_diag_nvfp4_cutlass_streamk() { return slot().nvfp4_cutlass_streamk; }
-void process_diag_set_nvfp4_cutlass_streamk(int v) { slot().nvfp4_cutlass_streamk = v; }
 int process_diag_nvfp4_cublaslt_min_m() { return slot().nvfp4_cublaslt_min_m; }
 int process_diag_nvfp4_tile_min_m() { return slot().nvfp4_tile_min_m; }
 bool process_diag_f16_tile() { return slot().f16_tile; }

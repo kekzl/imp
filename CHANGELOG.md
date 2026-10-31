@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Removed
+- `gemm.nvfp4_cutlass_streamk`: no GEMM read it since CUTLASS left (#2938); the own tile plans stream-K per grid (#2934). `--set gemm.nvfp4_cutlass_streamk=...` now stops at startup as an unknown key; in `imp.conf` it logs a warning and is ignored.
+
 ## [0.60.0] - 2026-10-31
 
 ### Fixed

@@ -62,7 +62,7 @@ Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold
 | CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`, `runtime.graph_prewarm` (32/32 captures in 2.3 s) |
 | PDL both halves | `runtime.no_pdl=false`; registered kernels call `griddepcontrol.wait` before the first global access (`src/compute/pdl_device.cuh`); registered = waits, blanket registrations without a wait RACED (`GreedyDeterminism`) |
 | FA2 prefill family | `attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, `fa2_dense_2cta` (all on); `fa2_hd256_bkv` 64 |
-| Stream-K on the CUTLASS prefill GEMM | `gemm.nvfp4_cutlass_streamk=1`: N > 2048, >= 1 wave, last wave <= half full; workspace sized as the max over every 128-tile grid (~22 MB), a 0 B workspace refuses EVERY launch (22k -> 4.2k tok/s); the SK-typed kernel in data-parallel mode is slower (109 vs 100 us) so shapes outside the rule keep the plain kernel |
+| Stream-K on the dense NVFP4 prefill GEMM | the own tile plans it per grid (#2934: below half a wave 2 k-pieces, above one wave hybrid vs uniform stream-K by cost); `gemm.nvfp4_cutlass_streamk` left with CUTLASS (#2938). Size a stream-K workspace for every grid it can see: a 0 B workspace refused every CUTLASS launch once (22k -> 4.2k tok/s, #1841) |
 | Batched-decode sidecars | `gemm.nvfp4_smallm` + `_impl=2` + `_pair`, `gdn.state_bf16` (+0.21% PPL by design), `gemm.fp8_ssm_proj`, `gemm.nvfp4_lm_head*`, `gemm.fp8_attn_proj` |
 | Chunk-parallel GDN prefill | `gdn.chunkpar_scan`, `gdn.chunkpar_strip` |
 | INT8-IMMA prefill for GGUF MoE | dense Q4_K IMMA loses to cuBLAS and is off by design |
