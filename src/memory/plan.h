@@ -84,9 +84,10 @@ struct LibraryReserve {
 // used to be miscounted here; they are planned separately now, VRAMBudget::
 // imma_plane_bytes). kMeasuredLibraryReserveBytes stays as the cold-start floor for
 // models with no recorded measurement: over-reserving costs KV, under-reserving spills
-// the card. Re-measure after a driver or CUDA
+// the card. Measured 2026-10-31 (cuBLASLt only, CUTLASS gone): 16-97 MiB on 12 models, Qwen3.8-Flash-Next
+// 973 MiB; 1536 covers it with margin (was 3900 under CUTLASS + cuBLAS v2). Re-measure after a driver or CUDA
 // bump; imp.conf vram.library_reserve_mb overrides it per host.
-constexpr size_t kMeasuredLibraryReserveBytes = 3900ull * 1024 * 1024;
+constexpr size_t kMeasuredLibraryReserveBytes = 1536ull * 1024 * 1024;
 
 struct PlanInput {
     ModelShape model;

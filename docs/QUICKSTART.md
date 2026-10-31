@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-31
-commit: daca1665
+commit: cc0936bb
 -->
 
 # Quickstart
@@ -87,7 +87,8 @@ docker run --gpus all \
 Mount the cache volume. It holds two things; the second costs VRAM rather than time:
 
 - the transformed weights, so a second start skips the conversion: on Qwen3-14B-NVFP4, 7.9 s cold against 2.1 s warm;
-- the measured library reserve. Without it the memory plan charges a 3900 MiB constant on every start, out of the KV pool. Second `docker run --rm` on the volume against the first: Qwen3.8-27B-NVFP4 plans 1930 MiB instead of 3900 and starts with 2025 KV blocks (32400 tokens) instead of 975 (15600); Qwen3-8B-Q8_0 plans 1033 MiB, KV ceiling 5617 -> 6606 blocks. The first start says so after its first forward ("library reserve MISMATCH").
+- the measured library reserve (v0.60.0: 16-107 MiB per model, Qwen3.8-Flash-Next ~1 GiB). Without it the plan starts from a 1536 MiB constant; warmup then re-sizes the KV pool to its own measurement (#2436), so a cold start ends at the same KV blocks (Qwen3.8-27B 4950, Flash-Next 2025, 2026-10-31). Weight caches and auto `max_batch_size` / `max_seq_len` are still resolved under the constant.
+  [PROV: commit=cc0936bb date=2026-10-31 hw=RTX5090 model=12 SafeTensors models + Qwen3.8-27B/Flash-Next servers quant=NVFP4/FP8/FP16 cuda=13.4.3 path=library-reserve cmd=`imp-cli --bench` cold `--rm` + `tools/analysis/launch_server_bench.sh` without CACHE_VOL n=1 per model note=ghcr 0.60.0 (3900) and this tree (1536) end at the same KV blocks]
 
 A `docker run --rm` without this volume re-measures every start and never uses the answer.
 

@@ -252,9 +252,9 @@ struct RuntimeConfig {
         // floored at the 4 % allocator headroom. Clamped to [0, 50] at use.
         // Default 0 = the headroom alone (1304 MiB on 32 GB); raise to opt in.
         int reserve_floor_pct = 0;
-        // Fixed CUDA/cuBLAS/CUTLASS charge on the first forward pass, MiB;
+        // Fixed CUDA/cuBLASLt charge on the first forward pass, MiB;
         // not a workspace imp allocates, so the budget pass cannot otherwise
-        // see it (docs/internals/MEMORY.md A1.5). ~3900 measured, invariant
+        // see it (docs/internals/MEMORY.md A1.5). 16-973 MiB measured 2026-10-31 (1536 default), invariant
         // to batch/context on this target.
         //   -1 = built-in measured constant (default)
         //    0 = charge nothing (driver/toolkit where it does not apply)

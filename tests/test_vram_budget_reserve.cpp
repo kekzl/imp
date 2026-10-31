@@ -23,6 +23,10 @@
 
 #include "test_cuda_skip.h"
 
+// Shape-tuned scenarios (tight budgets, floors that must fire) were sized against a 3900 MiB library
+// charge, the cold-start constant until 2026-10-31; pinned so they test their path, not the constant.
+constexpr int kFixtureLibraryMiB = 3900;
+
 using namespace imp;
 
 namespace {
@@ -351,6 +355,7 @@ TEST(VramBudgetReserve, TransientReserveDoesNotStarveTheKvPlan) {
     fill_prequant_model(m);
 
     EngineConfig config;
+    config.library_reserve_mb = kFixtureLibraryMiB;
     config.max_seq_len = 4096;
     config.max_batch_size = 32;
     config.use_nvfp4_decode = 2;
@@ -371,7 +376,7 @@ TEST(VramBudgetReserve, TransientReserveDoesNotStarveTheKvPlan) {
     probe.distributable_bytes = free_vram;
     probe.mandatory_cache_bytes = live.mandatory_sf_bytes + live.mandatory_moe_bytes;
     probe.ssm_state_bytes = live.ssm_footprint_bytes;
-    probe.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+    probe.library_reserve_bytes = size_t{kFixtureLibraryMiB} << 20;
     probe.n_kv_layers = 8;
     probe.max_batch_size = 32;
     probe.max_seq_len = 4096;
@@ -407,6 +412,7 @@ TEST(VramBudgetReserve, PreallocCoversDemandAndFreesKv) {
     fill_prequant_model(m);
 
     EngineConfig config;
+    config.library_reserve_mb = kFixtureLibraryMiB;
     config.max_seq_len = 32768;
     config.max_batch_size = 8;
     config.use_nvfp4_decode = 2;
@@ -527,6 +533,7 @@ TEST(VramBudgetReserve, PlanNeverExceedsTheBudgetItWasGiven) {
         fill_model(m, c.attn, c.ffn);
 
         EngineConfig config;
+        config.library_reserve_mb = kFixtureLibraryMiB;
         config.max_seq_len = c.max_seq_len;
         config.max_batch_size = c.max_batch;
         config.use_nvfp4_decode = c.use_nvfp4_decode;
@@ -541,7 +548,7 @@ TEST(VramBudgetReserve, PlanNeverExceedsTheBudgetItWasGiven) {
         probe.weight_cache_demand = live.weight_cache_estimate_bytes;
         probe.mandatory_cache_bytes = live.mandatory_sf_bytes + live.mandatory_moe_bytes;
         probe.ssm_state_bytes = live.ssm_footprint_bytes;
-        probe.library_reserve_bytes = kMeasuredLibraryReserveBytes;
+        probe.library_reserve_bytes = size_t{kFixtureLibraryMiB} << 20;
         probe.n_kv_layers = c.n_kv_layers;
         probe.max_batch_size = c.max_batch;
         probe.max_seq_len = c.max_seq_len;
@@ -710,6 +717,7 @@ TEST(VramBudgetReserve, PreFloorBlocksSurviveTheMinKvTokensRaise) {
     fill_model(m, QType::Q8_0, QType::Q8_0);
 
     EngineConfig config;
+    config.library_reserve_mb = kFixtureLibraryMiB;
     config.max_seq_len = 32768;
     config.max_batch_size = 1;
     config.use_cuda_graphs = false;
