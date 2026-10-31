@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-31
-commit: ed4422b7
+commit: daca1665
 -->
 
 # docs

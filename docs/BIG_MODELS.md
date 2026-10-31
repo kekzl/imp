@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: a4070e6a
+verified: 2026-10-31
+commit: daca1665
 -->
 
 # Models larger than the card
@@ -18,12 +18,13 @@ Mixture-of-experts models use a few experts per token.
 
 | | measured |
 | --- | --- |
-| one user, 6 real prompts x 400 tokens | **92.1 tokens/s** (89.2-96.4 across the prompts, 91.8-92.2 across 3 starts), first token after 392 ms |
-| reading a 512-token prompt | 1338.18 tokens/s (1331.51-1341.98) |
-| host RAM taken at load | ~68 GiB (`MemAvailable` 76.6-77.0 -> 8.9-9.2 GiB on a 78 GiB host) |
-| card memory in use, start to ready | 25.7 GiB of 32; 38-43 s (50 s on the first start, which records the memory plan) |
+| one user, 6 real prompts x 400 tokens | **91.8 tokens/s** (89.5-95.9 across the prompts, 91.8-92.0 across 3 starts), first token after 388 ms |
+| reading a 512-token prompt (v0.59.0) | 1338.18 tokens/s (1331.51-1341.98) |
+| host RAM taken at load | ~67 GiB (`MemAvailable` 74.7-75.9 -> 8.4-8.7 GiB on a 78 GiB host) |
+| card memory in use, start to ready | 25.6 GiB of 32; 45-50 s (76 s on the first start, which records the memory plan) |
 
-<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` +
+<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts note=v0.60.0 tree 0937bac4, harness_md5=7ade1eb1, docs/audit/launch_2026_10_31/fn.txt; rows one user, host RAM, card memory] -->
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=
        `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --bench-prompt-file novel_prose_2026.txt` n=3 server starts, 3 bench processes note=40 GiB row: CHANGELOG [0.50.0] #2621] -->
 
 ## What you need

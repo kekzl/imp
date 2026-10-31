@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: 4666a109
+verified: 2026-10-31
+commit: daca1665
 -->
 
 # Benchmarks
@@ -116,15 +116,21 @@ Fresh server per arm, engine defaults (imp `--max-concurrent N --set runtime.max
 [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/engine3_conc.sh`
        n=3 trials x 3 waves note=imp ghcr v0.59.0 sha256 7a52810d, vllm/vllm-openai:v0.31.0 sha256 c1c9f6fd;
        raw logs docs/audit/launch_2026_10_27/]
+[PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/engine3_conc.sh`
+       n=3 trials x 3 waves note=imp v0.60.0 tree 0937bac4 (imp:test), vllm/vllm-openai:v0.31.0; harness_md5=5525cd20;
+       raw logs docs/audit/launch_2026_10_31/]
 
 | engine | checkpoint | speculative decoding | 1 stream tok/s | 32 streams tok/s |
 |---|---|---|---:|---:|
+| imp v0.60.0 | Qwen3.8-27B-NVFP4-vllm | off (`speculative.mtp_k=0 speculative.ngram=false`) | **95.5** (95.4-95.7) | - |
+| imp v0.60.0 | Qwen3.8-27B-NVFP4-vllm | default: none at 32 | - | **1974.8** (1963.7-1976.6) |
+| vLLM 0.31.0 (2026-10-31) | Qwen3.8-27B-NVFP4-vllm | default: none | 70.4 (70.0-70.9) | 1380.1 (1378.1-1394.3) |
 | imp v0.59.0 | Qwen3.8-27B-NVFP4-vllm | off (`speculative.mtp_k=0 speculative.ngram=false`) | **96.3** (95.4-96.4) | - |
 | imp v0.59.0 | Qwen3.8-27B-NVFP4-vllm | default: MTP k=2 at 1 stream, none at 32 | 116.2 (113.9-121.8) | **1979.1** (1978.6-1980.1) |
 | vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | default: none | 69.9 (68.7-70.4) | 1414.2 (1404.7-1415.6) |
 | vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | MTP k=2 (`--speculative-config`) | 124.4 (119.4-126.9) | 913.6 (906.0-941.5) |
 
-- MTP k=2 on both: these template completions put the two within prompt noise (imp waves 95.7-132.5); 6 real chat prompts x 400 tokens, 3 starts (`tools/analysis/mtp_vs_vllm.sh`): imp **126.49** vs vLLM 116.84 tok/s. Speculation off: imp leads by 38 %. imp keeps the KV cache in NVFP4 on this family.
+- MTP k=2 on both: these template completions put the two within prompt noise (imp waves 95.7-132.5); 6 real chat prompts x 400 tokens, 3 starts (`tools/analysis/mtp_vs_vllm.sh`): imp **126.49** vs vLLM 116.84 tok/s. Speculation off: imp leads by 35.7 % (v0.60.0; 37.8 % on v0.59.0). imp keeps the KV cache in NVFP4 on this family.
 - The 2026-10-11 sweep (imp 91.0 / 93.7 one stream): [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## imp vs vLLM at concurrency
