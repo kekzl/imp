@@ -234,7 +234,7 @@ __device__ __forceinline__ float4* sk_slot(const TileArgs& p, int b) {
 // CTA holding a later piece of t (read by the finisher, the segment with kb == 0 and ke < KT).
 template <class F>
 __device__ __forceinline__ void sk_walk(const TileArgs& p, int KT, int units, int b, F&& f) {
-    if (p.sk_dp > 0) {  // hybrid: whole tiles b, b + grid, ..., then one piece of a tail tile
+    if (p.sk_split > 0) {  // hybrid: whole tiles b, b + grid, ..., then one piece of a tail tile
         for (int t = b; t < p.sk_dp; t += static_cast<int>(gridDim.x))
             f(t, 0, KT, b);
         const int pieces = p.sk_split;
@@ -466,13 +466,9 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
     // (128x128 at M=512 N=17408: 115 -> 105 us).
     dim3 grid = C::kSk ? dim3((p.N + C::kBN - 1) / C::kBN, (p.M + kBM - 1) / kBM)
                        : dim3((p.M + kBM - 1) / kBM, (p.N + C::kBN - 1) / C::kBN);
-    if constexpr (C::kSk) {  // caller set the plan and the workspace
-        if (p.sk_dp > 0)
-            grid = dim3(p.sk_per);
-        else {
-            const int units = static_cast<int>(grid.x * grid.y) * ((p.K + C::kBK - 1) / C::kBK);
-            grid = dim3((units + p.sk_per - 1) / p.sk_per);
-        }
+    if constexpr (C::kSk) {  // caller set the plan and the workspace; hybrid: grid = sk_per
+        const int units = static_cast<int>(grid.x * grid.y) * ((p.K + C::kBK - 1) / C::kBK);
+        grid = dim3(p.sk_split > 0 ? p.sk_per : (units + p.sk_per - 1) / p.sk_per);
     }
     gemm_nvfp4_tile_kernel<C><<<grid, C::kThreads, C::kSmemBytes, stream>>>(p, map_a, map_w, map_d);
     IMP_CUDA_CHECK_LAUNCH();
@@ -499,9 +495,12 @@ int sm_count() {
 }
 
 // Data-parallel tile by wave cost per column of work (128x256 1.0, 128x128 1.12, isolated
-// full-wave bench; 128x256 only from 3/4 of a wave). Hybrid stream-K only when that tile idles
-// >= 15 % of its waves: M=512 N=17408 88.4 vs 92.1 us, but M=2048 N=6144 132.5 vs 128.5.
-int pick_variant(int M, int N, int sms, bool sk_fits) {
+// full-wave bench; 128x256 only from 3/4 of a wave). Stream-K only when that tile idles >= 15 % of its
+// waves (M=2048 N=6144 132.5 vs 128.5 us data-parallel); then hybrid (4) vs uniform (3) by k-steps per CTA,
+// uniform paying ~5.5 for its fixups: Gemma-4 2048x2816x2112 hybrid 29.0 vs uniform 30.5 us, flushed M=512
+// N=17408 K=5120 110 vs 101.5. Below half a wave the split-only plan (4), else data-parallel (M=512 flushed:
+// N=4096 K=4096 21.5 vs stream-K 31.5 us).
+int pick_variant(int M, int N, int kt, int sms, bool sk_fits) {
     const int m_tiles = (M + kBM - 1) / kBM;
     const int t128 = ((N + 127) / 128) * m_tiles;
     const int t256 = ((N + 255) / 256) * m_tiles;
@@ -513,25 +512,30 @@ int pick_variant(int M, int N, int sms, bool sk_fits) {
     const bool use256 = 4 * t256 >= 3 * sms && c256 <= c128;
     const int dp = use256 ? t256 : t128;
     const float idle = 1.0f - (static_cast<float>(dp) / (waves(dp) * static_cast<float>(sms)));
-    if (sk_fits && idle >= 0.15f)
+    if (sk_fits && 2 * t128 <= sms)
         return 4;
+    if (sk_fits && idle >= 0.15f && t128 >= sms) {
+        const int hybrid = ((t128 / sms) * kt) + ((kt + 2) / 3);
+        const float uniform = (static_cast<float>(t128 * kt) / static_cast<float>(sms)) + 5.5f;
+        return static_cast<float>(hybrid) <= uniform ? 4 : 3;
+    }
     return use256 ? 1 : 0;
 }
 
-// Hybrid stream-K plan over grid = SMs: whole waves of tiles data-parallel, each tile of the partial last
-// wave split into `pieces` k-ranges on as many CTAs. False without a whole wave or a partial one. Gemma-4
-// down_proj 2048x2816x2112 in situ, us: pieces 3 29.0 (cuBLASLt 29.1), 2 29.2-29.7, 4 30.0, 8 34.4, uniform
-// stream-K 30.5-31.0.
-bool hybrid_plan(TileArgs& p, int sms, int kt, int pieces) {
+// Hybrid stream-K plan: whole waves of tiles data-parallel over grid = SMs, each tile of the partial last
+// wave split into 3 k-ranges on as many CTAs; below one wave every tile splits in 2 (grid = tiles x 2;
+// Qwen3-8B 512x1024x4096 in situ 10.9-11.0 us vs 4 pieces 11.5-11.6). Gemma-4 down_proj 2048x2816x2112 in
+// situ, us: pieces 3 29.0 (cuBLASLt 29.1), 2 29.2-29.7, 4 30.0, 8 34.4, uniform stream-K 30.5-31.0.
+bool hybrid_plan(TileArgs& p, int sms, int kt) {
     const int tiles = ((p.N + 127) / 128) * ((p.M + kBM - 1) / kBM);
     const int dp = (tiles / sms) * sms;
     const int tail = tiles - dp;
-    pieces = std::min(pieces, kt);
-    if (dp == 0 || tail == 0 || pieces < 2 || tail * pieces > sms)  // dp 0 would read as the uniform plan
+    const int pieces = std::min(dp > 0 ? 3 : 2, kt);
+    if (tail == 0 || pieces < 2 || tail * pieces > sms)
         return false;
     p.sk_dp = dp;
     p.sk_split = pieces;
-    p.sk_per = sms;  // the grid
+    p.sk_per = dp > 0 ? sms : tail * pieces;  // the grid
     return true;
 }
 
@@ -566,7 +570,7 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
     p.sk_parts = sk_fits ? static_cast<float*>(workspace) : nullptr;
     p.sk_per = (units + sms - 1) / sms;
     if (variant < 0)
-        variant = pick_variant(M, N, sms, sk_fits);
+        variant = pick_variant(M, N, (K + Sk::kBK - 1) / Sk::kBK, sms, sk_fits);
     switch (variant) {
         case 1:
             if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))
@@ -576,7 +580,7 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
             return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
         case 4: {
             TileArgs h = p;
-            if (sk_fits && hybrid_plan(h, sms, (K + Sk::kBK - 1) / Sk::kBK, 3) && launch_tile<Sk>(h, stream))
+            if (sk_fits && hybrid_plan(h, sms, (K + Sk::kBK - 1) / Sk::kBK) && launch_tile<Sk>(h, stream))
                 return true;
             [[fallthrough]];
         }
