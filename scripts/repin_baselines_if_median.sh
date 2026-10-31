@@ -1,46 +1,45 @@
 #!/bin/bash
 # Guarded baseline re-pin: refuses to run on top-range or volatile host days (issue #526/#697
 # lesson: re-pinning on a top day bakes a threshold that fails on normal days).
-# Gate: two Qwen3-8B Q8_0 tg128@pp512 probes must BOTH land inside the healthy band AND agree
-# within 2%. On pass: gen_perf_baseline.sh for Q8 -> perf_baseline.json, for 14B ->
-# perf_baseline_north_star.candidate.json (merge deliberately, then make verify-north-star).
-# Run from repo root: bash scripts/repin_baselines_if_median.sh.
+# Gate: two gate-model tg128@pp512 probes must BOTH land inside the healthy band AND agree
+# within 2%. On pass: gen_perf_baseline.sh for the gate model -> perf_baseline.json, for the
+# north-star model -> perf_baseline_north_star.candidate.json (merge deliberately, then
+# make verify-north-star). Run from repo root after make build: bash scripts/repin_baselines_if_median.sh.
 set -euo pipefail
 
-# Band derived for the spec-OFF gate metric (tight, ~0.5% spread); the spec-ON metric's
+# Band for the spec-OFF gate metric on GATE_MODEL (tight, ~0.5% spread); the spec-ON metric's
 # verify-path volatility (~11% across restarts) does not belong in this band.
-# Pin 2026-09-17: tg128 299.61 (three cold-median runs 297.26-299.66); band = pin -4 % / +1.5 %.
-BAND_LO="${BAND_LO:-288}"
-BAND_HI="${BAND_HI:-304}"
+# Pin 2026-10-31: tg128 281.35 (two cold-median passes 281.27-281.35); band = pin -4 % / +1.5 %.
+# An intentional speedup lands above BAND_HI: pass BAND_LO/BAND_HI for that re-pin, then move the pin here.
+BAND_LO="${BAND_LO:-270}"
+BAND_HI="${BAND_HI:-286}"
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 IMG="${IMG:-imp:test}"
+GATE_MODEL="${GATE_MODEL:-/models/Qwen3-8B-NVFP4-cortecs}"
+NORTH_STAR_MODEL="${NORTH_STAR_MODEL:-/models/Qwen3-14B-NVFP4}"
 
-if [ "$(docker ps -q | wc -l)" != "0" ]; then
-    echo "ABORT: containers running — GPU must be exclusive"; exit 2
-fi
+# Load criterion (utilization + VRAM), not `docker ps`: idle non-GPU containers are no tenant,
+# a Windows-side tenant is invisible there.
+bash scripts/require_free_gpu.sh "guarded re-pin" || exit 2
 
 probe() {
     docker run --rm --gpus all -u "$(id -u):$(id -g)" -w /tmp \
         -v "$MODELS_DIR":/models -e CUBLAS_WORKSPACE_CONFIG=:4096:8 \
-        --entrypoint /usr/local/bin/imp-cli "$IMG" \
-        --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 \
-        --bench-reps 10 --max-tokens 128 --temperature 0 \
-        --set speculative.ngram=false 2>&1 |
-        sed -n 's/^tg .*( *\([0-9.]*\) tok\/s.*/\1/p'
+        --entrypoint bash "$IMG" -c "imp-cli --model $GATE_MODEL --bench --bench-pp 512 \
+            --bench-reps 10 --max-tokens 128 --temperature 0 --json \
+            --set speculative.ngram=false 2>/dev/null | jq -er .decode_tps"
 }
 
 P1=$(probe); P2=$(probe)
 CLK=$(nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw --format=csv,noheader)
 echo "probes: $P1 / $P2 tok/s   clocks: $CLK   band: [$BAND_LO, $BAND_HI]"
 
-python3 - "$P1" "$P2" "$BAND_LO" "$BAND_HI" <<'EOF'
-import sys
-p1, p2, lo, hi = map(float, sys.argv[1:5])
-spread = abs(p1 - p2) / max(p1, p2)
-ok = lo <= p1 <= hi and lo <= p2 <= hi and spread <= 0.02
-print(f"spread: {100*spread:.1f}%  -> {'MEDIAN-DAY: proceeding' if ok else 'NOT a stable median day: refusing to re-pin'}")
-sys.exit(0 if ok else 1)
-EOF
+awk -v p1="$P1" -v p2="$P2" -v lo="$BAND_LO" -v hi="$BAND_HI" 'BEGIN {
+    spread = (p1 > p2 ? p1 - p2 : p2 - p1) / (p1 > p2 ? p1 : p2)
+    ok = p1 >= lo && p1 <= hi && p2 >= lo && p2 <= hi && spread <= 0.02
+    printf "spread: %.1f%%  -> %s\n", 100 * spread, ok ? "MEDIAN-DAY: proceeding" : "NOT a stable median day: refusing to re-pin"
+    exit !ok
+}'
 
 run_gen() {
     # Host facts for the pin: the runtime image has no git or nvidia-smi (see Makefile gen-perf-baseline).
@@ -53,14 +52,18 @@ run_gen() {
         --entrypoint bash "$IMG" scripts/gen_perf_baseline.sh "$1"
 }
 
-echo "== re-pinning Q8 gate baseline =="
-run_gen "/models/Qwen3-8B-Q8_0.gguf"
+echo "== re-pinning gate baseline ($GATE_MODEL) =="
+run_gen "$GATE_MODEL"
 
-echo "== measuring north-star candidate (14B Q6_K) =="
-cp tests/perf_baseline.json /tmp/repin_q8_baseline.json
-run_gen "/models/Qwen3-14B-Q6_K.gguf"
+echo "== measuring north-star candidate ($NORTH_STAR_MODEL) =="
+# gen_perf_baseline.sh carries thresholds and notes over from the file it overwrites:
+# stage the north-star pin there so the candidate inherits its own policy.
+gate_pin=$(mktemp)
+trap 'cp "$gate_pin" tests/perf_baseline.json; rm -f "$gate_pin"' EXIT
+cp tests/perf_baseline.json "$gate_pin"
+cp tests/perf_baseline_north_star.json tests/perf_baseline.json
+run_gen "$NORTH_STAR_MODEL"
 mv tests/perf_baseline.json tests/perf_baseline_north_star.candidate.json
-mv /tmp/repin_q8_baseline.json tests/perf_baseline.json
 
 echo
 echo "DONE. Next steps:"
