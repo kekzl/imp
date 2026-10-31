@@ -53,12 +53,10 @@ ENV CUDA_HOME=/usr/local/cuda
 # GitHub serves a depth-1 fetch of any reachable SHA, so the pin costs nothing.
 # The tag is carried only as the human label and lands in /deps/PINS.
 ARG IMP_DEP_GOOGLETEST_TAG=v1.18.0
-ARG IMP_DEP_CUTLASS_TAG=v4.8.1
 ARG IMP_DEP_HTTPLIB_TAG=v0.62.0
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
 ARG IMP_DEP_PCRE2_TAG=pcre2-10.49
 ARG IMP_DEP_GOOGLETEST_SHA=063de7e9578f82b369302001269680b4b1553359
-ARG IMP_DEP_CUTLASS_SHA=2c85f497547eb441f0fe80bfb0fb2e6f9add1719
 ARG IMP_DEP_HTTPLIB_SHA=74ef3c42188acd6391f027c4337fb0e1a68c0024
 ARG IMP_DEP_NLOHMANN_JSON_SHA=55f93686c01528224f448c19128836e7df245f72
 ARG IMP_DEP_PCRE2_SHA=6f9d7c1373262c541324a16a358785b33ef116cf
@@ -66,7 +64,6 @@ RUN set -eu; \
     pin() { mkdir -p "$4"; git -C "$4" init -q; git -C "$4" fetch -q --depth=1 "$1" "$3"; \
             git -C "$4" checkout -q FETCH_HEAD; printf '%s %s %s\n' "$1" "$2" "$3" >> /deps/PINS; }; \
     pin https://github.com/google/googletest.git   ${IMP_DEP_GOOGLETEST_TAG}    ${IMP_DEP_GOOGLETEST_SHA}    /deps/googletest; \
-    pin https://github.com/NVIDIA/cutlass.git      ${IMP_DEP_CUTLASS_TAG}       ${IMP_DEP_CUTLASS_SHA}       /deps/cutlass; \
     pin https://github.com/yhirose/cpp-httplib.git ${IMP_DEP_HTTPLIB_TAG}       ${IMP_DEP_HTTPLIB_SHA}       /deps/httplib; \
     pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json; \
     pin https://github.com/PCRE2Project/pcre2.git  ${IMP_DEP_PCRE2_TAG}         ${IMP_DEP_PCRE2_SHA}         /deps/pcre2
@@ -116,7 +113,6 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
         -DIMP_TREE_ID=${IMP_TREE_ID} \
         ${IMP_EXTRA_CMAKE} \
         -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
-        -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
         -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
         -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 \

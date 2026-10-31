@@ -30,10 +30,24 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 | # | call site | share | state | next step |
 |---|---|---:|---|---|
 | 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
-| 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16), CUTLASS 0 launches in 9 cells, refusal fallback only | remove the CUTLASS TU (tests still use it as the reference) |
+| 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16); CUTLASS removed (step 17) | - |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts) refuted below | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
-| 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | removed (steps 13, 14) | - |
+| 5 | CUTLASS grouped 3.x, CUTLASS MXFP8, CUTLASS dense NVFP4 | 0 launches | removed (steps 13, 14, 17): no CUTLASS in the build | - |
+
+## Step 17: CUTLASS removed from the build (2026-10-31)
+
+After step 16 (#2935) and the fp32 LM head (#2937) no default path launched a CUTLASS kernel. #2936 moved the own SfAtom conversion and quantizers out of `gemm_cutlass_sm120.cu`; this step deletes that TU, `FetchContent_Declare(cutlass)`, the include paths, the `IMP_DEP_CUTLASS_*` pin (cmake, Dockerfile) and the dead `cute/arch/config.hpp` include in the FMHA TU. `gemm_dispatch` (CUTLASS_NVFP4 tier) and the prefill adapter call `gemm_nvfp4_tile`; on refusal the adapter takes cuBLASLt (M >= 2048) or the dequant fallback. The NVFP4 GEMM workspace is the tile's stream-K partials (`gemm_tile_streamk_workspace_bytes()`).
+
+Tests compare against `tests/nvfp4_ref_gemm.cuh` (library-free, fp32 per 16-element block; max diff 0 on every tile shape, x1.02 reference mutant red in 10 tests). Dropped CUTLASS-only tests: stream-K vs data-parallel, workspace contract, pp512 bench, cuBLASLt vs CUTLASS.
+
+| `main` 9cda0552 vs branch, 2 pairs, pp tok/s | main | branch |
+|---|---:|---:|
+| Qwen3-8B-NVFP4 pp512 | 43763-43983 | 43377-44420 |
+| Qwen3-30B-A3B pp512 | 32025-32703 | 32576-32756 |
+| Gemma-4 pp4096 | 43201-43799 | 43743-43860 |
+
+Deterministic PPL equal: Qwen3-8B-NVFP4 13.6200, Qwen3-30B 13.3833.
 
 ## Step 16: dense NVFP4 below M 2048 on the own tile (2026-10-31)
 

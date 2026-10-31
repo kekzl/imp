@@ -201,8 +201,8 @@ Shared from the T2 arena, sized by the plan, per-process (not per-handle, not pe
 
 - `gemm.cu`'s two statics (64 MiB workspace, 32 MiB bench scratch) moved to T2.
 - The grouped-GEMM reserve was guesswork at 512 MiB against a measured 152 320 B (170 SMs x 896 B persistent-scheduler state), now 1 MiB, freeing 488 MiB on every MoE model.
-- The lazy CUTLASS growth path (`cudaFree`+`cudaMalloc` at GEMM time, unsafe under graph capture) is deleted: `gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` pre-sizes, the planner takes the max over the model's shape set.
-- The FP32 LM head caller needs 0 bytes at every shape measured, pinned by the `CutlassWorkspaceContract` test suite.
+- The lazy CUTLASS growth path (`cudaFree`+`cudaMalloc` at GEMM time, unsafe under graph capture) is deleted; since the CUTLASS GEMM left (2026-10-31) the NVFP4 GEMM workspace is the own tile's stream-K partials, `gemm_tile_streamk_workspace_bytes()` (SMs x 64 KiB), shape-independent.
+- The FP32 LM head (`gemm_nvfp4_tile_f32`) shares that workspace; without it the tile runs data-parallel.
 - A workspace exists only for a path the default dispatch runs (#2716): no cuBLAS S-matrix when FA2 serves every layer (hd 64 incl. learned sinks, 128, 256); no MoE batch dequant buffer when CUTLASS grouped (NVFP4/MXFP4) or the MoE IMMA kernel (K-quants except Q8_0) serves every expert, a decline dequants into a `vram_alloc` temporary; MMVQ scratch one row, every GGUF strategy is `m_is_one`.
 
 ### A5.4 Vision tower

@@ -541,14 +541,9 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
 // ===========================================================================
 
 // gemm_dispatch CUTLASS_NVFP4 tier (M>1): dispatch reconstructs CutlassNvFP4Weight from the
-// payload and calls gemm_nvfp4_cutlass_sm120, same as the direct call. Skips if the CUTLASS
-// kernel is unavailable.
+// payload and calls gemm_nvfp4_tile (auto variant, stream-K workspace), same as the direct call.
 TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
-    if (!cutlass_sm120_nvfp4_available()) {
-        GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not compiled/available on this device";
-    }
-
-    // K must be multiple of 16; choose dims that CUTLASS GEMM can handle
+    // Own tile: K % 64 == 0, N % 8 == 0.
     const int M = 8, N = 16, K = 64;
 
     std::vector<half> h_w(N * K), h_x(M * K);
@@ -574,7 +569,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     // Allocate activation scratch for direct call
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
     size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    size_t ws_needed = gemm_tile_streamk_workspace_bytes();
 
     void* d_act_data;
     cudaMalloc(&d_act_data, act_data_bytes);
@@ -591,16 +586,12 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     half* d_y_disp;
     cudaMalloc(&d_y_disp, M * N * sizeof(half));
 
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_direct, M, N, K, d_ws, ws_needed,
-                                       stream_);
+    bool ok = gemm_nvfp4_tile(d_act_data, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y_direct, M,
+                              N, K, stream_, -1, d_ws, ws_needed);
     cudaStreamSynchronize(stream_);
+    ASSERT_TRUE(ok) << "gemm_nvfp4_tile refused M=" << M << " N=" << N << " K=" << K;
 
-    if (!ok) {
-        // CUTLASS rejected the dimensions — skip test, not a dispatch bug.
-        GTEST_SKIP() << "gemm_nvfp4_cutlass_sm120 returned false for M=" << M << " N=" << N << " K=" << K;
-    }
-
-    // Build handle: workspace holds act_data + act_sf + CUTLASS workspace
+    // Build handle: workspace holds act_data + act_sf + stream-K partials
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::CUTLASS_NVFP4;
@@ -614,7 +605,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
     Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
-    // Workspace layout: [act_data | act_sf | cutlass_ws]
+    // Workspace layout: [act_data | act_sf | stream-K partials]
     // Must fit in kWorkspaceBytes (64 MiB)
     ASSERT_LE(act_data_bytes + act_sf_bytes + ws_needed, kWorkspaceBytes);
 
@@ -626,7 +617,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     for (int i = 0; i < M * N; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
-        // Same kernel path (both call gemm_nvfp4_cutlass_sm120 with identical
+        // Same kernel path (both call gemm_nvfp4_tile with identical
         // FP4-quantized activation) — outputs should be byte-identical.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "CUTLASS_NVFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;

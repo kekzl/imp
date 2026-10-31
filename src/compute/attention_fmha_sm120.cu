@@ -20,7 +20,6 @@
 #include <iterator>  // std::size
 #include <utility>   // std::index_sequence
 #include <mma.h>
-#include <cute/arch/config.hpp>  // CUTE_ARCH_F8F6F4_MMA_ENABLED
 
 using namespace nvcuda;
 
@@ -551,8 +550,8 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
 // (n=8 each), k-loop over head_dim/32 - vs FP16 WMMA's 1 MMA/tile, k-loop over head_dim/16
 // (2x k-throughput, same iteration count).
 
-// FP8 FMHA requires sm_120f for .kind::f8f6f4 MMA (CUTE_ARCH_F8F6F4_MMA_ENABLED, set by CUTLASS
-// config.hpp). !defined(__CUDA_ARCH__) lets host-side launcher code compile unconditionally.
+// FP8 FMHA requires sm_120a for .kind::f8f6f4 MMA (guarded by __CUDA_ARCH__ >= 1200).
+// !defined(__CUDA_ARCH__) lets host-side launcher code compile unconditionally.
 
 // Device helper: convert 4 FP16 values to 4 FP8 E4M3 packed in uint32
 __device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3(const half* src) {

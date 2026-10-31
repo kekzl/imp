@@ -1,15 +1,16 @@
-// CUTLASS sm_120 NVFP4xNVFP4 prefill and its FP8 E4M3 encoder: guards the bisected bug where
+// NVFP4xNVFP4 prefill GEMM and its FP8 E4M3 encoder: guards the bisected bug where
 // float_to_fp8_e4m3 clamped to (e=14,m=7)=0x77 (decode 240) instead of the correct E4M3-fn
 // max 448=(e=15,m=6)=0x7E, squashing any value >240 in the e=15 slot - breaking
-// compressed-tensors NVFP4 prequant, where outlier scales near 448 are routine.
-// Boundary test pins the encoder; the two GEMM tests guard the prefill path against the
-// precision cliff returning.
+// compressed-tensors NVFP4 prequant, where outlier scales near 448 are routine (found on CUTLASS).
+// Boundary test pins the encoder; the GEMM tests run the own tile (gemm_nvfp4_tile) on the same
+// SfAtom operand bytes and guard the prefill path against the precision cliff returning.
 
 #include "compute/gemm.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
+#include "quant/nvfp4_gemm_tile.h"
 #include "quant/fp8_utils.cuh"
 
 #include <gtest/gtest.h>
@@ -22,7 +23,7 @@ using namespace imp;
 
 namespace {
 
-class CutlassNvfp4AlphaTest : public ::testing::Test {
+class Nvfp4GemmAlphaTest : public ::testing::Test {
 protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
     void TearDown() override { cudaStreamDestroy(stream_); }
@@ -46,7 +47,7 @@ __global__ void encode_fp8_e4m3_kernel(const float* in, uint8_t* out, int n) {
 }  // namespace
 
 // Pin the encoder boundary: 448 must round-trip to 0x7E, not 0x77.
-TEST_F(CutlassNvfp4AlphaTest, Fp8E4M3EncoderClampBoundary) {
+TEST_F(Nvfp4GemmAlphaTest, Fp8E4M3EncoderClampBoundary) {
     // Inputs cover the precision cliff and the canonical normals.
     // Expected bytes are the standard FP8 E4M3-fn encodings.
     const std::vector<std::pair<float, uint8_t>> cases = {
@@ -90,12 +91,8 @@ TEST_F(CutlassNvfp4AlphaTest, Fp8E4M3EncoderClampBoundary) {
     cudaFree(d_out);
 }
 
-TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
-    if (!cutlass_sm120_nvfp4_available()) {
-        GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
-    }
-
-    // Modest tile size that CUTLASS reliably accepts.
+TEST_F(Nvfp4GemmAlphaTest, AlphaIsActuallyApplied) {
+    // Small shape: one output tile, two 64-wide k-stages.
     const int M = 8, N = 64, K = 128;
 
     // Random-looking but deterministic weights and activations.
@@ -123,17 +120,14 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
     convert_nvfp4_to_cutlass(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
-    // Activation NVFP4 quantization (CUTLASS dynamic-quant kernel).
+    // Activation NVFP4 quantization (SfAtom dynamic-quant kernel).
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
     size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
 
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    void* d_ws = nullptr;
-    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y_a = nullptr;
@@ -143,15 +137,16 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
 
     // -------- Run 1: alpha = baseline_tensor_scale --------
     cw.tensor_scale = baseline_tensor_scale;
-    bool ok1 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_a, M, N, K, d_ws, ws_needed, stream_);
+    bool ok1 = gemm_nvfp4_tile(d_act_data, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y_a, M, N,
+                               K, stream_);
     cudaStreamSynchronize(stream_);
-    if (!ok1)
-        GTEST_SKIP() << "CUTLASS rejected dims";
+    ASSERT_TRUE(ok1);
 
     // -------- Run 2: alpha = baseline * 0.25 (i.e. quarter the scale) --------
     constexpr float kRatio = 0.25f;
     cw.tensor_scale = baseline_tensor_scale * kRatio;
-    bool ok2 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_b, M, N, K, d_ws, ws_needed, stream_);
+    bool ok2 = gemm_nvfp4_tile(d_act_data, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y_b, M, N,
+                               K, stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok2);
 
@@ -205,20 +200,15 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
     cudaFree(d_x);
     cudaFree(d_act_data);
     cudaFree(d_act_sf);
-    cudaFree(d_ws);
     cudaFree(d_y_a);
     cudaFree(d_y_b);
 }
 
 // Mistral-3.2-NVFP4 L0 q_proj-shaped reproducer of the stress-test memo's observed
 // conditions: K=5120, N=4096, max(|W|)~4.36 -> global_scale~616 -> tensor_scale~0.00162,
-// activation RMS~1. Saturated FP16 (Inf/65504) output isolates the bug to CUTLASS; sane
+// activation RMS~1. Saturated FP16 (Inf/65504) output isolates the bug to the GEMM; sane
 // sub-1.0 output means it's upstream (loader, dequant, byte layout).
-TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
-    if (!cutlass_sm120_nvfp4_available()) {
-        GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
-    }
-
+TEST_F(Nvfp4GemmAlphaTest, MistralL0Reproducer) {
     const int M = 16, N = 4096, K = 5120;
 
     // Construct W with one large outlier per row (Mistral-style attention
@@ -260,20 +250,18 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
     size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
 
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    void* d_ws = nullptr;
-    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y = nullptr;
     cudaMalloc(&d_y, M * N * sizeof(half));
 
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y, M, N, K, d_ws, ws_needed, stream_);
+    bool ok = gemm_nvfp4_tile(d_act_data, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y, M, N, K,
+                              stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok);
 
@@ -329,7 +317,7 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     }
     ref_rms = std::sqrt(ref_rms / (M * N));
 
-    // Per-element diff CUTLASS vs reference
+    // Per-element diff GEMM vs reference
     double max_diff = 0.0, sum_diff = 0.0;
     int n_big_diff = 0;
     for (int i = 0; i < M * N; ++i) {
@@ -343,13 +331,13 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     }
     fprintf(stderr,
             "[MISTRAL-REPRO] reference (dequant+cuBLAS): max|y|=%.4g rms=%.4g\n"
-            "[MISTRAL-REPRO] CUTLASS - reference:  max_diff=%.4g  mean_diff=%.4g  n>0.5=%d\n",
+            "[MISTRAL-REPRO] GEMM - reference:  max_diff=%.4g  mean_diff=%.4g  n>0.5=%d\n",
             ref_max, ref_rms, max_diff, sum_diff / (M * N), n_big_diff);
 
     // Hard fail conditions:
-    EXPECT_EQ(n_inf, 0) << "CUTLASS output contains Inf — saturation path";
-    EXPECT_EQ(n_nan, 0) << "CUTLASS output contains NaN";
-    EXPECT_LE(max_abs, ref_max * 5.0) << "CUTLASS output magnitudes wildly exceed reference";
+    EXPECT_EQ(n_inf, 0) << "GEMM output contains Inf - saturation path";
+    EXPECT_EQ(n_nan, 0) << "GEMM output contains NaN";
+    EXPECT_LE(max_abs, ref_max * 5.0) << "GEMM output magnitudes wildly exceed reference";
 
     free_nvfp4_result(qr);
     free_cutlass_nvfp4_weight(cw);
@@ -357,7 +345,6 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     cudaFree(d_x);
     cudaFree(d_act_data);
     cudaFree(d_act_sf);
-    cudaFree(d_ws);
     cudaFree(d_y);
     cudaFree(d_w_dequant);
     cudaFree(d_y_ref);
@@ -369,11 +356,7 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
 // (~0.00162 for Mistral) vs imp's max(|W|)/6 (~0.73) with micro-scales in W-domain.
 // Mathematically identical, but the FP8 bit-level encoding may hit precision pathologies
 // under one convention and not the other - the stress-test memo's exact symptom.
-TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
-    if (!cutlass_sm120_nvfp4_available()) {
-        GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
-    }
-
+TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     const int M = 16, N = 4096, K = 5120;
     constexpr int kBlockSize = 16;
     constexpr float kFP4Max = 6.0f;
@@ -499,11 +482,11 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     qr_pq.N = N;
     qr_pq.K = K;
 
-    // 5. Convert to CUTLASS format (this is the same path Phase-0b registers)
+    // 5. Convert to SfAtom format (this is the same path Phase-0b registers)
     CutlassNvFP4Weight cw;
     convert_nvfp4_to_cutlass(qr_pq, cw, stream_);
     cudaStreamSynchronize(stream_);
-    fprintf(stderr, "[PREQ] CUTLASS cw.tensor_scale=%.6g  (used as alpha)\n", cw.tensor_scale);
+    fprintf(stderr, "[PREQ] cw.tensor_scale=%.6g  (used as alpha)\n", cw.tensor_scale);
 
     // 6. Build activations — RMSNorm-output magnitude (~1)
     std::vector<half> h_x(static_cast<size_t>(M) * K);
@@ -517,18 +500,16 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
     size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
     void* d_act_data = nullptr;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf = nullptr;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    void* d_ws = nullptr;
-    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
     half* d_y = nullptr;
     cudaMalloc(&d_y, M * N * sizeof(half));
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y, M, N, K, d_ws, ws_needed, stream_);
+    bool ok = gemm_nvfp4_tile(d_act_data, d_act_sf, cw.data, cw.scale_factors, cw.tensor_scale, d_y, M, N, K,
+                              stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok);
 
@@ -591,13 +572,13 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     }
     fprintf(stderr,
             "[PREQ] reference dequant→cuBLAS: max=%.4g rms=%.4g\n"
-            "[PREQ] CUTLASS - reference:  max_diff=%.4g  mean_diff=%.4g  n>0.5=%d\n",
+            "[PREQ] GEMM - reference:  max_diff=%.4g  mean_diff=%.4g  n>0.5=%d\n",
             ref_max, ref_rms, max_diff, sum_diff / (M * N), n_big_diff);
 
-    EXPECT_EQ(n_inf, 0) << "CUTLASS prequant-byte-layout produced Inf";
-    EXPECT_EQ(n_nan, 0) << "CUTLASS prequant-byte-layout produced NaN";
+    EXPECT_EQ(n_inf, 0) << "GEMM prequant-byte-layout produced Inf";
+    EXPECT_EQ(n_nan, 0) << "GEMM prequant-byte-layout produced NaN";
     EXPECT_LE(max_abs, ref_max * 5.0)
-        << "CUTLASS prequant magnitudes exceed reference 5x — likely the in-the-wild bug";
+        << "GEMM prequant magnitudes exceed reference 5x - likely the in-the-wild bug";
 
     free_cutlass_nvfp4_weight(cw);
     cudaFree(d_packed);
@@ -605,52 +586,7 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     cudaFree(d_x);
     cudaFree(d_act_data);
     cudaFree(d_act_sf);
-    cudaFree(d_ws);
     cudaFree(d_y);
     cudaFree(d_w_dequant);
     cudaFree(d_y_ref);
-}
-
-// Contract that let A7 step 8 delete lazy CUTLASS workspace growth: the GEMM used to
-// cudaFree+cudaMalloc a file-scope workspace when the caller's buffer was too small, illegal
-// under CUDA-graph capture. It now refuses and falls back to dequant instead - safe only if
-// no call needs more than its caller reserved.
-// Two of three callers request the EXACT shape they pass; the third
-// (allocate_auxiliary_buffers) sizes ONCE at (max_tokens,max_n,max_k) and reuses it, which
-// needs max-shape-covers-every-smaller-call - not obvious since NVFP4 switches KERNEL at N<=2048.
-TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
-    // A generous stand-in for the executor's max shape: 4096 tokens is the
-    // max_tokens cap, and N/K above any hero model's projections.
-    const int max_m = 4096, max_n = 8192, max_k = 8192;
-    const size_t nv_at_max = gemm_nvfp4_cutlass_sm120_workspace(max_m, max_n, max_k);
-
-    for (int m : {1, 8, 512, 2048, 4096}) {
-        for (int n : {1024, 2048, 2049, 5120, 8192}) {  // straddles kSmallNThreshold
-            for (int k : {512, 2048, 5120, 8192}) {
-                EXPECT_LE(gemm_nvfp4_cutlass_sm120_workspace(m, n, k), nv_at_max)
-                    << "NVFP4 M=" << m << " N=" << n << " K=" << k
-                    << " needs more workspace than the max shape the executor sizes for — "
-                       "the refusal path would fire and drop this GEMM to dequant";
-            }
-        }
-    }
-    // Report the absolute numbers: if these ever leave 0, the executor starts
-    // allocating a real buffer and the sizing above starts doing real work.
-    fprintf(stderr, "[WS] nvfp4 max-shape workspace=%zu B\n", nv_at_max);
-}
-
-// FP32 LM-head variant (executor_forward.cu, executor_perplexity.cu) passes
-// workspace=nullptr, size=0: with the static grow path deleted, any non-zero requirement
-// would make the LM head refuse on EVERY decode step and silently drop to the batched GEMV
-// (correct output, worse decode) - so this variant's requirement must be exactly zero.
-TEST(CutlassWorkspaceContract, Fp32LmHeadVariantNeedsNoWorkspaceAtAll) {
-    for (int m : {1, 4, 8, 65, 512, 4096}) {
-        for (int vocab : {32000, 151936, 262144}) {
-            for (int d_model : {2048, 4096, 5120, 8192}) {
-                EXPECT_EQ(gemm_nvfp4_cutlass_sm120_fp32_workspace(m, vocab, d_model), 0u)
-                    << "LM head M=" << m << " vocab=" << vocab << " d_model=" << d_model
-                    << " wants workspace, but its call sites pass none";
-            }
-        }
-    }
 }

@@ -271,8 +271,8 @@ public:
     // borrows the NVFP4 decode cache. No-op unless serving and LM head is NVFP4. Must run AFTER
     // pre_dequant_weights().
     void build_lm_head_cutlass_(cudaStream_t stream);
-    // LM head as one NVFP4 GEMM, fp32 logits [rows, vocab] from the rows quantized into qscratch_: own tile,
-    // CUTLASS on refusal; runtime.deterministic passes no stream-K workspace.
+    // LM head as one NVFP4 GEMM (own tile), fp32 logits [rows, vocab] from the rows quantized into qscratch_;
+    // runtime.deterministic passes no stream-K workspace. false = refused (the GEMV path takes over).
     [[nodiscard]] bool lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream);
 
     // Split-K workspace for gemm_nvfp4_smallm (batched-decode small-M GEMMs).

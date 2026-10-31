@@ -28,7 +28,7 @@ namespace imp {
 // cuBLAS/CUTLASS workspace. FP8: [0..M*K) FP8 activation, [M*K..+sizeof(float)) d_act_scale.
 // Too-small workspace falls back to gemm_nvfp4 / plain gemm.
 
-// CUTLASS NVFP4 M=1: zero the SfAtom slice (padding the kernel does not touch), quantize, GEMM.
+// NVFP4 M=1 on the own tile: zero the SfAtom slice (padding the kernel does not touch), quantize, GEMM.
 // false = the caller's fallback; a failed memset counts (unzeroed padding).
 static bool cutlass_nvfp4_m1(const Tensor& x, void* act_data, void* act_sf, size_t act_sf_bytes,
                              const CutlassNvFP4Weight& cw, Tensor& y, int M, int N, int K, void* ws_buf,
@@ -36,7 +36,8 @@ static bool cutlass_nvfp4_m1(const Tensor& x, void* act_data, void* act_sf, size
     if (cudaMemsetAsync(act_sf, 0, act_sf_bytes, stream) != cudaSuccess)
         return false;
     quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
-    return gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf, ws_needed, stream);
+    return gemm_nvfp4_tile(act_data, act_sf, cw.data, cw.scale_factors, cw.tensor_scale, y.data, M, N, K,
+                           stream, -1, process_diag_deterministic() ? nullptr : ws_buf, ws_needed);
 }
 
 // MXFP4 prefill (M > 1): quantize the activation into the workspace, then the own tile GEMM
@@ -141,7 +142,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
 
         // CUTLASS NVFP4: weight is CutlassNvFP4Weight (SfAtom layout). M=1 decode: same NVFP4 GEMV
         // path. M>1 prefill: quantize activation to NVFP4 CUTLASS format via workspace, call
-        // gemm_nvfp4_cutlass_sm120; falls back to gemm_nvfp4 (dequant) if workspace too small.
+        // the own tile GEMM (gemm_nvfp4_tile); falls back to gemm_nvfp4 (dequant) if workspace too small.
         case StorageTier::CUTLASS_NVFP4: {
             int M = static_cast<int>(x.shape[0]);
             int K = static_cast<int>(x.shape[1]);
@@ -160,12 +161,11 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
 
             if (M == 1) {
                 // Decode via CUTLASS_NVFP4: payload holds SfAtom (not per-16 FP8 micro_scales), so
-                // gemv_nvfp4_kpar cannot be used directly. Uses gemm_nvfp4_cutlass_sm120 with an M=1
+                // gemv_nvfp4_kpar cannot be used directly. Uses the own tile GEMM with an M=1
                 // quantized activation if workspace is large enough; else logs an error.
                 size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
                 size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-                size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
-                size_t total_needed = act_data_bytes + act_sf_bytes + ws_needed;
+                size_t total_needed = act_data_bytes + act_sf_bytes;  // the rest: optional stream-K partials
 
                 if (workspace != nullptr && workspace_bytes >= total_needed) {
                     uint8_t* act_data = reinterpret_cast<uint8_t*>(workspace);
@@ -174,13 +174,13 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                     // SfAtom layout has padding bytes the kernel doesn't touch;
                     // workspace path can't assume the slice is pre-zeroed (unlike
                     // qscratch_.cutlass_act_sf which is zeroed at allocation).
-                    if (cutlass_nvfp4_m1(x, act_data, act_sf, act_sf_bytes, cw, y, M, N, K, ws_buf, ws_needed,
-                                         stream))
+                    if (cutlass_nvfp4_m1(x, act_data, act_sf, act_sf_bytes, cw, y, M, N, K, ws_buf,
+                                         workspace_bytes - total_needed, stream))
                         return;
                 }
                 // Fallback: dequant + cuBLAS (no NvFP4QuantResult with valid micro_scales).
                 IMP_LOG_WARN(
-                    "gemm_dispatch CUTLASS_NVFP4 M=1: workspace too small or CUTLASS failed, "
+                    "gemm_dispatch CUTLASS_NVFP4 M=1: workspace too small or the tile GEMM refused, "
                     "falling back to gemm_cublaslt with FP16 weight approximation");
                 // Can't dequant without NvFP4QuantResult micro_scales — log error.
                 IMP_LOG_ERROR("gemm_dispatch CUTLASS_NVFP4 M=1: no valid fallback available");
@@ -190,16 +190,17 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             // M>1 prefill: activate → NVFP4 cutlass, then GEMM.
             size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
             size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-            size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
-            size_t total_needed = act_data_bytes + act_sf_bytes + ws_needed;
+            size_t total_needed = act_data_bytes + act_sf_bytes;  // the rest: optional stream-K partials
 
             if (workspace != nullptr && workspace_bytes >= total_needed) {
                 uint8_t* act_data = reinterpret_cast<uint8_t*>(workspace);
                 void* act_sf = act_data + act_data_bytes;
                 void* ws_buf = reinterpret_cast<uint8_t*>(act_sf) + act_sf_bytes;
                 quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
-                bool ok = gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf, ws_needed,
-                                                   stream);
+                const size_t ws_left = process_diag_deterministic() ? 0 : workspace_bytes - total_needed;
+                bool ok = gemm_nvfp4_tile(act_data, act_sf, cw.data, cw.scale_factors, cw.tensor_scale,
+                                          y.data, M, N, K, stream, -1, ws_left > 0 ? ws_buf : nullptr,
+                                          ws_left);
                 if (ok)
                     return;
                 IMP_LOG_ERROR(

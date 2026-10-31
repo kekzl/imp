@@ -138,18 +138,6 @@ if(IMP_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
 endif()
 
-FetchContent_Declare(cutlass
-    GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-    GIT_TAG ${IMP_DEP_CUTLASS_SHA}  # commit pin, cmake/imp-deps.cmake
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-# CUTLASS is mandatory and header-only for our use: disable all build targets
-set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "" FORCE)
-set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
-set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(cutlass)
 
 # PCRE2, 8-bit with Unicode properties, no JIT: tokenizer.json pre-tokenizer regexes
 # (src/model/tokenizer_regex.cpp).
@@ -407,7 +395,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_scratch.cu
 )
 
-list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_sfatom_quant.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
@@ -643,11 +630,6 @@ target_link_libraries(imp
         OpenSSL::Crypto
         JPEG::JPEG
         pcre2-8-static
-)
-
-target_include_directories(imp PRIVATE
-    ${cutlass_SOURCE_DIR}/include
-    ${cutlass_SOURCE_DIR}/tools/util/include
 )
 
 set_target_properties(imp PROPERTIES
@@ -1357,8 +1339,7 @@ if(IMP_BUILD_TESTS)
         tests/test_grouped_nvfp4_args.cu
         tests/test_gemm_grouped_nvfp4_tile.cu
         tests/test_grouped_nvfp4_ref.cu
-        tests/test_cutlass_nvfp4_alpha.cu
-        tests/test_cutlass_nvfp4_streamk.cu
+        tests/test_nvfp4_gemm_alpha.cu
         tests/test_mxfp8_gemm.cu
         tests/test_nvfp4_smallm.cu
         tests/test_nvfp4_smallm_v2.cu

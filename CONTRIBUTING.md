@@ -15,7 +15,7 @@ Single-author / single-target project (NVIDIA Blackwell `sm_120a` only) - contri
 - CUDA Toolkit 13.2+ (minimum enforced by CMake); the canonical, tested toolchain is 13.4.3 - what `Dockerfile`'s `imp:toolchain`/`imp:builder` stages and CI build with.
 - CMake 3.25+ and a C++23 host compiler (GCC 13+, Clang 16+) - `CMAKE_CXX_STANDARD 23` is required, not a preference. CUDA libs: `cudart`, `cuda_driver`, `cublas`, `cublasLt`.
 - Docker with GPU passthrough for the canonical build/test workflow. The host needs none of the above directly - `make build` runs everything in a CUDA 13.4.3 container.
-- CUTLASS v4.6.2 and Google Test v1.17.0 fetch automatically via `FetchContent`. `stb_image`/`stb_image_resize2` are vendored in `third_party/stb/`.
+- Google Test v1.18.0 fetches automatically via `FetchContent`. `stb_image`/`stb_image_resize2` are vendored in `third_party/stb/`.
 
 ## Build
 
@@ -115,7 +115,7 @@ Other rules:
 - `.cu` for CUDA, `.cpp` for plain C++, `.h` for headers (CUDA or not).
 - File names are `snake_case`. Known exception: `gemm_grouped_nvfp4_smallM.{h,cu}` mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.
 - Errors return codes (`ImpError` / `bool`); CUDA errors are checked and logged, not thrown.
-- Don't add third-party dependencies without a strong reason - the only runtime deps are the CUDA toolkit, CUTLASS (vendored via `FetchContent`) and `stb_image` for vision.
+- Don't add third-party dependencies without a strong reason - the only runtime deps are the CUDA toolkit (cuBLAS, cuBLASLt) and `stb_image` for vision.
 - **Serving allocates nothing** - the measured steady state is `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`. Acquire memory through `src/memory/backend.h` and the tier allocators (`arena`, `block_pool`, `scratch_stack`, `graph_slots`) rather than raw `cudaMalloc`/`cudaFree`, and resolve capacity at init instead of at first use. The blocking `Alloc sites` CI job (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt`) rejects new direct allocation sites. See [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md).
 - Don't `__noinline__` GPU inner-loop functions; spills go to local memory and tank performance.
 

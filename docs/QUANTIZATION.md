@@ -28,7 +28,7 @@ numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM i
 
 GGUF is mmap'd and uploaded as-is; `*.K` quants store block scales in the format the dp4a
 kernels expect. NVFP4 prequant arrives packed with FP8 E4M3 micro-scales (per-16) and an FP32
-tensor scale; imp registers it directly into the NVFP4 decode cache and CUTLASS GEMM path, no re-quantization.
+tensor scale; imp registers it directly into the NVFP4 decode cache and the SfAtom tile GEMM path, no re-quantization.
 
 ## AWQ SafeTensors
 
@@ -77,7 +77,7 @@ default `auto` = per-row FP8), see below; `--set gemm.nvfp4_lm_head=false` serve
 **W4A16 on disk, W4A4 from M >= 2.** These checkpoints declare `input_activations: null`
 (W4A16), which imp does not read: at `n == 1` decode the activations stay FP16 (the NVFP4 GEMV
 family), from M >= 2 they are quantized to NVFP4 too and the GEMM runs W4A4
-(`gemm.nvfp4_smallm`, default on, for M <= 32, the CUTLASS NVFP4 x NVFP4 prefill GEMM above it,
+(`gemm.nvfp4_smallm`, default on, for M <= 32, the own NVFP4 x NVFP4 tile GEMM above it,
 and the batched LM head). Deliberate and measured (+16% at 32 streams, +36% at 8, #1766);
 `--set gemm.nvfp4_smallm=false` falls back to FP16 activations.
 
@@ -236,7 +236,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 ## MXFP4 (GGUF)
 
 Same FP4 E2M1 nibble layout as NVFP4, UE8M0 micro-scales (per 32 elements), no separate tensor
-scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS
+scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through the own block-scaled tile GEMM
 at full throughput; shipped inside GGUF under a proprietary tensor-type code (31).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
 wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 % ([record](plans/2026-10-17-gptq-nvfp4.md)).
