@@ -164,6 +164,16 @@ sequence, rows 1..31 carry different content at different lengths.
 | M=1 vs M=32, `gemm.nvfp4_smallm=false` (CUTLASS GEMM, also W4A4) | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
 | `gemm.nvfp4_smallm=false` alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
 
+[PROV: commit=814ada2e date=2026-10-31 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3
+ path=smallm_v2_a4 vs smallm_v2 FP16 activations cmd="test-e2e --gtest_filter=BatchInvarianceTest.NativeNvfp4DecodeSoloVsBatched" n=1
+ note=A16 arm = gemm.nvfp4_smallm_a4=false + nvfp4_lm_head_smallm=false + nvfp4_lm_head_cutlass=false]
+
+| arm (2026-10-31) | mean NLL | mean \|delta logprob\| | max | greedy top-1 |
+|---|---|---|---|---|
+| W4A4 M=1 vs M=32 (default) | 3.433412 -> 3.443541 | 0.235 | 1.665 | 58/64 |
+| A16 config alone, both M=1 | 3.433412 -> 3.429951 | 0.090 | 0.509 | 62/64 |
+| **W4A16 M=1 vs M=32** | 3.429951 -> 3.436889 | **0.021** | 0.130 | 62/64 |
+
 The control arm is also the test's race detector: between #1954 and the
 2026-09-08 fix it read 1-3 flips of 64 (a stage barrier in the small-M
 pipeline completing before the prefetched weights landed, on the 544-CTA
@@ -186,9 +196,10 @@ What the table settles:
   `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
   NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
   fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams
-  ([closed row 13](plans/2026-09-16-open-rows-closed-detail.md), #2026). The
-  test's third arm runs that switch since 2026-10-31; the two rows above are
-  the 2026-09-06 `nvfp4_smallm=false` arm.
+  ([closed row 13](plans/2026-09-16-open-rows-closed-detail.md), #2026). On
+  Qwen3-14B-NVFP4 it cuts the batch drift 0.235 -> 0.021 mean |delta logprob|
+  (2026-10-31 table): the activation quantize, not the batch shape, is most
+  of the gap.
 - **Two identical inits agree bit for bit**, so the numbers above are the batch
   effect and not run-to-run noise. Flipping `gemm.nvfp4_smallm` does not: the
   24-token prompt (M = 24) leaves the small-M kernel for the tile GEMM, and
