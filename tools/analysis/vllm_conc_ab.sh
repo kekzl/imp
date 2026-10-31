@@ -72,7 +72,9 @@ run_arm() {  # $1 = arm name (I|V), $2 = trial
         echo "GPU BUSY before $1 - aborting" | tee -a "$LOG"; exit 2; }
     if [ "$1" = I ]; then start_imp || exit 3; else start_vllm || exit 3; fi
     echo "== arm $1 trial $2 ==" | tee -a "$LOG"
-    MODEL_NAME=$MODEL_NAME python3 "$HERE/conc_client.py" $PORT $CONC $WAVES "$1$2" $PLEN 2>&1 | tee -a "$LOG"
+    # Client in imp:toolchain, never host python3 (clean host; same shape as engine3_conc.sh).
+    docker run --rm --network host -e MODEL_NAME="$MODEL_NAME" -v "$HERE":/t:ro imp:toolchain \
+        python3 /t/conc_client.py $PORT $CONC $WAVES "$1$2" $PLEN 2>&1 | grep -v -e CUDA -e NVIDIA | tee -a "$LOG"
     docker rm -f engine-ab >/dev/null 2>&1
     sleep 5
 }

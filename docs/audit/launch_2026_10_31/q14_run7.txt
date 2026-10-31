@@ -1,0 +1,122 @@
+imp=imp:test vllm=vllm/vllm-openai:v0.31.0 conc=32 waves=3 trials=3 plen=1000 imp_extra='' vllm_extra=''
+== arm I trial 1 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.77s = 2545.6 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.78s = 2542.2 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.67s = 2618.3 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2545.6
+== arm V trial 1 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.71s = 2590.4 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.65s = 2631.1 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.64s = 2637.1 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2631.1
+== arm V trial 2 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.66s = 2623.8 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.60s = 2669.9 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.60s = 2668.2 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2668.2
+== arm I trial 2 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.78s = 2538.8 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.77s = 2547.3 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.69s = 2599.5 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2547.3
+== arm I trial 3 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.81s = 2522.5 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.77s = 2548.9 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.67s = 2618.0 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2548.9
+== arm V trial 3 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 9600 tok in 3.66s = 2620.4 tok/s aggregate (prompt 982 tok avg)
+wave1: 9600 tok in 3.60s = 2666.4 tok/s aggregate (prompt 982 tok avg)
+wave2: 9600 tok in 3.61s = 2658.4 tok/s aggregate (prompt 982 tok avg)
+MEDIAN 2658.4
+=== summary ===
+/tmp/vllm_conc_ab_32_p1000.log:== arm I trial 1 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2545.6
+/tmp/vllm_conc_ab_32_p1000.log:== arm V trial 1 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2631.1
+/tmp/vllm_conc_ab_32_p1000.log:== arm V trial 2 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2668.2
+/tmp/vllm_conc_ab_32_p1000.log:== arm I trial 2 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2547.3
+/tmp/vllm_conc_ab_32_p1000.log:== arm I trial 3 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2548.9
+/tmp/vllm_conc_ab_32_p1000.log:== arm V trial 3 ==
+/tmp/vllm_conc_ab_32_p1000.log:MEDIAN 2658.4
