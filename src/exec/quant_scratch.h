@@ -23,6 +23,8 @@ struct QuantScratch {
     float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
     float* d_fp8_absmax = nullptr;       // pre-allocated absmax scalar
     int fp8_max_grid = 0;                // max grid size for reduction
+    void* fp8_tile_ws = nullptr;         // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
+    size_t fp8_tile_ws_size = 0;
 
     // --- CUTLASS NVFP4 prefill activation buffers ---
     void* cutlass_act_data = nullptr;  // [max_tokens, max_K/2] packed FP4

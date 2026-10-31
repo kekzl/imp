@@ -35,6 +35,8 @@ void QuantScratch::free(VRAMAllocator* alloc) {
         d_fp8_absmax = nullptr;
     }
     fp8_max_grid = 0;
+    vfree(fp8_tile_ws);
+    fp8_tile_ws_size = 0;
 
     vfree(cutlass_act_data);
     cutlass_act_data_size = 0;
