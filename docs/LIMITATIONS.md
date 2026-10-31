@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: edd4d4ac
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # Limitations
@@ -84,7 +84,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Video arrives as frames, not as a file | video prompts, Qwen3-VL and InternVL3.5 (server) | "No video input" closed: a `video` content part (or `imp-cli --video-frames`) carries 2..768 client-sampled frames with `fps` or `timestamps`; no container decoding (mp4 out by decision, only `stb` vendored); `cap_pixels_per_frame` off (transformers 5.17.0 default) | sample frames client-side (ffmpeg), [API_FEATURES](API_FEATURES.md#video) |
 | InternVL images run as one 448 x 448 tile | InternVL3.5 (HF layout) | "No vision architecture registry" closed: `src/vision/vision_family.cpp` maps `qwen3_vl`/`qwen3_5`/`qwen3_5_moe` and `internvl_vision`; Pixtral and other towers still load text-only. InternVL uses `crop_to_patches` false (256 tokens per image); the HF processor default tiles a large image into up to 12 crops plus a thumbnail, so fine detail on large images differs from HF; InternVL video frames are one tile each | downscale-sensitive detail: crop the region client-side, [MODELS](MODELS.md#vision) |
 | **AWQ** SafeTensors checkpoints (`quant_method: awq`) load only as 4-bit GEMM with zero points, and not in 4-bit | AWQ SafeTensors loader | `bits=4 zero_point=true version=gemm` dequantizes to FP16 at upload (`src/quant/dequant_awq.cu`), so VRAM holds FP16 weights (4x the checkpoint); GEMV, Marlin, `bits != 4` or `zero_point=false` are refused at load with the detected bits/group_size/zero_point/version; use a GPTQ export (#2249), or an NVFP4 export for 4-bit weights in VRAM | #2196, #2205 |
-| NVFP4 activations are quantized without a tensor scale: a 16-element block whose absmax / 6 is below 2^-9 (smallest E4M3 subnormal) flushes to zero | NVFP4 prefill and batched decode (CUTLASS, small-M) on models with small activations | LFM2-8B-A1B: 75 % of the `w2` input blocks flush, PPL 38.92 vs 20.22 BF16 (`src/compute/nvfp4_sfatom_quant.cu:163 local_absmax / 6.0f`); HF W4A4 fake-quant with a tensor scale: 21.93 | imp-quantize folds power-of-two producer/consumer pre-scales for LFM2 (`tools/imp-quantize/act_prescale.cpp`, 22.13). A tensor scale is no general fix: Qwen3-14B HF fake-quant W4A4 9.7065 with one, 9.6416 without (W4 only 9.5156); other archs: check PPL vs BF16 after imp-quantize |
+| NVFP4 activations are quantized without a tensor scale: a 16-element block whose absmax / 6 is below 2^-9 (smallest E4M3 subnormal) flushes to zero | NVFP4 prefill and batched decode (own tile GEMM, small-M) on models with small activations | LFM2-8B-A1B: 75 % of the `w2` input blocks flush, PPL 38.92 vs 20.22 BF16 (`src/compute/nvfp4_sfatom_quant.cu:163 local_absmax / 6.0f`); HF W4A4 fake-quant with a tensor scale: 21.93 | imp-quantize folds power-of-two producer/consumer pre-scales for LFM2 (`tools/imp-quantize/act_prescale.cpp`, 22.13). A tensor scale is no general fix: Qwen3-14B HF fake-quant W4A4 9.7065 with one, 9.6416 without (W4 only 9.5156); other archs: check PPL vs BF16 after imp-quantize |
 
 ## Model-specific blockers
 

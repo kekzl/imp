@@ -824,9 +824,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // NVFP4/MXFP4 experts take CUTLASS 3.x grouped prefill (MXFP4 via Phase 3: gpt-oss 506 MiB),
+        // NVFP4/MXFP4 experts take the own grouped NVFP4 GEMM (MXFP4 via Phase 3: gpt-oss 506 MiB),
         // K-quant experts the MoE IMMA kernel (Qwen3-30B-A3B 384, Gemma-4 484 MiB). A decline then
-        // runs the legacy per-expert path (CUTLASS) or dequants into a stream-ordered temporary (IMMA).
+        // runs the legacy per-expert path or dequants into a stream-ordered temporary (IMMA).
         const MoeExpertServe serve = classify_moe_experts(*model_, dispatch_policy().gemm.moe_imma_prefill,
                                                           compute_dtype_);
         moe_.imma_serves_all = serve.imma_all;

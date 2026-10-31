@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: 4666a109
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # Quantization
@@ -16,8 +16,9 @@ numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM i
 
 | Format | Bits / weight | Source | Used for |
 |---|---:|---|---|
-| Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q4_0 | 8.0 / 6.5 / 5.5 / 4.5 / 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
-| IQ4_NL / IQ4_XS / IQ3_S | 4.5 / 4.25 / 3.44 | GGUF | dequant->FP16 cache decode + dequant->cuBLAS prefill (no dp4a/MMVQ kernels) |
+| Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q4_0 | 8.0 / 6.5 / 5.5 / 4.5 / 4.5 | GGUF (legacy) | dp4a GEMV decode; prefill on own kernels (Q8_0 INT8 IMMA, Q6_K / Q5_K / Q4_K blocks decoded in the FP16 tile, #2913, #2915), else dequant + cuBLASLt |
+| IQ4_NL / IQ4_XS | 4.5 / 4.25 | GGUF (legacy) | dequant->FP16 cache decode + dequant->cuBLASLt prefill (no dp4a/MMVQ kernels) |
+| IQ3_S | 3.44 | GGUF (legacy) | native: dp4a decode, IMMA prompt GEMMs (#2872, #2907) |
 | FP8 E4M3 | 8.0 | runtime | KV cache (opt-in), prefill weight cache |
 | INT8 | 8.0 | runtime | KV cache (opt-in) |
 | INT4 | 4.0 | runtime | KV cache (long-ctx, opt-in) |
@@ -62,7 +63,7 @@ Calibrated per-tensor scales via AWQ or SmoothQuant. Compatible producers:
 
 | Tool | Status |
 |---|---|
-| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (PR #88 lit up the CUTLASS NVFP4xNVFP4 prefill cache); usage recipe: [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md). |
+| [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (PR #88 lit up the NVFP4xNVFP4 prefill cache; it runs the own tile GEMM since #2935); usage recipe: [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md). |
 | [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads; several models degenerate past ~30 tokens. See [roadmap](ROADMAP.md). Prefer Modelopt. |
 | `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, round-to-nearest without. Below a published export either way. |
 
@@ -288,8 +289,8 @@ Quick guidance, not a benchmark:
 - **Q4_K_M**: most VRAM-efficient GGUF, sufficient for most chat; degenerates on long code-gen on
   Gemma-4 (use Q5_K_M or Q8_0 there). **Q6_K** is in between, good MoE pick on Qwen3-Coder-30B.
 - **IQ4_NL / IQ4_XS**: load and run since #556 via the dequant path (FP16-cache decode like
-  Q4_K, dequant->cuBLAS prefill), for community-quant compatibility; at equal VRAM prefer
-  Q4_K_M (dp4a/MMVQ kernels). IQ3_S too (UD mixes, #2687); IQ1/IQ2/IQ3_XXS refused at load.
+  Q4_K, dequant->cuBLASLt prefill), for community-quant compatibility; at equal VRAM prefer
+  Q4_K_M (dp4a/MMVQ kernels). IQ3_S runs native (UD mixes, #2687, #2872); IQ1/IQ2/IQ3_XXS refused at load.
 - **NVFP4** (SafeTensors prequant): highest decode throughput on prequant-aware models (per-model
   numbers: [`BENCHMARKS.md`](BENCHMARKS.md)); requires AWQ/SmoothQuant calibration, only Modelopt
   fully tested.

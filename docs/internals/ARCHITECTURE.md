@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-16
-commit: bad6a308
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # imp - Architecture
@@ -25,7 +25,7 @@ imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode
 |---|---|
 | NVFP4 block-scaled `mma.sync`, `kind::mxf4nvf4` | FlashAttention-2-style block scaling, not a B200 kernel design |
 | FP8 MMA `kind::f8f6f4` | `f` family-feature suffix; used for attention scores |
-| TMA bulk-tensor loads, including a CUTLASS warp-specialized grouped-GEMM mainloop | `src/compute/gemm_grouped_nvfp4_smallM.cu:67 Emits UTMALDG` wraps `cp.async.bulk.tensor.2d...`, emits `UTMALDG`; the shipped grouped-NVFP4 cubin was verified (`cuobjdump`, #1543) to contain a TMA-WS mainloop on native `sm_120a` SASS - the `compute_120f` PTX fallback loses it |
+| TMA bulk-tensor loads, including the producer-warp mainloops of the own NVFP4 tile GEMMs | `src/compute/gemm_grouped_nvfp4_smallM.cu:67 Emits UTMALDG` wraps `cp.async.bulk.tensor.2d...`, emits `UTMALDG`; the dense and grouped tiles load through `src/quant/nvfp4_gemm_tile_ptx.cuh:53 cp.async.bulk.tensor.2d` (`nvfp4_gemm_tile.cu`, `gemm_grouped_nvfp4_tile.cu`); the CUTLASS TMA-WS cubin verified in #1543 left the build in #2938 |
 
 Kernel designs published for B200 or Hopper do not port as-is; check which architecture a reported FP4 win was measured on. Deeper hardware notes, MMA shapes, measured ceilings: [`SM120.md`](SM120.md).
 
@@ -100,7 +100,7 @@ Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 
 | Limitation | Affected | Detail |
 |---|---|---|
-| cuBLAS attention path allocates ~384 MiB S-matrix workspace (`attention.attn_scores_mib`) | legacy cuBLAS fallback configs only (heterogeneous per-layer shapes such as Gemma-4 hd 256/512, MLA, opted-out hd=256) | FA2 is primary for hd=64 incl. learned sinks, hd=128 (#687) and hd=256 (#932); S-matrix is skipped at init on FA2-served configs (gpt-oss -378 MiB, #2716) |
+| Materialized attention path (`attention_cublas_prefill`, cuBLASLt via `gemm_lt_ex.h`) allocates ~384 MiB S-matrix workspace (`attention.attn_scores_mib`) | fallback configs only (heterogeneous per-layer shapes such as Gemma-4 hd 256/512, MLA, opted-out hd=256) | FA2 is primary for hd=64 incl. learned sinks, hd=128 (#687) and hd=256 (#932); S-matrix is skipped at init on FA2-served configs (gpt-oss -378 MiB, #2716) |
 | `process_diag` is a process-wide config snapshot (`src/core/process_diag.h`) | multi-`Engine` process with different diagnostics/attention-variant settings per Engine | `RuntimeConfig` itself is per-Engine; the leaf-utility diagnostics cache is seeded once per process |
 
 Also owned by [`docs/LIMITATIONS.md`](../LIMITATIONS.md).

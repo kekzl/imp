@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: a4070e6a
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # imp - Goal Definition
@@ -72,7 +72,7 @@ Means, not ends.
 
 | Area | Commitment |
 |---|---|
-| Compute | NVFP4 stays the default fast path (FP16/BF16 correctness-only). MXFP4 FMHA +6.7-7.9 % over FP8 FMHA on Qwen3 is the baseline not ceiling. FA2 prefill family carries the prefill commitment (FP8xFP8 cuBLAS prefill `NOT_SUPPORTED` on `sm_120`). Paged decode attention (FP16/FP8/INT8/INT4/NVFP4 KV) + CUDA-graph decode is the workhorse, tuned per hero head dim. Grouped-GEMM MoE prefill: gap to vLLM closed, see table above |
+| Compute | NVFP4 stays the default fast path (FP16/BF16 correctness-only). MXFP4 attention removed (#2911; REFUTED #868, +10 % NLL at 9k). FA2 prefill family carries the prefill commitment (FP8xFP8 cuBLAS prefill `NOT_SUPPORTED` on `sm_120`). Paged decode attention (FP16/FP8/INT8/INT4/NVFP4 KV) + CUDA-graph decode is the workhorse, tuned per hero head dim. Grouped-GEMM MoE prefill: gap to vLLM closed, see table above |
 | Memory & latency | Paged KV cache (block 16), LRU, prefix caching: keep, extend. NVFP4 decode KV ships, expand to prefill where quality allows; TurboQuant retired 2026-05-17, CLI flags survive as deprecated aliases. CUDA graphs everywhere on decode: done, never regress. PDL: keep aggressive. No host syncs on the decode hot path, ever, CI-enforced |
 | Speculation | TurboDraft (L2-resident draft) parked: "~25-30 % K=1 acceptance" (2026-05-30) was a kernel bug (MTP attn-output gate used silu where sigmoid was expected), fixed (#804) to 85 %+ on Qwen3.6; generation stays parked, GDN-hybrid MTP carries irreversible recurrent state through verify (net-negative), needs a non-recurrent MTP model |
 | Surface | OpenAI/Anthropic HTTP server first-class: chat/completions, `/v1/messages`, SSE, tool calling, logprobs, `/tokenize`. C library stable enough to embed. CLI for bench + interactive use |

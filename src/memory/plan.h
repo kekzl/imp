@@ -101,7 +101,7 @@ struct PlanInput {
     // Executor forward-scratch high-water. From a recorded warmup measurement
     // when available; the caller's conservative estimate otherwise.
     size_t forward_scratch_bytes = 0;
-    // Workspaces, cuBLAS/CUTLASS scratch, graph buffers.
+    // Workspaces, cuBLASLt and own-GEMM scratch, graph buffers.
     size_t engine_persistent_bytes = 0;
 };
 

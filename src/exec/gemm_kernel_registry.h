@@ -144,7 +144,7 @@ private:
 // Per-TU registration, called once from GemmKernelRegistry::instance(). The call is the
 // link-time reference that keeps each kernel TU in every binary linking libimp.a.
 void register_generic_dequant_gemm_kernels(GemmKernelRegistry& reg);  // 1 key
-void register_gguf_gemm_kernels(GemmKernelRegistry& reg);             // 8 keys
+void register_gguf_gemm_kernels(GemmKernelRegistry& reg);             // 11 keys
 void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg);    // 1 key
 
 }  // namespace imp

@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-14
-commit: e48ff0d5
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # Attention dispatch
@@ -27,14 +27,14 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 | `attention.apa_eps > 0` (default on), `hd == 128`, no window, softcap or sinks, `kv_len >= attention.apa_min_kv`, `n >= 256` rows, not `runtime.deterministic` | APA (`try_apa_paged_prefill` on an FP16 cache in chunked prefill, else `try_fp4_prefill`) - FP4 pass 1, exact FP16 pass 2 over hot KV tiles |
 | no learned sinks, and `hd == 128` or (`hd == 256` and `attention.fa2_hd256`), and `fa2_fp16qk != "never"` | `try_fa2_fp16qk_prefill` - FP16-QK FA2, O(n) memory, primary path |
 | S-matrix fits and below the FMHA threshold | `attention_cublas_prefill` - materialized `[nh, n, ctx]` FP16 S-matrix |
-| `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1042) - cuBLAS in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
+| `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1042) - cuBLASLt (`lt_gemm_strided_batched`, `src/compute/attention_cublas.cu`) in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
 | otherwise | `attention_prefill_dispatch` → the FMHA chain below |
 
 [PROV: commit=7360fbb7 date=2026-07-16 hw=RTX5090 model=none (hd=512 kernel) quant=FP16 cuda=unknown
        path=attention_cublas_prefill_sliced cmd=`test_attention_fmha_hd512.cu` DISABLED benches
        n=unknown note=isolated kernel A/B from the #1042 PR body, not an e2e figure]
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:50 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:48 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
