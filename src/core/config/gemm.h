@@ -92,13 +92,11 @@ struct GEMM {
     // mxf4nvf4 MMA via a producer/consumer cp.async+mbarrier pipeline on the
     // same plain weight bytes the M=1 GEMVs read (zero extra VRAM). Default on.
     bool nvfp4_smallm = true;
-    // Stream-K tile scheduler for the CUTLASS NVFP4 prefill GEMM (cooperative
-    // 128x128 tile, N>2048): 0=off, 1=heuristic on grids with a short tail wave
-    // (>=1 wave, last wave <= half full), 2=forced at every shape. Not bit-identical to data-parallel
-    // (K-split partials sum in another order); runtime.deterministic forces 0 (#2556).
+    // No GEMM reads this since the CUTLASS NVFP4 GEMM left (#2938); the own tile plans stream-K
+    // per grid (#2934). Still parsed and copied into process_diag.
     int nvfp4_cutlass_streamk = 1;
-    // cuBLASLt block-scaled NVFP4 (VEC16_UE4M3) instead of the CUTLASS dense prefill GEMM at
-    // M >= this, 0 = off. Same SfAtom bytes, output matches; M=2048 GEMM -5.8..-7.7 % (#2540).
+    // cuBLASLt block-scaled NVFP4 (VEC16_UE4M3) for dense prefill when the own tile refuses, at
+    // M >= this, 0 = off. Same SfAtom bytes; M=2048 GEMM -5.8..-7.7 % vs CUTLASS (#2540).
     // runtime.deterministic forces 0 (timed algo pick).
     int nvfp4_cublaslt_min_m = 2048;
     // Own TMA + mxf4nvf4 dense prefill GEMM (src/quant/nvfp4_gemm_tile.cu) from M >= this, 0 = off;

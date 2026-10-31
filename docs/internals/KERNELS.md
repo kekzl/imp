@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-31
+commit: e08db9d2
 -->
 
 # The optimal sm_120a attention kernel
@@ -20,10 +20,12 @@ Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB20
 | `fmha_sm120_fa2_kernel` | `src/compute/attention_fmha_sm120.cu` | primary register-resident FA2 attention prefill, dispatched by `fmha_sm120_fa2_prefill` | shipped, optimization target |
 | `fmha_sm120_kernel` | `src/compute/attention_fmha_sm120.cu` | tiled-FMHA fallback | shipped, not an optimization target |
 | own dense NVFP4 / MXFP4 / MXFP8 / FP8 tile GEMM (TMA, `mma.sync` block-scaled) | `src/quant/nvfp4_gemm_tile.cu` | production dense GEMM (projections, FFN, LM head); replaced the CUTLASS GEMM, removed 2026-10-31 | shipped |
+| own grouped NVFP4 tile GEMM (TMA, producer warp, persistent CTAs) | `src/compute/gemm_grouped_nvfp4_tile.cu` | MoE prefill grouped GEMM; replaced the CUTLASS 3.x grouped GEMM (#2929) | shipped |
 | `gemm_grouped_nvfp4_smallM` | `src/compute/gemm_grouped_nvfp4_smallM.cu` | small-M / split-K grouped NVFP4 GEMM (MoE prefill) | shipped |
+| own FP16 tile GEMM (128x256, TMA) | `src/compute/gemm_f16_tile.cu` | `gemm()` F16 x F16 -> F16 with fp16 accumulation when K >= N, >= one wave of tiles and tiles >= 80 % of the rounded-up wave slots (`gemm_f16_tile_route`); cuBLASLt otherwise (`gemm.f16_tile`) | shipped |
 | decode FFN GEMV | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV, HBM-bound at the GDDR7 ceiling; decode levers: [`MEMORY.md`](MEMORY.md) | shipped |
 | `fa2_sm120a_optimal.cu` | `tools/standalone/fa2_sm120a_optimal.cu` | bit-exact standalone FA2 reference, no imp/CUTLASS deps | reference only, not wired into imp |
-| `gemm_nvfp4_sm120a.cu` | `tools/standalone/gemm_nvfp4_sm120a.cu` | standalone NVFP4 GEMM, cp.async + L2-layout tricks | reference only; production keeps CUTLASS TMA+warp-spec instead (archive) |
+| `gemm_nvfp4_sm120a.cu` | `tools/standalone/gemm_nvfp4_sm120a.cu` | standalone NVFP4 GEMM, cp.async + L2-layout tricks | reference only; production runs the own TMA tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) |
 | `gemm_nvfp4_sm120a_tma.cu` | `tools/standalone/gemm_nvfp4_sm120a_tma.cu` | TMA + warp-specialization on the standalone kernel | documented negative result |
 
 Paged attention decode kernels (per KV dtype): [`ATTENTION_DISPATCH.md`](ATTENTION_DISPATCH.md).

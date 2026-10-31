@@ -28,7 +28,7 @@ description: Build, test suite, CI status, build/test failures - make build, tes
 | Full image (the gate; anything you measure or push) | `make build` -> `imp:test` (main checkout) or `imp:test-<dir>-<hash8>` (worktree, `scripts/image_tag.sh`) | ~6 min cold; 10-40 s from a warm ccache (595 TUs, 2026-09-11); 0 s when the image already carries the tree (`imp.tree` label) |
 | CPU unit binary | `make test-unit` (`imp-tests-unit`) | <5 s |
 | Full GPU suite | `make test-gpu` | 4-10 min |
-| E2E on real models | `make test-e2e` | Qwen3-4B-Instruct-2507-Q8_0, Qwen3.5-4B-mxfp4, gemma-4-26B-A4B Q4_K_M, `MOE_MODEL` (gpt-oss-20b-mxfp4), Qwen3-Coder-30B FP4, Nemotron-3-Nano NVFP4 (paths in `Makefile`) |
+| E2E on real models | `make test-e2e` | SafeTensors only: Qwen3-8B NVFP4, Qwen3.8-27B NVFP4, Gemma-4-26B-A4B NVFP4 (also `MOE_MODEL`, the determinism suite) (paths in `Makefile`) |
 | GDN restore group of test-e2e (a `scripts/check-release.sh` stage) | `make test-hybrid-restore` | Qwen3.5-4B-mxfp4; a skip fails the stage |
 | Server e2e (the ONLY place handlers/batching run end to end) | `make test-server` | includes `degen_suite.py` and `tests/test_server_tracing.py` |
 | Rerank / agents / external harnesses | `make test-rerank`, `make test-agents`, `make test-agents-external` | GPU + local model |
