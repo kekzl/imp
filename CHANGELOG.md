@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content, 5 of 6 schema-valid.
+- json_schema `number` with a lower bound: a fraction run to the 40-digit cap (`0.000...` under `exclusiveMinimum: 0`) left no legal token and the response stopped mid-object; the cap digit must now keep the value in bounds.
 
 ### Changed
 - Fused QK-norm + RoPE computes cos/sin once per token and runs one warp per head, bit-identical outputs: 109.2 -> 26.9 us at 2048 rows, 3.60 -> 1.68 us at 32 rows (Qwen3-14B). Qwen3-14B-NVFP4, 32 streams: +2.6 % aggregate tok/s with 1000-token prompts, +2.0 % with short ones.
