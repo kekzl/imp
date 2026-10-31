@@ -33,6 +33,7 @@ struct TileArgs {
     // b % sk_split of tail tile sk_dp + b / sk_split (piece 0 finishes it). sk_split 0: sk_per units each.
     int sk_dp;
     int sk_split;
+    float* d32;  // non-null: fp32 D (row stride ldd) instead of d, stored per fragment (LM head logits)
 };
 
 // alpha, times col_scale[col], col + 1 for the MXFP8 row-scale view, times the FP8 tensor scales.
@@ -72,8 +73,12 @@ __device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], c
                 const int row = m0 + wm + mf * 16 + T1 + h * 8;
                 if (row >= p.M || col >= p.N)
                     continue;
-                __half2* dst = reinterpret_cast<__half2*>(p.d + (static_cast<size_t>(row) * p.ldd) + col);
                 float2 v = make_float2(acc[mf][nf][h * 2] * sc.x, acc[mf][nf][(h * 2) + 1] * sc.y);
+                if (p.d32 != nullptr) {
+                    *reinterpret_cast<float2*>(p.d32 + (static_cast<size_t>(row) * p.ldd) + col) = v;
+                    continue;
+                }
+                __half2* dst = reinterpret_cast<__half2*>(p.d + (static_cast<size_t>(row) * p.ldd) + col);
                 if constexpr (C::kF8)
                     if (p.beta != 0.0f) {
                         const float2 old = __half22float2(*dst);
@@ -89,6 +94,10 @@ __device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], c
 template <class C>
 __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], half* so, int m0, int n0, int wm,
                                            int wn, int lane, const TileArgs& p) {
+    if (p.d32 != nullptr) {  // fp32 D: per fragment
+        store_direct<C>(acc, p, m0, n0, wm, wn, lane);
+        return;
+    }
     if constexpr (C::kF8)
         if (p.beta != 0.0f) {
             store_direct<C>(acc, p, m0, n0, wm, wn, lane);
@@ -131,6 +140,10 @@ template <class C>
 __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], const Ring& g, const TileArgs& p,
                                           const CUtensorMap* md) {
     static_assert(C::kStages * C::kStageBytes >= (C::kBN / 64) * kBM * 128, "boxes must fit the ring");
+    if (p.d32 != nullptr) {  // fp32 D: per fragment
+        store_direct<C>(acc, p, g.m0, g.n0, g.wm, g.wn, g.lane);
+        return;
+    }
     if constexpr (C::kF8)
         if (p.beta != 0.0f) {
             store_direct<C>(acc, p, g.m0, g.n0, g.wm, g.wn, g.lane);

@@ -15,6 +15,11 @@ namespace imp {
 [[nodiscard]] bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
                                    int variant = -1, void* workspace = nullptr, size_t workspace_bytes = 0);
+// Same, fp32 D [M,N] stored per fragment (LM head logits); auto variant.
+[[nodiscard]] bool gemm_nvfp4_tile_f32(const void* a_data, const void* a_sf, const void* w_data,
+                                       const void* w_sf, float alpha, float* d_fp32, int M, int N, int K,
+                                       cudaStream_t stream, void* workspace = nullptr,
+                                       size_t workspace_bytes = 0);
 
 // Same kernel on MXFP8 operands (quant/mxfp8_sfatom.h bytes): A [M,K] / W [N,K] E4M3, UE8M0 per 32 K
 // in SfAtom layout (cutlass_mxfp8_sf_size). K % 64 == 0, N % 8 == 0. col_scale (may be null): D column n

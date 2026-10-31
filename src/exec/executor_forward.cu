@@ -22,6 +22,8 @@
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "core/process_diag.h"
+#include "quant/nvfp4_gemm_tile.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -207,6 +209,19 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
                      "(N=%lld K=%lld, +%zu KiB SfAtom scales)",
                      static_cast<long long>(lm_head_cutlass_.N),
                      static_cast<long long>(lm_head_cutlass_.K), lm_head_cutlass_.sf_bytes / 1024);
+}
+
+bool GraphExecutor::lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream) {
+    const auto& cfg = model_->config();
+    if (gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_.data,
+                            lm_head_cutlass_.scale_factors, lm_head_cutlass_.tensor_scale, logits, rows,
+                            cfg.vocab_size, cfg.d_model, stream,
+                            process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace,
+                            qscratch_.cutlass_workspace_size))
+        return true;
+    return gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
+                                         lm_head_cutlass_, logits, rows, cfg.vocab_size, cfg.d_model, nullptr,
+                                         0, stream);
 }
 
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
@@ -966,9 +981,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 qscratch_.cutlass_act_sf != nullptr) {
                 quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data,
                                                qscratch_.cutlass_act_sf, n, cfg.d_model, stream);
-                lm_done = gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
-                                                        lm_head_cutlass_, static_cast<float*>(lg.data), n,
-                                                        cfg.vocab_size, cfg.d_model, nullptr, 0, stream);
+                lm_done = lm_head_nvfp4_gemm_f32_(n, static_cast<float*>(lg.data), stream);
             }
             if (!lm_done) {
                 gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),

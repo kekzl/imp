@@ -453,7 +453,8 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
             !encode_operand(&map_w, p.w, p.N, static_cast<int>(C::row_bytes(p.K)), C::kRB, C::kBN))
             return false;
         if constexpr (!C::kSk || C::kSkStaged)
-            if (reinterpret_cast<uintptr_t>(p.d) % 16 != 0 || !encode_out(&map_d, p.d, p.M, p.N, p.ldd))
+            if (p.d32 == nullptr &&
+                (reinterpret_cast<uintptr_t>(p.d) % 16 != 0 || !encode_out(&map_d, p.d, p.M, p.N, p.ldd)))
                 return false;
     }
     static const bool smem_ok = cudaFuncSetAttribute(gemm_nvfp4_tile_kernel<C>,
@@ -496,7 +497,7 @@ int sm_count() {
 // Shape and operands every config needs: SF slabs for the block-scaled formats, scale scalars for FP8.
 template <Fmt F>
 bool args_ok(const TileArgs& p) {
-    if (p.M <= 0 || p.N <= 0 || p.K <= 0 || p.N % 8 != 0 || !p.a || !p.w || !p.d)
+    if (p.M <= 0 || p.N <= 0 || p.K <= 0 || p.N % 8 != 0 || !p.a || !p.w || (!p.d && !p.d32))
         return false;
     if constexpr (F == Fmt::kF8)
         return p.a_scale != nullptr && p.w_scale != nullptr;
@@ -576,6 +577,22 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      nullptr,
                      0.0f};
     return run_tile<Fmt::kNv4>(p, stream, variant, workspace, workspace_bytes);
+}
+
+bool gemm_nvfp4_tile_f32(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
+                         float alpha, float* d_fp32, int M, int N, int K, cudaStream_t stream,
+                         void* workspace, size_t workspace_bytes) {
+    TileArgs p{static_cast<const uint8_t*>(a_data),
+               static_cast<const uint8_t*>(a_sf),
+               static_cast<const uint8_t*>(w_data),
+               static_cast<const uint8_t*>(w_sf),
+               nullptr,
+               alpha,
+               M,
+               N,
+               K};
+    p.d32 = d_fp32;
+    return run_tile<Fmt::kNv4>(p, stream, -1, workspace, workspace_bytes);
 }
 
 bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,

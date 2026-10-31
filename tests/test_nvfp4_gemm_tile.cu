@@ -145,6 +145,47 @@ INSTANTIATE_TEST_SUITE_P(Shapes, Nvfp4GemmTileTest,
                                            std::make_tuple(200, 384, 192),       // K % 128 = 64
                                            std::make_tuple(2048, 2816, 2112)));  // Gemma-4 down_proj
 
+// fp32 D (LM head logits) against CUTLASS's fp32 epilogue: decode-batch and PPL-chunk rows, a 128x64 grid,
+// stream-K shapes; ragged M and N.
+TEST(Nvfp4GemmTileF32, MatchesCutlassFp32) {
+    cudaStream_t s;
+    cudaStreamCreate(&s);
+    const int shapes[][3] = {{4, 18432, 2048}, {33, 1024, 512}, {512, 16384, 2048}, {200, 384, 192}};
+    for (const auto& sh : shapes) {
+        Operands o;
+        make_operands(o, sh[0], sh[1], sh[2], s);
+        float* ref = nullptr;
+        float* own = nullptr;
+        const size_t n = size_t(o.M) * o.N;
+        ASSERT_EQ(cudaMalloc(&ref, n * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&own, n * sizeof(float)), cudaSuccess);
+        cudaMemsetAsync(own, 0xff, n * sizeof(float), s);
+        ASSERT_TRUE(gemm_nvfp4_cutlass_sm120_fp32(o.act, o.act_sf, o.cw, ref, o.M, o.N, o.K, nullptr, 0, s));
+        ASSERT_TRUE(gemm_nvfp4_tile_f32(o.act, o.act_sf, o.cw.data, o.cw.scale_factors, o.cw.tensor_scale,
+                                        own, o.M, o.N, o.K, s, o.ws, o.ws_bytes));
+        ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+        std::vector<float> r(n), x(n);
+        cudaMemcpy(r.data(), ref, n * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(x.data(), own, n * sizeof(float), cudaMemcpyDeviceToHost);
+        double max_ref = 0.0, max_diff = 0.0;
+        size_t bad = 0;
+        for (size_t i = 0; i < n; ++i) {
+            bad += std::isfinite(x[i]) ? 0 : 1;
+            max_ref = std::max(max_ref, std::fabs(double(r[i])));
+            max_diff = std::max(max_diff, std::fabs(double(r[i]) - double(x[i])));
+        }
+        std::fprintf(stderr, "[tile f32] M=%d N=%d K=%d max|ref|=%.4g max|diff|=%.4g\n", o.M, o.N, o.K,
+                     max_ref, max_diff);
+        EXPECT_EQ(bad, 0u);
+        EXPECT_GT(max_ref, 0.0);
+        EXPECT_LE(max_diff, 1e-5 * max_ref) << o.M << "x" << o.N << "x" << o.K;
+        cudaFree(ref);
+        cudaFree(own);
+        free_operands(o);
+    }
+    cudaStreamDestroy(s);
+}
+
 // Timing on Qwen3.8-27B projection shapes, operands from DRAM (L2 flushed before each call).
 TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
     if (!cutlass_sm120_nvfp4_available())
