@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-31
+commit: ed4422b7
 -->
 
 # Contributing to imp
@@ -13,7 +13,7 @@ Single-author / single-target project (NVIDIA Blackwell `sm_120a` only) - contri
 
 - An NVIDIA RTX 5090, RTX PRO 5000 or RTX PRO 6000 Blackwell (`sm_120a`). Other architectures are not supported and will not be added.
 - CUDA Toolkit 13.2+ (minimum enforced by CMake); the canonical, tested toolchain is 13.4.3 - what `Dockerfile`'s `imp:toolchain`/`imp:builder` stages and CI build with.
-- CMake 3.25+ and a C++23 host compiler (GCC 13+, Clang 16+) - `CMAKE_CXX_STANDARD 23` is required, not a preference. CUDA libs: `cudart`, `cuda_driver`, `cublas`, `cublasLt`.
+- CMake 3.25+ and a C++23 host compiler (GCC 13+, Clang 16+) - `CMAKE_CXX_STANDARD 23` is required, not a preference. CUDA libs: `cudart`, `cuda_driver`, `cublasLt`. Building only to run imp: [`docs/BUILD.md`](docs/BUILD.md).
 - Docker with GPU passthrough for the canonical build/test workflow. The host needs none of the above directly - `make build` runs everything in a CUDA 13.4.3 container.
 - Google Test v1.18.0 fetches automatically via `FetchContent`. `stb_image`/`stb_image_resize2` are vendored in `third_party/stb/`.
 
