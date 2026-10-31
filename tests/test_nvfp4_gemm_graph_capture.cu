@@ -1,7 +1,7 @@
-// gemm_nvfp4 M>1 fallback dequantizes NVFP4 to FP16 then calls cuBLAS; the dequant scratch
+// gemm_nvfp4 M>1 uses one scratch (M<=16: batched-GEMV y32; else dequant to FP16 + cuBLASLt); that scratch
 // buffer used to lazy-cudaMalloc on first use, crashing inside a captured CUDA stream. Fix:
 // pre-allocated workspace (set_nvfp4_dequant_workspace); missing workspace + capture mode
-// now fails loud instead of crashing. Does NOT cover cuBLAS's own graph-safety (algo reselect).
+// now fails loud instead of crashing. Does NOT cover cuBLASLt's own graph-safety (algo reselect).
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -98,8 +98,8 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
         << " bytes (>= needed) yet the legacy lazy buffer grew from " << lazy_before << " to "
         << lazy_after << " — the workspace branch was bypassed";
 
-    // Also check the GEMM produced something (the dequant + cuBLAS path
-    // ran end-to-end against the workspace, not just bailed out).
+    // Also check the GEMM produced something (at M=4 the batched GEMV with its y32 in the
+    // workspace ran end-to-end, not just bailed out).
     std::vector<half> h_c(static_cast<size_t>(tw.M) * tw.N);
     cudaMemcpy(h_c.data(), tw.d_c, h_c.size() * sizeof(half), cudaMemcpyDeviceToHost);
     int n_nonzero = 0;
@@ -139,7 +139,7 @@ TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
     cudaError_t end_err = cudaStreamEndCapture(stream_, &graph);
     if (graph)
         cudaGraphDestroy(graph);
-    // We don't assert end_err here — cuBLAS-or-other internal state may have
+    // We don't assert end_err here: cuBLASLt-or-other internal state may have
     // invalidated the capture before our guard fired. The point is that the
     // runtime is still usable below.
     (void)end_err;

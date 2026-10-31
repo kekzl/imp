@@ -14,7 +14,7 @@ namespace imp {
 
 // MemAccount: process-global VRAM accounting harness (Phase-0 audit). VRAMAllocator only
 // tracks allocations routed through it; the large consumers (KV pool, NVFP4 decode
-// cache, CUTLASS/cuBLAS workspaces, CUDA-graph buffers, weights) call cudaMalloc
+// cache, cuBLASLt/own-GEMM workspaces, CUDA-graph buffers, weights) call cudaMalloc
 // directly and are invisible to it. Three complementary, low-overhead signals close
 // the gap:
 //   1. CHECKPOINTS: a labeled cudaMemGetInfo snapshot at each init phase; the free-VRAM
@@ -72,7 +72,7 @@ public:
     // Named, non-imp charges the pool notes cannot see, so the reconciliation residual
     // reports what is genuinely unattributed. Set from Engine::init once known:
     //   context  - CUDA primary context + driver (checkpoint 00_pre_init)
-    //   library  - the fixed charge CUDA/cuBLAS/CUTLASS claim on the first forward (A1.5)
+    //   library  - the fixed charge CUDA/cuBLASLt claim on the first forward (A1.5; CUTLASS until 2026-10-31)
     //   arena    - engine-persistent tier reservation (its high-water is what the planner
     //              should eventually use)
     void set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,

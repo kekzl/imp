@@ -83,7 +83,7 @@ void cpu_gemm(const float* A, const float* B, float* C, int M, int N, int K, flo
 }
 
 // =========================================================================
-// Test fixture: init/cleanup cuBLAS once
+// Test fixture: init/cleanup cuBLASLt once
 // =========================================================================
 class GemmTest : public ::testing::Test {
 protected:

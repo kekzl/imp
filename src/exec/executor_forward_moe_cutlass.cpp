@@ -116,106 +116,92 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         return false;
     }
 
-// CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM (NVFP4xNVFP4->FP16), on by
-// default (moe.no_cutlass3x forces legacy). Zero dequant overhead vs the
-// NVFP4->FP16 batch path; per-group alpha via fusion_args.alpha_ptr_array.
-// Fully device-args dispatch runs gate/up/activation/down end-to-end via
-// device-resident kernels before any D2H+sync, a prerequisite for graph
-// capture of MoE prefill. Falls back to legacy on dispatch failure or an unpopulated workspace.
-bool device_args_done = false;
-{
-    // moe.nvfp4_device_args: default on; set false to force the legacy
-    // host-args + smallM dispatch for A/B or workarounds.
-    const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
-    // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2 only and has no
-    // per-expert bias hooks; the unstaged path below runs bias + apply_expert_activation
-    // (GPT_OSS_GLU) + a plain quantize instead. The staged path keeps gpt-oss on legacy.
-    const bool use_device_args =
-        da_enabled && (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) &&
-        moe_.d_M_per && moe_.d_M_per_count >= ne &&
-        moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
-        moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
-        moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
-        moe_.cutlass3x_sfa_ptrs &&
-        moe_.cutlass3x_sfa_ptrs_count >= ne;
-    if (use_device_args) {
-        // Log once per process; layer==0 fires on every
-        // forward, but only the first ever needs to flag
-        // the path choice.
-        static std::atomic<bool> s_da_logged{false};
-        if (layer == 0 && !s_da_logged.exchange(true))
-            IMP_LOG_INFO(
-                "MoE prefill: CUTLASS 3.x device-args full path "
-                "(default; set moe.nvfp4_device_args=false to disable)");
-        // Populate device-resident d_M_per (no D2H).
-        imp::compute_M_per_from_offsets_device(
-            static_cast<const int32_t*>(routing.expert_offsets.data),
-            moe_.d_M_per, ne, stream);
+    // Grouped NVFP4xNVFP4->FP16 tile GEMM (gemm_grouped_nvfp4_dispatch), no dequant pass, per-expert alpha
+    // from dargs.d_alpha in the epilogue; moe.no_cutlass3x forces legacy. Device-args: gate/up/act/down on
+    // device before any D2H+sync (MoE prefill graph capture). Legacy on dispatch failure or empty workspace.
+    bool device_args_done = false;
+    {
+        // moe.nvfp4_device_args: default on; set false to force the legacy
+        // host-args + smallM dispatch for A/B or workarounds.
+        const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
+        // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2 only and has no
+        // per-expert bias hooks; the unstaged path below runs bias + apply_expert_activation
+        // (GPT_OSS_GLU) + a plain quantize instead. The staged path keeps gpt-oss on legacy.
+        const bool use_device_args = da_enabled && (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) &&
+                                     moe_.d_M_per && moe_.d_M_per_count >= ne && moe_.d_sfa_offsets &&
+                                     moe_.d_B_ptrs_cache && moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
+                                     moe_.cutlass3x_packed && moe_.cutlass3x_sf && moe_.cutlass3x_sfa_ptrs &&
+                                     moe_.cutlass3x_sfa_ptrs_count >= ne;
+        if (use_device_args) {
+            // Log once per process; layer==0 fires on every
+            // forward, but only the first ever needs to flag
+            // the path choice.
+            static std::atomic<bool> s_da_logged{false};
+            if (layer == 0 && !s_da_logged.exchange(true))
+                IMP_LOG_INFO(
+                    "MoE prefill: CUTLASS 3.x device-args full path "
+                    "(default; set moe.nvfp4_device_args=false to disable)");
+            // Populate device-resident d_M_per (no D2H).
+            imp::compute_M_per_from_offsets_device(static_cast<const int32_t*>(routing.expert_offsets.data),
+                                                   moe_.d_M_per, ne, stream);
 
-        // gathered_base intentionally not bound: gate/up input quantize reads
-        // ctx.no via sorted_token_ids directly (skip-the-read half of the
-        // gather+quant fusion). Down projection input comes from
-        // fused_act_quantize_device, which reads gate/up outputs directly.
-        char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
-        char* expert_up_base   = static_cast<char*>(moe_.expert_up.data);
-        char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
+            // gathered_base intentionally not bound: gate/up input quantize reads
+            // ctx.no via sorted_token_ids directly (skip-the-read half of the
+            // gather+quant fusion). Down projection input comes from
+            // fused_act_quantize_device, which reads gate/up outputs directly.
+            char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+            char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+            char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
-        // SFA buffer prep — shared by both gate/up quant
-        // (K_in = d) and the fused down-input quant (K_in = eff).
-        auto prep_sfa = [&](int K_in) {
-            imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream,
-                                            reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
-                                            moe_.cutlass3x_sf);
-            // Zeroes only the ACTIVE prefix of the SFA staging buffer: padded rows of
-            // the SfAtom layout must be 0 for clean CUTLASS reads. QW5 (#604) replaces
-            // the full cudaMemsetAsync with a bounded device kernel that reads
-            // d_sfa_offsets[ne] as the byte count, capped at cutlass3x_sf_size.
-            imp::bzero_sfa_active(
-                moe_.cutlass3x_sf,
-                moe_.d_sfa_offsets,
-                ne,
-                moe_.cutlass3x_sf_size,
-                stream);
-        };
-        // (Former quantize_device lambda removed — the gate/up call site
-        // below uses quantize_fp16_to_nvfp4_cutlass_moe_gather inline.
-        // The down-projection input is handled by fused_act_quantize_device.)
+            // SFA buffer prep — shared by both gate/up quant
+            // (K_in = d) and the fused down-input quant (K_in = eff).
+            auto prep_sfa = [&](int K_in) {
+                imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream,
+                                                reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
+                                                moe_.cutlass3x_sf);
+                // Zeroes only the ACTIVE prefix of the SFA staging buffer: padded rows of
+                // the SfAtom layout must be 0 for clean grouped-GEMM reads. QW5 (#604) replaces
+                // the full cudaMemsetAsync with a bounded device kernel that reads
+                // d_sfa_offsets[ne] as the byte count, capped at cutlass3x_sf_size.
+                imp::bzero_sfa_active(moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, moe_.cutlass3x_sf_size,
+                                      stream);
+            };
+            // (Former quantize_device lambda removed — the gate/up call site
+            // below uses quantize_fp16_to_nvfp4_cutlass_moe_gather inline.
+            // The down-projection input is handled by fused_act_quantize_device.)
 
-        // Fused activation+quantize for the down-projection input: reads gate/up
-        // directly, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed
-        // FP4+SFA (M1, #604). Non-gated (RELU_SQR): gate is nullptr, reads `up`
-        // only; unlike the legacy relu_sqr_inplace, this does NOT clobber `up`.
-        auto fused_act_quantize_device = [&](const char* gate_base, const char* up_base, int K_in,
-                                             FFNActivation act_type, const void* gate_bias = nullptr,
-                                             const void* up_bias = nullptr) {
-            prep_sfa(K_in);
-            imp::fused_act_quantize_fp16_to_nvfp4_cutlass_moe(
-                gate_base, up_base, moe_.cutlass3x_packed,
-                reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-                static_cast<const int*>(routing.expert_offsets.data), expanded, K_in, ne, act_type, stream,
-                gate_bias, up_bias);
-        };
+            // Fused activation+quantize for the down-projection input: reads gate/up
+            // directly, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed
+            // FP4+SFA (M1, #604). Non-gated (RELU_SQR): gate is nullptr, reads `up`
+            // only; unlike the legacy relu_sqr_inplace, this does NOT clobber `up`.
+            auto fused_act_quantize_device = [&](const char* gate_base, const char* up_base, int K_in,
+                                                 FFNActivation act_type, const void* gate_bias = nullptr,
+                                                 const void* up_bias = nullptr) {
+                prep_sfa(K_in);
+                imp::fused_act_quantize_fp16_to_nvfp4_cutlass_moe(
+                    gate_base, up_base, moe_.cutlass3x_packed,
+                    reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                    static_cast<const int*>(routing.expert_offsets.data), expanded, K_in, ne, act_type,
+                    stream, gate_bias, up_bias);
+            };
 
-        // Per-layer pre-cached arrays (Phase 3c-full Step 3): when ready, all
-        // three projections feed dispatch_device with device-resident ptr arrays,
-        // no per-call host iteration or H2D. Falls back to per-call upload via the
-        // Step 1 workspace caches when the pre-cache isn't built.
-        const bool da_cache_ready =
-            layer < static_cast<int>(moe_.per_layer_da_cache.size()) &&
-            moe_.per_layer_da_cache[layer].ready;
+            // Per-layer pre-cached arrays (Phase 3c-full Step 3): when ready, all
+            // three projections feed dispatch_device with device-resident ptr arrays,
+            // no per-call host iteration or H2D. Falls back to per-call upload via the
+            // Step 1 workspace caches when the pre-cache isn't built.
+            const bool da_cache_ready = layer < static_cast<int>(moe_.per_layer_da_cache.size()) &&
+                                        moe_.per_layer_da_cache[layer].ready;
 
-        // Host-resident experts: the staged copy stands in for the resident
-        // one, so from here this layer is dispatched like any other. See
-        // build_staged_device_args_().
-        MoEWorkspace::PerLayerNvfp4DeviceArgsCache da_cache{};
-        if (!build_staged_device_args_(ctx, non_gated_experts, da_cache) && da_cache_ready)
-            da_cache = moe_.per_layer_da_cache[layer];
+            // Host-resident experts: the staged copy stands in for the resident
+            // one, so from here this layer is dispatched like any other. See
+            // build_staged_device_args_().
+            MoEWorkspace::PerLayerNvfp4DeviceArgsCache da_cache{};
+            if (!build_staged_device_args_(ctx, non_gated_experts, da_cache) && da_cache_ready)
+                da_cache = moe_.per_layer_da_cache[layer];
 
-        auto dispatch_device =
-            [&](const std::vector<TensorID>& weight_ids,
-                const void** pre_d_B, const void** pre_d_SFB,
-                float* pre_d_alpha, char* c_base, int K_in,
-                int N_out, int e0 = 0, int n_e = -1) -> bool {
+            auto dispatch_device = [&](const std::vector<TensorID>& weight_ids, const void** pre_d_B,
+                                       const void** pre_d_SFB, float* pre_d_alpha, char* c_base, int K_in,
+                                       int N_out, int e0 = 0, int n_e = -1) -> bool {
                 // Expert block [e0, e0 + n_e): the offset arrays are absolute prefix sums, so a
                 // block is a slice of every per-expert array with the A/D bases unchanged.
                 const int n_grp = n_e < 0 ? ne : n_e;
@@ -268,93 +254,80 @@ bool device_args_done = false;
                 return imp::gemm_grouped_nvfp4_dispatch(n_grp, N_out, K_in, expanded, dargs, stream);
             };
 
-        // Gate/Up share input quantization (K_in=d): fused gather+quantize reads
-        // ctx.no in token order via sorted_token_ids and writes packed FP4+SFA in
-        // expert-sorted layout in one kernel pass, saving the gathered_base HBM read.
-        prep_sfa(d);
-        imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
-            ctx.no.data,
-            static_cast<const int32_t*>(routing.sorted_token_ids.data),
-            moe_.cutlass3x_packed,
-            reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-            static_cast<const int*>(routing.expert_offsets.data),
-            expanded, d, ne, stream);
-        bool ok = true;
-        if (ctx.staged_blocks) {
-            const auto& da = da_cache;
-            ok = run_staged_blocks_(
-                layer, stream, ctx,
-                [&](ExpertProj p, int e0, int n_ex) {
-                    if (p == ExpertProj::Gate)
-                        return dispatch_device(ly.expert_gate_ids, da.d_gate_B_ptrs, da.d_gate_SFB_ptrs,
-                                               da.d_gate_alpha, expert_gate_base, d, eff, e0, n_ex);
-                    if (p == ExpertProj::Up)
-                        return dispatch_device(ly.expert_up_ids, da.d_up_B_ptrs, da.d_up_SFB_ptrs,
-                                               da.d_up_alpha, expert_up_base, d, eff, e0, n_ex);
-                    return dispatch_device(ly.expert_down_ids, da.d_down_B_ptrs, da.d_down_SFB_ptrs,
-                                           da.d_down_alpha, expert_down_base, eff, d, e0, n_ex);
-                },
-                [&] {
-                    fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base, expert_up_base,
-                                              eff,
-                                              non_gated_experts ? FFNActivation::RELU_SQR
-                                                                : cfg.ffn_activation);
-                });
-        } else {
-        if (!non_gated_experts)
-            ok = ok && dispatch_device(ly.expert_gate_ids,
-                                       da_cache.d_gate_B_ptrs,
-                                       da_cache.d_gate_SFB_ptrs,
-                                       da_cache.d_gate_alpha,
-                                       expert_gate_base, d, eff);
-        ok = ok && dispatch_device(ly.expert_up_ids,
-                                   da_cache.d_up_B_ptrs,
-                                   da_cache.d_up_SFB_ptrs,
-                                   da_cache.d_up_alpha,
-                                   expert_up_base, d, eff);
-        if (ok) {
-            // Fused: activation (SwiGLU/GeGLU/ReLU²) + NVFP4 quant
-            // for the down-projection input. Saves one HBM
-            // round-trip of the swiglu intermediate per layer.
-            const FFNActivation act_type =
-                non_gated_experts ? FFNActivation::RELU_SQR : cfg.ffn_activation;
-            const char* gate_for_fused =
-                non_gated_experts ? nullptr : expert_gate_base;
-            const auto* d_offs = static_cast<const int32_t*>(routing.expert_offsets.data);
-            const bool gpt_oss = model_->profile().moe_expert_bias_glu;
-            // gpt-oss (#547, #2466): gate/up biases + clamped GLU fused into the quantize (cfg act is
-            // GPT_OSS_GLU); the down bias rides the fused scatter when phase 7 takes it.
-            fused_act_quantize_device(gate_for_fused, expert_up_base, eff, act_type, ly.expert_gate_bias.data,
-                                      ly.expert_up_bias.data);
-            ok = dispatch_device(ly.expert_down_ids,
-                                 da_cache.d_down_B_ptrs,
-                                 da_cache.d_down_SFB_ptrs,
-                                 da_cache.d_down_alpha,
-                                 expert_down_base, eff, d);
-            if (ok && gpt_oss) {
-                if (moe_scatter_can_add_down_bias(ctx, compute_dtype_))
-                    ctx.scatter_down_bias = ly.expert_down_bias.data;
-                else
-                    moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne,
-                                               expanded, d, stream);
+            // Gate/Up share input quantization (K_in=d): fused gather+quantize reads
+            // ctx.no in token order via sorted_token_ids and writes packed FP4+SFA in
+            // expert-sorted layout in one kernel pass, saving the gathered_base HBM read.
+            prep_sfa(d);
+            imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
+                ctx.no.data, static_cast<const int32_t*>(routing.sorted_token_ids.data),
+                moe_.cutlass3x_packed, reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream);
+            bool ok = true;
+            if (ctx.staged_blocks) {
+                const auto& da = da_cache;
+                ok = run_staged_blocks_(
+                    layer, stream, ctx,
+                    [&](ExpertProj p, int e0, int n_ex) {
+                        if (p == ExpertProj::Gate)
+                            return dispatch_device(ly.expert_gate_ids, da.d_gate_B_ptrs, da.d_gate_SFB_ptrs,
+                                                   da.d_gate_alpha, expert_gate_base, d, eff, e0, n_ex);
+                        if (p == ExpertProj::Up)
+                            return dispatch_device(ly.expert_up_ids, da.d_up_B_ptrs, da.d_up_SFB_ptrs,
+                                                   da.d_up_alpha, expert_up_base, d, eff, e0, n_ex);
+                        return dispatch_device(ly.expert_down_ids, da.d_down_B_ptrs, da.d_down_SFB_ptrs,
+                                               da.d_down_alpha, expert_down_base, eff, d, e0, n_ex);
+                    },
+                    [&] {
+                        fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base,
+                                                  expert_up_base, eff,
+                                                  non_gated_experts ? FFNActivation::RELU_SQR
+                                                                    : cfg.ffn_activation);
+                    });
+            } else {
+                if (!non_gated_experts)
+                    ok = ok &&
+                         dispatch_device(ly.expert_gate_ids, da_cache.d_gate_B_ptrs, da_cache.d_gate_SFB_ptrs,
+                                         da_cache.d_gate_alpha, expert_gate_base, d, eff);
+                ok = ok && dispatch_device(ly.expert_up_ids, da_cache.d_up_B_ptrs, da_cache.d_up_SFB_ptrs,
+                                           da_cache.d_up_alpha, expert_up_base, d, eff);
+                if (ok) {
+                    // Fused: activation (SwiGLU/GeGLU/ReLU²) + NVFP4 quant
+                    // for the down-projection input. Saves one HBM
+                    // round-trip of the swiglu intermediate per layer.
+                    const FFNActivation act_type = non_gated_experts ? FFNActivation::RELU_SQR
+                                                                     : cfg.ffn_activation;
+                    const char* gate_for_fused = non_gated_experts ? nullptr : expert_gate_base;
+                    const auto* d_offs = static_cast<const int32_t*>(routing.expert_offsets.data);
+                    const bool gpt_oss = model_->profile().moe_expert_bias_glu;
+                    // gpt-oss (#547, #2466): gate/up biases + clamped GLU fused into the quantize (cfg act is
+                    // GPT_OSS_GLU); the down bias rides the fused scatter when phase 7 takes it.
+                    fused_act_quantize_device(gate_for_fused, expert_up_base, eff, act_type,
+                                              ly.expert_gate_bias.data, ly.expert_up_bias.data);
+                    ok = dispatch_device(ly.expert_down_ids, da_cache.d_down_B_ptrs, da_cache.d_down_SFB_ptrs,
+                                         da_cache.d_down_alpha, expert_down_base, eff, d);
+                    if (ok && gpt_oss) {
+                        if (moe_scatter_can_add_down_bias(ctx, compute_dtype_))
+                            ctx.scatter_down_bias = ly.expert_down_bias.data;
+                        else
+                            moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne,
+                                                       expanded, d, stream);
+                    }
+                }
+            }
+            if (ok) {
+                device_args_done = true;
+                // What the tier DID, not what its preconditions promised: the block
+                // above can still fail on dispatch and fall through to the legacy
+                // host-args path below.
+                obs.device_args_ready = true;
+                dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
+                verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(),
+                                                 obs, MoePrefillPath::DEVICE_ARGS);
+            } else {
+                IMP_LOG_ERROR("device-args full path failed; falling back to legacy");
             }
         }
-        }
-        if (ok) {
-            device_args_done = true;
-            // What the tier DID, not what its preconditions promised: the block
-            // above can still fail on dispatch and fall through to the legacy
-            // host-args path below.
-            obs.device_args_ready = true;
-            dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
-            verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
-                                             MoePrefillPath::DEVICE_ARGS);
-        } else {
-            IMP_LOG_ERROR(
-                "device-args full path failed; falling back to legacy");
-        }
     }
-}
 
 if (!device_args_done) {
 // Lazy moe_gather: caller skipped the upstream gather when this path was

@@ -276,7 +276,7 @@ static bool upload_qtype_q4_0_(Tensor& weight, QType qtype, QType compute_dtype,
     int64_t K = weight.shape[1];  // in_features (cols), logical
 
     // Raw upload: keep quantized bytes on GPU for dp4a GEMV decode path.
-    // Prefill uses fp16_cache or on-the-fly dequant_gpu → cuBLAS GEMM.
+    // Prefill uses fp16_cache or on-the-fly dequant_gpu → cuBLASLt GEMM.
     if (raw_quant) {
         size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
         void* d_data = nullptr;

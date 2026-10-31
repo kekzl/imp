@@ -5,7 +5,7 @@
 // zero (B26). This closes the plain cudaMalloc/cudaFree hole without touching call
 // sites: the linker redirects references to __wrap_*, which record and forward to
 // __real_*.
-// Calls made INSIDE libcudart/libcublas/CUTLASS are NOT redirected (resolved at their
+// Calls made INSIDE libcudart/libcublasLt are NOT redirected (resolved at their
 // own link time); the ~3.9 GiB library reserve stays out of the counter and is charged
 // separately by the planner. Built only with IMP_ALLOC_INTERPOSE=ON: --wrap must be on
 // the final executable link, so it stays out of shipping binaries.

@@ -1,7 +1,7 @@
 #pragma once
 
 // Opens the engine-persistent (T2) arena (docs/internals/MEMORY.md A3.3) for tests exercising
-// a T2 tenant without an Engine - CUTLASS grouped GEMM and IMMA prefill scratch needed this.
+// a T2 tenant without an Engine - grouped NVFP4 GEMM and IMMA prefill scratch need this.
 // Idempotent: does not close an already-open arena, so nesting is safe.
 
 #include "memory/backend.h"

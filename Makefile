@@ -104,6 +104,13 @@ DEV_CCACHE_VOL ?= imp-dev-ccache
 DEV_CCACHE_SIZE ?= 2G
 DEV_RUN = docker run --rm -v $(PWD):/src -w /src -v $(DEV_CCACHE_VOL):/ccache \
           -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=$(DEV_CCACHE_SIZE) $(DEV_IMG)
+# Python tools never run on the host: plain python3 inside a container or CI, else $(PY_IMG).
+PY_IMG ?= python:3.13-slim
+ifneq ($(wildcard /.dockerenv)$(GITHUB_ACTIONS),)
+PY_RUN = python3
+else
+PY_RUN = docker run --rm -i -u $(shell id -u):$(shell id -g) --network host -v $(PWD):/src -w /src --entrypoint python3 $(PY_IMG)
+endif
 DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOOLS=ON \
                  -DIMP_BUILD_SERVER=ON \
                  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -360,7 +367,9 @@ bench-competitive: build check-gpu
 	@echo "Competitive decode sweep vs vLLM on SafeTensors heroes (image pinned by digest in the script)"
 	bash scripts/bench_competitive.sh
 
-bench-agentic: build check-gpu
+# agent_bench.py and agent_replay_bench.py shell out to curl: python:3.13-slim has none, imp:lint has.
+bench-agentic: PY_IMG = $(LINT_IMG)
+bench-agentic: build check-gpu lint-image
 	@echo "=== imp agentic bench (RTX 5090) — model=$(AGENTIC_MODEL) ==="
 	@docker rm -f imp-agentic-bench >/dev/null 2>&1 || true
 	@docker run -d --name imp-agentic-bench --gpus all -p 8080:8080 \
@@ -370,9 +379,9 @@ bench-agentic: build check-gpu
 	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
 	trap 'docker rm -f imp-agentic-bench >/dev/null 2>&1' EXIT; \
 	echo "--- concurrency TTFT/ITL ---"; \
-	python3 tools/agent_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --concurrency 1,4,16; \
+	$(PY_RUN) tools/agent_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --concurrency 1,4,16; \
 	echo "--- multi-turn replay ---"; \
-	python3 tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
+	$(PY_RUN) tools/agent_replay_bench.py --url http://localhost:8080 --model $(AGENTIC_MODEL) --turns 16
 
 # Server-level serving benchmark (#2202): imp-server in Docker, streaming concurrency sweep,
 # results/bench_serve_<sha>_<model>.json + table. Usage:
@@ -402,9 +411,9 @@ test-agents: build check-gpu
 	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
 	trap 'docker rm -f imp-agent-suite >/dev/null 2>&1' EXIT; \
 	echo "--- stage 1: wire-conformance (forced flows, 3 dialects) ---"; \
-	python3 tools/analysis/agent_loop_suite.py --url http://localhost:8080; \
+	$(PY_RUN) tools/analysis/agent_loop_suite.py --url http://localhost:8080; \
 	echo "--- stage 2: real model-driven loop (auto tool_choice, real tools) ---"; \
-	python3 tools/analysis/agent_task_loop.py --url http://localhost:8080 --model $(AGENTIC_MODEL)
+	$(PY_RUN) tools/analysis/agent_task_loop.py --url http://localhost:8080 --model $(AGENTIC_MODEL)
 
 # Needle-in-a-haystack retrieval gate past 16K (#1022): boots a model that fits
 # a long context and asserts a planted needle is retrieved at 16K and 32K across
@@ -452,7 +461,7 @@ test-niah: build check-gpu
 	@echo "waiting for server..."; \
 	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
 	trap 'docker rm -f imp-niah >/dev/null 2>&1' EXIT; \
-	python3 tools/analysis/niah_check.py --url http://localhost:8080 --model $(NIAH_MODEL) \
+	$(PY_RUN) tools/analysis/niah_check.py --url http://localhost:8080 --model $(NIAH_MODEL) \
 		--lengths 16000,32000 --depths 0.1,0.5,0.9
 
 # #1007 stage-2 EXTERNAL gate (opt-in): REAL third-party agent binaries driving
@@ -632,19 +641,19 @@ sanitize:
 
 # Apply clang-format in place across src/, include/, tools/, tests/.
 # I1 gate (docs/internals/MEMORY.md): no direct CUDA memory API outside
-# src/memory/, against a monotonically shrinking allowlist. Host-only, no Docker.
+# src/memory/, against a monotonically shrinking allowlist. CPU only, no GPU.
 check-alloc-sites:
-	@python3 tools/check_alloc_sites.py
+	@$(PY_RUN) tools/check_alloc_sites.py
 
 # Remaining direct allocation sites, worst files first. Never fails.
 alloc-sites-stats:
-	@python3 tools/check_alloc_sites.py --stats
+	@$(PY_RUN) tools/check_alloc_sites.py --stats
 
 # Lazy device statics must register an IMP_REGISTER_CUDA_STATIC_RESET hook (or
 # check engine_arena().generation()), else the second engine in a process reads
-# the first one's closed arena. Host-only, no Docker.
+# the first one's closed arena. CPU only, no GPU.
 check-static-reset:
-	@python3 tools/check_static_reset.py --list
+	@$(PY_RUN) tools/check_static_reset.py --list
 
 # Assemble the compute_120f PTX fallback out of a built artefact (#1650). Needs
 # ptxas, not a GPU. Runs in CI's `PTX fallback` job; this target reproduces it.
@@ -655,9 +664,9 @@ check-ptx-fallback:
 		bash scripts/check_ptx_fallback.sh $(or $(PTX_BIN),build-dev/libimp.a)
 
 # Allocate/free API pairing: cudaMalloc<->cudaFree, cudaMallocAsync<->cudaFreeAsync,
-# cudaMallocHost/cudaHostAlloc<->cudaFreeHost. Host-only, no Docker.
+# cudaMallocHost/cudaHostAlloc<->cudaFreeHost. CPU only, no GPU.
 check-alloc-pairs:
-	@python3 tools/check_alloc_pairs.py
+	@$(PY_RUN) tools/check_alloc_pairs.py
 
 # Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
 # BUILT artifact, so this needs no GPU and no special build flags - but it does
@@ -679,14 +688,16 @@ kernel-resources-dump:
 	  fi; \
 	done
 
-kernel-resources: 
-	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -
+# kernel_resources.py demangles through c++filt / cu++filt: $(DEV_IMG) carries both.
+kernel-resources kernel-resources-update kernel-resources-stats: PY_IMG = $(DEV_IMG)
+kernel-resources:
+	@$(MAKE) --no-print-directory kernel-resources-dump | $(PY_RUN) tools/kernel_resources.py -
 
 kernel-resources-update:
-	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --update
+	@$(MAKE) --no-print-directory kernel-resources-dump | $(PY_RUN) tools/kernel_resources.py - --update
 
 kernel-resources-stats:
-	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py - --stats
+	@$(MAKE) --no-print-directory kernel-resources-dump | $(PY_RUN) tools/kernel_resources.py - --stats
 
 # Re-pin tests/refs/chat_template_goldens.h from the upstream chat templates.
 # Needs network (six of the nine families have no local checkpoint) and writes
@@ -700,7 +711,7 @@ chat-goldens:
 
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:
-	@python3 tools/check_alloc_pairs.py --list
+	@$(PY_RUN) tools/check_alloc_pairs.py --list
 
 # Lane census + gate: every GTest macro in a ctest lane, none demoted from `ctest -L unit`
 # (docs/DESIGN_DECISIONS.md "No GPU runner in CI"). Source-derived, no build, no Docker.
@@ -709,11 +720,11 @@ check-test-lanes:
 
 # Functions defined inline in a header that nothing in the tree mentions.
 check-dead-inline:
-	@python3 tools/check_dead_inline_accessors.py --list
+	@$(PY_RUN) tools/check_dead_inline_accessors.py --list
 
 # Sites that log at FATAL and then continue. IMP_LOG_FATAL does not abort.
 check-log-fatal:
-	@python3 tools/check_log_fatal.py --list
+	@$(PY_RUN) tools/check_log_fatal.py --list
 
 lint-image:
 	@docker build $(DEP_ARGS) --target lint -t $(LINT_IMG) . >/dev/null

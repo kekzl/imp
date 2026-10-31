@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - Cold-start library reserve constant 3900 -> 1536 MiB: without CUTLASS and cuBLAS v2 the first forward claims 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB. KV blocks after warmup are unchanged (#2436 re-sizes; Qwen3.8-27B 4950, Flash-Next 2025); weight caches and auto batch/seq resolve against 2.3 GiB less.
 - MoE router GEMM at prefill takes the own split-K kernel only while cuBLASLt would accumulate in fp32 (`gemm.cublas_fp16_acc` off, Gemma-4); Nemotron-3-Nano (fp16 accumulate on) goes back to cuBLASLt: router kernels 5.83 -> 4.48 ms per pp4096 run, e2e pp4096 +0.5 % (3/3 pairs).
+- Docs: `gemm.nvfp4_smallm=false` keeps NVFP4 activations (the tile GEMM quantizes them); FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`, -38 % at 32 streams on Qwen3.8-27B-NVFP4. `BatchInvarianceTest` third arm now runs that switch.
 
 ### Removed
 - `gemm.nvfp4_cutlass_streamk`: no GEMM read it since CUTLASS left (#2938); the own tile plans stream-K per grid (#2934). `--set gemm.nvfp4_cutlass_streamk=...` now stops at startup as an unknown key; in `imp.conf` it logs a warning and is ignored.

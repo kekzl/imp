@@ -69,7 +69,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         borrow_payload_from_wcache(h, *wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
-        //   Prefill (M>1): FP16 cuBLAS > FP8 cuBLAS > CUTLASS NVFP4 > source dequant
+        //   Prefill (M>1): FP16 > FP8 > CUTLASS_NVFP4 tier (own tile GEMM) > source dequant
         //   Decode (M=1):  NVFP4 GEMV > FP8 GEMV > source dp4a GEMV
         // Native NVFP4: all dense weights get FP16 prefill (dequanted at load) to avoid FP8
         // precision loss compounding across layers; decode uses source NVFP4 (single-token, no
@@ -354,7 +354,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // Decode-redundancy diagnostic: how many bytes of original GGUF the overlay tier
         // (NVFP4/CUTLASS_NVFP4/FP8/MXFP4) covers for DECODE. An UPPER BOUND, not freeable VRAM:
         // M>1 prefill still reads the GGUF source for these weights under the current
-        // strict-quality-neutral prefill paths (IMMA raw-read, on-the-fly dequant, or CUTLASS).
+        // strict-quality-neutral prefill paths (IMMA raw-read, on-the-fly dequant, or the NVFP4 tile GEMM).
         // FP16-cached weights keep the original for dp4a decode and are not counted.
         {
             size_t decode_redundant_count = 0;
@@ -377,8 +377,8 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         }
     }
 
-    // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays. The CUTLASS
-    // 3.x device-args dispatch (moe.nvfp4_device_args) consumes per-expert weight pointers
+    // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays. The grouped
+    // NVFP4 device-args dispatch (moe.nvfp4_device_args) consumes per-expert weight pointers
     // as device-resident arrays; per-call host iteration + cudaMemcpyAsync was the residual
     // overhead blocking full CUDA-graph capture of the MoE prefill. Build the caches once
     // here while handle payloads are populated; the forward path then uses device pointers

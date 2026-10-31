@@ -91,7 +91,7 @@ TEST(PrefillRowInvariance, RouterLogitsIndependentOfBatch) {
     cudaFree(dY);
 }
 
-// Host replica of sfatom_offset (gemm_cutlass_sm120.cu): SfAtom 128 rows x 4 K-groups, 512 B.
+// Host replica of sfatom_offset (nvfp4_sfatom_quant.cu): SfAtom 128 rows x 4 K-groups, 512 B.
 int sfatom_off(int row, int kg, int n_k_tiles) {
     const int rl = row % 128;
     return ((row / 128) * n_k_tiles + kg / 4) * 512 + (rl % 32) * 16 + (rl / 32) * 4 + kg % 4;

@@ -349,7 +349,7 @@ ArmResult run_arm(TeacherForcedDriver& drv, const std::vector<int32_t>& toks, in
 
 // One checkpoint, three arms: control M=1 vs M=1 must read exactly zero under
 // IMP_DETERMINISTIC=1 (else the M=32 number is noise); measured M=1 vs M=32 prices the
-// W4A16->W4A4 activation-quant step.
+// batch (shape + W4A16->W4A4 activation quantize), the W4A16 arm prices the shape alone.
 TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     const std::string path = model_path();
     if (!fs::exists(path + "/config.json"))
@@ -430,17 +430,20 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         print_comparison("re-init M=1/M=1", solo_a4, solo, reinit);
     }
 
-    // gemm.nvfp4_smallm=false routes 2..32 rows to dequant/CUTLASS GEMM (W4A16 at every M) - the
-    // operator-facing switch. Isolates "batching changed the GEMM shape" from "batching
-    // quantized the activations": both arms below share the shape.
+    // W4A16 at every M: smallm_a4=false feeds FP16 rows to the dequant+HMMA kernel (K % 128),
+    // the LM-head pair off leaves the batched FP16 GEMV. nvfp4_smallm=false would stay W4A4 (own
+    // tile GEMM quantizes). Isolates "batch shape" from "activation quantize": both arms share the shape.
     ArmResult batched_w4a16;
     Comparison measured_w4a16{}, solo_vs_solo_cfg{};
     {
         RuntimeConfig rc;
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
-        rc.gemm.nvfp4_smallm = false;
+        rc.gemm.nvfp4_smallm = true;
+        rc.gemm.nvfp4_smallm_a4 = false;
         rc.gemm.nvfp4_lm_head = kLmHead;
+        rc.gemm.nvfp4_lm_head_smallm = false;
+        rc.gemm.nvfp4_lm_head_cutlass = false;
         set_pending_runtime_config(rc);
 
         Engine engine;
@@ -451,7 +454,7 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
 
         solo_vs_solo_cfg = compare(solo_a4, solo);
         measured_w4a16 = compare(solo, batched_w4a16);
-        print_comparison("smallm-off M=1/M=1", solo_a4, solo, solo_vs_solo_cfg);
+        print_comparison("A16 cfg M=1/M=1", solo_a4, solo, solo_vs_solo_cfg);
         print_comparison("W4A16 M=1/M=32", solo, batched_w4a16, measured_w4a16);
     }
 
@@ -462,14 +465,12 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
                                         "holding, so the M=32 deltas are unattributable";
     EXPECT_LT(control.max_abs_lp, 1e-9) << "M=1 vs M=1 logprobs differ by " << control.max_abs_lp;
 
-    // Re-initializing the SAME config reproduces M=1 bit-for-bit, but toggling smallM off (which
-    // removes an arena tenant, touches no M=1 kernel) still moves M=1 - an address/alignment
-    // boundary. Every batched comparison here stays WITHIN one engine so this boundary noise
-    // can't dominate the measured batch effect.
+    // The A16 config also moves M=1: the 24-row prompt runs the small-M kernel on FP16 rows.
+    // Batched comparisons stay within one engine; this bounds the solo shift below the batch
+    // effect so the two arms' deltas (docs/PERF.md "Batch invariance") read side by side.
     EXPECT_LT(solo_vs_solo_cfg.mean_abs_lp, measured_a4.mean_abs_lp)
-        << "flipping an unrelated config knob moved M=1 by " << solo_vs_solo_cfg.mean_abs_lp
-        << ", as much as batching itself (" << measured_a4.mean_abs_lp
-        << "): the solo baseline is too unstable for the batched numbers to mean anything";
+        << "the A16 config moved M=1 by " << solo_vs_solo_cfg.mean_abs_lp << ", as much as batching itself ("
+        << measured_a4.mean_abs_lp << "): the two arms' solo baselines are not comparable";
 
     // Regression fence on NLL delta (docs/PERF.md "Batch invariance"), not an invariance claim
     // (imp guarantees none, docs/DETERMINISM.md): fails only if the gap grows by an order of
@@ -481,11 +482,10 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     EXPECT_LT(measured_a4.mean_abs_lp, 0.6)
         << "mean |delta logprob| between M=1 and M=32 is " << measured_a4.mean_abs_lp;
 
-    // Same fence on the W4A16 batched arm; deliberately not an ordering assertion between the
-    // two arms - on the measured checkpoint they're the same size, so the batch effect is the
-    // GEMM shape, not the activation format (docs/PERF.md).
+    // Same fence on the W4A16 batched arm; no ordering assertion between the two arms: the
+    // 0.261 vs 0.242 reading (docs/PERF.md) came from nvfp4_smallm=false, W4A4 in both arms.
     EXPECT_LT(measured_w4a16.mean_abs_lp, 0.6)
-        << "mean |delta logprob| between M=1 and M=32 without smallM is " << measured_w4a16.mean_abs_lp;
+        << "mean |delta logprob| between M=1 and M=32 on FP16 activations is " << measured_w4a16.mean_abs_lp;
 
     // Absolute NLL anchor: every assertion above is a DIFFERENCE, so an error hitting both arms
     // equally cancels. A planted 2% smallM-A4 output-scale error left all five deltas inside
