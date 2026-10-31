@@ -51,13 +51,13 @@ Leading on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b clo
 | Qwen3-8B | NVFP4, FP8 | daily driver dense |
 | Qwen3-14B | NVFP4 | sweet spot, the north-star model |
 | Qwen3-Coder-30B-A3B | NVFP4 | hero MoE |
-| Qwen3.6-35B-A3B | NVFP4 | hybrid GDN+MoE daily driver, MTP head |
+| Qwen3.8-Flash-Next | NVFP4 | 123.6 GiB GDN+MoE on one 32 GB card, experts in host RAM; no vLLM arm |
 | Gemma-4 26B-A4B (text+vision) | NVFP4 | multimodal + MoE hero |
 | Nemotron-H | NVFP4 | hybrid Mamba2+Attn+MoE flagship |
 | Qwen3.8-27B | NVFP4 | dense-GDN flagship, text + images, README default |
 | gpt-oss-20b | MXFP4 (official SafeTensors; only the GGUF is staged on this host) | experts converted to NVFP4 at load, Harmony channels, tg ~315-345, pp512 ~16-19k |
 
-The GGUF forms formerly in this set (Qwen3-4B/8B Q8_0, Qwen3-14B Q6_K, Qwen3.8-27B Q4_K_M, the UD-Q4_K_M MoE files, gpt-oss MXFP4 GGUF) are legacy since 2026-10-30.
+The GGUF forms formerly in this set (Qwen3-4B/8B Q8_0, Qwen3-14B Q6_K, Qwen3.8-27B Q4_K_M, the UD-Q4_K_M MoE files, gpt-oss MXFP4 GGUF) are legacy since 2026-10-30. Since 2026-10-31 the set is Qwen3.8 plus Qwen3 (3.0), no older Qwen generation: Qwen3.6-35B-A3B left it.
 
 `check-release.sh` stage `make bench-competitive (release bar 2)` runs it with `RELEASE_BAR=1`: imp and vLLM serve each SafeTensors hero from a fresh container, one stream, 300-token greedy answers, speculation off on both (imp's default column is reported, not gated); it fails any hero imp leads by < 5 %.
 

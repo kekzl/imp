@@ -21,6 +21,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Hero set (`docs/GOAL.md`, `make bench-competitive`): Qwen3.8-Flash-Next NVFP4 in, listed as not contestable (123.6 GiB, no vLLM arm on one 32 GB card); Qwen3.6-35B-A3B out. Qwen3.8 plus Qwen3 (3.0), no older Qwen generation. README suggests Qwen3-Coder-30B-A3B in its place.
 - Perf gate re-pinned at f26bad0b (`tests/perf_baseline.json`, previous pin 2026-10-30) after CUTLASS, cuSOLVER and cuBLAS v2 left the build: pp128 19210.34 -> 23237.96, pp512 41930.89 -> 45852.06, tg128 274.93 -> 281.35, own peak 6214 -> 6140 MiB. Second pass 281.27 / 45752.52.
 - Gemma-4 MoE router GEMM at prefill (n >= 1024, d >= 2560, <= 128 experts) runs an own cluster split-K FP16 GEMM instead of cuBLASLt: pp4096 cuBLASLt sum 8.0 -> 0.22 ms, GEMM kernel sum 957.7-958.5 -> 954.9-957.4 ms, e2e 43548-43723 -> 43703-43864 tok/s; deterministic PPL unchanged (18.2854).
 - Own tile GEMM grids up to a quarter wave (k/v projections at prefill) split every 128x64 tile in 2 k-pieces when a stream-K workspace is passed: pp512 GEMM sum Qwen3-30B-A3B 14.02-14.30 -> 13.95 ms, Qwen3-8B-NVFP4 64.9-65.4 -> 64.4-64.7, others neutral; deterministic mode unchanged.

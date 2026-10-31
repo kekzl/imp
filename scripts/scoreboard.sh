@@ -23,8 +23,6 @@ Qwen3-14B	Qwen3-14B-NVFP4	dense	NVFP4
 Qwen3-30B-A3B	Qwen3-30B-A3B-NVFP4-Modelopt	moe	NVFP4
 Qwen3-30B-A3B	Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf	moe	Q4_K_M
 Qwen3-Coder-30B-A3B	Qwen3-Coder-30B-A3B-Instruct-FP4	moe	NVFP4
-Qwen3.6-35B-A3B	Qwen3.6-35B-A3B-NVFP4	hybrid	NVFP4
-Qwen3.6-35B-A3B	qwen3.6-35B-A3B-gguf/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf	hybrid	Q4_K_M
 Gemma-4-26B-A4B	Gemma-4-26B-A4B-it-NVFP4	moe	NVFP4
 Gemma-4-26B-A4B	gemma-4-26B-A4B-it-UD-Q4_K_M.gguf	moe	Q4_K_M
 Gemma-3-12B	gemma-3-12b-it-Q4_K_M.gguf	dense	Q4_K_M
