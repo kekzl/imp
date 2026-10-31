@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-10-31
+
 ### Fixed
 - `gemm.f16_tile` took grids just over one wave (Nemotron-3-Nano Mamba out_proj 2048x2688x4096: 176 tiles, 220 vs cuBLASLt 122 us); it now needs >= 80 % of its last wave filled. Nemotron pp4096 vs v0.59.2: -2.6 % -> +0.6 % (3/3 pairs, `tools/analysis/release_ab.sh`).
 - `/v1/embeddings` on last-token embedders (Qwen3-Embedding, SafeTensors): imp mean-pooled pre-norm states and never loaded the prefix-less weights; it now reads `1_Pooling/config.json`, appends the tokenizer's end token and pools the normed last token. Cos vs HF 0.23-0.57 -> 0.999993+ (`make test-embed`); `make test-rerank` defaults to Qwen3-Reranker-0.6B.
