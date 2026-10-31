@@ -296,7 +296,7 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
             const int s = ring % C::kStages;
             mbar_wait_sleep(g.bars + s * 8, (ring / C::kStages) & 1);
             mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane,
-                         C::sf_g0(kt));
+                         C::sf_g0(kt), n0 & 127);
             __syncwarp();
             if (g.lane == 0)
                 mbar_arrive(g.bars + (C::kStages + s) * 8);
@@ -504,6 +504,48 @@ bool args_ok(const TileArgs& p) {
     return p.a_sf != nullptr && p.w_sf != nullptr;
 }
 
+// One variant (see the header), falling through to the next simpler plan; false = every TMA config refused.
+template <Fmt F>
+bool launch_variant(const TileArgs& p, int variant, bool sk_fits, int sms, cudaStream_t stream) {
+    constexpr int kB1 = F == Fmt::kMx8 || F == Fmt::kF8 ? 64 : 128;
+    using Sk = Cfg<128, kB1, 3, true, true, true, F>;
+    const int kt = (p.K + Sk::kBK - 1) / Sk::kBK;
+    switch (variant) {
+        case 1:
+            if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))
+                return true;
+            break;
+        case 2:
+            return launch_tile<Cfg<128, 2 * kB1, 2, false, false, false, F>>(p, stream);
+        case 6: {  // 128x64, every tile split in 2 k-pieces
+            TileArgs h = p;
+            if (sk_fits && hybrid_plan(h, sms, kt, 64) &&
+                launch_tile<Cfg<64, kB1, 4, true, true, true, F>>(h, stream))
+                return true;
+            [[fallthrough]];
+        }
+        case 5:
+            if (launch_tile<Cfg<64, kB1, 4, true, true, false, F>>(p, stream))
+                return true;
+            break;
+        case 4: {
+            TileArgs h = p;
+            if (sk_fits && hybrid_plan(h, sms, kt) && launch_tile<Sk>(h, stream))
+                return true;
+            [[fallthrough]];
+        }
+        case 3:
+            if (sk_fits && launch_tile<Sk>(p, stream))
+                return true;
+            [[fallthrough]];
+        default:
+            if (launch_tile<Cfg<128, kB1, 4, true, true, false, F>>(p, stream))
+                return true;
+            break;
+    }
+    return false;
+}
+
 // All formats run the same byte geometry: an MXFP8 stage of BK elements moves what an NVFP4 / MXFP4 stage
 // of 2 x BK does, so the NVFP4 tile choices carry over with BK halved.
 template <Fmt F>
@@ -526,32 +568,8 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
     p.sk_per = (units + sms - 1) / sms;
     if (variant < 0)
         variant = pick_variant(M, N, (K + Sk::kBK - 1) / Sk::kBK, sms, sk_fits);
-    switch (variant) {
-        case 1:
-            if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))
-                return true;
-            break;
-        case 2:
-            return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
-        case 5:
-            if (launch_tile<Cfg<64, kB1, 4, true, true, false, F>>(p, stream))
-                return true;
-            break;
-        case 4: {
-            TileArgs h = p;
-            if (sk_fits && hybrid_plan(h, sms, (K + Sk::kBK - 1) / Sk::kBK) && launch_tile<Sk>(h, stream))
-                return true;
-            [[fallthrough]];
-        }
-        case 3:
-            if (sk_fits && launch_tile<Sk>(p, stream))
-                return true;
-            [[fallthrough]];
-        default:
-            if (launch_tile<Cfg<128, kB1, 4, true, true, false, F>>(p, stream))
-                return true;
-            break;
-    }
+    if (launch_variant<F>(p, variant, sk_fits, sms, stream))
+        return true;
     // no TMA map (alignment): sync mainloop
     return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
 }

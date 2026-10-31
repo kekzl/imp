@@ -10,7 +10,8 @@ namespace imp {
 // A [M,K/2] / W [N,K/2] packed E2M1 row-major, scales UE4M3 in SfAtom layout
 // (cutlass_nvfp4_sf_size, rows padded to 128). K % 64 == 0 (K % 128 = 64: partial last stage), N % 8 == 0;
 // false = refused. variant -1 = auto; 0 128x128, 1 128x256, 2 sync, 3 stream-K 128x128, 4 hybrid stream-K
-// (whole waves data-parallel, partial-wave tiles in 3 k-pieces; else 3). workspace: stream-K partials
+// (whole waves data-parallel, partial-wave tiles in 3 k-pieces; below a wave every tile in 2; else 3),
+// 5 128x64, 6 128x64 split in 2 k-pieces (else 5). workspace: stream-K partials
 // (SMs x 64 KiB); without it auto never picks stream-K.
 [[nodiscard]] bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
