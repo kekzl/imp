@@ -86,10 +86,10 @@ process, 10 reps), command `imp-cli --model <dir>/ --bench --bench-pp 16 --bench
 | gpt-oss-20b | 21B (3.6B) | 325 -> **391** (2026-07-13, `63df2d30`, `gemm.fp8_attn_proj` sidecar, +12%, teacher-forced PPL unaffected by construction) |
 
 gpt-oss experts convert SafeTensors MXFP4 to NVFP4 at load (bit-exact nibbles, power-of-two
-scales) and register for the CUTLASS grouped-GEMM prefill (pp512 ~16-19k tok/s); attention stays
-on cuBLAS. On `sm_120`, native NVFP4 decode is effectively uncontested: vLLM falls back to
-Marlin (its NVFP4 path gates on an opcode family consumer Blackwell lacks, see
-[`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md));
+scales) and register for the grouped NVFP4 prefill GEMM (pp512 ~16-19k tok/s, measured on the
+CUTLASS kernel; the own grouped kernel since #2929); attention stays on cuBLAS. vLLM 0.31.0 runs
+NVFP4 natively on `sm_120` (`FlashInferCutlassNvFp4LinearKernel`, FP8 KV with the XQA decode
+backend on Qwen3-14B-NVFP4, 2026-10-31 server log);
 per-row superseding evidence: [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## NVFP4 prefill (FP16-QK FA2 primary hd=128 prefill, #687)
@@ -167,8 +167,10 @@ Harness `tools/analysis/vllm_conc_ab.sh`.
 The GDN-hybrid checkpoint (runs 1-4) leads vLLM at every shape tried; the dense counter-probe
 (runs 5-10) crossed over between 8 and 32 streams on 2026-09-02; on v0.60.0 vs vLLM 0.31.0
 (runs 11-13) imp leads at 8 and 32 streams with short prompts and trails only with 1000-token
-prompts at 32 streams (-4.2%); single-stream imp leads 17-22% on both checkpoints (native FP4 decode vs
-vLLM's Marlin dequant-to-BF16 fallback, no native FP4 path on `sm_120`). The 32-stream GDN-hybrid
+prompts at 32 streams (-4.2%; a streamed re-run on main `ce149da7`, 3 waves per engine: TTFT max
+1.19-1.23 vs 0.95-1.02 s, wall minus TTFT max 2.51-2.57 vs 2.63-2.64 s, so the gap is prefill);
+single-stream imp leads 17-22% on both
+checkpoints. The 32-stream GDN-hybrid
 aggregate moved 81.5 -> 1807.9 tok/s across this branch's levers; runs 8-9 and the profiling
 breakdown that attributed the gap (GEMM class, GPU idle, launch density):
 [archive](archive/BENCHMARKS_PRE_V0.44.md).
