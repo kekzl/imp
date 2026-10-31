@@ -360,8 +360,9 @@ bool Engine::init_weights() {
 
     // Check for host-resident expert weights.
     // gpt-oss is exempt: its MXFP4 experts are kept host-resident through
-    // upload but converted to on-device NVFP4 + CUTLASS-grouped at pre_dequant,
-    // not host-offloaded at decode; treating them as on-host would read post-convert device pointers as host MXFP4 (garbage) and wrongly disable CUDA graphs.
+    // upload but converted to on-device NVFP4 (grouped NVFP4 GEMM) at pre_dequant,
+    // not host-offloaded at decode; treating them as on-host would read post-convert device pointers as host
+    // MXFP4 (garbage) and wrongly disable CUDA graphs.
     if (mcfg.n_experts > 0 && !model_->profile().experts_convert_at_predequant) {
         for (int i = 0; i < mcfg.n_layers; i++) {
             const auto& L = model_->layer(i);

@@ -1,5 +1,5 @@
 // Host-side routing decisions from attention-prefill (attention_dispatch.cpp) and MoE-prefill
-// GEMM dispatch (executor_forward_moe_cutlass.cu), R2/P1.4: the #493 routing regression and
+// GEMM dispatch (executor_forward_moe_cutlass.cpp), R2/P1.4: the #493 routing regression and
 // the #574 grouped-GEMM-vs-fallback path were both E2E-only. These pin the tables as a cheap
 // CPU diff.
 
@@ -355,7 +355,7 @@ TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
 
-// executor_forward_moe_cutlass.cu replays select_moe_prefill_path() against what the chain
+// executor_forward_moe_cutlass.cpp replays select_moe_prefill_path() against what the chain
 // observed (verify_against_moe_routing_model), logging on divergence; these pin the replay so
 // it can't fire on a correct dispatch. Observations mirror what a tier DID, not what its
 // preconditions promised: device-args/smallM can pass their gate then fail inside and fall
@@ -441,7 +441,7 @@ TEST(MoeTierPrecedence, GroupedBeatsLegacyWhenReady) {
     EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::GROUPED);
 }
 
-// The entry gate short-circuits every CUTLASS tier, however ready they look.
+// The entry gate short-circuits every grouped tier, however ready they look.
 TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_smallM = true;

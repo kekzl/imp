@@ -777,7 +777,7 @@ void Engine::init_resolve_quant_flags_() {
         }
     }
 
-    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all
+    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS_NVFP4-tier paths, and CUDA graphs all
     // have incompatibilities with the per-layer head_dim + split MoE tensor
     // layout; force plain FP16 until proper kernels land. GDN models can't
     // use FP8 prefill either: recurrent state accumulates error per token,
@@ -805,7 +805,7 @@ void Engine::init_resolve_quant_flags_() {
         // [attention] fp8_prefill = "never" for max prefill at medium pp.
         if (config_.use_nvfp4_decode) {
             // Prequant SafeTensors NVFP4 weights are already NVFP4 on disk:
-            // Phase 3a/3b (Q*_K->NVFP4->CUTLASS) iterate `wcache_.nvfp4`,
+            // Phase 3a/3b (Q*_K->NVFP4->SfAtom cache) iterate `wcache_.nvfp4`,
             // which stays empty here, so they are no-ops. Phase 3-MoE
             // (cache_moe_native_nvfp4 in executor_pre_dequant.cpp) IS
             // load-bearing: it builds the contiguous per-layer expert buffer
@@ -830,7 +830,7 @@ void Engine::init_resolve_quant_flags_() {
         // src/exec/executor_kv_write.cu by narrowing the calibration view to
         // `nkv * hd` per layer.
         // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
-        // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
+        // from cuBLASLt algo selection / split-K atomics amplifies into wildly
         // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
         // deterministic GEMM paths so generation is stable run-to-run.
         if (!runtime_config_.runtime.deterministic_gemm) {

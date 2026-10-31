@@ -1,7 +1,7 @@
 #pragma once
 
 // Persisted library-reserve measurements (MEMORY.md A1.5, AUDIT B41/B42/B49).
-// kMeasuredLibraryReserveBytes (what cuBLAS/CUTLASS claim on the first forward) was a
+// kMeasuredLibraryReserveBytes (what cuBLASLt, CUTLASS until 2026-10-31, claims on the first forward) was a
 // single constant, wrong in both directions across models: it either wastes GiB of KV
 // pool or under-reserves and spills the card.
 // The plan needs the figure BEFORE the forward that produces it, so a single run cannot

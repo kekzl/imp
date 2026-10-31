@@ -7,7 +7,7 @@
 // build_banned_token_list: runtime ban-list from RuntimeConfig + model tokenizer, keeping
 // stop/EOS/think/Gemma-4 channel markers out of the ban set.
 //
-// warmup: optional first forward pass to prime cuBLAS + CUDA graph capture. Skipped for
+// warmup: optional first forward pass to prime cuBLASLt + CUDA graph capture. Skipped for
 // MXFP4 weights (FP16-cache bypass) and Gemma-4 (algo jitter); resets FP8 KV calibration
 // after the synthetic BOS pass.
 //
@@ -80,7 +80,7 @@ bool Engine::init_features() {
 
     // Prefill/decode overlap gates (runtime.prefill_overlap): each DECLINE is logged once
     // (#1755), since a gate that refuses silently is a gate nobody can see. The per-step gate
-    // (decode batch >= 2, no spec-verify sharing the CUTLASS activation scratch) lives in step_impl_.
+    // (decode batch >= 2, no spec-verify sharing the NVFP4 activation scratch) lives in step_impl_.
     if (runtime_config_.runtime.prefill_overlap) {
         const char* decline = nullptr;
         if (!green_ctx_.is_available())
@@ -408,7 +408,7 @@ static void log_library_measurement(size_t forward_window, int64_t residual, siz
 // Report the charge against what the plan assumed, and name the value to pin.
 //
 // The caller takes max(forward_window, whole_init) and caches that: on the NVFP4 path the
-// two differ by orders of magnitude, since CUTLASS claims during the phase-02 cache build
+// two differed by orders of magnitude, since CUTLASS (until 2026-10-31) claimed during the phase-02 build
 // while the window only opens at the warmup forward (AUDIT B79). Runs after the charge is
 // decided, so it can recommend the correct number instead of the forward window alone.
 static void report_library_reserve(size_t charge, size_t forward_window, size_t whole_init,
@@ -498,8 +498,8 @@ void Engine::warmup() {
     const size_t forward_window = measure_library_forward_window(warm_free_before, imma_planes_in_window);
 
     // Which library claims WHEN depends on the model's execution path, so the forward window
-    // only sees part of the charge (Q8_0 measures ~7.5 GiB in-forward; NVFP4's CUTLASS claims
-    // two phases earlier and measures ~0, AUDIT B79). What imp's own allocations (B78: allocator
+    // only sees part of the charge (Q8_0 measures ~7.5 GiB in-forward; NVFP4 with CUTLASS claimed
+    // two phases earlier and measured ~0, AUDIT B79). What imp's own allocations (B78: allocator
     // + async mempool fully named) cannot account for IS the rest (invariant A1.5).
     //
     // This reads the per-pool ledger, which is why note() is no longer gated on
@@ -567,7 +567,7 @@ void Engine::warmup() {
             IMP_LOG_ERROR("warmup CUDA error: %s", cudaGetErrorString(e));
     }
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
-    // failure on consumer GPUs: the error propagates to cuBLAS otherwise).
+    // failure on consumer GPUs: the error propagates to cuBLASLt otherwise).
     cudaGetLastError();
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());  // ensure all weight upload/dequant kernels are done
 

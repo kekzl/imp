@@ -65,7 +65,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     }
     cudaStreamSynchronize(stream_);
 
-    // Path B: gemm_nvfp4 single-call (dequant → cuBLAS) — the bypass path.
+    // Path B: gemm_nvfp4 single-call (batched FP32 GEMV at M=11 <= 16), the bypass path.
     int64_t ashape[2] = {M, K};
     int64_t yshape[2] = {M, N};
     Tensor a_t(d_a, QType::F16, 2, ashape, /*on_device=*/true);

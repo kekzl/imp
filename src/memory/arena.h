@@ -14,7 +14,7 @@
 //   - model-resident: weights + the pre-dequant weight caches. Released
 //     wholesale on model unload, which is what makes server.model_swap a
 //     bounded operation rather than a process restart.
-//   - engine-persistent: workspaces, cuBLAS/CUTLASS scratch, graph buffers.
+//   - engine-persistent: workspaces, cuBLASLt/own-GEMM scratch, graph buffers.
 //     Survives a model swap.
 
 #include "memory/backend.h"

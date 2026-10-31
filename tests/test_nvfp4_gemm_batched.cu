@@ -1,7 +1,8 @@
 // gemm_nvfp4_batched (#998): verify chunks (M=2..33) previously took the M>1 prefill
 // dispatch, which on GGUF+NVFP4-overlay dequantizes the full source per GEMM (measured 52%
 // of the tg window at ctx 2048 on Qwen3-14B Q6_K, tg -39% vs spec-off). Reference: gemm_nvfp4
-// (dequant->cuBLAS) on identical weights, must agree within FP16 accumulation-order noise.
+// (batched FP32 GEMV at M<=16, dequant->gemm() cuBLASLt above) on identical weights, must agree
+// within FP16 accumulation-order noise.
 
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
