@@ -167,9 +167,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
             quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
                                            csz, cfg.d_model, stream);
-            lm_cutlass_done = gemm_nvfp4_cutlass_sm120_fp32(
-                qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_,
-                static_cast<float*>(lg.data), csz, cfg.vocab_size, cfg.d_model, nullptr, 0, stream);
+            lm_cutlass_done = lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream);
         }
         if (lm_cutlass_done) {
             // logits already written
@@ -551,8 +549,7 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         Tensor lg = view_tokens(logits_, csz);
         quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz, cfg.d_model,
                                        stream);
-        if (!gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_,
-                                           static_cast<float*>(lg.data), csz, V, cfg.d_model, nullptr, 0, stream))
+        if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
             return false;
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals, pidxs);
