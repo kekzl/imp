@@ -1,0 +1,89 @@
+Generating SQLite file /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/00b66963-b861-4fa0-8df7-358185005fec/scratchpad/router/nsys/Nemotron_fix.sqlite from /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/00b66963-b861-4fa0-8df7-358185005fec/scratchpad/router/nsys/Nemotron_fix.nsys-rep
+Processing [/tmp/claude-1000/-home-kekz-github-com-kekzl-imp/00b66963-b861-4fa0-8df7-358185005fec/scratchpad/router/nsys/Nemotron_fix.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+33.9,253382401,920,275415.7,270191.0,36768,627966,100703.4,"imp::<unnamed>::gemm_grouped_nvfp4_tile_kernel(imp::<unnamed>::GArgs, CUtensorMap_st, CUtensorMap_st)"
+9.5,70987806,414,171468.1,168079.0,164608,494782,31246.4,"void imp::<unnamed>::ssm_scan_ssd_kernel<(bool)1, (bool)1>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, const float *, void *, __half *, const __half *, int, int, int, int, const int *)"
+5.4,40578798,1134,35783.8,35744.0,32224,43232,2105.5,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)128, (int)128, (int)4, (bool)1, (bool)1, (bool)0, (imp::nvfp4_tile::Fmt)0>>(imp::nvfp4_tile::TileArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)"
+4.8,36055005,108,333842.6,331967.0,181375,496574,137793.8,"void imp::fmha_sm120_fa2_kernel_2cta<(int)128, (int)128, (bool)1, (bool)1, (int)64, (bool)1, (bool)1, (bool)0>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const float *, const int *, bool, const __half *)"
+4.8,35590307,108,329539.9,326847.0,314751,648989,31904.6,nvjet_sm120_hhh_mma_256x112x64_2_64x56x64_tmaAB_alignCD4_bz_TNNN
+4.1,30692520,306,100302.4,95440.0,91807,404414,20073.1,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)256, (int)128, (int)3, (bool)1, (bool)0, (bool)0, (imp::nvfp4_tile::Fmt)0>>(imp::nvfp4_tile::TileArgs, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)"
+3.5,26417830,218,121182.7,121072.0,106560,136415,6120.5,nvjet_sm120_hhh_mma_128x256x64_2_64x64x64_tmaAB_alignCD4_bz_TNNN
+2.8,20956724,1564,13399.4,12768.0,11456,26304,2929.6,"void imp::gemv_nvfp4_moe_decode_mr_kernel<(int)8>(const unsigned char *, const unsigned char *, const float *, const int *, const __half *, __half *, int, int, unsigned long, unsigned long, int, int, int, const int *, int)"
+2.7,20211705,460,43938.5,43488.0,5344,326302,23901.4,"void imp::moe_scatter_fused_residual_kernel<(bool)0>(const __half *, const int *, const float *, const __half *, __half *, int, int, const __half *, const int *)"
+2.2,16409065,3726,4403.9,928.0,480,22464,5276.5,"imp::elementwise_add_fp16_kernel(__half *, const __half *, long)"
+1.9,14185702,110,128960.9,128639.5,117439,137312,3525.9,nvjet_sm120_hhh_mma_128x208x64_2_32x104x64_tmaAB_alignCD4_bz_TNNN
+1.7,12421168,2142,5798.9,5536.0,4896,9920,997.0,"imp::gemv_nvfp4_kpar_kernel(const unsigned char *, const unsigned char *, float, const __half *, __half *, int, int)"
+1.7,12339722,460,26825.5,27936.0,2112,46112,9186.4,"void imp::fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<(int)2>(const __half *, const __half *, unsigned char *, unsigned char *const *, const int *, int, int, int, int, const __half *, const __half *)"
+1.7,12334667,1242,9931.3,2048.0,1760,29791,11271.9,"imp::group_rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, int, float)"
+1.5,11564544,460,25140.3,22191.5,7392,279871,14378.1,"void imp::<unnamed>::conv_silu_split_kernel<(int)4>(const float *, const __half *, long, const __half *, const __half *, __half *, __half *, __half *, int, int, int)"
+1.5,11323068,1440,7863.2,7424.0,4128,357822,9488.5,"imp::quantize_fp16_nvfp4_cutlass_kernel(const __half *, unsigned char *, unsigned char *, int, int, int)"
+1.5,10966769,460,23840.8,26080.0,2208,28160,7153.2,"imp::quantize_fp16_nvfp4_cutlass_moe_kernel(const __half *, const int *, unsigned char *, unsigned char *const *, const int *, int, int, int, int)"
+1.3,9346912,2862,3265.9,1440.0,1088,17344,2848.7,"void imp::rmsnorm_fp16_rowblock_kernel<(int)1>(const __half *, const __half *, __half *, int, float, float)"
+1.2,8628236,816,10573.8,9616.0,2656,32896,8142.5,"imp::gemv_fp16_kernel(const __half *, const __half *, __half *, int, int)"
+1.1,8131075,46,176762.5,177055.5,174079,179392,1147.7,"imp::convert_scales_sfatom_moe_kernel(const unsigned char *, unsigned char *, int, int, int, unsigned long, unsigned long, const int *)"
+1.1,8036934,1242,6471.0,3552.0,3232,14080,4239.8,"imp::topk_gating_kernel(const float *, int, int, int *, float *, bool, bool, const __half *)"
+1.0,7423205,54,137466.8,121615.5,120064,243999,40238.9,"void imp::gemv_nvfp4_multirow_fp32_kernel<(int)8>(const unsigned char *, const unsigned char *, float, const __half *, float *, int, int, imp::NvFP4NormFoldIn)"
+1.0,7338150,578,12695.8,11936.0,11168,22752,2455.1,"void imp::gemv_nvfp4_multirow_kernel<(int)8>(const unsigned char *, const unsigned char *, float, const __half *, __half *, int, int)"
+0.9,6879079,2024,3398.8,544.0,480,24160,5593.6,"imp::relu_sqr_inplace_fp16_kernel(__half *, long)"
+0.8,5913937,408,14494.9,16768.0,7423,36352,6882.6,"void imp::gemv_fp8_e4m3_kernel<(bool)1>(const unsigned char *, const __half *, __half *, int, int, float, const float *)"
+0.5,3992402,828,4821.7,4496.0,4064,11648,1190.8,"void imp::<unnamed>::ssm_scan_reg_kernel<(bool)1, (bool)1, (int)16, (int)8>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, const float *, void *, __half *, const __half *, int, int, int, int, const int *, void *, const int *)"
+0.5,3969712,54,73513.2,3312.0,2368,212063,96510.5,"void imp::embedding_lookup_vec_kernel<__half>(const T1 *, const int *, T1 *, int)"
+0.5,3874021,416,9312.6,8800.0,7680,18880,1720.4,nvjet_sm120_hhh_mma_64x128x64_4_32x32x64_tmaAB_alignCD4_splitK_TNNN
+0.5,3388564,1566,2163.8,960.0,575,16960,1899.7,"imp::device_copy_v4_kernel(const uint4 *, uint4 *, unsigned long)"
+0.4,3184818,192,16587.6,16448.0,16064,19648,459.7,"void imp::paged_attention_splitk_fp8_tile_kernel<(int)128>(const __half *, const unsigned char *, const unsigned char *, float *, const int *, const int *, int, int, int, int, float, float, int, int, int, float)"
+0.4,2794617,218,12819.3,12576.0,11424,14880,794.8,nvjet_sm120_hhh_mma_128x112x64_3_32x56x64_tmaAB_alignCD4_splitK_TNNN
+0.4,2683669,782,3431.8,3327.0,3135,4960,359.3,"imp::gemv_gate_fp32_kernel(const __half *, const __half *, float *, int, int)"
+0.3,2367384,126,18788.8,16032.0,12256,31007,5951.8,"void imp::<unnamed>::gemm_nvfp4_smallm_kernel<(bool)1>(const unsigned char *, const unsigned char *, float, const __half *, const unsigned char *, const unsigned char *, float, float *, int, int, int)"
+0.2,1738520,324,5365.8,704.0,640,25056,6831.2,"imp::elementwise_add_store_fp16_kernel(const __half *, const __half *, __half *, long)"
+0.2,1671512,920,1816.9,1792.0,1024,2912,281.7,"imp::bzero_sfa_active_kernel(unsigned char *, const long *, int, long)"
+0.2,1643674,460,3573.2,3616.0,2336,4352,356.5,"imp::moe_permute_scatter_kernel(const int *, int, int, int, int, const int *, int *, int *, int *, int *)"
+0.2,1563132,756,2067.6,1952.0,896,3904,636.3,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, __half, __half, __half, __half, (bool)0, __half, __half, __half, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+0.2,1183741,324,3653.5,1568.0,1280,275487,15255.7,"imp::write_kv_cache_fp8_fused_kernel(const __half *, const __half *, const int *, const int *, __nv_fp8_e4m3 *, __nv_fp8_e4m3 *, float, int, int, int, int, int, int)"
+0.2,1180411,920,1283.1,1248.0,1024,3008,150.4,"imp::compute_sfa_offsets_kernel(const int *, long *, unsigned char **, unsigned char *, int, int)"
+0.2,1152602,782,1473.9,1440.0,1248,2688,174.9,"imp::ssm_conv1d_decode_kernel(float *, const __half *, const __half *, const __half *, __half *, int, int)"
+0.1,1071484,192,5580.6,5600.0,5280,5856,94.9,"imp::paged_attention_reduce_kernel(const float *, __half *, int, int, int, const __half *, imp::block_q8_1 *, float *)"
+0.1,1057213,1,1057213.0,1057213.0,1057213,1057213,0.0,"imp::quantize_nvfp4_from_absmax_kernel(const __half *, unsigned char *, unsigned char *, const float *, float *, long, long)"
+0.1,930237,1,930237.0,930237.0,930237,930237,0.0,"imp::absmax_kernel(const __half *, long, float *)"
+0.1,905757,12,75479.8,66543.5,46176,108640,30399.2,"imp::quantize_fp8_rows_kernel(const __half *, unsigned char *, int, float *)"
+0.1,849886,14,60706.1,68608.0,11456,70880,20875.8,nvjet_sm120_hhh_mma_128x16x64_5_32x16x64_tmaAB_alignCD4_bz_TNNN
+0.1,688499,782,880.4,832.0,800,1216,87.6,"imp::moe_weighted_sum_residual_kernel(const __half *, const float *, const __half *, __half *, int, int)"
+0.1,682431,1242,549.5,544.0,416,1120,119.1,"imp::scale_fp32_kernel(float *, float, long)"
+0.1,606592,460,1318.7,1376.0,1056,2688,176.9,"imp::ssm_conv1d_commit_kernel(float *, const __half *, int, int, int, long, const int *, const int *, long, const int *)"
+0.1,558879,22,25403.6,29360.0,5344,31968,9305.7,nvjet_sm120_hhh_mma_256x16x64_2_64x16x64_tmaAB_alignCD4_splitK_TNNN
+0.1,500350,460,1087.7,1088.0,608,2496,278.8,"imp::fp16_to_fp32_kernel(const __half *, float *, long)"
+0.1,497439,460,1081.4,1088.0,608,1600,118.3,"imp::moe_permute_tile_hist_kernel(const int *, int, int, int, int *)"
+0.1,464574,81,5735.5,3744.0,3520,89919,9642.9,"imp::convert_scales_sfatom_kernel(const unsigned char *, unsigned char *, int, int, int)"
+0.1,428992,782,548.6,544.0,512,832,38.0,"imp::silu_inplace_fp16_kernel(__half *, long)"
+0.1,399583,460,868.7,832.0,640,1568,127.8,"imp::moe_imbalance_kernel(const int *, unsigned int *, int, int)"
+0.0,358878,14,25634.1,28768.0,6720,29120,8015.1,nvjet_sm120_hhh_mma_128x32x128_2_32x16x128_tmaAB_alignCD4_splitK_TNNN
+0.0,347710,108,3219.5,3168.0,2752,4576,438.4,"imp::paged_kv_gather_fp8_to_fp16_kernel(__half *, const __nv_fp8_e4m3 *, const int *, float, int, int, int, int, const int *)"
+0.0,325696,34,9579.3,9648.0,8832,10272,326.0,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<(int)6, __half>(const unsigned char *, const unsigned char *, const unsigned char *, const unsigned char *, float *, T2 *, float, int, int, int, int, int)"
+0.0,318557,54,5899.2,3056.0,2016,13600,4163.6,"void imp::<unnamed>::sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3, (bool)1>(const T1 *, long, __half2 *, long, const int *, const int *, const int *, int, int, int, int, int)"
+0.0,261248,460,567.9,544.0,512,1216,90.0,"imp::moe_compute_M_per_kernel(const int *, int *, int)"
+0.0,204383,8,25547.9,30992.0,8864,31840,10277.7,nvjet_sm120_hhh_mma_128x48x64_4_64x24x64_tmaAB_alignCD4_splitK_TNNN
+0.0,202366,160,1264.8,1184.0,1088,2272,193.3,"imp::quantize_nvfp4_kernel(const __half *, unsigned char *, unsigned char *, float, long, long)"
+0.0,130912,45,2909.2,2976.0,2112,4000,412.5,"imp::argmax_partial_kernel(const float *, int, float *, int *)"
+0.0,127456,126,1011.6,976.0,704,3904,392.2,"void imp::<unnamed>::smallm_splitk_reduce_kernel<(bool)0>(const float *, __half *, int, int)"
+0.0,112096,28,4003.4,3808.0,3648,5344,529.1,"imp::post_decode_step_kernel(const int *, int *, int *, int *, int *, int *, int, int, const int *, int, const int *, int, int, int, int *, int *, int *, int *, int *, const unsigned char *, int, int, int *, int *, const int *, int *, unsigned long long)"
+0.0,69536,12,5794.7,5824.0,5504,6048,154.6,"void imp::<unnamed>::paged_attention_decode_fp8_gqa_kernel<(int)16, (int)2, (int)4>(const __half *, const unsigned char *, const unsigned char *, __half *, const int *, const int *, int, int, int, int, float, float, int, int, float, const __half *)"
+0.0,66528,25,2661.1,2688.0,1664,3136,343.2,nvjet_sm120_hhh_mma_32x16x128_8_16x8x128_tmaAB_alignCD4_splitK_TNNN
+0.0,62815,25,2512.6,2560.0,1472,3072,341.7,nvjet_sm120_hhh_mma_64x8x64_10_16x8x64_tmaAB_alignCD4_splitK_TNNN
+0.0,60224,45,1338.3,1280.0,1248,1728,120.0,"imp::argmax_reduce_kernel(const float *, const int *, int, int *)"
+0.0,48736,45,1083.0,1024.0,896,2048,185.6,"ban_logits_kernel(float *, const int *, int, int)"
+0.0,47711,1,47711.0,47711.0,47711,47711,0.0,"void apa::apa_kernel<(int)128, (bool)1, (bool)0, (bool)0, __half, apa::FlatKV<__half>>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const apa::HeadScale *, const T5 *, T6, T5 *, apa::Dims, float, apa::Pass1Out, int, int, unsigned int *, apa::Win, const int *)"
+0.0,47200,14,3371.4,3552.0,1952,4032,635.1,nvjet_sm120_hhh_mma_32x32x128_6_32x8x128_tmaAB_alignCD4_splitK_TNNN
+0.0,47168,12,3930.7,3936.0,3168,4544,626.7,"void imp::fmha_sm120_fa2_kernel<(int)64, (int)128, (bool)1, (bool)1, (int)64, (bool)0, (bool)1, (bool)0>(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, float, bool, int, float, int, const float *, const int *, bool, const __half *)"
+0.0,46271,1,46271.0,46271.0,46271,46271,0.0,"void apa::apa_kernel<(int)128, (bool)1, (bool)0, (bool)0, __half, apa::PagedF16KV>(const unsigned char *, const unsigned char *, const float *, const unsigned char *, const apa::HeadScale *, const T5 *, T6, T5 *, apa::Dims, float, apa::Pass1Out, int, int, unsigned int *, apa::Win, const int *)"
+0.0,45951,14,3282.2,3487.5,1760,3904,674.3,nvjet_sm120_hhh_mma_64x16x128_4_16x16x128_tmaAB_alignCD4_splitK_TNNN
+0.0,36256,34,1066.4,1056.0,864,1216,109.9,"void imp::<unnamed>::smallm_v2_reduce_kernel<(bool)0>(const float *, __half *, int, int, int, float)"
+0.0,27552,24,1148.0,1152.0,768,1536,292.3,"imp::absmax_reduce_kernel(const __half *, float *, int)"
+0.0,27520,24,1146.7,1088.0,832,1504,244.4,"imp::absmax_final_reduce_kernel(const float *, float *, int)"
+0.0,22592,28,806.9,800.0,736,896,36.3,"ban_logits_if_kernel(float *, const int *, int, int, const int *)"
+0.0,19968,34,587.3,544.0,448,1280,211.5,"imp::<unnamed>::norm_fold_zero_kernel(unsigned long long *, int)"
+0.0,9824,1,9824.0,9824.0,9824,9824,0.0,"void apa::stats_kernel<(int)128, apa::PagedF16KV>(T2, apa::Dims, unsigned int *, float *, const int *, int)"
+0.0,7936,2,3968.0,3968.0,3968,3968,0.0,"void apa::quant_q_kernel<(int)128, __half>(const T2 *, apa::Dims, float, unsigned char *, unsigned char *, float *)"
+0.0,5632,1,5632.0,5632.0,5632,5632,0.0,"void apa::stats_kernel<(int)128, apa::FlatKV<__half>>(T2, apa::Dims, unsigned int *, float *, const int *, int)"
+0.0,4288,1,4288.0,4288.0,4288,4288,0.0,"void apa::quant_kv_kernel<(int)128, apa::PagedF16KV>(T2, apa::Dims, const float *, const apa::HeadScale *, unsigned char *, int, int, const int *, int *)"
+0.0,3744,1,3744.0,3744.0,3744,3744,0.0,"void apa::quant_kv_kernel<(int)128, apa::FlatKV<__half>>(T2, apa::Dims, const float *, const apa::HeadScale *, unsigned char *, int, int, const int *, int *)"
+0.0,1920,2,960.0,960.0,960,960,0.0,"void apa::finalize_stats_kernel<(int)128>(const unsigned int *, const float *, int, float *, apa::HeadScale *, int, float, const int *, bool)"
+
