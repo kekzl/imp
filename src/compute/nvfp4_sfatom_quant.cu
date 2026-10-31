@@ -1,5 +1,5 @@
 // NVFP4 SfAtom layout, weight scale conversion and activation quantizers for the block-scaled NVFP4 GEMMs
-// (own tile and grouped kernels; the CUTLASS GEMM in gemm_cutlass_sm120.cu reads the same bytes). Moved
+// (own tile and grouped kernels, cuBLASLt block-scaled on refusal). Moved
 // verbatim from gemm_cutlass_sm120.cu. Weight conversion (once at init): packed FP4 [N,K/2] borrowed,
 // micro_scales linear [N,K/16] -> SfAtom UE4M3, tensor_scale stays the GEMM alpha. Activations per prefill
 // call: FP16 [M,K] -> NVFP4 packed [M,K/2] + SfAtom UE4M3 scales. No CUTLASS include.
@@ -612,6 +612,8 @@ void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up
         (K + kAtomKElems - 1) / kAtomKElems);
     IMP_CUDA_CHECK_LAUNCH();
 }
+
+bool cutlass_sm120_nvfp4_available() { return true; }
 
 // Reads the clip flag once, from gemm_cleanup() (engine shutdown): a "should never happen"
 // event, checked there to keep it off the hot path. cudaMemcpyFromSymbol synchronises (#1544).

@@ -124,7 +124,7 @@ def evaluate(found, expected, doc):
 
     # The doc has to keep naming the uncovered path by file, because that is the
     # claim a reader acts on.
-    for needed in ("gemm_cutlass_sm120.cu", "process_diag_deterministic_gemm"):
+    for needed in ("nvfp4_gemm_tile.cu", "process_diag_deterministic_gemm"):
         if needed not in doc:
             problems.append(f"docs/DETERMINISM.md no longer mentions `{needed}`; "
                             "known limit 5 is what tells an operator which weight "
@@ -144,7 +144,7 @@ def selftest():
     import tempfile
 
     call = f"return {READER};"
-    doc = "gemm_cutlass_sm120.cu process_diag_deterministic_gemm"
+    doc = "nvfp4_gemm_tile.cu process_diag_deterministic_gemm"
     base = {
         "src/compute/gemm.cpp": 2,
         "src/compute/cublas_gemm_algo.h": 1,

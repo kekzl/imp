@@ -1,7 +1,7 @@
 # CompilerFlags.cmake - Compiler and CUDA flags for IMP
 
 # Warning flags (-Wall -Wextra -Wpedantic) intentionally not global here: they leak onto
-# FetchContent deps (gtest/cutlass). Live on the imp_warnings INTERFACE target (CMakeLists.txt),
+# FetchContent deps (gtest). Live on the imp_warnings INTERFACE target (CMakeLists.txt),
 # linked PRIVATE, scoped to CXX only (never nvcc).
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DIMP_DEBUG=1")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=x86-64-v3 -DNDEBUG")
@@ -21,5 +21,5 @@ set(CMAKE_CUDA_FLAGS_RELWITHDEBINFO "-O3 --use_fast_math --extra-device-vectoriz
 
 # Suppress noisy CUDA warnings
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=esa_on_defaulted_function_ignored")
-# CUTLASS sm100/sm103 headers use [=] lambdas that implicitly capture 'this' (deprecated in C++20)
+# 2908: [=] lambdas implicitly capturing this (CUTLASS headers, removed 2026-10-31); 177: unused variables
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=2908 --diag-suppress=177")

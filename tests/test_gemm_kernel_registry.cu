@@ -1,10 +1,11 @@
 #include "exec/gemm_kernel_registry.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
+#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass
 #include "core/tensor.h"
 #include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
 #include "exec/gemm_scratch.h"      // prewarm_mmvq_scratch
 #include "quant/dequant_gpu.h"      // generic-dequant parity test
+#include "quant/nvfp4_gemm_tile.h"  // gemm_tile_streamk_workspace_bytes
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -73,7 +74,7 @@ TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
 // CUTLASS_NVFP4 adapter must refuse loud (PreconditionFail) when activation scratch is
 // missing, not fall through to legacy silently (mirrors the FP8 missing-scratch test, Slice
 // 2 pattern). Note: the GEMM workspace is NOT a precondition since
-// gemm_nvfp4_cutlass_sm120 has its own static-fallback alloc - this exercises only the
+// gemm_nvfp4_tile runs data-parallel without one - this exercises only the
 // act_data null path.
 TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     constexpr int M = 4;
@@ -92,7 +93,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
 
     // Dummy CutlassNvFP4Weight payload pointer is non-null but the kernel returns
     // PreconditionFail before dereferencing it (workspace check fires first), so the dummy is
-    // safe without ever invoking gemm_nvfp4_cutlass_sm120.
+    // safe without ever invoking gemm_nvfp4_tile.
     CutlassNvFP4Weight dummy{};
     dummy.N = N;
     dummy.K = K;
@@ -112,17 +113,14 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     cudaFree(d_out);
 }
 
-// End-to-end smoke: registry CUTLASS_NVFP4 dispatch runs Ok with non-zero output. No
-// direct-vs-registry parity comparison (unlike FP16/FP8/NVFP4-dequant slices) because
-// gemm_nvfp4_cutlass_sm120 bails on any sticky CUDA error from a prior call in the same
-// process, so a second invocation would PreconditionFail on residue, not its own merits. The
-// adapter is a verbatim wrap of quantize_fp16_to_nvfp4_cutlass + gemm_nvfp4_cutlass_sm120
-// (executor_kernels.cu:2147,2179-2181); parity is structural, and dispatch-site coverage
-// comes from verify-fast's engine smoke tests.
+// End-to-end smoke: registry CUTLASS_NVFP4 dispatch runs Ok with non-zero output. The adapter
+// wraps quantize_fp16_to_nvfp4_cutlass + gemm_nvfp4_tile (cuBLASLt on refusal); bitwise
+// direct-vs-dispatch parity lives in test_weight_dispatch.cu (CUTLASS_NVFP4_GemmMatchesDirect),
+// dispatch-site coverage in verify-fast's engine smoke tests.
 TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     constexpr int M = 128;
     constexpr int N = 128;
-    constexpr int K = 128;  // CUTLASS NVFP4 tile is 128x128x128 — match for can_implement.
+    constexpr int K = 128;  // one 128x128 tile, two 64-wide k-stages
 
     std::vector<__half> h_input(M * K);
     std::vector<__half> h_weight_fp16(N * K);
@@ -150,7 +148,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
 
     // Allocate activation quantization scratch + GEMM workspace.
     size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_bytes = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    size_t ws_bytes = gemm_tile_streamk_workspace_bytes();
     void *d_act_data = nullptr, *d_act_sf = nullptr, *d_ws = nullptr;
     cudaMalloc(&d_act_data, static_cast<size_t>(M) * K / 2);  // packed FP4 [M, K/2]
     cudaMalloc(&d_act_sf, act_sf_bytes);
@@ -162,8 +160,8 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     cudaMemsetAsync(d_out, 0, sizeof(__half) * M * N, stream_);
     Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
 
-    // Drain sticky CUDA errors from setup (quantize/convert/cudaMalloc). The
-    // CUTLASS kernel bails on any prior cudaGetLastError() != cudaSuccess.
+    // Drain sticky CUDA errors from setup (quantize/convert/cudaMalloc) so a failure
+    // below belongs to the dispatch, not to the setup.
     cudaStreamSynchronize(stream_);
     cudaError_t pre = cudaGetLastError();
     ASSERT_EQ(pre, cudaSuccess) << "Pre-dispatch sticky CUDA error: " << cudaGetErrorString(pre);

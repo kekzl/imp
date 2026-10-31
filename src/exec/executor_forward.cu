@@ -213,15 +213,11 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
 
 bool GraphExecutor::lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream) {
     const auto& cfg = model_->config();
-    if (gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_.data,
-                            lm_head_cutlass_.scale_factors, lm_head_cutlass_.tensor_scale, logits, rows,
-                            cfg.vocab_size, cfg.d_model, stream,
-                            process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace,
-                            qscratch_.cutlass_workspace_size))
-        return true;
-    return gemm_nvfp4_cutlass_sm120_fp32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
-                                         lm_head_cutlass_, logits, rows, cfg.vocab_size, cfg.d_model, nullptr,
-                                         0, stream);
+    return gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_.data,
+                               lm_head_cutlass_.scale_factors, lm_head_cutlass_.tensor_scale, logits, rows,
+                               cfg.vocab_size, cfg.d_model, stream,
+                               process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace,
+                               qscratch_.cutlass_workspace_size);
 }
 
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {

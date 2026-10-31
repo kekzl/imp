@@ -1,7 +1,7 @@
 #include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
-#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, gemm_nvfp4_cutlass_sm120, quantize_fp16_to_nvfp4_cutlass
+#include "compute/gemm_cutlass_sm120.h"        // CutlassNvFP4Weight, quantize_fp16_to_nvfp4_cutlass
 #include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -9,8 +9,8 @@
 
 namespace imp {
 
-// Adapter: quantizes the FP16 activation into cutlass_act_data/_sf, then runs
-// gemm_nvfp4_cutlass_sm120 against the pre-converted CUTLASS weight. Preferred NVFP4
+// Adapter: quantizes the FP16 activation into cutlass_act_data/_sf, then runs the own tile GEMM
+// (gemm_nvfp4_tile, cuBLASLt on refusal) against the pre-converted SfAtom weight. Preferred NVFP4
 // GEMM path when cutlass_nvfp4_cache + workspace pointers are populated; else the
 // dequant fallback (gemm_nvfp4) takes over. Decode (M==1) never reaches here (uses
 // gemv_nvfp4_kpar); only the prefill strategy is registered.
@@ -42,13 +42,13 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     if (!args.act_prequantized)
         quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
                                        args.stream);
-    // The CUTLASS NVFP4 epilogue is built with beta=0 literal; a beta=1 call would overwrite
+    // The NVFP4 tile epilogue has no beta (beta = 0); a beta=1 call would overwrite
     // the residual instead of adding, producing silent garbage. Refuse (caller falls to the
     // dequant path, which honours beta). Unreachable today (o_proj/down_proj exclude this
     // tier) but kept because that is one edit away from not being true (#1547).
     if (args.beta != 0.0f)
         return GemmDispatchResult::PreconditionFail;
-    // gemm.nvfp4_tile_min_m: own TMA GEMM, same SfAtom bytes, bit-equal to CUTLASS; libraries on refusal.
+    // gemm.nvfp4_tile_min_m: own TMA GEMM on the SfAtom bytes; cuBLASLt on refusal.
     const int tile_min_m = process_diag_nvfp4_tile_min_m();
     if (tile_min_m > 0 && M >= tile_min_m &&
         gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
@@ -64,21 +64,13 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
         }
         return GemmDispatchResult::Ok;
     }
-    // gemm.nvfp4_cublaslt_min_m: cuBLASLt on the same SfAtom bytes from M >= min_m; CUTLASS on refusal.
+    // gemm.nvfp4_cublaslt_min_m: cuBLASLt on the same SfAtom bytes from M >= min_m.
     const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
     if (lt_min_m > 0 && M >= lt_min_m &&
         gemm_nvfp4_cublaslt(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
                             payload.tensor_scale, args.output->data, M, N, K, args.stream))
         return GemmDispatchResult::Ok;
-    bool ok = gemm_nvfp4_cutlass_sm120(args.cutlass_act_data, args.cutlass_act_sf, payload,
-                                       args.output->data, M, N, K, args.cutlass_workspace,
-                                       args.cutlass_workspace_size, args.stream);
-    if (!ok) {
-        // Failed CUTLASS run drops through to the dequant fallback: return PreconditionFail.
-        // gemm_nvfp4_cutlass_sm120 already logs WARN/ERROR on failure internally; no double-log.
-        return GemmDispatchResult::PreconditionFail;
-    }
-    return GemmDispatchResult::Ok;
+    return GemmDispatchResult::PreconditionFail;  // both refused: the dequant fallback
 }
 
 // Only the (M>1) prefill slot: (M==1) decode always picks the gemv_nvfp4_kpar fast path.

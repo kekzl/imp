@@ -43,7 +43,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
 | `vram.library_reserve_cache` | `""` | file for the measured first-forward charge (empty = `$XDG_CACHE_HOME/imp/library_reserve`, else `~/.cache/imp/library_reserve`; `off` = disabled). A later start of the same model plans with it instead of the constant. In a container mount the path (the image runs as `imp`: `/home/imp/.cache/imp`) or point this key at a mounted file |
-| `vram.library_reserve_mb` | `-1` (auto) | floor for the measured cuBLAS/CUTLASS first-forward charge (-1 charges the 3900 MiB constant; per-model first-forward measurements 1033-1930 MiB, #2357); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |
+| `vram.library_reserve_mb` | `-1` (auto) | floor for the measured library (cuBLAS / cuBLASLt; CUTLASS until 2026-10-31) first-forward charge (-1 charges the 3900 MiB constant; per-model first-forward measurements 1033-1930 MiB, #2357); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |
 | `rope.scaling` (imp.conf `[rope]` section) | `""` (off) | `yarn` \| `linear`, runtime RoPE-scaling override, mirrors the model's declared `rope_scaling` metadata |
 | `rope.factor` | `1.0` | context-extension factor; raises the detected window to `factor x orig_ctx`, e.g. `4.0` stretches 32k -> 128k |
 | `rope.orig_ctx` | `0` (auto) | native training context the factor applies to |
@@ -125,7 +125,7 @@ KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto ta
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
 
-- The cap binds but is not exact: the CUDA primary context (~1.7 GiB on the reference host) and ~1.8 GiB of dequant scratch/CUTLASS scale buffers/pinned staging sit outside the sizing gates.
+- The cap binds but is not exact: the CUDA primary context (~1.7 GiB on the reference host) and ~1.8 GiB of dequant scratch/SfAtom scale buffers/pinned staging sit outside the sizing gates.
 - Measured on Qwen3-8B-Q8_0: `--vram-budget 16000` peaks at 19468 MiB, leave ~3.5 GiB of headroom between the sum of budgets and the card.
 - The VRAM audit table printed at init and shutdown shows the peak against the cap and marks `[OVER BUDGET]`.
 - A budget too small for one `max_seq_len` sequence is refused at init, naming the blocks available, needed and the MiB to add.

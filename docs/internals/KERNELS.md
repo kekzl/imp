@@ -19,7 +19,7 @@ Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB20
 |---|---|---|---|
 | `fmha_sm120_fa2_kernel` | `src/compute/attention_fmha_sm120.cu` | primary register-resident FA2 attention prefill, dispatched by `fmha_sm120_fa2_prefill` | shipped, optimization target |
 | `fmha_sm120_kernel` | `src/compute/attention_fmha_sm120.cu` | tiled-FMHA fallback | shipped, not an optimization target |
-| grouped-NVFP4 CUTLASS GEMM (`KernelTmaWarpSpecializedCooperativeBlockScaledSm120`) | `src/compute/gemm_cutlass_sm120.cu` | production dense NVFP4 GEMM (projections, FFN) | shipped |
+| own dense NVFP4 / MXFP4 / MXFP8 / FP8 tile GEMM (TMA, `mma.sync` block-scaled) | `src/quant/nvfp4_gemm_tile.cu` | production dense GEMM (projections, FFN, LM head); replaced the CUTLASS GEMM, removed 2026-10-31 | shipped |
 | `gemm_grouped_nvfp4_smallM` | `src/compute/gemm_grouped_nvfp4_smallM.cu` | small-M / split-K grouped NVFP4 GEMM (MoE prefill) | shipped |
 | decode FFN GEMV | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV, HBM-bound at the GDDR7 ceiling; decode levers: [`MEMORY.md`](MEMORY.md) | shipped |
 | `fa2_sm120a_optimal.cu` | `tools/standalone/fa2_sm120a_optimal.cu` | bit-exact standalone FA2 reference, no imp/CUTLASS deps | reference only, not wired into imp |

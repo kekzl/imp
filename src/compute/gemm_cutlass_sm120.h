@@ -104,39 +104,7 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
                                            void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream);
 
-// Runs CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM: D = alpha*A@B^T. A (activation) [M,K]
-// NVFP4 RowMajor + SFA; B (weight) [N,K] NVFP4 RowMajor + SFB (micro_scale only); D [M,N] FP16
-// RowMajor; alpha = b.tensor_scale (compensates the deferred tensor_scale). Returns false if
-// CUTLASS can't handle the dimensions.
-[[nodiscard]] bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b, void* d_fp16,
-                              int M, int N, int K, void* workspace, size_t workspace_size,
-                              cudaStream_t stream);
-
-// Get CUTLASS GEMM workspace size for given problem dimensions.
-size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K);
-
-// Stream-K variant of the cooperative tile, callable directly (the dispatch above takes it via
-// gemm.nvfp4_cutlass_streamk and grid size). force=true pins the stream-K decomposition; false
-// lets the scheduler's heuristic choose data-parallel vs stream-K.
-[[nodiscard]] bool gemm_nvfp4_cutlass_sm120_streamk(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
-                                      void* d_fp16, int M, int N, int K, void* workspace,
-                                      size_t workspace_size, cudaStream_t stream, bool force);
-size_t gemm_nvfp4_cutlass_sm120_streamk_workspace(int M, int N, int K);
-// A/B probe: the pingpong 128x64 tile regardless of N.
-[[nodiscard]] bool gemm_nvfp4_cutlass_sm120_smalln(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
-                                     void* d_fp16, int M, int N, int K, void* workspace,
-                                     size_t workspace_size, cudaStream_t stream);
-// Stream-K units the scheduler would launch for the shape (0 = data-parallel).
-int gemm_nvfp4_cutlass_sm120_streamk_units(int M, int N, int K, bool force);
-
-// FP32-output NVFP4 GEMM (large-N cooperative tile). Used for the batched-decode
-// LM head, which needs float logits. d_fp32 is [M, N] row-major float.
-[[nodiscard]] bool gemm_nvfp4_cutlass_sm120_fp32(const void* a_data, const void* a_sf, const CutlassNvFP4Weight& b,
-                                   void* d_fp32, int M, int N, int K, void* workspace,
-                                   size_t workspace_size, cudaStream_t stream);
-size_t gemm_nvfp4_cutlass_sm120_fp32_workspace(int M, int N, int K);
-
-// Check if sm_120 CUTLASS NVFP4 GEMM is compiled and available.
+// SfAtom NVFP4 tier available (own tile GEMMs; the CUTLASS GEMM was removed 2026-10-31). Always true.
 [[nodiscard]] bool cutlass_sm120_nvfp4_available();
 
 }  // namespace imp

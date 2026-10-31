@@ -16,6 +16,7 @@
 #include "compute/gemm_f16_narrow_smallm.h"  // gemm_f16_narrow_smallm_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
+#include "quant/nvfp4_gemm_tile.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
@@ -1167,8 +1168,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * max_k / 2;
             // SfAtom scale factors for activation
             qscratch_.cutlass_act_sf_size = cutlass_nvfp4_sf_size(max_tokens_, max_k);
-            // CUTLASS GEMM workspace
-            qscratch_.cutlass_workspace_size = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+            // Stream-K workspace of the own tile GEMMs (SMs x 64 KiB)
+            qscratch_.cutlass_workspace_size = gemm_tile_streamk_workspace_bytes();  // tile stream-K partials
 
             qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size,
                                                     "cutlass_act_data");

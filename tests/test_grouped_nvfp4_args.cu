@@ -1,11 +1,13 @@
 // Own grouped NVFP4 MoE GEMM argument forms: host-args (gemm_grouped_nvfp4_host_args) vs a per-expert
-// dense CUTLASS NVFP4 GEMM on the same bits, and device-args (gemm_grouped_nvfp4_tile, B slab mode (a),
-// pointer arrays mode (b), expert-block slices) bit-identical to host-args.
+// library-free dense reference (nvfp4_ref_gemm.cuh) on the same bits, and device-args
+// (gemm_grouped_nvfp4_tile, B slab mode (a), pointer arrays mode (b), expert-block slices) bit-identical
+// to host-args.
 
 #include <gtest/gtest.h>
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
+#include "nvfp4_ref_gemm.cuh"
 #include "quant/nvfp4_quant.h"
 #include "scoped_engine_arena.h"
 #include <cuda_runtime.h>
@@ -174,12 +176,11 @@ static size_t bit_mismatches(const std::vector<half>& x, const std::vector<half>
     return n;
 }
 
-// Different kernels (accumulation order), so f16-class tolerance: |d| <= 1e-2 (1 + |ref|) everywhere.
+// Library-free per-expert reference (another accumulation order), so f16-class tolerance:
+// |d| <= 1e-2 (1 + |ref|) everywhere.
 TEST_F(GroupedNvfp4ArgsTest, HostArgsMatchesPerExpertDense) {
     if (sm_ < 120)
         GTEST_SKIP() << "SM120 required";
-    if (!cutlass_sm120_nvfp4_available())
-        GTEST_SKIP() << "CUTLASS NVFP4 (dense reference) disabled";
     Problem p;
     p.build({32, 0, 16, 48, 64}, /*N=*/256, /*K=*/256, /*seed=*/100, stream_);
     const size_t n_out = static_cast<size_t>(p.M_total) * p.N;
@@ -191,12 +192,12 @@ TEST_F(GroupedNvfp4ArgsTest, HostArgsMatchesPerExpertDense) {
     for (int e = 0; e < p.ne; ++e) {
         if (p.M_per[e] == 0)
             continue;
-        ASSERT_TRUE(
-            gemm_nvfp4_cutlass_sm120(static_cast<const char*>(p.a) +
-                                         (static_cast<size_t>(p.offsets[e]) * p.K / 2),
-                                     static_cast<const char*>(p.a_sf) + p.sfa_off[e], p.experts[e].cutlass_w,
-                                     static_cast<half*>(d_ref) + (static_cast<size_t>(p.offsets[e]) * p.N),
-                                     p.M_per[e], p.N, p.K, nullptr, 0, stream_))
+        const CutlassNvFP4Weight& w = p.experts[e].cutlass_w;
+        ASSERT_TRUE(imp::test::ref_nvfp4_gemm(
+            static_cast<const char*>(p.a) + (static_cast<size_t>(p.offsets[e]) * p.K / 2),
+            static_cast<const char*>(p.a_sf) + p.sfa_off[e], w.data, w.scale_factors, w.tensor_scale,
+            static_cast<half*>(d_ref) + (static_cast<size_t>(p.offsets[e]) * p.N), p.M_per[e], p.N, p.K,
+            stream_))
             << "per-expert dense reference failed on expert " << e;
     }
     ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);

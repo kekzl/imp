@@ -45,7 +45,6 @@ inner() {
         # Same configure as CI's tidy job (cmake --preset ci); a reconfigure costs ~3 s.
         if cmake --preset ci -B "$OUT/build" \
                 -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
-                -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
                 -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
                 -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
                 -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 > "$OUT/configure.log" 2>&1 \

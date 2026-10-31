@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Parallel compile jobs that fit in RAM, printed for `cmake --build -j`.
 #
-# The four CUTLASS TUs peak at 5.2-7.9 GB resident each (nvcc 13.4, measured
+# The four CUTLASS TUs (all removed by 2026-10-31) peaked at 5.2-7.9 GB resident each (nvcc 13.4, measured
 # 2026-09-19: gemm_cutlass_sm120 7.85 GB, grouped_3x 5.49, mxfp4 5.36, mxfp8
 # 5.24) and the build starts all four within 7 s of each other. On a 16 GB CI
 # runner -j4 is an OOM kill (exit 137 plus "runner has received a shutdown

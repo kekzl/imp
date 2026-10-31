@@ -109,7 +109,6 @@ DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOO
                  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
                  -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
                  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
-                 -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
                  -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
                  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
                  -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2
@@ -736,7 +735,6 @@ tidy: lint-image
 	@docker run --rm -v $(PWD):/work -w /work $(LINT_IMG) bash -c '\
 	  test -f build/compile_commands.json || cmake --preset ci \
 	      -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
-	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
 	      -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 >/dev/null; \
