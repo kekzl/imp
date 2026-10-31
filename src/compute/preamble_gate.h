@@ -67,6 +67,8 @@ public:
                                               !tool_detection_active();
         state_ = (configured_ && !reasoning_already_closed) ? State::ACTIVE : State::OFF;
         seen_ = 0;
+        think_closed_ = false;
+        reasoning_text_seen_ = false;
         char_buf_.clear();
     }
 
@@ -120,6 +122,7 @@ private:
         // continues post-think) and resets the budget for fresh post-think slack. Legacy mode
         // (no tool detection) exits to OFF so the FSM enforces the structural mask.
         if (close_token_ >= 0 && token == close_token_) {
+            think_closed_ = true;
             if (tool_detection_active()) {
                 seen_ = 0;
                 char_buf_.clear();
@@ -147,13 +150,20 @@ private:
             }
         }
 
-        // JSON start — exit to FSM and forward this token.
-        for (char c : text) {
-            if (c == '{' || c == '[') {
-                state_ = State::OFF;
-                return false;
+        // JSON start — exit to FSM and forward this token. Inside an open think block only as the
+        // first non-whitespace output (a model skipping its reasoning): a `{` after reasoning text
+        // is a draft in the block, and enforcing there ends the request without an answer.
+        const bool think_open = close_token_ >= 0 && thinking_open_ && !think_closed_;
+        if (!think_open || !reasoning_text_seen_) {
+            for (char c : text) {
+                if (c == '{' || c == '[') {
+                    state_ = State::OFF;
+                    return false;
+                }
             }
         }
+        if (think_open && text.find_first_not_of(" \t\n\r") != std::string::npos)
+            reasoning_text_seen_ = true;
 
         // Budget exhausted — give up on preamble.
         if (max_tokens_ > 0 && seen_ >= max_tokens_) {
@@ -221,6 +231,8 @@ private:
     int32_t close_token_ = -1;
     int max_tokens_ = 0;
     int seen_ = 0;
+    bool think_closed_ = false;         // close_token_ absorbed (tool-aware mode stays ACTIVE after it)
+    bool reasoning_text_seen_ = false;  // a non-whitespace token went by while the block was open
 
     std::vector<int32_t> open_tokens_;
     std::vector<int32_t> close_tokens_;
