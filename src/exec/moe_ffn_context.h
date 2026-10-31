@@ -47,20 +47,20 @@ struct MoeFfnContext {
     const void* scatter_down_bias = nullptr;
 
     // True if moe_gather already populated moe_.gathered for this call. Set false when the
-    // CUTLASS3x device-args path will fire (it consumes sorted_token_ids directly, no
+    // grouped NVFP4 device-args path will fire (it consumes sorted_token_ids directly, no
     // gathered intermediate needed); if that path falls back to legacy, moe_gather runs
     // lazily and flips this back to true. Default true so unchecked paths see it populated.
     bool moe_gather_done = true;
     // The prefill path left gathered input and gate/up outputs expert-sorted in moe_ (FP16 batch,
-    // CUTLASS 3.x, NVFP4 dequant): the per-expert calibration statistics read them.
+    // grouped NVFP4, NVFP4 dequant): the per-expert calibration statistics read them.
     bool experts_sorted_fp16 = false;
 
     // Host-resident NVFP4 experts staged into the device buffer for THIS layer. Filled by
     // whichever prefill path reaches the layer first, reused by later ones: a layer
-    // transfers once even when the CUTLASS attempt falls through to legacy.
+    // transfers once even when the grouped NVFP4 attempt falls through to legacy.
     StagedProj staged[kExpertProjCount]{};
     bool staged_done = false;
-    // Chunked staging (moe.stage_expert_chunks > 1): the CUTLASS dispatch stages expert blocks
+    // Chunked staging (moe.stage_expert_chunks > 1): the grouped NVFP4 dispatch stages expert blocks
     // itself, gate+up then down; `staged` stays empty, so a legacy fallback runs unstaged.
     bool staged_blocks = false;
     // This layer's alpha row in MoEWorkspace::layer_stage_alpha, set with staged_done / staged_blocks.

@@ -206,7 +206,7 @@ TEST(MmqQ8Imma, Q6KDenseSmallMUnalignedFallback) {
     run_q6k_dense(7, 256, 768, true, 2);
 }
 TEST(MmqQ8Imma, Q6KDenseDeclinesBetween32And64) {
-    // 33..63 rows: refused, the caller keeps dequant + cuBLAS. Refused before any pointer is read.
+    // 33..63 rows: refused, the caller keeps dequant + cuBLASLt. Refused before any pointer is read.
     EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 33, 128, 512, nullptr));
     EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 63, 128, 512, nullptr));
     EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 1, 128, 512, nullptr));

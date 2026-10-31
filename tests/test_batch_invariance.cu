@@ -430,9 +430,9 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         print_comparison("re-init M=1/M=1", solo_a4, solo, reinit);
     }
 
-    // gemm.nvfp4_smallm=false routes 2..32 rows to dequant/CUTLASS GEMM (W4A16 at every M) - the
-    // operator-facing switch. Isolates "batching changed the GEMM shape" from "batching
-    // quantized the activations": both arms below share the shape.
+    // gemm.nvfp4_smallm=false routes 2..32 rows to the NVFP4 tile GEMM (gemm.nvfp4_tile_min_m=1), which
+    // quantizes the activations too (W4A4; dequant route only on refusal or beta!=0): "w4a16" is a
+    // historical name, gemm.nvfp4_smallm_a4=false is the FP16-activation switch. Both arms share the shape.
     ArmResult batched_w4a16;
     Comparison measured_w4a16{}, solo_vs_solo_cfg{};
     {

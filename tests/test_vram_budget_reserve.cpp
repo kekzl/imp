@@ -71,7 +71,7 @@ TEST(VramBudgetReserve, PlannerDemandKeepsKvPoolFromEatingWeightCacheRoom) {
     config.use_nvfp4_decode = 2;   // mode 2: reserve floor is the flat 512 MiB
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
-    // Isolated from the library charge (#1109 floors reserve_bytes at cuBLAS/CUTLASS's first
+    // Isolated from the library charge (#1109 floors reserve_bytes at the GEMM libraries' first
     // forward claim, its own test below): folding it in made this assert the sum of two unrelated
     // policies, which went red for three PRs (AUDIT B63).
     config.library_reserve_mb = 0;
@@ -144,7 +144,7 @@ TEST(VramBudgetReserve, BeneficialSourcesKeepFullKvPool) {
     config.use_nvfp4_decode = 2;
     config.use_cuda_graphs = false;
     config.kv_cache_dtype = QType::F16;
-    // Isolated from the library charge (#1109 floors reserve_bytes at cuBLAS/CUTLASS's first
+    // Isolated from the library charge (#1109 floors reserve_bytes at the GEMM libraries' first
     // forward claim, its own test below): folding it in made this assert the sum of two unrelated
     // policies, which went red for three PRs (AUDIT B63).
     config.library_reserve_mb = 0;

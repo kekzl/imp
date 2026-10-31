@@ -894,7 +894,7 @@ bool Engine::init_kv_cache() {
     // wcache_.nvfp4 (populated above, so must come AFTER pre_dequant_weights).
     // Lets the M>1 fallback path run inside CUDA stream capture without cudaMalloc.
     (void)executor_->allocate_nvfp4_dequant_workspace();
-    // CUTLASS NVFP4 LM head for batched-decode GEMM: only n>1 decode consumes
+    // NVFP4 tile-GEMM LM head for batched-decode GEMM: only n>1 decode consumes
     // it, so skip the 19-47 MiB SfAtom-scale VRAM when max_batch_size==1 (the
     // perplexity harness lazy-builds its own). Must run AFTER pre_dequant_weights
     // and BEFORE decode-graph capture so the captured topology includes it.

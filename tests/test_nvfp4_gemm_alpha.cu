@@ -291,7 +291,7 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0Reproducer) {
             "[MISTRAL-REPRO] n_inf=%d  n_nan=%d  n_saturated(>=65504)=%d  total=%d\n",
             M, N, K, qr.tensor_scale, max_abs, mean_abs, rms, n_inf, n_nan, n_saturated, M * N);
 
-    // Reference FP16 GEMM (dequant→cuBLAS path) for comparison.
+    // Reference FP16 GEMM (dequant→gemm(), cuBLASLt) for comparison.
     void* d_w_dequant = nullptr;
     cudaMalloc(&d_w_dequant, (size_t)N * K * sizeof(half));
     dequantize_nvfp4_to_fp16(qr, d_w_dequant, stream_);
@@ -533,7 +533,7 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     fprintf(stderr, "[PREQ] max|y|=%.4g mean|y|=%.4g rms=%.4g  n_inf=%d n_nan=%d n_sat=%d\n", max_abs,
             sum_abs / (M * N), std::sqrt(sumsq / (M * N)), n_inf, n_nan, n_saturated);
 
-    // Reference: dequant our hand-built NVFP4 buffer to FP16, run cuBLAS GEMM
+    // Reference: dequant our hand-built NVFP4 buffer to FP16, run gemm() (cuBLASLt)
     void* d_w_dequant = nullptr;
     cudaMalloc(&d_w_dequant, (size_t)N * K * sizeof(half));
     dequantize_nvfp4_to_fp16(qr_pq, d_w_dequant, stream_);

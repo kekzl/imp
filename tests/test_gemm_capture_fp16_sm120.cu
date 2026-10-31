@@ -1,5 +1,5 @@
 // Capture-safe sm_120 FP16 WMMA GEMM: validates bit-stable correctness vs a CPU reference,
-// same numerics as cuBLAS gemm() (FP16 tolerance) where WMMA replaces cuBLASLt under
+// same numerics as cuBLASLt gemm() (FP16 tolerance) where WMMA replaces cuBLASLt under
 // capture, and prints per-shape timing alongside cuBLASLt (informational, not gated).
 
 #include <gtest/gtest.h>
@@ -153,7 +153,7 @@ TEST_F(GemmCaptureSm120, Correctness_256x256x256_alpha_beta) {
 }
 
 TEST_F(GemmCaptureSm120, Correctness_VsCublas_512x2048x2560) {
-    // Typical mid-size prefill shape. Compare to cuBLAS path through gemm().
+    // Typical mid-size prefill shape. Compare to the cuBLASLt path through gemm().
     constexpr int M = 512, N = 2048, K = 2560;
     std::vector<float> A(M * K), B(N * K);
     std::mt19937 rng(3);
@@ -170,7 +170,7 @@ TEST_F(GemmCaptureSm120, Correctness_VsCublas_512x2048x2560) {
     // WMMA path
     ASSERT_TRUE(gemm_capture_fp16_sm120(dA.data, dB.data, dD_wmma.data, M, N, K, 1.0f, 0.0f, 0));
 
-    // cuBLAS via gemm() — build minimal Tensor wrappers around the device pointers.
+    // cuBLASLt via gemm(): build minimal Tensor wrappers around the device pointers.
     Tensor tA{}, tB{}, tC{};
     tA.qtype = QType::F16;
     tA.data  = dA.data;

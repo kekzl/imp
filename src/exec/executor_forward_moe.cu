@@ -395,7 +395,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
     if (dispatch_policy().moe.no_cutlass3x)
         return false;
     // gpt-oss: only the unstaged device-args path carries its bias + GLU seam (mirror of the
-    // use_device_args gate in executor_forward_moe_cutlass.cu).
+    // use_device_args gate in executor_forward_moe_cutlass.cpp).
     if (model_->profile().moe_expert_bias_glu && ctx.staged_blocks)
         return false;
     if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))

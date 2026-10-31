@@ -56,7 +56,7 @@ enum class MoePrefillOuter {
 };
 
 // Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_
-// (exec/executor_forward_moe_cutlass.cu).
+// (exec/executor_forward_moe_cutlass.cpp).
 enum class MoePrefillPath {
     DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)
     SMALL_M,      // gemm_grouped_nvfp4_smallM (small token counts)

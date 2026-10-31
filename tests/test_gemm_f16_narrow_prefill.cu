@@ -1,7 +1,7 @@
 // gemm_f16_narrow_prefill: one-launch alpha/beta projection of GDN prefill rows. Checks vs a
 // double CPU reference at the Qwen3.8-27B shape (K=5120, N=48/pair) for M=33..4096 (every
 // split the launcher picks, partial row tiles), the single-pair form, bitwise determinism
-// (fixed-order split-K reduce), refusals, and the wall time against the two cuBLAS GEMMs.
+// (fixed-order split-K reduce), refusals, and the wall time against the two cuBLASLt GEMMs.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>

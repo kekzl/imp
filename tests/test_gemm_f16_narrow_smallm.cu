@@ -181,7 +181,7 @@ TEST(GemmF16NarrowSmallM, RefusesUnsupportedShapes) {
 }
 
 // Informational: per-launch wall time inside a replayed CUDA graph (the kernel's actual
-// regime) vs the two cuBLAS gemm() calls it replaces. No threshold (timing anchors flake in
+// regime) vs the two gemm() calls (cuBLASLt) it replaces. No threshold (timing anchors flake in
 // the full suite); WSL2 host launch cost would dominate an eager loop.
 TEST(GemmF16NarrowSmallM, BenchQwen38Shape) {
     Case c(32, 48, 48, 5120, 11u);

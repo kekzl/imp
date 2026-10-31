@@ -155,7 +155,7 @@ bool Engine::step_impl_() {
 
     // Prefill/decode overlap engages only when the in-flight decode runs in
     // workspace slot 1 (>= 2 rows; the bs==1 regimes carry spec-verify
-    // chunks, which share the CUTLASS activation scratch with prefill).
+    // chunks, which share the NVFP4 activation scratch qscratch_.cutlass_act_* with prefill).
     const bool overlap_step = overlap_ready_ && sched_decode_batch_.size() >= 2;
 
     // A pipelined decode step in flight shares workspace 0 with prefill and

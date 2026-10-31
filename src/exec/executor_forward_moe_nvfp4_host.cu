@@ -230,7 +230,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         out[p].n_experts = ne;
         any = true;
 
-        // CUTLASS device-args view: the grouped GEMM reads SfAtom-ordered scale
+        // Device-args view: the grouped GEMM reads SfAtom-ordered scale
         // factors and per-expert pointer arrays, neither of which staged bytes
         // carry. Building them here lets a host-resident layer take the same prefill path as a resident one.
         if (!moe_.layer_stage_sf || moe_.layer_stage_sf_proj_bytes == 0)
@@ -379,12 +379,12 @@ bool GraphExecutor::run_staged_blocks_(int layer, cudaStream_t stream, const Moe
 }
 
 // Stages a host-resident layer for prefill and reports whether it can
-// carry the CUTLASS path. Staged once per MoE call, carried on ctx, so a
+// carry the grouped NVFP4 path. Staged once per MoE call, carried on ctx, so a
 // legacy fallback doesn't re-transfer the same bytes. The staged weights
-// live in the staging buffer, not the registry, which is why the CUTLASS
+// live in the staging buffer, not the registry, which is why the grouped-path
 // entry predicate (covers_ids) cannot see them.
 bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
-    // Chunked buffer: the CUTLASS dispatch stages expert blocks itself (stage_nvfp4_block_).
+    // Chunked buffer: the grouped NVFP4 dispatch stages expert blocks itself (stage_nvfp4_block_).
     if (moe_.layer_stage_slots == 2) {
         const auto& ly = model_->layer(layer);
         ctx.staged_blocks = dispatch_policy().moe.staged_cutlass_prefill && ctx.n > 1 &&
@@ -409,7 +409,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
            (ctx.non_gated_experts || ready(ExpertProj::Gate));
 }
 
-// Presents a staged layer to the CUTLASS grouped prefill as if
+// Presents a staged layer to the grouped NVFP4 prefill as if
 // device-resident: the staging pass already wrote per-expert pointer and
 // alpha arrays, this just slices them per projection.
 // moe.staged_cutlass_prefill (default on).

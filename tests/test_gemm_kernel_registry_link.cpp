@@ -19,7 +19,7 @@ TEST(GemmKernelRegistryLink, HoldsExactlyTheProducedKeys) {
         {StorageTier::FP16, QType::Q4_0, true},          {StorageTier::FP16, QType::Q2_K, true},
         {StorageTier::FP16, QType::Q3_K, true},          {StorageTier::FP16, QType::IQ4_NL, true},
         {StorageTier::FP16, QType::IQ4_XS, true},        {StorageTier::FP16, QType::IQ3_S, true},
-        {StorageTier::CUTLASS_NVFP4, QType::F16, false},  // CUTLASS NVFP4 prefill
+        {StorageTier::CUTLASS_NVFP4, QType::F16, false},  // NVFP4 prefill (own tile)
     };
     EXPECT_EQ(reg.size(), std::size(produced))
         << "1 generic dequant + 11 GGUF small-M qtypes + 1 CUTLASS_NVFP4";

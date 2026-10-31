@@ -89,7 +89,7 @@ Engine::~Engine() {
     // Cross-model CUDA-error-leak guard: the CUDA error state is per primary
     // context, NOT per Engine, so a sticky error from this model's workload
     // survives imp_context_free/imp_model_free and corrupts the NEXT model's
-    // first cudaGetLastError()-guarded kernel (e.g. gemm_cutlass_sm120.cu). Drain it here.
+    // first cudaGetLastError()-guarded kernel (e.g. sampling_topk_topp.cu). Drain it here.
     if (cudaError_t leaked = cudaGetLastError(); leaked != cudaSuccess) {
         IMP_LOG_WARN(
             "Engine teardown: cleared a leaked CUDA error (%s) so it cannot "
@@ -777,10 +777,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
     graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len);
     gemm_init();
-    // grouped-3x prewarm takes CUTLASS staging + workspace slices from the T2
+    // grouped-3x prewarm takes grouped NVFP4 staging + workspace slices from the T2
     // arena so the grouped NVFP4 GEMM never grows mid-capture. Gated on the
     // model having experts, not just sm_120 capability (AUDIT B12): a model
-    // without experts never reaches exec/executor_forward_moe*.cu. Workspace measured at 152 320 B (AUDIT B73), not the 512 MiB guess.
+    // without experts never reaches exec/executor_forward_moe*.cu. Workspace measured at
+    // 152 320 B (AUDIT B73), not the 512 MiB guess.
     // IMMA prefill scratch (A7 step 8 / AUDIT B13): take it at the charged
     // bound now rather than letting the GEMM climb a staircase of takes later,
     // each intermediate one stranded in a bump arena with no free.
