@@ -2,15 +2,15 @@
 # Release-over-release A/B: two images, SafeTensors heroes, one model per process, arms alternate.
 # Per (model, image, trial): one --bench-pp 512 run (pp512 + tg128, the gate shape) and one
 # --bench-pp 4096 run, speculation off (bench pins + speculative.ngram=false), 5 reps each.
-# Usage: tools/analysis/release_ab.sh OLD_IMAGE NEW_IMAGE [TRIALS=3] > out.tsv; medians via the
-# summary block at the end. Rows: model image trial pp512 tg128 pp4096.
+# Usage: tools/analysis/release_ab.sh OLD_IMAGE NEW_IMAGE [TRIALS=3] > out.tsv. Rows: model image
+# trial pp512 tg128 pp4096. Qwen3.8-Flash-Next (host experts): tools/analysis/flashnext_tg_ab.sh.
 set -uo pipefail
 
 OLD="${1:?old image}"
 NEW="${2:?new image}"
 TRIALS="${3:-3}"
 MODELS_DIR="${MODELS_DIR:-$HOME/models}"
-MODELS="${MODELS:-Qwen3-8B-NVFP4-cortecs Qwen3-8B-FP8 Qwen3-14B-NVFP4 Qwen3-Coder-30B-A3B-Instruct-FP4 Qwen3.6-35B-A3B-NVFP4 Gemma-4-26B-A4B-it-NVFP4 Nemotron-3-Nano-30B-A3B-NVFP4 Qwen3.8-27B-NVFP4-vllm}"
+MODELS="${MODELS:-Qwen3-8B-NVFP4-cortecs Qwen3-8B-FP8 Qwen3-14B-NVFP4 Qwen3-Coder-30B-A3B-Instruct-FP4 Gemma-4-26B-A4B-it-NVFP4 Nemotron-3-Nano-30B-A3B-NVFP4 Qwen3.8-27B-NVFP4-vllm}"
 
 bash scripts/require_free_gpu.sh "release A/B" || exit 2
 echo "# harness: md5=$(md5sum "$0" | cut -d' ' -f1) old=$OLD new=$NEW trials=$TRIALS" >&2

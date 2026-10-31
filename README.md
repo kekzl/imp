@@ -59,7 +59,7 @@ Step by step, without Docker, or with another model: [`docs/QUICKSTART.md`](docs
 | --- | --- |
 | **not sure** | **Qwen3.8-27B** (the example above): reads text and images, fits a 24-32 GB card |
 | fast answers on a 12-16 GB card | **Qwen3-8B** |
-| more knowledge, still fast | **Qwen3.6-35B-A3B** |
+| code and agents, fast | **Qwen3-Coder-30B-A3B** |
 | the biggest, with ~68 GiB free RAM | **Qwen3.8-Flash-Next** ([how](docs/BIG_MODELS.md)) |
 
 imp is built for models in **SafeTensors** format (NVFP4 or FP8). Which models work and how big they are: [`docs/MODELS.md`](docs/MODELS.md). Which card holds what: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#which-card).

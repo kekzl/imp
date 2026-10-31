@@ -37,7 +37,6 @@ Qwen3-8B NVFP4	Qwen3-8B-NVFP4-cortecs	hero
 Qwen3-8B FP8	Qwen3-8B-FP8	hero
 Qwen3-14B NVFP4	Qwen3-14B-NVFP4	hero
 Qwen3-Coder-30B-A3B NVFP4	Qwen3-Coder-30B-A3B-Instruct-FP4	hero
-Qwen3.6-35B-A3B NVFP4	Qwen3.6-35B-A3B-NVFP4	hero
 Gemma-4-26B-A4B NVFP4	Gemma-4-26B-A4B-it-NVFP4	hero
 Nemotron-3-Nano-30B-A3B NVFP4	Nemotron-3-Nano-30B-A3B-NVFP4	hero
 Qwen3.8-27B NVFP4	Qwen3.8-27B-NVFP4-vllm	hero
@@ -48,6 +47,7 @@ TSV
 # (DEBT_LEDGER section (h)).
 read -r -d '' UNCONTESTED <<'TSV' || true
 gpt-oss-20b	official SafeTensors not staged on this host
+Qwen3.8-Flash-Next NVFP4	123.6 GiB: vLLM cannot serve it on one 32 GB card; imp keeps experts in host RAM (tools/analysis/flashnext_tg_ab.sh)
 TSV
 
 RELEASE_BAR=${RELEASE_BAR:-0}      # 1 = evaluate GOAL.md's hero bar and exit non-zero on a breach
