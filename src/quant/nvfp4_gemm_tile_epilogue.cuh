@@ -29,8 +29,8 @@ struct TileArgs {
     const float* w_scale;
     float beta;
     int ldd;  // D row stride in elements (0: N); a column block of a wider D
-    // Stream-K hybrid plan (sk_dp > 0): CTA b runs whole tiles b, b + grid, ... below sk_dp, then piece
-    // b % sk_split of tail tile sk_dp + b / sk_split (piece 0 finishes it). sk_dp 0: contiguous sk_per units.
+    // Stream-K hybrid plan (sk_split > 0): CTA b runs whole tiles b, b + grid, ... below sk_dp, then piece
+    // b % sk_split of tail tile sk_dp + b / sk_split (piece 0 finishes it). sk_split 0: sk_per units each.
     int sk_dp;
     int sk_split;
 };
