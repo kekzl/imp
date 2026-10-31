@@ -28,8 +28,9 @@ namespace imp::nvfp4_tile {
     const bool use256 = 4 * t256 >= 3 * sms && c256 <= c128;
     const int dp = use256 ? t256 : t128;
     const float idle = 1.0f - (static_cast<float>(dp) / (waves(dp) * static_cast<float>(sms)));
-    if (4 * t128 <= sms)  // 128x64, grid <= half a wave: M=512 N=512 K=2048 flushed 9.5 vs split 11.3 us
-        return 5;
+    if (4 * t128 <=
+        sms)  // 128x64, split in 2 with a workspace: pp512 tile sum Qwen3-30B 14.02-14.30 -> 13.95 ms
+        return sk_fits ? 6 : 5;
     if (sk_fits && 2 * t128 <= sms)
         return 4;
     if (sk_fits && idle >= 0.15f && t128 >= sms) {
@@ -45,8 +46,8 @@ namespace imp::nvfp4_tile {
 // wave split into 3 k-ranges on as many CTAs; below one wave every tile splits in 2 (grid = tiles x 2;
 // Qwen3-8B 512x1024x4096 in situ 10.9-11.0 us vs 4 pieces 11.5-11.6). Gemma-4 down_proj 2048x2816x2112 in
 // situ, us: pieces 3 29.0 (cuBLASLt 29.1), 2 29.2-29.7, 4 30.0, 8 34.4, uniform stream-K 30.5-31.0.
-[[nodiscard]] inline bool hybrid_plan(TileArgs& p, int sms, int kt) {
-    const int tiles = ((p.N + 127) / 128) * ((p.M + kBM - 1) / kBM);
+[[nodiscard]] inline bool hybrid_plan(TileArgs& p, int sms, int kt, int bn = 128) {  // bn: the tile width
+    const int tiles = ((p.N + bn - 1) / bn) * ((p.M + kBM - 1) / kBM);
     const int dp = (tiles / sms) * sms;
     const int tail = tiles - dp;
     const int pieces = std::min(dp > 0 ? 3 : 2, kt);
