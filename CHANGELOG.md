@@ -17,6 +17,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Gemma-4 NVFP4 down_proj (K 2112) runs the own NVFP4 tile from M 2048 instead of cuBLASLt block-scaled: partial last K stage, hybrid stream-K for partial waves, TMA-store epilogue. Gemma-4-26B-A4B pp4096 43682-43833 -> 44000-44183 tok/s, Qwen3-8B-FP8 26429-26485 -> 26828-26864, PPL unchanged (deterministic).
 - Native FP8 checkpoints run prefill rows from M 2048 on an own FP8 GEMM (block-scaled MMA with unit scales, `gemm.fp8_tile_min_m`) instead of cuBLASLt: Qwen3-8B-FP8 pp4096 26548-26651 -> 26759-26802 tok/s, PPL 10.7654 -> 10.7691; below M 2048 cuBLASLt stays (own -18 % at pp512).
 - Perf gates and test models are SafeTensors only: `verify-fast` pins Qwen3-8B NVFP4 (tg128 274.93), north star Qwen3-14B NVFP4 (170.88), the GDN battery Qwen3.8-27B NVFP4; e2e tests pick the load format from the path instead of a fixed GGUF.
 - No GGUF checkpoint is left on the test host: `make test-rerank` needs `RERANK_MODEL=`, `make test-vision` no longer points `VisionGolden` at the deleted Gemma mmproj files, `/v1/embeddings` drops to implemented (0 of 1 embedder tests run).

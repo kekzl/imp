@@ -35,6 +35,17 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
         "r"(parity)
         : "memory");
 }
+// Same wait with a suspend-time hint (CUTLASS ClusterBarrier value): the warp sleeps in the try_wait instead
+// of spinning through branch / issue slots.
+__device__ __forceinline__ void mbar_wait_sleep(uint32_t bar, uint32_t parity) {
+    asm volatile(
+        "{\n\t.reg .pred P;\n"
+        "TILE_SLEEP_%=:\n\t"
+        "mbarrier.try_wait.parity.shared::cta.b64 P, [%0], %1, %2;\n\t"
+        "@!P bra TILE_SLEEP_%=;\n\t}" ::"r"(bar),
+        "r"(parity), "r"(0x989680)
+        : "memory");
+}
 // .shared::cta (no clusters launched): .shared::cluster made ptxas guard every issue with a CTA-id check and
 // a CALL.ABS slow path, which disables setmaxnreg (C7506) and adds an ABI stack frame.
 __device__ __forceinline__ void tma_2d(uint32_t dst, const CUtensorMap* map, int x, int y, uint32_t bar) {
@@ -102,6 +113,26 @@ __device__ __forceinline__ void ldsm_x4(uint32_t r[4], uint32_t addr) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                  : "r"(addr));
+}
+// stmatrix x4: the inverse of ldsm_x4 (register j of lane l = u32 at row l/4, byte (l%4)*4 of matrix j).
+__device__ __forceinline__ void stsm_x4(uint32_t addr, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3) {
+    asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};" ::"r"(addr), "r"(r0),
+                 "r"(r1), "r"(r2), "r"(r3)
+                 : "memory");
+}
+// TMA store of one box from shared memory; rows / columns past the map clip. Generic writes to the box
+// need fence_async_smem first; the box stays in use until bulk_wait_read.
+__device__ __forceinline__ void tma_store_2d(const CUtensorMap* map, uint32_t src, int x, int y) {
+    asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, {%1, %2}], [%3];" ::"l"(map),
+                 "r"(x), "r"(y), "r"(src)
+                 : "memory");
+}
+__device__ __forceinline__ void fence_async_smem() {
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+}
+__device__ __forceinline__ void bulk_commit() { asm volatile("cp.async.bulk.commit_group;" ::: "memory"); }
+__device__ __forceinline__ void bulk_wait_read() {
+    asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
 }
 
 // Host: 2D uint8 TMA map over [rows, row_bytes], box [box_bytes, box_rows], 64B/128B swizzle by

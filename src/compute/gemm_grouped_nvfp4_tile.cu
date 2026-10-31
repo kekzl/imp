@@ -181,7 +181,7 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], con
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int row = wm + mf * 16 + T1 + h * 8;
-                const int col = wn + nf * 8 + T0 * 2;
+                const int col = C::ncol(wn, nf) + T0 * 2;
                 *reinterpret_cast<__half2*>(x.so + (static_cast<size_t>(row) * C::kOS) +
                                             col) = __floats2half2_rn(acc[mf][nf][h ? 2 : 0] * alpha,
                                                                      acc[mf][nf][h ? 3 : 1] * alpha);
