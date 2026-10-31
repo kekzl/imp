@@ -65,7 +65,7 @@ struct ProcessDiag {
     bool attention_fp8_qk_scaled = false;
     int nvfp4_cutlass_streamk = 1;  // matches the config.h default
     int nvfp4_cublaslt_min_m = 2048;     // matches the config.h default
-    int nvfp4_tile_min_m = 2048;         // matches the config.h default
+    int nvfp4_tile_min_m = 1;            // matches the config.h default
     bool f16_tile = true;                // matches the config.h default
     bool q6k_tile = true;                // matches the config.h default
     bool mxfp4_tile = true;              // matches the config.h default
