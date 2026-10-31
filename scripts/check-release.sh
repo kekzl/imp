@@ -282,7 +282,11 @@ fi
 # only warns (#2231). Same gate runs in the
 # pre-commit/pre-push hooks and the Build job (citations selection).
 section "living-doc citations"
-if python3 scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
+# Never python3 on the host: plain inside a container or CI, else python:3.13-slim.
+PY=(python3)
+[ -f /.dockerenv ] || [ -n "${GITHUB_ACTIONS:-}" ] || \
+    PY=(docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/src -w /src python:3.13-slim python3)
+if "${PY[@]}" scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
     pass "living-doc citations resolve"
 else
     sed 's/^/  /' /tmp/imp_check_citations.log
