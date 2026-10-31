@@ -1082,6 +1082,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                          qscratch_.fp8_act_size / (1024.0 * 1024.0));
             qscratch_.fp8_act_size = 0;
         }
+        // Stream-K partials of the own FP8 tile GEMM (gemm.fp8_tile_min_m); without them it runs
+        // data-parallel only. Qwen3-8B-FP8 pp4096 FP8 GEMM sum 907.5-909.1 -> 898.4-901.7 ms with them.
+        if (dispatch_policy().gemm.fp8_tile_min_m > 0) {
+            qscratch_.fp8_tile_ws_size = gemm_tile_streamk_workspace_bytes();
+            qscratch_.fp8_tile_ws = vram_alloc(vram_alloc_, qscratch_.fp8_tile_ws_size, "fp8_tile_ws");
+            if (!qscratch_.fp8_tile_ws)
+                qscratch_.fp8_tile_ws_size = 0;
+        }
         {
             // T2 (A7 step 4b.2): engine-lifetime, sized from init-time shapes; each caller degrades
             // on null (the reduction pair falls back to the sync path via its own log line). No
