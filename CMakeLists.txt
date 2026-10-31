@@ -708,7 +708,7 @@ if(IMP_BUILD_TOOLS)
     # Export recipe (#2481): the build's git tree id (build_image.sh), one TU so ccache keeps the rest.
     set(IMP_TREE_ID "" CACHE STRING "git tree id recorded in imp-quantize export recipes")
     set_source_files_properties(tools/imp-quantize/recipe.cpp PROPERTIES COMPILE_DEFINITIONS "IMP_TREE_ID=\"${IMP_TREE_ID}\"")
-    target_link_libraries(imp-quantize PRIVATE imp imp_warnings CUDA::cusolver CUDA::cublas)
+    target_link_libraries(imp-quantize PRIVATE imp imp_warnings CUDA::cublas)
     target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                    ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
@@ -1398,10 +1398,10 @@ if(IMP_BUILD_TESTS)
     target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
     set_target_properties(imp_test_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(test-quant PRIVATE imp_test_kernels)
-    # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU and cuSOLVER.
+    # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU and cuBLAS.
     target_sources(test-quant PRIVATE tools/imp-quantize/gptq.cu tests/test_gptq_nvfp4.cu)
     target_include_directories(test-quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-quantize)
-    target_link_libraries(test-quant PRIVATE CUDA::cusolver CUDA::cublas)
+    target_link_libraries(test-quant PRIVATE CUDA::cublas)
 
     imp_add_test_module(test-kv GPU SOURCES
         tests/test_fp8_kv_cache.cu
