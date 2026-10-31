@@ -96,13 +96,14 @@ void run_ref(const Operands& o, float beta, cudaStream_t s) {
 }
 
 bool run_own(const Operands& o, float beta, int variant, cudaStream_t s) {
-    const bool sk = variant == 3 || variant < 0;
+    const bool sk = variant == 3 || variant == 4 || variant < 0;
     return gemm_fp8_tile(o.a, o.w, o.a_scale, o.w_scale, beta, o.y_own, o.M, o.N, o.K, s, variant,
                          sk ? o.ws : nullptr, sk ? o.ws_bytes : 0);
 }
 
-constexpr int kVariants = 5;  // 0 128x128, 1 128x256, 2 sync, 3 stream-K, then -1 (auto)
-int variant_of(int i) { return i < 4 ? i : -1; }
+// 0 128x128, 1 128x256, 2 sync, 3 stream-K, 4 hybrid / split, 5 128x64, -1 (auto)
+constexpr int kVariants = 7;
+int variant_of(int i) { return i < 6 ? i : -1; }
 
 class Fp8GemmTileTest : public ::testing::TestWithParam<std::tuple<int, int, int>> {
 protected:
@@ -267,8 +268,8 @@ TEST(Fp8GemmTileBench, DISABLED_VsCublasLt) {
     // Qwen3-8B: q/o 4096x4096, k/v 1024x4096, gate or up 12288x4096 (and the fused 24576), down 4096x12288.
     const int nk[][2] = {{4096, 4096}, {1024, 4096}, {12288, 4096}, {24576, 4096}, {4096, 12288}};
     const int ms[] = {512, 2048};
-    std::fprintf(stderr, "%6s %6s %6s %9s %9s %9s %9s %9s %9s %7s\n", "M", "N", "K", "cublasLt", "t128",
-                 "t256", "sync", "sk", "auto", "auto_TF");
+    std::fprintf(stderr, "%6s %6s %6s %9s %9s %9s %9s %9s %9s %9s %9s %7s\n", "M", "N", "K", "cublasLt",
+                 "t128", "t256", "sync", "sk", "hybrid", "t64", "auto", "auto_TF");
     for (const auto& s_nk : nk) {
         for (int M : ms) {
             Operands o;
@@ -278,7 +279,7 @@ TEST(Fp8GemmTileBench, DISABLED_VsCublasLt) {
             for (int i = 0; i < kVariants; ++i)
                 t_v[i] = median_us([&] { (void)run_own(o, 0.0f, variant_of(i), s); });
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
-            const double tf = 2.0 * o.M * o.N * double(o.K) / (t_v[4] * 1e-6) / 1e12;
+            const double tf = 2.0 * o.M * o.N * double(o.K) / (t_v[kVariants - 1] * 1e-6) / 1e12;
             std::fprintf(stderr, "%6d %6d %6d %9.1f", o.M, o.N, o.K, t_ref);
             for (double t : t_v)
                 std::fprintf(stderr, " %9.1f", t);
