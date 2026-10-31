@@ -342,8 +342,9 @@ kv_fraction       = 1.0
 # below the allocator headroom. Clamped to [0, 50]. 0 = the headroom alone;
 # 10 (the old default) = 3.2 GiB on a 32 GiB card.
 reserve_floor_pct = 0
-# What cuBLAS/CUTLASS claim on the FIRST forward pass, in MiB. -1 = the 3900 MiB
-# constant (per-model measurements: 1033-1930 MiB, #2357). This is a FIXED charge: it does not shrink
+# What the libraries (cuBLASLt) claim on the FIRST forward pass, in MiB. -1 = the 1536 MiB
+# constant (measured 2026-10-31: 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB;
+# 3900 under CUTLASS + cuBLAS v2). This is a FIXED charge: it does not shrink
 # because --vram-budget asked for a smaller slice of the card, so it floors the
 # reserve above, which is otherwise all percentages. Before that floor existed
 # a 16 GiB budget scaled the reserve to 1.6 GiB against a real 3.9 GiB and the
@@ -367,9 +368,9 @@ library_reserve_mb = -1
 # both log `library reserve: could not write` and re-measure every start.
 #   mkdir -p $HOME/.cache/imp && chown 1001 $HOME/.cache/imp
 #   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
-# Second start on a persisted path plans the measured reserve instead of 3900
-# (#2357): Qwen3.8-27B-NVFP4 1930 MiB (975 -> 2025 KV blocks), Qwen3-8B-Q8_0
-# 1033 MiB (KV ceiling 5617 -> 6606 blocks), Qwen3.8-Flash-Next-NVFP4 1796 MiB.
+# Second start on a persisted path plans the measured reserve instead of the constant;
+# since #2436 a cold start re-sizes the KV pool after warmup to the same blocks
+# (Qwen3.8-27B-NVFP4 4950 either way, 2026-10-31).
 library_reserve_cache =
 # Pinned staging ring for the weight upload: depth x chunk size in MiB.
 # Pinning host memory is expensive on WDDM, and the ring's cost is paid at every

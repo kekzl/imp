@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-31
+commit: cc0936bb
 -->
 
 # Benchmarking methodology
@@ -52,7 +52,7 @@ Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confiden
 |---|---|---|
 | KV dtype inherited, not stated | state `kv_cache.dtype` explicitly; `kv_cache.dtype=auto` resolves NVFP4 on Qwen3.5, FP8/FP16 elsewhere - the same `--kv-fp8` halves KV bytes on most families and doubles them there | an inherited pin read as a batch-size effect for a whole sweep |
 | Short context can't show a KV-dtype difference | use long-context arms; per-step KV traffic is negligible at a few hundred prompt tokens | reported "costs nothing"; real cost 16 % on real prose (11 % on synthetic filler with a fixed sentence skeleton) |
-| KV block counts depend on library-reserve state | compare only within one library-reserve state | `--rm` (3900 MiB constant) vs a mounted `/home/imp/.cache/imp` (measured): Qwen3-8B-Q8_0 KV ceiling 5617 vs 6606 blocks, reserve 3900 vs 1033 MiB (#2357; the earlier "716 blocks, +4389 MiB" predates the WEIGHTS ledger fix #2355) |
+| KV block counts depend on library-reserve state | compare only within one library-reserve state; since #2436 warmup re-sizes the pool, cold and cached Qwen3.8-27B both end at 4950 blocks (2026-10-31) | `--rm` (constant: 3900 MiB until 2026-10-31, 1536 since) vs a mounted `/home/imp/.cache/imp` (measured): Qwen3-8B-Q8_0 KV ceiling 5617 vs 6606 blocks, reserve 3900 vs 1033 MiB (#2357; the earlier "716 blocks, +4389 MiB" predates the WEIGHTS ledger fix #2355) |
 | Speculation makes arms diverge, then compares texts | different KV precision gives different logits; the n-gram matcher drafts from the request's own emitted tokens | same reproducer: "NVFP4 +20 %" one session, "FP8 +13 %" another, `drafted=0` on the other arm each time |
 | Non-bit-deterministic forward; spec off is not enough | force equal emitted-token counts: set `max_tokens` BELOW what the task needs so both arms cut off at the same number | 3 pairs on 2026-08-30 compared counts that merely happened to match; the mismatched pair read the opposite sign; forced-length repeat: FP8 13.5 % ahead, 0.3 % spread per arm (#1817 later removed the gap itself) |
 | Wrong config file loaded silently (a dev build with the repo as its working directory reads `./imp.conf`; a release image does not) | record which config file was loaded, not just the flags; imp logs `imp.conf loaded from <path>` - keep that line in the record | a stray gitignored `imp.conf` made both arms of two profiling runs the same arm: identical kernel lists to within 3 ms/row |

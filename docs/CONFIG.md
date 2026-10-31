@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: 4666a109
+verified: 2026-10-31
+commit: cc0936bb
 -->
 
 # Configuration reference
@@ -43,7 +43,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
 | `vram.library_reserve_cache` | `""` | file for the measured first-forward charge (empty = `$XDG_CACHE_HOME/imp/library_reserve`, else `~/.cache/imp/library_reserve`; `off` = disabled). A later start of the same model plans with it instead of the constant. In a container mount the path (the image runs as `imp`: `/home/imp/.cache/imp`) or point this key at a mounted file |
-| `vram.library_reserve_mb` | `-1` (auto) | floor for the measured library (cuBLAS / cuBLASLt; CUTLASS until 2026-10-31) first-forward charge (-1 charges the 3900 MiB constant; per-model first-forward measurements 1033-1930 MiB, #2357); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |
+| `vram.library_reserve_mb` | `-1` (auto) | floor for the measured library (cuBLAS / cuBLASLt; CUTLASS until 2026-10-31) first-forward charge (-1 charges the 1536 MiB constant, 3900 until 2026-10-31; first-forward measurements 2026-10-31: 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |
 | `rope.scaling` (imp.conf `[rope]` section) | `""` (off) | `yarn` \| `linear`, runtime RoPE-scaling override, mirrors the model's declared `rope_scaling` metadata |
 | `rope.factor` | `1.0` | context-extension factor; raises the detected window to `factor x orig_ctx`, e.g. `4.0` stretches 32k -> 128k |
 | `rope.orig_ctx` | `0` (auto) | native training context the factor applies to |

@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- Cold-start library reserve constant 3900 -> 1536 MiB: without CUTLASS and cuBLAS v2 the first forward claims 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB. KV blocks after warmup are unchanged (#2436 re-sizes; Qwen3.8-27B 4950, Flash-Next 2025); weight caches and auto batch/seq resolve against 2.3 GiB less.
 - MoE router GEMM at prefill takes the own split-K kernel only while cuBLASLt would accumulate in fp32 (`gemm.cublas_fp16_acc` off, Gemma-4); Nemotron-3-Nano (fp16 accumulate on) goes back to cuBLASLt: router kernels 5.83 -> 4.48 ms per pp4096 run, e2e pp4096 +0.5 % (3/3 pairs).
 
 ### Removed
