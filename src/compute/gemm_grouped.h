@@ -5,8 +5,8 @@
 
 namespace imp {
 
-// Batched GEMM for MoE expert parallelism via cublasGemmBatchedEx; all active experts
-// dispatched in one cuBLAS call. For each expert e with count[e]>0: C_e = A_e @ B_e^T,
+// Batched GEMM for MoE expert parallelism: one cuBLASLt pointer-array batch per distinct
+// expert M (a lone expert: one plain GEMM). For each expert e with count[e]>0: C_e = A_e @ B_e^T,
 // A_e [count_e,K] gathered tokens, B_e [N,K] expert weight, C_e [count_e,N] output.
 //   a_base/c_base: gathered input/output buffers [expanded,K]/[expanded,N]
 //   offsets: host [n_experts+1] start offsets into expanded dim

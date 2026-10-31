@@ -1,14 +1,12 @@
 #include "vision/vision_encoder.h"
 #include "memory/engine_arena.h"
-#include "compute/cublas_handle.h"
+#include "compute/gemm_lt_ex.h"
 #include "compute/warp_reduce.cuh"
-#include "core/cuda_static_reset.h"
 #include "memory/vram_allocator.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -19,30 +17,10 @@
 
 namespace imp {
 
-// ---- cuBLAS handle for vision encoder ----
-static cublasHandle_t s_vision_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
-
-static cublasHandle_t get_vision_cublas_handle() {
-    if (!s_vision_cublas_handle)
-        s_vision_cublas_handle = cublas_handle_create("imp::vision_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
-    return s_vision_cublas_handle;
-}
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void vision_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_vision_cublas_handle); }
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(vision_encoder_reset_static_cuda_state);
-}  // namespace
-
 // ---- Helper: cuBLAS GEMM  C = alpha * A @ B^T ----
 // A: [M, K], B: [N, K], C: [M, N]  (row-major)
 static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta,
                         cudaStream_t stream) {
-    auto handle = get_vision_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
-
     // FP32 accumulation (FP16 in/out): the FFN down-projection sums thousands of terms; FP16
     // accumulation overflows for high-magnitude tokens (inf, then RMSNorm turns inf*0 into
     // NaN). alpha/beta must be float for COMPUTE_32F.
@@ -51,14 +29,13 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
 
     // cuBLAS uses column-major, so we compute C^T = B @ A^T
     // C^T [N, M] = B [N, K] @ A^T [K, M]
-    IMP_CUBLAS_CHECK_LOG(cublasGemmEx(handle,
-                                      CUBLAS_OP_T,                 // A^T
-                                      CUBLAS_OP_N,                 // B
-                                      N, M, K,                     // m, n, k in col-major terms
-                                      &f_alpha, B, CUDA_R_16F, K,  // B [N, K] col-major stride = K
-                                      A, CUDA_R_16F, K,            // A [M, K] col-major stride = K
-                                      &f_beta, C, CUDA_R_16F, N,   // C [M, N] col-major stride = N
-                                      CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T,                 // A^T
+                                    CUBLAS_OP_N,                 // B
+                                    N, M, K,                     // m, n, k in col-major terms
+                                    &f_alpha, B, CUDA_R_16F, K,  // B [N, K] col-major stride = K
+                                    A, CUDA_R_16F, K,            // A [M, K] col-major stride = K
+                                    &f_beta, C, CUDA_R_16F, N,   // C [M, N] col-major stride = N
+                                    CUBLAS_COMPUTE_32F, stream));
 }
 
 // ======================================================================
@@ -612,8 +589,6 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
         float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
         {
-            auto handle = get_vision_cublas_handle();
-            IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
             half h_alpha = __float2half(scale);
             half h_beta = __float2half(0.0f);
@@ -625,17 +600,16 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             // In col-major for cuBLAS: computing S^T[np, np] = K @ Q^T
             // where Q, K have leading dim nh*hd and batch stride hd
             IMP_CUBLAS_CHECK_LOG(
-                cublasGemmStridedBatchedEx(handle,
-                                           CUBLAS_OP_T,                                // K^T
-                                           CUBLAS_OP_N,                                // Q
-                                           np, np, head_dim,                           // m, n, k
-                                           &h_alpha, d_k_, CUDA_R_16F, nh * head_dim,  // lda for K
-                                           head_dim,                         // batch stride for K (next head)
-                                           d_q_, CUDA_R_16F, nh * head_dim,  // ldb for Q
-                                           head_dim,                         // batch stride for Q
-                                           &h_beta, d_attn_scores_, CUDA_R_16F, np,  // ldc for scores
-                                           static_cast<long long>(np) * np,  // batch stride for scores
-                                           nh, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
+                lt_gemm_strided_batched(CUBLAS_OP_T,                                // K^T
+                                        CUBLAS_OP_N,                                // Q
+                                        np, np, head_dim,                           // m, n, k
+                                        &h_alpha, d_k_, CUDA_R_16F, nh * head_dim,  // lda for K
+                                        head_dim,                         // batch stride for K (next head)
+                                        d_q_, CUDA_R_16F, nh * head_dim,  // ldb for Q
+                                        head_dim,                         // batch stride for Q
+                                        &h_beta, d_attn_scores_, CUDA_R_16F, np,  // ldc for scores
+                                        static_cast<long long>(np) * np,          // batch stride for scores
+                                        nh, CUBLAS_COMPUTE_16F, stream));
         }
 
         // Non-causal softmax
@@ -645,8 +619,6 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
         // attn_out = scores @ V
         {
-            auto handle = get_vision_cublas_handle();
-            IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
             half h_one = __float2half(1.0f);
             half h_zero = __float2half(0.0f);
@@ -657,18 +629,17 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
             // Col-major: out^T[hd, np] = V^T[hd, np] @ scores^T[np, np]
             IMP_CUBLAS_CHECK_LOG(
-                cublasGemmStridedBatchedEx(handle,
-                                           CUBLAS_OP_N,  // V^T is what we want, but V stored row-major...
-                                           CUBLAS_OP_N,  // scores
-                                           head_dim, np, np,                         // m, n, k
-                                           &h_one, d_v_, CUDA_R_16F, nh * head_dim,  // V: lda = nh*hd
-                                           head_dim,                                 // batch stride
-                                           d_attn_scores_, CUDA_R_16F, np,           // scores: lda = np
-                                           static_cast<long long>(np) * np,          // batch stride
-                                           &h_zero, d_attn_out_, CUDA_R_16F,
-                                           nh * head_dim,  // out: lda = nh*hd
-                                           head_dim,       // batch stride
-                                           nh, CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
+                lt_gemm_strided_batched(CUBLAS_OP_N,       // V^T is what we want, but V stored row-major...
+                                        CUBLAS_OP_N,       // scores
+                                        head_dim, np, np,  // m, n, k
+                                        &h_one, d_v_, CUDA_R_16F, nh * head_dim,  // V: lda = nh*hd
+                                        head_dim,                                 // batch stride
+                                        d_attn_scores_, CUDA_R_16F, np,           // scores: lda = np
+                                        static_cast<long long>(np) * np,          // batch stride
+                                        &h_zero, d_attn_out_, CUDA_R_16F,
+                                        nh * head_dim,  // out: lda = nh*hd
+                                        head_dim,       // batch stride
+                                        nh, CUBLAS_COMPUTE_16F, stream));
         }
 
         // Output projection: attn_out @ wo^T + bo
@@ -856,28 +827,24 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
 
         // attention: scores = Q @ K^T, kq_scale = 1.0 (q/k-norm controls magnitude)
         {
-            auto handle = get_vision_cublas_handle();
-            IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
             float f_alpha = 1.0f;  // kq_scale = 1.0; FP32 accumulate to avoid FP16 overflow
             float f_beta = 0.0f;
-            IMP_CUBLAS_CHECK_LOG(cublasGemmStridedBatchedEx(
-                handle, CUBLAS_OP_T, CUBLAS_OP_N, np, np, head_dim, &f_alpha, d_k_, CUDA_R_16F, nh * head_dim,
-                head_dim, d_q_, CUDA_R_16F, nh * head_dim, head_dim, &f_beta, d_attn_scores_, CUDA_R_16F, np,
-                static_cast<long long>(np) * np, nh, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+            IMP_CUBLAS_CHECK_LOG(
+                lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, np, np, head_dim, &f_alpha, d_k_,
+                                        CUDA_R_16F, nh * head_dim, head_dim, d_q_, CUDA_R_16F, nh * head_dim,
+                                        head_dim, &f_beta, d_attn_scores_, CUDA_R_16F, np,
+                                        static_cast<long long>(np) * np, nh, CUBLAS_COMPUTE_32F, stream));
         }
         softmax_2d_kernel<<<nh * np, 256, 0, stream>>>(d_attn_scores_, np);
         IMP_CUDA_CHECK_LAUNCH();
         {
-            auto handle = get_vision_cublas_handle();
-            IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
             float f_one = 1.0f;
             float f_zero = 0.0f;
-            IMP_CUBLAS_CHECK_LOG(cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, np,
-                                                            np, &f_one, d_v_, CUDA_R_16F, nh * head_dim,
-                                                            head_dim, d_attn_scores_, CUDA_R_16F, np,
-                                                            static_cast<long long>(np) * np, &f_zero,
-                                                            d_attn_out_, CUDA_R_16F, nh * head_dim, head_dim,
-                                                            nh, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+            IMP_CUBLAS_CHECK_LOG(
+                lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, head_dim, np, np, &f_one, d_v_, CUDA_R_16F,
+                                        nh * head_dim, head_dim, d_attn_scores_, CUDA_R_16F, np,
+                                        static_cast<long long>(np) * np, &f_zero, d_attn_out_, CUDA_R_16F,
+                                        nh * head_dim, head_dim, nh, CUBLAS_COMPUTE_32F, stream));
         }
 
         // output projection (no bias) → d_residual_

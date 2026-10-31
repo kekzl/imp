@@ -1,14 +1,12 @@
 #include "vision/internvl_encoder.h"
 
-#include "compute/cublas_handle.h"
-#include "core/cuda_static_reset.h"
+#include "compute/gemm_lt_ex.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "vision/internvl_encoder_kernels.h"
 #include "vision/qwen3vl_encoder_kernels.h"
 
-#include <cublas_v2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -19,30 +17,17 @@ namespace {
 
 constexpr int kAttnChunk = 512;  // query rows per score pass; scores are the only tokens^2 buffer
 
-cublasHandle_t s_handle = nullptr;
-
-cublasHandle_t handle() {
-    if (!s_handle)
-        s_handle = cublas_handle_create("imp::internvl_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
-    return s_handle;
-}
-
 // C[M, N] = A[M, K] @ W[N, K]^T + b, row-major, FP32 accumulation (fc2 sums 4096 terms). The bias
 // is written into C first and accumulated with beta = 1, so the output is rounded to FP16 once,
 // not twice (GEMM, then bias add): the per-stage bound against HF FP32 is 1e-3 relL2.
 void linear(const half* A, const half* W, half* C, int M, int N, int K, const half* b, cudaStream_t stream) {
     const float one = 1.0f;
     launch_internvl_fill_rows(C, b, M, N, stream);
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
-    IMP_CUBLAS_CHECK_LOG(cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &one, W, CUDA_R_16F, K, A,
-                                      CUDA_R_16F, K, &one, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F,
-                                      CUBLAS_GEMM_DEFAULT));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &one, W, CUDA_R_16F, K, A, CUDA_R_16F,
+                                    K, &one, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F, stream));
 }
 
 const half* hp(const Tensor& t) { return static_cast<const half*>(t.data); }
-
-void internvl_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_handle); }
-IMP_REGISTER_CUDA_STATIC_RESET(internvl_encoder_reset_static_cuda_state);
 
 }  // namespace
 
@@ -116,25 +101,24 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
     const VisionConfig& c = model_->config;
     const int heads = c.num_heads, hd = c.head_dim;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd)), zero = 0.0f, one = 1.0f;
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
     for (int c0 = 0; c0 < tokens; c0 += kAttnChunk) {
         const int rows = std::min(kAttnChunk, tokens - c0);
-        cublasStatus_t st = cublasGemmStridedBatchedEx(
-            handle(), CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_, CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, &zero, d_scores_, CUDA_R_16F, tokens,
-            static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_,
+                                                    CUDA_R_16F, hd, static_cast<long long>(tokens) * hd,
+                                                    d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+                                                    static_cast<long long>(tokens) * hd, &zero, d_scores_,
+                                                    CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens,
+                                                    heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("InternVL encoder: QK^T failed (%d)", static_cast<int>(st));
             return false;
         }
         launch_qwen3vl_softmax_rows(d_scores_, heads * rows, tokens, stream);
-        st = cublasGemmStridedBatchedEx(handle(), CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_,
-                                        CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_,
-                                        CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
-                                        d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-                                        static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F,
-                                        CUBLAS_GEMM_DEFAULT);
+        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_, CUDA_R_16F, hd,
+                                     static_cast<long long>(tokens) * hd, d_scores_, CUDA_R_16F, tokens,
+                                     static_cast<long long>(rows) * tokens, &zero,
+                                     d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+                                     static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("InternVL encoder: attn@V failed (%d)", static_cast<int>(st));
             return false;

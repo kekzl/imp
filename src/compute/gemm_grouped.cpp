@@ -1,13 +1,10 @@
-#include "compute/cublas_gemm_algo.h"
-#include "compute/cublas_handle.h"
 #include "compute/gemm_grouped.h"
-#include "core/cuda_static_reset.h"
+#include "compute/gemm_lt_ex.h"
 #include "core/cuda_errors.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 
-#include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -20,24 +17,6 @@
 
 namespace imp {
 
-
-// cuBLAS handle, lazily initialized, process-lifetime. Uses cublasGemmEx, the same proven
-// path as gemm.cu's gemm().
-static cublasHandle_t s_grouped_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
-
-static cublasHandle_t get_cublas_handle() {
-    if (!s_grouped_cublas_handle)
-        s_grouped_cublas_handle = cublas_handle_create("imp::gemm_grouped", CUBLAS_DEFAULT_MATH);
-    return s_grouped_cublas_handle;
-}
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void gemm_grouped_reset_static_cuda_state() { cublas_handle_destroy(s_grouped_cublas_handle); }
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_reset_static_cuda_state);
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // Helper: map QType -> cudaDataType
@@ -86,10 +65,8 @@ static cublasComputeType_t dtype_to_compute(QType dt) {
     }
 }
 
-// gemm_moe_batched: one cublasGemmBatchedEx call for all experts with nonzero token counts,
-// eliminating per-expert kernel launch overhead (critical for 128-expert models). All experts
-// share K,N but differ in M; cublasGemmBatchedEx requires uniform M per batch, so experts are
-// grouped by M (typically 2-5 calls instead of one per expert).
+// gemm_moe_batched: one pointer-array GEMM batch per distinct expert M (typically 2-5 calls
+// instead of one per expert); all experts share K, N.
 void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs,
                       int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs,
                       QType output_dtype, const float* a_scales, const float* b_scales) {
@@ -104,9 +81,6 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     // scales only (non-FP8 path). The CUTLASS 2.x GemmGrouped wrapper was removed: cuBLAS grouped
     // is faster on prefill and equivalent on decode on sm_120 since NVIDIA optimized
     // cublasLtMatmulGrouped in CUDA 13.2+; cuBLAS dispatch below handles all cases it covered.
-
-    cublasHandle_t handle = get_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cudaDataType_t cuda_dt_ab = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = dtype_to_compute(dtype);
@@ -249,55 +223,21 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_C_ptrs), static_cast<const void*>(h_C.data()),
                                        active_bytes, cudaMemcpyHostToDevice, stream));
 
-    // Use cublasGemmGroupedBatchedEx: single cuBLAS call for ALL groups.
-    // This eliminates per-group launch overhead (critical for 61+ groups with 128 experts).
-    {
-        int group_count = static_cast<int>(groups.size());
-
-        // Per-group descriptor arrays (host)
-        std::vector<cublasOperation_t> transa_arr(group_count, CUBLAS_OP_T);
-        std::vector<cublasOperation_t> transb_arr(group_count, CUBLAS_OP_N);
-        std::vector<int> m_arr(group_count);  // cuBLAS m = N (col-major trick: result cols)
-        std::vector<int> n_arr(group_count);  // cuBLAS n = M (result rows)
-        std::vector<int> k_arr(group_count);
-        std::vector<int> lda_arr(group_count);  // B leading dim
-        std::vector<int> ldb_arr(group_count);  // A leading dim
-        std::vector<int> ldc_arr(group_count);  // C leading dim
-        std::vector<int> group_size_arr(group_count);
-        std::vector<float> alpha_arr(group_count);
-        std::vector<float> beta_arr(group_count, 0.0f);
-
-        for (int gi = 0; gi < group_count; gi++) {
-            m_arr[gi] = N;             // output columns (row-major N)
-            n_arr[gi] = groups[gi].M;  // output rows (token count for this group)
-            k_arr[gi] = K;
-            lda_arr[gi] = K;  // B stride (weight matrix [N,K], col-major [K,N])
-            ldb_arr[gi] = K;  // A stride (activation [M,K], col-major [K,M])
-            ldc_arr[gi] = N;  // C stride (output [M,N], col-major [N,M])
-            group_size_arr[gi] = groups[gi].count;
-            alpha_arr[gi] = groups[gi].alpha;
-        }
-
-        cublasStatus_t st = cublasGemmGroupedBatchedEx(
-            handle, transa_arr.data(), transb_arr.data(), m_arr.data(), n_arr.data(), k_arr.data(),
-            alpha_arr.data(), (const void* const*)d_B_ptrs, cuda_dt_ab, lda_arr.data(),
-            (const void* const*)d_A_ptrs, cuda_dt_ab, ldb_arr.data(), beta_arr.data(), (void* const*)d_C_ptrs,
-            cuda_dt_c, ldc_arr.data(), group_count, group_size_arr.data(), compute_type);
-
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR(
-                "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
-                "(groups=%d, active=%d, K=%d, N=%d, status %d)",
-                group_count, n_active, K, N, (int)st);
-            // Fallback: per-group cublasGemmBatchedEx
-            for (const auto& g : groups) {
-                float g_alpha = g.alpha;
-                IMP_CUBLAS_CHECK_LOG(cublasGemmBatchedEx(
-                    handle, CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha, (const void**)(d_B_ptrs + g.start),
-                    cuda_dt_ab, K, (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K, &beta,
-                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N, g.count, compute_type, cublas_gemm_algo()));
-            }
-        }
+    // One pointer-array cuBLASLt batch per M group (cuBLASLt has no grouped algo on sm_120,
+    // docs/internals/SM120.md); a single expert takes its host pointers and exact alignment.
+    for (const auto& g : groups) {
+        float g_alpha = g.alpha;
+        cublasStatus_t st = g.count == 1
+                                ? lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha, h_B[g.start],
+                                             cuda_dt_ab, K, h_A[g.start], cuda_dt_ab, K, &beta, h_C[g.start],
+                                             cuda_dt_c, N, compute_type, stream)
+                                : lt_gemm_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha,
+                                                  d_B_ptrs + g.start, cuda_dt_ab, K, d_A_ptrs + g.start,
+                                                  cuda_dt_ab, K, &beta, d_C_ptrs + g.start, cuda_dt_c, N,
+                                                  g.count, compute_type, stream);
+        if (st != CUBLAS_STATUS_SUCCESS)
+            IMP_LOG_ERROR("imp::gemm_moe_batched: cuBLASLt failed (M=%d, experts=%d, K=%d, N=%d, status %d)",
+                          g.M, g.count, K, N, (int)st);
     }
 
     if (owns_ptrs) {

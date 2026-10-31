@@ -7,7 +7,6 @@
 
 #include "core/tensor.h"
 
-#include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cstddef>
 
@@ -22,7 +21,6 @@ static inline int gemv_blocks(int M) { return (M + kGemvWarps - 1) / kGemvWarps;
 
 // cuBLAS internals shared with the batched-GEMM TU (gemm_batched.cu); definitions + the
 // lazily-initialized handles/workspace live in gemm.cu.
-cublasHandle_t gemm_internal_cublas_handle();
 cublasLtHandle_t gemm_internal_cublaslt_handle();
 cudaDataType_t gemm_internal_dtype_to_cuda(QType dt);
 void* gemm_internal_workspace();

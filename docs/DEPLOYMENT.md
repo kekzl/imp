@@ -62,7 +62,7 @@ cosign verify-blob imp-<version>-linux-x86_64.tar.gz --bundle imp-<version>-linu
 ```
 
 - `bin/` holds launchers that start `libexec/` with the bundled loader (`scripts/bundle_release.sh`); only `libcuda.so.1` comes from the host.
-- Size: 474 MB packed (v0.59.2 tree, 43 libraries; cuBLASLt 546 MB unpacked, no cuSOLVER).
+- Size: 426 MB packed (v0.59.2 tree, 42 libraries; cuBLASLt 546 MB unpacked, no cuBLAS / cuSOLVER).
 - Tested: `debian:12` (glibc 2.36) and `ubuntu:22.04` resolve every library from `lib/`; `debian:12 --gpus all` serves Llama-3.2-3B Q8_0 greedy byte-identical to `imp:test` (713 bytes).
 - Build it locally: `make bundle` writes `dist/`.
 

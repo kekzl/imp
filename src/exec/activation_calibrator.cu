@@ -1,5 +1,4 @@
 #include "exec/activation_calibrator.h"
-#include "compute/cublas_handle.h"
 
 #include "core/logging.h"
 
@@ -72,10 +71,6 @@ ActivationCalibrator::~ActivationCalibrator() {
     for (auto& [key, e] : hess_)
         if (e.d_H)
             alloc_->free(e.d_H);
-    if (cublas_) {
-        auto h = static_cast<cublasHandle_t>(cublas_);
-        cublas_handle_destroy(h);
-    }
 }
 
 void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const Tensor& input,

@@ -34,8 +34,4 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
                                      cudaStream_t stream = nullptr, int sliding_window = 0,
                                      const void* sinks = nullptr);
 
-// Force-create the static cuBLAS handle (safe to call multiple times). Engine init calls this so
-// the first captured-stream call reuses it instead of cublasCreate (illegal under capture).
-void attention_cublas_prewarm();
-
 }  // namespace imp

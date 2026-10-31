@@ -1,12 +1,9 @@
-#include "compute/cublas_gemm_algo.h"
 #include "compute/attention_cublas.h"
-#include "compute/cublas_handle.h"
-#include "core/cuda_static_reset.h"
+#include "compute/gemm_lt_ex.h"
 #include "core/cuda_errors.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -34,68 +31,6 @@ uint64_t attention_cublas_prefill_call_count() {
 }
 void attention_cublas_prefill_reset_count() {
     s_cublas_prefill_calls.store(0, std::memory_order_relaxed);
-}
-
-// ---------------------------------------------------------------------------
-// cuBLAS handle (reuse global — same as gemm.cu)
-// ---------------------------------------------------------------------------
-static cublasHandle_t s_attn_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
-
-static cublasHandle_t get_attn_cublas_handle() {
-    if (!s_attn_cublas_handle)
-        s_attn_cublas_handle = cublas_handle_create("imp::attention_cublas", CUBLAS_TF32_TENSOR_OP_MATH);
-    return s_attn_cublas_handle;
-}
-
-// Forward-decl: definition lower in the file alongside s_attn_d_ptrs.
-static void ensure_attn_ptr_arrays(int n_heads);
-
-void attention_cublas_prewarm() {
-    // Force lazy-init of the static cuBLAS handle plus a dummy GemmBatchedEx so cuBLAS allocates its
-    // workspace and picks an algorithm; pre-sizes s_attn_d_ptrs for n_heads=256 (host stack bound).
-    // All cudaMallocs happen eagerly here so captured-stream calls never trigger one (illegal under capture).
-    cublasHandle_t h = get_attn_cublas_handle();
-    // Handle is process-global and outlives engines; its last cublasSetStream() may reference a stream
-    // a previous engine destroyed (model auto-swap), segfaulting inside cuBLAS algo selection. Rebind to
-    // the default stream here; real callers set their own stream before every use.
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(h, nullptr));
-    ensure_attn_ptr_arrays(/*n_heads=*/256);
-
-    constexpr size_t kM = 8, kN = 8, kK = 8;
-    half *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
-    void *d_ap = nullptr, *d_bp = nullptr, *d_cp = nullptr;
-    auto dalloc = [](auto** p, size_t bytes) {
-        if (cudaMalloc(p, bytes) == cudaSuccess) return true;
-        *p = nullptr;
-        return false;
-    };
-    auto release = [&] {
-        for (void* p : {static_cast<void*>(d_a), static_cast<void*>(d_b), static_cast<void*>(d_c), d_ap, d_bp, d_cp})
-            if (p) IMP_CUDA_CHECK_LOG(cudaFree(p));
-    };
-    // Setup failure: no warm-up GEMM (it would read unset pointer tables); best-effort, as before.
-    const bool setup_ok =
-        dalloc(&d_a, kM * kK * sizeof(half)) && dalloc(&d_b, kK * kN * sizeof(half)) &&
-        dalloc(&d_c, kM * kN * sizeof(half)) && dalloc(&d_ap, sizeof(void*)) && dalloc(&d_bp, sizeof(void*)) &&
-        dalloc(&d_cp, sizeof(void*)) && cudaMemset(d_a, 0, kM * kK * sizeof(half)) == cudaSuccess &&
-        cudaMemset(d_b, 0, kK * kN * sizeof(half)) == cudaSuccess &&
-        cudaMemcpy(d_ap, static_cast<const void*>(&d_a), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess &&
-        cudaMemcpy(d_bp, static_cast<const void*>(&d_b), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess &&
-        cudaMemcpy(d_cp, static_cast<const void*>(&d_c), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess;
-    if (!setup_ok) {
-        IMP_LOG_WARN("attention_cublas_prewarm: setup failed, warm-up skipped");
-        release();
-        return;
-    }
-
-    float alpha = 1.0f, beta = 0.0f;
-    (void)cublasGemmBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, kN, kM, kK, &alpha,
-                              (const void**)d_ap, CUDA_R_16F, kK,
-                              (const void**)d_bp, CUDA_R_16F, kK, &beta,
-                              (void**)d_cp, CUDA_R_16F, kN, 1, CUBLAS_COMPUTE_32F,
-                              CUBLAS_GEMM_DEFAULT);
-    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
-    release();
 }
 
 // Fused causal softmax FP32->FP16: reads FP32 S, writes FP16 probs to a separate buffer, saving
@@ -297,77 +232,8 @@ __global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
     }
 }
 
-// Static device pointer arrays for cublasGemmBatchedEx (GQA attention). Allocated once, grown as
-// needed. Layout: [A_ptrs..., B_ptrs..., C_ptrs...].
-static void** s_attn_d_ptrs = nullptr;
-static int s_attn_d_ptrs_capacity = 0;  // in number of pointers
-
-// Not a T2 arena tenant (A7 step 8): attention_cublas_prefill() returns void and dereferences
-// s_attn_d_ptrs unconditionally, so null means a corrupted CUDA context, not a slower path.
-// Direct allocation, prewarmed at n_heads=256; moving it needs a signature that can refuse (AUDIT B47).
-static void ensure_attn_ptr_arrays(int n_heads) {
-    int needed = 3 * n_heads;
-    if (needed <= s_attn_d_ptrs_capacity)
-        return;
-    if (s_attn_d_ptrs)
-        IMP_CUDA_CHECK_LOG(cudaFree(static_cast<void*>(s_attn_d_ptrs)));
-    s_attn_d_ptrs = nullptr;
-    s_attn_d_ptrs_capacity = 0;
-    cuda_alloc_or_throw(cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*)),
-                        "attention_cublas pointer arrays");
-    s_attn_d_ptrs_capacity = needed;
-}
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void attention_cublas_reset_static_cuda_state() {
-    cublas_handle_destroy(s_attn_cublas_handle);
-    if (s_attn_d_ptrs) {
-        (void)cudaFree(static_cast<void*>(s_attn_d_ptrs));
-        s_attn_d_ptrs = nullptr;
-    }
-    s_attn_d_ptrs_capacity = 0;
-}
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(attention_cublas_reset_static_cuda_state);
-}  // namespace
-
-// Fills s_attn_d_ptrs device-side for graph-capturable GQA cuBLAS: host pointers have no stable
-// identity across graph replays and H2D copies abort capture. Pattern:
-//   A: GQA-shared, ptr = base_A + (h/gqa_ratio)*stride_A; B/C: per-head, ptr = base + h*stride.
-__global__ void build_attn_ptr_arrays_kernel(const void** d_A, const void** d_B, void** d_C,
-                                              const char* base_A, int64_t stride_A_bytes,
-                                              const char* base_B, int64_t stride_B_bytes,
-                                              char* base_C, int64_t stride_C_bytes, int gqa_ratio,
-                                              int n_heads) {
-    int h = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (h >= n_heads)
-        return;
-    int g = h / gqa_ratio;
-    d_A[h] = base_A + (g * stride_A_bytes);
-    d_B[h] = base_B + (h * stride_B_bytes);
-    d_C[h] = base_C + (h * stride_C_bytes);
-}
-
-static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void* base_A,
-                                          int64_t stride_A_bytes, const void* base_B,
-                                          int64_t stride_B_bytes, void* base_C,
-                                          int64_t stride_C_bytes, int gqa_ratio,
-                                          cudaStream_t stream) {
-    const int block = 64;
-    int grid = (n_heads + block - 1) / block;
-    build_attn_ptr_arrays_kernel<<<grid, block, 0, stream>>>(
-        const_cast<const void**>(d_ptrs), const_cast<const void**>(d_ptrs + n_heads),
-        d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads), reinterpret_cast<const char*>(base_A), stride_A_bytes,
-        reinterpret_cast<const char*>(base_B), stride_B_bytes, reinterpret_cast<char*>(base_C),
-        stride_C_bytes, gqa_ratio, n_heads);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
 // cuBLAS batched attention for prefill. Q:[seq,n_heads*hd], K/V:[seq,n_kv*hd], O:[seq,n_heads*hd],
-// S:[n_heads,seq,seq] workspace. GQA (n_kv_heads<n_heads): cublasGemmBatchedEx with pointer arrays
-// mapping multiple Q heads to one K/V head. MHA: cublasGemmStridedBatchedEx, single call.
+// S:[n_heads,seq,seq] workspace. cuBLASLt strided batches, one per KV head under GQA.
 void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, Tensor& S,
                               int n_heads, int n_kv_heads, int head_dim, float scale, bool causal,
                               float softcap, int q_offset, cudaStream_t stream, int sliding_window,
@@ -380,9 +246,6 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         return;
 
     int gqa_ratio = n_heads / n_kv_heads;
-
-    cublasHandle_t handle = get_attn_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     const half* Q_base = static_cast<const half*>(Q.data);
     const half* K_base = static_cast<const half*>(K.data);
@@ -418,126 +281,67 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     // path; identical to S_base on the FP16-S path (in-place, safe).
     half* S_prob = use_fp32_s ? (S_base + (2 * s_fp32_elems)) : S_base;
 
-    if (gqa_ratio == 1) {
-        // ---------------------------------------------------------------
-        // MHA path: single strided batched call per direction
-        // ---------------------------------------------------------------
+    // One strided batch per KV head: its gqa_ratio Q heads against a shared K / V (stride 0);
+    // MHA is one batch over all heads.
+    const int groups = gqa_ratio == 1 ? 1 : n_kv_heads;
+    const int per_group = n_heads / groups;
+    const long long kv_stride = gqa_ratio == 1 ? head_dim : 0;
+    void* S_qk = use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base);
+    const cudaDataType_t s_type = use_fp32_s ? CUDA_R_32F : CUDA_R_16F;
+    const size_t s_elem = use_fp32_s ? sizeof(float) : sizeof(half);
 
-        // S = scale * Q × K^T (FP32 output when use_fp32_s)
+    // S = scale * Q x K^T
+    for (int g = 0; g < groups; g++) {
+        const long long h0 = static_cast<long long>(g) * per_group;
         IMP_CUBLAS_CHECK_LOG(
-            cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f,
-                                       K_base, CUDA_R_16F, ld_k, static_cast<long long>(head_dim), Q_base,
-                                       CUDA_R_16F, ld_q, static_cast<long long>(head_dim), &beta_f,
-                                       use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base),
-                                       use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s, strideS, n_heads,
-                                       CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
+            lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f,
+                                    K_base + (static_cast<ptrdiff_t>(g) * head_dim), CUDA_R_16F, ld_k,
+                                    kv_stride, Q_base + (h0 * head_dim), CUDA_R_16F, ld_q, head_dim, &beta_f,
+                                    static_cast<char*>(S_qk) +
+                                        (h0 * strideS * static_cast<long long>(s_elem)),
+                                    s_type, ld_s, strideS, per_group, CUBLAS_COMPUTE_32F, stream));
+    }
 
-        // Softcap (if enabled): applied to whichever buffer the softmax reads —
-        // S_f32 on the use_fp32_s path, S_base otherwise. Gemma-2 sets softcap=50;
-        // skipping it on the FP32 path sharpened the softmax incorrectly.
-        if (softcap > 0.0f) {
-            int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
-            int block = 256;
-            int grid_sc = static_cast<int>((total + block - 1) / block);
-            if (use_fp32_s) {
-                softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
+    // Softcap (if enabled) on the buffer the softmax reads; Gemma-2 sets softcap=50.
+    if (softcap > 0.0f) {
+        int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
+        int block = 256;
+        int grid_sc = static_cast<int>((total + block - 1) / block);
+        if (use_fp32_s) {
+            softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+            IMP_CUDA_CHECK_LAUNCH();
         }
+    }
 
-        // Softmax (FP32 or FP16)
-        {
-            int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
-            threads = std::min(threads, 1024);
-            dim3 grid(q_len, n_heads);
-            if (use_fp32_s) {
-                // Fused FP32 softmax + downcast: reads FP32 scores, writes FP16
-                // probabilities to S_base directly. Replaces softmax_fp32_inplace
-                // + fp32_to_fp16_kernel pair (saves one full pass over the tensor).
-                causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
-                    S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
+    // Softmax: FP32 scores -> FP16 probabilities (fused downcast), or FP16 in place.
+    {
+        int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
+        threads = std::min(threads, 1024);
+        dim3 grid(q_len, n_heads);
+        if (use_fp32_s) {
+            causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(S_f32, S_prob, q_len, kv_len,
+                                                                             q_offset, causal, sliding_window,
+                                                                             sinks_h);
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(S_base, q_len, kv_len, q_offset,
+                                                                        causal, sliding_window, sinks_h);
+            IMP_CUDA_CHECK_LAUNCH();
         }
+    }
 
-        // O = P × V (always FP16). P is read from S_prob (== S_base on the
-        // FP16-S path; the non-overlapping FP16 region on the FP32-S path).
-        IMP_CUBLAS_CHECK_LOG(cublasGemmStridedBatchedEx(
-            handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f, V_base, CUDA_R_16F, ld_k,
-            static_cast<long long>(head_dim), S_prob, CUDA_R_16F, ld_s, strideS, &zero_f, O_base, CUDA_R_16F,
-            ld_o, static_cast<long long>(head_dim), n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
-
-    } else {
-        // GQA path: single batched call with explicit pointer arrays; multiple Q heads share one K/V head.
-        ensure_attn_ptr_arrays(n_heads);
-
-        // Step 1: S = scale * Q × K^T — fill pointer arrays device-side.
-        launch_build_attn_ptrs(s_attn_d_ptrs, n_heads, K_base,
-                               static_cast<int64_t>(head_dim) * sizeof(half), Q_base,
-                               static_cast<int64_t>(head_dim) * sizeof(half),
-                               use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base),
-                               static_cast<int64_t>(strideS) *
-                                   (use_fp32_s ? sizeof(float) : sizeof(half)),
-                               gqa_ratio, stream);
-
-        IMP_CUBLAS_CHECK_LOG(cublasGemmBatchedEx(
-            handle, CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f, (const void**)s_attn_d_ptrs,
-            CUDA_R_16F, ld_k, (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_q, &beta_f,
-            (void**)(s_attn_d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads)),
-            use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s, n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
-
-        // Softcap (if enabled): applied to S_f32 on the use_fp32_s path, else S_base
-        // (same fix as the MHA path above — was dropped on FP32-S for Gemma-2).
-        if (softcap > 0.0f) {
-            int64_t total = static_cast<int64_t>(n_heads) * q_len * kv_len;
-            int block = 256;
-            int grid_sc = static_cast<int>((total + block - 1) / block);
-            if (use_fp32_s) {
-                softcap_fp32_kernel<<<grid_sc, block, 0, stream>>>(S_f32, total, softcap);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
-        }
-
-        // Softmax
-        {
-            int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
-            threads = std::min(threads, 1024);
-            dim3 grid(q_len, n_heads);
-            if (use_fp32_s) {
-                // Fused FP32 softmax + downcast (see MHA path above).
-                causal_softmax_fp32_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-                    S_f32, S_prob, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
-                    S_base, q_len, kv_len, q_offset, causal, sliding_window, sinks_h);
-                IMP_CUDA_CHECK_LAUNCH();
-            }
-        }
-
-        // Step 3: O = P x V, pointer arrays refilled device-side for the second cuBLAS call.
-        // C = alpha*A*B, A=V (OP_N, GQA-shared), B=P (OP_N, per-head), read from S_prob (#677).
-        launch_build_attn_ptrs(s_attn_d_ptrs, n_heads, V_base,
-                               static_cast<int64_t>(head_dim) * sizeof(half), S_prob,
-                               static_cast<int64_t>(strideS) * sizeof(half), O_base,
-                               static_cast<int64_t>(head_dim) * sizeof(half), gqa_ratio, stream);
-
-        IMP_CUBLAS_CHECK_LOG(
-            cublasGemmBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
-                                (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
-                                (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_s, &zero_f,
-                                (void**)(s_attn_d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads)), CUDA_R_16F,
-                                ld_o, n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
+    // O = P x V (FP16), P read from S_prob (#677).
+    for (int g = 0; g < groups; g++) {
+        const long long h0 = static_cast<long long>(g) * per_group;
+        IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len,
+                                                     &one_f, V_base + (static_cast<ptrdiff_t>(g) * head_dim),
+                                                     CUDA_R_16F, ld_k, kv_stride, S_prob + (h0 * strideS),
+                                                     CUDA_R_16F, ld_s, strideS, &zero_f,
+                                                     O_base + (h0 * head_dim), CUDA_R_16F, ld_o, head_dim,
+                                                     per_group, CUBLAS_COMPUTE_32F, stream));
     }
 }
 

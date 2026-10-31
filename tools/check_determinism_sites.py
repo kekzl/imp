@@ -46,7 +46,6 @@ READER = "process_diag_deterministic_gemm()"
 # in two dispatch branches, and losing one is the same drift as losing the file.
 EXPECTED = {
     "src/compute/gemm.cpp": 2,
-    "src/compute/cublas_gemm_algo.h": 1,
     "src/compute/sampling_topk_topp.cu": 1,
     "src/compute/sampling_filters.cu": 1,
     "src/compute/moe_routing_permute.cu": 1,
@@ -147,8 +146,7 @@ def selftest():
     doc = "nvfp4_gemm_tile.cu process_diag_deterministic_gemm"
     base = {
         "src/compute/gemm.cpp": 2,
-        "src/compute/cublas_gemm_algo.h": 1,
-        "src/compute/sampling_topk_topp.cu": 1,
+            "src/compute/sampling_topk_topp.cu": 1,
         "src/compute/sampling_filters.cu": 1,
         "src/compute/moe_routing_permute.cu": 1,
     }

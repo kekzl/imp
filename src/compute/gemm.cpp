@@ -9,6 +9,7 @@
 #include "core/cuda_raii.h"
 #include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
+#include "compute/gemm_lt_ex.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
@@ -16,7 +17,6 @@
 #include "core/pdl.h"
 #include "core/process_diag.h"
 
-#include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -48,19 +48,11 @@ bool gemm_lt_capture_allowed() {
 
 // kGemvThreads / kGemvWarps / gemv_blocks live in
 // gemm_internal.cuh, warp_reduce_sum in gemm_internal_device.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
-// cublasGemm*Ex algorithm: cublas_gemm_algo() (compute/cublas_gemm_algo.h, #2168).
 
 // ---------------------------------------------------------------------------
 // cuBLAS / cuBLASLt handles (lazily initialized)
 // ---------------------------------------------------------------------------
-static cublasHandle_t s_cublas_handle = nullptr;
 static cublasLtHandle_t s_cublaslt_handle = nullptr;
-
-static cublasHandle_t get_cublas_handle() {
-    if (!s_cublas_handle)
-        s_cublas_handle = cublas_handle_create("imp::gemm", CUBLAS_TF32_TENSOR_OP_MATH);
-    return s_cublas_handle;
-}
 
 static cublasLtHandle_t get_cublaslt_handle() {
     if (!s_cublaslt_handle)
@@ -85,7 +77,6 @@ static uint64_t s_slices_gen = 0;
 
 void gemm_init() {
     // Force handle creation early.
-    get_cublas_handle();
     get_cublaslt_handle();
 
     const uint64_t gen = engine_arena().generation();
@@ -136,10 +127,6 @@ void gemm_init() {
     if (s_workspace_size < prev_workspace_size)
         gemm_cleanup();
 
-    // Also let legacy cuBLAS API use the same workspace; null after a dropped slice, never stale.
-    if (s_workspace || prev_workspace_size > 0)
-        IMP_CUBLAS_CHECK_LOG(cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size));
-
     if (!s_bench_scratch) {
         auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
         if (!slab.empty()) {
@@ -176,7 +163,6 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
 
 // Non-static accessors exposing the file-local cuBLAS internals to the
 // batched-GEMM TU (gemm_batched.cu) via gemm_internal.cuh.
-cublasHandle_t gemm_internal_cublas_handle() { return get_cublas_handle(); }
 cublasLtHandle_t gemm_internal_cublaslt_handle() { return get_cublaslt_handle(); }
 cudaDataType_t gemm_internal_dtype_to_cuda(QType dt) { return dtype_to_cuda(dt); }
 void* gemm_internal_workspace() { return s_workspace; }
@@ -852,6 +838,7 @@ void gemm_cleanup() {
         IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescDestroy(entry.opDesc));
     }
     s_gemm_cache.clear();
+    lt_gemm_ex_cleanup();
 }
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h): frees + nulls the
@@ -859,7 +846,6 @@ void gemm_cleanup() {
 // guards re-arm on the next use after the reset.
 void gemm_reset_static_cuda_state() {
     gemm_cleanup();  // idempotent: clears the cuBLASLt descriptor/algo cache
-    cublas_handle_destroy(s_cublas_handle);
     cublas_handle_destroy(s_cublaslt_handle);
     // Arena-owned since A7 step 8 — the region belongs to the T2 arena, which
     // ~Engine closes. Only the pointers are re-armed here, so the next
@@ -930,20 +916,16 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         }
     }
 
-    // Mixed-precision output (e.g. FP16xFP16->FP32 for diagnostic precision probes): bypasses
-    // cuBLASLt and uses cublasGemmEx directly. cuBLASLt's descriptor + algo selection produces
-    // wildly wrong results for FP16->FP32 dims on sm_120; cublasGemmEx with CUBLAS_COMPUTE_32F
-    // handles it correctly.
+    // Mixed-precision output (e.g. FP16xFP16->FP32 for diagnostic precision probes): its own
+    // per-call descriptor (lt_gemm_ex), not the bucketed-M cache below, which produced wrong
+    // results for FP16->FP32 on sm_120.
     if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
-        cublasHandle_t fb_handle = get_cublas_handle();
-        IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
-        cublasStatus_t st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha,
-                                         B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta,
-                                         C.data, cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F,
-                                         CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha, B.data,
+                                       cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta, C.data,
+                                       cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_WARN("gemm: cublasGemmEx FP16→FP32 failed status=%d M=%ld K=%ld N=%ld", (int)st, (long)M,
-                         (long)K, (long)N);
+            IMP_LOG_WARN("gemm: FP16→FP32 failed status=%d M=%ld K=%ld N=%ld", (int)st, (long)M, (long)K,
+                         (long)N);
         }
         return;
     }
@@ -983,21 +965,19 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_WARN(
                 "gemm: cublasLtMatmul (INT) failed (status %d) M=%ld K=%ld N=%ld, "
-                "falling back to cublasGemmEx",
+                "falling back to an exact-alignment descriptor",
                 (int)st, (long)M, (long)K, (long)N);
-            cublasHandle_t fb_handle = get_cublas_handle();
-            IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
-            cublasStatus_t fb_st = cublasGemmEx(
-                fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha, B.data, cuda_dtype_B,
-                (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C, (int)N,
-                CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
+            cublasStatus_t fb_st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha,
+                                              B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K,
+                                              &ibeta, C.data, cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32I,
+                                              stream);
             if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                // Both cublasLt and the cublasGemmEx fallback failed: C holds garbage. Continuing
+                // Both the cached and the exact-alignment descriptor failed: C holds garbage. Continuing
                 // corrupts the forward pass silently (repeated-token gibberish + downstream IMA).
                 // Fail loudly instead.
                 char msg[192];
                 snprintf(msg, sizeof(msg),
-                         "gemm(INT): cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
+                         "gemm(INT): cublasLtMatmul + exact-alignment fallback both failed (status %d) "
                          "M=%ld K=%ld N=%ld — aborting rather than emitting garbage",
                          (int)fb_st, (long)M, (long)K, (long)N);
                 throw std::runtime_error(msg);
@@ -1027,27 +1007,25 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 if (++fallback_count <= 10) {
                     IMP_LOG_WARN(
                         "gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
-                        "after algo reselect, falling back to cublasGemmEx",
+                        "after algo reselect, falling back to an exact-alignment descriptor",
                         (int)st, (long)M, (long)K, (long)N);
                 }
-                cublasHandle_t fb_handle = get_cublas_handle();
-                IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
-                cublasStatus_t fb_st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M,
-                                                    (int)K, &alpha, B.data, cuda_dtype_B, (int)K, A.data,
-                                                    cuda_dtype_A, (int)K, &beta, C.data, cuda_dtype_C, (int)N,
-                                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                cublasStatus_t fb_st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha,
+                                                  B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K,
+                                                  &beta, C.data, cuda_dtype_C, (int)N,
+                                                  lt_compute_32f(cuda_dtype_A), stream);
                 if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                    // Both cublasLt and cublasGemmEx failed. Output buffer holds garbage; continuing
+                    // Both descriptors failed. Output buffer holds garbage; continuing
                     // corrupts the forward pass silently (repeated-token gibberish + downstream IMA). Fail
                     // loudly: under CUDA-graph capture this aborts the capture (per-step fallback) rather
                     // than baking in garbage.
                     char msg[192];
                     snprintf(msg, sizeof(msg),
-                             "gemm: cublasLtMatmul + cublasGemmEx fallback both failed (status %d) "
+                             "gemm: cublasLtMatmul + exact-alignment fallback both failed (status %d) "
                              "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d — aborting rather than "
                              "emitting garbage",
-                             (int)fb_st, (long)M, (long)K, (long)N, (int)cuda_dtype_A,
-                             (int)cuda_dtype_B, (int)cuda_dtype_C);
+                             (int)fb_st, (long)M, (long)K, (long)N, (int)cuda_dtype_A, (int)cuda_dtype_B,
+                             (int)cuda_dtype_C);
                     throw std::runtime_error(msg);
                 }
             }

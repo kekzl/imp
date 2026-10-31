@@ -1,13 +1,11 @@
 #include "vision/qwen3vl_encoder.h"
-#include "compute/cublas_handle.h"
-#include "core/cuda_static_reset.h"
+#include "compute/gemm_lt_ex.h"
 
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "vision/qwen3vl_encoder_kernels.h"
 
-#include <cublas_v2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,34 +21,16 @@ constexpr int kAttnChunk = 512;
 constexpr float kLayerNormEps = 1e-6f;
 constexpr float kVisionRopeTheta = 10000.0f;
 
-cublasHandle_t s_handle = nullptr;
-
-cublasHandle_t handle() {
-    if (!s_handle)
-        s_handle = cublas_handle_create("imp::qwen3vl_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
-    return s_handle;
-}
-
 // C[M, N] = alpha * A[M, K] @ B[N, K]^T, all row-major. Weights come off the
 // checkpoint as [out, in], which is exactly B.
 void gemm_nt(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta,
              cudaStream_t stream) {
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
     // FP32 accumulation: the FFN down-projection sums 4096 terms, and FP16
     // accumulation overflows there for high-magnitude tokens.
-    IMP_CUBLAS_CHECK_LOG(cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, B, CUDA_R_16F, K,
-                                      A, CUDA_R_16F, K, &beta, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F,
-                                      CUBLAS_GEMM_DEFAULT));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, B, CUDA_R_16F, K, A,
+                                    CUDA_R_16F, K, &beta, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F, stream));
 }
 
-}  // namespace
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void qwen3vl_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_handle); }
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(qwen3vl_encoder_reset_static_cuda_state);
 }  // namespace
 
 Qwen3VLEncoder::~Qwen3VLEncoder() { free_buffers(); }
@@ -170,17 +150,17 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
     const int hd = c.head_dim;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
     const float zero = 0.0f;
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
 
     for (int c0 = 0; c0 < tokens; c0 += kAttnChunk) {
         const int rows = std::min(kAttnChunk, tokens - c0);
 
         // scores[h] = Q[h][c0 : c0+rows] @ K[h]^T * scale   -> [rows, tokens]
-        cublasStatus_t st = cublasGemmStridedBatchedEx(
-            handle(), CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_, CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, &zero, d_scores_, CUDA_R_16F, tokens,
-            static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_,
+                                                    CUDA_R_16F, hd, static_cast<long long>(tokens) * hd,
+                                                    d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+                                                    static_cast<long long>(tokens) * hd, &zero, d_scores_,
+                                                    CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens,
+                                                    heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: QK^T failed (%d)", static_cast<int>(st));
             return false;
@@ -191,12 +171,11 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
 
         // out[h][c0 : c0+rows] = scores[h] @ V[h]   -> [rows, head_dim]
         const float one = 1.0f;
-        st = cublasGemmStridedBatchedEx(handle(), CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_,
-                                        CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_,
-                                        CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
-                                        d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-                                        static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F,
-                                        CUBLAS_GEMM_DEFAULT);
+        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_, CUDA_R_16F, hd,
+                                     static_cast<long long>(tokens) * hd, d_scores_, CUDA_R_16F, tokens,
+                                     static_cast<long long>(rows) * tokens, &zero,
+                                     d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+                                     static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: attn@V failed (%d)", static_cast<int>(st));
             return false;

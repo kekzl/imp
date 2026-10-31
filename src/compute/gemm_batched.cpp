@@ -1,10 +1,9 @@
-#include "compute/cublas_gemm_algo.h"
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
+#include "compute/gemm_lt_ex.h"
 
 #include "core/cublas_check.h"
 #include "core/logging.h"
-#include <cublas_v2.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -15,12 +14,11 @@ namespace imp {
 // Bridge the file-local cuBLAS internals (defined in gemm.cu) to the original
 // symbol names so the moved function bodies stay byte-identical.
 
-static inline cublasHandle_t get_cublas_handle() { return gemm_internal_cublas_handle(); }
 static inline cublasLtHandle_t get_cublaslt_handle() { return gemm_internal_cublaslt_handle(); }
 static inline cudaDataType_t dtype_to_cuda(QType dt) { return gemm_internal_dtype_to_cuda(dt); }
 
 // ---------------------------------------------------------------------------
-// Batched K/V projection via cublasGemmStridedBatchedEx
+// Batched K/V projection via one strided cuBLASLt batch
 // ---------------------------------------------------------------------------
 
 void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out, Tensor& v_out,
@@ -28,9 +26,6 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
     int M = static_cast<int>(input.shape[0]);  // n_tokens
     int K = static_cast<int>(input.shape[1]);  // d_model
     int N = static_cast<int>(k_out.shape[1]);  // nkv * hd
-
-    cublasHandle_t handle = get_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
@@ -60,19 +55,19 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
         return;
     }
 
-    cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M,
-                                                   K,                              // cuBLAS m, n, k
-                                                   &alpha, weight_kv.data, dt, K,  // A (weight), lda=K
-                                                   weight_stride,                  // strideA: offset to wv
-                                                   input.data, dt, K,              // B (input), ldb=K
-                                                   0,  // strideB: 0 (same input for both)
-                                                   &beta, k_out.data, dt, N,  // C (output), ldc=N
-                                                   output_stride,             // strideC: offset to v_out
-                                                   2,                         // batch_count = 2 (K and V)
-                                                   CUBLAS_COMPUTE_32F, cublas_gemm_algo());
+    cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, M,
+                                                K,                              // cuBLAS m, n, k
+                                                &alpha, weight_kv.data, dt, K,  // A (weight), lda=K
+                                                weight_stride,                  // strideA: offset to wv
+                                                input.data, dt, K,              // B (input), ldb=K
+                                                0,                         // strideB: 0 (same input for both)
+                                                &beta, k_out.data, dt, N,  // C (output), ldc=N
+                                                output_stride,             // strideC: offset to v_out
+                                                2,                         // batch_count = 2 (K and V)
+                                                lt_compute_32f(dt), stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        IMP_LOG_ERROR("imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
+        IMP_LOG_ERROR("imp::gemm_kv_batched: lt_gemm_strided_batched failed (status %d)", (int)st);
     }
 }
 
@@ -82,9 +77,6 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     int K = static_cast<int>(input.shape[1]);  // d_model
     int N = static_cast<int>(out1.shape[1]);   // d_ff (or nkv*hd)
 
-    cublasHandle_t handle = get_cublas_handle();
-    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
-
     cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
 
@@ -93,13 +85,12 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     long long output_stride = (static_cast<const char*>(out2.data) - static_cast<const char*>(out1.data)) /
                               dtype_size(input.qtype);
 
-    cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha,
-                                                   weight_fused.data, dt, K, weight_stride, input.data, dt, K,
-                                                   0, &beta, out1.data, dt, N, output_stride, 2,
-                                                   CUBLAS_COMPUTE_32F, cublas_gemm_algo());
+    cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, weight_fused.data,
+                                                dt, K, weight_stride, input.data, dt, K, 0, &beta, out1.data,
+                                                dt, N, output_stride, 2, lt_compute_32f(dt), stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        IMP_LOG_ERROR("imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)", (int)st);
+        IMP_LOG_ERROR("imp::gemm_pair_batched: lt_gemm_strided_batched failed (status %d)", (int)st);
     }
 }
 

@@ -777,7 +777,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
     graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len);
     gemm_init();
-    attention_cublas_prewarm();
     // grouped-3x prewarm takes CUTLASS staging + workspace slices from the T2
     // arena so the grouped NVFP4 GEMM never grows mid-capture. Gated on the
     // model having experts, not just sm_120 capability (AUDIT B12): a model
