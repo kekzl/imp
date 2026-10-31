@@ -20,7 +20,7 @@ struct InferenceState;
 void abort_stream_capture(cudaStream_t stream);
 
 // Shared graph-capture helpers: the process-wide capture mode (relaxed by default; global
-// deadlocks the CUTLASS grouped GEMM), and the kernel→kernel PDL edge rewrite.
+// deadlocked the CUTLASS grouped GEMM, removed #2929), and the kernel→kernel PDL edge rewrite.
 cudaStreamCaptureMode get_capture_mode();
 int apply_pdl_edges(cudaGraph_t graph);
 

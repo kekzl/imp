@@ -16,8 +16,7 @@
 
 namespace imp {
 
-// Bridge to the cuBLAS handle owned by gemm.cu so gemm_try_sgemm stays
-// byte-identical to its original gemm.cu form.
+// gemm_try_sgemm runs on lt_gemm_ex (cuBLASLt, compute/gemm_lt_ex.h); no cuBLAS handle since #2950.
 
 // --- GEMV fast path for M=1 decode (memory-bandwidth-bound) ---
 // Applies when all operands share the same dtype (excludes LM head: FP16→FP32).

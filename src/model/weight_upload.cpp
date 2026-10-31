@@ -1588,7 +1588,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 return true;  // already on GPU (e.g. from Gemma 4 fused split)
 
             // gpt-oss MXFP4 experts stay host-resident raw: the executor's pre_dequant phase converts
-            // them to NVFP4 and registers the CUTLASS grouped path. Uploading raw MXFP4 here would
+            // them to NVFP4 and registers the grouped NVFP4 path. Uploading raw MXFP4 here would
             // leave them in a format no MoE kernel consumes (NaN); the F16-slice fallback also
             // mis-strides MXFP4 bytes.
             if (ctx.mxfp4_experts_deferred && qtype == QType::MXFP4) {

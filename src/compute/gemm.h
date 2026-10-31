@@ -12,7 +12,7 @@ namespace imp {
 inline constexpr size_t kGemmCublasWorkspaceBytes = 64ull << 20;  // 64 MiB
 inline constexpr size_t kGemmBenchScratchBytes = 32ull << 20;     // 32 MiB
 
-// Pre-initialize cuBLAS handle and workspace. Call early (before weight upload)
+// Pre-initialize the cuBLASLt handle and workspace. Call early (before weight upload)
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
 
@@ -26,7 +26,7 @@ void gemm_set_lt_capture_allowed(bool allowed);
 // Destroy cached cuBLASLt descriptors. Call at shutdown (e.g. Engine destructor).
 void gemm_cleanup();
 
-// cuBLAS GEMM wrapper: C = alpha * A @ B^T + beta * C
+// Generic GEMM (M=1 GEMV, FP32 TF32, else gemm_cublaslt_generic): C = alpha * A @ B^T + beta * C
 // A [M, K]  B [N, K]  C [M, N]   -- all row-major
 void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float beta = 0.0f,
           cudaStream_t stream = nullptr);

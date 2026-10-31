@@ -72,15 +72,15 @@ struct GEMM {
     // quality cost for a decode gain. Default on; gemm.nvfp4_lm_head=false
     // still kills the NVFP4 LM head entirely (dense + GDN).
     bool nvfp4_lm_head_gdn = true;
-    // Batched-decode (n>1) LM head via one CUTLASS NVFP4 tensor-core GEMM
+    // Batched-decode (n>1) LM head via one NVFP4 tensor-core GEMM (gemm_nvfp4_tile_f32, #2937)
     // instead of the FP16-activation batched-M GEMV: reads the weight once for
     // the batch, but forces NVFP4 activations on the final logits (quality/speed
     // trade). n==1 decode and the spec-verify LM head never take this path. Default on.
     bool nvfp4_lm_head_cutlass = true;
     // Batched-decode LM head at n<=32 on the small-M mxf4nvf4 kernel (FP32
-    // logits, final-norm-fused activation quantize) ahead of the CUTLASS
-    // 128-row tile: avoids reading the CUTLASS weight sweep below the compute
-    // floor at small batch. Same W4A4 numerics as CUTLASS. Default on.
+    // logits, final-norm-fused activation quantize) ahead of the own
+    // NVFP4 tile GEMM: avoids reading that GEMM's weight sweep below the compute
+    // floor at small batch. Same W4A4 numerics as the tile GEMM. Default on.
     bool nvfp4_lm_head_smallm = true;
     // M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV folds into
     // both (producer writes h*gamma/4 + atomic sum of squares, consumer scales by rsqrt).
@@ -99,7 +99,7 @@ struct GEMM {
     // Own TMA + mxf4nvf4 dense prefill GEMM (src/quant/nvfp4_gemm_tile.cu) from M >= this, 0 = off;
     // ahead of cuBLASLt, same SfAtom bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM sum
     // -0.9 % vs cuBLASLt; from M 1 since the per-grid plan + 128x64 tile: pp128 Qwen3-8B 42.8-43.3 ->
-    // 34.8-35.1 ms vs CUTLASS. CUTLASS only on refusal.
+    // 34.8-35.1 ms vs CUTLASS (#2935). On refusal: cuBLASLt from nvfp4_cublaslt_min_m, else dequant.
     int nvfp4_tile_min_m = 1;
     // Own FP16 GEMM (src/compute/gemm_f16_tile.cu) instead of cuBLASLt for F16 x F16 -> F16 with fp16
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
@@ -150,16 +150,16 @@ struct GEMM {
     // F16 sources only: GGUF Q8_0 projections decode in place via dp4a (#2688, the copy cost
     // 5280 MiB on Qwen3.8-27B Q4_K_M). Default on.
     bool fp8_ssm_proj = true;
-    // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the CUTLASS
-    // block-scaled GEMM (W4A4) instead of cuBLAS FP16 (~320 TFLOPS on sm_120, 35-40% of peak).
+    // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the own NVFP4
+    // tile GEMM (W4A4) instead of the FP16 GEMM (~320 TFLOPS on sm_120, 35-40% of peak).
     // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.
     // M<=32 and M=1 keep FP16 / the FP8 sidecar. Measured: in pp4096 +7.7% (Qwen3.6-35B),
     // +12.3% (Qwen3.8-27B, BF16 in_proj export) for PPL (45k corpus) +0.68% / +0.32..0.56%;
     // gate +0.60%, out +1.98%, all +4.25% PPL on Qwen3.6-35B stay opt-in (roadmap Open 12).
     // Builds only for projections without FP8 decode rows while the MXFP8 route below is fp8rows (default).
     std::string nvfp4_gdn_proj_prefill = "in";
-    // MXFP8 (E4M3, UE8M0 per 32) prefill copies of the same projections on the CUTLASS
-    // block-scaled GEMM: 3 mantissa bits per element against NVFP4's 1, twice the copy bytes.
+    // MXFP8 (E4M3, UE8M0 per 32) prefill copies of the same projections on the own MXFP8
+    // tile GEMM (#2928): 3 mantissa bits per element against NVFP4's 1, twice the copy bytes.
     // Same vocabulary; a projection named here takes MXFP8 ahead of its NVFP4 copy. Qwen3.8-27B
     // 45k PPL: in +0.08%, gate -0.51%, out -0.18% (NVFP4 +0.32 / +0.01 / +0.47%); pp4096
     // Qwen3.6-35B in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies on
@@ -175,7 +175,7 @@ struct GEMM {
     std::string fp8_attn_proj = "auto";
     // Route native-NVFP4 MoE expert decode (M=1) through the fast per-expert
     // gemv_nvfp4_moe kernels (borrowing resident expert data+scales) instead of
-    // the CUTLASS grouped-GEMM, which under-utilizes the GPU at M=1. Prefill stays on CUTLASS.
+    // the grouped GEMM (CUTLASS under-utilized the GPU at M=1). Prefill stays on the own grouped GEMM.
     bool nvfp4_moe_decode = true;
 };
 }  // namespace imp::cfg

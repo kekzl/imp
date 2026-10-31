@@ -27,10 +27,10 @@ void trim_graph_mem() {
 // cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and the ConditionalRunner
 // body-graph capture. Probed at first call and cached.
 //
-// "relaxed" is the default: CUTLASS 3.x grouped GEMM silently HANGS under
+// "relaxed" is the default: the CUTLASS 3.x grouped GEMM (removed #2929) HUNG under
 // cudaStreamCaptureModeGlobal during NVFP4 MoE prefill capture (Blocker B,
 // prefill_graph_blockers_2026_05_14 memo). Relaxed drops the cross-thread synchronization
-// constraint CUTLASS's collective scheduler is suspected to deadlock on, and is a strict
+// constraint CUTLASS's collective scheduler was suspected to deadlock on, and is a strict
 // superset of capturable behaviors, so the decode fast path still works under it.
 cudaStreamCaptureMode get_capture_mode() {
     static cudaStreamCaptureMode cached = []() {

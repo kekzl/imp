@@ -48,7 +48,7 @@ enum class MoePrefillOuter {
     NONE,            // dense model — no MoE layers
     FP16_BATCH,      // try_run_moe_fp16_batch_prefill
     FP8_BATCH,       // try_run_moe_fp8_batch_prefill
-    CUTLASS3X,       // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath
+    CUTLASS3X,       // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath (own grouped GEMM)
     NVFP4_DEQUANT,   // try_run_moe_nvfp4_dequant_batch_prefill_
     LEGACY,          // run_moe_legacy_fallback_
     FUSED_Q6K,       // try_run_moe_q6k_prefill (gemm.moe_imma_prefill=false only)
@@ -58,9 +58,9 @@ enum class MoePrefillOuter {
 // Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_
 // (exec/executor_forward_moe_cutlass.cu).
 enum class MoePrefillPath {
-    DEVICE_ARGS,  // CUTLASS 3.x NVFP4 device-args full path (fast)
+    DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)
     SMALL_M,      // gemm_grouped_nvfp4_smallM (small token counts)
-    GROUPED,      // host-args CUTLASS 3.x grouped GEMM (+ gpt-oss bias seams)
+    GROUPED,      // gemm_grouped_nvfp4_host_args (+ gpt-oss bias seams)
     LEGACY,       // per-expert legacy fallback (gather + serial GEMM)
 };
 

@@ -31,8 +31,8 @@ struct MoE {
     // default; weight_upload pins NVFP4 prequant experts anyway when host RAM allows,
     // and whole-layer staging follows the pinned slabs, not this flag.
     bool pin_host_experts = false;
-    // Dispatch a staged host-resident MoE layer through the CUTLASS grouped
-    // NVFP4 prefill instead of the per-expert dequant fallback. Needs pinned slabs.
+    // Dispatch a staged host-resident MoE layer through the own grouped
+    // NVFP4 prefill GEMM instead of the per-expert dequant fallback. Needs pinned slabs.
     // Qwen3.8-Flash-Next-NVFP4: pp3692 203 -> 1143 tok/s; Qwen3-30B-A3B-NVFP4, 48 host layers:
     // pp4096 2631-2748 -> 7067-7093. Staged in moe.stage_expert_chunks blocks (below).
     bool staged_cutlass_prefill = true;
@@ -65,8 +65,8 @@ struct MoE {
     // Per-process MoE workspace reserve override (MiB). 0 = use computed
     // default.
     int reserve_mib = 0;
-    // CUTLASS 3.x device-args full path for NVFP4 MoE prefill. Default ON
-    // since 2026-05-14 (+11-39% pp512 on 4-model A/B).
+    // Device-args full path for NVFP4 MoE prefill (gemm_grouped_nvfp4_dispatch). Default ON
+    // since 2026-05-14 (+11-39% pp512 on 4-model A/B, then on CUTLASS 3.x).
     bool nvfp4_device_args = true;
     // Opt-in smallM kernel branch for NVFP4 MoE prefill.
     bool nvfp4_smallM = false;

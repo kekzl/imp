@@ -938,7 +938,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Small-M path first (n<=32, gemm.nvfp4_lm_head_smallm): the smallm v2
             // kernel streams the LM-head weight once at one stripe and writes FP32
             // logits straight from its accumulators; the final norm fuses the
-            // activation quantize. Declines fall through to the CUTLASS/GEMV chain.
+            // activation quantize. Declines fall through to the tile GEMM / GEMV chain.
             if (dispatch_policy().gemm.nvfp4_lm_head_smallm && n <= 32 && (cfg.d_model % 256) == 0 &&
                 (cfg.vocab_size % 64) == 0) {
                 const int K = cfg.d_model;
@@ -970,8 +970,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
             if (!normed)
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-            // Tensor-core path: one CUTLASS NVFP4 GEMM (M=n) reads the LM-head weight
-            // ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (samplers read
+            // Tensor-core path: one NVFP4 tile GEMM (M=n, gemm_nvfp4_tile_f32) reads the
+            // LM-head weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (samplers read
             // float logits). Falls back to the GEMV if disabled or the kernel declines the shape.
             if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
                 qscratch_.cutlass_act_sf != nullptr) {

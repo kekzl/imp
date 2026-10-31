@@ -494,8 +494,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         };
 
         // Helper: batch dequant all experts + single grouped GEMM.
-        // Dequants all experts to FP16, then runs a single batched GEMM.
-        // CUTLASS 2.x GemmGrouped provides lower launch overhead than cuBLAS.
+        // Dequants all experts to FP16, then runs a single batched GEMM
+        // (gemm_moe_batched: cuBLASLt, one call per group of equal M).
         auto chunked_dequant_gemm = [&](const Tensor& packed, QType qtype,
                                         const std::vector<Tensor>& fallback,
                                         const std::vector<TensorID>& fallback_ids,
@@ -601,7 +601,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
         } else if (can_dequant_batch) {
             // ===== BATCH DEQUANT + GROUPED GEMM =====
-            // Dequant all experts to FP16, then single grouped GEMM via CUTLASS.
+            // Dequant all experts to FP16, then single grouped GEMM via cuBLASLt.
 
             if (!non_gated_experts)
                 chunked_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
