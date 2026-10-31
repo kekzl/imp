@@ -1,8 +1,8 @@
 // MoE FFN forward pass, extracted from executor_forward.cu.
 // GraphExecutor::run_moe_ffn(): routing -> expert dispatch -> scatter -> residual add.
 // Dispatch paths: 1 NVFP4 decode fast (n=1); 2 TC fused (Q6K/Q4K GEMM);
-// 3 scalar fused (dp4a GEMV, small experts); 4 batch (cuBLAS/CUTLASS,
-// large batches); 5 shared expert (parallel dense FFN when present).
+// 3 scalar fused (dp4a GEMV, small experts); 4 batch (cuBLASLt / own grouped
+// NVFP4 GEMM, large batches); 5 shared expert (parallel dense FFN when present).
 
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
@@ -358,7 +358,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     }
 }
 
-// Cheap precondition mirror for the CUTLASS 3.x NVFP4 device-args fast
+// Cheap precondition mirror for the grouped NVFP4 device-args fast
 // path inside try_run_moe_cutlass3x_nvfp4_prefill_. Keep the two
 // predicates in sync: if the real gate flips false at runtime while this
 // returns true, the legacy fallback gathers lazily, so output stays
@@ -368,7 +368,7 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     if (!has_moe_)
         return false;
     // Mirrors try_run_moe_cutlass3x_nvfp4_prefill_'s entry gate: without the
-    // CUTLASS 3.x grouped path + packed/scale workspace, every MoE prefill
+    // grouped NVFP4 path + packed/scale workspace, every MoE prefill
     // lands in run_moe_legacy_fallback_, whose host-args guard throws under
     // capture (moe_host_args_capture_guard).
     if (dispatch_policy().moe.no_cutlass3x)
@@ -517,8 +517,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // is preferred (no D2H sync, simpler pipeline); FP8 batch is only the
             // fallback when FP16 batch isn't available.
 
-            // Gather (reorder tokens by expert assignment) is skipped when the CUTLASS
-            // 3.x NVFP4 device-args fast path will fire: that path reads ctx.no via
+            // Gather (reorder tokens by expert assignment) is skipped when the grouped
+            // NVFP4 device-args fast path will fire: that path reads ctx.no via
             // routing.sorted_token_ids in a fused gather+quantize kernel and never
             // touches moe_.gathered. Lazy gather in the legacy fallback catches the
             // rare case where the inner gate flips false at runtime.

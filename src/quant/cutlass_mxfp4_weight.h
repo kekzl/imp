@@ -12,7 +12,7 @@ namespace imp {
 
 struct CutlassMxFP4Weight {
     const void* data = nullptr;     // [N, K/2] packed E2M1 nibbles
-    void* scale_factors = nullptr;  // SfAtom layout UE8M0 (for CUTLASS prefill)
+    void* scale_factors = nullptr;  // SfAtom layout UE8M0 (gemm_mxfp4_tile prefill)
     void* linear_scales = nullptr;  // [N, K/32] row-major UE8M0 (for GEMV decode)
     float tensor_scale = 1.0f;      // deferred global scale
     int64_t N = 0;

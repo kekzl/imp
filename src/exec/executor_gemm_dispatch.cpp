@@ -130,8 +130,8 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream);
 }
 
-// One CUTLASS NVFP4 prefill GEMM through the kernel registry: quantizes `input` into the
-// shared activation scratch (skipped when ctx says a prior dispatch on the same input
+// One NVFP4 prefill GEMM (own tile, cuBLASLt on refusal) via the kernel registry: quantizes `input`
+// into the shared activation scratch (skipped when ctx says a prior dispatch on the same input
 // already did) and declines on a missing SfAtom (GGUF source, Phase 3 G3), a missing scratch
 // or a nonzero beta (the epilogue bakes beta=0), so the caller falls through to a beta-honouring route.
 static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
@@ -286,7 +286,7 @@ static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, co
 }
 
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
-// the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
+// the dispatch is guaranteed to reach the NVFP4 tile prefill block
 // (which quantizes input into the shared activation scratch). Every
 // earlier-return route in gemm_via_handle_ must answer false here.
 bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
@@ -304,16 +304,16 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
         return false;
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
-    // FP16 / FP8 prefill-cache hits intercept before the CUTLASS block.
+    // FP16 / FP8 prefill-cache hits intercept before the NVFP4 tile block.
     if (prefill == StorageTier::FP16 && wcache_.fp16.contains(h.source_data))
         return false;
     if (prefill == StorageTier::FP8 && wcache_.fp8.contains(h.source_data))
         return false;
     // GGUF source with NVFP4 decode overlay: prefill dequants the original
-    // quant — never reaches the CUTLASS block.
+    // quant, never reaches the NVFP4 tile block.
     if (h.source_data != nullptr && dequant_gpu_supported(h.source_qtype))
         return false;
-    // The CUTLASS block itself requires the activation scratch.
+    // The NVFP4 tile block itself requires the activation scratch.
     return qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr;
 }
 
@@ -515,7 +515,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // with no direct small-M kernel, e.g. Q6_K, otherwise pay ~7x a decode
         // step per verify). Also aligns verify argmax with the decode path. M cap
         // = largest capture bucket (33). Scoped to dequantable GGUF sources;
-        // native-ST NVFP4 weights read NVFP4 directly via the CUTLASS block below
+        // native-ST NVFP4 weights read NVFP4 directly via the NVFP4 tile block below
         // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
         // speculative.verify_smallm routes the chunk to the small-M block instead.
         if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
@@ -533,10 +533,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 return;
             }
         }
-        // #1055: native ST-NVFP4 verify chunks. The CUTLASS prefill block serves
-        // them correctly but at low bandwidth for tiny M; the batched GEMV reads
-        // the weight once per MR=4 tile, winning only in the single-tile regime:
-        // hard cap M<=4, larger chunks stay on CUTLASS. Same weight + linear
+        // #1055: native ST-NVFP4 verify chunks. The NVFP4 tile prefill block serves
+        // them correctly (CUTLASS, measured then: low bandwidth at tiny M); the batched GEMV
+        // reads the weight once per MR=4 tile, winning only in the single-tile regime:
+        // hard cap M<=4, larger chunks stay on the tile block. Same weight + linear
         // micro-scales as the M=1 decode GEMV, but NOT the same kernel (decode
         // uses gemv_nvfp4_kpar, verify uses gemm_nvfp4_batched); no argmax parity
         // with non-speculative greedy output either way (docs/LIMITATIONS.md).
@@ -586,7 +586,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
             const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                    : gemm_nvfp4_smallm_workspace_bytes(N);
-            // Capturing with a too-small workspace falls through (CUTLASS on
+            // Capturing with a too-small workspace falls through (the NVFP4 tile on
             // a native source, the dequant route on a GGUF one);
             // prewarm_smallm_workspace sizes both scratches at init.
             ensure_smallm_ws_(need, ctx.stream);
@@ -717,8 +717,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // and degenerates output. Reached only when no FP16/FP8 prefill cache
     // exists (sm_120 disables FP8 prefill, #428). Decode rows read the NVFP4
     // cache instead (M=1 and 2..32-row small-M, #1897). Native NVFP4
-    // SafeTensors models are excluded (source_qtype rejected by dequant_gpu_supported()) and use the CUTLASS
-    // path.
+    // SafeTensors models are excluded (source_qtype rejected by dequant_gpu_supported()) and use the NVFP4
+    // tile path.
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
         if (imma_source_prefill(h, input, output, ctx, M, cur_decode_rows_))
@@ -727,7 +727,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         return;
     }
 
-    // ---- CUTLASS NVFP4 prefill via GemmKernelRegistry (qscratch buffers) ----
+    // ---- CUTLASS_NVFP4 tier prefill via GemmKernelRegistry (own tile GEMM, qscratch buffers) ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
         {
             CutlassNvFP4Weight cw;
@@ -755,13 +755,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     }
 
     // Native-NVFP4 prefill (M>1) safety net: dequant the packed weight to FP16
-    // and run cuBLAS. Reached when the fast CUTLASS-NVFP4 path declines and
+    // and run gemm() (cuBLASLt). Reached when the NVFP4 tile path declines and
     // there is no FP16/FP8 prefill companion (native source rejected by
     // dequant_gpu_supported()). Without this, dispatch falls to the generic
     // gemm(), which hands cuBLAS an unsupported FP16xINT8 GEMM
     // (CUBLAS_STATUS_NOT_SUPPORTED) -> silent repeated-token garbage + IMA
-    // (hit Qwen3.6-35B-A3B-NVFP4's shared-expert gate/up). Slower than CUTLASS but correct; only fires on
-    // decline.
+    // (hit Qwen3.6-35B-A3B-NVFP4's shared-expert gate/up). Slower than the tile GEMM but correct; only
+    // fires on decline.
     if (M > 1 && h.source_data && h.source_scales &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4) &&
         (h.source_qtype == QType::NVFP4 || h.source_qtype == QType::INT8)) {

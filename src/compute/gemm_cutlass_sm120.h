@@ -12,8 +12,8 @@ namespace imp {
 
 struct NvFP4QuantResult;  // forward
 
-// Converted weight data for CUTLASS sm_120 block-scaled GEMM. Packed FP4 pointer is borrowed
-// from the NVFP4 cache (RowMajor K-contiguous). Scale factors hold micro_scale only (UE4M3
+// Weight for the block-scaled NVFP4 GEMMs (own tile, cuBLASLt on refusal; "Cutlass" names historical, #2938).
+// Packed FP4 borrowed from the NVFP4 cache (RowMajor K-contiguous); scale_factors = micro_scale only (UE4M3
 // SfAtom); tensor_scale is deferred to the GEMM epilogue alpha (avoids UE4M3 denormal range).
 struct CutlassNvFP4Weight {
     const void* data = nullptr;     // borrowed from NvFP4QuantResult::packed_data (not owned)

@@ -266,7 +266,7 @@ public:
     // the largest exceeds the 512 MiB sanity cap; the fallback then lazy-cudaMallocs on non-captured streams.
     [[nodiscard]] bool allocate_nvfp4_dequant_workspace();
 
-    // Builds a CUTLASS NVFP4 LM-head weight for batched decode (n>1): one
+    // Builds the SfAtom NVFP4 LM-head weight for batched decode (n>1): one
     // tensor-core GEMM (weight read once) instead of per-row/batched-M GEMV
     // (read ceil(M/4)x). Only the SfAtom scale buffer is allocated; FP4 data
     // borrows the NVFP4 decode cache. No-op unless serving and LM head is NVFP4. Must run AFTER
@@ -671,7 +671,7 @@ private:
     // hidden_[0..n_rows) in batches of max_logit_tokens_, calling
     // consume(logits_view, row0, csz) per batch (softcap already applied).
     // Used by perplexity_nll_partial and greedy_argmax_all. allow_cutlass
-    // routes NVFP4 LM heads through the CUTLASS NVFP4-activation GEMM (true
+    // routes NVFP4 LM heads through the NVFP4-activation tile GEMM (true
     // only for the perplexity harness); spec-decode verify passes false so
     // batch=1 output stays bit-identical to the FP16-activation GEMV.
     void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
@@ -947,8 +947,8 @@ private:
 public:
     [[nodiscard]] bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
 
-    // True when MoE prefill will run the legacy host-args fallback (no CUTLASS
-    // NVFP4 grouped workspace, e.g. GGUF Q*_K MoE). That path reads routing on
+    // True when MoE prefill will run the legacy host-args fallback (no grouped
+    // NVFP4 workspace, e.g. GGUF Q*_K MoE). That path reads routing on
     // the host (D2H+sync) and throws under active capture, so the scheduler
     // must not attempt prefill-graph capture at all (#874).
     [[nodiscard]] bool moe_prefill_uncapturable() const;
@@ -984,7 +984,7 @@ private:
     bool overlap_prefill_active_ = false;
     int32_t* sample_slot_override_ = nullptr;
 
-    // CUTLASS NVFP4 LM head for batched-decode (n>1) tensor-core GEMM. Borrows
+    // SfAtom NVFP4 LM head for the batched-decode (n>1) tile GEMM (#2937). Borrows
     // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.
     // Built by build_lm_head_cutlass_() when serving; freed in the destructor.
     CutlassNvFP4Weight lm_head_cutlass_{};
@@ -1201,8 +1201,8 @@ private:
     // stride N.
     [[nodiscard]] bool try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input,
                                     const GemmContext& ctx);
-    // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
-    // NVFP4 prefill block (which quantizes input into shared activation
+    // True when an M>1 dispatch of `id` is guaranteed to take the NVFP4
+    // tile prefill block (which quantizes input into shared activation
     // scratch). Gates the act-quant-hint dedupe at QKV/gate-up call sites;
     // must be CONSERVATIVE: false negative just re-quantizes, false positive skips with stale scratch.
     [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
@@ -1215,15 +1215,15 @@ private:
     // [calibration]: pooled expert-input statistic plus one down-input statistic per expert.
     void calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx);
     void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
-    // NVFP4→FP16 batch dequant fallback (when CUTLASS 3.x grouped-NVFP4
-    // can't fire). Predicate is checked internally; returns true if the
+    // NVFP4→FP16 batch dequant fallback (when the grouped NVFP4
+    // GEMM can't fire). Predicate is checked internally; returns true if the
     // path ran.
     [[nodiscard]] bool try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Legacy MoE prefill path (D2H-sync + serial / batched-dequant /
     // pre-cached-FP16 dispatch). Unconditional — caller selects when no
     // other path matched.
     void run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
-    // CUTLASS 3.x NVFP4 BlockScaled grouped GEMM MoE prefill (device-args
+    // Own grouped NVFP4 GEMM MoE prefill, "cutlass3x" name historical (device-args
     // / smallM / legacy host-args sub-variants). Predicate is checked
     // internally; returns true if the path ran.
     [[nodiscard]] bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
@@ -1282,7 +1282,7 @@ private:
     [[nodiscard]] bool stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets,
                             StagedProj out[kExpertProjCount]);
 
-    // Builds a CUTLASS device-args view over a layer staged by
+    // Builds a grouped-GEMM device-args view over a layer staged by
     // stage_nvfp4_layer_, so a host-resident layer dispatches like a
     // device-resident one. False when the layer was not staged, a projection
     // could not build its SfAtom view, or the opt-in is off.
@@ -1290,14 +1290,14 @@ private:
                                    MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const;
 
     // Stage a host-resident layer (once per MoE call, carried on ctx) and say
-    // whether the staged copy can carry the CUTLASS prefill.
+    // whether the staged copy can carry the grouped NVFP4 prefill.
     [[nodiscard]] bool stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
     // Chunked staging: experts [e0, e0 + n) of p0 into slot 0 and p1 (-1 = none) into slot 1,
     // SfAtom view and the per-expert pointer entries [e0, e0 + n) of each projection filled.
     [[nodiscard]] bool stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1, const int32_t* expert_offsets,
                             cudaStream_t stream);
-    // The chunked CUTLASS prefill of a staged-in-blocks host layer: gemm(proj, e0, n) per block,
+    // The chunked grouped NVFP4 prefill of a staged-in-blocks host layer: gemm(proj, e0, n) per block,
     // act_quantize between the gate+up and the down pass. False on any stage or GEMM failure.
     [[nodiscard]] bool run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
                             const std::function<bool(ExpertProj, int, int)>& gemm,

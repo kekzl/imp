@@ -3,7 +3,7 @@
 // GemmKernel registry, the (Strategy -> handler) table behind the 3 dispatch sites:
 //   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
 //   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq/dp4a/fused gemv), 8 qtypes
-//   {CUTLASS_NVFP4, F16, false}  CUTLASS NVFP4 prefill GEMM
+//   {CUTLASS_NVFP4, F16, false}  NVFP4 prefill GEMM (own tile, cuBLASLt on refusal)
 // Every key has one producer and vice versa; GemmKernelRegistryLink.HoldsExactlyTheProducedKeys
 // (test-core) pins the 10 keys. A new tier registers here only together with its dispatch site.
 // Registration is explicit: instance() calls the register_*_gemm_kernels functions below once.

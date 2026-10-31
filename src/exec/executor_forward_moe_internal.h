@@ -21,7 +21,7 @@ namespace imp {
 // SILENTLY, the host reads uninitialized offsets, and the recorded graph
 // launches expert GEMMs with garbage geometry -> misaligned address at
 // launch (#855 class, root-caused on Nemotron-H NVFP4 in #847). Only the
-// CUTLASS 3.x device-args path records cleanly; every host-args path must fail the capture loudly (#858).
+// grouped NVFP4 device-args path records cleanly; every host-args path must fail the capture loudly (#858).
 inline void moe_host_args_capture_guard(cudaStream_t stream) {
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
     if (cudaStreamIsCapturing(stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone)

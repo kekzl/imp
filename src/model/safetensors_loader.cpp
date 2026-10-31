@@ -1221,7 +1221,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // NVFP4: scale tensors were already routed into model->nvfp4_scratch_ by weight_map.cpp;
     // executor_pre_dequant.cpp Phase 0 promote() resolves them back onto the weight's sidecars,
     // no load-side linking needed here. MXFP4: gpt-oss experts decode natively (transcoded
-    // MXFP4->NVFP4 at init, run through CUTLASS NVFP4 grouped GEMM); other MXFP4 SafeTensors
+    // MXFP4->NVFP4 at init, prefill on the grouped NVFP4 GEMM); other MXFP4 SafeTensors
     // archs have no decode path yet and still need the GGUF conversion warning.
     HFConfigLoader::MxFP4Config mxfp4_cfg;
     if (HFConfigLoader::load_mxfp4_config(model_dir, mxfp4_cfg)) {

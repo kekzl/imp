@@ -36,9 +36,9 @@ struct MoePrefillWorkspace {
 // GLU-clamp/per-expert-bias hooks).
 inline MoePrefillPath select_moe_prefill_path(bool expert_bias_glu, const DispatchPolicy& rcfg,
                                               const MoePrefillWorkspace& ws) {
-    // Function-entry gate: moe.no_cutlass3x or an unavailable/uncovered CUTLASS 3.x grouped
+    // Function-entry gate: moe.no_cutlass3x or an unavailable/uncovered grouped NVFP4
     // path makes try_run_... return false -> per-expert LEGACY fallback. Checked before
-    // device-args, gating every CUTLASS tier including device-args.
+    // device-args, gating every grouped tier including device-args.
     if (rcfg.moe.no_cutlass3x || !ws.grouped_available)
         return MoePrefillPath::LEGACY;
 

@@ -218,8 +218,8 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
         }
 
         // MXFP4: weight is CutlassMxFP4Weight (UE8M0 SfAtom scales + linear_scales). M=1 decode:
-        // gemv_mxfp4_kpar (linear_scales). M>1 prefill: quantize activation to MXFP4 cutlass, then
-        // GEMM. Falls back to the NVFP4 dequant path if workspace is insufficient.
+        // gemv_mxfp4_kpar (linear_scales). M>1 prefill: quantize activation to MXFP4 SfAtom, then
+        // gemm_mxfp4_tile (mxfp4_prefill_gemm); a short workspace or a refusal logs an error.
         case StorageTier::MXFP4: {
             int M = static_cast<int>(x.shape[0]);
             int K = static_cast<int>(x.shape[1]);

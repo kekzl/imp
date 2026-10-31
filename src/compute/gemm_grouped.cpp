@@ -77,10 +77,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     if (n_experts == 0)
         return;
 
-    // CUTLASS grouped GEMM: single persistent kernel for all experts, FP16 without per-expert
-    // scales only (non-FP8 path). The CUTLASS 2.x GemmGrouped wrapper was removed: cuBLAS grouped
-    // is faster on prefill and equivalent on decode on sm_120 since NVIDIA optimized
-    // cublasLtMatmulGrouped in CUDA 13.2+; cuBLAS dispatch below handles all cases it covered.
+    // All experts run on cuBLASLt below: lt_gemm_ex per single-expert group, lt_gemm_batched per
+    // group of equal M. The CUTLASS 2.x GemmGrouped wrapper it replaced was removed: cuBLAS grouped
+    // was faster on prefill and equivalent on decode on sm_120 (CUDA 13.2+).
 
     cudaDataType_t cuda_dt_ab = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = dtype_to_compute(dtype);

@@ -67,7 +67,7 @@ struct RuntimeConfig {
         // (not a refusal check). 4096 = 1024x1024.
         int vision_max_patches = 4096;
         // cudaStreamCaptureMode: "global" | "relaxed" (default) | "thread_local".
-        // "relaxed" avoids a suspected CUTLASS grouped-GEMM deadlock under
+        // "relaxed" avoided a suspected CUTLASS grouped-GEMM deadlock (removed #2929) under
         // prefill capture (prefill_graph_blockers_2026_05_14.md, Blocker B);
         // it is a strict superset of "global" so the decode path is
         // unaffected. Regression: try "thread_local" before reverting to "global".
