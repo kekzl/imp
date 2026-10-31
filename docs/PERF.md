@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-30
-commit: a4070e6a
+verified: 2026-10-31
+commit: cc0936bb
 -->
 
 # Performance
@@ -161,8 +161,18 @@ sequence, rows 1..31 carry different content at different lengths.
 | control M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
 | re-init M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
 | **M=1 vs M=32** | 3.440330 -> 3.488856 | 0.242 | 1.636 | **57/64** |
-| M=1 vs M=32, `gemm.nvfp4_smallm=false` | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
-| config change alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
+| M=1 vs M=32, `gemm.nvfp4_smallm=false` (CUTLASS GEMM, also W4A4) | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
+| `gemm.nvfp4_smallm=false` alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
+
+[PROV: commit=814ada2e date=2026-10-31 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3
+ path=smallm_v2_a4 vs smallm_v2 FP16 activations cmd="test-e2e --gtest_filter=BatchInvarianceTest.NativeNvfp4DecodeSoloVsBatched" n=1
+ note=A16 arm = gemm.nvfp4_smallm_a4=false + nvfp4_lm_head_smallm=false + nvfp4_lm_head_cutlass=false]
+
+| arm (2026-10-31) | mean NLL | mean \|delta logprob\| | max | greedy top-1 |
+|---|---|---|---|---|
+| W4A4 M=1 vs M=32 (default) | 3.433412 -> 3.443541 | 0.235 | 1.665 | 58/64 |
+| A16 config alone, both M=1 | 3.433412 -> 3.429951 | 0.090 | 0.509 | 62/64 |
+| **W4A16 M=1 vs M=32** | 3.429951 -> 3.436889 | **0.021** | 0.130 | 62/64 |
 
 The control arm is also the test's race detector: between #1954 and the
 2026-09-08 fix it read 1-3 flips of 64 (a stage barrier in the small-M
@@ -170,19 +180,30 @@ pipeline completing before the prefetched weights landed, on the 544-CTA
 gate|up launch of the 24-token prefill), see the roadmap ledger row
 "small-M pipeline race".
 
-Three things the table settles:
+What the table settles:
 
 - **Batching is not a rounding-sized effect.** 7 of 64 greedy tokens change,
   and mean NLL rises 1.4 %. The 0.22 % figure the docs carried came from a
   2-layer FP16 synthetic harness that runs no quantized kernel.
-- **The activation format is not the cause.** `gemm.nvfp4_smallm=false` serves
-  2..32 rows as W4A16 instead of W4A4 and leaves the gap the same size (0.261
-  vs 0.242, 7 flips either way); the batch SHAPE is the term. That switch costs
-  about 11 % aggregate throughput at 32 streams and buys no numerical closeness.
+- **`gemm.nvfp4_smallm=false` does not test the activation format.** It moves
+  2..32 rows from the small-M kernel to the NVFP4 tile GEMM (CUTLASS when
+  measured), which quantizes the activations too
+  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:42 quantize_fp16_to_nvfp4_cutlass`):
+  W4A4 in both arms, same gap (0.261 vs 0.242, 7 flips either way), about 11 %
+  less aggregate throughput at 32 streams for no numerical closeness.
+- **FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`**
+  (`src/exec/executor_gemm_dispatch.cpp:575 nvfp4_smallm_a4`), plus
+  `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
+  NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
+  fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams
+  ([closed row 13](plans/2026-09-16-open-rows-closed-detail.md), #2026). On
+  Qwen3-14B-NVFP4 it cuts the batch drift 0.235 -> 0.021 mean |delta logprob|
+  (2026-10-31 table): the activation quantize, not the batch shape, is most
+  of the gap.
 - **Two identical inits agree bit for bit**, so the numbers above are the batch
-  effect and not run-to-run noise. Flipping an unrelated config knob does not:
-  removing the small-M scratch from the engine arena moves solo decode by one
-  greedy token in 64 all by itself.
+  effect and not run-to-run noise. Flipping `gemm.nvfp4_smallm` does not: the
+  24-token prompt (M = 24) leaves the small-M kernel for the tile GEMM, and
+  solo decode moves by one greedy token in 64.
 
 The M=1 branch declines any weight that is not in the NVFP4 decode cache, and
 the small-M gate is `M <= 32`, not `2..32`, so such a weight takes the W4A4
