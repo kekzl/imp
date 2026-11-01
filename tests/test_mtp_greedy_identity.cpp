@@ -340,10 +340,9 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) { mtp_identity(false);
 
 TEST(MtpGreedyIdentityTest, MtpDoesNotChangeConstrainedGreedyTokens) { mtp_identity(true); }
 
-// DSpark block drafter: 7 drafts per step, 8-row verify every step.
-TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {
+// Block drafter: DSpark 7 drafts per step (8-row verify), DFlash 15 (16-row verify).
+void block_drafter_identity(const std::string& drafter, const char* tag) {
     const std::string dir = model_or("IMP_TEST_MODEL_DSPARK_TARGET", "/models/Qwen3-8B-NVFP4-cortecs");
-    const std::string drafter = model_or("IMP_TEST_MODEL_DSPARK", "/models/dflash_qwen3_8b_block7");
     if (!present(dir) || !present(drafter))
         GTEST_SKIP() << "checkpoint not present at " << dir << " or " << drafter;
     constexpr size_t kNeededMiB = 12000;  // one 8B NVFP4 load at a time + 2 GB drafter
@@ -353,7 +352,7 @@ TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {
 
     std::vector<GreedyRun> baseline;
     plain_baseline(dir, &baseline);
-    if (HasFatalFailure())
+    if (::testing::Test::HasFatalFailure())
         return;
 
     imp::RuntimeConfig rc = arm_config(0);
@@ -374,12 +373,20 @@ TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {
     imp_context_free(ctx);
     imp_model_free(model);
 
-    ASSERT_GT(stats.drafted, 0) << "DSpark drafted nothing: the plain path was compared against itself";
-    ASSERT_GT(stats.accepted, 0) << "DSpark drafted " << stats.drafted
+    ASSERT_GT(stats.drafted, 0) << tag << " drafted nothing: the plain path was compared against itself";
+    ASSERT_GT(stats.accepted, 0) << tag << " drafted " << stats.drafted
                                  << " tokens and the verify accepted none";
-    std::printf("[spec-identity] dspark drafted=%lld accepted=%lld verify_steps=%lld\n", stats.drafted,
+    std::printf("[spec-identity] %s drafted=%lld accepted=%lld verify_steps=%lld\n", tag, stats.drafted,
                 stats.accepted, stats.verify_steps);
-    expect_near_tie_only(baseline, speculated, "dspark");
+    expect_near_tie_only(baseline, speculated, tag);
+}
+
+TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {
+    block_drafter_identity(model_or("IMP_TEST_MODEL_DSPARK", "/models/dflash_qwen3_8b_block7"), "dspark");
+}
+
+TEST(MtpGreedyIdentityTest, DFlashDoesNotChangeGreedyTokens) {
+    block_drafter_identity(model_or("IMP_TEST_MODEL_DFLASH", "/models/Qwen3-8B-DFlash-b16"), "dflash");
 }
 
 }  // namespace

@@ -118,9 +118,14 @@ struct Speculative {
     // engine-wide suffix index, asked when the request's own history has no match (speculative.suffix).
     // "" = off.
     std::string ngram_corpus;
-    // DSpark block drafter checkpoint directory (deepseek-ai/dflash_qwen3_8b_block7 for Qwen3-8B):
-    // drafts block_size tokens per verify from the target's hidden states; forces batch 1. "" = off.
+    // DSpark / DFlash block drafter checkpoint directory (deepseek-ai/dflash_qwen3_8b_block7: 7 drafts,
+    // z-lab/Qwen3-8B-DFlash-b16: 15 drafts, embed / lm_head read from the target): drafts from the target's
+    // hidden states; forces batch 1. "" = off.
     std::string dspark_model;
+    // Block drafter economics: after 8 verifies a request below this many emitted tokens per verify stops
+    // drafting until the next speculative.burst re-arm. 0 = the n-gram rule (15 % of drafted tokens
+    // accepted, final), which stopped Qwen3-8B-NVFP4 prose at 287 tok/s; 1.8: 348, 2.0: 300 (nospec 282).
+    float dspark_min_emit = 1.8f;
     // DSpark drafter q / o / gate / up / down / lm_head as per-row FP8 E4M3 instead of FP16: half the
     // bytes per propose. Drafts only: verify keeps greedy output exact either way.
     bool dspark_fp8 = true;

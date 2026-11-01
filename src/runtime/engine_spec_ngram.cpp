@@ -42,6 +42,7 @@
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
+#include "runtime/spec_gates.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/mtp_forward.h"
@@ -1216,17 +1217,18 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
         }
     }
-    const bool acceptance_poor =
-        req->spec_verifies >= 8 &&
-        req->spec_accepted * 100 < req->spec_drafted * 15;
+    const SpecEconVerdict econ = spec_economics({req->spec_verifies, req->spec_drafted, req->spec_accepted,
+                                                 req->spec_emitted, dspark_ != nullptr,
+                                                 scfg.dspark_min_emit});
+    const bool acceptance_poor = econ.stop;
     // Layer offload: a verify costs one streamed pass like a decode step (190.5 vs 188.6 ms), nothing to
     // amortize.
     if (!req->spec_ngram_given_up && scfg.give_up_after > 0 && !offload_mgr_ &&
         (acceptance_poor || req->spec_consecutive_misses >= scfg.give_up_after)) {
         req->spec_ngram_given_up = true;
         req->spec_last_giveup_pos = static_cast<int>(req->output_tokens.size());
-        if (acceptance_poor)
-            req->spec_acceptance_doomed = true;  // economics verdict is final
+        if (acceptance_poor && econ.final)
+            req->spec_acceptance_doomed = true;  // n-gram economics verdict is final
         IMP_LOG_INFO("spec-ngram: req %d gave up (%s: verifies=%d accepted=%lld/%lld misses=%d) — "
                      "re-enabling async graph loop",
                      req->id, acceptance_poor ? "acceptance-poor" : "draft-poor",
