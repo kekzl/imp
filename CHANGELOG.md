@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- BF16 MoE experts (Ling-3.0) are packed into one F16 slab per projection at load and decode through the device-side F16 expert GEMV, so the decode CUDA graph captures: Ling-3.0-tiny tg128 64.47 -> 447.79 tok/s, pp512 3165.51 -> 3615.04 (median of 3 alternating runs, #2983).
+
 ## [0.61.0] - 2026-11-01
 
 ### Added
