@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-30
-commit: edd4d4ac
+verified: 2026-11-01
+commit: 696ef613
 -->
 
 # tests/refs/ — independent reference goldens
@@ -53,6 +53,7 @@ Generators:
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
+| `gen_gemma4_audio_golden.py` | `gemma4_audio_features_golden.h` | `tests/test_audio_features.cpp` (HF `Gemma4AudioFeatureExtractor`, transformers 5.22.1, 1e-4) |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
 | `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |
 | `gen_qwen3_embedding_ref.py` | `qwen3_embedding_ref.json` | `tools/analysis/embed_check.py` (`make test-embed`) |

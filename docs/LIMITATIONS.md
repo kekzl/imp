@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-01
+commit: 696ef613
 -->
 
 # Limitations
@@ -91,7 +91,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | cc 12.1 has no image in the default build: the `compute_120f` PTX is opt-in (`IMP_DISABLE_120F_FALLBACK=OFF`, C-012) and lacks 26 kernels there (dense NVFP4 decode GEMVs, Q4_K / Q5_1 / Q5_K / Q6_K IMMA raw kernels, the `-rdc` TUs) | cc 12.1 devices (GB10, DGX Spark), untested; RTX 5090 / 5080 / 5070 Ti (cc 12.0) load `sm_120a` and are not affected | build with `IMP_DISABLE_120F_FALLBACK=OFF`; dropping `-rdc` costs -5.83 % decode on RTX 5090 ([`SM120.md`](internals/SM120.md)) | #1651 |
-| Audio is blocked on weights, not on work | Gemma-4 | declares the modality, imp says so at load; Gemma-4-12B-NVFP4 ships exactly one audio tensor (`model.embed_audio.embedding_projection.weight`, BF16 [3840, 640], 4.69 MiB), the bridge into the LM, nothing that produces those 640 dims from a waveform; `audio_config` describes no encoder either (`architectures: null`, no layer or head count, no mel parameters, only `audio_embed_dim`, `rms_norm_eps` and `PretrainedConfig` defaults); the same export carries 10 `model.embed_vision.*` tensors and zero `model.vision_tower.*` (vs 355 tower tensors in Gemma-4-26B-A4B-it-NVFP4), so this quantisation dropped both towers; needs a checkpoint carrying the audio tower, the way `--mmproj` supplies the vision one; imp downloads nothing itself (`scripts/stage-model.sh`) | roadmap Open 8, #1929 |
+| Audio input runs only where the text model runs: the Gemma-4 checkpoints with an audio tower (E2B, E4B) have a text stack imp does not implement | Gemma-4 E2B / E4B | the audio tower, front end and `input_audio` part exist (`src/audio/`, [`MODELS.md`](MODELS.md#audio)), but E4B's text model uses per-layer embeddings (129 `per_layer_*` tensors, `embed_tokens_per_layer` [262144, 10752]) and KV sharing across its last 18 layers (`num_kv_shared_layers`), and no code in `src/` reads either (0 matches), so the LM half answers wrong; the encoder is gated alone against HF (`test_gemma4_audio_encoder.cu`); Gemma-4-12B-NVFP4 ships only the embedder (`model.embed_audio.*`, no `model.audio_tower.*`), Gemma-4-26B/31B declare no audio | roadmap row 120, #1929 |
 | Qwen3.5-27B MXFP4 blocked on a checkpoint imp can decode | Qwen3.5-27B | no MXFP4 SafeTensors decode path exists outside gpt-oss; not a bug | - |
 | Gemma-4 on the FP8-KV quality gate: baseline perplexity on the gate corpus is broken | Gemma-4-it | scores text only inside its own turn framing; raw prose after BOS reads 19312; the same prose plus its turn framing (below) reads 18.16 (UD-Q4_K_M), 26.06 (NVFP4 export), 26.99 (imp-quantize NVFP4), 704 tokens; stays FP16 KV unless opted in; gate corpus `tools/analysis/ppl_corpus_gemma4_turn.txt` | #2044 |
 | Declares no FP8 KV hint | Qwen3.6-35B, Qwen3.5 | FP16 KV by default | - |

@@ -155,8 +155,8 @@ struct ModelConfig {
     // <|endoftext|>); the last-token pool reads it. -1 = none. imp's encode() does not apply it.
     int32_t embed_append_token = -1;
 
-    // Checkpoint declares an audio encoder; imp has no audio path at all (no encoder, input
-    // type, or tokenizer route). Read from audio_config being a JSON OBJECT, not key presence:
+    // Checkpoint declares an audio encoder (gemma4_audio loads via audio/gemma4_audio_model.h
+    // when the tower tensors are present). Read from audio_config being a JSON OBJECT, not key presence:
     // Gemma-4-26B writes audio_config:null with no audio tensor, Gemma-4-12B writes the object.
     bool has_audio_config = false;
 

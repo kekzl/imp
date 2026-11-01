@@ -11,6 +11,7 @@
 
 #include "api/imp_internal.h"
 #include "model/image_placeholders.h"
+#include "audio/audio_features.h"
 #include "vision/image_processor.h"
 #include "vision/video_evs.h"
 #include "vision/vision_family.h"
@@ -36,6 +37,9 @@ struct ChatVideoInput {
     std::vector<double> seconds;
     double pruning_rate = -1.0;  // EVS rate from the part's "pruning_rate"; < 0 = runtime.video_pruning_rate
 };
+
+// input_audio parts one request may carry; each decodes to up to 30 s of features on a handler thread.
+inline constexpr size_t kMaxAudioPartsPerRequest = 8;
 
 // Sampling fields (temperature, penalties, priority, stream, ...): SamplingFields, sampling_fields.h.
 struct ChatRequestParams : SamplingFields {
@@ -118,6 +122,9 @@ struct ChatRequestParams : SamplingFields {
     // dropping one image would shift every later picture onto the wrong
     // placeholder, which reads as a coherent answer about the wrong thing.
     std::string image_error;
+    // Every `input_audio` part (WAV bytes), in prompt order; audio_error set when one did not decode.
+    std::vector<std::vector<uint8_t>> audios;
+    std::string audio_error;
     // Every `video` part, in prompt order (frames sampled by the client).
     std::vector<ChatVideoInput> videos;
     // Vision parts in content order: 'i' = next image, 'v' = next video.
@@ -152,6 +159,8 @@ struct ChatStateSnapshot {
     // req->images at every request-build site. The batch worker encodes + binds them
     // per-request (no engine pause). Empty for text-only requests.
     std::vector<std::shared_ptr<imp::ImageData>> vision_images;
+    // Gemma-4 audio clips (log-mel features), prompt order, copied to req->audios like images.
+    std::vector<std::shared_ptr<imp::AudioFeatures>> audio_inputs;
     // Qwen3-VL: dynamic-resolution images are patchified CPU-side before tokenizing (token counts
     // must be known up front to reserve exact placeholder counts per image, hence a list).
     std::vector<std::shared_ptr<imp::QwenPatches>> qwen_patches;

@@ -438,6 +438,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
+    src/runtime/engine_audio.cpp
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_stats.cpp
     src/runtime/engine_spec_sampled.cpp
@@ -574,6 +575,15 @@ set(IMP_VISION_SOURCES
     src/vision/video_evs_kernels.cu
 )
 
+set(IMP_AUDIO_SOURCES
+    src/audio/audio_wav.cpp
+    src/audio/audio_features.cpp
+    src/audio/gemma4_audio_model.cpp
+    src/audio/gemma4_audio_kernels.cu
+    src/audio/gemma4_audio_encoder.cpp
+    src/audio/audio_pipeline.cpp
+)
+
 set(IMP_API_SOURCES
     src/api/imp_api.cpp
     src/api/imp_api_vision.cpp
@@ -602,6 +612,7 @@ add_library(imp STATIC
     ${IMP_RUNTIME_SOURCES}
     ${IMP_EXEC_SOURCES}
     ${IMP_VISION_SOURCES}
+    ${IMP_AUDIO_SOURCES}
     ${IMP_API_SOURCES}
 )
 
@@ -1106,6 +1117,8 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_video.cpp
         # EVS video token pruning: retained count, stable mask, pruned layout and M-RoPE (host half).
         tests/test_video_evs.cpp
+        tests/test_audio_features.cpp
+        tests/test_gemma4_audio_load.cpp
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
@@ -1513,6 +1526,7 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_encoder.cu
         tests/test_internvl_encoder.cu
         tests/test_qwen3vl_pipeline.cu
+        tests/test_gemma4_audio_encoder.cu
     )
 
     # test_batching_engine_fault.cu drives the server BatchingEngine

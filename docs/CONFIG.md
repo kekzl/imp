@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-01
+commit: 696ef613
 -->
 
 # Configuration reference
@@ -36,6 +36,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `runtime.think_answer_reserve` | `256` | tokens reserved for the answer after forced reasoning close |
 | `runtime.think_max_tokens` | `32768` (`0`=no cap) | reasoning tokens before the engine injects `</think>`, whatever `max_tokens` is |
 | `runtime.no_vision` | `false` | drop the checkpoint's Qwen3-VL tower at init: image and video parts answer 400, the tower's VRAM reservation goes to the expert cache (Qwen3.8-Flash-Next text-only) |
+| `runtime.no_audio` | `false` | drop the checkpoint's Gemma-4 audio tower at init: `input_audio` parts answer 400, its weights and clip scratch stay off the card |
 | `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
@@ -97,7 +98,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--interactive` | off | interactive chat; refuses `--json` (a token stream is not one document) |
 | `--stop <str>` | - | repeatable, up to 4 |
 | `--chat-template <t>` | `auto` | `auto\|none\|chatml\|llama2\|llama3\|nemotron\|gemma\|deepseek_r1\|phi` |
-| `--temperature <f>` / `--top-p <f>` / `--top-k <n>` | model default | `generation_config.json`, else the arch preset (`src/model/model.cpp:208 0.6f, 0.95f, 20` on qwen3); `imp-server` resolves the same (#2462) |
+| `--temperature <f>` / `--top-p <f>` / `--top-k <n>` | model default | `generation_config.json`, else the arch preset (`src/model/model.cpp:209 0.6f, 0.95f, 20` on qwen3); `imp-server` resolves the same (#2462) |
 | `--min-p <f>` / `--typical-p <f>` | `0.0` (off) / `1.0` (off) | |
 | `--repeat-penalty <f>` / `--repeat-last-n <n>` | `1.0` (off) / `0` (all) | |
 | `--frequency-penalty <f>` / `--presence-penalty <f>` | `0.0` / `0.0` | |

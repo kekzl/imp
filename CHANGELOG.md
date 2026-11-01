@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
+- Gemma-4 audio input (row 120): `input_audio` WAV parts (16 kHz, up to 30 s) on `/v1/chat/completions`, HF log-mel front end, Conformer audio tower + embedder on the GPU (`src/audio/`), spliced like images; no tower = 400. Encoder vs HF transformers, 2.3 s clip: worst-row embedding cosine NUMBER.
 
 ### Fixed
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content and schema-valid.

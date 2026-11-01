@@ -83,6 +83,25 @@ inline void drop_vision_tower_if_disabled(Model& model, bool no_vision) {
     }
 }
 
+// Arena bytes the Gemma-4 audio tower + clip scratch take (0 without a tower); uploaded at warmup.
+inline size_t audio_arena_bytes(Model& model) {
+    return model.audio_tower ? AudioPipeline::demand_bytes(*model.audio_tower) : 0;
+}
+
+// A tower that fails to come up leaves the text model serving: input_audio then answers 400.
+inline void init_audio_pipeline(AudioPipeline& audio, Model& model) {
+    if (model.audio_tower && !audio.init(*model.audio_tower))
+        IMP_LOG_WARN("Gemma-4 audio tower failed to initialise: continuing without audio input");
+}
+
+// runtime.no_audio: same, for the Gemma-4 audio tower.
+inline void drop_audio_tower_if_disabled(Model& model, bool no_audio) {
+    if (no_audio && model.audio_tower) {
+        IMP_LOG_INFO("runtime.no_audio: audio tower dropped, input_audio parts answer 400");
+        model.audio_tower.reset();
+    }
+}
+
 // The library reserve the PLAN charges: imp.conf's vram.library_reserve_mb, or
 // the measured default when unset. Shared because both the audit table and the
 // warmup reporter need the same number, and duplicating the ternary at two call

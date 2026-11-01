@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-01
+commit: 696ef613
 -->
 
 # Supported models
@@ -136,6 +136,28 @@ imp-cli --model gemma-3-12b-it-Q8_0.gguf --mmproj mmproj-google_gemma-3-12b-it-f
 ```
 
 Image tokens cost VRAM in the encoder workspace, sized by `runtime.vision_max_patches` (default 4096 ≈ 1024x1024). Larger images are scaled down to fit that budget rather than refused.
+
+## Audio
+
+A Gemma-4 SafeTensors checkpoint with a `gemma4_audio` `audio_config` and `model.audio_tower.*` loads the tower with the text model (no flag; `runtime.no_audio` drops it). `/v1/chat/completions` then takes OpenAI `input_audio` parts; a model without a tower answers `400 audio_unavailable`.
+
+```json
+{"type": "input_audio", "input_audio": {"data": "<base64 WAV>", "format": "wav"}}
+```
+
+| rule | value |
+|---|---|
+| format | `wav` only: PCM 8/16/24/32-bit or IEEE float 32/64, channels averaged to mono; `mp3` and others: `400` |
+| sample rate | 16000 Hz, no resampler: other rates `400` naming the rate |
+| length | 30 s per clip at most (HF truncates, imp refuses: `400`), one 20 ms frame at least; 8 parts per request |
+| tokens | one per 40 ms, HF `Gemma4Processor` arithmetic (mel frames through two stride-2 convs): 2.3 s = 58 |
+| prompt | one `<\|audio\|>` per clip ahead of the first user turn's text, expanded to `<boa>` + N x `<\|audio\|>` + `<eoa>`; a literal `<\|audio\|>` in the text: `400` |
+| mixing | `input_audio` with `image_url` or `video` in one request: `400`; not on `/v1/messages`, `/v1/responses` or `imp-cli` |
+
+- Front end: HF `Gemma4AudioFeatureExtractor` (128 HTK mel bins, 20 ms Hann frames every 10 ms, log(mel + 0.001)), golden vs transformers 5.22.1 within 1e-4 (`tests/test_audio_features.cpp`).
+- Encoder: 12 Conformer blocks (chunked relative-position attention, light conv) + embedder into the LM width (`src/audio/`); on the card 566 MiB of weights (linears FP16, the rest FP32) and 80 MiB of scratch for a 30 s clip (shape arithmetic, not measured).
+- Clip bytes salt the prefix cache like images.
+- The checkpoints with a tower, [gemma-4-E2B-it / gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it), have a text stack imp does not run yet (per-layer embeddings, KV sharing): [LIMITATIONS](LIMITATIONS.md#model-specific-blockers). Gemma-4-12B-NVFP4 has no tower; Gemma-4-26B/31B declare no audio.
 
 ## Format notes
 

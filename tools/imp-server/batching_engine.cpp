@@ -405,6 +405,12 @@ void BatchingEngine::worker_loop() {
                         sr->push_finish("image_encode_failed");
                         continue;
                     }
+                    // Audio clips: same worker, same splice buffer (vision_emb at the audio token).
+                    if (!sr->request->audios.empty() && !engine->encode_audio_for(*sr->request)) {
+                        sr->request->status = imp::RequestStatus::CANCELLED;
+                        sr->push_finish("audio_encode_failed");
+                        continue;
+                    }
 
                     sr->notified_count = sr->request->output_tokens.size();
                     // queue_ms is closed when the scheduler puts the request into its first batch
