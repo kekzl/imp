@@ -21,15 +21,8 @@ constexpr uint32_t kUe8m0One = 0x7F7F7F7Fu;
 // SF).
 enum class Fmt { kNv4, kMx4, kMx8, kF8 };
 
-// MW: MMA warps (8 = 2 x 4 warp tiles of 64 x BN/4, 4 = 2 x 2 of 64 x BN/2); MINB: CTAs per SM in
-// __launch_bounds__ (the smem of MINB CTAs must fit the 100 KiB per SM).
-template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4,
-          int MW = 8, int MINB = 1>
+template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4>
 struct Cfg {
-    static_assert(MW == 8 || MW == 4, "warp grid 2 x MW/2");
-    static constexpr int kMW = MW;
-    static constexpr int kMinB = MINB;
-    static constexpr int kMmaThr = MW * 32;
     static constexpr int kBN = BN;
     static constexpr int kBK = BK;
     // A stage moves kRB bytes per row in every format, so ldmatrix fragments, swizzle and TMA boxes are
@@ -50,8 +43,8 @@ struct Cfg {
     static_assert(!SK || (TMA && PW), "stream-K runs on the producer-warp mainloop");
     // NVFP4 TMA: K % BK = r * 64 runs a partial last stage (r SfAtoms per slab).
     static constexpr bool kPartK = TMA && F == Fmt::kNv4;
-    static constexpr int kThreads = kMmaThr + (kPw ? 32 : 0);
-    static constexpr int kWN = BN / (MW / 2);  // warp tile 64 x kWN
+    static constexpr int kThreads = kMmaThreads + (kPw ? 32 : 0);
+    static constexpr int kWN = BN / 4;  // warp tile 64 x kWN
     static constexpr int kNF = kWN / 8;
     // 4-bit formats: fragments 32 columns apart, so the kNF W scales of a k step share a 16 B SfAtom line per
     // 128-row slab (one LDS.128). 8-bit formats keep a warp's columns contiguous: whole 32 B sectors in the
@@ -95,12 +88,8 @@ struct Cfg {
     static constexpr int kAlign = 1024;  // 128B-swizzle atom; stage and tile offsets keep it
     // Stream-K stages the epilogue in its own buffer behind the mbarriers when it fits 99 KiB: the
     // producer refills the ring meanwhile.
-    // 1 KiB per CTA is system smem: MINB x (bytes + 1 KiB) <= 100 KiB.
-    static constexpr bool kSkStaged = SK && MINB * ((STAGES * kStageBytes) + 128 + (kBM * kOS * 2) + kAlign +
-                                                    1024) <=
-                                                102400;
+    static constexpr bool kSkStaged = SK && (STAGES * kStageBytes) + 128 + (kBM * kOS * 2) + kAlign <= 101376;
     static constexpr int kSmemBytes = STAGES * kStageBytes + 128 + (kSkStaged ? kBM * kOS * 2 : 0) + kAlign;
-    static_assert(MINB * (kSmemBytes + 1024) <= 102400, "MINB CTAs must fit one SM's shared memory");
     static_assert(STAGES * kStageBytes >= kBM * kOS * 2, "epilogue staging must fit the ring");
     static_assert(2 * STAGES * 8 <= 128, "mbarrier area");
     static_assert(TMA || BN == 128, "sync mainloop loads one 128-row W slab");

@@ -38,7 +38,7 @@ __device__ __forceinline__ void load_stage(uint32_t s_base, const TileArgs& p, i
     const size_t k_byte = static_cast<size_t>(kt) * C::kRB;
     const size_t sf_k = C::sf_k(kt);
     const size_t sf_slab = C::sf_slab(p.K);
-    for (int i = threadIdx.x; i < 2 * kData + 2 * kSf; i += C::kMmaThr) {
+    for (int i = threadIdx.x; i < 2 * kData + 2 * kSf; i += kMmaThreads) {
         if (i < 2 * kData) {
             const bool is_w = i >= kData;
             const int j = is_w ? i - kData : i;
@@ -112,7 +112,7 @@ __device__ __forceinline__ bool tma_mainloop(float (&acc)[4][C::kNF][4], const R
     if (threadIdx.x == 0) {
         for (int s = 0; s < C::kStages; ++s) {
             mbar_init(g.bars + s * 8, 1);
-            mbar_init(g.bars + (C::kStages + s) * 8, C::kMmaThr / 32);
+            mbar_init(g.bars + (C::kStages + s) * 8, kMmaThreads / 32);
         }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
@@ -124,7 +124,7 @@ __device__ __forceinline__ bool tma_mainloop(float (&acc)[4][C::kNF][4], const R
         tma_consume<C, true>(acc, g, p, ma, mw);
         return true;
     } else {
-        if (g.warp != C::kMmaThr / 32) {
+        if (g.warp != kMmaThreads / 32) {
             tma_consume<C, false>(acc, g, p, ma, mw);
             return true;
         }
@@ -162,7 +162,7 @@ __device__ __forceinline__ void sync_mainloop(float (&acc)[4][C::kNF][4], const 
 }
 
 template <class C>
-__global__ void __launch_bounds__(C::kThreads, C::kMinB) gemm_nvfp4_tile_kernel(
+__global__ void __launch_bounds__(C::kThreads, 1) gemm_nvfp4_tile_kernel(
     TileArgs p, const __grid_constant__ CUtensorMap map_a, const __grid_constant__ CUtensorMap map_w,
     const __grid_constant__ CUtensorMap map_d) {
     extern __shared__ __align__(128) uint8_t smem_raw[];
@@ -178,7 +178,7 @@ __global__ void __launch_bounds__(C::kThreads, C::kMinB) gemm_nvfp4_tile_kernel(
                  warp,
                  static_cast<int>(threadIdx.x & 31),
                  (warp & 1) * 64,
-                 ((warp >> 1) % (C::kMW / 2)) * C::kWN};
+                 ((warp >> 1) & 3) * C::kWN};
 
     if constexpr (C::kSk) {
         sk_mainloop<C>(g, p, &map_a, &map_w, &map_d);
@@ -271,14 +271,9 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
                 (reinterpret_cast<uintptr_t>(p.d) % 16 != 0 || !encode_out(&map_d, p.d, p.M, p.N, p.ldd)))
                 return false;
     }
-    // MINB > 1: the whole carveout as shared memory, or the driver may plan one CTA per SM.
     static const bool smem_ok = cudaFuncSetAttribute(gemm_nvfp4_tile_kernel<C>,
                                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     C::kSmemBytes) == cudaSuccess &&
-                                (C::kMinB == 1 ||
-                                 cudaFuncSetAttribute(gemm_nvfp4_tile_kernel<C>,
-                                                      cudaFuncAttributePreferredSharedMemoryCarveout,
-                                                      cudaSharedmemCarveoutMaxShared) == cudaSuccess);
+                                                     C::kSmemBytes) == cudaSuccess;
     if (!smem_ok)
         return false;
     // Data-parallel tiles walk M fastest: neighbouring CTAs share a W tile
@@ -323,33 +318,12 @@ bool args_ok(const TileArgs& p) {
     return p.a_sf != nullptr && p.w_sf != nullptr;
 }
 
-// FP8 128x64 on 4 MMA warps + producer, 3 stages, 2 CTAs per SM (2 x SMs slots): 7 uniform stream-K, 8 hybrid
-// (else 7), 9 data-parallel; stream-K falls back to 9.
-template <Fmt F>
-bool launch_two_cta(const TileArgs& p, int variant, bool sk_fits, int sms, int kt, cudaStream_t stream) {
-    using Sk2 = Cfg<64, 64, 3, true, true, true, F, 4, 2>;
-    if (sk_fits && variant != 9) {
-        TileArgs h = p;
-        if (variant == 8 && hybrid_plan(h, 2 * sms, kt, 64) && launch_tile<Sk2>(h, stream))
-            return true;
-        h = p;
-        const int units = ((p.N + 63) / 64) * ((p.M + kBM - 1) / kBM) * kt;
-        h.sk_per = (units + (2 * sms) - 1) / (2 * sms);
-        if (launch_tile<Sk2>(h, stream))
-            return true;
-    }
-    return launch_tile<Cfg<64, 64, 3, true, true, false, F, 4, 2>>(p, stream);
-}
-
 // One variant (see the header), falling through to the next simpler plan; false = every TMA config refused.
 template <Fmt F>
 bool launch_variant(const TileArgs& p, int variant, bool sk_fits, int sms, cudaStream_t stream) {
     constexpr int kB1 = F == Fmt::kMx8 || F == Fmt::kF8 ? 64 : 128;
     using Sk = Cfg<128, kB1, 3, true, true, true, F>;
     const int kt = (p.K + Sk::kBK - 1) / Sk::kBK;
-    if constexpr (F == Fmt::kF8)
-        if (variant >= 7 && variant <= 9 && launch_two_cta<F>(p, variant, sk_fits, sms, kt, stream))
-            return true;
     switch (variant) {
         case 1:
             if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))

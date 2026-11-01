@@ -77,7 +77,7 @@ __device__ __forceinline__ void st_release(int* p, int v) {
 // Partial tile of CTA b in fragment order: float4 j of thread tid at (j * 256 + tid), coalesced.
 template <class C>
 __device__ __forceinline__ float4* sk_slot(const TileArgs& p, int b) {
-    return reinterpret_cast<float4*>(p.sk_parts) + (static_cast<size_t>(b) * 4 * C::kNF * C::kMmaThr);
+    return reinterpret_cast<float4*>(p.sk_parts) + (static_cast<size_t>(b) * 4 * C::kNF * kMmaThreads);
 }
 
 // Calls f(t, kb, ke, last) for every segment (tile t, k-steps [kb, ke)) of CTA b in order; last: the highest
@@ -112,13 +112,13 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
     if (threadIdx.x == 0) {
         for (int s = 0; s < C::kStages; ++s) {
             mbar_init(g.bars + s * 8, 1);
-            mbar_init(g.bars + (C::kStages + s) * 8, C::kMmaThr / 32);
+            mbar_init(g.bars + (C::kStages + s) * 8, kMmaThreads / 32);
         }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
     int ring = 0;
-    if (g.warp == C::kMmaThr / 32) {
+    if (g.warp == kMmaThreads / 32) {
         if (g.lane == 0)
             sk_walk(p, KT, units, b, [&](int t, int kb, int ke, int) {
                 const int m0 = (t / n_tiles) * kBM;
@@ -158,10 +158,10 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
             for (int mf = 0; mf < 4; ++mf)
 #pragma unroll
                 for (int nf = 0; nf < C::kNF; ++nf)
-                    own[((mf * C::kNF + nf) * C::kMmaThr) + threadIdx.x] =
+                    own[((mf * C::kNF + nf) * kMmaThreads) + threadIdx.x] =
                         make_float4(acc[mf][nf][0], acc[mf][nf][1], acc[mf][nf][2], acc[mf][nf][3]);
             __threadfence();
-            asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));
+            asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
             if (threadIdx.x == 0)
                 st_release(g_sk_flags + b, 1);
             return;
@@ -172,13 +172,13 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
                     while (ld_acquire(g_sk_flags + q) == 0) {}
                     g_sk_flags[q] = 0;  // the only reader: every set flag is 0 again when the launch ends
                 }
-                asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));
+                asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
                 const float4* src = sk_slot<C>(p, q);
 #pragma unroll
                 for (int mf = 0; mf < 4; ++mf)
 #pragma unroll
                     for (int nf = 0; nf < C::kNF; ++nf) {
-                        const float4 v = __ldcg(src + ((mf * C::kNF + nf) * C::kMmaThr) + threadIdx.x);
+                        const float4 v = __ldcg(src + ((mf * C::kNF + nf) * kMmaThreads) + threadIdx.x);
                         acc[mf][nf][0] += v.x;
                         acc[mf][nf][1] += v.y;
                         acc[mf][nf][2] += v.z;

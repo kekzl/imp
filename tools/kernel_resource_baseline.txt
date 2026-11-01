@@ -33,14 +33,14 @@ imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	252	0	0
 void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, false, false>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, true, false>	sm_120a	252	0	0
-void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 64, 3, true, false, false, (imp::nvfp4_tile::Fmt)3, 8, 1> >	sm_120a	251	0	0
+void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 64, 3, true, false, false, (imp::nvfp4_tile::Fmt)3> >	sm_120a	251	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
-void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, 8, 1> >	sm_120a	240	0	0
+void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0> >	sm_120a	240	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigIQ3S<2>, false, true>	sm_120a	240	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ8_0<2>, false, true>	sm_120a	240	0	0
 void apa::apa_kernel<128, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	168	88	0
@@ -114,9 +114,9 @@ void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp32_kernel<3>	sm_120a	48	8	0
 imp::topk_gating_kernel	sm_120a	46	256	0
+imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	42	1056	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
-imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
 imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
