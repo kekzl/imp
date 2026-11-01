@@ -168,12 +168,18 @@ static std::string strip_generation_tags(const std::string& s) {
     return out;
 }
 
+// Bailing (Ling-3.0) template: thinking switched by "detailed thinking on/off" in its SYSTEM turn.
+static bool bailing_think_switch(const std::string& jinja_str) {
+    return jinja_str.contains("<role>SYSTEM</role>") && jinja_str.contains("detailed thinking ");
+}
+
 bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str) {
     family_ = family;
     stop_token_ids_.clear();
     use_jinja_ = false;
     mentions_thinking_ = false;  // resolved below once the Jinja engine is up
     tool_xml_dialect_ = false;
+    own_think_switch_ = bailing_think_switch(jinja_str);
     reasoning_effort_values_.clear();
     reasoning_effort_default_.clear();
 
@@ -733,7 +739,7 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
 
     // Build Jinja2 context
     jinja::Context ctx;
-    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking && !own_think_switch_));
     // HF apply_chat_template passes tools=None: `tools is defined` holds without tools (#2269).
     ctx["tools"] = jinja::Value();
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt && !cont);
@@ -876,7 +882,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
 
     // Build context
     jinja::Context ctx;
-    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking && !own_think_switch_));
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
     const bool cont = continuing_(msgs);

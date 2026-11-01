@@ -79,6 +79,12 @@ static void load_fim_meta_ids(const std::unordered_map<std::string, GGUFValue>& 
     }
 }
 
+// Archs wired from config.json only (layer pattern, fused KDA tensors): no GGUF tensor layout exists.
+static void refuse_safetensors_only_arch(ModelArch arch) {
+    if (arch == ModelArch::BAILING_HYBRID)
+        throw std::runtime_error("bailing_hybrid GGUF is not supported; load the SafeTensors checkpoint");
+}
+
 // ---- Main GGUF loader ----
 
 std::unique_ptr<Model> load_gguf(const std::string& path) {
@@ -336,6 +342,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         throw std::runtime_error("lfm2 GGUF is not supported; load the SafeTensors checkpoint");
     if (cfg.arch == ModelArch::OLMO3)
         throw std::runtime_error("olmo3 GGUF is not supported; load the SafeTensors checkpoint");
+    refuse_safetensors_only_arch(cfg.arch);
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));
 

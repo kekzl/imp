@@ -3,6 +3,7 @@
 #include "model/model_arch.h"
 #include "model/mxfp8_widen.h"
 #include "model/weight_map.h"
+#include "model/weight_map_arch.h"
 #include "model/hf_config_loader.h"
 #include "model/llm_compressor_loader.h"
 #include "model/ngram_table.h"
@@ -1202,7 +1203,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     if (cfg.has_audio_config)
         model->audio_tower = load_gemma4_audio_from_checkpoint(model_dir, tensor_map);
 
-    // 6. Assign tensors via WeightMap
+    // 6. Assign tensors via WeightMap (after the arch whole-map rewrite, model/weight_map_arch.h)
+    arch_prepare_tensor_map(cfg, tensor_map, model->host_owned_buffers_);
     WeightMap wmap(cfg.arch);
     if (!wmap.apply_weights(*model, tensor_map))
         return nullptr;  // logged by apply_weights

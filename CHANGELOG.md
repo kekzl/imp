@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Ling-3.0 (`bailing_hybrid`, roadmap row 52): Kimi Delta Attention scans (recurrent, chunk 16), group-limited MoE top-k (`n_group`/`topk_group`, DeepSeek-V3 too), MLA head-wise output gate. Ling-3.0-tiny BF16 greedy equals the HF fp32 reference on 8 of 8 tokens, also from a 9-token chunked prefill (`Ling3Ref`) (#2979).
 - Gemma-4 E-variants (gemma-4-E4B-it), text: per-layer inputs (PLE table in mapped host RAM) and KV sharing (layers 24..41 read layer 22/23, no KV blocks of their own). Greedy equals the HF fp32 reference on 9 of 9 and 20 of 20 tokens (`Gemma4E4BRef`) (#2978).
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
 - Gemma-4 audio input on gemma-4-E4B-it: `input_audio` WAV parts (16 kHz, up to 30 s) on `/v1/chat/completions`, Conformer tower + embedder on the GPU (`src/audio/`); no tower = 400. Encoder vs HF: worst-row embedding cosine 0.999976; a 10.4 s LibriSpeech clip transcribes word for word as HF fp32 does (#2980).

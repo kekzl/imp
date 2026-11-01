@@ -139,6 +139,27 @@ void mla_compact_attn_output(const half* src, half* dst,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// One block per (head, token): out[t, h, :] *= sigmoid(gate[t, h]), sigmoid in FP32.
+__global__ static void head_gate_mul_kernel(__half* __restrict__ out, const __half* __restrict__ gate,
+                                            int n_heads, int head_dim) {
+    const int h = static_cast<int>(blockIdx.x);
+    const int64_t t = blockIdx.y;
+    const float g = 1.0f / (1.0f + __expf(-__half2float(gate[(t * n_heads) + h])));
+    __half* o = out + (((t * n_heads) + h) * head_dim);
+    for (int j = static_cast<int>(threadIdx.x); j < head_dim; j += static_cast<int>(blockDim.x))
+        o[j] = __float2half(__half2float(o[j]) * g);
+}
+
+void head_gate_sigmoid_mul(half* out, const half* gate, int n_tokens, int n_heads, int head_dim,
+                           cudaStream_t stream) {
+    if (n_tokens == 0 || n_heads == 0)
+        return;
+    const dim3 grid(static_cast<unsigned>(n_heads), static_cast<unsigned>(n_tokens));
+    head_gate_mul_kernel<<<grid, 128, 0, stream>>>(reinterpret_cast<__half*>(out),
+                                                   reinterpret_cast<const __half*>(gate), n_heads, head_dim);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
                                        Tensor& O, half* o_full, int64_t o_full_elems, const int* block_tables,
                                        const int* context_lens, int block_size, float scale,

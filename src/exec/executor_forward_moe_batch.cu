@@ -688,6 +688,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                         bool norm_weights, MoeRoutingResult& routing) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
+    const MoeGroupLimit grp{cfg.moe_n_group, cfg.moe_topk_group};
 
     auto run_topk = [&](const Tensor& logits_f32) {
         // gpt-oss (#547): router bias is a true LINEAR bias on the logits, added
@@ -698,10 +699,10 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             moe_add_logit_bias(static_cast<float*>(logits_f32.data), ly.router_bias.data, n, ne, stream);
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid,
-                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
+                            norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast, grp);
         } else {
-            moe_topk_gating(logits_f32, top_k, routing, stream, use_sigmoid, norm_weights,
-                            router_bias_ptr);
+            moe_topk_gating(logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr,
+                            grp);
         }
     };
 
@@ -720,7 +721,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
         if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
-    } else if (ne <= kMaxFusedExperts && n == 1 && compute_dtype_ == QType::F16 &&
+    } else if (ne <= grp.fused_expert_cap(kMaxFusedExperts) && n == 1 && compute_dtype_ == QType::F16 &&
                ly.moe_gate.qtype == QType::F16 && moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel
         moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),

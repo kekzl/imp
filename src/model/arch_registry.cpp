@@ -152,6 +152,10 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "cohere2moe", ModelArch::COHERE2},  // refused at load (gguf_loader.cpp)
     {HF_CLASS, "Cohere2MoeForCausalLM", ModelArch::COHERE2},
     {HF_MODEL_TYPE, "cohere2_moe", ModelArch::COHERE2},
+    // BAILING_HYBRID (Ling-3.0): KDA tensors fused in model/bailing_hybrid_tensors.cpp
+    {GGUF, "bailing_hybrid", ModelArch::BAILING_HYBRID},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "BailingMoeV3ForCausalLM", ModelArch::BAILING_HYBRID},
+    {HF_MODEL_TYPE, "bailing_hybrid", ModelArch::BAILING_HYBRID},
 };
 
 struct HfConfigHookRow {
@@ -176,6 +180,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::OLMO3, parse_olmo3_config},
     {ModelArch::LFM2, parse_lfm2_config},
     {ModelArch::COHERE2, parse_cohere2_config},
+    {ModelArch::BAILING_HYBRID, parse_bailing_hybrid_config},
 };
 // clang-format on
 

@@ -192,6 +192,7 @@ enum {
     kApiOlmo3 = 19,
     kApiLfm2 = 20,
     kApiCohere2 = 21,
+    kApiBailingHybrid = 22,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -239,6 +240,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::LFM2, "lfm2", kApiLfm2, -1, 0, -1, -1, true, true, 0.3f, 0.95f, 0},
     // Cohere2-MoE: interleaved RoPE (rotate_half on even/odd pairs), sigmoid router without norm.
     {ModelArch::COHERE2, "cohere2moe", kApiCohere2, 0, 0, -1, -1, true, false, 0.3f, 0.95f, 0},
+    // Ling-3.0: MLA rope_interleave (pairs 2i,2i+1, as DeepSeek), sigmoid router + expert_bias,
+    // norm_topk_prob; generation_config 1.0 / 0.95 / 20.
+    {ModelArch::BAILING_HYBRID, "bailing_hybrid", kApiBailingHybrid, 0, 0, -1, -1, true, true, 1.0f, 0.95f,
+     20},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

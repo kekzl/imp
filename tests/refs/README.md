@@ -52,6 +52,9 @@ Generators:
 | `gen_attention_crosspath_golden.py` | `attention_crosspath_golden.h` | `tests/test_attention_crosspath.cu` |
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
+| `gen_kda_golden.py` | `kda_golden.h` | `tests/test_kda_reference.cpp` (host ref; `tests/test_kda.cu` judges the GPU scans against it) |
+| `gen_moe_group_topk_golden.py` | `moe_group_topk_golden.h` | `tests/test_moe_group_limit.cpp`, `tests/test_moe_group_topk.cu` |
+| `gen_ling3_template_golden.py` | `ling3_template_golden.h` | `tests/test_ling3_chat_template.cpp` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `gen_gemma4_audio_golden.py` | `gemma4_audio_features_golden.h` | `tests/test_audio_features.cpp` (HF `Gemma4AudioFeatureExtractor`, transformers 5.22.1, 1e-4) |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |

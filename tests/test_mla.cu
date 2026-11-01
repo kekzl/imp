@@ -593,6 +593,34 @@ TEST(MLAAttnOutput, PrefillCompaction) {
     free_gpu(g_dst);
 }
 
+// Ling-3.0 head-wise gate: out[t,h,:] *= sigmoid(gate[t,h]); every head scaled by its own gate.
+TEST(MLAAttnOutput, HeadGateSigmoidPerHead) {
+    SKIP_IF_NO_CUDA();
+    static constexpr int n_tokens = 3, n_heads = 4, v_hd = 128;
+    std::vector<float> h_out(n_tokens * n_heads * v_hd), h_gate(n_tokens * n_heads);
+    for (size_t i = 0; i < h_out.size(); i++)
+        h_out[i] = 0.25f * static_cast<float>(static_cast<int>(i % 17) - 8);
+    for (size_t i = 0; i < h_gate.size(); i++)
+        h_gate[i] = -3.0f + 0.5f * static_cast<float>(i);
+    Tensor g_out = make_gpu_fp16(h_out, {n_tokens, n_heads, v_hd});
+    Tensor g_gate = make_gpu_fp16(h_gate, {n_tokens, n_heads});
+    head_gate_sigmoid_mul(static_cast<half*>(g_out.data), static_cast<const half*>(g_gate.data), n_tokens,
+                          n_heads, v_hd, nullptr);
+    cudaDeviceSynchronize();
+    auto out = read_gpu_fp16(g_out);
+    for (int t = 0; t < n_tokens; t++)
+        for (int h = 0; h < n_heads; h++) {
+            const float gt = __half2float(__float2half(h_gate[t * n_heads + h]));
+            const float s = 1.0f / (1.0f + std::exp(-gt));
+            for (int d = 0; d < v_hd; d++) {
+                const int idx = (t * n_heads + h) * v_hd + d;
+                EXPECT_NEAR(out[idx], h_out[idx] * s, 2e-3f) << "t=" << t << " h=" << h << " d=" << d;
+            }
+        }
+    free_gpu(g_out);
+    free_gpu(g_gate);
+}
+
 // mla_assemble_kv with v_dst_head_dim > v_head_dim must write V into the first v_head_dim
 // dims of each hd-wide head slot and zero the tail; this over-allocation lets prefill
 // kernels accumulate V at head_dim.

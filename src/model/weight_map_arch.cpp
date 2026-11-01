@@ -51,6 +51,8 @@ bool assign_mla_tensor(TransformerLayer& layer, const std::string& proj, const T
         layer.q_a_proj = t;
     else if (proj == "q_a_layernorm")
         layer.q_a_layernorm = t;
+    else if (proj == "head_gate")  // Ling-3.0 head-wise output gate (bailing_hybrid_tensors.cpp)
+        layer.attn_head_gate = t;
     else
         return false;
     return true;

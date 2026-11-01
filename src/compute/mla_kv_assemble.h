@@ -45,6 +45,11 @@ void mla_compact_attn_output(const half* src, half* dst,
                              int head_dim, int v_head_dim,
                              cudaStream_t stream = nullptr);
 
+// Head-wise output gate (Ling-3.0 gated_attention_proj_granularity_type=head_wise):
+// out[t, h, :] *= sigmoid(gate[t, h]). out [n_tokens, n_heads, head_dim], gate [n_tokens, n_heads].
+void head_gate_sigmoid_mul(half* out, const half* gate, int n_tokens, int n_heads, int head_dim,
+                           cudaStream_t stream = nullptr);
+
 // F16 paged decode; MLA (v_head_dim < head_dim, V zero-padded to head_dim, n_heads == n_kv_heads,
 // o_full >= batch*n_heads*head_dim halfs, not aliasing O or Q): symmetric decode into o_full, then
 // compaction to O [batch,1,n_heads,v_head_dim] (#2374). Otherwise forwards to paged_attention_decode.

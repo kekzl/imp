@@ -1,4 +1,5 @@
 #include "compute/moe_routing.h"
+#include "compute/moe_group_limit.h"
 #include "compute/moe_routing_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
@@ -9,6 +10,8 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace imp {
@@ -17,10 +20,95 @@ namespace imp {
 // select, normalize weights.
 // expert_indices[token*top_k+j] = j-th selected expert; expert_weights[...] = its normalized weight.
 
+// Group-limited routing: experts of groups outside the topk_group best leave the selection scores.
+// Block-uniform; the launcher has validated the group geometry.
+__device__ void apply_group_limit(float* sel, int n_experts, MoeGroupLimit grp) {
+    __shared__ unsigned char s_keep[kMoeMaxGroups];
+    if (threadIdx.x == 0)
+        (void)moe_group_limit_mask(sel, n_experts, grp, s_keep);
+    __syncthreads();
+    const int gs = n_experts / grp.n_group;
+    for (int i = threadIdx.x; i < n_experts; i += blockDim.x)
+        if (!s_keep[i / gs])
+            sel[i] = -FLT_MAX;
+    __syncthreads();
+}
+
+// Softmax gating (Mixtral, DeepSeek, etc.) into s_probs; s_warp holds BLOCK_SIZE / WARP_SIZE floats.
+// Moved verbatim out of topk_gating_kernel (CCN gate).
+__device__ void gating_softmax_probs(const float* __restrict__ logits, int n_experts, float* s_probs,
+                                     float* s_warp) {
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    const int tid = threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    // Step 1: Find max for numerical stability
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < n_experts; i += blockDim.x) {
+        local_max = fmaxf(local_max, logits[i]);
+    }
+    local_max = warp_reduce_max(local_max);
+
+    if (lane_id == 0)
+        s_warp[warp_id] = local_max;
+    __syncthreads();
+    if (warp_id == 0) {
+        float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : -FLT_MAX;
+        val = warp_reduce_max(val);
+        if (lane_id == 0)
+            s_warp[0] = val;
+    }
+    __syncthreads();
+    float gmax = s_warp[0];
+    // Every warp must read the max before warp 0 overwrites slot 0 with its partial sum:
+    // without this barrier a late warp took a sum as the max and top-k picked wrong experts.
+    __syncthreads();
+
+    // Step 2: Compute exp and sum for softmax
+    float local_sum = 0.0f;
+    for (int i = tid; i < n_experts; i += blockDim.x) {
+        local_sum += expf(logits[i] - gmax);
+    }
+    local_sum = warp_reduce_sum(local_sum);
+
+    if (lane_id == 0)
+        s_warp[warp_id] = local_sum;
+    __syncthreads();
+    if (warp_id == 0) {
+        float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : 0.0f;
+        val = warp_reduce_sum(val);
+        if (lane_id == 0)
+            s_warp[0] = val;
+    }
+    __syncthreads();
+    float inv_sum = 1.0f / s_warp[0];
+
+    // Step 3: Compute softmax probabilities
+    for (int i = tid; i < n_experts; i += blockDim.x) {
+        s_probs[i] = expf(logits[i] - gmax) * inv_sum;
+    }
+}
+
+// Thread 0 of topk_gating_kernel: normalise the selected weights and write one token's row (moved verbatim).
+__device__ void gating_write_topk(const int32_t* s_topk_idx, const float* s_topk_val, int top_k,
+                                  bool normalize_weights, int32_t* indices_row, float* weights_row) {
+    float multiplier = 1.0f;
+    if (normalize_weights) {
+        float norm = 0.0f;
+        for (int j = 0; j < top_k; ++j)
+            norm += s_topk_val[j];
+        multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+    }
+    for (int j = 0; j < top_k; ++j) {
+        indices_row[j] = s_topk_idx[j];
+        weights_row[j] = s_topk_val[j] * multiplier;
+    }
+}
+
 __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k,
                                    int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights,
                                    bool use_sigmoid, bool normalize_weights,
-                                   const half* __restrict__ score_bias) {
+                                   const half* __restrict__ score_bias, MoeGroupLimit grp) {
     const int token = blockIdx.x;
     const int tid = threadIdx.x;
     const float* logits = gate_logits + (static_cast<int64_t>(token) * n_experts);
@@ -51,54 +139,11 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
             }
         }
     } else {
-        // --- Softmax gating (Mixtral, DeepSeek, etc.) ---
-        // Step 1: Find max for numerical stability
-        float local_max = -FLT_MAX;
-        for (int i = tid; i < n_experts; i += blockDim.x) {
-            local_max = fmaxf(local_max, logits[i]);
-        }
-        local_max = warp_reduce_max(local_max);
-
-        if (lane_id == 0)
-            s_warp[warp_id] = local_max;
-        __syncthreads();
-        if (warp_id == 0) {
-            float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : -FLT_MAX;
-            val = warp_reduce_max(val);
-            if (lane_id == 0)
-                s_warp[0] = val;
-        }
-        __syncthreads();
-        float gmax = s_warp[0];
-        // Every warp must read the max before warp 0 overwrites slot 0 with its partial sum:
-        // without this barrier a late warp took a sum as the max and top-k picked wrong experts.
-        __syncthreads();
-
-        // Step 2: Compute exp and sum for softmax
-        float local_sum = 0.0f;
-        for (int i = tid; i < n_experts; i += blockDim.x) {
-            local_sum += expf(logits[i] - gmax);
-        }
-        local_sum = warp_reduce_sum(local_sum);
-
-        if (lane_id == 0)
-            s_warp[warp_id] = local_sum;
-        __syncthreads();
-        if (warp_id == 0) {
-            float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : 0.0f;
-            val = warp_reduce_sum(val);
-            if (lane_id == 0)
-                s_warp[0] = val;
-        }
-        __syncthreads();
-        float inv_sum = 1.0f / s_warp[0];
-
-        // Step 3: Compute softmax probabilities
-        for (int i = tid; i < n_experts; i += blockDim.x) {
-            s_probs[i] = expf(logits[i] - gmax) * inv_sum;
-        }
+        gating_softmax_probs(logits, n_experts, s_probs, s_warp);
     }
     __syncthreads();
+    if (grp.active())
+        apply_group_limit(score_bias ? s_sel_probs : s_probs, n_experts, grp);
 
     // Parallel top-k: block-wide argmax reduction, each iteration finds global max, records,
     // masks it out. With score_bias: select on biased scores (s_sel_probs) but weight values
@@ -162,20 +207,10 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
         }
 
         // Thread 0: normalize weights and write output
-        if (tid == 0) {
-            float multiplier = 1.0f;
-            if (normalize_weights) {
-                float norm = 0.0f;
-                for (int j = 0; j < top_k; ++j)
-                    norm += s_topk_val[j];
-                multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-            }
-            int base = token * top_k;
-            for (int j = 0; j < top_k; ++j) {
-                expert_indices[base + j] = s_topk_idx[j];
-                expert_weights[base + j] = s_topk_val[j] * multiplier;
-            }
-        }
+        const ptrdiff_t row = static_cast<ptrdiff_t>(token) * top_k;
+        if (tid == 0)
+            gating_write_topk(s_topk_idx, s_topk_val, top_k, normalize_weights, expert_indices + row,
+                              expert_weights + row);
     }
 }
 
@@ -398,10 +433,21 @@ static Tensor make_tensor_2d(void* data, QType dtype, int64_t d0, int64_t d1, bo
 // Public API: moe_topk_gating
 // ============================================================================
 
+// A group geometry the kernel cannot serve fails loud instead of routing ungrouped.
+static void check_group_limit(int n_experts, MoeGroupLimit grp) {
+    if (!grp.active())
+        return;
+    if (grp.n_group > kMoeMaxGroups || n_experts % grp.n_group != 0 || n_experts / grp.n_group < 2)
+        throw std::runtime_error("moe_topk_gating: n_group " + std::to_string(grp.n_group) +
+                                 " does not split " + std::to_string(n_experts) +
+                                 " experts into groups of >= 2");
+}
+
 void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result, cudaStream_t stream,
-                     bool use_sigmoid, bool normalize_weights, const void* score_bias) {
+                     bool use_sigmoid, bool normalize_weights, const void* score_bias, MoeGroupLimit grp) {
     const int n_tokens = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
+    check_group_limit(n_experts, grp);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
     const int total_assignments = n_tokens * top_k;
 
@@ -460,7 +506,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
     pdl::enable_kernel(topk_gating_kernel);
     pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
                 static_cast<const float*>(d_logits), n_experts, top_k, d_expert_indices, d_expert_weights,
-                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias));
+                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias), grp);
     IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Stable count + scan + scatter ----
@@ -564,9 +610,10 @@ void MoeRoutingBuffers::free() {
 
 void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& buffers,
                      MoeRoutingResult& result, cudaStream_t stream, bool use_sigmoid, bool normalize_weights,
-                     const void* score_bias, bool skip_sorting) {
+                     const void* score_bias, bool skip_sorting, MoeGroupLimit grp) {
     const int n_tokens = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
+    check_group_limit(n_experts, grp);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
     const int total_assignments = n_tokens * top_k;
 
@@ -584,7 +631,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
     pdl::enable_kernel(topk_gating_kernel);
     pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
                 static_cast<const float*>(d_logits), n_experts, top_k, d_expert_indices, d_expert_weights,
-                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias));
+                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias), grp);
     IMP_CUDA_CHECK_LAUNCH();
 
     if (!skip_sorting) {
