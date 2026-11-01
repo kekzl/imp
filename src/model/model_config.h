@@ -44,6 +44,19 @@ struct ModelConfig {
     float rope_theta_swa = 0.0f;            // Gemma 4: RoPE theta for SWA layers (default: rope_local_theta)
     // Gemma 4 HF: full_attention inv freqs [global hd/2]; empty = plain theta RoPE.
     std::vector<float> rope_inv_freqs_global;
+    // Gemma-4 E-variants, per-layer inputs (PLE): hidden_size_per_layer_input (E4B 256, 0 = off)
+    // and vocab_size_per_layer_input (rows of the [vocab, n_layers * pli_dim] table).
+    int pli_dim = 0;
+    int pli_vocab = 0;
+    // Gemma-4 KV sharing (num_kv_shared_layers): kv_source_layer[l] = layer whose K/V layer l
+    // reads, -1 = own K/V. Empty = no sharing. E4B: layers 24..41 read 22 (sliding) or 23 (full).
+    std::vector<int> kv_source_layer;
+    [[nodiscard]] int kv_source(int layer) const {
+        return (layer >= 0 && layer < static_cast<int>(kv_source_layer.size()))
+                   ? kv_source_layer[static_cast<size_t>(layer)]
+                   : -1;
+    }
+    [[nodiscard]] bool layer_kv_shared(int layer) const { return kv_source(layer) >= 0; }
 
     // Mamba2 SSM config
     int ssm_conv_kernel = 0;  // 4
@@ -339,6 +352,9 @@ struct TransformerLayer {
     // [d, ple_d], depthwise conv1d [hc*d, 1, k] (dilation ngram_size), three grouped norms over
     // hc*d. The F8 table shards, the I64 hash buffers and the table scale live in Model::ngram_table().
     Tensor ple_key_proj, ple_value_proj, ple_conv1d, ple_norm_key, ple_norm_query, ple_norm_conv;
+    // Gemma-4 E-variant per-layer input: per_layer_input_gate [pli_dim, d], per_layer_projection
+    // [d, pli_dim], post_per_layer_input_norm [d] (plain w, no offset).
+    Tensor pli_gate, pli_proj, pli_norm;
     // Qwen4Exp QSA indexer (attention layers): index_qk_proj [(q_heads + kv_heads) * idx_dim, d],
     // per-head RMSNorm (1+w) weights [idx_dim] for the query and the pooled block key.
     Tensor qsa_index_qk, qsa_index_q_norm, qsa_index_k_norm;

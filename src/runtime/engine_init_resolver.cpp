@@ -469,9 +469,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
             int kv_layers = mcfg.n_layers;
             if (!mcfg.n_kv_heads_per_layer.empty()) {
                 int populated = 0;
-                for (int v : mcfg.n_kv_heads_per_layer)
-                    if (v > 0)
-                        ++populated;
+                for (size_t l = 0; l < mcfg.n_kv_heads_per_layer.size(); ++l)
+                    if (mcfg.n_kv_heads_per_layer[l] > 0 && !mcfg.layer_kv_shared(static_cast<int>(l)))
+                        ++populated;  // a Gemma-4 KV-shared layer holds no KV
                 if (populated > 0)
                     kv_layers = populated;
             }
@@ -954,9 +954,9 @@ void Engine::init_compute_max_seq_len_() {
         int kv_layer_count = mcfg.n_layers;
         if (!mcfg.n_kv_heads_per_layer.empty()) {
             int populated = 0;
-            for (int v : mcfg.n_kv_heads_per_layer)
-                if (v > 0)
-                    ++populated;
+            for (size_t l = 0; l < mcfg.n_kv_heads_per_layer.size(); ++l)
+                if (mcfg.n_kv_heads_per_layer[l] > 0 && !mcfg.layer_kv_shared(static_cast<int>(l)))
+                    ++populated;  // a Gemma-4 KV-shared layer holds no KV
             if (populated > 0)
                 kv_layer_count = populated;
         }
@@ -969,7 +969,7 @@ void Engine::init_compute_max_seq_len_() {
         if (runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching)) {
             int swa_layers = 0;
             for (int l = 0; l < mcfg.n_layers; l++)
-                if (layer_swa_window(mcfg, model_->profile(), l) > 0)
+                if (layer_swa_window(mcfg, model_->profile(), l) > 0 && !mcfg.layer_kv_shared(l))
                     ++swa_layers;
             if (swa_layers > 0 && swa_layers < kv_layer_count) {
                 IMP_LOG_INFO("max_seq_len auto: SWA sizing — %d/%d windowed layers excluded "

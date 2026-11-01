@@ -91,6 +91,9 @@ std::string dump_config(const ModelConfig& c) {
     d.vi("swa_layers", c.swa_layers);
     d.f("rope_theta_swa", c.rope_theta_swa);
     d.vf("rope_inv_freqs_global", c.rope_inv_freqs_global);
+    d.i("pli_dim", c.pli_dim);
+    d.i("pli_vocab", c.pli_vocab);
+    d.vi("kv_source_layer", c.kv_source_layer);
     d.i("ssm_conv_kernel", c.ssm_conv_kernel);
     d.i("ssm_state_size", c.ssm_state_size);
     d.i("ssm_group_count", c.ssm_group_count);

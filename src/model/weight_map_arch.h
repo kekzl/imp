@@ -29,4 +29,15 @@ void base_model_canonical_name(std::string& name);
 // false = not an MLA tensor.
 [[nodiscard]] bool assign_mla_tensor(TransformerLayer& layer, const std::string& proj, const Tensor& t);
 
+class Model;
+
+// Gemma-4 E-variant tensors (wrapper prefix stripped; Other unless gemma4_layout):
+//   Assigned: embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm and
+//             layers.N.{per_layer_input_gate, per_layer_projection, post_per_layer_input_norm}.
+//   Unused:   layers.N.self_attn.{k_proj,v_proj,k_norm} of a KV-shared layer (HF ignores them too).
+//   Other:    the generic matchers take it.
+enum class Gemma4ETensor { Other, Assigned, Unused };
+[[nodiscard]] Gemma4ETensor assign_gemma4_e_tensor(bool gemma4_layout, Model& model, const std::string& name,
+                                                   const Tensor& t);
+
 }  // namespace imp

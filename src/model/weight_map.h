@@ -15,7 +15,8 @@ public:
     struct SkipStats {
         int total = 0;
         int vision = 0;        // model.{vision_tower,visual,embed_vision}.*
-        int audio = 0;         // model.embed_audio.*
+        int audio = 0;         // model.embed_audio.* / model.audio_tower.*
+        int kv_shared = 0;     // Gemma-4 k/v_proj + k_norm of KV-shared layers (unused by HF too)
         int mtp = 0;           // mtp.* / model.mtp.* stripped by the multimodal path
         int unrecognised = 0;  // no matcher claimed the name
     };

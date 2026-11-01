@@ -17,6 +17,11 @@ struct VisionModel;  // vision/vision_model.h — only a pointer is needed here
 // theta^(-2p/hd), every other pair 0 (unrotated). hd=512, factor 0.25: 64 of 256 pairs.
 std::vector<float> proportional_rope_inv_freqs(float theta, int head_dim, float partial_factor);
 
+// Gemma-4 num_kv_shared_layers: the last n_shared layers read the K/V of the last earlier layer of
+// the same type (HF Gemma4TextAttention store_full_length_kv). [l] = source or -1; empty when
+// n_shared <= 0 or a type has no earlier layer. E4B (42 layers, 18 shared): 24..41 -> 22 / 23.
+std::vector<int> gemma4_kv_source_layers(const std::vector<uint8_t>& swa_layers, int n_shared);
+
 struct HFConfigLoader {
     // Loads config.json, populates ModelConfig; only overwrites fields present in the JSON.
     // out_vision_tower, when non-null and the checkpoint carries a supported vision tower,

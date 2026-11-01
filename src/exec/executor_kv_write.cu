@@ -46,6 +46,8 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     int kv_layer = get_kv_layer(kv_layer_map_, layer);
     if (kv_layer < 0)
         return;  // not an attention layer
+    if (model_->config().layer_kv_shared(layer))
+        return;  // Gemma-4 KV-shared layer: its slot is the source layer's, written there
 
     KVCache* cache = state.kv_cache;
     const bool row_range = (bt_flat != nullptr);

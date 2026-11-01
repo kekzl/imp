@@ -70,6 +70,64 @@ void widen_scalar_geometry(ModelConfig& cfg) {
 
 }  // namespace
 
+std::vector<int> gemma4_kv_source_layers(const std::vector<uint8_t>& swa_layers, int n_shared) {
+    const int n = static_cast<int>(swa_layers.size());
+    const int first_shared = n - n_shared;
+    std::vector<int> src;
+    if (n_shared <= 0 || first_shared <= 0)
+        return src;
+    src.assign(static_cast<size_t>(n), -1);
+    for (int l = first_shared; l < n; ++l) {
+        for (int s = first_shared - 1; s >= 0; --s) {
+            if (swa_layers[static_cast<size_t>(s)] == swa_layers[static_cast<size_t>(l)]) {
+                src[static_cast<size_t>(l)] = s;
+                break;
+            }
+        }
+        if (src[static_cast<size_t>(l)] < 0)
+            return {};  // no earlier layer of this type: HF would raise, refused by the caller
+    }
+    return src;
+}
+
+namespace {
+
+// E-variant keys: PLE width/vocab and num_kv_shared_layers. false = a config imp cannot serve.
+bool parse_gemma4_e_variant(const JValue& eff, ModelConfig& cfg) {
+    jobj_opt_int(eff, "hidden_size_per_layer_input", cfg.pli_dim);
+    cfg.pli_vocab = cfg.vocab_size;
+    jobj_opt_int(eff, "vocab_size_per_layer_input", cfg.pli_vocab);
+    if (cfg.pli_dim < 0 || (cfg.pli_dim > 0 && cfg.pli_vocab <= 0)) {
+        IMP_LOG_ERROR("Gemma 4: hidden_size_per_layer_input %d / vocab_size_per_layer_input %d invalid",
+                      cfg.pli_dim, cfg.pli_vocab);
+        return false;
+    }
+    if (cfg.pli_dim == 0)
+        cfg.pli_vocab = 0;
+    int double_wide = 0;  // JSON bools parse as NUMBER 0/1
+    jobj_opt_int(eff, "use_double_wide_mlp", double_wide);
+    int n_shared = 0;
+    jobj_opt_int(eff, "num_kv_shared_layers", n_shared);
+    cfg.kv_source_layer.clear();
+    if (n_shared <= 0)
+        return true;
+    if (double_wide) {
+        IMP_LOG_ERROR("Gemma 4: use_double_wide_mlp (2x d_ff on KV-shared layers) is not supported");
+        return false;
+    }
+    cfg.kv_source_layer = gemma4_kv_source_layers(cfg.swa_layers, n_shared);
+    if (cfg.kv_source_layer.empty()) {
+        IMP_LOG_ERROR("Gemma 4: num_kv_shared_layers %d leaves no source layer for every type (%zu layers)",
+                      n_shared, cfg.swa_layers.size());
+        return false;
+    }
+    IMP_LOG_INFO("Gemma 4: %d KV-shared layers (from layer %d), per-layer input dim %d", n_shared,
+                 static_cast<int>(cfg.swa_layers.size()) - n_shared, cfg.pli_dim);
+    return true;
+}
+
+}  // namespace
+
 // Gemma-4: layer_types[] gives SWA vs global; head_dim/global_head_dim and
 // num_key_value_heads/num_global_key_value_heads define the dual geometry. Builds
 // per-layer vectors so executor_attention.cu picks the right shape/theta per layer.
@@ -82,7 +140,7 @@ bool parse_gemma4_config(const JValue& /*root*/, const JValue& eff, ModelConfig&
 
     const JValue* lt = jobj_find(eff, "layer_types");
     if (!lt || lt->type != JType::ARRAY)
-        return true;
+        return parse_gemma4_e_variant(eff, cfg);
     cfg.swa_layers.clear();
     cfg.head_dim_per_layer.clear();
     cfg.n_kv_heads_per_layer.clear();
@@ -98,7 +156,7 @@ bool parse_gemma4_config(const JValue& /*root*/, const JValue& eff, ModelConfig&
                                                   : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
     }
     widen_scalar_geometry(cfg);
-    return true;
+    return parse_gemma4_e_variant(eff, cfg);
 }
 
 }  // namespace imp

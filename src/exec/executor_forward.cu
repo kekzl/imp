@@ -369,6 +369,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                          state.vision_emb_offset, stream);
     }
 
+    // Gemma-4 E-variant per-layer inputs: from the embedding after the vision rows (HF projects the
+    // merged inputs_embeds).
+    pli_inputs_run_(state, n, stream);
     debug_tensor_stats("after_embedding", h, stream);
     debug_tensor_stats_all("after_embedding_all", view_tokens(h, n), stream);
     if (model_->profile().gated_residual) {
@@ -519,6 +522,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 }
             }
         }
+
+        // Gemma-4 E-variant: per-layer input branch after the FFN residual, before layer_out_scale.
+        pli_layer_run_(i, n, stream);
 
         // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
         // gemma4-iswa.cpp:215-218 multiplies the layer output by this BEFORE the

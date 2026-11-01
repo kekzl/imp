@@ -24,6 +24,9 @@ std::string wrapped_lm_architecture(const JValue& root, const std::string& top_a
 // Qwen3.6), model.embed_vision. (Gemma-4 unified), vision_tower. and multi_modal_projector.
 // (InternVL, HF layout).
 bool is_wrapper_vision_name(const std::string& name);
+// model.embed_audio.* / model.audio_tower.* (Gemma-4); mtp.* / model.mtp.* (MTP sidecar heads).
+bool is_wrapper_audio_name(const std::string& name);
+bool is_wrapper_mtp_name(const std::string& name);
 
 // The wrapper's LM names -> bare text-model names: model.language_model.X (Qwen3-VL, Gemma-4) and
 // language_model.model.X (InternVL) -> model.X; language_model.lm_head.* -> lm_head.*;
