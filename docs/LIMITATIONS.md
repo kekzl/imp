@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-01
+commit: 696ef613
 -->
 
 # Limitations
@@ -28,6 +28,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Type exists, nothing exercises it | FP8 E5M2 KV / weights | none | #1680 |
 | Aliases onto the LLaMA path, no checkpoint of its own in a gate | Phi-4 | none | #1680 |
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |
+| Per-layer inputs (PLE) and KV sharing never ran on a GPU: CPU unit tests cover config parse and tensor mapping only; `use_double_wide_mlp` (2x d_ff on shared layers) is refused at load; the 5.25 GiB FP16 PLE table sits in mapped pinned host RAM (VRAM if pinning fails); the PLE and KV-share workspace is outside the memory plan | Gemma-4 E-variants (E4B) | `Gemma4E4BRef` e2e test against the HF fp32 reference (`IMP_TEST_MODEL_GEMMA4_E4B`, `IMP_TEST_GEMMA4_E4B_REF`) | - |
 | Dequant paths with no gate reading such a checkpoint (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K do have one) | GGUF Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K | none | #1680 |
 | **Q8_1** (GGUF wire type 9, an activation format) has no weight path at all | GGUF loader | refused at parse | - |
 | Cross-check against a reference reranker is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |

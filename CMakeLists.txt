@@ -385,6 +385,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm_conv_split.cu
     src/compute/gated_residual.cu
     src/compute/ple.cu
+    src/compute/gemma_pli.cu
     src/compute/gdn_factor.cu
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
@@ -533,6 +534,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
     src/exec/executor_ple.cpp
+    src/exec/executor_gemma_pli.cpp
     src/exec/executor_gdn_alpha_beta.cpp
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cpp
@@ -1109,6 +1111,8 @@ if(IMP_BUILD_TESTS)
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
+        # Gemma-4 E-variants: PLE + KV-sharing config keys and tensor mapping (E4B config fixture).
+        tests/test_gemma4_e_variant.cpp
         tests/test_internvl_lm_names.cpp
         tests/test_internvl_vision.cpp
         tests/test_internvl_preprocess.cpp
@@ -1452,6 +1456,8 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e.cpp
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
+        # Gemma-4 E4B greedy vs the HF fp32 reference (env-gated: model + reference dir).
+        tests/test_e2e_gemma4_e4b.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
         tests/test_scheduler_embedding_prefix.cpp

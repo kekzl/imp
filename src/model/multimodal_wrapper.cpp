@@ -33,6 +33,14 @@ bool is_wrapper_vision_name(const std::string& n) {
     return false;
 }
 
+bool is_wrapper_audio_name(const std::string& n) {
+    return n.starts_with("model.embed_audio.") || n.starts_with("model.audio_tower.");
+}
+
+bool is_wrapper_mtp_name(const std::string& n) {
+    return n.starts_with("mtp.") || n.starts_with("model.mtp.");
+}
+
 std::string strip_wrapper_lm_prefix(const std::string& n) {
     static constexpr std::pair<std::string_view, std::string_view> kRenames[] = {
         {"model.language_model.", "model."},

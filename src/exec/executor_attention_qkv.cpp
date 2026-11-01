@@ -306,7 +306,8 @@
                     }
                     if (!qkv_multi) {
                         gemm_via_handle_(ly.wq_id, no, q_target, ctx);
-                        gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
+                        if (ly.wk.data != nullptr)  // null: Gemma-4 KV-shared layer, Q only
+                            gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
                         if (ly.wv.data != nullptr) {
                             gemm_via_handle_(ly.wv_id, no, vv, kv_ctx);
                         }

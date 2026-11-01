@@ -142,6 +142,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor po = view_tokens(proj_out_, n);
 
     const bool per_layer_shapes = (!cfg.head_dim_per_layer.empty() || !cfg.n_kv_heads_per_layer.empty());
+    // Gemma-4 KV-shared layer: Q only, K/V are the source layer's (kv_share_bind below).
+    const bool kv_shared = cfg.layer_kv_shared(layer);
 
     // Per-layer shape narrowing: Q/K/V/ao workspace tensors are allocated with
     // max shapes (for worst-case layer). For layers with smaller head_dim (Gemma 4
@@ -255,7 +257,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Gemma 4: K=V sharing for global attention layers (wv==null): no V
     // projection exists, V is aliased from K. Copy K->V here so downstream
     // code (QK-norm, V-norm, KV-write, attention) sees a valid V tensor.
-    if (prof.k_as_v_without_wv && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
+    if (prof.k_as_v_without_wv && !kv_shared && ly.wv.data == nullptr && kk.data != nullptr &&
+        vv.data != nullptr) {
         size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.qtype);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes, cudaMemcpyDeviceToDevice, stream));
     }
@@ -263,7 +266,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // V-normalization (Gemma 4): per-head RMSNorm with NO learned weight.
     // Matches llama.cpp's `Vcur = ggml_rms_norm(Vcur, eps)` (gemma4-iswa.cpp:82).
     // Required for both K=V-shared global layers and standard SWA layers.
-    if (prof.v_rmsnorm && v_norm_ones_buf_ != nullptr) {
+    if (prof.v_rmsnorm && !kv_shared && v_norm_ones_buf_ != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
         Tensor v_flat(vv.data, vv.qtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};
@@ -420,8 +423,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate launches per layer.
         // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
         // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
-        if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
-            !no_qknorm_fused && layer_rope) {
+        if (kv_shared && ly.attn_q_norm.data != nullptr && n <= 65535 && qv.qtype == QType::F16) {
+            // q_norm + RoPE on Q only (n_kv_heads 0); the shared K/V are normed and rotated.
+            qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(qv.data),
+                              static_cast<const half*>(ly.attn_q_norm.data),
+                              static_cast<const half*>(ly.attn_q_norm.data), nh, 0, hd, eps, state.positions,
+                              layer_rope_theta, layer_rope_freq_scale, fused_rope_dim, cfg.rope_neox, stream,
+                              norm_w_off_, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs,
+                              state.mrope, n);
+        } else if (kv_shared) {
+            throw std::runtime_error("Gemma 4 KV-shared layer needs q_norm and FP16 Q");
+        } else if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
+                   !no_qknorm_fused && layer_rope) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -468,6 +482,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Llama-4 query temperature past attn_temp_floor (Ministral 3, #2411); no-op when off.
     q_position_temperature(static_cast<half*>(qv.data), state.positions, n, nh, hd, cfg.attn_temp_scale,
                            cfg.attn_temp_floor, stream);
+    // Gemma-4 KV sharing: a source layer keeps this chunk's K/V rows (no-op on other layers); a
+    // shared layer attends to them plus the source's paged past (kv_layer_map_ -> source slot).
+    if (kv_shared) {
+        if (rope_k_deferred || !kv_share_bind(gpli_, cfg, layer, kk, vv, n))
+            throw std::runtime_error("Gemma 4 KV-shared layer has no source K/V rows");
+    } else {
+        kv_share_save(gpli_, layer, kk, vv, n, stream);
+    }
 
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step2_after_rope_q", qv, stream);
