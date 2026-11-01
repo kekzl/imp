@@ -150,6 +150,9 @@
         const int attn_max_ctx = sparse_selects
                                      ? std::min(sub_state.max_context_len, qscratch_.sparse_budget_blocks* kv_bs)
                                      : sub_state.max_context_len;
+        // kv_cache.evict_keep_ratio: rows read a compacted copy of the table, no kernel sees a -1 hole.
+        // After attn_max_ctx (an upper bound for the compacted rows); no-op when off.
+        kv_evict_tables_(sub_state, sub_block_tables, sub_n, n_seq, kv_bs, attn_bt, attn_ctx_lens, stream);
 
         if (cache_dtype == QType::INT4) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT4);

@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/engine_kv_evict.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_vision_load.h"
@@ -675,6 +676,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_resolve_quant_flags_();
     init_resolve_kv_block_size_();
     init_resolve_sparse_attention_();
+    kv_evict_resolve(runtime_config_, model_->config(), config_.kv_cache_dtype, config_.streaming_kv_enabled);
 
     init_compute_max_seq_len_();
 
