@@ -64,7 +64,7 @@ bool Engine::pipeline_row_eligible_(const Request& r) const {
     if (r.mirostat != 0 || r.host_logit_shaping() || r.forcing())
         return false;
     // rep/freq/presence penalties ARE supported (device-side history — the
-    // server defaults to repetition_penalty 1.05, so the common serving row
+    // server takes the model's repetition_penalty (1.05 on Gemma-4 channel models), so a serving row
     // carries them). DRY needs the host-side token array — excluded.
     if (r.dry_multiplier > 0.0f)
         return false;

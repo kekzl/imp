@@ -8,10 +8,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
 
 ### Fixed
+- Sampling: `top_p` now cuts the top-k candidates renormalized, as HF, vLLM and llama.cpp do; against the full-vocabulary mass it never fired while the top k held less than `top_p`, so the tail of the k was sampled (Qwen3.8: `top_k` 20, `top_p` 0.95). A top 4 holding 0.8 at `top_p` 0.75 now samples only its 2 head tokens.
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content and schema-valid.
 - json_schema `number` with a lower bound: a fraction run to the 40-digit cap (`0.000...` under `exclusiveMinimum: 0`) left no legal token and the response stopped mid-object; the cap digit must now keep the value in bounds.
 
 ### Changed
+- imp-server's default `repetition_penalty` is the model's (`generation_config.json`, else 1.0, as HF and vLLM) instead of 1.05; Gemma-4 channel models keep 1.05. Qwen3.8-27B-NVFP4, 6 German books with the top_p fix: 17 misspelled words at 1.05, 1 at 1.0; bad sentences 10.7 -> 8.1 per 1000 words (vLLM 9.6).
 - Fused QK-norm + RoPE computes cos/sin once per token and runs one warp per head, bit-identical outputs: 109.2 -> 26.9 us at 2048 rows, 3.60 -> 1.68 us at 32 rows (Qwen3-14B). Qwen3-14B-NVFP4, 32 streams: +2.6 % aggregate tok/s with 1000-token prompts, +2.0 % with short ones.
 - Cold-start library reserve constant 3900 -> 1536 MiB: without CUTLASS and cuBLAS v2 the first forward claims 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB. KV blocks after warmup are unchanged (#2436 re-sizes; Qwen3.8-27B 4950, Flash-Next 2025); weight caches and auto batch/seq resolve against 2.3 GiB less.
 - MoE router GEMM at prefill takes the own split-K kernel only while cuBLASLt would accumulate in fp32 (`gemm.cublas_fp16_acc` off, Gemma-4); Nemotron-3-Nano (fp16 accumulate on) goes back to cuBLASLt: router kernels 5.83 -> 4.48 ms per pp4096 run, e2e pp4096 +0.5 % (3/3 pairs).
