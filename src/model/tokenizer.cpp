@@ -334,6 +334,7 @@ static void init_codepoint_table() {
 
 // Convert a single byte to its GPT2 Unicode character (UTF-8 encoded)
 static std::string byte_to_gpt2(uint8_t byte) { return codepoint_to_utf8(BYTE_TO_CODEPOINT[byte]); }
+std::string gpt2_byte_piece(uint8_t byte) { return byte_to_gpt2(byte); }
 
 // Convert a UTF-8 character (from GPT2 encoding) back to the original byte
 // Returns -1 if not a valid GPT2 byte-encoded character

@@ -364,6 +364,7 @@ std::expected<void, std::string> copy_aux_files(const std::string& in_dir, const
                                    "vocab.json",
                                    "merges.txt",
                                    "tokenizer.model",
+                                   "tiktoken.model",
                                    "chat_template.jinja",
                                    "chat_template.json"};
     std::set<std::string> copied;

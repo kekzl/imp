@@ -239,6 +239,7 @@ set(IMP_MODEL_SOURCES
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
     src/model/tokenizer_regex.cpp
+    src/model/tokenizer_tiktoken.cpp
     src/model/unicode_class.cpp
     src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
@@ -1274,6 +1275,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_tokenizer_llama_bpe.cpp
         tests/test_tokenizer_pretok_json.cpp
+        tests/test_tokenizer_tiktoken.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_chat_template.cpp
         tests/test_chat_template_continue.cpp
@@ -1493,6 +1495,8 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
+        # Kimi tiktoken vs HF (env-gated: IMP_TEST_MODEL_KIMI = dir with tiktoken.model).
+        tests/test_tokenizer_kimi.cpp
         # /v1/decide + /v1/score boundary guard on a real tokenizer.json (no GPU, model file).
         tests/test_candidate_tokens.cpp
         tests/test_fim_tokenizer.cpp
