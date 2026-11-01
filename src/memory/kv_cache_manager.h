@@ -260,6 +260,11 @@ public:
     // of physical blocks freed.
     int evict_middle_blocks(int seq_id, int n_sink_tokens, int n_window_tokens);
 
+    // Score-based eviction (kv_cache.evict_keep_ratio): frees the listed logical blocks, leaving
+    // -1 holes like evict_middle_blocks. Shared blocks (ref_count != 1) and pinned blocks stay;
+    // the prefix-hash chain from the first freed block on is dropped. Returns blocks freed.
+    int evict_blocks(int seq_id, std::span<const int> logical_blocks);
+
     // ── Stats ────────────────────────────────────────────────────────
 
     // Snapshot of all cache statistics.

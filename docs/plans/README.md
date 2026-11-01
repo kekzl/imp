@@ -31,3 +31,4 @@ is the other direction: text moved OUT of the roadmap.
 | [2026-09-19-qwen4exp-port](2026-09-19-qwen4exp-port.md) | record, Qwen3.8-Flash-Next port shipped | CHANGELOG Qwen3.8-Flash-Next |
 | [2026-09-28-qwen4exp-mtp](2026-09-28-qwen4exp-mtp.md) | record, MTP draft-layer reference semantics; drafting shipped (#2272) | CHANGELOG `speculative.mtp_k` |
 | [2026-10-01-recurrent-state-paging-measured](2026-10-01-recurrent-state-paging-measured.md) | CLOSED 2026-10-01, DO NOT BUILD | roadmap Open 5 (archive) |
+| [2026-11-01-kv-eviction](2026-11-01-kv-eviction.md) | CLOSED 2026-11-01, REFUTED (continuation recall -11.2 % at keep 0.5), harness opt-in | roadmap row 48 |

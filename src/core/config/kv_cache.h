@@ -70,6 +70,16 @@ struct KVCache {
     // at load when outside that set, not silently rounded (AUDIT_ARCH_2026 B-5).
     int block_size = 0;
 
+    // KV eviction proof harness (roadmap row 48, docs/plans/2026-11-01-kv-eviction.md): after
+    // the last prefill chunk, TriAttention-scored whole blocks beyond the budget are freed and
+    // decode attention skips them. Fraction of the prompt's blocks kept; 0 = off.
+    float evict_keep_ratio = 0.0f;
+    // Blocks covering the first / last N prompt tokens are never evicted.
+    int evict_sink_tokens = 64;
+    int evict_recent_tokens = 256;
+    // Prompts shorter than this are never evicted.
+    int evict_min_tokens = 4096;
+
     SwaSizingMode swa_sizing_mode() const {
         if (swa_sizing == "auto")
             return SwaSizingMode::Auto;

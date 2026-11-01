@@ -589,6 +589,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                               rows_view(ao, static_cast<int64_t>(nh) * hd, rb, nr), rst.block_tables);
             }
         } else {
+            kv_evict_prefill_qstats_(layer, state, qv, n, stream);  // kv_cache.evict_keep_ratio, off: no-op
             prefill_attend_seq(n, state.prefill_offset, 0, qv, kk, vv, ao, layer_block_tables,
                                /*bt_flat=*/nullptr, /*bt_swa_flat=*/nullptr, /*seq_positions=*/nullptr);
             // Qwen4Exp QSA: the rows past 2050 tokens get the learned block selection

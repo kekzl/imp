@@ -190,6 +190,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
     src/memory/kv_cache_manager_session.cpp
+    src/memory/kv_cache_manager_evict.cpp
     src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
@@ -440,6 +441,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/jump_draft.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_kv_evict.cpp
     src/runtime/engine_embed.cpp
     src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
@@ -489,6 +491,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/sparse_attn_select.cu
+    src/exec/kv_evict.cu
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cpp
@@ -510,6 +513,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_workspace.cpp
     src/exec/executor_workspace_buffers.cpp
     src/exec/executor_sparse_prefill.cpp
+    src/exec/executor_kv_evict.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
     src/exec/pre_dequant_phase0_nvfp4_loader.cpp
@@ -686,6 +690,7 @@ set_source_files_properties(
     src/exec/executor_attention_helpers.cpp
     src/exec/executor_workspace_buffers.cpp
     src/exec/executor_sparse_prefill.cpp
+    src/exec/executor_kv_evict.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
@@ -932,6 +937,8 @@ if(IMP_BUILD_TESTS)
         tests/test_ffn_graph_cache.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
+        # KV eviction block selection (kv_cache.evict_keep_ratio, roadmap row 48).
+        tests/test_kv_evict_select.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.
         tests/test_moe_prefill_select.cpp
         # GGUF MoE NVFP4 decode cache: whole layer or nothing.
@@ -1358,6 +1365,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
+        tests/test_kv_evict.cu
         tests/test_sparse_prefill.cu
     )
 
