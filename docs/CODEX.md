@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-21
-commit: 800df80f
+verified: 2026-11-01
+commit: 216a779c
 -->
 
 # Codex CLI on imp
@@ -61,7 +61,7 @@ wire_api = "responses"
 ```
 
 - `base_instructions` is required. Copy Codex's own text (the first `developer` input item of any Codex request, "You are a coding agent running in the Codex CLI ..."), or write your own.
-- `context_window`: Flash-Next serves up to 131072 tokens; its KV pool grows on demand ([`QUICKSTART.md`](QUICKSTART.md#qwen38-flash-next)).
+- `context_window`: Flash-Next serves up to 131072 tokens; its KV pool grows on demand ([`BIG_MODELS.md`](BIG_MODELS.md#after-start)).
 
 ## Measured
 
