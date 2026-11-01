@@ -68,3 +68,17 @@ for k in "${keep_arms[@]}"; do
     ppl /work/arm "AWQ + FP8 keep $k" "$(bytes arm)"
 done
 clean arm
+
+# BENCH_BUDGET=P: pp512 + tg128 of AWQ vs the budget-P export, BENCH_RUNS alternating pairs, n-gram off.
+if [ -n "${BENCH_BUDGET:-}" ]; then
+    quant mixed bench.log --fp8-score /work/calib_bf16.bin.hess --fp8-budget "$BENCH_BUDGET"
+    for r in $(seq "${BENCH_RUNS:-3}"); do
+        for m in awq mixed; do
+            printf 'bench run %s %s\t' "$r" "$m"
+            run imp-cli --model "/work/$m" --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --temperature 0 \
+                --set speculative.ngram=false 2>&1 | grep -E "^(pp|tg) " | tr '\n' ' '
+            echo
+        done
+    done
+    clean mixed
+fi
