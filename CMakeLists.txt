@@ -232,6 +232,7 @@ set(IMP_MODEL_SOURCES
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_fit.cpp
+    src/model/expert_pack.cpp
     src/model/host_expert_pin.cpp
     src/model/weight_upload.cpp
     src/model/host_embedding.cpp
@@ -1089,6 +1090,8 @@ if(IMP_BUILD_TESTS)
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.
         tests/test_workspace_sizes.cpp
+        # Per-expert F16 -> packed [ne, rows, cols] at load (src/model/expert_pack.h).
+        tests/test_expert_pack.cpp
         # Persisted library-reserve measurement: a keyed text file whose number
         # decides how much VRAM the plan hands out, so its failure modes are
         # pinned in the lane CI actually runs.

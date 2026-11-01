@@ -15,9 +15,11 @@ class Model;
 // Which prefill path serves every on-device expert without batch_dequant_buf.
 // cutlass_fp4 (name historical): NVFP4/MXFP4 experts (grouped NVFP4 GEMM); imma_all: K-quant experts
 // the MoE IMMA kernel takes (Q8_0 excluded: its planes can hit the plane budget at runtime).
+// f16_all: every packed expert tensor is device F16 (nothing to dequant; Ling-3.0 BF16: 192 MiB).
 struct MoeExpertServe {
     bool cutlass_fp4 = false;
     bool imma_all = false;
+    bool f16_all = false;
 };
 [[nodiscard]] MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill,
                                                   QType compute_dtype);

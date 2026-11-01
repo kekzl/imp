@@ -1049,7 +1049,8 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     }
 
     // dp4a/FP16 sub-path: gate+up projection (fused if gated)
-    bool use_dp4a = (qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
+    const bool use_dp4a = moe_decode_uses_dp4a(ly,
+                                               qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
 
     if (use_dp4a) {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);

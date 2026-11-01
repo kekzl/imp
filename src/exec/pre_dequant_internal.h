@@ -107,6 +107,18 @@ inline bool has_host_resident_experts(const Model& m) {
     return false;
 }
 
+// F16 experts (BF16 checkpoints, packed or per-expert): their M > 1 MoE runs the host-args legacy path.
+inline bool has_f16_experts(const Model& m) {
+    for (int i = 0; i < m.config().n_layers; ++i) {
+        const auto& L = m.layer(i);
+        if (L.expert_up_packed.data && L.expert_up_packed.qtype == QType::F16)
+            return true;
+        if (!L.expert_w_up.empty() && L.expert_w_up[0].data && L.expert_w_up[0].qtype == QType::F16)
+            return true;
+    }
+    return false;
+}
+
 // A dense projection or the LM head in native MXFP4 (the tensors the MXFP4 unpack registers).
 [[nodiscard]] inline bool model_has_dense_mxfp4(const Model& m, int n_layers) {
     for (int i = 0; i < n_layers; ++i) {

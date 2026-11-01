@@ -2,6 +2,7 @@
 #include "memory/vram_query.h"
 #include "memory/weight_snapshot.h"
 #include "memory/weight_cache_file.h"
+#include "model/expert_pack.h"
 #include "model/host_expert_fit.h"
 #include "model/host_expert_pin.h"
 #include "model/expert_placement.h"
@@ -1898,6 +1899,18 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     return false;
                 }
             }
+            // F16 experts -> one [ne, rows, cols] buffer each (expert_pack.h).
+            const ExpertPackAlloc pa = [&](size_t b) {
+                void* d = nullptr;
+                return checked_cuda_malloc(&d, b, ctx.stream) == cudaSuccess ? d : nullptr;
+            };
+            const ExpertPackRelease pr = [&](void* p, size_t b) {
+                release_upload_alloc(ctx.gpu_allocs, p, b, ctx.stream);
+            };
+            for (auto [v, pk] : {std::pair{&L.expert_w_gate, &L.expert_gate_packed},
+                                 std::pair{&L.expert_w_up, &L.expert_up_packed},
+                                 std::pair{&L.expert_w_down, &L.expert_down_packed}})
+                (void)pack_device_experts(*v, *pk, ctx.gpu_allocs, pa, pr, ctx.stream);
         } else {
             // Host-resident per-expert 2D BF16 tensors: converted BF16->FP16 in pinned host memory,
             // since the legacy MoE GEMM path's cuBLAS call rejects mixed FP16-activation x BF16-weight
