@@ -45,12 +45,10 @@ struct GDN {
     // FP16 tensor-core launch instead of two cuBLAS GEMMs. FP16-resident
     // alpha/beta weights only; other tiers keep the two-call path.
     bool alpha_beta_smallm = true;
-    // Prefill (M>32): alpha/beta projections in one split-K FP16 tensor-core
-    // launch (FP32 accumulate) plus one reduce instead of two cuBLAS GEMMs.
-    // Opt-in: Qwen3.8-27B pp512 -0.6% wall, PPL 4.6242 -> 4.6404 because the
-    // cuBLAS default accumulates in FP16 (gemm.cublas_fp16_acc); cuBLAS at
-    // FP32 reads 4.6426. Same weight condition as alpha_beta_smallm.
-    bool alpha_beta_prefill = false;
+    // Prefill (M>32): alpha/beta in one cluster split-K FP32-accumulate launch, not two cuBLASLt
+    // GEMMs + 2 reduces. Qwen3.8-27B per GDN layer pp512 8.1-8.6 vs 11.9-12.1 us, pp4096 20.9-21.0
+    // vs 26.8-27.2 us. Same weight condition as alpha_beta_smallm.
+    bool alpha_beta_prefill = true;
     // Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj/gate/alpha/
     // beta fused into one GEMV, out-proj adds the residual in its epilogue,
     // gated attention runs q|k|v as one launch. false = per-projection launches.

@@ -1,35 +1,33 @@
-// Narrow FP16 GEMM for prefill rows, up to two (W,C) pairs per launch. Grid (64-row tiles) x
-// split. Block tile 64 x NPAD x 32 (NPAD = N0+N1 rounded up to 16, <= 128), 4 warps each own
-// 16 rows and every 16-column fragment (WMMA m16n16k16, FP32 accumulate); A and the
-// concatenated [W0; W1] rows stream through a 3-4 stage cp.async pipeline in shared memory.
-// Split > 1: one FP32 partial per split in ws[ks][m][col] and a second launch sums them in
-// index order (a one-CTA-per-tile reduce behind a ticket ran at L2 latency: 12-24 us at
-// M=512). Fixed order = bitwise deterministic.
+// Narrow FP16 GEMM for prefill rows, up to two (W,C) pairs per launch. Grid (row tiles) x split,
+// the split CTAs of a row tile form one thread-block cluster. Block tile BM x NPAD x 32 (NPAD =
+// N0+N1 rounded up to 16, <= 128; BM = 16 * WM), 4 warps as WM row x (4 / WM) column groups,
+// mma.sync m16n8k16 FP32 accumulate from ldmatrix on XOR-swizzled 64 B smem rows (the WMMA form
+// lost 72 % of its shared-load wavefronts to bank conflicts), cp.async pipeline for A and [W0; W1].
+// Split > 1: every CTA parks its fragments in ws (L2), one cluster barrier, then CTA r sums its
+// share over the split partials in rank order: deterministic, one launch (the separate reduce
+// launch was 3.2 of 15 us at M=512; DSMEM reads lose to L2 on sm_120, gemm_f16_tile.cu).
 
 #include "compute/gemm_f16_narrow_prefill.h"
 #include "core/logging.h"
-#include "core/pdl_launch.cuh"
+#include "core/pdl.h"
 #include "core/pdl_device.cuh"
 
+#include <cooperative_groups.h>
 #include <cstdint>
-#include <mma.h>
 
 namespace imp {
 namespace {
 
-using namespace nvcuda;
-
-constexpr int kBM = 64;
 constexpr int kBK = 32;
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
 constexpr int kMaxN = 128;
-constexpr int kMaxSplit = 32;
+constexpr int kMaxSplit = 8;  // portable cluster size
 constexpr int kTargetCtas = 256;
 constexpr int kMinKPerCta = 128;  // >= 4 BK iterations per CTA
 constexpr int kChunkHalves = 8;   // one 16 B cp.async
 constexpr int kChunksPerRow = kBK / kChunkHalves;
-constexpr int kReduceThreads = 256;
+constexpr int kWsRowPad = 64;  // ws rows per tile, the largest BM
 
 struct PrefillArgs {
     const half* A;
@@ -41,11 +39,10 @@ struct PrefillArgs {
     int n_total;
     int split;
     int k_cta;
-    float* ws;  // [split][M][n_total]
+    float4* ws;  // [tile][split][frag][thread], fragment-native
 };
 
-__device__ __forceinline__ void cp_async_cg16_zero(void* smem_ptr, const void* gmem_ptr, bool valid) {
-    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));
+__device__ __forceinline__ void cp_async_cg16_zero(uint32_t s, const void* gmem_ptr, bool valid) {
     const int src_size = valid ? 16 : 0;
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem_ptr), "r"(src_size));
 }
@@ -55,210 +52,277 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// Pipeline depth under the 48 KB static smem limit: 4 stages up to NPAD=96, 3 at 128.
-template <int NPAD>
-constexpr int stages_for() {
-    return NPAD >= 128 ? 3 : 4;
+// Byte offset of 16 B chunk c (0..3) of 64 B row r: chunk ^ ((r >> 1) & 3) puts the 8 rows of an
+// ldmatrix 8x8 matrix (and 8 consecutive cp.async threads) on 8 distinct bank quads.
+__device__ __forceinline__ uint32_t swz(int r, int c) {
+    return static_cast<uint32_t>((r * kBK * 2) + ((c ^ ((r >> 1) & 3)) * 16));
 }
 
-// NPAD rows of W and 64 rows of A per stage; the float epilogue tile aliases the stages.
-template <int NPAD>
-struct Smem {
-    static constexpr int kStages = stages_for<NPAD>();
-    static constexpr int kA = kBM * kBK;   // halves per stage
-    static constexpr int kW = NPAD * kBK;  // halves per stage
-    static constexpr int kStageHalves = kA + kW;
-    static constexpr int kPipelineBytes = kStages * kStageHalves * static_cast<int>(sizeof(half));
-    static constexpr int kEpilogueBytes = kBM * NPAD * static_cast<int>(sizeof(float));
-    static constexpr int kBytes = kPipelineBytes > kEpilogueBytes ? kPipelineBytes : kEpilogueBytes;
+template <int NPAD, int WM>
+struct Cfg {
+    static constexpr int kBM = 16 * WM;
+    static constexpr int kWN = kWarps / WM;    // column groups
+    static constexpr int kWCols = NPAD / kWN;  // columns per warp
+    static constexpr int kNF = kWCols / 8;     // n8 fragments per warp
+    static constexpr int kStageBytes = (kBM + NPAD) * kBK * 2;
+    static constexpr int kStagesRaw = 49152 / kStageBytes;
+    static constexpr int kStages = kStagesRaw > 6 ? 6 : kStagesRaw;
+    static constexpr int kSmemBytes = kStages * kStageBytes;
+    static_assert(kWCols % 16 == 0 && kStages >= 3, "ldmatrix.x4 B pairs, pipeline depth");
 };
 
-// Stage (A rows of this row tile, W rows 0..n_total) for k-tile kt into stage buffer `s`.
-template <int NPAD>
-__device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args, int row0, int kt) {
-    half* As = stage;
-    half* Ws = stage + Smem<NPAD>::kA;
-    const int k0 = kt * kBK;
-    // #2218 bounded: r < max(kBM, NPAD) <= 128 (NPAD template 32..128, :311): r * kBK < 128 * 32 = 4096
-    for (int c = threadIdx.x; c < kBM * kChunksPerRow; c += kThreads) {
-        const int r = c / kChunksPerRow;
-        const int kc = (c - (r * kChunksPerRow)) * kChunkHalves;
-        const int gr = row0 + r;
-        const bool valid = gr < args.M;
-        const half* src = args.A + (static_cast<size_t>(valid ? gr : 0) * args.K) + k0 + kc;
-        cp_async_cg16_zero(As + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
+// One 16 B chunk per thread per 32 tile rows: A rows of this row tile, then W rows 0..NPAD.
+// Source pointers and smem offsets are fixed per thread; a stage only adds its k offset.
+template <int NPAD, int BM>
+struct Loader {
+    static constexpr int kN = (BM + NPAD) / (kThreads / kChunksPerRow);
+    const half* src[kN];
+    uint32_t dst[kN];
+    unsigned ok = 0;
+
+    __device__ __forceinline__ Loader(const PrefillArgs& args, int row0, int kt0) {
+        const int kc = static_cast<int>(threadIdx.x) % kChunksPerRow;
+        const int r0 = static_cast<int>(threadIdx.x) / kChunksPerRow;
+        const size_t k_off = (static_cast<size_t>(kt0) * kBK) + static_cast<size_t>(kc * kChunkHalves);
+#pragma unroll
+        for (int i = 0; i < kN; ++i) {
+            const int r = r0 + (i * (kThreads / kChunksPerRow));  // tile row: A below BM, then W
+            bool valid;
+            const half* row;
+            if (r < BM) {
+                valid = row0 + r < args.M;
+                row = args.A + (static_cast<size_t>(valid ? row0 + r : 0) * args.K);
+            } else {
+                const int n = r - BM;
+                valid = n < args.n_total;
+                const bool p1 = valid && n >= args.N[0];
+                row = (p1 ? args.W[1] : args.W[0]) +
+                      (static_cast<size_t>(valid ? (p1 ? n - args.N[0] : n) : 0) * args.K);
+            }
+            src[i] = row + k_off;
+            dst[i] = swz(r, kc);
+            ok |= valid ? (1u << i) : 0u;
+        }
     }
-    for (int c = threadIdx.x; c < NPAD * kChunksPerRow; c += kThreads) {
-        const int r = c / kChunksPerRow;
-        const int kc = (c - (r * kChunksPerRow)) * kChunkHalves;
-        const bool valid = r < args.n_total;
-        const bool p1 = r >= args.N[0];
-        const half* base = p1 ? args.W[1] : args.W[0];
-        const int wr = valid ? (p1 ? r - args.N[0] : r) : 0;
-        const half* src = (valid ? base : args.W[0]) + (static_cast<size_t>(wr) * args.K) + k0 + kc;
-        cp_async_cg16_zero(Ws + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
+
+    // k-tile kt0 + step into the stage at smem address s.
+    __device__ __forceinline__ void load(uint32_t s, int step) const {
+#pragma unroll
+        for (int i = 0; i < kN; ++i)
+            cp_async_cg16_zero(s + dst[i], src[i] + (step * kBK), (ok >> i) & 1u);
     }
+};
+
+__device__ __forceinline__ void ldsm_x4(uint32_t addr, uint32_t& r0, uint32_t& r1, uint32_t& r2,
+                                        uint32_t& r3) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+                 : "r"(addr));
 }
 
-template <int NPAD>
-__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(PrefillArgs args) {
-    constexpr int NF = NPAD / 16;
-    constexpr int kStages = Smem<NPAD>::kStages;
-    __shared__ __align__(16) unsigned char smem_raw[Smem<NPAD>::kBytes];
-    half* stages = reinterpret_cast<half*>(smem_raw);
-    // #2218 bounded: kBM = 64, kBK = 32 (:22,23), NPAD template <= 128 (launch<128> :311), warp < 4:
-    // warp * 16 * NPAD < 8192, j * 16 * kBK < NPAD * kBK <= 4096, warp * 16 * kBK < 2048, kk/j * 16 < 128
+__device__ __forceinline__ void mma_f32(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+        "{%0,%1,%2,%3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
 
-    pdl_wait();
+// Output column `col` (even, < n_total) of row m as a half2: N0 % 8 == 0 keeps an n8 fragment in one pair.
+__device__ __forceinline__ void store_out(const PrefillArgs& args, int m, int col, float x, float y) {
+    const bool p1 = col >= args.N[0];
+    half* C = args.C[p1 ? 1 : 0];
+    const int N = args.N[p1 ? 1 : 0];
+    *reinterpret_cast<half2*>(C + (static_cast<size_t>(m) * N) +
+                              (p1 ? col - args.N[0] : col)) = __floats2half2_rn(x, y);
+}
+
+template <int NPAD, int WM>
+__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(PrefillArgs args) {
+    using C = Cfg<NPAD, WM>;
+    constexpr int BM = C::kBM;
+    constexpr int NF = C::kNF;
+    constexpr int kStages = C::kStages;
+    __shared__ __align__(128) unsigned char smem_raw[C::kSmemBytes];
+    const uint32_t s0 = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
 
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int M = args.M;
-    const int N0 = args.N[0];
-    const int nt = args.n_total;
+    const int wr = warp % WM;                 // 16-row group
+    const int wc0 = (warp / WM) * C::kWCols;  // first column
     const int ks = blockIdx.y;
-    const int row0 = blockIdx.x * kBM;
+    const int row0 = blockIdx.x * BM;
     const int kt0 = (ks * args.k_cta) / kBK;
     const int n_tiles = args.k_cta / kBK;
+    const Loader<NPAD, BM> ld(args, row0, kt0);
+    pdl_wait();  // A is the previous kernel's output
 
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[NF];
+    float acc[NF][4];
 #pragma unroll
     for (int j = 0; j < NF; ++j)
-        wmma::fill_fragment(acc[j], 0.0f);
+#pragma unroll
+        for (int e = 0; e < 4; ++e)
+            acc[j][e] = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < kStages - 1; ++s) {
         if (s < n_tiles)
-            load_stage<NPAD>(stages + s * Smem<NPAD>::kStageHalves, args, row0, kt0 + s);
+            ld.load(s0 + (s * C::kStageBytes), s);
         cp_async_commit();
     }
+
+    // ldmatrix lane roles: A x4 = rows (lane & 15), k half (lane >> 4); B x4 = n rows (lane & 7) +
+    // 8 * (lane >> 4), k half (lane >> 3) & 1.
+    const int a_row = (wr * 16) + (lane & 15);
+    const int a_kh = lane >> 4;
+    const int b_row = BM + wc0 + (lane & 7) + ((lane >> 4) << 3);
+    const int b_kh = (lane >> 3) & 1;
 
     for (int kt = 0; kt < n_tiles; ++kt) {
         cp_async_wait_group<kStages - 2>();
         __syncthreads();
         const int nxt = kt + kStages - 1;
         if (nxt < n_tiles)
-            load_stage<NPAD>(stages + (nxt % kStages) * Smem<NPAD>::kStageHalves, args, row0, kt0 + nxt);
+            ld.load(s0 + ((nxt % kStages) * C::kStageBytes), nxt);
         cp_async_commit();
 
-        const half* As = stages + (kt % kStages) * Smem<NPAD>::kStageHalves;
-        const half* Ws = As + Smem<NPAD>::kA;
+        const uint32_t st = s0 + ((kt % kStages) * C::kStageBytes);
 #pragma unroll
         for (int kk = 0; kk < kBK / 16; ++kk) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-            wmma::load_matrix_sync(
-                a_frag, As + static_cast<ptrdiff_t>(warp * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
+            uint32_t a[4];
+            ldsm_x4(st + swz(a_row, (kk * 2) + a_kh), a[0], a[1], a[2], a[3]);
 #pragma unroll
-            for (int j = 0; j < NF; ++j) {
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(
-                    b_frag, Ws + static_cast<ptrdiff_t>(j * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
-                wmma::mma_sync(acc[j], a_frag, b_frag, acc[j]);
+            for (int jb = 0; jb < NF / 2; ++jb) {
+                uint32_t b0, b1, b2, b3;
+                ldsm_x4(st + swz(b_row + (jb * 16), (kk * 2) + b_kh), b0, b1, b2, b3);
+                mma_f32(acc[2 * jb], a, b0, b1);
+                mma_f32(acc[(2 * jb) + 1], a, b2, b3);
             }
         }
     }
     cp_async_wait_group<0>();
     pdl_trigger();
-    __syncthreads();
 
-    // Epilogue through smem: [64][NPAD] floats, warp w owns rows 16w..16w+15.
-    float* tile = reinterpret_cast<float*>(smem_raw);
-#pragma unroll
-    for (int j = 0; j < NF; ++j)
-        wmma::store_matrix_sync(tile + static_cast<ptrdiff_t>(warp * 16 * NPAD) +
-                                    static_cast<ptrdiff_t>(j * 16),
-                                acc[j], NPAD, wmma::mem_row_major);
-    __syncwarp();
-
+    // Fragment f of a warp: rows wr*16 + g and +8, columns wc0 + 8f + 2t (+1), g = lane / 4, t = lane % 4.
     if (args.split == 1) {
-        for (int o = lane; o < 16 * nt; o += 32) {
-            const int r = o / nt;
-            const int c = o - (r * nt);
-            const int m = row0 + (warp * 16) + r;
-            if (m >= M)
+        const int m = row0 + (wr * 16) + (lane >> 2);
+#pragma unroll
+        for (int f = 0; f < NF; ++f) {
+            const int col = wc0 + (f * 8) + ((lane & 3) * 2);
+            if (col >= args.n_total)
                 continue;
-            const bool p1 = c >= N0;
-            half* C = args.C[p1 ? 1 : 0];
-            const int N = args.N[p1 ? 1 : 0];
-            C[(static_cast<size_t>(m) * N) + (p1 ? c - N0 : c)] = __float2half_rn(
-                tile[(((warp * 16) + r) * NPAD) + c]);
+            if (m < args.M)
+                store_out(args, m, col, acc[f][0], acc[f][1]);
+            if (m + 8 < args.M)
+                store_out(args, m + 8, col, acc[f][2], acc[f][3]);
         }
         return;
     }
 
-    float* ws = args.ws;
-    for (int o = lane; o < 16 * nt; o += 32) {
-        const int r = o / nt;
-        const int c = o - (r * nt);
-        const int m = row0 + (warp * 16) + r;
-        if (m >= M)
+    const int S = args.split;
+    float4* tile_ws = args.ws + (static_cast<size_t>(blockIdx.x) * S * NF * kThreads);
+    float4* own = tile_ws + (static_cast<size_t>(ks) * NF * kThreads);
+#pragma unroll
+    for (int f = 0; f < NF; ++f)
+        __stcg(own + static_cast<ptrdiff_t>((f * kThreads) + threadIdx.x),
+               make_float4(acc[f][0], acc[f][1], acc[f][2], acc[f][3]));
+
+    cooperative_groups::this_cluster().sync();  // release/acquire: the peers' partials are visible
+
+    constexpr int kItems = NF * kThreads;
+    const int i0 = (ks * kItems) / S;
+    const int i1 = ((ks + 1) * kItems) / S;
+    for (int i = i0 + static_cast<int>(threadIdx.x); i < i1; i += kThreads) {
+        float4 v[kMaxSplit];  // every partial in flight before the first add
+#pragma unroll
+        for (int q = 0; q < kMaxSplit; ++q)
+            if (q < S)
+                v[q] = __ldcg(tile_ws + (static_cast<size_t>(q) * kItems) + i);
+        float4 sum = v[0];
+#pragma unroll
+        for (int q = 1; q < kMaxSplit; ++q)
+            if (q < S) {
+                sum.x += v[q].x;
+                sum.y += v[q].y;
+                sum.z += v[q].z;
+                sum.w += v[q].w;
+            }
+        const int f = i / kThreads;
+        const int t = i - (f * kThreads);
+        const int tw = t >> 5;
+        const int m = row0 + ((tw % WM) * 16) + ((t & 31) >> 2);
+        const int col = ((tw / WM) * C::kWCols) + (f * 8) + ((t & 3) * 2);
+        if (col >= args.n_total)
             continue;
-        ws[(((static_cast<size_t>(ks) * M) + m) * nt) + c] = tile[(((warp * 16) + r) * NPAD) + c];
+        if (m < args.M)
+            store_out(args, m, col, sum.x, sum.y);
+        if (m + 8 < args.M)
+            store_out(args, m + 8, col, sum.z, sum.w);
     }
 }
 
-// Four columns per thread, every split's partial in flight before the first add. N0 % 8 == 0
-// keeps a float4 inside one pair.
-__global__ void __launch_bounds__(kReduceThreads) gemm_f16_narrow_prefill_reduce_kernel(PrefillArgs args) {
-    pdl_wait();
-    const int M = args.M;
-    const int nt = args.n_total;
-    const int nt4 = nt >> 2;
-    const int o = (blockIdx.x * kReduceThreads) + threadIdx.x;
-    if (o >= M * nt4)
-        return;
-    const int m = o / nt4;
-    const int c = (o - (m * nt4)) * 4;
-    const float* ws = args.ws;
-    float4 p[kMaxSplit];
-#pragma unroll
-    for (int k2 = 0; k2 < kMaxSplit; ++k2)
-        p[k2] = (k2 < args.split) ? __ldcg(reinterpret_cast<const float4*>(
-                                        &ws[(((static_cast<size_t>(k2) * M) + m) * nt) + c]))
-                                  : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    float4 sum = p[0];
-#pragma unroll
-    for (int k2 = 1; k2 < kMaxSplit; ++k2) {
-        if (k2 < args.split) {
-            sum.x += p[k2].x;
-            sum.y += p[k2].y;
-            sum.z += p[k2].z;
-            sum.w += p[k2].w;
-        }
-    }
-    pdl_trigger();
-    const int N0 = args.N[0];
-    const bool p1 = c >= N0;
-    half* C = args.C[p1 ? 1 : 0];
-    const int N = args.N[p1 ? 1 : 0];
-    half2* dst = reinterpret_cast<half2*>(C + (static_cast<size_t>(m) * N) + (p1 ? c - N0 : c));
-    dst[0] = __floats2half2_rn(sum.x, sum.y);
-    dst[1] = __floats2half2_rn(sum.z, sum.w);
-}
-
-int row_tiles(int M) { return (M + kBM - 1) / kBM; }
+int row_tiles(int M, int bm) { return (M + bm - 1) / bm; }
 
 int g_max_split = kMaxSplit;
 int g_target_ctas = kTargetCtas;
+int g_bm = 0;
 
-template <int NPAD>
-void launch(const PrefillArgs& args, const dim3& grid, cudaStream_t stream) {
-    pdl::enable_kernel(gemm_f16_narrow_prefill_kernel<NPAD>);
-    pdl::launch(gemm_f16_narrow_prefill_kernel<NPAD>, grid, dim3(kThreads), size_t(0), stream, args);
-    IMP_CUDA_CHECK_LAUNCH();
+template <int NPAD, int WM>
+bool launch(const PrefillArgs& args, int tiles, cudaStream_t stream) {
+    auto* kern = gemm_f16_narrow_prefill_kernel<NPAD, WM>;
+    cudaLaunchConfig_t cfg{};
+    cfg.gridDim = dim3(tiles, args.split);
+    cfg.blockDim = dim3(kThreads);
+    cfg.dynamicSmemBytes = 0;
+    cfg.stream = stream;
+    cudaLaunchAttribute attrs[2]{};
+    int n = 0;
+    if (args.split > 1) {
+        attrs[n].id = cudaLaunchAttributeClusterDimension;
+        attrs[n].val.clusterDim.x = 1;
+        attrs[n].val.clusterDim.y = static_cast<unsigned>(args.split);
+        attrs[n].val.clusterDim.z = 1;
+        ++n;
+    }
+    pdl::enable(reinterpret_cast<const void*>(kern));
+    if (pdl::is_enabled(reinterpret_cast<const void*>(kern))) {
+        attrs[n].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[n].val.programmaticStreamSerializationAllowed = 1;
+        ++n;
+    }
+    cfg.attrs = attrs;
+    cfg.numAttrs = static_cast<unsigned>(n);
+    if (cudaLaunchKernelEx(&cfg, kern, args) != cudaSuccess) {
+        (void)cudaGetLastError();  // refused (cluster does not fit): the caller keeps its path
+        return false;
+    }
+    return true;
+}
+
+template <int WM>
+bool launch_npad(const PrefillArgs& args, int tiles, cudaStream_t stream) {
+    if (args.n_total <= 32)
+        return launch<32, WM>(args, tiles, stream);
+    if (args.n_total <= 64)
+        return launch<64, WM>(args, tiles, stream);
+    if (args.n_total <= 96)
+        return launch<96, WM>(args, tiles, stream);
+    return launch<128, WM>(args, tiles, stream);
 }
 
 }  // namespace
 
-void gemm_f16_narrow_prefill_tune(int max_split, int target_ctas) {
+void gemm_f16_narrow_prefill_tune(int max_split, int target_ctas, int bm) {
     g_max_split = (max_split > 0 && max_split <= kMaxSplit) ? max_split : kMaxSplit;
     g_target_ctas = target_ctas > 0 ? target_ctas : kTargetCtas;
+    g_bm = (bm == 32 || bm == 64) ? bm : 0;
 }
 
 size_t gemm_f16_narrow_prefill_workspace_bytes(int M, int n_total, int split) {
     if (split <= 1)
         return 0;
-    return static_cast<size_t>(split) * M * n_total * sizeof(float);
+    const int npad = (n_total + 15) & ~15;
+    return static_cast<size_t>(row_tiles(M, kWsRowPad)) * kWsRowPad * split * npad * sizeof(float);
 }
 
 bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,
@@ -275,9 +339,11 @@ bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* 
         (C1 && (reinterpret_cast<uintptr_t>(C1) & 3)) || (ws && (reinterpret_cast<uintptr_t>(ws) & 15)))
         return false;
 
-    // Split-K until the grid reaches kTargetCtas CTAs, every CTA keeps >= kMinKPerCta of
-    // BK-aligned K, and the partials fit the workspace (split 1 needs none).
-    const int tiles = row_tiles(M);
+    // 32-row tiles while 64-row tiles at the largest split stay under the CTA target. Split-K
+    // until the grid reaches it, every CTA keeps >= kMinKPerCta of BK-aligned K, and the
+    // partials fit the workspace (split 1 needs none).
+    const int bm = g_bm != 0 ? g_bm : (row_tiles(M, 64) * g_max_split < g_target_ctas ? 32 : 64);
+    const int tiles = row_tiles(M, bm);
     int split = 1;
     while (split < g_max_split && tiles * split < g_target_ctas && (K % (split * 2 * kBK)) == 0 &&
            K / (split * 2) >= kMinKPerCta)
@@ -298,26 +364,8 @@ bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* 
     args.n_total = n_total;
     args.split = split;
     args.k_cta = K / split;
-    args.ws = split > 1 ? static_cast<float*>(ws) : nullptr;
-
-    const dim3 grid(tiles, split);
-    if (n_total <= 32)
-        launch<32>(args, grid, stream);
-    else if (n_total <= 64)
-        launch<64>(args, grid, stream);
-    else if (n_total <= 96)
-        launch<96>(args, grid, stream);
-    else
-        launch<128>(args, grid, stream);
-    if (split > 1) {
-        const int outputs = M * (n_total / 4);
-        const dim3 rgrid((outputs + kReduceThreads - 1) / kReduceThreads);
-        pdl::enable_kernel(gemm_f16_narrow_prefill_reduce_kernel);
-        pdl::launch(gemm_f16_narrow_prefill_reduce_kernel, rgrid, dim3(kReduceThreads), size_t(0), stream,
-                    args);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-    return true;
+    args.ws = split > 1 ? static_cast<float4*>(ws) : nullptr;
+    return bm == 32 ? launch_npad<2>(args, tiles, stream) : launch_npad<4>(args, tiles, stream);
 }
 
 }  // namespace imp
