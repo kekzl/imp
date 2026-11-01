@@ -1,7 +1,8 @@
 // Kimi Delta Attention layer (Ling-3.0 bailing_hybrid): the GDN slots with a per-key-channel decay.
 // norm -> ssm_in (q|k|v) -> short conv + SiLU -> KDA scan (compute/kda.h) -> gated RMSNorm (sigmoid)
-// -> ssm_out -> residual. Buffers: proj/conv_f32 in ssm_proj_buf_ (the GDN layout), f in ssm_xBC_buf_
-// once the conv is done with it, beta in ssm_dt_buf_, gate in ssm_z_buf_, y in ssm_y_buf_.
+// -> ssm_out -> residual. Buffers: proj and conv_f32 (offset 0 at every n) in ssm_proj_buf_, the conv
+// reads a copy of proj in ssm_xBC_buf_, f in ssm_xBC_buf_ once the conv is done with it, beta in
+// ssm_dt_buf_, gate in ssm_z_buf_, y in ssm_y_buf_.
 // Speculative verify shapes (grouped chunks, state snapshots) are refused: Ling-3.0 ships no MTP head.
 
 #include "compute/gdn.h"
@@ -14,6 +15,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 #include "exec/gemm_context.h"
+#include "exec/workspace_sizes.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -38,8 +40,8 @@ void GraphExecutor::kda_conv_(int layer, const InferenceState& state, const Tens
     const int conv_channels = cfg.ssm_conv_channels();
     const size_t es = dtype_size(compute_dtype_);
     Tensor xbc(ssm_xBC_buf_.data, compute_dtype_, 2, proj.shape, true);
-    if (n > 1)  // conv_f32 overlaps proj from row 0: read a copy
-        device_copy_async(xbc.data, proj.data, static_cast<size_t>(n) * conv_channels * es, stream);
+    // conv_f32 overlaps proj from row 0 at every n: read a copy (an n == 1 prefill chunk too).
+    device_copy_async(xbc.data, proj.data, static_cast<size_t>(n) * conv_channels * es, stream);
     if (state.ragged_prefill()) {
         for (int s = 0; s < state.n_sequences; ++s) {
             const int rb = state.h_seq_offsets[s];
@@ -68,7 +70,7 @@ void GraphExecutor::kda_conv_(int layer, const InferenceState& state, const Tens
                                            ly.ssm_conv1d_b, conv_f32, state.ssm_n_seq, conv_channels,
                                            cfg.ssm_conv_kernel, stream);
     } else {
-        ssm_conv1d_decode_f32_silu(conv_st, n == 1 ? proj : xbc, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
+        ssm_conv1d_decode_f32_silu(conv_st, xbc, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
                                    cfg.ssm_conv_kernel, stream);
     }
 }
@@ -140,11 +142,8 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
     Tensor beta(ssm_dt_buf_.data, compute_dtype_, 2, beta_shape, true);
     gemm_via_handle_(ly.gdn_beta_id, no, beta, ctx);
 
-    // At n == 1 the conv reads proj in place and conv_f32 sits past its row (GDN layout).
-    float* conv_f32 = static_cast<float*>(ssm_proj_buf_.data);
-    if (n == 1)
-        conv_f32 = reinterpret_cast<float*>(static_cast<char*>(ssm_proj_buf_.data) +
-                                            align256(static_cast<size_t>(conv_channels) * es));
+    float* conv_f32 = reinterpret_cast<float*>(static_cast<char*>(ssm_proj_buf_.data) +
+                                               exec_ssm_conv_f32_offset(n, conv_channels, es, /*kda=*/true));
     kda_conv_(layer, state, proj, conv_f32, ssm_idx, stream);
 
     // f [n, H*K] reuses ssm_xBC_buf_ ([n, conv_channels] >= [n, inner]) now that the conv read it.
