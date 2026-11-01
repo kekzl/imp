@@ -44,8 +44,15 @@ __device__ __forceinline__ StateT* kda_state_ptr(const KdaScanArgs& a, int seq, 
     return base + (static_cast<size_t>(h) * kHD * kHD);
 }
 
-// Log-space decay of key channel c: lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).
-__device__ __forceinline__ float kda_log_decay(float f, float a_exp, float dt_bias, float lower_bound) {
+// Log-space decay of key channel c. Safe gate (Ling-3.0): lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).
+// Softplus gate (Kimi-Linear): -exp(A_log) * softplus(f + dt_bias), no bound. Softplus as fla's
+// fused_kda_gate PTX: x above 20, else lg2(1 + ex2(x)) approx.
+__device__ __forceinline__ float kda_log_decay(float f, float a_exp, float dt_bias, float lower_bound,
+                                               bool softplus_gate) {
+    if (softplus_gate) {
+        const float x = f + dt_bias;
+        return -a_exp * (x > 20.0f ? x : __logf(1.0f + __expf(x)));
+    }
     const float z = a_exp * (f + dt_bias);
     return lower_bound / (1.0f + __expf(-z));
 }

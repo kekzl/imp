@@ -229,6 +229,7 @@ set(IMP_MODEL_SOURCES
     src/model/lfm2_names.cpp
     src/model/weight_map_arch.cpp
     src/model/bailing_hybrid_tensors.cpp
+    src/model/kimi_linear_tensors.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_fit.cpp
@@ -1136,6 +1137,8 @@ if(IMP_BUILD_TESTS)
         tests/test_moe_group_limit.cpp
         # Ling-3.0 bailing_hybrid: config parse and KDA tensor fusion without the checkpoint.
         tests/test_bailing_hybrid.cpp
+        # Kimi-Linear: config parse, KDA tensor rename / fusion, NVFP4 q/k/v split, without the checkpoint.
+        tests/test_kimi_linear.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         # Gemma-4 E-variants: PLE + KV-sharing config keys and tensor mapping (E4B config fixture).
@@ -1286,6 +1289,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
         tests/test_ling3_chat_template.cpp
+        tests/test_kimi_chat_template.cpp
         tests/test_jinja.cpp
         tests/test_jinja_undefined.cpp
         tests/test_chat_template_goldens.cpp

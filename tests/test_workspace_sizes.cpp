@@ -660,3 +660,23 @@ TEST(ExecSsmConvF32, EndsInsideTheProjBufferForGdnAndKda) {
               3840u);
     EXPECT_EQ(exec_ssm_conv_f32_offset(1, 6144, 2, true), 0u);
 }
+
+// Kimi-Linear (32 KDA heads x 128: inner 4096, conv 12288, dt 32): the three split q/k/v GEMM outputs
+// fit ssm_proj_buf_ and the rank-128 LoRA intermediate fits ssm_y_buf_ ([rows, inner] FP16) at every
+// row count; the blocks sit back to back, so k starts where q ends.
+TEST(ExecKdaKimiScratch, SplitQkvAndLoraFitTheirBuffers) {
+    const int inner = 4096, conv_channels = 3 * inner, dt_rank = 32, rank = 128;
+    const int proj_dim = inner + conv_channels + dt_rank;  // ModelConfig::ssm_proj_dim
+    for (int64_t rows : {1, 2, 16, 28, 2048}) {
+        EXPECT_LE(exec_kda_split_qkv_bytes(rows, inner, 2),
+                  exec_ssm_proj_bytes(rows, proj_dim, sizeof(float)))
+            << "rows=" << rows;
+        EXPECT_EQ(exec_kda_split_qkv_offset(rows, inner, 2, 1), static_cast<size_t>(rows) * inner * 2);
+        EXPECT_EQ(exec_kda_split_qkv_bytes(rows, inner, 2), 3 * exec_kda_split_qkv_offset(rows, inner, 2, 1));
+        EXPECT_LE(exec_kda_lora_bytes(rows, rank, 2), static_cast<size_t>(rows) * inner * 2)
+            << "rows=" << rows;
+    }
+    EXPECT_EQ(exec_kda_lora_bytes(3, rank, 2), 768u);
+    EXPECT_GT(exec_kda_lora_bytes(1, inner + 1, 2), static_cast<size_t>(inner) * 2)
+        << "rank > inner overflows y";
+}

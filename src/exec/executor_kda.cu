@@ -3,7 +3,9 @@
 // -> ssm_out -> residual. Buffers: proj and conv_f32 (offset 0 at every n) in ssm_proj_buf_, the conv
 // reads a copy of proj in ssm_xBC_buf_, f in ssm_xBC_buf_ once the conv is done with it, beta in
 // ssm_dt_buf_, gate in ssm_z_buf_, y in ssm_y_buf_.
-// Speculative verify shapes (grouped chunks, state snapshots) are refused: Ling-3.0 ships no MTP head.
+// Kimi-Linear: softplus decay; NVFP4 q / k / v as three GEMMs copied into the ssm_xBC_buf_ rows
+// (kda_split_qkv_); f and gate as rank-128 LoRA pairs, the [n, 128] intermediate in ssm_y_buf_.
+// Speculative verify shapes (grouped chunks, state snapshots) are refused: neither model ships an MTP head.
 
 #include "compute/gdn.h"
 #include "compute/kda.h"
@@ -33,7 +35,7 @@ void GraphExecutor::run_recurrent_mixer_(int layer, const InferenceState& state,
 
 // conv1d + SiLU of the q|k|v projection into conv_f32 (FP32), committing the conv window.
 void GraphExecutor::kda_conv_(int layer, const InferenceState& state, const Tensor& proj, float* conv_f32,
-                              int ssm_idx, cudaStream_t stream) {
+                              int ssm_idx, cudaStream_t stream, bool proj_in_xbc) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
     const int n = static_cast<int>(proj.shape[0]);
@@ -41,7 +43,8 @@ void GraphExecutor::kda_conv_(int layer, const InferenceState& state, const Tens
     const size_t es = dtype_size(compute_dtype_);
     Tensor xbc(ssm_xBC_buf_.data, compute_dtype_, 2, proj.shape, true);
     // conv_f32 overlaps proj from row 0 at every n: read a copy (an n == 1 prefill chunk too).
-    device_copy_async(xbc.data, proj.data, static_cast<size_t>(n) * conv_channels * es, stream);
+    if (!proj_in_xbc)
+        device_copy_async(xbc.data, proj.data, static_cast<size_t>(n) * conv_channels * es, stream);
     if (state.ragged_prefill()) {
         for (int s = 0; s < state.n_sequences; ++s) {
             const int rb = state.h_seq_offsets[s];
@@ -84,6 +87,7 @@ void GraphExecutor::kda_scan_(int layer, const InferenceState& state, KdaScanArg
     a.neg_a = static_cast<const float*>(ly.ssm_a.data);
     a.dt_bias = static_cast<const float*>(ly.ssm_dt_b.data);
     a.lower_bound = cfg.kda_lower_bound;
+    a.softplus_gate = cfg.kda_softplus_gate;
     a.conv_channels = cfg.ssm_conv_channels();
     a.n_heads = cfg.ssm_dt_rank;
     a.state_bf16 = state.ssm_state->h_dtype() == QType::BF16;
@@ -109,6 +113,45 @@ void GraphExecutor::kda_scan_(int layer, const InferenceState& state, KdaScanArg
         kda_scan_recurrent(a, stream);
 }
 
+// q / k / v GEMMs into back-to-back [n, inner] blocks of ssm_proj_buf_, then each block into its column
+// range of the [n, conv_channels] rows in ssm_xBC_buf_ (the layout the fused in_proj_qkv GEMM writes).
+void GraphExecutor::kda_split_qkv_(int layer, const Tensor& normed, const GemmContext& ctx,
+                                   cudaStream_t stream) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
+    const int n = static_cast<int>(normed.shape[0]);
+    const int inner = cfg.ssm_inner_size;
+    const int conv_channels = cfg.ssm_conv_channels();
+    const size_t es = dtype_size(compute_dtype_);
+    if (exec_kda_split_qkv_bytes(n, inner, es) > ssm_proj_buf_.nbytes())
+        throw std::runtime_error("run_kda: split q/k/v outputs exceed ssm_proj_buf_");
+    const TensorID ids[3] = {ly.ssm_in_id, ly.kda_k_proj_id, ly.kda_v_proj_id};
+    int64_t shape[2] = {n, inner};
+    for (int i = 0; i < 3; ++i) {
+        char* blk = static_cast<char*>(ssm_proj_buf_.data) + exec_kda_split_qkv_offset(n, inner, es, i);
+        Tensor out(blk, compute_dtype_, 2, shape, true);
+        gemm_via_handle_(ids[i], normed, out, ctx);
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy2DAsync(static_cast<char*>(ssm_xBC_buf_.data) + (static_cast<size_t>(i) * inner * es),
+                              static_cast<size_t>(conv_channels) * es, blk, static_cast<size_t>(inner) * es,
+                              static_cast<size_t>(inner) * es, static_cast<size_t>(n),
+                              cudaMemcpyDeviceToDevice, stream));
+    }
+}
+
+void GraphExecutor::kda_lora_(TensorID a_id, TensorID b_id, const Tensor& normed, Tensor& out,
+                              const GemmContext& ctx) {
+    const int n = static_cast<int>(normed.shape[0]);
+    const int rank = model_->config().kda_lora_rank;
+    const size_t es = dtype_size(compute_dtype_);
+    if (rank <= 0 || exec_kda_lora_bytes(n, rank, es) > ssm_y_buf_.nbytes())
+        throw std::runtime_error("run_kda: LoRA intermediate does not fit ssm_y_buf_");
+    int64_t shape[2] = {n, rank};
+    Tensor lo(ssm_y_buf_.data, compute_dtype_, 2, shape, true);
+    gemm_via_handle_(a_id, normed, lo, ctx);
+    gemm_via_handle_(b_id, lo, out, ctx);
+}
+
 void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(ws_.shared_max_tokens());
     const auto& cfg = model_->config();
@@ -132,24 +175,39 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
     device_copy_async(r.data, h.data, h.nbytes(), stream);
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, stream, norm_w_off_);
 
+    // Kimi-Linear: NVFP4 q / k / v (three global scales) as three GEMMs, f and the gate as LoRA pairs.
+    const bool split_qkv = ly.kda_k_proj_id != kInvalidTensorID;
+    const bool lora = ly.kda_f_a_id != kInvalidTensorID;
+    if (split_qkv != (ly.kda_v_proj_id != kInvalidTensorID) || lora != (ly.kda_g_a_id != kInvalidTensorID))
+        throw std::runtime_error("run_kda: layer " + std::to_string(layer) +
+                                 " has half a Kimi-Linear KDA layout");
     int64_t proj_shape[2] = {n, conv_channels};
     Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-    gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
+    if (split_qkv)
+        kda_split_qkv_(layer, no, ctx, stream);
+    else
+        gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
     int64_t gate_shape[2] = {n, inner};
     Tensor gate(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-    gemm_via_handle_(ly.gdn_gate_id, no, gate, ctx);
+    if (lora)
+        kda_lora_(ly.kda_g_a_id, ly.gdn_gate_id, no, gate, ctx);
+    else
+        gemm_via_handle_(ly.gdn_gate_id, no, gate, ctx);
     int64_t beta_shape[2] = {n, n_heads};
     Tensor beta(ssm_dt_buf_.data, compute_dtype_, 2, beta_shape, true);
     gemm_via_handle_(ly.gdn_beta_id, no, beta, ctx);
 
     float* conv_f32 = reinterpret_cast<float*>(static_cast<char*>(ssm_proj_buf_.data) +
                                                exec_ssm_conv_f32_offset(n, conv_channels, es, /*kda=*/true));
-    kda_conv_(layer, state, proj, conv_f32, ssm_idx, stream);
+    kda_conv_(layer, state, proj, conv_f32, ssm_idx, stream, /*proj_in_xbc=*/split_qkv);
 
     // f [n, H*K] reuses ssm_xBC_buf_ ([n, conv_channels] >= [n, inner]) now that the conv read it.
     int64_t f_shape[2] = {n, inner};
     Tensor f(ssm_xBC_buf_.data, compute_dtype_, 2, f_shape, true);
-    gemm_via_handle_(ly.gdn_alpha_id, no, f, ctx);
+    if (lora)
+        kda_lora_(ly.kda_f_a_id, ly.gdn_alpha_id, no, f, ctx);  // its [n, rank] dies before the scan writes y
+    else
+        gemm_via_handle_(ly.gdn_alpha_id, no, f, ctx);
 
     Tensor y = view_tokens(ssm_y_buf_, n);
     KdaScanArgs a;

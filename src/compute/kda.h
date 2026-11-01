@@ -10,7 +10,8 @@ namespace imp {
 // Kimi Delta Attention (KDA, fla-org fla/ops/kda): the gated delta rule with a per-key-channel
 // decay. Per head, state S[K][V] (same [n_heads, SS, HD] layout as the GDN pool), per token:
 //   q, k = l2norm(q), l2norm(k)  (x * rsqrt(sum(x^2) + 1e-6), q also * K^-0.5)
-//   g    = lower_bound * sigmoid(exp(A_log[h]) * (f + dt_bias[h, :]))     (log decay, [K])
+//   g    = lower_bound * sigmoid(exp(A_log[h]) * (f + dt_bias[h, :]))     (log decay, [K], Ling-3.0)
+//   g    = -exp(A_log[h]) * softplus(f + dt_bias[h, :])                  (softplus_gate, Kimi-Linear)
 //   S    = S * exp(g)[:, None];  S += sigmoid(b) * k (v - k^T S)^T;  o = q^T S
 // Head dims are fixed at K = V = 128 (Ling-3.0, Kimi-Linear); launchers throw otherwise.
 inline constexpr int kKdaHeadDim = 128;
@@ -23,6 +24,7 @@ struct KdaScanArgs {
     const float* neg_a = nullptr;          // [H] -exp(A_log): the GDN ssm_a upload transform
     const float* dt_bias = nullptr;        // [H*K]
     float lower_bound = -5.0f;             // kda_lower_bound (safe gate)
+    bool softplus_gate = false;            // Kimi-Linear decay: no bound, lower_bound unused
     void* h_state = nullptr;               // slot pool base (seq_slots) or one sequence's [H, K, V]
     bool state_bf16 = false;               // state storage BF16, arithmetic FP32
     const int* seq_slots = nullptr;        // device [n_seq] slot ids; nullptr = h_state is one sequence

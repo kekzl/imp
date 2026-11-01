@@ -1,5 +1,5 @@
 result=true
-arch=22
+arch=23
 n_layers=2
 n_heads=4
 n_kv_heads=4

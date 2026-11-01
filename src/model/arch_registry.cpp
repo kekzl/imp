@@ -156,6 +156,10 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "bailing_hybrid", ModelArch::BAILING_HYBRID},  // refused at load (gguf_loader.cpp)
     {HF_CLASS, "BailingMoeV3ForCausalLM", ModelArch::BAILING_HYBRID},
     {HF_MODEL_TYPE, "bailing_hybrid", ModelArch::BAILING_HYBRID},
+    // KIMI_LINEAR: KDA tensors renamed / fused in model/kimi_linear_tensors.cpp
+    {GGUF, "kimi_linear", ModelArch::KIMI_LINEAR},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "KimiLinearForCausalLM", ModelArch::KIMI_LINEAR},
+    {HF_MODEL_TYPE, "kimi_linear", ModelArch::KIMI_LINEAR},
 };
 
 struct HfConfigHookRow {
@@ -181,6 +185,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::LFM2, parse_lfm2_config},
     {ModelArch::COHERE2, parse_cohere2_config},
     {ModelArch::BAILING_HYBRID, parse_bailing_hybrid_config},
+    {ModelArch::KIMI_LINEAR, parse_kimi_linear_config},
 };
 // clang-format on
 

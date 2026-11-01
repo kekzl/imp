@@ -188,6 +188,20 @@ Tensor* resolve_layer_slot(TransformerLayer& L, const std::string& slot) {
         return &L.gdn_alpha;
     if (slot == "gdn_beta")
         return &L.gdn_beta;
+    // MLA latent projections (Kimi-Linear ships them NVFP4): widened to FP16 after promotion below.
+    if (slot == "kv_a_proj")
+        return &L.kv_a_proj;
+    if (slot == "kv_b_proj")
+        return &L.kv_b_proj;
+    // Kimi-Linear KDA: k / v run native NVFP4 like ssm_in (q); the LoRA down-projections are widened.
+    if (slot == "kda_k_proj")
+        return &L.kda_k_proj;
+    if (slot == "kda_v_proj")
+        return &L.kda_v_proj;
+    if (slot == "kda_f_a")
+        return &L.kda_f_a;
+    if (slot == "kda_g_a")
+        return &L.kda_g_a;
     return nullptr;
 }
 
@@ -466,11 +480,18 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     // decay/learning-rate projections are precision-sensitive and the GDN GEMM expects FP16.
     // If promoted to NVFP4, dequant back to FP16 here before plan_storage runs. ssm_in/
     // ssm_out/gdn_gate stay native NVFP4 (Phase 0b, gemv_nvfp4, same as Nemotron-H).
+    // Same treatment (Kimi-Linear): the KDA LoRA pairs (f_a -> gdn_alpha, g_a -> gdn_gate; K = rank 128,
+    // 23.6 MiB F16 over 20 layers) and the MLA latent kv_a / kv_b (nvfp4_policy::role_excluded: the runtime
+    // slices them; 77 MiB F16 over 7 layers). gdn_gate is widened only as a LoRA up-projection.
     {
         int n_gdn_dequant = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             auto& L = mut_model->layers_[i];
-            for (Tensor* w : {&L.gdn_alpha, &L.gdn_beta}) {
+            Tensor* lora_gate = L.kda_g_a.data ? &L.gdn_gate : nullptr;
+            for (Tensor* w :
+                 {&L.gdn_alpha, &L.gdn_beta, &L.kda_f_a, &L.kda_g_a, lora_gate, &L.kv_a_proj, &L.kv_b_proj}) {
+                if (!w)
+                    continue;
                 if (w->qtype != QType::NVFP4 || !w->data || !w->scales)
                     continue;
                 int64_t N = w->shape[0];
@@ -488,8 +509,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                     continue;
                 }
                 dequantize_nvfp4_to_fp16(q, fp16buf, stream);
-                // Old FP4 data + borrowed micro_scales are tiny (N≈n_heads); leave
-                // them resident rather than risk a use-after-free on the async stream.
+                // Old FP4 data + borrowed micro_scales stay resident (no use-after-free on the async
+                // stream): N = n_heads for alpha/beta, Kimi-Linear's largest is kv_b (2.3 MiB x 7 layers).
                 w->data = fp16buf;
                 w->qtype = QType::F16;
                 w->scales = nullptr;
@@ -500,8 +521,9 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             }
         }
         if (n_gdn_dequant > 0)
-            IMP_LOG_INFO("GDN NVFP4 alpha/beta: dequantized %d FP16_ONLY projections to FP16",
-                         n_gdn_dequant);
+            IMP_LOG_INFO(
+                "NVFP4 FP16_ONLY (GDN alpha/beta, KDA LoRA, MLA kv_a/kv_b): dequantized %d projections",
+                n_gdn_dequant);
     }
 
     // gpt-oss residual rescale (model.cpp registry, embed_scale 2^-4): the loader shifts the BF16
@@ -621,6 +643,8 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
             register_prequant(L.ssm_in);
             register_prequant(L.ssm_out);
             register_prequant(L.gdn_gate);  // Qwen3.5 GDN output gate — native NVFP4
+            register_prequant(L.kda_k_proj);  // Kimi-Linear KDA k / v beside ssm_in (q)
+            register_prequant(L.kda_v_proj);
             for (const auto& ew : L.expert_w_gate) register_prequant(ew);
             for (const auto& ew : L.expert_w_up) register_prequant(ew);
             for (const auto& ew : L.expert_w_down) register_prequant(ew);

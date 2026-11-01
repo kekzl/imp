@@ -11,35 +11,25 @@
 
 namespace imp {
 
-namespace {
-
-// Separate q/k/v projections and short convs of one KDA layer, fused below into the GDN slots.
-struct KdaPieces {
-    const Tensor* proj[3] = {nullptr, nullptr, nullptr};  // q, k, v  [H*128, d_model]
-    const Tensor* conv[3] = {nullptr, nullptr, nullptr};  // q, k, v  [H*128, 1, kernel]
-};
-
-bool dense(const Tensor& t) {
+bool kda_dense_tensor(const Tensor& t) {
     return (t.qtype == QType::F32 || t.qtype == QType::F16 || t.qtype == QType::BF16) && !t.scales &&
            t.data && t.ndim >= 2 && t.shape[0] > 0;
 }
 
-// Row-concatenation of three dense tensors with equal trailing dims and dtype, bytes owned by `owned`.
-Tensor concat_rows(const Tensor* const parts[3], std::vector<void*>& owned, const std::string& what) {
+Tensor kda_concat_rows(const Tensor* const parts[3], std::vector<void*>& owned, const std::string& what) {
     size_t total = 0;
     for (int i = 0; i < 3; ++i) {
         const Tensor& p = *parts[i];
         const bool same = p.qtype == parts[0]->qtype && p.ndim == parts[0]->ndim &&
                           p.nbytes() / static_cast<size_t>(p.shape[0]) ==
                               parts[0]->nbytes() / static_cast<size_t>(parts[0]->shape[0]);
-        if (!dense(p) || !same)
-            throw std::runtime_error("bailing_hybrid: " + what +
-                                     " pieces are not dense tensors of one shape");
+        if (!kda_dense_tensor(p) || !same)
+            throw std::runtime_error(what + " pieces are not dense tensors of one shape");
         total += p.nbytes();
     }
     void* buf = std::malloc(total);
     if (!buf)
-        throw std::runtime_error("bailing_hybrid: out of host memory fusing " + what);
+        throw std::runtime_error("out of host memory fusing " + what);
     owned.push_back(buf);
     Tensor out = *parts[0];
     out.data = buf;
@@ -53,6 +43,14 @@ Tensor concat_rows(const Tensor* const parts[3], std::vector<void*>& owned, cons
     out.compute_strides();
     return out;
 }
+
+namespace {
+
+// Separate q/k/v projections and short convs of one KDA layer, fused below into the GDN slots.
+struct KdaPieces {
+    const Tensor* proj[3] = {nullptr, nullptr, nullptr};  // q, k, v  [H*128, d_model]
+    const Tensor* conv[3] = {nullptr, nullptr, nullptr};  // q, k, v  [H*128, 1, kernel]
+};
 
 // model.layers.N.attention.<sub> -> the GDN (linear_attn) or MLA (self_attn) spelling; nullptr = keep.
 const char* attention_target(std::string_view sub, const Tensor& t, int n_heads) {
@@ -108,8 +106,9 @@ std::string canonical_top_level(const std::string& name) {
 
 }  // namespace
 
-void arch_prepare_tensor_map(const ModelConfig& cfg, std::unordered_map<std::string, Tensor>& tensors,
-                             std::vector<void*>& owned) {
+void bailing_hybrid_prepare_tensor_map(const ModelConfig& cfg,
+                                       std::unordered_map<std::string, Tensor>& tensors,
+                                       std::vector<void*>& owned) {
     if (cfg.arch != ModelArch::BAILING_HYBRID)
         return;
     constexpr std::string_view kLayers = "model.layers.";
@@ -143,8 +142,10 @@ void arch_prepare_tensor_map(const ModelConfig& cfg, std::unordered_map<std::str
             throw std::runtime_error("bailing_hybrid: layer " + std::to_string(layer) +
                                      " lacks one of the KDA q/k/v projections or convs");
         const std::string prefix = "model.layers." + std::to_string(layer) + ".linear_attn.";
-        out.emplace(prefix + "in_proj_qkv.weight", concat_rows(p.proj, owned, "q/k/v projection"));
-        out.emplace(prefix + "conv1d.weight", concat_rows(p.conv, owned, "q/k/v short conv"));
+        out.emplace(prefix + "in_proj_qkv.weight",
+                    kda_concat_rows(p.proj, owned, "bailing_hybrid: q/k/v projection"));
+        out.emplace(prefix + "conv1d.weight",
+                    kda_concat_rows(p.conv, owned, "bailing_hybrid: q/k/v short conv"));
         ++fused;
     }
     IMP_LOG_INFO("bailing_hybrid: %zu KDA layers fused (q|k|v projections and short convs)", fused);

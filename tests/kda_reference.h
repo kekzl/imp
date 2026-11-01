@@ -1,7 +1,7 @@
 #pragma once
 
-// Host reference for KDA: a C++ port of fla's naive_recurrent_kda plus the Ling-3.0 front end
-// (l2norm with +1e-6, lower-bound sigmoid gate, sigmoid beta), FP64 accumulation.
+// Host reference for KDA: a C++ port of fla's naive_recurrent_kda plus the front end (l2norm with
+// +1e-6, sigmoid beta, gate: Ling-3.0 lower-bound sigmoid or Kimi-Linear softplus), FP64 accumulation.
 // Pinned against fla's torch code by tests/test_kda_reference.cpp (tests/refs/kda_golden.h).
 
 #include <cmath>
@@ -31,8 +31,16 @@ struct Lcg {
 struct Inputs {
     int T = 0, H = 0, K = 0, V = 0;
     float lower_bound = -5.0f;
+    bool softplus_gate = false;  // Kimi-Linear: g = -exp(A_log) * softplus(f + dt_bias), lower_bound unused
     std::vector<float> q, k, v, f, b, A_log, dt_bias;
 };
+
+// Log decay of one key channel; torch F.softplus (beta 1, threshold 20) on the softplus arm.
+inline double log_decay(const Inputs& in, double a_exp, double x) {
+    if (in.softplus_gate)
+        return -a_exp * (x > 20.0 ? x : std::log1p(std::exp(x)));
+    return in.lower_bound / (1.0 + std::exp(-(a_exp * x)));
+}
 
 inline void forward(const Inputs& in, std::vector<double>& state, std::vector<double>& out) {
     const int T = in.T, H = in.H, K = in.K, V = in.V;
@@ -52,8 +60,8 @@ inline void forward(const Inputs& in, std::vector<double>& state, std::vector<do
             for (int c = 0; c < K; ++c) {
                 q[c] = in.q[qk_off + c] * qi * scale;
                 k[c] = in.k[qk_off + c] * ki;
-                const double z = a_exp * (static_cast<double>(in.f[qk_off + c]) + in.dt_bias[(h * K) + c]);
-                decay[c] = std::exp(in.lower_bound / (1.0 + std::exp(-z)));
+                const double x = static_cast<double>(in.f[qk_off + c]) + in.dt_bias[(h * K) + c];
+                decay[c] = std::exp(log_decay(in, a_exp, x));
             }
             const double beta = 1.0 / (1.0 + std::exp(-static_cast<double>(in.b[(t * H) + h])));
             double* S = state.data() + (static_cast<size_t>(h) * K * V);
@@ -82,10 +90,10 @@ inline void forward(const Inputs& in, std::vector<double>& state, std::vector<do
 
 // Inputs in the golden's fill order: q, k, v, f, b, A_log, dt_bias, then the initial state.
 inline Inputs make_inputs(uint64_t seed, int T, int H, int K, int V, float lower_bound,
-                          std::vector<float>* state0) {
+                          std::vector<float>* state0, bool softplus_gate = false) {
     Lcg rng(seed);
     Inputs in;
-    in.T = T, in.H = H, in.K = K, in.V = V, in.lower_bound = lower_bound;
+    in.T = T, in.H = H, in.K = K, in.V = V, in.lower_bound = lower_bound, in.softplus_gate = softplus_gate;
     const size_t tk = static_cast<size_t>(T) * H * K;
     in.q = rng.fill(tk, 1.0);
     in.k = rng.fill(tk, 1.0);

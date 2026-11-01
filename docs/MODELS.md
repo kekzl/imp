@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: 8a97b792
+commit: 4c60482b
 -->
 
 # Supported models
@@ -49,6 +49,7 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [North-Mini-Code-1.0](https://huggingface.co/CohereLabs/North-Mini-Code-1.0) | NVFP4 (imp-quantize) | 17 GB | - | SafeTensors - `Cohere2MoeForCausalLM`: parallel attention + MoE block, 36 sliding-window RoPE + 13 full NoPE layers, 128 experts top-8 sigmoid; tool calls in the `<|START_ACTION|>` format. PPL 11.8222 vs HF BF16 11.2088 (24000-char slice); pp512 29707.98 / tg128 347.34 tok/s. |
 | [GLM-4.7-Flash](https://huggingface.co/zai-org/GLM-4.7-Flash) | NVFP4 (imp-quantize) | 18 GB | - | SafeTensors - `Glm4MoeLiteForCausalLM` on the DeepSeek MLA path (q_lora 768, kv_lora 512, head 256), 64 experts top-4 + 1 shared; tool calls in the `<arg_key>` format. PPL 10.4301 vs HF BF16 9.7618 (24000-char slice; the full corpus exceeds the default KV pool). |
 | [Ling-3.0-tiny](https://huggingface.co/inclusionAI/Ling-3.0-tiny) | bf16 | 13.8 GiB weights, 16.6 GiB device total in the `Ling3Ref` test (VRAM audit at init, 2026-11-01) | - | SafeTensors - `BailingMoeV3ForCausalLM` (`bailing_hybrid`): 18 Kimi Delta Attention + 6 MLA layers (q_lora 256, kv_lora 512, head-wise sigmoid output gate), 128 experts top-8 + 1 shared, routing limited to 4 of 8 groups. Greedy equals the HF fp32 reference (8 of 8 tokens, chunked prefill too, `Ling3Ref`); decode runs in a CUDA graph (experts packed into one F16 slab per projection at load). |
+| [Kimi-Linear-48B-A3B-Instruct](https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct) | NVFP4 ([Firworks](https://huggingface.co/Firworks/Kimi-Linear-48B-A3B-Instruct-nvfp4), compressed-tensors) | 26.8 GiB checkpoint (index `total_size` 28740888840 B) | - | SafeTensors - `KimiLinearForCausalLM` (`kimi_linear`): 20 Kimi Delta Attention layers (softplus decay, rank-128 LoRA f and output gate, NVFP4 q/k/v as three GEMMs) + 7 MLA NoPE layers (kv_lora 512, no q_lora, kv_a/kv_b widened to FP16), 256 experts top-8 + 1 shared. RTX 5090: experts host-resident by default, pp512 2000 / tg128 316 tok/s; `moe.force_host_experts=8` pp512 4868 / tg128 340 tok/s (2026-11-01); no reference parity gate ([LIMITATIONS](LIMITATIONS.md#untested-code-paths)). |
 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | Q6_K | 19 GB | - | GGUF |
 | [Devstral-Small-2-24B-Instruct-2512](https://huggingface.co/bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF) | Q4_K_M | 14 GB | - | GGUF (`mistral3`, #2411): YaRN factor 48 with mscale ratio 1.0, `llama_4_scaling_beta` 0.1 query temperature past 8192, tekken pre-tokenizer. vs llama.cpp b11347 same GGUF, dense, scored rows [C/2, C-2]: PPL 11.5692 / 7.0820 / 5.4277 at C 4096 / 16384 / 32768 (llama.cpp 11.5807 / 7.0861 / 5.4338); NIAH 16k + 32k 6/6. Sparse prefill at 4096 tokens: 7.3424 / 5.9936 at 16k / 32k. |
 | [DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF) | Q8_0 | 7.6 GB | - | GGUF |
