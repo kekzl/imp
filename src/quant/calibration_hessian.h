@@ -22,6 +22,7 @@ struct HessianIndexEntry {
     uint64_t rows = 0;
     uint64_t offset = 0;  // byte offset of the first float of matrix 0
     uint32_t mats = 1;    // matrices per entry: 1 (IMPHES01) or 2 (IMPHES02)
+    uint32_t file = 0;    // read_hessian_set: index into its file list
 };
 
 // Streams entries into one file; "" on success, else the reason (the file is then incomplete).
@@ -41,6 +42,10 @@ private:
 };
 
 std::string read_hessian_index(const std::string& path, std::vector<HessianIndexEntry>& out);
+// Comma-separated files merged into one index (sequential GPTAQ: one file per layer group). Error on
+// a (layer, kind) in two files or on mixed IMPHES01/02.
+std::string read_hessian_set(const std::string& paths_csv, std::vector<std::string>& files,
+                             std::vector<HessianIndexEntry>& out);
 // Matrix `mat` (< e.mats) of entry e.
 std::string read_hessian(const std::string& path, const HessianIndexEntry& e, std::vector<float>& out,
                          uint32_t mat = 0);

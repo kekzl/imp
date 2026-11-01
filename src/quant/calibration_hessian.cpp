@@ -1,5 +1,6 @@
 #include "quant/calibration_hessian.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace imp {
@@ -109,6 +110,36 @@ std::string read_hessian_index(const std::string& path, std::vector<HessianIndex
     }
     std::fclose(f);
     return err;
+}
+
+std::string read_hessian_set(const std::string& paths_csv, std::vector<std::string>& files,
+                             std::vector<HessianIndexEntry>& out) {
+    files.clear();
+    out.clear();
+    for (size_t at = 0; at <= paths_csv.size();) {
+        const size_t comma = std::min(paths_csv.find(',', at), paths_csv.size());
+        if (comma > at)
+            files.push_back(paths_csv.substr(at, comma - at));
+        at = comma + 1;
+    }
+    if (files.empty())
+        return "no Hessian file in '" + paths_csv + "'";
+    std::vector<HessianIndexEntry> one;
+    for (size_t i = 0; i < files.size(); i++) {
+        if (std::string err = read_hessian_index(files[i], one); !err.empty())
+            return err;
+        for (auto& e : one) {
+            if (!out.empty() && e.mats != out.front().mats)
+                return files[i] + ": IMPHES01 and IMPHES02 mixed";
+            for (const auto& o : out)
+                if (o.layer == e.layer && o.kind == e.kind)
+                    return files[i] + ": layer " + std::to_string(e.layer) + " " + e.kind + " also in " +
+                           files[o.file];
+            e.file = static_cast<uint32_t>(i);
+            out.push_back(std::move(e));
+        }
+    }
+    return "";
 }
 
 std::string read_hessian(const std::string& path, const HessianIndexEntry& e, std::vector<float>& out,

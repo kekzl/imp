@@ -33,7 +33,7 @@ class WeightQuantizer {
 public:
     // --gptq or --gptaq from the options (they exclude each other); "" when neither is set.
     std::string open(const Options& opt);
-    std::string open_gptq(const std::string& hess_path, float damp);
+    std::string open_gptq(const std::string& hess_paths, float damp);
     // GPTAQ over an IMPHES02 file from the AWQ export built with the same --calib: its inputs are
     // already x / s, so H is used as is and the cross term is dXX = diag(1/s) C - H.
     std::string open_gptaq(const std::string& path, float damp, float alpha);
@@ -44,7 +44,7 @@ public:
     std::string summary() const;
 
 private:
-    std::string path_;
+    std::vector<std::string> files_;  // comma-separated --gptq / --gptaq, one per layer group
     float damp_ = 10.0f;
     bool gptaq_ = false;
     float alpha_ = 0.0f;

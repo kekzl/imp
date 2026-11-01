@@ -56,7 +56,8 @@ public:
     // writes every weight input to a dump (calibration.pair_dump); the export pass reads it back
     // call by call on the same tokens and accumulates xq^T xq and x^T xq (calibration.pair_read).
     std::string enable_pair_dump(const std::string& path);
-    std::string enable_pair_read(const std::string& path);
+    // Only layers [layer_begin, layer_end) accumulate (layer_end 0 = all).
+    std::string enable_pair_read(const std::string& path, int layer_begin = 0, int layer_end = 0);
     void arm_pairs() { pairs_armed_ = true; }
     // Dump mode: closes the dump. Read mode: writes IMPHES02 to out_path; error on any misaligned call.
     std::string finish_pairs(const std::string& out_path, cudaStream_t stream);
