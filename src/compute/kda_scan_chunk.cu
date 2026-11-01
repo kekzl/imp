@@ -6,6 +6,7 @@
 //   T = (I + L)^-1 * diag(beta);  w = T (exp(G) . k);  u = T v
 //   v' = u - w S;  o = (q . exp(G)) S + Aqk v';  S = exp(G_C) . S + (k . exp(G_C - G))^T v'
 // exp(G_i - G_j) is taken per pair; exp(G) alone stays >= exp(16 * lower_bound) = exp(-80) > FLT_MIN.
+// Softplus gate (unbounded): exp(G) may flush to 0, it only multiplies (no division), as in fla.
 
 #include "compute/kda_common.cuh"
 #include "core/logging.h"
@@ -68,7 +69,7 @@ __device__ void chunk_load(const ChunkCtx& c, ChunkSmem& sm) {
             kv = conv[c.HK + (static_cast<size_t>(c.h) * kHD) + ch];
             const float fv = __half2float(
                 a.f[(row * static_cast<size_t>(c.HK)) + (static_cast<size_t>(c.h) * kHD) + ch]);
-            gv = kda_log_decay(fv, c.a_exp, dtb[ch], a.lower_bound);
+            gv = kda_log_decay(fv, c.a_exp, dtb[ch], a.lower_bound, a.softplus_gate);
         }
         sm.q[i][ch] = qv;
         sm.k[i][ch] = kv;

@@ -46,6 +46,7 @@ typedef enum {
     IMP_ARCH_LFM2 = 20,
     IMP_ARCH_COHERE2 = 21,
     IMP_ARCH_BAILING_HYBRID = 22,
+    IMP_ARCH_KIMI_LINEAR = 23,
 } ImpModelArch;
 
 typedef enum {

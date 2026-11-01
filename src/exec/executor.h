@@ -1392,8 +1392,13 @@ private:
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
     void run_recurrent_mixer_(int layer, const InferenceState& state, cudaStream_t stream);
     void run_kda(int layer, const InferenceState& state, cudaStream_t stream);
+    // proj_in_xbc: the q|k|v rows are already in ssm_xBC_buf_ (kda_split_qkv_), no copy of proj.
     void kda_conv_(int layer, const InferenceState& state, const Tensor& proj, float* conv_f32, int ssm_idx,
-                   cudaStream_t stream);
+                   cudaStream_t stream, bool proj_in_xbc = false);
+    // Kimi-Linear: NVFP4 q / k / v as three GEMMs (three global scales), interleaved into ssm_xBC_buf_ rows.
+    void kda_split_qkv_(int layer, const Tensor& normed, const GemmContext& ctx, cudaStream_t stream);
+    // Kimi-Linear rank-r LoRA projection out = (x @ a^T) @ b^T, the [n, r] intermediate in ssm_y_buf_.
+    void kda_lora_(TensorID a_id, TensorID b_id, const Tensor& normed, Tensor& out, const GemmContext& ctx);
     void kda_scan_(int layer, const InferenceState& state, KdaScanArgs a, int ssm_idx, cudaStream_t stream);
     // Qwen4Exp gated residual (executor_gated_residual.cpp). hc_read_ turns the hc streams into the
     // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the

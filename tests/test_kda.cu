@@ -42,9 +42,9 @@ struct Case {
     std::vector<float> s0;
 };
 
-Case make_case(uint64_t seed, int T, int H) {
+Case make_case(uint64_t seed, int T, int H, bool softplus_gate = false) {
     Case c;
-    c.in = kda_ref::make_inputs(seed, T, H, kD, kD, -5.0f, &c.s0);
+    c.in = kda_ref::make_inputs(seed, T, H, kD, kD, -5.0f, &c.s0, softplus_gate);
     for (auto* v : {&c.in.f, &c.in.b})
         for (auto& x : *v)
             x = __half2float(__float2half(x));
@@ -144,11 +144,12 @@ double state_diff(const std::vector<double>& ref, const std::vector<S>& got) {
     return m;
 }
 
-void run_single(int T, int H, bool chunk) {
-    const Case c = make_case(1000 + T, T, H);
+void run_single(int T, int H, bool chunk, bool softplus_gate = false) {
+    const Case c = make_case(1000 + T, T, H, softplus_gate);
     DevBatch b = upload({c});
     float* st = to_device(c.s0);
-    const KdaScanArgs a = args_of(b, st, 1, T);
+    KdaScanArgs a = args_of(b, st, 1, T);
+    a.softplus_gate = softplus_gate;
     if (chunk)
         kda_scan_chunk(a, nullptr);
     else
@@ -158,8 +159,9 @@ void run_single(int T, int H, bool chunk) {
     reference(c, c, rs, ro);
     const auto y = to_host(b.y, ro.size());
     const auto s = to_host(st, rs.size());
-    EXPECT_LT(max_abs_diff(ro, y.data(), ro.size()), 3e-3) << "T=" << T << " chunk=" << chunk;
-    EXPECT_LT(state_diff(rs, s), 3e-3) << "T=" << T << " chunk=" << chunk;
+    EXPECT_LT(max_abs_diff(ro, y.data(), ro.size()), 3e-3)
+        << "T=" << T << " chunk=" << chunk << " softplus=" << softplus_gate;
+    EXPECT_LT(state_diff(rs, s), 3e-3) << "T=" << T << " chunk=" << chunk << " softplus=" << softplus_gate;
     cudaFree(st);
     b.free_all();
 }
@@ -172,6 +174,17 @@ TEST(KdaScan, RecurrentMatchesReference) {
 TEST(KdaScan, ChunkMatchesReference) {
     for (int T : {16, 17, 64, 100, 300})
         run_single(T, 4, true);
+}
+
+// Kimi-Linear softplus gate (no lower bound): both scans against the host reference.
+TEST(KdaScan, SoftplusGateRecurrentMatchesReference) {
+    for (int T : {1, 2, 7, 33})
+        run_single(T, 4, false, /*softplus_gate=*/true);
+}
+
+TEST(KdaScan, SoftplusGateChunkMatchesReference) {
+    for (int T : {16, 17, 64, 100, 300})
+        run_single(T, 4, true, /*softplus_gate=*/true);
 }
 
 // Ragged prefill: sequences of different lengths, each on its own slot of a pool, one launch.

@@ -1294,6 +1294,11 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     if (L.gdn_beta.data && !L.gdn_beta.on_device) {
         UPLOAD_OR_FAIL(L.gdn_beta, L.gdn_beta.qtype, "gdn_beta", i, ctx);
     }
+    // Kimi-Linear KDA (null elsewhere, UPLOAD_OR_FAIL no-ops on them).
+    UPLOAD_OR_FAIL(L.kda_k_proj, L.kda_k_proj.qtype, "kda_k_proj", i, ctx);
+    UPLOAD_OR_FAIL(L.kda_v_proj, L.kda_v_proj.qtype, "kda_v_proj", i, ctx);
+    UPLOAD_OR_FAIL(L.kda_f_a, L.kda_f_a.qtype, "kda_f_a", i, ctx);
+    UPLOAD_OR_FAIL(L.kda_g_a, L.kda_g_a.qtype, "kda_g_a", i, ctx);
 
     // GDN input projection fusion (M=1 decode GEMV): tries the full 4-way pack (ssm_in+
     // gdn_gate+gdn_alpha+gdn_beta -> one weight) first, falls back to the alpha+beta-only 2-way

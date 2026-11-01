@@ -246,6 +246,12 @@ size_t exec_ssm_proj_bytes(int64_t rows, int ssm_proj_dim, size_t elem_bytes);
 // FP16 input row (decode conv reads it in place). KDA always 0: its proj row has no z|dt tail, the
 // GDN offset overran ssm_proj_buf_ by 3840 B on Ling-3.0 (6144 conv channels, proj dim 8208).
 size_t exec_ssm_conv_f32_offset(int64_t rows, int conv_channels, size_t es, bool kda);
+// Kimi-Linear split q/k/v: three [rows, inner] GEMM outputs back to back in ssm_proj_buf_ (q at 0, k at
+// one block, v at two), copied out into ssm_xBC_buf_ rows before the conv writes conv_f32 over them.
+size_t exec_kda_split_qkv_offset(int64_t rows, int inner, size_t es, int which);
+size_t exec_kda_split_qkv_bytes(int64_t rows, int inner, size_t es);
+// Kimi-Linear LoRA intermediate [rows, rank] in ssm_y_buf_ ([rows, inner]): live before the scan writes y.
+size_t exec_kda_lora_bytes(int64_t rows, int rank, size_t es);
 
 // Width of the attention output gate, 0 when the model has no gate. Both SSM z
 // sizings call this so the buffer and its charge cannot drift apart.

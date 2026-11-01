@@ -14,7 +14,7 @@ constexpr int kRecSplit = 2;                     // threads per value column
 constexpr int kRecRows = kHD / kRecSplit;        // key rows per thread
 constexpr int kRecThreads = kVCols * kRecSplit;  // 64
 
-template <typename StateT>
+template <typename StateT, bool kSoftplus>
 __global__ void __launch_bounds__(kRecThreads) kda_recurrent_kernel(KdaScanArgs a) {
     const int h = static_cast<int>(blockIdx.x);
     const int seq = static_cast<int>(blockIdx.y);
@@ -32,6 +32,7 @@ __global__ void __launch_bounds__(kRecThreads) kda_recurrent_kernel(KdaScanArgs 
     StateT* state = kda_state_ptr<StateT>(a, seq, h);
     const int HK = a.n_heads * kHD;
     const float a_exp = -a.neg_a[h];
+    const float lower_bound = a.lower_bound;
     const float scale = rsqrtf(static_cast<float>(kHD));
 
     float H[kRecRows];
@@ -55,7 +56,7 @@ __global__ void __launch_bounds__(kRecThreads) kda_recurrent_kernel(KdaScanArgs 
             s_k[i] = kv;
             qq += qv * qv;
             kk += kv * kv;
-            s_decay[i] = __expf(kda_log_decay(__half2float(f_src[i]), a_exp, dtb[i], a.lower_bound));
+            s_decay[i] = __expf(kda_log_decay(__half2float(f_src[i]), a_exp, dtb[i], lower_bound, kSoftplus));
         }
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) {
@@ -113,11 +114,21 @@ void kda_scan_recurrent(const KdaScanArgs& a, cudaStream_t stream) {
     if (a.n_seq <= 0 || (!a.seq_row_offsets && a.n_tokens <= 0))
         return;
     const dim3 grid(static_cast<unsigned>(a.n_heads), static_cast<unsigned>(a.n_seq), kVSplit);
-    if (a.state_bf16)
-        kda_recurrent_kernel<__nv_bfloat16><<<grid, kRecThreads, 0, stream>>>(a);
-    else
-        kda_recurrent_kernel<float><<<grid, kRecThreads, 0, stream>>>(a);
-    IMP_CUDA_CHECK_LAUNCH();
+    // Gate kind as a template argument: a runtime branch in the token loop gave the BF16 kernel an 8 B
+    // stack frame (168 registers either way).
+    if (a.state_bf16 && a.softplus_gate) {
+        kda_recurrent_kernel<__nv_bfloat16, true><<<grid, kRecThreads, 0, stream>>>(a);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else if (a.state_bf16) {
+        kda_recurrent_kernel<__nv_bfloat16, false><<<grid, kRecThreads, 0, stream>>>(a);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else if (a.softplus_gate) {
+        kda_recurrent_kernel<float, true><<<grid, kRecThreads, 0, stream>>>(a);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        kda_recurrent_kernel<float, false><<<grid, kRecThreads, 0, stream>>>(a);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
 }
 
 }  // namespace imp

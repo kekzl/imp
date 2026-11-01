@@ -8,6 +8,14 @@
 
 namespace imp {
 
+void arch_prepare_tensor_map(const ModelConfig& cfg, std::unordered_map<std::string, Tensor>& tensors,
+                             std::vector<void*>& owned) {
+    if (cfg.arch == ModelArch::BAILING_HYBRID)
+        bailing_hybrid_prepare_tensor_map(cfg, tensors, owned);
+    else if (cfg.arch == ModelArch::KIMI_LINEAR)
+        kimi_linear_prepare_tensor_map(cfg, tensors, owned);
+}
+
 // Arch-specific name translation before the generic matchers. false = drop the tensor as an MTP
 // sidecar: DeepSeek-style checkpoints (GLM-4.7-Flash) append num_nextn_predict_layers as
 // model.layers.<n_layers + i>.*, which would otherwise grow the decoder stack.
@@ -56,6 +64,34 @@ bool assign_mla_tensor(TransformerLayer& layer, const std::string& proj, const T
     else
         return false;
     return true;
+}
+
+const char* kimi_kda_scale_slot(const std::string& proj) {
+    if (proj == "in_proj_q")
+        return "ssm_in";
+    if (proj == "in_proj_k")
+        return "kda_k_proj";
+    if (proj == "in_proj_v")
+        return "kda_v_proj";
+    if (proj == "f_a_proj")
+        return "kda_f_a";
+    if (proj == "g_a_proj")
+        return "kda_g_a";
+    return nullptr;
+}
+
+Tensor* kimi_kda_slot(TransformerLayer& layer, const std::string& proj) {
+    if (proj == "in_proj_q")
+        return &layer.ssm_in;
+    if (proj == "in_proj_k")
+        return &layer.kda_k_proj;
+    if (proj == "in_proj_v")
+        return &layer.kda_v_proj;
+    if (proj == "f_a_proj")
+        return &layer.kda_f_a;
+    if (proj == "g_a_proj")
+        return &layer.kda_g_a;
+    return nullptr;
 }
 
 namespace {

@@ -118,6 +118,12 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         L.gdn_beta_id = register_tensor(L.gdn_beta, TensorKind::GDN_BETA);
         L.gdn_alpha_beta_packed_id = register_tensor(L.gdn_alpha_beta_packed, TensorKind::GDN_ALPHA_BETA_PACKED);
         L.gdn_input_packed_id = register_tensor(L.gdn_input_packed, TensorKind::GDN_INPUT_PACKED);
+        // Kimi-Linear KDA: k / v are input projections like ssm_in (q); the LoRA down-projections
+        // feed the decay and the output gate like gdn_alpha / gdn_gate.
+        L.kda_k_proj_id = register_tensor(L.kda_k_proj, TensorKind::SSM_IN);
+        L.kda_v_proj_id = register_tensor(L.kda_v_proj, TensorKind::SSM_IN);
+        L.kda_f_a_id = register_tensor(L.kda_f_a, TensorKind::GDN_ALPHA);
+        L.kda_g_a_id = register_tensor(L.kda_g_a, TensorKind::GDN_GATE);
 
         // Per-expert TensorIDs (Task 3.4)
         const int ne_layer = static_cast<int>(L.expert_w_gate.size());

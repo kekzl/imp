@@ -91,6 +91,11 @@ struct ModelConfig {
     // gdn_alpha = f_proj [H*K], ssm_dt_b = dt_bias [H*K]; compute/kda.h. kda_lower_bound < 0.
     bool gdn_kda = false;
     float kda_lower_bound = -5.0f;
+    // Kimi-Linear KDA: decay -exp(A_log) * softplus(f + dt_bias) (no bound); f and the output gate are
+    // rank-kda_lora_rank LoRA pairs (kda_f_a -> gdn_alpha, kda_g_a -> gdn_gate). 0 = direct projections.
+    bool kda_softplus_gate = false;
+    int kda_lora_rank = 0;
+    std::vector<uint8_t> kda_layers;    // Kimi-Linear: 1 = KDA layer (linear_attn_config.kda_layers, 0-based)
     int rope_dim = 0;                   // 0 = full head_dim, 84 = partial
     int qsa_budget = 0, qsa_ratio = 0;  // Qwen4Exp indexer_budget / indexer_compress_ratio (0 = no indexer)
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
@@ -424,6 +429,12 @@ struct TransformerLayer {
     TensorID gdn_beta_id = kInvalidTensorID;
     TensorID gdn_alpha_beta_packed_id = kInvalidTensorID;
     TensorID gdn_input_packed_id = kInvalidTensorID;
+    // Kimi-Linear KDA: NVFP4 k / v projections (q stays ssm_in) and the LoRA down-projections of f and the
+    // output gate (their up-projections are gdn_alpha / gdn_gate).
+    TensorID kda_k_proj_id = kInvalidTensorID;
+    TensorID kda_v_proj_id = kInvalidTensorID;
+    TensorID kda_f_a_id = kInvalidTensorID;
+    TensorID kda_g_a_id = kInvalidTensorID;
     // Fused KV / gate+up handles. Populated when the runtime decides to build
     // a fused weight pair for strided batched prefill GEMM. kInvalidTensorID
     // means no fused weight was built for this layer (per-layer dispatch path).
@@ -464,6 +475,10 @@ struct TransformerLayer {
     Tensor gdn_gate;   // [d_model, inner_size] output gating projection
     Tensor gdn_alpha;  // [d_model, n_gdn_heads] delta rule decay
     Tensor gdn_beta;   // [d_model, n_gdn_heads] delta rule learning rate
+    // Kimi-Linear KDA (kimi_linear_tensors.cpp): NVFP4 q/k/v keep three global scales, so q is ssm_in
+    // [H*K, d] and k / v sit here; ssm_in is the q|k|v concat only on dense checkpoints.
+    Tensor kda_k_proj, kda_v_proj;  // [H*K, d_model]
+    Tensor kda_f_a, kda_g_a;        // [lora_rank, d_model]; up-projections gdn_alpha / gdn_gate [H*K, rank]
 
     // Decode-only fused weight: gdn_alpha/gdn_beta interleaved along N as
     // [d_model, 2*n_gdn_heads], firing the M=1 path as one GEMV instead of two. Built at load

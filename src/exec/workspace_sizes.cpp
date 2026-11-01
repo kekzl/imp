@@ -215,6 +215,18 @@ size_t exec_ssm_conv_f32_offset(int64_t rows, int conv_channels, size_t es, bool
     return (row + 255) & ~size_t(255);
 }
 
+size_t exec_kda_split_qkv_offset(int64_t rows, int inner, size_t es, int which) {
+    return static_cast<size_t>(which) * static_cast<size_t>(rows) * static_cast<size_t>(inner) * es;
+}
+
+size_t exec_kda_split_qkv_bytes(int64_t rows, int inner, size_t es) {
+    return exec_kda_split_qkv_offset(rows, inner, es, 3);
+}
+
+size_t exec_kda_lora_bytes(int64_t rows, int rank, size_t es) {
+    return static_cast<size_t>(rows) * static_cast<size_t>(rank) * es;
+}
+
 int exec_attn_gate_cols(const Model& model) {
     const auto& cfg = model.config();
     const int q_cols = cfg.n_heads * cfg.head_dim;

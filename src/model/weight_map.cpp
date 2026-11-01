@@ -1211,6 +1211,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     } else if (proj == "in_proj_z") {
                         layer.gdn_gate = t;
                         matched = true;
+                    } else if (Tensor* kimi = kimi_kda_slot(layer, proj)) {  // kimi_linear_tensors.cpp
+                        *kimi = t;
+                        matched = true;
                     } else if (proj == "in_proj_qkvz" || proj == "in_proj_ba") {  // Qwen3-Next
                         if (!assign_gdn_fused_input(proj, t, model.config_, model.host_owned_buffers_, layer))
                             return false;
@@ -1244,6 +1247,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                         slot = "gdn_gate";
                     else if (proj == "out_proj")
                         slot = "ssm_out";
+                    else
+                        slot = kimi_kda_scale_slot(proj);
                     if (slot) {
                         route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                         matched = true;

@@ -138,6 +138,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
         add_dense(L.ssm_in);
         add_dense(L.ssm_out);
         add_dense(L.gdn_gate);
+        add_dense(L.kda_k_proj);  // Kimi-Linear KDA k / v (q is ssm_in)
+        add_dense(L.kda_v_proj);
         if (L.expert_gate_packed.data)
             add_dense(L.expert_gate_packed);
         else

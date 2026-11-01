@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Kimi-Linear (`kimi_linear`, roadmap row 51), not run on a GPU yet: config and tensor map for the Firworks NVFP4 checkpoint (q/k/v as three GEMMs, MLA kv_a/kv_b widened to FP16), KDA softplus decay gate, rank-128 LoRA f and output gate, MLA NoPE. Host gate math within 2e-5 of fla's naive_kda_gate; chat template equals HF on 3 of 3 prompts (#2984).
+
 ### Changed
 - BF16 MoE experts (Ling-3.0) are packed into one F16 slab per projection at load and decode through the device-side F16 expert GEMV, so the decode CUDA graph captures: Ling-3.0-tiny tg128 64.47 -> 447.79 tok/s, pp512 3165.51 -> 3615.04 (median of 3 alternating runs, #2983).
 
