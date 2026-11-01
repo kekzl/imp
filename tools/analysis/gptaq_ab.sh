@@ -21,12 +21,14 @@ CALIB_CORPUS="$WORK/calib_corpus.txt"
 [ -f "$CALIB_CORPUS" ] || "$REPO/tools/analysis/fetch_calib_corpus.sh" "$CALIB_CORPUS"
 
 run() {
-    docker run --rm --gpus all -v "$MODELS_HOST:/models" -v "$WORK:/work" \
-        -v "$REPO/tools/analysis:/corpus:ro" "$IMG" "$@"
+    docker run --rm --gpus all -v "$MODELS_HOST:/models" -v "$WORK:/work" "$IMG" "$@"
 }
+PPL_CORPUS="${PPL_CORPUS:-$REPO/tools/analysis/ppl_corpus_45k.txt}"  # untracked: make_ppl_corpus.sh
+[ -f "$PPL_CORPUS" ] || { echo "missing $PPL_CORPUS (tools/analysis/make_ppl_corpus.sh)" >&2; exit 1; }
 ppl() {  # ppl <model-path-in-container> <label>
     printf '%s\t' "$2"
-    run imp-cli --model "$1" --perplexity /corpus/ppl_corpus_45k.txt \
+    docker run --rm --gpus all -v "$MODELS_HOST:/models" -v "$WORK:/work" -v "$PPL_CORPUS:/ppl.txt:ro" "$IMG" \
+        imp-cli --model "$1" --perplexity /ppl.txt \
         --set runtime.deterministic_gemm=true 2>&1 | grep -E "^[Pp]erplexity:" | tail -1
 }
 clean() { docker run --rm -v "$WORK:/work" --entrypoint /bin/sh "$IMG" -c "rm -rf /work/$1"; }
@@ -39,14 +41,18 @@ quant() {  # quant <out-dir> <extra args...>
     run imp-quantize --model "/models/$MODEL_NAME" --out "/work/$1" "${@:2}" | grep -E "GPTA?Q:|rror" | tail -2
 }
 
-echo "### calibration on the BF16 source (AWQ stats, H, pair dump)"
-calib "/models/$MODEL_NAME" /work/calib_bf16.bin --set calibration.hessian=true \
-    --set calibration.pair_dump=/work/x.dump
-quant awq --calib /work/calib_bf16.bin
-echo "### pairs on the AWQ export, same corpus"
-calib /work/awq /work/calib_q.bin --set calibration.pair_read=/work/x.dump
-clean x.dump
-ls -la "$WORK" | grep -E "\.(hess|gptaq)$"
+if [ "${REUSE_CALIB:-0}" = 1 ] && [ -f "$WORK/calib_q.bin.gptaq" ] && [ -d "$WORK/awq" ]; then
+    echo "### reusing the calibration in $WORK"
+else
+    echo "### calibration on the BF16 source (AWQ stats, H, pair dump)"
+    calib "/models/$MODEL_NAME" /work/calib_bf16.bin --set calibration.hessian=true \
+        --set calibration.pair_dump=/work/x.dump
+    quant awq --calib /work/calib_bf16.bin
+    echo "### pairs on the AWQ export, same corpus"
+    calib /work/awq /work/calib_q.bin --set calibration.pair_read=/work/x.dump
+    clean x.dump
+    ls -la "$WORK" | grep -E "\.(hess|gptaq)$"
+fi
 
 echo "### scores"
 ppl "/models/$MODEL_NAME" "BF16"

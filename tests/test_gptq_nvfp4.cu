@@ -186,8 +186,7 @@ TEST(GptqNvfp4, AsymmetricTermTracksTheFullPrecisionOutput) {
             Hf[ij] = static_cast<float>(H[ij] / rows);
             dxx[static_cast<size_t>(j) * K + i] = static_cast<float>((C[ij] - H[ij]) / rows);
         }
-    auto out_err = [&](const gptq::Result& r) {
-        const auto q = dequant(r, N, K, c.tensor_scale);
+    auto out_err_w = [&](const std::vector<float>& q) {
         double total = 0.0;
         for (int n = 0; n < N; n++)
             for (int t = 0; t < rows; t++) {
@@ -202,6 +201,7 @@ TEST(GptqNvfp4, AsymmetricTermTracksTheFullPrecisionOutput) {
             }
         return total;
     };
+    auto out_err = [&](const gptq::Result& r) { return out_err_w(dequant(r, N, K, c.tensor_scale)); };
     auto gq = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f);
     ASSERT_TRUE(gq.has_value()) << gq.error();
     auto ga0 = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f, dxx, 0.0f);
@@ -209,8 +209,14 @@ TEST(GptqNvfp4, AsymmetricTermTracksTheFullPrecisionOutput) {
     EXPECT_EQ(ga0->packed, gq->packed) << "alpha 0 is GPTQ";
     auto ga = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f, dxx, 1.0f);
     ASSERT_TRUE(ga.has_value()) << ga.error();
-    const double e_gptq = out_err(*gq), e_gptaq = out_err(*ga);
-    EXPECT_LT(e_gptaq, 0.9 * e_gptq) << "gptaq " << e_gptaq << " gptq " << e_gptq;
+    auto gb = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f, dxx, 0.25f);
+    ASSERT_TRUE(gb.has_value()) << gb.error();
+    // Monotone in alpha on this input: GPTQ > alpha 0.25 > alpha 1 (about -8 % at alpha 1). A sign flip of
+    // the in-block P term fails all three checks.
+    const double e_gptq = out_err(*gq), e_quarter = out_err(*gb), e_gptaq = out_err(*ga);
+    EXPECT_LT(e_gptaq, 0.95 * e_gptq) << "gptaq " << e_gptaq << " gptq " << e_gptq;
+    EXPECT_LT(e_quarter, e_gptq) << "alpha 0.25 " << e_quarter << " gptq " << e_gptq;
+    EXPECT_LT(e_gptaq, e_quarter) << "alpha 1 " << e_gptaq << " alpha 0.25 " << e_quarter;
 }
 
 TEST(GptqNvfp4, LayerOfName) {

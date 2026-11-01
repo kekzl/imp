@@ -45,8 +45,10 @@ __global__ void group_scale_kernel(const float* __restrict__ w, int64_t N, int64
     sc[r] = s * tensor_scale;
 }
 
-// Column i: quantize, record the scaled error, update the rest of the block in place. GPTAQ (p set):
+// Column i: quantize, record the scaled error, update the rest of the block in place. kAsym (GPTAQ):
 // also adds x * P(i, j) with x the pre-quantization value and records the dequantized value in qb.
+// Separate instantiations: a runtime branch moved the GPTQ codes (Qwen3-0.6B d10 PPL 27.2857 -> 27.1658).
+template <bool kAsym>
 __global__ void column_kernel(float* __restrict__ w, int64_t N, int64_t K, int64_t i, int64_t b0, int64_t b1,
                               const float* __restrict__ u, const float* __restrict__ sc,
                               uint8_t* __restrict__ codes, float* __restrict__ err,
@@ -60,14 +62,14 @@ __global__ void column_kernel(float* __restrict__ w, int64_t N, int64_t K, int64
     codes[r * K + i] = code;
     const float e = (x - e2m1_value(code) * sc[r]) / u[i * K + i];
     err[r * kBlock + (i - b0)] = e;
-    if (p) {
+    if constexpr (kAsym) {
         qb[r * kBlock + (i - b0)] = e2m1_value(code) * sc[r];
         for (int64_t j = i + 1; j < b1; j++)
             row[j] -= e * u[j * K + i] - x * p[j * K + i];
-        return;
+    } else {
+        for (int64_t j = i + 1; j < b1; j++)
+            row[j] -= e * u[j * K + i];
     }
-    for (int64_t j = i + 1; j < b1; j++)
-        row[j] -= e * u[j * K + i];
 }
 
 // Column-major K x K: keep alpha * A(i, j) for j > i (strictly upper), zero the rest.
@@ -400,8 +402,12 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
         for (int64_t i = b0; i < b1; i++) {
             if (i % kNvfp4MicroBlockSize == 0)
                 group_scale_kernel<<<grid(N), kThreads>>>(dw.p, N, K, i, tensor_scale, dmicro.p, dsc.p);
-            column_kernel<<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p, derr.p, dP,
-                                                 dqb.p);
+            if (aq)
+                column_kernel<true>
+                    <<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p, derr.p, dP, dqb.p);
+            else
+                column_kernel<false><<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p,
+                                                            derr.p, nullptr, nullptr);
         }
         if (b1 < K) {
             // W[:, b1:] -= Err [N, B] * U(b0:b1, b1:). Column-major: C [K-b1, N] (ld K) -= A^T E with
