@@ -53,6 +53,7 @@ Generators:
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
 | `gen_kda_golden.py` | `kda_golden.h` | `tests/test_kda_reference.cpp` (host ref; `tests/test_kda.cu` judges the GPU scans against it) |
+| `gen_moe_group_topk_golden.py` | `moe_group_topk_golden.h` | `tests/test_moe_group_limit.cpp`, `tests/test_moe_group_topk.cu` |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
 | `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |

@@ -1107,6 +1107,8 @@ if(IMP_BUILD_TESTS)
         tests/test_mla.cpp
         # KDA host reference vs fla naive torch goldens (tests/refs/kda_golden.h).
         tests/test_kda_reference.cpp
+        # Group-limited MoE top-k vs Ling-3.0 BailingMoeV3Gate goldens (tests/refs/moe_group_topk_golden.h).
+        tests/test_moe_group_limit.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         tests/test_internvl_lm_names.cpp
@@ -1432,6 +1434,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
         tests/test_kda.cu
+        tests/test_moe_group_topk.cu
         tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu

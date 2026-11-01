@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/moe_group_limit.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <utility>
@@ -54,9 +55,11 @@ void moe_permute(const int32_t* expert_indices, int n_tokens, int top_k, int n_e
                  int32_t* sorted_token_ids, int32_t* sorted_flat_idx, int32_t* expert_offsets,
                  int32_t* token_to_expanded, int32_t* scratch, cudaStream_t stream = nullptr);
 
+// grp: group-limited selection (moe_group_limit.h) on the (biased) selection scores; a geometry
+// the kernel cannot serve throws.
 void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result,
                      cudaStream_t stream = nullptr, bool use_sigmoid = false, bool normalize_weights = true,
-                     const void* score_bias = nullptr);
+                     const void* score_bias = nullptr, MoeGroupLimit grp = {});
 
 // Variant using pre-allocated buffers (no cudaMalloc inside).
 // skip_sorting: when true, only runs the top-k gating kernel and skips
@@ -64,7 +67,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& buffers,
                      MoeRoutingResult& result, cudaStream_t stream = nullptr, bool use_sigmoid = false,
                      bool normalize_weights = true, const void* score_bias = nullptr,
-                     bool skip_sorting = false);
+                     bool skip_sorting = false, MoeGroupLimit grp = {});
 
 // gpt-oss router bias (#547): linear bias on gate LOGITS added BEFORE softmax/top-k
 // (affects selection AND weights). Distinct from DeepSeek-style score_bias (selection only).

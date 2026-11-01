@@ -72,7 +72,11 @@ struct ModelConfig {
     // GDN output gate activation: Qwen3.5/3.6 use SiLU (hidden_act); Qwen4Exp sets
     // output_gate_type=sigmoid on its gated RMSNorm.
     bool gdn_gate_sigmoid = false;
-    int rope_dim = 0;       // 0 = full head_dim, 84 = partial
+    // Kimi Delta Attention (Ling-3.0 bailing_hybrid): GDN layer whose decay is per key channel,
+    // gdn_alpha = f_proj [H*K], ssm_dt_b = dt_bias [H*K]; compute/kda.h. kda_lower_bound < 0.
+    bool gdn_kda = false;
+    float kda_lower_bound = -5.0f;
+    int rope_dim = 0;                   // 0 = full head_dim, 84 = partial
     int qsa_budget = 0, qsa_ratio = 0;  // Qwen4Exp indexer_budget / indexer_compress_ratio (0 = no indexer)
     bool rope_neox = true;  // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
@@ -134,6 +138,9 @@ struct ModelConfig {
     float expert_weights_scale = 1.0f;  // 2.5
     bool expert_weights_norm = false;
     bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
+    // Group-limited routing (DeepSeek-V3 / Ling n_group, topk_group): 1 / 0 = ungrouped.
+    int moe_n_group = 1;
+    int moe_topk_group = 0;
     float attn_logit_softcap = 0.0f;   // Gemma-2/3: tanh(score/cap)*cap before softmax (0=disabled)
     float final_logit_softcap = 0.0f;  // Gemma-2/3: tanh(logit/cap)*cap on output logits (0=disabled)
 
