@@ -61,9 +61,8 @@ public:
 
     // Drafts draft_len() tokens after `anchor` (the next token to feed, at position `pos`), for positions
     // pos + 1 ..: DSpark block row r predicts pos + r + 1 (anchor row included), DFlash row r >= 1 predicts
-    // pos + r. The first draft always stays; the list ends before the first later draft whose drafter softmax
-    // probability is below `min_prob` (0 = keep all). Syncs `stream`.
-    std::vector<int32_t> propose(int32_t anchor, int pos, cudaStream_t stream, float min_prob = 0.0f);
+    // pos + r. Ends before a non-finite row (argmax outside the vocabulary). Syncs `stream`.
+    std::vector<int32_t> propose(int32_t anchor, int pos, cudaStream_t stream);
 
     // Rows one append_ctx call takes.
     static constexpr int kMaxAppendRows = 1024;

@@ -122,4 +122,24 @@ TEST(SpecGates, HybridGroupedSlabIsCandidateZerosLastRow) {
     EXPECT_FALSE(imp::spec_hybrid_slab_at_row(true, 1, rows - 1, rows - 1, rows));
 }
 
+// Block drafter economics. Measured Qwen3-8B-NVFP4 prose: the n-gram rule stopped DSpark after 12
+// verifies (12 of 84 drafts accepted = 14 %, 2.00 tok/verify); priced per verify it ran on to 109 verifies
+// at 2.34 tok/verify, 348 vs 282 tok/s nospec.
+TEST(SpecGates, BlockDrafterIsPricedPerVerify) {
+    imp::SpecEconState poor{12, 84, 12, 24, true, 1.8f};
+    EXPECT_FALSE(imp::spec_economics(poor).stop);
+    EXPECT_FALSE(imp::spec_economics({109, 763, 146, 255, true, 1.8f}).stop);
+    poor.block_drafter = false;
+    EXPECT_TRUE(imp::spec_economics(poor).stop);
+    EXPECT_TRUE(imp::spec_economics(poor).final);
+    poor.block_drafter = true;
+    poor.min_emit = 0.0f;
+    EXPECT_TRUE(imp::spec_economics(poor).stop) << "min_emit 0 = the n-gram rule";
+    const imp::SpecEconState low{12, 84, 9, 21, true, 1.8f};  // 1.75 tok/verify
+    EXPECT_TRUE(imp::spec_economics(low).stop);
+    EXPECT_FALSE(imp::spec_economics(low).final) << "a block drafter re-arms after the next burst";
+    const imp::SpecEconState early{7, 49, 0, 7, true, 1.8f};
+    EXPECT_FALSE(imp::spec_economics(early).stop) << "no verdict before 8 verifies";
+}
+
 }  // namespace

@@ -83,8 +83,29 @@ __global__ void dspark_add_kernel(half* __restrict__ h, const half* __restrict__
         h[i] = __hadd(h[i], t[i]);
 }
 
-// One block per row: index of the largest logit (lowest index on ties) to out[row], its softmax probability
-// as float bits to out[gridDim.x + row].
+// One block per row: out = RMSNorm(x) * w, FP32 in (the fc output), FP16 out; blockDim 256.
+__global__ void dspark_rmsnorm_f32_in_kernel(const float* __restrict__ x, const half* __restrict__ w,
+                                             half* __restrict__ out, int d, float eps) {
+    const float* xr = x + (static_cast<size_t>(blockIdx.x) * d);
+    float ss = 0.0f;
+    for (int j = threadIdx.x; j < d; j += blockDim.x)
+        ss += xr[j] * xr[j];
+    for (int o = 16; o > 0; o >>= 1)
+        ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    __shared__ float part[8];
+    if ((threadIdx.x & 31) == 0)
+        part[threadIdx.x >> 5] = ss;
+    __syncthreads();
+    float tot = 0.0f;
+    for (int k = 0; k < static_cast<int>(blockDim.x >> 5); ++k)
+        tot += part[k];
+    const float inv = rsqrtf((tot / static_cast<float>(d)) + eps);
+    half* orow = out + (static_cast<size_t>(blockIdx.x) * d);
+    for (int j = threadIdx.x; j < d; j += blockDim.x)
+        orow[j] = __float2half(xr[j] * inv * __half2float(w[j]));
+}
+
+// One block per row: index of the largest logit (lowest index on ties).
 __global__ void dspark_argmax_rows_kernel(const half* __restrict__ logits, int vocab,
                                           int32_t* __restrict__ out) {
     const half* r = logits + (static_cast<size_t>(blockIdx.x) * vocab);
@@ -119,24 +140,6 @@ __global__ void dspark_argmax_rows_kernel(const half* __restrict__ logits, int v
                 idx = si[k];
             }
         out[blockIdx.x] = idx;
-        sb[0] = best;
-    }
-    __syncthreads();
-    const float mx = sb[0];
-    float sum = 0.0f;
-    for (int j = threadIdx.x; j < vocab; j += blockDim.x)
-        sum += __expf(__half2float(r[j]) - mx);
-    for (int o = 16; o > 0; o >>= 1)
-        sum += __shfl_xor_sync(0xffffffffu, sum, o);
-    __syncthreads();  // sb[0] read by every thread before the partial sums overwrite it
-    if ((threadIdx.x & 31) == 0)
-        sb[threadIdx.x >> 5] = sum;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float tot = 0.0f;
-        for (int k = 0; k < static_cast<int>(blockDim.x >> 5); ++k)
-            tot += sb[k];
-        out[gridDim.x + blockIdx.x] = __float_as_int(1.0f / tot);
     }
 }
 
@@ -183,7 +186,8 @@ struct DSparkDrafter::Impl {
     half *fc = nullptr, *hidden_norm = nullptr, *norm = nullptr, *lm_head = nullptr, *mask_emb = nullptr;
     Fp8Mat head8;
     // Scratch.
-    half *t = nullptr, *tn = nullptr, *h = nullptr, *xn = nullptr, *q = nullptr, *o = nullptr, *res = nullptr;
+    float* t32 = nullptr;  // [append rows, d] fc output
+    half *tn = nullptr, *h = nullptr, *xn = nullptr, *q = nullptr, *o = nullptr, *res = nullptr;
     half *gate = nullptr, *up = nullptr, *act = nullptr, *logits = nullptr;
     float* s = nullptr;  // dspark_attention split partials
     int* d_pos = nullptr;
@@ -486,7 +490,7 @@ std::string DSparkDrafter::Impl::upload_weights() {
 std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
     const int rows = std::max(kMaxAppendRows, block);
     const size_t qd = static_cast<size_t>(nh) * kHeadDim, b = static_cast<size_t>(block);
-    t = dev<half>(static_cast<size_t>(rows) * d);
+    t32 = dev<float>(static_cast<size_t>(rows) * d);
     tn = dev<half>(static_cast<size_t>(rows) * d);
     h = dev<half>(b * d);
     xn = dev<half>(b * d);
@@ -502,13 +506,13 @@ std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
     logits = dev<half>(b * vocab);
     s = dev<float>(dspark_attention_work_floats(block, nh, cap));
     d_pos = dev<int>(static_cast<size_t>(rows));
-    d_ids = dev<int32_t>(2 * b);  // ids, then top-1 probabilities as float bits
+    d_ids = dev<int32_t>(b);
     mask_emb = dev<half>(static_cast<size_t>(d));
     if (!all_set(
-            {t, tn, h, xn, q, o, res, kb, vb, d_params, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
+            {t32, tn, h, xn, q, o, res, kb, vb, d_params, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
         return "scratch allocation failed";
     pin_anchor = PinnedBuffer::acquire(cuda_host_pinned_allocator(), d * sizeof(half));
-    pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), 2 * b * sizeof(int32_t));
+    pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), b * sizeof(int32_t));
     pin_params = PinnedBuffer::acquire(cuda_host_pinned_allocator(), 2 * sizeof(int));
     h_anchor = pin_anchor.as<half>();
     h_ids = pin_ids.as<int32_t>();
@@ -580,11 +584,13 @@ void DSparkDrafter::append_ctx(const half* feat, int ld, int n, int pos0, cudaSt
     const int row0 = static_cast<int>(P.ctx_pos.size());
     const int kvd = P.kv_dim();
     P.upload_positions(pos0, n, stream);
-    Tensor tt = t2(P.t, n, P.d);
+    // fc in FP32 out, then hidden_norm to FP16: Qwen3-8B residual features reach 7096 and the z-lab b16 fc
+    // (absmax 6.56) overflowed an FP16 fc output (48 of 65536 inf on a 16-row prompt, every draft NaN).
+    Tensor tt = t2(P.t32, n, P.d, QType::F32);
     gemm(t2(const_cast<half*>(feat), n, ld), t2(P.fc, P.d, ld), tt, 1.0f, 0.0f, stream);
     Tensor tn = t2(P.tn, n, P.d);
-    rmsnorm(tt, Tensor(P.hidden_norm, QType::F16, 1, std::array<int64_t, 1>{P.d}.data(), true), tn, P.eps,
-            stream);
+    dspark_rmsnorm_f32_in_kernel<<<n, 256, 0, stream>>>(P.t32, P.hidden_norm, P.tn, P.d, P.eps);
+    IMP_CUDA_CHECK_LAUNCH();
     for (auto& L : P.layers) {
         half* k = L.k_cache + (static_cast<size_t>(row0) * kvd);
         half* v = L.v_cache + (static_cast<size_t>(row0) * kvd);
@@ -646,7 +652,7 @@ void DSparkDrafter::Impl::enqueue_propose(cudaStream_t st_) {
     proj(xn, d, lm_head, head8, logits, vocab, false, st_);
     dspark_argmax_rows_kernel<<<b, 1024, 0, st_>>>(logits, vocab, d_ids);
     IMP_CUDA_CHECK_LAUNCH();
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_ids, d_ids, sizeof(int32_t) * 2 * b, cudaMemcpyDeviceToHost, st_));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_ids, d_ids, sizeof(int32_t) * b, cudaMemcpyDeviceToHost, st_));
 }
 
 // Eager on the first propose (cuBLAS picks its algorithms outside a capture), captured on the second,
@@ -676,7 +682,7 @@ void DSparkDrafter::Impl::launch_propose(cudaStream_t st_) {
     enqueue_propose(st_);
 }
 
-std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream, float min_prob) {
+std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream) {
     Impl& P = *p_;
     const int n_ctx = static_cast<int>(P.ctx_pos.size());
     std::vector<int32_t> out;
@@ -691,12 +697,18 @@ std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return out;
     out.assign(P.h_ids + P.row0, P.h_ids + P.block);
-    const float* prob = reinterpret_cast<const float*>(P.h_ids + P.block) + P.row0;
-    for (size_t i = 1; i < out.size(); ++i)
-        if (prob[i] < min_prob) {
-            out.resize(i);
-            break;
+    // An argmax over NaN logits leaves INT_MAX: such a draft would index the target's embedding.
+    const auto bad = std::find_if(out.begin(), out.end(),
+                                  [&](int32_t id) { return id < 0 || id >= P.vocab; });
+    if (bad != out.end()) {
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            IMP_LOG_WARN("dspark: drafter produced token %d outside the vocabulary (non-finite logits)",
+                         *bad);
         }
+        out.erase(bad, out.end());
+    }
     return out;
 }
 

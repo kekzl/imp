@@ -78,4 +78,29 @@ constexpr bool spec_hybrid_slab_at_row(bool grouped, int winner, int j, int K, i
     return grouped ? (winner == 0 && j == rows_per_cand - 1) : j == K;
 }
 
+// Speculation economics after a request's verify step: stop drafting? `final` = for the rest of the
+// request. N-gram drafts are free, so below 15 % of drafted tokens accepted a verify cannot amortize (final).
+// A block drafter pays per verify: emitted / verify below min_emit stops it until the next burst re-arm.
+// Qwen3-8B-NVFP4 prose: 2.34 tok/verify at 19 % accepted, 348 vs 282 tok/s nospec; the 15 % rule stopped it.
+struct SpecEconState {
+    int verifies = 0;
+    long long drafted = 0, accepted = 0, emitted = 0;
+    bool block_drafter = false;  // speculative.dspark_model loaded
+    float min_emit = 0.0f;       // speculative.dspark_min_emit, 0 = the n-gram rule
+};
+struct SpecEconVerdict {
+    bool stop = false;
+    bool final = false;
+};
+
+constexpr SpecEconVerdict spec_economics(const SpecEconState& s) {
+    constexpr int kSample = 8;  // verifies before judging
+    if (s.verifies < kSample)
+        return {};
+    if (s.block_drafter && s.min_emit > 0.0f)
+        return {.stop = static_cast<float>(s.emitted) < static_cast<float>(s.verifies) * s.min_emit,
+                .final = false};
+    return {.stop = s.accepted * 100 < s.drafted * 15, .final = true};
+}
+
 }  // namespace imp

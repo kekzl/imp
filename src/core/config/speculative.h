@@ -122,11 +122,10 @@ struct Speculative {
     // z-lab/Qwen3-8B-DFlash-b16: 15 drafts, embed / lm_head read from the target): drafts from the target's
     // hidden states; forces batch 1. "" = off.
     std::string dspark_model;
-    // Verify at most this many of a propose's drafts (0 = all): a 16-row DFlash block in a 9-row chunk.
-    int dspark_max_draft = 0;
-    // Verify drafts only up to the first (after the first draft) whose drafter top-1 probability is below
-    // this: the chunk shrinks where the drafter guesses. 0 = off.
-    float dspark_min_prob = 0.0f;
+    // Block drafter economics: after 8 verifies a request below this many emitted tokens per verify stops
+    // drafting until the next speculative.burst re-arm. 0 = the n-gram rule (15 % of drafted tokens
+    // accepted, final), which stopped Qwen3-8B-NVFP4 prose at 287 tok/s; 1.8: 348, 2.0: 300 (nospec 282).
+    float dspark_min_emit = 1.8f;
     // DSpark drafter q / o / gate / up / down / lm_head as per-row FP8 E4M3 instead of FP16: half the
     // bytes per propose. Drafts only: verify keeps greedy output exact either way.
     bool dspark_fp8 = true;

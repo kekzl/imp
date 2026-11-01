@@ -3,10 +3,11 @@
 # imp-server --max-batch 1, greedy, 256 tokens with ignore_eos, /no_think, one server start per arm and round,
 # one warmup request, then prose / code / list x 2. Arms alternate order every round.
 # tok/s = completion tokens / request wall; tok/verify = emitted / verify steps from the /metrics delta.
-# Arms: nospec (speculative.ngram=false), dspark (block7), dflash (b16, 15 drafts), dflash8 (b16, max_draft 8),
-# dflashpNN (b16, dspark_min_prob 0.NN).
+# Arms: nospec (speculative.ngram=false), dspark (block7), dflash (z-lab b16, 15 drafts),
+# dsparkeX (block7, speculative.dspark_min_emit X; dsparke0 = the n-gram 15 % rule).
 # Usage: ROUNDS=3 ARMS="nospec dspark dflash" tools/analysis/block_drafter_ab.sh
 #   IMP_SERVER_IMG=imp:toolchain runs build-dev/imp-server from this tree; IMP_SERVER_IMG=imp:test the image's.
+#   EXTRA="--set k=v ..." is appended to every arm.
 # Output (stdout, TSV): round, arm, workload, rep, tokens, ms, tok_s, verify_steps, emitted, tok_verify.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -24,8 +25,8 @@ arm_flags() {
         nospec) echo "--set speculative.ngram=false" ;;
         dspark) echo "--set speculative.dspark_model=$DSPARK" ;;
         dflash) echo "--set speculative.dspark_model=$DFLASH" ;;
-        dflash8) echo "--set speculative.dspark_model=$DFLASH --set speculative.dspark_max_draft=8" ;;
-        dflashp*) echo "--set speculative.dspark_model=$DFLASH --set speculative.dspark_min_prob=0.${1#dflashp}" ;;
+        dsparke*) echo "--set speculative.dspark_model=$DSPARK --set speculative.dspark_min_emit=${1#dsparke}" ;;
+        dflashe*) echo "--set speculative.dspark_model=$DFLASH --set speculative.dspark_min_emit=${1#dflashe}" ;;
         *) echo "unknown arm $1" >&2; return 1 ;;
     esac
 }
@@ -42,7 +43,7 @@ start_server() {
     fi
     # shellcheck disable=SC2046
     docker run -d --name "$NAME" --gpus all -p "$PORT:8080" "${mounts[@]}" --entrypoint "$bin" "$IMG" \
-        --host 0.0.0.0 --port 8080 --model "$MODEL" --max-batch 1 $(arm_flags "$1") >/dev/null || return 1
+        --host 0.0.0.0 --port 8080 --model "$MODEL" --max-batch 1 $(arm_flags "$1") ${EXTRA:-} >/dev/null || return 1
     for _ in $(seq 1 200); do
         curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
         docker ps --format '{{.Names}}' | grep -qx "$NAME" || { docker logs "$NAME" 2>&1 | tail -20 >&2; return 1; }
@@ -83,8 +84,8 @@ for r in $(seq 1 "$ROUNDS"); do
                 v1=$(metric imp_spec_ngram_verify_steps_total) e1=$(metric imp_spec_ngram_emitted_total)
                 awk -v r="$r" -v a="$arm" -v w="$w" -v p="$rep" -v tk="$tk" -v ms="$ms" \
                     -v v="$(( ${v1:-0} - ${v0:-0} ))" -v e="$(( ${e1:-0} - ${e0:-0} ))" \
-                    'BEGIN {printf "%s\t%s\t%s\t%s\t%d\t%d\t%.2f\t%d\t%d\t%.2f\n", r, a, w, p, tk, ms,
-                            ms > 0 ? tk * 1000 / ms : 0, v, e, v > 0 ? e / v : 0}'
+                    'BEGIN {ts = ms > 0 ? tk * 1000 / ms : 0; tv = v > 0 ? e / v : 0
+                            printf "%s\t%s\t%s\t%s\t%d\t%d\t%.2f\t%d\t%d\t%.2f\n", r, a, w, p, tk, ms, ts, v, e, tv}'
             done
         done
         docker logs "$NAME" 2>&1 | grep -E "dspark: /models|\[dspark\] [0-9]+ drafts" | tail -2 >&2
