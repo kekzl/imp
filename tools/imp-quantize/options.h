@@ -15,6 +15,8 @@ struct Options {
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
     std::string gptq_file;   // --gptq: IMPHES01 second moments (calibration.hessian), GPTQ per weight
     float gptq_damp = 10.0f;  // --gptq-damp: fraction of mean diag(H) added to the diagonal (gptq.h)
+    std::string gptaq_file;   // --gptaq: IMPHES02 pairs (calibration.pair_read), damp from --gptq-damp
+    float gptaq_alpha = 0.25f;  // --gptaq-alpha: scale of the asymmetric term (gptq::kDefaultGptaqAlpha)
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     // Empty = awq::default_groups(n_rep, hybrid), resolved in build_plan.
     std::string calib_groups;

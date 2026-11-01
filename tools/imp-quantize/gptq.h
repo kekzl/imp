@@ -23,9 +23,15 @@ struct Result {
 // H is consumed (damped in place). damp: fraction of the mean diagonal added to it. Qwen3-1.7B
 // AWQ+GPTQ PPL: 19.58 at 0.01, 18.07-18.46 over 5-30, AWQ alone 18.23 (docs/QUANTIZATION.md).
 inline constexpr float kDefaultDamp = 10.0f;
+// GPTAQ (Li et al., arXiv 2504.02692): H from the quantized model's inputs xq, dxx column-major
+// [K, K] with dxx[j * K + i] = E[(x_i - xq_i) xq_j] (x = full-precision input, same token); every
+// update adds W P, P = alpha * triu1(dxx U^T) U. Empty dxx or alpha 0 = GPTQ. 0.25 = reference code.
+inline constexpr float kDefaultGptaqAlpha = 0.25f;
 [[nodiscard]] std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_t N, int64_t K,
                                                                 std::vector<float> H, float tensor_scale,
-                                                                float damp = kDefaultDamp);
+                                                                float damp = kDefaultDamp,
+                                                                std::vector<float> dxx = {},
+                                                                float alpha = 0.0f);
 
 // In place on a column-major K x K device matrix: H (symmetric positive definite) -> U, the upper
 // Cholesky factor of H^-1 (H^-1 = U^T U). Only the upper triangle holds U on return.

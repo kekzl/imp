@@ -141,6 +141,78 @@ TEST(GptqNvfp4, UpperCholeskyOfInverse) {
     }
 }
 
+std::vector<float> dequant(const gptq::Result& r, int N, int K, float tensor_scale) {
+    std::vector<float> q(static_cast<size_t>(N) * K);
+    for (int n = 0; n < N; n++)
+        for (int k = 0; k < K; k++) {
+            const uint8_t byte = r.packed[static_cast<size_t>(n) * K / 2 + k / 2];
+            const uint8_t code = (k % 2 == 0) ? (byte & 0xF) : (byte >> 4);
+            const float s = e4m3_to_float(r.micro[static_cast<size_t>(n) * K / 16 + k / 16]) * tensor_scale;
+            q[static_cast<size_t>(n) * K + k] = ((code & 8) ? -kE2M1[code & 7] : kE2M1[code & 7]) * s;
+        }
+    return q;
+}
+
+// GPTAQ (arXiv 2504.02692): inputs x, a coarse-grid copy xq standing in for upstream quantization
+// error. Target sum_t |W x_t - Wq xq_t|^2: the asymmetric term must beat GPTQ on H = E[xq xq^T].
+TEST(GptqNvfp4, AsymmetricTermTracksTheFullPrecisionOutput) {
+    Case c(5);
+    const int K = c.K, N = c.N, rows = 4 * K;
+    std::mt19937 g(13);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> x(static_cast<size_t>(rows) * K), xq(x.size());
+    for (int r = 0; r < rows; r++) {
+        const float shared = nd(g);
+        for (int k = 0; k < K; k++) {
+            const size_t p = static_cast<size_t>(r) * K + k;
+            x[p] = 0.6f * shared + nd(g) * (k % 37 == 0 ? 8.0f : 1.0f);
+            xq[p] = 0.75f * std::round(x[p] / 0.75f);
+        }
+    }
+    const size_t kk = static_cast<size_t>(K) * K;
+    std::vector<double> H(kk, 0.0), C(kk, 0.0);
+    for (int r = 0; r < rows; r++)
+        for (int i = 0; i < K; i++)
+            for (int j = 0; j < K; j++) {
+                H[static_cast<size_t>(i) * K + j] += xq[static_cast<size_t>(r) * K + i] *
+                                                     xq[static_cast<size_t>(r) * K + j];
+                C[static_cast<size_t>(i) * K + j] += x[static_cast<size_t>(r) * K + i] *
+                                                     xq[static_cast<size_t>(r) * K + j];
+            }
+    std::vector<float> Hf(kk), dxx(kk);
+    for (int i = 0; i < K; i++)
+        for (int j = 0; j < K; j++) {
+            const size_t ij = static_cast<size_t>(i) * K + j;
+            Hf[ij] = static_cast<float>(H[ij] / rows);
+            dxx[static_cast<size_t>(j) * K + i] = static_cast<float>((C[ij] - H[ij]) / rows);
+        }
+    auto out_err = [&](const gptq::Result& r) {
+        const auto q = dequant(r, N, K, c.tensor_scale);
+        double total = 0.0;
+        for (int n = 0; n < N; n++)
+            for (int t = 0; t < rows; t++) {
+                double y = 0.0, yq = 0.0;
+                for (int k = 0; k < K; k++) {
+                    y += static_cast<double>(c.w[static_cast<size_t>(n) * K + k]) *
+                         x[static_cast<size_t>(t) * K + k];
+                    yq += static_cast<double>(q[static_cast<size_t>(n) * K + k]) *
+                          xq[static_cast<size_t>(t) * K + k];
+                }
+                total += (y - yq) * (y - yq);
+            }
+        return total;
+    };
+    auto gq = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f);
+    ASSERT_TRUE(gq.has_value()) << gq.error();
+    auto ga0 = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f, dxx, 0.0f);
+    ASSERT_TRUE(ga0.has_value()) << ga0.error();
+    EXPECT_EQ(ga0->packed, gq->packed) << "alpha 0 is GPTQ";
+    auto ga = gptq::quantize_nvfp4(c.w16.data(), N, K, Hf, c.tensor_scale, 0.01f, dxx, 1.0f);
+    ASSERT_TRUE(ga.has_value()) << ga.error();
+    const double e_gptq = out_err(*gq), e_gptaq = out_err(*ga);
+    EXPECT_LT(e_gptaq, 0.9 * e_gptq) << "gptaq " << e_gptaq << " gptq " << e_gptq;
+}
+
 TEST(GptqNvfp4, LayerOfName) {
     EXPECT_EQ(gptq::layer_of("model.layers.12.mlp.down_proj.weight"), 12);
     EXPECT_EQ(gptq::layer_of("model.language_model.layers.3.self_attn.q_proj.weight"), 3);

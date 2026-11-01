@@ -1328,3 +1328,8 @@ out_path             = ""
 # Also mean x^T x per weight input for imp-quantize --gptq, written as <out>.hess
 # (FP32 [K, K] each, Qwen3-1.7B 5.3 GB). Rows above 20x the median row norm are left out.
 hessian              = false
+# GPTAQ pairs for imp-quantize --gptaq: the BF16 source pass writes every weight input to
+# pair_dump (tens of GB, never tmpfs); the AWQ export pass over the same corpus reads it with
+# pair_read and writes <out>.gptaq (IMPHES02). Both start with the corpus, after warmup.
+pair_dump            = ""
+pair_read            = ""

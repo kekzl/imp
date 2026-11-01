@@ -63,6 +63,25 @@ std::string WeightQuantizer::open_gptq(const std::string& hess_path, float damp)
     return "";
 }
 
+std::string WeightQuantizer::open(const Options& opt) {
+    if (!opt.gptq_file.empty() && !opt.gptaq_file.empty())
+        return "--gptq and --gptaq exclude each other";
+    if (!opt.gptq_file.empty())
+        return open_gptq(opt.gptq_file, opt.gptq_damp);
+    return opt.gptaq_file.empty() ? "" : open_gptaq(opt.gptaq_file, opt.gptq_damp, opt.gptaq_alpha);
+}
+
+std::string WeightQuantizer::open_gptaq(const std::string& path, float damp, float alpha) {
+    if (std::string err = open_gptq(path, damp); !err.empty())
+        return err;
+    if (!index_.empty() && index_.front().mats != 2)
+        return path + ": IMPHES01 holds no cross term; GPTAQ needs IMPHES02 (calibration.pair_read)";
+    gptaq_ = true;
+    alpha_ = alpha;
+    printf("GPTAQ: alpha %g\n", static_cast<double>(alpha));
+    return "";
+}
+
 std::expected<Quantized, std::string> WeightQuantizer::quantize(
     const std::string& name, const std::vector<uint16_t>& h, int64_t N, int64_t K, float forced_scale,
     const std::map<std::string, std::vector<float>>& col_scale) {
@@ -74,14 +93,30 @@ std::expected<Quantized, std::string> WeightQuantizer::quantize(
     std::vector<float> H;
     if (std::string err = read_hessian(path_, *he, H); !err.empty())
         return std::unexpected(err);
-    if (const auto cs = col_scale.find(name);
-        cs != col_scale.end() && cs->second.size() == static_cast<size_t>(K))
+    const auto cs = col_scale.find(name);
+    const std::vector<float>* s = cs != col_scale.end() && cs->second.size() == static_cast<size_t>(K)
+                                      ? &cs->second
+                                      : nullptr;
+    std::vector<float> dxx;
+    if (gptaq_ && alpha_ != 0.0f) {
+        // Row-major C[i*K+j] = E[x_i xq_j] -> column-major dXX(i, j) = E[(x_i / s_i - xq_i) xq_j].
+        std::vector<float> C;
+        if (std::string err = read_hessian(path_, *he, C, 1); !err.empty())
+            return std::unexpected(err);
+        dxx.resize(C.size());
+        for (int64_t i = 0; i < K; i++)
+            for (int64_t j = 0; j < K; j++) {
+                const size_t ij = (static_cast<size_t>(i) * K) + j;
+                dxx[(static_cast<size_t>(j) * K) + i] = (C[ij] / (s ? (*s)[i] : 1.0f)) - H[ij];
+            }
+    } else if (s && !gptaq_) {
         for (int64_t i = 0; i < K; i++)
             for (int64_t j = 0; j < K; j++)
-                H[(static_cast<size_t>(i) * K) + j] /= cs->second[i] * cs->second[j];
+                H[(static_cast<size_t>(i) * K) + j] /= (*s)[i] * (*s)[j];
+    }
     const float scale = forced_scale > 0.0f ? forced_scale
                                             : export_tensor_scale(fp16_absmax(h.data(), h.size()));
-    auto g = gptq::quantize_nvfp4(h.data(), N, K, std::move(H), scale, damp_);
+    auto g = gptq::quantize_nvfp4(h.data(), N, K, std::move(H), scale, damp_, std::move(dxx), alpha_);
     if (!g)
         return std::unexpected(g.error());
     loss_rtn_ += g->loss_rtn;
@@ -96,9 +131,9 @@ std::string WeightQuantizer::summary() const {
         return "";
     char buf[320];
     std::snprintf(buf, sizeof(buf),
-                  "GPTQ: %zu tensors (damp %g), output loss sum(dW H dW^T) %.6g vs round-to-nearest %.6g "
+                  "%s: %zu tensors (damp %g), output loss sum(dW H dW^T) %.6g vs round-to-nearest %.6g "
                   "(%.1f%%), %zu tensors worse",
-                  n_, static_cast<double>(damp_), loss_gptq_, loss_rtn_,
+                  gptaq_ ? "GPTAQ" : "GPTQ", n_, static_cast<double>(damp_), loss_gptq_, loss_rtn_,
                   loss_rtn_ > 0.0 ? 100.0 * loss_gptq_ / loss_rtn_ : 0.0, n_worse_);
     return buf;
 }
