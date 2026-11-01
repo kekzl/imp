@@ -166,6 +166,8 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
     it->second.rows += static_cast<uint64_t>(rows);
     if (hessian_)
         accumulate_hessian_(layer, kind, input, row_stride, stream);
+    if (pair_ && pairs_armed_)
+        accumulate_pair_(layer, kind, input, row_stride, stream);
 }
 
 CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) const {

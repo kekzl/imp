@@ -7,6 +7,7 @@
 #include "core/fp_bits.h"
 #include "quant/awq_norm_fold.h"
 #include "quant/awq_transform.h"
+#include "quant/calibration_hessian.h"
 #include "quant/calibration_stats.h"
 
 #include <gtest/gtest.h>
@@ -390,4 +391,60 @@ TEST(AwqCalibration, MatrixTransformIgnoresMismatchedVectors) {
     EXPECT_EQ(w, before);
     awq_apply_matrix(w, N, K, {}, std::vector<float>(K, 2.0f));
     EXPECT_NEAR(h2f(w[0]), 2.0f, 1e-3f);
+}
+
+// IMPHES02 (GPTAQ): two matrices per entry, each read back bit-exact by index; IMPHES01 still
+// reads with one matrix; a truncated v2 body is an error, not a short index.
+TEST(GptqHessianFile, V2RoundTripsBothMatricesAndV1StillReads) {
+    const std::string p1 = temp_path("imp_hes01.bin"), p2 = temp_path("imp_hes02.bin");
+    const int64_t K = 5;
+    std::vector<float> a(K * K), b(K * K), c(3 * 3);
+    for (size_t i = 0; i < a.size(); i++) {
+        a[i] = 0.5f + static_cast<float>(i);
+        b[i] = -1.0f - static_cast<float>(i);
+    }
+    for (size_t i = 0; i < c.size(); i++)
+        c[i] = 7.0f * static_cast<float>(i);
+    {
+        HessianWriter w;
+        ASSERT_EQ(w.open(p2, 2, 2), "");
+        ASSERT_EQ(w.add(3, "WQ", K, 100, a.data(), b.data()), "");
+        ASSERT_EQ(w.add(3, "W_DOWN", 3, 40, c.data(), c.data()), "");
+        ASSERT_EQ(w.close(), "");
+    }
+    {
+        HessianWriter w;
+        ASSERT_EQ(w.open(p1, 1), "");
+        ASSERT_EQ(w.add(0, "WO", K, 9, a.data()), "");
+        ASSERT_EQ(w.close(), "");
+    }
+    std::vector<HessianIndexEntry> idx;
+    ASSERT_EQ(read_hessian_index(p2, idx), "");
+    ASSERT_EQ(idx.size(), 2u);
+    EXPECT_EQ(idx[0].mats, 2u);
+    EXPECT_EQ(idx[0].rows, 100u);
+    EXPECT_EQ(idx[1].kind, "W_DOWN");
+    std::vector<float> got;
+    ASSERT_EQ(read_hessian(p2, idx[0], got, 0), "");
+    EXPECT_EQ(got, a);
+    ASSERT_EQ(read_hessian(p2, idx[0], got, 1), "");
+    EXPECT_EQ(got, b);
+    ASSERT_EQ(read_hessian(p2, idx[1], got, 1), "");
+    EXPECT_EQ(got, c);
+    EXPECT_NE(read_hessian(p2, idx[0], got, 2), "");
+    ASSERT_EQ(find_hessian(idx, 3, "WK"), &idx[0]);
+
+    ASSERT_EQ(read_hessian_index(p1, idx), "");
+    ASSERT_EQ(idx.size(), 1u);
+    EXPECT_EQ(idx[0].mats, 1u);
+    ASSERT_EQ(read_hessian(p1, idx[0], got, 0), "");
+    EXPECT_EQ(got, a);
+    EXPECT_NE(read_hessian(p1, idx[0], got, 1), "");
+
+    std::filesystem::resize_file(p2, std::filesystem::file_size(p2) - 4);
+    EXPECT_NE(read_hessian_index(p2, idx), "");
+    HessianWriter bad;
+    EXPECT_NE(bad.open(p2, 1, 3), "");
+    std::filesystem::remove(p1);
+    std::filesystem::remove(p2);
 }

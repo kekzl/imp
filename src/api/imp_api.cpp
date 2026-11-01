@@ -820,6 +820,9 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // stale positions once corpus exceeded the resolved chunk size, default 512).
         if (!ctx->engine->begin_perplexity_capture(std::span(tokens, static_cast<size_t>(n_tokens))))
             return IMP_ERROR_INTERNAL;
+        // GPTAQ pairs start with the corpus: warmup forwards differ between source and export.
+        if (imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration())
+            calib->arm_pairs();
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
         double ppl = -1.0;
         const bool reduced = ctx->engine->end_perplexity_capture(&ppl);  // always frees buffers
@@ -847,7 +850,7 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
     if (!ctx->engine || !ctx->engine->executor())
         return IMP_ERROR_INTERNAL;
     try {
-        const imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration();
+        imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration();
         if (!calib || calib->empty()) {
             IMP_LOG_ERROR(
                 "imp_calibration_write: nothing collected — is [calibration] enabled set, and did a "
@@ -863,9 +866,8 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
             return IMP_ERROR_INTERNAL;
         }
         IMP_LOG_INFO("Calibration written: %s (%zu entries)", path, stats.entries.size());
-        // GPTQ second moments (row 101): <path>.hess, nothing when calibration.hessian is off.
-        if (const std::string herr = calib->write_hessians(std::string(path) + ".hess", nullptr);
-            !herr.empty()) {
+        // Row 101: GPTQ <path>.hess (calibration.hessian), GPTAQ pairs <path>.gptaq (calibration.pair_*).
+        if (const std::string herr = calib->write_second_moments(path, nullptr); !herr.empty()) {
             IMP_LOG_ERROR("imp_calibration_write: %s", herr.c_str());
             return IMP_ERROR_INTERNAL;
         }
