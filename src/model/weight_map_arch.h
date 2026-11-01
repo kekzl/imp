@@ -4,8 +4,17 @@
 #include "model/model_arch.h"
 
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace imp {
+
+// Whole-map rewrite before WeightMap::apply_weights for archs whose layout is not one tensor per slot.
+// bailing_hybrid (Ling-3.0): attention.* renamed to linear_attn.* (KDA) / self_attn.* (MLA), KDA q/k/v
+// projections and short convs row-concatenated into in_proj_qkv / conv1d (bytes owned by `owned`).
+// No-op for other archs. Throws std::runtime_error on a checkpoint it cannot serve.
+void arch_prepare_tensor_map(const ModelConfig& cfg, std::unordered_map<std::string, Tensor>& tensors,
+                             std::vector<void*>& owned);
 
 // Arch-specific name translation before the generic matchers (LFM2 names, DeepSeek/GLM q_b_proj and
 // e_score_correction_bias). false = drop the tensor as an MTP sidecar: DeepSeek-style checkpoints

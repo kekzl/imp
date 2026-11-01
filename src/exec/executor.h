@@ -68,6 +68,7 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
 // a DAG for visualization/debugging only; this executor hardcodes the
 // standard forward pass for efficiency. No graph walking at runtime.
 struct GemmContext;  // defined in gemm_context.h
+struct KdaScanArgs;  // defined in compute/kda.h; only executor_kda.cu builds one
 struct VRAMBudget;   // defined in runtime/vram_budget.h; only pre_dequant_weights() names it
 class GraphExecutor {
 public:
@@ -385,11 +386,10 @@ public:
     // MLA Q: wq(no), or with q_lora_rank > 0 (V3, GLM) wq(rmsnorm(q_a_proj(no), q_a_layernorm)).
     void mla_q_projection_(const TransformerLayer& ly, const Tensor& no, Tensor& qv, int n, float eps,
                            const GemmContext& ctx);
-    // Ling-3.0 head-wise MLA output gate: sigmoid(g_proj(no)) per head, logits taken with the Q
-    // projection, applied to the compact attention output. No-ops without attn_head_gate.
+    // Ling-3.0 MLA head gate: logits with the Q projection, sigmoid scales the compact output. No-op without
+    // it.
     void mla_head_gate_logits_(const TransformerLayer& ly, const Tensor& no, int n, cudaStream_t stream);
-    void mla_apply_head_gate_(const TransformerLayer& ly, const Tensor& ao, int n, int nh,
-                              cudaStream_t stream);
+    void mla_apply_head_gate_(const TransformerLayer& ly, const Tensor& ao, int n, int nh, cudaStream_t s);
     // RMSNorm+Q8_1 once; q|k|v in one launch, or q|k plus a v GEMV on the same Q8_1 when v's qtype differs.
     void dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv, Tensor& kk,
                    Tensor& vv, float eps, cudaStream_t stream);
@@ -1387,6 +1387,12 @@ private:
     // LFM2 short-conv layer.
     void run_shortconv(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
+    // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
+    void run_recurrent_mixer_(int layer, const InferenceState& state, cudaStream_t stream);
+    void run_kda(int layer, const InferenceState& state, cudaStream_t stream);
+    void kda_conv_(int layer, const InferenceState& state, const Tensor& proj, float* conv_f32, int ssm_idx,
+                   cudaStream_t stream);
+    void kda_scan_(int layer, const InferenceState& state, KdaScanArgs a, int ssm_idx, cudaStream_t stream);
     // Qwen4Exp gated residual (executor_gated_residual.cpp). hc_read_ turns the hc streams into the
     // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the
     // block output from hidden_ (block convention: h = mixed + out) and injects it into the streams.

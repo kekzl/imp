@@ -228,6 +228,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/lfm2_names.cpp
     src/model/weight_map_arch.cpp
+    src/model/bailing_hybrid_tensors.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_fit.cpp
@@ -532,6 +533,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn_graph.cpp
     src/exec/ffn_graph_cache.cpp
     src/exec/executor_ssm_gdn.cu
+    src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
     src/exec/executor_ple.cpp
@@ -1109,6 +1111,8 @@ if(IMP_BUILD_TESTS)
         tests/test_kda_reference.cpp
         # Group-limited MoE top-k vs Ling-3.0 BailingMoeV3Gate goldens (tests/refs/moe_group_topk_golden.h).
         tests/test_moe_group_limit.cpp
+        # Ling-3.0 bailing_hybrid: config parse and KDA tensor fusion without the checkpoint.
+        tests/test_bailing_hybrid.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         tests/test_internvl_lm_names.cpp
@@ -1255,6 +1259,7 @@ if(IMP_BUILD_TESTS)
         tests/test_transcript_ids.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
+        tests/test_ling3_chat_template.cpp
         tests/test_jinja.cpp
         tests/test_jinja_undefined.cpp
         tests/test_chat_template_goldens.cpp
