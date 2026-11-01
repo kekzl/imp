@@ -1409,11 +1409,13 @@ static bool upload_pass1_layers(Model& model, const UploadCtx& ctx) {
 // upload_expert_weights (Pass 2): handles packed 3D and per-expert 2D expert tensors.
 // Phase 1 fills layer_expert_bytes (host_expert_fit.h) and returns total_expert_bytes.
 static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& layers, int n_layers,
-                                          std::vector<size_t>& layer_expert_bytes) {
+                                          std::vector<size_t>& layer_expert_bytes, bool nvfp4_prequant) {
     size_t total_expert_bytes = 0;
     layer_expert_bytes.assign(n_layers, 0);
     for (int i = 0; i < n_layers; ++i) {
-        layer_expert_bytes[i] = layer_host_expert_bytes(layers[i]);
+        // NVFP4 experts on the card also get their phase-3 SfAtom scales (host_expert_fit.h).
+        layer_expert_bytes[i] = layer_host_expert_bytes(layers[i]) +
+                                (nvfp4_prequant ? layer_nvfp4_expert_sf_bytes(layers[i]) : 0);
         total_expert_bytes += layer_expert_bytes[i];
     }
     return total_expert_bytes;
@@ -1455,13 +1457,11 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
                 total_expert_bytes / (1024.0 * 1024.0 * 1024.0), free_mem / (1024.0 * 1024.0 * 1024.0));
         }
     }
-    // NVFP4-prequant experts have no working host-offload path: host-resident they stay
-    // QType::INT8 packed (Phase-0 promote never runs on them) and the MoE fallback hands raw
-    // packed bytes to cuBLAS -> CUBLAS_STATUS_NOT_SUPPORTED, repeated-token garbage + IMA. They
-    // are mandatory on-device: drop the KV/workspace reserve so they all upload when they
-    // physically fit, and size the KV pool from what's left (correctness over context length).
+    // NVFP4 experts: 10 % like the aggressive pick. Host-resident they are served by the expert
+    // cache; at 0 % Kimi-Linear (24.7 GiB experts + SfAtom, 28.5 GiB free) went all-on-card and
+    // the phase-3 SfAtom build ran out of memory.
     if (is_nvfp4_prequant)
-        overhead_pct = 0;
+        overhead_pct = 10;
     size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
     size_t total_reserve = expert_reserve_bytes + overhead;
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
@@ -1552,7 +1552,8 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
 static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers,
                                   size_t expert_reserve_bytes, const UploadCtx& ctx) {
     std::vector<size_t> layer_expert_bytes;
-    size_t total_expert_bytes = compute_expert_layer_costs_(layers, n_layers, layer_expert_bytes);
+    size_t total_expert_bytes = compute_expert_layer_costs_(layers, n_layers, layer_expert_bytes,
+                                                            ctx.is_nvfp4_prequant);
 
     std::vector<bool> experts_upload_layer(n_layers, false);
     decide_expert_layer_placement_(layer_expert_bytes, total_expert_bytes, expert_reserve_bytes, n_layers,

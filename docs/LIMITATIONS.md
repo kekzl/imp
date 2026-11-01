@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: 8a97b792
+commit: 4c60482b
 -->
 
 # Limitations
@@ -34,7 +34,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | No Gemma mmproj checkpoint on the test host since the GGUF checkpoints were deleted (2026-10-30): `VisionGolden` skips | Gemma vision encoder | pass `IMP_TEST_MMPROJ*` | - |
 | Mean-pooled embeddings of a decoder model pool the residual stream before the final RMSNorm, where HF pools `last_hidden_state` after it; only last-token models (Qwen3-Embedding) are checked against HF | `/v1/embeddings`, decoder embedders without `pooling_mode_lasttoken` | none | - |
 | Implemented, ungated | `/admin/suspend`, `/admin/resume`, `server.model_swap` | none | #1680 |
-| Implemented, never run on a GPU: softplus KDA gate in both scans (`KdaScan.SoftplusGate*` in `test-moe-gdn` written, not run), NVFP4 q/k/v split GEMMs, KDA LoRA GEMMs, MLA NoPE, FP16 widening of NVFP4 kv_a/kv_b; no greedy-vs-HF gate; FP16 KV default, no speculation, GGUF refused | Kimi-Linear (`kimi_linear`) | none | roadmap row 51 |
+| No greedy-vs-reference gate: vLLM 0.31.0 runs out of memory on the Firworks NVFP4 checkpoint at 32 GB (3 configs, a 4th with `--cpu-offload-gb 8` hits an illegal address) and an HF fp32 forward needs ~196 GB host RAM; checked by chat smoke only (capital, German story, 2-turn recall, code). Experts host-resident by default (prefill slower than with 8 host layers, numbers in [MODELS](MODELS.md)); FP16 KV default, no speculation, GGUF refused | Kimi-Linear (`kimi_linear`) | `--set moe.force_host_experts=8` | roadmap row 51 |
 | SSE frames, usage accounting, `finish_reason`, tool-call streaming: CI's `Real API contract (model-less)` job deselects every token-producing test, no GPU runner | server generation contract | run `make test-server` on a carded machine | #1600, #1559 |
 | Perf gate benches `imp-cli`, which never enters the SSE writer, tool-argument filter or per-chunk JSON serialisation | `tools/imp-server/` per-request cost | `scripts/verify.sh` server gate since 2026-10-05: 8 streamed 128-token chats on the baseline model, 8 % under the pin in `tests/perf_baseline.json`; tool-argument filter and multi-turn not driven | #1685 |
 | One tree vs a pin measured weeks earlier; host moves 4-6 % between sessions; only recorded catch is -36 %, a real -7.3 % shipped at +0.33 % | perf regressions under 8 % | `make verify-ab` (paired, alternating vs `origin/main`); measures only the pin's shape (Qwen3-8B Q8_0, pp512/tg128) | [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) |
