@@ -4,7 +4,6 @@
 #include "core/process_diag.h"
 
 #include <cstdint>
-#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -20,16 +19,16 @@ using RouteKey = std::tuple<std::string, std::string, int, int, int, int>;  // r
 std::mutex s_mutex;
 std::map<RouteKey, uint64_t> s_counts;
 
-// "src/compute/gemm.cpp:12" from an absolute or build-relative path.
+// "src/compute/gemm.cpp:12" from an absolute or build-relative path (last src/tools/tests component).
 std::string site_of(const std::source_location& loc) {
-    const char* f = loc.file_name();
+    const std::string f = loc.file_name();
+    size_t cut = std::string::npos;
     for (const char* root : {"/src/", "/tools/", "/tests/"}) {
-        if (const char* p = std::strstr(f, root)) {
-            f = p + 1;
-            break;
-        }
+        const size_t p = f.rfind(root);
+        if (p != std::string::npos && (cut == std::string::npos || p > cut))
+            cut = p;
     }
-    return std::string(f) + ":" + std::to_string(loc.line());
+    return (cut == std::string::npos ? f : f.substr(cut + 1)) + ":" + std::to_string(loc.line());
 }
 
 }  // namespace
