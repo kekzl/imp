@@ -9,6 +9,7 @@
 #include "runtime/tool_call_gate.h"
 #include "runtime/spec_request.h"
 #include "exec/sae_token.h"
+#include "vision/video_evs.h"
 
 namespace imp {
 
@@ -364,6 +365,9 @@ struct Request {
     // it folded the video pads into image pads (fold_video_pads); empty for image-only prompts.
     // One video frame pair = one qwen_patches entry, in prompt order with the images.
     std::vector<uint8_t> qwen_token_types;
+    // EVS-pruned videos, in prompt order (vision/video_evs.h): all frame pairs are encoded, the
+    // kept tokens compacted into vision_emb and the DeepStack taps; empty = nothing pruned.
+    std::vector<VideoEvsPlan> qwen_video_evs;
     // Hash of this request's image bytes, seeded into the prefix cache's block chain: without it,
     // every image token shares the same id and a second request could inherit the first one's
     // picture. Zero is refused the cache entirely, so a missed plumbing site degrades to "no

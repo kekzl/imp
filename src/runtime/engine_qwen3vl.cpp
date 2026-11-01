@@ -18,6 +18,8 @@
 #include "model/image_placeholders.h"
 #include "model/mrope_positions.h"
 #include "runtime/request.h"
+#include "vision/video_evs.h"
+#include "vision/video_evs_kernels.h"
 
 #include <algorithm>
 
@@ -292,6 +294,82 @@ std::vector<int> Engine::pending_image_token_counts() const {
     return counts;
 }
 
+namespace {
+
+// EVS: scores every pruned video's tokens on the GPU, picks the kept ones on the host and
+// compacts `emb` and every DeepStack tap to them; kept[v] per plan.
+bool evs_prune_qwen_videos(const Qwen3VLPipeline& vision, const std::vector<VideoEvsPlan>& plans,
+                           const std::vector<int>& tokens_per_item, std::shared_ptr<Buffer>& emb,
+                           std::vector<std::shared_ptr<Buffer>>& deep,
+                           std::vector<std::vector<int32_t>>& kept, cudaStream_t stream) {
+    if (!evs_plans_match(plans, tokens_per_item)) {
+        IMP_LOG_ERROR("Qwen3-VL EVS: %zu pruning plan(s) do not match the %zu encoded item(s)", plans.size(),
+                      tokens_per_item.size());
+        return false;
+    }
+    const size_t dim = static_cast<size_t>(vision.embedding_dim());
+    std::vector<size_t> item_row(tokens_per_item.size() + 1, 0);
+    for (size_t i = 0; i < tokens_per_item.size(); ++i)
+        item_row[i + 1] = item_row[i] + static_cast<size_t>(tokens_per_item[i]);
+    std::vector<size_t> score_at(plans.size() + 1, 0);
+    for (size_t v = 0; v < plans.size(); ++v)
+        score_at[v + 1] = score_at[v] + static_cast<size_t>(plans[v].groups * plans[v].tokens_per_group);
+
+    // Scores on the GPU, the top-k on the host: one D2H of groups * tokens_per_group floats per video.
+    Buffer d_scores = Buffer::device(score_at.back() * sizeof(float));
+    if (!d_scores)
+        return false;
+    for (size_t v = 0; v < plans.size(); ++v)
+        launch_evs_dissimilarity(emb->as<half>() + (item_row[static_cast<size_t>(plans[v].first_item)] * dim),
+                                 plans[v].groups, plans[v].tokens_per_group, static_cast<int>(dim),
+                                 d_scores.as<float>() + score_at[v], stream);
+    std::vector<float> scores(score_at.back());
+    if (cudaMemcpyAsync(scores.data(), d_scores.ptr(), scores.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                        stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        IMP_LOG_ERROR("Qwen3-VL EVS: dissimilarity readback failed");
+        return false;
+    }
+
+    // Rows to keep, in prompt order: every image row, each pruned video's kept rows ascending.
+    kept.assign(plans.size(), {});
+    for (size_t v = 0; v < plans.size(); ++v)
+        kept[v] = evs_kept_indices(
+            evs_retention_mask(std::span<const float>(scores).subspan(score_at[v],
+                                                                      score_at[v + 1] - score_at[v]),
+                               plans[v].groups, plans[v].tokens_per_group, plans[v].keep));
+    const std::vector<int32_t> rows = evs_gather_rows(plans, tokens_per_item, kept);
+
+    const int n_out = static_cast<int>(rows.size());
+    Buffer d_rows = Buffer::device(rows.size() * sizeof(int32_t));
+    if (!d_rows || cudaMemcpyAsync(d_rows.ptr(), rows.data(), rows.size() * sizeof(int32_t),
+                                   cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        return false;
+    auto compact = [&](std::shared_ptr<Buffer>& src) {
+        auto dst = std::make_shared<Buffer>(Buffer::device(vision.embedding_bytes(n_out)));
+        if (!*dst)
+            return false;
+        launch_gather_rows(src->as<half>(), d_rows.as<int32_t>(), n_out, static_cast<int>(dim),
+                           dst->as<half>(), stream);
+        src = std::move(dst);
+        return true;
+    };
+    // `full` keeps the full-size sources alive until the sync below: the gathers read them.
+    std::vector<std::shared_ptr<Buffer>> full{emb};
+    full.insert(full.end(), deep.begin(), deep.end());
+    if (!compact(emb))
+        return false;
+    for (auto& d : deep)
+        if (!compact(d))
+            return false;
+    if (cudaStreamSynchronize(stream) != cudaSuccess)
+        return false;
+    IMP_LOG_INFO("Qwen3-VL EVS: %zu video(s), %zu -> %d vision tokens", plans.size(), item_row.back(), n_out);
+    return true;
+}
+
+}  // namespace
+
 // Turns a request's CPU-preprocessed image into its own device buffers and its
 // own (t, h, w) layout. Runs on the batch worker: it drives the GPU, so it
 // cannot be on an HTTP thread.
@@ -355,6 +433,12 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
     }
     req.qwen_patches.clear();  // host pixels no longer needed
 
+    // EVS: every pair was encoded at full size; the pruned prompt splices only the kept rows.
+    std::vector<std::vector<int32_t>> kept;
+    if (!req.qwen_video_evs.empty() && !qwen_vision_.is_internvl() &&
+        !evs_prune_qwen_videos(qwen_vision_, req.qwen_video_evs, tokens_per_image, emb, deep, kept, stream))
+        return false;
+
     // InternVL: plain 1-D positions, so the layout is only the splice id and the count.
     if (qwen_vision_.is_internvl()) {
         const auto found = std::count(req.input_tokens.begin(), req.input_tokens.end(), qwen_image_pad_id_);
@@ -366,7 +450,7 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
         req.vision_token_id = qwen_image_pad_id_;
         req.n_vision_tokens = total_tokens;
         IMP_LOG_INFO("InternVL: %zu image(s), %d image tokens", shapes.size(), total_tokens);
-    } else if (!build_qwen_layout_(req, shapes)) {
+    } else if (!build_qwen_layout_(req, shapes, kept)) {
         return false;
     }
     req.vision_emb = std::move(emb);
@@ -377,7 +461,8 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
 // The prompt-side half: which positions hold the image, and what that costs the
 // M-RoPE sequence. Kept apart from the encode because it is pure bookkeeping
 // over the token ids and fails for entirely different reasons.
-bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes) {
+bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes,
+                                const std::vector<std::vector<int32_t>>& kept) {
     // Token types: from add_request's fold when the prompt held a video, else image pads only.
     std::vector<uint8_t> types = req.qwen_token_types;
     if (types.size() != req.input_tokens.size()) {
@@ -392,6 +477,8 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
     int expected = 0;
     for (const auto& s : shapes)
         expected += s.tokens;
+    for (const auto& p : req.qwen_video_evs)  // EVS: the pruned rows never reach the prompt
+        expected -= (p.groups * p.tokens_per_group) - p.keep;
     if (found != expected) {
         // The prompt and the encoder describe different images. Every position
         // after the mismatch would be shifted, so this is fatal, not tolerated.
@@ -406,7 +493,11 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
     items.reserve(shapes.size());
     for (const auto& s : shapes)
         items.push_back({s.grid_rows, s.grid_cols});
-    const auto mrope = qwen_build_mrope_positions_items(types, items, 0);
+    // EVS: positions of the unpruned prompt, kept tokens at their own (t, h, w).
+    const auto mrope = req.qwen_video_evs.empty()
+                           ? qwen_build_mrope_positions_items(types, items, 0)
+                           : qwen_evs_mrope_positions(types, req.input_tokens, qwen_vision_end_id_, items,
+                                                      req.qwen_video_evs, kept, 0);
     if (!mrope) {
         IMP_LOG_ERROR("Qwen3-VL: %s", mrope.error().c_str());
         return false;

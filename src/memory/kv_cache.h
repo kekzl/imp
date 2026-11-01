@@ -112,8 +112,9 @@ public:
 
     // Commit memory for at least `wanted` blocks and make them allocatable. Returns the
     // capacity afterwards, which the caller must believe: a partial growth is a real,
-    // servable capacity, not a failure. Costs one driver mapping call per layer region
-    // (measured ~1.18 ms per 256 MiB), so callers grow in coarse steps, not per block.
+    // servable capacity, not a failure. Costs one driver mapping per layer region: 31-109 ms
+    // per growth whatever its size (Qwen3-14B, 80 regions, 800-1920 MiB), so callers grow in
+    // coarse steps, not per block.
     int try_grow_to(int wanted);
 
     // Re-reserve a growable pool at a larger ceiling, same committed blocks. Every pointer
@@ -252,6 +253,7 @@ private:
     std::atomic<int> last_capped_logged_{-1};
     double residency_gbps_ = 0.0;  // probe_residency() result, 0 = not probed
     int committed_blocks_ = 0;  // blocks whose memory is backed in every layer
+    double last_zero_ms_ = 0.0;  // commit_blocks_(): memset + stream-0 sync of the last growth
     // What may be handed out. Mirrored here rather than read from the block
     // pool because admission asks per pending request per step, and the pool's
     // accessor takes the lock that allocate/free contend for.

@@ -191,6 +191,10 @@ no_vision            = false
 # 4096 patches ~ 1024x1024. Does not apply to the mmproj (SigLIP/gemma4v) path,
 # which is sized off the checkpoint's fixed image_size.
 vision_max_patches   = 4096
+# EVS video token pruning rate q in [0, 1) (vLLM video_prune/evs.py): a Qwen3-VL video keeps
+# max(tokens per frame pair, int(tokens * (1 - q))) tokens, dropping those least changed
+# from the previous frame pair. 0 = off; a video part's "pruning_rate" overrides it.
+video_pruning_rate   = 0
 # Batched GDN/Mamba2 decode: separate sequences parallelise across blockIdx.y
 # in the recurrent scan, so a 32-stream step runs its GEMMs at M=32 instead of
 # M=1 (82 % of GPU time sat in M=1 GEMVs at 32-way load without it).

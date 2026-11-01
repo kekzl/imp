@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-11-01
+commit: 150e8b23
 -->
 
 # API features
@@ -218,7 +218,7 @@ Refusal rules:
 
 ## Video
 
-✅ on `/v1/chat/completions` for Qwen3-VL and InternVL3.5, as a `video` content part of frames the client sampled; no container decoding (mp4 is out by decision).
+✅ on `/v1/chat/completions` for Qwen3-VL and InternVL3.5, as a `video` content part of frames the client sampled; no container decoding (mp4 is out by decision). Model without a Qwen3-VL or InternVL tower: `400 vision_unavailable`.
 
 ```json
 {"type": "video", "video": ["data:image/png;base64,...", "data:image/png;base64,..."], "fps": 2}
@@ -226,14 +226,14 @@ Refusal rules:
 
 | field | rule |
 |---|---|
-| `video` | 2..768 frame image URLs, same rules as `image_url` (data URI; `http(s)` only with `--allow-remote-images`), all frames the same size |
+| `video` | 2..768 frame image URLs, same rules as `image_url` (data URI; `http(s)` only with `--allow-remote-images`), all frames the same size; wrong count, unreadable or mixed-size frames: `400` |
 | `fps` | frame k sits at k/`fps` seconds; default 24 (HF `Qwen3VLProcessor` fallback) |
 | `timestamps` | one number per frame, seconds; overrides `fps` |
 
 - Frames pair up on the temporal axis (odd count repeats the last frame); each pair becomes one `<x.x seconds><\|vision_start\|>` + tokens + `<\|vision_end\|>` group, as `Qwen3VLProcessor` emits it.
+- `pruning_rate` q in [0, 1) (Qwen3-VL; default `runtime.video_pruning_rate`, 0 = off; else `400`): EVS pruning ([vLLM #48912](https://github.com/vllm-project/vllm/pull/48912), `video_prune/evs.py`), a video keeps max(tokens per frame pair, int(tokens x (1 - q))) tokens; pair 0 always, the rest ranked by 1 - cosine to the same (h, w) token of the previous pair. All kept tokens sit in pair 0's slot, later pairs keep their timestamp and empty `<|vision_start|><|vision_end|>`; M-RoPE positions stay those of the unpruned video. The rate joins the prefix-cache key.
 - Resize bound: t*h*w in 4096..25165824 pixels (`video_preprocessor_config.json`), capped at frames x the per-image patch budget; `cap_pixels_per_frame` off (transformers 5.17.0 default).
 - `imp-cli`: `--video-frames a.png,b.png,... [--video-fps F | --video-timestamps s0,s1,...]` (Qwen3-VL only). InternVL3.5 (server): each frame is one 448 x 448 tile (256 tokens), rendered as HF `replace_video_token`: `Frame{i}: <img>...</img>` lines, `fps` / `timestamps` unread; InternVL3.5-2B, frames cat, cat, bus, bus: "A cat and red double decker buses.", 1077 prompt tokens.
-- Wrong frame count, unreadable or mixed-size frames: `400`. Model without a Qwen3-VL or InternVL tower: `400 vision_unavailable`.
 
 ## Fill-in-the-middle
 

@@ -12,6 +12,7 @@
 #include "api/imp_internal.h"
 #include "model/image_placeholders.h"
 #include "vision/image_processor.h"
+#include "vision/video_evs.h"
 #include "vision/vision_family.h"
 #include "runtime/request.h"
 #include "runtime/spec_request.h"
@@ -33,6 +34,7 @@
 struct ChatVideoInput {
     std::vector<std::vector<uint8_t>> frames;
     std::vector<double> seconds;
+    double pruning_rate = -1.0;  // EVS rate from the part's "pruning_rate"; < 0 = runtime.video_pruning_rate
 };
 
 // Sampling fields (temperature, penalties, priority, stream, ...): SamplingFields, sampling_fields.h.
@@ -159,6 +161,8 @@ struct ChatStateSnapshot {
     // One layout per video part, in prompt order; its frame pairs sit in `qwen_patches` at the
     // video's position among the images.
     std::vector<imp::VideoPlaceholderLayout> qwen_video_layouts;
+    // EVS-pruned videos (keep < all tokens), copied to imp::Request::qwen_video_evs.
+    std::vector<imp::VideoEvsPlan> qwen_video_evs;
     // Frames per video part (a frame_label family encodes each frame as an image).
     std::vector<int> video_frame_counts;
     // Prompt layout of the loaded tower (imp::vision_prompt_layout).

@@ -510,6 +510,16 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                         for (size_t k = 0; k < frames.size(); ++k)
                             v.seconds.push_back(static_cast<double>(k) / fps);
                     }
+                    if (part.contains("pruning_rate")) {
+                        const json& q = part["pruning_rate"];
+                        const double rate = q.is_number() ? q.get<double>() : -1.0;
+                        if (!(rate >= 0.0 && rate < 1.0)) {
+                            send_json_error(res, 400, "invalid_request_error",
+                                            "video \"pruning_rate\" must be a number in [0, 1)");
+                            return false;
+                        }
+                        v.pruning_rate = rate;
+                    }
                     for (const auto& f : frames) {
                         v.frames.emplace_back();
                         read_vision_url(state, f.is_string() ? f.get<std::string>() : std::string(),

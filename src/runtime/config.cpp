@@ -151,6 +151,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.no_vision_graph", cfg.runtime.no_vision_graph);
     B("runtime.no_vision", cfg.runtime.no_vision);
     I("runtime.vision_max_patches", cfg.runtime.vision_max_patches);
+    F("runtime.video_pruning_rate", cfg.runtime.video_pruning_rate);  // range: apply_one_checked
     S("runtime.graph_capture_mode", cfg.runtime.graph_capture_mode);
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
@@ -507,6 +508,22 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     return matched;
 }
 
+// apply_one plus the range checks a binder cannot express; a value outside its range is
+// rejected and the previous one kept. runtime.video_pruning_rate: [0, 1), q = 1 keeps one pair.
+bool apply_one_checked(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw,
+                       bool& value_ok) {
+    const float rate_before = cfg.runtime.video_pruning_rate;
+    const bool matched = apply_one(cfg, dotted_key, raw, &value_ok);
+    const float q = cfg.runtime.video_pruning_rate;
+    if (!(q >= 0.0f && q < 1.0f)) {
+        cfg.runtime.video_pruning_rate = rate_before;
+        if (!cfg.explicit_keys.empty() && cfg.explicit_keys.back() == dotted_key)
+            cfg.explicit_keys.pop_back();
+        value_ok = false;
+    }
+    return matched;
+}
+
 bool file_exists(const std::string& path) {
     if (path.empty())
         return false;
@@ -629,7 +646,7 @@ bool RuntimeConfig::load_from_file(const std::string& path) {
             dotted += key;
         }
         bool value_ok = true;
-        if (!apply_one(*this, dotted, val, &value_ok))
+        if (!apply_one_checked(*this, dotted, val, value_ok))
             IMP_LOG_WARN("imp.conf: unknown key '%s' (value '%s') — ignoring", dotted.c_str(), val.c_str());
         else if (!value_ok)
             IMP_LOG_WARN("imp.conf: key '%s' has an unreadable value '%s' — the default is kept (#1627)",
@@ -649,7 +666,7 @@ std::vector<std::string> RuntimeConfig::apply_overrides(const std::vector<std::s
         std::string key = trim(kv.substr(0, eq));
         std::string val = trim(kv.substr(eq + 1));
         bool value_ok = true;
-        if (!apply_one(*this, key, val, &value_ok))
+        if (!apply_one_checked(*this, key, val, value_ok))
             rejected.push_back(kv + "  (no such key)");
         else if (!value_ok)
             rejected.push_back(kv + "  (value not readable for this key; the default is kept)");
