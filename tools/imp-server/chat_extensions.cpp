@@ -105,10 +105,11 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
                 "\"cfg_scale\" needs a model that decodes two sequences in one step (hybrids: "
                 "runtime.gdn_batched_decode)",
                 "cfg_scale"};
-        if (!p.images.empty() || !p.videos.empty() || p.has_tools || !p.banned_strings.empty() ||
-            !p.banned_regex.empty())
+        if (!p.images.empty() || !p.videos.empty() || !p.audios.empty() || p.has_tools ||
+            !p.banned_strings.empty() || !p.banned_regex.empty())
             return {
-                "\"cfg_scale\" cannot be combined with images, video, tools, banned_strings or banned_regex",
+                "\"cfg_scale\" cannot be combined with images, video, audio, tools, banned_strings or "
+                "banned_regex",
                 "cfg_scale"};
         const bool has_system = std::any_of(p.chat_msgs.begin(), p.chat_msgs.end(),
                                             [](const auto& m) { return m.role == "system"; });

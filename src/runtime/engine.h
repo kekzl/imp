@@ -11,6 +11,7 @@
 #include "runtime/cuda_graph.h"
 #include "vision/vision_pipeline.h"
 #include "vision/qwen3vl_pipeline.h"
+#include "audio/audio_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/config.h"
 #include "core/dispatch_policy.h"
@@ -265,6 +266,11 @@ public:
     // shares the encoder workspace). False when no vision model or image.
     [[nodiscard]] bool preprocess_image(std::span<const uint8_t> data, ImageData& out);
     [[nodiscard]] bool encode_image_for(Request& req);
+    // Gemma-4 audio: is_ready(), token ids and preprocess() (WAV -> log-mel, CPU, any thread).
+    // encode_audio_for: GPU encode of req.audios into req.vision_emb (spliced at the audio soft
+    // token), batch worker only; false without a tower.
+    const AudioPipeline& audio() const noexcept { return audio_; }
+    [[nodiscard]] bool encode_audio_for(Request& req);
     // Soft tokens one picture takes in the prompt (mmproj tower; 0 without one).
     [[nodiscard]] int vision_image_tokens() const noexcept { return vision_.num_image_tokens(); }
 
@@ -821,6 +827,8 @@ private:
     // GGUF, and its token count is per-image — so it gets its own pipeline
     // rather than a mode inside `vision_`.
     Qwen3VLPipeline qwen_vision_;
+    // Gemma-4 audio tower from the checkpoint (model->audio_tower); per-clip token counts.
+    AudioPipeline audio_;
     // [3, n] device scratch for M-RoPE positions, refilled per step. Two
     // buffers: a captured decode graph bakes in the POINTER, so growing one
     // shared buffer would reallocate it and leave replayed graphs reading

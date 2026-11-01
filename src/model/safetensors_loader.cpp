@@ -15,6 +15,7 @@
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
 #include "model/mtp_head.h"
+#include "audio/gemma4_audio_model.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -1197,6 +1198,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
             layer.expert_w_down.resize(cfg.n_experts);
         }
     }
+
+    // 5a. Gemma-4 audio tower: same shard map, own loader; the weight map skips its names.
+    if (cfg.has_audio_config)
+        model->audio_tower = load_gemma4_audio_from_checkpoint(model_dir, tensor_map);
 
     // 6. Assign tensors via WeightMap (after the arch whole-map rewrite, model/weight_map_arch.h)
     arch_prepare_tensor_map(cfg, tensor_map, model->host_owned_buffers_);

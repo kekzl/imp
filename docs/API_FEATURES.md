@@ -2,12 +2,12 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: 150e8b23
+commit: 696ef613
 -->
 
 # API features
 
-Constrained decoding, tool calling, thinking/reasoning, images and fill-in-the-middle. Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
+Constrained decoding, tool calling, thinking/reasoning, images and fill-in-the-middle; audio input (`input_audio`): [`MODELS.md`](MODELS.md#audio). Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
 
 ## Constrained decoding
 
@@ -208,7 +208,7 @@ Refusal rules:
 - Unreadable content part or block: `400` naming it, all three dialects.
 | Endpoint | Reads |
 |---|---|
-| `/v1/chat/completions`, `/v1/responses` | chat: `text`, `image_url`, `video`; responses: `input_text`, `input_image` with `image_url` (URL or `data:` URI), not `file_id` or `input_file` |
+| `/v1/chat/completions`, `/v1/responses` | chat: `text`, `image_url`, `input_audio`, `video`; responses: `input_text`, `input_image` with `image_url` (URL or `data:` URI), not `file_id` or `input_file` |
 | `/v1/messages` | `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking` |
 
 - On `/v1/messages` the `system` field takes string or array of `text` blocks.

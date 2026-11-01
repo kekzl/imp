@@ -62,6 +62,9 @@ struct RuntimeConfig {
         // Drop the checkpoint's Qwen3-VL tower at init: image/video parts answer 400, its arena
         // reservation goes to the expert cache (Flash-Next: 1079 MiB, 396 -> 422 slots/layer).
         bool no_vision = false;
+        // Drop the checkpoint's Gemma-4 audio tower at init: input_audio parts answer 400, its
+        // arena reservation (E4B, shape arithmetic: 566 MiB weights + 80 MiB clip scratch) stays free.
+        bool no_audio = false;
         // Qwen3-VL patch budget, in 16x16 patches: ceiling that pulls the
         // preprocessor's max_pixels down and sizes every encoder workspace
         // (not a refusal check). 4096 = 1024x1024.

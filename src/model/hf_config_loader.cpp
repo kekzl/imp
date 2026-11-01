@@ -88,11 +88,15 @@ void note_audio_config(const JValue& root, bool has_vision, ModelConfig& cfg) {
     cfg.has_audio_config = true;
     std::string audio_type;
     jobj_opt_string(*ac, "model_type", audio_type);
-    IMP_LOG_WARN(
-        "Audio modality present (audio_config, model_type='%s') and unsupported. imp has no "
-        "audio encoder: `model.embed_audio.*` tensors are dropped at load and audio input "
-        "cannot be sent. The model loads as text%s only (roadmap Open 8).",
-        audio_type.empty() ? "?" : audio_type.c_str(), has_vision ? "+vision" : "");
+    // gemma4_audio with its tower loads in safetensors_loader (audio/gemma4_audio_model.h), which
+    // says loudly when the tower is missing; any other audio type has no encoder here.
+    if (audio_type == "gemma4_audio")
+        IMP_LOG_INFO("Audio modality declared (audio_config, model_type='gemma4_audio')");
+    else
+        IMP_LOG_WARN(
+            "Audio modality present (audio_config, model_type='%s') and unsupported: audio "
+            "tensors are dropped at load and audio input cannot be sent. The model loads as text%s only.",
+            audio_type.empty() ? "?" : audio_type.c_str(), has_vision ? "+vision" : "");
 }
 
 // sentence-transformers pooling module (<model_dir>/1_Pooling/config.json): only last-token

@@ -139,6 +139,37 @@ std::expected<void, std::string> expand_internvl_image_placeholders(std::vector<
     return {};
 }
 
+std::expected<void, std::string> expand_audio_placeholders(std::vector<int32_t>& tokens, int32_t audio_id,
+                                                           int32_t boa_id, int32_t eoa_id,
+                                                           const std::vector<int>& counts) {
+    const auto found = std::count(tokens.begin(), tokens.end(), audio_id);
+    if (static_cast<size_t>(found) != counts.size())
+        return std::unexpected("prompt holds " + std::to_string(found) + " audio placeholder(s) but " +
+                               std::to_string(counts.size()) + " input_audio part(s) were sent");
+    if (audio_id < 0 || boa_id < 0 || eoa_id < 0)
+        return std::unexpected("audio tokens are not configured");
+    size_t extra = 0;
+    for (int c : counts) {
+        if (c <= 0)
+            return std::unexpected("an audio clip encodes to no token");
+        extra += static_cast<size_t>(c) + 1;
+    }
+    std::vector<int32_t> out;
+    out.reserve(tokens.size() + extra);
+    size_t k = 0;
+    for (int32_t t : tokens) {
+        if (t != audio_id) {
+            out.push_back(t);
+            continue;
+        }
+        out.push_back(boa_id);
+        out.insert(out.end(), static_cast<size_t>(counts[k++]), audio_id);
+        out.push_back(eoa_id);
+    }
+    tokens = std::move(out);
+    return {};
+}
+
 size_t image_content_hash(std::span<const uint8_t> data) {
     size_t h = 0xcbf29ce484222325ULL;
     for (const uint8_t b : data) {

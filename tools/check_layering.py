@@ -20,7 +20,7 @@ WHAT IT CHECKS
 Every `#include "<layer>/..."` line under src/<layer>/ is an edge. The layer
 order is
 
-    api > runtime > vision > exec > lora > model > compute > quant > memory > core
+    api > runtime > vision = audio > exec > lora > model > compute > quant > memory > core
 
 and an edge from a lower to a higher layer is backward. Each backward
 (includer layer, included header) pair must be listed in
@@ -53,7 +53,7 @@ PINS = ROOT / "tools" / "layering_pins.txt"
 
 RANK = {
     "core": 0, "memory": 1, "quant": 2, "compute": 3, "model": 4,
-    "lora": 5, "exec": 6, "vision": 7, "runtime": 8, "api": 9,
+    "lora": 5, "exec": 6, "vision": 7, "audio": 7, "runtime": 8, "api": 9,
 }
 EXTS = (".h", ".cuh", ".cu", ".cpp", ".inl")
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([a-z_]+)/([^"]+)"', re.M)

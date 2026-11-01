@@ -16,6 +16,7 @@ namespace imp {
 // Forward declares to keep CUDA / buffer headers out of this widely-included file.
 struct ImageData;
 struct QwenPatches;  // vision/image_processor.h
+struct AudioFeatures;  // audio/audio_features.h
 class Buffer;      // src/core/buffer.h
 struct PhraseBanState;  // runtime/phrase_ban.h
 struct CfgState;        // runtime/cfg_guidance.h
@@ -349,6 +350,10 @@ struct Request {
     // [n_vision_tokens, d_model] fp16) on admission and clears `images`. step_prefill_one binds
     // vision_emb at offset==0; shared_ptr auto-frees on the last reference. Empty for text.
     std::vector<std::shared_ptr<ImageData>> images;
+    // Gemma-4 audio clips (log-mel features), prompt order. The batch worker encodes them into
+    // vision_emb with vision_token_id = the audio soft token and clears this; a request carries
+    // images or audio, not both (one splice id).
+    std::vector<std::shared_ptr<AudioFeatures>> audios;
     std::shared_ptr<Buffer> vision_emb;
     int32_t vision_token_id = -1;
     int n_vision_tokens = 0;
@@ -404,7 +409,8 @@ struct Request {
     // shares one id); direct mode (#2198) never reuses; embeddings mean-pool (#2245) and prompt
     // logprobs (#2207) score every input row.
     [[nodiscard]] bool prefix_reuse_allowed() const {
-        const bool has_image = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        const bool has_image = !images.empty() || !audios.empty() || !qwen_patches.empty() || vision_emb ||
+                               n_vision_tokens > 0;
         return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request &&
                prompt_logprobs < 0;
     }
@@ -412,7 +418,8 @@ struct Request {
     // May this request be a row of the cross-sequence ragged prefill? Score rows yes: the
     // epilogue reads their compacted last row (#2198 shared). Engine::prefill_ragged_req_ok_.
     [[nodiscard]] bool ragged_prefill_allowed() const {
-        const bool has_vision = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        const bool has_vision = !images.empty() || !audios.empty() || !qwen_patches.empty() || vision_emb ||
+                                n_vision_tokens > 0;
         return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 &&
                !wants_constraints() && !phrase && !cfg;
     }

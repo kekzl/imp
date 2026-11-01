@@ -239,6 +239,8 @@ bool Engine::init_features() {
             qwen_vision_end_id_ = model_->tokenizer()->find_token(std::string(layout.end));
         }
     }
+    // Gemma-4 audio tower, same rule: a tower that fails leaves the text model serving.
+    engine_internal::init_audio_pipeline(audio_, *model_);
 
     // Pinned sample buffer for CUDA graphs
     if (!h_sample_pinned_) {
