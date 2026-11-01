@@ -104,6 +104,9 @@ bool parse_gemma4_e_variant(const JValue& eff, ModelConfig& cfg) {
     }
     if (cfg.pli_dim == 0)
         cfg.pli_vocab = 0;
+    jobj_opt_int(eff, "pad_token_id", cfg.pli_pad_id);
+    if (cfg.pli_pad_id < 0 || (cfg.pli_vocab > 0 && cfg.pli_pad_id >= cfg.pli_vocab))
+        cfg.pli_pad_id = 0;
     int double_wide = 0;  // JSON bools parse as NUMBER 0/1
     jobj_opt_int(eff, "use_double_wide_mlp", double_wide);
     int n_shared = 0;

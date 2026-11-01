@@ -1,7 +1,7 @@
 // Gemma-4 audio tower on the GPU vs HF transformers (Gemma4AudioModel + Gemma4MultimodalEmbedder,
 // fp32 CPU) on a 2.3 s synthetic clip. Needs the checkpoint (IMP_TEST_MODEL_GEMMA4_AUDIO, a
 // single-file model.safetensors such as gemma-4-E4B-it) and the reference dir
-// (IMP_TEST_GEMMA4_AUDIO_REF: features.f32, features_mask.u8, sscp.f32, layer0.f32,
+// (IMP_TEST_GEMMA4_AUDIO_REF: features.f32, features_pcm16.f32, features_mask.u8, sscp.f32, layer0.f32,
 // tower_out.f32, embeds.f32, signal.wav from tools/analysis/gemma4_audio_ref.py). Skips otherwise.
 
 #include "audio/audio_features.h"
@@ -122,11 +122,15 @@ TEST_F(Gemma4AudioEncoderTest, WavFrontEndMatchesHfFeatures) {
     ASSERT_EQ(f->n_frames, ref.n_frames);
     EXPECT_EQ(f->mask, ref.mask);
     EXPECT_EQ(f->n_tokens, ref.n_tokens);
-    // The WAV holds the clip as PCM16, HF saw float32: the 1/32768 quantisation moves log-mel a little.
+    // Reference = HF features of the WAV's PCM16 samples: PCM16 noise lifts near-silent bins off the
+    // log floor by up to 0.659 vs the float32 features, so those cannot be the bar.
+    const std::vector<float> wav_ref = read_f32(r + "/features_pcm16.f32");
+    ASSERT_EQ(wav_ref.size(), f->mel.size());
     double worst = 0.0;
     for (size_t i = 0; i < f->mel.size(); ++i)
-        worst = std::max(worst, static_cast<double>(std::fabs(f->mel[i] - ref.mel[i])));
-    EXPECT_LT(worst, 0.05);
+        worst = std::max(worst, static_cast<double>(std::fabs(f->mel[i] - wav_ref[i])));
+    std::printf("front end vs HF (PCM16 samples): worst |d log-mel| %.3g\n", worst);
+    EXPECT_LT(worst, 1e-4);  // measured 4.77e-07 (2026-11-01)
 }
 
 TEST_F(Gemma4AudioEncoderTest, MatchesHfTowerAndEmbedder) {

@@ -48,6 +48,8 @@ struct ModelConfig {
     // and vocab_size_per_layer_input (rows of the [vocab, n_layers * pli_dim] table).
     int pli_dim = 0;
     int pli_vocab = 0;
+    // text_config.pad_token_id: PLE token-identity row for image/audio placeholder positions (HF).
+    int pli_pad_id = 0;
     // Gemma-4 KV sharing (num_kv_shared_layers): kv_source_layer[l] = layer whose K/V layer l
     // reads, -1 = own K/V. Empty = no sharing. E4B: layers 24..41 read 22 (sliding) or 23 (full).
     std::vector<int> kv_source_layer;

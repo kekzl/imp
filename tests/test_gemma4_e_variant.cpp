@@ -72,6 +72,25 @@ TEST_F(Gemma4EConfig, E4BPerLayerInputsAndKvSources) {
     EXPECT_EQ(shared, 18);
 }
 
+// HF Gemma4Model.forward looks up placeholder positions in the PLE table at text pad_token_id.
+TEST_F(Gemma4EConfig, PliPadIdFollowsTextConfig) {
+    ModelConfig cfg;
+    ASSERT_TRUE(load(fixture(), cfg));
+    EXPECT_EQ(cfg.pli_pad_id, 0);
+    std::string json = fixture();
+    const std::string key = "\"pad_token_id\": 0";
+    const size_t at = json.find(key);
+    ASSERT_NE(at, std::string::npos);
+    json.replace(at, key.size(), "\"pad_token_id\": 7");
+    ModelConfig moved;
+    ASSERT_TRUE(load(json, moved));
+    EXPECT_EQ(moved.pli_pad_id, 7);
+    json.replace(json.find("\"pad_token_id\": 7"), key.size(), "\"pad_token_id\": -1");
+    ModelConfig bad;
+    ASSERT_TRUE(load(json, bad));
+    EXPECT_EQ(bad.pli_pad_id, 0);  // out of the table: falls back to row 0
+}
+
 TEST_F(Gemma4EConfig, DoubleWideMlpIsRefused) {
     std::string json = fixture();
     const std::string key = "\"use_double_wide_mlp\": false";

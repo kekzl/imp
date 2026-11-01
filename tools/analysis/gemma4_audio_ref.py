@@ -4,7 +4,7 @@
 # No GPU. Container only, e.g. with torch/transformers/numpy installed under /pip/site:
 #   docker run --rm -e PYTHONPATH=/pip/site -v <pip>:/pip -v $PWD/tools/analysis:/t:ro \
 #     -v ~/models/gemma-4-E4B-it:/m:ro -v <out>:/o python:3.12-slim python /t/gemma4_audio_ref.py /m /o
-# Writes features.f32, features_mask.u8, sscp/l0_*/layer0/tower_out/embeds.f32, signal.wav,
+# Writes features.f32, features_pcm16.f32, features_mask.u8, sscp/l0_*/layer0/tower_out/embeds.f32, signal.wav,
 # small_golden.json, shapes.json; prints the chunked-attention re-derivation error.
 import json
 import math
@@ -75,6 +75,10 @@ with open(os.path.join(out_dir, "signal.wav"), "wb") as fh:
     fh.write(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE")
     fh.write(b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16))
     fh.write(b"data" + struct.pack("<I", len(data)) + data)
+# Features of the WAV's own samples (PCM16 / 32768): the reference for imp's WAV front end. PCM16
+# noise lifts near-silent mel bins off the log floor (0.659 max vs the float32 features).
+fwav = fe([pcm16.astype(np.float32) / 32768.0], return_tensors="np")
+save("features_pcm16", fwav["input_features"][0])
 
 # Processor token count (no tokenizer needed for the arithmetic).
 proc = Gemma4Processor.__new__(Gemma4Processor)

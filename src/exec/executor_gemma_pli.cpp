@@ -110,9 +110,11 @@ void GraphExecutor::pli_inputs_run_(const InferenceState& state, int n, cudaStre
     // per_layer_model_projection(emb) * hidden_size^-0.5 (the scale rides the GEMM alpha)
     gemm(emb, model_->pli_model_proj(), proj, 1.0f / std::sqrt(static_cast<float>(cfg.d_model)), 0.0f,
          stream);
+    // HF Gemma4Model.forward: placeholder ids -> text pad id for the table lookup only; the
+    // projection reads the merged embedding (encoder rows), which hidden_ holds here.
     const int32_t mm_id = state.n_vision_tokens > 0 ? state.vision_token_id : -1;
     pli_project_combine(proj.data, model_->pli_table().data, state.token_ids, model_->pli_proj_norm().data, n,
-                        cfg.n_layers, cfg.pli_dim, cfg.pli_vocab, mm_id, /*pad_id=*/0, cfg.rms_norm_eps,
+                        cfg.n_layers, cfg.pli_dim, cfg.pli_vocab, mm_id, cfg.pli_pad_id, cfg.rms_norm_eps,
                         std::sqrt(static_cast<float>(cfg.pli_dim)), 1.0f / std::sqrt(2.0f), stream);
 }
 

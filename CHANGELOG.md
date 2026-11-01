@@ -7,7 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - Gemma-4 E-variants (gemma-4-E4B-it), text: per-layer inputs (PLE table in mapped host RAM) and KV sharing (layers 24..41 read layer 22/23, no KV blocks of their own). Greedy equals the HF fp32 reference on 9 of 9 and 20 of 20 tokens (`Gemma4E4BRef`) (#2978).
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
-- Gemma-4 audio input (row 120): `input_audio` WAV parts (16 kHz, up to 30 s) on `/v1/chat/completions`, HF log-mel front end, Conformer audio tower + embedder on the GPU (`src/audio/`), spliced like images; no tower = 400. Encoder vs HF transformers, 2.3 s clip: worst-row embedding cosine NUMBER.
+- Gemma-4 audio input on gemma-4-E4B-it: `input_audio` WAV parts (16 kHz, up to 30 s) on `/v1/chat/completions`, Conformer tower + embedder on the GPU (`src/audio/`); no tower = 400. Encoder vs HF: worst-row embedding cosine 0.999976; a 10.4 s LibriSpeech clip transcribes word for word as HF fp32 does (#2980).
 
 ### Fixed
 - Sampling: `top_p` now cuts the top-k candidates renormalized, as HF, vLLM and llama.cpp do; against the full-vocabulary mass it never fired while the top k held less than `top_p`, so the tail of the k was sampled (Qwen3.8: `top_k` 20, `top_p` 0.95). A top 4 holding 0.8 at `top_p` 0.75 now samples only its 2 head tokens.
