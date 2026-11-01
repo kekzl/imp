@@ -70,7 +70,8 @@ struct Diagnostics {
     bool spec_capture_fidelity = false;
     bool spec_capture_probe = false;
     // Log shape + per-candidate algoId/tileId + chosen algo for every
-    // benchmark_and_select_algo call.
+    // benchmark_and_select_algo call; at engine teardown one [lt-route] line per cuBLASLt
+    // (route, caller file:line, m n k batch) with its host call count.
     bool log_gemm_algo = false;
     // MTP pattern logging (predicted, actual, match per step).
     bool mtp_pattern_log = false;

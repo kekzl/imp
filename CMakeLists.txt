@@ -940,6 +940,8 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_admission.cpp
         # KV eviction block selection (kv_cache.evict_keep_ratio, roadmap row 48).
         tests/test_kv_evict_select.cpp
+        # cuBLASLt route counter labels and table (diagnostics.log_gemm_algo, roadmap row 123).
+        tests/test_lt_route_trace.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.
         tests/test_moe_prefill_select.cpp
         # GGUF MoE NVFP4 decode cache: whole layer or nothing.

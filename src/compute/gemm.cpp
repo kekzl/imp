@@ -882,13 +882,8 @@ static bool fp16_acc_route(const Tensor& A, const Tensor& B, const Tensor& C) {
 // gemm()'s caller while gemm_cublaslt_generic runs (lt_route_note site).
 static thread_local const std::source_location* t_gemm_caller = nullptr;
 
-static void note_generic_lt(QType a, bool fp16_acc, cublasComputeType_t compute, int64_t M, int64_t N,
-                            int64_t K) {
-    const char* route = fp16_acc ? "gemm:f16_acc16" : a == QType::F16 ? "gemm:f16_acc32" : "gemm:other";
-    if (compute == CUBLAS_COMPUTE_32I)
-        route = "gemm:int8";
-    lt_route_note(route, (int)M, (int)N, (int)K, 1,
-                  t_gemm_caller ? *t_gemm_caller : std::source_location::current());
+static std::source_location gemm_caller() {
+    return t_gemm_caller ? *t_gemm_caller : std::source_location::current();
 }
 
 static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
@@ -936,7 +931,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
         cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha, B.data,
                                        cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta, C.data,
-                                       cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F, stream);
+                                       cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F, stream, gemm_caller());
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_WARN("gemm: FP16→FP32 failed status=%d M=%ld K=%ld N=%ld", (int)st, (long)M, (long)K,
                          (long)N);
@@ -944,7 +939,9 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         return;
     }
 
-    note_generic_lt(A.qtype, use_fp16_acc, compute_type, M, N, K);
+    lt_route_note(lt_route_gemm_label(use_fp16_acc, A.qtype == QType::F16,
+                                      compute_type == CUBLAS_COMPUTE_32I),
+                  (int)M, (int)N, (int)K, 1, gemm_caller());
     cublasLtHandle_t lt = get_cublaslt_handle();
 
     GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, bucket_m(M), K, N, false};
@@ -1093,18 +1090,13 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
 
 // gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales. Uses the
 // same static workspace as gemm().
-static const char* fp8_route_label(QType a, QType b) {
-    if (b != QType::FP8_E4M3)
-        return "gemm_cublaslt:other";
-    return a == QType::FP8_E4M3 ? "gemm_cublaslt:fp8xfp8" : "gemm_cublaslt:f16xfp8";
-}
-
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, const float* aScale,
                    const float* bScale, cudaStream_t stream, const std::source_location& loc) {
     const int64_t M = A.shape[0];
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
-    lt_route_note(fp8_route_label(A.qtype, B.qtype), (int)M, (int)N, (int)K, 1, loc);
+    lt_route_note(lt_route_fp8_label(A.qtype == QType::FP8_E4M3, B.qtype == QType::FP8_E4M3), (int)M, (int)N,
+                  (int)K, 1, loc);
 
     cublasLtHandle_t lt = get_cublaslt_handle();
 

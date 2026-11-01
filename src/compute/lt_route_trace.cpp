@@ -33,6 +33,20 @@ std::string site_of(const std::source_location& loc) {
 
 }  // namespace
 
+const char* lt_route_gemm_label(bool fp16_acc, bool a_f16, bool int8) {
+    if (int8)
+        return "gemm:int8";
+    if (fp16_acc)
+        return "gemm:f16_acc16";
+    return a_f16 ? "gemm:f16_acc32" : "gemm:other";
+}
+
+const char* lt_route_fp8_label(bool a_fp8, bool b_fp8) {
+    if (!b_fp8)
+        return "gemm_cublaslt:other";
+    return a_fp8 ? "gemm_cublaslt:fp8xfp8" : "gemm_cublaslt:f16xfp8";
+}
+
 void lt_route_note(const char* route, int m, int n, int k, int batch, const std::source_location& loc) {
     if (!process_diag_log_gemm_algo())
         return;
