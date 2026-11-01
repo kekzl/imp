@@ -104,6 +104,12 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         // thinking is an implicit </think> (NVFP4 quants on Qwen3.6 skip the
         // explicit close); flipping the flag lets the next stop finish the request instead of freezing forever with every EOS masked.
         if (is_stop_token(token)) {
+            // A constrained answer must follow the block: force a real </think> (next step, the
+            // end_thinking path) so the constraint gate engages and the server splits content.
+            if (req.wants_constraints() && think_end_id_ >= 0) {
+                req.end_thinking = true;
+                return false;
+            }
             req.in_think_block = false;
             req.think_exit_idx = static_cast<int>(req.output_tokens.size());
             req.content_after_think = false;  // fresh post-think grace window

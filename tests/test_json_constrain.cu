@@ -481,8 +481,9 @@ TEST(PreambleGateTest, LegacyConfigureKeepsBinaryBehavior) {
     EXPECT_TRUE(g.absorb(TOK_TOOL_OPEN, "<tool_call>"));
     EXPECT_TRUE(g.active());  // still in ACTIVE (preamble), not TOOL_BODY
 
-    // `{` still triggers preamble exit (legacy behaviour).
-    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));
+    // After that text a `{` is a draft inside the open block; the close token exits (legacy: OFF).
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, "{"));
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
     EXPECT_FALSE(g.active());
 }
 
@@ -561,6 +562,31 @@ TEST(PreambleGateTest, ThinkingOpenStillAbsorbsUntilClose) {
     EXPECT_TRUE(g.absorb(TOK_TEXT, "reasoning..."));
     EXPECT_TRUE(g.active());
     EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_FALSE(g.active());
+}
+
+TEST(PreambleGateTest, JsonDraftInsideReasoningDoesNotEngageMask) {
+    // Qwen3.8-27B drafts the answer object while thinking ("Wahrscheinlich: {..."): engaging the
+    // mask there completed the JSON inside the block, then EOS, content "" (16 of 18 calls).
+    PreambleGate g;
+    g.configure(TOK_THINK_CLOSE, 8192, /*thinking_open=*/true);
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "Welche Struktur? Wahrscheinlich:"));
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, " {")) << "a draft brace inside reasoning stays in the preamble";
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, "["));
+    EXPECT_TRUE(g.active());
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_FALSE(g.active());
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{")) << "after </think> the brace goes to the FSM";
+}
+
+TEST(PreambleGateTest, ToolModeBraceAfterThinkCloseStillExits) {
+    PreambleGate g;
+    g.configure_with_tools(TOK_THINK_CLOSE, 64, {TOK_TOOL_OPEN}, {TOK_TOOL_CLOSE}, "", "");
+    EXPECT_TRUE(g.absorb(TOK_TEXT, "reasoning"));
+    EXPECT_TRUE(g.absorb(TOK_OPEN_BRACE, "{"));  // draft inside the block
+    EXPECT_TRUE(g.absorb(TOK_THINK_CLOSE, "</think>"));
+    EXPECT_TRUE(g.active());
+    EXPECT_FALSE(g.absorb(TOK_OPEN_BRACE, "{"));
     EXPECT_FALSE(g.active());
 }
 

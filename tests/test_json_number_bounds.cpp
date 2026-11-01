@@ -114,5 +114,17 @@ TEST(JsonNumberBounds, IntegerPrefixMatchesBruteForce) {
     }
 }
 
+TEST(JsonNumberBounds, FractionAtDigitCapMustBeInBounds) {
+    // exclusiveMinimum 0, cap 40 digits: "0." + 38 zeros still reaches 0.0...01; with 39 zeros
+    // nothing can follow and 0 is out of bounds, so the 40th zero is infeasible.
+    const NumberBounds b = bounds("0", true, nullptr, false);
+    const std::string z38 = "0." + std::string(38, '0');
+    EXPECT_TRUE(number_prefix_feasible(b, z38, false, 40));
+    EXPECT_FALSE(number_prefix_feasible(b, z38 + "0", false, 40));
+    EXPECT_TRUE(number_prefix_feasible(b, z38 + "1", false, 40));
+    EXPECT_FALSE(number_prefix_feasible(b, "1" + std::string(39, '0') + ".", false, 40));
+    EXPECT_TRUE(number_prefix_feasible(bounds("0", false, nullptr, false), z38 + "0", false, 40));
+}
+
 }  // namespace
 }  // namespace imp

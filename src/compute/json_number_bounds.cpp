@@ -259,6 +259,10 @@ bool number_prefix_feasible(const NumberBounds& b, std::string_view prefix, bool
     }
     if (dot != std::string_view::npos) {  // [I.F, I.F + 10^-|F|)
         const std::string frac(rest.substr(dot + 1));
+        // At the digit cap no digit follows: the prefix is the value ("min_total": 0.000... under
+        // exclusiveMinimum 0 ran to 40 zeros, then neither a digit nor the close was legal).
+        if (static_cast<int>(digits.size() + frac.size()) >= max_digits)
+            return !frac.empty() && number_in_bounds(b, prefix);
         const std::string scaled = inc_digits(digits + frac);
         const size_t split = scaled.size() - frac.size();
         return magnitude_ok(b, neg, make(false, digits, frac),
