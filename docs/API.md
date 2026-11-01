@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-17
-commit: 00a34025
+verified: 2026-11-01
+commit: 216a779c
 -->
 
 # API
@@ -38,7 +38,7 @@ so a streaming fix lands in all of them at once.
 | `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md). `--idle-unload-seconds N` (default 0 = off) suspends after N s without a request and resumes on the next one, see [Admin](#admin-idle-unload-and-lora) |
 | `POST /v1/requests/{id}/end_thinking` | ✅ | ends a pending or running request's think block; the answer continues on the same KV. `id`: completion / message / response id or the client `X-Request-Id`. See [`API_CONTROL.md`](API_CONTROL.md) |
 | `POST /admin/lora/load`, `/admin/lora/unload` | 🟡 | load or free a PEFT adapter at runtime, see [Admin](#admin-idle-unload-and-lora). Validation is gated in the API contract lanes; the device path runs only in `scripts/accept_2199.sh` (GPU) |
-| `GET /` | ✅ | built-in chat UI. Calls `GET /v1/models`, `/props`, `/info`, `/health`, `/metrics`, `POST /v1/chat/completions`, `/tokenize`, `/v1/requests/{id}/end_thinking`; features: [`QUICKSTART.md`](QUICKSTART.md#4-or-use-the-other-surfaces) |
+| `GET /` | ✅ | built-in chat UI. Calls `GET /v1/models`, `/props`, `/info`, `/health`, `/metrics`, `POST /v1/chat/completions`, `/tokenize`, `/v1/requests/{id}/end_thinking`; features: [`WEB_UI.md`](WEB_UI.md) |
 
 ## Sampling and generation fields
 

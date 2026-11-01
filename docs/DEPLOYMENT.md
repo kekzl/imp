@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-15
-commit: c0211fea
+verified: 2026-11-01
+commit: 216a779c
 -->
 
 # Deployment
@@ -34,6 +34,9 @@ The cache volume is not optional in a service context: without it every restart 
 - Must be writable by the container user; a fresh volume owned by root silently disables the warm weight cache (on by default, `[warm_cache] enabled = false` to opt out) and the library-reserve measurement.
 - Raw quant payloads are never duplicated: near-zero size for raw-served GGUF/NVFP4-prequant, ~model-size for BF16-dense.
 - A stale cache (changed model file) is detected and ignored.
+- Second start on Qwen3-14B-NVFP4: 7.9 s cold, 2.1 s warm.
+- It also keeps the measured library reserve (v0.60.0: 16-107 MiB per model, Qwen3.8-Flash-Next ~1 GiB). Without it the plan starts from a 1536 MiB constant; warmup then re-sizes the KV pool to its own measurement (#2436), so a cold start ends at the same KV blocks (Qwen3.8-27B 4950, Flash-Next 2025). Weight caches and auto `max_batch_size` / `max_seq_len` are still resolved under the constant.
+  [PROV: commit=cc0936bb date=2026-10-31 hw=RTX5090 model=12 SafeTensors models + Qwen3.8-27B/Flash-Next servers quant=NVFP4/FP8/FP16 cuda=13.4.3 path=library-reserve cmd=`imp-cli --bench` cold `--rm` + `tools/analysis/launch_server_bench.sh` without CACHE_VOL n=1 per model note=ghcr 0.60.0 (3900) and this tree (1536) end at the same KV blocks]
 
 ## Verify the image
 

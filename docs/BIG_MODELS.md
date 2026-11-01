@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: daca1665
+verified: 2026-11-01
+commit: 216a779c
 -->
 
 # Models larger than the card
@@ -41,4 +41,19 @@ docker run -d --name imp-server --gpus all -v ~/models:/models -v imp-cache:/hom
   -p 127.0.0.1:8090:8090 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8090
 ```
 
-**Ready** when `docker logs imp-server` prints `Server listening on http://0.0.0.0:8090`. Load times, KV growth, batching and a 27-turn chat: [`QUICKSTART.md`](QUICKSTART.md#qwen38-flash-next).
+**Ready** when `docker logs imp-server` prints `Server listening on http://0.0.0.0:8090`.
+
+- Image `ghcr.io/kekzl/imp:latest`, v0.46.0 or later (the Flash-Next fixes, [`CHANGELOG.md`](../CHANGELOG.md) `[0.46.0]`).
+- The repo has 25 files; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (20 + 3201 MTP/vision tensors imp does not use; the 333-tensor vision tower sits in shard 9 and loads).
+
+## After start
+
+| | measured |
+| --- | --- |
+| KV | starts at 2025 blocks (32400 tokens), grows to 131072 tokens (8192 blocks) on a 110580-token prompt |
+| batch | up to 8 requests per decode step: `max_batch_size: auto → 8` with the host experts pinned (`→ 1` on the host expert tier); the KV pool stays one 131072-token context, shared by the rows |
+| long chat | 27 turns, 28 requests all `200`, up to 27241 tokens of context: decode median 64.2 tok/s, slowest turn 51.8 tok/s |
+
+[PROV: commit=78264274 date=2026-10-01 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4
+       path=host-resident-experts n=1 server start, 28 requests cmd=the README `docker run` with image
+       imp:test-imp-longchat-87847c8b (build of 78264274) note=KV, batch and long-chat rows]
