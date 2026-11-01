@@ -26,6 +26,7 @@
 #include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
+#include "exec/kv_evict.h"
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
@@ -599,6 +600,13 @@ public:
     }
     int streaming_window() const { return streaming_window_; }
 
+    // kv_cache.evict_keep_ratio (executor_kv_evict.cpp): scores tokens [tok_begin, tok_end) of the prompt
+    // just prefilled from 0; false when off or the query statistics do not cover exactly ctx_len rows.
+    [[nodiscard]] bool kv_evict_score_prompt(KVCache* cache, std::span<const int> h_block_table, int ctx_len,
+                                             int tok_begin, int tok_end, std::vector<float>& token_scores,
+                                             cudaStream_t stream);
+    [[nodiscard]] bool kv_evict_enabled() const { return kv_evict_.enabled; }
+
     // LoRA runtime delta (#522): activation-path low-rank deltas, no weight
     // patching, works with every quant tier. nullptr = base model. Caller
     // (Engine) must invalidate decode graphs around swaps: the captured graph
@@ -664,6 +672,13 @@ private:
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
     int streaming_window_ = 0;
+
+    KvEvictScratch kv_evict_;  // kv_cache.evict_keep_ratio (exec/kv_evict.h, executor_kv_evict.cpp)
+    void allocate_kv_evict_scratch_();
+    void kv_evict_prefill_qstats_(int layer, const InferenceState& state, const Tensor& q, int n,
+                                  cudaStream_t stream);
+    void kv_evict_tables_(const InferenceState& st, const int* bt, int sub_n, int n_seq, int kv_bs,
+                          const int*& attn_bt, const int*& attn_ctx, cudaStream_t stream);
 
     class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;

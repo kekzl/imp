@@ -4,6 +4,7 @@
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/engine.h"
+#include "runtime/engine_kv_evict.h"
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
@@ -934,6 +935,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
                 kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
             }
+            if (executor_->kv_evict_enabled())  // kv_cache.evict_keep_ratio
+                kv_evict_after_prefill(*executor_, *kv_manager_, kv_cache_raw_, runtime_config_.kv_cache,
+                                       req->id, offset + chunk_len, mtp_spec_decode_enabled(), pf_stream);
         }
     }
 

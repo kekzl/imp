@@ -191,6 +191,10 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);
     I("kv_cache.max_blocks", cfg.kv_cache.max_blocks);
     I("kv_cache.block_size", cfg.kv_cache.block_size);
+    F("kv_cache.evict_keep_ratio", cfg.kv_cache.evict_keep_ratio);
+    I("kv_cache.evict_sink_tokens", cfg.kv_cache.evict_sink_tokens);
+    I("kv_cache.evict_recent_tokens", cfg.kv_cache.evict_recent_tokens);
+    I("kv_cache.evict_min_tokens", cfg.kv_cache.evict_min_tokens);
 
     // [rope]
     S("rope.scaling", cfg.rope.scaling);
