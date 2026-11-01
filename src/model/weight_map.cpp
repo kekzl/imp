@@ -375,14 +375,14 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++stats.vision;
                 continue;
             }
-            // Gemma-4 unified multimodal: the audio embedder ships under model.embed_audio.*; no
-            // encoder anywhere in imp, a lost modality rather than a lost tensor, counted apart.
-            if (name.starts_with("model.embed_audio.")) {
+            // Gemma-4 multimodal: model.embed_audio.* / model.audio_tower.*; no audio encoder in imp,
+            // a lost modality rather than a lost tensor, counted apart.
+            if (is_wrapper_audio_name(name)) {
                 ++skipped;
                 ++stats.audio;
                 continue;
             }
-            if (name.starts_with("mtp.") || name.starts_with("model.mtp.")) {
+            if (is_wrapper_mtp_name(name)) {
                 ++skipped;
                 ++stats.mtp;
                 continue;
@@ -493,6 +493,13 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             ++assigned;
             continue;
         }
+        // Gemma-4 E-variant PLE tensors, and the unused k/v of KV-shared layers.
+        const Gemma4ETensor g4 = assign_gemma4_e_tensor(gemma4_layout, model, name, t);
+        assigned += static_cast<int>(g4 == Gemma4ETensor::Assigned);
+        skipped += static_cast<int>(g4 == Gemma4ETensor::Unused);
+        stats.kv_shared += static_cast<int>(g4 == Gemma4ETensor::Unused);
+        if (g4 != Gemma4ETensor::Other)
+            continue;
         if (name == "model.norm.weight") {
             model.out_norm_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_norm", name.c_str());
@@ -1395,8 +1402,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // greppable instead of arithmetic. Printed only when something was
     // dropped, so a text-only load stays as quiet as it was.
     if (skipped > 0)
-        IMP_LOG_INFO("  skipped: %d vision, %d audio, %d MTP head, %d unrecognised", stats.vision,
-                     stats.audio, stats.mtp, stats.unrecognised);
+        IMP_LOG_INFO("  skipped: %d vision, %d audio, %d KV-shared k/v, %d MTP head, %d unrecognised",
+                     stats.vision, stats.audio, stats.kv_shared, stats.mtp, stats.unrecognised);
 
     // Audio is the one tensor class with no owner downstream: vision is routed by the vision
     // mapper or already announced by the config loader, mtp.* has its own loader, but
@@ -1404,7 +1411,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // out loud once.
     if (stats.audio > 0)
         IMP_LOG_WARN(
-            "WeightMap: %d audio tensor(s) dropped (model.embed_audio.*). imp has no audio "
+            "WeightMap: %d audio tensor(s) dropped (model.embed_audio.*, model.audio_tower.*). No audio "
             "encoder; this checkpoint runs as a text model and audio input cannot be sent.",
             stats.audio);
 

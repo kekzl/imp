@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-01
+commit: bf83b5bd
 -->
 
 # Supported models
@@ -37,6 +37,7 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [Qwen3-32B](https://huggingface.co/unsloth/Qwen3-32B-GGUF) | Q4_K_M | 19 GB | - | GGUF |
 | [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 157 | SafeTensors (nvidia), fused projections. Phi-4 is an alias onto the LLaMA loader path (`src/model/arch_registry.cpp:16 {GGUF, "phi3", ModelArch::LLAMA}`), not a separate loader; no dedicated gate (#1680) |
 | [Gemma-4-12B](https://huggingface.co/AxionML/Gemma-4-12B-NVFP4) | NVFP4 | 11 GB | - | SafeTensors (Modelopt) - **dense** Gemma-4, `gemma4_unified` multimodal wrapper (nested `text_config`, `model.language_model.*` prefix, vision/audio embedders skipped). This export carries the embedders only: 0 `model.vision_tower.*` and no audio tower, so it serves as text even where a fuller release would see or hear ([LIMITATIONS](LIMITATIONS.md#model-specific-blockers)). FFN in NVFP4, attention BF16. |
+| [Gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | bf16 | 8.65 GiB weights, 11.3 GiB device total in the `Gemma4E4BRef` test (VRAM audit at shutdown, 2026-11-01; PLE table 5.25 GiB in host RAM) | - | SafeTensors - dense Gemma-4 E-variant: per-layer inputs (PLE, `hidden_size_per_layer_input` 256) and KV sharing (layers 24..41 read layer 22 / 23, no KV blocks of their own). Text only; audio and vision towers skipped. Greedy equals the HF fp32 reference (9 of 9 and 20 of 20 tokens, `Gemma4E4BRef`). |
 | [Llama-3.2-3B-Instruct](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF) | Q8_0 | 3.2 GB | 306 | GGUF |
 | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | bf16 | 4.7 GB | - | SafeTensors - `LlamaForCausalLM`. `ppl_corpus_45k` 10.4937 vs HF BF16 10.4138, token ids identical to HF (digit-triple pre-split). Reasoning split by `<think>` (id 8, added token). |
 | [Granite-4.2-8B](https://huggingface.co/ibm-granite/granite-4.2-8b) | bf16 / NVFP4 (imp-quantize) | 16 / 5.3 GB | - | SafeTensors - `GraniteForCausalLM` (#2412): `attention_multiplier` 1/128 replaces 1/sqrt(head_dim); embedding and residual multipliers fold into one embedding scale. `ppl_corpus_45k` 25.36 BF16, 27.17 NVFP4 (GENERIC route before: 1380.74). vs HF fp32: top-1 32/32 greedy positions, max abs logit diff 0.41. `logits_scaling` != 1 (Granite 3.x) is refused. |

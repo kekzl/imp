@@ -1078,6 +1078,9 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
         {&L.ffn_gate_inp_scale, "ffn_gate_inp_scale"},
         {&L.layer_out_scale, "layer_out_scale"},
         {&L.expert_down_scale, "expert_down_scale"},
+        {&L.pli_gate, "pli_gate"},
+        {&L.pli_proj, "pli_proj"},
+        {&L.pli_norm, "pli_norm"},
     };
     for (const auto& [norm, name] : post_norms) {
         if (norm->data && !norm->on_device) {
@@ -2078,12 +2081,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         }
     }
 
-    // --- Qwen4Exp final hyper-connection mixer (BF16, no offset: the kernel applies 1 + W) ---
-    for (auto* t : {&hc_mixer_norm_, &hc_mixer_down_, &hc_mixer_up_}) {
+    // Gemma-4 E-variant PLE table (E4B 262144 x 10752, 5.25 GiB FP16): read 21 KiB per token, so
+    // mapped pinned host memory (no-op without the table); the loop below uploads it on refusal.
+    (void)place_embedding_on_host(pli_table_, ctx.host_pinned_allocs);
+    // --- Qwen4Exp final hyper-connection mixer (BF16, no offset: the kernel applies 1 + W) and the
+    // Gemma-4 E-variant per-layer input tensors (plain w norm) ---
+    for (auto* t :
+         {&hc_mixer_norm_, &hc_mixer_down_, &hc_mixer_up_, &pli_table_, &pli_model_proj_, &pli_proj_norm_}) {
         if (t->data && !t->on_device) {
             if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
-                IMP_LOG_ERROR("Failed to upload hyper_connection_mixer tensor");
+                IMP_LOG_ERROR("Failed to upload hyper_connection_mixer / per-layer input tensor");
                 return false;
             }
         }

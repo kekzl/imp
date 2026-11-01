@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-01
+commit: bf83b5bd
 -->
 
 # Limitations
@@ -52,6 +52,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | One LoRA adapter at a time: engine-global (executor pointer, decode graphs) | LoRA serving | batching worker serializes by adapter (a request naming a different one waits for in-flight requests, then switches, never batched with them); prefix cache is keyed by adapter, so a shared system prompt prefills once per adapter; C API `imp_lora_set` has no such guard, swap between requests only | AUDIT_ARCH_2026 E-1 |
+| `use_double_wide_mlp` (2x d_ff on the KV-shared layers) is refused at load; the 5.25 GiB FP16 PLE table sits in mapped pinned host RAM (VRAM if pinning fails); the PLE and KV-share workspace is outside the memory plan; the e2e gate `Gemma4E4BRef` needs `IMP_TEST_MODEL_GEMMA4_E4B` and `IMP_TEST_GEMMA4_E4B_REF`, else `test-e2e` skips it | Gemma-4 E-variants (E4B) | none | - |
 | GGUF batched decode rows read the 4-bit overlay with 4-bit activations | batched decode (2-32 rows) on a GGUF source | small-M NVFP4 GEMM runs on the NVFP4 decode overlay (`smallm_weight_`, `src/exec/executor_gemm_smallm.cpp`); single-stream decode reads the same overlay with FP16 activations, prompt rows keep the full-precision dequant route; batched output not byte-identical to single-stream at temperature 0; numbers in [`PERF.md`](PERF.md) "Serving KPIs" | #1897, #1766 |
 | `server.green_contexts=true` gives no green contexts on this chip | sm_120 decode scheduling | `cudaDevResourceGenerateDesc` fails for the decode partition; fallback is priority streams with distinct memSyncDomains, `has_green_contexts()` stays false; dynamic SM reconfiguration in `step_schedule()` is gated on the flag and never runs [PROV: date=2026-08-22 hw=RTX5090, 170 SMs, 80/20 split, 99/1 retry] | reconfigure race #1656 is real code, unreachable on sm_120 |
 | Remote `image_url` fetching is vulnerable to DNS rebinding when on (off by default) | `--allow-remote-images` | check and connection are two separate resolutions, so a name whose records change in between reaches a private address; fix needs a connect-time callback httplib does not expose; treat the flag as "this server's network is trusted" | - |

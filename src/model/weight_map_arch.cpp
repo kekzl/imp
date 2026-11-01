@@ -1,6 +1,7 @@
 #include "model/weight_map_arch.h"
 
 #include "model/lfm2_names.h"
+#include "model/model.h"
 #include "model/model_limits.h"
 
 #include <string_view>
@@ -53,6 +54,64 @@ bool assign_mla_tensor(TransformerLayer& layer, const std::string& proj, const T
     else
         return false;
     return true;
+}
+
+namespace {
+
+Tensor* gemma4_pli_model_slot(Model& model, const std::string& name) {
+    if (name == "model.embed_tokens_per_layer.weight")
+        return &model.pli_table_;
+    if (name == "model.per_layer_model_projection.weight")
+        return &model.pli_model_proj_;
+    if (name == "model.per_layer_projection_norm.weight")
+        return &model.pli_proj_norm_;
+    return nullptr;
+}
+
+// rest = the name after "model.layers.<idx>."
+Gemma4ETensor gemma4_e_layer_tensor(Model& model, int idx, std::string_view rest, const Tensor& t) {
+    if (idx < 0 || idx >= kMaxModelLayers)
+        return Gemma4ETensor::Other;
+    Tensor* slot = nullptr;
+    if (rest == "per_layer_input_gate.weight" || rest == "per_layer_projection.weight" ||
+        rest == "post_per_layer_input_norm.weight") {
+        if (idx >= static_cast<int>(model.layers_.size()))
+            model.layers_.resize(static_cast<size_t>(idx) + 1);
+        TransformerLayer& L = model.layers_[static_cast<size_t>(idx)];
+        slot = rest.starts_with("per_layer_input_gate")   ? &L.pli_gate
+               : rest.starts_with("per_layer_projection") ? &L.pli_proj
+                                                          : &L.pli_norm;
+        *slot = t;
+        return Gemma4ETensor::Assigned;
+    }
+    const bool kv_tensor = rest.starts_with("self_attn.k_proj.") || rest.starts_with("self_attn.v_proj.") ||
+                           rest.starts_with("self_attn.k_norm.");
+    return kv_tensor && model.config_.layer_kv_shared(idx) ? Gemma4ETensor::Unused : Gemma4ETensor::Other;
+}
+
+}  // namespace
+
+Gemma4ETensor assign_gemma4_e_tensor(bool gemma4_layout, Model& model, const std::string& name,
+                                     const Tensor& t) {
+    if (!gemma4_layout)
+        return Gemma4ETensor::Other;
+    if (Tensor* slot = gemma4_pli_model_slot(model, name)) {
+        *slot = t;
+        return Gemma4ETensor::Assigned;
+    }
+    constexpr std::string_view kLayers = "model.layers.";
+    if (!name.starts_with(kLayers))
+        return Gemma4ETensor::Other;
+    const size_t dot = name.find('.', kLayers.size());
+    if (dot == std::string::npos || dot == kLayers.size())
+        return Gemma4ETensor::Other;
+    int idx = 0;
+    for (size_t i = kLayers.size(); i < dot; ++i) {
+        if (name[i] < '0' || name[i] > '9' || idx >= kMaxModelLayers)
+            return Gemma4ETensor::Other;
+        idx = (idx * 10) + (name[i] - '0');
+    }
+    return gemma4_e_layer_tensor(model, idx, std::string_view(name).substr(dot + 1), t);
 }
 
 }  // namespace imp

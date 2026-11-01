@@ -722,7 +722,10 @@ size_t kv_block_bytes_layer_mean(const ModelConfig& mcfg, QType kv_dtype, int bl
         kv_dtype == QType::INT8 || kv_dtype == QType::INT4)
         return max_shape;
     size_t sum = 0;
+    int owners = 0;
     for (int l = 0; l < n; l++) {
+        if (mcfg.layer_kv_shared(l))
+            continue;  // Gemma-4 KV-shared layer: no pool region
         int nkv = mcfg.n_kv_heads;
         if (l < static_cast<int>(mcfg.n_kv_heads_per_layer.size())) {
             if (mcfg.n_kv_heads_per_layer[l] == 0)
@@ -732,8 +735,11 @@ size_t kv_block_bytes_layer_mean(const ModelConfig& mcfg, QType kv_dtype, int bl
         }
         const int hd = mcfg.head_dim_per_layer[l] > 0 ? mcfg.head_dim_per_layer[l] : head_dim;
         sum += kv_block_bytes_per_layer(kv_dtype, block_size, nkv, hd);
+        ++owners;
     }
-    return std::min(max_shape, (sum + n - 1) / n);
+    if (owners == 0)
+        return max_shape;
+    return std::min(max_shape, (sum + owners - 1) / owners);
 }
 
 const char* sparse_minmax_refusal(QType kv_dtype, bool mla_absorb, bool token_recycling,
