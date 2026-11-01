@@ -24,6 +24,8 @@ namespace imp {
 struct VideoPlaceholderLayout {
     int tokens_per_group = 0;                     // merged rows * cols of one frame pair
     std::vector<std::vector<int32_t>> stamp_ids;  // one per frame pair; size() = group count
+    // Pad count per frame pair; empty = tokens_per_group each. EVS pruning: {keep, 0, ..., 0}.
+    std::vector<int> group_tokens;
 };
 
 // Replaces the k-th video_pad with videos[k]'s layout. The template's own vision_start/end around

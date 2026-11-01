@@ -236,6 +236,7 @@ bool Engine::init_features() {
             if (qwen_image_pad_id_ < 0)
                 IMP_LOG_WARN("vision: no %s in the tokenizer, images unavailable", pad.c_str());
             qwen_video_pad_id_ = model_->tokenizer()->find_token(std::string(layout.video_pad));
+            qwen_vision_end_id_ = model_->tokenizer()->find_token(std::string(layout.end));
         }
     }
 

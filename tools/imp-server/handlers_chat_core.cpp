@@ -306,7 +306,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             return fail(ctx.params.image_error);
         // Salts the prefix cache so a hit needs the same pictures and frames, not just the same
         // token ids (every image token shares one id). Folded in content order.
-        ctx.snap.vision_content_hash = vision_parts_hash(ctx.params);
+        ctx.snap.vision_content_hash = vision_parts_hash(ctx.params, state.ctx->engine.get());
         if (state.ctx->engine->has_qwen_vision()) {
             // Dynamic resolution: patchify now (CPU only) so each placeholder expands to its own
             // picture's (or frame pair's) token count before the prompt is tokenized.
@@ -612,9 +612,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     // joined to this HTTP request (#1582). With n>1 several engine requests
     // share one completion id, which is what the response says too.
     req->trace_id = ctx.req_id;
-    req->images = ctx.snap.vision_images;       // per-request vision (empty for text)
-    req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
-    req->vision_content_hash = ctx.snap.vision_content_hash;
+    bind_vision_parts(*req, ctx.snap);  // per-request vision (empty for text)
     req->lora_id = ctx.snap.lora_id;
     req->cvec_id = ctx.snap.cvec_id;
     req->cvec_scale = ctx.snap.cvec_id > 0 ? ctx.params.cvec_scale : 0.0f;
