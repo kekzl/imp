@@ -71,8 +71,11 @@ bool Engine::init_kv_cache() {
     int n_attn_layers = 0;
     std::vector<int> kv_layer_map(mcfg.n_layers, -1);
     for (int i = 0; i < mcfg.n_layers; i++) {
-        if (model_->layer(i).wq.data != nullptr && model_->layer(i).gdn_gate.data == nullptr)
-            kv_layer_map[i] = n_attn_layers++;
+        if (model_->layer(i).wq.data == nullptr || model_->layer(i).gdn_gate.data != nullptr)
+            continue;
+        // Gemma-4 KV sharing: the shared layer reads its source's slot and owns none.
+        const int src = mcfg.kv_source(i);
+        kv_layer_map[i] = (src >= 0 && src < i) ? kv_layer_map[src] : n_attn_layers++;
     }
     if (n_attn_layers == 0) {
         n_attn_layers = mcfg.n_layers;
@@ -101,8 +104,8 @@ bool Engine::init_kv_cache() {
     if (swa_mode != SwaSizingMode::Off) {
         const auto& prof = model_->profile();
         for (int i = 0; i < mcfg.n_layers; i++) {
-            if (kv_layer_map[i] < 0)
-                continue;  // non-attention layer
+            if (kv_layer_map[i] < 0 || mcfg.layer_kv_shared(i))
+                continue;  // non-attention or KV-shared layer (no slot of its own)
             int w = layer_swa_window(mcfg, prof, i);
             if (w > 0) {
                 n_swa_layers++;
@@ -587,8 +590,8 @@ bool Engine::init_kv_cache() {
             for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
                 int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size()) ? mcfg.n_kv_heads_per_layer[l]
                                                                            : mcfg.n_kv_heads;
-                if (kv_layer_map[l] < 0)
-                    continue;  // non-attention layer (SSM/GDN)
+                if (kv_layer_map[l] < 0 || mcfg.layer_kv_shared(l))
+                    continue;  // non-attention (SSM/GDN) or KV-shared layer
                 if (attn_nkv <= 0)
                     attn_nkv = mcfg.n_kv_heads;
                 per_layer_nkv[k] = attn_nkv;

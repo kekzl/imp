@@ -22,6 +22,7 @@
 #include "exec/expert_cache_device.h"
 #include "compute/qsa_indexer.h"
 #include "exec/ffn_graph_cache.h"
+#include "exec/gemma_pli_state.h"
 #include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
@@ -780,6 +781,7 @@ private:
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
     CudaEvent ple_h2d_done_;
+    GemmaPliState gpli_;  // Gemma-4 E-variant PLE scratch + KV-share rows (exec/gemma_pli_state.h)
     // Qwen4Exp QSA indexer (executor_qsa.cpp): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
     // selection lists and a scratch paged K/V for qsa_rows_ query rows.
@@ -1394,6 +1396,11 @@ private:
     // the layer's attention hyper-connection. No-op family without model_->ngram_table().
     [[nodiscard]] bool ple_alloc_(int max_tokens);
     void ple_free_();
+    // Gemma-4 E-variant (executor_gemma_pli.cpp), no-ops without PLE / KV sharing.
+    [[nodiscard]] bool gemma_pli_alloc_(int max_tokens);
+    void gemma_pli_free_();
+    void pli_inputs_run_(const InferenceState& state, int n, cudaStream_t stream);
+    void pli_layer_run_(int layer, int n, cudaStream_t stream);
     // Qwen4Exp QSA indexer (executor_qsa.cpp). qsa_decode_ replaces the dense decode kernel
     // for one sequence (false: caller runs dense); qsa_prefill_ recomputes the rows whose
     // selection is no longer all-true after the dense chunk attention.

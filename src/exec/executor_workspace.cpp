@@ -438,6 +438,10 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
         IMP_LOG_ERROR("PLE workspace allocation failed, cannot run inference");
         return false;
     }
+    if (!gemma_pli_alloc_(max_tokens_)) {
+        IMP_LOG_ERROR("Gemma 4 per-layer input / KV-share workspace allocation failed, cannot run inference");
+        return false;
+    }
     if (!qsa_alloc_(max_tokens_)) {
         IMP_LOG_ERROR("QSA indexer workspace allocation failed, cannot run inference");
         return false;

@@ -61,6 +61,11 @@ public:
     const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }
     const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
     const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
+    // Gemma-4 E-variant per-layer inputs: table [pli_vocab, n_layers*pli_dim] (mapped host FP16
+    // when pinning succeeds), model projection [n_layers*pli_dim, d], projection norm [pli_dim].
+    const Tensor& pli_table() const { return pli_table_; }
+    const Tensor& pli_model_proj() const { return pli_model_proj_; }
+    const Tensor& pli_proj_norm() const { return pli_proj_norm_; }
     const NGramTable* ngram_table() const { return ngram_table_.get(); }  // Qwen4Exp PLE, else null
     // Qwen4Exp PLE conv rows of one sequence: (kernel-1)*ngram_size rows x hc*d FP16. 0 without PLE.
     size_t ple_state_bytes() const;
@@ -123,6 +128,7 @@ public:
     // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model
     // before out_norm_ (hc_norm [hc*d], down [lowrank, hc*d], up [hc*d, lowrank]; no inject).
     Tensor hc_mixer_norm_, hc_mixer_down_, hc_mixer_up_;
+    Tensor pli_table_, pli_model_proj_, pli_proj_norm_;  // Gemma-4 E-variant PLE (pli_table() above)
     // Encoder embedder extras (#836, nomic-bert): post-embedding LayerNorm
     // (weight+bias) and the token-type embedding table [n_types, d_model]
     // (row 0 is added to every text token's embedding).

@@ -377,12 +377,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
             // Gemma-4 audio tower + embedder: read by load_gemma4_audio_from_checkpoint when the
             // checkpoint carries the tower, otherwise a lost modality, counted apart.
-            if (name.starts_with("model.embed_audio.") || name.starts_with("model.audio_tower.")) {
+            if (is_wrapper_audio_name(name)) {
                 ++skipped;
                 ++stats.audio;
                 continue;
             }
-            if (name.starts_with("mtp.") || name.starts_with("model.mtp.")) {
+            if (is_wrapper_mtp_name(name)) {
                 ++skipped;
                 ++stats.mtp;
                 continue;
@@ -493,6 +493,13 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             ++assigned;
             continue;
         }
+        // Gemma-4 E-variant PLE tensors, and the unused k/v of KV-shared layers.
+        const Gemma4ETensor g4 = assign_gemma4_e_tensor(gemma4_layout, model, name, t);
+        assigned += static_cast<int>(g4 == Gemma4ETensor::Assigned);
+        skipped += static_cast<int>(g4 == Gemma4ETensor::Unused);
+        stats.kv_shared += static_cast<int>(g4 == Gemma4ETensor::Unused);
+        if (g4 != Gemma4ETensor::Other)
+            continue;
         if (name == "model.norm.weight") {
             model.out_norm_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_norm", name.c_str());
@@ -1395,8 +1402,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // greppable instead of arithmetic. Printed only when something was
     // dropped, so a text-only load stays as quiet as it was.
     if (skipped > 0)
-        IMP_LOG_INFO("  skipped: %d vision, %d audio, %d MTP head, %d unrecognised", stats.vision,
-                     stats.audio, stats.mtp, stats.unrecognised);
+        IMP_LOG_INFO("  skipped: %d vision, %d audio, %d KV-shared k/v, %d MTP head, %d unrecognised",
+                     stats.vision, stats.audio, stats.kv_shared, stats.mtp, stats.unrecognised);
 
     // Audio tensors without a loaded tower (Gemma-4-12B ships the embedder alone) are a whole
     // lost modality, said out loud once.
