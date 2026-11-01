@@ -240,6 +240,13 @@ int exec_ssm_z_cols(const Model& model);
 size_t exec_gdn_beta_offset(int64_t rows, int n_heads, size_t es);
 size_t exec_gdn_dt_bytes(int64_t max_rows, int n_heads, size_t es);
 
+// ssm_proj_buf_ bytes for `rows` (configure_ssm_workspace carve; FP32 elements on GDN/KDA models).
+size_t exec_ssm_proj_bytes(int64_t rows, int ssm_proj_dim, size_t elem_bytes);
+// Byte offset of conv_f32 ([rows, conv_channels] FP32) in ssm_proj_buf_. GDN at rows == 1: past the
+// FP16 input row (decode conv reads it in place). KDA always 0: its proj row has no z|dt tail, the
+// GDN offset overran ssm_proj_buf_ by 3840 B on Ling-3.0 (6144 conv channels, proj dim 8208).
+size_t exec_ssm_conv_f32_offset(int64_t rows, int conv_channels, size_t es, bool kda);
+
 // Width of the attention output gate, 0 when the model has no gate. Both SSM z
 // sizings call this so the buffer and its charge cannot drift apart.
 int exec_attn_gate_cols(const Model& model);

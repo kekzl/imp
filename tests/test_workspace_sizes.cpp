@@ -635,3 +635,28 @@ TEST(ExecGdnDtBytes, OldSizeOverranAtTheTranscriptTailChunk) {
     EXPECT_EQ(old_bytes(1), 256u);
     EXPECT_EQ(exec_gdn_dt_bytes(1, 32, 2), 512u);
 }
+
+// conv_f32 ([rows, conv_channels] FP32) must end inside ssm_proj_buf_ at every row count, the
+// carve being sized at the current n. Ling-3.0 KDA with the GDN n == 1 offset ended 3840 B past
+// it, inside ssm_xBC_buf_, and the f projection written there clobbered 960 V columns per decode.
+TEST(ExecSsmConvF32, EndsInsideTheProjBufferForGdnAndKda) {
+    struct Geo {
+        const char* name;
+        int inner, conv_channels, dt_rank;
+        bool kda;
+    };
+    const Geo geos[] = {{"Qwen3.5 GDN", 4096, 8192, 32, false}, {"Ling-3.0 KDA", 2048, 6144, 16, true}};
+    for (const auto& g : geos) {
+        const int proj_dim = g.inner + g.conv_channels + g.dt_rank;  // ModelConfig::ssm_proj_dim
+        for (int64_t rows : {1, 2, 16, 28}) {
+            const size_t end = exec_ssm_conv_f32_offset(rows, g.conv_channels, 2, g.kda) +
+                               (static_cast<size_t>(rows) * g.conv_channels * sizeof(float));
+            EXPECT_LE(end, exec_ssm_proj_bytes(rows, proj_dim, sizeof(float))) << g.name << " rows=" << rows;
+        }
+    }
+    // The overrun the KDA route avoids: the GDN offset on the Ling geometry.
+    EXPECT_EQ(exec_ssm_conv_f32_offset(1, 6144, 2, false) + (6144 * sizeof(float)) -
+                  exec_ssm_proj_bytes(1, 2048 + 6144 + 16, sizeof(float)),
+              3840u);
+    EXPECT_EQ(exec_ssm_conv_f32_offset(1, 6144, 2, true), 0u);
+}

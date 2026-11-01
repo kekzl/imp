@@ -395,11 +395,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     // conv_f32 destination for FP32 pipeline (conv+SiLU output). At n == 1 it
     // sits past the FP16 input row, so the decode conv reads proj in place
     // (no xBC copy); every tail scratch below is relative to conv_f32.
-    float* conv_f32 = static_cast<float*>(ssm_proj_buf_.data);
-    if (n == 1)
-        conv_f32 = reinterpret_cast<float*>(static_cast<char*>(ssm_proj_buf_.data) +
-                                            align256(static_cast<size_t>(conv_channels) *
-                                                     dtype_size(compute_dtype_)));
+    float* conv_f32 = reinterpret_cast<float*>(
+        static_cast<char*>(ssm_proj_buf_.data) +
+        exec_ssm_conv_f32_offset(n, conv_channels, dtype_size(compute_dtype_), /*kda=*/false));
 
     if (conv_st) {
         if (state.ragged_prefill()) {

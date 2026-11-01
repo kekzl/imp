@@ -451,7 +451,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Attention, GDN, or SSM (mutually exclusive per layer).
         // GDN check first: GDN layers have ssm_in (from attn_qkv) but use delta rule.
         if (layer_has_gdn(i)) {
-            run_gdn(i, state, stream);
+            run_recurrent_mixer_(i, state, stream);
         } else if (layer_has_ssm(i)) {
             run_ssm_layer_(i, state, stream);
         } else if (layer_has_attention(i)) {

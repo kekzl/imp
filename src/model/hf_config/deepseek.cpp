@@ -63,11 +63,14 @@ void parse_deepseek_router(const JValue& eff, ModelConfig& cfg) {
     const JValue* ntp = jobj_find(eff, "norm_topk_prob");
     if (ntp && ntp->type == JType::NUMBER)
         cfg.expert_weights_norm = (ntp->num_val != 0.0);
-    int n_group = 1;
+    int n_group = 1, topk_group = 0;
     jobj_opt_int(eff, "n_group", n_group);
-    if (n_group > 1)
-        IMP_LOG_WARN("  DeepSeek router n_group=%d: grouped top-k is not modelled (all experts compete)",
-                     n_group);
+    jobj_opt_int(eff, "topk_group", topk_group);
+    if (n_group > 1 && topk_group > 0 && topk_group < n_group) {
+        cfg.moe_n_group = n_group;
+        cfg.moe_topk_group = topk_group;
+        IMP_LOG_INFO("  MoE router: group-limited top-k, %d of %d groups", topk_group, n_group);
+    }
 }
 
 }  // namespace

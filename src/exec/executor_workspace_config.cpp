@@ -107,8 +107,7 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     // Non-GDN SSM layers only need FP16 (es bytes/elem).
     size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
     ssm_proj_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ssm_in_dim,
-                                          align256(static_cast<size_t>(max_tokens) * ssm_in_dim *
-                                                   proj_elem_size));
+                                          exec_ssm_proj_bytes(max_tokens, ssm_in_dim, proj_elem_size));
     ssm_xBC_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, conv_channels,
                                          align256(static_cast<size_t>(max_tokens) * conv_channels * es));
     ssm_y_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
