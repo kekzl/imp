@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Block drafter priced per verify: `speculative.dspark_min_emit` (1.8) replaces the n-gram 15 % give-up that stopped DSpark prose after 12 verifies. Qwen3-8B-NVFP4 prose 287-290 -> 336-353 tok/s (nospec 287-289), code / list unchanged. z-lab DFlash checkpoints load (b16 measured below DSpark, roadmap row 49).
 - Kimi-Linear (`kimi_linear`, roadmap row 51): Firworks NVFP4 checkpoint, KDA softplus decay gate, rank-128 LoRA f and output gate, MLA NoPE, q/k/v as three NVFP4 GEMMs. RTX 5090: experts host-resident by default, pp512 2000 / tg128 316 tok/s; `moe.force_host_experts=8` pp512 4868 / tg128 340. vLLM 0.31.0 runs out of memory on the same checkpoint (#2984).
 - `imp-quantize --gptaq` (GPTAQ, arXiv 2504.02692, opt-in): BF16 and AWQ-export inputs paired on the same tokens (`calibration.pair_dump` / `pair_read`). No gain: Qwen3-1.7B NVFP4 PPL +0.94 % to +34.11 % vs AWQ over 8 arms; GPTQ on the export's H, fixed for a double AWQ scaling, +0.94 % (roadmap row 101).
 - Sequential GPTAQ (opt-in): `calibration.pair_layer_begin/end` and `--gptaq F0,F1,...` take each layer group's pairs from an export whose earlier layers are already GPTAQ. No gain: best arm Qwen3-0.6B -2.91 %, Qwen3-1.7B -0.55 % NVFP4 PPL vs AWQ, short of the 2 % bar (roadmap row 101).

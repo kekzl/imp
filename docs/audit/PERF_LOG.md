@@ -4,6 +4,26 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-01 · Block drafter priced per verify; z-lab DFlash b16 below DSpark (ROADMAP row 49)
+
+Protocol: `tools/analysis/block_drafter_ab.sh` (2026-10-19 protocol: Qwen3-8B-NVFP4-cortecs, `--max-batch 1`, greedy 256 tokens, `ignore_eos`, /no_think, one server start per arm and round, warmup, prose / code / list x 2), `build-dev` imp-server in `imp:toolchain`, 3 rounds, arm order reversed every round; tok/verify from the `/metrics` delta per request.
+
+| tok/s, min-max of 6 (tok/verify) | prose | code | list |
+|---|---|---|---|
+| nospec | 287.32-288.61 | 281.32-287.32 | 286.35-287.96 |
+| DSpark, n-gram 15 % rule (`dspark_min_emit=0`, before) | 287.00-289.92 (2.00) | 558.95-593.97 (4.18) | 377.58-390.24 (2.63) |
+| DSpark, `dspark_min_emit=1.8` (default) | 335.52-352.62 (2.34) | 544.68-615.38 (4.18) | 375.92-392.64 (2.63) |
+| DFlash b16 (z-lab/Qwen3-8B-DFlash-b16), 1.8 | 280.70-293.24 (2.20) | 475.84-496.12 (3.75) | 248.06-255.74 (1.74) |
+
+- Prose parity was the economics, not the drafter: the n-gram rule (accepted < 15 % of drafted after 8 verifies, final) stopped DSpark after 12 verifies (24 of 256 tokens drafted); priced per verify it runs 109 verifies at 2.34 tok/verify: min 335.52 vs nospec max 288.61 = +16.3 %.
+- Threshold, 1 round: `dspark_min_emit` 2.0 prose 300.12 tok/s (60 verifies, gives up half way), 1.8 348.30, 0 287.32; code and list unchanged.
+- DFlash b16 (MT-Bench tau 4.24 in its paper) loses on every workload: 2.20 / 3.75 / 1.74 vs 2.34 / 4.18 / 2.63 tok/verify, and its 16-row verify costs more; `dspark_min_emit` 2.3 list 272.05, 0 list 282.56. Feature tap at id - 1 / id + 1: DFlash prose 2.12 / 2.12, DSpark code 3.75 / 3.59 vs 4.18 at id.
+- DFlash fix on the way: Qwen3-8B-NVFP4 residual features reach 7096; the b16 fc (absmax 6.56 vs DSpark 1.33) overflowed an FP16 fc output (48 of 65536 inf, every draft NaN, argmax INT_MAX into the target embedding). fc now writes FP32 (`DFlashDrafterTest`, red under an FP16-output mutant).
+- Refuted beside it, 1 round: `dspark_min_prob` 0.3 (verify cut at the first draft below 0.3 drafter probability) prose 351.17 vs 348.30, code 595.35 vs 592.59: neutral, not shipped; DFlash capped at 8 drafts prose 272.92.
+- Gates: `MtpGreedyIdentityTest.DSpark*` margins 0.686 / 0.394 nats (unchanged), `DFlash*` same margins (1995 drafted, 248 accepted); degen_suite `--quick` with DSpark 52 checks 0 FAIL (8855 drafted, 6933 accepted), stderr clean.
+
+---
+
 ## 2026-11-01 · KV pool growth on the run-13 shape: ~40 ms per growth, doubling refuted as a default
 
 Protocol: Qwen3-14B-NVFP4 server, `max_batch_size 32`, `max_seq_len 4096`, `kv_cache.max_blocks 8192`, 32 x 1000-token prompts x 300 tokens, 3 waves (`ttft_client.py`), main e654c654 + growth timing in the `grew` log line; 3 alternating pairs.
