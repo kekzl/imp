@@ -38,6 +38,11 @@ struct Options {
     std::string keep_gdn_proj;
     // Kept GDN projections written as MXFP8 (E4M3 + E8M0 per 32, #2475) instead of the source dtype.
     bool gdn_proj_mxfp8 = false;
+    // Mixed NVFP4 + FP8 (fp8_keep.h): --fp8-keep unit list, --fp8-budget percent over the pure NVFP4
+    // export (< 0 = off), ranked by --fp8-score (IMPHES01 file = output-loss proxy, else a rank file).
+    std::string fp8_keep;
+    double fp8_budget = -1.0;
+    std::string fp8_score;
     bool dry_run = false;
     OutputFormat format = OutputFormat::Modelopt;
 };

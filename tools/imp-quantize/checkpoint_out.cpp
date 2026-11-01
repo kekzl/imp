@@ -458,19 +458,23 @@ bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type
 std::expected<void, std::string> write_modelopt_quant_config(const std::string& out_dir,
                                                              const std::vector<std::string>& excluded,
                                                              bool calibrated, bool kv_fp8,
-                                                             const std::string& recipe) {
+                                                             const std::string& recipe,
+                                                             const std::string& quantized_layers) {
     std::ofstream f(fs::path(out_dir) / "hf_quant_config.json");
     if (!f)
         return std::unexpected("cannot write hf_quant_config.json");
+    const bool mixed = !quantized_layers.empty();
     f << "{\n"
       << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"2\", \"calibration\": \""
       << (calibrated ? "awq" : "none") << "\",\n"
       << "    \"recipe\": " << recipe << " },\n"
       << "  \"quantization\": {\n"
-      << "    \"quant_algo\": \"NVFP4\",\n"
+      << "    \"quant_algo\": \"" << (mixed ? "MIXED_PRECISION" : "NVFP4") << "\",\n"
       << "    \"kv_cache_quant_algo\": " << (kv_fp8 ? "\"FP8\"" : "null") << ",\n"
-      << "    \"group_size\": 16,\n"
-      << "    \"exclude_modules\": [";
+      << "    \"group_size\": 16,\n";
+    if (mixed)
+        f << "    \"quantized_layers\": " << quantized_layers << ",\n";
+    f << "    \"exclude_modules\": [";
     for (size_t i = 0; i < excluded.size(); i++)
         f << (i ? ", " : "") << '"' << json_escape(excluded[i]) << '"';
     f << "]\n  }\n}\n";

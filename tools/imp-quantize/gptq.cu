@@ -309,6 +309,24 @@ std::expected<void, std::string> upper_cholesky_of_inverse(float* d_a, int64_t K
     return upper_cholesky_of_inverse_dev(d_a, K);
 }
 
+std::expected<double, std::string> output_loss(const std::vector<float>& e, const std::vector<float>& H,
+                                               int64_t N, int64_t K) {
+    const size_t nk = static_cast<size_t>(N) * static_cast<size_t>(K), kk = static_cast<size_t>(K) * K;
+    if (e.size() != nk || H.size() != kk)
+        return std::unexpected("output_loss: error is not N x K or H is not K x K");
+    Dev<float> de(nk), dh(kk), deh(nk), dd(1);
+    if (!de.p || !dh.p || !deh.p || !dd.p)
+        return std::unexpected("cudaMalloc failed for N = " + std::to_string(N) +
+                               ", K = " + std::to_string(K));
+    if (cudaMemcpy(de.p, e.data(), nk * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(dh.p, H.data(), kk * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return std::unexpected("H2D copy failed");
+    const double loss = quad_loss(de.p, dh.p, deh.p, dd.p, N, K);
+    if (loss < 0.0)
+        return std::unexpected("output loss GEMM failed");
+    return loss;
+}
+
 int layer_of(const std::string& name) {
     const size_t p = name.find(".layers.");
     if (p == std::string::npos)

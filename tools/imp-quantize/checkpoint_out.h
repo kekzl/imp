@@ -131,10 +131,11 @@ bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type
 // hf_quant_config.json — Modelopt's declaration. Not written for
 // compressed-tensors, where a second declaration in a DIFFERENT format is a way
 // for the two to disagree later. kv_fp8 writes kv_cache_quant_algo "FP8", else null.
-// `recipe` (recipe_json) lands in producer.recipe.
+// `recipe` (recipe_json) lands in producer.recipe. A non-empty `quantized_layers` JSON object
+// (Fp8Keep) declares quant_algo MIXED_PRECISION with that per-module table.
 [[nodiscard]] std::expected<void, std::string> write_modelopt_quant_config(
     const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated, bool kv_fp8,
-    const std::string& recipe);
+    const std::string& recipe, const std::string& quantized_layers = "");
 
 // imp_recipe.json: the recipe of a compressed-tensors export, which has no hf_quant_config.json.
 [[nodiscard]] std::expected<void, std::string> write_recipe_json(const std::string& out_dir,
