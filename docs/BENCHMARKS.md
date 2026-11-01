@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: 31ee90c6
+verified: 2026-11-01
+commit: d8550086
 -->
 
 # Benchmarks
@@ -22,7 +22,7 @@ before timing, `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Decode (tg) is the reliable A/
 (pp) varies up to 2.6x across container restarts (cuBLAS autotuning) and is not tabulated for
 comparisons.
 
-**Toolchain (current: `v0.60.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.3.
+**Toolchain (current: `v0.61.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.3.
 
 The CI-gated canonical baseline lives in [`tests/perf_baseline.json`](../tests/perf_baseline.json)
 (8% decode / 8% prefill regression gate, 10% peak-VRAM ceiling); pinned values, thresholds and

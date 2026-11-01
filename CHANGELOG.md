@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-11-01
+
 ### Added
 - tiktoken tokenizers: a checkpoint with `tiktoken.model` and no `tokenizer.json` (Kimi-Linear-48B-A3B-Instruct) loads; rank-ordered byte BPE, specials from `tokenizer_config.json`, Kimi's `[A&&[^\p{Han}]]` regex classes rewritten for PCRE2. Ids equal HF transformers on 55 strings, 589 tokens, 0 mismatches. (#2981)
 - Ling-3.0 (`bailing_hybrid`, roadmap row 52): Kimi Delta Attention scans (recurrent, chunk 16), group-limited MoE top-k (`n_group`/`topk_group`, DeepSeek-V3 too), MLA head-wise output gate. Ling-3.0-tiny BF16 greedy equals the HF fp32 reference on 8 of 8 tokens, also from a 9-token chunked prefill (`Ling3Ref`) (#2979).
