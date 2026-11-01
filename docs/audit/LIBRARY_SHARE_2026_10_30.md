@@ -29,7 +29,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 
 | # | call site | share | state | next step |
 |---|---|---:|---|---|
-| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below; 2026-10-31 recheck with the per-grid plan, Qwen3-8B-FP8 pp512 `gemm.fp8_tile_min_m=64`: tile 133.1-133.2 ms (+ 14.5 ms cuBLASLt left) vs cuBLASLt 131.3-131.8, with a stream-K workspace (the FP8 caller passes none) 129.4-130.2, e2e -9..-10 % | M < 2048: FP8 mainloop efficiency on compute-bound shapes. Positional in-situ match (2026-10-31, Qwen3-8B-FP8 pp512, 252 calls per position, us cuBLASLt / own): q 26.8 / 25.9, k/v 14.9-15.7 / 14.1-14.8, o 26.1 / 27.7, gate/up 72.4-73.9 / 86.0-87.6, down 85.8 / 90.0; gate/up alone ~13.6 ms of the gap; 128x64 92, 128x256 100, BK 128 x 3 stages 86 there |
+| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below; 2026-10-31 recheck with the per-grid plan, Qwen3-8B-FP8 pp512 `gemm.fp8_tile_min_m=64`: tile 133.1-133.2 ms (+ 14.5 ms cuBLASLt left) vs cuBLASLt 131.3-131.8, with a stream-K workspace (the FP8 caller passes none) 129.4-130.2, e2e -9..-10 % | M < 2048: FP8 mainloop efficiency on compute-bound shapes. Positional in-situ match (2026-10-31, Qwen3-8B-FP8 pp512, 252 calls per position, us cuBLASLt / own): q 26.8 / 25.9, k/v 14.9-15.7 / 14.1-14.8, o 26.1 / 27.7, gate/up 72.4-73.9 / 86.0-87.6, down 85.8 / 90.0; gate/up alone ~13.6 ms of the gap; 128x64 92, 128x256 100, BK 128 x 3 stages 86 there; 2026-11-01 128x64 at 2 CTAs per SM: gate/up 118.13-126.69 us vs cuBLASLt 76.74-78.66, refuted ([below](#2026-11-01-two-ctas-per-sm-below-m-2048-refuted)) |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile from M 1 (step 16); CUTLASS removed (step 17) | - |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only; MoE router (N = n_experts): own for the Gemma-4 shape, cuBLASLt for the rest (section below); N > K at parity (2026-10-31, Nemotron pp4096, 2 pairs: the 128x256 tile replaces 50.48 ms cuBLASLt by 50.04 ms, 128x128 +4..6 %, e2e 56447-56584 vs 56278-56406 tok/s): stays cuBLASLt | per-SM efficiency |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile from step 15, down_proj 29.0 vs 29.1 us | - |
@@ -146,6 +146,23 @@ Restricted to the shapes it wins (n >= 1024, d >= 2560, <= 128 experts: Gemma-4)
 
 - pp4096 per shape (M 2048 chunks): k/v 62.2 -> 38.4 ms, gate/up 448.1 -> 430.4 ms, q/o/down 416.1 -> 445.5 ms.
 - Stream-K workspace (10.6 MiB) REFUTED in situ: pp512 GEMM sum 163 -> 155 ms (still behind 131), pp4096 932 -> 963 ms; not wired.
+
+### 2026-11-01: two CTAs per SM below M 2048 (refuted)
+
+FP8 128x64 tile on 4 MMA warps (64x32 each) + producer, 160 threads, 3 stages, 38016 B smem, `__launch_bounds__(160, 2)`: 128 regs data-parallel, 158 stream-K, no local memory. Variants 7 (uniform stream-K over 2 x SMs), 8 (hybrid), 9 (data-parallel) behind `gemm.fp8_tile_variant` in commit 405e91d6 (PR head, not on `main`). Harness `tools/analysis/fp8_tile_insitu_ab.sh` (md5 07f817962dc14ad9e1bac9dab976073c), Qwen3-8B-FP8, 3 rounds in rotating arm order, build-dev at 405e91d6.
+
+| Qwen3-8B-FP8 | cuBLASLt | own 128x128 (auto) | 2-CTA data-parallel (9) | 2-CTA hybrid (8) | 2-CTA uniform stream-K (7) |
+|---|---:|---:|---:|---:|---:|
+| pp512 GEMM sum, ms | 127.9-130.6 | 136.5-138.5 | 167.7-170.5 | 172.4-176.5 | 171.3-179.5 |
+| pp512 e2e, tok/s | 31899-32135 | 30393-30656 | 24642-25445 | 20690-24708 | 22997-24837 |
+| pp512 gate/up, avg us per launch | 76.74-78.66 (a) | 97.83-99.05 | 118.13-121.24 | 122.18-125.89 | 119.20-126.69 (b) |
+| pp2048 GEMM sum, ms | 467.6-468.6 | 453.5-470.9 | 556.8-572.5 | 584.6-596.7 | - |
+| pp2048 e2e, tok/s | 30180-30626 | 29801-31269 | 25601-26775 | 25096-25586 | - |
+
+(a) the 616-CTA row, with 144 launches of the short warmup prompt. (b) one row with down_proj (972 launches).
+
+- Correctness: variants 7 and 8 fail `Fp8GemmTileTest` (max|diff| up to 0.98 at max|ref| 9.0) when 2 stream-K CTAs share an SM; the same kernel passes with grid = SMs or with 60000 B dynamic smem (1 CTA per SM). Bad elements sit in 1 to 4 of the 4 warp tiles of a 128x64 tile, split and whole tiles alike. `__syncwarp` before the named barriers, `st.cg` / `ld.cv` partials and relaxed flag polling did not fix it; cause not found. Existing stream-K configs need > 50 KB smem each, so 2 never share an SM.
+- Decision: no default flip, cuBLASLt stays below M 2048; the 2-CTA configs are not on `main`.
 
 ## Step 13: CUTLASS MXFP8 GEMM removed
 
