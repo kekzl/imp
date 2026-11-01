@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- Sampling: `top_p` now cuts the top-k candidates renormalized, as HF, vLLM and llama.cpp do. Measured against the full-vocabulary mass it never fired while the top k held less than `top_p`, so the whole tail of the k was sampled (Qwen3.8 defaults `top_k` 20, `top_p` 0.95). TOPP_NUMBER
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content and schema-valid.
 - json_schema `number` with a lower bound: a fraction run to the 40-digit cap (`0.000...` under `exclusiveMinimum: 0`) left no legal token and the response stopped mid-object; the cap digit must now keep the value in bounds.
 
