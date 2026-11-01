@@ -160,7 +160,7 @@ $ imp-bench gemm --json 2>/dev/null
 | item | behaviour |
 |---|---|
 | target | HF cache layout under `HUGGINGFACE_HUB_CACHE`, else `$HF_HOME/hub`; the image sets `HF_HOME=/models/huggingface`, so files land in the mounted `/models` |
-| selection | `:<file>` picks one `.gguf`; without it: the repo's only `.gguf`, else exit 1 with the list; a repo without `.gguf` takes top-level `*.safetensors`, `*.json`, `*.jinja`, `tokenizer.model`, `merges.txt`, `vocab.txt` |
+| selection | `:<file>` picks one `.gguf`; without it: the repo's only `.gguf`, else exit 1 with the list; a repo without `.gguf` takes top-level `*.safetensors`, `*.json`, `*.jinja`, `tokenizer.model`, `tiktoken.model`, `merges.txt`, `vocab.txt` |
 | auth | `HF_TOKEN` sent as `Authorization: Bearer`; a gated repo without it fails before any byte is written |
 | integrity | `<file>.part`, resumed with `Range` (3 retries per start, and again on the next start), LFS files checked against the sha256 from `/api/models/<repo>?blobs=true`; a mismatch deletes the part |
 | second start | `refs/<rev>` plus the file present: `hf-fetch: cache hit ... no download`, no network request; delete `refs/<rev>` to pick up a newer commit |

@@ -1309,7 +1309,21 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         std::string tok_spm_path = model_dir + "/tokenizer.model";
         bool has_json = std::filesystem::exists(tok_json_path);
         bool has_spm = std::filesystem::exists(tok_spm_path);
-        if (has_json) {
+        const std::string tok_tiktoken_path = model_dir + "/tiktoken.model";
+        if (!has_json && std::filesystem::exists(tok_tiktoken_path)) {
+            // Kimi family: no tokenizer.json, ranks in tiktoken.model, specials in tokenizer_config.json.
+            auto tok = std::make_unique<Tokenizer>();
+            if (tok->load_tiktoken(tok_tiktoken_path, model_dir + "/tokenizer_config.json")) {
+                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty())
+                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
+                model->set_tokenizer(std::move(tok));
+                IMP_LOG_INFO("Loaded tiktoken tokenizer from %s (no tokenizer.json present)",
+                             tok_tiktoken_path.c_str());
+            } else {
+                IMP_LOG_ERROR("Found %s but failed to load it; chat input cannot be encoded.",
+                              tok_tiktoken_path.c_str());
+            }
+        } else if (has_json) {
             auto tok = std::make_unique<Tokenizer>();
             if (tok->load(tok_json_path)) {
                 // Preserve chat template if already set

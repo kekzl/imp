@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- tiktoken tokenizers: a checkpoint with `tiktoken.model` and no `tokenizer.json` (Kimi-Linear-48B-A3B-Instruct) loads; rank-ordered byte BPE, specials from `tokenizer_config.json`, Kimi's `[A&&[^\p{Han}]]` regex classes rewritten for PCRE2. Ids equal HF transformers on 55 strings, 589 tokens, 0 mismatches. (#XXXX)
 - Gemma-4 E-variants (gemma-4-E4B-it), text: per-layer inputs (PLE table in mapped host RAM) and KV sharing (layers 24..41 read layer 22/23, no KV blocks of their own). Greedy equals the HF fp32 reference on 9 of 9 and 20 of 20 tokens (`Gemma4E4BRef`) (#2978).
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
 
