@@ -9,6 +9,7 @@
 #include "compute/attention_paged.h"
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
+#include "compute/mla_kv_assemble.h"
 #include "lora/lora_adapter.h"
 
 namespace imp {
@@ -34,8 +35,32 @@ void GraphExecutor::qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Te
     apply(kk, ly.attn_k_norm, nkv);
 }
 
+// Head-wise output gate logits [n, n_heads] from the attention input, into the SSM z buffer the
+// Qwen3.5 output gate also borrows (carved by run_gdn, which runs before the first MLA layer of a
+// KDA hybrid). Applied by mla_apply_head_gate_ once the attention output is compact.
+void GraphExecutor::mla_head_gate_logits_(const TransformerLayer& ly, const Tensor& no, int n,
+                                          cudaStream_t stream) {
+    if (ly.attn_head_gate.data == nullptr)
+        return;
+    if (ssm_z_buf_.data == nullptr)
+        throw std::runtime_error(
+            "MLA head gate: no SSM z buffer (no recurrent layer ran before this attention layer)");
+    const int64_t shape[2] = {n, ly.attn_head_gate.shape[0]};
+    Tensor g(ssm_z_buf_.data, compute_dtype_, 2, shape, true);
+    gemm(no, ly.attn_head_gate, g, 1.0f, 0.0f, stream);
+}
+
+void GraphExecutor::mla_apply_head_gate_(const TransformerLayer& ly, const Tensor& ao, int n, int nh,
+                                         cudaStream_t stream) {
+    if (ly.attn_head_gate.data == nullptr)
+        return;
+    head_gate_sigmoid_mul(static_cast<half*>(ao.data), static_cast<const half*>(ssm_z_buf_.data), n, nh,
+                          static_cast<int>(ao.shape[1]) / nh, stream);
+}
+
 void GraphExecutor::mla_q_projection_(const TransformerLayer& ly, const Tensor& no, Tensor& qv, int n,
                                       float eps, const GemmContext& ctx) {
+    mla_head_gate_logits_(ly, no, n, ctx.stream);
     if (ly.q_a_proj.data == nullptr) {
         gemm_via_handle_(ly.wq_id, no, qv, ctx);
         return;

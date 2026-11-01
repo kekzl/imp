@@ -627,6 +627,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             ao.shape[1] = mla_ao_cols;
             ao.compute_strides();
         }
+        mla_apply_head_gate_(ly, ao, n, nh, stream);
     }
 
     // Qwen3.5 attention output gate: ao[i] *= sigmoid(gate[i])

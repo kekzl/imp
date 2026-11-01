@@ -385,6 +385,11 @@ public:
     // MLA Q: wq(no), or with q_lora_rank > 0 (V3, GLM) wq(rmsnorm(q_a_proj(no), q_a_layernorm)).
     void mla_q_projection_(const TransformerLayer& ly, const Tensor& no, Tensor& qv, int n, float eps,
                            const GemmContext& ctx);
+    // Ling-3.0 head-wise MLA output gate: sigmoid(g_proj(no)) per head, logits taken with the Q
+    // projection, applied to the compact attention output. No-ops without attn_head_gate.
+    void mla_head_gate_logits_(const TransformerLayer& ly, const Tensor& no, int n, cudaStream_t stream);
+    void mla_apply_head_gate_(const TransformerLayer& ly, const Tensor& ao, int n, int nh,
+                              cudaStream_t stream);
     // RMSNorm+Q8_1 once; q|k|v in one launch, or q|k plus a v GEMV on the same Q8_1 when v's qtype differs.
     void dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv, Tensor& kk,
                    Tensor& vv, float eps, cudaStream_t stream);

@@ -315,6 +315,7 @@ struct TransformerLayer {
     // up-projects to 16*(128+128)=4096.
     Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
     Tensor q_a_proj, q_a_layernorm;  // MLA q_lora_rank > 0 (V3, GLM): Q = wq(rmsnorm(q_a_proj(x)))
+    Tensor attn_head_gate;           // [n_heads, d_model] head-wise sigmoid output gate (Ling-3.0 MLA g_proj)
     Tensor q_bias, k_bias, v_bias;  // Attention biases (Qwen2)
     Tensor o_bias;                  // Output-projection bias (gpt-oss)
     Tensor attn_sinks;              // Per-head sink logits [n_heads] (gpt-oss)

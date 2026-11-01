@@ -1153,6 +1153,7 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx
 
     // MoE gate (routing weights, typically F32/F16)
     UPLOAD_UNQUANT_OR_FAIL(L.moe_gate, "moe_gate", i, ctx);
+    UPLOAD_UNQUANT_OR_FAIL(L.attn_head_gate, "attn_head_gate", i, ctx);
 
     // Router bias (Nemotron MoE)
     UPLOAD_UNQUANT_OR_FAIL(L.moe_router_bias, "moe_router_bias", i, ctx);
