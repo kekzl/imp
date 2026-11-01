@@ -160,6 +160,23 @@ TEST(PreTokenizeSplitSequenceTest, MatchesHfOnDeepSeekShapedSteps) {
     EXPECT_EQ(split(" \xc2\xb2x"), (Chunks{" ", "\xc2\xb2", "x"}));  // U+00B2 is a Digits piece
 }
 
+// Kimi's tiktoken regex: [A&&[^B]] is A minus B, one code point, as a lookahead before [A].
+TEST(PreTokenizeSplitSequenceTest, ClassIntersectionBecomesLookahead) {
+    EXPECT_EQ(onig_to_pcre2("[a-z&&[^aeiou]]+"), "(?:(?![aeiou])[a-z])+");
+    EXPECT_EQ(onig_to_pcre2("[a-z&&[a-f]]"), "(?:(?=[a-f])[a-z])");
+    EXPECT_EQ(onig_to_pcre2("[\\w&&[^\\d]]"), "(?:(?![\\d])[\\p{L}\\p{M}\\p{N}\\p{Pc}])");
+    auto cons = RegexPretokenizer::from_regexes({"[a-z&&[^aeiou]]+"}, nullptr);
+    ASSERT_NE(cons, nullptr);
+    EXPECT_EQ(cons->split("strength area"), (Chunks{"str", "e", "ngth", " a", "r", "ea"}));
+    // Letters minus Han: Lo covers Han, so without the exclusion "abc中文def" stays one piece.
+    auto letters = RegexPretokenizer::from_regexes({"[\\p{L}&&[^\\p{Han}]]+|[\\p{Han}]+"}, nullptr);
+    ASSERT_NE(letters, nullptr);
+    EXPECT_EQ(letters->split("abc\xe4\xb8\xad\xe6\x96\x87"
+                             "def \xe3\x81\x8b\xe3\x81\xaa\xe6\xbc\xa2"),
+              (Chunks{"abc", "\xe4\xb8\xad\xe6\x96\x87", "def", " ", "\xe3\x81\x8b\xe3\x81\xaa",
+                      "\xe6\xbc\xa2"}));
+}
+
 // Onig (Ruby syntax) $ also matches before any "\n", not only at the end.
 TEST(PreTokenizeSplitSequenceTest, TrailingSpaceDollarIsEndOfLine) {
     auto seq = RegexPretokenizer::from_regexes({"\\s+$"}, nullptr);
@@ -172,8 +189,11 @@ TEST(PreTokenizeSplitSequenceTest, TrailingSpaceDollarIsEndOfLine) {
 // Oniguruma forms PCRE2 has no spelling for are refused, never compiled to something else.
 TEST(PreTokenizeSplitSequenceTest, RefusesRegexItCannotMatchExactly) {
     EXPECT_EQ(onig_to_pcre2("[a[b]]"), "");       // nested class
-    EXPECT_EQ(onig_to_pcre2("[a-z&&[^b]]"), "");  // intersection
-    EXPECT_EQ(onig_to_pcre2("[\\S]"), "");        // negated shorthand inside a class
+    EXPECT_EQ(onig_to_pcre2("[^a-z&&[^b]]"), "");   // intersection in a negated class
+    EXPECT_EQ(onig_to_pcre2("[a-z&&b-c]"), "");     // intersection without a nested class
+    EXPECT_EQ(onig_to_pcre2("[a-z&&[^b]c]"), "");   // operand after the nested class
+    EXPECT_EQ(onig_to_pcre2("[a-z&&[b[c]]]"), "");  // nested class inside the operand
+    EXPECT_EQ(onig_to_pcre2("[\\S]"), "");          // negated shorthand inside a class
     EXPECT_EQ(RegexPretokenizer::from_regexes({"[a[b]]"}, nullptr), nullptr);
     EXPECT_EQ(RegexPretokenizer::from_regexes({"(unclosed"}, nullptr), nullptr);
     EXPECT_EQ(RegexPretokenizer::from_regexes({}, nullptr), nullptr);

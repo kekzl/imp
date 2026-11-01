@@ -72,12 +72,45 @@ bool rewrite_escape(char e, bool in_class, std::string& out) {
     }
 }
 
+// Class intersection `&&[^B]]` / `&&[B]]` closing the class opened at out[cls]: PCRE2 has no `&&`,
+// so the one code point is tested by a lookahead, [A&&[^B]] -> (?:(?![B])[A]). i at the first '&';
+// returns the index of the outer ']' or 0 for a form without that rewrite.
+size_t rewrite_intersection(const std::string& rx, size_t i, size_t cls, std::string& out) {
+    size_t j = i + 2;
+    if (j >= rx.size() || rx[j] != '[')
+        return 0;
+    ++j;
+    const bool neg = j < rx.size() && rx[j] == '^';
+    j += neg ? 1 : 0;
+    std::string inner = "[";
+    if (j < rx.size() && rx[j] == ']')
+        inner += rx[j++];  // a leading ']' is literal
+    for (; j < rx.size() && rx[j] != ']'; ++j) {
+        if (rx[j] == '[' || (rx[j] == '&' && j + 1 < rx.size() && rx[j + 1] == '&'))
+            return 0;
+        if (rx[j] == '\\' && j + 1 < rx.size()) {
+            if (!rewrite_escape(rx[++j], true, inner))
+                return 0;
+            continue;
+        }
+        inner += rx[j];
+    }
+    if (j + 1 >= rx.size() || rx[j + 1] != ']')
+        return 0;
+    const std::string outer = out.substr(cls) + "]";
+    out.resize(cls);
+    out += std::string("(?:(?") + (neg ? "!" : "=") + inner + "])" + outer + ")";
+    return j + 1;
+}
+
 }  // namespace
 
 std::string onig_to_pcre2(const std::string& rx) {
     std::string out;
     out.reserve(rx.size() + 32);
-    int depth = 0;  // class nesting; Oniguruma nests, PCRE2 does not
+    int depth = 0;   // class nesting; Oniguruma nests, PCRE2 does not
+    size_t cls = 0;  // out index of the open class's '['
+    bool cls_neg = false;
     for (size_t i = 0; i < rx.size(); ++i) {
         const char c = rx[i];
         if (c == '\\' && i + 1 < rx.size()) {
@@ -88,10 +121,12 @@ std::string onig_to_pcre2(const std::string& rx) {
         }
         if (c == '[') {
             if (depth > 0)
-                return {};  // nested class / intersection
+                return {};  // nested class
             ++depth;
+            cls = out.size();
             out += c;
-            if (i + 1 < rx.size() && rx[i + 1] == '^')
+            cls_neg = i + 1 < rx.size() && rx[i + 1] == '^';
+            if (cls_neg)
                 out += rx[++i];
             if (i + 1 < rx.size() && rx[i + 1] == ']')
                 out += rx[++i];  // a leading ']' is literal
@@ -99,8 +134,14 @@ std::string onig_to_pcre2(const std::string& rx) {
         }
         if (c == ']' && depth > 0)
             --depth;
-        else if (c == '&' && depth > 0 && i + 1 < rx.size() && rx[i + 1] == '&')
-            return {};
+        else if (c == '&' && depth > 0 && i + 1 < rx.size() && rx[i + 1] == '&') {
+            const size_t end = cls_neg ? 0 : rewrite_intersection(rx, i, cls, out);
+            if (end == 0)
+                return {};
+            i = end;
+            depth = 0;
+            continue;
+        }
         out += c;
     }
     return out;

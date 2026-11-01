@@ -25,6 +25,10 @@ public:
     // Load from standalone tokenizer file (SentencePiece .model or HuggingFace .json)
     [[nodiscard]] bool load(const std::string& path);
 
+    // tiktoken checkpoint (Kimi): `tiktoken.model` "<base64> <rank>" lines (rank = id) plus
+    // tokenizer_config.json added_tokens_decoder. Ids equal tiktoken's (tokenizer_tiktoken.cpp).
+    [[nodiscard]] bool load_tiktoken(const std::string& model_path, const std::string& config_path);
+
     // Load vocabulary extracted from GGUF metadata
     [[nodiscard]] bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
                     int eos_id);
@@ -238,5 +242,11 @@ private:
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.
 std::string nfc_normalize(const std::string& text);
+
+// GPT-2 ByteLevel spelling of one byte (the vocab form of byte-level BPE tokens).
+std::string gpt2_byte_piece(uint8_t byte);
+
+// tokenization_kimi.py TikTokenTokenizer.pat_str (Oniguruma-style class intersections).
+extern const char* const kKimiTiktokenRegex;
 
 }  // namespace imp

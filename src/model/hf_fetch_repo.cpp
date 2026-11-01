@@ -42,7 +42,8 @@ bool is_safetensors_set_member(const std::string& name) {
     if (name.contains('/'))
         return false;
     return ends_with(name, ".safetensors") || ends_with(name, ".json") || ends_with(name, ".jinja") ||
-           name == "tokenizer.model" || name == "merges.txt" || name == "vocab.txt";
+           name == "tokenizer.model" || name == "tiktoken.model" || name == "merges.txt" ||
+           name == "vocab.txt";
 }
 
 }  // namespace
