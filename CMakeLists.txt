@@ -539,6 +539,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn_graph.cpp
     src/exec/ffn_graph_cache.cpp
     src/exec/executor_ssm_gdn.cu
+    src/exec/gdn_ragged.cu
     src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
@@ -1469,6 +1470,7 @@ if(IMP_BUILD_TESTS)
         tests/test_activation_calibrator_experts.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_gdn_ragged_riders.cu
         tests/test_kda.cu
         tests/test_moe_group_topk.cu
         tests/test_ple_batched.cu

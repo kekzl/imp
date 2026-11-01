@@ -60,6 +60,9 @@ run_arm() {  # $1 = arm name, $2 = extra sets, $3 = trial, $4 = image
     docker run --rm --network host -e MODEL_NAME="$MODEL_NAME" -e IGNORE_EOS="$IGNORE_EOS" -e LATE_PLEN="${LATE_PLEN:-0}" \
         -e LATE_DELAY="${LATE_DELAY:-2.0}" -e GEN -v "$HERE":/t:ro python:3.13-slim \
         python3 /t/burst_stream_client.py $PORT $CONC $WAVES "$1$3" $PLEN 2>&1 | tee -a "$LOG"
+    # Proof the arm's path ran: mixed-step count per arm (0 = riders never rode).
+    curl -sf "http://127.0.0.1:${PORT}/metrics" | grep '^imp_mixed_decode_steps_total' \
+        | sed "s/^/arm $1 trial $3 /" | tee -a "$LOG"
     docker rm -f imp-capab >/dev/null 2>&1
     sleep 3
 }
@@ -76,4 +79,4 @@ for t in $(seq 1 $TRIALS); do
     done
 done
 echo "=== summary ===" | tee -a "$LOG"
-grep -H "== arm\|^wave" "$LOG" | tail -60
+grep -H "== arm\|^wave\|imp_mixed_decode_steps_total" "$LOG" | tail -80
