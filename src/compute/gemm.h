@@ -4,6 +4,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <source_location>
+
 namespace imp {
 
 // cuBLASLt workspace + algo-selection bench scratch, taken from the engine-persistent
@@ -27,15 +29,16 @@ void gemm_set_lt_capture_allowed(bool allowed);
 void gemm_cleanup();
 
 // Generic GEMM (M=1 GEMV, FP32 TF32, else gemm_cublaslt_generic): C = alpha * A @ B^T + beta * C
-// A [M, K]  B [N, K]  C [M, N]   -- all row-major
+// A [M, K]  B [N, K]  C [M, N]   -- all row-major. loc: caller site for lt_route_note (lt_route_trace.h).
 void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float beta = 0.0f,
-          cudaStream_t stream = nullptr);
+          cudaStream_t stream = nullptr, const std::source_location& loc = std::source_location::current());
 
 // cuBLASLt GEMM with explicit algorithm selection and FP8 scale support.
 // aScale/bScale are optional per-tensor FP32 scales for FP8 operands.
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.0f, float beta = 0.0f,
                    const float* aScale = nullptr, const float* bScale = nullptr,
-                   cudaStream_t stream = nullptr);
+                   cudaStream_t stream = nullptr,
+                   const std::source_location& loc = std::source_location::current());
 
 // Block-scaled NVFP4 GEMM via cuBLASLt (gemm.nvfp4_cublaslt_min_m): D[M,N] fp16 = alpha * A W^T, A/W packed
 // E2M1 row-major with SfAtom UE4M3 scales (same bytes as gemm_nvfp4_tile). False = not run.

@@ -360,6 +360,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cpp
     src/compute/gemm_lt_ex.cpp
+    src/compute/lt_route_trace.cpp
     src/compute/mmq_q8_imma_q4k.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu

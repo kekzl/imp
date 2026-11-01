@@ -10,6 +10,7 @@
 #include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
 #include "compute/gemm_lt_ex.h"
+#include "compute/lt_route_trace.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
@@ -830,6 +831,7 @@ void gemm_cleanup() {
             "[gemm-algo] %d matmul failure(s) with a pin chosen at another M; %d M(s) got an exact-M "
             "entry because the bucket pin failed cublasLtMatmulAlgoCheck",
             f, x);
+    lt_route_dump();
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
     for (auto& [key, entry] : s_gemm_cache) {
         IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Adesc));
@@ -875,6 +877,18 @@ IMP_REGISTER_CUDA_STATIC_RESET(gemm_reset_static_cuda_state);
 static bool fp16_acc_route(const Tensor& A, const Tensor& B, const Tensor& C) {
     return process_diag_cublas_fp16_acc() && A.shape[0] > 1 && A.qtype == QType::F16 &&
            B.qtype == QType::F16 && C.qtype == QType::F16;
+}
+
+// gemm()'s caller while gemm_cublaslt_generic runs (lt_route_note site).
+static thread_local const std::source_location* t_gemm_caller = nullptr;
+
+static void note_generic_lt(QType a, bool fp16_acc, cublasComputeType_t compute, int64_t M, int64_t N,
+                            int64_t K) {
+    const char* route = fp16_acc ? "gemm:f16_acc16" : a == QType::F16 ? "gemm:f16_acc32" : "gemm:other";
+    if (compute == CUBLAS_COMPUTE_32I)
+        route = "gemm:int8";
+    lt_route_note(route, (int)M, (int)N, (int)K, 1,
+                  t_gemm_caller ? *t_gemm_caller : std::source_location::current());
 }
 
 static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
@@ -930,6 +944,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         return;
     }
 
+    note_generic_lt(A.qtype, use_fp16_acc, compute_type, M, N, K);
     cublasLtHandle_t lt = get_cublaslt_handle();
 
     GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, bucket_m(M), K, N, false};
@@ -1033,7 +1048,8 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     }
 }
 
-void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream) {
+void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream,
+          const std::source_location& loc) {
     // Defensive guard: a packed NVFP4 weight (or INT8-typed packed payload) must never reach
     // the generic FP16 cuBLAS path. cuBLAS rejects FP16xINT8/NVFP4 with
     // CUBLAS_STATUS_NOT_SUPPORTED and leaves the output uninitialised (silent garbage + IMA).
@@ -1067,7 +1083,9 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
         return;
     if (gemm_try_sgemm(A, B, C, alpha, beta, stream))
         return;
+    t_gemm_caller = &loc;
     gemm_cublaslt_generic(A, B, C, alpha, beta, stream);
+    t_gemm_caller = nullptr;
 }
 
 // gemv() and the dtype GEMV kernels (fp32/fp16/bf16) live in
@@ -1075,11 +1093,18 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, 
 
 // gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales. Uses the
 // same static workspace as gemm().
+static const char* fp8_route_label(QType a, QType b) {
+    if (b != QType::FP8_E4M3)
+        return "gemm_cublaslt:other";
+    return a == QType::FP8_E4M3 ? "gemm_cublaslt:fp8xfp8" : "gemm_cublaslt:f16xfp8";
+}
+
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, const float* aScale,
-                   const float* bScale, cudaStream_t stream) {
+                   const float* bScale, cudaStream_t stream, const std::source_location& loc) {
     const int64_t M = A.shape[0];
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
+    lt_route_note(fp8_route_label(A.qtype, B.qtype), (int)M, (int)N, (int)K, 1, loc);
 
     cublasLtHandle_t lt = get_cublaslt_handle();
 
@@ -1208,6 +1233,7 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_dat
     cublasLtHandle_t lt = get_cublaslt_handle();
     if (!lt)
         return false;
+    lt_route_note("gemm_nvfp4_cublaslt", M, N, K, 1, std::source_location::current());
     // cuBLAS "A" operand is the weight (Bdesc of the row-major convention), "B" the activation.
     auto set_scales = [&](cublasLtMatmulDesc_t desc) {
         IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
