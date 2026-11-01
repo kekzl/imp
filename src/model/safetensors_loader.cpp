@@ -978,6 +978,65 @@ static void apply_generation_config(Model& model, const std::string& model_dir) 
         model.tokenizer_->add_eos_id(eid);
 }
 
+// Installs the tokenizer the checkpoint ships, keeping a chat template loaded before it.
+static void install_tokenizer(Model& model, std::unique_ptr<Tokenizer> tok) {
+    if (model.tokenizer_ && !model.tokenizer_->chat_template_str().empty())
+        tok->set_chat_template_str(model.tokenizer_->chat_template_str());
+    model.set_tokenizer(std::move(tok));
+}
+
+// tiktoken.model when tokenizer.json is absent (Kimi), else tokenizer.json, else tokenizer.model.
+static void load_tokenizer_files(Model& model, const std::string& model_dir) {
+    const std::string tok_json_path = model_dir + "/tokenizer.json";
+    const std::string tok_spm_path = model_dir + "/tokenizer.model";
+    const std::string tok_tiktoken_path = model_dir + "/tiktoken.model";
+    const bool has_json = std::filesystem::exists(tok_json_path);
+    if (!has_json && std::filesystem::exists(tok_tiktoken_path)) {
+        auto tok = std::make_unique<Tokenizer>();
+        if (tok->load_tiktoken(tok_tiktoken_path, model_dir + "/tokenizer_config.json")) {
+            install_tokenizer(model, std::move(tok));
+            IMP_LOG_INFO("Loaded tiktoken tokenizer from %s", tok_tiktoken_path.c_str());
+        } else {
+            IMP_LOG_ERROR("Found %s but failed to load it; no tokenizer", tok_tiktoken_path.c_str());
+        }
+        return;
+    }
+    if (has_json) {
+        auto tok = std::make_unique<Tokenizer>();
+        if (tok->load(tok_json_path)) {
+            install_tokenizer(model, std::move(tok));
+            IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
+        }
+        return;
+    }
+    if (!std::filesystem::exists(tok_spm_path)) {
+        IMP_LOG_WARN(
+            "No tokenizer.json or tokenizer.model in %s — model will load "
+            "without a tokenizer; chat input cannot be encoded.",
+            model_dir.c_str());
+        return;
+    }
+    // SentencePiece-only checkpoint (older Llama 1/2, Mistral): native protobuf parser fills
+    // vocab, scores, token types; BPE-from-spm checkpoints share the vocab table.
+    SentencePieceModel spm = load_sentencepiece_model_file(tok_spm_path);
+    if (spm.empty()) {
+        IMP_LOG_ERROR(
+            "Found %s but failed to parse — checkpoint may be corrupt or "
+            "use an unsupported SentencePiece variant. Workaround: convert via\n"
+            "  python -c \"from transformers import AutoTokenizer; "
+            "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"",
+            tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
+        return;
+    }
+    auto tok = std::make_unique<Tokenizer>();
+    tok->set_type("spm");
+    // spm.pieces is non-empty and load_vocab refuses only an empty vocab: cannot fail.
+    (void)tok->load_vocab(spm.pieces, spm.scores, spm.bos_id, spm.eos_id);
+    tok->load_token_types(spm.types);
+    install_tokenizer(model, std::move(tok));
+    IMP_LOG_INFO("Loaded SentencePiece tokenizer from %s (no tokenizer.json present)", tok_spm_path.c_str());
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -1310,69 +1369,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 9. Load tokenizer from tokenizer.json (if available)
-    if (!model_dir.empty()) {
-        std::string tok_json_path = model_dir + "/tokenizer.json";
-        std::string tok_spm_path = model_dir + "/tokenizer.model";
-        bool has_json = std::filesystem::exists(tok_json_path);
-        bool has_spm = std::filesystem::exists(tok_spm_path);
-        const std::string tok_tiktoken_path = model_dir + "/tiktoken.model";
-        if (!has_json && std::filesystem::exists(tok_tiktoken_path)) {
-            // Kimi family: no tokenizer.json, ranks in tiktoken.model, specials in tokenizer_config.json.
-            auto tok = std::make_unique<Tokenizer>();
-            if (tok->load_tiktoken(tok_tiktoken_path, model_dir + "/tokenizer_config.json")) {
-                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty())
-                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
-                model->set_tokenizer(std::move(tok));
-                IMP_LOG_INFO("Loaded tiktoken tokenizer from %s (no tokenizer.json present)",
-                             tok_tiktoken_path.c_str());
-            } else {
-                IMP_LOG_ERROR("Found %s but failed to load it; chat input cannot be encoded.",
-                              tok_tiktoken_path.c_str());
-            }
-        } else if (has_json) {
-            auto tok = std::make_unique<Tokenizer>();
-            if (tok->load(tok_json_path)) {
-                // Preserve chat template if already set
-                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty()) {
-                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
-                }
-                model->set_tokenizer(std::move(tok));
-                IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
-            }
-        } else if (has_spm) {
-            // SentencePiece-only checkpoint (older Llama 1/2, Mistral, ...): native protobuf parser
-            // populates vocab+scores+token types, encode_spm() handles the rest. BPE-from-spm
-            // checkpoints share the same vocab table; the score-based encoder produces equivalent
-            // output for most practical text.
-            SentencePieceModel spm = load_sentencepiece_model_file(tok_spm_path);
-            if (!spm.empty()) {
-                auto tok = std::make_unique<Tokenizer>();
-                tok->set_type("spm");
-                // spm.pieces is non-empty and load_vocab refuses only an empty vocab: cannot fail.
-                (void)tok->load_vocab(spm.pieces, spm.scores, spm.bos_id, spm.eos_id);
-                tok->load_token_types(spm.types);
-                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty()) {
-                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
-                }
-                model->set_tokenizer(std::move(tok));
-                IMP_LOG_INFO("Loaded SentencePiece tokenizer from %s (no tokenizer.json present)",
-                             tok_spm_path.c_str());
-            } else {
-                IMP_LOG_ERROR(
-                    "Found %s but failed to parse — checkpoint may be corrupt or "
-                    "use an unsupported SentencePiece variant. Workaround: convert via\n"
-                    "  python -c \"from transformers import AutoTokenizer; "
-                    "AutoTokenizer.from_pretrained('%s').save_pretrained('%s')\"",
-                    tok_spm_path.c_str(), model_dir.c_str(), model_dir.c_str());
-            }
-        } else {
-            IMP_LOG_WARN(
-                "No tokenizer.json or tokenizer.model in %s — model will load "
-                "without a tokenizer; chat input cannot be encoded.",
-                model_dir.c_str());
-        }
-    }
+    // 9. Tokenizer: tiktoken.model, tokenizer.json or tokenizer.model.
+    if (!model_dir.empty())
+        load_tokenizer_files(*model, model_dir);
 
     // tokenizer_config.json tokenizer-side flags (add_bos_token, add_prefix_space), mirroring
     // gguf_loader.cpp's tokenizer.ggml.add_bos_token/add_space_prefix. Without this the
