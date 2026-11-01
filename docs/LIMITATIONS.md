@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: 696ef613
+commit: bf83b5bd
 -->
 
 # Limitations
@@ -28,7 +28,6 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Type exists, nothing exercises it | FP8 E5M2 KV / weights | none | #1680 |
 | Aliases onto the LLaMA path, no checkpoint of its own in a gate | Phi-4 | none | #1680 |
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |
-| Per-layer inputs (PLE) and KV sharing never ran on a GPU: CPU unit tests cover config parse and tensor mapping only; `use_double_wide_mlp` (2x d_ff on shared layers) is refused at load; the 5.25 GiB FP16 PLE table sits in mapped pinned host RAM (VRAM if pinning fails); the PLE and KV-share workspace is outside the memory plan | Gemma-4 E-variants (E4B) | `Gemma4E4BRef` e2e test against the HF fp32 reference (`IMP_TEST_MODEL_GEMMA4_E4B`, `IMP_TEST_GEMMA4_E4B_REF`) | - |
 | Dequant paths with no gate reading such a checkpoint (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K do have one) | GGUF Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K | none | #1680 |
 | **Q8_1** (GGUF wire type 9, an activation format) has no weight path at all | GGUF loader | refused at parse | - |
 | Cross-check against a reference reranker is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
@@ -53,6 +52,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | One LoRA adapter at a time: engine-global (executor pointer, decode graphs) | LoRA serving | batching worker serializes by adapter (a request naming a different one waits for in-flight requests, then switches, never batched with them); prefix cache is keyed by adapter, so a shared system prompt prefills once per adapter; C API `imp_lora_set` has no such guard, swap between requests only | AUDIT_ARCH_2026 E-1 |
+| `use_double_wide_mlp` (2x d_ff on the KV-shared layers) is refused at load; the 5.25 GiB FP16 PLE table sits in mapped pinned host RAM (VRAM if pinning fails); the PLE and KV-share workspace is outside the memory plan; the e2e gate `Gemma4E4BRef` needs `IMP_TEST_MODEL_GEMMA4_E4B` and `IMP_TEST_GEMMA4_E4B_REF`, else `test-e2e` skips it | Gemma-4 E-variants (E4B) | none | - |
 | GGUF batched decode rows read the 4-bit overlay with 4-bit activations | batched decode (2-32 rows) on a GGUF source | small-M NVFP4 GEMM runs on the NVFP4 decode overlay (`smallm_weight_`, `src/exec/executor_gemm_smallm.cpp`); single-stream decode reads the same overlay with FP16 activations, prompt rows keep the full-precision dequant route; batched output not byte-identical to single-stream at temperature 0; numbers in [`PERF.md`](PERF.md) "Serving KPIs" | #1897, #1766 |
 | `server.green_contexts=true` gives no green contexts on this chip | sm_120 decode scheduling | `cudaDevResourceGenerateDesc` fails for the decode partition; fallback is priority streams with distinct memSyncDomains, `has_green_contexts()` stays false; dynamic SM reconfiguration in `step_schedule()` is gated on the flag and never runs [PROV: date=2026-08-22 hw=RTX5090, 170 SMs, 80/20 split, 99/1 retry] | reconfigure race #1656 is real code, unreachable on sm_120 |
 | Remote `image_url` fetching is vulnerable to DNS rebinding when on (off by default) | `--allow-remote-images` | check and connection are two separate resolutions, so a name whose records change in between reaches a private address; fix needs a connect-time callback httplib does not expose; treat the flag as "this server's network is trusted" | - |

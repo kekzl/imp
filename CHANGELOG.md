@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- Gemma-4 E-variants (gemma-4-E4B-it), text: per-layer inputs (PLE table in mapped host RAM) and KV sharing (layers 24..41 read layer 22/23, no KV blocks of their own). Greedy vs HF fp32 CPU reference: NUMBER of 9 tokens match; untested on GPU so far.
+- Gemma-4 E-variants (gemma-4-E4B-it), text: per-layer inputs (PLE table in mapped host RAM) and KV sharing (layers 24..41 read layer 22/23, no KV blocks of their own). Greedy equals the HF fp32 reference on 9 of 9 and 20 of 20 tokens (`Gemma4E4BRef`) (#2978).
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
 
 ### Fixed
