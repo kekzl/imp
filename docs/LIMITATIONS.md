@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-01
+commit: bd6921fe
 -->
 
 # Limitations
@@ -25,6 +25,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | Loads with no dedicated gate | Llama-4 | manual smoke test only | #1680 |
+| Implemented, never run on a GPU: KDA scans checked only against the host reference in the CPU lane; no speculative decoding (KDA writes no verify snapshot), FP16 KV default, GGUF refused | Ling-3.0 (`bailing_hybrid`) | `test-moe-gdn --gtest_filter='KdaScan.*:MoeGroupTopk.*'`, then an HF logit comparison | roadmap row 52 |
 | Type exists, nothing exercises it | FP8 E5M2 KV / weights | none | #1680 |
 | Aliases onto the LLaMA path, no checkpoint of its own in a gate | Phi-4 | none | #1680 |
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |

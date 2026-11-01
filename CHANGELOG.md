@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Ling-3.0 (`bailing_hybrid`, roadmap row 52), not yet run on a GPU: Kimi Delta Attention scans (recurrent, chunk 16), group-limited MoE top-k (`n_group`/`topk_group`, DeepSeek-V3 too), MLA head-wise output gate. Host KDA reference vs fla's torch code: max diff < 2e-5; grouped routing picks 48 of 48 golden experts.
+
 ### Fixed
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content and schema-valid.
 - json_schema `number` with a lower bound: a fraction run to the 40-digit cap (`0.000...` under `exclusiveMinimum: 0`) left no legal token and the response stopped mid-object; the cap digit must now keep the value in bounds.
