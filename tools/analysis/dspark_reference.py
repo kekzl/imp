@@ -4,11 +4,14 @@ Usage (torch + safetensors, e.g. the vllm/vllm-openai image):
   python3 -I tools/analysis/dspark_reference.py <drafter dir> <target dir> <out.json> [ctx_rows=24]
 
 Inputs are deterministic so the C++ test rebuilds them: ctx feature [i][j] = 2 sin(0.37 i + 0.011 j) rounded
-to BF16, block = [target token 785, mask x 6], positions ctx 0..C-1, block C..C+6. Writes the 7 draft argmax
-ids (target lm_head; block row r predicts position C + r + 1, the anchor row included: on real Qwen3-8B features
-all 7 rows match the greedy continuation), the final-norm hidden of every block row (first 16 dims + L2 norm), and the same
+to BF16, block = [target token 785, mask x (block_size - 1)], positions ctx 0..C-1, block C..C+block_size-1.
+Writes the draft argmax ids (target lm_head; DSpark block row r predicts position C + r + 1, the anchor row
+included: on real Qwen3-8B features all 7 rows match the greedy continuation; DFlash, architectures
+DFlashDraftModel, drafts from rows 1.. with embed / lm_head from the target dir), the final-norm hidden of every
+block row (first 16 dims + L2 norm), and the same
 argmax ids when the context arrives in two parts (C/2, then the rest) through the draft KV cache.
 """
+import glob
 import json
 import math
 import sys
@@ -86,11 +89,27 @@ class Draft:
         return rms(h, w["norm.weight"], eps)
 
 
+def target_head(ddir, tdir):
+    """embed_tokens / lm_head: the drafter's own (DSpark, == target's), else the target's shards (DFlash)."""
+    tw = load(f"{ddir}/model.safetensors", {"embed_tokens.weight", "lm_head.weight"})
+    if len(tw) == 2:
+        return tw
+    names = {"model.embed_tokens.weight": "embed_tokens.weight", "lm_head.weight": "lm_head.weight"}
+    for f in sorted(glob.glob(f"{tdir}/*.safetensors")):
+        for k, v in load(f, set(names)).items():
+            tw[names[k]] = v
+    return tw
+
+
 def main():
     ddir, tdir, out = sys.argv[1], sys.argv[2], sys.argv[3]
     n_ctx = int(sys.argv[4]) if len(sys.argv) > 4 else 24
     cfg = json.load(open(f"{ddir}/config.json"))
-    tw = load(f"{ddir}/model.safetensors", {"embed_tokens.weight", "lm_head.weight"})  # == target's (checked)
+    dflash = cfg.get("architectures", [""])[0] == "DFlashDraftModel"  # rows 1.. draft, dflash_config
+    cfg.update(cfg.get("dflash_config", {}))
+    cfg.setdefault("rope_parameters", {"rope_theta": cfg.get("rope_theta", 1e6)})
+    row0 = 1 if dflash else 0
+    tw = target_head(ddir, tdir)
     d_model, n_feat = cfg["hidden_size"], len(cfg["target_layer_ids"])
     i = torch.arange(n_ctx, dtype=torch.float32)[:, None]
     j = torch.arange(n_feat * d_model, dtype=torch.float32)[None, :]
@@ -107,8 +126,8 @@ def main():
             d.ctx(feat[start:start + n], pos_ctx[start:start + n])
             start += n
         hid = d.block(emb, pos_blk)
-        ids = (hid @ tw["lm_head.weight"].T).argmax(-1)  # row r predicts position C + r + 1
-        return hid, ids
+        ids = (hid @ tw["lm_head.weight"].T).argmax(-1)  # DSpark row r -> C + r + 1, DFlash row r >= 1 -> C + r
+        return hid, ids[row0:]
 
     hid, ids = run([n_ctx])
     _, ids2 = run([n_ctx // 2, n_ctx - n_ctx // 2])

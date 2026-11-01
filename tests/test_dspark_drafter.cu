@@ -117,4 +117,62 @@ TEST_F(DSparkDrafterTest, GraphReplayFollowsContextLength) {
     EXPECT_EQ(g.graph_replays(), 2);
 }
 
+// z-lab DFlash layout (z-lab/Qwen3-8B-DFlash-b16): 16-row block, rows 1..15 draft, embed / lm_head borrowed
+// from the target checkpoint. Same reference script and features; FP16 eager, then FP8 + graph.
+std::string env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? v : dflt;
+}
+
+const std::vector<int32_t> kDFlashRefIds = {277, 11,  11,  594, 374, 374, 304, 304,
+                                            382, 382, 382, 279, 311, 311, 311};  // row r -> C + r
+
+TEST(DFlashDrafterTest, BlockMatchesReference) {
+    const std::string dir = env_or("IMP_TEST_MODEL_DFLASH", "/models/Qwen3-8B-DFlash-b16");
+    const std::string target = env_or("IMP_TEST_MODEL_DSPARK_TARGET", "/models/Qwen3-8B-NVFP4-cortecs");
+    if (!std::filesystem::exists(dir + "/model.safetensors") || !std::filesystem::exists(target))
+        GTEST_SKIP() << "no DFlash drafter at " << dir << " or target at " << target;
+    cudaStream_t stream = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+    imp::VRAMAllocator va;
+    ASSERT_TRUE(va.init());
+    constexpr int kCtx = 24;
+    {
+        imp::DSparkDrafter none;
+        EXPECT_FALSE(none.load(va, dir, 4096, 36, 256, stream, kEager16).empty())
+            << "no target path: embed / lm_head must be refused, not read from nowhere";
+    }
+    imp::DSparkDrafter dr;
+    imp::DSparkOptions opt = kEager16;
+    opt.target_path = target;
+    const std::string err = dr.load(va, dir, 4096, 36, 256, stream, opt);
+    ASSERT_TRUE(err.empty()) << err;
+    ASSERT_EQ(dr.block_size(), 16);
+    ASSERT_EQ(dr.draft_len(), 15);
+    const std::vector<half> host = features(kCtx, dr.feature_dim());
+    half* feat = nullptr;
+    ASSERT_EQ(cudaMalloc(&feat, host.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(feat, host.data(), host.size() * sizeof(half), cudaMemcpyHostToDevice), cudaSuccess);
+    dr.append_ctx(feat, dr.feature_dim(), kCtx, 0, stream);
+    EXPECT_EQ(dr.propose(785, kCtx, stream), kDFlashRefIds);
+    // speculative.dspark_min_prob: a probability is <= 1, so 1.01 keeps only the always-kept first draft.
+    EXPECT_EQ(dr.propose(785, kCtx, stream, 1.01f), std::vector<int32_t>{kDFlashRefIds[0]});
+
+    imp::DSparkDrafter g;
+    opt.fp8 = true;
+    opt.graph = true;
+    ASSERT_TRUE(g.load(va, dir, 4096, 36, 256, stream, opt).empty());
+    g.append_ctx(feat, g.feature_dim(), kCtx, 0, stream);
+    const std::vector<int32_t> eager = g.propose(785, kCtx, stream);
+    ASSERT_EQ(eager.size(), kDFlashRefIds.size());
+    int same = 0;
+    for (size_t i = 0; i < eager.size(); ++i)
+        same += eager[i] == kDFlashRefIds[i] ? 1 : 0;
+    EXPECT_GE(same, 13) << "FP8 drafts agreeing with the FP32 reference";
+    EXPECT_EQ(g.propose(785, kCtx, stream), eager) << "graph replay";
+    EXPECT_EQ(g.graph_replays(), 1);
+    cudaFree(feat);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace

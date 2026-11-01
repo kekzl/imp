@@ -1073,8 +1073,13 @@ suffix_k_max         = 64
 # Empty = off.
 # Experimental, expires: 2026-12-31 (remove or promote by then).
 ngram_corpus         = ""
-# DSpark block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 for Qwen3-8B); forces batch 1.
+# DSpark / DFlash block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 or
+# z-lab/Qwen3-8B-DFlash-b16 for Qwen3-8B; DFlash reads embed / lm_head from the target); forces batch 1.
 dspark_model         = ""
+# Verify at most this many drafts of one propose (0 = the whole block).
+dspark_max_draft     = 0
+# Verify drafts only up to the first later one whose drafter probability is below this (0 = off).
+dspark_min_prob      = 0.0
 # DSpark drafter q / o / gate / up / down / lm_head as per-row FP8: propose 3.07 -> 1.76 ms with the graph.
 dspark_fp8           = true
 # Greedy JSON / schema / regex / grammar / tool-constrained requests verify drafts (rows checked

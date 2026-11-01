@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <map>
@@ -82,7 +83,8 @@ __global__ void dspark_add_kernel(half* __restrict__ h, const half* __restrict__
         h[i] = __hadd(h[i], t[i]);
 }
 
-// One block per row: index of the largest logit (lowest index on ties).
+// One block per row: index of the largest logit (lowest index on ties) to out[row], its softmax probability
+// as float bits to out[gridDim.x + row].
 __global__ void dspark_argmax_rows_kernel(const half* __restrict__ logits, int vocab,
                                           int32_t* __restrict__ out) {
     const half* r = logits + (static_cast<size_t>(blockIdx.x) * vocab);
@@ -117,6 +119,24 @@ __global__ void dspark_argmax_rows_kernel(const half* __restrict__ logits, int v
                 idx = si[k];
             }
         out[blockIdx.x] = idx;
+        sb[0] = best;
+    }
+    __syncthreads();
+    const float mx = sb[0];
+    float sum = 0.0f;
+    for (int j = threadIdx.x; j < vocab; j += blockDim.x)
+        sum += __expf(__half2float(r[j]) - mx);
+    for (int o = 16; o > 0; o >>= 1)
+        sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    __syncthreads();  // sb[0] read by every thread before the partial sums overwrite it
+    if ((threadIdx.x & 31) == 0)
+        sb[threadIdx.x >> 5] = sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float tot = 0.0f;
+        for (int k = 0; k < static_cast<int>(blockDim.x >> 5); ++k)
+            tot += sb[k];
+        out[gridDim.x + blockIdx.x] = __float_as_int(1.0f / tot);
     }
 }
 
@@ -148,6 +168,7 @@ struct DSparkDrafter::Impl {
         Fp8Mat q8, o8, gate8, up8, down8;
     };
     int d = 0, n_layers = 0, nh = 0, nkv = 0, ff = 0, vocab = 0, block = 0, mask_id = 0, cap = 0;
+    int row0 = 0;  // first drafting block row: 0 DSpark, 1 DFlash
     float eps = 1e-6f, log2_theta = 0.0f;
     bool fp8 = false;
     bool graph = false;  // capture on the next eager-warmed propose
@@ -171,6 +192,8 @@ struct DSparkDrafter::Impl {
     half* h_anchor = nullptr;  // pin_anchor [d]
     int32_t* h_ids = nullptr;  // pin_ids
     RawSafeTensors st;
+    std::vector<RawSafeTensors> target_st;  // target shards holding embed_tokens / lm_head (DFlash)
+    std::string target_path;
     const uint16_t* embed_bf16 = nullptr;  // host mmap [vocab, d]
     std::vector<int> ctx_pos;              // position of every held context row, ascending
     size_t bytes = 0;
@@ -203,6 +226,7 @@ struct DSparkDrafter::Impl {
     // y[b, m] (+)= x[b, k] W^T through the FP8 copy when present, else cuBLAS on the FP16 one.
     void proj(const half* x, int k, const half* w16, const Fp8Mat& w8, half* y, int m, bool accumulate,
               cudaStream_t st_) const;
+    std::string borrow_target_tensors(std::map<std::string, const RawTensor*>& by_name);
     std::string upload_weights();
     std::string alloc_scratch(cudaStream_t stream);
     // The whole propose from h_params / h_anchor to h_ids, fixed pointers only: graph-capturable.
@@ -228,6 +252,7 @@ DSparkDrafter::DSparkDrafter() = default;
 DSparkDrafter::~DSparkDrafter() = default;
 
 int DSparkDrafter::block_size() const { return p_ ? p_->block : 0; }
+int DSparkDrafter::draft_len() const { return p_ ? p_->block - p_->row0 : 0; }
 const std::vector<int>& DSparkDrafter::target_layer_ids() const { return p_->layer_ids; }
 int DSparkDrafter::feature_dim() const { return p_ ? static_cast<int>(p_->layer_ids.size()) * p_->d : 0; }
 size_t DSparkDrafter::device_bytes() const { return p_ ? p_->bytes : 0; }
@@ -249,10 +274,20 @@ double json_num(const JValue& obj, const char* key, double dflt) {
     return (v && v->type == JType::NUMBER) ? v->num_val : dflt;
 }
 
+// architectures[0] == "DFlashDraftModel": the z-lab layout (rows 1.. draft, dflash_config sub-object).
+bool is_dflash_layout(const JValue& cfg) {
+    const JValue* a = jobj_find(cfg, "architectures");
+    return a && a->type == JType::ARRAY && !a->arr.empty() && a->arr[0].type == JType::STRING &&
+           a->arr[0].str_val == "DFlashDraftModel";
+}
+
 // config.json -> dims, block, mask id, theta, target layers. "" or a one-line reason.
 std::string parse_dspark_config(const JValue& cfg, int& d, int& n_layers, int& nh, int& nkv, int& ff,
                                 int& vocab, int& block, int& mask_id, float& eps, float& log2_theta,
                                 std::vector<int>& ids) {
+    // DFlash keeps mask_token_id / target_layer_ids in dflash_config; DSpark at the top level.
+    const JValue* sub = jobj_find(cfg, "dflash_config");
+    const JValue& lay = (sub && sub->type == JType::OBJECT) ? *sub : cfg;
     d = static_cast<int>(json_num(cfg, "hidden_size", 0));
     n_layers = static_cast<int>(json_num(cfg, "num_hidden_layers", 0));
     nh = static_cast<int>(json_num(cfg, "num_attention_heads", 0));
@@ -260,13 +295,13 @@ std::string parse_dspark_config(const JValue& cfg, int& d, int& n_layers, int& n
     ff = static_cast<int>(json_num(cfg, "intermediate_size", 0));
     vocab = static_cast<int>(json_num(cfg, "vocab_size", 0));
     block = static_cast<int>(json_num(cfg, "block_size", 0));
-    mask_id = static_cast<int>(json_num(cfg, "mask_token_id", -1));
+    mask_id = static_cast<int>(json_num(lay, "mask_token_id", -1));
     eps = static_cast<float>(json_num(cfg, "rms_norm_eps", 1e-6));
     double theta = json_num(cfg, "rope_theta", 1e6);
     if (const JValue* rp = jobj_find(cfg, "rope_parameters"); rp && rp->type == JType::OBJECT)
         theta = json_num(*rp, "rope_theta", theta);
     log2_theta = static_cast<float>(std::log2(theta));
-    if (const JValue* v = jobj_find(cfg, "target_layer_ids"); v && v->type == JType::ARRAY)
+    if (const JValue* v = jobj_find(lay, "target_layer_ids"); v && v->type == JType::ARRAY)
         for (const JValue& e : v->arr)
             ids.push_back(static_cast<int>(e.num_val));
     if (json_num(cfg, "markov_rank", 0) != 0)
@@ -348,10 +383,52 @@ void DSparkDrafter::Impl::proj(const half* x, int k, const half* w16, const Fp8M
     }
 }
 
+// embed_tokens / lm_head from the target checkpoint (a .safetensors file or every *.safetensors in a
+// directory) into `by_name` under the drafter's names; a tied target serves lm_head from embed_tokens.
+std::string DSparkDrafter::Impl::borrow_target_tensors(std::map<std::string, const RawTensor*>& by_name) {
+    if (target_path.empty())
+        return "embed_tokens / lm_head not in the drafter and no target checkpoint path";
+    std::vector<std::string> files;
+    std::error_code ec;
+    if (std::filesystem::is_directory(target_path, ec)) {
+        for (const auto& e : std::filesystem::directory_iterator(target_path, ec))
+            if (e.path().extension() == ".safetensors")
+                files.push_back(e.path().string());
+        std::sort(files.begin(), files.end());
+    } else {
+        files.push_back(target_path);
+    }
+    for (const std::string& f : files) {
+        RawSafeTensors t;
+        if (!t.open(f).empty())
+            continue;
+        const bool wanted = std::any_of(t.tensors().begin(), t.tensors().end(), [](const RawTensor& rt) {
+            return rt.name == "lm_head.weight" || rt.name == "model.embed_tokens.weight";
+        });
+        if (wanted)
+            target_st.push_back(std::move(t));
+    }
+    for (const RawSafeTensors& t : target_st)
+        for (const RawTensor& rt : t.tensors()) {
+            if (rt.name == "lm_head.weight")
+                by_name.emplace("lm_head.weight", &rt);
+            else if (rt.name == "model.embed_tokens.weight")
+                by_name.emplace("embed_tokens.weight", &rt);
+        }
+    if (!by_name.contains("lm_head.weight") && by_name.contains("embed_tokens.weight"))
+        by_name.emplace("lm_head.weight", by_name.at("embed_tokens.weight"));
+    if (!by_name.contains("lm_head.weight") || !by_name.contains("embed_tokens.weight"))
+        return "embed_tokens / lm_head neither in the drafter nor in " + target_path;
+    return "";
+}
+
 std::string DSparkDrafter::Impl::upload_weights() {
     std::map<std::string, const RawTensor*> by_name;
     for (const RawTensor& rt : st.tensors())
         by_name[rt.name] = &rt;
+    if (!by_name.contains("lm_head.weight") || !by_name.contains("embed_tokens.weight"))
+        if (std::string err = borrow_target_tensors(by_name); !err.empty())
+            return err;
     const int64_t qd = static_cast<int64_t>(nh) * kHeadDim, kvd = kv_dim(), dd = d;
     fc = upload(by_name, "fc.weight", dd * static_cast<int64_t>(layer_ids.size()) * dd);
     hidden_norm = upload(by_name, "hidden_norm.weight", dd);
@@ -425,13 +502,13 @@ std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
     logits = dev<half>(b * vocab);
     s = dev<float>(dspark_attention_work_floats(block, nh, cap));
     d_pos = dev<int>(static_cast<size_t>(rows));
-    d_ids = dev<int32_t>(b);
+    d_ids = dev<int32_t>(2 * b);  // ids, then top-1 probabilities as float bits
     mask_emb = dev<half>(static_cast<size_t>(d));
     if (!all_set(
             {t, tn, h, xn, q, o, res, kb, vb, d_params, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
         return "scratch allocation failed";
     pin_anchor = PinnedBuffer::acquire(cuda_host_pinned_allocator(), d * sizeof(half));
-    pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), b * sizeof(int32_t));
+    pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), 2 * b * sizeof(int32_t));
     pin_params = PinnedBuffer::acquire(cuda_host_pinned_allocator(), 2 * sizeof(int));
     h_anchor = pin_anchor.as<half>();
     h_ids = pin_ids.as<int32_t>();
@@ -455,6 +532,7 @@ std::string DSparkDrafter::load(VRAMAllocator& alloc, const std::string& dir, in
     p->fp8 = opt.fp8;
     p->graph = opt.graph;
     p->stream = stream;
+    p->target_path = opt.target_path;
     std::ifstream cf(dir + "/config.json");
     if (!cf)
         return "no " + dir + "/config.json";
@@ -469,6 +547,7 @@ std::string DSparkDrafter::load(VRAMAllocator& alloc, const std::string& dir, in
                                               p->block, p->mask_id, p->eps, p->log2_theta, p->layer_ids);
         !err.empty())
         return err;
+    p->row0 = is_dflash_layout(cfg) ? 1 : 0;
     if (p->d != target_d_model)
         return "hidden_size " + std::to_string(p->d) + " != target d_model " + std::to_string(target_d_model);
     for (int id : p->layer_ids)
@@ -567,7 +646,7 @@ void DSparkDrafter::Impl::enqueue_propose(cudaStream_t st_) {
     proj(xn, d, lm_head, head8, logits, vocab, false, st_);
     dspark_argmax_rows_kernel<<<b, 1024, 0, st_>>>(logits, vocab, d_ids);
     IMP_CUDA_CHECK_LAUNCH();
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_ids, d_ids, b * sizeof(int32_t), cudaMemcpyDeviceToHost, st_));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_ids, d_ids, sizeof(int32_t) * 2 * b, cudaMemcpyDeviceToHost, st_));
 }
 
 // Eager on the first propose (cuBLAS picks its algorithms outside a capture), captured on the second,
@@ -597,7 +676,7 @@ void DSparkDrafter::Impl::launch_propose(cudaStream_t st_) {
     enqueue_propose(st_);
 }
 
-std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream) {
+std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream, float min_prob) {
     Impl& P = *p_;
     const int n_ctx = static_cast<int>(P.ctx_pos.size());
     std::vector<int32_t> out;
@@ -611,7 +690,13 @@ std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_
     P.launch_propose(stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return out;
-    out.assign(P.h_ids, P.h_ids + P.block);
+    out.assign(P.h_ids + P.row0, P.h_ids + P.block);
+    const float* prob = reinterpret_cast<const float*>(P.h_ids + P.block) + P.row0;
+    for (size_t i = 1; i < out.size(); ++i)
+        if (prob[i] < min_prob) {
+            out.resize(i);
+            break;
+        }
     return out;
 }
 

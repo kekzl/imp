@@ -28,7 +28,9 @@ bool Engine::init_dspark_() {
     }
     auto dr = std::make_unique<DSparkDrafter>();
     const int max_ctx = config_.max_seq_len > 0 ? config_.max_seq_len : mc.max_seq_len;
-    const DSparkOptions opt{.fp8 = runtime_config_.speculative.dspark_fp8, .graph = config_.use_cuda_graphs};
+    const DSparkOptions opt{.fp8 = runtime_config_.speculative.dspark_fp8,
+                            .graph = config_.use_cuda_graphs,
+                            .target_path = model_->source_path()};
     if (std::string err = dr->load(vram_alloc_, dir, mc.d_model, mc.n_layers, max_ctx, stream_, opt);
         !err.empty()) {
         IMP_LOG_ERROR("speculative.dspark_model %s: %s", dir.c_str(), err.c_str());
@@ -53,9 +55,12 @@ bool Engine::init_dspark_() {
         if (scheduler_)
             scheduler_->clamp_max_batch_size(1);
     }
-    IMP_LOG_INFO("dspark: %s, block %d, %zu target layers, %zu MiB drafter + %zu MiB feature rows (%d)",
-                 dir.c_str(), dr->block_size(), dr->target_layer_ids().size(), dr->device_bytes() >> 20,
-                 feat_bytes >> 20, rows);
+    IMP_LOG_INFO(
+        "dspark: %s, block %d, %d drafts per propose (max_draft %d), %zu target layers, %zu MiB drafter + "
+        "%zu "
+        "MiB feature rows (%d)",
+        dir.c_str(), dr->block_size(), dr->draft_len(), runtime_config_.speculative.dspark_max_draft,
+        dr->target_layer_ids().size(), dr->device_bytes() >> 20, feat_bytes >> 20, rows);
     dspark_ = std::move(dr);
     return true;
 }
@@ -94,7 +99,11 @@ std::vector<int32_t> Engine::dspark_draft_(const Request& req) {
         IMP_LOG_INFO("[dspark] draft anchor=%d pos=%d ctx_rows=%d next_pos=%d", req.output_tokens.back(),
                      req.context_len() - 1, dspark_->ctx_rows(), dspark_->next_pos());
     const auto t0 = std::chrono::steady_clock::now();
-    std::vector<int32_t> draft = dspark_->propose(req.output_tokens.back(), req.context_len() - 1, stream_);
+    std::vector<int32_t> draft = dspark_->propose(req.output_tokens.back(), req.context_len() - 1, stream_,
+                                                  runtime_config_.speculative.dspark_min_prob);
+    if (const int cap = runtime_config_.speculative.dspark_max_draft;
+        cap > 0 && static_cast<int>(draft.size()) > cap)
+        draft.resize(static_cast<size_t>(cap));
     DSparkTiming& t = g_dspark_timing;
     t.propose_ms += ms_since(t0);
     if (++t.n == DSparkTiming::kWindow) {
