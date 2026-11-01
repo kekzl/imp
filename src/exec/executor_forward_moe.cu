@@ -112,7 +112,7 @@ static bool can_decode_fast(int n, const TransformerLayer& ly, void* dequant_buf
         (non_gated || ly.nvfp4_moe_gate_ptr != nullptr))
         return true;
     // #2444: gate, up and down each need an arm in the sub-path that runs; the dispatch throws otherwise.
-    const bool dp4a = qs.q8_1_buf != nullptr && qs.d8_buf != nullptr;
+    const bool dp4a = moe_decode_uses_dp4a(ly, qs.q8_1_buf != nullptr && qs.d8_buf != nullptr);
     auto has_arm = dp4a ? moe_dp4a_decode_supported : moe_fp16_decode_supported;
     if (!non_gated && (ly.expert_gate_packed.data == nullptr || !has_arm(ly.expert_gate_packed.qtype)))
         return false;
@@ -335,7 +335,9 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     // Per-expert tensor views for grouped GEMM, two paths: pre-dequanted
     // (expert_w_gate[e] etc. FP16 on GPU, legacy/unquantized packed) or
     // on-the-fly dequant (expert_*_packed raw Q6_K/Q8_0/Q4_0, dequant per GEMM).
-    ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr);
+    // Packed F16 experts need no dequant: the per-expert views into the pack are the FP16 weights.
+    ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
+                              ly.expert_up_packed.qtype != QType::F16);
 
     // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
     // Note: can't use expert_w_gate.empty() because loader pre-allocates the vector for all layers.
@@ -381,6 +383,9 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     // Host-resident NVFP4 experts stage per chunk from host memory: a captured M=512 prefill
     // faulted on replay (IMA / SIGSEGV, Qwen3-Coder-Next, Qwen3.6-35B force_host_experts, #2574).
     if (pre_dequant_internal::has_host_resident_experts(*model_))
+        return true;
+    // F16 experts never reach the grouped NVFP4 path; a capture attempt throws and costs a forward.
+    if (pre_dequant_internal::has_f16_experts(*model_))
         return true;
     return false;
 }

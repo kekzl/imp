@@ -239,12 +239,16 @@ void gemv_q6k_moe_decode(const void* packed_weights, const int32_t* expert_indic
 void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
                           int rows, int K, size_t expert_stride_bytes, int x_stride, int top_k,
                           cudaStream_t stream = nullptr);
-// FP16 experts (MTP draft head only; main model experts are always quantized). Stride
-// is in ELEMENTS not bytes, unlike the quantized variants: no block packing here, so
-// elements are the natural unit (a byte stride would invite an off-by-factor-of-two).
+// FP16 experts (MTP draft head, BF16 main-model experts packed at load). Stride is in
+// ELEMENTS not bytes, unlike the quantized variants; the moe_fp16_decode_kernel(F16) table
+// entry converts the byte stride.
 void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
                          int rows, int K, size_t expert_stride_elems, int x_stride, int top_k,
                          cudaStream_t stream = nullptr);
+void gemv_f16_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                const int32_t* expert_indices, const half* x, half* y_gate, half* y_up,
+                                int rows, int K, size_t gate_stride_elems, size_t up_stride_elems,
+                                int x_stride, int top_k, cudaStream_t stream = nullptr);
 
 // dp4a-accelerated MoE decode GEMV: same interface as above but with pre-quantized Q8_1
 // input. q8_1_stride: 0 = shared input for all experts (gate/up), K/32 = per-expert

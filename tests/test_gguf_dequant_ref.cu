@@ -589,6 +589,63 @@ TEST(GgufRef, MoeDecodeDispatchRefusesUnsupportedQType) {
         EXPECT_THROW(moe_fp16_gate_up_kernel(qt), std::invalid_argument) << qtype_name(qt);
     }
 }
+// F16 experts (BF16 checkpoints packed at load): the table arms take a BYTE stride and convert it.
+TEST(GgufRef, F16_MoeDecodeDispatchGateUpAndDown) {
+    constexpr int E = 4, N = 96, K = 1536, TOP_K = 3;
+    ASSERT_TRUE(moe_fp16_decode_supported(QType::F16));
+    ASSERT_FALSE(moe_dp4a_decode_supported(QType::F16));
+    Lcg g(0xF16Eu);
+    auto rnd = [&](size_t n) {
+        std::vector<half> v(n);
+        for (auto& h : v)
+            h = __float2half(0.5f * g.unit());
+        return v;
+    };
+    const std::vector<half> hg = rnd(static_cast<size_t>(E) * N * K), hu = rnd(hg.size());
+    const std::vector<half> hx = rnd(static_cast<size_t>(TOP_K) * K);  // per-slot rows for the down case
+    const int32_t h_idx[TOP_K] = {3, 0, 2};
+    half *dg = nullptr, *du = nullptr, *dx = nullptr, *yg = nullptr, *yu = nullptr;
+    int32_t* d_idx = nullptr;
+    ASSERT_EQ(cudaMalloc(&dg, hg.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&du, hu.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dx, hx.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&yg, TOP_K * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&yu, TOP_K * N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_idx, sizeof(h_idx)), cudaSuccess);
+    cudaMemcpy(dg, hg.data(), hg.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(du, hu.data(), hu.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(dx, hx.data(), hx.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_idx, h_idx, sizeof(h_idx), cudaMemcpyHostToDevice);
+
+    const size_t stride_bytes = static_cast<size_t>(N) * K * sizeof(half);
+    auto check = [&](const char* name, const half* dy, const std::vector<half>& w, int x_stride) {
+        std::vector<half> hy(static_cast<size_t>(TOP_K) * N);
+        ASSERT_EQ(cudaMemcpy(hy.data(), dy, hy.size() * sizeof(half), cudaMemcpyDeviceToHost), cudaSuccess);
+        for (int s = 0; s < TOP_K; ++s)
+            for (int r = 0; r < N; ++r) {
+                double ref = 0.0;
+                const size_t wrow = ((static_cast<size_t>(h_idx[s]) * N) + r) * K;
+                for (int k = 0; k < K; ++k)
+                    ref += static_cast<double>(__half2float(w[wrow + k])) *
+                           __half2float(hx[(static_cast<size_t>(s) * x_stride) + k]);
+                ASSERT_NEAR(__half2float(hy[(static_cast<size_t>(s) * N) + r]), ref,
+                            2e-2 + (2e-3 * std::fabs(ref)))
+                    << name << " slot " << s << " row " << r;
+            }
+    };
+    moe_fp16_gate_up_kernel(QType::F16)(dg, du, d_idx, dx, yg, yu, N, K, stride_bytes, stride_bytes,
+                                        /*x_stride=*/0, TOP_K, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    check("gate", yg, hg, 0);
+    check("up", yu, hu, 0);
+    moe_fp16_decode_kernel(QType::F16)(du, d_idx, dx, yg, N, K, stride_bytes, /*x_stride=*/K, TOP_K, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    check("down", yg, hu, K);
+    for (void* p : {static_cast<void*>(dg), static_cast<void*>(du), static_cast<void*>(dx),
+                    static_cast<void*>(yg), static_cast<void*>(yu), static_cast<void*>(d_idx)})
+        cudaFree(p);
+}
+
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
 // Q4_0 dp4a-GEMV vs fp64 reference surfaced AUDIT.md F1: Q4_0_Traits::dp4a_block read
 // nibbles INTERLEAVED (2k=low,2k+1=high) while standard ggml Q4_0 is SPLIT (e=low,e+16=high),

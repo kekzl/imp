@@ -38,10 +38,24 @@ MoeDp4aGateUpFn find_dp4a_gate_up(QType qt) {
     }
 }
 
+// F16 kernels take element strides; the table contract is bytes.
+void f16_decode_bytes(const void* w, const int32_t* idx, const half* x, half* y, int rows, int K,
+                      size_t stride_bytes, int x_stride, int top_k, cudaStream_t s) {
+    gemv_f16_moe_decode(w, idx, x, y, rows, K, stride_bytes / sizeof(half), x_stride, top_k, s);
+}
+void f16_gate_up_bytes(const void* wg, const void* wu, const int32_t* idx, const half* x, half* yg, half* yu,
+                       int rows, int K, size_t g_stride_bytes, size_t u_stride_bytes, int x_stride, int top_k,
+                       cudaStream_t s) {
+    gemv_f16_moe_gate_up_fused(wg, wu, idx, x, yg, yu, rows, K, g_stride_bytes / sizeof(half),
+                               u_stride_bytes / sizeof(half), x_stride, top_k, s);
+}
+
 MoeFp16DecodeFn find_fp16_decode(QType qt) {
     switch (qt) {
     case QType::Q6_K: return gemv_q6k_moe_decode;
     case QType::Q8_0: return gemv_q8_0_moe_decode;
+    case QType::F16:
+        return f16_decode_bytes;
     default: return nullptr;
     }
 }
@@ -50,6 +64,8 @@ MoeFp16GateUpFn find_fp16_gate_up(QType qt) {
     switch (qt) {
     case QType::Q6_K: return gemv_q6k_moe_gate_up_fused;
     case QType::Q8_0: return gemv_q8_0_moe_gate_up_fused;
+    case QType::F16:
+        return f16_gate_up_bytes;
     default: return nullptr;
     }
 }

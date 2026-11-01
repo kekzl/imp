@@ -830,9 +830,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         const MoeExpertServe serve = classify_moe_experts(*model_, dispatch_policy().gemm.moe_imma_prefill,
                                                           compute_dtype_);
         moe_.imma_serves_all = serve.imma_all;
-        if (serve.cutlass_fp4 || serve.imma_all) {
-            IMP_LOG_INFO("MoE batch dequant buffer: skipped (%s serves every expert tensor)",
-                         serve.cutlass_fp4 ? "grouped NVFP4 GEMM" : "MoE IMMA prefill");
+        if (serve.cutlass_fp4 || serve.imma_all || serve.f16_all) {
+            IMP_LOG_INFO("MoE batch dequant buffer: skipped (%s)",
+                         serve.f16_all       ? "F16 experts need no dequant"
+                         : serve.cutlass_fp4 ? "grouped NVFP4 GEMM serves every expert tensor"
+                                             : "MoE IMMA prefill serves every expert tensor");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
         } else

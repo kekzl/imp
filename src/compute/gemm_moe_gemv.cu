@@ -142,10 +142,12 @@ void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indi
 // and issue one GEMM per chosen expert, which kept the whole draft path out of CUDA graph
 // capture. Straight dot product per row, one warp per row, vectorised 2-wide: bandwidth-bound
 // on the weight read, so each warp walking its row contiguously is what matters.
-__global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weights,
+// blockIdx.y selects (w0, y0, stride0) or (w1, y1, stride1): one launch for gate + up.
+__global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ w0, const half* __restrict__ w1,
                                            const int32_t* __restrict__ expert_indices,
-                                           const half* __restrict__ x, half* __restrict__ y, int rows, int K,
-                                           size_t expert_stride_elems, int x_stride, int blocks_per_expert) {
+                                           const half* __restrict__ x, half* __restrict__ y0,
+                                           half* __restrict__ y1, int rows, int K, size_t stride0_elems,
+                                           size_t stride1_elems, int x_stride, int blocks_per_expert) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
@@ -157,6 +159,10 @@ __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weigh
     if (row >= rows)
         return;
 
+    const bool second = (blockIdx.y == 1);
+    const half* packed_weights = second ? w1 : w0;
+    half* y = second ? y1 : y0;
+    const size_t expert_stride_elems = second ? stride1_elems : stride0_elems;
     const int expert_id = expert_indices[expert_slot];
     const half* W_row = packed_weights + ((size_t)expert_id * expert_stride_elems) + ((size_t)row * K);
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
@@ -188,9 +194,24 @@ void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indic
                          int rows, int K, size_t expert_stride_elems, int x_stride, int top_k,
                          cudaStream_t stream) {
     const int blocks_per_expert = gemv_blocks(rows);
+    const auto* w = static_cast<const half*>(packed_weights);
     gemv_f16_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
-        static_cast<const half*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_elems,
-        x_stride, blocks_per_expert);
+        w, w, expert_indices, x, y, y, rows, K, expert_stride_elems, expert_stride_elems, x_stride,
+        blocks_per_expert);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void gemv_f16_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                const int32_t* expert_indices, const half* x, half* y_gate, half* y_up,
+                                int rows, int K, size_t gate_stride_elems, size_t up_stride_elems,
+                                int x_stride, int top_k, cudaStream_t stream) {
+    const int blocks_per_expert = gemv_blocks(rows);
+    dim3 grid(top_k * blocks_per_expert, 2);
+    gemv_f16_moe_decode_kernel<<<grid, kGemvThreads, 0, stream>>>(static_cast<const half*>(gate_weights),
+                                                                  static_cast<const half*>(up_weights),
+                                                                  expert_indices, x, y_gate, y_up, rows, K,
+                                                                  gate_stride_elems, up_stride_elems,
+                                                                  x_stride, blocks_per_expert);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

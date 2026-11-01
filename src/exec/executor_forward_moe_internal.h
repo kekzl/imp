@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "compute/activation.h"
+#include "compute/gemm.h"
 #include "compute/ssm.h"
 #include "quant/dequant_gpu.h"
 #include "exec/expert_cache.h"
@@ -55,6 +56,14 @@ inline void apply_expert_activation(void* gate_data, void* up_data, void* swiglu
         else
             swiglu(g, u, a, stream);
     }
+}
+
+// n == 1 MoE decode: Q8_1 activations (dp4a) only when every packed expert tensor has a dp4a arm,
+// else FP16 activations (F16 experts have no dp4a arm). Shared by the dispatch and run_moe_decode_fast.
+[[nodiscard]] inline bool moe_decode_uses_dp4a(const TransformerLayer& ly, bool q8_1_buffers) {
+    auto arm = [](const Tensor& t) { return t.data == nullptr || moe_dp4a_decode_supported(t.qtype); };
+    return q8_1_buffers && arm(ly.expert_gate_packed) && arm(ly.expert_up_packed) &&
+           arm(ly.expert_down_packed);
 }
 
 inline size_t expert_stride(const Tensor& packed, QType qtype) {

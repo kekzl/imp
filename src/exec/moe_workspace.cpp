@@ -8,7 +8,19 @@
 namespace imp {
 
 MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill, QType compute_dtype) {
-    MoeExpertServe s{true, moe_imma_prefill && compute_dtype == QType::F16};
+    MoeExpertServe s{true, moe_imma_prefill && compute_dtype == QType::F16, false};
+    bool any_f16 = false, all_f16 = true;
+    for (int i = 0; i < model.config().n_layers; i++) {
+        const auto& L = model.layer(i);
+        for (const Tensor* t : {&L.expert_gate_packed, &L.expert_up_packed, &L.expert_down_packed}) {
+            if (!t->data)
+                continue;
+            const bool f16 = t->qtype == QType::F16 && t->on_device;
+            any_f16 = any_f16 || f16;
+            all_f16 = all_f16 && f16;
+        }
+    }
+    s.f16_all = any_f16 && all_f16;
     auto fp4 = [](const Tensor& t) { return !t.data || t.qtype == QType::NVFP4 || t.qtype == QType::MXFP4; };
     // Packed experts are [ne][N][K].
     auto imma = [](const Tensor& t) {
