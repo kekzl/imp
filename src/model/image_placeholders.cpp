@@ -46,9 +46,15 @@ std::expected<void, std::string> expand_video_placeholders(
     if (found != videos.size())
         return std::unexpected("prompt holds " + std::to_string(found) + " video placeholder(s) but " +
                                std::to_string(videos.size()) + " video(s) were encoded");
-    for (size_t k = 0; k < videos.size(); ++k)
-        if (videos[k].tokens_per_group <= 0 || videos[k].stamp_ids.empty())
+    for (size_t k = 0; k < videos.size(); ++k) {
+        const VideoPlaceholderLayout& v = videos[k];
+        if (v.tokens_per_group <= 0 || v.stamp_ids.empty())
             return std::unexpected("video " + std::to_string(k) + " produced no tokens");
+        if (!v.group_tokens.empty() &&
+            (v.group_tokens.size() != v.stamp_ids.size() || v.group_tokens[0] <= 0 ||
+             std::any_of(v.group_tokens.begin(), v.group_tokens.end(), [](int c) { return c < 0; })))
+            return std::unexpected("video " + std::to_string(k) + " has an invalid per-pair token count");
+    }
     if (found == 0)
         return {};
 
@@ -61,10 +67,12 @@ std::expected<void, std::string> expand_video_placeholders(
             continue;
         }
         const VideoPlaceholderLayout& v = videos[k++];
-        for (const auto& stamp : v.stamp_ids) {
+        for (size_t g = 0; g < v.stamp_ids.size(); ++g) {
+            const auto& stamp = v.stamp_ids[g];
+            const int pads = v.group_tokens.empty() ? v.tokens_per_group : v.group_tokens[g];
             out.insert(out.end(), stamp.begin(), stamp.end());
             out.push_back(vision_start_id);
-            out.insert(out.end(), static_cast<size_t>(v.tokens_per_group), video_pad_id);
+            out.insert(out.end(), static_cast<size_t>(pads), video_pad_id);
             out.push_back(vision_end_id);
         }
     }

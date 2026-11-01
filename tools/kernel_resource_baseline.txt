@@ -114,7 +114,7 @@ void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp32_kernel<3>	sm_120a	48	8	0
 imp::topk_gating_kernel	sm_120a	46	256	0
-imp::topk_finalize_rows_kernel	sm_120a	44	1056	0
+imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	42	1056	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0

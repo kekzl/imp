@@ -34,7 +34,7 @@
     "regex": "",
     "rep_pen_explicit": false,
     "repeat_last_n": 0,
-    "repetition_penalty": 1.0499999523162842,
+    "repetition_penalty": 1.0,
     "seed": -1,
     "session_id": "",
     "spec_mtp_k": -1,
@@ -1021,14 +1021,12 @@
   },
   "repetition_penalty=1": {
    "params": {
-    "rep_pen_explicit": true,
-    "repetition_penalty": 1.0
+    "rep_pen_explicit": true
    }
   },
   "repetition_penalty=1.0": {
    "params": {
-    "rep_pen_explicit": true,
-    "repetition_penalty": 1.0
+    "rep_pen_explicit": true
    }
   },
   "repetition_penalty=100": {
@@ -1055,8 +1053,7 @@
   },
   "repetition_penalty=true": {
    "params": {
-    "rep_pen_explicit": true,
-    "repetition_penalty": 1.0
+    "rep_pen_explicit": true
    }
   },
   "repetition_penalty={}": {
@@ -1693,7 +1690,7 @@
     "priority": 0,
     "prompt_logprobs": -1,
     "repeat_last_n": 0,
-    "repetition_penalty": 1.0499999523162842,
+    "repetition_penalty": 1.0,
     "seed": -1,
     "session_id": "",
     "spec_mtp_k": -1,
@@ -2673,14 +2670,10 @@
    }
   },
   "repetition_penalty=1": {
-   "params": {
-    "repetition_penalty": 1.0
-   }
+   "params": {}
   },
   "repetition_penalty=1.0": {
-   "params": {
-    "repetition_penalty": 1.0
-   }
+   "params": {}
   },
   "repetition_penalty=100": {
    "params": {
@@ -2702,9 +2695,7 @@
    "status": 400
   },
   "repetition_penalty=true": {
-   "params": {
-    "repetition_penalty": 1.0
-   }
+   "params": {}
   },
   "repetition_penalty={}": {
    "error": "\"repetition_penalty\" must be a number, got object",
@@ -3315,7 +3306,7 @@
     "regex": "",
     "rep_pen_explicit": false,
     "repeat_last_n": 0,
-    "repetition_penalty": 1.0499999523162842,
+    "repetition_penalty": 1.0,
     "seed": -1,
     "session_id": "",
     "spec_mtp_k": -1,
@@ -4595,7 +4586,7 @@
     "regex": "",
     "rep_pen_explicit": false,
     "repeat_last_n": 0,
-    "repetition_penalty": 1.0499999523162842,
+    "repetition_penalty": 1.0,
     "seed": -1,
     "session_id": "",
     "spec_mtp_k": -1,

@@ -37,6 +37,7 @@ TEST(SamplingDefaultsParity, EveryArchCliEqualsServer) {
             EXPECT_EQ(srv.temperature, cli.temperature) << imp::model_arch_name(arch);
             EXPECT_EQ(srv.top_p, cli.top_p) << imp::model_arch_name(arch);
             EXPECT_EQ(srv.top_k, cli.top_k) << imp::model_arch_name(arch);
+            EXPECT_EQ(srv.repetition_penalty, cli.repetition_penalty) << imp::model_arch_name(arch);
         }
         const imp::SamplingDefaults preset = imp::get_sampling_defaults(arch);
         EXPECT_EQ(imp::resolve_sampling_defaults(arch, none).temperature, preset.temperature);
@@ -49,6 +50,16 @@ TEST(SamplingDefaultsParity, QwenPresetReplacesServerConstants) {
     EXPECT_FLOAT_EQ(f.temperature, 0.6f);
     EXPECT_FLOAT_EQ(f.top_p, 0.95f);
     EXPECT_EQ(f.top_k, 20);
+}
+
+// Repetition penalty: the model's generation_config value, else 1.0 (HF, vLLM); 1.05 typo'd German.
+TEST(SamplingDefaultsParity, RepetitionPenaltyFollowsGenerationConfig) {
+    EXPECT_FLOAT_EQ(server_defaults(ModelArch::QWEN3, {}).repetition_penalty, 1.0f);
+    HFConfigLoader::GenerationConfig gen;
+    gen.repetition_penalty = 1.1f;
+    EXPECT_FLOAT_EQ(server_defaults(ModelArch::QWEN3, gen).repetition_penalty, 1.1f);
+    const nlohmann::json body = {{"repetition_penalty", 1.2}};
+    EXPECT_FLOAT_EQ(server_defaults(ModelArch::QWEN3, gen, body).repetition_penalty, 1.2f);
 }
 
 TEST(SamplingDefaultsParity, ExplicitRequestFieldsWin) {

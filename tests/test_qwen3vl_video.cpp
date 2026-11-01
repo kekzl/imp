@@ -320,8 +320,8 @@ TEST(QwenVideoLayout, RefusesMismatchedVideoInput) {
     std::vector<int32_t> toks{1, 9, 2};
     const auto orig = toks;
     EXPECT_FALSE(expand_video_placeholders(toks, 9, 5, 6, {}));
-    EXPECT_FALSE(expand_video_placeholders(toks, 9, 5, 6, {VideoPlaceholderLayout{0, {{7}}}}));
-    EXPECT_FALSE(expand_video_placeholders(toks, 9, 5, 6, {VideoPlaceholderLayout{4, {}}}));
+    EXPECT_FALSE(expand_video_placeholders(toks, 9, 5, 6, {VideoPlaceholderLayout{0, {{7}}, {}}}));
+    EXPECT_FALSE(expand_video_placeholders(toks, 9, 5, 6, {VideoPlaceholderLayout{4, {}, {}}}));
     EXPECT_EQ(toks, orig);
 
     // A 2-group video with one group's worth of tokens in the prompt.

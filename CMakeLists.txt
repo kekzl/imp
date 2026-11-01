@@ -574,6 +574,8 @@ set(IMP_VISION_SOURCES
     src/vision/image_decode.cpp
     src/vision/vision_encoder.cu
     src/vision/deepstack_inject.cu
+    src/vision/video_evs.cpp
+    src/vision/video_evs_kernels.cu
 )
 
 set(IMP_API_SOURCES
@@ -1106,6 +1108,8 @@ if(IMP_BUILD_TESTS)
         tests/test_mrope_positions.cpp
         # Qwen3-VL video: frame-pair patchify, layout, M-RoPE vs HF fixtures in tests/fixtures/qwen3vl_video.
         tests/test_qwen3vl_video.cpp
+        # EVS video token pruning: retained count, stable mask, pruned layout and M-RoPE (host half).
+        tests/test_video_evs.cpp
         tests/test_mla.cpp
         # KDA host reference vs fla naive torch goldens (tests/refs/kda_golden.h).
         tests/test_kda_reference.cpp
@@ -1516,6 +1520,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn_graph_buckets.cu
         tests/test_determinism_e2e.cpp
         tests/test_deepstack_inject.cu
+        tests/test_video_evs_kernels.cu
         tests/test_vision_chunk_offset.cu
         tests/test_vision_golden.cu
         tests/test_qwen3vl_encoder.cu

@@ -236,24 +236,25 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
     float inv_sum = (gsum > 0.0f) ? (1.0f / gsum) : 1.0f;
 
     // logits -> probabilities (global softmax), top-p cutoff, renormalize, sample
+    float k_mass = 0.0f;
     for (int i = 0; i < top_k; ++i) {
         if (s_idx[i] >= 0)
             s_val[i] = expf((s_val[i] - gmax) * inv_temperature) * inv_sum;
         else
             s_val[i] = 0.0f;
+        k_mass += s_val[i];
     }
+    const float p_cut = top_p * k_mass;  // top-p over the renormalized top k (HF, vLLM, llama.cpp)
     float cumsum = 0.0f;
     int cutoff = top_k;
     for (int i = 0; i < top_k; ++i) {
         cumsum += s_val[i];
-        if (cumsum >= top_p) {
+        if (cumsum >= p_cut) {
             cutoff = i + 1;
             break;
         }
     }
-    float norm = 0.0f;
-    for (int i = 0; i < cutoff; ++i)
-        norm += s_val[i];
+    const float norm = cumsum;  // the prefix sum up to cutoff, same summation order
     float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
 
     unsigned int rng_state = sampler_seed_scramble(seed);
@@ -452,19 +453,21 @@ __global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_
         return;
     seed += d_seed_salt ? static_cast<unsigned int>(d_seed_salt[0]) : 0u;
 
+    float k_mass = 0.0f;  // top-p over the renormalized top k, as in topk_finalize_body
+    for (int i = 0; i < top_k; i++)
+        k_mass += sorted_probs[i];
+    const float p_cut = top_p * k_mass;
     float cumsum = 0.0f;
     int cutoff = top_k;
     for (int i = 0; i < top_k; i++) {
         cumsum += sorted_probs[i];
-        if (cumsum >= top_p) {
+        if (cumsum >= p_cut) {
             cutoff = i + 1;
             break;
         }
     }
 
-    float norm = 0.0f;
-    for (int i = 0; i < cutoff; i++)
-        norm += sorted_probs[i];
+    const float norm = cumsum;  // the prefix sum up to cutoff, same summation order
     float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
 
     unsigned int rng_state = sampler_seed_scramble(seed);

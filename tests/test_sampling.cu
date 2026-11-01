@@ -280,6 +280,40 @@ TEST(SamplingTest, TopPTruncatesCubPath) {
     run_top_p_truncation_case(/*top_k=*/200, "CUB, all-negative logits");
 }
 
+// top-p applies to the top-k set renormalized (HF, vLLM, llama.cpp). `head` tokens hold `head_p`
+// each, `mid` tokens `mid_p` each, the rest of the vocabulary the remainder: the top k hold
+// less than top_p of the full mass, so a cutoff against the full mass never fires.
+static void run_top_p_after_top_k_case(int top_k, int head, float head_p, int mid, float mid_p, float top_p,
+                                       const char* path_name) {
+    constexpr int V = 4096;
+    ASSERT_EQ(head + mid, top_k);
+    const float rest = (1.0f - head * head_p - mid * mid_p) / (V - top_k);
+    ASSERT_LT(rest, mid_p);
+    std::vector<float> logits(V, std::log(rest));
+    for (int i = 0; i < head; i++)
+        logits[i * 7 + 3] = std::log(head_p);
+    for (int i = 0; i < mid; i++)
+        logits[i * 7 + 4] = std::log(mid_p);
+    Tensor d_logits = make_logits(logits.data(), V);
+    for (unsigned int seed = 0; seed < 512; seed++) {
+        const int32_t tok = sample_topk_topp(d_logits, top_k, top_p, /*temperature=*/1.0f, seed);
+        EXPECT_TRUE(tok >= 0 && tok % 7 == 3 && tok / 7 < head)
+            << path_name << ": token " << tok << " is outside the renormalized top_p=" << top_p
+            << " nucleus (seed " << seed << ")";
+    }
+    free_gpu_tensor(d_logits);
+}
+
+TEST(SamplingTest, TopPRenormalizesTopKMultiblockPath) {
+    // top 4 hold 0.8: renormalized 0.375 0.375 0.125 0.125, top_p 0.75 keeps the first two.
+    run_top_p_after_top_k_case(/*top_k=*/4, 2, 0.30f, 2, 0.10f, /*top_p=*/0.75f, "multiblock");
+}
+
+TEST(SamplingTest, TopPRenormalizesTopKCubPath) {
+    // top 200 hold 0.698: the head pair is 0.716 of it, top_p 0.7 keeps only the pair.
+    run_top_p_after_top_k_case(/*top_k=*/200, 2, 0.25f, 198, 0.001f, /*top_p=*/0.7f, "CUB");
+}
+
 TEST(SamplingTest, TopPTruncatesCubPathShifted) {
     // Same distribution shifted +5 so the max is positive: softmax is shift-invariant, so this
     // must behave identically to the unshifted case, or the sampler's max reduction is
