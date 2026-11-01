@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
+
 ### Fixed
 - `response_format` json_schema with thinking on: a `{` the model drafted inside its reasoning engaged the schema mask there, so the request ended with empty `content` (Qwen3.8-27B-NVFP4, 6 of 6 calls); the mask now waits for `</think>`, and an EOS inside thinking closes the block first. Same calls: 6 of 6 with content and schema-valid.
 - json_schema `number` with a lower bound: a fraction run to the 40-digit cap (`0.000...` under `exclusiveMinimum: 0`) left no legal token and the response stopped mid-object; the cap digit must now keep the value in bounds.

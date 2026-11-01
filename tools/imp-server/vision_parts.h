@@ -13,8 +13,17 @@ class Engine;
 }  // namespace imp
 
 // Normalises params.vision_order (a dialect that fills only `images` gets all-images) and folds
-// every image and video frame, in that order, into one prefix-cache salt.
-size_t vision_parts_hash(ChatRequestParams& params);
+// every image and video frame, in that order, into one prefix-cache salt. A video's EVS rate
+// (its "pruning_rate", else the engine's runtime.video_pruning_rate) joins the salt when > 0.
+size_t vision_parts_hash(ChatRequestParams& params, const imp::Engine* engine = nullptr);
+
+// Copies the snapshot's vision state onto a request: images, Qwen patches, EVS plans, content salt.
+void bind_vision_parts(imp::Request& req, const ChatStateSnapshot& snap);
+
+// The EVS rate a video part runs at: its own "pruning_rate", else the server default.
+inline double video_pruning_rate(const ChatVideoInput& v, double default_rate) {
+    return v.pruning_rate >= 0.0 ? v.pruning_rate : default_rate;
+}
 
 // Patchifies every part into snap.qwen_patches (a video adds one entry per frame pair; on InternVL
 // one image per frame), with snap.qwen_image_tokens, snap.qwen_video_layouts and

@@ -866,7 +866,9 @@ private:
     // not garbage.
     [[nodiscard]] bool encode_qwen_image_for_(Request& req, cudaStream_t stream);
     // Prompt-side half: where the image sits and what it costs in positions.
-    [[nodiscard]] bool build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes);
+    // kept[v]: ascending kept token indices of req.qwen_video_evs[v] (EVS; empty = nothing pruned).
+    [[nodiscard]] bool build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes,
+                                          const std::vector<std::vector<int32_t>>& kept);
 
     // CLI only: images preprocessed on the caller's thread, in the order they
     // were given, waiting for the next request that has placeholders for them.
@@ -876,7 +878,7 @@ private:
     // question, "same tokens and same pictures?", and two requests differing
     // only in the order of two images must not share a prefix.
     size_t pending_image_hash_ = 0;
-    int32_t qwen_image_pad_id_ = -1, qwen_video_pad_id_ = -1;
+    int32_t qwen_image_pad_id_ = -1, qwen_video_pad_id_ = -1, qwen_vision_end_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints): a
     // single engine-global manager clobbers FSMs across concurrent
     // prefill/finish and drops enforcement at decode batch>1. The pool

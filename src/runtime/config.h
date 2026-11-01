@@ -66,6 +66,10 @@ struct RuntimeConfig {
         // preprocessor's max_pixels down and sizes every encoder workspace
         // (not a refusal check). 4096 = 1024x1024.
         int vision_max_patches = 4096;
+        // EVS video token pruning rate q (vLLM video_prune/evs.py): a Qwen3-VL video keeps
+        // max(tokens per frame pair, int(tokens * (1 - q))), the least changed tokens go.
+        // 0 = off; a video part's "pruning_rate" overrides it. Outside [0, 1): rejected.
+        float video_pruning_rate = 0.0f;
         // cudaStreamCaptureMode: "global" | "relaxed" (default) | "thread_local".
         // "relaxed" avoided a suspected CUTLASS grouped-GEMM deadlock (removed #2929) under
         // prefill capture (prefill_graph_blockers_2026_05_14.md, Blocker B);
