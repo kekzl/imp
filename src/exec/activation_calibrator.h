@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 
 namespace imp {
@@ -51,7 +52,26 @@ public:
     void enable_hessian() { hessian_ = true; }
     std::string write_hessians(const std::string& path, cudaStream_t stream) const;
 
+    // GPTAQ pairs (row 101, activation_calibrator_pair.cpp): after arm_pairs() the source pass
+    // writes every weight input to a dump (calibration.pair_dump); the export pass reads it back
+    // call by call on the same tokens and accumulates xq^T xq and x^T xq (calibration.pair_read).
+    std::string enable_pair_dump(const std::string& path);
+    std::string enable_pair_read(const std::string& path);
+    void arm_pairs() { pairs_armed_ = true; }
+    // Dump mode: closes the dump. Read mode: writes IMPHES02 to out_path; error on any misaligned call.
+    std::string finish_pairs(const std::string& out_path, cudaStream_t stream);
+    // write_hessians(base + ".hess"), then finish_pairs(base + ".gptaq").
+    std::string write_second_moments(const std::string& base, cudaStream_t stream);
+
 private:
+    struct PairState;
+    struct PairDeleter {
+        void operator()(PairState* p) const;
+    };
+    void accumulate_pair_(int layer, TensorKind kind, const Tensor& input, int64_t row_stride,
+                          cudaStream_t stream);
+    std::unique_ptr<PairState, PairDeleter> pair_;
+    bool pairs_armed_ = false;
     void accumulate_hessian_(int layer, TensorKind kind, const Tensor& input, int64_t row_stride,
                              cudaStream_t stream);
     struct HessEntry {

@@ -444,6 +444,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("calibration.enabled", cfg.calibration.enabled);
     S("calibration.out_path", cfg.calibration.out_path);
     B("calibration.hessian", cfg.calibration.hessian);
+    S("calibration.pair_dump", cfg.calibration.pair_dump);
+    S("calibration.pair_read", cfg.calibration.pair_read);
 
     // [constrained]
     B("constrained.jump_ahead", cfg.constrained.jump_ahead);

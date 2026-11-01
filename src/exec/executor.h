@@ -646,6 +646,7 @@ public:
             calib_->enable_hessian();
     }
     const ActivationCalibrator* calibration() const { return calib_.get(); }
+    ActivationCalibrator* calibration() { return calib_.get(); }
 
     const DispatchPolicy& dispatch_policy() const noexcept {
         // CRITICAL: set_dispatch_policy() must be called before any forward.

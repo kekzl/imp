@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - Kimi-Linear (`kimi_linear`, roadmap row 51): Firworks NVFP4 checkpoint, KDA softplus decay gate, rank-128 LoRA f and output gate, MLA NoPE, q/k/v as three NVFP4 GEMMs. RTX 5090: experts host-resident by default, pp512 2000 / tg128 316 tok/s; `moe.force_host_experts=8` pp512 4868 / tg128 340. vLLM 0.31.0 runs out of memory on the same checkpoint (#2984).
+- `imp-quantize --gptaq` (GPTAQ, arXiv 2504.02692, opt-in): BF16 and AWQ-export inputs paired on the same tokens (`calibration.pair_dump` / `pair_read`). No gain: Qwen3-1.7B NVFP4 PPL +0.94 % to +34.11 % vs AWQ over 8 arms; GPTQ on the export's H, fixed for a double AWQ scaling, +0.94 % (roadmap row 101).
 
 ### Changed
 - GDN hybrids decode inside the prefill step by default (`runtime.prefill_mixed_decode_hybrid`): one batched decode conv + scan per layer for all riders, chunk cap 512 while they ride (`runtime.prefill_chunk_decode_cap_hybrid`). Qwen3.8-27B-NVFP4, 31 streams + a 4151-token ingest: their ITL max 123 -> 68-70 ms, ingest TTFT 620-626 -> 530-539 ms.

@@ -45,10 +45,14 @@ __global__ void group_scale_kernel(const float* __restrict__ w, int64_t N, int64
     sc[r] = s * tensor_scale;
 }
 
-// Column i: quantize, record the scaled error, update the rest of the block in place.
+// Column i: quantize, record the scaled error, update the rest of the block in place. kAsym (GPTAQ):
+// also adds x * P(i, j) with x the pre-quantization value and records the dequantized value in qb.
+// Separate instantiations: a runtime branch moved the GPTQ codes (Qwen3-0.6B d10 PPL 27.2857 -> 27.1658).
+template <bool kAsym>
 __global__ void column_kernel(float* __restrict__ w, int64_t N, int64_t K, int64_t i, int64_t b0, int64_t b1,
                               const float* __restrict__ u, const float* __restrict__ sc,
-                              uint8_t* __restrict__ codes, float* __restrict__ err) {
+                              uint8_t* __restrict__ codes, float* __restrict__ err,
+                              const float* __restrict__ p, float* __restrict__ qb) {
     const int64_t r = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (r >= N)
         return;
@@ -58,8 +62,22 @@ __global__ void column_kernel(float* __restrict__ w, int64_t N, int64_t K, int64
     codes[r * K + i] = code;
     const float e = (x - e2m1_value(code) * sc[r]) / u[i * K + i];
     err[r * kBlock + (i - b0)] = e;
-    for (int64_t j = i + 1; j < b1; j++)
-        row[j] -= e * u[j * K + i];
+    if constexpr (kAsym) {
+        qb[r * kBlock + (i - b0)] = e2m1_value(code) * sc[r];
+        for (int64_t j = i + 1; j < b1; j++)
+            row[j] -= e * u[j * K + i] - x * p[j * K + i];
+    } else {
+        for (int64_t j = i + 1; j < b1; j++)
+            row[j] -= e * u[j * K + i];
+    }
+}
+
+// Column-major K x K: keep alpha * A(i, j) for j > i (strictly upper), zero the rest.
+__global__ void triu1_scale_kernel(float* __restrict__ a, int64_t K, float alpha) {
+    const int64_t p = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (p >= K * K)
+        return;
+    a[p] = (p / K > p % K) ? alpha * a[p] : 0.0f;
 }
 
 // Round-to-nearest codes of the original weights (the loss baseline), same scale rule.
@@ -306,12 +324,16 @@ int layer_of(const std::string& name) {
 }
 
 std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_t N, int64_t K,
-                                                  std::vector<float> H, float tensor_scale, float damp) {
+                                                  std::vector<float> H, float tensor_scale, float damp,
+                                                  std::vector<float> dxx, float alpha) {
     if (K % kNvfp4MicroBlockSize != 0)
         return std::unexpected("K = " + std::to_string(K) + " is not a multiple of 16");
     const size_t nk = static_cast<size_t>(N) * static_cast<size_t>(K), kk = static_cast<size_t>(K) * K;
     if (H.size() != kk)
         return std::unexpected("Hessian is not K x K");
+    const bool aq = !dxx.empty() && alpha != 0.0f;
+    if (aq && dxx.size() != kk)
+        return std::unexpected("GPTAQ cross term is not K x K");
 
     // Host: FP32 weights, dead inputs zeroed, H damped.
     std::vector<float> w(nk);
@@ -328,6 +350,8 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
             d = 1.0f;
             for (int64_t r = 0; r < N; r++)
                 w[static_cast<size_t>(r) * K + i] = 0.0f;
+            if (aq)  // dXX(:, i) = 0, as the reference code
+                std::fill_n(dxx.begin() + static_cast<int64_t>(i * K), K, 0.0f);
         }
         d += static_cast<float>(damp * mean_diag);
     }
@@ -352,13 +376,38 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
     if (auto u = upper_cholesky_of_inverse_dev(du.p, K); !u)
         return std::unexpected(u.error());
 
+    // GPTAQ: P = alpha * triu1(dXX U^T) U into dp (column-major), dt scratch; qb = dequantized block.
+    Dev<float> dp(aq ? kk : 1), dt(aq ? kk : 1), dqb(aq ? static_cast<size_t>(N) * kBlock : 1);
+    if (aq) {
+        const float one = 1.0f, zero = 0.0f;
+        if (!dp.p || !dt.p || !dqb.p)
+            return std::unexpected("cudaMalloc failed for the GPTAQ term, K = " + std::to_string(K));
+        if (cudaMemcpy(dt.p, dxx.data(), kk * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+            return std::unexpected("H2D copy failed");
+        const bool ok = lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_T, k, k, k, &one, dt.p, CUDA_R_32F, k, du.p,
+                                   CUDA_R_32F, k, &zero, dp.p, CUDA_R_32F, k, CUBLAS_COMPUTE_32F,
+                                   nullptr) == CUBLAS_STATUS_SUCCESS;
+        if (ok)
+            triu1_scale_kernel<<<grid(static_cast<int64_t>(kk)), kThreads>>>(dp.p, K, alpha);
+        if (!ok ||
+            lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_N, k, k, k, &one, dp.p, CUDA_R_32F, k, du.p, CUDA_R_32F, k,
+                       &zero, dt.p, CUDA_R_32F, k, CUBLAS_COMPUTE_32F, nullptr) != CUBLAS_STATUS_SUCCESS)
+            return std::unexpected("GPTAQ P GEMM failed");
+    }
+    const float* dP = aq ? dt.p : nullptr;
+
     // Blocks of kBlock columns: per-column quantize + in-block update, then one GEMM for the tail.
     for (int64_t b0 = 0; b0 < K; b0 += kBlock) {
         const int64_t b1 = std::min<int64_t>(b0 + kBlock, K);
         for (int64_t i = b0; i < b1; i++) {
             if (i % kNvfp4MicroBlockSize == 0)
                 group_scale_kernel<<<grid(N), kThreads>>>(dw.p, N, K, i, tensor_scale, dmicro.p, dsc.p);
-            column_kernel<<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p, derr.p);
+            if (aq)
+                column_kernel<true>
+                    <<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p, derr.p, dP, dqb.p);
+            else
+                column_kernel<false><<<grid(N), kThreads>>>(dw.p, N, K, i, b0, b1, du.p, dsc.p, dcodes.p,
+                                                            derr.p, nullptr, nullptr);
         }
         if (b1 < K) {
             // W[:, b1:] -= Err [N, B] * U(b0:b1, b1:). Column-major: C [K-b1, N] (ld K) -= A^T E with
@@ -369,6 +418,12 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
                            CUDA_R_32F, kBlock, &one, dw.p + b1, CUDA_R_32F, k, CUBLAS_COMPUTE_32F,
                            nullptr) != CUBLAS_STATUS_SUCCESS)
                 return std::unexpected("tail update GEMM failed");
+            // GPTAQ: W[:, b1:] += Q [N, B] * P(b0:b1, b1:), Q = the block's dequantized values.
+            if (aq && lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(K - b1), static_cast<int>(N),
+                                 static_cast<int>(b1 - b0), &one, dP + b1 * K + b0, CUDA_R_32F, k, dqb.p,
+                                 CUDA_R_32F, kBlock, &one, dw.p + b1, CUDA_R_32F, k, CUBLAS_COMPUTE_32F,
+                                 nullptr) != CUBLAS_STATUS_SUCCESS)
+                return std::unexpected("GPTAQ tail update GEMM failed");
         }
     }
 

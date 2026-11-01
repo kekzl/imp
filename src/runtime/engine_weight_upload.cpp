@@ -234,6 +234,16 @@ bool Engine::init_weights() {
             // The collector allocates an accumulator the first time it sees a
             // weight, which a graph capture rejects outright.
             demote_graphs_(GraphDemotionReason::CalibrationActive);
+            const auto& cal = runtime_config_.calibration;
+            if (!cal.pair_dump.empty() || !cal.pair_read.empty()) {
+                ActivationCalibrator* c = executor_->calibration();
+                const std::string err = !cal.pair_dump.empty() ? c->enable_pair_dump(cal.pair_dump)
+                                                               : c->enable_pair_read(cal.pair_read);
+                if (!err.empty()) {
+                    IMP_LOG_ERROR("calibration: %s", err.c_str());
+                    return false;
+                }
+            }
         }
 
         if (config_.streaming_kv_enabled) {

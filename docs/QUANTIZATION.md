@@ -241,7 +241,7 @@ Same FP4 E2M1 nibble layout as NVFP4, UE8M0 micro-scales (per 32 elements), no s
 scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through the own block-scaled tile GEMM
 at full throughput; shipped inside GGUF under a proprietary tensor-type code (31).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
-wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 % ([record](plans/2026-10-17-gptq-nvfp4.md)).
+wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 %; GPTAQ (`--gptaq`, inputs of the AWQ export paired with BF16 on the same tokens): Qwen3-1.7B +0.94 % to +34.11 % vs AWQ over 8 arms, no gain ([record](plans/2026-10-17-gptq-nvfp4.md)).
 
 ## KV cache element type
 

@@ -463,6 +463,11 @@ struct RuntimeConfig {
         // Also collect mean x^T x per weight input for imp-quantize --gptq (row 101), written
         // next to the file as <out>.hess. FP32 [K, K] each: Qwen3-1.7B about 5.6 GB.
         bool hessian = false;
+        // GPTAQ (imp-quantize --gptaq, row 101): the BF16 source pass writes every weight input to
+        // pair_dump (Qwen3-1.7B, 150k-char corpus: tens of GB); the AWQ export pass over the same
+        // corpus reads it and writes <out>.gptaq (IMPHES02). Both start after warmup.
+        std::string pair_dump;
+        std::string pair_read;
     } calibration;
 
     // ----- Loading -----

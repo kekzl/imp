@@ -500,6 +500,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
     src/exec/activation_calibrator_hessian.cu
+    src/exec/activation_calibrator_pair.cpp
     src/exec/gemm_kernel_registry.cpp
     src/exec/gemm_kernel_cutlass_nvfp4.cpp
     src/exec/gemm_kernel_gguf.cpp

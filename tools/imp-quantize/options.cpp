@@ -52,6 +52,10 @@ std::optional<int> parse_args(int argc, char** argv, Options& opt) {
                 opt.keep_gdn_proj = "all";
         } else if (a == "--gptq")
             opt.gptq_file = next();
+        else if (a == "--gptaq")
+            opt.gptaq_file = next();
+        else if (a == "--gptaq-alpha")
+            opt.gptaq_alpha = std::stof(next());
         else if (a == "--gptq-damp")
             opt.gptq_damp = std::stof(next());
         else if (a == "--calib")
