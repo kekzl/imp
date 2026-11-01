@@ -32,6 +32,14 @@ namespace imp {
 using engine_internal::build_logprob_info;
 using engine_internal::free_prefill_buffers;
 
+namespace {
+// Hybrid riders wait on the whole chunk forward: runtime.prefill_chunk_decode_cap_hybrid bounds it
+// (min with the cap; either at 0 leaves the cap as configured).
+int step_decode_cap(int cap, int hybrid_cap, bool hybrid, size_t n_riders) {
+    return (hybrid && n_riders > 0 && cap > 0 && hybrid_cap > 0) ? std::min(cap, hybrid_cap) : cap;
+}
+}  // namespace
+
 void Engine::step_prefill(cudaStream_t stream) {
     // Hard cap: chunk size must never exceed the executor's max_tokens (itself
     // capped to 2048 for SSM/GDN hybrids, executor_workspace.cu:240). Without
@@ -46,7 +54,16 @@ void Engine::step_prefill(cudaStream_t stream) {
     // decoders are active; full chunk returns once nobody decodes.
     // runtime.prefill_cap_fairness=W scales the cap by W x waiting/decoding
     // (prefill_pacing.h), so a burst's waiters aren't paced behind its first finishers. 0 when nobody decodes.
-    const int configured_cap = runtime_config_.runtime.prefill_chunk_decode_cap;
+
+    // Mixed step (runtime.prefill_mixed_decode): the decoders ride this step's ragged forward
+    // as one-row members, so their rows come off the same row cap and no decode forward runs.
+    const bool ragged_mode = prefill_ragged_enabled_();
+    std::vector<std::shared_ptr<Request>> riders;
+    if (ragged_mode)
+        mixed_collect_riders_(riders);
+    const int configured_cap = step_decode_cap(runtime_config_.runtime.prefill_chunk_decode_cap,
+                                               runtime_config_.runtime.prefill_chunk_decode_cap_hybrid,
+                                               ssm_state_ != nullptr, riders.size());
     const int decode_cap = paced_prefill_cap(configured_cap, effective_chunk,
                                              static_cast<int>(sched_prefill_batch_.size()),
                                              static_cast<int>(sched_decode_batch_.size()),
@@ -98,19 +115,12 @@ void Engine::step_prefill(cudaStream_t stream) {
     // path. Selection order, budget accounting and the rotor are identical
     // either way, except the 256-token launch-cost floor is charged once per
     // FORWARD, so ragged members charge their real chunk tokens instead.
-    const bool ragged_mode = prefill_ragged_enabled_();
     std::vector<std::shared_ptr<Request>> ragged_batch;
     bool ragged_floor_charged = false;
     // Rows the ragged forward can still take this step. step_prefill_ragged_
     // packs members up to effective_chunk rows total, clamping each to what is
     // left, so a member is charged the rows it will get, not its full chunk.
     int ragged_rows_left = std::min(effective_chunk, executor_->max_tokens());
-    // Mixed prefill+decode step (runtime.prefill_mixed_decode): the decoders
-    // ride this step's ragged forward as one-row members, so their rows come
-    // off the same row cap and the step runs no separate decode forward.
-    std::vector<std::shared_ptr<Request>> riders;
-    if (ragged_mode)
-        mixed_collect_riders_(riders);
     ragged_rows_left -= static_cast<int>(riders.size());
     size_t forwards = 0;
     for (size_t i = 0; i < n_prefill; i++) {

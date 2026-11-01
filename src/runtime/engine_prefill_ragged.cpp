@@ -82,15 +82,14 @@ void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders
     riders.clear();
     if (!runtime_config_.runtime.prefill_mixed_decode || sched_decode_batch_.empty())
         return;
-    // Dense only (a recurrent state has no one-row ragged route), and only
-    // when nothing else owns the decode batch: a pipelined step in flight,
+    // Only when nothing else owns the decode batch: a pipelined step in flight,
     // the constrained pipeline, the MoE offload manager, or prefill/decode
     // stream overlap. A PARKED async runner is fine: step_impl_ resumes a
     // running one before step_prefill is reached.
     const char* why = nullptr;
-    // GDN hybrids: a rider is a one-token continuation chunk of its ragged row, the
-    // route chunked prefill already takes (slot state + conv window per row). Gated
-    // by runtime.prefill_mixed_decode_hybrid; Mamba2 never reaches here (model gate).
+    // GDN hybrids: riders decode on their live slots through one batched decode conv
+    // + scan per layer (exec/gdn_ragged.h). Gated by runtime.prefill_mixed_decode_hybrid;
+    // Mamba2 never reaches here (model gate).
     if (ssm_state_ && !runtime_config_.runtime.prefill_mixed_decode_hybrid)
         why = "recurrent model";
     else if (bd_pipe_.in_flight)

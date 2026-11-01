@@ -159,6 +159,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_size", cfg.runtime.prefill_chunk_size);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
+    I("runtime.prefill_chunk_decode_cap_hybrid", cfg.runtime.prefill_chunk_decode_cap_hybrid);
     I("runtime.prefill_cap_fairness", cfg.runtime.prefill_cap_fairness);
     I("runtime.prefill_batch_decode_cap", cfg.runtime.prefill_batch_decode_cap);
     B("runtime.prefill_mixed_decode", cfg.runtime.prefill_mixed_decode);
