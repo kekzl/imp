@@ -70,6 +70,14 @@ std::vector<uint8_t> fold_video_pads(std::vector<int32_t>& tokens, int32_t image
     std::vector<int32_t>& tokens, int32_t context_id, int32_t start_id, int32_t end_id, int n_images,
     int tokens_per_image);
 
+// Gemma-4 audio (HF Gemma4Processor.replace_audio_token): the k-th audio_id the template rendered
+// becomes boa_id + counts[k] x audio_id + eoa_id. Refuses when the prompt's audio_id count differs
+// from counts.size() (a literal placeholder typed by the user, or a lost clip); tokens untouched on refusal.
+[[nodiscard]] std::expected<void, std::string> expand_audio_placeholders(std::vector<int32_t>& tokens,
+                                                                         int32_t audio_id, int32_t boa_id,
+                                                                         int32_t eoa_id,
+                                                                         const std::vector<int>& counts);
+
 // FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
 // hit needs the same tokens AND the same picture. Never returns 0 — that value
 // means "no image" to the cache, and an all-zero image must not claim it.

@@ -37,7 +37,7 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [Qwen3-32B](https://huggingface.co/unsloth/Qwen3-32B-GGUF) | Q4_K_M | 19 GB | - | GGUF |
 | [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 157 | SafeTensors (nvidia), fused projections. Phi-4 is an alias onto the LLaMA loader path (`src/model/arch_registry.cpp:16 {GGUF, "phi3", ModelArch::LLAMA}`), not a separate loader; no dedicated gate (#1680) |
 | [Gemma-4-12B](https://huggingface.co/AxionML/Gemma-4-12B-NVFP4) | NVFP4 | 11 GB | - | SafeTensors (Modelopt) - **dense** Gemma-4, `gemma4_unified` multimodal wrapper (nested `text_config`, `model.language_model.*` prefix, vision/audio embedders skipped). This export carries the embedders only: 0 `model.vision_tower.*` and no audio tower, so it serves as text even where a fuller release would see or hear ([LIMITATIONS](LIMITATIONS.md#model-specific-blockers)). FFN in NVFP4, attention BF16. |
-| [Gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | bf16 | 8.65 GiB weights, 11.3 GiB device total in the `Gemma4E4BRef` test (VRAM audit at shutdown, 2026-11-01; PLE table 5.25 GiB in host RAM) | - | SafeTensors - dense Gemma-4 E-variant: per-layer inputs (PLE, `hidden_size_per_layer_input` 256) and KV sharing (layers 24..41 read layer 22 / 23, no KV blocks of their own). Text only; audio and vision towers skipped. Greedy equals the HF fp32 reference (9 of 9 and 20 of 20 tokens, `Gemma4E4BRef`). |
+| [Gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | bf16 | 8.65 GiB weights, 11.3 GiB device total in the `Gemma4E4BRef` test (VRAM audit at shutdown, 2026-11-01; PLE table 5.25 GiB in host RAM) | - | SafeTensors - dense Gemma-4 E-variant: per-layer inputs (PLE, `hidden_size_per_layer_input` 256) and KV sharing (layers 24..41 read layer 22 / 23, no KV blocks of their own). Text and audio ([Audio](#audio)); vision tower skipped. Greedy equals the HF fp32 reference (9 of 9 and 20 of 20 tokens, `Gemma4E4BRef`). |
 | [Llama-3.2-3B-Instruct](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF) | Q8_0 | 3.2 GB | 306 | GGUF |
 | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | bf16 | 4.7 GB | - | SafeTensors - `LlamaForCausalLM`. `ppl_corpus_45k` 10.4937 vs HF BF16 10.4138, token ids identical to HF (digit-triple pre-split). Reasoning split by `<think>` (id 8, added token). |
 | [Granite-4.2-8B](https://huggingface.co/ibm-granite/granite-4.2-8b) | bf16 / NVFP4 (imp-quantize) | 16 / 5.3 GB | - | SafeTensors - `GraniteForCausalLM` (#2412): `attention_multiplier` 1/128 replaces 1/sqrt(head_dim); embedding and residual multipliers fold into one embedding scale. `ppl_corpus_45k` 25.36 BF16, 27.17 NVFP4 (GENERIC route before: 1380.74). vs HF fp32: top-1 32/32 greedy positions, max abs logit diff 0.41. `logits_scaling` != 1 (Granite 3.x) is refused. |
@@ -138,6 +138,29 @@ imp-cli --model gemma-3-12b-it-Q8_0.gguf --mmproj mmproj-google_gemma-3-12b-it-f
 ```
 
 Image tokens cost VRAM in the encoder workspace, sized by `runtime.vision_max_patches` (default 4096 ≈ 1024x1024). Larger images are scaled down to fit that budget rather than refused.
+
+## Audio
+
+A Gemma-4 SafeTensors checkpoint with a `gemma4_audio` `audio_config` and `model.audio_tower.*` loads the tower with the text model (no flag; `runtime.no_audio` drops it). `/v1/chat/completions` then takes OpenAI `input_audio` parts; a model without a tower answers `400 audio_unavailable`.
+
+```json
+{"type": "input_audio", "input_audio": {"data": "<base64 WAV>", "format": "wav"}}
+```
+
+| rule | value |
+|---|---|
+| format | `wav` only: PCM 8/16/24/32-bit or IEEE float 32/64, channels averaged to mono; `mp3` and others: `400` |
+| sample rate | 16000 Hz, no resampler: other rates `400` naming the rate |
+| length | 30 s per clip at most (HF truncates, imp refuses: `400`), one 20 ms frame at least; 8 parts per request |
+| tokens | one per 40 ms, HF `Gemma4Processor` arithmetic (mel frames through two stride-2 convs): 2.3 s = 58 |
+| prompt | one `<\|audio\|>` per clip ahead of the first user turn's text, expanded to `<boa>` + N x `<\|audio\|>` + `<eoa>`; a literal `<\|audio\|>` in the text: `400` |
+| mixing | `input_audio` with `image_url` or `video` in one request: `400`; not on `/v1/messages`, `/v1/responses` or `imp-cli` |
+
+- Front end: HF `Gemma4AudioFeatureExtractor` (128 HTK mel bins, 20 ms Hann frames every 10 ms, log(mel + 0.001)), golden vs transformers 5.22.1 within 1e-4 (`tests/test_audio_features.cpp`).
+- Encoder: 12 Conformer blocks (chunked relative-position attention, light conv) + embedder into the LM width (`src/audio/`); on the card 565.9 MiB of weights (linears FP16, the rest FP32), 645.0 MiB with scratch for a 30 s clip (load log, gemma-4-E4B-it). Worst-row embedding cosine vs HF fp32 0.999976 on a 2.3 s clip, front end on the WAV samples within 4.77e-07 (`test_gemma4_audio_encoder.cu`).
+- Placeholder positions take PLE token row `pad_token_id` and the encoder rows as projection input (HF `Gemma4Model.forward`).
+- Clip bytes salt the prefix cache like images.
+- [gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it), greedy: a 10.4 s LibriSpeech clip (`Narsil/asr_dummy` `1.flac`, 278 prompt tokens, 261 audio) transcribes to the same text as HF transformers fp32. gemma-4-E2B-it is untested (not local). Gemma-4-12B-NVFP4 has no tower; Gemma-4-26B/31B declare no audio.
 
 ## Format notes
 

@@ -116,13 +116,18 @@ bool validate_content_parts(const json& body, httplib::Response& res) {
             // Client-sampled video frames (Qwen3-VL); count and frame rules live in the parser.
             if (type == "video" && part.contains("video") && part["video"].is_array())
                 continue;
+            // OpenAI audio input: {"input_audio": {"data": base64, "format": "wav"}}; format rules in the
+            // parser.
+            if (type == "input_audio" && part.contains("input_audio") && part["input_audio"].is_object())
+                continue;
             res.status = 400;
-            json err = {{"error",
-                         {{"message", "unsupported content part \"" +
-                                          (type.empty() ? std::string("(missing type)") : type) +
-                                          "\": this endpoint reads \"text\", \"image_url\" and \"video\" "
-                                          "(array of frame URLs) parts"},
-                          {"type", "invalid_request_error"}}}};
+            json err = {
+                {"error",
+                 {{"message", "unsupported content part \"" +
+                                  (type.empty() ? std::string("(missing type)") : type) +
+                                  "\": this endpoint reads \"text\", \"image_url\", \"input_audio\" and "
+                                  "\"video\" (array of frame URLs) parts"},
+                  {"type", "invalid_request_error"}}}};
             res.set_content(dump_safe(err), "application/json");
             return false;
         }

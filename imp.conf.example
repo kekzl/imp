@@ -186,6 +186,8 @@ no_vision_graph      = false
 # Drop the checkpoint's Qwen3-VL vision tower at init: image and video parts answer 400,
 # the tower's VRAM reservation goes to the expert cache instead (Flash-Next text-only).
 no_vision            = false
+# Drop the checkpoint's Gemma-4 audio tower at init: input_audio parts answer 400.
+no_audio             = false
 # Image-token budget for the Qwen3-VL encoder: the workspace is sized from it, so
 # it is a hard ceiling — a larger image is scaled down to fit, never refused.
 # 4096 patches ~ 1024x1024. Does not apply to the mmproj (SigLIP/gemma4v) path,

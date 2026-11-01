@@ -221,6 +221,14 @@ TEST(ContentParts, ImagePartWithoutTheObjectIsRejected) {
     EXPECT_FALSE(parts_ok(json::array({{{"type", "image_url"}}})));
 }
 
+// OpenAI input_audio passes with its object; the bare type or a string payload is rejected.
+TEST(ContentParts, InputAudioIsAcceptedOnlyAsAnObject) {
+    EXPECT_TRUE(parts_ok(json::array(
+        {{{"type", "input_audio"}, {"input_audio", {{"data", "UklGRg=="}, {"format", "wav"}}}}})));
+    EXPECT_FALSE(parts_ok(json::array({{{"type", "input_audio"}}})));
+    EXPECT_FALSE(parts_ok(json::array({{{"type", "input_audio"}, {"input_audio", "UklGRg=="}}})));
+}
+
 TEST(ContentParts, MissingTypeIsRejected) {
     httplib::Response res;
     ASSERT_FALSE(validate_content_parts(parts_body(json::array({{{"text", "hi"}}})), res));
