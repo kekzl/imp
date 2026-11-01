@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <cstdio>
 #include <cstring>
@@ -438,6 +439,7 @@ int KVCache::commit_blocks_(int blocks) {
     const size_t added = region_.committed() - before;
     if (added > 0)
         MemAccount::instance().note("kv_cache", static_cast<std::ptrdiff_t>(added));
+    const auto zero_t0 = std::chrono::steady_clock::now();
     // Fresh blocks start clean, as the fixed pool's one big memset guarantees; driver-
     // committed pages carry no such promise, so a block handed out with stale bytes in its
     // unused tail shows up as rare, unreproducible output rather than an error. Only the new
@@ -469,6 +471,8 @@ int KVCache::commit_blocks_(int blocks) {
     // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
     if (blocks > first_new)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
+    last_zero_ms_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - zero_t0).count();
     // A block is usable only with its scales and metadata backed too (#2483, #2360).
     if (!commit_scales_(first_new, blocks) || !commit_minmax_(first_new, blocks))
         return committed_blocks_;
@@ -560,20 +564,24 @@ int KVCache::try_grow_to(int wanted) {
         if (target <= have)
             return have;
     }
+    const auto grow_t0 = std::chrono::steady_clock::now();
+    last_zero_ms_ = 0.0;
     const int got = commit_blocks_(target);
     if (got <= have)
         return have;
     if (blocks_.grow_slots(got) != MemError::Ok)
         return have;
+    const double grow_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - grow_t0).count();
     // Published only after the ids exist: a reader that saw the new capacity
     // first would admit a request the pool cannot yet hand blocks for.
     usable_blocks_.store(got, std::memory_order_release);
     growths_.fetch_add(1, std::memory_order_relaxed);
     IMP_LOG_INFO(
         "KV cache: grew %d -> %d blocks (%.0f tokens, %.0f MiB committed of a %d-block "
-        "ceiling)",
+        "ceiling) in %.1f ms (zero + sync %.1f ms)",
         have, got, static_cast<double>(got) * block_size_, region_.committed() / (1024.0 * 1024.0),
-        max_blocks_);
+        max_blocks_, grow_ms, last_zero_ms_);
     return got;
 }
 
