@@ -472,6 +472,29 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     ctx.params.vision_order.push_back('i');
                     read_vision_url(state, url, "image_url", ctx.params.images.back(),
                                     ctx.params.image_error);
+                } else if (type == "input_audio") {
+                    // {"input_audio": {"data": base64 WAV, "format": "wav"}}; decoded and checked in
+                    // handlers_chat_core once the model is known (sample rate, length, tower present).
+                    const json ia = part.value("input_audio", json::object());
+                    const std::string fmt = ia.is_object() ? ia.value("format", "") : "";
+                    const json data = ia.is_object() ? ia.value("data", json()) : json();
+                    if (fmt != "wav" || !data.is_string()) {
+                        send_json_error(res, 400, "invalid_request_error",
+                                        "input_audio needs {\"data\": base64 WAV, \"format\": \"wav\"}; "
+                                        "other formats (mp3, ...) are not decoded by this server",
+                                        "input_audio");
+                        return false;
+                    }
+                    if (ctx.params.audios.size() >= kMaxAudioPartsPerRequest) {
+                        send_json_error(res, 400, "invalid_request_error",
+                                        "request carries more than " +
+                                            std::to_string(kMaxAudioPartsPerRequest) + " input_audio parts",
+                                        "input_audio");
+                        return false;
+                    }
+                    ctx.params.audios.push_back(base64_decode(data.get<std::string>()));
+                    if (ctx.params.audios.back().empty() && ctx.params.audio_error.empty())
+                        ctx.params.audio_error = "could not read input_audio: data is not base64";
                 } else if (type == "video") {
                     // {"type":"video","video":[frame URL, ...],"fps":F | "timestamps":[s, ...]}: frames the
                     // client sampled itself (no decoder here). Frame k sits at k/F s or timestamps[k].

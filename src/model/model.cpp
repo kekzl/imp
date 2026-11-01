@@ -8,6 +8,7 @@
 #include "memory/mem_account.h"  // trim_device_mempool
 #include "memory/weight_snapshot.h"
 // Complete type needed here: ~Model destroys the unique_ptr<VisionModel>.
+#include "audio/gemma4_audio_model.h"
 #include "vision/vision_model.h"
 #include <cuda_runtime.h>
 #include <algorithm>

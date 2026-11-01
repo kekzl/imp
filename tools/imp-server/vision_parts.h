@@ -30,3 +30,18 @@ inline double video_pruning_rate(const ChatVideoInput& v, double default_rate) {
 // snap.video_frame_counts. Returns "" or the 400 message.
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
                                          ChatStateSnapshot& snap);
+
+// mmproj tower: a fixed token count per picture, one block each, encoded back to back. Decodes every
+// image into snap.vision_images (CPU). Returns "" or the 400 message.
+std::string mmproj_preprocess_images(imp::Engine& engine, const ChatRequestParams& params,
+                                     ChatStateSnapshot& snap);
+
+// Before rendering: refuses input_audio without a tower (400 audio_unavailable), mixed with
+// images/video, or undecodable; else WAV -> log-mel into snap.audio_inputs (CPU), salts the prefix
+// cache and prepends one audio placeholder per clip to the first user turn. False = 400 sent.
+[[nodiscard]] bool prepare_audio_parts(httplib::Response& res, const imp::Engine* engine,
+                                       ChatRequestParams& params, ChatStateSnapshot& snap);
+
+// After tokenizing: each placeholder -> <boa> + n_tokens x <audio> + <eoa>. False = 400 sent.
+[[nodiscard]] bool expand_audio_parts(httplib::Response& res, const imp::Engine* engine,
+                                      ChatStateSnapshot& snap);

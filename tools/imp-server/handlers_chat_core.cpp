@@ -223,6 +223,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                         nullptr, "vision_unavailable");
         return false;
     }
+    // Audio (vision_parts.h): refuse, not drop, without a tower; log-mel on this thread so every
+    // clip's placeholder count is known before the prompt renders.
+    if (!prepare_audio_parts(res, state.ctx ? state.ctx->engine.get() : nullptr, ctx.params, ctx.snap))
+        return false;
     if (const std::string err = logit_bias_vocab_error(ctx.params.logit_bias, ctx.snap.tok->vocab_size());
         !err.empty()) {
         send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
@@ -314,16 +318,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                                                      ctx.snap);
                 !err.empty())
                 return fail(err);
-        } else {
-            // mmproj tower: a fixed token count per picture, one block each, encoded back to back.
-            for (const auto& bytes : ctx.params.images) {
-                auto img = std::make_shared<imp::ImageData>();
-                if (!state.ctx->engine->preprocess_image(bytes, *img))
-                    return fail("Failed to process image " +
-                                std::to_string(ctx.snap.vision_images.size() + 1) +
-                                " (accepted formats: JPEG, PNG)");
-                ctx.snap.vision_images.push_back(std::move(img));
-            }
+        } else if (const std::string err = mmproj_preprocess_images(*state.ctx->engine, ctx.params, ctx.snap);
+                   !err.empty()) {
+            return fail(err);
         }
     }
 
@@ -513,6 +510,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             raw.pop_back();  // the prefix continues on its own line
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
     }
+    if (!expand_audio_parts(res, state.ctx ? state.ctx->engine.get() : nullptr, ctx.snap))
+        return false;
     cfg_render_negative(ctx, force_thinking);     // guidance shadow prompt (row 117), same template state
     ctx.snap.chat_tpl.set_continue_final(false);  // the cache_control prefix renders closed turns
 

@@ -19,6 +19,7 @@ class WeightUploadLog;
 // weights are views into the same mapping and share the model's lifetime. Forward-declared
 // so model/ has no header dependency on vision/.
 struct VisionModel;
+struct Gemma4AudioModel;
 struct MtpHead;  // model/mtp_head.h; held by unique_ptr so 208 -> few TUs see it
 class NGramTable;
 // Held by unique_ptr only; set_tokenizer and ~Model are out of line (model.cpp).
@@ -180,6 +181,8 @@ public:
     // parties that own each half: the config loader fills `->config` from
     // config.json, weight_map fills the tensors from the shard map.
     std::unique_ptr<VisionModel> vision_tower;
+    // Gemma-4 audio tower + embedder (model.audio_tower.*, model.embed_audio.*); null without one.
+    std::unique_ptr<Gemma4AudioModel> audio_tower;
     std::unique_ptr<NGramTable> ngram_table_;  // Qwen4Exp PLE table (model/ngram_table.h)
     int last_warm_hits_ = 0;
     // Path the loader was invoked with (GGUF file or SafeTensors directory).

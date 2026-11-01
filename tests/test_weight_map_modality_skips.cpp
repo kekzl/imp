@@ -86,6 +86,23 @@ TEST(WeightMapModalitySkips, AudioIsCountedApartFromVision) {
     EXPECT_EQ(s.total, 11);
 }
 
+// Gemma-4-E4B ships the audio tower too: its tensors belong to the audio loader
+// (audio/gemma4_audio_model.h), never to "unrecognised".
+TEST(WeightMapModalitySkips, AudioTowerIsCountedAsAudio) {
+    Fixture f;
+    f.add_language_model();
+    f.add("model.embed_audio.embedding_projection.weight");
+    f.add("model.audio_tower.output_proj.weight");
+    f.add("model.audio_tower.layers.0.self_attn.q_proj.linear.weight");
+
+    WeightMap wm(ModelArch::GEMMA4);
+    ASSERT_TRUE(wm.apply_weights(f.model, f.tensors));
+
+    const auto& s = wm.skip_stats();
+    EXPECT_EQ(s.audio, 3);
+    EXPECT_EQ(s.unrecognised, 0);
+}
+
 // Gemma-4-26B-A4B-it-NVFP4 has a vision tower and no audio at all. Vision alone
 // must not read as an audio drop, or the warning cries wolf on every Gemma-4.
 TEST(WeightMapModalitySkips, VisionOnlyReportsNoAudio) {

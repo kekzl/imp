@@ -704,6 +704,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     engine_internal::drop_vision_tower_if_disabled(*model_, runtime_config_.runtime.no_vision);
+    engine_internal::drop_audio_tower_if_disabled(*model_, runtime_config_.runtime.no_audio);
     // Engine-persistent (T2) arena, opened before the first tenant
     // (docs/internals/MEMORY.md A3.3): its Region reserves capacity against
     // everything allocated later, notably the pre-dequant cache build (AUDIT
@@ -734,6 +735,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                  : 0;
         if (!config_.mmproj_path.empty())
             vision_bytes += vision_mmproj_arena_bytes(config_.mmproj_path, model_->config_.d_model);
+        // Gemma-4 audio tower + clip scratch: uploaded at warmup, an arena tenant like the Qwen3-VL tower.
+        vision_bytes += engine_internal::audio_arena_bytes(*model_);
         // The decode batch pool is engine-lifetime and config-sized but
         // allocated after KV sizing, so reserve for it here. with_swa_tables is
         // unknown yet; assume true, guessing high costs nothing, low exhausts the arena.

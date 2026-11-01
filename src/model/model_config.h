@@ -48,6 +48,8 @@ struct ModelConfig {
     // and vocab_size_per_layer_input (rows of the [vocab, n_layers * pli_dim] table).
     int pli_dim = 0;
     int pli_vocab = 0;
+    // text_config.pad_token_id: PLE token-identity row for image/audio placeholder positions (HF).
+    int pli_pad_id = 0;
     // Gemma-4 KV sharing (num_kv_shared_layers): kv_source_layer[l] = layer whose K/V layer l
     // reads, -1 = own K/V. Empty = no sharing. E4B: layers 24..41 read 22 (sliding) or 23 (full).
     std::vector<int> kv_source_layer;
@@ -175,8 +177,8 @@ struct ModelConfig {
     // <|endoftext|>); the last-token pool reads it. -1 = none. imp's encode() does not apply it.
     int32_t embed_append_token = -1;
 
-    // Checkpoint declares an audio encoder; imp has no audio path at all (no encoder, input
-    // type, or tokenizer route). Read from audio_config being a JSON OBJECT, not key presence:
+    // Checkpoint declares an audio encoder (gemma4_audio loads via audio/gemma4_audio_model.h
+    // when the tower tensors are present). Read from audio_config being a JSON OBJECT, not key presence:
     // Gemma-4-26B writes audio_config:null with no audio tensor, Gemma-4-12B writes the object.
     bool has_audio_config = false;
 

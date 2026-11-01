@@ -375,8 +375,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++stats.vision;
                 continue;
             }
-            // Gemma-4 multimodal: model.embed_audio.* / model.audio_tower.*; no audio encoder in imp,
-            // a lost modality rather than a lost tensor, counted apart.
+            // Gemma-4 audio tower + embedder: read by load_gemma4_audio_from_checkpoint when the
+            // checkpoint carries the tower, otherwise a lost modality, counted apart.
             if (is_wrapper_audio_name(name)) {
                 ++skipped;
                 ++stats.audio;
@@ -1405,14 +1405,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         IMP_LOG_INFO("  skipped: %d vision, %d audio, %d KV-shared k/v, %d MTP head, %d unrecognised",
                      stats.vision, stats.audio, stats.kv_shared, stats.mtp, stats.unrecognised);
 
-    // Audio is the one tensor class with no owner downstream: vision is routed by the vision
-    // mapper or already announced by the config loader, mtp.* has its own loader, but
-    // model.embed_audio.* is read by nothing in imp, so the drop is a whole lost modality, said
-    // out loud once.
-    if (stats.audio > 0)
+    // Audio tensors without a loaded tower (Gemma-4-12B ships the embedder alone) are a whole
+    // lost modality, said out loud once.
+    if (stats.audio > 0 && !model.audio_tower)
         IMP_LOG_WARN(
-            "WeightMap: %d audio tensor(s) dropped (model.embed_audio.*, model.audio_tower.*). No audio "
-            "encoder; this checkpoint runs as a text model and audio input cannot be sent.",
+            "WeightMap: %d audio tensor(s) dropped (model.embed_audio.* / model.audio_tower.*) with no "
+            "usable audio tower; this checkpoint runs without audio input.",
             stats.audio);
 
     // Vision tower, when the config loader recognised one: same shard map as the LM, own mapper.
