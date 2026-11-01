@@ -468,6 +468,10 @@ struct RuntimeConfig {
         // corpus reads it and writes <out>.gptaq (IMPHES02). Both start after warmup.
         std::string pair_dump;
         std::string pair_read;
+        // pair_read accumulates only layers [begin, end) (end 0 = all); other records are consumed
+        // unread. Sequential GPTAQ: one export pass per layer group.
+        int pair_layer_begin = 0;
+        int pair_layer_end = 0;
     } calibration;
 
     // ----- Loading -----

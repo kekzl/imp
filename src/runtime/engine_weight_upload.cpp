@@ -237,8 +237,10 @@ bool Engine::init_weights() {
             const auto& cal = runtime_config_.calibration;
             if (!cal.pair_dump.empty() || !cal.pair_read.empty()) {
                 ActivationCalibrator* c = executor_->calibration();
-                const std::string err = !cal.pair_dump.empty() ? c->enable_pair_dump(cal.pair_dump)
-                                                               : c->enable_pair_read(cal.pair_read);
+                const std::string err = !cal.pair_dump.empty()
+                                            ? c->enable_pair_dump(cal.pair_dump)
+                                            : c->enable_pair_read(cal.pair_read, cal.pair_layer_begin,
+                                                                  cal.pair_layer_end);
                 if (!err.empty()) {
                     IMP_LOG_ERROR("calibration: %s", err.c_str());
                     return false;

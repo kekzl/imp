@@ -1337,3 +1337,7 @@ hessian              = false
 # pair_read and writes <out>.gptaq (IMPHES02). Both start with the corpus, after warmup.
 pair_dump            = ""
 pair_read            = ""
+# pair_read accumulates only layers [pair_layer_begin, pair_layer_end), end 0 = all: sequential
+# GPTAQ runs one export pass per layer group (tools/analysis/gptaq_ab.sh SEQ_GROUP=N).
+pair_layer_begin     = 0
+pair_layer_end       = 0

@@ -4,6 +4,9 @@
 # Pairs: the BF16 pass dumps every weight input (calibration.pair_dump, Qwen3-1.7B ~26 GB, keep WORK
 # off tmpfs), the AWQ export pass reads it on the same tokens and writes calib_q.bin.gptaq (IMPHES02).
 # ALPHAS: 0 = GPTQ on the export's inputs, 0.25 = reference-code default, 1 = the paper's update.
+# SEQ_GROUP=N: sequential GPTAQ, the pairs of layers [lo, lo+N) come from an export whose layers < lo
+# are already GPTAQ at the same damp and alpha (one export + calibration pass per group and arm; the
+# dump stays until the end).
 # Usage: MODEL_NAME=Qwen3-1.7B [IMP_IMG=imp:test] [WORK=/mnt/data/scratch/gptaq_<model>] tools/analysis/gptaq_ab.sh
 set -euo pipefail
 
@@ -13,7 +16,9 @@ IMG="${IMP_IMG:-imp:test}"
 WORK="${WORK:-/mnt/data/scratch/gptaq_$MODEL_NAME}"
 DAMPS="${DAMPS:-1 10}"
 ALPHAS="${ALPHAS:-0 0.25 1}"
+SEQ_GROUP="${SEQ_GROUP:-0}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LAYERS="$(grep -oE '"num_hidden_layers": *[0-9]+' "$MODELS_HOST/$MODEL_NAME/config.json" | grep -oE '[0-9]+$')"
 
 mkdir -p "$WORK"
 chmod 777 "$WORK"
@@ -41,7 +46,9 @@ quant() {  # quant <out-dir> <extra args...>
     run imp-quantize --model "/models/$MODEL_NAME" --out "/work/$1" "${@:2}" | grep -E "GPTA?Q:|rror" | tail -2
 }
 
-if [ "${REUSE_CALIB:-0}" = 1 ] && [ -f "$WORK/calib_q.bin.gptaq" ] && [ -d "$WORK/awq" ]; then
+FIRST_PAIRS="$WORK/calib_q.bin.gptaq"
+[ "$SEQ_GROUP" = 0 ] || FIRST_PAIRS="$WORK/seq_g0.bin.gptaq"
+if [ "${REUSE_CALIB:-0}" = 1 ] && [ -f "$FIRST_PAIRS" ] && [ -d "$WORK/awq" ]; then
     echo "### reusing the calibration in $WORK"
 else
     echo "### calibration on the BF16 source (AWQ stats, H, pair dump)"
@@ -49,8 +56,13 @@ else
         --set calibration.pair_dump=/work/x.dump
     quant awq --calib /work/calib_bf16.bin
     echo "### pairs on the AWQ export, same corpus"
-    calib /work/awq /work/calib_q.bin --set calibration.pair_read=/work/x.dump
-    clean x.dump
+    if [ "$SEQ_GROUP" = 0 ]; then
+        calib /work/awq /work/calib_q.bin --set calibration.pair_read=/work/x.dump
+        clean x.dump
+    else  # group 0 sees the plain AWQ export in every arm
+        calib /work/awq /work/seq_g0.bin --set calibration.pair_read=/work/x.dump \
+            --set calibration.pair_layer_begin=0 --set calibration.pair_layer_end="$SEQ_GROUP"
+    fi
     ls -la "$WORK" | grep -E "\.(hess|gptaq)$"
 fi
 
@@ -61,8 +73,27 @@ quant gptq_hbf16_d10 --calib /work/calib_bf16.bin --gptq /work/calib_bf16.bin.he
 ppl /work/gptq_hbf16_d10 "AWQ+GPTQ(H bf16) damp 10"
 for d in $DAMPS; do
     for a in $ALPHAS; do
-        quant "gptaq_d${d}_a$a" --calib /work/calib_bf16.bin --gptaq /work/calib_q.bin.gptaq \
+        if [ "$SEQ_GROUP" = 0 ]; then
+            quant "gptaq_d${d}_a$a" --calib /work/calib_bf16.bin --gptaq /work/calib_q.bin.gptaq \
+                --gptq-damp "$d" --gptaq-alpha "$a"
+            ppl "/work/gptaq_d${d}_a$a" "AWQ+GPTAQ damp $d alpha $a"
+            continue
+        fi
+        # Sequential: group [lo, lo+G) pairs come from the export whose layers < lo are GPTAQ.
+        files=/work/seq_g0.bin.gptaq
+        for ((lo = SEQ_GROUP; lo < LAYERS; lo += SEQ_GROUP)); do
+            hi=$((lo + SEQ_GROUP < LAYERS ? lo + SEQ_GROUP : LAYERS))
+            quant seq_tmp --calib /work/calib_bf16.bin --gptaq "$files" --gptq-damp "$d" --gptaq-alpha "$a"
+            calib /work/seq_tmp "/work/seq_d${d}_a${a}_g$lo.bin" --set calibration.pair_read=/work/x.dump \
+                --set calibration.pair_layer_begin="$lo" --set calibration.pair_layer_end="$hi"
+            files="$files,/work/seq_d${d}_a${a}_g$lo.bin.gptaq"
+        done
+        quant "gptaq_seq_d${d}_a$a" --calib /work/calib_bf16.bin --gptaq "$files" \
             --gptq-damp "$d" --gptaq-alpha "$a"
-        ppl "/work/gptaq_d${d}_a$a" "AWQ+GPTAQ damp $d alpha $a"
+        ppl "/work/gptaq_seq_d${d}_a$a" "AWQ+GPTAQ sequential (group $SEQ_GROUP) damp $d alpha $a"
+        clean seq_tmp
+        clean "gptaq_seq_d${d}_a$a"
     done
 done
+
+[ "$SEQ_GROUP" = 0 ] || clean x.dump
