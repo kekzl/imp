@@ -103,7 +103,7 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], hal
             store_direct<C>(acc, p, m0, n0, wm, wn, lane);
             return;
         }
-    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // every warp left the ring / the last store loop
+    asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));  // every warp left the ring / the last store loop
     const int T0 = lane & 3;
     const int T1 = lane >> 2;
 #pragma unroll
@@ -117,8 +117,8 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], hal
                                             T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * sc.x,
                                                                         acc[mf][nf][h * 2 + 1] * sc.y);
         }
-    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
-    for (int i = threadIdx.x; i < kBM * (C::kBN / 8); i += kMmaThreads) {
+    asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));
+    for (int i = threadIdx.x; i < kBM * (C::kBN / 8); i += C::kMmaThr) {
         const int r = i / (C::kBN / 8);
         const int c = (i % (C::kBN / 8)) * 8;
         const int row = m0 + r;
@@ -145,7 +145,7 @@ __device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][
     const int T1 = g.lane >> 2;
 #pragma unroll
     for (int c0 = 0; c0 < C::kBN; c0 += CW) {
-        asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // the ring / the previous chunk is free
+        asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));  // the ring / the previous chunk is free
 #pragma unroll
         for (int mf = 0; mf < 4; ++mf)
 #pragma unroll
@@ -161,8 +161,8 @@ __device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][
                         make_float2(acc[mf][nf][h * 2] * sc.x, acc[mf][nf][(h * 2) + 1] * sc.y);
                 }
             }
-        asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
-        for (int i = static_cast<int>(threadIdx.x); i < kBM * (CW / 4); i += kMmaThreads) {
+        asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));
+        for (int i = static_cast<int>(threadIdx.x); i < kBM * (CW / 4); i += C::kMmaThr) {
             const int r = i / (CW / 4);
             const int c = (i % (CW / 4)) * 4;
             const int row = g.m0 + r;
@@ -213,7 +213,7 @@ __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], cons
             store_beta<C>(acc, g, p);
             return;
         }
-    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // every warp left the ring
+    asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));   // every warp left the ring
     const int j = g.lane >> 3;                           // matrix this lane addresses: (h, nf + 1)
     const int T0 = g.lane & 3;
 #pragma unroll
@@ -231,7 +231,7 @@ __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], cons
                     pack_half2(acc[mf][nf + 1][2] * s1.x, acc[mf][nf + 1][3] * s1.y));
         }
     fence_async_smem();
-    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
+    asm volatile("bar.sync 1, %0;" ::"n"(C::kMmaThr));
     if (threadIdx.x == 0) {
 #pragma unroll
         for (int b = 0; b < C::kBN / 64; ++b)

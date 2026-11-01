@@ -118,6 +118,9 @@ struct GEMM {
     // Own per-tensor FP8 GEMM (nvfp4_gemm_tile.cu, F8 configs) before cuBLASLt FP8 x FP8 from this M (0 off).
     // Qwen3-8B-FP8 pp4096 e2e +0.6 %, pp512 -18 % (cuBLASLt below 2048). Refuses K % 64 != 0.
     int fp8_tile_min_m = 2048;
+    // Tile plan of the own FP8 GEMM: -1 auto, else a gemm_fp8_tile variant (nvfp4_gemm_tile.h; 7-9 the
+    // 2-CTA 128x64 configs). A/B instrument.
+    int fp8_tile_variant = -1;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

@@ -878,7 +878,8 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     const int min_m = process_diag_fp8_tile_min_m();
     if (min_m > 0 && M >= min_m && out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() &&
         a_scale && w_scale &&
-        gemm_fp8_tile(a8.data, w8.data, a_scale, w_scale, beta, out.data, M, N, K, stream, -1,
+        gemm_fp8_tile(a8.data, w8.data, a_scale, w_scale, beta, out.data, M, N, K, stream,
+                      process_diag_fp8_tile_variant(),
                       process_diag_deterministic() ? nullptr : qscratch_.fp8_tile_ws,
                       qscratch_.fp8_tile_ws_size)) {
         static bool logged = false;  // activity proof, once

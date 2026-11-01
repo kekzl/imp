@@ -73,6 +73,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.mxfp4_tile = cfg.gemm.mxfp4_tile;
     d.q45k_tile = cfg.gemm.q45k_tile;
     d.fp8_tile_min_m = cfg.gemm.fp8_tile_min_m;
+    d.fp8_tile_variant = cfg.gemm.fp8_tile_variant;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.verify_row_parity = cfg.speculative.verify_row_parity;
