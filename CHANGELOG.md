@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Kimi-Linear (`kimi_linear`, roadmap row 51): Firworks NVFP4 checkpoint, KDA softplus decay gate, rank-128 LoRA f and output gate, MLA NoPE, q/k/v as three NVFP4 GEMMs. RTX 5090: experts host-resident by default, pp512 2000 / tg128 316 tok/s; `moe.force_host_experts=8` pp512 4868 / tg128 340. vLLM 0.31.0 runs out of memory on the same checkpoint (#2984).
 
 ### Changed
+- `gdn.alpha_beta_prefill` defaults to true: GDN alpha/beta prefill projections run as one cluster split-K launch (in-cluster reduce, no reduce kernel) instead of two cuBLASLt GEMMs. Qwen3.8-27B per GDN layer pp512 8.1-8.6 vs 11.9-12.1 us, pp4096 20.9-21.0 vs 26.8-27.2 us; pp512 e2e 11087 -> 11218 tok/s (mean of 3 pairs).
 - BF16 MoE experts (Ling-3.0) are packed into one F16 slab per projection at load and decode through the device-side F16 expert GEMV, so the decode CUDA graph captures: Ling-3.0-tiny tg128 64.47 -> 447.79 tok/s, pp512 3165.51 -> 3615.04 (median of 3 alternating runs, #2983).
 - NVFP4 MoE expert placement counts the phase-3 SfAtom scales (~1/8 of the expert bytes) and keeps 10 % headroom instead of 0 %: Kimi-Linear-48B (24.7 GiB with scales, 28.5 GiB free) went all-on-card and ran out of memory at load; Gemma-4-26B, Qwen3-Coder-30B and Qwen3.8-Flash-Next place as before (#2984).
 

@@ -2,11 +2,11 @@
 // Narrow FP16 GEMM for prefill rows (M > 32): up to two (W,C) pairs in one launch.
 //   C_p[M,N_p] = A[M,K] @ W_p[N_p,K]^T   p = 0,1
 // FP16 operands, FP32 accumulate, FP16 out; N_0+N_1 <= 128, N_p%8==0, K%32==0, A/W 16 B
-// aligned. Built for the
-// GDN alpha/beta projections at prefill (N=n_heads), where cuBLAS runs two split-K GEMMs plus
-// two reduce launches per layer. Split-K across CTAs, the partials summed in index order by a
-// second launch: bitwise deterministic per shape. Workspace (device, 16 B aligned) holds the
-// FP32 partials; the split adapts to what fits, split 1 needs no workspace and no second launch.
+// aligned. Built for the GDN alpha/beta projections at prefill (N=n_heads), where cuBLAS runs two
+// split-K GEMMs plus two reduce launches per layer. Split-K (<= 8) across the CTAs of one cluster,
+// the partials summed in rank order after a cluster barrier: one launch, bitwise deterministic per
+// shape. Workspace (device, 16 B aligned) holds the FP32 partials; the split adapts to what fits,
+// split 1 needs no workspace.
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -23,7 +23,7 @@ size_t gemm_f16_narrow_prefill_workspace_bytes(int M, int n_total, int split);
                              half* C1, int N1, void* ws, size_t ws_bytes, cudaStream_t stream);
 
 // Grid-shape knobs for the sweep in tests/test_gemm_f16_narrow_prefill.cu: the split-K cap
-// (power of two, <= 32) and the CTA count the split reaches for. 0 = the shipped default.
-void gemm_f16_narrow_prefill_tune(int max_split, int target_ctas);
+// (power of two, <= 8), the CTA count the split reaches for, the row tile (32 or 64). 0 = default.
+void gemm_f16_narrow_prefill_tune(int max_split, int target_ctas, int bm = 0);
 
 }  // namespace imp
