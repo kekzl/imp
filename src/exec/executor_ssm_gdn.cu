@@ -6,6 +6,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/workspace_sizes.h"
 #include "exec/gemm_context.h"
+#include "exec/gdn_ragged.h"
 #include "compute/layernorm.h"
 #include "compute/activation.h"
 #include "compute/ssm.h"
@@ -401,32 +402,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     if (conv_st) {
         if (state.ragged_prefill()) {
-            // Ragged cross-sequence prefill: each sequence owns its conv state and row
-            // range, so the fused prefill conv loops per sequence (its state handoff
-            // is a per-seq sliding window, not a slot-strided pool access). The scan below batches all
-            // sequences in one launch.
+            // Ragged cross-sequence prefill: prompt members on the per-sequence prefill conv,
+            // mixed-step riders on one batched decode conv (exec/gdn_ragged.h).
             IMP_CUDA_CHECK_LOG(
                 cudaMemcpyAsync(xBC_out.data, xBC_in.data,
                                 static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
                                 cudaMemcpyDeviceToDevice, stream));
-            const size_t es_c = dtype_size(compute_dtype_);
-            for (int s = 0; s < state.n_sequences; ++s) {
-                const int rb = state.h_seq_offsets[s];
-                const int ns = state.h_seq_offsets[s + 1] - rb;
-                if (ns <= 0)
-                    continue;
-                void* cst = state.ssm_state->conv_state(state.h_ssm_slots[s], ssm_idx);
-                int64_t seq_shape[2] = {static_cast<int64_t>(ns),
-                                        static_cast<int64_t>(conv_channels)};
-                Tensor xBC_s(static_cast<char*>(xBC_out.data) +
-                                 (static_cast<size_t>(rb) * conv_channels * es_c),
-                             compute_dtype_, 2, seq_shape, true);
-                ssm_conv1d_prefill_f32_silu(cst, xBC_s, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                                            conv_f32 + (static_cast<size_t>(rb) * conv_channels), conv_kernel,
-                                            stream, /*d_real_n=*/nullptr,
-                                            /*conv_snap=*/nullptr, /*d_snap_n=*/nullptr,
-                                            /*conv_prev=*/nullptr);
-            }
+            gdn_ragged_conv(gdn_ragged_rows(state), *state.ssm_state, ssm_idx, xBC_out, ly.ssm_conv1d_w,
+                            ly.ssm_conv1d_b, conv_f32, conv_kernel, stream);
         } else if (state.ssm_grouped_chunk()) {
             // Multi-candidate verify chunk: ssm_n_seq candidate groups of
             // ssm_seq_tokens rows, group c on the conv window of slot
@@ -773,68 +756,29 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             const int* snap_n = (snap || per_group_snap) ? state.d_snap_n : nullptr;
             // Ragged prefill on the chunk-parallel scan runs one member at a time
             // (gdn.chunkpar_scan): the fused batched kernel walks every token of every
-            // member serially on n_heads x n_seq CTAs, so a packed multi-sequence
-            // forward pays more scan time than the single-sequence forwards it
-            // replaced. Members below the chunk-parallel minimum take the fused
-            // single-sequence kernel on their own rows; many short prompts packed
-            // together are faster on the one batched launch instead.
-            bool ragged_chunkpar = ragged && !grouped && dispatch_policy().gdn.chunkpar_scan &&
-                                   state.h_seq_offsets != nullptr && state.h_ssm_slots != nullptr &&
-                                   gdn_ws_.chunkpar != nullptr && head_dim_ssm == 128 && ssize == 128;
-            if (ragged_chunkpar) {
-                int n_small = 0, n_big = 0;
-                for (int sq = 0; sq < state.ssm_n_seq; ++sq) {
-                    const int rows = state.h_seq_offsets[sq + 1] - state.h_seq_offsets[sq];
-                    if (rows >= 128)
-                        n_big++;
-                    else if (rows > 0)
-                        n_small++;
-                }
-                ragged_chunkpar = n_big >= 1 && n_small <= 4;
+            // member serially on n_heads x n_seq CTAs. Riders share one batched decode launch.
+            bool ragged_split = false;
+            if (ragged && !grouped && dispatch_policy().gdn.chunkpar_scan) {
+                GdnRaggedScanIo io;
+                io.conv_f32 = conv_f32;
+                io.conv_channels = conv_channels;
+                io.alpha = static_cast<const half*>(alpha_proj_out.data);
+                io.beta = static_cast<const half*>(beta_proj_out.data);
+                io.A_log = static_cast<const float*>(ly.ssm_a.data);
+                io.dt_bias = static_cast<const float*>(ly.ssm_dt_b.data);
+                io.y = static_cast<half*>(y_buf.data);
+                io.n_heads = n_heads;
+                io.head_dim = head_dim_ssm;
+                io.state_size = ssize;
+                io.n_groups = n_groups;
+                io.grouped_layout = gl;
+                io.chunkpar_ws = static_cast<float*>(gdn_ws_.chunkpar);
+                io.chunkpar_bytes = gdn_ws_.chunkpar_bytes;
+                io.chunkpar_strip = dispatch_policy().gdn.chunkpar_strip;
+                ragged_split = gdn_ragged_scan_split(gdn_ragged_rows(state), *state.ssm_state, ssm_idx, io,
+                                                     stream);
             }
-            if (ragged_chunkpar) {
-                const size_t inner = static_cast<size_t>(n_heads) * head_dim_ssm;
-                const auto* A_log = static_cast<const float*>(ly.ssm_a.data);
-                const auto* dt_b = static_cast<const float*>(ly.ssm_dt_b.data);
-                for (int sq = 0; sq < state.ssm_n_seq; ++sq) {
-                    const int r0 = state.h_seq_offsets[sq];
-                    const int rows = state.h_seq_offsets[sq + 1] - r0;
-                    if (rows <= 0)
-                        continue;
-                    const float* conv_s = conv_f32 + (static_cast<size_t>(r0) * conv_channels);
-                    const half* alpha_s = static_cast<const half*>(alpha_proj_out.data) +
-                                          (static_cast<size_t>(r0) * n_heads);
-                    const half* beta_s = static_cast<const half*>(beta_proj_out.data) +
-                                         (static_cast<size_t>(r0) * n_heads);
-                    half* y_s = static_cast<half*>(y_buf.data) + (static_cast<size_t>(r0) * inner);
-                    void* h_s = state.ssm_state->h_state(state.h_ssm_slots[sq], ssm_idx);
-                    if (rows >= 128) {
-                        if (state_bf16) {
-                            gdn_scan_chunkpar_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
-                                                   static_cast<__nv_bfloat16*>(h_s), y_s, rows, n_heads,
-                                                   head_dim_ssm, ssize, n_groups, stream, gl,
-                                                   static_cast<float*>(gdn_ws_.chunkpar),
-                                                   gdn_ws_.chunkpar_bytes,
-                                                   dispatch_policy().gdn.chunkpar_strip);
-                        } else {
-                            gdn_scan_chunkpar_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
-                                                  static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm,
-                                                  ssize, n_groups, stream, gl,
-                                                  static_cast<float*>(gdn_ws_.chunkpar),
-                                                  gdn_ws_.chunkpar_bytes,
-                                                  dispatch_policy().gdn.chunkpar_strip);
-                        }
-                    } else if (state_bf16) {
-                        gdn_scan_fused_bf16(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
-                                            static_cast<__nv_bfloat16*>(h_s), y_s, rows, n_heads,
-                                            head_dim_ssm, ssize, n_groups, stream, gl, nullptr);
-                    } else {
-                        gdn_scan_fused_f32(conv_s, conv_channels, alpha_s, beta_s, A_log, dt_b,
-                                           static_cast<float*>(h_s), y_s, rows, n_heads, head_dim_ssm, ssize,
-                                           n_groups, stream, gl, nullptr);
-                    }
-                }
-            } else if (state_bf16) {
+            if (!ragged_split && state_bf16) {
                 gdn_scan_fused_bf16_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                     static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
@@ -845,7 +789,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n,
                     grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr,
                     fac_out, fac_in, state.ssm_fac_stride);
-            } else {
+            } else if (!ragged_split) {
                 gdn_scan_fused_f32_batched(
                     conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                     static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),

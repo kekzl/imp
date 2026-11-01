@@ -73,6 +73,10 @@ prefill_chunk_size   = -1
 # to 31 decoding streams their inter-token p95 goes 109 -> 186 ms; that stall
 # is what this knob bounds, so 1024 stays the default.
 prefill_chunk_decode_cap = 1024
+# GDN hybrids whose decoders ride the mixed step: min(this, the cap above) per
+# chunk, 0 = the cap above. Qwen3.8-27B-NVFP4, 31 riders + a 4151-token ingest:
+# their ITL max 105-107 -> 68-69 ms, ingest TTFT 458-475 -> 532-539 ms.
+prefill_chunk_decode_cap_hybrid = 512
 # Scale the cap above by W x waiting / decoding once that exceeds 1, up to
 # the full chunk; W is how many waiters one decoder's smoothness is worth,
 # 0 = off, 1 = symmetric. A burst then packs two ~1k-token prompts per
@@ -91,16 +95,16 @@ prefill_cap_fairness = 4
 prefill_batch_decode_cap = 0
 # Mixed prefill+decode step: while prompts prefill, the decoding requests ride
 # the ragged prefill forward as one-row members and the step runs no separate
-# decode forward. Dense models only; any decoder the ragged path does not
+# decode forward. Hybrids: next key; any decoder the ragged path does not
 # admit (vision, logprobs, constraints) keeps the batch on the separate step.
 # Measured on Qwen3-14B-NVFP4: 32 x ~1k-token burst +6.6..+7.8% aggregate,
 # TTFT p50 -20..-23%, ITL max 141 -> 80 ms; 31 streams + a 4.4k-token ingest:
 # their ITL during the ingest p95 63 -> 51 ms.
 prefill_mixed_decode = true
-# GDN hybrids in the mixed step: a decoding row rides the ragged prefill as a
-# one-token continuation chunk. Measured negative on Qwen3.8-27B (32 x 1k
-# prompts x 300 tokens: 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on).
-prefill_mixed_decode_hybrid = false
+# GDN hybrids in the mixed step: riders decode through one batched decode conv
+# + scan per layer. Qwen3.8-27B-NVFP4, 31 streams + a 4151-token ingest: their
+# ITL max during it 122-124 -> 104-108 ms, ingest TTFT 618-630 -> 461-469 ms.
+prefill_mixed_decode_hybrid = true
 # Batched decode: the penalty-history append rides behind the sampler flush
 # before the host waits on the token gather (event split) instead of after
 # the sync; nsys at 32 streams read 62 us of GPU idle on each side of the

@@ -113,6 +113,10 @@ struct RuntimeConfig {
         // session's large ingest (#1643). Raise (e.g. 4096) for burst-shaped
         // rather than mixed workloads; 0 = off.
         int prefill_chunk_decode_cap = 1024;
+        // GDN hybrids whose decoders ride the mixed step: min(this, the cap above)
+        // per chunk; 0 = the cap above. Qwen3.8-27B-NVFP4, 31 riders + a 4151-token
+        // ingest: their ITL max 105-107 -> 68-69 ms, ingest TTFT 458-475 -> 532-539 ms.
+        int prefill_chunk_decode_cap_hybrid = 512;
         // Scales the cap above by W x (requests waiting for prefill) /
         // (requests decoding) once that ratio exceeds 1, clamped to the full
         // chunk (prefill_pacing.h). W = how many waiters one decoder's
@@ -132,16 +136,16 @@ struct RuntimeConfig {
         // Mixed prefill+decode step: while prompts prefill, decoding
         // requests ride the ragged prefill forward as one-row members
         // (sampled by the decode sampler) instead of a separate decode
-        // forward. Dense models only; a decoder the ragged path does not
+        // forward. GDN hybrids: prefill_mixed_decode_hybrid; a decoder the ragged path does not
         // admit (vision, logprobs, constraints, MTP) keeps the whole batch
         // on the separate decode step (docs/ROADMAP.md, Server and latency).
         bool prefill_mixed_decode = true;
-        // Lets GDN hybrids into the mixed step: a decoding row rides the ragged
-        // prefill as a one-token continuation chunk (its live slot, the chunked-
-        // prefill route). Measured NEGATIVE, Qwen3.8-27B 32 x 1k prompts x 300:
-        // 868.6/869.7/874.1 off vs 840.6/822.5/831.5 on (-4.6%); a 4400-token late
-        // ingest beside 31 streams: their ITL max 126-128 -> 181-184 ms. Mamba2 stays out.
-        bool prefill_mixed_decode_hybrid = false;
+        // Lets GDN hybrids into the mixed step: riders decode on their live slots
+        // through one batched decode conv + scan per layer (exec/gdn_ragged.h).
+        // Qwen3.8-27B-NVFP4, 31 streams + a 4151-token ingest: their ITL max during
+        // it 122-124 -> 104-108 ms, ingest TTFT 618-630 -> 461-469 ms; 32 x 1k burst
+        // 883.1-892.4 -> 901.9-909.7 tok/s. Mamba2 stays out.
+        bool prefill_mixed_decode_hybrid = true;
         // Batched decode: enqueue the penalty-history append behind the sampler
         // flush BEFORE the host waits on the token gather (event split), instead
         // of after the sync. nsys at 32 streams read 62 us of GPU idle on each
