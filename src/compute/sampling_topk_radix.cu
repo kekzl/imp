@@ -351,17 +351,20 @@ __device__ __forceinline__ int topk_softmax_topp_sample(int top_k, float top_p, 
     }
     float inv_sum = (gsum > 0.0f) ? (1.0f / gsum) : 1.0f;
 
+    float k_mass = 0.0f;
     for (int i = 0; i < top_k; ++i) {
         if (s_idx[i] >= 0)
             s_val[i] = expf((s_val[i] - gmax) * inv_temperature) * inv_sum;
         else
             s_val[i] = 0.0f;
+        k_mass += s_val[i];
     }
+    const float p_cut = top_p * k_mass;  // top-p over the renormalized top k (topk_finalize_body)
     float cumsum = 0.0f;
     int cutoff = top_k;
     for (int i = 0; i < top_k; ++i) {
         cumsum += s_val[i];
-        if (cumsum >= top_p) {
+        if (cumsum >= p_cut) {
             cutoff = i + 1;
             break;
         }
