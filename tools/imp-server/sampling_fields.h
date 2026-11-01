@@ -16,8 +16,9 @@
 
 struct SamplingFields {
     float temperature = 0.7f, top_p = 0.95f, min_p = 0.0f, typical_p = 1.0f;
-    // 1.05: breaks 40-turn repetition spirals, keeps structural repetition; pass 1.0 to disable.
-    float repetition_penalty = 1.05f, frequency_penalty = 0.0f, presence_penalty = 0.0f;
+    // Model default (generation_config.json, else 1.0), as HF and vLLM. 1.05 on Qwen3.8-27B: 17
+    // misspelled German words in 6 books vs 1 at 1.0 (bookforge blind count, 2026-11-01).
+    float repetition_penalty = 1.0f, frequency_penalty = 0.0f, presence_penalty = 0.0f;
     float dry_multiplier = 0.0f, dry_base = 1.75f, mirostat_tau = 5.0f, mirostat_eta = 0.1f;
     float think_budget = 0.0f;  // parsed default: --think-budget
     int top_k = 40, seed = -1, repeat_last_n = 0;
@@ -39,6 +40,8 @@ struct SamplingFields {
             top_p = d.top_p;
         if (!top_k_explicit)
             top_k = d.top_k;
+        if (!rep_pen_explicit)
+            repetition_penalty = d.repetition_penalty;
     }
 
     // Everything but seed and stream, which callers set per completion.

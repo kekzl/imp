@@ -11,6 +11,7 @@ struct SamplingDefaults {
     float temperature = 0.6f;
     float top_p = 0.95f;
     int top_k = 0;
+    float repetition_penalty = 1.0f;  // generation_config.json only; no arch preset sets one
 };
 
 // Get sampling defaults for a model architecture.

@@ -16,6 +16,8 @@ SamplingDefaults resolve_sampling_defaults(ModelArch arch, const GenerationConfi
         d.top_p = gen.top_p;
     if (gen.top_k >= 0)
         d.top_k = gen.top_k;
+    if (gen.repetition_penalty > 0.0f)
+        d.repetition_penalty = gen.repetition_penalty;
     return d;
 }
 
