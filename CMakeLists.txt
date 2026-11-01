@@ -389,6 +389,8 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
     src/compute/gdn_gated_norm.cu
+    src/compute/kda_recurrent.cu
+    src/compute/kda_scan_chunk.cu
     src/compute/hadamard.cu
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
@@ -1103,6 +1105,8 @@ if(IMP_BUILD_TESTS)
         # Qwen3-VL video: frame-pair patchify, layout, M-RoPE vs HF fixtures in tests/fixtures/qwen3vl_video.
         tests/test_qwen3vl_video.cpp
         tests/test_mla.cpp
+        # KDA host reference vs fla naive torch goldens (tests/refs/kda_golden.h).
+        tests/test_kda_reference.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         tests/test_internvl_lm_names.cpp
@@ -1427,6 +1431,7 @@ if(IMP_BUILD_TESTS)
         tests/test_activation_calibrator_experts.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_kda.cu
         tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu

@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-30
-commit: edd4d4ac
+verified: 2026-11-01
+commit: 542df7ce
 -->
 
 # tests/refs/ — independent reference goldens
@@ -52,6 +52,7 @@ Generators:
 | `gen_attention_crosspath_golden.py` | `attention_crosspath_golden.h` | `tests/test_attention_crosspath.cu` |
 | `gen_nvfp4_outlier_golden.py` | `nvfp4_outlier_golden.h` | `tests/test_nvfp4_outlier_ref.cu` |
 | `gen_yarn_rope_golden.py` | `yarn_rope_golden.h` | `tests/test_gpt_oss_yarn_ref.cu` |
+| `gen_kda_golden.py` | `kda_golden.h` | `tests/test_kda_reference.cpp` (host ref; `tests/test_kda.cu` judges the GPU scans against it) |
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
 | `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |
