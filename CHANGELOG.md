@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- Ling-3.0 (`bailing_hybrid`, roadmap row 52), not yet run on a GPU: Kimi Delta Attention scans (recurrent, chunk 16), group-limited MoE top-k (`n_group`/`topk_group`, DeepSeek-V3 too), MLA head-wise output gate. Host KDA reference vs fla's torch code: max diff < 2e-5; grouped routing picks 48 of 48 golden experts.
+- Ling-3.0 (`bailing_hybrid`, roadmap row 52): Kimi Delta Attention scans (recurrent, chunk 16), group-limited MoE top-k (`n_group`/`topk_group`, DeepSeek-V3 too), MLA head-wise output gate. Ling-3.0-tiny BF16 greedy equals the HF fp32 reference on 8 of 8 tokens, also from a 9-token chunked prefill (`Ling3Ref`) (#2979).
 - EVS video token pruning (vLLM #48912) for Qwen3-VL `video` parts: `runtime.video_pruning_rate` or a part's `pruning_rate` q keeps max(one frame pair, tokens x (1 - q)), dropping those least like the previous pair; M-RoPE keeps unpruned positions. Qwen3-VL-4B, 32 frames, q 0.75: 4480 -> 1120 tokens, TTFT 0.645 -> 0.522 s median (5 pairs).
 
 ### Fixed

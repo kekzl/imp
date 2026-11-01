@@ -1465,6 +1465,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e.cpp
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
+        tests/test_e2e_ling3.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
         tests/test_scheduler_embedding_prefix.cpp

@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-11-01
-commit: bd6921fe
+commit: bf83b5bd
 -->
 
 # Limitations
@@ -25,7 +25,6 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | Loads with no dedicated gate | Llama-4 | manual smoke test only | #1680 |
-| Implemented, never run on a GPU: KDA scans checked only against the host reference in the CPU lane; no speculative decoding (KDA writes no verify snapshot), FP16 KV default, GGUF refused | Ling-3.0 (`bailing_hybrid`) | `test-moe-gdn --gtest_filter='KdaScan.*:MoeGroupTopk.*'`, then an HF logit comparison | roadmap row 52 |
 | Type exists, nothing exercises it | FP8 E5M2 KV / weights | none | #1680 |
 | Aliases onto the LLaMA path, no checkpoint of its own in a gate | Phi-4 | none | #1680 |
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |
@@ -53,6 +52,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | limitation | affected | workaround | issue |
 |---|---|---|---|
 | One LoRA adapter at a time: engine-global (executor pointer, decode graphs) | LoRA serving | batching worker serializes by adapter (a request naming a different one waits for in-flight requests, then switches, never batched with them); prefix cache is keyed by adapter, so a shared system prompt prefills once per adapter; C API `imp_lora_set` has no such guard, swap between requests only | AUDIT_ARCH_2026 E-1 |
+| No speculative decoding (KDA writes no verify snapshot); decode runs without CUDA graphs (the BF16 MoE expert path reads routing on the host, so the capture aborts); GGUF refused; the e2e gate `Ling3Ref` needs `IMP_TEST_MODEL_LING3` and `IMP_TEST_LING3_REF`, else `test-e2e` skips it | Ling-3.0 (`bailing_hybrid`) | none | - |
 | GGUF batched decode rows read the 4-bit overlay with 4-bit activations | batched decode (2-32 rows) on a GGUF source | small-M NVFP4 GEMM runs on the NVFP4 decode overlay (`smallm_weight_`, `src/exec/executor_gemm_smallm.cpp`); single-stream decode reads the same overlay with FP16 activations, prompt rows keep the full-precision dequant route; batched output not byte-identical to single-stream at temperature 0; numbers in [`PERF.md`](PERF.md) "Serving KPIs" | #1897, #1766 |
 | `server.green_contexts=true` gives no green contexts on this chip | sm_120 decode scheduling | `cudaDevResourceGenerateDesc` fails for the decode partition; fallback is priority streams with distinct memSyncDomains, `has_green_contexts()` stays false; dynamic SM reconfiguration in `step_schedule()` is gated on the flag and never runs [PROV: date=2026-08-22 hw=RTX5090, 170 SMs, 80/20 split, 99/1 retry] | reconfigure race #1656 is real code, unreachable on sm_120 |
 | Remote `image_url` fetching is vulnerable to DNS rebinding when on (off by default) | `--allow-remote-images` | check and connection are two separate resolutions, so a name whose records change in between reaches a private address; fix needs a connect-time callback httplib does not expose; treat the flag as "this server's network is trusted" | - |
