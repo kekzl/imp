@@ -203,6 +203,18 @@ size_t exec_gdn_dt_bytes(int64_t max_rows, int n_heads, size_t es) {
     return 2 * exec_gdn_beta_offset(max_rows, n_heads, es);
 }
 
+size_t exec_ssm_proj_bytes(int64_t rows, int ssm_proj_dim, size_t elem_bytes) {
+    const size_t raw = static_cast<size_t>(rows) * static_cast<size_t>(ssm_proj_dim) * elem_bytes;
+    return (raw + 255) & ~size_t(255);
+}
+
+size_t exec_ssm_conv_f32_offset(int64_t rows, int conv_channels, size_t es, bool kda) {
+    if (kda || rows != 1)
+        return 0;
+    const size_t row = static_cast<size_t>(conv_channels) * es;
+    return (row + 255) & ~size_t(255);
+}
+
 int exec_attn_gate_cols(const Model& model) {
     const auto& cfg = model.config();
     const int q_cols = cfg.n_heads * cfg.head_dim;

@@ -29,7 +29,9 @@ enum class ModelArch {
     OLMO3,       // Olmo3ForCausalLM: post-norm-only block, full-width QK-norm, 3:1 sliding/full layers
     LFM2,        // Lfm2(Moe)ForCausalLM: gated short-conv layers (conv state in the SSM pool) + GQA layers
     COHERE2,     // Cohere2MoeForCausalLM: parallel block, 3:1 SWA (RoPE) / full (NoPE) layers, sigmoid MoE
-    GENERIC,     // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
+    BAILING_HYBRID,  // BailingMoeV3ForCausalLM (Ling-3.0): 3:1 KDA (gdn_kda) / MLA layers, grouped sigmoid
+                     // MoE
+    GENERIC,         // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 
 const char* model_arch_name(ModelArch arch);

@@ -23,6 +23,8 @@ void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	80	0
 void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	80	0
 void apa::apa_kernel<256, false, false, false, __half, apa::FlatKV<__half> >	sm_120a	255	72	0
 void apa::apa_kernel<256, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	255	64	0
+void imp::(anonymous namespace)::kda_chunk_kernel<__nv_bfloat16>	sm_120a	255	64	0
+void imp::(anonymous namespace)::kda_chunk_kernel<float>	sm_120a	255	64	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	64	0
 void apa::apa_kernel<256, true, false, false, __half, apa::FlatKV<__half> >	sm_120a	255	56	0
 void apa::apa_kernel<256, true, false, false, __half, apa::PagedF16KV>	sm_120a	255	56	0
@@ -111,6 +113,7 @@ void imp::paged_attention_splitk_int4_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp32_kernel<3>	sm_120a	48	8	0
+imp::topk_gating_kernel	sm_120a	46	256	0
 imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	42	1056	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0

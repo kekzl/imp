@@ -201,6 +201,9 @@ private:
     bool use_jinja_ = false;
     bool mentions_thinking_ = false;
     bool tool_xml_dialect_ = false;
+    // Bailing template (Ling-3.0) switches thinking itself in the system turn ("detailed thinking off"):
+    // suppress_thinking then sets enable_thinking only, no Qwen3 "/no_think" suffix.
+    bool own_think_switch_ = false;
     std::vector<std::string> reasoning_effort_values_;
     std::string reasoning_effort_default_;
 

@@ -228,6 +228,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/lfm2_names.cpp
     src/model/weight_map_arch.cpp
+    src/model/bailing_hybrid_tensors.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_fit.cpp
@@ -390,6 +391,8 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm_conv_tap.cu
     src/compute/gdn.cu
     src/compute/gdn_gated_norm.cu
+    src/compute/kda_recurrent.cu
+    src/compute/kda_scan_chunk.cu
     src/compute/hadamard.cu
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
@@ -531,6 +534,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn_graph.cpp
     src/exec/ffn_graph_cache.cpp
     src/exec/executor_ssm_gdn.cu
+    src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
     src/exec/executor_ple.cpp
@@ -1109,6 +1113,12 @@ if(IMP_BUILD_TESTS)
         # EVS video token pruning: retained count, stable mask, pruned layout and M-RoPE (host half).
         tests/test_video_evs.cpp
         tests/test_mla.cpp
+        # KDA host reference vs fla naive torch goldens (tests/refs/kda_golden.h).
+        tests/test_kda_reference.cpp
+        # Group-limited MoE top-k vs Ling-3.0 BailingMoeV3Gate goldens (tests/refs/moe_group_topk_golden.h).
+        tests/test_moe_group_limit.cpp
+        # Ling-3.0 bailing_hybrid: config parse and KDA tensor fusion without the checkpoint.
+        tests/test_bailing_hybrid.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         # Gemma-4 E-variants: PLE + KV-sharing config keys and tensor mapping (E4B config fixture).
@@ -1257,6 +1267,7 @@ if(IMP_BUILD_TESTS)
         tests/test_transcript_ids.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp
+        tests/test_ling3_chat_template.cpp
         tests/test_jinja.cpp
         tests/test_jinja_undefined.cpp
         tests/test_chat_template_goldens.cpp
@@ -1435,6 +1446,8 @@ if(IMP_BUILD_TESTS)
         tests/test_activation_calibrator_experts.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_kda.cu
+        tests/test_moe_group_topk.cu
         tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu
@@ -1456,6 +1469,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e.cpp
         tests/test_e2e_models.cpp
         tests/test_e2e_greedy_lock.cpp
+        tests/test_e2e_ling3.cpp
         # Gemma-4 E4B greedy vs the HF fp32 reference (env-gated: model + reference dir).
         tests/test_e2e_gemma4_e4b.cpp
         tests/test_continuous_batching.cpp
