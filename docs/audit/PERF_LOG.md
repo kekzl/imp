@@ -4,6 +4,22 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-01 · KV pool growth on the run-13 shape: ~40 ms per growth, doubling refuted as a default
+
+Protocol: Qwen3-14B-NVFP4 server, `max_batch_size 32`, `max_seq_len 4096`, `kv_cache.max_blocks 8192`, 32 x 1000-token prompts x 300 tokens, 3 waves (`ttft_client.py`), main e654c654 + growth timing in the `grew` log line; 3 alternating pairs.
+
+| | +25 % steps (main) | doubling (`have + max(64, have)`) |
+|---|---|---|
+| growths per run | 6 (2025 -> 7720 blocks) | 2 (2025 -> 8100) |
+| time per growth | 31.2-108.8 ms | 47.8-95.8 ms |
+| growth time per run | 249 / 242 / 307 ms | 109 / 108 / 169 ms |
+| wall, 3 waves | 11.08 / 11.00 / 11.12 s | 10.91 / 10.90 / 11.13 s |
+
+- Zero + stream-0 sync is 0.8-3.8 ms of a growth (13.8-17.5 ms for the 4050-block doubling step); the rest is the per-region VMM commit, so a growth costs about the same at 800 and at 1920 MiB.
+- Not shipped: -0.8 % wall (2 of 3 pairs, third neutral) is paid once per process (the pool never shrinks), and doubling commits up to ~60 % more VRAM than a workload needs. Admission growth for the whole round instead of per request: same 6 growths, no change.
+
+---
+
 ## 2026-10-27 · Qwen3.8-Flash-Next server decode: three rate definitions on one run (v0.59.0 notes corrected)
 
 Protocol: `ghcr.io/kekzl/imp:latest` v0.59.0, README `docker run`, `tools/analysis/decode_rate_methods.py`: the 6 prompts of `seq_stream_client.py`, 400 greedy tokens, `ignore_eos`, thinking at the model default (~200 reasoning deltas, ~197 content deltas per request). Raw: `docs/audit/launch_2026_10_27/decode_rate_methods_flashnext.txt`.
