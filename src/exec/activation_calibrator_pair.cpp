@@ -33,6 +33,7 @@ struct ActivationCalibrator::PairState {
     VRAMAllocator* alloc = nullptr;
     FILE* f = nullptr;
     bool reading = false;
+    int layer_begin = 0, layer_end = 0;  // read mode: accumulated layers, end 0 = all
     std::string path;
     struct Rec {
         int64_t offset = 0;  // first payload byte
@@ -133,13 +134,17 @@ std::string ActivationCalibrator::enable_pair_dump(const std::string& path) {
     return "";
 }
 
-std::string ActivationCalibrator::enable_pair_read(const std::string& path) {
+std::string ActivationCalibrator::enable_pair_read(const std::string& path, int layer_begin, int layer_end) {
     if (!alloc_)
         return "pair read needs a device allocator";
+    if (layer_begin < 0 || (layer_end != 0 && layer_end <= layer_begin))
+        return "pair layers [" + std::to_string(layer_begin) + ", " + std::to_string(layer_end) + ") empty";
     pair_.reset(new PairState);
     pair_->alloc = alloc_;
     pair_->path = path;
     pair_->reading = true;
+    pair_->layer_begin = layer_begin;
+    pair_->layer_end = layer_end;
     FILE* f = std::fopen(path.c_str(), "rb");
     pair_->f = f;
     char magic[8];
@@ -178,6 +183,9 @@ void ActivationCalibrator::accumulate_pair_(int layer, TensorKind kind, const Te
         return;
     }
     const PairState::Rec* rec = p.next(key, rows, K);
+    // Outside [begin, end): the record is consumed for the alignment check, never loaded.
+    if (rec && (layer < p.layer_begin || (p.layer_end != 0 && layer >= p.layer_end)))
+        return;
     PairState::Acc* a = rec && p.load(*rec, stream) ? p.acc_for(key, K, stream) : nullptr;
     // Row-major [rows, K] is column-major [K, rows]: D = A B^T, D(i, j) = sum_r A[r][i] B[r][j].
     // D = Xq^T X stored column-major is C = X^T Xq row-major.
@@ -219,6 +227,9 @@ std::string ActivationCalibrator::finish_pairs(const std::string& out_path, cuda
                  p.acc.size(), static_cast<unsigned long long>(p.misaligned), unread);
     if (p.misaligned != 0 || unread != 0)
         return "source and export calls do not align (same corpus, chunking and binary?)";
+    if (p.acc.empty())
+        return "no weight input in pair layers [" + std::to_string(p.layer_begin) + ", " +
+               std::to_string(p.layer_end) + ")";
     HessianWriter w;
     if (std::string err = w.open(out_path, static_cast<uint32_t>(p.acc.size()), 2); !err.empty())
         return err;

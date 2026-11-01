@@ -54,12 +54,11 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
     return out;
 }
 
-std::string WeightQuantizer::open_gptq(const std::string& hess_path, float damp) {
-    path_ = hess_path;
+std::string WeightQuantizer::open_gptq(const std::string& hess_paths, float damp) {
     damp_ = damp;
-    if (std::string err = read_hessian_index(path_, index_); !err.empty())
+    if (std::string err = read_hessian_set(hess_paths, files_, index_); !err.empty())
         return err;
-    printf("GPTQ: %zu Hessians from %s\n", index_.size(), path_.c_str());
+    printf("GPTQ: %zu Hessians from %zu file(s)\n", index_.size(), files_.size());
     return "";
 }
 
@@ -91,7 +90,7 @@ std::expected<Quantized, std::string> WeightQuantizer::quantize(
     if (!he || he->K != K)
         return quantize_one(h, N, K, forced_scale);
     std::vector<float> H;
-    if (std::string err = read_hessian(path_, *he, H); !err.empty())
+    if (std::string err = read_hessian(files_[he->file], *he, H); !err.empty())
         return std::unexpected(err);
     const auto cs = col_scale.find(name);
     const std::vector<float>* s = cs != col_scale.end() && cs->second.size() == static_cast<size_t>(K)
@@ -101,7 +100,7 @@ std::expected<Quantized, std::string> WeightQuantizer::quantize(
     if (gptaq_ && alpha_ != 0.0f) {
         // Row-major C[i*K+j] = E[x_i xq_j] -> column-major dXX(i, j) = E[(x_i / s_i - xq_i) xq_j].
         std::vector<float> C;
-        if (std::string err = read_hessian(path_, *he, C, 1); !err.empty())
+        if (std::string err = read_hessian(files_[he->file], *he, C, 1); !err.empty())
             return std::unexpected(err);
         dxx.resize(C.size());
         for (int64_t i = 0; i < K; i++)
