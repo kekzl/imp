@@ -87,9 +87,9 @@ struct RuntimeConfig {
         // captured on its second sighting and kept across context resets.
         bool prefill_graph = true;
         // Prompts up to N tokens keep a prefill graph each, captured at startup (two dummy prefills
-        // per length), so a first request of that length replays instead of running eager; longer
-        // prompts share one re-captured runner. 0 = one shared runner for all.
-        int prefill_graph_prewarm = 0;
+        // per length, F16 KV): a first request of that length replays instead of running eager
+        // (Gemma-4 12.4 -> 6.6 ms TTFT; +150 MiB, +0.9 s at 32). Longer prompts share one runner.
+        int prefill_graph_prewarm = 32;
         // Every other prefill (ragged waves, continuation chunks, prefix hits): the FFN/MoE phase
         // replays per (layer, padded rows) from a graph, attention stays eager (#2435).
         bool prefill_ffn_graph = true;

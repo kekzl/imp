@@ -39,7 +39,7 @@ prefill_graph        = true
 # Prompts up to N tokens keep a prefill graph each, captured at startup (two
 # dummy prefills per length): the first request of a short length replays
 # instead of running eager. Longer prompts share one re-captured runner.
-prefill_graph_prewarm = 0
+prefill_graph_prewarm = 32
 # Every other prefill (ragged waves, continuation chunks, prefix hits): the
 # FFN/MoE phase replays per (layer, padded rows) from a CUDA graph, attention
 # stays eager (#2435).

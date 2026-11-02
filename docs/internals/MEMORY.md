@@ -58,6 +58,7 @@ All in `src/memory/`; nothing above L1 calls the driver.
 | VMM for the KV pool | the pool must be sized before the weight caches exist, from a free-VRAM reading wrong by ~3.9 GiB (archive 0, F3/F4); `cuMemAddressReserve` the maximum KV the config could want, commit 64-256 MiB chunks on demand, decommit when idle |
 | WSL2/WDDM spike: GO (2026-07-29, `tools/analysis/vmm_wsl2_probe.cu`, 24/24 checks) | 24 GiB reserve costs 0 MiB physical; commit granularity 2 MiB (not 64 KiB); base address invariant across an 8-chunk grow/shrink cycle; a graph captured over a fixed VA survives +1.5 GiB growth with the same checksum three times; decommit costs ~2x commit (~2.4-2.6 ms per 256 MiB) |
 | Not `cudaMallocAsync` as the backend | imp already pins its default pool's release threshold to `UINT64_MAX` (a de-facto arena without an arena's guarantees); its reserved-vs-used split is a recurring accounting-confusion source |
+| Growth off the admission path (`kv_cache.grow_ahead`, default on) | a synchronous growth was the request's queue time (34.8-64.7 ms on Qwen3-8B, `docs/audit/VLLM_GAP_2026_11_02.md`); a worker thread commits the next step (max(64, 25 %)) once the free list drops below it, zeroes it on its own stream, the scheduler adopts it next round; same free-VRAM cap, same ceiling |
 
 ```cpp
 // src/memory/backend.h - the ONLY place in imp that calls the driver.
@@ -189,7 +190,7 @@ A KV block has **two** refcount holders, not three (COW-fork does not exist, arc
 | Pool | Keyed by | Bound |
 |---|---|---|
 | `decode_graph_pool_[64]` | `n_sequences - 1` | `kMaxGraphPoolSize = 64`, fixed array |
-| `prefill_graph_runner_` | - | 1 |
+| `prefill_graphs_` (`PrefillGraphCache`) | (chunk_len, blocks, KV calibration generation, recurrent slot) | one per prompt length up to `runtime.prefill_graph_prewarm` (32) plus one shared; Gemma-4 ~4.7 MiB each |
 | `async_graph_runner_` | - | 1 (conditional-node loop) |
 | `spec_graphs_` | `(n_tokens, ctx_capacity, rec_slot)` | uncounted, ~1950 execs at `--max-batch 64`; cleared wholesale by `free_spec_graphs_()` |
 
