@@ -445,11 +445,6 @@ public:
     // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
                                           TensorID consumer_id, int n, cudaStream_t stream);
-    // GeGLU for a down projection whose K the small-M route declines (Gemma-4 shared d_ff 2112) at
-    // 2..32 rows: the CUTLASS tile's activation quantize rides in the GeGLU kernel (true = act
-    // scratch holds quantize(so), pass the hint); else plain geglu().
-    [[nodiscard]] bool geglu_for_tile_down_(const Tensor& go, const Tensor& uo, Tensor& so,
-                                            TensorID consumer_id, int n, cudaStream_t stream);
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV:
     // fills `out` from the secondary decode cache or the native-NVFP4 registry
     // tier (same sources the decode-path LM head uses). False when the LM head

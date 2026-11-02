@@ -1,5 +1,5 @@
-// Dense SwiGLU / GeGLU + CUTLASS NVFP4 quantize (#2470): FP16 output, packed FP4 and SfAtom
-// scales byte-identical to swiglu() / geglu() followed by quantize_fp16_to_nvfp4_cutlass().
+// Dense prefill SwiGLU + CUTLASS NVFP4 quantize (#2470): FP16 output, packed FP4 and SfAtom
+// scales byte-identical to swiglu() followed by quantize_fp16_to_nvfp4_cutlass().
 
 #include <gtest/gtest.h>
 #include "compute/activation.h"
@@ -31,7 +31,7 @@ struct Buf {
 };
 
 // M crosses a 128-row SfAtom tile and is not a multiple of it; K = Qwen3-14B d_ff.
-void run_case(int M, int K, float range, bool geglu_act = false) {
+void run_case(int M, int K, float range) {
     const size_t n = static_cast<size_t>(M) * K;
     std::vector<half> g(n), u(n);
     uint64_t s = 0x2470u + static_cast<uint64_t>(M);
@@ -50,14 +50,9 @@ void run_case(int M, int K, float range, bool geglu_act = false) {
     int64_t shape[2] = {M, K};
     Tensor tg(dg.p, QType::F16, 2, shape, true), tu(du.p, QType::F16, 2, shape, true),
         to(out_ref.p, QType::F16, 2, shape, true);
-    if (geglu_act)
-        geglu(tg, tu, to, nullptr);
-    else
-        swiglu(tg, tu, to, nullptr);
+    swiglu(tg, tu, to, nullptr);
     quantize_fp16_to_nvfp4_cutlass(out_ref.p, pk_ref.p, sf_ref.p, M, K, nullptr);
-    (geglu_act ? geglu_quantize_fp16_to_nvfp4_cutlass
-               : swiglu_quantize_fp16_to_nvfp4_cutlass)(dg.p, du.p, out_fused.p, pk_fused.p, sf_fused.p, M, K,
-                                                        nullptr);
+    swiglu_quantize_fp16_to_nvfp4_cutlass(dg.p, du.p, out_fused.p, pk_fused.p, sf_fused.p, M, K, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     EXPECT_EQ(out_ref.bytes(), out_fused.bytes()) << "M=" << M;
@@ -69,14 +64,6 @@ TEST(SwigluQuantizeCutlass, ByteIdenticalToSwigluThenQuantize) {
     run_case(33, 17408, 8.0f);
     run_case(200, 17408, 8.0f);
     run_case(129, 1024, 40.0f);
-}
-
-// Gemma-4 shared MLP down input (d_ff 2112, not a small-M K): batched-decode rows 2..32, plus a
-// range where gelu(g) * u leaves FP16 and hits the clamp.
-TEST(SwigluQuantizeCutlass, GegluByteIdenticalToGegluThenQuantize) {
-    for (int m : {2, 5, 16, 32})
-        run_case(m, 2112, 8.0f, /*geglu_act=*/true);
-    run_case(33, 2112, 400.0f, /*geglu_act=*/true);
 }
 
 }  // namespace

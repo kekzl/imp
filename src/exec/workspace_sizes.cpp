@@ -15,6 +15,17 @@ namespace {
 // Per-take alignment of the workspace arena (bytes): each take may waste up to this much.
 constexpr size_t kTakeAlign = 256;
 
+// Split-K workspace a small-M NVFP4 weight may need: the larger of v1 and v2 (K % 128; K % 128 == 64 runs
+// only the workspace-free ws kernel).
+size_t smallm_split_k_bytes(int64_t n, int64_t k) {
+    if ((k % 128) != 0)
+        return 0;
+    const size_t v1 = gemm_nvfp4_smallm_workspace_bytes(static_cast<int>(n));
+    if ((k % 256) != 0 || (n % 64) != 0)
+        return v1;
+    return std::max(v1, gemm_nvfp4_smallm_v2_workspace_bytes(static_cast<int>(n), static_cast<int>(k)));
+}
+
 // Logical (unpacked) K of a weight tensor. NVFP4 stores two e2m1 values per
 // byte, so shape[...] is the PACKED byte count and the dequant target is twice
 // as wide — the same distinction allocate_nvfp4_dequant_workspace makes.
@@ -398,21 +409,19 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // Small-M NVFP4 scratch (executor_gemm_smallm.cpp): the largest of the v1/v2 split-K
     // workspaces over the dense projections (the LM head never takes this route), plus the
     // packed 32-row activation for the widest K. Both kernel variants are charged because
-    // the choice is a runtime knob (gemm.nvfp4_smallm_impl).
+    // the choice is a runtime knob (gemm.nvfp4_smallm_impl). The ws kernel (impl 3, the only one at
+    // K % 128 == 64) needs the activation only; executor_gemm_smallm.cpp takes >= 256 workspace bytes.
     {
         size_t ws = 0;
         int64_t k_max = 0;
         for (const auto& [n, k] : shape.weights) {
-            if (n <= 0 || k <= 0 || (k % 128) != 0 || n == shape.vocab_size)
+            if (n <= 0 || k <= 0 || (k % 64) != 0 || n == shape.vocab_size)
                 continue;
-            ws = std::max(ws, gemm_nvfp4_smallm_workspace_bytes(static_cast<int>(n)));
-            if ((k % 256) == 0 && (n % 64) == 0)
-                ws = std::max(ws,
-                              gemm_nvfp4_smallm_v2_workspace_bytes(static_cast<int>(n), static_cast<int>(k)));
             k_max = std::max(k_max, k);
+            ws = std::max(ws, smallm_split_k_bytes(n, k));
         }
-        if (ws > 0)
-            out.smallm_scratch = ws + (32 * static_cast<size_t>(k_max / 2)) +
+        if (k_max > 0)
+            out.smallm_scratch = std::max<size_t>(ws, 256) + (32 * static_cast<size_t>(k_max / 2)) +
                                  (32 * static_cast<size_t>(k_max / 16)) + (2 * kTakeAlign);
     }
 

@@ -291,6 +291,9 @@
                         const TensorID qkv_ids[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
                         Tensor* qkv_outs[3] = {&q_target, &kk, &vv};
                         qkv_multi = try_smallm_multi_dispatch_(qkv_ids, qkv_outs, 3, no, ctx);
+                    } else if (n > 1 && ly.wk.data != nullptr) {
+                        // K=V layer (Gemma-4 global attention): q|k as one launch, v copied from k below.
+                        qkv_multi = try_smallm_pair_dispatch_(ly.wq_id, ly.wk_id, no, q_target, kk, ctx);
                     }
                     // Single-stream decode on gated attention (the ungated
                     // nvfp4_qkv path above already fuses): q|k|v in one
