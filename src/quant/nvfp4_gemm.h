@@ -98,6 +98,29 @@ struct SmallMV2Sibling {
                                   const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
                                   int K, cudaStream_t stream);
 
+// Weight-streaming small-M GEMM (nvfp4_gemm_smallm_ws.cu, gemm.nvfp4_smallm_impl 3): plain NVFP4 W and
+// Xq, y = ts * Xq W^T + beta * y, one launch, no workspace. M 1..32, K % 64 == 0, N % 16 == 0; false
+// (y untouched) otherwise. A row's bits depend on K only, never on M, N or its neighbours.
+inline constexpr int kNvfp4SmallMWsMaxM = 32;
+[[nodiscard]] bool gemm_nvfp4_smallm_ws_supports(int N, int K);
+[[nodiscard]] bool gemm_nvfp4_smallm_ws(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+                                        int N, int K, float beta, cudaStream_t stream);
+// 2-3 siblings on one Xq (q|k|v, gate|up), beta 0, one launch; per tensor bit-equal to the single call.
+[[nodiscard]] bool gemm_nvfp4_smallm_ws_multi(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq,
+                                              int M, int K, cudaStream_t stream);
+// Bench/test hooks: (rows per CTA, k-steps per warp per load round) in {16, 32} x {1, 2}; rows must divide
+// every N. The default picks by M and the combined N (n_gcd: a common divisor).
+struct WsCfg {
+    int rows, unroll;
+};
+WsCfg gemm_nvfp4_smallm_ws_cfg(int M, int N_total, int n_gcd);
+[[nodiscard]] bool gemm_nvfp4_smallm_ws_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y,
+                                              int M, int N, int K, float beta, cudaStream_t stream, int rows,
+                                              int unroll);
+[[nodiscard]] bool gemm_nvfp4_smallm_ws_multi_tuned(const SmallMV2Sibling* t, int count,
+                                                    const NvFP4QuantResult& Xq, int M, int K,
+                                                    cudaStream_t stream, int rows, int unroll);
+
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K,
                         int n_act, cudaStream_t stream);
 // beta=1 twin: y += A @ x (o/down residual-add verify GEMMs, #1055).

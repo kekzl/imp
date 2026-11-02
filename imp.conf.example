@@ -913,9 +913,11 @@ fp8_native_prefill   = true
 # multi-row GEMV: 32 streams 992.5 -> 1151.7 tok/s on Qwen3.8-27B-NVFP4 (+16 %).
 nvfp4_smallm         = true
 # Which small-M implementation: 1 = the W4A16 dequant+HMMA kernel (A/B), 2 = the
-# native mxf4nvf4 producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu).
-nvfp4_smallm_impl    = 2
-# Sibling-pair launch for impl 2: gate|up and GDN in|z as one launch, output
+# native mxf4nvf4 producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu), 3 = v2 where it
+# splits K under 4 ways, else the weight-streaming kernel: one launch, no split-K, K % 64
+# (nvfp4_gemm_smallm_ws.cu).
+nvfp4_smallm_impl    = 3
+# Sibling launch for impl 2 / 3: q|k|v, gate|up and GDN in|z as one launch, output
 # bit-identical per tensor; 112 launches fewer per 64-layer decode step.
 nvfp4_smallm_pair    = true
 # Small-M activations packed to NVFP4 (A4). false keeps them FP16 (dequant+HMMA

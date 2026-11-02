@@ -29,6 +29,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "exec/smallm_policy.h"
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/fp8_gemm_smallm.h"
 #include "quant/mxfp4_gemm.h"
@@ -582,11 +583,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                       /*accumulate=*/ctx.beta == 1.0f))
                     return;
             }
-            // impl 2 = the native mxf4nvf4 pipeline kernel (v2), impl 1 = the
-            // dequant+HMMA kernel on packed activations; unaligned shapes fall back to v1.
-            const bool v2 = dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
-            const size_t need = v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
-                                   : gemm_nvfp4_smallm_workspace_bytes(N);
+            // smallm_policy.h: impl 3 = v2 on its single-stripe shapes, else the weight-streaming kernel
+            // (ws, K % 64); impl 2 = v2 (K % 256); else the dequant+HMMA kernel on packed activations
+            // (v1, K % 128). A shape no kernel serves skips the activation quantize.
+            const SmallMKernel kern = smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, N, K);
+            const size_t need = smallm_workspace_bytes(kern, N, K);
+            const bool kernel_ok = kern != SmallMKernel::kNone;
             // Capturing with a too-small workspace falls through (the NVFP4 tile on
             // a native source, the dequant route on a GGUF one);
             // prewarm_smallm_workspace sizes both scratches at init.
@@ -597,7 +599,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // for K_max on first eager use, like the split-K workspace.
             const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
             ensure_smallm_xq_(xq_need, ctx.stream);
-            if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
+            if (kernel_ok && smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
                 uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
                 // Shared-activation skip: the call site marked this input as already
@@ -627,13 +629,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 xq.tensor_scale = 1.0f;
                 xq.N = M;
                 xq.K = K;
-                const bool ok = v2 ? gemm_nvfp4_smallm_v2_a4(nv, xq, reinterpret_cast<half*>(output.data), M,
-                                                             N, K, smallm_ws_, ctx.stream,
-                                                             /*accumulate=*/ctx.beta == 1.0f)
-                                   : gemm_nvfp4_smallm_a4(nv, xq, reinterpret_cast<half*>(output.data), M, N,
-                                                          K, smallm_ws_, ctx.stream,
-                                                          /*accumulate=*/ctx.beta == 1.0f);
-                if (ok)
+                if (smallm_launch_a4(kern, nv, xq, reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_,
+                                     ctx.beta, ctx.stream))
                     return;
             }
         }
