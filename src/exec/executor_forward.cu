@@ -534,7 +534,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // next layer reads it. Without it, the residual stream grows unbounded.
         {
             const auto& ly = model_->layer(i);
-            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device && h.qtype == QType::F16) {
+            // fp32_tail_fused_ applied the scale to both views already.
+            const bool scale_fused = fp32_tail_layer_ == i;
+            fp32_tail_layer_ = -1;
+            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device && h.qtype == QType::F16 &&
+                !scale_fused) {
                 int64_t total = static_cast<int64_t>(n) * cfg.d_model;
                 int threads = 256;
                 int blocks = static_cast<int>(((total / 2) + threads - 1) / threads);

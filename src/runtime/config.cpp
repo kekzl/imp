@@ -352,6 +352,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_lm_head_smallm", cfg.gemm.nvfp4_lm_head_smallm);
     B("gemm.nvfp4_norm_fold", cfg.gemm.nvfp4_norm_fold);
+    B("gemm.fp32_residual_fuse", cfg.gemm.fp32_residual_fuse);
     B("gemm.nvfp4_smallm", cfg.gemm.nvfp4_smallm);
     I("gemm.nvfp4_cublaslt_min_m", cfg.gemm.nvfp4_cublaslt_min_m);
     I("gemm.nvfp4_tile_min_m", cfg.gemm.nvfp4_tile_min_m);

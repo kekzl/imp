@@ -340,6 +340,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/rope.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
+    src/compute/fp32_residual_norm.cu
     src/compute/mla_kv_assemble.cu
     src/compute/mla_absorb.cu
     src/compute/activation.cu
@@ -551,6 +552,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
+    src/exec/executor_fp32_residual.cpp
     src/exec/executor_ple.cpp
     src/exec/executor_gemma_pli.cpp
     src/exec/executor_gdn_alpha_beta.cpp
@@ -1329,6 +1331,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mrope.cu
         tests/test_gpt_oss_yarn_ref.cu
         tests/test_layernorm.cu
+        tests/test_fp32_residual_norm.cu
         tests/test_mla.cu
         tests/test_activation.cu
         tests/test_embedding.cu

@@ -823,6 +823,10 @@ nvfp4_lm_head_smallm = true
 # M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV
 # folds into both kernels (one launch fewer per norm); deterministic.
 nvfp4_norm_fold      = true
+# Decode on an FP32 residual stream (Gemma-4): post-attention accumulate + MoE
+# pre-norm, and the layer tail (branch post-norms, add, post_ffn_norm, layer
+# scale, next attn_norm + NVFP4 quantize) run as one launch each; bit-identical.
+fp32_residual_fuse   = true
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false

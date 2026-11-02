@@ -351,6 +351,27 @@ public:
     const void* prenorm_out_ = nullptr;
     const void* prenorm_w_ = nullptr;
     int prenorm_n_ = 0;
+    // FP32-residual sandwich-norm fusion (gemm.fp32_residual_fuse, executor_fp32_residual.cpp, Gemma-4
+    // decode): each replaces a chain of norm / add / copy / scale / quantize launches, same bits.
+    [[nodiscard]] bool fp32_resid_fuse_ok_(int n) const;
+    // Q/K/V input from fp32_hidden_: skipped when the previous layer's tail wrote it, else one launch
+    // with the small-M NVFP4 quantize of the Q GEMM.
+    void fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cudaStream_t stream);
+    // Post-attention accumulate + residual save + the MoE pre-norm (phase 2 then skips both).
+    [[nodiscard]] bool fp32_post_attn_fused_(int layer, const Tensor& po, int n, cudaStream_t stream);
+    // The post-attention FP32 accumulate: fused as above, else rmsnorm_fp32_accum_to_fp16.
+    void fp32_post_attn_(int layer, const Tensor& po, Tensor& h, Tensor& fp32_h, int n, float eps,
+                         cudaStream_t stream);
+    // Phase-8 tail: both branch post-norms, add, post_ffn_norm accumulate, layer_out_scale and the
+    // next layer's attention norm + quantize. Sets fp32_tail_layer_ so the forward skips the scale.
+    [[nodiscard]] bool fp32_tail_ok_(int layer, int n) const;
+    void fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, cudaStream_t stream);
+    int fp32_tail_layer_ = -1;
+    // A non-producer write to `p`: a stale producer tag must not let a GEMM skip its quantize.
+    void smallm_xq_forget_(const void* p) {
+        if (smallm_xq_src_ == p)
+            smallm_xq_from_producer_ = false;
+    }
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
     // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
     // run rmsnorm() as before.
@@ -1251,6 +1272,12 @@ private:
     // [calibration]: pooled expert-input statistic plus one down-input statistic per expert.
     void calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx);
     void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // Phase 2 on the FP32 residual: take fp32_post_attn_fused_'s r + no (true = done), and the
+    // pre-norm from fp32_hidden_ (skipped when prenormed) + the n == 1 Q8_1 copy for dp4a.
+    [[nodiscard]] bool moe_take_prenorm_(const Tensor& norm_w, const MoeFfnContext& ctx);
+    void moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, bool prenormed, cudaStream_t stream);
+    // Phase 8 without fp32_tail_fused_: sanitize, branch post-norms, shared FFN, residual.
+    void moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // NVFP4→FP16 batch dequant fallback (when the grouped NVFP4
     // GEMM can't fire). Predicate is checked internally; returns true if the
     // path ran.
@@ -1277,7 +1304,7 @@ private:
                                float eps, const Tensor& no, Tensor& h);
     // Shared expert up to its gated down output in the given [n, eff] / [n, d] scratch, no add.
     Tensor shared_expert_core_(int layer, cudaStream_t stream, int n, int d, float eps, const Tensor& no,
-                               void* gate_buf, void* up_buf, void* act_buf, void* down_buf);
+                               void* gate_buf, void* up_buf, void* act_buf, void* down_buf, bool raw = false);
     // moe.shared_expert_overlap (executor_forward_moe_nvfp4_host.cu): fork runs the shared expert
     // on shexp_overlap_.stream; join waits for it and does the add. False = not forked.
     void init_shexp_overlap_();

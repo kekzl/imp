@@ -776,10 +776,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                   fp32_tmp[off + 2]);
                 }
             }
-            rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(po.data),
-                                       static_cast<const half*>(ly.post_attn_norm.data),
-                                       static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), n,
-                                       model_->config().d_model, post_eps, norm_w_off_, stream);
+            // Fused with the residual save and the MoE pre-norm where it can be (executor_fp32_residual.cpp).
+            fp32_post_attn_(layer, po, h, fp32_h, n, post_eps, stream);
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }

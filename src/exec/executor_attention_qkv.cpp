@@ -205,8 +205,7 @@
             // Norm fold: only try_attn_qkv_fused_m1_ below reads a folded `no` (n == 1).
             NvFP4NormFoldIn m1_fold{};
             if (using_fp32_accum && prof.fp32_residual_norms) {
-                Tensor fp32_h = view_tokens(fp32_hidden_, n);
-                rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
+                fp32_attn_norm_(layer, no, n, eps, stream);
             } else {
                 // Producer fusion: quantize into the small-M scratch inside
                 // the norm kernel when Q will take that route (batched
