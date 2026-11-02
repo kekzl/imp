@@ -655,7 +655,6 @@ void Engine::warmup() {
                      captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",
                      missing.c_str());
     }
-    prewarm_prefill_graphs_(warmup_id);
     // The eager pre-capture step exists for per-process lazy init (cuBLASLt probe, workspaces), done
     // by now for the sizes above. Skipping it lets the first REAL request run the captured-graph
     // kernel mix of every later one (greedy request-order independence, docs/DETERMINISM.md).
@@ -668,6 +667,7 @@ void Engine::warmup() {
     // prefill, and real prefill widens it further when needed.
     if (executor_)
         executor_->reset_kv_calibration();
+    prewarm_prefill_graphs_(warmup_id);  // after the reset: the key carries the calibration generation
     const ModelConfig& mc = model_->config();
     attention_apa_warmup(mc.n_heads, mc.n_kv_heads, mc.head_dim, mc.d_model,
                          runtime_config_.attention.apa_eps, stream_);
@@ -683,7 +683,9 @@ void Engine::warmup() {
 void Engine::prewarm_prefill_graphs_(int32_t token_id) {
     const int n_max = std::min({runtime_config_.runtime.prefill_graph_prewarm, prefill_graphs_.short_max(),
                                 config_.max_seq_len - 2});
-    if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !config_.use_cuda_graphs)
+    // F16 KV only: an FP8 pool captures once calibrated, and these synthetic prompts must not calibrate it.
+    if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !config_.use_cuda_graphs ||
+        config_.kv_cache_dtype != QType::F16)
         return;
     const auto t0 = std::chrono::steady_clock::now();
     const int captures0 = prefill_graphs_.captures();
