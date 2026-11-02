@@ -2,7 +2,7 @@
 # Table for vllm_gap_sweep.sh output: per model and engine the median over trials (min-max) of
 # tg128 (1000/TPOT p50), ppN (prompt tokens / mean max_tokens=1 latency), TTFT ms, conc 4/16 aggregate,
 # peak VRAM (nvidia-smi max - pre-start baseline), SM clock p50 while util >= 50 %.
-# Usage: vllm_gap_table.py OUTDIR
+# Usage: vllm_gap_table.py OUTDIR   Env: REF (vllm; base = the IMG_BASE arm of an imp A/B)
 import glob
 import json
 import os
@@ -11,6 +11,7 @@ import statistics
 import sys
 
 OUT = sys.argv[1]
+REF = os.environ.get("REF", "vllm")  # REF=base: an imp A/B (vllm_gap_sweep.sh IMG_BASE)
 
 
 def kpi(path):
@@ -80,16 +81,16 @@ models = sorted(d for d in os.listdir(OUT) if glob.glob(os.path.join(OUT, d, "*-
 rows = []
 for m in models:
     res = {}
-    for eng in ("imp", "vllm"):
+    for eng in ("imp", REF):
         arms = [arm(d) for d in sorted(glob.glob(os.path.join(OUT, m, f"{eng}-t*")))]
         res[eng] = {k: agg([a.get(k) for a in arms]) for k in KEYS}
         ntoks = [a.get("ntok512") for a in arms if a.get("ntok512")] + [a.get("ntok4096") for a in arms if a.get("ntok4096")]
         res[eng]["_ntok"] = ntoks
     print(f"## {m}")
-    print("| metric | imp median (min-max, n) | vLLM median (min-max, n) | imp vs vLLM |")
+    print(f"| metric | imp median (min-max, n) | {REF} median (min-max, n) | imp vs {REF} |")
     print("|---|---:|---:|---:|")
     for k in KEYS:
-        i, v = res["imp"][k], res["vllm"][k]
+        i, v = res["imp"][k], res[REF][k]
         if i[0] is None and v[0] is None:
             continue
 

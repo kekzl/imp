@@ -205,7 +205,9 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
                                   ly.w_up_shared.data ==
                                       nullptr;  // must not have shared expert for full residual fusion
 
-    if (!ctx.will_skip_residual_copy) {
+    // fp32_post_attn_fused_ already wrote r = h and no = norm_w(fp32 residual) for this layer.
+    const bool prenormed = moe_take_prenorm_(norm_w, ctx);
+    if (!ctx.will_skip_residual_copy && !prenormed) {
         // Kernel copy, not cudaMemcpyAsync: the D2D DMA submission blocked
         // the host ~165 us per call — at one residual copy per MoE layer per
         // decode step that alone was ~8 ms/step at n=16 (nsys 2026-07-12).
@@ -238,18 +240,37 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     } else {
         // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
         if (ctx.gemma4_fp32_norm) {
-            Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
-            rmsnorm_fp32_to_fp16(fp32_h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
-            // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
-            if (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
-                quantize_fp16_to_q8_1(static_cast<const half*>(ctx.no.data),
-                                      static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf,
-                                      ctx.d, stream);
-            }
+            moe_fp32_prenorm_(norm_w, ctx, prenormed, stream);
         } else {
             rmsnorm(ctx.h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
         }
     }
+}
+
+// Gemma-4 router input, FP16: rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d), from the FP32 residual
+// when there is one. fp32_post_attn_fused_ may have written it already (router_prenorm_).
+Tensor GraphExecutor::moe_router_in_fp16_(const TransformerLayer& ly, const MoeFfnContext& ctx,
+                                          cudaStream_t stream) {
+    int64_t ri_shape[2] = {static_cast<int64_t>(ctx.n), static_cast<int64_t>(ctx.d)};
+    Tensor router_in(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+    const bool done = router_prenorm_ == router_in.data && router_prenorm_n_ == ctx.n;
+    router_prenorm_ = nullptr;
+    if (done)
+        return router_in;
+    if (fp32_accum_buf_ != nullptr) {
+        Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
+        rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
+    } else {
+        rmsnorm(ctx.h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
+    }
+    int64_t total_elems = static_cast<int64_t>(ctx.n) * ctx.d;
+    int threads_s = 256;
+    int blocks_s = static_cast<int>(((total_elems / 2) + threads_s - 1) / threads_s);
+    float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
+    scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
+                                                          __float2half(inv_sqrt_d), total_elems);
+    IMP_CUDA_CHECK_LAUNCH();
+    return router_in;
 }
 
 void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
@@ -292,21 +313,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
             ctx.fp32_gate_logits_ready = true;
         } else {
             // FP16 fallback (prefill or non-FP32-accum)
-            int64_t ri_shape[2] = {static_cast<int64_t>(ctx.n), static_cast<int64_t>(ctx.d)};
-            router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
-            if (fp32_accum_buf_ != nullptr) {
-                Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
-                rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
-            } else {
-                rmsnorm(ctx.h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
-            }
-            int64_t total_elems = static_cast<int64_t>(ctx.n) * ctx.d;
-            int threads_s = 256;
-            int blocks_s = static_cast<int>(((total_elems / 2) + threads_s - 1) / threads_s);
-            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
-            scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
-                                                                  __float2half(inv_sqrt_d), total_elems);
-            IMP_CUDA_CHECK_LAUNCH();
+            router_in = moe_router_in_fp16_(ly, ctx, stream);
         }
     }
 
@@ -699,13 +706,37 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
 // post_ffw_norm_2 / shared expert FFN / post_ffn_norm (FP32-accum or
 // plain) / residual add / debug stats / free routing buffers if owned.
 void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
+    const auto& ly = model_->layer(layer);
+    // Gemma-4 decode: the shared MLP input norm + its quantize, then one tail launch for both branch
+    // post-norms, the add, post_ffn_norm, layer_out_scale and the next attn_norm
+    // (executor_fp32_residual.cpp).
+    if (!ctx.residual_fused && fp32_tail_ok_(layer, ctx.n)) {
+        rmsnorm_for_smallm_(ctx.r, ly.ffn_norm, ctx.no, ly.w_up_shared_id, ctx.n, ctx.eps, stream,
+                            norm_w_off_);
+        const Tensor sd = shared_expert_core_(layer, stream, ctx.n, ctx.d, ctx.eps, ctx.no,
+                                              moe_.expert_gate.data, moe_.expert_up.data,
+                                              moe_.expert_swiglu.data, moe_.expert_down.data,
+                                              /*raw=*/true);
+        fp32_tail_fused_(layer, ctx.h, sd, ctx.n, stream);
+    } else {
+        moe_ffn_phase8_unfused_(layer, stream, ctx);
+    }
+
+    // 10. Free routing result tensors only if allocated by moe_topk_gating.
+    //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
+    if (ctx.routing.owns_memory) {
+        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_indices.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_weights.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.sorted_token_ids.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_offsets.data));
+    }
+}
+
+void GraphExecutor::moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
 
-    // Shared expert FFN: all tokens pass through a dense FFN whose output adds
-    // to the routed expert output, reusing MoE workspace buffers. Supports
-    // gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
     // Gemma 4: sanitizes inf/NaN in MoE scatter output before post-norm.
     if (prof.sanitize_ffn_fp16) {
         sanitize_fp16(static_cast<__half*>(ctx.h.data), static_cast<int64_t>(ctx.n) * ctx.d, stream);
@@ -780,15 +811,6 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
         char buf[64];
         snprintf(buf, sizeof(buf), "L%d_after_residual_pre_scale", layer);
         debug_tensor_stats_all(buf, ctx.h, stream);
-    }
-
-    // 10. Free routing result tensors only if allocated by moe_topk_gating.
-    //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
-    if (ctx.routing.owns_memory) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_indices.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_weights.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.sorted_token_ids.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_offsets.data));
     }
 }
 

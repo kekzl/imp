@@ -1172,7 +1172,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
 
 Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n, int d, float eps,
                                           const Tensor& no, void* gate_buf, void* up_buf, void* act_buf,
-                                          void* down_buf) {
+                                          void* down_buf, bool raw) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
@@ -1222,6 +1222,9 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
         debug_tensor_rows("L0_sh_down_rows", sh_down, stream);
         debug_tensor_rows("L0_shared_norm_in", view_tokens(no, n), stream);
     }
+    // raw: the caller's fused tail (fp32_tail_fused_) sanitizes and post-norms the down output.
+    if (raw)
+        return sh_down;
     // Gemma-4: shared MLP can overflow FP16 at deep layers; sanitize inf/NaN
     // before post_ffw_norm_1 so rmsnorm doesn't produce all-zero output.
     if (model_->profile().sanitize_ffn_fp16) {

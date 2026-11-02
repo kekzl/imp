@@ -86,6 +86,10 @@ struct GEMM {
     // both (producer writes h*gamma/4 + atomic sum of squares, consumer scales by rsqrt).
     // Fixed-point integer atomics: deterministic, also under runtime.deterministic.
     bool nvfp4_norm_fold = true;
+    // Decode on an FP32 residual stream (Gemma-4): post-attn accumulate + MoE pre-norm, and the
+    // layer tail (branch post-norms, add, post_ffn_norm, layer scale, next attn_norm + NVFP4
+    // quantize) as one launch each. Bit-identical to the unfused chain.
+    bool fp32_residual_fuse = true;
     // Small-M (<=32) NVFP4 GEMM for batched decode. v1 (W4A16 dequant+HMMA)
     // won isolated but lost the real 32-stream step: synchronous SIMT loads
     // are exposed to the GDN scan's L2 pressure. v2 uses native block-scaled

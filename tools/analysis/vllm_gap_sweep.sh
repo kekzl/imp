@@ -6,6 +6,7 @@
 # imp runs spec-off (speculative.mtp_k=0, speculative.ngram=false); vLLM runs its defaults.
 # Usage: bash tools/analysis/vllm_gap_sweep.sh [MODELS="dir1 dir2"] [TRIALS=3] [CELLS="base long"] [OUT=/mnt/data/scratch/vllmgap]
 # Table: docker run --rm -v $OUT:/o -v tools/analysis:/t:ro imp:toolchain python3 /t/vllm_gap_table.py /o
+# imp A/B: IMG_BASE=<image> replaces the vLLM arm by a "base" imp arm (same flags); table with REF=base.
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -14,6 +15,9 @@ TRIALS=${TRIALS:-3}
 OUT=${OUT:-/mnt/data/scratch/vllmgap}
 IMG_IMP=${IMG_IMP:-imp:test}
 IMG_VLLM=${IMG_VLLM:-vllm/vllm-openai:v0.31.0}
+IMG_BASE=${IMG_BASE:-}
+REF=vllm
+[ -n "$IMG_BASE" ] && REF=base
 CLIENT=${CLIENT:-imp:toolchain}
 PORT=${PORT:-8097}
 MAXC=${MAXC:-16}
@@ -27,7 +31,7 @@ LOG="$OUT/sweep.log"
 {
     echo "start $(date -Is) commit=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null)"
     echo "harness md5=$(md5sum < "$0" | cut -d' ' -f1)"
-    for img in "$IMG_IMP" "$IMG_VLLM" "$CLIENT"; do
+    for img in "$IMG_IMP" "${IMG_BASE:-$IMG_VLLM}" "$CLIENT"; do
         echo "image $img id=$(docker image inspect --format '{{.Id}}' "$img" 2>/dev/null | cut -c8-19)" \
              "digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$img" 2>/dev/null)" \
              "tree=$(docker image inspect --format '{{index .Config.Labels "imp.tree"}}' "$img" 2>/dev/null)"
@@ -76,7 +80,8 @@ run_arm() {  # $1 = engine imp|vllm, $2 = model dir, $3 = trial
     local common=(-d --name $NAME --gpus all -v "$MODELS_DIR":/models:ro -p "$PORT:$PORT")
     local t0; t0=$(date +%s)
     case "$eng" in
-        imp) docker run "${common[@]}" "$IMG_IMP" imp-server --model "/models/$MODEL" --host 0.0.0.0 \
+        imp|base) docker run "${common[@]}" "$([ "$eng" = base ] && echo "$IMG_BASE" || echo "$IMG_IMP")" \
+                 imp-server --model "/models/$MODEL" --host 0.0.0.0 \
                  --port "$PORT" --max-concurrent "$MAXC" --set "runtime.max_batch_size=$MAXC" \
                  --set speculative.mtp_k=0 --set speculative.ngram=false >/dev/null ;;
         vllm) docker run "${common[@]}" --ipc=host -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 "$IMG_VLLM" \
@@ -124,7 +129,7 @@ for m in $MODELS; do
     [ -r "$MODELS_DIR/$m/config.json" ] || { echo "== $m: NOMODEL" | tee -a "$LOG"; continue; }
     vllm_ok=1
     for t in $(seq 1 "$TRIALS"); do
-        if [ $((t % 2)) -eq 1 ]; then order="imp vllm"; else order="vllm imp"; fi
+        if [ $((t % 2)) -eq 1 ]; then order="imp $REF"; else order="$REF imp"; fi
         for e in $order; do
             if [ "$e" = vllm ] && [ $vllm_ok -eq 0 ]; then continue; fi
             run_arm "$e" "$m" "$t" || { [ "$e" = vllm ] && vllm_ok=0; }
