@@ -7,6 +7,14 @@
 
 namespace imp {
 
+// Activation scale of an FP8 x FP8 GEMM: one device scalar (checkpoint input_scale), or per_row: one
+// scale per activation row (per-token dynamic, quantize_fp8_act_rows). Null d = not quantized.
+struct Fp8ActScale {
+    const float* d = nullptr;
+    bool per_row = false;
+    explicit operator bool() const { return d != nullptr; }
+};
+
 // Quantization scratch buffers: pre-allocated per-GEMM scratch for activation
 // quantization, on-the-fly weight dequant, and dp4a GEMV. Allocated once during
 // GraphExecutor::allocate_workspaces(), freed by free(). All members public for
@@ -23,6 +31,8 @@ struct QuantScratch {
     float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
     float* d_fp8_absmax = nullptr;       // pre-allocated absmax scalar
     int fp8_max_grid = 0;                // max grid size for reduction
+    float* d_act_row_scales = nullptr;   // per-token dynamic act scales, act_row_scales_n floats (T2 arena)
+    int act_row_scales_n = 0;
     void* fp8_tile_ws = nullptr;         // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
     size_t fp8_tile_ws_size = 0;
 

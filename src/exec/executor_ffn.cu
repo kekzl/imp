@@ -255,7 +255,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             const bool fp8_ffn = (n >= fp8x8_min_rows_ && !cur_force_fp16_ && hwg &&
                                   hwg->primary_tier == StorageTier::FP8 && hwu &&
                                   hwu->primary_tier == StorageTier::FP8);
-            const float* fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : nullptr;
+            const Fp8ActScale fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : Fp8ActScale{};
             if (fp8_a_scale) {
                 // Reconstruct FP8 weight tensors from handle payloads.
                 auto make_fp8_tensor = [](const WeightHandle* hw) {
@@ -500,10 +500,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
                     break;
             }
-            const float* down_a_scale = (will_fuse_down_beta1 && !cur_force_fp16_ &&
-                                         wd_tier == StorageTier::FP8)
-                                            ? quantize_act_fp8_(*hwd, so, stream)
-                                            : nullptr;
+            const Fp8ActScale down_a_scale = (will_fuse_down_beta1 && !cur_force_fp16_ &&
+                                              wd_tier == StorageTier::FP8)
+                                                 ? quantize_act_fp8_(*hwd, so, stream)
+                                                 : Fp8ActScale{};
             if (down_a_scale) {
                 // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
                 Tensor fp8_so(qscratch_.fp8_act, QType::FP8_E4M3, so.ndim, so.shape, true);

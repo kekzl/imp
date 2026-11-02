@@ -4,7 +4,8 @@
 //   L1 no-allocate), each lane holds rows g and g+8 (g = lane / 4) at byte t4 * 16 of the k-step.
 //   mma.sync m16n8k32 e4m3 with W as the A operand (16 rows) and the activations as B (8 tokens per
 //   n-tile, kNT tiles): the k permutation phys = t4 * 16 + j is applied to both operands alike.
-//   fp32 accumulate, warp partials summed in warp order through smem, per-tensor scales + beta in fp32.
+//   fp32 accumulate, warp partials summed in warp order through smem, scales (per-tensor or per-token
+//   activation) + beta in fp32.
 // A row's result depends on (N, K, kWarps) only: tokens never share an MMA column, the K order is fixed.
 
 #include "quant/fp8_gemm_smallm.h"
@@ -47,7 +48,8 @@ template <int kNT, int kWarps, int kU>
 __device__ __forceinline__ void fp8_smallm_cta(const uint8_t* __restrict__ a, const uint8_t* __restrict__ w,
                                                const float* __restrict__ a_scale,
                                                const float* __restrict__ w_scale, float beta,
-                                               half* __restrict__ y, int M, int N, int K, int n0) {
+                                               half* __restrict__ y, int M, int N, int K, int n0,
+                                               bool a_rows) {
     __shared__ float red[kWarps][kNT * 8][kRows];
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
@@ -147,7 +149,7 @@ __device__ __forceinline__ void fp8_smallm_cta(const uint8_t* __restrict__ a, co
         red[warp][tok + 1][g + 8] = acc[nt][3];
     }
     __syncthreads();
-    const float scale = *a_scale * *w_scale;
+    const float ws = *w_scale;
     for (int i = threadIdx.x; i < kNT * 8 * kRows; i += kWarps * 32) {
         const int tok = i / kRows;
         const int r = i % kRows;
@@ -158,7 +160,7 @@ __device__ __forceinline__ void fp8_smallm_cta(const uint8_t* __restrict__ a, co
         for (int ww = 0; ww < kWarps; ++ww)
             s += red[ww][tok][r];
         half* o = y + (static_cast<int64_t>(tok) * N) + n0 + r;
-        float v = s * scale;
+        float v = s * ((a_rows ? a_scale[tok] : *a_scale) * ws);
         if (beta != 0.0f)
             v += beta * __half2float(*o);
         *o = __float2half(v);
@@ -168,8 +170,8 @@ __device__ __forceinline__ void fp8_smallm_cta(const uint8_t* __restrict__ a, co
 template <int kNT, int kWarps, int kU>
 __global__ void __launch_bounds__(kWarps * 32) fp8_smallm_kernel(
     const uint8_t* __restrict__ a, const uint8_t* __restrict__ w, const float* __restrict__ a_scale,
-    const float* __restrict__ w_scale, float beta, half* __restrict__ y, int M, int N, int K) {
-    fp8_smallm_cta<kNT, kWarps, kU>(a, w, a_scale, w_scale, beta, y, M, N, K, blockIdx.x * kRows);
+    const float* __restrict__ w_scale, float beta, half* __restrict__ y, int M, int N, int K, bool a_rows) {
+    fp8_smallm_cta<kNT, kWarps, kU>(a, w, a_scale, w_scale, beta, y, M, N, K, blockIdx.x * kRows, a_rows);
 }
 
 // Up to kFp8SmallMMaxSiblings weights on one activation (q|k|v, gate|up), beta 0: grid.x walks their
@@ -186,7 +188,7 @@ template <int kNT, int kWarps, int kU>
 __global__ void __launch_bounds__(kWarps * 32) fp8_smallm_multi_kernel(MultiArgs p,
                                                                        const uint8_t* __restrict__ a,
                                                                        const float* __restrict__ a_scale,
-                                                                       int M, int K) {
+                                                                       int M, int K, bool a_rows) {
     const int t = blockIdx.x;
     const bool t1 = t >= p.tiles_end[0];
     const bool t2 = t >= p.tiles_end[1];
@@ -195,38 +197,38 @@ __global__ void __launch_bounds__(kWarps * 32) fp8_smallm_multi_kernel(MultiArgs
     const float* ws = t2 ? p.ws[2] : (t1 ? p.ws[1] : p.ws[0]);
     half* y = t2 ? p.y[2] : (t1 ? p.y[1] : p.y[0]);
     const int N = t2 ? p.N[2] : (t1 ? p.N[1] : p.N[0]);
-    fp8_smallm_cta<kNT, kWarps, kU>(a, w, a_scale, ws, 0.0f, y, M, N, K, (t - first) * kRows);
+    fp8_smallm_cta<kNT, kWarps, kU>(a, w, a_scale, ws, 0.0f, y, M, N, K, (t - first) * kRows, a_rows);
 }
 
 template <int kNT, int kWarps, int kU>
-void launch_multi(const MultiArgs& p, int tiles, const void* a, const float* as, int M, int K,
+void launch_multi(const MultiArgs& p, int tiles, const void* a, const float* as, int M, int K, bool a_rows,
                   cudaStream_t stream) {
     auto* k = fp8_smallm_multi_kernel<kNT, kWarps, kU>;
     pdl::enable_kernel(k);
     pdl::launch(k, dim3(tiles), dim3(kWarps * 32), size_t(0), stream, p, static_cast<const uint8_t*>(a), as,
-                M, K);
+                M, K, a_rows);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 template <int kNT, int kWarps, int kU>
 void launch(const void* a, const void* w, const float* as, const float* ws, float beta, half* y, int M, int N,
-            int K, cudaStream_t stream) {
+            int K, bool a_rows, cudaStream_t stream) {
     auto* k = fp8_smallm_kernel<kNT, kWarps, kU>;
     pdl::enable_kernel(k);
     pdl::launch(k, dim3(N / kRows), dim3(kWarps * 32), size_t(0), stream, static_cast<const uint8_t*>(a),
-                static_cast<const uint8_t*>(w), as, ws, beta, y, M, N, K);
+                static_cast<const uint8_t*>(w), as, ws, beta, y, M, N, K, a_rows);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 template <int kWarps, int kU>
 void launch_nt(const void* a, const void* w, const float* as, const float* ws, float beta, half* y, int M,
-               int N, int K, cudaStream_t stream) {
+               int N, int K, bool a_rows, cudaStream_t stream) {
     if (M <= 8)
-        launch<1, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, stream);
+        launch<1, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, a_rows, stream);
     else if (M <= 16)
-        launch<2, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, stream);
+        launch<2, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, a_rows, stream);
     else
-        launch<4, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, stream);
+        launch<4, kWarps, kU>(a, w, as, ws, beta, y, M, N, K, a_rows, stream);
 }
 
 bool args_ok(const void* a, const void* w, const float* as, const float* ws, const half* y, int M, int N,
@@ -242,28 +244,28 @@ bool args_ok(const void* a, const void* w, const float* as, const float* ws, con
 
 bool gemm_fp8_smallm_tuned(const void* a_fp8, const void* w_fp8, const float* a_scale, const float* w_scale,
                            float beta, half* y, int M, int N, int K, cudaStream_t stream, int warps,
-                           int unroll) {
+                           int unroll, bool a_per_row) {
     if (!args_ok(a_fp8, w_fp8, a_scale, w_scale, y, M, N, K))
         return false;
     if (warps == 8 && unroll == 1)
-        launch_nt<8, 1>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
+        launch_nt<8, 1>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, a_per_row, stream);
     else if (warps == 8 && unroll == 2)
-        launch_nt<8, 2>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
+        launch_nt<8, 2>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, a_per_row, stream);
     else if (warps == 8 && unroll == 4)
-        launch_nt<8, 4>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
+        launch_nt<8, 4>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, a_per_row, stream);
     else
         return false;
     return true;
 }
 
 bool gemm_fp8_smallm(const void* a_fp8, const void* w_fp8, const float* a_scale, const float* w_scale,
-                     float beta, half* y, int M, int N, int K, cudaStream_t stream) {
+                     float beta, half* y, int M, int N, int K, cudaStream_t stream, bool a_per_row) {
     return gemm_fp8_smallm_tuned(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream, kDefaultWarps,
-                                 kDefaultUnroll);
+                                 kDefaultUnroll, a_per_row);
 }
 
 bool gemm_fp8_smallm_multi(const Fp8SmallMSibling* t, int count, const void* a_fp8, const float* a_scale,
-                           int M, int K, cudaStream_t stream) {
+                           int M, int K, cudaStream_t stream, bool a_per_row) {
     if (count < 2 || count > kFp8SmallMMaxSiblings)
         return false;
     MultiArgs p{};
@@ -281,11 +283,11 @@ bool gemm_fp8_smallm_multi(const Fp8SmallMSibling* t, int count, const void* a_f
     for (int i = count; i < kFp8SmallMMaxSiblings; ++i)
         p.tiles_end[i] = tiles;
     if (M <= 8)
-        launch_multi<1, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<1, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, a_per_row, stream);
     else if (M <= 16)
-        launch_multi<2, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<2, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, a_per_row, stream);
     else
-        launch_multi<4, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<4, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, a_per_row, stream);
     return true;
 }
 

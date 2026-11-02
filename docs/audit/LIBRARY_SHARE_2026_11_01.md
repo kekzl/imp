@@ -182,7 +182,7 @@ Numerics:
 - `mma.sync` m16n8k32 e4m3, fp32 accumulate, W as the A operand (16 rows), activations as B (8 tokens per n-tile, 1 / 2 / 4 tiles for M <= 8 / 16 / 32); the k permutation `t4 * 16 + j` is applied to both operands.
 - Warp partials summed in warp order through smem; per-tensor `*a_scale * *w_scale` and beta in fp32; PDL: first weight rounds load before `griddepcontrol.wait`.
 - A row's bits depend on (N, K) only: no M-dependent split, tokens never share an MMA column. Sibling launch: q|k|v and gate|up as one grid, bits equal to single launches.
-- Activations: the checkpoint's static `input_scale` (`quantize_act_fp8_`); o_proj keeps its dynamic per-tensor absmax over all rows (`qscratch_.d_act_scale`), a row dependence this GEMM does not remove.
+- Activations: the checkpoint's static `input_scale` (`quantize_act_fp8_`); o_proj keeps its dynamic per-tensor absmax over all rows (`qscratch_.d_act_scale`), a row dependence this GEMM does not remove. Closed 2026-11-02: o_proj takes the static scale too, checkpoints without one per-token scales (`gemm.fp8_static_act_scale`, docs/DETERMINISM.md).
 - Registers 48-140 (w8u2 instances), no local memory.
 
 Cold L2 (256 MiB memset before each call, median of 31 after >= 0.3 s warm-up, `Fp8GemmSmallMBench.DISABLED_VsCublasLt`), us per call, own = default config:

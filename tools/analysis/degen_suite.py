@@ -674,8 +674,9 @@ class Suite:
                   for r in (first, again)]
         # The resend must restore; the first send may prefill fresh. Row-invariant (bit-equal) in
         # default mode: dense models on FP16 or FP8 KV (#2152, FP8 since round_prefill_kv_to_cache).
-        # MoE and FP8-weight GEMMs pick kernels by row count unless runtime.deterministic=true
+        # MoE and mixed NVFP4 + FP8 GEMMs pick kernels by row count unless runtime.deterministic=true
         # (Qwen3-30B-A3B-NVFP4: drift 0.14 nats default, 0 deterministic; docs/DETERMINISM.md).
+        # Dense FP8 (Qwen3-8B-FP8) passes in default mode since its o_proj left the batch-wide absmax.
         if not cached[1]:
             self.skip("multi-turn", name, f"resend did not restore (cached={cached})")
             return

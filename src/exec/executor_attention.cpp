@@ -694,14 +694,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
-        // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden
+        // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
+        // scales, as q/k/v and the FFN: a batch-wide absmax made a row depend on its neighbours.
         const WeightHandle& wo_h = registry_.handle(ly.wo_id);
-        int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
-        Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-        Tensor fp8_ao(qscratch_.fp8_act, QType::FP8_E4M3, ao.ndim, ao.shape, true);
-        quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
-                                  qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-        gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
+        if (const Fp8ActScale a = quantize_act_fp8_(wo_h, ao, stream)) {
+            int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
+            Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
+            Tensor fp8_ao(qscratch_.fp8_act, QType::FP8_E4M3, ao.ndim, ao.shape, true);
+            gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale, stream);
+        } else {
+            gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
+        }
     } else if (will_fuse_o_beta1_nvfp4) {
         // Batched-decode NVFP4: hidden += attn_out @ wo^T via the smallm
         // accumulate path (falls through to a beta-honouring handler if the

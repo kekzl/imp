@@ -365,6 +365,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("gemm.fp8_smallm_max_m", cfg.gemm.fp8_smallm_max_m);
     B("gemm.fp8_smallm_multi", cfg.gemm.fp8_smallm_multi);
     B("gemm.fp8_smallm_m1", cfg.gemm.fp8_smallm_m1);
+    B("gemm.fp8_static_act_scale", cfg.gemm.fp8_static_act_scale);
     I("gemm.nvfp4_smallm_impl", cfg.gemm.nvfp4_smallm_impl);
     B("gemm.nvfp4_smallm_pair", cfg.gemm.nvfp4_smallm_pair);
     B("gemm.nvfp4_smallm_a4", cfg.gemm.nvfp4_smallm_a4);

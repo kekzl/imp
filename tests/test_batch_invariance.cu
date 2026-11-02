@@ -303,13 +303,14 @@ EngineConfig batch_invariance_config() {
 // sequence under test; rows 1..n-1 carry DIFFERENT content at DIFFERENT
 // lengths, so a bug that keys off a per-row context length cannot hide.
 ArmResult run_arm(TeacherForcedDriver& drv, const std::vector<int32_t>& toks, int n_rows, int blocks_per_seq,
-                  int vocab) {
+                  int vocab, int neighbour_shift = 0) {
     // Row 0 is the sequence under test: corpus from token 0, full prompt.
     // Rows 1+ start at a different offset and are shortened by up to 4 tokens,
     // so neither the content nor the per-row context length matches row 0.
+    // neighbour_shift moves rows 1+ further into the corpus (other neighbours, same row 0).
     std::vector<int> starts(n_rows), lens(n_rows);
     for (int r = 0; r < n_rows; r++) {
-        starts[r] = (r == 0) ? 0 : (kPromptLen / 2 + r);
+        starts[r] = (r == 0) ? 0 : (kPromptLen / 2 + r + neighbour_shift);
         lens[r] = kPromptLen - (r == 0 ? 0 : (r % 5));
     }
 
@@ -575,6 +576,67 @@ TEST(BatchInvarianceTest, Fp8DenseDecodeOwnSmallMVsCublasLt) {
     EXPECT_LT(std::fabs(m1_solo.nll_delta), 0.03) << "M=1 own GEMM vs FP16-activation GEMV NLL";
     EXPECT_LT(m1_solo.mean_abs_lp, 0.2);
     EXPECT_GT(m1_solo.top1_agreement, 0.9);
+}
+
+// Dense native FP8, 32 decode rows: row 0's logprobs are bit-equal under two different sets of batch
+// neighbours, with the checkpoint's static input scales (default) and with per-token dynamic scales
+// (gemm.fp8_static_act_scale=false). A batch-wide activation absmax (o_proj before 2026-11-02) moved them.
+// The dynamic arm's NLL stays within the own-vs-cuBLASLt fence of the static one.
+TEST(BatchInvarianceTest, Fp8DenseDecodeRowIndependentOfNeighbours) {
+    const char* env = getenv(imp_test::kEnvModelFp8);
+    const std::string path = env ? env : "/models/Qwen3-8B-FP8";
+    if (!fs::exists(path + "/config.json"))
+        GTEST_SKIP() << "native-FP8 checkpoint not present at " << path << " (set " << imp_test::kEnvModelFp8
+                     << ")";
+    if (device_free_mib() < kNeededMiB)
+        GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free";
+    setenv("IMP_DETERMINISTIC", "1", 1);
+    constexpr int kShift = 9;
+
+    struct Arms {
+        ArmResult batched, batched_other;
+    };
+    auto run_engine = [&](bool static_scale, Arms& out) {
+        std::shared_ptr<Model> model = load_safetensors(path, /*load_mtp_head=*/false);
+        ASSERT_NE(model, nullptr) << "failed to load " << path;
+        ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr, 1ULL << 30));
+        gemm_init();
+        const int vocab = static_cast<int>(model->config().vocab_size);
+        const std::vector<int32_t> toks = model->tokenizer()->encode(kCorpus);
+        ASSERT_GT(static_cast<int>(toks.size()), 2 * kPromptLen + kDecodeSteps + kBatchRows + kShift + 8);
+        RuntimeConfig rc;
+        rc.runtime.deterministic = true;
+        rc.server.prefix_cache = false;
+        rc.gemm.fp8_static_act_scale = static_scale;
+        set_pending_runtime_config(rc);
+        EngineConfig cfg = batch_invariance_config();
+        cfg.use_nvfp4_decode = -1;
+        Engine engine;
+        ASSERT_TRUE(engine.init(model, cfg));
+        KVCache* kv = engine.kv_cache();
+        const int bps = (kPromptLen + kDecodeSteps + 2 + kv->block_size() - 1) / kv->block_size();
+        ASSERT_GE(kv->total_blocks(), kBatchRows * bps);
+        TeacherForcedDriver drv(*engine.executor(), *kv, kBatchRows, bps, vocab);
+        out.batched = run_arm(drv, toks, kBatchRows, bps, vocab);
+        out.batched_other = run_arm(drv, toks, kBatchRows, bps, vocab, kShift);
+    };
+    Arms st, dyn;
+    run_engine(true, st);
+    run_engine(false, dyn);
+
+    const Comparison st_nb = compare(st.batched, st.batched_other);
+    const Comparison dyn_nb = compare(dyn.batched, dyn.batched_other);
+    const Comparison dyn_vs_st = compare(st.batched, dyn.batched);
+    print_comparison("static nb A/B", st.batched, st.batched_other, st_nb);
+    print_comparison("per-token nb A/B", dyn.batched, dyn.batched_other, dyn_nb);
+    print_comparison("static/per-token", st.batched, dyn.batched, dyn_vs_st);
+
+    EXPECT_EQ(st_nb.max_abs_lp, 0.0) << "static input scales: row 0 moved with its neighbours";
+    EXPECT_EQ(st_nb.top1_flips, 0);
+    EXPECT_EQ(dyn_nb.max_abs_lp, 0.0) << "per-token scales: row 0 moved with its neighbours";
+    EXPECT_EQ(dyn_nb.top1_flips, 0);
+    EXPECT_LT(std::fabs(dyn_vs_st.nll_delta), 0.03) << "per-token vs static input scale NLL";
+    EXPECT_GT(dyn_vs_st.top1_agreement, 0.85);
 }
 
 }  // namespace imp

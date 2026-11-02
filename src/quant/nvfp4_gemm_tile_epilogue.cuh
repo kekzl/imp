@@ -34,6 +34,7 @@ struct TileArgs {
     int sk_dp;
     int sk_split;
     float* d32;  // non-null: fp32 D (row stride ldd) instead of d, stored per fragment (LM head logits)
+    bool a_per_row;  // FP8 only: a_scale holds M per-token scales, D row m uses a_scale[m]
 };
 
 // alpha, times col_scale[col], col + 1 for the MXFP8 row-scale view, times the FP8 tensor scales.
@@ -47,6 +48,18 @@ __device__ __forceinline__ float2 out_scale(const TileArgs& p, int col) {
         if (p.col_scale != nullptr && col < p.N)  // N % 8 == 0: col + 1 < N too
             return make_float2(p.alpha * p.col_scale[col], p.alpha * p.col_scale[col + 1]);
     return make_float2(p.alpha, p.alpha);
+}
+
+// out_scale for D row `row`: FP8 per-token scales replace *a_scale by a_scale[row] (same product order);
+// every other case returns sc. Rows past M read row M - 1, their stores are clipped.
+template <class C>
+__device__ __forceinline__ float2 row_scale(const TileArgs& p, float2 sc, int row) {
+    if constexpr (C::kF8)
+        if (p.a_per_row) {
+            const float s = p.alpha * __ldg(p.a_scale + min(row, p.M - 1)) * __ldg(p.w_scale);
+            return make_float2(s, s);
+        }
+    return sc;
 }
 
 // Per-CTA ring geometry shared by the mainloops and the epilogue.
@@ -73,7 +86,8 @@ __device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], c
                 const int row = m0 + wm + mf * 16 + T1 + h * 8;
                 if (row >= p.M || col >= p.N)
                     continue;
-                float2 v = make_float2(acc[mf][nf][h * 2] * sc.x, acc[mf][nf][(h * 2) + 1] * sc.y);
+                const float2 s = row_scale<C>(p, sc, row);
+                float2 v = make_float2(acc[mf][nf][h * 2] * s.x, acc[mf][nf][(h * 2) + 1] * s.y);
                 if (p.d32 != nullptr) {
                     *reinterpret_cast<float2*>(p.d32 + (static_cast<size_t>(row) * p.ldd) + col) = v;
                     continue;
@@ -112,10 +126,12 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], hal
         for (int nf = 0; nf < C::kNF; ++nf) {
             const float2 sc = out_scale<C>(p, n0 + C::ncol(wn, nf) + T0 * 2);
 #pragma unroll
-            for (int h = 0; h < 2; ++h)
+            for (int h = 0; h < 2; ++h) {
+                const float2 s = row_scale<C>(p, sc, m0 + wm + mf * 16 + T1 + h * 8);
                 *reinterpret_cast<__half2*>(so + ((wm + mf * 16 + T1 + h * 8) * C::kOS) + C::ncol(wn, nf) +
-                                            T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * sc.x,
-                                                                        acc[mf][nf][h * 2 + 1] * sc.y);
+                                            T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * s.x,
+                                                                        acc[mf][nf][h * 2 + 1] * s.y);
+            }
         }
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
     for (int i = threadIdx.x; i < kBM * (C::kBN / 8); i += kMmaThreads) {
@@ -157,8 +173,9 @@ __device__ __forceinline__ void store_beta_staged(const float (&acc)[4][C::kNF][
 #pragma unroll
                 for (int h = 0; h < 2; ++h) {
                     const int row = g.wm + mf * 16 + T1 + h * 8;
+                    const float2 s = row_scale<C>(p, sc, g.m0 + row);
                     *reinterpret_cast<float2*>(buf + (row * CW) + ((col - c0) ^ ((row & 7) << 3))) =
-                        make_float2(acc[mf][nf][h * 2] * sc.x, acc[mf][nf][(h * 2) + 1] * sc.y);
+                        make_float2(acc[mf][nf][h * 2] * s.x, acc[mf][nf][(h * 2) + 1] * s.y);
                 }
             }
         asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
@@ -222,13 +239,17 @@ __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], cons
         for (int nf = 0; nf < C::kNF; nf += 2) {
             const float2 s0 = out_scale<C>(p, g.n0 + C::ncol(g.wn, nf) + T0 * 2);
             const float2 s1 = out_scale<C>(p, g.n0 + C::ncol(g.wn, nf + 1) + T0 * 2);
+            // Fragment rows: c0/c1 at r0, c2/c3 at r0 + 8 (FP8 per-token scales differ between them).
+            const int r0 = g.m0 + g.wm + mf * 16 + (g.lane >> 2);
+            const float2 s0a = row_scale<C>(p, s0, r0), s0b = row_scale<C>(p, s0, r0 + 8);
+            const float2 s1a = row_scale<C>(p, s1, r0), s1b = row_scale<C>(p, s1, r0 + 8);
             const int row = g.wm + mf * 16 + ((j & 1) * 8) + (g.lane & 7);
             const int col = C::ncol(g.wn, nf + (j >> 1));
             stsm_x4(g.s0 + ((col >> 6) * (kBM * 128)) + (row * 128) + ((((col & 63) >> 3) ^ (row & 7)) * 16),
-                    pack_half2(acc[mf][nf][0] * s0.x, acc[mf][nf][1] * s0.y),
-                    pack_half2(acc[mf][nf][2] * s0.x, acc[mf][nf][3] * s0.y),
-                    pack_half2(acc[mf][nf + 1][0] * s1.x, acc[mf][nf + 1][1] * s1.y),
-                    pack_half2(acc[mf][nf + 1][2] * s1.x, acc[mf][nf + 1][3] * s1.y));
+                    pack_half2(acc[mf][nf][0] * s0a.x, acc[mf][nf][1] * s0a.y),
+                    pack_half2(acc[mf][nf][2] * s0b.x, acc[mf][nf][3] * s0b.y),
+                    pack_half2(acc[mf][nf + 1][0] * s1a.x, acc[mf][nf + 1][1] * s1a.y),
+                    pack_half2(acc[mf][nf + 1][2] * s1b.x, acc[mf][nf + 1][3] * s1b.y));
         }
     fence_async_smem();
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));

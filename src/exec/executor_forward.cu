@@ -1026,19 +1026,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
             // For n>1 decode with quantized output weights, use FP8 GEMM or FP16 cache.
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
-            if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr &&
-                qscratch_.d_act_scale != nullptr) {
-                int64_t wshape[2] = {lm_h->shape[0], lm_h->shape[1]};
-                Tensor fp8_lm_w(lm_h->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no_final.ndim, no_final.shape, true);
-                quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
-                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax,
-                                          qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f, qscratch_.d_act_scale,
-                              lm_h->payload.fp8.d_scale, stream);
-            } else {
+            if (lm_tier != StorageTier::FP8 || !lm_head_fp8_tier_(*lm_h, no_final, lg, stream))
                 gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
-            }
         }
     lm_head_done:
         logits_out = lg;

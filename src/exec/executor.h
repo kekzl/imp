@@ -704,6 +704,9 @@ private:
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
     // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
     [[nodiscard]] bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
+    // FP8-tier head on normed rows `no` -> FP32 lg, per-token activation scales. False: not served.
+    [[nodiscard]] bool lm_head_fp8_tier_(const WeightHandle& lm_h, const Tensor& no, Tensor& lg,
+                                         cudaStream_t stream);
     void finalize_logits_(Tensor& logits_out, int n, cudaStream_t stream);  // soft-cap + final-logit dump
     // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
     // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
@@ -1005,6 +1008,8 @@ private:
     struct {
         void* fp8_act; size_t fp8_act_size; float* d_act_scale; float* d_fp8_block_maxes;
         float* d_fp8_absmax; int fp8_max_grid; void* q8_1_buf; float* d8_buf; int q8_1_rows;
+        float* d_act_row_scales;
+        int act_row_scales_n;
     } qscratch_prefill_save_{};
     bool overlap_prefill_active_ = false;
     int32_t* sample_slot_override_ = nullptr;
@@ -1159,19 +1164,21 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
-    // FP16 input -> qscratch_.fp8_act for an FP8-tier weight: the weight's static input scale,
-    // else a per-call absmax. Returns the activation scale for gemm_cublaslt, null = no scratch.
-    const float* quantize_act_fp8_(const WeightHandle& hw, const Tensor& input, cudaStream_t stream);
+    // FP16 input -> qscratch_.fp8_act for an FP8-tier weight: the weight's static input scale
+    // (gemm.fp8_static_act_scale), else per-token dynamic scales; a row never depends on its neighbours.
+    // Null = no scratch.
+    Fp8ActScale quantize_act_fp8_(const WeightHandle& hw, const Tensor& input, cudaStream_t stream);
     // M>1 GEMM on an FP8-tier weight: FP8 x FP8 cuBLASLt, else (native) FP16 dequant scratch.
     void gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry& e, const Tensor& input, Tensor& output,
                            const GemmContext& ctx);
-    // out = *a_scale * *w_scale * a8 w8^T + beta out, E4M3 operands: own tile (gemm.fp8_tile), else cuBLASLt.
-    void gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, const float* a_scale,
+    // out = as * *w_scale * a8 w8^T + beta out, E4M3 operands: own small-M / tile, else cuBLASLt (scalar a
+    // only).
+    void gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
                      const float* w_scale, cudaStream_t stream);
     // 2-3 FP8 weights on one FP8 activation, beta 0 (q|k|v, gate|up): one small-M launch on decode rows,
     // else gemm_fp8x8_ per weight. w8/out/w_scale arrays of `count`.
     void gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
-                           const float* const* w_scale, int count, const float* a_scale, cudaStream_t stream);
+                           const float* const* w_scale, int count, Fp8ActScale a, cudaStream_t stream);
     // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
     // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
     void offload_enter_(int layer, int n_layers, cudaStream_t stream);
