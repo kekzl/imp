@@ -58,11 +58,13 @@ inline constexpr GreedyLock kGreedyLocks[] = {
     // RoPE-NeoX class shipped prompt-blind output exactly here).
     // Re-locked 2026-09-29 under pinned FP16 KV (#2208): Italy/Rome, Spain/Madrid,
     // Germany/Berlin, Netherlands/Amsterdam; token-identical to the Q8_0 row.
+    // Re-locked 2026-11-02 (gemm.nvfp4_static_act_scale: checkpoint input_global_scale): token 26 on
+    // Belgium/Brussels instead of Netherlands/Amsterdam, facts correct; verified: internal 2026-11-02.
     {"Qwen3-8B-NVFP4-cortecs",
      "The capital of France is",
      32,
      {12095, 13, 576, 6722, 315, 15344, 374, 21718, 13, 576, 6722, 315, 17689, 374, 24081, 13,
-      576, 6722, 315, 9856, 374, 19846, 13, 576, 6722, 315, 279, 25662, 374, 37741, 13, 576}},
+      576, 6722, 315, 9856, 374, 19846, 13, 576, 6722, 315, 32961, 374, 37169, 13, 576, 6722}},
     // verified: internal 2026-06-04 — "17+25=42": arithmetically correct,
     // prompt-grounded (the prompt-blindness detector for the NVFP4 path).
     // Regenerated 2026-09-05 (dispatch #4, same reason as the Q8_0 row above):

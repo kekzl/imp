@@ -289,19 +289,20 @@ __device__ __forceinline__ float act(float g, float u) {
 // One 16-column block of a row held by the 4 lanes of a quad (2 fragments x 2 values each): absmax over the
 // quad, UE4M3 scale, FP4 bytes (quantize_micro_block_nvfp4_from_vals).
 __device__ __forceinline__ void quant_block(const float (&v)[4], bool valid, uint8_t* prow, int col,
-                                            uint8_t* sf, int T0) {
+                                            uint8_t* sf, int T0, float as) {
     float amax = fmaxf(fmaxf(fabsf(v[0]), fabsf(v[1])), fmaxf(fabsf(v[2]), fabsf(v[3])));
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
     if (!valid)
         return;
-    if (amax > 2688.0f)
+    const float scale_f = amax / (as * 6.0f);  // as: static act tensor scale, 1.0 = amax / 6
+    if (scale_f > 448.0f)
         g_dec_clipped = 1u;
-    const uint8_t ue = float_to_fp8_e4m3(amax / 6.0f);
+    const uint8_t ue = float_to_fp8_e4m3(scale_f);
     float actual = fp8_e4m3_to_float_fast(ue);
     if (actual == 0.0f)
         actual = 1.0f / 512.0f;
-    const float inv = 1.0f / actual;
+    const float inv = 1.0f / (as * actual);
     prow[(col / 2)] = pack_fp4(v[0] * inv, v[1] * inv);
     prow[(col / 2) + 4] = pack_fp4(v[2] * inv, v[3] * inv);
     if (T0 == 0)
@@ -355,7 +356,7 @@ __device__ __forceinline__ void store(const float (&acc)[4][4], const DArgs& g, 
                 quant_block(v, lrow < tl.rows && col0 < g.N, prow, col0 + (T0 * 2),
                             sf + (static_cast<size_t>(((lrow / kBM) * at_o) + (col0 >> 6)) * kM16Atom) +
                                 (static_cast<size_t>(row) * 4) + ((col0 >> 4) & 3),
-                            T0);
+                            T0, g.a.act_scale);
             }
         }
     }

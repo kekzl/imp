@@ -23,6 +23,34 @@ using imp::pre_dequant_internal::infer_tier_from_wcache;
 
 namespace imp {
 
+// WeightHandle::act_scale of a native NVFP4 weight: its checkpoint scale under gemm.nvfp4_static_act_scale.
+static float static_act_scale(const Tensor& t, bool on) {
+    return on && t.qtype == QType::NVFP4 ? t.act_scale : 1.0f;
+}
+
+// Per-layer MoE static act scales (1.0 unless gemm.nvfp4_static_act_scale): the max over the experts,
+// so the shared quantize clips no expert's calibrated range. gu = gate|up input, dn = down input.
+static void fill_moe_act_scales(const Model& model, const WeightRegistry& reg, int n_layers,
+                                std::vector<MoEWorkspace::ActScales>& out) {
+    auto widest = [&](const std::vector<TensorID>& ids, float s) {
+        for (TensorID id : ids)
+            if (id != kInvalidTensorID)
+                s = std::max(s, reg.handle(id).act_scale);
+        return s;
+    };
+    auto or_unit = [](float s) { return s > 0.0f ? s : 1.0f; };  // no valid expert id: unit scale
+    out.assign(n_layers, MoEWorkspace::ActScales{});
+    int n_scaled = 0;
+    for (int li = 0; li < n_layers; ++li) {
+        const auto& L = model.layer(li);
+        out[li].gu = or_unit(widest(L.expert_up_ids, widest(L.expert_gate_ids, 0.0f)));
+        out[li].dn = or_unit(widest(L.expert_down_ids, 0.0f));
+        n_scaled += (out[li].gu != 1.0f || out[li].dn != 1.0f) ? 1 : 0;
+    }
+    if (n_scaled > 0)
+        IMP_LOG_INFO("NVFP4 MoE: static act scales on %d layers (gemm.nvfp4_static_act_scale)", n_scaled);
+}
+
 void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     const ModelConfig& cfg, cudaStream_t stream) {
     (void)stream;  // unused but kept for signature consistency
@@ -66,6 +94,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         h.source_qtype = t.qtype;
         h.source_scales = t.scales;
         h.source_tensor_scale = t.tensor_scale;
+        h.act_scale = static_act_scale(t, dispatch_policy().gemm.nvfp4_static_act_scale);
         borrow_payload_from_wcache(h, *wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
@@ -394,11 +423,13 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         const int n_layers = cfg.n_layers;
         if (ne > 0) {
         moe_->per_layer_da_cache.assign(n_layers, MoEWorkspace::PerLayerNvfp4DeviceArgsCache{});
+        fill_moe_act_scales(*model_, *registry_, n_layers, moe_->layer_act_scale);
 
         std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
         std::vector<float>       h_alpha(ne);
         bool any_built = false;
 
+        float proj_act_scale = 1.0f;  // static act scale build_proj folds into the alpha table
         auto build_proj =
             [&](const std::vector<TensorID>& ids, const void**& d_B,
                 const void**& d_SFB, float*& d_alpha) -> bool {
@@ -413,9 +444,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                         return false;
                     h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
                     h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-                    h_alpha[e]    = h.payload.cutlass_nvfp4.global_scale
-                                        ? *h.payload.cutlass_nvfp4.global_scale
-                                        : 1.0f;
+                    h_alpha[e] = h.cutlass_nvfp4_alpha(proj_act_scale);
                 }
                 cudaError_t err;
                 err = cudaMalloc(&d_B,   ne * sizeof(const void*)); if (err != cudaSuccess) return false;
@@ -480,11 +509,13 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             // layer, silently forcing the per-call H2D fallback dispatch and, under graph capture, a
             // memcpy node reading a dead stack buffer (#860).
             const bool gate_absent = !any_valid_id(L.expert_gate_ids);
+            proj_act_scale = moe_->layer_act_scale[li].gu;  // gate|up share one input quantize
             bool g_ok = !gate_absent &&
                         build_proj(L.expert_gate_ids, c.d_gate_B_ptrs,
                                    c.d_gate_SFB_ptrs, c.d_gate_alpha);
             bool u_ok = build_proj(L.expert_up_ids, c.d_up_B_ptrs,
                                    c.d_up_SFB_ptrs, c.d_up_alpha);
+            proj_act_scale = moe_->layer_act_scale[li].dn;
             bool d_ok = build_proj(L.expert_down_ids, c.d_down_B_ptrs,
                                    c.d_down_SFB_ptrs, c.d_down_alpha);
             c.ready = (g_ok || gate_absent) && u_ok && d_ok;

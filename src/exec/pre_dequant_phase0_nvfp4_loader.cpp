@@ -15,6 +15,8 @@
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <initializer_list>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -121,6 +123,44 @@ static void record_native_fp8_input_scale(const NvFP4PreQuantWeight& sc, const c
         memcpy(&s, sc.input_scale.data, sizeof(float));
     if (s > 0.0f && std::isfinite(s))
         out[w] = s;
+}
+
+// A native NVFP4 weight's checkpoint activation scale in dequant form (calibration amax / 2688):
+// Modelopt input_scale as stored, compressed-tensors input_global_scale (448 * 6 / amax) inverted.
+// Absent, non-F32 or non-finite: 1.0 (the act quantizers' unit tensor scale).
+static float nvfp4_checkpoint_act_scale(const NvFP4PreQuantWeight& sc, const char* key, bool llm_compressor) {
+    if (!sc.input_scale.data || sc.input_scale.qtype != QType::F32)
+        return 1.0f;
+    float s = 0.0f;
+    if (sc.input_scale.on_device)
+        read_device_scale_or_throw(&s, sc.input_scale.data, key);
+    else
+        memcpy(&s, sc.input_scale.data, sizeof(float));
+    if (llm_compressor)
+        s = (s > 0.0f) ? 1.0f / s : 0.0f;
+    return (s > 0.0f && std::isfinite(s)) ? s : 1.0f;
+}
+
+// Projections reading one quantized activation share one act scale (the max = the widest
+// calibrated range): q|k|v and gate|up, dense and shared expert. Equal in the checkpoints
+// measured (Gemma-4, Qwen3-8B/14B/30B-A3B); the merge keeps the activation-quantize dedupe valid.
+static void merge_sibling_act_scales(Model& model, int n_layers) {
+    auto merge = [](std::initializer_list<Tensor*> ts) {
+        float s = 0.0f;
+        for (Tensor* t : ts)
+            if (t->data && t->qtype == QType::NVFP4)
+                s = std::max(s, t->act_scale);
+        if (s > 0.0f)
+            for (Tensor* t : ts)
+                if (t->data && t->qtype == QType::NVFP4)
+                    t->act_scale = s;
+    };
+    for (int i = 0; i < n_layers; ++i) {
+        auto& L = model.layer(i);
+        merge({&L.wq, &L.wk, &L.wv});
+        merge({&L.w_gate, &L.w_up});
+        merge({&L.w_gate_shared, &L.w_up_shared});
+    }
 }
 
 static bool phase0_has_work(const ModelConfig& cfg, const Model& model) {
@@ -247,6 +287,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     int n_zero_scale = 0;
     int n_nonfinite_after_flip = 0;
     int n_with_input_scale = 0;
+    int n_act_scale = 0;  // input_scale decoded to a static NVFP4 act scale != 1
     int n_wrong_scale_dtype = 0;
     int n_native_fp8 = 0;
     auto promote = [&](const NvFP4PreQuantWeight& sc, Tensor& w, const char* key) {
@@ -365,6 +406,9 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         }
         if (sc.input_scale.data) {
             n_with_input_scale++;
+            w.act_scale = nvfp4_checkpoint_act_scale(sc, key, cfg.is_llm_compressor_nvfp4);
+            if (w.act_scale != 1.0f)
+                n_act_scale++;
         }
         w.qtype = QType::NVFP4;
         w.scales = sc.weight_scale.data;
@@ -382,6 +426,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         if (promote(sc, *w, key.c_str()))
             prequant_count++;
     }
+    merge_sibling_act_scales(*mut_model, cfg.n_layers);
     // Fused projection scale split: weight_map split qkv_proj/gate_up_proj data pointers, but
     // scales routed as fused tensors to ALL sub-projections; fix sub-projection scales to the
     // correct row offsets. Provenance-gated since #1960: the shape predicate alone is also
@@ -567,15 +612,14 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                          "(skipped — possible NVFP4/MXFP4 cross-misroute or corrupt checkpoint)",
                          n_wrong_scale_dtype);
         }
-        if (cfg.is_llm_compressor_nvfp4 && n_with_input_scale > 0) {
-            // input_scale is a SmoothQuant-style activation-rescaling vector some llm-compressor
-            // exports ship. Imp does NOT apply it at inference (absorbing it did not fix
-            // Mistral-3.2-NVFP4 drift). Kept only as a diagnostic path via
-            // diagnostics.audit_nvfp4_scales; without it, scratch tensors are skipped on GPU upload.
+        if (n_with_input_scale > 0) {
+            // The scalar per-tensor activation scale (Modelopt input_scale, compressed-tensors
+            // input_global_scale): the W4A4 quantizers use it under gemm.nvfp4_static_act_scale.
             IMP_LOG_INFO(
-                "NVFP4 prequant: %d Linears carry input_scale (intentionally NOT applied; "
-                "set diagnostics.audit_nvfp4_scales=true for stats).",
-                n_with_input_scale);
+                "NVFP4 prequant: %d Linears carry an input scale, %d decoded to a static act scale "
+                "(gemm.nvfp4_static_act_scale=%s)",
+                n_with_input_scale, n_act_scale,
+                dispatch_policy().gemm.nvfp4_static_act_scale ? "on" : "off");
         }
     }
     if (n_native_fp8 > 0) {

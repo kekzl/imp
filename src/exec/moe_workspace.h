@@ -141,6 +141,17 @@ struct MoEWorkspace {
         bool ready = false;
     };
     std::vector<PerLayerNvfp4DeviceArgsCache> per_layer_da_cache;
+    // Static NVFP4 act tensor scale per MoE layer (max WeightHandle::act_scale over the experts):
+    // gu = the shared gate|up input quantize, dn = the down input. Every alpha table carries it.
+    struct ActScales {
+        float gu = 1.0f;
+        float dn = 1.0f;
+    };
+    std::vector<ActScales> layer_act_scale;
+    [[nodiscard]] ActScales act_scales(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(layer_act_scale.size()) ? layer_act_scale[layer]
+                                                                              : ActScales{};
+    }
 
     // Device-side weight pointer array for device-grouped GEMM.
     void** d_weight_ptrs = nullptr;
