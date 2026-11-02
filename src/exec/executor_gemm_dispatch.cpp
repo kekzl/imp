@@ -876,8 +876,8 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     const int N = static_cast<int>(w8.shape[0]);
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if (cur_decode_rows_ && M <= smallm_max && out.qtype == QType::F16 && a8.is_contiguous() &&
-        out.is_contiguous() && a_scale && w_scale &&
+    if ((cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= smallm_max && out.qtype == QType::F16 &&
+        a8.is_contiguous() && out.is_contiguous() && a_scale && w_scale &&
         gemm_fp8_smallm(a8.data, w8.data, a_scale, w_scale, beta, static_cast<half*>(out.data), M, N, K,
                         stream)) {
         static bool logged = false;  // activity proof, once
@@ -913,8 +913,8 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = cur_decode_rows_ && g.fp8_smallm_multi && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
-              count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = (cur_decode_rows_ || fp8x8_min_rows_ == 1) && g.fp8_smallm_multi && M <= g.fp8_smallm_max_m &&
+              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();

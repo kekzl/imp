@@ -128,8 +128,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
                                     qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                     h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
+    // gemm.fp8_smallm_m1: one FP8 decode row accumulates into hidden like n > 1.
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
-                                 n > 1 && (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
+                                 fp8_beta1_rows(n, fp8x8_min_rows_, wd_tier) &&
+                                 (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
                                          qscratch_.dequant != nullptr &&
@@ -250,8 +252,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            const bool fp8_ffn = (n > 1 && !cur_force_fp16_ && hwg && hwg->primary_tier == StorageTier::FP8 &&
-                                  hwu && hwu->primary_tier == StorageTier::FP8);
+            const bool fp8_ffn = (n >= fp8x8_min_rows_ && !cur_force_fp16_ && hwg &&
+                                  hwg->primary_tier == StorageTier::FP8 && hwu &&
+                                  hwu->primary_tier == StorageTier::FP8);
             const float* fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : nullptr;
             if (fp8_a_scale) {
                 // Reconstruct FP8 weight tensors from handle payloads.

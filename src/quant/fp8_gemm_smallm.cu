@@ -18,9 +18,10 @@
 namespace imp {
 namespace {
 
-constexpr int kRows = 16;   // weight rows per CTA (MMA m)
-constexpr int kKStep = 64;  // bytes per k-step: two m16n8k32 MMAs
-constexpr int kDefaultWarps = 8;
+constexpr int kRows = 16;          // weight rows per CTA (MMA m)
+constexpr int kKStep = 64;         // bytes per k-step: two m16n8k32 MMAs
+constexpr int kDefaultWarps = 8;   // fixes the K order: never chosen by M
+constexpr int kDefaultUnroll = 2;  // Qwen3-8B cold L2, M 1..32: gate/down 37.4-42.0 us (cuBLASLt 58.8-72.8)
 
 __device__ __forceinline__ uint4 ldg_stream(const uint8_t* p) {
     uint4 v;
@@ -76,45 +77,63 @@ __device__ __forceinline__ void fp8_smallm_cta(const uint8_t* __restrict__ a, co
         for (int r = 0; r < 4; ++r)
             acc[nt][r] = 0.0f;
 
-    uint4 wa[kU], wb[kU];
-    auto load_w = [&](int round) {
+    // Two register buffers: round r+1's loads are in flight while round r's MMAs run.
+    uint4 wa0[kU], wb0[kU], x0[kU][kNT];
+    uint4 wa1[kU], wb1[kU], x1[kU][kNT];
+    auto load_w = [&](uint4(&da)[kU], uint4(&db)[kU], int round) {
 #pragma unroll
         for (int u = 0; u < kU; ++u) {
             const int ks = (round * kPerRound) + (u * kWarps) + warp;
             if (ks < ks_total) {
-                wa[u] = ldg_stream(w0 + (static_cast<int64_t>(ks) * kKStep));
-                wb[u] = ldg_stream(w1 + (static_cast<int64_t>(ks) * kKStep));
+                da[u] = ldg_stream(w0 + (static_cast<int64_t>(ks) * kKStep));
+                db[u] = ldg_stream(w1 + (static_cast<int64_t>(ks) * kKStep));
             } else {
-                wa[u] = make_uint4(0, 0, 0, 0);
-                wb[u] = make_uint4(0, 0, 0, 0);
+                da[u] = make_uint4(0, 0, 0, 0);
+                db[u] = make_uint4(0, 0, 0, 0);
             }
         }
     };
-    // Weights are immutable: the first round streams in before the grid dependency (pdl_device.cuh).
-    if (rounds > 0)
-        load_w(0);
-    pdl_wait();
-
-    for (int round = 0; round < rounds; ++round) {
-        if (round > 0)
-            load_w(round);
-        uint4 x[kU][kNT];
+    auto load_x = [&](uint4(&dx)[kU][kNT], int round) {
 #pragma unroll
         for (int u = 0; u < kU; ++u) {
             const int ks = (round * kPerRound) + (u * kWarps) + warp;
 #pragma unroll
             for (int nt = 0; nt < kNT; ++nt)
-                x[u][nt] = (xv[nt] && ks < ks_total)
-                               ? *reinterpret_cast<const uint4*>(xr[nt] + (static_cast<int64_t>(ks) * kKStep))
-                               : make_uint4(0, 0, 0, 0);
+                dx[u][nt] = (xv[nt] && ks < ks_total) ? *reinterpret_cast<const uint4*>(
+                                                            xr[nt] + (static_cast<int64_t>(ks) * kKStep))
+                                                      : make_uint4(0, 0, 0, 0);
         }
+    };
+    auto mma_round = [&](const uint4(&da)[kU], const uint4(&db)[kU], const uint4(&dx)[kU][kNT]) {
 #pragma unroll
         for (int u = 0; u < kU; ++u) {
 #pragma unroll
             for (int nt = 0; nt < kNT; ++nt) {
-                mma_e4m3(acc[nt], wa[u].x, wb[u].x, wa[u].y, wb[u].y, x[u][nt].x, x[u][nt].y);
-                mma_e4m3(acc[nt], wa[u].z, wb[u].z, wa[u].w, wb[u].w, x[u][nt].z, x[u][nt].w);
+                mma_e4m3(acc[nt], da[u].x, db[u].x, da[u].y, db[u].y, dx[u][nt].x, dx[u][nt].y);
+                mma_e4m3(acc[nt], da[u].z, db[u].z, da[u].w, db[u].w, dx[u][nt].z, dx[u][nt].w);
             }
+        }
+    };
+    // Weights are immutable: round 0 (and 1) stream in before the grid dependency (pdl_device.cuh).
+    load_w(wa0, wb0, 0);
+    if (rounds > 1)
+        load_w(wa1, wb1, 1);
+    pdl_wait();
+    load_x(x0, 0);
+    if (rounds > 1)
+        load_x(x1, 1);
+    for (int round = 0; round < rounds; round += 2) {
+        mma_round(wa0, wb0, x0);
+        if (round + 2 < rounds) {
+            load_w(wa0, wb0, round + 2);
+            load_x(x0, round + 2);
+        }
+        if (round + 1 >= rounds)
+            break;
+        mma_round(wa1, wb1, x1);
+        if (round + 3 < rounds) {
+            load_w(wa1, wb1, round + 3);
+            load_x(x1, round + 3);
         }
     }
 
@@ -226,10 +245,8 @@ bool gemm_fp8_smallm_tuned(const void* a_fp8, const void* w_fp8, const float* a_
                            int unroll) {
     if (!args_ok(a_fp8, w_fp8, a_scale, w_scale, y, M, N, K))
         return false;
-    if (warps == 4 && unroll == 2)
-        launch_nt<4, 2>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
-    else if (warps == 4 && unroll == 4)
-        launch_nt<4, 4>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
+    if (warps == 8 && unroll == 1)
+        launch_nt<8, 1>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
     else if (warps == 8 && unroll == 2)
         launch_nt<8, 2>(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream);
     else if (warps == 8 && unroll == 4)
@@ -241,7 +258,8 @@ bool gemm_fp8_smallm_tuned(const void* a_fp8, const void* w_fp8, const float* a_
 
 bool gemm_fp8_smallm(const void* a_fp8, const void* w_fp8, const float* a_scale, const float* w_scale,
                      float beta, half* y, int M, int N, int K, cudaStream_t stream) {
-    return gemm_fp8_smallm_tuned(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream, kDefaultWarps, 4);
+    return gemm_fp8_smallm_tuned(a_fp8, w_fp8, a_scale, w_scale, beta, y, M, N, K, stream, kDefaultWarps,
+                                 kDefaultUnroll);
 }
 
 bool gemm_fp8_smallm_multi(const Fp8SmallMSibling* t, int count, const void* a_fp8, const float* a_scale,
@@ -263,11 +281,11 @@ bool gemm_fp8_smallm_multi(const Fp8SmallMSibling* t, int count, const void* a_f
     for (int i = count; i < kFp8SmallMMaxSiblings; ++i)
         p.tiles_end[i] = tiles;
     if (M <= 8)
-        launch_multi<1, kDefaultWarps, 4>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<1, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
     else if (M <= 16)
-        launch_multi<2, kDefaultWarps, 4>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<2, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
     else
-        launch_multi<4, kDefaultWarps, 4>(p, tiles, a_fp8, a_scale, M, K, stream);
+        launch_multi<4, kDefaultWarps, kDefaultUnroll>(p, tiles, a_fp8, a_scale, M, K, stream);
     return true;
 }
 

@@ -25,8 +25,8 @@ struct Fp8SmallMSibling {
 [[nodiscard]] bool gemm_fp8_smallm_multi(const Fp8SmallMSibling* t, int count, const void* a_fp8,
                                          const float* a_scale, int M, int K, cudaStream_t stream);
 
-// Bench/test hook: explicit warps per CTA (4, 8) and k-steps per load round (2, 4). warps changes the
-// K summation order; production uses gemm_fp8_smallm's fixed choice.
+// Bench/test hook: 8 warps per CTA, explicit k-steps per load round (1, 2, 4).
+// Any other warps value is refused; production uses gemm_fp8_smallm (8 warps, 2 k-steps).
 [[nodiscard]] bool gemm_fp8_smallm_tuned(const void* a_fp8, const void* w_fp8, const float* a_scale,
                                          const float* w_scale, float beta, half* y, int M, int N, int K,
                                          cudaStream_t stream, int warps, int unroll);

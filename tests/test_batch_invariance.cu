@@ -48,6 +48,7 @@
 #include "model/model.h"
 #include "model/safetensors_loader.h"
 #include "model/tokenizer.h"
+#include "quant/fp8_gemm_smallm.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
 #include "test_models.h"
@@ -498,6 +499,82 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
             << " (pinned 3.4403 on 2026-09-06, docs/PERF.md). A uniform shift like this is a "
                "kernel numerics change, which the solo-vs-batched deltas cannot see.";
     }
+}
+
+// Dense native FP8: decode rows 2..32 on cuBLASLt (gemm.fp8_smallm_max_m=0) vs the own small-M
+// GEMM, and M=1 on the FP16-activation GEMV vs the own GEMM (gemm.fp8_smallm_m1). Both batched
+// arms are W8A8 with the checkpoint's input scale; they differ in fp32 accumulation order only.
+TEST(BatchInvarianceTest, Fp8DenseDecodeOwnSmallMVsCublasLt) {
+    const char* env = getenv(imp_test::kEnvModelFp8);
+    const std::string path = env ? env : "/models/Qwen3-8B-FP8";
+    if (!fs::exists(path + "/config.json"))
+        GTEST_SKIP() << "native-FP8 checkpoint not present at " << path << " (set " << imp_test::kEnvModelFp8
+                     << ")";
+    if (device_free_mib() < kNeededMiB)
+        GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free";
+    setenv("IMP_DETERMINISTIC", "1", 1);
+
+    struct Arms {
+        ArmResult solo, solo_repeat, batched;
+    };
+    // max_m 0: cuBLASLt at 2..32 rows; m1 routes the solo row through the own GEMM too. One model
+    // load per engine: the FP8 LM head frees the source, a second engine refuses the handle.
+    auto run_engine = [&](int max_m, bool m1, Arms& out) {
+        std::shared_ptr<Model> model = load_safetensors(path, /*load_mtp_head=*/false);
+        ASSERT_NE(model, nullptr) << "failed to load " << path;
+        ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr, 1ULL << 30));
+        gemm_init();
+        const int vocab = static_cast<int>(model->config().vocab_size);
+        const std::vector<int32_t> toks = model->tokenizer()->encode(kCorpus);
+        ASSERT_GT(static_cast<int>(toks.size()), 2 * kPromptLen + kDecodeSteps + kBatchRows + 8);
+        RuntimeConfig rc;
+        rc.runtime.deterministic = true;
+        rc.server.prefix_cache = false;
+        rc.gemm.fp8_smallm_max_m = max_m;
+        rc.gemm.fp8_smallm_m1 = m1;
+        set_pending_runtime_config(rc);
+        EngineConfig cfg = batch_invariance_config();
+        cfg.use_nvfp4_decode = -1;  // the server's auto: FP8 weights stay the decode tier
+        Engine engine;
+        ASSERT_TRUE(engine.init(model, cfg));
+        KVCache* kv = engine.kv_cache();
+        const int bps = (kPromptLen + kDecodeSteps + 2 + kv->block_size() - 1) / kv->block_size();
+        ASSERT_GE(kv->total_blocks(), kBatchRows * bps);
+        TeacherForcedDriver drv(*engine.executor(), *kv, kBatchRows, bps, vocab);
+        out.solo = run_arm(drv, toks, 1, bps, vocab);
+        out.solo_repeat = run_arm(drv, toks, 1, bps, vocab);
+        out.batched = run_arm(drv, toks, kBatchRows, bps, vocab);
+    };
+    Arms lt, own, own_m1;
+    run_engine(0, false, lt);
+    run_engine(kFp8SmallMMaxM, false, own);
+    run_engine(kFp8SmallMMaxM, true, own_m1);
+
+    const Comparison control = compare(lt.solo, lt.solo_repeat);
+    const Comparison lt_b = compare(lt.solo, lt.batched);
+    const Comparison own_b = compare(own.solo, own.batched);
+    const Comparison own_vs_lt = compare(lt.batched, own.batched);
+    const Comparison m1_solo = compare(own.solo, own_m1.solo);
+    const Comparison m1_b = compare(own_m1.solo, own_m1.batched);
+    print_comparison("control M=1/M=1", lt.solo, lt.solo_repeat, control);
+    print_comparison("Lt M=1/M=32", lt.solo, lt.batched, lt_b);
+    print_comparison("own M=1/M=32", own.solo, own.batched, own_b);
+    print_comparison("M=32 Lt/own", lt.batched, own.batched, own_vs_lt);
+    print_comparison("M=1 gemv/own", own.solo, own_m1.solo, m1_solo);
+    print_comparison("own+m1 M=1/M=32", own_m1.solo, own_m1.batched, m1_b);
+
+    EXPECT_EQ(control.top1_flips, 0);
+    EXPECT_LT(control.max_abs_lp, 1e-9);
+    // Regression fences, ~2x the 2026-11-02 reading on Qwen3-8B-FP8 (own vs Lt at M=32: NLL +0.0114,
+    // mean |dlogp| 0.101, top-1 59/64; M=1 own vs GEMV: -0.0014, 0.085, 63/64): a wrong tile or scale
+    // moves NLL by far more. The batched own arm sits closer to M=1 than cuBLASLt (0.070 vs 0.109).
+    EXPECT_LT(std::fabs(own_vs_lt.nll_delta), 0.03) << "own vs cuBLASLt batched NLL";
+    EXPECT_LT(own_vs_lt.mean_abs_lp, 0.2);
+    EXPECT_GT(own_vs_lt.top1_agreement, 0.85);
+    EXPECT_LT(std::fabs(own_b.nll_delta), 0.03) << "own M=1 vs M=32 NLL";
+    EXPECT_LT(std::fabs(m1_solo.nll_delta), 0.03) << "M=1 own GEMM vs FP16-activation GEMV NLL";
+    EXPECT_LT(m1_solo.mean_abs_lp, 0.2);
+    EXPECT_GT(m1_solo.top1_agreement, 0.9);
 }
 
 }  // namespace imp

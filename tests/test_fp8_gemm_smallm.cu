@@ -166,7 +166,26 @@ TEST(Fp8GemmSmallMTest, MatchesDoubleReferenceEveryM) {
             EXPECT_EQ(bad, 0u) << "N=" << s.N << " K=" << s.K << " M=" << M;
             EXPECT_LE(max_diff, 1e-4 * max_ref + 1e-6) << "N=" << s.N << " K=" << s.K << " M=" << M;
         }
-        std::fprintf(stderr, "[fp8 smallm] N=%d K=%d max|ref|=%.4g ok\n", s.N, s.K, max_ref);
+        // Informational: own vs cuBLASLt distance to the double reference at M 16.
+        double err_own = 0.0, err_lt = 0.0;
+        {
+            constexpr int M = 16;
+            const int64_t ash[2] = {M, s.K}, wsh[2] = {s.N, s.K}, csh[2] = {M, s.N};
+            Tensor A(s.d_a, QType::FP8_E4M3, 2, ash, true);
+            Tensor W(s.d_w, QType::FP8_E4M3, 2, wsh, true);
+            Tensor C(s.d_y2, QType::F16, 2, csh, true);
+            gemm_cublaslt(A, W, C, 1.0f, 0.0f, s.d_as, s.d_ws, nullptr);
+            ASSERT_TRUE(gemm_fp8_smallm(s.d_a, s.d_w, s.d_as, s.d_ws, 0.0f, s.d_y, M, s.N, s.K, nullptr));
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto own = download(s.d_y, size_t(M) * s.N);
+            const auto lt = download(s.d_y2, size_t(M) * s.N);
+            for (size_t i = 0; i < own.size(); ++i) {
+                err_own = std::max(err_own, std::fabs(double(__half2float(own[i])) - s.ref[i]));
+                err_lt = std::max(err_lt, std::fabs(double(__half2float(lt[i])) - s.ref[i]));
+            }
+        }
+        std::fprintf(stderr, "[fp8 smallm] N=%d K=%d max|ref|=%.4g M16 max|err| own %.3e cuBLASLt %.3e\n",
+                     s.N, s.K, max_ref, err_own, err_lt);
         s.free_all();
     }
 }
@@ -315,6 +334,8 @@ TEST(Fp8GemmSmallMTest, RefusesIllegalShapes) {
     EXPECT_FALSE(gemm_fp8_smallm(s.d_a, s.d_w, nullptr, s.d_ws, 0.0f, s.d_y, 4, 48, 192, nullptr));
     EXPECT_FALSE(gemm_fp8_smallm(s.d_a + 1, s.d_w, s.d_as, s.d_ws, 0.0f, s.d_y, 4, 48, 192, nullptr));
     EXPECT_FALSE(gemm_fp8_smallm_tuned(s.d_a, s.d_w, s.d_as, s.d_ws, 0.0f, s.d_y, 4, 48, 192, nullptr, 3, 4));
+    EXPECT_FALSE(
+        gemm_fp8_smallm_tuned(s.d_a, s.d_w, s.d_as, s.d_ws, 0.0f, s.d_y, 4, 48, 192, nullptr, 16, 2));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<uint8_t> host(bytes);
     cudaMemcpy(host.data(), s.d_y, bytes, cudaMemcpyDeviceToHost);
@@ -353,9 +374,9 @@ TEST(Fp8GemmSmallMBench, DISABLED_VsCublasLt) {
         std::sort(v.begin(), v.end());
         return v[v.size() / 2];
     };
-    const int cfg[][2] = {{4, 2}, {4, 4}, {8, 2}, {8, 4}};
-    std::fprintf(stderr, "%4s %6s %6s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "lt", "gemv16", "w4u2",
-                 "w4u4", "w8u2", "w8u4", "GB/s");
+    const int cfg[][2] = {{8, 1}, {8, 2}, {8, 4}};
+    std::fprintf(stderr, "%4s %6s %6s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "lt", "gemv16", "w8u1",
+                 "w8u2", "w8u4", "GB/s");
     for (const auto& nk : kShapes) {
         if (nk[0] < 1024)
             continue;
@@ -364,7 +385,7 @@ TEST(Fp8GemmSmallMBench, DISABLED_VsCublasLt) {
         half* x16 = nullptr;
         cudaMalloc(&x16, size_t(s.K) * sizeof(half));
         cudaMemset(x16, 0, size_t(s.K) * sizeof(half));
-        for (int M : {1, 2, 4, 8, 12, 16, 24, 32}) {
+        for (int M : {1, 2, 4, 8, 12, 16, 32}) {
             const int64_t ash[2] = {M, s.K}, wsh[2] = {s.N, s.K}, csh[2] = {M, s.N};
             Tensor A(s.d_a, QType::FP8_E4M3, 2, ash, true);
             Tensor W(s.d_w, QType::FP8_E4M3, 2, wsh, true);
@@ -377,15 +398,15 @@ TEST(Fp8GemmSmallMBench, DISABLED_VsCublasLt) {
                 Tensor Y(s.d_y2, QType::F16, 1, ysh, true);
                 t_gemv = median_us([&] { gemv_fp8(W, X, Y, kWScale, st); });
             }
-            double t_c[4];
-            for (int c = 0; c < 4; ++c)
+            double t_c[3];
+            for (int c = 0; c < 3; ++c)
                 t_c[c] = median_us([&] {
                     (void)gemm_fp8_smallm_tuned(s.d_a, s.d_w, s.d_as, s.d_ws, 0.0f, s.d_y, M, s.N, s.K, st,
                                                 cfg[c][0], cfg[c][1]);
                 });
-            const double best = *std::min_element(t_c, t_c + 4);
-            std::fprintf(stderr, "%4d %6d %6d %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f %7.0f\n", M, s.N, s.K, t_lt,
-                         t_gemv, t_c[0], t_c[1], t_c[2], t_c[3], double(s.N) * s.K / (best * 1e3));
+            const double best = *std::min_element(t_c, t_c + 3);
+            std::fprintf(stderr, "%4d %6d %6d %8.2f %8.2f %8.2f %8.2f %8.2f %7.0f\n", M, s.N, s.K, t_lt,
+                         t_gemv, t_c[0], t_c[1], t_c[2], double(s.N) * s.K / (best * 1e3));
         }
         cudaFree(x16);
         s.free_all();

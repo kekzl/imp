@@ -771,6 +771,8 @@ private:
     // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode
     // step from a short prefill.
     bool cur_decode_rows_ = false;
+    // Fewest rows on the FP8 x FP8 route: 1 on a one-row decode step under gemm.fp8_smallm_m1, else 2.
+    int fp8x8_min_rows_ = 2;
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL

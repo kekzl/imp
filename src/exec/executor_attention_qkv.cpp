@@ -227,7 +227,7 @@
                                       fp8_hwk->primary_tier == StorageTier::FP8 && fp8_hwv &&
                                       fp8_hwv->primary_tier == StorageTier::FP8);
             // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
-            const float* fp8_a_scale = (n > 1 && !state.force_fp16_gemm && fp8_qkv_available)
+            const float* fp8_a_scale = (n >= fp8x8_min_rows_ && !state.force_fp16_gemm && fp8_qkv_available)
                                            ? quantize_act_fp8_(*fp8_hwq, no, stream)
                                            : nullptr;
             if (fp8_a_scale) {
