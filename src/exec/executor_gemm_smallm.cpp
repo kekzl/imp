@@ -7,6 +7,7 @@
 #include "exec/executor.h"
 #include "exec/gemm_context.h"
 #include "quant/nvfp4_gemm.h"
+#include "exec/smallm_policy.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/layernorm.h"
 #include "exec/executor_debug.h"
@@ -23,6 +24,27 @@
 
 namespace imp {
 
+namespace {
+
+// Kernel for one sibling launch on the combined N: ws, or v2 in one stripe; kNone declines (v2 would split K
+// per tensor, or no kernel takes the shapes).
+SmallMKernel sibling_kernel(int impl, const SmallMV2Sibling* sib, int count, int K) {
+    int n_total = 0;
+    bool all_n64 = true;
+    bool all_ws = true;
+    for (int i = 0; i < count; ++i) {
+        n_total += sib[i].N;
+        all_n64 = all_n64 && (sib[i].N % 64) == 0;
+        all_ws = all_ws && gemm_nvfp4_smallm_ws_supports(sib[i].N, K);
+    }
+    const SmallMKernel k = smallm_kernel_for(impl, n_total, K, all_n64, all_ws, /*siblings=*/true);
+    if (k == SmallMKernel::kWs || (k == SmallMKernel::kV2 && gemm_nvfp4_smallm_v2_stripes(n_total, K) == 1))
+        return k;
+    return SmallMKernel::kNone;
+}
+
+}  // namespace
+
 bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const {
     if (h.source_data == nullptr)
         return false;
@@ -37,13 +59,13 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out)
         if (decode != StorageTier::NVFP4)
             return false;
         auto it = wcache_.nvfp4.find(h.source_data);
-        if (it == wcache_.nvfp4.end() || (it->second.K % 128) != 0)
+        if (it == wcache_.nvfp4.end() || (it->second.K % 64) != 0)
             return false;
         out = it->second;
         return true;
     }
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_scales == nullptr ||
-        ((h.shape[1] * 2) % 128) != 0)
+        ((h.shape[1] * 2) % 64) != 0)
         return false;
     out.packed_data = const_cast<void*>(h.source_data);
     out.micro_scales = h.source_scales;
@@ -71,15 +93,17 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
             continue;
         const int N = static_cast<int>(nv.N);
         const int K = static_cast<int>(nv.K);
-        // A16 (gemm.nvfp4_smallm_a4=false) runs the dequant+HMMA kernel at every shape.
-        const bool v2 = dispatch_policy().gemm.nvfp4_smallm_a4 &&
-                        dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
-        ws_need = std::max(ws_need, v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
-                                       : gemm_nvfp4_smallm_workspace_bytes(N));
+        // A16 (gemm.nvfp4_smallm_a4=false) runs the dequant+HMMA kernel at every shape; the ws kernel needs
+        // no workspace.
+        const SmallMKernel kern = dispatch_policy().gemm.nvfp4_smallm_a4
+                                      ? smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, N, K)
+                                      : ((K % 128) == 0 ? SmallMKernel::kV1 : SmallMKernel::kNone);
+        ws_need = std::max(ws_need, smallm_workspace_bytes(kern, N, K));
         xq_need = std::max(xq_need, ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16)));
         ++n_weights;
     }
     cur_decode_rows_ = saved;
+    ws_need = std::max<size_t>(ws_need, 256);  // a non-empty take keeps the arena path when ws needs none
     if (n_weights == 0 || smallm_ws_bytes_ >= ws_need)
         return;
     auto ws = engine_arena().take_bytes(ws_need);
@@ -113,12 +137,14 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
     if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         overlap_prefill_active_)
         return nullptr;
-    if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
+    if (M < 2 || M > 32 || K <= 0 || (K % 64) != 0)
         return nullptr;
     if (consumer_id == kInvalidTensorID)
         return nullptr;
     NvFP4QuantResult nv;
-    if (!smallm_weight_(registry_.handle(consumer_id), nv) || static_cast<int>(nv.K) != K)
+    if (!smallm_weight_(registry_.handle(consumer_id), nv) || static_cast<int>(nv.K) != K ||
+        smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, static_cast<int>(nv.N), K) ==
+            SmallMKernel::kNone)
         return nullptr;
     const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
     ensure_smallm_xq_(xq_need, stream);
@@ -206,22 +232,27 @@ void GraphExecutor::ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Te
 }
 
 bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
-                                       int n, cudaStream_t stream) {
+                                       int n, cudaStream_t stream, bool gelu) {
     const int K = static_cast<int>(so.shape[1]);
     // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
-    if (n > 32 && K % 16 == 0 && so.qtype == QType::F16 && prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+    if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
+        prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
         swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
                                               qscratch_.cutlass_act_sf, n, K, stream);
         return true;
     }
     uint8_t* xq_scales = nullptr;
     uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
-    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)) {
+    if (xq_packed != nullptr && (gelu ? geglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)
+                                      : swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream))) {
         smallm_producer_tag_(so.data, n, K);
         return false;
     }
-    swiglu(go, uo, so, stream);
+    if (gelu)
+        geglu(go, uo, so, stream);
+    else
+        swiglu(go, uo, so, stream);
     if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
         smallm_xq_from_producer_ = false;
     return false;
@@ -236,11 +267,11 @@ bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, cons
 
 bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count,
                                                const Tensor& input, const GemmContext& ctx) {
-    // Mirror of the single-tensor smallm v2 eligibility in gemm_via_handle_,
-    // applied to EVERY weight, plus: same K, v2 only, the single-stripe policy
-    // on the combined tile count, fresh outputs only. Every decline is a plain
-    // false; the caller issues the single dispatches it would have anyway.
-    if (!dispatch_policy().gemm.nvfp4_smallm || dispatch_policy().gemm.nvfp4_smallm_impl != 2 ||
+    // Mirror of the single-tensor smallm eligibility in gemm_via_handle_, applied to EVERY weight,
+    // plus: same K, smallm_kernel_for() on the combined N (v2 only when single-stripe), fresh outputs
+    // only. Every decline is a plain false; the caller issues the single dispatches.
+    const int impl = dispatch_policy().gemm.nvfp4_smallm_impl;
+    if (!dispatch_policy().gemm.nvfp4_smallm || (impl != 2 && impl != 3) ||
         !dispatch_policy().gemm.nvfp4_smallm_pair || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         ctx.spec_verify_small_m || overlap_prefill_active_ || ctx.beta != 0.0f || count < 2 ||
         count > kSmallMV2MaxSiblings)
@@ -252,7 +283,6 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     NvFP4QuantResult nv[kSmallMV2MaxSiblings];
     SmallMV2Sibling sib[kSmallMV2MaxSiblings];
     int K = 0;
-    int total_tiles = 0;
     for (int i = 0; i < count; ++i) {
         if (ids[i] == kInvalidTensorID || outs[i] == nullptr || outs[i]->qtype != QType::F16)
             return false;
@@ -262,12 +292,12 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
         if (i == 0)
             K = static_cast<int>(nv[i].K);
         // Output row stride must be N: the kernel writes y[m * N + n].
-        if (static_cast<int>(nv[i].K) != K || (K % 256) != 0 || (N % 64) != 0 || outs[i]->shape[1] != N)
+        if (static_cast<int>(nv[i].K) != K || outs[i]->shape[1] != N)
             return false;
         sib[i] = {&nv[i], reinterpret_cast<half*>(outs[i]->data), N};
-        total_tiles += N / 64;
     }
-    if (gemm_nvfp4_smallm_v2_stripes(total_tiles * 64, K) != 1)
+    const SmallMKernel kern = sibling_kernel(impl, sib, count, K);
+    if (kern == SmallMKernel::kNone)
         return false;
     const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
     ensure_smallm_xq_(xq_need, ctx.stream);
@@ -300,7 +330,8 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     xq.tensor_scale = 1.0f;
     xq.N = M;
     xq.K = K;
-    return gemm_nvfp4_smallm_v2_multi_a4(sib, count, xq, M, K, ctx.stream);
+    return kern == SmallMKernel::kWs ? gemm_nvfp4_smallm_ws_multi(sib, count, xq, M, K, ctx.stream)
+                                     : gemm_nvfp4_smallm_v2_multi_a4(sib, count, xq, M, K, ctx.stream);
 }
 
 }  // namespace imp

@@ -491,7 +491,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             bool down_prequant = false;  // scratch holds quantize(so) for the CUTLASS down (#2470)
             switch (cfg.ffn_activation) {
                 case FFNActivation::GEGLU:
-                    geglu(go, uo, so, stream);
+                    // Small-M producer fusion only (no CUTLASS prefill twin): geglu() otherwise.
+                    (void)swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream, /*gelu=*/true);
                     break;
                 default:
                     // Producer fusion: quantize into the small-M scratch

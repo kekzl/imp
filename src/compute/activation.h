@@ -18,6 +18,10 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stre
 // Fused GeGLU: out = gelu_tanh(gate) * up  (Gemma-3)
 void geglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stream = nullptr);
 
+// GeGLU twin of swiglu_quantize_nvfp4: `out` bit-identical to geglu(), same envelope.
+[[nodiscard]] bool geglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
+                                        uint8_t* xq_scales, cudaStream_t stream = nullptr);
+
 // gpt-oss clamped GLU (issue #547), HF GptOssExperts semantics:
 //   gate_c = min(gate, 7);  up_c = clamp(up, -7, 7)
 //   out = (up_c + 1) * gate_c * sigmoid(1.702 * gate_c)

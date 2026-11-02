@@ -192,7 +192,7 @@ What the table settles:
   W4A4 in both arms, same gap (0.261 vs 0.242, 7 flips either way), about 11 %
   less aggregate throughput at 32 streams for no numerical closeness.
 - **FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`**
-  (`src/exec/executor_gemm_dispatch.cpp:576 nvfp4_smallm_a4`), plus
+  (`src/exec/executor_gemm_dispatch.cpp:577 nvfp4_smallm_a4`), plus
   `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
   NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
   fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams

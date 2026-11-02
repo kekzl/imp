@@ -275,6 +275,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_gemm_smallm.cu
     src/quant/fp8_gemm_smallm.cu
     src/quant/nvfp4_gemm_smallm_v2.cu
+    src/quant/nvfp4_gemm_smallm_ws.cu
     src/quant/nvfp4_gemm_tile.cu
     src/quant/mxfp4_sfatom.cu
     src/quant/mxfp8_sfatom.cu
@@ -1410,6 +1411,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mxfp8_gemm.cu
         tests/test_nvfp4_smallm.cu
         tests/test_nvfp4_smallm_v2.cu
+        tests/test_nvfp4_smallm_ws.cu
         tests/test_nvfp4_merged_scale_spread.cu
         tests/test_smallm_dense_bench.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu

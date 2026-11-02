@@ -418,9 +418,11 @@ public:
     const void* norm_fold_out_ = nullptr;
     unsigned long long* norm_fold_pending_ = nullptr;
     // Fused swiglu+quantize when the down projection takes the small-M
-    // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu().
+    // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
+    // small-M rows only (no CUTLASS prefill fusion), else plain geglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
-                                          TensorID consumer_id, int n, cudaStream_t stream);
+                                          TensorID consumer_id, int n, cudaStream_t stream,
+                                          bool gelu = false);
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV:
     // fills `out` from the secondary decode cache or the native-NVFP4 registry
     // tier (same sources the decode-path LM head uses). False when the LM head
