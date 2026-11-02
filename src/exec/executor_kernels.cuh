@@ -53,6 +53,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     __nv_fp8_e4m3* __restrict__ v_cache_base, float inv_scale, int block_stride, int row_elems,
     int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
 
+__global__ __launch_bounds__(256) void round_kv_fp8_inplace_kernel(half* __restrict__ k, half* __restrict__ v,
+                                                                   int64_t k_stride, int64_t v_stride,
+                                                                   int row_elems, int n_tokens,
+                                                                   float inv_scale, float scale);
+
 __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, int8_t* __restrict__ k_cache_base,

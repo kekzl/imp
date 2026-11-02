@@ -630,6 +630,38 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     }
 }
 
+// In-place FP8 round trip of n K/V rows: the value write_kv_cache_fp8_fused_kernel stores (half
+// multiply, cvt.rn.satfinite) read back as paged_kv_gather_fp8_to_fp16 does (float(e4m3) * scale).
+// blockIdx.x = token, blockIdx.y = 0 (K) or 1 (V). Re-quantizing the result yields the same byte.
+__global__ __launch_bounds__(256) void round_kv_fp8_inplace_kernel(half* __restrict__ k, half* __restrict__ v,
+                                                                   int64_t k_stride, int64_t v_stride,
+                                                                   int row_elems, int n_tokens,
+                                                                   float inv_scale, float scale) {
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens)
+        return;
+    half* row = blockIdx.y == 0 ? k + (token_idx * k_stride) : v + (token_idx * v_stride);
+    const half inv_scale_h = __float2half(inv_scale);
+    const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
+    const int pairs = (row_elems / 4) * 2;  // the write kernel's vectorized span, as half2
+    half2* row2 = reinterpret_cast<half2*>(row);
+    for (int i = threadIdx.x; i < pairs; i += blockDim.x) {
+        half2 x = __hmul2(row2[i], inv_scale_h2);
+        const uint16_t q = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&x));
+        __nv_fp8_e4m3 lo;
+        __nv_fp8_e4m3 hi;
+        lo.__x = static_cast<__nv_fp8_storage_t>(q & 0xFFu);
+        hi.__x = static_cast<__nv_fp8_storage_t>(q >> 8);
+        row2[i] = __halves2half2(__float2half(static_cast<float>(lo) * scale),
+                                 __float2half(static_cast<float>(hi) * scale));
+    }
+    // The write kernel's scalar tail.
+    for (int i = (pairs * 2) + threadIdx.x; i < row_elems; i += blockDim.x) {
+        const __nv_fp8_e4m3 q(__half2float(row[i]) * inv_scale);
+        row[i] = __float2half(static_cast<float>(q) * scale);
+    }
+}
+
 // Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
 // Grid: (1, n_heads), Block: rope_pairs.
 __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict__ Q,  // [n_heads * head_dim]

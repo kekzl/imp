@@ -499,4 +499,66 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
         << "a transcript under snapshot_min_prompt_tokens must still restore at the reply end";
 }
 
+// FP8 KV: two hits of one prompt at different offsets re-prefill tails of different length; a
+// prefill chunk used to see its own K/V at FP16 and the gathered past at FP8, so the boundary moved
+// every logprob (Qwen3-1.7B AWQ export: 0.30 nats by token 9, greedy flip at token 13). Dense only.
+TEST_F(PrefixCacheE2ETest, DenseFp8KvHitsAtTwoOffsetsBitEqual) {
+    if (model_ && model_->model && model_->model->config().ssm_inner_size > 0)
+        GTEST_SKIP() << "recurrent model: hits land on snapshot boundaries, not on the offsets asserted here";
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = 1;
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 1;
+    cfg.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    imp::Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_NE(engine->kv_cache(), nullptr);
+    ASSERT_EQ(engine->kv_cache()->qtype(), imp::QType::FP8_E4M3) << "FP8 KV was not applied: proves nothing";
+    const int kv_bs = engine->kv_cache()->block_size();
+
+    std::vector<int32_t> full(4096);
+    int n_full = 0;
+    ASSERT_EQ(imp_tokenize(model_, kLongPrompt, full.data(), &n_full, static_cast<int>(full.size())),
+              IMP_SUCCESS);
+    ASSERT_GE(n_full, 320);
+    const std::vector<int32_t> prompt(full.begin(), full.begin() + 320);
+    const std::vector<int32_t> head(full.begin(), full.begin() + 6 * kv_bs);
+
+    auto run = [&](const std::vector<int32_t>& tokens, int* cached_tokens, std::vector<float>* lp) {
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = tokens;
+        req->max_tokens = 32;
+        req->temperature = 0.0f;
+        req->top_p = 1.0f;
+        req->top_k = 0;
+        req->ignore_eos = true;
+        req->logprobs = true;
+        req->status = imp::RequestStatus::PENDING;
+        engine->add_request(req);
+        for (int i = 0; i < 4096 && req->status != imp::RequestStatus::FINISHED &&
+                        req->status != imp::RequestStatus::CANCELLED;
+             ++i)
+            (void)engine->step();
+        EXPECT_EQ(req->status, imp::RequestStatus::FINISHED);
+        *cached_tokens = req->cached_tokens;
+        for (const auto& t : req->output_logprobs)
+            lp->push_back(t.logprob);
+        return req->output_tokens;
+    };
+
+    int c_head = -1, c_short = -1, c_long = -1;
+    std::vector<float> lp_head, lp_short, lp_long;
+    (void)run(head, &c_head, &lp_head);  // fixes the FP8 scales, caches the first blocks
+    const std::vector<int32_t> out_short = run(prompt, &c_short, &lp_short);
+    const std::vector<int32_t> out_long = run(prompt, &c_long, &lp_long);
+    ASSERT_GT(c_short, 0) << "the first full send must hit the head blocks";
+    ASSERT_GT(c_long, c_short) << "the resend must hit further than the first send";
+    ASSERT_EQ(lp_short.size(), out_short.size());
+    EXPECT_EQ(out_short, out_long) << "hit at " << c_short << " vs " << c_long << " changed the greedy reply";
+    EXPECT_EQ(lp_short, lp_long) << "hit at " << c_short << " vs " << c_long
+                                 << " moved the logprobs: a prefill row depends on where its chunk starts";
+}
+
 }  // namespace

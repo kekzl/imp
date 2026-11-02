@@ -20,6 +20,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - BF16 MoE experts (Ling-3.0) are packed into one F16 slab per projection at load and decode through the device-side F16 expert GEMV, so the decode CUDA graph captures: Ling-3.0-tiny tg128 64.47 -> 447.79 tok/s, pp512 3165.51 -> 3615.04 (median of 3 alternating runs, #2983).
 - NVFP4 MoE expert placement counts the phase-3 SfAtom scales (~1/8 of the expert bytes) and keeps 10 % headroom instead of 0 %: Kimi-Linear-48B (24.7 GiB with scales, 28.5 GiB free) went all-on-card and ran out of memory at load; Gemma-4-26B, Qwen3-Coder-30B and Qwen3.8-Flash-Next place as before (#2984).
 
+### Fixed
+- FP8 KV prefill: a chunk attends to its own K/V at the cached E4M3 value, as later chunks and decode do, so a prefix-cache hit no longer changes the reply with its offset. Qwen3-1.7B AWQ export, hits at 64/208 tokens and cache off: 118/118 tokens, bit-equal logprobs (was a flip at token 13); Qwen3-8B-NVFP4 FP8-KV PPL 11.3201 -> 11.2202.
+
 ## [0.61.0] - 2026-11-01
 
 ### Added
