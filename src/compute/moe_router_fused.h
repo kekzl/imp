@@ -26,7 +26,7 @@ struct MoeRouterFusedArgs {
     float* weights = nullptr;          // [M, top_k]
 };
 
-// ws: per-tile split-K tickets (zeroed once at allocation, self-resetting) + fp32 partials.
+// ws: per-tile split-K tickets + int64 sums (zeroed once at allocation, self-resetting).
 // False = refused (shape, alignment, workspace): the caller keeps its GEMM + top-k path.
 [[nodiscard]] bool moe_router_fused(const MoeRouterFusedArgs& args, void* ws, size_t ws_bytes,
                                     cudaStream_t stream);

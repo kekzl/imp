@@ -673,16 +673,16 @@ class Suite:
         cached = [(r["raw"].get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
                   for r in (first, again)]
         # The resend must restore; the first send may prefill fresh. Row-invariant (bit-equal) in
-        # default mode: dense models on FP16 or FP8 KV (#2152, FP8 since round_prefill_kv_to_cache).
-        # MoE and mixed NVFP4 + FP8 GEMMs pick kernels by row count unless runtime.deterministic=true
-        # (Qwen3-30B-A3B-NVFP4: drift 0.14 nats default, 0 deterministic; docs/DETERMINISM.md).
-        # Dense FP8 (Qwen3-8B-FP8) passes in default mode since its o_proj left the batch-wide absmax.
+        # default mode: dense models on FP16 or FP8 KV (#2152, FP8 since round_prefill_kv_to_cache),
+        # dense FP8 since its o_proj left the batch-wide absmax, NVFP4 MoE since the fused router sums
+        # its k tiles exactly (its fp32 split-K order followed M: Qwen3-30B-A3B 0.086 nats, Gemma-4-26B
+        # 0.061; docs/DETERMINISM.md). Mixed NVFP4 + FP8 exports still pick cuBLASLt by row count.
         if not cached[1]:
             self.skip("multi-turn", name, f"resend did not restore (cached={cached})")
             return
         same = first["content"] == again["content"] and bool(first["content"].strip())
         detail = (f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}"
-                  "; MoE / FP8-weight model: rerun with runtime.deterministic=true before calling it a bug")
+                  "; mixed NVFP4 + FP8 export: rerun with runtime.deterministic=true before calling it a bug")
         # Hard check also when the first send found no snapshot: a restored snapshot pairs only
         # with the KV blocks its own forward wrote (#2174).
         self.record("multi-turn", name, same, detail)
