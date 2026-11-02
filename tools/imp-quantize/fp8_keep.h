@@ -49,9 +49,17 @@ std::string mixed_precision_layers_json(const std::vector<std::string>& nvfp4_mo
                                         const std::vector<std::string>& fp8_modules,
                                         const std::string& indent);
 
-// The two tensors an FP8 weight becomes: <base>.weight F8_E4M3 [N, K] and <base>.weight_scale
-// F32 [1]. Pointers are borrowed until the shard is written.
+// The tensors an FP8 weight becomes: <base>.weight F8_E4M3 [N, K], <base>.weight_scale F32 [1],
+// and with `input_scale` <base>.input_scale F32 [1] (static activation scale, amax / 448; without
+// it the runtime scales each call's input by its batch absmax). Pointers are borrowed until the
+// shard is written.
 std::vector<SafeTensorsOut> fp8_weight_outputs(const std::string& weight_name, int64_t N, int64_t K,
-                                               const uint8_t* codes, const float* scale);
+                                               const uint8_t* codes, const float* scale,
+                                               const float* input_scale = nullptr);
+
+// Static FP8 input_scale for a weight reading an activation with per-channel max |x| `max_abs`
+// [K], divided by its AWQ column scale `col_scale` (empty = none): max_c(max_abs[c] / s[c]) / 448.
+// 0 when max_abs does not match K or is all zero.
+float fp8_input_scale(const std::vector<float>& max_abs, const std::vector<float>& col_scale, int64_t K);
 
 }  // namespace imp::quantize

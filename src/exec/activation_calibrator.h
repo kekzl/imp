@@ -83,7 +83,7 @@ private:
     std::map<uint32_t, HessEntry> hess_;  // same key as entries_
     bool hessian_ = false;
     struct Entry {
-        double* d_sum = nullptr;  // [K], FP64 so long corpora do not lose the tail
+        double* d_sum = nullptr;  // [3K] sum|x|, sum x^2, max|x|; FP64 so long corpora keep the tail
         int64_t K = 0;
         uint64_t rows = 0;
     };

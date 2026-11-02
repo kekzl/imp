@@ -13,9 +13,10 @@ MODELS_HOST="${MODELS_HOST:-$HOME/models}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-0.6B}"
 IMG="${IMP_IMG:-imp:test}"
 WORK="${WORK:-/mnt/data/scratch/fp8mix_$MODEL_NAME}"
-SINGLE="${SINGLE:-}"
-BUDGETS="${BUDGETS:-5 10 15 20}"
-KEEPS="${KEEPS:-}"
+SINGLE="${SINGLE-}"
+BUDGETS="${BUDGETS-5 10 15 20}"  # BUDGETS="" = no budget arm
+KEEPS="${KEEPS-}"
+SCORE="${SCORE:-/work/calib_bf16.bin.hess}"  # budget ranking: the proxy, or a rank file under WORK
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 mkdir -p "$WORK"
@@ -42,7 +43,7 @@ quant() {  # quant <out-dir> <log> <extra args...>
     grep -E "^FP8 keep:|^size:" "$WORK/$2" | sed 's/^/  /'
 }
 
-if [ ! -f "$WORK/calib_bf16.bin.hess" ]; then
+if [ ! -f "$WORK/calib_bf16.bin" ] || [ ! -f "$WORK/calib_bf16.bin.hess" ]; then
     echo "### calibration on the BF16 source (AWQ stats + Hessians)"
     run imp-cli --model "/models/$MODEL_NAME" --perplexity /work/calib_corpus.txt --calibrate /work/calib_bf16.bin \
         --set calibration.hessian=true 2>&1 | grep -E "Hessians|calibration:|rror" | tail -4
@@ -59,8 +60,8 @@ for u in $SINGLE; do
     ppl /work/arm "AWQ + FP8 $u" "$(bytes arm)"
 done
 for b in $BUDGETS; do
-    quant arm "budget_$b.log" --fp8-score /work/calib_bf16.bin.hess --fp8-budget "$b"
-    ppl /work/arm "AWQ + FP8 budget $b %" "$(bytes arm)"
+    quant arm "budget_$b.log" --fp8-score "$SCORE" --fp8-budget "$b"
+    ppl /work/arm "AWQ + FP8 budget $b % ($(basename "$SCORE"))" "$(bytes arm)"
 done
 IFS=';' read -r -a keep_arms <<< "$KEEPS"
 for k in "${keep_arms[@]}"; do
@@ -80,5 +81,5 @@ if [ -n "${BENCH_BUDGET:-}" ]; then
             echo
         done
     done
-    clean mixed
+    [ "${KEEP_MIXED:-0}" = 1 ] || clean mixed  # KEEP_MIXED=1: left in WORK/mixed
 fi

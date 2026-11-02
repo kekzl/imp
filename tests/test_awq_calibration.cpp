@@ -135,6 +135,51 @@ TEST(AwqCalibration, SecondMomentRoundTripsAndIsAbsentFromOldFiles) {
     std::filesystem::remove(old_path);
 }
 
+// IMPCAL03 max|x| (the static FP8 input_scale of --fp8-keep) round-trips and is absent, not
+// fabricated, in an IMPCAL02 file.
+TEST(AwqCalibration, MaxAbsRoundTripsAndIsAbsentFromV2Files) {
+    CalibrationStats in;
+    CalibrationEntry e;
+    e.layer = 1;
+    e.kind = "W_DOWN";
+    e.rows = 8;
+    e.mean_abs = {0.5f, 1.0f};
+    e.mean_sq = {0.5f, 2.0f};
+    e.max_abs = {3.0f, 97.5f};
+    in.entries.push_back(e);
+    const std::string path = temp_path("imp_calib_max.bin");
+    ASSERT_EQ(write_calibration_stats(path, in), "");
+    CalibrationStats out;
+    ASSERT_EQ(read_calibration_stats(path, out), "");
+    const CalibrationEntry* q = out.find(1, "W_DOWN");
+    ASSERT_NE(q, nullptr);
+    ASSERT_EQ(q->max_abs.size(), 2u);
+    EXPECT_FLOAT_EQ(q->max_abs[1], 97.5f);
+    EXPECT_FLOAT_EQ(q->mean_sq[1], 2.0f);
+
+    std::vector<char> raw;
+    {
+        std::ifstream f(path, std::ios::binary);
+        raw.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    ASSERT_GE(raw.size(), 8u);
+    EXPECT_EQ(raw[7], '3');
+    raw[7] = '2';
+    const std::string v2_path = temp_path("imp_calib_v2.bin");
+    {
+        std::ofstream f(v2_path, std::ios::binary);
+        f.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+    CalibrationStats v2;
+    ASSERT_EQ(read_calibration_stats(v2_path, v2), "");
+    const CalibrationEntry* q2 = v2.find(1, "W_DOWN");
+    ASSERT_NE(q2, nullptr);
+    EXPECT_EQ(q2->mean_sq.size(), 2u);
+    EXPECT_TRUE(q2->max_abs.empty()) << "a v2 file must not claim a max it does not carry";
+    std::filesystem::remove(path);
+    std::filesystem::remove(v2_path);
+}
+
 TEST(AwqCalibration, RejectsForeignAndTruncatedFiles) {
     const std::string path = temp_path("imp_calib_foreign.bin");
     {

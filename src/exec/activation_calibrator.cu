@@ -18,18 +18,21 @@ constexpr int kThreads = 256;
 // one pass (sum|x| for AWQ scale candidates, sum x^2 for the error weight)
 // to avoid reading the activation twice.
 __global__ void accum_abs_cols_kernel(const half* __restrict__ x, int64_t rows, int64_t K, int64_t row_stride,
-                                      double* __restrict__ sum, double* __restrict__ sumsq) {
+                                      double* __restrict__ sum, double* __restrict__ sumsq,
+                                      double* __restrict__ amax) {
     int64_t j = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (j >= K)
         return;
-    double acc = 0.0, accsq = 0.0;
+    double acc = 0.0, accsq = 0.0, mx = 0.0;
     for (int64_t r = 0; r < rows; r++) {
         const double v = static_cast<double>(__half2float(x[(r * row_stride) + j]));
         acc += fabs(v);
         accsq += v * v;
+        mx = fmax(mx, fabs(v));
     }
     sum[j] += acc;
     sumsq[j] += accsq;
+    amax[j] = fmax(amax[j], mx);  // one thread per column, launches serialized on the stream
 }
 
 // blockIdx.y = expert: the same column walk over that expert's row segment.
@@ -139,16 +142,16 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
         Entry e;
         e.K = K;
         // Allocating here is why calibration forces CUDA graphs off (alloc inside
-        // capture is an error). One buffer of 2K: [0,K) sum|x|, [K,2K) sum x^2,
-        // avoiding two allocations per entry.
+        // capture is an error). One buffer of 3K: [0,K) sum|x|, [K,2K) sum x^2,
+        // [2K,3K) max|x|, avoiding three allocations per entry.
         e.d_sum = static_cast<double*>(
-            alloc_->allocate(static_cast<size_t>(2 * K) * sizeof(double), "activation_calibration"));
+            alloc_->allocate(static_cast<size_t>(3 * K) * sizeof(double), "activation_calibration"));
         if (!e.d_sum) {
             IMP_LOG_WARN("calibration: allocation failed for layer %d kind %s (K=%lld)", layer,
                          tensor_kind_name(kind), static_cast<long long>(K));
             return;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum, 0, static_cast<size_t>(2 * K) * sizeof(double), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum, 0, static_cast<size_t>(3 * K) * sizeof(double), stream));
         it = entries_.emplace(key, e).first;
     } else if (it->second.K != K) {
         // Same (layer, kind) arriving with a different inner dimension means the
@@ -160,8 +163,8 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
 
     const int blocks = static_cast<int>((K + kThreads - 1) / kThreads);
     accum_abs_cols_kernel<<<blocks, kThreads, 0, stream>>>(static_cast<const half*>(input.data), rows, K,
-                                                           row_stride, it->second.d_sum,
-                                                           it->second.d_sum + K);
+                                                           row_stride, it->second.d_sum, it->second.d_sum + K,
+                                                           it->second.d_sum + (2 * K));
     IMP_CUDA_CHECK_LAUNCH();
     it->second.rows += static_cast<uint64_t>(rows);
     if (hessian_)
@@ -180,7 +183,7 @@ CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) con
     for (const auto& [key, e] : entries_) {
         if (!e.d_sum || e.rows == 0)
             continue;
-        host.resize(static_cast<size_t>(2 * e.K));
+        host.resize(static_cast<size_t>(3 * e.K));
         if (cudaMemcpy(host.data(), e.d_sum, host.size() * sizeof(double), cudaMemcpyDeviceToHost) !=
             cudaSuccess) {
             IMP_LOG_WARN("calibration: D2H copy failed for key %u", key);
@@ -193,10 +196,12 @@ CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) con
         const size_t k = static_cast<size_t>(e.K);
         ce.mean_abs.resize(k);
         ce.mean_sq.resize(k);
+        ce.max_abs.resize(k);
         const double inv = 1.0 / static_cast<double>(e.rows);
         for (size_t i = 0; i < k; i++) {
             ce.mean_abs[i] = static_cast<float>(host[i] * inv);
             ce.mean_sq[i] = static_cast<float>(host[k + i] * inv);
+            ce.max_abs[i] = static_cast<float>(host[(2 * k) + i]);
         }
         out.entries.push_back(std::move(ce));
     }

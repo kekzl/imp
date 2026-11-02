@@ -160,6 +160,10 @@ std::string Fp8Keep::plan(const Options& opt, const std::vector<std::unique_ptr<
     if (opt.fp8_budget >= 0.0 && opt.fp8_score.empty())
         return "--fp8-budget needs --fp8-score (F.hess or a rank file)";
     fp16_of_ = std::move(fp16_of);
+    col_scale_ = &col_scale;
+    if (!opt.dry_run && !opt.calib_file.empty())
+        if (std::string err = read_calibration_stats(opt.calib_file, calib_); !err.empty())
+            return err;
 
     // Units and the pure NVFP4 export size the budget is a percent of.
     std::map<std::string, std::vector<const RawTensor*>> members;
@@ -248,10 +252,45 @@ bool Fp8Keep::emit(const RawTensor& t, bool dry_run, std::vector<SafeTensorsOut>
         fprintf(stderr, "  %s: %s\n", t.name.c_str(), f.error().c_str());
         return false;
     }
+    f->input_scale = static_input_scale(t.name, K);
+    if (f->input_scale <= 0.0f && n_dynamic_++ == 0)
+        printf(
+            "  note: %s has no max|x| in --calib (IMPCAL03): written without input_scale, the runtime\n"
+            "        scales each FP8 call by its batch absmax, so rows depend on their batch neighbours\n",
+            t.name.c_str());
     store_.push_back(std::move(*f));
-    for (const auto& o : fp8_weight_outputs(t.name, N, K, store_.back().codes.data(), &store_.back().scale))
+    const Fp8Weight& w = store_.back();
+    for (const auto& o : fp8_weight_outputs(t.name, N, K, w.codes.data(), &w.scale,
+                                            w.input_scale > 0.0f ? &w.input_scale : nullptr))
         out.push_back(o);
     return true;
+}
+
+float Fp8Keep::static_input_scale(const std::string& weight_name, int64_t K) const {
+    // The calibrator keys the shared input under each consumer's kind; max over the unit's kinds.
+    const std::string unit = fp8_unit_of(weight_name);
+    const std::string group = unit.substr(unit.find('.') + 1);
+    const std::vector<const char*> kinds = group == "qkv"       ? std::vector<const char*>{"WQ", "WK", "WV"}
+                                           : group == "gate_up" ? std::vector<const char*>{"W_GATE", "W_UP"}
+                                           : group == "o"       ? std::vector<const char*>{"WO"}
+                                                                : std::vector<const char*>{"W_DOWN"};
+    std::vector<float> amax;
+    for (const char* k : kinds) {
+        const CalibrationEntry* e = calib_.find(gptq::layer_of(weight_name), k);
+        if (!e || e->max_abs.size() != static_cast<size_t>(K))
+            continue;
+        if (amax.empty())
+            amax = e->max_abs;
+        else
+            for (size_t c = 0; c < amax.size(); c++)
+                amax[c] = std::max(amax[c], e->max_abs[c]);
+    }
+    static const std::vector<float> kNone;
+    const std::vector<float>* cs = &kNone;
+    if (col_scale_)
+        if (const auto it = col_scale_->find(weight_name); it != col_scale_->end())
+            cs = &it->second;
+    return fp8_input_scale(amax, *cs, K);
 }
 
 std::string Fp8Keep::quantized_layers_json(const std::string& indent) const {

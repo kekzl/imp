@@ -157,10 +157,27 @@ std::string mixed_precision_layers_json(const std::vector<std::string>& nvfp4_mo
 }
 
 std::vector<SafeTensorsOut> fp8_weight_outputs(const std::string& weight_name, int64_t N, int64_t K,
-                                               const uint8_t* codes, const float* scale) {
+                                               const uint8_t* codes, const float* scale,
+                                               const float* input_scale) {
     const std::string base = weight_name.substr(0, weight_name.size() - std::string(".weight").size());
-    return {{weight_name, "F8_E4M3", {N, K}, codes, static_cast<size_t>(N) * static_cast<size_t>(K)},
-            {base + ".weight_scale", "F32", {1}, scale, sizeof(float)}};
+    std::vector<SafeTensorsOut> out = {
+        {weight_name, "F8_E4M3", {N, K}, codes, static_cast<size_t>(N) * static_cast<size_t>(K)},
+        {base + ".weight_scale", "F32", {1}, scale, sizeof(float)}};
+    if (input_scale)
+        out.push_back({base + ".input_scale", "F32", {1}, input_scale, sizeof(float)});
+    return out;
+}
+
+float fp8_input_scale(const std::vector<float>& max_abs, const std::vector<float>& col_scale, int64_t K) {
+    if (K <= 0 || max_abs.size() != static_cast<size_t>(K))
+        return 0.0f;
+    const bool scaled = col_scale.size() == static_cast<size_t>(K);
+    float amax = 0.0f;
+    for (size_t c = 0; c < max_abs.size(); c++) {
+        const float s = scaled && col_scale[c] > 0.0f ? col_scale[c] : 1.0f;
+        amax = std::max(amax, max_abs[c] / s);
+    }
+    return std::isfinite(amax) && amax > 0.0f ? amax / 448.0f : 0.0f;
 }
 
 }  // namespace imp::quantize

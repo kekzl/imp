@@ -106,6 +106,20 @@ TEST(Fp8Keep, OutputsAreModeloptFp8) {
     EXPECT_EQ(o[1].nbytes, sizeof(float));
 }
 
+TEST(Fp8Keep, InputScaleIsTheScaledActivationMax) {
+    // x' = x / s: channel 1 has max 8 but s 4 -> 2; channel 0 max 3, s 1 -> 3 wins.
+    EXPECT_FLOAT_EQ(fp8_input_scale({3.0f, 8.0f}, {1.0f, 4.0f}, 2), 3.0f / 448.0f);
+    EXPECT_FLOAT_EQ(fp8_input_scale({3.0f, 8.0f}, {}, 2), 8.0f / 448.0f);
+    EXPECT_EQ(fp8_input_scale({3.0f}, {}, 2), 0.0f);  // wrong K: none rather than a guess
+    EXPECT_EQ(fp8_input_scale({0.0f, 0.0f}, {}, 2), 0.0f);
+    const uint8_t codes[1] = {0};
+    const float s = 1.0f, in_s = 0.25f;
+    const auto o = fp8_weight_outputs("model.layers.0.self_attn.o_proj.weight", 1, 1, codes, &s, &in_s);
+    ASSERT_EQ(o.size(), 3u);
+    EXPECT_EQ(o[2].name, "model.layers.0.self_attn.o_proj.input_scale");
+    EXPECT_EQ(o[2].data, &in_s);
+}
+
 struct TempDir {
     std::string path;
     TempDir() {

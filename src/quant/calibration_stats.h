@@ -22,6 +22,9 @@ struct CalibrationEntry {
     uint64_t rows = 0;            // tokens accumulated into this entry
     std::vector<float> mean_abs;  // [K] per input channel
     std::vector<float> mean_sq{};  // [K] per input channel, empty when read from an IMPCAL01 file
+    // [K] max|x| per input channel (IMPCAL03): the static FP8 input_scale of imp-quantize --fp8-keep.
+    // Empty from older files and for MoE expert entries.
+    std::vector<float> max_abs{};
 };
 
 struct CalibrationStats {

@@ -7,6 +7,7 @@
 
 #include "model/safetensors_raw.h"
 #include "model/safetensors_writer.h"
+#include "quant/calibration_stats.h"
 
 #include <cstdint>
 #include <deque>
@@ -23,6 +24,7 @@ namespace imp::quantize {
 struct Fp8Weight {
     std::vector<uint8_t> codes;  // [N, K] E4M3, code * scale = weight
     float scale = 1.0f;          // absmax / 448
+    float input_scale = 0.0f;    // static activation scale from --calib max|x|, 0 = none written
 };
 
 // Per-tensor E4M3 through the runtime's quantize_fp16_to_fp8_e4m3_scaled.
@@ -60,6 +62,10 @@ private:
     std::set<std::string> units_;
     Fp16Of fp16_of_;
     std::deque<Fp8Weight> store_;  // deque: push_back keeps earlier codes in place
+    CalibrationStats calib_;       // --calib, for the static input_scale
+    const std::map<std::string, std::vector<float>>* col_scale_ = nullptr;
+    size_t n_dynamic_ = 0;  // FP8 weights written without an input_scale
+    float static_input_scale(const std::string& weight_name, int64_t K) const;
     std::vector<std::string> fp8_modules_, nvfp4_modules_;
 };
 

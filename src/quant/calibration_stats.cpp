@@ -7,10 +7,10 @@ namespace imp {
 
 namespace {
 
-// 01 carried mean_abs only; 02 adds mean_sq per entry. Reading accepts both,
-// so a calibration file produced before the second moment existed still loads
-// and the search falls back to its old weight.
-constexpr char kMagic[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '2'};
+// 01 carried mean_abs only; 02 adds mean_sq, 03 max_abs per entry. Reading accepts all three,
+// so a calibration file produced before a moment existed still loads with that moment empty.
+constexpr char kMagic[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '3'};
+constexpr char kMagicV2[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '2'};
 constexpr char kMagicV1[8] = {'I', 'M', 'P', 'C', 'A', 'L', '0', '1'};
 // A calibration file is small (K floats per weight), so an entry claiming a
 // K in the hundreds of millions is a corrupt read, not a large model.
@@ -41,6 +41,20 @@ bool get_str(FILE* f, std::string& s) {
     return n == 0 || std::fread(s.data(), 1, n, f) == n;
 }
 
+// A length-prefixed float block; length 0 = the producer had none.
+bool put_floats(FILE* f, const std::vector<float>& v) {
+    return put(f, static_cast<int64_t>(v.size())) &&
+           (v.empty() || std::fwrite(v.data(), sizeof(float), v.size(), f) == v.size());
+}
+
+bool get_floats(FILE* f, std::vector<float>& v) {
+    int64_t k = 0;
+    if (!get(f, k) || k < 0 || k > kMaxK)
+        return false;
+    v.resize(static_cast<size_t>(k));
+    return k == 0 || std::fread(v.data(), sizeof(float), static_cast<size_t>(k), f) == static_cast<size_t>(k);
+}
+
 }  // namespace
 
 const CalibrationEntry* CalibrationStats::find(int layer, const std::string& kind) const {
@@ -66,10 +80,7 @@ std::string write_calibration_stats(const std::string& path, const CalibrationSt
                     std::fwrite(e.mean_abs.data(), sizeof(float), e.mean_abs.size(), f) == e.mean_abs.size());
         // mean_sq is written at the same K, or as an explicit 0 when the
         // producer had none, so a reader never has to guess from the length.
-        const int64_t ksq = static_cast<int64_t>(e.mean_sq.size());
-        ok = ok && put(f, ksq);
-        ok = ok && (e.mean_sq.empty() ||
-                    std::fwrite(e.mean_sq.data(), sizeof(float), e.mean_sq.size(), f) == e.mean_sq.size());
+        ok = ok && put_floats(f, e.mean_sq) && put_floats(f, e.max_abs);
         if (!ok)
             break;
     }
@@ -87,7 +98,8 @@ std::string read_calibration_stats(const std::string& path, CalibrationStats& ou
         return "cannot open " + path;
     char magic[sizeof(kMagic)] = {};
     const bool got = std::fread(magic, 1, sizeof(magic), f) == sizeof(magic);
-    const bool v2 = got && std::memcmp(magic, kMagic, sizeof(kMagic)) == 0;
+    const bool v3 = got && std::memcmp(magic, kMagic, sizeof(kMagic)) == 0;
+    const bool v2 = v3 || (got && std::memcmp(magic, kMagicV2, sizeof(kMagicV2)) == 0);
     const bool v1 = got && std::memcmp(magic, kMagicV1, sizeof(kMagicV1)) == 0;
     if (!v2 && !v1) {
         std::fclose(f);
@@ -117,18 +129,9 @@ std::string read_calibration_stats(const std::string& path, CalibrationStats& ou
             std::fclose(f);
             return "truncated entry " + std::to_string(i) + " in " + path;
         }
-        if (v2) {
-            int64_t ksq = 0;
-            if (!get(f, ksq) || ksq < 0 || ksq > kMaxK) {
-                std::fclose(f);
-                return "corrupt second moment in entry " + std::to_string(i) + " of " + path;
-            }
-            e.mean_sq.resize(static_cast<size_t>(ksq));
-            if (ksq > 0 && std::fread(e.mean_sq.data(), sizeof(float), static_cast<size_t>(ksq), f) !=
-                               static_cast<size_t>(ksq)) {
-                std::fclose(f);
-                return "truncated second moment in entry " + std::to_string(i) + " of " + path;
-            }
+        if ((v2 && !get_floats(f, e.mean_sq)) || (v3 && !get_floats(f, e.max_abs))) {
+            std::fclose(f);
+            return "corrupt or truncated moment block in entry " + std::to_string(i) + " of " + path;
         }
         out.entries.push_back(std::move(e));
     }
