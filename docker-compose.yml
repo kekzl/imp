@@ -61,7 +61,7 @@ services:
       retries: 10
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.12.4@sha256:a5b9e403d19154796850679c8c5d1295301cee954be8b84ddd62af92426558f7
+    image: ghcr.io/open-webui/open-webui:v0.12.5@sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded
     restart: unless-stopped
     ports:
       - "${WEBUI_PORT:-3000}:8080"
@@ -121,7 +121,7 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     restart: unless-stopped
     ports:
       - "${GRAFANA_PORT:-3002}:3000"
