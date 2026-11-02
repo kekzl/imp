@@ -7,10 +7,12 @@
 #include "compute/fp32_residual_norm.h"
 #include "compute/layernorm.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_forward_moe_kernels.cuh"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -158,13 +160,22 @@ TEST(Fp32ResidualNorm, PostAttnMatchesAccumCopyNorm) {
     for (const Case& c : kCases) {
         Inputs ref(c.rows, c.d), fus(c.rows, c.d);
         const size_t hb = sizeof(half) * c.rows * c.d;
-        Buf h_ref(hb), r_ref(hb), no_ref(hb), h_f(hb), r_f(hb), no_f(hb);
+        Buf h_ref(hb), r_ref(hb), no_ref(hb), h_f(hb), r_f(hb), no_f(hb), ri_ref(hb), ri_f(hb);
         rmsnorm_fp32_accum_to_fp16(ref.a.as<half>(), ref.wacc.as<half>(), ref.fp32.as<float>(),
                                    h_ref.as<half>(), c.rows, c.d, kEps, c.w_off, nullptr);
         cudaMemcpy(r_ref.p, h_ref.p, hb, cudaMemcpyDeviceToDevice);
         Tensor no_t = view(no_ref, QType::F16, c.rows, c.d);
         rmsnorm_fp32_to_fp16(view(ref.fp32, QType::F32, c.rows, c.d), view1(ref.wn, c.d), no_t, kEps, nullptr,
                              c.w_off);
+        // Gemma-4 router input (moe_router_in_fp16_): weight offset 0, then * half(1/sqrt(d)).
+        const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(c.d));
+        Tensor ri_t = view(ri_ref, QType::F16, c.rows, c.d);
+        rmsnorm_fp32_to_fp16(view(ref.fp32, QType::F32, c.rows, c.d), view1(ref.wb, c.d), ri_t, kEps, nullptr,
+                             0.0f);
+        const int64_t total = static_cast<int64_t>(c.rows) * c.d;
+        scale_fp16_kernel<<<static_cast<int>(((total / 2) + 255) / 256), 256>>>(ri_ref.as<half>(),
+                                                                                __float2half(inv_sqrt_d),
+                                                                                total);
 
         Fp32ResidArgs a;
         a.d_model = c.d;
@@ -177,12 +188,17 @@ TEST(Fp32ResidualNorm, PostAttnMatchesAccumCopyNorm) {
         a.r_out = r_f.as<half>();
         a.w_norm = fus.wn.as<half>();
         a.no_out = no_f.as<half>();
+        a.w_norm2 = fus.wb.as<half>();
+        a.w_off2 = 0.0f;
+        a.no2_out = ri_f.as<half>();
+        a.no2_scale = inv_sqrt_d;
         ASSERT_TRUE(fp32_residual_norm(Fp32ResidMode::kPostAttn, a, c.rows, nullptr));
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         expect_same(ref.fp32, fus.fp32, "fp32 residual", c);
         expect_same(h_ref, h_f, "h", c);
         expect_same(r_ref, r_f, "r", c);
         expect_same(no_ref, no_f, "no", c);
+        expect_same(ri_ref, ri_f, "router input", c);
     }
 }
 

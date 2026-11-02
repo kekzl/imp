@@ -227,6 +227,22 @@ __device__ __forceinline__ void layer_scale(float4& h4, float (&acc)[8], __half 
         acc[k] *= sf;
 }
 
+// The second norm of the same row (same inv_rms): rmsnorm_fp32_in_kernel's store, then
+// scale_fp16_kernel's FP16 multiply.
+__device__ __forceinline__ void second_norm_out(const float (&acc)[8], float inv_rms, int64_t off,
+                                                const Fp32ResidArgs& a) {
+    const int t = threadIdx.x;
+    const float4 w4 = ld4(a.w_norm2, t);
+    const __half* wh = reinterpret_cast<const __half*>(&w4);
+    const __half sc = __float2half(a.no2_scale);
+    float4 o4;
+    __half* oh = reinterpret_cast<__half*>(&o4);
+#pragma unroll
+    for (int k = 0; k < 8; ++k)
+        oh[k] = __hmul(__float2half(acc[k] * inv_rms * (__half2float(wh[k]) + a.w_off2)), sc);
+    reinterpret_cast<float4*>(a.no2_out + off)[t] = o4;
+}
+
 // rmsnorm_fp32_in_kernel<__half, __half> (thread u sums elements u, u + 512, ...) of acc into no;
 // kQuant: the rowblock NVFP4 producer quantize of the rounded row (a thread pair per micro-block).
 template <bool kQuant>
@@ -260,6 +276,8 @@ __device__ __forceinline__ void norm_out(const float (&acc)[8], const float4& wn
         }
         reinterpret_cast<float4*>(a.no_out + off)[t] = o4;
     }
+    if (act && a.no2_out != nullptr)
+        second_norm_out(acc, inv_rms, off, a);
     if constexpr (kQuant) {
         // d % 256 == 0 keeps every warp wholly active or wholly idle for the pair exchange.
         const float mb_amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, 1));
@@ -341,6 +359,8 @@ void launch_mode(const Fp32ResidArgs& a, int rows, cudaStream_t stream) {
 }
 
 bool args_fit(Fp32ResidMode mode, const Fp32ResidArgs& a, bool quant) {
+    if (a.no2_out != nullptr && (a.w_norm2 == nullptr || a.w_norm == nullptr))
+        return false;
     const bool norm_ok = a.w_norm != nullptr && a.no_out != nullptr;
     switch (mode) {
         case Fp32ResidMode::kNorm:

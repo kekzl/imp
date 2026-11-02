@@ -367,6 +367,9 @@ public:
     [[nodiscard]] bool fp32_tail_ok_(int layer, int n) const;
     void fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, cudaStream_t stream);
     int fp32_tail_layer_ = -1;
+    // Router input written by fp32_post_attn_fused_ (buffer + rows), consumed by moe_router_in_fp16_.
+    const void* router_prenorm_ = nullptr;
+    int router_prenorm_n_ = 0;
     // A non-producer write to `p`: a stale producer tag must not let a GEMM skip its quantize.
     void smallm_xq_forget_(const void* p) {
         if (smallm_xq_src_ == p)
@@ -1281,6 +1284,8 @@ private:
     // pre-norm from fp32_hidden_ (skipped when prenormed) + the n == 1 Q8_1 copy for dp4a.
     [[nodiscard]] bool moe_take_prenorm_(const Tensor& norm_w, const MoeFfnContext& ctx);
     void moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, bool prenormed, cudaStream_t stream);
+    // Gemma-4 FP16 router input (scatter_out scratch); skipped when fp32_post_attn_fused_ wrote it.
+    Tensor moe_router_in_fp16_(const TransformerLayer& ly, const MoeFfnContext& ctx, cudaStream_t stream);
     // Phase 8 without fp32_tail_fused_: sanitize, branch post-norms, shared FFN, residual.
     void moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // NVFP4→FP16 batch dequant fallback (when the grouped NVFP4

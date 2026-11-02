@@ -247,6 +247,32 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     }
 }
 
+// Gemma-4 router input, FP16: rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d), from the FP32 residual
+// when there is one. fp32_post_attn_fused_ may have written it already (router_prenorm_).
+Tensor GraphExecutor::moe_router_in_fp16_(const TransformerLayer& ly, const MoeFfnContext& ctx,
+                                          cudaStream_t stream) {
+    int64_t ri_shape[2] = {static_cast<int64_t>(ctx.n), static_cast<int64_t>(ctx.d)};
+    Tensor router_in(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+    const bool done = router_prenorm_ == router_in.data && router_prenorm_n_ == ctx.n;
+    router_prenorm_ = nullptr;
+    if (done)
+        return router_in;
+    if (fp32_accum_buf_ != nullptr) {
+        Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
+        rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
+    } else {
+        rmsnorm(ctx.h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
+    }
+    int64_t total_elems = static_cast<int64_t>(ctx.n) * ctx.d;
+    int threads_s = 256;
+    int blocks_s = static_cast<int>(((total_elems / 2) + threads_s - 1) / threads_s);
+    float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
+    scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
+                                                          __float2half(inv_sqrt_d), total_elems);
+    IMP_CUDA_CHECK_LAUNCH();
+    return router_in;
+}
+
 void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
@@ -287,21 +313,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
             ctx.fp32_gate_logits_ready = true;
         } else {
             // FP16 fallback (prefill or non-FP32-accum)
-            int64_t ri_shape[2] = {static_cast<int64_t>(ctx.n), static_cast<int64_t>(ctx.d)};
-            router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
-            if (fp32_accum_buf_ != nullptr) {
-                Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
-                rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
-            } else {
-                rmsnorm(ctx.h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
-            }
-            int64_t total_elems = static_cast<int64_t>(ctx.n) * ctx.d;
-            int threads_s = 256;
-            int blocks_s = static_cast<int>(((total_elems / 2) + threads_s - 1) / threads_s);
-            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
-            scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
-                                                                  __float2half(inv_sqrt_d), total_elems);
-            IMP_CUDA_CHECK_LAUNCH();
+            router_in = moe_router_in_fp16_(ly, ctx, stream);
         }
     }
 

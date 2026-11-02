@@ -13,6 +13,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace imp {
@@ -88,8 +89,20 @@ bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cu
     a.r_out = static_cast<half*>(r.data);
     a.w_norm = static_cast<const half*>(ly.ffn_pre_norm_2.data);
     a.no_out = static_cast<half*>(no.data);
+    // Gemma-4 scaled router, rows >= 2 (n == 1 keeps its FP32 router input): moe_router_in_fp16_'s
+    // norm reads the same FP32 row, so it shares this launch's inv_rms.
+    const bool router = n >= 2 && model_->profile().scaled_router_norm && f16_weight(ly.ffn_gate_inp_scale) &&
+                        moe_.scatter_out.data != nullptr && compute_dtype_ == QType::F16;
+    if (router) {
+        a.w_norm2 = static_cast<const half*>(ly.ffn_gate_inp_scale.data);
+        a.w_off2 = 0.0f;
+        a.no2_out = static_cast<half*>(moe_.scatter_out.data);
+        a.no2_scale = 1.0f / std::sqrt(static_cast<float>(cfg.d_model));
+    }
     if (!fp32_residual_norm(Fp32ResidMode::kPostAttn, a, n, stream))
         return false;
+    router_prenorm_ = router ? moe_.scatter_out.data : nullptr;
+    router_prenorm_n_ = n;
     smallm_xq_forget_(no.data);
     // moe_ffn_phase2_state_and_norm_ skips its residual copy and norm on this match.
     prenorm_out_ = no.data;

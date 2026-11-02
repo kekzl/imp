@@ -1189,20 +1189,17 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
 
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
+    gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
+
     bool down_prequant = false;  // the CUTLASS act scratch holds quantize(sh_swiglu)
     if (shared_gated) {
         Tensor sh_gate(gate_buf, compute_dtype_, 2, sh_shape, true);
-        // Batched decode: gate|up as one small-M launch (bit-identical per tensor).
-        if (!try_smallm_pair_dispatch_(ly.w_gate_shared_id, ly.w_up_shared_id, no, sh_gate, sh_up, ctx)) {
-            gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
-            gemm_via_handle_(ly.w_gate_shared_id, no, sh_gate, ctx);
-        }
+        gemm_via_handle_(ly.w_gate_shared_id, no, sh_gate, ctx);
         if (cfg.ffn_activation == FFNActivation::GEGLU)
             down_prequant = geglu_for_tile_down_(sh_gate, sh_up, sh_swiglu, ly.w_down_shared_id, n, stream);
         else
             swiglu(sh_gate, sh_up, sh_swiglu, stream);
     } else {
-        gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
         // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
         relu_sqr_inplace(sh_up, stream);
     }

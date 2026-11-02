@@ -36,6 +36,12 @@ struct Fp32ResidArgs {
     __half* no_out = nullptr;             // [rows, d] FP16 normed output
     uint8_t* xq_packed = nullptr;         // small-M NVFP4 activation scratch (nullable)
     uint8_t* xq_scales = nullptr;
+    // Second norm of the same FP32 row (Gemma-4 router input): no2 = rmsnorm(fp32, w_norm2, w_off2)
+    // rounded to FP16, then * half(no2_scale) in FP16 (scale_fp16_kernel). Nullable; needs w_norm.
+    const __half* w_norm2 = nullptr;
+    float w_off2 = 0.0f;
+    __half* no2_out = nullptr;
+    float no2_scale = 1.0f;
 };
 
 // One CTA per row, 512 threads. Envelope: d_model % 256 == 0, d_model <= 4096 (the accumulate
