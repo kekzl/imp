@@ -205,6 +205,55 @@ TEST_P(MoeRouterFusedTest, MatchesReference) {
     }
 }
 
+// A row's ids and weights are bit-equal whatever M, row tile and K split serve it: a prefix-cache resend
+// re-prefills a shorter tail than the first send (Qwen3-30B-A3B rows 225 vs 33: split 8 vs 16, the fp32
+// k sum moved the resend 0.086 nats).
+TEST_P(MoeRouterFusedTest, RowsIndependentOfMAndSplit) {
+    const Case c = GetParam();
+    constexpr int kMaxM = 2048, kRows = 33;
+    std::mt19937 rng(99 + c.K);
+    std::normal_distribution<float> nx(0.0f, 1.0f), nw(0.0f, 0.03f), nb(0.0f, 0.05f);
+    std::vector<__half> x(static_cast<size_t>(kMaxM) * c.K), w(static_cast<size_t>(c.ne) * c.K), b(c.ne);
+    // Per-32-channel scales 2^-12..2^4 (outlier channels, as real activations): k-tile partials over 16
+    // binades, where an fp32 sum depends on its order (unit-scale data sums exactly in any order).
+    std::uniform_int_distribution<int> ne_exp(-12, 4);
+    std::vector<float> kscale(c.K / 32);
+    for (auto& s : kscale)
+        s = std::ldexp(1.0f, ne_exp(rng));
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = __float2half(nx(rng) * kscale[(i % c.K) / 32]);
+    for (auto& v : w)
+        v = __float2half(nw(rng));
+    for (auto& v : b)
+        v = __float2half(nb(rng));
+    DevBuf dx(x.size() * 2), dw(w.size() * 2), db(b.size() * 2);
+    cudaMemcpy(dx.p, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dw.p, w.data(), w.size() * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(db.p, b.data(), b.size() * 2, cudaMemcpyHostToDevice);
+
+    FusedOut base;  // M 2048 on 32-row tiles, no split
+    moe_router_fused_tune(32, 1);
+    const bool base_ok = run_fused(dx, dw, db, kMaxM, c, base);
+    moe_router_fused_tune(0, 0);
+    ASSERT_TRUE(base_ok);
+    const size_t n = static_cast<size_t>(kRows) * c.top_k;
+    struct Arm {
+        int M, bm, split;
+    };
+    for (const Arm arm : {Arm{33, 0, 0}, Arm{225, 0, 0}, Arm{512, 0, 0}, Arm{33, 16, 1}, Arm{33, 16, 2},
+                          Arm{33, 32, 4}, Arm{225, 16, 8}, Arm{225, 32, 16}}) {
+        moe_router_fused_tune(arm.bm, arm.split);
+        FusedOut got;
+        const bool ok = run_fused(dx, dw, db, arm.M, c, got);
+        moe_router_fused_tune(0, 0);
+        ASSERT_TRUE(ok) << "M=" << arm.M;
+        EXPECT_EQ(0, std::memcmp(got.ids.data(), base.ids.data(), n * sizeof(int32_t)))
+            << "M=" << arm.M << " bm=" << arm.bm << " split=" << arm.split;
+        EXPECT_EQ(0, std::memcmp(got.weights.data(), base.weights.data(), n * sizeof(float)))
+            << "M=" << arm.M << " bm=" << arm.bm << " split=" << arm.split;
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(RouterShapes, MoeRouterFusedTest,
                          ::testing::Values(Case{2048, 128, 8, false, false, true},    // Qwen3-30B-A3B
                                            Case{2816, 128, 8, false, false, true},    // Gemma-4-26B-A4B
@@ -255,7 +304,7 @@ TEST(MoeRouterFusedBench, DISABLED_TileSplitSweep) {
     cudaEvent_t e0, e1;
     cudaEventCreate(&e0);
     cudaEventCreate(&e1);
-    for (int M : {2, 16, 512, 2048, 4096})
+    for (int M : {2, 16, 512, 1024, 2048, 3072, 4096})
         for (int bm : {0, 16, 32})
             for (int split : {0, 1, 2, 4, 8, 16}) {
                 moe_router_fused_tune(bm, split);

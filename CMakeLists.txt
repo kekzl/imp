@@ -1345,6 +1345,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemv_dp4a_multi.cu
         tests/test_gemm_dp4a.cu
         tests/test_gemm_kernel_registry.cu
+        tests/test_nvfp4_prompt_streamk.cu
         tests/test_fp8_gemm.cu
         tests/test_mmvq.cu
         tests/test_softmax.cu

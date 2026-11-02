@@ -1,9 +1,11 @@
 // Fused MoE router: CTA tile = BM rows x all experts (<= 128), mma.sync m16n8k16 with an fp16
-// accumulator per 32-wide k tile promoted into fp32 (fp32-accumulate MMA runs at 1/4 rate on sm_120:
-// 253 vs 1956 TFLOPS), ldmatrix on XOR-swizzled 64 B smem rows, cp.async pipeline (the
-// gemm_f16_narrow_prefill structure). Small M splits K over CTAs: each parks its fragments in ws,
-// the last to take the tile's ticket sums them in split order (deterministic per shape) and runs the
-// epilogue: logits to smem, one warp per row: softmax / sigmoid (+ bias), top-k, renorm.
+// accumulator per 32-wide k tile (fp32-accumulate MMA runs at 1/4 rate on sm_120: 253 vs 1956 TFLOPS),
+// ldmatrix on XOR-swizzled 64 B smem rows, cp.async pipeline (the gemm_f16_narrow_prefill structure).
+// The fp16 k-tile partials sum exactly in int64 units of 2^-24, rounded to fp32 once: a row's logits do
+// not depend on the split, so not on M (an fp32 sum picked its order by M: Qwen3-30B-A3B resend drift
+// 0.086 nats). Small M splits K over CTAs: each adds its fragments into int64 sums in ws, the last to take
+// the tile's ticket runs the epilogue: logits to smem, one warp per row: softmax / sigmoid (+ bias), top-k,
+// renorm.
 
 #include "compute/moe_router_fused.h"
 #include "core/logging.h"
@@ -22,6 +24,7 @@ constexpr int kNPad = 128;
 constexpr int kChunkHalves = 8;  // one 16 B cp.async
 constexpr int kChunksPerRow = kBK / kChunkHalves;
 constexpr int kMaxSplit = 16;
+constexpr int kMaxK = 32768;  // fix_add hi sum: K / 32 tiles x 2^20 < 2^31
 constexpr int kMinKTilesPerCta = 4;
 constexpr int kTargetCtas = 192;
 constexpr int kMaxTiles = 4096;  // ticket slots
@@ -35,8 +38,27 @@ struct Args {
     int split;
     int ktiles;
     unsigned* tickets;
-    float4* partials;  // [tile][split][frag][thread]
+    unsigned long long* sums;  // split-K sums [tile][frag * 4 + j][thread], zero between launches
 };
+
+// Every finite fp16 v is a multiple of 2^-24 below 2^16. hi = v on the 2^-4 grid (v + 1.5 * 2^19 stays in
+// [2^19, 2^20), ulp 2^-4), lo = v - hi (|lo| <= 2^-5, lo + 0.75 has ulp 2^-24): both exact, both read as
+// integers off the mantissa bits, no F2I (int64 casts cost 26.2 -> 66.7 us at M 4096). Wrapping sums;
+// the n * magic bias comes off in fix_total.
+constexpr float kMagicHi = 786432.0f;
+constexpr float kMagicLo = 0.75f;
+__device__ __forceinline__ void fix_add(float v, unsigned& hi, unsigned& lo) {
+    const float t = __fadd_rn(v, kMagicHi);  // intrinsics: never contracted or reassociated
+    hi += __float_as_uint(t);
+    lo += __float_as_uint(__fadd_rn(__fsub_rn(v, __fsub_rn(t, kMagicHi)), kMagicLo));
+}
+// Sum of n fix_add terms in units of 2^-24 (|hi| < n * 2^20, |lo| <= n * 2^19).
+__device__ __forceinline__ long long fix_total(unsigned hi, unsigned lo, int n) {
+    const int h = static_cast<int>(hi - (static_cast<unsigned>(n) * __float_as_uint(kMagicHi)));
+    const int l = static_cast<int>(lo - (static_cast<unsigned>(n) * __float_as_uint(kMagicLo)));
+    return (static_cast<long long>(h) * (1LL << 20)) + l;
+}
+__device__ __forceinline__ float unfix24(long long v) { return __ll2float_rn(v) * (1.0f / 16777216.0f); }
 
 __device__ __forceinline__ void cp_async16(uint32_t s, const void* g, bool valid) {
     const int src_size = valid ? 16 : 0;
@@ -119,10 +141,11 @@ struct Loader {
     }
 };
 
-// K tiles [kt0, kt0 + n_tiles) of this CTA into acc; fp16 partial per k tile, promoted to fp32.
+// K tiles [kt0, kt0 + n_tiles) of this CTA into acc (units of 2^-24); fp16 partial per k tile, summed
+// exactly (fix_add).
 template <int WM>
 __device__ __forceinline__ void mainloop(const MoeRouterFusedArgs& a, uint32_t s0, int row0, int kt0,
-                                         int n_tiles, float (&acc)[Cfg<WM>::kNF][4]) {
+                                         int n_tiles, long long (&acc)[Cfg<WM>::kNF][4]) {
     using C = Cfg<WM>;
     constexpr int NF = C::kNF;
     const int warp = static_cast<int>(threadIdx.x) >> 5;
@@ -139,6 +162,8 @@ __device__ __forceinline__ void mainloop(const MoeRouterFusedArgs& a, uint32_t s
     const int a_kh = lane >> 4;
     const int b_row = C::kBM + wc0 + (lane & 7) + ((lane >> 4) << 3);
     const int b_kh = (lane >> 3) & 1;
+    unsigned fh[NF][4] = {};
+    unsigned fl[NF][4] = {};
     for (int kt = 0; kt < n_tiles; ++kt) {
         cp_async_wait<C::kStages - 2>();
         __syncthreads();
@@ -162,31 +187,38 @@ __device__ __forceinline__ void mainloop(const MoeRouterFusedArgs& a, uint32_t s
         }
 #pragma unroll
         for (int f = 0; f < NF; ++f) {  // rows g / g + 8, columns 2t, 2t + 1
-            const float2 lo = __half22float2(*reinterpret_cast<const half2*>(&h[f][0]));
-            const float2 hi = __half22float2(*reinterpret_cast<const half2*>(&h[f][1]));
-            acc[f][0] += lo.x;
-            acc[f][1] += lo.y;
-            acc[f][2] += hi.x;
-            acc[f][3] += hi.y;
+            const float2 r0 = __half22float2(*reinterpret_cast<const half2*>(&h[f][0]));
+            const float2 r8 = __half22float2(*reinterpret_cast<const half2*>(&h[f][1]));
+            fix_add(r0.x, fh[f][0], fl[f][0]);
+            fix_add(r0.y, fh[f][1], fl[f][1]);
+            fix_add(r8.x, fh[f][2], fl[f][2]);
+            fix_add(r8.y, fh[f][3], fl[f][3]);
         }
     }
+#pragma unroll
+    for (int f = 0; f < NF; ++f)
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            acc[f][j] = fix_total(fh[f][j], fl[f][j], n_tiles);
     cp_async_wait<0>();
     __syncthreads();  // the pipeline smem holds the logits next
 }
 
-// Split-K: park the fragments, take the tile's ticket; the last CTA sums every split in order into
-// acc and re-arms the ticket. False for the other CTAs (they exit).
+// Split-K: every CTA adds its fragments into the tile's int64 sums (integer red.add: exact in any order)
+// and takes the tile's ticket; the last reads the sums, zeroes them and re-arms the ticket for the next
+// launch. False for the other CTAs (they exit).
 template <int WM>
-__device__ __forceinline__ bool split_reduce(const Args& args, int tile, int ks,
-                                             float (&acc)[Cfg<WM>::kNF][4], int& s_last) {
+__device__ __forceinline__ bool split_reduce(const Args& args, int tile, long long (&acc)[Cfg<WM>::kNF][4],
+                                             int& s_last) {
     constexpr int NF = Cfg<WM>::kNF;
     const int S = args.split;
-    float4* tile_ws = args.partials + (static_cast<size_t>(tile) * S * NF * kThreads);
-    float4* own = tile_ws + (static_cast<size_t>(ks) * NF * kThreads);
+    unsigned long long* sums = args.sums + (static_cast<size_t>(tile) * NF * 4 * kThreads);
 #pragma unroll
     for (int f = 0; f < NF; ++f)
-        __stcg(own + ((static_cast<size_t>(f) * kThreads) + threadIdx.x),
-               make_float4(acc[f][0], acc[f][1], acc[f][2], acc[f][3]));
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            atomicAdd(sums + ((static_cast<size_t>((f * 4) + j) * kThreads) + threadIdx.x),
+                      static_cast<unsigned long long>(acc[f][j]));
     __threadfence();
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -200,27 +232,13 @@ __device__ __forceinline__ bool split_reduce(const Args& args, int tile, int ks,
         return false;
     __threadfence();
 #pragma unroll
-    for (int f = 0; f < NF; ++f) {
-        float4 v[kMaxSplit];  // every partial in flight before the first add (one L2 latency, not S)
+    for (int f = 0; f < NF; ++f)
 #pragma unroll
-        for (int q = 0; q < kMaxSplit; ++q)
-            if (q < S)
-                v[q] = __ldcg(tile_ws + (static_cast<size_t>(q) * NF * kThreads) +
-                              (static_cast<size_t>(f) * kThreads) + threadIdx.x);
-        float4 sum = v[0];
-#pragma unroll
-        for (int q = 1; q < kMaxSplit; ++q)
-            if (q < S) {
-                sum.x += v[q].x;
-                sum.y += v[q].y;
-                sum.z += v[q].z;
-                sum.w += v[q].w;
-            }
-        acc[f][0] = sum.x;
-        acc[f][1] = sum.y;
-        acc[f][2] = sum.z;
-        acc[f][3] = sum.w;
-    }
+        for (int j = 0; j < 4; ++j) {
+            unsigned long long* p = sums + ((static_cast<size_t>((f * 4) + j) * kThreads) + threadIdx.x);
+            acc[f][j] = static_cast<long long>(__ldcg(p));
+            __stcg(p, 0ull);
+        }
     return true;
 }
 
@@ -332,9 +350,9 @@ __global__ void __launch_bounds__(kThreads) moe_router_fused_kernel(Args args) {
     const int kt0 = (ks * args.ktiles) / args.split;
     const int kt1 = ((ks + 1) * args.ktiles) / args.split;
 
-    float acc[NF][4] = {};
+    long long acc[NF][4] = {};
     mainloop<WM>(args.a, s0, row0, kt0, kt1 - kt0, acc);
-    if (args.split > 1 && !split_reduce<WM>(args, tile, ks, acc, s_last))
+    if (args.split > 1 && !split_reduce<WM>(args, tile, acc, s_last))
         return;
 
     float* s_logits = reinterpret_cast<float*>(smem_raw);
@@ -342,12 +360,10 @@ __global__ void __launch_bounds__(kThreads) moe_router_fused_kernel(Args args) {
     const int c0 = ((warp / WM) * C::kWCols) + ((lane & 3) * 2);
 #pragma unroll
     for (int f = 0; f < NF; ++f) {
-        *reinterpret_cast<float2*>(
-            s_logits + static_cast<ptrdiff_t>((r * kLogitLd) + c0 + (f * 8))) = make_float2(acc[f][0],
-                                                                                            acc[f][1]);
-        *reinterpret_cast<float2*>(
-            s_logits + static_cast<ptrdiff_t>(((r + 8) * kLogitLd) + c0 + (f * 8))) = make_float2(acc[f][2],
-                                                                                                  acc[f][3]);
+        *reinterpret_cast<float2*>(s_logits + static_cast<ptrdiff_t>((r * kLogitLd) + c0 + (f * 8))) =
+            make_float2(unfix24(acc[f][0]), unfix24(acc[f][1]));
+        *reinterpret_cast<float2*>(s_logits + static_cast<ptrdiff_t>(((r + 8) * kLogitLd) + c0 + (f * 8))) =
+            make_float2(unfix24(acc[f][2]), unfix24(acc[f][3]));
     }
     __syncthreads();
     for (int base = warp * 2; base < C::kBM; base += kWarps * 2) {  // two rows per warp, one per half
@@ -359,7 +375,7 @@ __global__ void __launch_bounds__(kThreads) moe_router_fused_kernel(Args args) {
 int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
 bool shape_ok(const MoeRouterFusedArgs& a, const void* ws, size_t ws_bytes) {
-    if (!a.x || !a.w || !a.ids || !a.weights || a.M < 1 || a.K < kBK || (a.K % kBK) != 0)
+    if (!a.x || !a.w || !a.ids || !a.weights || a.M < 1 || a.K < kBK || a.K > kMaxK || (a.K % kBK) != 0)
         return false;
     if (a.ne < 8 || a.ne > kNPad || (a.ne % 8) != 0 || a.top_k < 1 || a.top_k > kMaxTopK || a.top_k > a.ne)
         return false;
@@ -377,12 +393,12 @@ bool launch(const Args& args, int tiles, cudaStream_t stream) {
 int g_bm = 0;     // moe_router_fused_tune: 16 / 32, 0 = heuristic
 int g_split = 0;  // 0 = heuristic
 
-// Graph bench (K 2048): M 512 bm 16 10.3 us, M 2048 bm 32 20.1 us, M 4096 bm 32 26.2 us; 64-row tiles
-// lost everywhere (8 epilogue passes, 165 registers).
+// Graph bench (K 2048), us bm 16 / 32: M 2048 20.7 / 23.0, M 3072 29.9 / 30.9, M 4096 33.6 / 29.9 (the
+// 32-row tile carries twice the fix_add work per thread); 64-row tiles lost everywhere (165 registers).
 int pick_bm(int M) {
     if (g_bm == 16 || g_bm == 32)
         return g_bm;
-    return M >= 2048 ? 32 : 16;
+    return M >= 4096 ? 32 : 16;
 }
 
 }  // namespace
@@ -393,15 +409,15 @@ void moe_router_fused_tune(int bm, int split) {
 }
 
 size_t moe_router_fused_workspace_bytes(int /*max_rows*/) {
-    // Split > 1 only while tiles * split <= kTargetCtas: the partials of the largest tile cap that.
-    return kTicketBytes + (static_cast<size_t>(kTargetCtas) * Cfg<2>::kBM * kNPad * sizeof(float));
+    // Split > 1 only while tiles * 2 <= kTargetCtas: the sums of that many 32-row tiles cap the workspace.
+    return kTicketBytes + (static_cast<size_t>(kTargetCtas / 2) * Cfg<2>::kBM * kNPad * sizeof(long long));
 }
 
 bool moe_router_fused(const MoeRouterFusedArgs& a, void* ws, size_t ws_bytes, cudaStream_t stream) {
     if (!shape_ok(a, ws, ws_bytes))
         return false;
     // Split K until the grid reaches the target and every CTA keeps >= kMinKTilesPerCta k tiles; the
-    // partials must fit the workspace.
+    // sums must fit the workspace.
     const int ktiles = a.K / kBK;
     const int bm = pick_bm(a.M);
     const int tiles = ceil_div(a.M, bm);
@@ -412,7 +428,7 @@ bool moe_router_fused(const MoeRouterFusedArgs& a, void* ws, size_t ws_bytes, cu
         split *= 2;
     if (g_split != 0)
         split = g_split;
-    const size_t part_bytes = static_cast<size_t>(tiles) * split * bm * kNPad * sizeof(float);
+    const size_t part_bytes = static_cast<size_t>(tiles) * bm * kNPad * sizeof(long long);
     if (split > 1 && kTicketBytes + part_bytes > ws_bytes)
         return false;
 
@@ -421,7 +437,7 @@ bool moe_router_fused(const MoeRouterFusedArgs& a, void* ws, size_t ws_bytes, cu
     args.split = split;
     args.ktiles = ktiles;
     args.tickets = static_cast<unsigned*>(ws);
-    args.partials = reinterpret_cast<float4*>(static_cast<unsigned char*>(ws) + kTicketBytes);
+    args.sums = reinterpret_cast<unsigned long long*>(static_cast<unsigned char*>(ws) + kTicketBytes);
     return bm == 32 ? launch<2>(args, tiles, stream) : launch<1>(args, tiles, stream);
 }
 

@@ -130,6 +130,14 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     auto S = [&](const char* k, std::string& f) {
         if (!matched && dotted_key == k) { f = val; matched = true; }
     };
+    // Tri-state auto|on|off; bool spellings map to on / off, anything else is a bad value (#1627).
+    auto T = [&](const char* k, std::string& f) {
+        if (!matched && dotted_key == k) {
+            const bool tri = val == "auto" || val == "on" || val == "off";
+            f = tri ? val : (parse_bool(val, false, &value_ok_local) ? "on" : "off");
+            matched = true;
+        }
+    };
 
     // [runtime]
     B("runtime.deterministic_gemm", cfg.runtime.deterministic_gemm);
@@ -338,18 +346,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
         }
         matched = true;
     }
-    if (!matched && dotted_key == "gemm.cublas_fp16_acc") {
-        // tri-state auto|on|off; legacy bool spellings stay valid
-        if (val == "auto" || val == "on" || val == "off") {
-            cfg.gemm.cublas_fp16_acc = val;
-        } else {
-            // A tri-state that also takes booleans; anything else is a bad
-            // value, not a third spelling of off (#1627).
-            bool b = parse_bool(val, false, &value_ok_local);
-            cfg.gemm.cublas_fp16_acc = b ? "on" : "off";
-        }
-        matched = true;
-    }
+    T("gemm.cublas_fp16_acc", cfg.gemm.cublas_fp16_acc);
     B("gemm.nvfp4_lm_head_gdn", cfg.gemm.nvfp4_lm_head_gdn);
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_lm_head_smallm", cfg.gemm.nvfp4_lm_head_smallm);
@@ -357,6 +354,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_smallm", cfg.gemm.nvfp4_smallm);
     I("gemm.nvfp4_cublaslt_min_m", cfg.gemm.nvfp4_cublaslt_min_m);
     I("gemm.nvfp4_tile_min_m", cfg.gemm.nvfp4_tile_min_m);
+    T("gemm.nvfp4_prompt_streamk", cfg.gemm.nvfp4_prompt_streamk);
     B("gemm.f16_tile", cfg.gemm.f16_tile);
     B("gemm.q6k_tile", cfg.gemm.q6k_tile);
     B("gemm.mxfp4_tile", cfg.gemm.mxfp4_tile);

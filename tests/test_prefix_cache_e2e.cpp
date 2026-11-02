@@ -17,6 +17,7 @@
 #include "test_models.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -499,9 +500,52 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
         << "a transcript under snapshot_min_prompt_tokens must still restore at the reply end";
 }
 
-// FP8 KV: two hits of one prompt at different offsets re-prefill tails of different length; a
-// prefill chunk used to see its own K/V at FP16 and the gathered past at FP8, so the boundary moved
-// every logprob (Qwen3-1.7B AWQ export: 0.30 nats by token 9, greedy flip at token 13). Dense only.
+// Greedy request through the engine loop: output tokens, cached prompt tokens, chosen-token logprobs.
+std::vector<int32_t> run_greedy(imp::Engine* engine, const std::vector<int32_t>& tokens, int max_tokens,
+                                int* cached_tokens, std::vector<float>* lp) {
+    auto req = std::make_shared<imp::Request>();
+    req->input_tokens = tokens;
+    req->max_tokens = max_tokens;
+    req->temperature = 0.0f;
+    req->top_p = 1.0f;
+    req->top_k = 0;
+    req->ignore_eos = true;
+    req->logprobs = true;
+    req->status = imp::RequestStatus::PENDING;
+    engine->add_request(req);
+    for (int i = 0; i < 4096 && req->status != imp::RequestStatus::FINISHED &&
+                    req->status != imp::RequestStatus::CANCELLED;
+         ++i)
+        (void)engine->step();
+    EXPECT_EQ(req->status, imp::RequestStatus::FINISHED);
+    *cached_tokens = req->cached_tokens;
+    for (const auto& t : req->output_logprobs)
+        lp->push_back(t.logprob);
+    return req->output_tokens;
+}
+
+// `prompt` sent twice after `head` cached its blocks: the first send re-prefills everything past the
+// head, the resend >= 33 rows. Every row must be bit-equal across the two, so a kernel picked by M
+// shows up as a moved logprob.
+void hits_at_two_offsets(imp::Engine* engine, const std::vector<int32_t>& head,
+                         const std::vector<int32_t>& prompt) {
+    int c_head = -1, c_short = -1, c_long = -1;
+    std::vector<float> lp_head, lp_short, lp_long;
+    (void)run_greedy(engine, head, 32, &c_head, &lp_head);  // fixes the FP8 scales, caches the first blocks
+    const std::vector<int32_t> out_short = run_greedy(engine, prompt, 32, &c_short, &lp_short);
+    const std::vector<int32_t> out_long = run_greedy(engine, prompt, 32, &c_long, &lp_long);
+    ASSERT_GT(c_short, 0) << "the first full send must hit the head blocks";
+    ASSERT_GT(c_long, c_short) << "the resend must hit further than the first send";
+    std::printf("[two-offset hits] prompt %zu, cached %d then %d\n", prompt.size(), c_short, c_long);
+    ASSERT_EQ(lp_short.size(), out_short.size());
+    EXPECT_EQ(out_short, out_long) << "hit at " << c_short << " vs " << c_long << " changed the greedy reply";
+    EXPECT_EQ(lp_short, lp_long) << "hit at " << c_short << " vs " << c_long
+                                 << " moved the logprobs: a prefill row depends on where its chunk starts";
+}
+
+// FP8 KV: a prefill chunk used to see its own K/V at FP16 and the gathered past at FP8, so the
+// boundary moved every logprob (Qwen3-1.7B AWQ export: 0.30 nats by token 9, greedy flip at token 13).
+// Dense only.
 TEST_F(PrefixCacheE2ETest, DenseFp8KvHitsAtTwoOffsetsBitEqual) {
     if (model_ && model_->model && model_->model->config().ssm_inner_size > 0)
         GTEST_SKIP() << "recurrent model: hits land on snapshot boundaries, not on the offsets asserted here";
@@ -517,48 +561,66 @@ TEST_F(PrefixCacheE2ETest, DenseFp8KvHitsAtTwoOffsetsBitEqual) {
     ASSERT_NE(engine->kv_cache(), nullptr);
     ASSERT_EQ(engine->kv_cache()->qtype(), imp::QType::FP8_E4M3) << "FP8 KV was not applied: proves nothing";
     const int kv_bs = engine->kv_cache()->block_size();
-
     std::vector<int32_t> full(4096);
     int n_full = 0;
     ASSERT_EQ(imp_tokenize(model_, kLongPrompt, full.data(), &n_full, static_cast<int>(full.size())),
               IMP_SUCCESS);
     ASSERT_GE(n_full, 320);
-    const std::vector<int32_t> prompt(full.begin(), full.begin() + 320);
-    const std::vector<int32_t> head(full.begin(), full.begin() + 6 * kv_bs);
-
-    auto run = [&](const std::vector<int32_t>& tokens, int* cached_tokens, std::vector<float>* lp) {
-        auto req = std::make_shared<imp::Request>();
-        req->input_tokens = tokens;
-        req->max_tokens = 32;
-        req->temperature = 0.0f;
-        req->top_p = 1.0f;
-        req->top_k = 0;
-        req->ignore_eos = true;
-        req->logprobs = true;
-        req->status = imp::RequestStatus::PENDING;
-        engine->add_request(req);
-        for (int i = 0; i < 4096 && req->status != imp::RequestStatus::FINISHED &&
-                        req->status != imp::RequestStatus::CANCELLED;
-             ++i)
-            (void)engine->step();
-        EXPECT_EQ(req->status, imp::RequestStatus::FINISHED);
-        *cached_tokens = req->cached_tokens;
-        for (const auto& t : req->output_logprobs)
-            lp->push_back(t.logprob);
-        return req->output_tokens;
-    };
-
-    int c_head = -1, c_short = -1, c_long = -1;
-    std::vector<float> lp_head, lp_short, lp_long;
-    (void)run(head, &c_head, &lp_head);  // fixes the FP8 scales, caches the first blocks
-    const std::vector<int32_t> out_short = run(prompt, &c_short, &lp_short);
-    const std::vector<int32_t> out_long = run(prompt, &c_long, &lp_long);
-    ASSERT_GT(c_short, 0) << "the first full send must hit the head blocks";
-    ASSERT_GT(c_long, c_short) << "the resend must hit further than the first send";
-    ASSERT_EQ(lp_short.size(), out_short.size());
-    EXPECT_EQ(out_short, out_long) << "hit at " << c_short << " vs " << c_long << " changed the greedy reply";
-    EXPECT_EQ(lp_short, lp_long) << "hit at " << c_short << " vs " << c_long
-                                 << " moved the logprobs: a prefill row depends on where its chunk starts";
+    hits_at_two_offsets(engine, std::vector<int32_t>(full.begin(), full.begin() + 6 * kv_bs),
+                        std::vector<int32_t>(full.begin(), full.begin() + 320));
 }
+
+// NVFP4 MoE in the default config (IMP_TEST_MODEL_NVFP4_MOE, IMP_TEST_MODEL_GEMMA4_NVFP4): the fused
+// router's fp32 split-K order followed M (both red before 2026-11-02). The dense tile's stream-K class
+// (Gemma-4 chat resend 0.179 nats) does not show on this text: Nvfp4PromptStreamK pins it.
+class MoePrefixHitE2ETest : public ::testing::TestWithParam<const char*> {
+protected:
+    void SetUp() override {
+        const char* path = std::getenv(GetParam());
+        if (!path)
+            GTEST_SKIP() << "Set " << GetParam() << " to run the MoE prefix-hit equivalence";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, GetParam()));
+        ASSERT_EQ(imp_model_load(path, IMP_FORMAT_SAFETENSORS, &model_), IMP_SUCCESS);
+    }
+    void TearDown() override {
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
+    }
+    ImpModel model_ = nullptr;
+    ImpContext ctx_ = nullptr;
+};
+
+TEST_P(MoePrefixHitE2ETest, HitsAtTwoOffsetsBitEqual) {
+    ImpConfig cfg = imp_config_default();
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 1;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    imp::Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_NE(engine->kv_cache(), nullptr);
+    ASSERT_GT(model_->model->config().n_experts, 0) << "not an MoE checkpoint: proves nothing here";
+    const int kv_bs = engine->kv_cache()->block_size();
+    std::vector<int32_t> full(4096);
+    int n_full = 0;
+    ASSERT_EQ(imp_tokenize(model_, kLongPrompt, full.data(), &n_full, static_cast<int>(full.size())),
+              IMP_SUCCESS);
+    ASSERT_GE(n_full, 4 * kv_bs + 16);
+    // The degen_suite resend shape: head (4 blocks), then the model's own greedy text, prompt 282 tokens:
+    // the first send re-prefills 218 rows, the resend 42.
+    const std::vector<int32_t> head(full.begin(), full.begin() + 4 * kv_bs);
+    int c = -1;
+    std::vector<float> lp;
+    const std::vector<int32_t> reply = run_greedy(engine, head, 240, &c, &lp);
+    std::vector<int32_t> prompt(full.begin(), full.begin() + 4 * kv_bs + 16);  // leaves the reply's hashes
+    prompt.insert(prompt.end(), reply.begin(), reply.end());
+    ASSERT_GE(prompt.size(), 282u);
+    prompt.resize(282);
+    hits_at_two_offsets(engine, head, prompt);
+}
+
+INSTANTIATE_TEST_SUITE_P(Nvfp4Moe, MoePrefixHitE2ETest,
+                         ::testing::Values(imp_test::kEnvModelNvfp4Moe, imp_test::kEnvModelGemma4Nvfp4));
 
 }  // namespace

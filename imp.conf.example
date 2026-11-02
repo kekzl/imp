@@ -777,6 +777,10 @@ nvfp4_cublaslt_min_m = 2048
 # ahead of cuBLASLt (0 = off). Same bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM
 # kernel sum -0.9 % vs cuBLASLt; from M 1 CUTLASS runs only on refusal.
 nvfp4_tile_min_m = 1
+# Stream-K (a k split picked by the row count) on prompt rows of that tile: auto|on|off. A prompt row
+# then changes with its chunk, so a prefix-cache resend can answer differently. auto = off on MoE
+# (pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep it.
+nvfp4_prompt_streamk = "auto"
 # Own FP16 GEMM instead of cuBLASLt for FP16-accumulate prefill GEMMs with K >= N and a full
 # wave of tiles (GGUF FP16 paths). Bit-equal; Qwen3-14B-Q6_K pp2048 +4.0 % e2e.
 f16_tile = true
