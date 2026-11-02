@@ -163,6 +163,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     F("runtime.video_pruning_rate", cfg.runtime.video_pruning_rate);  // range: apply_one_checked
     S("runtime.graph_capture_mode", cfg.runtime.graph_capture_mode);
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
+    I("runtime.prefill_graph_prewarm", cfg.runtime.prefill_graph_prewarm);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
     I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_size", cfg.runtime.prefill_chunk_size);
@@ -194,6 +195,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
+    B("kv_cache.grow_ahead", cfg.kv_cache.grow_ahead);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);

@@ -102,10 +102,10 @@ bool KVCache::commit_minmax_(int from, int to) {
         return false;
     for (int l = 0; l < n_layers_ && to > from; l++) {
         char* dst = static_cast<char*>(minmax_pool_) + (l * stride) + (from * minmax_block_bytes_);
-        IMP_CUDA_CHECK_LOG(cudaMemset(dst, 0, static_cast<size_t>(to - from) * minmax_block_bytes_));
+        zero_(dst, static_cast<size_t>(to - from) * minmax_block_bytes_);
     }
     if (to > from)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
+        zero_fence_();
     return true;
 }
 

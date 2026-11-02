@@ -84,8 +84,12 @@ struct RuntimeConfig {
         // (prefill_graph_blockers_2026_05_14.md, Blocker B). Opt out per
         // model via `--set runtime.prefill_graph=false` if one regresses. Serial prefill only
         // (not the ragged scheduler path): offset-0 chunks, F16 or calibrated FP8 KV, a shape
-        // captured on its second consecutive sighting and kept across context resets.
+        // captured on its second sighting and kept across context resets.
         bool prefill_graph = true;
+        // Prompts up to N tokens keep a prefill graph each, captured at startup (two dummy prefills
+        // per length, F16 KV): a first request of that length replays instead of running eager
+        // (Gemma-4 12.4 -> 6.6 ms TTFT; +150 MiB, +0.9 s at 32). Longer prompts share one runner.
+        int prefill_graph_prewarm = 32;
         // Every other prefill (ragged waves, continuation chunks, prefix hits): the FFN/MoE phase
         // replays per (layer, padded rows) from a graph, attention stays eager (#2435).
         bool prefill_ffn_graph = true;

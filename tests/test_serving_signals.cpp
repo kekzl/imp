@@ -17,8 +17,10 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <algorithm>
 #include <set>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -284,6 +286,95 @@ TEST(ServingSignalsTest, KvOverrunSwapsToHostInsteadOfCancelling) {
         EXPECT_GE(tail.size(), 10u) << "degenerate tail after swap";
     }
     be.stop();
+}
+
+// runtime.prefill_graph_prewarm: short prompts of lengths never seen before replay a graph captured
+// at startup from the first request on, so their TTFT matches the warm (repeated-length) TTFT. Before
+// the prewarm a fresh length ran eager (Gemma-4: 13-30 ms vs 7.4 ms replayed).
+TEST(ServingSignalsTest, FirstShortPromptsReplayPrewarmedPrefillGraphs) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    imp::RuntimeConfig rc;
+    rc.runtime.prefill_graph_prewarm = 64;
+    imp::set_pending_runtime_config(rc);
+    Loaded m;
+    ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/0));
+    auto* eng = m.ctx->engine.get();
+    ASSERT_GE(eng->prefill_graphs().captures(), 64) << "the prewarm captured nothing";
+    BatchingEngine be;
+    be.start(m.ctx);
+    imp::Tokenizer* tok = eng->model()->tokenizer();
+    const int vocab = tok->vocab_size();
+    auto ttft_of = [&](int n, int salt) {
+        auto sr = std::make_shared<ServerRequest>();
+        sr->request = std::make_shared<imp::Request>();
+        for (int i = 0; i < n; i++)
+            sr->request->input_tokens.push_back(1000 + ((salt * 131 + i * 7919) % (vocab / 2)));
+        sr->request->max_tokens = 1;
+        sr->request->temperature = 0.0f;
+        sr->request->ignore_eos = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        be.submit(sr);
+        TokenEvent ev{};
+        while (!sr->pop_token(ev, 500)) {}
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        Served s{sr};
+        (void)drain(s, 10000);
+        return ms;
+    };
+    const int captures0 = eng->prefill_graphs().captures();
+    const int replays0 = eng->prefill_graphs().replays();
+    std::vector<double> first;
+    for (int k = 0; k < 5; k++)
+        first.push_back(ttft_of(20 + k, k));  // five lengths no request had before
+    EXPECT_EQ(eng->prefill_graphs().captures(), captures0) << "a first request captured: not prewarmed";
+    EXPECT_GE(eng->prefill_graphs().replays() - replays0, 5) << "a first request ran eager";
+    std::vector<double> warm;
+    for (int k = 0; k < 10; k++)
+        warm.push_back(ttft_of(24, 100 + k));
+    be.stop();
+    std::ranges::sort(first);
+    std::ranges::sort(warm);
+    const double first_med = first[2], warm_med = warm[5];
+    EXPECT_LE(first_med, (1.5 * warm_med) + 2.0)
+        << "first-request TTFT median " << first_med << " ms vs warm " << warm_med << " ms";
+}
+
+// kv_cache.grow_ahead: a growable pool that has to grow for every new prompt (prefix cache keeps
+// the old ones) commits the next step while the GPU runs, so a request's queue time stays at the
+// scheduler pickup. Synchronous growth put the driver mapping there (Qwen3-8B: 35-65 ms per step).
+TEST(ServingSignalsTest, AdmissionDoesNotWaitForKvGrowth) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    imp::RuntimeConfig rc;
+    rc.kv_cache.growable_initial_pct = 1;  // max(16, 1 %) blocks: every prompt below grows the pool
+    imp::set_pending_runtime_config(rc);
+    Loaded m;
+    if (imp_model_load(model_path(), imp_test::model_format(model_path()), &m.model) != IMP_SUCCESS)
+        GTEST_FAIL() << "model load failed";
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 4096;
+    config.max_batch_size = 4;
+    ASSERT_EQ(imp_context_create(m.model, &config, &m.ctx), IMP_SUCCESS);
+    BatchingEngine be;
+    be.start(m.ctx);
+    const uint64_t growths0 = m.ctx->engine->kv_pool_growths();
+    std::vector<double> queue;
+    for (int r = 0; r < 12; r++) {
+        std::string p = "List " + std::to_string(r) + ":";
+        for (int i = 0; i < 600; i++)
+            p += " item " + std::to_string((r * 1000) + i);
+        Served s{make_request(m.ctx, p, 1, 0.0f)};
+        be.submit(s.sr);
+        ASSERT_TRUE(drain(s, 60000));
+        queue.push_back(s.sr->queue_ms.load());
+    }
+    be.stop();
+    EXPECT_GE(m.ctx->engine->kv_pool_growths() - growths0, 2u) << "the pool never grew: nothing exercised";
+    EXPECT_GE(m.ctx->engine->kv_cache()->growths_ahead(), 2u) << "growth ran on the admission path";
+    for (size_t r = 1; r < queue.size(); r++)
+        EXPECT_LT(queue[r], 15.0) << "request " << r << " waited in the queue for the KV pool to grow";
 }
 
 }  // namespace

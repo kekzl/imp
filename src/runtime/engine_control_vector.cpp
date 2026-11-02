@@ -68,7 +68,7 @@ bool Engine::control_vector_set(int id, float scale) {
     executor_->set_control_vector(id == 0 ? nullptr : control_vectors_[id - 1].get(), scale);
     // Captured graphs hold the add launches (or their absence) with the old pointer and scale.
     invalidate_graphs();
-    prefill_graph_runner_.invalidate();
+    prefill_graphs_.invalidate_all();
     for (auto& g : decode_graph_pool_)
         g.invalidate();
     IMP_LOG_INFO("control vector: active -> %d (scale %.3f)", id, scale);

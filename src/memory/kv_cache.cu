@@ -305,6 +305,7 @@ void KVCache::open_swa_group_() {
 }
 
 KVCache::~KVCache() {
+    stop_grow_ahead_();  // before any region goes: the worker maps into them
     // The manager's referents still hold UNTRACKED references at this point
     // (they store ints). abandon() skips the outstanding-ref check; it goes
     // away with the last int-based caller in A7 step 3's final commit.
@@ -461,16 +462,16 @@ int KVCache::commit_blocks_(int blocks) {
         if (hi <= static_cast<size_t>(first_new))
             continue;  // this layer's region is already fully zeroed
         const size_t bytes = (hi - static_cast<size_t>(first_new)) * bb;
-        IMP_CUDA_CHECK_LOG(cudaMemset(k_ptr(l, first_new), 0, bytes));
-        IMP_CUDA_CHECK_LOG(cudaMemset(v_ptr(l, first_new), 0, bytes));
+        zero_(k_ptr(l, first_new), bytes);
+        zero_(v_ptr(l, first_new), bytes);
     }
-    // The memsets above run on the LEGACY DEFAULT STREAM; the engine decodes on a
-    // cudaStreamNonBlocking stream with no ordering relationship to stream 0. Publishing
-    // capacity without waiting let a memset retire AFTER the first KV write into the same
-    // blocks, erasing live KV (#1652). Synchronize stream 0 (not the device): the only work
-    // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
+    // The memsets above run on the LEGACY DEFAULT STREAM (the worker's own stream under
+    // grow-ahead); the engine decodes on a cudaStreamNonBlocking stream with no ordering
+    // relationship to either. Publishing capacity without waiting let a memset retire AFTER the
+    // first KV write into the same blocks, erasing live KV (#1652). Synchronize that stream (not
+    // the device): the only work waited on is these memsets.
     if (blocks > first_new)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
+        zero_fence_();
     last_zero_ms_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - zero_t0).count();
     // A block is usable only with its scales and metadata backed too (#2483, #2360).
@@ -479,6 +480,13 @@ int KVCache::commit_blocks_(int blocks) {
     committed_blocks_ = blocks;
     return blocks;
 }
+
+// Fenced by zero_fence_() before commit_blocks_ publishes the blocks.
+void KVCache::zero_(void* dst, size_t bytes) {
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst, 0, bytes, zero_stream_));
+}
+
+void KVCache::zero_fence_() { IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(zero_stream_)); }
 
 size_t KVCache::committed_bytes() const { return region_ ? region_.committed() : 0; }
 
@@ -530,68 +538,13 @@ size_t KVCache::bytes_per_block() const {
     return total;
 }
 
-int KVCache::try_grow_to(int wanted) {
-    const int have = blocks_.num_blocks();
-    if (!growable_ || wanted <= have)
-        return have;
-    int target = std::min(wanted, max_blocks_);
-    if (target <= have)
-        return have;
-    // The ceiling was sized from post-weight VRAM at init, before the library reserve and
-    // forward scratch were claimed. A VMM commit does not fail when the card is full, it
-    // spills into host memory at a fraction of the bandwidth (#1103), so growth is capped at
-    // what is free above the headroom NOW; the planned commit stays the floor and nothing is
-    // sized from it.
-    size_t free_now = 0, total_now = 0;
-    const size_t per_block = bytes_per_block();
-    if (per_block > 0 && vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
-        // The reading already excludes what the lazy pools were charged for and
-        // have not committed (vram_budget_mem_get_info): this growth is
-        // opportunistic, a promised SSM slot or the vision tower is not.
-        const size_t headroom = vram_allocator_headroom(total_now);
-        const size_t spare = free_now > headroom ? free_now - headroom : 0;
-        const size_t affordable = static_cast<size_t>(have) + (spare / per_block);
-        if (affordable < static_cast<size_t>(target)) {
-            const int capped = static_cast<int>(affordable);
-            if (last_capped_logged_.exchange(capped, std::memory_order_relaxed) != capped) {
-                IMP_LOG_INFO(
-                    "KV cache: growth capped %d -> %d blocks by free VRAM (%.0f MiB free, %.0f MiB "
-                    "allocator headroom kept)",
-                    target, capped, free_now / (1024.0 * 1024.0), headroom / (1024.0 * 1024.0));
-            }
-            target = capped;
-        }
-        if (target <= have)
-            return have;
-    }
-    const auto grow_t0 = std::chrono::steady_clock::now();
-    last_zero_ms_ = 0.0;
-    const int got = commit_blocks_(target);
-    if (got <= have)
-        return have;
-    if (blocks_.grow_slots(got) != MemError::Ok)
-        return have;
-    const double grow_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - grow_t0).count();
-    // Published only after the ids exist: a reader that saw the new capacity
-    // first would admit a request the pool cannot yet hand blocks for.
-    usable_blocks_.store(got, std::memory_order_release);
-    growths_.fetch_add(1, std::memory_order_relaxed);
-    IMP_LOG_INFO(
-        "KV cache: grew %d -> %d blocks (%.0f tokens, %.0f MiB committed of a %d-block "
-        "ceiling) in %.1f ms (zero + sync %.1f ms)",
-        have, got, static_cast<double>(got) * block_size_, region_.committed() / (1024.0 * 1024.0),
-        max_blocks_, grow_ms, last_zero_ms_);
-    return got;
-}
-
 // The new pool is built whole before the old one is released, so a failure leaves the
 // serving pool untouched; peak is old + new committed blocks and scale planes.
 bool KVCache::raise_ceiling(int ceiling_blocks) {
     const int usable = usable_blocks_.load(std::memory_order_acquire);
     // A growable key min/max pool is rebuilt at the new ceiling (no live blocks, nothing to keep).
-    if (accounting_only_ || !growable_ || !region_ || ceiling_blocks <= max_blocks_ ||
-        (minmax_pool_ && !minmax_region_))
+    if (accounting_only_ || !growable_ || !region_ || grow_thread_.joinable() ||
+        ceiling_blocks <= max_blocks_ || (minmax_pool_ && !minmax_region_))
         return false;
     if (blocks_.live_blocks() != 0 || swa_blocks_.live_blocks() != 0)
         return false;

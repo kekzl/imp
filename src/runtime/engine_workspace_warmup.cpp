@@ -667,6 +667,7 @@ void Engine::warmup() {
     // prefill, and real prefill widens it further when needed.
     if (executor_)
         executor_->reset_kv_calibration();
+    prewarm_prefill_graphs_(warmup_id);  // after the reset: the key carries the calibration generation
     const ModelConfig& mc = model_->config();
     attention_apa_warmup(mc.n_heads, mc.n_kv_heads, mc.head_dim, mc.d_model,
                          runtime_config_.attention.apa_eps, stream_);
@@ -675,6 +676,41 @@ void Engine::warmup() {
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     trim_recurrent_slots_after_warmup_();
     IMP_LOG_INFO("Warmup complete");
+}
+
+// Each length runs twice: eager (cuBLASLt probes that M outside any capture), then captured. The
+// two prompts differ in their token so the second cannot reuse the first's prefix-cache blocks.
+void Engine::prewarm_prefill_graphs_(int32_t token_id) {
+    const int n_max = std::min({runtime_config_.runtime.prefill_graph_prewarm, prefill_graphs_.short_max(),
+                                config_.max_seq_len - 2});
+    // F16 KV only: an FP8 pool captures once calibrated, and these synthetic prompts must not calibrate it.
+    if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !config_.use_cuda_graphs ||
+        config_.kv_cache_dtype != QType::F16)
+        return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int captures0 = prefill_graphs_.captures();
+    const int vocab = std::max(2, model_->config().vocab_size);
+    for (int n = 1; n <= n_max; n++) {
+        for (int pass = 0; pass < 2; pass++) {
+            auto req = std::make_shared<Request>();
+            req->id = next_request_id_++;
+            req->input_tokens.assign(static_cast<size_t>(n), (token_id + pass) % vocab);
+            req->max_tokens = 1;
+            req->temperature = 0.0f;
+            req->ignore_eos = true;
+            scheduler_->add_request(req);
+            for (int i = 0; i < 4 && req->status != RequestStatus::FINISHED; i++)
+                (void)step();
+            kv_manager_->free_sequence(req->id);
+            reset_ssm_state(req->id);
+            req->status = RequestStatus::CANCELLED;
+            while (kv_manager_->evict_cached_block()) {}
+        }
+    }
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+    IMP_LOG_INFO("prefill graph prewarm: lengths 1..%d, %d graphs captured, %zu cached (%.2f s)", n_max,
+                 prefill_graphs_.captures() - captures0, prefill_graphs_.size(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 }  // namespace imp

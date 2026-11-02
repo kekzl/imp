@@ -42,6 +42,10 @@ struct KVCache {
     // grows at admission: a successful cudaMalloc proves nothing about free
     // VRAM on WSL2 (a full-size commit can silently spill to host memory).
     int growable_initial_pct = 25;
+    // Growable pool: a worker thread commits the next growth step (max(64, 25 %)) once the free
+    // list drops below it, so admission adopts backed blocks instead of waiting for the driver
+    // mapping (Qwen3-8B: 35-65 ms per growth, the request's queue time). Same cap as growth.
+    bool grow_ahead = true;
     // SWA-aware KV sizing: sliding-window layers allocate only the trailing
     // window instead of full-length KV. Auto-disabled for models without SWA,
     // INT8/INT4 KV, hybrids, MLA, StreamingLLM, deterministic mode. Numerically

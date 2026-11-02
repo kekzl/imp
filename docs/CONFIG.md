@@ -37,9 +37,11 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `runtime.think_max_tokens` | `32768` (`0`=no cap) | reasoning tokens before the engine injects `</think>`, whatever `max_tokens` is |
 | `runtime.no_vision` | `false` | drop the checkpoint's Qwen3-VL tower at init: image and video parts answer 400, the tower's VRAM reservation goes to the expert cache (Qwen3.8-Flash-Next text-only) |
 | `runtime.no_audio` | `false` | drop the checkpoint's Gemma-4 audio tower at init: `input_audio` parts answer 400, its weights and clip scratch stay off the card |
+| `runtime.prefill_graph_prewarm` | `32` | prompts up to N tokens keep a prefill CUDA graph each, captured at startup (F16 KV): the first request of such a length replays instead of running eager. `0` = one shared runner |
 | `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
+| `kv_cache.grow_ahead` | `true` | a worker thread commits the next growth step before the free list runs out; admission adopts it instead of waiting for the driver |
 | `kv_cache.host_spill_mb` | `0` | pinned host RAM (MiB) for prefix blocks the pool reclaims; a later prefix hit restores them by H2D instead of re-prefill. Off by default; needs prefix caching, refused with SWA layers or sparse key metadata; `/metrics` `imp_kv_host_spill_*` |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
