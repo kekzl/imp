@@ -286,10 +286,10 @@ __device__ __forceinline__ void norm_out(const float (&acc)[8], const float4& wn
         const int64_t packed_row = static_cast<int64_t>(blockIdx.x) * (d >> 1);
         const int64_t scales_row = static_cast<int64_t>(blockIdx.x) * (d >> 4);
         uint8_t s8;
-        const float actual = nvfp4_encode_micro_scale(mb_amax, /*tensor_scale=*/1.0f, &s8);
+        const float actual = nvfp4_encode_micro_scale(mb_amax, a.act_scale, &s8);
         if ((t & 1) == 0)
             a.xq_scales[scales_row + (t >> 1)] = s8;
-        const float inv = 1.0f / actual;
+        const float inv = 1.0f / (a.act_scale * actual);
         uchar4 pb;
         pb.x = nvfp4_pack_pair_hw(vals[0] * inv, vals[1] * inv);
         pb.y = nvfp4_pack_pair_hw(vals[2] * inv, vals[3] * inv);

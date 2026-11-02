@@ -36,6 +36,9 @@ struct WeightHandle {
     QType source_qtype = QType::NONE;
     void* source_scales = nullptr;
     float source_tensor_scale = 1.0f;
+    // NVFP4 activation tensor scale (dequant form) the W4A4 GEMMs quantize this weight's input with;
+    // alpha = weight tensor scale x act_scale. 1.0 unless gemm.nvfp4_static_act_scale and a checkpoint scale.
+    float act_scale = 1.0f;
     // Phase 4b freed the source bytes (source_data stays as the cache key): paths not covered
     // by a copy rebuild the F16 weight from wcache (released_source_gemm_), never read source_data.
     bool source_released = false;
@@ -78,6 +81,11 @@ struct WeightHandle {
     // the original), FP32 (LM-head policy keeps original), Undefined.
     // Conservative: true only when source_data is present AND the tier covers
     // both M=1 and M>1 paths; actual freeing needs a dispatch-site audit too.
+    // W4A4 GEMM alpha of a CUTLASS_NVFP4 payload: weight tensor scale (1.0 when absent) x `act_scale`.
+    [[nodiscard]] float cutlass_nvfp4_alpha(float act) const {
+        return (payload.cutlass_nvfp4.global_scale ? *payload.cutlass_nvfp4.global_scale : 1.0f) * act;
+    }
+
     bool can_drop_source() const {
         if (source_data == nullptr)
             return false;

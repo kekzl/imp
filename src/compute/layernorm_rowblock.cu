@@ -108,7 +108,8 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                    __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
                                                    uint8_t* __restrict__ xq_scales, int d_model, float eps,
                                                    float weight_offset, const __half* __restrict__ add_a,
-                                                   __half* add_r, __half* __restrict__ add_h) {
+                                                   __half* add_r, __half* __restrict__ add_h,
+                                                   float act_scale) {
     const int d_vec = d_model >> 3;
     const float4* x_vec = reinterpret_cast<const float4*>(x + (static_cast<int64_t>(blockIdx.x) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
@@ -207,10 +208,10 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
         const float mb_amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, 1));
         if (active) {
             uint8_t s8;
-            const float actual = nvfp4_encode_micro_scale(mb_amax, /*tensor_scale=*/1.0f, &s8);
+            const float actual = nvfp4_encode_micro_scale(mb_amax, act_scale, &s8);
             if ((i & 1) == 0)
                 xq_scales[scales_row + (i >> 1)] = s8;
-            const float inv = 1.0f / actual;
+            const float inv = 1.0f / (act_scale * actual);
             uchar4 pb;
             pb.x = nvfp4_pack_pair_hw(vals[0] * inv, vals[1] * inv);
             pb.y = nvfp4_pack_pair_hw(vals[2] * inv, vals[3] * inv);
@@ -241,8 +242,8 @@ void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, i
 // Host dispatch: rmsnorm + NVFP4 activation quantize (producer fusion). Returns false when the
 // shape is outside the fused kernel's envelope; the caller then runs plain rmsnorm() and lets
 // the GEMM dispatch quantize as before.
-bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
-                   uint8_t* xq_scales, float eps, cudaStream_t stream, float weight_offset) {
+bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed, uint8_t* xq_scales,
+                   float eps, cudaStream_t stream, float weight_offset, float act_scale) {
     const int rows = static_cast<int>(x.shape[0]);
     const int d_model = static_cast<int>(x.shape[1]);
     // Null weight (Qwen4Exp final norm, rows >= 2): refuse, rmsnorm() applies the identity.
@@ -255,21 +256,21 @@ bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* 
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset,
                     static_cast<const __half*>(nullptr), static_cast<__half*>(nullptr),
-                    static_cast<__half*>(nullptr));
+                    static_cast<__half*>(nullptr), act_scale);
     } else {
         pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<2>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<2>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset,
                     static_cast<const __half*>(nullptr), static_cast<__half*>(nullptr),
-                    static_cast<__half*>(nullptr));
+                    static_cast<__half*>(nullptr), act_scale);
     }
     return true;
 }
 
 bool add_rmsnorm_nvfp4(const Tensor& a, Tensor& r, Tensor& h, const Tensor& weight, Tensor& out,
                        uint8_t* xq_packed, uint8_t* xq_scales, float eps, cudaStream_t stream,
-                       float weight_offset) {
+                       float weight_offset, float act_scale) {
     const int rows = static_cast<int>(h.shape[0]);
     const int d_model = static_cast<int>(h.shape[1]);
     if (weight.data == nullptr || h.qtype != QType::F16 || a.qtype != QType::F16 || r.qtype != QType::F16 ||
@@ -284,13 +285,13 @@ bool add_rmsnorm_nvfp4(const Tensor& a, Tensor& r, Tensor& h, const Tensor& weig
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<1, true>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(nullptr), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset, ap, rp,
-                    hp);
+                    hp, act_scale);
     } else {
         pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<2, true>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<2, true>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(nullptr), static_cast<const __half*>(weight.data),
                     static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset, ap, rp,
-                    hp);
+                    hp, act_scale);
     }
     return true;
 }

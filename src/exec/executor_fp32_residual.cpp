@@ -44,7 +44,8 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
     if (fp32_resid_fuse_ok_(n) && f16_weight(ly.attn_norm) &&
         fp32_residual_norm_fits(Fp32ResidMode::kNorm, d)) {
         uint8_t* xs = nullptr;
-        uint8_t* xp = smallm_producer_xq_(ly.wq_id, n, d, stream, &xs);
+        float as = 1.0f;
+        uint8_t* xp = smallm_producer_xq_(ly.wq_id, n, d, stream, &xs, &as);
         Fp32ResidArgs a;
         a.d_model = d;
         a.eps = eps;
@@ -54,9 +55,10 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
         a.no_out = static_cast<half*>(no.data);
         a.xq_packed = xp;
         a.xq_scales = xs;
+        a.act_scale = as;
         if (fp32_residual_norm(Fp32ResidMode::kNorm, a, n, stream)) {
             if (xp != nullptr)
-                smallm_producer_tag_(no.data, n, d);
+                smallm_producer_tag_(no.data, n, d, as);
             else
                 smallm_xq_forget_(no.data);
             return;
@@ -188,9 +190,11 @@ void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int
     if (next) {
         a.w_norm = static_cast<const half*>(model_->layer(nl).attn_norm.data);
         a.no_out = static_cast<half*>(no.data);
-        xp = smallm_producer_xq_(model_->layer(nl).wq_id, n, d, stream, &xs);
+        float as = 1.0f;
+        xp = smallm_producer_xq_(model_->layer(nl).wq_id, n, d, stream, &xs, &as);
         a.xq_packed = xp;
         a.xq_scales = xs;
+        a.act_scale = as;
     }
     if (!fp32_residual_norm(Fp32ResidMode::kTail, a, n, stream))
         throw std::runtime_error("fp32_tail_fused_: launch refused inside fp32_tail_ok_'s envelope");
@@ -198,7 +202,7 @@ void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int
     if (!next)
         return;
     if (xp != nullptr)
-        smallm_producer_tag_(no.data, n, d);
+        smallm_producer_tag_(no.data, n, d, a.act_scale);
     else
         smallm_xq_forget_(no.data);
     prenorm_out_ = no.data;
