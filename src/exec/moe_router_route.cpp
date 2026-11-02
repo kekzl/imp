@@ -11,6 +11,10 @@
 
 namespace imp {
 
+namespace {
+constexpr int kRouterFusedFp16AccMaxRows = 1024;
+}  // namespace
+
 bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int n, int ne, int top_k,
                         bool use_sigmoid, bool norm_weights, const void* score_bias, const RouterFusedGate& g,
                         MoeRoutingBuffers& buf, void* ws, size_t ws_bytes, cudaStream_t stream) {
@@ -21,6 +25,10 @@ bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int
     // Deterministic mode keeps the row-invariant router (a row must not depend on M, #2152).
     if (n < 2 || compute != QType::F16 || gate.qtype != QType::F16 || buf.pool == nullptr ||
         process_diag_deterministic() || in.stride[0] != d || gate.shape[1] != d || n > buf.max_tokens)
+        return false;
+    // From 1024 rows the full-rate fp16 split-K of cuBLASLt (gemm.cublas_fp16_acc) keeps the router:
+    // n 2048 Nemotron fused 28.56 vs 23.9 us chain, Qwen3-30B 26.65 vs 26.4; Gemma-4 (fp32 accumulate) gains.
+    if (n >= kRouterFusedFp16AccMaxRows && process_diag_cublas_fp16_acc())
         return false;
     MoeRouterFusedArgs a;
     a.x = static_cast<const half*>(in.data);

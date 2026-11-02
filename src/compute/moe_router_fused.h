@@ -31,6 +31,9 @@ struct MoeRouterFusedArgs {
 [[nodiscard]] bool moe_router_fused(const MoeRouterFusedArgs& args, void* ws, size_t ws_bytes,
                                     cudaStream_t stream);
 
+// Test / bench hook: force the row tile (16, 32, 64) and the K split (1..16); 0 = heuristic.
+void moe_router_fused_tune(int bm, int split);
+
 // Workspace that serves every M up to max_rows at the largest split the heuristic picks.
 [[nodiscard]] size_t moe_router_fused_workspace_bytes(int max_rows);
 

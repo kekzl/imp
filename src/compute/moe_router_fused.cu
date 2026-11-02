@@ -27,8 +27,8 @@ constexpr int kTargetCtas = 192;
 constexpr int kMaxTiles = 4096;  // ticket slots
 constexpr size_t kTicketBytes = kMaxTiles * sizeof(unsigned);
 constexpr int kLogitLd = kNPad + 4;  // smem logits row stride (floats)
-constexpr int kMaxTopK = 32;
-constexpr int kSlots = kNPad / 32;  // experts per lane in the epilogue
+constexpr int kMaxTopK = 16;
+constexpr int kSlots = kNPad / 16;  // experts per lane in the epilogue (half-warp per row)
 
 struct Args {
     MoeRouterFusedArgs a;
@@ -201,15 +201,21 @@ __device__ __forceinline__ bool split_reduce(const Args& args, int tile, int ks,
     __threadfence();
 #pragma unroll
     for (int f = 0; f < NF; ++f) {
-        float4 sum = __ldcg(tile_ws + ((static_cast<size_t>(f) * kThreads) + threadIdx.x));
-        for (int q = 1; q < S; ++q) {
-            const float4 v = __ldcg(tile_ws + (static_cast<size_t>(q) * NF * kThreads) +
-                                    (static_cast<size_t>(f) * kThreads) + threadIdx.x);
-            sum.x += v.x;
-            sum.y += v.y;
-            sum.z += v.z;
-            sum.w += v.w;
-        }
+        float4 v[kMaxSplit];  // every partial in flight before the first add (one L2 latency, not S)
+#pragma unroll
+        for (int q = 0; q < kMaxSplit; ++q)
+            if (q < S)
+                v[q] = __ldcg(tile_ws + (static_cast<size_t>(q) * NF * kThreads) +
+                              (static_cast<size_t>(f) * kThreads) + threadIdx.x);
+        float4 sum = v[0];
+#pragma unroll
+        for (int q = 1; q < kMaxSplit; ++q)
+            if (q < S) {
+                sum.x += v[q].x;
+                sum.y += v[q].y;
+                sum.z += v[q].z;
+                sum.w += v[q].w;
+            }
         acc[f][0] = sum.x;
         acc[f][1] = sum.y;
         acc[f][2] = sum.z;
@@ -218,94 +224,94 @@ __device__ __forceinline__ bool split_reduce(const Args& args, int tile, int ks,
     return true;
 }
 
-// Scores of one row's slots e = lane + 32 j: p = softmax / sigmoid (weights), sel = p + bias (selection).
-__device__ __forceinline__ void row_scores(const MoeRouterFusedArgs& a, const float* logits, int lane,
-                                           float (&p)[kSlots], float (&sel)[kSlots]) {
+// Order-preserving float <-> u32 (redux.sync has integer max / min only).
+__device__ __forceinline__ unsigned ord_bits(float f) {
+    const unsigned u = __float_as_uint(f);
+    return u ^ ((u >> 31) != 0u ? 0xffffffffu : 0x80000000u);
+}
+__device__ __forceinline__ float unord_bits(unsigned u) {
+    return __uint_as_float(u ^ ((u >> 31) != 0u ? 0x80000000u : 0xffffffffu));
+}
+
+// Scores of one row's slots e = hl + 16 j (half-warp hl, mask = its 16 lanes): p = softmax / sigmoid
+// (weights), sel = p + bias (selection).
+__device__ __forceinline__ void row_scores(const MoeRouterFusedArgs& a, const float* logits, int hl,
+                                           unsigned mask, float (&p)[kSlots], float (&sel)[kSlots]) {
     float mx = -FLT_MAX;
 #pragma unroll
     for (int j = 0; j < kSlots; ++j) {
-        p[j] = (lane + (32 * j)) < a.ne ? logits[lane + (32 * j)] : -FLT_MAX;
+        p[j] = (hl + (16 * j)) < a.ne ? logits[hl + (16 * j)] : -FLT_MAX;
         mx = fmaxf(mx, p[j]);
     }
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
-        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    mx = unord_bits(__reduce_max_sync(mask, ord_bits(mx)));
     float sum = 0.0f;
 #pragma unroll
     for (int j = 0; j < kSlots; ++j)
-        sum += (lane + (32 * j)) < a.ne ? expf(p[j] - mx) : 0.0f;
+        sum += (hl + (16 * j)) < a.ne ? expf(p[j] - mx) : 0.0f;
 #pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
+    for (int o = 8; o > 0; o >>= 1)  // offsets < 16 stay inside the half-warp
         sum += __shfl_xor_sync(0xffffffffu, sum, o);
     const float inv = 1.0f / sum;
 #pragma unroll
     for (int j = 0; j < kSlots; ++j) {
-        const int e = lane + (32 * j);
+        const int e = hl + (16 * j);
         const float s = a.use_sigmoid ? 1.0f / (1.0f + expf(-p[j])) : expf(p[j] - mx) * inv;
         p[j] = e < a.ne ? s : -FLT_MAX;
         sel[j] = (e < a.ne && a.score_bias) ? p[j] + __half2float(a.score_bias[e]) : p[j];
     }
 }
 
-// Warp argmax over the lane slots; ties pick the lowest expert index (topk_gating_kernel's order).
-__device__ __forceinline__ void warp_argmax(const float (&sel)[kSlots], int lane, float& best, int& bi) {
-    best = sel[0];
-    bi = lane;
+// Half-warp argmax of sel: max of the order-preserving bits, then the lowest expert index holding it
+// (topk_gating_kernel's tie order). Returns the expert index.
+__device__ __forceinline__ int half_argmax(const float (&sel)[kSlots], int hl, unsigned mask) {
+    float best = sel[0];
+    int bi = hl;
 #pragma unroll
     for (int j = 1; j < kSlots; ++j)
         if (sel[j] > best) {
             best = sel[j];
-            bi = lane + (32 * j);
+            bi = hl + (16 * j);
         }
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        const float ov = __shfl_xor_sync(0xffffffffu, best, o);
-        const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-        if (ov > best || (ov == best && oi < bi)) {
-            best = ov;
-            bi = oi;
-        }
-    }
+    const unsigned key = ord_bits(best);
+    const unsigned top = __reduce_max_sync(mask, key);
+    return static_cast<int>(__reduce_min_sync(mask, key == top ? static_cast<unsigned>(bi) : 0xffffffffu));
 }
 
-// Unbiased score of expert bi (broadcast from its owner lane), whose selection slot is cleared.
-__device__ __forceinline__ float take_expert(const float (&p)[kSlots], float (&sel)[kSlots], int bi,
-                                             int lane) {
-    const int owner = bi & 31;
-    const int slot = bi >> 5;
-    float pv = 0.0f;
-#pragma unroll
-    for (int j = 0; j < kSlots; ++j)
-        if (j == slot) {
-            pv = p[j];
-            if (lane == owner)
-                sel[j] = -FLT_MAX;
-        }
-    return __shfl_sync(0xffffffffu, pv, owner);
-}
-
-// One warp per row: top-k on sel, weights = unbiased scores, renorm summed in pick order.
-__device__ __forceinline__ void route_row(const MoeRouterFusedArgs& a, const float* logits, int row) {
+// Half-warp per row (both halves of a warp run in lockstep, a half past M only skips the store): top-k on
+// sel, weights = unbiased scores, renorm summed in pick order.
+__device__ __forceinline__ void route_row(const MoeRouterFusedArgs& a, const float* logits, int row,
+                                          bool live) {
     const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int hl = lane & 15;
+    const int half0 = lane & 16;
+    const unsigned mask = 0xffffu << half0;
     float p[kSlots], sel[kSlots];
-    row_scores(a, logits, lane, p, sel);
+    row_scores(a, logits, hl, mask, p, sel);
     int my_idx = 0;
     float my_val = 0.0f;
     float norm = 0.0f;
     for (int k = 0; k < a.top_k; ++k) {
-        float best;
-        int bi;
-        warp_argmax(sel, lane, best, bi);
-        const float pv = take_expert(p, sel, bi, lane);
+        const int bi = half_argmax(sel, hl, mask);
+        const int owner = bi & 15;
+        const int slot = bi >> 4;
+        float pv = 0.0f;
+#pragma unroll
+        for (int j = 0; j < kSlots; ++j)
+            if (j == slot) {
+                pv = p[j];
+                if (hl == owner)
+                    sel[j] = -FLT_MAX;
+            }
+        pv = __shfl_sync(0xffffffffu, pv, half0 | owner);
         norm += pv;
-        if (lane == k) {
+        if (hl == k) {
             my_idx = bi;
             my_val = pv;
         }
     }
     const float mult = (a.normalize && norm > 0.0f) ? 1.0f / norm : 1.0f;
-    if (lane < a.top_k) {
-        const size_t o = (static_cast<size_t>(row) * a.top_k) + lane;
+    if (live && hl < a.top_k) {
+        const size_t o = (static_cast<size_t>(row) * a.top_k) + hl;
         a.ids[o] = my_idx;
         a.weights[o] = my_val * mult;
     }
@@ -344,9 +350,10 @@ __global__ void __launch_bounds__(kThreads) moe_router_fused_kernel(Args args) {
                                                                                                   acc[f][3]);
     }
     __syncthreads();
-    for (int rr = warp; rr < C::kBM; rr += kWarps)
-        if (row0 + rr < args.a.M)
-            route_row(args.a, s_logits + static_cast<ptrdiff_t>(rr * kLogitLd), row0 + rr);
+    for (int base = warp * 2; base < C::kBM; base += kWarps * 2) {  // two rows per warp, one per half
+        const int rr = base + (lane >> 4);
+        route_row(args.a, s_logits + static_cast<ptrdiff_t>(rr * kLogitLd), row0 + rr, row0 + rr < args.a.M);
+    }
 }
 
 int ceil_div(int a, int b) { return (a + b - 1) / b; }
@@ -367,7 +374,23 @@ bool launch(const Args& args, int tiles, cudaStream_t stream) {
     return cudaGetLastError() == cudaSuccess;
 }
 
+int g_bm = 0;     // moe_router_fused_tune: 16 / 32, 0 = heuristic
+int g_split = 0;  // 0 = heuristic
+
+// Graph bench (K 2048): M 512 bm 16 10.3 us, M 2048 bm 32 20.1 us, M 4096 bm 32 26.2 us; 64-row tiles
+// lost everywhere (8 epilogue passes, 165 registers).
+int pick_bm(int M) {
+    if (g_bm == 16 || g_bm == 32)
+        return g_bm;
+    return M >= 2048 ? 32 : 16;
+}
+
 }  // namespace
+
+void moe_router_fused_tune(int bm, int split) {
+    g_bm = bm;
+    g_split = (split >= 1 && split <= kMaxSplit) ? split : 0;
+}
 
 size_t moe_router_fused_workspace_bytes(int /*max_rows*/) {
     // Split > 1 only while tiles * split <= kTargetCtas: the partials of the largest tile cap that.
@@ -377,17 +400,18 @@ size_t moe_router_fused_workspace_bytes(int /*max_rows*/) {
 bool moe_router_fused(const MoeRouterFusedArgs& a, void* ws, size_t ws_bytes, cudaStream_t stream) {
     if (!shape_ok(a, ws, ws_bytes))
         return false;
-    // 32-row tiles once they fill the card, else 16; split K until the grid reaches the target and
-    // every CTA keeps >= kMinKTilesPerCta k tiles; the partials must fit the workspace.
+    // Split K until the grid reaches the target and every CTA keeps >= kMinKTilesPerCta k tiles; the
+    // partials must fit the workspace.
     const int ktiles = a.K / kBK;
-    const bool wide = ceil_div(a.M, 32) * 2 > kTargetCtas;
-    const int bm = wide ? 32 : 16;
+    const int bm = pick_bm(a.M);
     const int tiles = ceil_div(a.M, bm);
     if (tiles > kMaxTiles)
         return false;
     int split = 1;
     while (split < kMaxSplit && tiles * split * 2 <= kTargetCtas && ktiles / (split * 2) >= kMinKTilesPerCta)
         split *= 2;
+    if (g_split != 0)
+        split = g_split;
     const size_t part_bytes = static_cast<size_t>(tiles) * split * bm * kNPad * sizeof(float);
     if (split > 1 && kTicketBytes + part_bytes > ws_bytes)
         return false;
@@ -398,7 +422,7 @@ bool moe_router_fused(const MoeRouterFusedArgs& a, void* ws, size_t ws_bytes, cu
     args.ktiles = ktiles;
     args.tickets = static_cast<unsigned*>(ws);
     args.partials = reinterpret_cast<float4*>(static_cast<unsigned char*>(ws) + kTicketBytes);
-    return wide ? launch<2>(args, tiles, stream) : launch<1>(args, tiles, stream);
+    return bm == 32 ? launch<2>(args, tiles, stream) : launch<1>(args, tiles, stream);
 }
 
 }  // namespace imp
