@@ -9,6 +9,7 @@
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
+#include "runtime/prefill_graph_cache.h"
 #include "vision/vision_pipeline.h"
 #include "vision/qwen3vl_pipeline.h"
 #include "audio/audio_pipeline.h"
@@ -416,6 +417,7 @@ public:
     // Counted by the pool itself, not mirrored here: growth is decided in
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
+    const PrefillGraphCache& prefill_graphs() const noexcept { return prefill_graphs_; }
     // StreamingLLM auto-enable events (pool >90% full). Each one also demotes
     // CUDA graphs until the pressure clears (promote_graphs_), so it is the
     // preemption signal an operator wants as a counter, not as a WARN line.
@@ -646,17 +648,12 @@ private:
     PinnedBuffer h_hist_pos_[2];  // mapped (T5b)
     int* d_hist_pos_[2] = {nullptr, nullptr};
 
-    // Prefill graph runner: captures forward_logits for non-last chunks of
-    // chunked prefill. Single runner: in practice chunk_len ==
-    // prefill_chunk_size for all non-last chunks, so per-shape variability
-    // collapses to one shape. Gated by runtime.prefill_graph.
-    CudaGraphRunner prefill_graph_runner_;
-    // (chunk_len, block count, FP8 KV calibration generation, recurrent slot or -1): the captured
-    // shape, and the last eager shape (a repeat triggers the capture). The recurrent kernels bake
-    // their slot's state pointers into the graph.
-    using PrefillGraphKey = std::tuple<int, int, uint64_t, int>;
-    PrefillGraphKey prefill_graph_key_{-1, -1, 0, -1};
-    PrefillGraphKey prefill_pending_key_{-1, -1, 0, -1};
+    // Serial offset-0 prefill graphs (runtime.prefill_graph) keyed by (chunk_len, block count, FP8
+    // KV calibration generation, recurrent slot or -1): the recurrent kernels bake their slot's
+    // state pointers into the graph. One runner per short length (runtime.prefill_graph_prewarm).
+    PrefillGraphCache prefill_graphs_;
+    // runtime.prefill_graph_prewarm: capture the short prompt lengths before the engine goes ready.
+    void prewarm_prefill_graphs_(int32_t token_id);
     // T5b (memory/host_pinned.h): pinned staging for the graph-captured
     // greedy sample. NOT the executor's same-named member — see AUDIT B59.
     PinnedBuffer h_sample_pinned_;

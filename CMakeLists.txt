@@ -185,6 +185,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/vram_allocator.cpp
     src/memory/mem_account.cpp
     src/memory/kv_cache.cu
+    src/memory/kv_cache_grow.cpp
     src/memory/kv_cache_minmax.cu
     src/memory/kv_cache_scales.cu
     src/memory/kv_cache_manager.cpp
@@ -447,6 +448,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/jump_draft.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/prefill_graph_cache.cpp
     src/runtime/engine_kv_evict.cpp
     src/runtime/engine_embed.cpp
     src/runtime/engine_prompt_logprobs.cpp
@@ -945,6 +947,8 @@ if(IMP_BUILD_TESTS)
         tests/test_device_info.cpp
         # FFN prefill graph buckets (#2435).
         tests/test_ffn_graph_cache.cpp
+        # Serial prefill graph runners: one per short length, one shared (runtime.prefill_graph_prewarm).
+        tests/test_prefill_graph_cache.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
         # KV eviction block selection (kv_cache.evict_keep_ratio, roadmap row 48).

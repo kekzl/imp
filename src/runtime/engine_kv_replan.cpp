@@ -22,7 +22,7 @@ void Engine::apply_measured_library_reserve_() {
     const int ceiling_before = kv_cache_raw_->ceiling_blocks();
     const int commit_before = kv_cache_raw_->total_blocks();
     if (r.ceiling_blocks > ceiling_before && kv_cache_raw_->raise_ceiling(r.ceiling_blocks)) {
-        prefill_graph_runner_.invalidate();
+        prefill_graphs_.invalidate_all();
         (void)kv_cache_raw_->probe_residency();
     }
     const int commit_after = kv_cache_raw_->try_grow_to(r.commit_blocks);

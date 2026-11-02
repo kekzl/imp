@@ -12,6 +12,20 @@
 
 namespace imp {
 
+namespace {
+// kv_cache.grow_ahead: a step the worker committed counts for this round's admission.
+void kv_adopt_grown(KVCacheManager* m) {
+    if (m)
+        (void)m->kv_cache()->adopt_grown();
+}
+// After the round's reservations, before its forward: the next growth step commits while the GPU
+// runs, not in the next request's queue time.
+void kv_grow_ahead_tick(KVCacheManager* m) {
+    if (m)
+        m->kv_cache()->grow_ahead_tick();
+}
+}  // namespace
+
 Scheduler::Scheduler(int max_batch_size) : max_batch_size_(max_batch_size) {}
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
@@ -63,6 +77,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 3. Promote pending requests to prefill (up to max_batch_size_ budget). A swapped request
     // comes back first and holds the queue: new admissions would take the blocks it waits for.
+    kv_adopt_grown(kv_manager_);
     if (!swap_in_waiting_()) {
         auto it = pending_.begin();
         while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
@@ -276,6 +291,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             decode_batch.push_back(req);
         }
     }
+
+    // 5. kv_cache.grow_ahead
+    kv_grow_ahead_tick(kv_manager_);
 }
 
 bool Scheduler::has_pending() const { return !pending_.empty(); }

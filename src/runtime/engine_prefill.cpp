@@ -672,28 +672,17 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                  state.vision_embeddings == nullptr &&
                                  // a capture skips the SAE hook (row 116)
                                  !executor_->sae_armed();
-        // Capture a shape on its second consecutive sighting: capture + instantiate cost more than
+        // Capture a shape on its second sighting (PrefillGraphCache): capture + instantiate cost more than
         // one eager forward (26.5 ms instantiate at pp512 on Qwen3-30B-A3B), so a one-off prompt
         // length runs eager and leaves the cached graph in place.
         // Recurrent slot in the key: a replay for another request wrote the captured request's
         // slot (Nemotron-H, two equal-length prompts; GDN prompts take the ragged path).
-        const PrefillGraphKey key{chunk_len, static_cast<int>(block_table.size()),
-                                  executor_->kv_calibration_generation(),
-                                  state.ssm_state ? state.ssm_seq_id : -1};
-        bool use_graph = false;
-        if (can_capture) {
-            if (key == prefill_graph_key_) {
-                use_graph = true;
-            } else if (key == prefill_pending_key_) {
-                prefill_graph_runner_.invalidate_for_update();
-                prefill_graph_key_ = key;
-                use_graph = true;
-            } else {
-                prefill_pending_key_ = key;
-            }
-        }
-        if (use_graph) {
-            prefill_graph_runner_.set_decode_fn([this, &state, &logits_out](cudaStream_t s) {
+        const PrefillGraphCache::Key key{chunk_len, static_cast<int>(block_table.size()),
+                                         executor_->kv_calibration_generation(),
+                                         state.ssm_state ? state.ssm_seq_id : -1};
+        CudaGraphRunner* runner = can_capture ? prefill_graphs_.select(key) : nullptr;
+        if (runner != nullptr) {
+            runner->set_decode_fn([this, &state, &logits_out](cudaStream_t s) {
                 // cuBLASLt records into the capture as in the verify graphs (#847): this shape ran
                 // eagerly before (hysteresis), so Lt's algo cache is warm. The WMMA capture
                 // fallback changed greedy output on Qwen3-30B-A3B at token 11.
@@ -704,7 +693,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 executor_->forward_logits(state, logits_out, s);
             });
             // false only without a decode fn; capture/replay failures fall back to eager inside execute().
-            (void)prefill_graph_runner_.execute(pf_stream);
+            (void)runner->execute(pf_stream);
             if (logits_out.data == nullptr) {
                 logits_out = executor_->get_logits_view(/*n=*/1);
             }

@@ -7,7 +7,10 @@
 #include <cstdint>
 #include <cstddef>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace imp {
@@ -116,6 +119,20 @@ public:
     // per growth whatever its size (Qwen3-14B, 80 regions, 800-1920 MiB), so callers grow in
     // coarse steps, not per block.
     int try_grow_to(int wanted);
+
+    // Grow-ahead (kv_cache.grow_ahead): a worker thread commits the next growth step while the
+    // GPU runs, so admission adopts backed blocks instead of waiting for the driver. Start after
+    // warmup (raise_ceiling refuses once started); a fixed or accounting pool ignores it.
+    void start_grow_ahead();
+    // Once per scheduling round, never blocks: adopt staged blocks, then wake the worker when the
+    // free list is below one growth step (max(64, total / 4)) and the pool below its ceiling.
+    void grow_ahead_tick();
+    // Publish what the worker committed (block ids appended, capacity raised). Returns
+    // total_blocks(). Same thread as allocation.
+    int adopt_grown();
+    [[nodiscard]] bool grow_ahead_running() const { return grow_thread_.joinable(); }
+    // Growths the worker committed off the admission path; growths() counts them on adoption.
+    [[nodiscard]] uint64_t growths_ahead() const { return growths_ahead_.load(std::memory_order_relaxed); }
 
     // Re-reserve a growable pool at a larger ceiling, same committed blocks. Every pointer
     // moves: only while no block is held and nothing captured one (init, #2436). False and
@@ -262,6 +279,26 @@ private:
     int plan_growth_(int max_blocks, int ceiling_blocks);
     [[nodiscard]] bool reserve_pool_(size_t total_bytes, int fixed_blocks);
     int commit_blocks_(int blocks);
+    // Fresh-block zeroing: on zero_stream_ when set (the worker), else the legacy stream.
+    void zero_(void* dst, size_t bytes);
+    void zero_fence_();
+    // try_grow_to's free-VRAM cap: target lowered to what fits above the allocator headroom.
+    int cap_by_free_vram_(int target, int base);
+
+    // Grow-ahead state. commit_mu_ serialises commit_blocks_ between try_grow_to and the worker;
+    // staged_blocks_ is committed_blocks_ after the last commit, published by adopt_grown().
+    std::mutex commit_mu_;
+    std::atomic<int> staged_blocks_{0};
+    std::thread grow_thread_;
+    std::mutex grow_mu_;
+    std::condition_variable grow_cv_;
+    int grow_want_ = 0;       // guarded by grow_mu_
+    bool grow_stop_ = false;  // guarded by grow_mu_
+    int grow_device_ = 0;
+    cudaStream_t zero_stream_ = nullptr;  // set by the worker under commit_mu_
+    std::atomic<uint64_t> growths_ahead_{0};
+    void grow_ahead_loop_();
+    void stop_grow_ahead_();
 
     // Per-layer geometry, shared by the memory-backed and accounting per-layer
     // constructors so the two cannot disagree about a shape. layout_layers_ normalises the

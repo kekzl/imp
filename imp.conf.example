@@ -36,6 +36,10 @@ graph_capture_mode   = "relaxed"
 # Capture prefill into a CUDA graph too (default ON since 2026-05-17).
 # Auto-disabled when the model's prefill path is uncapturable.
 prefill_graph        = true
+# Prompts up to N tokens keep a prefill graph each, captured at startup (two
+# dummy prefills per length): the first request of a short length replays
+# instead of running eager. Longer prompts share one re-captured runner.
+prefill_graph_prewarm = 0
 # Every other prefill (ragged waves, continuation chunks, prefix hits): the
 # FFN/MoE phase replays per (layer, padded rows) from a CUDA graph, attention
 # stays eager (#2435).
@@ -247,6 +251,10 @@ growable                    = true
 # spilled into host memory decodes at a fraction of the bandwidth with nothing
 # reporting an error.
 growable_initial_pct        = 25
+# Commit the next growth step on a worker thread once the free list drops below
+# it, so a request adopts backed blocks instead of waiting in the queue for the
+# driver mapping (35-65 ms per growth on Qwen3-8B). Same free-VRAM cap.
+grow_ahead                  = true
 # BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0

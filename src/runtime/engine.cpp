@@ -58,6 +58,15 @@ namespace imp {
 // File-local helpers live in runtime/engine_internal.h, shared by the
 // per-subsystem engine_*.cpp translation units.
 
+namespace {
+// After warmup's raise_ceiling (it refuses once the worker runs). A "global" capture forbids the
+// worker's driver calls in every thread while the engine captures.
+void start_kv_grow_ahead(KVCache* kv, const RuntimeConfig& rc) {
+    if (kv != nullptr && rc.kv_cache.grow_ahead && rc.runtime.graph_capture_mode != "global")
+        kv->start_grow_ahead();
+}
+}  // namespace
+
 namespace engine_internal {
 void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
                                    int& meta_cap) {
@@ -289,7 +298,7 @@ void Engine::invalidate_graphs() {
     cudaStreamCaptureStatus pf_capture = cudaStreamCaptureStatusNone;
     if (prefill_stream() && cudaStreamIsCapturing(prefill_stream(), &pf_capture) == cudaSuccess &&
         pf_capture != cudaStreamCaptureStatusNone)
-        prefill_graph_runner_.invalidate();
+        prefill_graphs_.invalidate_all();
     abort_stream_capture(prefill_stream());
 }
 
@@ -327,7 +336,7 @@ bool Engine::lora_set(int id) {
     // kernels and with the old adapter's pointers), drop everything,
     // including the per-batch pool that invalidate_graphs() preserves.
     invalidate_graphs();
-    prefill_graph_runner_.invalidate();
+    prefill_graphs_.invalidate_all();
     for (auto& g : decode_graph_pool_)
         g.invalidate();
     IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");
@@ -859,6 +868,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                    << 20);
     wire_kv_swap_();
     executor_->set_ffn_graphs_enabled(runtime_config_.runtime.prefill_ffn_graph, config_.use_cuda_graphs);
+    prefill_graphs_.set_short_max(runtime_config_.runtime.prefill_graph_prewarm);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate
     // the small-M scratches (#1897). Charged in the T2 arena demand above.
@@ -881,6 +891,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // serving-phase acquisition; release builds count it per tag and log once,
     // since a production server must not die over an accounting bug.
     set_alloc_phase(AllocPhase::Serving);
+    start_kv_grow_ahead(kv_cache_raw_, runtime_config_);
     // Arm the CUDA-side watermarks too: the phase guard only sees Backend
     // traffic, these see every cudaMallocAsync and every graph-owned
     // allocation regardless of who made it (AUDIT B8).

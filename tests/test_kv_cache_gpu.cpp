@@ -14,11 +14,13 @@
 #include "core/tensor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <numeric>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -638,6 +640,51 @@ TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
               cudaSuccess)
         << "a block grown past the old ceiling has its min/max backed";
     EXPECT_TRUE(std::all_of(meta.begin(), meta.end(), [](uint8_t b) { return b == 0; }));
+}
+
+// kv_cache.grow_ahead: the free list falling below one step (max(64, total / 4)) wakes the worker,
+// which commits and zeroes the step off the caller's thread; nothing is published until
+// adopt_grown(), and a later try_grow_to finds the step backed without committing again.
+TEST(KVCacheGrowTest, GrowAheadCommitsOffThePathAndAdoptionPublishes) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::NVFP4, /*max_blocks=*/64,
+                  /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/512);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    cache.grow_ahead_tick();  // not started: a no-op
+    EXPECT_EQ(cache.growths_ahead(), 0u);
+    cache.start_grow_ahead();
+    ASSERT_TRUE(cache.grow_ahead_running());
+    EXPECT_FALSE(cache.raise_ceiling(1024)) << "the worker maps into the reservation";
+
+    cache.grow_ahead_tick();  // 64 free, not below the 64-block step
+    const int held = cache.allocate_block();
+    ASSERT_GE(held, 0);
+    cache.grow_ahead_tick();  // 63 free: wakes the worker for 64 + 64
+    for (int i = 0; i < 400 && cache.growths_ahead() == 0; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    ASSERT_EQ(cache.growths_ahead(), 1u) << "the worker never committed the step";
+    EXPECT_EQ(cache.total_blocks(), 64) << "staged blocks are invisible until adopted";
+
+    const uint64_t growths_before = cache.growths();
+    EXPECT_EQ(cache.adopt_grown(), 128);
+    EXPECT_EQ(cache.total_blocks(), 128);
+    EXPECT_EQ(cache.num_free_blocks(), 127);
+    EXPECT_EQ(cache.growths(), growths_before + 1);
+    EXPECT_EQ(cache.try_grow_to(128), 128);
+    EXPECT_EQ(cache.growths_ahead(), 1u);
+
+    const size_t bb = cache.block_bytes();
+    std::vector<uint8_t> host(bb, 0xAB);
+    ASSERT_EQ(cudaMemcpy(host.data(), cache.v_ptr(1, 127), bb, cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }))
+        << "a block the worker grew is backed and zeroed";
+    std::vector<uint8_t> sc(cache.scale_block_bytes(1), 0xAB);
+    ASSERT_EQ(cudaMemcpy(sc.data(), cache.k_scale_ptr(1, 127), sc.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    EXPECT_TRUE(std::all_of(sc.begin(), sc.end(), [](uint8_t b) { return b == 0; }))
+        << "its scales are backed and zeroed too";
+    cache.free_block(held);
 }
 
 // Per-layer geometry re-lays out every layer at the new stride.
