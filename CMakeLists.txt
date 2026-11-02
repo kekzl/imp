@@ -273,6 +273,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_gemv_dense.cu
     src/quant/nvfp4_gemv_batched.cu
     src/quant/nvfp4_gemm_smallm.cu
+    src/quant/fp8_gemm_smallm.cu
     src/quant/nvfp4_gemm_smallm_v2.cu
     src/quant/nvfp4_gemm_tile.cu
     src/quant/mxfp4_sfatom.cu
@@ -1413,6 +1414,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemm_tile.cu
         tests/test_gemm_mxfp8_tile.cu
         tests/test_gemm_fp8_tile.cu
+        tests/test_fp8_gemm_smallm.cu
         tests/test_gemm_mxfp4_tile.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_prefill_row_invariance.cu

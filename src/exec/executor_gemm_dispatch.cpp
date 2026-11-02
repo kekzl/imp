@@ -30,6 +30,7 @@
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_tile.h"
+#include "quant/fp8_gemm_smallm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/gemm_q8_0_dense.h"
@@ -873,6 +874,20 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
+    // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
+    const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
+    if (cur_decode_rows_ && M <= smallm_max && out.qtype == QType::F16 && a8.is_contiguous() &&
+        out.is_contiguous() && a_scale && w_scale &&
+        gemm_fp8_smallm(a8.data, w8.data, a_scale, w_scale, beta, static_cast<half*>(out.data), M, N, K,
+                        stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("gemm.fp8_smallm_max_m: own FP8 small-M GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M,
+                         N, K, beta);
+        }
+        return;
+    }
     // gemm.fp8_tile_min_m: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own -18
     // %).
     const int min_m = process_diag_fp8_tile_min_m();
@@ -890,6 +905,32 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         return;
     }
     gemm_cublaslt(a8, w8, out, 1.0f, beta, a_scale, w_scale, stream);
+}
+
+void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
+                                      const float* const* w_scale, int count, const float* a_scale,
+                                      cudaStream_t stream) {
+    const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
+    const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
+    const auto& g = dispatch_policy().gemm;
+    bool ok = cur_decode_rows_ && g.fp8_smallm_multi && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
+              count >= 2 && count <= kFp8SmallMMaxSiblings;
+    Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
+    for (int i = 0; ok && i < count; ++i) {
+        ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
+        t[i] = {w8[i].data, w_scale[i], static_cast<half*>(out[i]->data), static_cast<int>(w8[i].shape[0])};
+    }
+    if (ok && gemm_fp8_smallm_multi(t, count, a8.data, a_scale, M, K, stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("gemm.fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
+                         count, K);
+        }
+        return;
+    }
+    for (int i = 0; i < count; ++i)
+        gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a_scale, w_scale[i], stream);
 }
 
 const float* GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,

@@ -262,8 +262,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 Tensor fp8_tg = make_fp8_tensor(hwg);
                 Tensor fp8_tu = make_fp8_tensor(hwu);
-                gemm_fp8x8_(fp8_no, fp8_tg, go, 0.0f, fp8_a_scale, hwg->payload.fp8.d_scale, stream);
-                gemm_fp8x8_(fp8_no, fp8_tu, uo, 0.0f, fp8_a_scale, hwu->payload.fp8.d_scale, stream);
+                const Tensor w2[2] = {fp8_tg, fp8_tu};
+                Tensor* const o2[2] = {&go, &uo};
+                const float* const s2[2] = {hwg->payload.fp8.d_scale, hwu->payload.fp8.d_scale};
+                gemm_fp8x8_multi_(fp8_no, w2, o2, s2, 2, fp8_a_scale, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the
