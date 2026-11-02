@@ -2,7 +2,7 @@
 # Kernel inventory: nsys (graphs ON, --cuda-graph-trace=node) over model x workload cells of
 # `imp-cli --bench`, per-phase kernel sums via inventory_extract.py (NVTX bench:* ranges).
 # Usage: tools/roofline/inventory/inventory.sh [model_key...]   (default: every row of matrix.tsv)
-# Env: WORKLOADS="pp512 pp4096 tg128 tg128_ctx8k" IMAGE=imp:test
+# Env: WORKLOADS="pp512 pp4096 tg128 tg128_ctx8k" (also pp32) IMAGE=imp:test
 #      BIN_DIR=<dir> BIN=<file>: profile that imp-cli copy (inside IMAGE) instead of the image's
 #      OUT=<dir>: output directory; an existing <cell>.json is skipped
 # Output: tools/roofline/inventory/out/<model>__<workload>.{json,log}; .nsys-rep/.sqlite deleted.
@@ -24,6 +24,7 @@ workloads="${WORKLOADS:-pp512 pp4096 tg128 tg128_ctx8k}"
 # workload -> imp-cli args (decode arms: spec off, the gate's regime)
 wl_args() {
     case "$1" in
+        pp32) echo "--bench-pp 32 --max-tokens 1 --bench-reps 10" ;;
         pp512) echo "--bench-pp 512 --max-tokens 1 --bench-reps 3" ;;
         pp4096) echo "--bench-pp 4096 --max-tokens 1 --bench-reps 2" ;;
         tg128) echo "--bench-pp 512 --max-tokens 128 --bench-reps 2 --set speculative.ngram=false" ;;
