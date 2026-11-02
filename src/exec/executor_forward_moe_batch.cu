@@ -36,6 +36,7 @@
 #include "compute/attention_cublas.h"
 #include "compute/attention_paged.h"
 #include "compute/moe_routing.h"
+#include "exec/moe_router_route.h"
 #include "compute/sampling.h"
 #include "compute/ssm.h"
 #include "compute/gdn.h"
@@ -681,6 +682,15 @@ static void router_logits_gemm(const Tensor& in, const Tensor& gate, void* scrat
     }
 }
 
+// Routing decision dump (diagnostics.dump_routing_dir): layer 0, or every layer for "all".
+static void maybe_dump_routing(const std::string& drv, int layer, int n, int top_k,
+                               const MoeRoutingResult& routing) {
+    if (drv.empty() || (layer != 0 && drv != "all"))
+        return;
+    dump_routing_decision(layer, n, top_k, static_cast<const int32_t*>(routing.expert_indices.data),
+                          static_cast<const float*>(routing.expert_weights.data));
+}
+
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -721,6 +731,14 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
         if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
+    } else if (router_fused_route(router_in, ly.moe_gate, compute_dtype_, n, ne, top_k, use_sigmoid,
+                                  norm_weights, router_bias_ptr,
+                                  RouterFusedGate{dispatch_policy().moe.router_fused, dump_logits,
+                                                  grp.active(), model_->profile().moe_router_logit_bias,
+                                                  ly.router_bias.data},
+                                  moe_.routing_buffers, moe_.router_fused_ws, moe_.router_fused_ws_bytes,
+                                  stream)) {
+        moe_topk_finish(n, ne, top_k, moe_.routing_buffers, routing, stream, will_decode_fast);
     } else if (ne <= grp.fused_expert_cap(kMaxFusedExperts) && n == 1 && compute_dtype_ == QType::F16 &&
                ly.moe_gate.qtype == QType::F16 && moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel
@@ -750,13 +768,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         run_topk(gate_logits_f32);
     }
 
-    // Routing decision dump
-    if (const std::string& drv = dispatch_policy().diagnostics.dump_routing_dir; !drv.empty()) {
-        bool dump_all = (drv == "all");
-        if (layer == 0 || dump_all)
-            dump_routing_decision(layer, n, top_k, static_cast<const int32_t*>(routing.expert_indices.data),
-                                  static_cast<const float*>(routing.expert_weights.data));
-    }
+    maybe_dump_routing(dispatch_policy().diagnostics.dump_routing_dir, layer, n, top_k, routing);
 
     // Per-launch expert imbalance (#1548), always on (not diagnostics-gated):
     // answers "is this layer padding-bound" for a running server, unlike the

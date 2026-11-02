@@ -83,6 +83,10 @@ struct MoE {
     // Decode on the device expert cache: the miss gather runs on a side stream while the routed
     // experts that hit run their GEMVs; the misses follow once the gather lands. Output bits unchanged.
     bool expert_gather_overlap = true;
+    // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
+    // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +
+    // top-k. F16 router, <= 128 experts, no group limit; off under runtime.deterministic.
+    bool router_fused = true;
     // Host expert tier for unpinned host-resident NVFP4 experts (#2621): pinned LRU of expert
     // units filled by pread from the checkpoint. 0 = host RAM available - max(6 GiB, 10 % RAM), N = cap MiB
     // (below the experts: they are not pinned, the tier serves), -1 = off.

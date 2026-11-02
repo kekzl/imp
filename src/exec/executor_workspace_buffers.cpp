@@ -20,6 +20,7 @@
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
+#include "compute/moe_router_fused.h"           // moe_router_fused_workspace_bytes
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -1070,6 +1071,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (!moe_.router_ws)
             moe_.router_ws_bytes = 0;
     }
+    if (has_moe_ && dispatch_policy().moe.router_fused && cfg.n_experts > 0 && cfg.n_experts <= 128) {
+        moe_.router_fused_ws_bytes = moe_router_fused_workspace_bytes(max_tokens_);
+        moe_.router_fused_ws = vram_alloc(vram_alloc_, moe_.router_fused_ws_bytes, "moe_router_fused_ws");
+        if (moe_.router_fused_ws)
+            IMP_CUDA_CHECK_LOG(cudaMemset(moe_.router_fused_ws, 0, moe_.router_fused_ws_bytes));  // tickets
+        else
+            moe_.router_fused_ws_bytes = 0;
+    }
 
     // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
     if (fp8_act_scratch_needed(*model_, wcache_.use_fp8, dispatch_policy().gemm.fp8_native_prefill)) {
@@ -1440,6 +1449,8 @@ void GraphExecutor::free_buffers() {
     gdn_ws_.ab_prefill_bytes = 0;
     vfree(moe_.router_ws);
     moe_.router_ws_bytes = 0;
+    vfree(moe_.router_fused_ws);
+    moe_.router_fused_ws_bytes = 0;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {

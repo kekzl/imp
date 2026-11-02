@@ -41,6 +41,8 @@ struct MoEWorkspace {
     // --- Separately allocated buffers ---
     void* router_ws = nullptr;  // fp32 split-K partials of the router GEMM (gemm_f16_splitk)
     size_t router_ws_bytes = 0;
+    void* router_fused_ws = nullptr;  // moe_router_fused: split-K tickets (zeroed once) + fp32 partials
+    size_t router_fused_ws_bytes = 0;
 
     // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
     void* dequant_buf = nullptr;

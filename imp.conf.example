@@ -670,6 +670,9 @@ shared_expert_overlap = true
 # Decode on the device expert cache: the miss gather crosses PCIe on a side stream while the
 # routed experts that hit run their GEMVs; output bits unchanged.
 expert_gather_overlap = true
+# Router of n >= 2 rows as one launch (GEMM + softmax / sigmoid + top-k + renorm), F16 router,
+# <= 128 experts, no group limit; off under runtime.deterministic.
+router_fused         = true
 # Host expert tier (#2621): when host RAM cannot pin every host-resident NVFP4 expert, an LRU
 # of pinned expert units is filled from the checkpoint by parallel pread and feeds the device
 # expert cache (CUDA graphs stay on). 0 = host RAM available minus max(6 GiB, 10 % of RAM), N = cap in MiB (a cap
