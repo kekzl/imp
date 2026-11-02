@@ -85,6 +85,17 @@ void usage() {
         "                per 32, `<m>.weight_scale` U8 [N,K/32]): half the BF16 bytes.\n"
         "                The loader widens them to BF16. Implies --keep-gdn-proj all\n"
         "                unless that flag names roles.\n"
+        "  --fp8-keep L.G[,...]\n"
+        "                write these dense projections as FP8 E4M3 with one F32\n"
+        "                per-tensor scale instead of NVFP4; G = qkv | o | gate_up |\n"
+        "                down, L = layer or * (\"*.down,27.gate_up\"). Declared as\n"
+        "                Modelopt MIXED_PRECISION; modelopt format only.\n"
+        "  --fp8-budget P\n"
+        "                keep the highest-scoring units in FP8 while the export\n"
+        "                stays within P %% over the pure NVFP4 export; needs\n"
+        "  --fp8-score F  F.hess (calibration.hessian): score = output loss\n"
+        "                sum(dW H dW^T) of NVFP4 minus FP8; else a text file of\n"
+        "                '<layer>.<group> <score>' lines (e.g. measured PPL gains)\n"
         "  --dry-run    report what would be quantized and how large the result\n"
         "                will be, against what the card has left. Writes nothing.\n");
 }

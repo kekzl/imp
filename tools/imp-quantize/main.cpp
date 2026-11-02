@@ -25,6 +25,7 @@
 #include "checkpoint_out.h"
 #include "expert_destack.h"
 #include "fp8_head.h"
+#include "fp8_keep_run.h"
 #include "options.h"
 #include "fp8_source.h"
 #include "quant_report.h"
@@ -332,6 +333,60 @@ void push_mxfp8(const RawTensor& t, const std::vector<uint16_t>& h, bool dry_run
     out.push_back({t.name + "_scale", "U8", {N, K / imp::kMxfp8Block}, s.data(), s.size()});
 }
 
+// Fused layers share one tensor scale (checkpoint_out.h): an engine merging q/k/v into one
+// linear keeps one scale for the merged weight, so three independently calibrated scales leave
+// two matrices dequantized wrong. Decided in its own pass over the source since the scale must
+// be known before the first member is quantized and members aren't guaranteed to share a shard.
+bool plan_fused_scales(const std::vector<std::unique_ptr<RawSafeTensors>>& opened, const Options& opt,
+                       const std::set<std::string>& fp8_scale_names,
+                       const std::set<std::string>& gated_q_proj,
+                       const std::map<std::string, const RawTensor*>& fp8_scale_of, const awq::Plan& plan,
+                       std::map<std::string, float>& forced_scale) {
+    std::map<std::string, std::vector<const RawTensor*>> groups;
+    for (const auto& src : opened) {
+        for (const auto& t : src->tensors()) {
+            if (fp8_scale_names.contains(t.name) || gated_q_proj.contains(t.name))
+                continue;
+            // Asks the policy exactly as the writer does, so a tensor the writer keeps at full precision
+            // isn't given a scale here, and doesn't drag a fused sibling's scale up with an absmax that
+            // was never quantized.
+            std::string why;
+            const bool refused = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) ||
+                                 (fp8_scale_of.contains(t.name)
+                                      ? quantize::fp8_source_action(t, false, opt.quantize_lm_head, why) !=
+                                            quantize::Fp8SourceAction::Quantize
+                                      : !quantize::should_quantize(t, opt.quantize_lm_head, why));
+            if (refused)
+                continue;
+            const std::string key = quantize::fusion_group_key(t.name);
+            if (!key.empty())
+                groups[key].push_back(&t);
+        }
+    }
+    size_t n_shared = 0, n_groups = 0;
+    for (auto& [key, members] : groups) {
+        if (members.size() < 2)
+            continue;  // a group of one shares with nobody
+        float amax = 0.0f;
+        for (const RawTensor* t : members) {
+            const auto h = tensor_as_fp16(*t, fp8_scale_of, plan);
+            if (!h) {
+                fprintf(stderr, "  %s: %s\n", t->name.c_str(), h.error().c_str());
+                return false;
+            }
+            amax = std::max(amax, quantize::fp16_absmax(h->data(), h->size()));
+        }
+        const float s = quantize::export_tensor_scale(amax);
+        for (const RawTensor* t : members)
+            forced_scale[t->name] = s;
+        n_shared += members.size();
+        n_groups++;
+    }
+    if (n_groups)
+        printf("fused layers: %zu tensors in %zu groups share a tensor scale\n", n_shared, n_groups);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -533,62 +588,32 @@ int main(int argc, char** argv) {
         fp8_scale_names = std::move(pairing.consumed);
     }
 
-    // Fused layers share one tensor scale (checkpoint_out.h): an engine merging q/k/v into one
-    // linear keeps one scale for the merged weight, so three independently calibrated scales leave
-    // two matrices dequantized wrong. Decided in its own pass over the source since the scale must
-    // be known before the first member is quantized and members aren't guaranteed to share a shard.
     std::map<std::string, float> forced_scale;
-    if (!opt.dry_run) {
-        std::map<std::string, std::vector<const RawTensor*>> groups;
-        for (const auto& src : opened) {
-            for (const auto& t : src->tensors()) {
-                if (fp8_scale_names.contains(t.name) || gated_q_proj.contains(t.name))
-                    continue;
-                // Asks the policy exactly as the writer does, so a tensor the writer keeps at full precision
-                // isn't given a scale here, and doesn't drag a fused sibling's scale up with an absmax that
-                // was
-                // never quantized.
-                std::string why;
-                const bool refused = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) ||
-                                     (fp8_scale_of.contains(t.name)
-                                          ? quantize::fp8_source_action(t, false, opt.quantize_lm_head,
-                                                                        why) !=
-                                                quantize::Fp8SourceAction::Quantize
-                                          : !quantize::should_quantize(t, opt.quantize_lm_head, why));
-                if (refused)
-                    continue;
-                const std::string key = quantize::fusion_group_key(t.name);
-                if (!key.empty())
-                    groups[key].push_back(&t);
-            }
-        }
-        size_t n_shared = 0, n_groups = 0;
-        for (auto& [key, members] : groups) {
-            if (members.size() < 2)
-                continue;  // a group of one shares with nobody
-            float amax = 0.0f;
-            for (const RawTensor* t : members) {
-                const auto h = tensor_as_fp16(*t, fp8_scale_of, plan);
-                if (!h) {
-                    fprintf(stderr, "  %s: %s\n", t->name.c_str(), h.error().c_str());
-                    return 1;
-                }
-                amax = std::max(amax, quantize::fp16_absmax(h->data(), h->size()));
-            }
-            const float s = quantize::export_tensor_scale(amax);
-            for (const RawTensor* t : members)
-                forced_scale[t->name] = s;
-            n_shared += members.size();
-            n_groups++;
-        }
-        if (n_groups)
-            printf("fused layers: %zu tensors in %zu groups share a tensor scale\n", n_shared, n_groups);
-    }
+    if (!opt.dry_run &&
+        !plan_fused_scales(opened, opt, fp8_scale_names, gated_q_proj, fp8_scale_of, plan, forced_scale))
+        return 1;
 
     auto forced_of = [&](const std::string& name) {
         const auto it = forced_scale.find(name);
         return it == forced_scale.end() ? 0.0f : it->second;
     };
+    // Mixed NVFP4 + FP8 (row 101, fp8_keep_run.h): BF16/FP16-source dense projections only.
+    quantize::Fp8Keep fp8_keep;
+    auto nvfp4_target = [&](const RawTensor& t) {
+        std::string why;
+        return !fp8_scale_of.contains(t.name) && !fp8_scale_names.contains(t.name) &&
+               !stacked_names.contains(t.name) && !gated_q_proj.contains(t.name) &&
+               !quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) &&
+               quantize::should_quantize(t, opt.quantize_lm_head, why);
+    };
+    if (const std::string err = fp8_keep.plan(
+            opt, opened, nvfp4_target,
+            [&](const RawTensor& t) { return tensor_as_fp16(t, fp8_scale_of, plan); }, forced_of,
+            plan.col_scale);
+        !err.empty()) {
+        fprintf(stderr, "imp-quantize: %s\n", err.c_str());
+        return 1;
+    }
     // GPTQ (row 101) for weights with a Hessian, round-to-nearest for the rest.
     quantize::WeightQuantizer wq;
     if (const std::string err = opt.dry_run ? "" : wq.open(opt); !err.empty()) {
@@ -606,6 +631,7 @@ int main(int argc, char** argv) {
                               const std::string& weight_name, int64_t N, int64_t K, const Quantized& q) {
         scale_store.push_back(quantize::global_scale_value(q.tensor_scale, opt.format));
         const std::string base = weight_name.substr(0, weight_name.size() - strlen(".weight"));
+        fp8_keep.note_nvfp4(base);
         const quantize::QuantTensorNames names = quantize::quant_tensor_names(base, opt.format);
         out.push_back({names.packed, "U8", {N, K / 2}, q.packed.data(), q.packed.size()});
         out.push_back({names.micro_scale, "F8_E4M3", {N, K / 16}, q.micro.data(), q.micro.size()});
@@ -793,6 +819,12 @@ int main(int argc, char** argv) {
                 n_copied++;
                 continue;
             }
+            if (fp8_keep.selected(t.name)) {
+                if (!fp8_keep.emit(t, opt.dry_run, out, bytes_out))
+                    return 1;
+                n_quantized++;
+                continue;
+            }
 
             const int64_t N = t.shape[0], K = t.shape[1];
             if (opt.dry_run) {
@@ -844,6 +876,7 @@ int main(int argc, char** argv) {
         }
         for (const auto& o : out)
             tensor_to_shard.emplace_back(o.name, shard.filename().string());
+        fp8_keep.release_shard();
         printf("  -> %s\n", dst.string().c_str());
     }
 
@@ -873,7 +906,8 @@ int main(int argc, char** argv) {
         auto declared = opt.format == quantize::OutputFormat::Modelopt
                             ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules, calibrated,
                                                                     kv_fp8,
-                                                                    quantize::recipe_json(recipe, "    "))
+                                                                    quantize::recipe_json(recipe, "    "),
+                                                                    fp8_keep.quantized_layers_json("    "))
                             : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
         if (declared && opt.format != quantize::OutputFormat::Modelopt)
             declared = quantize::write_recipe_json(opt.out_dir, quantize::recipe_json(recipe, ""));

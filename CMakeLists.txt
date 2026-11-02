@@ -736,6 +736,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/awq.cu
         tools/imp-quantize/gptq.cu
         tools/imp-quantize/quantize_weight.cpp
+        tools/imp-quantize/fp8_keep.cpp
+        tools/imp-quantize/fp8_keep_run.cpp
     )
     # Export recipe (#2481): the build's git tree id (build_image.sh), one TU so ccache keeps the rest.
     set(IMP_TREE_ID "" CACHE STRING "git tree id recorded in imp-quantize export recipes")
@@ -1190,6 +1192,9 @@ if(IMP_BUILD_TESTS)
         tools/imp-quantize/recipe.cpp
         tests/test_quantize_recipe.cpp
         tests/test_quantize_checkpoint_out.cpp
+        # Mixed NVFP4 + FP8 export units, budget pick, MIXED_PRECISION table (row 101).
+        tools/imp-quantize/fp8_keep.cpp
+        tests/test_quantize_fp8_keep.cpp
         # Table of which consumers share an activation, which producer absorbs 1/s, and whether a
         # norm carries a unit offset: a pure function, so the CPU lane holds it. Wrong here means a
         # checkpoint that loads but is a different model.

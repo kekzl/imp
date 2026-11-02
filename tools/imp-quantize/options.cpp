@@ -8,6 +8,7 @@
 #include "imp/error.h"
 
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 
 namespace imp::quantize {
@@ -50,7 +51,19 @@ std::optional<int> parse_args(int argc, char** argv, Options& opt) {
             opt.gdn_proj_mxfp8 = true;
             if (opt.keep_gdn_proj.empty())
                 opt.keep_gdn_proj = "all";
-        } else if (a == "--gptq")
+        } else if (a == "--fp8-keep")
+            opt.fp8_keep = next();
+        else if (a == "--fp8-budget") {
+            const std::string v = next();
+            char* end = nullptr;
+            opt.fp8_budget = std::strtod(v.c_str(), &end);
+            if (v.empty() || *end != '\0' || !(opt.fp8_budget >= 0.0)) {
+                fprintf(stderr, "imp-quantize: --fp8-budget '%s': expected a percent >= 0\n", v.c_str());
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
+            }
+        } else if (a == "--fp8-score")
+            opt.fp8_score = next();
+        else if (a == "--gptq")
             opt.gptq_file = next();
         else if (a == "--gptaq")
             opt.gptaq_file = next();
