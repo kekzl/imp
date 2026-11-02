@@ -68,6 +68,8 @@ void process_diag_install(const RuntimeConfig& cfg) {
     // runtime.deterministic: no timed cuBLASLt algo pick.
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
+    // "auto" resolves per model at engine init (init_resolve_quant_flags_); without an engine: on.
+    d.nvfp4_prompt_streamk = cfg.gemm.nvfp4_prompt_streamk != "off";
     d.f16_tile = cfg.gemm.f16_tile;
     d.q6k_tile = cfg.gemm.q6k_tile;
     d.mxfp4_tile = cfg.gemm.mxfp4_tile;

@@ -101,6 +101,10 @@ struct GEMM {
     // -0.9 % vs cuBLASLt; from M 1 since the per-grid plan + 128x64 tile: pp128 Qwen3-8B 42.8-43.3 ->
     // 34.8-35.1 ms vs CUTLASS (#2935). On refusal: cuBLASLt from nvfp4_cublaslt_min_m, else dequant.
     int nvfp4_tile_min_m = 1;
+    // Stream-K on prompt rows (M >= 33) of the own NVFP4 tile: its k split follows M, so a prompt row
+    // moves with its chunk (prefix-cache resend). "auto": off on MoE (Gemma-4-26B resend 0.179 nats -> 0,
+    // pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep stream-K.
+    std::string nvfp4_prompt_streamk = "auto";
     // Own FP16 GEMM (src/compute/gemm_f16_tile.cu) instead of cuBLASLt for F16 x F16 -> F16 with fp16
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
     // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.

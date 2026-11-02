@@ -41,7 +41,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_CPP = ROOT / "src" / "runtime" / "config.cpp"
 EXAMPLE = ROOT / "imp.conf.example"
 
-BIND_RE = re.compile(r'^\s*[BIFS]\("([A-Za-z0-9_.]+)"', re.M)
+BIND_RE = re.compile(r'^\s*[BIFST]\("([A-Za-z0-9_.]+)"', re.M)
 DOTTED_RE = re.compile(r'dotted_key\s*==\s*"([a-z0-9_.]+)"')
 SECTION_RE = re.compile(r"^\[([a-z0-9_]+)\]")
 KEY_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=")

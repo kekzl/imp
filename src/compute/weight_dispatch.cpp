@@ -197,7 +197,12 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                 void* act_sf = act_data + act_data_bytes;
                 void* ws_buf = reinterpret_cast<uint8_t*>(act_sf) + act_sf_bytes;
                 quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
-                const size_t ws_left = process_diag_deterministic() ? 0 : workspace_bytes - total_needed;
+                // Prompt rows (M >= 33) and stream-K: gemm.nvfp4_prompt_streamk, as
+                // gemm_kernel_cutlass_nvfp4.cpp.
+                const size_t ws_left = (process_diag_deterministic() ||
+                                        (M > 32 && !process_diag_nvfp4_prompt_streamk()))
+                                           ? 0
+                                           : workspace_bytes - total_needed;
                 bool ok = gemm_nvfp4_tile(act_data, act_sf, cw.data, cw.scale_factors, cw.tensor_scale,
                                           y.data, M, N, K, stream, -1, ws_left > 0 ? ws_buf : nullptr,
                                           ws_left);

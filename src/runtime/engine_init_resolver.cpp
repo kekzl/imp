@@ -699,6 +699,13 @@ void Engine::init_resolve_quant_flags_() {
         IMP_LOG_INFO("cuBLAS FP16-accumulate prefill: auto → %s (arch=%s)", deny ? "OFF" : "ON",
                      model_arch_name(mcfg.arch));
     }
+    // gemm.nvfp4_prompt_streamk=auto: off on MoE, where the dense projections are a small prefill share
+    // (pp512 -0.7 %) and the resend must not move; on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it).
+    if (runtime_config_.gemm.nvfp4_prompt_streamk == "auto") {
+        const bool moe = mcfg.n_experts > 0;
+        process_diag_set_nvfp4_prompt_streamk(!moe);
+        IMP_LOG_INFO("gemm.nvfp4_prompt_streamk: auto → %s (%s)", moe ? "OFF" : "ON", moe ? "MoE" : "dense");
+    }
 
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;

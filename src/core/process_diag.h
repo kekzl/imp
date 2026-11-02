@@ -65,6 +65,7 @@ struct ProcessDiag {
     bool attention_fp8_qk_scaled = false;
     int nvfp4_cublaslt_min_m = 2048;     // matches the config.h default
     int nvfp4_tile_min_m = 1;            // matches the config.h default
+    bool nvfp4_prompt_streamk = true;    // gemm.nvfp4_prompt_streamk, auto resolved at engine init
     bool f16_tile = true;                // matches the config.h default
     bool q6k_tile = true;                // matches the config.h default
     bool mxfp4_tile = true;              // matches the config.h default
@@ -172,6 +173,8 @@ void process_diag_set_fa2_hd256_bkv(int v);
 void process_diag_set_fp8_qk_scaled(bool v);
 int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
 [[nodiscard]] int process_diag_nvfp4_tile_min_m();  // gemm.nvfp4_tile_min_m: 0 off
+[[nodiscard]] bool process_diag_nvfp4_prompt_streamk();  // gemm.nvfp4_prompt_streamk (resolved)
+void process_diag_set_nvfp4_prompt_streamk(bool v);
 [[nodiscard]] bool process_diag_f16_tile();         // gemm.f16_tile
 [[nodiscard]] bool process_diag_q6k_tile();         // gemm.q6k_tile
 [[nodiscard]] bool process_diag_mxfp4_tile();       // gemm.mxfp4_tile

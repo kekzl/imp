@@ -53,9 +53,12 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     if (tile_min_m > 0 && M >= tile_min_m &&
         gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
                         payload.tensor_scale, args.output->data, M, N, K, args.stream, /*variant=*/-1,
-                        // no workspace = no stream-K under runtime.deterministic: its partial sums take
-                        // another order than the data-parallel tile, and the pick follows M (#2152)
-                        process_diag_deterministic() ? nullptr : args.cutlass_workspace,
+                        // no workspace = no stream-K: its partial sums take another order than the
+                        // data-parallel tile and the pick follows M, so a prompt row (chunks >= 33 rows,
+                        // runtime/prompt_tail.h) moves with its chunk (#2152): gemm.nvfp4_prompt_streamk
+                        (process_diag_deterministic() || (M > 32 && !process_diag_nvfp4_prompt_streamk()))
+                            ? nullptr
+                            : args.cutlass_workspace,
                         args.cutlass_workspace_size)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
