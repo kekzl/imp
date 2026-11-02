@@ -26,16 +26,17 @@ void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, i
 // micro-scales [rows,d/16] the small-M NVFP4 GEMM reads (plain layout, tensor_scale 1.0,
 // bit-identical to quantize_fp16_to_nvfp4_into on the stored FP16). Returns false outside the
 // fused envelope (F16, rows 2..64, d%256==0, d<=8192); caller falls back to rmsnorm().
+// act_scale: NVFP4 act tensor scale (dequant form) of the consumer GEMM; 1.0 = the bytes above.
 [[nodiscard]] bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
-                   uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
-                   float weight_offset = 0.0f);
+                                 uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
+                                 float weight_offset = 0.0f, float act_scale = 1.0f);
 
 // Residual add + residual save + rmsnorm_nvfp4 in one launch (#2414): h = a + r (FP16 __hadd2, as
 // elementwise_add_store), r = h, then rmsnorm_nvfp4(h). Bit-identical to the three calls. Same
 // envelope as rmsnorm_nvfp4; h, r, a and out distinct. Returns false outside it.
 [[nodiscard]] bool add_rmsnorm_nvfp4(const Tensor& a, Tensor& r, Tensor& h, const Tensor& weight, Tensor& out,
                                      uint8_t* xq_packed, uint8_t* xq_scales, float eps, cudaStream_t stream,
-                                     float weight_offset = 0.0f);
+                                     float weight_offset = 0.0f, float act_scale = 1.0f);
 
 // RMSNorm with FP32 input and FP16 output. Used when the residual stream is
 // kept in FP32 (Gemma-4 post-norm arch) but the downstream GEMM wants FP16.

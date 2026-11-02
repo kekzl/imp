@@ -137,6 +137,11 @@ struct GEMM {
     // FP8 x FP8 activations take the checkpoint's static input_scale; false (or no input_scale): per-token
     // dynamic scales (row absmax / 448) on the own small-M / tile GEMMs, never a batch-wide absmax.
     bool fp8_static_act_scale = true;
+    // NVFP4 x NVFP4 activations quantize with the checkpoint's static per-linear scale (Modelopt
+    // input_scale, compressed-tensors 1 / input_global_scale), alpha = weight x act scale; false or a
+    // checkpoint without one: act tensor scale 1.0 (block scale = amax / 6, UE4M3 range 2^-9..448).
+    // PPL Qwen3-30B-A3B 11.3565 -> 10.9678, Gemma-4 turn corpus 18.2854 -> 17.8489 (default chunk).
+    bool nvfp4_static_act_scale = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu), 3 = v2 where it splits K under 4 ways, else the

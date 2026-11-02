@@ -342,10 +342,13 @@ float* GraphExecutor::stage_alpha_row_(int layer, cudaStream_t stream) {
     const auto& ly = model_->layer(layer);
     const std::vector<Tensor>* projs[kExpertProjCount] = {&ly.expert_w_gate, &ly.expert_w_up,
                                                           &ly.expert_w_down};
+    // alpha = weight x static act scale of the projection's input (gate|up shared, down its own).
+    const MoEWorkspace::ActScales las = moe_.act_scales(layer);
+    const float act[kExpertProjCount] = {las.gu, las.gu, las.dn};
     std::vector<float> h(kExpertProjCount * stride, 1.0f);
     for (int p = 0; p < kExpertProjCount; ++p)
         for (size_t e = 0; e < std::min(stride, projs[p]->size()); ++e)
-            h[(p * stride) + e] = (*projs[p])[e].tensor_scale;
+            h[(p * stride) + e] = (*projs[p])[e].tensor_scale * act[p];
     IMP_CUDA_CHECK_LOG(
         cudaMemcpyAsync(row, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
     moe_.layer_stage_alpha_filled[layer] = 1;

@@ -288,7 +288,7 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
 // swiglu_fp16_kernel), packed to NVFP4 nibbles + FP8 micro-scale, tensor_scale 1.0.
 __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
                                          __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
-                                         uint8_t* __restrict__ xq_scales, int64_t total_mb) {
+                                         uint8_t* __restrict__ xq_scales, int64_t total_mb, float act_scale) {
     const int64_t mb = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     pdl_wait();     // gate/up are the gate|up GEMM's outputs
     pdl_trigger();  // scheduling only: the down GEMM prefetches its weights during this grid
@@ -328,9 +328,9 @@ __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const 
     reinterpret_cast<float4*>(out + base)[1] = ov[1];
 
     uint8_t s8;
-    const float actual = nvfp4_encode_micro_scale(amax, /*tensor_scale=*/1.0f, &s8);
+    const float actual = nvfp4_encode_micro_scale(amax, act_scale, &s8);
     xq_scales[mb] = s8;
-    const float inv = 1.0f / actual;
+    const float inv = 1.0f / (act_scale * actual);
     uint2 pk;
     uint8_t* pb = reinterpret_cast<uint8_t*>(&pk);
     // #2218 bounded: k * 2 <= 14 (loop k < 8 literal, float vals[16] at :313)
@@ -354,7 +354,7 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stre
 // Host dispatch for the fused swiglu+NVFP4 kernel (see kernel comment).
 // Returns false outside the fused envelope; caller falls back to swiglu() + GEMM's own quantize.
 bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
-                           uint8_t* xq_scales, cudaStream_t stream) {
+                           uint8_t* xq_scales, cudaStream_t stream, float act_scale) {
     if (gate.qtype != QType::F16 || up.qtype != QType::F16 || out.qtype != QType::F16)
         return false;
     const int64_t n = gate.numel();
@@ -366,7 +366,7 @@ bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, ui
     pdl::enable_kernel(swiglu_fp16_nvfp4_kernel);
     pdl::launch(swiglu_fp16_nvfp4_kernel, dim3(grid), dim3(block), size_t(0), stream,
                 static_cast<const __half*>(gate.data), static_cast<const __half*>(up.data),
-                static_cast<__half*>(out.data), xq_packed, xq_scales, total_mb);
+                static_cast<__half*>(out.data), xq_packed, xq_scales, total_mb, act_scale);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

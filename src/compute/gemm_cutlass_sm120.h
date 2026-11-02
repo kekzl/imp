@@ -59,8 +59,10 @@ void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfa
 void nvfp4_report_scale_clipping();
 [[nodiscard]] bool gemm_grouped_nvfp4_decode_scale_clipped();
 
+// act_scale (all SfAtom quantizers): static activation tensor scale, dequant form; the GEMM alpha must
+// carry the same factor. 1.0 = block scale amax / 6 (bytes unchanged).
 void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
-                                    cudaStream_t stream);
+                                    cudaStream_t stream, float act_scale = 1.0f);
 
 // MoE fused variant: single kernel quantizes all [expanded,K] rows into dst_packed
 // [expanded,K/2] contiguous FP4 bytes (row-major); d_sfa_bases[e] is expert e's SFA slab
@@ -68,7 +70,7 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 // contribute no threads; their sfa_bases entry is unused, set nullptr for defensive no-op.
 void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, uint8_t* const* d_sfa_bases,
                                         const int* d_offsets, int expanded, int K, int ne,
-                                        cudaStream_t stream);
+                                        cudaStream_t stream, float act_scale = 1.0f);
 
 // MoE fused gather + NVFP4 CUTLASS quantize. Same packing/scale layout as
 // quantize_fp16_to_nvfp4_cutlass_moe, but reads input in token order (pre-permute
@@ -76,12 +78,10 @@ void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16, void* dst_packed, 
 // to (moe_gather -> quantize_fp16_to_nvfp4_cutlass_moe) since sorted_token_ids is a
 // permutation. Enables a future skip-gather optimization gated on a lazy-gather addition in
 // the legacy fallback (docs/plans/moe_prefill_cudagraph_via_cutlass_moe_scheduler_*.md).
-void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
-                                               const int32_t* sorted_token_ids,
-                                               void* dst_packed,
-                                               uint8_t* const* d_sfa_bases,
+void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16, const int32_t* sorted_token_ids,
+                                               void* dst_packed, uint8_t* const* d_sfa_bases,
                                                const int* d_offsets, int expanded, int K, int ne,
-                                               cudaStream_t stream);
+                                               cudaStream_t stream, float act_scale = 1.0f);
 
 // Fused activation + NVFP4 CUTLASS quantize for the MoE down-projection input. Replaces
 // apply_expert_activation(gate,up->swiglu) + quantize_fp16_to_nvfp4_cutlass_moe(swiglu): reads
@@ -99,12 +99,13 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
                                                   const int* d_offsets, int expanded, int K, int ne,
                                                   FFNActivation act_type, cudaStream_t stream,
                                                   const void* gate_bias_fp16 = nullptr,
-                                                  const void* up_bias_fp16 = nullptr);
+                                                  const void* up_bias_fp16 = nullptr, float act_scale = 1.0f);
 
 // Dense prefill SwiGLU into out_fp16 [M,K] plus its CUTLASS NVFP4 quantize (dst_data [M,K/2],
 // dst_sf SfAtom): bit-identical to swiglu() + quantize_fp16_to_nvfp4_cutlass(out_fp16), #2470.
 void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
-                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream);
+                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream,
+                                           float act_scale = 1.0f);
 
 // SfAtom NVFP4 tier available (own tile GEMMs; the CUTLASS GEMM was removed 2026-10-31). Always true.
 [[nodiscard]] bool cutlass_sm120_nvfp4_available();

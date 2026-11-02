@@ -133,7 +133,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 }
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
-                                            uint8_t** scales_out) {
+                                            uint8_t** scales_out, float* act_scale_out) {
     if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         overlap_prefill_active_)
         return nullptr;
@@ -151,13 +151,24 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
     if (smallm_xq_bytes_ < xq_need)
         return nullptr;
     *scales_out = static_cast<uint8_t*>(smallm_xq_) + ((size_t)32 * (K / 2));
+    *act_scale_out = act_scale_of_(consumer_id);
     return static_cast<uint8_t*>(smallm_xq_);
 }
 
-void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K) {
+float GraphExecutor::act_scale_of_(TensorID id) const {
+    return id == kInvalidTensorID ? 1.0f : registry_.handle(id).act_scale;
+}
+
+bool GraphExecutor::smallm_xq_holds_(const void* data, int M, int K, float act_scale) const {
+    return smallm_xq_src_ == data && smallm_xq_src_m_ == M && smallm_xq_src_k_ == K &&
+           smallm_xq_src_scale_ == act_scale;
+}
+
+void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K, float act_scale) {
     smallm_xq_src_ = out_data;
     smallm_xq_src_m_ = M;
     smallm_xq_src_k_ = K;
+    smallm_xq_src_scale_ = act_scale;
     smallm_xq_from_producer_ = true;
 }
 
@@ -179,10 +190,11 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
     }
     const int K = static_cast<int>(h.shape[1]);
     uint8_t* xq_scales = nullptr;
-    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
+    float as = 1.0f;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as);
     if (xq_packed != nullptr &&
-        rmsnorm_nvfp4(h, w, no, xq_packed, xq_scales, eps, stream, weight_offset)) {
-        smallm_producer_tag_(no.data, n, K);
+        rmsnorm_nvfp4(h, w, no, xq_packed, xq_scales, eps, stream, weight_offset, as)) {
+        smallm_producer_tag_(no.data, n, K, as);
         return;
     }
     rmsnorm(h, w, no, eps, stream, weight_offset);
@@ -204,11 +216,12 @@ bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, 
         return false;
     const int K = static_cast<int>(h.shape[1]);
     uint8_t* xq_scales = nullptr;
-    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
+    float as = 1.0f;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as);
     if (xq_packed == nullptr ||
-        !add_rmsnorm_nvfp4(a, r, h, w, no, xq_packed, xq_scales, eps, stream, norm_w_off_))
+        !add_rmsnorm_nvfp4(a, r, h, w, no, xq_packed, xq_scales, eps, stream, norm_w_off_, as))
         return false;
-    smallm_producer_tag_(no.data, n, K);
+    smallm_producer_tag_(no.data, n, K, as);
     prenorm_out_ = no.data;
     prenorm_w_ = w.data;
     prenorm_n_ = n;
@@ -237,14 +250,17 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
     if (n > 32 && K % 16 == 0 && so.qtype == QType::F16 && prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+        const float as = act_scale_of_(consumer_id);
         swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
-                                              qscratch_.cutlass_act_sf, n, K, stream);
+                                              qscratch_.cutlass_act_sf, n, K, stream, as);
+        qscratch_.cutlass_act_scale = as;
         return true;
     }
     uint8_t* xq_scales = nullptr;
-    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
-    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)) {
-        smallm_producer_tag_(so.data, n, K);
+    float as = 1.0f;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as);
+    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as)) {
+        smallm_producer_tag_(so.data, n, K, as);
         return false;
     }
     swiglu(go, uo, so, stream);
@@ -305,24 +321,26 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     }
     uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
     uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
+    // One activation quantize serves every sibling: siblings share one act scale (merged at load).
+    const float as = act_scale_of_(ids[0]);
     // Quantize dedupe — identical contract to the single-tensor block: a
     // matching scratch tag plus either the caller's act-quant hint or a
     // producer-side tag skips the re-quantize.
-    const bool tag_match = smallm_xq_src_ == input.data && smallm_xq_src_m_ == M && smallm_xq_src_k_ == K;
+    const bool tag_match = smallm_xq_holds_(input.data, M, K, as);
     const bool hint_match = ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
                             ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
     if (!(tag_match && (hint_match || smallm_xq_from_producer_))) {
-        quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
-                                    /*tensor_scale=*/1.0f, ctx.stream);
+        quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales, /*tensor_scale=*/as, ctx.stream);
         smallm_xq_src_ = input.data;
         smallm_xq_src_m_ = M;
         smallm_xq_src_k_ = K;
+        smallm_xq_src_scale_ = as;
         smallm_xq_from_producer_ = false;
     }
     NvFP4QuantResult xq;
     xq.packed_data = xq_packed;
     xq.micro_scales = xq_scales;
-    xq.tensor_scale = 1.0f;
+    xq.tensor_scale = as;
     xq.N = M;
     xq.K = K;
     return kern == SmallMKernel::kWs ? gemm_nvfp4_smallm_ws_multi(sib, count, xq, M, K, ctx.stream)

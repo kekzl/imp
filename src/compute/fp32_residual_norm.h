@@ -36,6 +36,7 @@ struct Fp32ResidArgs {
     __half* no_out = nullptr;             // [rows, d] FP16 normed output
     uint8_t* xq_packed = nullptr;         // small-M NVFP4 activation scratch (nullable)
     uint8_t* xq_scales = nullptr;
+    float act_scale = 1.0f;  // NVFP4 act tensor scale (dequant form) of the consumer GEMM
     // Second norm of the same FP32 row (Gemma-4 router input): no2 = rmsnorm(fp32, w_norm2, w_off2)
     // rounded to FP16, then * half(no2_scale) in FP16 (scale_fp16_kernel). Nullable; needs w_norm.
     const __half* w_norm2 = nullptr;

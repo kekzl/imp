@@ -78,7 +78,7 @@ static bool compact_smallM_alpha(const float* d_alpha, float* d_out, const std::
 // on every replay (#860). False on a failed upload (the caller's !ok fallback runs, no GEMM on stale tables).
 static bool resolve_expert_tables(const WeightRegistry& registry, const std::vector<TensorID>& weight_ids,
                                   int ne, const MoEWorkspace& moe, cudaStream_t stream, const void**& d_B,
-                                  const void**& d_SFB, float*& d_a) {
+                                  const void**& d_SFB, float*& d_a, float act_scale) {
     if (d_B && d_SFB && d_a)
         return true;
     moe_host_args_capture_guard(stream);
@@ -88,7 +88,7 @@ static bool resolve_expert_tables(const WeightRegistry& registry, const std::vec
         const auto& h = registry.handle(weight_ids[e]);
         h_B_ptrs[e] = h.payload.cutlass_nvfp4.weight;
         h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-        h_alpha[e] = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
+        h_alpha[e] = h.cutlass_nvfp4_alpha(act_scale);
     }
     const size_t ptr_bytes = ne * sizeof(const void*);
     IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe.d_B_ptrs_cache),
@@ -111,7 +111,7 @@ static bool resolve_expert_tables(const WeightRegistry& registry, const std::vec
 static bool launch_moe_decode_grouped(const MoEWorkspace::PerLayerNvfp4DeviceArgsCache& da,
                                       const MoEWorkspace& moe, const int32_t* d_offsets, int ne, int d,
                                       int eff, int expanded, MoeDecodeEpi epi, void* down_out,
-                                      cudaStream_t stream) {
+                                      float down_act_scale, cudaStream_t stream) {
     const bool gated = epi != MoeDecodeEpi::kRelu2;
     if (!da.d_up_B_ptrs || !da.d_up_SFB_ptrs || !da.d_up_alpha || !da.d_down_B_ptrs || !da.d_down_SFB_ptrs ||
         !da.d_down_alpha || (gated && (!da.d_gate_B_ptrs || !da.d_gate_SFB_ptrs || !da.d_gate_alpha)))
@@ -138,6 +138,7 @@ static bool launch_moe_decode_grouped(const MoEWorkspace::PerLayerNvfp4DeviceArg
     }
     a.base_D = mid;
     a.base_D_sf = mid_sf;
+    a.act_scale = down_act_scale;  // the down alpha table carries the same factor
     if (!gemm_grouped_nvfp4_decode(ne, eff, d, expanded, epi, a, stream))
         return false;
     GroupedNvfp4DecodeArgs b{};
@@ -162,6 +163,7 @@ struct MoeDecodeGroupedIn {
     bool non_gated;
     FFNActivation act;
     void* down_out;
+    float down_act_scale;  // MoEWorkspace::ActScales::dn
 };
 
 static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t stream) {
@@ -172,7 +174,7 @@ static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t st
                              : in.act == FFNActivation::GEGLU ? MoeDecodeEpi::kGeglu
                                                               : MoeDecodeEpi::kSwiglu;
     if (!launch_moe_decode_grouped(in.da, in.moe, in.d_offsets, in.ne, in.d, in.eff, in.expanded, epi,
-                                   in.down_out, stream)) {
+                                   in.down_out, in.down_act_scale, stream)) {
         static std::atomic<bool> s_refused{false};
         if (!s_refused.exchange(true))
             IMP_LOG_WARN(
@@ -193,6 +195,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                                           MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
+    const MoEWorkspace::ActScales las = moe_.act_scales(layer);  // static act scales, gate|up and down input
     int&  n        = ctx.n;
     int&  d        = ctx.d;
     int&  ne       = ctx.ne;
@@ -298,7 +301,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                     gate_base, up_base, moe_.cutlass3x_packed,
                     reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
                     static_cast<const int*>(routing.expert_offsets.data), expanded, K_in, ne, act_type,
-                    stream, gate_bias, up_bias);
+                    stream, gate_bias, up_bias, las.dn);
             };
 
             // Per-layer pre-cached arrays (Phase 3c-full Step 3): when ready, all
@@ -324,7 +327,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                 const void** d_B   = pre_d_B;
                 const void** d_SFB = pre_d_SFB;
                 float*       d_a   = pre_d_alpha;
-                if (!resolve_expert_tables(registry_, weight_ids, ne, moe_, stream, d_B, d_SFB, d_a))
+                const float as = &weight_ids == &ly.expert_down_ids ? las.dn : las.gu;
+                if (!resolve_expert_tables(registry_, weight_ids, ne, moe_, stream, d_B, d_SFB, d_a, as))
                     return false;
 
                 imp::GroupedNvfp4DeviceArgs dargs{};
@@ -348,7 +352,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
                 ctx.no.data, static_cast<const int32_t*>(routing.sorted_token_ids.data),
                 moe_.cutlass3x_packed, reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-                static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream);
+                static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream, las.gu);
             bool ok = true;
             if (ctx.staged_blocks) {
                 const auto& da = da_cache;
@@ -374,7 +378,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                                static_cast<const int32_t*>(routing.expert_offsets.data), n,
                                                ne, d, eff, expanded, dispatch_policy().moe.nvfp4_decode_rows,
                                                calib_ == nullptr && !model_->profile().moe_expert_bias_glu,
-                                               non_gated_experts, cfg.ffn_activation, expert_down_base},
+                                               non_gated_experts, cfg.ffn_activation, expert_down_base,
+                                               las.dn},
                                               stream)) {
                 // Decode rows done: gate + up + act + quantize, down (gemm_grouped_nvfp4_decode.h).
             } else {
@@ -714,7 +719,7 @@ if (!smallM_done) {
 // pointer array is reused for both grouped GEMMs; down reuses the staging
 // buffer with a fresh quantize for K_in=eff.
 auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_offsets,
-                         std::vector<uint8_t*>& h_sfa_bases) -> bool {
+                         std::vector<uint8_t*>& h_sfa_bases, float act_scale) -> bool {
     sfa_offsets.assign(ne + 1, 0);
     h_sfa_bases.assign(ne, nullptr);
     size_t total_packed = 0;
@@ -742,11 +747,11 @@ auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_
     // Zero active SFA region (SfAtom pads rows to 128).
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
     // Fused per-expert quantize in one kernel launch.
-    quantize_fp16_to_nvfp4_cutlass_moe(
-        a_base, moe_.cutlass3x_packed, moe_.cutlass3x_sfa_ptrs,
-        routing.expert_offsets.data ? static_cast<const int*>(routing.expert_offsets.data)
-                                    : nullptr,
-        expanded, K_in, ne, stream);
+    quantize_fp16_to_nvfp4_cutlass_moe(a_base, moe_.cutlass3x_packed, moe_.cutlass3x_sfa_ptrs,
+                                       routing.expert_offsets.data
+                                           ? static_cast<const int*>(routing.expert_offsets.data)
+                                           : nullptr,
+                                       expanded, K_in, ne, stream, act_scale);
     return true;
 };
 
@@ -754,14 +759,14 @@ auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_
 // full path failed its precondition check (workspace buffers not
 // populated). Kept as the safety-net fallback path.
 auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in, int N_out,
-                        const std::vector<size_t>& sfa_offsets) {
+                        const std::vector<size_t>& sfa_offsets, float act_scale) {
     std::vector<const void*> hB(ne), hSFB(ne);
     std::vector<float> hAlpha(ne);
     for (int e = 0; e < ne; ++e) {
         const auto& h = registry_.handle(weight_ids[e]);
         hB[e] = h.payload.cutlass_nvfp4.weight;
         hSFB[e] = h.payload.cutlass_nvfp4.sf;
-        hAlpha[e] = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
+        hAlpha[e] = h.cutlass_nvfp4_alpha(act_scale);
     }
     GroupedNvfp4HostArgs args{};
     args.offsets = h_offsets.data();
@@ -782,10 +787,10 @@ auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, i
 // run two grouped GEMMs reusing staging buffers.
 std::vector<size_t> sfa_offs;
 std::vector<uint8_t*> sfa_bases;
-if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
+if (quantize_once(gathered_base, d, sfa_offs, sfa_bases, las.gu)) {
     if (!non_gated_experts)
-        grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs);
-    grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs);
+        grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs, las.gu);
+    grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs, las.gu);
 }
 
 // gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
@@ -809,8 +814,8 @@ apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
 // (~11%, low SM occupancy at small expanded); the separate swiglu kernel
 // has better per-element parallelism, kept separate.
 char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
-    grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs);
+if (quantize_once(down_act, eff, sfa_offs, sfa_bases, las.dn)) {
+    grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs, las.dn);
     if (gpt_oss_offsets)
         moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, gpt_oss_offsets, ne,
                                    expanded, d, stream);

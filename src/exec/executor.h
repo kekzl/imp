@@ -297,6 +297,7 @@ public:
     const void* smallm_xq_src_ = nullptr;
     int smallm_xq_src_m_ = 0;
     int smallm_xq_src_k_ = 0;
+    float smallm_xq_src_scale_ = 1.0f;  // act tensor scale of that quantize
     // True when the scratch was filled by a PRODUCER fusion (fused
     // rmsnorm/swiglu + quantize), not the dispatch's own quantize: the
     // small-M block then accepts a matching tag without an act-quant hint,
@@ -309,12 +310,14 @@ public:
     // Producer-fusion gate + scratch handout: returns the xq packed/scales
     // pointers when consumer_id's weight will take the small-M NVFP4 route for
     // [M,K] F16 activations and the scratch fits; nullptr otherwise (caller
-    // runs unfused kernels). Never allocates while `stream` is capturing.
+    // runs unfused kernels). Never allocates while `stream` is capturing. *act_scale_out: quantize with it.
     uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
-                                 uint8_t** scales_out);
-    // Tag the scratch as holding quantize(out[0..M,0..K)) written by a fused
+                                 uint8_t** scales_out, float* act_scale_out);
+    // Tag the scratch as holding quantize(out[0..M,0..K), act_scale) written by a fused
     // producer kernel.
-    void smallm_producer_tag_(const void* out_data, int M, int K);
+    void smallm_producer_tag_(const void* out_data, int M, int K, float act_scale);
+    [[nodiscard]] float act_scale_of_(TensorID id) const;  // WeightHandle::act_scale, 1.0 for an invalid id
+    [[nodiscard]] bool smallm_xq_holds_(const void* data, int M, int K, float act_scale) const;
     // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
     // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode overlay
     // of a dequantable GGUF source. False when neither exists; prompt rows on

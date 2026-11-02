@@ -34,6 +34,7 @@ struct GroupedNvfp4DecodeArgs {
     const float* d_galpha = nullptr;
     void* base_D = nullptr;     // kF16: FP16 [expanded, N]; else packed FP4 [expanded, N/2]
     void* base_D_sf = nullptr;  // act epilogues: M16 scales
+    float act_scale = 1.0f;     // act epilogues: static NVFP4 act tensor scale of the down input
 };
 
 // True when the kernel serves the shape: 0 < n_experts <= 512, K % 64 == 0, K >= 320 (map slot reuse),

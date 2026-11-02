@@ -30,6 +30,9 @@ struct Tensor {
     // schemes (NVFP4); default 1.0 = no-op. llm-compressor NVFP4 pre-applies the 1/x reciprocal.
     void* scales = nullptr;
     float tensor_scale = 1.0f;
+    // NVFP4 weight only: the checkpoint's static activation scale for this linear's input, dequant
+    // form (calibration amax / 2688); 1.0 = none. Applied only under gemm.nvfp4_static_act_scale.
+    float act_scale = 1.0f;
 
     // GGUF MXFP4 has two on-disk block layouts: imp legacy (GGML type 31)
     // [data(16B)|scale(1B)], llama.cpp standard (type 39) [scale(1B)|data(16B)].
