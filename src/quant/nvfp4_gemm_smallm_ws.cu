@@ -177,7 +177,6 @@ __device__ __forceinline__ void ws_cta(const uint8_t* __restrict__ w, const uint
     constexpr int kPerRound = kWarps * kU;
     const int rounds = (ks_total + kPerRound - 1) / kPerRound;
 
-    pdl_trigger();
     // #2218 bounded: n0 + kR <= N (grid covers N / kR tiles); ks * 64 + 16 t4 + 16 <= K / 2 on data loads,
     // tokens < M, ks * 8 + 8 <= K / 16 on full steps (+4 on the tail).
     Ptrs<kMT, kNT> p;
@@ -229,6 +228,9 @@ __device__ __forceinline__ void ws_cta(const uint8_t* __restrict__ w, const uint
     if (rounds > 1)
         load_round_w(s1, 1);
     pdl_wait();
+    // Trigger after the wait: triggered at CTA start, a PDL-registered neighbour (fused norm producer
+    // before, Gemma-4 layer tail after) read garbage under graph replay (degen ple-isolation).
+    pdl_trigger();
     load_round_x(s0, 0);
     if (rounds > 1)
         load_round_x(s1, 1);
