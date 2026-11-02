@@ -293,6 +293,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("moe.no_cutlass3x", cfg.moe.no_cutlass3x);
     I("moe.reserve_mib", cfg.moe.reserve_mib);
     B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
+    I("moe.nvfp4_decode_rows", cfg.moe.nvfp4_decode_rows);
     B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
     B("moe.device_expert_cache", cfg.moe.device_expert_cache);
     B("moe.shared_expert_overlap", cfg.moe.shared_expert_overlap);

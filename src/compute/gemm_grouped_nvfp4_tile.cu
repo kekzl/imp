@@ -8,6 +8,7 @@
 
 #include "compute/gemm_grouped_nvfp4_tile.h"
 
+#include "compute/gemm_grouped_nvfp4_decode.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "quant/nvfp4_gemm_tile_core.cuh"
@@ -371,6 +372,7 @@ bool gemm_grouped_nvfp4_host_args(int n_experts, int N, int K, int expanded, con
 }
 
 void gemm_grouped_nvfp4_prewarm() {
+    gemm_grouped_nvfp4_decode_prewarm();
     const uint64_t gen = engine_arena().generation();
     if (s_staging != nullptr && s_staging_gen == gen)
         return;

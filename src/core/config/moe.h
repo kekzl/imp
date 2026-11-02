@@ -68,6 +68,9 @@ struct MoE {
     // Device-args full path for NVFP4 MoE prefill (gemm_grouped_nvfp4_dispatch). Default ON
     // since 2026-05-14 (+11-39% pp512 on 4-model A/B, then on CUTLASS 3.x).
     bool nvfp4_device_args = true;
+    // Device-args NVFP4 MoE at up to this many tokens: 16-row grouped decode GEMM, gate + up + act fused
+    // (gemm_grouped_nvfp4_decode.h), bit-equal per row to the tile path. 0 = off.
+    int nvfp4_decode_rows = 64;
     // Opt-in smallM kernel branch for NVFP4 MoE prefill.
     bool nvfp4_smallM = false;
     // Decode on host-resident NVFP4 or GGUF experts: resolve routing to cache slots and gather the

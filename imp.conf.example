@@ -650,6 +650,9 @@ reserve_mib          = 0
 # CUTLASS 3.x device-args full path for NVFP4 MoE prefill (default ON
 # since 2026-05-14, +11-39% pp512).
 nvfp4_device_args    = true
+# Device-args NVFP4 MoE up to this many tokens on the 16-row grouped decode GEMM (gate + up + act in one
+# launch, bit-equal per row to the tile path). 0 = off.
+nvfp4_decode_rows    = 64
 # Opt-in smallM kernel branch for NVFP4 MoE prefill + its M threshold.
 nvfp4_smallM         = false
 nvfp4_smallM_threshold = 64
