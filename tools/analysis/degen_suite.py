@@ -672,13 +672,16 @@ class Suite:
         again = self.srv.chat(msgs, max_tokens=120, **kw)
         cached = [(r["raw"].get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens", 0)
                   for r in (first, again)]
-        # The resend must restore; the first send may prefill fresh (prompt chunks keep >= 33
-        # rows since #2152, so the chunk split alone no longer changes a row).
+        # The resend must restore; the first send may prefill fresh. Row-invariant (bit-equal) in
+        # default mode: dense models on FP16 or FP8 KV (#2152, FP8 since round_prefill_kv_to_cache).
+        # MoE and FP8-weight GEMMs pick kernels by row count unless runtime.deterministic=true
+        # (Qwen3-30B-A3B-NVFP4: drift 0.14 nats default, 0 deterministic; docs/DETERMINISM.md).
         if not cached[1]:
             self.skip("multi-turn", name, f"resend did not restore (cached={cached})")
             return
         same = first["content"] == again["content"] and bool(first["content"].strip())
-        detail = f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}"
+        detail = (f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}"
+                  "; MoE / FP8-weight model: rerun with runtime.deterministic=true before calling it a bug")
         # Hard check also when the first send found no snapshot: a restored snapshot pairs only
         # with the KV blocks its own forward wrote (#2174).
         self.record("multi-turn", name, same, detail)

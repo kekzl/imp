@@ -4,6 +4,9 @@
 // arrives as lambda parameters; everything else is captured by reference. `return` falls through to
 // `after_attention`.
 // clang-format off
+        // FP8 KV: this chunk sees its own rows at cache precision, like the gathered past (prefix-cache
+        // resend: same greedy reply at a 64- and a 192-token hit).
+        round_prefill_kv_to_cache(layer, state, seq_k, seq_v, row_begin, seq_n, stream);
         // Chunked prefill (prefill_offset>0): gathers past [0,prefill_offset) KV
         // to contiguous, appends the current chunk, runs rectangular
         // attention_cublas_prefill with q_offset. cudaMallocAsync per layer here
