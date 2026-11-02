@@ -7,6 +7,7 @@
 #include "exec/moe_prefill_decision.h"  // select_moe_prefill_path — the mirror this file verifies against
 #include "core/dispatch_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
@@ -72,7 +73,122 @@ static bool compact_smallM_alpha(const float* d_alpha, float* d_out, const std::
     return err == cudaSuccess;
 }
 
-// ---------------------------------------------------------------------------
+// Pre-cache miss: per-call H2D of the expert pointer / alpha tables into the workspace caches. NOT
+// graph-capturable: the memcpy sources are stack vectors, so a recorded node would read a dead stack address
+// on every replay (#860). False on a failed upload (the caller's !ok fallback runs, no GEMM on stale tables).
+static bool resolve_expert_tables(const WeightRegistry& registry, const std::vector<TensorID>& weight_ids,
+                                  int ne, const MoEWorkspace& moe, cudaStream_t stream, const void**& d_B,
+                                  const void**& d_SFB, float*& d_a) {
+    if (d_B && d_SFB && d_a)
+        return true;
+    moe_host_args_capture_guard(stream);
+    std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
+    std::vector<float> h_alpha(ne);
+    for (int e = 0; e < ne; ++e) {
+        const auto& h = registry.handle(weight_ids[e]);
+        h_B_ptrs[e] = h.payload.cutlass_nvfp4.weight;
+        h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
+        h_alpha[e] = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
+    }
+    const size_t ptr_bytes = ne * sizeof(const void*);
+    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe.d_B_ptrs_cache),
+                                        static_cast<const void*>(h_B_ptrs.data()), ptr_bytes,
+                                        cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe.d_SFB_ptrs_cache),
+                                        static_cast<const void*>(h_SFB_ptrs.data()), ptr_bytes,
+                                        cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(moe.d_alpha_full, h_alpha.data(), ne * sizeof(float),
+                                        cudaMemcpyHostToDevice, stream));
+    d_B = moe.d_B_ptrs_cache;
+    d_SFB = moe.d_SFB_ptrs_cache;
+    d_a = moe.d_alpha_full;
+    return true;
+}
+
+// Decode rows: gate + up + activation + NVFP4 quantize in one grouped launch, down in a second
+// (gemm_grouped_nvfp4_decode.h), per-row bits equal to the 4-launch tile path. The down input lives in the
+// FP16 up buffer, which this path never writes. False = not taken; the caller runs the tile path.
+static bool launch_moe_decode_grouped(const MoEWorkspace::PerLayerNvfp4DeviceArgsCache& da,
+                                      const MoEWorkspace& moe, const int32_t* d_offsets, int ne, int d,
+                                      int eff, int expanded, MoeDecodeEpi epi, void* down_out,
+                                      cudaStream_t stream) {
+    const bool gated = epi != MoeDecodeEpi::kRelu2;
+    if (!da.d_up_B_ptrs || !da.d_up_SFB_ptrs || !da.d_up_alpha || !da.d_down_B_ptrs || !da.d_down_SFB_ptrs ||
+        !da.d_down_alpha || (gated && (!da.d_gate_B_ptrs || !da.d_gate_SFB_ptrs || !da.d_gate_alpha)))
+        return false;
+    if (!gemm_grouped_nvfp4_decode_supports(ne, eff, d, epi) ||
+        !gemm_grouped_nvfp4_decode_supports(ne, d, eff, MoeDecodeEpi::kF16) ||
+        gemm_grouped_nvfp4_decode_act_bytes(ne, expanded, eff) > moe.expert_up.nbytes())
+        return false;
+    char* mid = static_cast<char*>(moe.expert_up.data);
+    char* mid_sf = mid + gemm_grouped_nvfp4_decode_act_sf_offset(expanded, eff);
+    GroupedNvfp4DecodeArgs a{};
+    a.d_M_per = moe.d_M_per;
+    a.d_expert_offsets = d_offsets;
+    a.d_sfa_offsets = moe.d_sfa_offsets;  // prep_sfa(d) of the gate/up input
+    a.base_A_packed = moe.cutlass3x_packed;
+    a.base_A_sf = moe.cutlass3x_sf;
+    a.d_B_ptrs = da.d_up_B_ptrs;
+    a.d_SFB_ptrs = da.d_up_SFB_ptrs;
+    a.d_alpha = da.d_up_alpha;
+    if (gated) {
+        a.d_G_ptrs = da.d_gate_B_ptrs;
+        a.d_SFG_ptrs = da.d_gate_SFB_ptrs;
+        a.d_galpha = da.d_gate_alpha;
+    }
+    a.base_D = mid;
+    a.base_D_sf = mid_sf;
+    if (!gemm_grouped_nvfp4_decode(ne, eff, d, expanded, epi, a, stream))
+        return false;
+    GroupedNvfp4DecodeArgs b{};
+    b.d_M_per = moe.d_M_per;
+    b.d_expert_offsets = d_offsets;
+    b.base_A_packed = mid;
+    b.base_A_sf = mid_sf;  // SF slab offsets computed in the kernel (K = eff)
+    b.d_B_ptrs = da.d_down_B_ptrs;
+    b.d_SFB_ptrs = da.d_down_SFB_ptrs;
+    b.d_alpha = da.d_down_alpha;
+    b.base_D = down_out;
+    return gemm_grouped_nvfp4_decode(ne, d, eff, expanded, MoeDecodeEpi::kF16, b, stream);
+}
+
+struct MoeDecodeGroupedIn {
+    const MoEWorkspace::PerLayerNvfp4DeviceArgsCache& da;
+    const MoEWorkspace& moe;
+    const int32_t* d_offsets;
+    int n, ne, d, eff, expanded;
+    int max_rows;   // moe.nvfp4_decode_rows
+    bool eligible;  // no calibration, no expert bias GLU (gpt-oss)
+    bool non_gated;
+    FFNActivation act;
+    void* down_out;
+};
+
+static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t stream) {
+    if (in.n > in.max_rows || !in.eligible ||
+        (!in.non_gated && in.act != FFNActivation::GEGLU && in.act != FFNActivation::SWIGLU))
+        return false;
+    const MoeDecodeEpi epi = in.non_gated                     ? MoeDecodeEpi::kRelu2
+                             : in.act == FFNActivation::GEGLU ? MoeDecodeEpi::kGeglu
+                                                              : MoeDecodeEpi::kSwiglu;
+    if (!launch_moe_decode_grouped(in.da, in.moe, in.d_offsets, in.ne, in.d, in.eff, in.expanded, epi,
+                                   in.down_out, stream)) {
+        static std::atomic<bool> s_refused{false};
+        if (!s_refused.exchange(true))
+            IMP_LOG_WARN(
+                "MoE decode rows: grouped NVFP4 decode GEMM refused (n=%d ne=%d d=%d eff=%d, down input "
+                "%zu B vs up buffer %zu B), tile path",
+                in.n, in.ne, in.d, in.eff, gemm_grouped_nvfp4_decode_act_bytes(in.ne, in.expanded, in.eff),
+                in.moe.expert_up.nbytes());
+        return false;
+    }
+    static std::atomic<bool> s_logged{false};  // activity proof, once
+    if (!s_logged.exchange(true))
+        IMP_LOG_INFO("MoE decode rows: grouped NVFP4 decode GEMM ACTIVE (gate+up+act fused, n=%d, epi=%d)",
+                     in.n, static_cast<int>(epi));
+    return true;
+}
+
 bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream,
                                                           MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
@@ -208,37 +324,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                 const void** d_B   = pre_d_B;
                 const void** d_SFB = pre_d_SFB;
                 float*       d_a   = pre_d_alpha;
-                if (!d_B || !d_SFB || !d_a) {
-                    // Pre-cache miss falls back to per-call H2D into the Step 1 workspace
-                    // caches. NOT graph-capturable: the memcpy sources are stack vectors, so a
-                    // recorded node would read a dead stack address on every replay (#860,
-                    // nondeterministic garbage pointers / misaligned-address graph launches).
-                    moe_host_args_capture_guard(stream);
-                    std::vector<const void*> h_B_ptrs(ne), h_SFB_ptrs(ne);
-                    std::vector<float> h_alpha(ne);
-                    for (int e = 0; e < ne; ++e) {
-                        const auto& h = registry_.handle(weight_ids[e]);
-                        h_B_ptrs[e]   = h.payload.cutlass_nvfp4.weight;
-                        h_SFB_ptrs[e] = h.payload.cutlass_nvfp4.sf;
-                        h_alpha[e] =
-                            h.payload.cutlass_nvfp4.global_scale
-                                ? *h.payload.cutlass_nvfp4.global_scale
-                                : 1.0f;
-                    }
-                    // Failed table upload: false, the caller's !ok fallback runs (no GEMM on stale tables).
-                    const size_t ptr_bytes = ne * sizeof(const void*);
-                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_B_ptrs_cache),
-                                                        static_cast<const void*>(h_B_ptrs.data()), ptr_bytes,
-                                                        cudaMemcpyHostToDevice, stream));
-                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_SFB_ptrs_cache),
-                                                        static_cast<const void*>(h_SFB_ptrs.data()),
-                                                        ptr_bytes, cudaMemcpyHostToDevice, stream));
-                    IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(), ne * sizeof(float),
-                                                        cudaMemcpyHostToDevice, stream));
-                    d_B   = moe_.d_B_ptrs_cache;
-                    d_SFB = moe_.d_SFB_ptrs_cache;
-                    d_a   = moe_.d_alpha_full;
-                }
+                if (!resolve_expert_tables(registry_, weight_ids, ne, moe_, stream, d_B, d_SFB, d_a))
+                    return false;
 
                 imp::GroupedNvfp4DeviceArgs dargs{};
                 dargs.d_M_per          = moe_.d_M_per + e0;
@@ -283,6 +370,13 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                                   non_gated_experts ? FFNActivation::RELU_SQR
                                                                     : cfg.ffn_activation);
                     });
+            } else if (run_moe_decode_grouped({da_cache, moe_,
+                                               static_cast<const int32_t*>(routing.expert_offsets.data), n,
+                                               ne, d, eff, expanded, dispatch_policy().moe.nvfp4_decode_rows,
+                                               calib_ == nullptr && !model_->profile().moe_expert_bias_glu,
+                                               non_gated_experts, cfg.ffn_activation, expert_down_base},
+                                              stream)) {
+                // Decode rows done: gate + up + act + quantize, down (gemm_grouped_nvfp4_decode.h).
             } else {
                 if (!non_gated_experts)
                     ok = ok &&

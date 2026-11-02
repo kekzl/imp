@@ -618,6 +618,8 @@ bool cutlass_sm120_nvfp4_available() { return true; }
 // Reads the clip flag once, from gemm_cleanup() (engine shutdown): a "should never happen"
 // event, checked there to keep it off the hot path. cudaMemcpyFromSymbol synchronises (#1544).
 void nvfp4_report_scale_clipping() {
+    if (gemm_grouped_nvfp4_decode_scale_clipped())
+        IMP_LOG_WARN("[NVFP4] MoE decode act-quantize clipped a micro-block scale (absmax > 2688, #1544)");
     unsigned int clipped = 0;
     if (cudaMemcpyFromSymbol(&clipped, g_nvfp4_scale_clipped, sizeof(clipped)) != cudaSuccess || clipped == 0)
         return;
