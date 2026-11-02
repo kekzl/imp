@@ -64,6 +64,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 | Q8_0 blocks | 34 bytes, not 4-aligned: `memcpy()`, never `reinterpret_cast` |
 | FP8 prefill | auto-disabled on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M); `attention.fp8_prefill=always` for experiments only. FP8 GDN-projection prefill REFUTED e2e (record `docs/plans/2026-08-31-fp8-ssm-prefill.md`): `out / row_scale` in FP16 overflows to inf on small-absmax rows; cuBLASLt `SCALE_OUTER_VEC_32F` applies `scale[n & ~1]` on sm_120/13.3 |
 | Activation quantize | producer-fused since #1771/#1773 (`src/quant/nvfp4_pack.cuh`; skip = act-quant hint AND scratch tag); invariant: bit-identity vs `quantize_fp16_to_nvfp4_into` |
+| NVFP4 act tensor scale | `gemm.nvfp4_static_act_scale` (default on): checkpoint `input_scale` / `1 / input_global_scale` per linear into every W4A4 quantize AND its alpha (`WeightHandle::act_scale`, MoE per-layer max); a producer that drops it is off by the scale, loudly. Qwen3-30B-A3B PPL 11.3565 -> 10.9678. `imp-quantize` exports carry none (unit scale) |
 | MXFP4 GGUF | Qwen3.5-4B MXFP4 works (#935/#937); Qwen3.5-27B MXFP4 blocked (OOM on 32 GB) |
 | MXFP4 on GDN hybrids | decode falls back MXFP4 -> FP16; the planner reserves that fallback (#935) or token-0 `!` garbage; keep the reserve |
 | MoE expert leak | host-resident experts left unpromoted (`status 15` / garbage): check `src/model/weight_upload.cpp` promotion first (#925) |
