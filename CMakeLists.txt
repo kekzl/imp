@@ -1565,6 +1565,7 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        tests/test_fp32_residual_e2e.cpp
         # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
         tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of
