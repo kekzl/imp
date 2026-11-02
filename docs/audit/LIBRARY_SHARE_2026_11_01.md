@@ -55,11 +55,11 @@ Per-kernel detail (pp phase, nsys):
 |---|---|---|---:|---|---|
 | a1 | FP8 x FP8 below M 2048 (`gemm_fp8x8_`) | Qwen3-8B-FP8 prompts < 2048 rows | 81 % of pp512 | F8 tile (`gemm_fp8_tile`) | refuted: pp512 GEMM sum Lt 127.9-130.6 vs own 136.5-138.5 ms, 2-CTA 167.7-179.5 ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#2026-11-01-two-ctas-per-sm-below-m-2048-refuted)); own from M 2048 |
 | a2 | fp16-tier tensors (`gemm_dispatch_uncached_fallback` -> `gemm()`) | Nemotron-3-Nano | 9.3-14.2 % (incl. a3) | `gemm_f16_tile` (K >= N, >= 0.8 wave) | refuted: 128x256 for every shape 50.04 vs 50.48 ms Lt, e2e 56278-56406 vs 56447-56584 tok/s ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#remaining-call-sites-ordered-by-share), row 3) |
-| a3 | MoE router (`router_logits_gemm` -> `gemm()`) | Qwen3-30B, Coder, Nemotron (fp16 accumulate), Gemma-4 n < 1024 | 1.1-1.6 % | `gemm_f16_splitk` | own for Gemma-4 n >= 1024; refuted for K 2048 (11.3 vs 10.5 us), n <= 1000 (5-7 vs 1.2-4.4 us), Nemotron fp16-acc (4.48 vs 5.83 ms) ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#moe-router-gemm-f16-n--n_experts-own-split-k-for-the-gemma-4-shape-cublaslt-for-the-rest-2026-10-31)); in-situ A/B for Qwen3-30B n >= 1024 open |
-| a4 | MTP head BF16 dense (`mtp_feed_dense_rows`) | Qwen3.8-27B with MTP | 0.59 % of the prompt phase, 0 in decode | `gemm_f16_tile` declines (40 / 8 tiles < 1 wave) | open, below 1 % |
-| a5 | DSpark FP16 k/v + fc (`DSparkDrafter` context projections) | Qwen3-8B-NVFP4 + drafter (opt-in) | 0.29 % decode, 5.4 % prompt | none for M 2-32 x N 1024 x K 4096 FP16 | open, opt-in |
+| a3 | MoE router (`router_logits_gemm` -> `gemm()`) | Qwen3-30B, Coder, Nemotron (fp16 accumulate), Gemma-4 n < 1024 | 1.1-1.6 % | `gemm_f16_splitk` | own for Gemma-4 n >= 1024; refuted for K 2048 (11.3 vs 10.5 us), n <= 1000 (5-7 vs 1.2-4.4 us), Nemotron fp16-acc (4.48 vs 5.83 ms) ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#moe-router-gemm-f16-n--n_experts-own-split-k-for-the-gemma-4-shape-cublaslt-for-the-rest-2026-10-31)); Qwen3-30B n >= 1024 in situ refuted (close section) |
+| a4 | MTP head BF16 dense (`mtp_feed_dense_rows`) | Qwen3.8-27B with MTP | 0.59 % of the prompt phase, 0 in decode | `gemm_f16_tile` declines (40 / 8 tiles < 1 wave) | accepted, below 1 % |
+| a5 | DSpark FP16 k/v + fc (`DSparkDrafter` context projections) | Qwen3-8B-NVFP4 + drafter (opt-in) | 0.29 % decode, 5.4 % prompt | none for M 2-32 x N 1024 x K 4096 FP16 | accepted, opt-in, below 1 % of decode |
 
-Not covered by the single-stream bench (static, unmeasured; GPU paused 2026-11-01): batched decode at M 2-32 sends FP8 dense (`gemm_fp8_prefill_`, no FP8 small-M kernel), the MoE router and Nemotron's fp16-tier tensors to cuBLASLt; NVFP4 dense takes `gemm_nvfp4_smallm` (own).
+Batched decode (M 2-16, not in the single-stream bench): measured under conc 16 in the close section below; NVFP4 dense takes `gemm_nvfp4_smallm` (own).
 
 (b) GGUF only (legacy, no new GGUF kernel work: stays on cuBLASLt):
 
@@ -97,16 +97,40 @@ Not covered by the single-stream bench (static, unmeasured; GPU paused 2026-11-0
 | `executor_lora.cu`, `executor_gemma_pli.cpp`, `executor_qsa.cpp`, `executor_prompt_logprobs.cu` | LoRA adapters, Gemma PLI, Flash-Next QSA index, prompt logprobs |
 | `gemm_kv_batched`, `gemm_pair_batched`, FP16 tier of `gemm_dispatch` | BF16 / FP16 dense checkpoints |
 
-## Close condition (proposal)
+## Close (2026-11-02)
 
-Row 123 can close when every (a) route is library-free or measured refuted:
+Owner decision 2026-11-01: close after the router A/B and the batched-decode inventory.
 
-| item | state 2026-11-01 |
+| Qwen3-30B-A3B-NVFP4 router, `main` vs own `gemm_f16_splitk` from n 1024 (fp16-acc and d >= 2560 gates dropped, 8 MiB workspace for every MoE), pp4096, 3 pairs, order flipped | Lt (main) | own |
+|---|---:|---:|
+| e2e tok/s | 44362.75-44460.71 | 42443.90-44536.62 |
+| router set in the whole run (nvjet + splitKreduce / `gemm_f16_splitk_kernel`), ms | 9.521-9.887 (1932 launches) | 12.826-13.108 (1064 launches) |
+
+Verdict: refuted, the router stays on cuBLASLt outside the Gemma-4 shape.
+
+| conc 16, build-dev imp-server under nsys (whole run), `conc_client.py` 4 waves x 16 x 400 tokens | kernels ms | Lt ms | Lt % | Lt routes (`[lt-route]`, distinct shapes) | median tok/s |
+|---|---:|---:|---:|---|---:|
+| Qwen3-8B-FP8 | 14269.17 | 11411.981 | 79.98 | `gemm_fp8x8_` FP8 x FP8 at M 2-16 (150) | 2279.3 |
+| Qwen3-30B-A3B-NVFP4 | 16683.94 | 265.318 | 1.59 | router at M 2-16 (36) | 1672.9 |
+| Nemotron-3-Nano-30B-A3B | 4711.86 | 301.460 | 6.40 | fp16-tier tensors (72), router (19) | 581.1 |
+| Gemma-4-26B-A4B | 38144.89 | 440.539 | 1.15 | router (38) | 692.7 |
+
+- Qwen3-8B-FP8 decode rows run the M 512 algo pin (`kFp8RowPinRefM`, #2152): `qqhsh 160x128x128` 4840.04 ms over 104832 calls (46 us per gate/up at M <= 16).
+- Nemotron replies stop early (638 / 474 tokens per wave), its run is prompt-heavy.
+
+| Qwen3-8B-FP8 conc 16 without nsys, own F8 tile at every M (`gemm.fp8_tile_min_m=1`) vs default, 3 pairs, order flipped | default (Lt below M 2048) | own from M 1 |
+|---|---:|---:|
+| median aggregate tok/s | 1680.1-1702.6 | 1479.0-1483.8 |
+
+Verdict: refuted (-11.7 to -13.1 %); FP8 batched decode stays on cuBLASLt with the FP8 prefill rows below M 2048. A dedicated FP8 small-M kernel (the NVFP4 `gemm_nvfp4_smallm` analogue) is the remaining lever, outside this row.
+
+Accepted cuBLASLt uses (row 123 closed):
+
+| use | evidence |
 |---|---|
-| a1 FP8 below M 2048 | refuted |
-| a2 Nemotron fp16-tier | refuted |
-| a3 routers | refuted except one in-situ A/B (Qwen3-30B n >= 1024, `gemm_f16_splitk` vs Lt fp16 split-K 8.8 + 2.3 us) |
-| a4 MTP head, a5 DSpark FP16 | < 1 % of decode; accept or A/B |
-| batched decode M 2-32 | conc 16 inventory on FP8-8B, Qwen3-30B, Nemotron, Gemma-4 |
-
-Accepted cuBLASLt uses after closing: (b) GGUF legacy, a1 FP8 below M 2048, a2 FP16 N > K and sub-wave grids, a3 routers outside the Gemma-4 shape, (c) offline tools, (d) cold fallbacks, (e) feature encoders.
+| (b) GGUF legacy | no new GGUF kernel work (`DESIGN_DECISIONS.md`) |
+| a1 FP8 x FP8 below M 2048, prefill and batched decode | own tile pp512 e2e 25544-25709 vs 30481-31167 tok/s, conc 16 decode -11.7 to -13.1 % |
+| a2 FP16 N > K and sub-wave grids (Nemotron) | own 128x256 at parity, e2e -0.2..-0.3 % |
+| a3 MoE routers outside the Gemma-4 shape | own split-K +3.3 ms per pp4096 run (above), n <= 1000 and decode rows 1.2-4.4 vs 5-7 us |
+| a4 MTP head, a5 DSpark FP16 | < 1 % of decode |
+| (c) offline tools, (d) cold fallbacks, (e) feature encoders | off the hot SafeTensors path |
