@@ -22,6 +22,13 @@ struct KVCache {
     // dtype resolves to FP16 (pre-hint behavior). imp.conf key only — the
     // old IMP_KV_FP8_AUTO env var is no longer read.
     bool fp8_auto_legacy = false;
+    // FP8 E4M3 KV scale per layer (src/core/kv_fp8_scale.h). "legacy" (default): first real prefill's
+    // absmax / 448, floored at 1.0. "checkpoint": k_scale / v_scale tensors, static from load, 1.0
+    // where absent. "calibrate": fixed-text prefill at warmup, amax * fp8_scale_headroom / 448.
+    // Static modes round up to a power of two and never move after load (prefix cache, row invariance).
+    std::string fp8_scale = "legacy";
+    // calibrate only: margin over the calibration amax before E4M3 saturates (448). Values < 1 act as 1.
+    float fp8_scale_headroom = 2.0f;
     // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
     // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
     // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.

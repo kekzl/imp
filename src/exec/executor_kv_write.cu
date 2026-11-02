@@ -7,6 +7,7 @@
 #include "exec/executor_helpers.h"
 #include "quant/fp8_quant.h"
 #include "core/kv_dtype.h"
+#include "core/kv_fp8_scale.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -79,6 +80,13 @@ float GraphExecutor::fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int r
         }
         float k_scale = calibrate_fp8_scale(kv_cal, stream);
         float v_scale = calibrate_fp8_scale(vv_cal, stream);
+        // kv_cache.fp8_scale=calibrate: the engine turns these into static scales (an all-zero
+        // tensor reads as 448: calibrate_fp8_scale returns 1.0 for it).
+        const size_t cal_k = 2 * static_cast<size_t>(kv_layer);
+        if (kv_cal_collect_ && cal_k + 1 < kv_cal_amax_.size()) {
+            kv_cal_amax_[cal_k] = k_scale * kFp8KvE4M3Max;
+            kv_cal_amax_[cal_k + 1] = v_scale * kFp8KvE4M3Max;
+        }
         float new_scale = std::max(k_scale, v_scale);
         if (new_scale < 1e-12f)
             new_scale = 1.0f;
@@ -91,6 +99,48 @@ float GraphExecutor::fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int r
     if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
         return 1.0f / kv_scales_[kv_layer];
     return 1.0f;
+}
+
+void GraphExecutor::set_kv_layer_map(std::vector<int> map) {
+    kv_layer_map_ = std::move(map);
+    int n_kv = 0;
+    for (int idx : kv_layer_map_)
+        n_kv = std::max(n_kv, idx + 1);  // -1 = not an attention layer
+    kv_scales_.assign(n_kv, 1.0f);
+    kv_calibrated_.assign(n_kv, false);
+    kv_scales_static_ = false;
+}
+
+void GraphExecutor::reset_kv_calibration() {
+    if (kv_scales_static_)
+        return;  // kv_cache.fp8_scale checkpoint / calibrate: fixed for the process
+    std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
+    std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
+    ++kv_calib_gen_;
+}
+
+bool GraphExecutor::kv_scales_calibrated() const {
+    return std::find(kv_calibrated_.begin(), kv_calibrated_.end(), false) == kv_calibrated_.end();
+}
+
+void GraphExecutor::set_static_kv_scales(const std::vector<float>& scales) {
+    IMP_CHECK(scales.size() == kv_scales_.size(), "set_static_kv_scales: %zu scales for %zu KV layers",
+              scales.size(), kv_scales_.size());
+    kv_scales_ = scales;
+    kv_calibrated_.assign(kv_scales_.size(), true);
+    kv_scales_static_ = true;
+    kv_cal_collect_ = false;
+    ++kv_calib_gen_;  // prefill graphs keyed on the generation never replay an older scale
+}
+
+void GraphExecutor::begin_kv_scale_calibration() {
+    // Scale 0 drops the 1.0 floor: the std::max above keeps the calibration prefill's own amax / 448.
+    kv_scales_static_ = false;
+    kv_cal_collect_ = true;
+    std::fill(kv_scales_.begin(), kv_scales_.end(), 0.0f);
+    std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
+    kv_cal_amax_.assign(2 * kv_scales_.size(), 0.0f);
+    ++kv_calib_gen_;
 }
 
 void GraphExecutor::round_prefill_kv_to_cache(int layer, const InferenceState& state, Tensor& seq_k,

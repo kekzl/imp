@@ -383,6 +383,10 @@ struct TransformerLayer {
     // indistinguishable from a promotion failure, and firing then misroutes a sibling's scales.
     bool qkv_split_from_fused = false;
     bool gate_up_split_from_fused = false;
+    // Checkpoint FP8 KV dequant scales (self_attn.{k_proj.,}k_scale / v_scale), 0 = absent.
+    // Read only under kv_cache.fp8_scale=checkpoint (src/core/kv_fp8_scale.h).
+    float kv_ckpt_k_scale = 0.0f;
+    float kv_ckpt_v_scale = 0.0f;
     Tensor w_gate, w_up, w_down, ffn_norm;
     Tensor moe_gate;
     std::vector<Tensor> expert_w_gate, expert_w_up, expert_w_down;

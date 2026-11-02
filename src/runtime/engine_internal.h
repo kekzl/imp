@@ -13,6 +13,7 @@
 #include "model/model.h"
 #include "runtime/batch.h"
 #include "exec/executor.h"
+#include "runtime/kv_fp8_scale_init.h"  // kv_cache.fp8_scale (warmup calibration)
 #include "core/logging.h"
 
 #include <algorithm>
