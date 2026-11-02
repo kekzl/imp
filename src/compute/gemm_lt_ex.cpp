@@ -1,6 +1,7 @@
 #include "compute/gemm_lt_ex.h"
 
 #include "compute/gemm_internal.cuh"
+#include "compute/lt_route_trace.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
 
@@ -171,9 +172,11 @@ cublasStatus_t lt_gemm_strided_batched(cublasOperation_t transa, cublasOperation
                                        int lda, long long stride_a, const void* B, cudaDataType_t b_type,
                                        int ldb, long long stride_b, const void* beta, void* C,
                                        cudaDataType_t c_type, int ldc, long long stride_c, int batch,
-                                       cublasComputeType_t compute, cudaStream_t stream) {
+                                       cublasComputeType_t compute, cudaStream_t stream,
+                                       const std::source_location& loc) {
     if (m == 0 || n == 0 || batch == 0)
         return CUBLAS_STATUS_SUCCESS;
+    lt_route_note("lt_ex", m, n, k, batch, loc);
     const bool batched = batch > 1;
     const Key key{.stride_a = batched ? stride_a : 0,
                   .stride_b = batched ? stride_b : 0,
@@ -202,9 +205,11 @@ cublasStatus_t lt_gemm_batched(cublasOperation_t transa, cublasOperation_t trans
                                const void* alpha, const void* const* a, cudaDataType_t a_type, int lda,
                                const void* const* b, cudaDataType_t b_type, int ldb, const void* beta,
                                void* const* c, cudaDataType_t c_type, int ldc, int batch,
-                               cublasComputeType_t compute, cudaStream_t stream) {
+                               cublasComputeType_t compute, cudaStream_t stream,
+                               const std::source_location& loc) {
     if (m == 0 || n == 0 || batch == 0)
         return CUBLAS_STATUS_SUCCESS;
+    lt_route_note("lt_ptr_batched", m, n, k, batch, loc);
     // The matrix pointers live on the device: assume only element alignment.
     const Key key{.workspace = gemm_internal_workspace() ? gemm_internal_workspace_size() : 0,
                   .transa = transa,

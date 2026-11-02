@@ -203,7 +203,8 @@ TEST(ServingSignalsTest, QueueTimeIsTheSchedulerWaitAndTheSplitIsVisible) {
     ASSERT_TRUE(m.open(/*max_batch_size=*/1, /*kv_blocks=*/0));
     BatchingEngine be;
     be.start(m.ctx);
-    Served r1{make_request(m.ctx, long_prompt(), 64, 1.0f)};
+    // 256 tokens: at 64, a fast build finished r1 in ~92 ms and q2 fell under the 100 ms bound.
+    Served r1{make_request(m.ctx, long_prompt(), 256, 1.0f)};
     Served r2{make_request(m.ctx, long_prompt(), 4, 1.0f)};
     be.submit(r1.sr);
     be.submit(r2.sr);
@@ -220,7 +221,7 @@ TEST(ServingSignalsTest, QueueTimeIsTheSchedulerWaitAndTheSplitIsVisible) {
     const double q1 = r1.sr->queue_ms.load();
     const double q2 = r2.sr->queue_ms.load();
     EXPECT_GE(q1, 0.0);
-    EXPECT_GT(q2, 100.0) << "r2 waited for r1's 64 tokens; a stamp at worker pickup reads ~0 here";
+    EXPECT_GT(q2, 100.0) << "r2 waited for r1's 256 tokens;a stamp at worker pickup reads ~0 here";
     EXPECT_GT(q2, q1);
     be.stop();
 }

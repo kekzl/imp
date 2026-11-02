@@ -1288,7 +1288,8 @@ no_nvfp4_decode_cache = false
 # verify chunk forward and log per-attempt outcomes (capturability census,
 # not a perf path; falls back to the eager forward on any failure).
 spec_capture_probe   = false
-# Log shape + per-candidate algo for every cuBLASLt algo selection.
+# Log shape + per-candidate algo for every cuBLASLt algo selection, and at
+# teardown every cuBLASLt call site with its shape and count ([lt-route]).
 log_gemm_algo        = false
 # MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.
 mtp_pattern_log      = false
