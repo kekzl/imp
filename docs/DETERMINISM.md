@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-31
-commit: cc0936bb
+verified: 2026-11-02
+commit: e66bf1d9
 -->
 
 # Determinism
@@ -59,6 +59,26 @@ The GEMM knobs move the particular near-tie the short probe lands on; over 96 to
 
 - `PrefixCacheE2ETest.FreshVsPrefixHitTokenEqual` asserts the strong version of the guarantee and passes: its long multi-block prompt has no margin this narrow.
 - The gate is right about what it measures; the promise above is wider than what the gate can see.
+
+## FP8 KV PPL below FP16 KV
+
+Measured 2026-11-02 at e66bf1d9: `imp-cli --perplexity`, `runtime.deterministic_gemm=true`, `attention.apa_eps=0`, chunk 2048 unless noted. "before" = `round_prefill_kv_to_cache` removed (#3002).
+
+| Model, corpus | FP16 KV | FP8 before | FP8 after |
+|---|---:|---:|---:|
+| Qwen3-1.7B BF16, `ppl_corpus_45k` | 16.8827 | 16.7016 | 16.7006 |
+| same, chunk 1 | 16.8715 | 16.6698 | 16.7103 |
+| Qwen3-1.7B BF16, `prose_30k` | 21.8016 | 21.7212 | 21.8740 |
+| Qwen3-0.6B BF16, `ppl_corpus_45k` / `prose_30k` | 22.9272 / 29.5530 | 23.3635 / 29.7411 | 23.5063 / 30.1791 |
+| Qwen3-8B-NVFP4, `ppl_corpus_45k` chunk 2048 / 512 | 11.3005 / 11.2751 | 11.2968 / 11.2653 | 11.2394 / 11.2766 |
+| Qwen3-8B-NVFP4, `prose_30k` | 15.2656 | 15.0877 | 15.2175 |
+
+- E4M3 rounding of K, not a defect: an FP16 cache with K/V rounded in place (scale 1) gives 16.7006 / 21.8740, bit-equal to FP8 KV. K only 16.7003, V only 16.8841; K in layers 3-27 16.6914, layers 0-2 16.9201.
+- The scale (`fp8_kv_inv_scale_`) is a no-op here: 91 of 92 layers (1.7B, 0.6B, 8B) calibrate to the 1.0 floor, absmax over the first 2048 tokens < 448 (1.7B K 22-394, V 1.2-398); 0.6B layer 0 1.095. K at scale 2 (no saturation below 896) 16.7086; clipping K at 112 (scale 1/4) 18.4028.
+- Broad, grows with context: 1.7B `ppl_corpus_45k` FP8 minus FP16 NLL -0.0108 nats/token, 10806/13536 positions move by > 0.001, -0.005 (tokens 0-2047) to -0.022 (10240-12287). Before vs after #3002: -0.00006.
+- The sign follows corpus and model (1.7B prose +0.33 %, 0.6B +2.5 %): judge FP8 KV by per-position NLL distance to FP16, not by PPL against FP16 on one corpus.
+- Since #3002 prefill agrees with the decode-shaped path: 1.7B chunk 1 / 512 / 2048 16.7103 / 16.7205 / 16.7006.
+- Qwen3-8B-NVFP4 moves more with the harness than with the KV dtype: FP16 KV 11.3005 / 11.2751 at chunk 2048 / 512, 11.3145 with default APA; chunk 1 drops `prose_30k` by 5 % (FP16 14.4738, FP8 14.4631). The #3002 commit's 11.3201 -> 11.2202 (APA on) sits in that band.
 
 ## Recipe: reproducible evals
 
