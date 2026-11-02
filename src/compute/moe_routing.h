@@ -69,6 +69,11 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                      bool normalize_weights = true, const void* score_bias = nullptr,
                      bool skip_sorting = false, MoeGroupLimit grp = {});
 
+// Tail of the buffers variant: expert ids / weights already in buffers (moe_router_fused or the
+// gating kernel); runs the permute unless skip_sorting and fills result.
+void moe_topk_finish(int n_tokens, int n_experts, int top_k, MoeRoutingBuffers& buffers,
+                     MoeRoutingResult& result, cudaStream_t stream, bool skip_sorting);
+
 // gpt-oss router bias (#547): linear bias on gate LOGITS added BEFORE softmax/top-k
 // (affects selection AND weights). Distinct from DeepSeek-style score_bias (selection only).
 // logits_f32[n,ne] FP32 mutated in place; bias[ne] FP16 device.

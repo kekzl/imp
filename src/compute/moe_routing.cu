@@ -615,12 +615,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
     check_group_limit(n_experts, grp);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
-    const int total_assignments = n_tokens * top_k;
-
     int32_t* d_expert_indices = buffers.expert_indices;
     float* d_expert_weights = buffers.expert_weights;
-    int32_t* d_sorted_token_ids = buffers.sorted_token_ids;
-    int32_t* d_expert_offsets = buffers.expert_offsets;
 
     // Kernel 1: Softmax + top-k selection per token
     int probs_arrays = score_bias ? 2 : 1;
@@ -633,7 +629,16 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                 static_cast<const float*>(d_logits), n_experts, top_k, d_expert_indices, d_expert_weights,
                 use_sigmoid, normalize_weights, static_cast<const half*>(score_bias), grp);
     IMP_CUDA_CHECK_LAUNCH();
+    moe_topk_finish(n_tokens, n_experts, top_k, buffers, result, stream, skip_sorting);
+}
 
+void moe_topk_finish(int n_tokens, int n_experts, int top_k, MoeRoutingBuffers& buffers,
+                     MoeRoutingResult& result, cudaStream_t stream, bool skip_sorting) {
+    const int total_assignments = n_tokens * top_k;
+    int32_t* d_expert_indices = buffers.expert_indices;
+    float* d_expert_weights = buffers.expert_weights;
+    int32_t* d_sorted_token_ids = buffers.sorted_token_ids;
+    int32_t* d_expert_offsets = buffers.expert_offsets;
     if (!skip_sorting) {
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
         // Scratch is sized for buffers.max_experts; a wider router takes the single-CTA kernel.

@@ -19,6 +19,7 @@ src/exec/executor_qsa.cpp cudaMemcpy(d_ctx debug  # attention.qsa_debug comparis
 src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab_prefill init  # executor init, before the warmup device syncs
 src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab init  # executor init, before the warmup device syncs
 src/exec/executor_workspace_buffers.cpp cudaMemset(qscratch_.cutlass_act_sf init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(moe_.router_fused_ws init  # executor init, before the warmup device syncs
 src/exec/executor_workspace.cpp cudaMemcpy(*buf init  # GraphExecutor::init, Gemma-4 V-norm ones
 src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_ init  # GraphExecutor::init
 src/exec/executor_workspace.cpp cudaMemcpy(longrope_short_freqs_ init  # GraphExecutor::init
