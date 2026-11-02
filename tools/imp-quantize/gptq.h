@@ -37,6 +37,11 @@ inline constexpr float kDefaultGptaqAlpha = 0.25f;
 // Cholesky factor of H^-1 (H^-1 = U^T U). Only the upper triangle holds U on return.
 [[nodiscard]] std::expected<void, std::string> upper_cholesky_of_inverse(float* d_a, int64_t K);
 
+// sum over rows of e_r H e_r^T for a host error matrix e [N, K] (row-major) and H [K, K].
+[[nodiscard]] std::expected<double, std::string> output_loss(const std::vector<float>& e,
+                                                             const std::vector<float>& H, int64_t N,
+                                                             int64_t K);
+
 // Layer index of a checkpoint weight name (".layers.N."), -1 when absent.
 int layer_of(const std::string& name);
 
