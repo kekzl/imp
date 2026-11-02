@@ -3,8 +3,8 @@
 # the interval between consecutive MARK kernels, steady = kernel-count mode, the median-period step is
 # printed. LAYER (regex) marks the first kernel of each layer; rows FROM..TO layers are listed, then a
 # per-name table over the whole step for kernels matching CLASS. Usage: decode_step_seq.py SQLITE
-# Env: MARK (argmax_reduce), LAYER (paged_attention|fa2_hd512), FROM (2), TO (3),
-#      CLASS (rmsnorm|quantize_nvfp4|sanitize|scale_|elementwise|device_copy|fp16_to|add_|copy)
+# Env: MARK (argmax_reduce), LAYER (regex of the first kernel of a layer), FROM (2), TO (3),
+#      CLASS (norm, quantize, sanitize, scale, add, copy, activation kernels)
 import collections
 import os
 import re
@@ -15,7 +15,7 @@ import sys
 db = sqlite3.connect(sys.argv[1])
 mark = re.compile(os.environ.get("MARK", "argmax_reduce"))
 layer_re = re.compile(os.environ.get("LAYER", "rmsnorm_fp32_in_kernel"))
-cls = re.compile(os.environ.get("CLASS", "rmsnorm|quantize_nvfp4|sanitize|scale_|elementwise|device_copy|fp16_to|_add_|copy"))
+cls = re.compile(os.environ.get("CLASS", "rmsnorm|quantize|sanitize|scale_|elementwise|device_copy|fp16_to|_add_|copy|fp32_residual|geglu|swiglu"))
 lo, hi = int(os.environ.get("FROM", "2")), int(os.environ.get("TO", "3"))
 rows = list(db.execute(
     "SELECT k.start, k.end, s.value, k.gridX, k.blockX FROM CUPTI_ACTIVITY_KIND_KERNEL k "

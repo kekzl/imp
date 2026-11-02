@@ -105,6 +105,9 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 // dst_sf SfAtom): bit-identical to swiglu() + quantize_fp16_to_nvfp4_cutlass(out_fp16), #2470.
 void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
                                            void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream);
+// Same for GeGLU: bit-identical to geglu() + quantize_fp16_to_nvfp4_cutlass(out_fp16).
+void geglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
+                                          void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream);
 
 // SfAtom NVFP4 tier available (own tile GEMMs; the CUTLASS GEMM was removed 2026-10-31). Always true.
 [[nodiscard]] bool cutlass_sm120_nvfp4_available();

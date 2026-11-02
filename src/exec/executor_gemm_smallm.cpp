@@ -227,6 +227,21 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     return false;
 }
 
+bool GraphExecutor::geglu_for_tile_down_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
+                                         int n, cudaStream_t stream) {
+    const int K = static_cast<int>(so.shape[1]);
+    if (n >= 2 && n <= 32 && (K & 255) != 0 && K % 16 == 0 && so.qtype == QType::F16 &&
+        prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+        geglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
+                                             qscratch_.cutlass_act_sf, n, K, stream);
+        smallm_xq_forget_(so.data);
+        return true;
+    }
+    geglu(go, uo, so, stream);
+    smallm_xq_forget_(so.data);
+    return false;
+}
+
 bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                               Tensor& out_a, Tensor& out_b, const GemmContext& ctx) {
     const TensorID ids[2] = {id_a, id_b};
