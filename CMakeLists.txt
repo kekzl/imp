@@ -1506,6 +1506,7 @@ if(IMP_BUILD_TESTS)
         tests/test_ssm_scan_reg.cu
         tests/test_ssm_scan_ssd.cu
         tests/test_ssm_conv_split.cu
+        tests/test_ssm_batched_decode.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu
         tests/test_tool_call_constrain.cu

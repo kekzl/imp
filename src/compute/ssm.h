@@ -26,6 +26,12 @@ void ssm_conv1d_decode_f32_silu_batched(void* conv_state_pool, const int* seq_sl
 void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,
                        Tensor& x_out, int conv_kernel, cudaStream_t stream);
 
+// Batched Mamba2 conv1d decode: x_in/x_out [n_seq, channels]; row i uses the conv state of
+// pool slot seq_slots[i] (device table, stride in floats). Per row bit-identical to ssm_conv1d_decode.
+void ssm_conv1d_decode_batched(void* conv_state_pool, const int* seq_slots, int64_t conv_state_seq_stride,
+                               const Tensor& x_in, const Tensor& weight, const Tensor& bias, Tensor& x_out,
+                               int n_seq, int conv_kernel, cudaStream_t stream);
+
 // Conv1d prefill: causal 1D convolution over the full sequence; also updates conv_state
 // with the last conv_kernel values (shorter chunks shift in missing leading values from
 // the previous conv_state).
@@ -91,6 +97,15 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
                      const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y, const void* z,
                      int n_heads, int head_dim_ssm, int state_size, int n_groups, QType h_dtype = QType::F32,
                      cudaStream_t stream = nullptr);
+
+// Batched Mamba2 scan decode, one token per sequence: x/y/z [n_seq, inner], B/C [n_seq,
+// n_groups*state_size], dt [n_seq, n_heads]; row i advances the h_state of pool slot
+// seq_slots[i] (device table). Per row bit-identical to ssm_scan_decode.
+void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
+                             const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state_pool,
+                             const int* seq_slots, size_t h_slot_stride_bytes, Tensor& y, const void* z,
+                             int n_seq, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                             QType h_dtype, cudaStream_t stream);
 
 // SSM scan prefill: iterates scan_decode over all tokens sequentially. z:[n_tokens,
 // inner_size] gate (nullptr=no fusion).

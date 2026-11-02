@@ -64,11 +64,37 @@ static bool ssm_prefill_front_fused(const InferenceState& state, void* conv_st, 
     return false;
 }
 
-// Separate conv1d (prefill or decode) + SiLU over the full xBC output.
-static void ssm_conv_silu_separate(const InferenceState& state, void* conv_st, int ssm_idx,
+// Batched decode (runtime.gdn_batched_decode): n sequences, one token each, row i on recurrent
+// slot ssm_seq_slots[i]. Any other slot-table form (grouped verify) has no Mamba2 kernel.
+static bool ssm_batched_decode_rows(const InferenceState& state, int n, int ssm_idx) {
+    if (!state.ssm_seq_slots || state.ssm_n_seq <= 1)
+        return false;
+    if (state.is_prefill || state.ssm_n_seq != n || !state.ssm_state || ssm_idx < 0)
+        throw std::runtime_error("run_ssm: Mamba2 supports the slot table only for one-token batched decode");
+    return true;
+}
+
+// Factored spare: advance the accepted slots' conv windows by the drafted
+// tap before anything reads them. Once per layer, ahead of every branch.
+static void ssm_conv_tap_advance(const InferenceState& state, int ssm_idx, int conv_channels, int conv_kernel,
+                                 cudaStream_t stream) {
+    if (state.ssm_tap_in && state.ssm_tap_n > 0 && state.ssm_state && ssm_idx >= 0)
+        ssm_conv_tap_apply(state.ssm_state->conv_state(0, ssm_idx),
+                           static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
+                           static_cast<const char*>(state.ssm_tap_in) +
+                               (state.ssm_tap_layer_stride * ssm_idx * 2),
+                           conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
+}
+
+// Separate conv1d (prefill, decode or batched decode) + SiLU over the full xBC output.
+static void ssm_conv_silu_separate(const InferenceState& state, bool batched, void* conv_st, int ssm_idx,
                                    const Tensor& xBC_in, Tensor& xBC_out, const Tensor& w, const Tensor& b,
                                    int conv_kernel, cudaStream_t stream) {
-    if (conv_st) {
+    if (batched) {
+        ssm_conv1d_decode_batched(state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
+                                  static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
+                                  xBC_in, w, b, xBC_out, state.ssm_n_seq, conv_kernel, stream);
+    } else if (conv_st) {
         if (state.is_prefill) {
             // Speculative verify: writes the conv window as of d_snap_n rows into the
             // snapshot slab too, so a fully rejected draft can adopt state after the
@@ -189,16 +215,10 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     Tensor xBC_out(conv_out_ptr, compute_dtype_, 2, conv_out_shape, true);
 
     int ssm_idx = get_ssm_layer(ssm_layer_map_, layer);
+    const bool batched_dec = ssm_batched_decode_rows(state, n, ssm_idx);
     void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
                                                       : nullptr;
-    // Factored spare: advance the accepted slots' conv windows by the drafted
-    // tap before anything reads them. Once per layer, ahead of every branch.
-    if (state.ssm_tap_in && state.ssm_tap_n > 0 && state.ssm_state && ssm_idx >= 0)
-        ssm_conv_tap_apply(state.ssm_state->conv_state(0, ssm_idx),
-                           static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
-                           static_cast<const char*>(state.ssm_tap_in) +
-                               (state.ssm_tap_layer_stride * ssm_idx * 2),
-                           conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
+    ssm_conv_tap_advance(state, ssm_idx, conv_channels, conv_kernel, stream);
 
     const int BC_size = n_groups * ssize;
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
@@ -212,8 +232,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                                 static_cast<half*>(xBC_in.data), xBC_in.data, es, n, inner, BC_size,
                                 conv_kernel, stream);
     if (!front_fused)
-        ssm_conv_silu_separate(state, conv_st, ssm_idx, xBC_in, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                               conv_kernel, stream);
+        ssm_conv_silu_separate(state, batched_dec, conv_st, ssm_idx, xBC_in, xBC_out, ly.ssm_conv1d_w,
+                               ly.ssm_conv1d_b, conv_kernel, stream);
 
     // 6-7. Split conv output into x/B/C per token, run SSM scan.
 
@@ -274,10 +294,17 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             // Output goes into y_buf (overwrites x_contig which was temporary)
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
 
-            ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
-                             static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                             h_dtype, stream, state.d_chunk_len, h_snap, h_snap ? state.d_snap_n : nullptr,
-                             dispatch_policy().gdn.ssd_scan);
+            if (batched_dec)
+                ssm_scan_decode_batched(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b,
+                                        state.ssm_state->h_state(0, ssm_idx), state.ssm_seq_slots,
+                                        state.ssm_state->slot_stride_bytes(), y_all,
+                                        static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
+                                        n_groups, h_dtype, stream);
+            else
+                ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
+                                 static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
+                                 n_groups, h_dtype, stream, state.d_chunk_len, h_snap,
+                                 h_snap ? state.d_snap_n : nullptr, dispatch_policy().gdn.ssd_scan);
         }
     }
 
