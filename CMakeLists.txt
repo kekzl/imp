@@ -303,6 +303,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_q45k_f16_tile.cu
     src/compute/gemv_dp4a_multi.cu
     src/compute/gemm_grouped_nvfp4_tile.cu
+    src/compute/gemm_grouped_nvfp4_decode.cu
     src/compute/attention_fa2_hd512.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
@@ -1403,6 +1404,7 @@ if(IMP_BUILD_TESTS)
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_grouped_nvfp4_args.cu
         tests/test_gemm_grouped_nvfp4_tile.cu
+        tests/test_gemm_grouped_nvfp4_decode.cu
         tests/test_grouped_nvfp4_ref.cu
         tests/test_nvfp4_gemm_alpha.cu
         tests/test_mxfp8_gemm.cu
