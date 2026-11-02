@@ -283,13 +283,12 @@ static void dispatch_gated_activation(const Tensor& gate, const Tensor& up, Tens
     }
 }
 
-// Fused SwiGLU / GeGLU + NVFP4 quantize (batched-decode producer fusion for down-proj input).
-// One thread per 16-value micro-block: act(gate)*up rounded to FP16 (bit-identical to
-// swiglu_fp16_kernel / geglu_fp16_kernel), packed to NVFP4 nibbles + FP8 micro-scale, tensor_scale 1.0.
-template <bool kGelu>
-__global__ void gated_fp16_nvfp4_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
-                                        __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
-                                        uint8_t* __restrict__ xq_scales, int64_t total_mb) {
+// Fused SwiGLU + NVFP4 quantize (batched-decode producer fusion for down-proj input).
+// One thread per 16-value micro-block: silu(gate)*up rounded to FP16 (bit-identical to
+// swiglu_fp16_kernel), packed to NVFP4 nibbles + FP8 micro-scale, tensor_scale 1.0.
+__global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const __half* __restrict__ up,
+                                         __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
+                                         uint8_t* __restrict__ xq_scales, int64_t total_mb) {
     const int64_t mb = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     pdl_wait();     // gate/up are the gate|up GEMM's outputs
     pdl_trigger();  // scheduling only: the down GEMM prefetches its weights during this grid
@@ -315,20 +314,9 @@ __global__ void gated_fp16_nvfp4_kernel(const __half* __restrict__ gate, const _
         for (int k = 0; k < 4; ++k) {
             const float2 gf = __half22float2(g2[k]);
             const float2 uf = __half22float2(u2[k]);
-            if constexpr (kGelu) {
-                // geglu_fp16_kernel's expression, term for term.
-                constexpr float SQRT_2_PI = 0.7978845608028654f;
-                constexpr float COEFF = 0.044715f;
-                float gelu0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + (COEFF * gf.x * gf.x * gf.x))));
-                float gelu1 = gf.y * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.y + (COEFF * gf.y * gf.y * gf.y))));
-                float r0 = fminf(fmaxf(gelu0 * uf.x, -65504.0f), 65504.0f);
-                float r1 = fminf(fmaxf(gelu1 * uf.y, -65504.0f), 65504.0f);
-                o2[k] = __float22half2_rn(make_float2(r0, r1));
-            } else {
-                const float o0 = gf.x / (1.0f + __expf(-gf.x)) * uf.x;
-                const float o1 = gf.y / (1.0f + __expf(-gf.y)) * uf.y;
-                o2[k] = __float22half2_rn(make_float2(o0, o1));
-            }
+            const float o0 = gf.x / (1.0f + __expf(-gf.x)) * uf.x;
+            const float o1 = gf.y / (1.0f + __expf(-gf.y)) * uf.y;
+            o2[k] = __float22half2_rn(make_float2(o0, o1));
             const float2 rf = __half22float2(o2[k]);
             const int idx = (v * 8) + (k * 2);
             vals[idx] = rf.x;
@@ -363,11 +351,10 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out, cudaStream_t stre
                               swiglu_fp16_kernel, true, stream);
 }
 
-// Host dispatch for the fused gated-activation + NVFP4 kernels (see kernel comment).
-// Returns false outside the fused envelope; caller falls back to swiglu() / geglu() + GEMM's own quantize.
-template <bool kGelu>
-static bool gated_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
-                                 uint8_t* xq_scales, cudaStream_t stream) {
+// Host dispatch for the fused swiglu+NVFP4 kernel (see kernel comment).
+// Returns false outside the fused envelope; caller falls back to swiglu() + GEMM's own quantize.
+bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
+                           uint8_t* xq_scales, cudaStream_t stream) {
     if (gate.qtype != QType::F16 || up.qtype != QType::F16 || out.qtype != QType::F16)
         return false;
     const int64_t n = gate.numel();
@@ -376,22 +363,12 @@ static bool gated_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& o
     const int64_t total_mb = n >> 4;
     const int block = 256;
     const int grid = static_cast<int>((total_mb + block - 1) / block);
-    pdl::enable_kernel(gated_fp16_nvfp4_kernel<kGelu>);
-    pdl::launch(gated_fp16_nvfp4_kernel<kGelu>, dim3(grid), dim3(block), size_t(0), stream,
+    pdl::enable_kernel(swiglu_fp16_nvfp4_kernel);
+    pdl::launch(swiglu_fp16_nvfp4_kernel, dim3(grid), dim3(block), size_t(0), stream,
                 static_cast<const __half*>(gate.data), static_cast<const __half*>(up.data),
                 static_cast<__half*>(out.data), xq_packed, xq_scales, total_mb);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
-}
-
-bool swiglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
-                           uint8_t* xq_scales, cudaStream_t stream) {
-    return gated_quantize_nvfp4<false>(gate, up, out, xq_packed, xq_scales, stream);
-}
-
-bool geglu_quantize_nvfp4(const Tensor& gate, const Tensor& up, Tensor& out, uint8_t* xq_packed,
-                          uint8_t* xq_scales, cudaStream_t stream) {
-    return gated_quantize_nvfp4<true>(gate, up, out, xq_packed, xq_scales, stream);
 }
 
 // --------------------------------------------------------------------------

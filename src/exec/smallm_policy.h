@@ -6,8 +6,8 @@ namespace imp {
 
 // Which small-M NVFP4 kernel serves a weight (or a sibling set of combined N_total, all of one K) on A4
 // decode rows, by shape only: a row's bits never depend on M. impl 3: the weight-streaming kernel (ws) where
-// v2 splits K 4+ ways (+ reduce launch), cannot fuse the siblings in one stripe, or refuses K % 256; v2
-// elsewhere. Conc 16: Gemma-4 o / gate|up / down on ws +5 %; Qwen3-8B o / down (3 stripes) on ws -6 %.
+// v2 splits K 4+ ways (+ reduce launch), cannot fuse the siblings in one stripe, or refuses K % 256 (Gemma-4
+// down 2816 x 2112); v2 elsewhere. Qwen3-8B o / down (3 stripes, 64-row ws CTAs) on ws: conc 16 -5.9 %.
 enum class SmallMKernel { kNone, kV1, kV2, kWs };
 
 inline constexpr int kSmallMWsMinStripes = 4;

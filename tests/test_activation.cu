@@ -517,9 +517,8 @@ TEST(SoftmaxTest, LargeRow) {
 // SwigluNvfp4ProducerBitIdentity: fused swiglu+NVFP4 quantize producer must emit the same
 // FP16 bytes as swiglu() and the same packed nibbles/FP8 micro-scales as
 // quantize_fp16_to_nvfp4_into() on that output; inputs include near-zero and +-1000 range.
-// gelu: geglu() / geglu_quantize_nvfp4 (Gemma-4 dense MLP down input, 2112 columns).
-void gated_nvfp4_producer_bit_identity(bool gelu) {
-    const int shapes[][2] = {{3, 4096}, {32, 17408}, {16, 2112}};
+TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
+    const int shapes[][2] = {{3, 4096}, {32, 17408}};
     for (auto& sh : shapes) {
         const int rows = sh[0], cols = sh[1];
         const size_t n = (size_t)rows * cols;
@@ -551,14 +550,10 @@ void gated_nvfp4_producer_bit_identity(bool gelu) {
         cudaMemset(f_packed, 0xAA, packed_bytes);
         cudaMemset(f_scales, 0xAA, scale_bytes);
 
-        if (gelu)
-            geglu(d_g, d_u, d_out_ref, nullptr);
-        else
-            swiglu(d_g, d_u, d_out_ref, nullptr);
+        swiglu(d_g, d_u, d_out_ref, nullptr);
         quantize_fp16_to_nvfp4_into(d_out_ref.data, rows, cols, ref_packed, ref_scales,
                                     /*tensor_scale=*/1.0f, nullptr);
-        ASSERT_TRUE(gelu ? geglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr)
-                         : swiglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr));
+        ASSERT_TRUE(swiglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr));
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
         std::vector<uint8_t> h_ref_out(d_out_ref.nbytes()), h_f_out(d_out_fused.nbytes());
@@ -588,10 +583,6 @@ void gated_nvfp4_producer_bit_identity(bool gelu) {
         free_gpu_tensor(d_out_fused);
     }
 }
-
-TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) { gated_nvfp4_producer_bit_identity(/*gelu=*/false); }
-
-TEST(ActivationTest, GegluNvfp4ProducerBitIdentity) { gated_nvfp4_producer_bit_identity(/*gelu=*/true); }
 
 }  // namespace
 }  // namespace imp

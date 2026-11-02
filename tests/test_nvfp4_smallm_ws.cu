@@ -185,6 +185,37 @@ TEST(Nvfp4SmallMWsTest, MatchesDoubleReferenceEveryM) {
     }
 }
 
+// The v2 kernel on the striped shapes ws took over (Gemma-4 gate / up 5 stripes, k 10 stripes), same oracle.
+TEST(Nvfp4SmallMWsTest, V2MatchesDoubleReferenceOnStripedShapes) {
+    if (!has_device())
+        GTEST_SKIP() << "no CUDA device";
+    const int shapes[][2] = {{2112, 2816}, {1024, 2816}, {2816, 4096}};
+    for (const auto& nk : shapes) {
+        Shape s;
+        s.init(nk[0], nk[1], true);
+        double max_ref = 0.0;
+        for (double v : s.ref)
+            max_ref = std::max(max_ref, std::fabs(v));
+        void* d_ws = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_ws, gemm_nvfp4_smallm_v2_workspace_bytes(s.N, s.K)), cudaSuccess);
+        for (int M : {1, 16, 32}) {
+            ASSERT_TRUE(gemm_nvfp4_smallm_v2_a4(s.W(), s.X(), s.d_y, M, s.N, s.K, d_ws, nullptr));
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto y = download(s.d_y, size_t(M) * s.N);
+            double worst = 0.0;
+            for (size_t i = 0; i < y.size(); ++i) {
+                const double r = s.ref[i];
+                worst = std::max(worst, std::fabs(double(__half2float(y[i])) - r) /
+                                            (std::fabs(r) * 1e-3 + max_ref * 1e-5 + 1e-6));
+            }
+            EXPECT_LE(worst, 1.0) << "v2 N=" << s.N << " K=" << s.K << " M=" << M << " stripes "
+                                  << gemm_nvfp4_smallm_v2_stripes(s.N, s.K);
+        }
+        cudaFree(d_ws);
+        s.free_all();
+    }
+}
+
 // Row bits do not move with M, the row's batch position or the CTA config (rows per CTA, unroll).
 TEST(Nvfp4SmallMWsTest, RowBitsIndependentOfMPositionAndConfig) {
     if (!has_device())

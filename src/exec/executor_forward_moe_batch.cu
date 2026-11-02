@@ -1191,16 +1191,12 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
                                  model_->config().overrides.gemma4.force_mmvq);
     if (shared_gated) {
         Tensor sh_gate(gate_buf, compute_dtype_, 2, sh_shape, true);
-        // Decode rows: gate|up as one small-M launch on one activation quantize, and the down input's
-        // NVFP4 quantize inside the activation kernel; both decline to the separate calls.
+        // Decode rows: gate|up as one small-M launch on one activation quantize; declines to two calls.
         if (!try_smallm_pair_dispatch_(ly.w_gate_shared_id, ly.w_up_shared_id, no, sh_gate, sh_up, ctx)) {
             gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
             gemm_via_handle_(ly.w_gate_shared_id, no, sh_gate, ctx);
         }
-        const bool gelu = cfg.ffn_activation == FFNActivation::GEGLU;
-        if (n <= 32)
-            (void)swiglu_for_smallm_(sh_gate, sh_up, sh_swiglu, ly.w_down_shared_id, n, stream, gelu);
-        else if (gelu)
+        if (cfg.ffn_activation == FFNActivation::GEGLU)
             geglu(sh_gate, sh_up, sh_swiglu, stream);
         else
             swiglu(sh_gate, sh_up, sh_swiglu, stream);

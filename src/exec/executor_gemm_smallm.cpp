@@ -137,7 +137,7 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
     if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         overlap_prefill_active_)
         return nullptr;
-    if (M < 2 || M > 32 || K <= 0 || (K % 64) != 0)
+    if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
         return nullptr;
     if (consumer_id == kInvalidTensorID)
         return nullptr;
@@ -232,27 +232,22 @@ void GraphExecutor::ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Te
 }
 
 bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
-                                       int n, cudaStream_t stream, bool gelu) {
+                                       int n, cudaStream_t stream) {
     const int K = static_cast<int>(so.shape[1]);
     // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
-    if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
-        prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+    if (n > 32 && K % 16 == 0 && so.qtype == QType::F16 && prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
         swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
                                               qscratch_.cutlass_act_sf, n, K, stream);
         return true;
     }
     uint8_t* xq_scales = nullptr;
     uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
-    if (xq_packed != nullptr && (gelu ? geglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)
-                                      : swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream))) {
+    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)) {
         smallm_producer_tag_(so.data, n, K);
         return false;
     }
-    if (gelu)
-        geglu(go, uo, so, stream);
-    else
-        swiglu(go, uo, so, stream);
+    swiglu(go, uo, so, stream);
     if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
         smallm_xq_from_producer_ = false;
     return false;

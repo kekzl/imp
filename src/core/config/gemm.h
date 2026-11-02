@@ -135,10 +135,10 @@ struct GEMM {
     bool fp8_static_act_scale = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
-    // pipeline (nvfp4_gemm_smallm_v2.cu), 3 = weight-streaming mxf4nvf4, no split-K, K % 64
-    // (nvfp4_gemm_smallm_ws.cu).
+    // pipeline (nvfp4_gemm_smallm_v2.cu), 3 = v2 where it splits K under 4 ways, else the
+    // weight-streaming kernel (nvfp4_gemm_smallm_ws.cu, no split-K, K % 64; exec/smallm_policy.h).
     int nvfp4_smallm_impl = 3;
-    // Sibling-pair launch for the v2 kernel: two weights consuming the SAME
+    // Sibling launch for the v2 / ws kernels: weights consuming the SAME
     // activation (FFN gate|up, GDN in|z) run as ONE launch, same CTA body,
     // bit-identical per tensor. Saves one launch's overhead plus a tail wave per pair.
     bool nvfp4_smallm_pair = true;
