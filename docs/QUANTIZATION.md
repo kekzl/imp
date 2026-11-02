@@ -263,7 +263,7 @@ dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 `imp-quantize --kv-hint auto` (default, #2480) declares the hint for the two families measured above:
 
 - `model_type` `qwen3` / `qwen3_moe`: `kv_cache_quant_algo: "FP8"`; every other family: `null`; `--kv-hint fp8|none` overrides.
-- Qwen3-14B NVFP4 export, `ppl_45k.txt`, deterministic: KV FP16 9.7350, KV FP8 under `auto` 9.7642 (+0.30 %). FP8 KV can also score below FP16 KV (E4M3 rounding of K, sign varies by corpus): [`DETERMINISM.md`](DETERMINISM.md#fp8-kv-ppl-below-fp16-kv).
+- Qwen3-14B NVFP4 export, `ppl_45k.txt`, deterministic: KV FP16 9.7350, KV FP8 under `auto` 9.7642 (+0.30 %). FP8 KV can also score below FP16 KV (E4M3 rounding of K, sign varies by corpus): [`DETERMINISM.md`](DETERMINISM.md#fp8-kv-ppl-below-fp16-kv). Per-layer scale `kv_cache.fp8_scale = legacy` (default) `| checkpoint | calibrate`: Qwen3 neutral, Gemma-4 FP8 KV PPL +3.23 % -> +0.89 % over FP16 with `calibrate` ([static scales](DETERMINISM.md#static-scales-kv_cachefp8_scale)).
 
 The `auto` allowlist and per-family quality gate (`kv_fp8_hint_default_safe` /
 `kv_fp8_no_hint_default_safe`, `src/model/model.cpp`) is what makes `fp8` safe to force elsewhere.

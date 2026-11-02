@@ -121,8 +121,8 @@ void calibrate_fp8_kv_scales(Engine& engine, QType kv_dtype, int prefill_chunk_s
     if (!run_forward) {
         if (!ex->kv_scales_calibrated())
             IMP_LOG_WARN(
-                "kv_cache.fp8_scale=calibrate: no calibration forward ran (warmup skipped it), "
-                "the legacy FP8 KV scale applies");
+                "kv_cache.fp8_scale=calibrate: no calibration ran (warmup skipped its forward, or a "
+                "WARN above refused it), the legacy FP8 KV scale applies");
         return;
     }
     Tokenizer* tok = engine.model() ? engine.model()->tokenizer() : nullptr;

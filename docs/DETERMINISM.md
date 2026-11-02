@@ -112,6 +112,35 @@ Measured 2026-11-02 at e66bf1d9: `imp-cli --perplexity`, `runtime.deterministic_
 - Since #3002 prefill agrees with the decode-shaped path: 1.7B chunk 1 / 512 / 2048 16.7103 / 16.7205 / 16.7006.
 - Qwen3-8B-NVFP4 moves more with the harness than with the KV dtype: FP16 KV 11.3005 / 11.2751 at chunk 2048 / 512, 11.3145 with default APA; chunk 1 drops `prose_30k` by 5 % (FP16 14.4738, FP8 14.4631). The #3002 commit's 11.3201 -> 11.2202 (APA on) sits in that band.
 
+### Static scales (`kv_cache.fp8_scale`)
+
+Measured 2026-11-02 at 8ad05028 (main 65f984d0 + this change), same harness.
+
+- `legacy` (default): the 1.0 floor above.
+- `checkpoint`: `k_scale` / `v_scale` tensors; every local ModelOpt FP8-KV export ships 1.0, so bit-equal to legacy.
+- `calibrate hN`: fixed-text prefill at warmup, `pow2ceil(amax * N / 448)`.
+- Mean |dNLL|: per-position distance to FP16 KV (`diagnostics.ppl_dump=full`).
+
+| Model, corpus | FP16 | legacy | cal h1 | cal h2 | cal h4 | mean abs dNLL legacy / h1 / h2 / h4 |
+|---|---:|---:|---:|---:|---:|---|
+| Qwen3-1.7B, `ppl_45k` | 16.8827 | 16.7006 | 16.6987 | 16.7335 | 16.7197 | 0.1301 / 0.1298 / 0.1303 / 0.1299 |
+| Qwen3-1.7B, `prose_30k` | 21.8016 | 21.8740 | 21.9419 | 21.9069 | 21.8289 | 0.1261 / 0.1254 / 0.1244 / 0.1249 |
+| Qwen3-8B-NVFP4, `ppl_45k` | 11.2587 | 11.2335 | 11.2953 | 11.2769 | 11.2725 | 0.2575 / 0.2565 / 0.2549 / 0.2547 |
+| Qwen3-8B-NVFP4, `prose_30k` | 14.9318 | 15.0141 | 14.9080 | 14.9959 | 14.9093 | 0.2857 / 0.2895 / 0.2746 / 0.2790 |
+| Qwen3-8B-FP8, `ppl_45k` | 10.7754 | 10.7375 | 10.7699 | 10.7598 | 10.7613 | 0.1247 / 0.1249 / 0.1245 / 0.1251 |
+| Qwen3-8B-FP8, `prose_30k` | 14.2089 | 14.2606 | 14.2272 | 14.1509 | 14.2715 | 0.1300 / 0.1302 / 0.1252 / 0.1327 |
+| Gemma-4-26B-A4B NVFP4, `ppl_corpus_45k_gemma4_turn` | 17.8489 | 18.4248 | 17.6053 | 18.0085 | 17.7327 | 0.4952 / 0.4694 / 0.4808 / 0.4843 |
+
+- Qwen3: no arm wins. Every arm moves PPL and distance both ways within the spread of the arms themselves (8B-FP8 prose h2 0.1252, h4 0.1327); default stays `legacy`.
+- Gemma-4: every static arm beats legacy (h8 17.4282, 0.4787 too): legacy +3.23 % PPL over FP16, calibrate -2.4 % to +0.89 %. Its K is tiny (calibration K amax 0.94-1.78, V 15.2-22.0 = the unscaled `v_norm` bound sqrt(256)), so at scale 1 most K entries sit below the E4M3 normal floor 2^-6. Use `kv_cache.fp8_scale=calibrate` for FP8 KV on Gemma-4.
+- Power-of-two scales keep the E4M3 normal-range grid of scale 1 (`Fp8KvStaticScale.PowerOfTwoKeepsTheUnitGridOnNormals`): the arms differ only in the subnormal and saturation edges, so the K rounding effect above is the same in all of them.
+- Unchanged elsewhere (Qwen3-8B-NVFP4, legacy vs calibrate h2): NIAH 8k/16k/32k x 3 depths 9/9 both; `degen_suite.py --quick` 37 checks, 0 FAIL calibrate (legacy 1 FAIL: the known dense-NVFP4 prefix-resend flip); tg128 452.9 vs 453.7 tok/s (3 runs each); conc 16 aggregate 3472 vs 3605 tok/s (6 pairs, both orders, calibrate ahead in all 6, cause not isolated).
+
+[PROV: commit=8ad05028 date=2026-11-02 hw=RTX5090 model=Qwen3-8B quant=NVFP4 cuda=13.4.3 path=imp-cli+server-api cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5`, `tools/analysis/conc_arms_ab.sh`
+       n=3 runs (tg128), 6 trials x 3 waves (conc 16, CONC=16 MBS=16 SEQ=4096) note=kv_cache.dtype=fp8, speculative.mtp_k=0]
+- `calibrate` needs one prefill chunk for its 370-390 tokens: at `--prefill-chunk-size 1` it warns and keeps legacy.
+- `PrefixCacheE2ETest.DenseFp8Kv*HitsAtTwoOffsetsBitEqual` is red on Qwen3-1.7B BF16 in both modes and on main (identical greedy tokens), green on Qwen3-8B-NVFP4.
+
 ## Recipe: reproducible evals
 
 ```ini
