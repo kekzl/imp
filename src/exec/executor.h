@@ -771,6 +771,8 @@ private:
     // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode
     // step from a short prefill.
     bool cur_decode_rows_ = false;
+    // Fewest rows on the FP8 x FP8 route: 1 on a one-row decode step under gemm.fp8_smallm_m1, else 2.
+    int fp8x8_min_rows_ = 2;
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL
@@ -1166,6 +1168,10 @@ private:
     // out = *a_scale * *w_scale * a8 w8^T + beta out, E4M3 operands: own tile (gemm.fp8_tile), else cuBLASLt.
     void gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, const float* a_scale,
                      const float* w_scale, cudaStream_t stream);
+    // 2-3 FP8 weights on one FP8 activation, beta 0 (q|k|v, gate|up): one small-M launch on decode rows,
+    // else gemm_fp8x8_ per weight. w8/out/w_scale arrays of `count`.
+    void gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
+                           const float* const* w_scale, int count, const float* a_scale, cudaStream_t stream);
     // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
     // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
     void offload_enter_(int layer, int n_layers, cudaStream_t stream);

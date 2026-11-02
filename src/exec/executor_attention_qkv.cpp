@@ -227,7 +227,7 @@
                                       fp8_hwk->primary_tier == StorageTier::FP8 && fp8_hwv &&
                                       fp8_hwv->primary_tier == StorageTier::FP8);
             // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
-            const float* fp8_a_scale = (n > 1 && !state.force_fp16_gemm && fp8_qkv_available)
+            const float* fp8_a_scale = (n >= fp8x8_min_rows_ && !state.force_fp16_gemm && fp8_qkv_available)
                                            ? quantize_act_fp8_(*fp8_hwq, no, stream)
                                            : nullptr;
             if (fp8_a_scale) {
@@ -240,10 +240,11 @@
                 Tensor fp8_tq = make_fp8_tensor(fp8_hwq);
                 Tensor fp8_tk = make_fp8_tensor(fp8_hwk);
                 Tensor fp8_tv = make_fp8_tensor(fp8_hwv);
-                gemm_fp8x8_(fp8_no, fp8_tq, q_target, 0.0f, fp8_a_scale, fp8_hwq->payload.fp8.d_scale,
-                            stream);
-                gemm_fp8x8_(fp8_no, fp8_tk, kk, 0.0f, fp8_a_scale, fp8_hwk->payload.fp8.d_scale, stream);
-                gemm_fp8x8_(fp8_no, fp8_tv, vv, 0.0f, fp8_a_scale, fp8_hwv->payload.fp8.d_scale, stream);
+                const Tensor w3[3] = {fp8_tq, fp8_tk, fp8_tv};
+                Tensor* const o3[3] = {&q_target, &kk, &vv};
+                const float* const s3[3] = {fp8_hwq->payload.fp8.d_scale, fp8_hwk->payload.fp8.d_scale,
+                                            fp8_hwv->payload.fp8.d_scale};
+                gemm_fp8x8_multi_(fp8_no, w3, o3, s3, 3, fp8_a_scale, stream);
             } else {
                 // Fused K+V path: one strided batched GEMM for both projections, looked
                 // up via WeightRegistry handle (wcache_ is the storage owner only, not the

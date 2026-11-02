@@ -216,8 +216,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Released wo at n <= 32: the beta = 0 FP8 row GEMV plus the residual add, not a per-call F16 rebuild.
     const bool wo_released_small = n <= 32 && ly.wo_id != kInvalidTensorID &&
                                    registry_.handle(ly.wo_id).source_released;
-    bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && n > 1 &&
-                              !wo_released_small &&
+    bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
+                              fp8_beta1_rows(n, fp8x8_min_rows_, wo_tier) && !wo_released_small &&
                               (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&

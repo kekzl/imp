@@ -61,6 +61,9 @@ inline constexpr const char* kEnvModelMistral = "IMP_TEST_MODEL_MISTRAL";
 // Dense on purpose: MoE routing flips would sit on top of the numerics under test.
 // Default: /models/Qwen3-14B-NVFP4.
 inline constexpr const char* kEnvModelNvfp4 = "IMP_TEST_MODEL_NVFP4";
+// Dense native-FP8 checkpoint (per-tensor scales) for the FP8 small-M decode arm of the same
+// instrument. Default: /models/Qwen3-8B-FP8.
+inline constexpr const char* kEnvModelFp8 = "IMP_TEST_MODEL_FP8";
 
 // DeepSeek-V2/V3 directory for MLA config tests.
 // Expected: a HF model directory containing config.json.

@@ -792,6 +792,14 @@ q45k_tile = true
 # Own per-tensor FP8 GEMM before cuBLASLt FP8 x FP8 for native FP8 checkpoint prefill rows from this M
 # (0 = off, K % 64 == 0). Qwen3-8B-FP8 pp4096 +0.6 %; below 2048 cuBLASLt is faster.
 fp8_tile_min_m = 2048
+# Own small-M FP8 x FP8 GEMM for batched-decode rows (n > 1, never prompt rows) up to this M (0 = off,
+# max 32), instead of cuBLASLt. A row's bits do not depend on M or its batch position.
+fp8_smallm_max_m = 32
+# q|k|v and gate|up of that GEMM as one launch each (bits equal per tensor).
+fp8_smallm_multi = true
+# M=1 decode rows on that kernel too (W8A8 with the checkpoint's static input scale) instead of the
+# FP16-activation FP8 GEMV.
+fp8_smallm_m1 = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode

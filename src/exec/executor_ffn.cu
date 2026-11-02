@@ -128,8 +128,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
                                     qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                     h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
+    // gemm.fp8_smallm_m1: one FP8 decode row accumulates into hidden like n > 1.
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
-                                 n > 1 && (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
+                                 fp8_beta1_rows(n, fp8x8_min_rows_, wd_tier) &&
+                                 (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
                                          qscratch_.dequant != nullptr &&
@@ -250,8 +252,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            const bool fp8_ffn = (n > 1 && !cur_force_fp16_ && hwg && hwg->primary_tier == StorageTier::FP8 &&
-                                  hwu && hwu->primary_tier == StorageTier::FP8);
+            const bool fp8_ffn = (n >= fp8x8_min_rows_ && !cur_force_fp16_ && hwg &&
+                                  hwg->primary_tier == StorageTier::FP8 && hwu &&
+                                  hwu->primary_tier == StorageTier::FP8);
             const float* fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : nullptr;
             if (fp8_a_scale) {
                 // Reconstruct FP8 weight tensors from handle payloads.
@@ -262,8 +265,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 Tensor fp8_tg = make_fp8_tensor(hwg);
                 Tensor fp8_tu = make_fp8_tensor(hwu);
-                gemm_fp8x8_(fp8_no, fp8_tg, go, 0.0f, fp8_a_scale, hwg->payload.fp8.d_scale, stream);
-                gemm_fp8x8_(fp8_no, fp8_tu, uo, 0.0f, fp8_a_scale, hwu->payload.fp8.d_scale, stream);
+                const Tensor w2[2] = {fp8_tg, fp8_tu};
+                Tensor* const o2[2] = {&go, &uo};
+                const float* const s2[2] = {hwg->payload.fp8.d_scale, hwu->payload.fp8.d_scale};
+                gemm_fp8x8_multi_(fp8_no, w2, o2, s2, 2, fp8_a_scale, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the

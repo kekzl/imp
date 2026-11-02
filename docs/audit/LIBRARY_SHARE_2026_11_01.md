@@ -59,7 +59,7 @@ Per-kernel detail (pp phase, nsys):
 | a4 | MTP head BF16 dense (`mtp_feed_dense_rows`) | Qwen3.8-27B with MTP | 0.59 % of the prompt phase, 0 in decode | `gemm_f16_tile` declines (40 / 8 tiles < 1 wave) | accepted, below 1 % |
 | a5 | DSpark FP16 k/v + fc (`DSparkDrafter` context projections) | Qwen3-8B-NVFP4 + drafter (opt-in) | 0.29 % decode, 5.4 % prompt | none for M 2-32 x N 1024 x K 4096 FP16 | accepted, opt-in, below 1 % of decode |
 
-Batched decode (M 2-16, not in the single-stream bench): measured under conc 16 in the close section below; NVFP4 dense takes `gemm_nvfp4_smallm` (own).
+Batched decode (M 2-16, not in the single-stream bench): measured under conc 16 in the close section below; NVFP4 dense takes `gemm_nvfp4_smallm` (own), FP8 dense `gemm_fp8_smallm` (own, since 2026-11-02, [section below](#fp8-small-m-decode-gemm-2026-11-02)).
 
 (b) GGUF only (legacy, no new GGUF kernel work: stays on cuBLASLt):
 
@@ -129,7 +129,7 @@ Accepted cuBLASLt uses (row 123 closed):
 | use | evidence |
 |---|---|
 | (b) GGUF legacy | no new GGUF kernel work (`DESIGN_DECISIONS.md`) |
-| a1 FP8 x FP8 below M 2048, prefill and batched decode | own tile pp512 e2e 25544-25709 vs 30481-31167 tok/s, conc 16 decode -11.7 to -13.1 % |
+| a1 FP8 x FP8 prompt rows below M 2048 | own tile pp512 e2e 25544-25709 vs 30481-31167 tok/s; decode rows left cuBLASLt on 2026-11-02 (`gemm_fp8_smallm`, section below) |
 | a2 FP16 N > K and sub-wave grids (Nemotron) | own 128x256 at parity, e2e -0.2..-0.3 % |
 | a3 MoE router GEMM from 1024 rows on fp16-accumulate routers (Qwen3-30B, Nemotron prefill chunks) | own split-K +3.3 ms per pp4096 run (above); fused router 28.56 vs 23.9 us chain at Nemotron n 2048 (section below); every other router row runs `moe_router_fused` since 2026-11-02 |
 | a4 MTP head, a5 DSpark FP16 | < 1 % of decode |
@@ -173,3 +173,62 @@ Numerics:
 - Greedy text (informational): 0 of 10 prompts byte-identical, first differing word 1-80 (prompt routing differs at near ties).
 - `degen_suite.py --quick`: Qwen3-30B 52 checks 1 FAIL, Gemma-4 37 checks 1 FAIL, both "turn 2 resent from a prefix snapshot gives the same answer"; the same check fails with `moe.router_fused=false` (Qwen3-30B control, 52 checks 1 FAIL): pre-existing.
 - `MoeRouterFusedTest` (4 router shapes x M 2-2048 vs a double reference, repeatability, refusals): 5 tests pass.
+
+## FP8 small-M decode GEMM (2026-11-02)
+
+`gemm.fp8_smallm_max_m` (32), `gemm.fp8_smallm_multi`, `gemm.fp8_smallm_m1` (all default on, `src/quant/fp8_gemm_smallm.cu`): FP8 x FP8 decode rows 1..32 leave cuBLASLt (and the FP16-activation `gemv_fp8` at M=1); prompt rows keep the M 512 Lt pin (#2152).
+
+- Weight streaming, no smem pipeline: CTA = 16 weight rows x the whole K, 8 warps; warp w owns the 64-byte k-steps `ks % 8 == w`, LDG.128 with `L1::no_allocate`, two register buffers (round r+1 in flight while round r's MMAs run), 2 k-steps per round.
+- `mma.sync` m16n8k32 e4m3, fp32 accumulate, W as the A operand (16 rows), activations as B (8 tokens per n-tile, 1 / 2 / 4 tiles for M <= 8 / 16 / 32); the k permutation `t4 * 16 + j` is applied to both operands.
+- Warp partials summed in warp order through smem; per-tensor `*a_scale * *w_scale` and beta in fp32; PDL: first weight rounds load before `griddepcontrol.wait`.
+- A row's bits depend on (N, K) only: no M-dependent split, tokens never share an MMA column. Sibling launch: q|k|v and gate|up as one grid, bits equal to single launches.
+- Activations: the checkpoint's static `input_scale` (`quantize_act_fp8_`); o_proj keeps its dynamic per-tensor absmax over all rows (`qscratch_.d_act_scale`), a row dependence this GEMM does not remove.
+- Registers 48-140 (w8u2 instances), no local memory.
+
+Cold L2 (256 MiB memset before each call, median of 31 after >= 0.3 s warm-up, `Fp8GemmSmallMBench.DISABLED_VsCublasLt`), us per call, own = default config:
+
+| N x K | M | cuBLASLt (pin) | own | `gemv_fp8` FP16 act |
+|---|---:|---:|---:|---:|
+| 4096 x 4096 (q, o) | 1 / 4 / 16 / 32 | 25.38 / 25.89 / 25.60 / 25.54 | 13.57 / 15.62 / 15.81 / 19.52 | 15.36 (M 1) |
+| 1024 x 4096 (k, v) | 1 / 4 / 16 / 32 | 13.09 / 13.60 / 13.12 / 13.34 | 6.98 / 8.83 / 9.47 / 10.98 | 9.02 (M 1) |
+| 12288 x 4096 (gate, up) | 1 / 4 / 16 / 32 | 72.77 / 72.67 / 70.24 / 66.21 | 37.44 / 38.14 / 39.84 / 40.19 | 38.14 (M 1) |
+| 4096 x 12288 (down) | 1 / 4 / 16 / 32 | 62.27 / 62.72 / 58.78 / 60.03 | 38.14 / 38.14 / 40.03 / 41.98 | 39.94 (M 1) |
+
+Before the register double buffer the own kernel ran 52.2-54.2 us on down at M 12-16 (one memory latency per round). Sweep 8 / 16 warps x 1 / 2 / 4 k-steps per round: no config wins every cell (8 warps x 4: down M 1 36.10, q M 1 15.04; 16 warps x 1: down M 16 54.05); 8 x 2 kept, one K order for every M.
+
+In situ, Qwen3-8B-FP8 conc 16 under nsys (`--cuda-graph-trace=node`, 4 waves x 16 x 400 tokens), exclusive us per launch (`nsys_exclusive_time.py`, anchor `argmax_partial_rows`):
+
+| per layer and step | cuBLASLt | own |
+|---|---:|---:|
+| gate, up | 44.26 + 44.26 | 61.34 (one launch, 1.64 TB/s) |
+| q, k, v | 19.21 + 7.12 + 7.12 | 17.25 (one launch) |
+| o, down | 19.21 + 63.12 | 2 x 22.85 (mean of both) |
+| sum | 204.3 | 124.3 |
+| GEMM exclusive per step, us | 7385.4 | 4471.7 |
+| step wall, us | 10276.4 | 7187.4 |
+
+End to end, Qwen3-8B-FP8 (only dense FP8 checkpoint in `~/models`), `conc_client.py` 4 waves x CONC x 400 tokens (`IGNORE_EOS=1`), `max_batch_size` 32, `max_seq_len` 4096, `speculative.ngram=false`, 3 pairs, order flipped, no nsys, median tok/s:
+
+| arm | `gemm.fp8_smallm_max_m=0` | own |
+|---|---:|---:|
+| conc 16, final defaults | 1759.9-1764.0 | 2595.3-2599.4 |
+| conc 8 (`fp8_smallm_m1` off) | 889.8-892.6 | 1389.9-1397.1 |
+| conc 4 (`fp8_smallm_m1` off) | 442.2-442.9 | 713.5-716.7 |
+| conc 16, `fp8_smallm_multi` off vs on | 2536.7-2546.7 | 2594.5-2598.3 |
+| tg128, `imp-cli --bench`, final defaults | 174.56-174.66 | 182.83-182.96 |
+| pp512, same runs | 33043.07-33168.40 | 32958.26-33093.92 |
+
+Activity: `gemm.fp8_smallm_max_m: own FP8 small-M GEMM ACTIVE` and `gemm.fp8_smallm_multi: ... ACTIVE` in every own arm; nsys own arm: cuBLASLt FP8 0.3 launches per step (prompt chunks).
+
+Numerics:
+
+| check | result |
+|---|---|
+| `Fp8GemmSmallMTest` (6 tests): every M 1..32 on the Qwen3-8B shapes vs a double reference, beta 0 / 0.5 / 1, refusals | max error <= 1e-4 x max\|ref\| beyond fp16 half-ulp; at M 16 own and cuBLASLt max\|err\| equal (3.239e-03 / 1.952e-03 / 1.953e-03 / 3.905e-03) |
+| row bits vs M 1..32 and vs batch position (reversed batch); sibling vs single | bit-equal |
+| PPL `ppl_45k.txt`, `runtime.deterministic` (prompt rows, untouched) | 10.7691 in every arm |
+| teacher-forced 64 tokens, `BatchInvarianceTest.Fp8DenseDecodeOwnSmallMVsCublasLt`: NLL M=1 -> M=32 | cuBLASLt 3.573248 -> 3.557244 (mean\|dlogp\| 0.109), own 3.573248 -> 3.568685 (0.070) |
+| same, M=32 cuBLASLt vs own | NLL +0.011441, mean\|dlogp\| 0.101, top-1 59/64 |
+| same, M=1 `gemv_fp8` (W8A16) vs own (W8A8) | NLL 3.573248 -> 3.571890, mean\|dlogp\| 0.085, top-1 63/64 |
+| greedy text, 16 concurrent prompts (informational) | 3 of 16 byte-identical own vs cuBLASLt, all coherent |
+| `degen_suite.py --quick` | 52 checks 1 FAIL in both arms ("turn 2 resent from a prefix snapshot"), also under `runtime.deterministic` in both: pre-existing |

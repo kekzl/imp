@@ -2,6 +2,7 @@
 
 #include "memory/vram_allocator.h"
 #include "core/tensor.h"
+#include "core/storage_tier.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -96,6 +97,12 @@ static inline void clear_l2_policy(cudaStream_t stream) {
     attr.accessPolicyWindow.num_bytes = 0;
     if (cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) != cudaSuccess)
         (void)cudaGetLastError();
+}
+
+// Rows of an FP8 x FP8 beta=1 projection (o, down): n > 1, or one decode row on an FP8 weight under
+// gemm.fp8_smallm_m1 (fp8_min_rows 1, GraphExecutor::fp8x8_min_rows_).
+[[nodiscard]] inline bool fp8_beta1_rows(int n, int fp8_min_rows, StorageTier tier) {
+    return n > 1 || (n >= fp8_min_rows && tier == StorageTier::FP8);
 }
 
 }  // namespace imp
