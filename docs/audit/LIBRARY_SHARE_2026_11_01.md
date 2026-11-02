@@ -131,6 +131,45 @@ Accepted cuBLASLt uses (row 123 closed):
 | (b) GGUF legacy | no new GGUF kernel work (`DESIGN_DECISIONS.md`) |
 | a1 FP8 x FP8 below M 2048, prefill and batched decode | own tile pp512 e2e 25544-25709 vs 30481-31167 tok/s, conc 16 decode -11.7 to -13.1 % |
 | a2 FP16 N > K and sub-wave grids (Nemotron) | own 128x256 at parity, e2e -0.2..-0.3 % |
-| a3 MoE routers outside the Gemma-4 shape | own split-K +3.3 ms per pp4096 run (above), n <= 1000 and decode rows 1.2-4.4 vs 5-7 us |
+| a3 MoE router GEMM from 1024 rows on fp16-accumulate routers (Qwen3-30B, Nemotron prefill chunks) | own split-K +3.3 ms per pp4096 run (above); fused router 28.56 vs 23.9 us chain at Nemotron n 2048 (section below); every other router row runs `moe_router_fused` since 2026-11-02 |
 | a4 MTP head, a5 DSpark FP16 | < 1 % of decode |
 | (c) offline tools, (d) cold fallbacks, (e) feature encoders | off the hot SafeTensors path |
+
+## Fused MoE router (2026-11-02)
+
+`moe.router_fused` (default on, `src/compute/moe_router_fused.cu`): logits GEMM + softmax / sigmoid (+ selection bias) + top-k + renorm in one launch for router rows n >= 2, ids and weights straight into the routing buffers. CTA tile 16 / 32 rows x all experts (<= 128), mma.sync with an fp16 partial per 32-wide k tile promoted to fp32 (fp32-accumulate MMA: 1/4 rate on sm_120), split-K over CTAs with a self-resetting ticket, the last CTA sums the partials in split order, half a warp per row picks with `redux.sync` (lowest index on ties). Off under `runtime.deterministic`; from 1024 rows on fp16-accumulate routers (`gemm.cublas_fp16_acc`) cuBLASLt keeps the GEMM.
+
+Chain before (Qwen3-30B-A3B-NVFP4, nsys, us per router call; the top-k launch is PDL, its time includes the wait on the conversion):
+
+| n | Lt GEMM | splitK reduce | fp16 -> fp32 | top-k | chain, launches | fused |
+|---|---:|---:|---:|---:|---|---:|
+| 512 | 3.72 | 0.99 | 0.57 | 5.84 | 11.1, 4 | 10.99, 1 |
+| 2048 | 8.66 | 2.23 | 0.90 | 14.63 | 26.4, 4 | 26.65, 1 |
+
+Iterations at n 512 / 2048: one warp per row with 10 shuffles per pick 12.86 / 29.75 us; half-warp + `redux.sync` 11.70 / 27.99; unrolled split reduce (the serial partial loads cost ~11 us at M 16) and 16 / 32-row tiles 10.99 / 26.65. Graph bench (`MoeRouterFusedBench.DISABLED_TileSplitSweep`, K 2048): M <= 16 8.4 us, M 512 bm 16 10.27, M 2048 bm 32 20.12, M 4096 bm 32 26.19; 64-row tiles slower at every M (8 epilogue passes, 165 registers). Nemotron n 2048 (K 2688): fused 28.56 vs chain 9.55 + 2.02 + 0.92 + 11.42 us, hence the 1024-row rule.
+
+| in situ, 3 pairs, order flipped | fused | off (cuBLASLt chain) |
+|---|---:|---:|
+| Qwen3-30B pp512 tok/s | 33511.22-34599.33 | 33051.56-34331.73 |
+| Qwen3-30B pp512 router chain, ms per run | 7.213-7.246 (816 launches) | 7.355-7.363 (2412) |
+| Qwen3-30B conc 16 decode, median tok/s | 1765.1-1808.8 | 1743.0-1765.2 |
+| Qwen3-30B pp4096 tok/s (fused at n 2048, before the 1024-row rule) | 45806.65-46232.28 | 45691.09-45895.28 |
+| Gemma-4-26B-A4B pp4096 tok/s (replaces the own split-K + top-k) | 46877.52-47192.66 | 46491.68-46748.15 |
+| Gemma-4 pp4096 router chain, ms per run | 15.845-15.894 (806) | 19.764-19.799 (2074) |
+| Nemotron-3-Nano pp4096 tok/s (fused at n 2048, before the rule) | 57827.29-58280.44 | 58114.20-58385.02 |
+| Nemotron-3-Nano pp4096 tok/s (final: cuBLASLt from 1024 rows) | 58393.29-58698.32 | 58357.97-58621.70 |
+
+Numerics:
+
+| check | Qwen3-30B | Gemma-4 | Nemotron |
+|---|---|---|---|
+| ids vs the cuBLASLt chain on the same activations (conc 16, graphs off), rows with any differing id | 32637 of 934800 (3.5 %), 51838 ids | 3911 of 553930, 3911 ids | 535 of 116075, 535 ids |
+| exact fp64 top-k on sampled rows: rows matched, fused / cuBLASLt chain | 7968 / 7822 of 7996 | 5865 / 5844 of 5882 | - |
+| ids matched, fused / chain | 63940 / 63724 of 63968 | 47039 / 47018 of 47056 | - |
+| PPL, `runtime.deterministic_gemm`, chunk 512, fused / off | 11.3099 / 11.3925 (`ppl_45k`) | 17.9614 / 17.9966 (turn corpus, 2 reps bit-equal) | - |
+
+- The cuBLASLt chain on Qwen3-30B rounds the logits to fp16 (fp16 accumulate): the fused fp32 sum matches the exact top-k in 99.65 % of rows vs 97.82 %.
+- Gemma-4 on the plain `ppl_corpus_45k.txt` (out of its turn format, PPL > 400): 489.6871 fused vs 407.3879 off; on its turn corpus fused is lower.
+- Greedy text (informational): 0 of 10 prompts byte-identical, first differing word 1-80 (prompt routing differs at near ties).
+- `degen_suite.py --quick`: Qwen3-30B 52 checks 1 FAIL, Gemma-4 37 checks 1 FAIL, both "turn 2 resent from a prefix snapshot gives the same answer"; the same check fails with `moe.router_fused=false` (Qwen3-30B control, 52 checks 1 FAIL): pre-existing.
+- `MoeRouterFusedTest` (4 router shapes x M 2-2048 vs a double reference, repeatability, refusals): 5 tests pass.
