@@ -592,7 +592,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         }
         const size_t act = static_cast<size_t>(t) * static_cast<size_t>(max_dim);
         const size_t grid = (((act + 3) / 4) + 255) / 256;
-        out.fp8_reduction = (grid * sizeof(float)) + (2 * sizeof(float)) + (3 * kTakeAlign);
+        // + one per-token dynamic act scale per row (qscratch_.d_act_row_scales).
+        out.fp8_reduction = (grid * sizeof(float)) + (2 * sizeof(float)) +
+                            (static_cast<size_t>(t) * sizeof(float)) + (4 * kTakeAlign);
     }
 
     return out;

@@ -471,22 +471,23 @@ bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
 
 bool gemm_fp8_tile(const void* a_data, const void* w_data, const float* a_scale, const float* w_scale,
                    float beta, void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant,
-                   void* workspace, size_t workspace_bytes) {
-    const TileArgs p{static_cast<const uint8_t*>(a_data),
-                     nullptr,
-                     static_cast<const uint8_t*>(w_data),
-                     nullptr,
-                     static_cast<half*>(d_fp16),
-                     1.0f,
-                     M,
-                     N,
-                     K,
-                     nullptr,
-                     0,
-                     nullptr,
-                     a_scale,
-                     w_scale,
-                     beta};
+                   void* workspace, size_t workspace_bytes, bool a_per_row) {
+    TileArgs p{static_cast<const uint8_t*>(a_data),
+               nullptr,
+               static_cast<const uint8_t*>(w_data),
+               nullptr,
+               static_cast<half*>(d_fp16),
+               1.0f,
+               M,
+               N,
+               K,
+               nullptr,
+               0,
+               nullptr,
+               a_scale,
+               w_scale,
+               beta};
+    p.a_per_row = a_per_row;
     return run_tile<Fmt::kF8>(p, stream, variant, workspace, workspace_bytes);
 }
 

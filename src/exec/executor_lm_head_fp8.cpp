@@ -6,6 +6,7 @@
 #include "compute/layernorm.h"
 #include "core/logging.h"
 #include "core/qtype.h"
+#include "quant/fp8_quant.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -33,6 +34,25 @@ bool GraphExecutor::lm_head_fp8_view(const void*& weight, const float*& row_scal
         return false;
     weight = wcache_.lm_head_fp8.weight.data;
     row_scales = wcache_.lm_head_fp8.d_row_scales;
+    return true;
+}
+
+// FP8-tier head (registry tier, not the #2156 cache): per-token activation scales, FP32 logits scaled per row
+// after the GEMM (beta 0), so a row never depends on the other rows (was a batch-wide absmax).
+bool GraphExecutor::lm_head_fp8_tier_(const WeightHandle& lm_h, const Tensor& no, Tensor& lg,
+                                      cudaStream_t stream) {
+    const int n = static_cast<int>(no.shape[0]);
+    const int d = static_cast<int>(no.shape[no.ndim - 1]);
+    if (!qscratch_.fp8_act || !qscratch_.d_act_row_scales || n > qscratch_.act_row_scales_n ||
+        static_cast<size_t>(no.numel()) > qscratch_.fp8_act_size ||
+        !quantize_fp8_act_rows(no.data, qscratch_.fp8_act, n, d, qscratch_.d_act_row_scales, stream))
+        return false;
+    int64_t wshape[2] = {lm_h.shape[0], lm_h.shape[1]};
+    Tensor w8(lm_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
+    Tensor a8(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
+    gemm_cublaslt(a8, w8, lg, 1.0f, 0.0f, nullptr, lm_h.payload.fp8.d_scale, stream);
+    scale_rows_f32(static_cast<float*>(lg.data), qscratch_.d_act_row_scales, n,
+                   static_cast<int>(lg.shape[lg.ndim - 1]), stream);
     return true;
 }
 

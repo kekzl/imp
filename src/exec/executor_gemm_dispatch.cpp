@@ -846,7 +846,7 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     Tensor fp8_w(e.weight.data, QType::FP8_E4M3, 2, wshape, true);
     // cuBLASLt has no F16 x FP8 GEMM (status 15): quantize the activation first.
     if (input.qtype == QType::F16 && e.d_scale) {
-        if (const float* a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
+        if (const Fp8ActScale a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
             Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
             gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
             return;
@@ -869,17 +869,17 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
 }
 
-void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
-                                const float* a_scale, const float* w_scale, cudaStream_t stream) {
+void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
+                                const float* w_scale, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
+    const bool own_ok = out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() && a && w_scale;
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if ((cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= smallm_max && out.qtype == QType::F16 &&
-        a8.is_contiguous() && out.is_contiguous() && a_scale && w_scale &&
-        gemm_fp8_smallm(a8.data, w8.data, a_scale, w_scale, beta, static_cast<half*>(out.data), M, N, K,
-                        stream)) {
+    if ((cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
+        gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
+                        a.per_row)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
@@ -889,13 +889,13 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         return;
     }
     // gemm.fp8_tile_min_m: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own -18
-    // %).
+    // %). Per-token scales take the tile at every M: cuBLASLt 13.4 refuses FP8 OUTER_VEC_32F on sm_120. They
+    // run data-parallel only (no stream-K plan chosen by M), so a prompt row does not change with its chunk.
     const int min_m = process_diag_fp8_tile_min_m();
-    if (min_m > 0 && M >= min_m && out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() &&
-        a_scale && w_scale &&
-        gemm_fp8_tile(a8.data, w8.data, a_scale, w_scale, beta, out.data, M, N, K, stream, -1,
-                      process_diag_deterministic() ? nullptr : qscratch_.fp8_tile_ws,
-                      qscratch_.fp8_tile_ws_size)) {
+    void* sk_ws = (process_diag_deterministic() || a.per_row) ? nullptr : qscratch_.fp8_tile_ws;
+    if ((a.per_row || (min_m > 0 && M >= min_m)) && own_ok &&
+        gemm_fp8_tile(a8.data, w8.data, a.d, w_scale, beta, out.data, M, N, K, stream, -1, sk_ws,
+                      qscratch_.fp8_tile_ws_size, a.per_row)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
@@ -904,11 +904,17 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         }
         return;
     }
-    gemm_cublaslt(a8, w8, out, 1.0f, beta, a_scale, w_scale, stream);
+    if (a.per_row) {  // quantize_act_fp8_ checked K % 64 and N % 8: unreachable unless a sibling's N is odd
+        IMP_LOG_ERROR(
+            "FP8 per-token activation scales: no own GEMM serves M=%d N=%d K=%d, output not written", M, N,
+            K);
+        return;
+    }
+    gemm_cublaslt(a8, w8, out, 1.0f, beta, a.d, w_scale, stream);
 }
 
 void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
-                                      const float* const* w_scale, int count, const float* a_scale,
+                                      const float* const* w_scale, int count, Fp8ActScale a,
                                       cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
@@ -920,7 +926,7 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
         t[i] = {w8[i].data, w_scale[i], static_cast<half*>(out[i]->data), static_cast<int>(w8[i].shape[0])};
     }
-    if (ok && gemm_fp8_smallm_multi(t, count, a8.data, a_scale, M, K, stream)) {
+    if (ok && gemm_fp8_smallm_multi(t, count, a8.data, a.d, M, K, stream, a.per_row)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
@@ -930,24 +936,45 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
         return;
     }
     for (int i = 0; i < count; ++i)
-        gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a_scale, w_scale[i], stream);
+        gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream);
 }
 
-const float* GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,
-                                              cudaStream_t stream) {
+Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,
+                                             cudaStream_t stream) {
     if (!qscratch_.fp8_act || !input.is_contiguous() ||
         static_cast<size_t>(input.numel()) > qscratch_.fp8_act_size)
-        return nullptr;
-    if (hw.payload.fp8.d_act_scale &&
+        return {};
+    if (hw.payload.fp8.d_act_scale && dispatch_policy().gemm.fp8_static_act_scale &&
         quantize_fp16_to_fp8_e4m3_dscale(input.data, qscratch_.fp8_act, input.numel(),
                                          hw.payload.fp8.d_act_scale, stream))
-        return hw.payload.fp8.d_act_scale;
+        return {hw.payload.fp8.d_act_scale, false};
+    // Per-token dynamic scales (vLLM's dynamic FP8): a row's codes and scale depend on that row only.
+    // Served by the own small-M / tile GEMMs (K % 64 == 0, N % 8 == 0).
+    const int K = static_cast<int>(input.shape[input.ndim - 1]);
+    const int64_t M = K > 0 ? input.numel() / K : 0;
+    if (qscratch_.d_act_row_scales && M <= qscratch_.act_row_scales_n && K % 64 == 0 &&
+        hw.shape[0] % 8 == 0 &&
+        quantize_fp8_act_rows(input.data, qscratch_.fp8_act, static_cast<int>(M), K,
+                              qscratch_.d_act_row_scales, stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("FP8 activations: per-token dynamic scales ACTIVE (M=%ld K=%d)",
+                         static_cast<long>(M), K);
+        }
+        return {qscratch_.d_act_row_scales, true};
+    }
+    // Legacy batch-wide absmax (K % 64 != 0, no row-scale scratch): a row depends on its batch.
     if (!qscratch_.d_act_scale)
-        return nullptr;
+        return {};
+    static bool warned = false;
+    if (!std::exchange(warned, true))
+        IMP_LOG_WARN("FP8 activations: batch-wide absmax scale (M=%ld K=%d N=%ld), rows depend on the batch",
+                     static_cast<long>(M), K, static_cast<long>(hw.shape[0]));
     Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
     quantize_fp16_to_fp8_e4m3(input, fp8_in, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
                               qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-    return qscratch_.d_act_scale;
+    return {qscratch_.d_act_scale, false};
 }
 
 }  // namespace imp

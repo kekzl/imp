@@ -7,6 +7,7 @@
 #include "memory/device_alloc_all.h"
 #include "memory/engine_arena.h"
 
+#include <algorithm>
 #include <utility>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -507,6 +508,85 @@ bool quantize_fp16_to_fp8_e4m3_dscale(const void* input_fp16, void* output_fp8, 
         static_cast<const half*>(input_fp16), static_cast<uint8_t*>(output_fp8), n8, d_scale);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
+}
+
+// Per-token dynamic activation quantize: one CTA per row, 16-byte loads, the row read twice (absmax, encode).
+// A row's codes and scale depend on that row only (fp8_rows::row_scale / encode, as the weight rows).
+constexpr int kActRowThreads = 128;
+
+__global__ void __launch_bounds__(kActRowThreads) quantize_fp8_act_rows_kernel(
+    const half* __restrict__ in, uint8_t* __restrict__ out, int k8, float* __restrict__ d_row_scales) {
+    const int row = blockIdx.x;
+    const uint4* r = reinterpret_cast<const uint4*>(in) + (static_cast<int64_t>(row) * k8);
+    uint2* o = reinterpret_cast<uint2*>(out) + (static_cast<int64_t>(row) * k8);
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < k8; i += kActRowThreads) {
+        const uint4 v = r[i];
+        const __half2* h2 = reinterpret_cast<const __half2*>(&v);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float2 f = __half22float2(h2[j]);
+            m = fmaxf(m, fmaxf(fabsf(f.x), fabsf(f.y)));
+        }
+    }
+    __shared__ float s_warp[kActRowThreads / 32];
+    for (int off = 16; off; off >>= 1)
+        m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, off));
+    if ((threadIdx.x & 31) == 0)
+        s_warp[threadIdx.x >> 5] = m;
+    __syncthreads();
+#pragma unroll
+    for (int w = 0; w < kActRowThreads / 32; ++w)
+        m = fmaxf(m, s_warp[w]);
+    const float sc = fp8_rows::row_scale(m);
+    if (threadIdx.x == 0)
+        d_row_scales[row] = sc;
+    const float inv = 1.0f / sc;
+    for (int i = threadIdx.x; i < k8; i += kActRowThreads) {
+        const uint4 v = r[i];
+        const __half2* h2 = reinterpret_cast<const __half2*>(&v);
+        uint16_t packed[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float2 f = __half22float2(h2[j]);
+            f.x *= inv;
+            f.y *= inv;
+            packed[j] = __nv_cvt_float2_to_fp8x2(f, __NV_SATFINITE, __NV_E4M3);
+        }
+        uint2 q;
+        q.x = static_cast<uint32_t>(packed[0]) | (static_cast<uint32_t>(packed[1]) << 16);
+        q.y = static_cast<uint32_t>(packed[2]) | (static_cast<uint32_t>(packed[3]) << 16);
+        o[i] = q;
+    }
+}
+
+bool quantize_fp8_act_rows(const void* input_fp16, void* output_fp8, int rows, int K, float* d_row_scales,
+                           cudaStream_t stream) {
+    if (rows <= 0)
+        return true;
+    if (!input_fp16 || !output_fp8 || !d_row_scales || K <= 0 || K % 8 != 0 ||
+        reinterpret_cast<uintptr_t>(input_fp16) % 16 != 0 || reinterpret_cast<uintptr_t>(output_fp8) % 8 != 0)
+        return false;
+    quantize_fp8_act_rows_kernel<<<rows, kActRowThreads, 0, stream>>>(static_cast<const half*>(input_fp16),
+                                                                      static_cast<uint8_t*>(output_fp8),
+                                                                      K / 8, d_row_scales);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+__global__ void scale_rows_f32_kernel(float* __restrict__ y, const float* __restrict__ row_scales, int cols) {
+    const float s = row_scales[blockIdx.y];
+    float* r = y + (static_cast<int64_t>(blockIdx.y) * cols);
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < cols; i += gridDim.x * blockDim.x)
+        r[i] *= s;
+}
+
+void scale_rows_f32(float* y, const float* row_scales, int rows, int cols, cudaStream_t stream) {
+    if (!y || !row_scales || rows <= 0 || cols <= 0)
+        return;
+    scale_rows_f32_kernel<<<dim3(std::min((cols + 255) / 256, 64), rows), 256, 0, stream>>>(y, row_scales,
+                                                                                            cols);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---- quantize_fp16_to_fp8_e4m3_scaled (raw pointer API) ------------------

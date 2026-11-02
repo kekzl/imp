@@ -800,6 +800,9 @@ fp8_smallm_multi = true
 # M=1 decode rows on that kernel too (W8A8 with the checkpoint's static input scale) instead of the
 # FP16-activation FP8 GEMV.
 fp8_smallm_m1 = true
+# FP8 x FP8 activations quantize with the checkpoint's static input_scale. false (or a checkpoint
+# without one): per-token dynamic scales on the own GEMMs, a row never depends on its batch neighbours.
+fp8_static_act_scale = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode

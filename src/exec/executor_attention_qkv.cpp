@@ -227,9 +227,10 @@
                                       fp8_hwk->primary_tier == StorageTier::FP8 && fp8_hwv &&
                                       fp8_hwv->primary_tier == StorageTier::FP8);
             // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
-            const float* fp8_a_scale = (n >= fp8x8_min_rows_ && !state.force_fp16_gemm && fp8_qkv_available)
-                                           ? quantize_act_fp8_(*fp8_hwq, no, stream)
-                                           : nullptr;
+            const Fp8ActScale fp8_a_scale = (n >= fp8x8_min_rows_ && !state.force_fp16_gemm &&
+                                             fp8_qkv_available)
+                                                ? quantize_act_fp8_(*fp8_hwq, no, stream)
+                                                : Fp8ActScale{};
             if (fp8_a_scale) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 // Reconstruct FP8 weight tensors from handle payloads.

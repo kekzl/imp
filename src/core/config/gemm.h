@@ -126,6 +126,9 @@ struct GEMM {
     // M=1 decode rows on the same kernel (activations quantized with the checkpoint's static input
     // scale, W8A8) instead of the FP16-activation FP8 GEMV. Qwen3-8B-FP8 tg128 +4.8 %.
     bool fp8_smallm_m1 = true;
+    // FP8 x FP8 activations take the checkpoint's static input_scale; false (or no input_scale): per-token
+    // dynamic scales (row absmax / 448) on the own small-M / tile GEMMs, never a batch-wide absmax.
+    bool fp8_static_act_scale = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

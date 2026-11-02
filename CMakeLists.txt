@@ -1415,6 +1415,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_mxfp8_tile.cu
         tests/test_gemm_fp8_tile.cu
         tests/test_fp8_gemm_smallm.cu
+        tests/test_fp8_act_rows.cu
         tests/test_gemm_mxfp4_tile.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_prefill_row_invariance.cu

@@ -1138,6 +1138,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.d_fp8_block_maxes = reinterpret_cast<float*>(sl_bm.data());
                 qscratch_.d_fp8_absmax = reinterpret_cast<float*>(sl_am.data());
             }
+            // Per-token dynamic scales (no checkpoint input_scale): one float per row.
+            auto sl_rs = engine_arena().take_bytes(static_cast<size_t>(max_tokens_) * sizeof(float));
+            qscratch_.d_act_row_scales = sl_rs.empty() ? nullptr : reinterpret_cast<float*>(sl_rs.data());
+            qscratch_.act_row_scales_n = sl_rs.empty() ? 0 : max_tokens_;
             IMP_LOG_INFO(
                 "FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
                 qscratch_.fp8_act_size / (1024.0 * 1024.0), max_tokens_, max_dim, qscratch_.fp8_max_grid);
@@ -1951,7 +1955,8 @@ bool GraphExecutor::allocate_decode_qscratch(int max_batch) {
         auto bm = engine_arena().take_bytes(static_cast<size_t>(qscratch_decode_.fp8_max_grid) *
                                             sizeof(float));
         auto am = engine_arena().take_bytes(sizeof(float));
-        if (sl.empty() || sc.empty() || bm.empty() || am.empty()) {
+        auto rs = engine_arena().take_bytes(static_cast<size_t>(max_batch) * sizeof(float));
+        if (sl.empty() || sc.empty() || bm.empty() || am.empty() || rs.empty()) {
             IMP_LOG_WARN("decode qscratch: fp8 family unavailable from the T2 arena");
             return false;
         }
@@ -1959,6 +1964,8 @@ bool GraphExecutor::allocate_decode_qscratch(int max_batch) {
         qscratch_decode_.d_act_scale = reinterpret_cast<float*>(sc.data());
         qscratch_decode_.d_fp8_block_maxes = reinterpret_cast<float*>(bm.data());
         qscratch_decode_.d_fp8_absmax = reinterpret_cast<float*>(am.data());
+        qscratch_decode_.d_act_row_scales = reinterpret_cast<float*>(rs.data());
+        qscratch_decode_.act_row_scales_n = max_batch;
         total += qscratch_decode_.fp8_act_size;
     }
     if (qscratch_.q8_1_buf && qscratch_.q8_1_max_blocks > 0) {
@@ -1990,11 +1997,12 @@ void GraphExecutor::use_workspace(int slot) {
     if (!qscratch_decode_ready_ || ws_.active() == prev)
         return;
     if (slot == 1) {
-        qscratch_prefill_save_ = {qscratch_.fp8_act,      qscratch_.fp8_act_size,
-                                  qscratch_.d_act_scale,  qscratch_.d_fp8_block_maxes,
-                                  qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
-                                  qscratch_.q8_1_buf,     qscratch_.d8_buf,
-                                  qscratch_.q8_1_rows};
+        qscratch_prefill_save_ = {qscratch_.fp8_act,         qscratch_.fp8_act_size,
+                                  qscratch_.d_act_scale,     qscratch_.d_fp8_block_maxes,
+                                  qscratch_.d_fp8_absmax,    qscratch_.fp8_max_grid,
+                                  qscratch_.q8_1_buf,        qscratch_.d8_buf,
+                                  qscratch_.q8_1_rows,       qscratch_.d_act_row_scales,
+                                  qscratch_.act_row_scales_n};
         if (qscratch_decode_.fp8_act) {
             qscratch_.fp8_act = qscratch_decode_.fp8_act;
             qscratch_.fp8_act_size = qscratch_decode_.fp8_act_size;
@@ -2002,6 +2010,8 @@ void GraphExecutor::use_workspace(int slot) {
             qscratch_.d_fp8_block_maxes = qscratch_decode_.d_fp8_block_maxes;
             qscratch_.d_fp8_absmax = qscratch_decode_.d_fp8_absmax;
             qscratch_.fp8_max_grid = qscratch_decode_.fp8_max_grid;
+            qscratch_.d_act_row_scales = qscratch_decode_.d_act_row_scales;
+            qscratch_.act_row_scales_n = qscratch_decode_.act_row_scales_n;
         }
         if (qscratch_decode_.q8_1_buf) {
             qscratch_.q8_1_buf = qscratch_decode_.q8_1_buf;
@@ -2015,6 +2025,8 @@ void GraphExecutor::use_workspace(int slot) {
         qscratch_.d_fp8_block_maxes = qscratch_prefill_save_.d_fp8_block_maxes;
         qscratch_.d_fp8_absmax = qscratch_prefill_save_.d_fp8_absmax;
         qscratch_.fp8_max_grid = qscratch_prefill_save_.fp8_max_grid;
+        qscratch_.d_act_row_scales = qscratch_prefill_save_.d_act_row_scales;
+        qscratch_.act_row_scales_n = qscratch_prefill_save_.act_row_scales_n;
         qscratch_.q8_1_buf = qscratch_prefill_save_.q8_1_buf;
         qscratch_.d8_buf = qscratch_prefill_save_.d8_buf;
         qscratch_.q8_1_rows = qscratch_prefill_save_.q8_1_rows;

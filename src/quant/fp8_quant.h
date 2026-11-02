@@ -26,6 +26,15 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, 
                                                     int64_t n_elements, const float* d_scale,
                                                     cudaStream_t stream = nullptr);
 
+// Per-token dynamic activation quantize: d_row_scales[r] = row_absmax/448, row r = sat_e4m3(in / scale).
+// A row's bytes depend on that row only (no batch-wide absmax). False (nothing launched) unless K % 8 == 0,
+// input 16-byte and output 8-byte aligned.
+[[nodiscard]] bool quantize_fp8_act_rows(const void* input_fp16, void* output_fp8, int rows, int K,
+                                         float* d_row_scales, cudaStream_t stream = nullptr);
+
+// y[r][c] *= row_scales[r] (fp32 [rows, cols]): per-token activation scales after an FP32-output GEMM.
+void scale_rows_f32(float* y, const float* row_scales, int rows, int cols, cudaStream_t stream = nullptr);
+
 // Per-row (output-channel) E4M3 quantize: writes scale[row] = row_absmax/448
 // to d_row_scales and the quantized rows to output_fp8. Async, init-time.
 void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,
