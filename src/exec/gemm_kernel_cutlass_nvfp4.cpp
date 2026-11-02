@@ -41,7 +41,8 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // same input (QKV / gate-up dedupe); skip re-quantizing.
     if (!args.act_prequantized)
         quantize_fp16_to_nvfp4_cutlass(args.input->data, args.cutlass_act_data, args.cutlass_act_sf, M, K,
-                                       args.stream);
+                                       args.stream, args.act_scale);
+    const float alpha = payload.tensor_scale * args.act_scale;  // weight x activation tensor scale
     // The NVFP4 tile epilogue has no beta (beta = 0); a beta=1 call would overwrite
     // the residual instead of adding, producing silent garbage. Refuse (caller falls to the
     // dequant path, which honours beta). Unreachable today (o_proj/down_proj exclude this
@@ -52,7 +53,7 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     const int tile_min_m = process_diag_nvfp4_tile_min_m();
     if (tile_min_m > 0 && M >= tile_min_m &&
         gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
-                        payload.tensor_scale, args.output->data, M, N, K, args.stream, /*variant=*/-1,
+                        alpha, args.output->data, M, N, K, args.stream, /*variant=*/-1,
                         // no workspace = no stream-K: its partial sums take another order than the
                         // data-parallel tile and the pick follows M, so a prompt row (chunks >= 33 rows,
                         // runtime/prompt_tail.h) moves with its chunk (#2152): gemm.nvfp4_prompt_streamk
@@ -71,7 +72,7 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
     if (lt_min_m > 0 && M >= lt_min_m &&
         gemm_nvfp4_cublaslt(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
-                            payload.tensor_scale, args.output->data, M, N, K, args.stream))
+                            alpha, args.output->data, M, N, K, args.stream))
         return GemmDispatchResult::Ok;
     return GemmDispatchResult::PreconditionFail;  // both refused: the dequant fallback
 }

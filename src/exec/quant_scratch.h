@@ -41,6 +41,9 @@ struct QuantScratch {
     void* cutlass_act_sf = nullptr;    // SfAtom scale factors (NVFP4: UE4M3)
     size_t cutlass_act_data_size = 0;
     size_t cutlass_act_sf_size = 0;
+    // Act tensor scale the bytes in cutlass_act_data were quantized with: a hinted dedupe reuses
+    // them only at the same scale (mutable: GemmContext holds the scratch const).
+    mutable float cutlass_act_scale = 1.0f;
     void* cutlass_workspace = nullptr;  // CUTLASS GEMM workspace
     size_t cutlass_workspace_size = 0;
 

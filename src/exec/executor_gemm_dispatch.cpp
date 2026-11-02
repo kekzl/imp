@@ -137,7 +137,7 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
 // already did) and declines on a missing SfAtom (GGUF source, Phase 3 G3), a missing scratch
 // or a nonzero beta (the epilogue bakes beta=0), so the caller falls through to a beta-honouring route.
 static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
-                                           const GemmContext& ctx, int M) {
+                                           const GemmContext& ctx, int M, float act_scale = 1.0f) {
     const auto* qs = ctx.qscratch;
     if (!cw.scale_factors || !qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
         return false;
@@ -152,7 +152,11 @@ static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const T
     args.cutlass_workspace_size = qs->cutlass_workspace_size;
     args.act_prequantized = (ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
                              ctx.act_quant_hint_m == M &&
-                             ctx.act_quant_hint_k == static_cast<int>(input.shape[1]));
+                             ctx.act_quant_hint_k == static_cast<int>(input.shape[1])) &&
+                            qs->cutlass_act_scale == act_scale;
+    args.act_scale = act_scale;
+    if (!args.act_prequantized)
+        qs->cutlass_act_scale = act_scale;  // the kernel quantizes before any refusal
     args.beta = ctx.beta;
     GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
     return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
@@ -606,8 +610,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 // quantized by the PREVIOUS dispatch (act-quant hint), and the scratch tag
                 // confirms it still holds exactly that quantize. Saves one quantize launch
                 // + a [M,K] FP16 read per second member of a gate/up, q/k/v or GDN in/z pair.
-                const bool tag_match = smallm_xq_src_ == input.data && smallm_xq_src_m_ == M &&
-                                       smallm_xq_src_k_ == K;
+                const float as = h.act_scale;
+                const bool tag_match = smallm_xq_holds_(input.data, M, K, as);
                 const bool hint_match = ctx.act_quant_hint_data != nullptr &&
                                         ctx.act_quant_hint_data == input.data &&
                                         ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
@@ -617,16 +621,17 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 const bool prequant = tag_match && (hint_match || smallm_xq_from_producer_);
                 if (!prequant) {
                     quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
-                                                /*tensor_scale=*/1.0f, ctx.stream);
+                                                /*tensor_scale=*/as, ctx.stream);
                     smallm_xq_src_ = input.data;
                     smallm_xq_src_m_ = M;
                     smallm_xq_src_k_ = K;
+                    smallm_xq_src_scale_ = as;
                     smallm_xq_from_producer_ = false;
                 }
                 NvFP4QuantResult xq;
                 xq.packed_data = xq_packed;
                 xq.micro_scales = xq_scales;
-                xq.tensor_scale = 1.0f;
+                xq.tensor_scale = as;
                 xq.N = M;
                 xq.K = K;
                 if (smallm_launch_a4(kern, nv, xq, reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_,
@@ -738,7 +743,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             cw.K = h.shape[1] * 2;
             // Act-quant dedupe (QKV / gate-up share one normed input, see the
             // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
-            if (dispatch_cutlass_nvfp4_prefill(cw, input, output, ctx, M))
+            if (dispatch_cutlass_nvfp4_prefill(cw, input, output, ctx, M, h.act_scale))
                 return;
         }
         // FP8 fallback for CUTLASS_NVFP4 (legacy path)

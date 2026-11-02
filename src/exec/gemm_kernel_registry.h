@@ -75,6 +75,8 @@ struct GemmKernelArgs {
     // skips quantize_fp16_to_nvfp4_cutlass. Set when the GemmContext act-quant hint matches
     // (input.data, M, K).
     bool act_prequantized = false;
+    // Static NVFP4 activation tensor scale (WeightHandle::act_scale): quantize with it, alpha x it.
+    float act_scale = 1.0f;
 
     // Per-model gemma4.force_mmvq override (Phase 5 Track A). Used by the
     // GGUF small-M kernels to decide between the mmvq and dp4a backends.

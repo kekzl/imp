@@ -2337,9 +2337,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 upload_scale(sc.weight_scale);
             }
             upload_scale(sc.weight_scale_2);
-            // input_scale is loaded for diagnostics but never read by any GEMM kernel (see
-            // executor_pre_dequant.cpp Phase 0). Only uploaded when audit mode is on, to avoid burning
-            // VRAM on a tensor never used in production.
+            // input_scale: Phase 0 reads the scalar from the mmap into Tensor::act_scale
+            // (pre_dequant_phase0_nvfp4_loader.cpp); no GEMM reads the tensor. Uploaded in audit mode only.
             if (audit) {
                 upload_scale(sc.input_scale);
             }
