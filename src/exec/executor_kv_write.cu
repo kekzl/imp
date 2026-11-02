@@ -36,6 +36,85 @@ static Tensor kv_rows_view(Tensor t, const ModelConfig& cfg, int row_begin, int 
     return t;
 }
 
+// Per-layer K/V geometry (Gemma 4 dual attention geometry), else the cache's.
+static void kv_layer_geometry(const ModelConfig& cfg, const KVCache& cache, int layer, int& nkv, int& hd) {
+    if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
+        cfg.n_kv_heads_per_layer[layer] > 0) {
+        nkv = cfg.n_kv_heads_per_layer[layer];
+    } else {
+        nkv = cache.n_kv_heads();
+    }
+    if (!cfg.head_dim_per_layer.empty() && layer < (int)cfg.head_dim_per_layer.size() &&
+        cfg.head_dim_per_layer[layer] > 0) {
+        hd = cfg.head_dim_per_layer[layer];
+    } else {
+        hd = cache.head_dim();
+    }
+}
+
+float GraphExecutor::fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int row_elems,
+                                       cudaStream_t stream) {
+    // FP8 E4M3 KV scale per layer: the first prefill after Engine::warmup() resets calibrated_
+    // sets it (max with the 1.0 floor), every later prefill reuses it (cached FP8 blocks were
+    // written with it). The reset avoids warmup pollution (synthetic BOS tokens give a too-small scale).
+    if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
+        !kv_calibrated_[kv_layer]) {
+        // Narrows the calibration view to the per-layer K/V shape. k_/v_
+        // workspaces are sized for max_nkv*max_head_dim across all layers (Gemma-4
+        // dual head_dim 256/512); without narrowing, calibrate_fp8_scale would
+        // absmax-reduce over uninitialized memory past the live region for
+        // smaller-head_dim layers, locking the FP8 range to junk (was the root cause of the Gemma-4
+        // force-FP16 carve-out, engine.cpp:516).
+        const auto& cfg = model_->config();
+        Tensor kv_cal = kv_rows_view(view_tokens(k_, n), cfg, row_begin, row_elems);
+        Tensor vv_cal = kv_rows_view(view_tokens(v_, n), cfg, row_begin, row_elems);
+        const int64_t live_cols = row_elems;
+        if (kv_cal.shape[1] != live_cols) {
+            kv_cal.shape[1] = live_cols;
+            kv_cal.compute_strides();
+        }
+        if (vv_cal.shape[1] != live_cols) {
+            vv_cal.shape[1] = live_cols;
+            vv_cal.compute_strides();
+        }
+        float k_scale = calibrate_fp8_scale(kv_cal, stream);
+        float v_scale = calibrate_fp8_scale(vv_cal, stream);
+        float new_scale = std::max(k_scale, v_scale);
+        if (new_scale < 1e-12f)
+            new_scale = 1.0f;
+        // Promote only — the high-water mark is the union of every
+        // prefill we've seen, so values fit FP8 dynamic range.
+        kv_scales_[kv_layer] = std::max(kv_scales_[kv_layer], new_scale);
+        kv_calibrated_[kv_layer] = true;
+        return 1.0f / kv_scales_[kv_layer];
+    }
+    if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
+        return 1.0f / kv_scales_[kv_layer];
+    return 1.0f;
+}
+
+void GraphExecutor::round_prefill_kv_to_cache(int layer, const InferenceState& state, Tensor& seq_k,
+                                              Tensor& seq_v, int row_begin, int n_rows, cudaStream_t stream) {
+    if (state.kv_cache == nullptr || n_rows <= 0 || state.kv_cache->qtype() != QType::FP8_E4M3)
+        return;
+    const int kv_layer = get_kv_layer(kv_layer_map_, layer);
+    if (kv_layer < 0 || model_->config().layer_kv_shared(layer))
+        return;  // no write of its own (see write_kv_cache)
+    int nkv = 0;
+    int hd = 0;
+    kv_layer_geometry(model_->config(), *state.kv_cache, layer, nkv, hd);
+    const int row_elems = nkv * hd;
+    IMP_CHECK(seq_k.shape[1] >= row_elems && seq_v.shape[1] >= row_elems,
+              "round_prefill_kv_to_cache: K/V rows narrower than nkv*hd=%d", row_elems);
+    const float inv_scale = fp8_kv_inv_scale_(kv_layer, row_begin, n_rows, row_elems, stream);
+    // The scale paged_kv_gather_fp8_to_fp16 reads (gather_past_kv_fp16).
+    const float scale = kv_layer < static_cast<int>(kv_scales_.size()) ? kv_scales_[kv_layer] : 1.0f;
+    round_kv_fp8_inplace_kernel<<<dim3(n_rows, 2), std::min(row_elems, 256), 0, stream>>>(
+        static_cast<half*>(seq_k.data), static_cast<half*>(seq_v.data), seq_k.shape[1], seq_v.shape[1],
+        row_elems, n_rows, inv_scale, scale);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream,
                                    int row_begin, int n_rows, const int* bt_flat,
                                    const int* bt_swa_flat, const int* positions_override) {
@@ -69,20 +148,9 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     } else if (state.block_tables_swa != nullptr && layer_swa) {
         block_tables = state.block_tables_swa;
     }
-    // Per-layer shape support (Gemma 4 dual attention geometry)
-    int nkv, hd;
-    if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
-        cfg.n_kv_heads_per_layer[layer] > 0) {
-        nkv = cfg.n_kv_heads_per_layer[layer];
-    } else {
-        nkv = cache->n_kv_heads();
-    }
-    if (!cfg.head_dim_per_layer.empty() && layer < (int)cfg.head_dim_per_layer.size() &&
-        cfg.head_dim_per_layer[layer] > 0) {
-        hd = cfg.head_dim_per_layer[layer];
-    } else {
-        hd = cache->head_dim();
-    }
+    int nkv = 0;
+    int hd = 0;
+    kv_layer_geometry(cfg, *cache, layer, nkv, hd);
     const int kv_block_size = cache->block_size();
     int row_elems = nkv * hd;
     int block_stride = kv_block_size * row_elems;
@@ -157,47 +225,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {
-        // FP8 E4M3 KV write with online calibration, high-water-mark per layer:
-        // the first prefill after Engine::warmup() resets calibrated_ sets the
-        // initial scale, later prefills only promote it if absmax exceeds the
-        // stored value. Never reduced: avoids warmup-pollution (synthetic BOS
-        // tokens give a too-small scale, real generation overflows FP8_MAX).
-        float inv_scale;
-        if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
-            !kv_calibrated_[kv_layer]) {
-            // Narrows the calibration view to the per-layer K/V shape. k_/v_
-            // workspaces are sized for max_nkv*max_head_dim across all layers (Gemma-4
-            // dual head_dim 256/512); without narrowing, calibrate_fp8_scale would
-            // absmax-reduce over uninitialized memory past the live region for
-            // smaller-head_dim layers, locking the FP8 range to junk (was the root cause of the Gemma-4
-            // force-FP16 carve-out, engine.cpp:516).
-            Tensor kv_cal = view_rows(k_, n);
-            Tensor vv_cal = view_rows(v_, n);
-            const int64_t live_cols = static_cast<int64_t>(nkv) * hd;
-            if (kv_cal.shape[1] != live_cols) {
-                kv_cal.shape[1] = live_cols;
-                kv_cal.compute_strides();
-            }
-            if (vv_cal.shape[1] != live_cols) {
-                vv_cal.shape[1] = live_cols;
-                vv_cal.compute_strides();
-            }
-            float k_scale = calibrate_fp8_scale(kv_cal, stream);
-            float v_scale = calibrate_fp8_scale(vv_cal, stream);
-            float new_scale = std::max(k_scale, v_scale);
-            if (new_scale < 1e-12f)
-                new_scale = 1.0f;
-            // Promote only — the high-water mark is the union of every
-            // prefill we've seen, so values fit FP8 dynamic range.
-            kv_scales_[kv_layer] = std::max(kv_scales_[kv_layer], new_scale);
-            kv_calibrated_[kv_layer] = true;
-            inv_scale = 1.0f / kv_scales_[kv_layer];
-        } else if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size())) {
-            inv_scale = 1.0f / kv_scales_[kv_layer];
-        } else {
-            inv_scale = 1.0f;
-        }
-
+        const float inv_scale = fp8_kv_inv_scale_(kv_layer, row_begin, n, row_elems, stream);
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
         dim3 fp8_grid(n, 2);

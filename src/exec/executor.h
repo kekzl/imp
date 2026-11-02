@@ -1499,6 +1499,13 @@ private:
     void write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream, int row_begin = 0,
                         int n_rows = -1, const int* bt_flat = nullptr, const int* bt_swa_flat = nullptr,
                         const int* positions_override = nullptr);
+    // FP8 KV: rounds a prefill chunk's own K/V rows in place to the value the cache will hold, so the
+    // chunk attends to them as a later chunk (gather) and decode do; a row no longer depends on where its
+    // chunk starts. No-op for other KV dtypes.
+    void round_prefill_kv_to_cache(int layer, const InferenceState& state, Tensor& seq_k, Tensor& seq_v,
+                                   int row_begin, int n_rows, cudaStream_t stream);
+    // FP8 KV inverse scale of kv_layer; calibrates on rows [row_begin, row_begin+n) of k_/v_ first if unset.
+    float fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int row_elems, cudaStream_t stream);
 
     // Create a Tensor view of the first n_tokens rows of a max_tokens buffer.
     Tensor view_tokens(const Tensor& buf, int n_tokens) const;
