@@ -675,8 +675,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // Capture a shape on its second consecutive sighting: capture + instantiate cost more than
         // one eager forward (26.5 ms instantiate at pp512 on Qwen3-30B-A3B), so a one-off prompt
         // length runs eager and leaves the cached graph in place.
+        // Recurrent slot in the key: a replay for another request wrote the captured request's
+        // slot (Nemotron-H, two equal-length prompts; GDN prompts take the ragged path).
         const PrefillGraphKey key{chunk_len, static_cast<int>(block_table.size()),
-                                  executor_->kv_calibration_generation()};
+                                  executor_->kv_calibration_generation(),
+                                  state.ssm_state ? state.ssm_seq_id : -1};
         bool use_graph = false;
         if (can_capture) {
             if (key == prefill_graph_key_) {

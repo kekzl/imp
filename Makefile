@@ -251,7 +251,7 @@ test-e2e: build
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
 		-e IMP_TEST_MODEL_NVFP4_MOE=/models/Qwen3-30B-A3B-NVFP4-Modelopt \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:MoeAllocFailureTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*"
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:MoeAllocFailureTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*:*MoePrefixHitE2ETest*:Mamba2BatchedDecodeTest.*"
 	@# The greedy regression locks, the degeneration battery, the prefix-cache
 	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
 	@# target until 2026-09-05 (AUDIT_ARCH_2026 I-1 = D-3): the filter above
