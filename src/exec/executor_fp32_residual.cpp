@@ -23,11 +23,12 @@ bool f16_weight(const Tensor& t) { return t.data != nullptr && t.qtype == QType:
 
 bool GraphExecutor::fp32_resid_fuse_ok_(int n) const {
     // Decode rows only (n == 1 or batched decode / verify); prefill keeps the unfused chain.
-    return n >= 1 && (n == 1 || cur_decode_rows_) && dispatch_policy().gemm.fp32_residual_fuse &&
-           fp32_accum_buf_ != nullptr && model_->profile().fp32_residual_norms &&
-           compute_dtype_ == QType::F16 && !calib_ && lora_ == nullptr && cvec_ == nullptr &&
-           sae_rows_.empty() && !debug_forward_enabled() && !dispatch_policy().moe.force_fp16_sync &&
-           !model_->config().parallel_block && !model_->profile().gated_residual;
+    return n >= 1 && (n == 1 || cur_decode_rows_) && !overlap_prefill_active_ &&
+           dispatch_policy().gemm.fp32_residual_fuse && fp32_accum_buf_ != nullptr &&
+           model_->profile().fp32_residual_norms && compute_dtype_ == QType::F16 && !calib_ &&
+           lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() && !debug_forward_enabled() &&
+           !dispatch_policy().moe.force_fp16_sync && !model_->config().parallel_block &&
+           !model_->profile().gated_residual;
 }
 
 void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cudaStream_t stream) {
