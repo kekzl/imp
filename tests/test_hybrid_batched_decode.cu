@@ -49,11 +49,13 @@ constexpr const char* kPrompts[kRows] = {
 
 class HybridBatchedDecodeTest : public ::testing::Test {
 protected:
+    virtual const char* model_env() const { return imp_test::kEnvModelGdn; }
+    void rows_decode_independently_of_their_order();
     void SetUp() override {
-        const std::string path = imp_test::env_path(imp_test::kEnvModelGdn);
+        const std::string path = imp_test::env_path(model_env());
         if (path.empty())
-            GTEST_SKIP() << "Set " << imp_test::kEnvModelGdn << " to run the batched hybrid decode test";
-        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path.c_str(), imp_test::kEnvModelGdn));
+            GTEST_SKIP() << "Set " << model_env() << " to run the batched hybrid decode test";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path.c_str(), model_env()));
         const bool gguf = path.size() >= 5 && path.substr(path.size() - 5) == ".gguf";
         ASSERT_EQ(imp_model_load(path.c_str(), gguf ? IMP_FORMAT_GGUF : IMP_FORMAT_SAFETENSORS, &model_),
                   IMP_SUCCESS);
@@ -72,11 +74,26 @@ protected:
     ImpContext ctx_ = nullptr;
 };
 
+// Mamba2 hybrid (Nemotron-H): run_ssm decoded a batched step as one sequence's prefill until
+// it took the slot table; two concurrent requests then produced "one,,,,,," (degen ple-isolation).
+class Mamba2BatchedDecodeTest : public HybridBatchedDecodeTest {
+protected:
+    const char* model_env() const override { return imp_test::kEnvModelSsm; }
+};
+
 }  // namespace
 
 TEST_F(HybridBatchedDecodeTest, RowsDecodeIndependentlyOfTheirOrder) {
+    rows_decode_independently_of_their_order();
+}
+
+TEST_F(Mamba2BatchedDecodeTest, RowsDecodeIndependentlyOfTheirOrder) {
+    rows_decode_independently_of_their_order();
+}
+
+void HybridBatchedDecodeTest::rows_decode_independently_of_their_order() {
     if (!(model_ && model_->model && model_->model->config().ssm_inner_size > 0))
-        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: " << imp_test::kEnvModelGdn
+        GTEST_SKIP() << "SKIPPED ON A DENSE CHECKPOINT: " << model_env()
                      << " points at a model with ssm_inner_size == 0.";
 
     RuntimeConfig rc;

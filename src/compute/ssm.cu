@@ -93,10 +93,19 @@ __global__ void ssm_conv1d_decode_kernel(
     const half* __restrict__ weight,  // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
     const half* __restrict__ bias,    // [channels] or nullptr
     half* __restrict__ x_out,         // [channels]
-    int channels, int kernel_size) {
+    int channels, int kernel_size,
+    // Batched decode: sequence blockIdx.y reads row y of x_in/x_out and the conv state of pool
+    // slot seq_slots[y]. nullptr = single sequence (gridDim.y == 1, no offsets).
+    const int* __restrict__ seq_slots = nullptr, int64_t conv_state_seq_stride = 0) {
     int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
+    if (seq_slots) {
+        const int seq = blockIdx.y;
+        conv_state += static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(conv_state_seq_stride);
+        x_in += static_cast<size_t>(seq) * channels;
+        x_out += static_cast<size_t>(seq) * channels;
+    }
 
     float* state = conv_state + (static_cast<int64_t>(ch) * kernel_size);
     float sum;
@@ -232,6 +241,21 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         static_cast<half*>(x_out.data), channels, conv_kernel);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void ssm_conv1d_decode_batched(void* conv_state_pool, const int* seq_slots, int64_t conv_state_seq_stride,
+                               const Tensor& x_in, const Tensor& weight, const Tensor& bias, Tensor& x_out,
+                               int n_seq, int conv_kernel, cudaStream_t stream) {
+    if (n_seq <= 0)
+        return;
+    int channels = static_cast<int>(x_in.shape[x_in.ndim - 1]);
+    int threads = 256;
+    dim3 blocks((channels + threads - 1) / threads, n_seq);
+    ssm_conv1d_decode_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<float*>(conv_state_pool), static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        static_cast<half*>(x_out.data), channels, conv_kernel, seq_slots, conv_state_seq_stride);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -533,12 +557,28 @@ __global__ void ssm_scan_kernel(
     half* __restrict__ y,               // [n_tokens, inner_size]
     const half* __restrict__ z,         // [n_tokens, inner_size] (gate, only if FUSE_GATE)
     int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups, int s_tiles,
-    const int* __restrict__ d_real_n,    // device chunk length (padded verify chunk) or nullptr
-    void* __restrict__ h_snap,           // second state output, or nullptr
-    const int* __restrict__ d_snap_n) {  // row count h_snap is taken at
+    const int* __restrict__ d_real_n,  // device chunk length (padded verify chunk) or nullptr
+    void* __restrict__ h_snap,         // second state output, or nullptr
+    const int* __restrict__ d_snap_n,  // row count h_snap is taken at
+    // Batched decode: sequence blockIdx.y owns row y of x/B/C/dt/y/z (n_tokens == 1) and the
+    // state of pool slot seq_slots[y]. nullptr = single sequence (gridDim.y == 1).
+    const int* __restrict__ seq_slots = nullptr, size_t h_slot_stride_bytes = 0) {
     int h = blockIdx.x;
     if (h >= n_heads)
         return;
+    if (seq_slots) {
+        const int seq = blockIdx.y;
+        const int64_t inner = static_cast<int64_t>(n_heads) * head_dim_ssm;
+        const int64_t bc = static_cast<int64_t>(n_groups) * state_size;
+        h_state = static_cast<char*>(h_state) + (static_cast<size_t>(seq_slots[seq]) * h_slot_stride_bytes);
+        x += seq * inner;
+        y += seq * inner;
+        if (z)
+            z += seq * inner;
+        B_in += seq * bc;
+        C_in += seq * bc;
+        dt_raw += static_cast<int64_t>(seq) * n_heads;
+    }
     // Padded verify chunk (#847): y is produced for every row (padding rows
     // are causally invisible downstream), but h_state stops advancing after
     // the real last row so the committed recurrent state ignores the pads.
@@ -733,6 +773,49 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const T
                     static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
                     static_cast<const half*>(z), n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
                     h_dtype, stream, d_real_n, h_snap, d_snap_n, ssd);
+}
+
+void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
+                             const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state_pool,
+                             const int* seq_slots, size_t h_slot_stride_bytes, Tensor& y, const void* z,
+                             int n_seq, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                             QType h_dtype, cudaStream_t stream) {
+    if (n_seq <= 0)
+        return;
+    // Legacy kernel at the s_tiles the register kernel uses: bit-identical to ssm_scan_decode per row.
+    const int s_tiles = ssm_scan_s_tiles(head_dim_ssm, state_size);
+    const int hd = std::max(head_dim_ssm, 1);
+    const int threads = hd * s_tiles;
+    const size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
+    const dim3 grid(n_heads, n_seq);
+    const auto* xp = static_cast<const half*>(x.data);
+    const auto* bp = static_cast<const half*>(B.data);
+    const auto* cp = static_cast<const half*>(C.data);
+    const auto* dtp = static_cast<const half*>(dt.data);
+    const auto* ap = static_cast<const float*>(A_log.data);
+    const auto* dp = static_cast<const float*>(D.data);
+    const auto* dbp = static_cast<const float*>(dt_bias.data);
+    auto* yp = static_cast<half*>(y.data);
+    const auto* zp = static_cast<const half*>(z);
+#define SSM_SCAN_BATCHED(H_FP16_V, FUSE_V)                                                                 \
+    do {                                                                                                   \
+        ssm_scan_kernel<H_FP16_V, FUSE_V>                                                                  \
+            <<<grid, threads, smem_bytes, stream>>>(xp, bp, cp, dtp, ap, dp, dbp, h_state_pool, yp, zp, 1, \
+                                                    n_heads, head_dim_ssm, state_size, n_groups, s_tiles,  \
+                                                    nullptr, nullptr, nullptr, seq_slots,                  \
+                                                    h_slot_stride_bytes);                                  \
+        IMP_CUDA_CHECK_LAUNCH();                                                                           \
+    } while (0)
+    const bool fp16 = (h_dtype == QType::F16);
+    if (fp16 && zp)
+        SSM_SCAN_BATCHED(true, true);
+    else if (fp16)
+        SSM_SCAN_BATCHED(true, false);
+    else if (zp)
+        SSM_SCAN_BATCHED(false, true);
+    else
+        SSM_SCAN_BATCHED(false, false);
+#undef SSM_SCAN_BATCHED
 }
 
 // ---------------------------------------------------------------------------

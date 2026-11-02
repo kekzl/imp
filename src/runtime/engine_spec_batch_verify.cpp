@@ -52,7 +52,8 @@ bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
     const auto& scfg = cfg.speculative;
     if (!scfg.batch_verify || !scfg.hybrid)
         return false;
-    return model != nullptr && model->config().ssm_inner_size > 0;
+    // Mamba2 layers have no grouped verify scan (run_ssm decodes the slot table one token per row).
+    return model != nullptr && model->config().ssm_inner_size > 0 && !model->profile().has_pure_ssm;
 }
 
 bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
