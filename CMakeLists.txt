@@ -441,6 +441,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
+    src/runtime/engine_kv_fp8_scale.cpp
     src/runtime/engine_kv_replan.cpp
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
@@ -974,6 +975,8 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_session_pins.cpp
         tests/test_kv_accounting.cpp
         tests/test_kv_dtype.cpp
+        # kv_cache.fp8_scale selection + checkpoint k_scale / v_scale tensors.
+        tests/test_kv_fp8_scale.cpp
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_llama3.cpp
@@ -1480,6 +1483,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_kv_cache.cu
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
+        tests/test_fp8_kv_static_scale.cu
         tests/test_kv_block_copy.cu
         tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu

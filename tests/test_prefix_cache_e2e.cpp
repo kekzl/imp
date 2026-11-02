@@ -11,12 +11,15 @@
 #include "memory/kv_cache_manager.h"
 #include "model/model.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
+#include "exec/executor.h"
 #include "runtime/request.h"
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "test_models.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -568,6 +571,41 @@ TEST_F(PrefixCacheE2ETest, DenseFp8KvHitsAtTwoOffsetsBitEqual) {
     ASSERT_GE(n_full, 320);
     hits_at_two_offsets(engine, std::vector<int32_t>(full.begin(), full.begin() + 6 * kv_bs),
                         std::vector<int32_t>(full.begin(), full.begin() + 320));
+}
+
+// kv_cache.fp8_scale=calibrate: static power-of-two scales below the legacy 1.0 floor, set before the
+// warmup graph prewarm; the resend stays bit-equal and no request moves a scale. Dense only.
+TEST_F(PrefixCacheE2ETest, DenseFp8KvCalibratedScaleHitsAtTwoOffsetsBitEqual) {
+    if (model_ && model_->model && model_->model->config().ssm_inner_size > 0)
+        GTEST_SKIP() << "recurrent model: hits land on snapshot boundaries, not on the offsets asserted here";
+    imp::set_pending_runtime_config(imp::RuntimeConfig::load("", {"kv_cache.fp8_scale=calibrate"}));
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = 1;
+    cfg.enable_cuda_graphs = 1;
+    cfg.use_prefix_caching = 1;
+    cfg.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    imp::Engine* engine = ctx_->engine.get();
+    ASSERT_NE(engine, nullptr);
+    ASSERT_EQ(engine->kv_cache()->qtype(), imp::QType::FP8_E4M3) << "FP8 KV was not applied: proves nothing";
+    const std::vector<float> scales = engine->executor()->kv_scales();
+    ASSERT_FALSE(scales.empty());
+    ASSERT_LT(*std::min_element(scales.begin(), scales.end()), 1.0f)
+        << "every layer on 1.0: calibrate did not run, the test would pass on legacy";
+    for (float s : scales) {
+        int e = 0;
+        ASSERT_EQ(std::frexp(s, &e), 0.5f) << "scale " << s << " is not a power of two";
+    }
+    const int kv_bs = engine->kv_cache()->block_size();
+    std::vector<int32_t> full(4096);
+    int n_full = 0;
+    ASSERT_EQ(imp_tokenize(model_, kLongPrompt, full.data(), &n_full, static_cast<int>(full.size())),
+              IMP_SUCCESS);
+    ASSERT_GE(n_full, 320);
+    hits_at_two_offsets(engine, std::vector<int32_t>(full.begin(), full.begin() + 6 * kv_bs),
+                        std::vector<int32_t>(full.begin(), full.begin() + 320));
+    EXPECT_EQ(engine->executor()->kv_scales(), scales) << "a request moved a static scale";
 }
 
 // NVFP4 MoE in the default config (IMP_TEST_MODEL_NVFP4_MOE, IMP_TEST_MODEL_GEMMA4_NVFP4): the fused

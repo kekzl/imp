@@ -544,6 +544,9 @@ void Engine::warmup() {
     }
     // Before the invalidation below: a raised ceiling moves the pool every captured graph read.
     apply_measured_library_reserve_();
+    // After the forward-window measurement (its first forward claims the libraries), before the
+    // invalidation below: every decode graph captured from here on bakes the static scale in.
+    calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, true);
 
     // Runners stay cold through the prewarm ladder: each size runs one eager step (cuBLASLt probe at
     // that M) before its capture, so no algo probe runs inside a capture (#2396). Marked warm below.

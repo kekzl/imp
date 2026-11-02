@@ -3,6 +3,7 @@
 #include "model/gdn_fused_split.h"
 #include "model/multimodal_wrapper.h"
 #include "model/tensor_kind_matcher.h"
+#include "model/kv_scale_tensor.h"
 #include "core/config/lm_head_mode.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
@@ -1366,6 +1367,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 }
             }
         }
+
+        // FP8 KV dequant scales (kv_cache.fp8_scale=checkpoint); a scalar never becomes a Tensor slot.
+        matched = kv_scale_matched(matched, parts, t, name, layer.kv_ckpt_k_scale, layer.kv_ckpt_v_scale);
 
         if (matched) {
             IMP_LOG_DEBUG("  assigned: %s -> layer %d", name.c_str(), layer_idx);

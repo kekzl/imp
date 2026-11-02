@@ -190,6 +190,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("kv_cache.dtype", cfg.kv_cache.dtype);
     B("kv_cache.allow_nondeterministic_fp8", cfg.kv_cache.allow_nondeterministic_fp8);
     B("kv_cache.fp8_auto_legacy", cfg.kv_cache.fp8_auto_legacy);
+    S("kv_cache.fp8_scale", cfg.kv_cache.fp8_scale);
+    F("kv_cache.fp8_scale_headroom", cfg.kv_cache.fp8_scale_headroom);
     I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
     B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     B("kv_cache.growable", cfg.kv_cache.growable);

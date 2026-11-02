@@ -2,6 +2,7 @@
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
+#include "runtime/kv_fp8_scale_init.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "memory/vram_query.h"
@@ -744,16 +745,22 @@ bool Engine::init_kv_cache() {
         // Persistent cache is dense-only: restored KV blocks are usable for
         // hybrids only together with a recurrent-state snapshot, and snapshots
         // are not persisted (the recurrent-snapshot store below must also come up).
-        if (mcfg.ssm_inner_size == 0 && !config_.prefix_cache_path.empty()) {
+        if (mcfg.ssm_inner_size == 0 && !config_.prefix_cache_path.empty() &&
+            prefix_cache_restore_allowed(config_.kv_cache_dtype, runtime_config_)) {
             int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path,
-                                                          model_fingerprint_(), stream_);
+                                                          prefix_cache_fingerprint(model_fingerprint_(),
+                                                                                   config_.kv_cache_dtype,
+                                                                                   runtime_config_),
+                                                          stream_);
             if (restored > 0)
                 IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored,
                              config_.prefix_cache_path.c_str());
         }
     }
 
-    executor_->set_kv_layer_map(std::move(kv_layer_map));
+    executor_->set_kv_layer_map(kv_layer_map);
+    apply_checkpoint_fp8_kv_scales(*executor_, *model_, kv_layer_map, config_.kv_cache_dtype,
+                                   runtime_config_);
 
     if (offload_mgr_)
         executor_->set_offload_manager(offload_mgr_.get());

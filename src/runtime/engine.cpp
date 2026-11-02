@@ -1,5 +1,6 @@
 #include "runtime/engine.h"
 #include "runtime/engine_kv_evict.h"
+#include "runtime/kv_fp8_scale_init.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_vision_load.h"
@@ -126,7 +127,10 @@ Engine::~Engine() {
     // needs recurrent snapshots, which are device-resident and not persisted)
     if (kv_manager_ && !config_.prefix_cache_path.empty() && kv_manager_->prefix_caching_enabled() &&
         !ssm_state_) {
-        kv_manager_->save_prefix_cache(config_.prefix_cache_path, model_fingerprint_(), stream_);
+        kv_manager_->save_prefix_cache(config_.prefix_cache_path,
+                                       prefix_cache_fingerprint(model_fingerprint_(), config_.kv_cache_dtype,
+                                                                runtime_config_),
+                                       stream_);
     }
 
     gemm_cleanup();
@@ -868,8 +872,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     MemAccount::instance().checkpoint("04_features");
     if (!runtime_config_.runtime.warmup) {
         IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
+        // kv_cache.fp8_scale=calibrate still needs its static scale.
+        calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, true);
     } else {
         warmup();
+        // Warns when warmup skipped its forward (MXFP4); the calibration itself ran inside warmup().
+        calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, false);
     }
     // Last thing before the guard arms: the speculative verify path's one-shot
     // capacity resolutions (A7 step 5.4), which otherwise land mid-serving.

@@ -229,6 +229,12 @@ dtype                       = "auto"
 allow_nondeterministic_fp8  = false
 # Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
 fp8_auto_legacy             = false
+# FP8 KV scale per layer. "legacy": first real prefill's absmax / 448, floored
+# at 1.0. "checkpoint": the checkpoint's k_scale / v_scale, 1.0 where absent.
+# "calibrate": a fixed-text prefill at warmup, amax * fp8_scale_headroom / 448.
+# Static modes round up to a power of two and stay fixed for the process.
+fp8_scale                   = "legacy"
+fp8_scale_headroom          = 2.0
 # BitDecoding TC path for NVFP4 paged-attention QK (experimental).
 # Experimental, expires: 2026-12-31 (remove or promote by then).
 bitdecoding_qk              = false

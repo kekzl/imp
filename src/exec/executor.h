@@ -455,35 +455,26 @@ public:
     [[nodiscard]] bool lm_head_fp8_view(const void*& weight, const float*& row_scales) const;
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
-    void set_kv_layer_map(std::vector<int> map) {
-        kv_layer_map_ = std::move(map);
-        // Count KV layers and initialize per-layer FP8 scale vectors
-        int n_kv = 0;
-        for (int idx : kv_layer_map_) {
-            if (idx >= 0)
-                n_kv = std::max(n_kv, idx + 1);
-        }
-        kv_scales_.assign(n_kv, 1.0f);
-        kv_calibrated_.assign(n_kv, false);
-    }
+    // Also sizes the per-KV-layer FP8 scale vectors (scale 1.0, uncalibrated). executor_kv_write.cu.
+    void set_kv_layer_map(std::vector<int> map);
 
     // Drops calibrated_ AND the per-layer scale value (not just the flag) after
     // warmup: synthetic BOS tokens give unrepresentative K/V absmax (too-tight
     // scale overflows to FP8_MAX on real data, or too-wide scale under-uses
     // the FP8 grid). High-water-mark within one generation still applies via
-    // std::max in executor_kv_write.cu.
-    void reset_kv_calibration() {
-        std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
-        std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
-        ++kv_calib_gen_;
-    }
+    // std::max in executor_kv_write.cu. No-op on static scales (kv_cache.fp8_scale).
+    void reset_kv_calibration();
 
     // FP8 KV append bakes inv_scale into a captured prefill graph: capturable once every layer is
     // calibrated; the generation moves when reset_kv_calibration() drops the scales.
-    [[nodiscard]] bool kv_scales_calibrated() const {
-        return std::find(kv_calibrated_.begin(), kv_calibrated_.end(), false) == kv_calibrated_.end();
-    }
+    [[nodiscard]] bool kv_scales_calibrated() const;
     uint64_t kv_calibration_generation() const { return kv_calib_gen_; }
+    // Static FP8 KV scales (executor_kv_write.cu): one per KV layer, never recalibrated afterwards.
+    void set_static_kv_scales(const std::vector<float>& scales);
+    // Next prefill records per-layer absmax (no 1.0 floor): kv_calibration_amax()[2l] K, [2l+1] V.
+    void begin_kv_scale_calibration();
+    [[nodiscard]] const std::vector<float>& kv_calibration_amax() const { return kv_cal_amax_; }
+    [[nodiscard]] const std::vector<float>& kv_scales() const { return kv_scales_; }
 
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
@@ -1111,6 +1102,9 @@ private:
     // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
     std::vector<float> kv_scales_;     // [n_kv_layers] per-layer FP8 scale
     std::vector<bool> kv_calibrated_;  // [n_kv_layers] whether scale has been calibrated
+    bool kv_scales_static_ = false;    // set_static_kv_scales: reset_kv_calibration keeps them
+    bool kv_cal_collect_ = false;      // begin_kv_scale_calibration: record amax, no floor
+    std::vector<float> kv_cal_amax_;   // [2 * n_kv_layers] K, V absmax per layer
     uint64_t kv_calib_gen_ = 0;
 
     // YaRN correction dimension boundaries [2], precomputed at init.
