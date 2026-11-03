@@ -104,7 +104,7 @@ Weight random_weight(int N, int K, uint32_t seed) {
 }
 
 // Relative Frobenius error of y [M, N] vs the double x . W^T, per row (row 0 is the amax ~1 row).
-std::vector<double> row_rel_err(const std::vector<half>& x, const Weight& w, const std::vector<float>& y,
+std::vector<double> row_rel_err(const std::vector<double>& x, const Weight& w, const std::vector<float>& y,
                                 int M, int N, int K) {
     std::vector<double> e(M);
     for (int m = 0; m < M; ++m) {
@@ -112,7 +112,7 @@ std::vector<double> row_rel_err(const std::vector<half>& x, const Weight& w, con
         for (int n = 0; n < N; ++n) {
             double ref = 0.0;
             for (int k = 0; k < K; ++k)
-                ref += static_cast<double>(__half2float(x[(size_t(m) * K) + k])) * w.dq[(size_t(n) * K) + k];
+                ref += x[(size_t(m) * K) + k] * w.dq[(size_t(n) * K) + k];
             const double d = y[(size_t(m) * N) + n] - ref;
             num += d * d;
             den += ref * ref;
@@ -120,6 +120,13 @@ std::vector<double> row_rel_err(const std::vector<half>& x, const Weight& w, con
         e[m] = std::sqrt(num / std::max(den, 1e-300));
     }
     return e;
+}
+
+std::vector<double> to_double(const std::vector<half>& x) {
+    std::vector<double> d(x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+        d[i] = static_cast<double>(__half2float(x[i]));
+    return d;
 }
 
 double worst_small_row(const std::vector<double>& e) {
@@ -132,8 +139,8 @@ double worst_small_row(const std::vector<double>& e) {
 enum class Arm { kScaled, kUnit, kMutantAlphaDropsScale, kMutantQuantDropsScale };
 
 // Small-M v2: quantize_fp16_to_nvfp4_into with the quantize scale, Xq.tensor_scale = the alpha scale.
-std::vector<double> run_smallm(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
-                               Arm arm) {
+std::vector<float> smallm_y(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
+                            Arm arm) {
     const float qs = (arm == Arm::kScaled || arm == Arm::kMutantAlphaDropsScale) ? s : 1.0f;
     const float as = (arm == Arm::kScaled || arm == Arm::kMutantQuantDropsScale) ? s : 1.0f;
     half* dx = dev_upload(x);
@@ -164,12 +171,17 @@ std::vector<double> run_smallm(const std::vector<half>& x, const Weight& w, int 
     cudaFree(xs);
     cudaFree(dy);
     cudaFree(ws);
-    return row_rel_err(x, w, y, M, N, K);
+    return y;
+}
+
+std::vector<double> run_smallm(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
+                               Arm arm) {
+    return row_rel_err(to_double(x), w, smallm_y(x, w, M, N, K, s, arm), M, N, K);
 }
 
 // Prompt tile: SfAtom quantize with the quantize scale, alpha = weight scale x the alpha scale.
-std::vector<double> run_tile(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
-                             Arm arm) {
+std::vector<float> tile_y(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
+                          Arm arm) {
     const float qs = (arm == Arm::kScaled || arm == Arm::kMutantAlphaDropsScale) ? s : 1.0f;
     const float as = (arm == Arm::kScaled || arm == Arm::kMutantQuantDropsScale) ? s : 1.0f;
     CutlassNvFP4Weight cw;
@@ -195,7 +207,12 @@ std::vector<double> run_tile(const std::vector<half>& x, const Weight& w, int M,
     cudaFree(ad);
     cudaFree(asf);
     cudaFree(dy);
-    return row_rel_err(x, w, y, M, N, K);
+    return y;
+}
+
+std::vector<double> run_tile(const std::vector<half>& x, const Weight& w, int M, int N, int K, float s,
+                             Arm arm) {
+    return row_rel_err(to_double(x), w, tile_y(x, w, M, N, K, s, arm), M, N, K);
 }
 
 template <typename Run>
@@ -215,7 +232,7 @@ void check_arms(Run run, const char* what) {
     printf("[%s] worst small-row rel err: static scale %.4f, unit scale %.4f, mutants %.3g / %.3g\n", what,
            e_s, e_1, worst_small_row(mut_a), worst_small_row(mut_q));
     // NVFP4 W4A4 at normal block scales on uniform blocks: ~0.17 rel error per row; the unit scale rounds
-    // most values of the 2^-14 .. 2^-10 rows to 0 or +-0.5 steps (plain: scale floor 2^-9; SfAtom: scale 0).
+    // most values of the 2^-14 .. 2^-10 rows to 0 or +-0.5 steps (block scale floor 2^-9, plain and SfAtom).
     EXPECT_LT(e_s, 0.2) << what;
     EXPECT_GT(e_1, 2.0 * e_s) << what;
     // Dropping the scale on one side moves every output by 1/s (alpha) or s (quantize): rel err ~1e5 / ~1.
@@ -316,4 +333,111 @@ TEST(Nvfp4StaticActScaleTest, ProducersMatchReferenceQuantize) {
     cudaFree(dout);
     cudaFree(xq);
     cudaFree(xs);
+}
+
+namespace {
+
+// Tiny blocks at unit act scale (imp-quantize exports, gemm.nvfp4_static_act_scale off): every block scale
+// amax / 6 sits under the UE4M3 floor 2^-9. Block 0 amax 0, block 1 amax <= 6 * 2^-10 (scale <= 2^-10, rounds
+// to 0 even in RNE), the rest amax 2^-(10 - m % 4) per row m (2^-10 .. 2^-7).
+std::vector<half> tiny_activations(int M, int K, uint32_t seed) {
+    std::vector<half> x(size_t(M) * K);
+    uint32_t h = seed;
+    for (int m = 0; m < M; ++m)
+        for (int b = 0; b < K / 16; ++b) {
+            const double mag = (b == 0)   ? 0.0
+                               : (b == 1) ? 6.0 * std::ldexp(1.0, -10)
+                                          : std::ldexp(1.0, -10 + (m % 4));
+            for (int i = 0; i < 16; ++i)
+                x[(size_t(m) * K) + (b * 16) + i] = __float2half(static_cast<float>(unit(h) * mag));
+        }
+    return x;
+}
+
+// Plain-layout NVFP4 [M, K] decoded to fp64 at tensor scale s.
+std::vector<double> decode_plain(const std::vector<uint8_t>& p, const std::vector<uint8_t>& sc, int M, int K,
+                                 float s) {
+    std::vector<double> d(size_t(M) * K);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k) {
+            const uint8_t byte = p[(size_t(m) * K / 2) + (k / 2)];
+            d[(size_t(m) * K) + k] = fp4((k & 1) ? (byte >> 4) : byte) *
+                                     ue4m3(sc[(size_t(m) * K / 16) + (k / 16)]) * s;
+        }
+    return d;
+}
+
+size_t sfatom_at(int row, int kg, int K) {  // mirrors sfatom_offset() in nvfp4_sfatom_quant.cu
+    const int n_k_tiles = (K + 63) / 64, row_local = row % 128;
+    return (static_cast<size_t>(((row / 128) * n_k_tiles) + (kg / 4)) * 512) +
+           static_cast<size_t>(((row_local % 32) * 16) + ((row_local / 32) * 4) + (kg % 4));
+}
+
+}  // namespace
+
+// One rule for a block scale under 2^-9: clamp to 2^-9 (nvfp4_encode_micro_scale). The prompt SfAtom quantize
+// wrote the byte 0 there (block read as zero in the GEMM) while the plain quantize clamped: prompt rows and
+// decode rows of one token differed. SfAtom bytes = plain bytes, at unit and static scales, across 2 atom
+// rows.
+TEST(Nvfp4TinyBlockScaleTest, SfAtomBytesEqualPlainQuantize) {
+    constexpr int M = 144, K = 1024;
+    const auto x = tiny_activations(M, K, 23u);
+    half* dx = dev_upload(x);
+    const size_t sfb = cutlass_nvfp4_sf_size(M, K);
+    void *a = nullptr, *sf = nullptr;
+    ASSERT_EQ(cudaMalloc(&a, size_t(M) * K / 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&sf, sfb), cudaSuccess);
+    for (const float s : {1.0f, 0.37f, std::ldexp(1.0f, -6) / 2688.0f}) {
+        std::vector<uint8_t> rp, rs;
+        ref_plain(dx, M, K, s, rp, rs);
+        ASSERT_EQ(cudaMemset(sf, 0xFF, sfb), cudaSuccess);
+        quantize_fp16_to_nvfp4_cutlass(dx, a, sf, M, K, nullptr, s);
+        const auto ap = dev_download<uint8_t>(a, rp.size());
+        const auto as = dev_download<uint8_t>(sf, sfb);
+        size_t bad_s = 0, floor_blocks = 0;
+        for (int m = 0; m < M; ++m)
+            for (int kg = 0; kg < K / 16; ++kg) {
+                const uint8_t want = rs[(size_t(m) * K / 16) + kg];
+                bad_s += as[sfatom_at(m, kg, K)] != want ? 1 : 0;
+                floor_blocks += want == 0x01 ? 1 : 0;
+            }
+        printf("[tiny SfAtom] s=%g: sf bad %zu / %d, blocks at the 2^-9 floor %zu\n", s, bad_s, M * K / 16,
+               floor_blocks);
+        EXPECT_EQ(ap, rp) << "SfAtom packed vs plain, s=" << s;
+        EXPECT_EQ(bad_s, 0u) << "SfAtom scale bytes vs plain, s=" << s;
+        if (s == 1.0f)  // the regime under test: blocks 0 and 1 plus the 2^-10 .. 2^-7 rows clamp
+            EXPECT_GT(floor_blocks, size_t(M) * 2);
+    }
+    cudaFree(dx);
+    cudaFree(a);
+    cudaFree(sf);
+}
+
+// Prompt tile and small-M v2 at unit scale on tiny blocks vs the fp64 GEMM over the clamp-rule quantized
+// activations: both match to FP16 output rounding. A zero-byte encode reads 1.0 on every row.
+TEST(Nvfp4TinyBlockScaleTest, PromptTileAndSmallMMatchDoubleReference) {
+    constexpr int M = 16, K = 1024, N = 256;
+    const auto x = tiny_activations(M, K, 29u);
+    Weight w = random_weight(N, K, 31u);
+    half* dx = dev_upload(x);
+    std::vector<uint8_t> rp, rs;
+    ref_plain(dx, M, K, 1.0f, rp, rs);
+    const auto xq = decode_plain(rp, rs, M, K, 1.0f);
+    const auto e_tile = row_rel_err(xq, w, tile_y(x, w, M, N, K, 1.0f, Arm::kUnit), M, N, K);
+    const auto e_sm = row_rel_err(xq, w, smallm_y(x, w, M, N, K, 1.0f, Arm::kUnit), M, N, K);
+    const auto e_x = row_rel_err(to_double(x), w, tile_y(x, w, M, N, K, 1.0f, Arm::kUnit), M, N, K);
+    double wt = 0.0, ws = 0.0, wx = 0.0;
+    for (int m = 0; m < M; ++m) {
+        wt = std::max(wt, e_tile[m]);
+        ws = std::max(ws, e_sm[m]);
+        wx = std::max(wx, e_x[m]);
+    }
+    printf("[tiny GEMM] worst row rel err vs quantized fp64: tile %.3g, small-M %.3g; tile vs exact x %.4f\n",
+           wt, ws, wx);
+    EXPECT_LT(wt, 1e-2) << "prompt tile drops tiny blocks";
+    EXPECT_LT(ws, 1e-2) << "small-M v2";
+    EXPECT_LT(wx, 0.9) << "tile output vs the unquantized activations";
+    cudaFree(dx);
+    cudaFree(w.nv.packed_data);
+    cudaFree(w.nv.micro_scales);
 }

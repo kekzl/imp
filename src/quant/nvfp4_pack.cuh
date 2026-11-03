@@ -49,7 +49,8 @@ __device__ __forceinline__ uint8_t nvfp4_pack_pair_hw(float v0, float v1) {
 
 // Micro-scale encode for one 16-value micro-block: local absmax -> clamped FP8 E4M3
 // micro-scale. Returns the RECONSTRUCTED scale (what dequant will use), which the pack step
-// must divide by. Extracted verbatim from quantize_micro_block_nvfp4 step 2.
+// must divide by. Extracted verbatim from quantize_micro_block_nvfp4 step 2. The one block-scale rule of
+// every NVFP4 activation quantizer (plain, SfAtom, MoE decode epilogue): under 2^-9 clamps, never 0.
 __device__ __forceinline__ float nvfp4_encode_micro_scale(float local_absmax, float tensor_scale,
                                                           uint8_t* fp8_out) {
     float micro_scale_f = local_absmax / (tensor_scale * kNvfp4FP4E2M1Max);
