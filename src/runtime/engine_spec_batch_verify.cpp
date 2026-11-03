@@ -429,7 +429,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     if (!ensure_batch_verify_bufs_(stream))
         return false;
-    const int max_bs = std::min(runtime_config_.runtime.max_batch_size, bv_.cap_seq);
+    // The resolved batch: runtime.max_batch_size 0 = auto (a default server) took no row at all.
+    const int max_bs = std::min(config_.max_batch_size, bv_.cap_seq);
     std::vector<std::shared_ptr<Request>> reqs;
     for (auto& r : batch) {
         if (static_cast<int>(reqs.size()) >= max_bs)
