@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- `speculative.mtp_concurrent` (default on): `mtp_k=auto` also loads the MTP head on a concurrent GDN-hybrid server; a prompt prefilling alone binds it, batch > 1 decodes plain. Qwen3.8-27B-NVFP4 default server: 1 stream 96.87 -> 131.28 tok/s (6 chats x 400), c4 -0.47 %, c32 -0.07 %, own peak VRAM +2773 MiB, KV plan 15651 -> 13230 blocks.
 - F16 paged decode: the multitok walk loads the next K/V group while one computes, GQA split count fills one wave (16 Qwen3-8B rows unsplit, no reduce). Qwen3-8B FP8 16 x ~1k decode attention 2244.1 -> 1709.5 us per step, c16L +4.9 %, NVFP4 +7.3 %, Gemma-4 +3.0 % (#3027).
 - NVFP4 MoE prompt GEMMs up to 0.4 wave of 128x128 tiles run 128x64 data-parallel tiles (no stream-K since #3006, rows stay M-invariant): o_proj 64 -> 128 CTAs. Qwen3-Coder-30B-A3B pp512 32518.85 -> 33001.79 tok/s (+1.49 %, 5 rotations); rest of the v0.62.0 drop is routing and FP8 KV rounding (`docs/audit/PERF_LOG.md`) (#3026).
 

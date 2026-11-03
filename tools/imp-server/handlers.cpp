@@ -133,8 +133,8 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["mtp_head_hint"] =
             state.runtime_config.speculative.mtp_k == 0 && state.resolved_max_batch_size != 1
                 ? "this checkpoint ships an MTP head; speculative.mtp_k=auto left it unloaded "
-                  "because this server takes concurrent requests (MTP drafts for one request at "
-                  "a time, and the head's 0.79 GiB comes out of the batch slot budget). "
+                  "because this server takes concurrent requests and is not a GDN hybrid with "
+                  "speculative.mtp_concurrent on (MTP drafts for one request at a time). "
                   "--set speculative.mtp_k=2 --set speculative.ngram=false forces it: measured "
                   "+27-30% single-stream decode on Qwen3.8-27B-NVFP4 thinking chats (2026-08-27)."
                 : "this checkpoint ships an MTP head that is not loaded "
@@ -669,10 +669,13 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     imp::tools::mtp_attach_external_head(*state.model->model, state.runtime_config, mtp_k);
     // Resolve the pair against what the load produced, BEFORE the pending
     // config is stashed for Engine::init below.
-    imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k,
-                                  state.model->model->mtp_ && state.model->model->mtp_->loaded,
-                                  state.model->model->mtp_ ? imp::mtp_auto_k_cap(*state.model->model->mtp_)
-                                                           : 0);
+    const imp::ModelProfile prof = imp::derive_model_profile(*state.model->model,
+                                                             state.model->model->config());
+    imp::tools::mtp_auto_finalize(
+        state.runtime_config, mtp_k, state.model->model->mtp_ && state.model->model->mtp_->loaded,
+        state.model->model->mtp_ ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0,
+        imp::tools::mtp_auto_serving(state.runtime_config, state.resolved_max_batch_size,
+                                     prof.is_gdn && prof.is_hybrid && !prof.has_pure_ssm));
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
     if (mtp_k <= 0)

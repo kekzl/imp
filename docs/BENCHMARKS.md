@@ -133,6 +133,23 @@ Fresh server per arm, engine defaults (imp `--max-concurrent N --set runtime.max
 - MTP k=2 on both: these template completions put the two within prompt noise (imp waves 95.7-132.5); 6 real chat prompts x 400 tokens, 3 starts (`tools/analysis/mtp_vs_vllm.sh`): imp **126.49** vs vLLM 116.84 tok/s. Speculation off: imp leads by 35.7 % (v0.60.0; 37.8 % on v0.59.0). imp keeps the KV cache in NVFP4 on this family.
 - The 2026-10-11 sweep (imp 91.0 / 93.7 one stream): [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
+### MTP on a default server (`speculative.mtp_concurrent`)
+
+Default `imp-server` (no `--max-batch`, auto batch), fresh server per arm, 3 alternating pairs; 1 stream = 6 real chat prompts x 400 greedy tokens x 2 rounds (`seq_stream_client.py`, thinking on), c4 / c32 = `conc_client.py` 300-token bursts, median of waves 1-3. Harness `tools/analysis/mtp_concurrent_ab.sh`.
+
+[PROV: commit=d1765b68 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_concurrent_ab.sh`
+       n=3 pairs note=main d1765b68 vs this branch, images built from each tree; harness_md5=d264afa75dd4;
+       raw summaries docs/audit/qwen38_mtp_concurrent_2026_11_03/]
+
+| arm | max batch | 1 stream tok/s | c4 tok/s | c32 tok/s | own peak MiB | KV plan blocks |
+|---|---:|---:|---:|---:|---:|---:|
+| main, default (head not loaded) | 32 | 96.87 (96.86-96.90) | 341.3 (340.1-341.8) | 2043.5 (2040.7-2046.5) | 22034 | 15651 |
+| main, `--set speculative.mtp_k=2 --set speculative.ngram=false` (1 trial) | 17 | 130.82 | 334.9 | 1116.7 | 22276 | 16954 |
+| this branch, default (auto takes the head) | 32 | **131.28** (131.10-131.43) | 339.7 (339.1-340.1) | 2042.0 (2039.9-2042.0) | 24807 | 13230 |
+
+- 1 stream +35.5 %, 70.0 % of drafts accepted (2552 / 3644); c4 -0.47 % (all 3 pairs lower, 900-token c4 +0.4 % in one pair), c32 -0.07 % (pairs mixed sign).
+- Forcing the head on main cost c32 45 %: the auto batch charged it at recurrent-state price (32 -> 17 slots). Without that charge the head comes out of the KV pool: 15651 -> 13230 blocks (all 32 slots fit 7825 -> 6615 tokens), own peak +2773 MiB.
+
 ## imp vs vLLM at concurrency
 
 Same 19.6 GiB compressed-tensors NVFP4 checkpoint on both engines (`imp-quantize --format vllm`

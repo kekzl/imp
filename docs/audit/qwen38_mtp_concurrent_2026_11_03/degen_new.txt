@@ -1,0 +1,5 @@
+degen_suite: url=http://127.0.0.1:8212 model=Qwen3.8-27B-NVFP4-vllm categories=repetition,think-leak,special-tokens,adherence,long-context,kv-growth,multi-turn,ple-isolation,stream,constrained,anthropic-thinking quick=True
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (57s)
+MULTITURN: all 24 turns clean, context grew to see table
+wave0: 1097 tok in 3.52s = 312.1 tok/s aggregate (prompt 36 tok avg)
+wave1: 1200 tok in 3.53s = 340.0 tok/s aggregate (prompt 36 tok avg)

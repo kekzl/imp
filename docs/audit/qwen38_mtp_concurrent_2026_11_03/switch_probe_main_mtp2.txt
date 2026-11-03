@@ -1,0 +1,2 @@
+accepted phase1(alone) 73 phase2(batched) 4 phase3(alone again) 0; long words 504 max_word_run 1
+PASS

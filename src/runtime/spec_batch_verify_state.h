@@ -99,6 +99,29 @@ struct MtpBindPool {
     return req_id >= 0 && (active.req == req_id || pool.binds.contains(req_id));
 }
 
+// Would req_id's prompt take a head KV slot (mtp_acquire_slot_): bound already, a free slot, or a
+// parked binding to evict. The ACTIVE binding never yields its slot, so a prompt arriving behind it
+// drafts nothing and may ride the ragged prefill forward instead of the serial one.
+[[nodiscard]] inline bool mtp_slot_available(const MtpBind& active, const MtpBindPool& pool, int n_slots,
+                                             int req_id) {
+    if (mtp_bound(active, pool, req_id))
+        return true;
+    if (!pool.initialized)
+        return active.req < 0 || n_slots > 1;
+    return !pool.free_slots.empty() || !pool.binds.empty();
+}
+
+// A prompt takes the head when it prefills alone (a lone chat) or already holds it; the prompts of
+// a burst ride the ragged forward unbound (binding one would cost it a serial forward of its own).
+[[nodiscard]] constexpr bool mtp_prompt_takes_head(bool bound, bool slot_available, int prompts_this_step) {
+    return bound || (slot_available && prompts_this_step == 1);
+}
+
+// A bound request drafts only while the head cache covers exactly its pre-step context. Tokens
+// decoded without a host feed (batched or pipelined decode, a ragged rider row, a loop burst) leave no
+// hidden rows to catch up from: such a binding is dead and only holds the request on the eager path.
+[[nodiscard]] constexpr bool mtp_cache_behind(int mtp_pos, int cur_pos) { return mtp_pos != cur_pos; }
+
 struct RuntimeConfig;
 class Model;
 // Config + model say yes (no batch-size term): speculative.batch_verify on a

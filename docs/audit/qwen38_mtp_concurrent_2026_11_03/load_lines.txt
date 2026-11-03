@@ -1,0 +1,16 @@
+qwen38mtp_ab/p1_main [14:31:20.460][INFO] safetensors_loader.cpp:1171: MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it only on a single-stream run (max_batch_size=1) with runtime.deterministic off; force it with --set speculative.mtp_k=2 --set speculative.ngram=false: measured +17-21 % plain and +27-30 % thinking single-stream decode on Qwen3.8-27B-NVFP4 (2026-08-27), in exchange for the head's VRAM (0.79 GiB there) and eager-equal greedy trajectories. See docs/LIMITATIONS.md
+qwen38mtp_ab/p1_main [14:31:20.848][INFO] engine_init_resolver.cpp:549: max_batch_size: auto → 32 (approx_weights=18.8 GB, post-load headroom=9.9 GB, tier-floor=4, VRAM-aware)
+qwen38mtp_ab/p1_main   ceiling: recurrent 32 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 32 seqs at <= 7825 tokens
+qwen38mtp_ab/p1_main   WARN: the KV pool serves 1 of the 32 recurrent slots at max_seq_len 131072; all 32 fit only up to 7825 tokens of context (15651 blocks x 16). Set runtime.max_seq_len=7825, or lower runtime.max_batch_size
+qwen38mtp_ab/p1_main [14:31:30.902][INFO] engine_kv_cache_init.cpp:333: KV blocks: plan 15651 (live pass sized 12771)
+qwen38mtp_ab/p1_new [14:33:14.319][INFO] mtp_auto.cpp:74: speculative.mtp_k: auto -> 2 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen3.8-27B-NVFP4). Set speculative.mtp_k=0 to opt out.
+qwen38mtp_ab/p1_new [14:33:14.491][INFO] engine_init_resolver.cpp:551: max_batch_size: auto → 32 (approx_weights=18.8 GB, post-load headroom=9.9 GB, tier-floor=4, VRAM-aware)
+qwen38mtp_ab/p1_new [14:33:19.233][INFO] weight_upload.cpp:2420: MTP head: uploaded to GPU (15 allocations, 832 MiB of device free, 0.79 GiB on disk)
+qwen38mtp_ab/p1_new   ceiling: recurrent 32 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 32 seqs at <= 6615 tokens
+qwen38mtp_ab/p1_new   WARN: the KV pool serves 1 of the 32 recurrent slots at max_seq_len 131072; all 32 fit only up to 6615 tokens of context (13230 blocks x 16). Set runtime.max_seq_len=6615, or lower runtime.max_batch_size
+qwen38mtp_ab/p1_new [14:33:22.911][INFO] engine_kv_cache_init.cpp:333: KV blocks: plan 13230 (live pass sized 9813)
+qwen38mtp_gap/p1_mainmtp2 [13:38:40.313][INFO] engine_init_resolver.cpp:549: max_batch_size: auto → 17 (approx_weights=18.8 GB, post-load headroom=9.0 GB, tier-floor=4, VRAM-aware)
+qwen38mtp_gap/p1_mainmtp2 [13:38:45.200][INFO] weight_upload.cpp:2420: MTP head: uploaded to GPU (15 allocations, 832 MiB of device free, 0.79 GiB on disk)
+qwen38mtp_gap/p1_mainmtp2   ceiling: recurrent 17 seqs, KV 2 seqs at max_seq_len 131072 (8192 blocks/seq), all 17 seqs at <= 15956 tokens
+qwen38mtp_gap/p1_mainmtp2   WARN: the KV pool serves 2 of the 17 recurrent slots at max_seq_len 131072; all 17 fit only up to 15956 tokens of context (16954 blocks x 16). Set runtime.max_seq_len=15956, or lower runtime.max_batch_size
+qwen38mtp_gap/p1_mainmtp2 [13:38:48.369][INFO] engine_kv_cache_init.cpp:333: KV blocks: plan 16954 (live pass sized 14324)
