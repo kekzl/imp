@@ -136,6 +136,7 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
     sk_walk(p, KT, units, b, [&](int t, int kb, int ke, int last) {
         const int m0 = (t / n_tiles) * kBM;
         const int n0 = (t % n_tiles) * C::kBN;
+        sq_prefetch<C>(p, md, m0, n0, kb == 0);  // the finisher (k-step 0) runs the epilogue
 #pragma unroll
         for (int i = 0; i < 4; ++i)
 #pragma unroll
@@ -186,6 +187,7 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
                     }
             }
         }
+        static_assert(!C::kSq || C::kSkStaged, "the SwiGLU-quant epilogue reads the staged tile");
         if constexpr (C::kSkStaged) {  // TMA boxes past the barriers: the producer still fills the ring
             static_assert(1024 + ((C::kBN / 64) * kBM * 128) <= 128 + (kBM * C::kOS * 2), "boxes must fit");
             Ring o = g;

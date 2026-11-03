@@ -136,8 +136,11 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
 // into the shared activation scratch (skipped when ctx says a prior dispatch on the same input
 // already did) and declines on a missing SfAtom (GGUF source, Phase 3 G3), a missing scratch
 // or a nonzero beta (the epilogue bakes beta=0), so the caller falls through to a beta-honouring route.
+// pre_act / pre_sf: activation bytes quantized elsewhere at act_scale (gemm_nvfp4_prequant_), read instead of
+// the scratch; the scratch's tag stays.
 static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
-                                           const GemmContext& ctx, int M, float act_scale = 1.0f) {
+                                           const GemmContext& ctx, int M, float act_scale = 1.0f,
+                                           const void* pre_act = nullptr, const void* pre_sf = nullptr) {
     const auto* qs = ctx.qscratch;
     if (!cw.scale_factors || !qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
         return false;
@@ -146,20 +149,42 @@ static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const T
     args.output = &output;
     args.stream = ctx.stream;
     args.weight_payload = &cw;
-    args.cutlass_act_data = qs->cutlass_act_data;
-    args.cutlass_act_sf = qs->cutlass_act_sf;
+    args.cutlass_act_data = pre_act ? const_cast<void*>(pre_act) : qs->cutlass_act_data;
+    args.cutlass_act_sf = pre_act ? const_cast<void*>(pre_sf) : qs->cutlass_act_sf;
     args.cutlass_workspace = qs->cutlass_workspace;
     args.cutlass_workspace_size = qs->cutlass_workspace_size;
-    args.act_prequantized = (ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
-                             ctx.act_quant_hint_m == M &&
-                             ctx.act_quant_hint_k == static_cast<int>(input.shape[1])) &&
-                            qs->cutlass_act_scale == act_scale;
+    args.act_prequantized = pre_act != nullptr ||
+                            ((ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
+                              ctx.act_quant_hint_m == M &&
+                              ctx.act_quant_hint_k == static_cast<int>(input.shape[1])) &&
+                             qs->cutlass_act_scale == act_scale);
     args.act_scale = act_scale;
     if (!args.act_prequantized)
         qs->cutlass_act_scale = act_scale;  // the kernel quantizes before any refusal
     args.beta = ctx.beta;
     GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, false};
     return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
+}
+
+static CutlassNvFP4Weight cutlass_weight_of(const WeightHandle& h) {
+    CutlassNvFP4Weight cw;
+    cw.data = h.payload.cutlass_nvfp4.weight;
+    cw.scale_factors = h.payload.cutlass_nvfp4.sf;
+    cw.tensor_scale = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
+    cw.N = h.shape[0];
+    cw.K = h.shape[1] * 2;
+    return cw;
+}
+
+void GraphExecutor::gemm_nvfp4_prequant_(TensorID id, const Tensor& input, const void* act,
+                                         const void* act_sf, Tensor& output, const GemmContext& ctx) {
+    const auto& h = registry_.handle(id);
+    const int M = static_cast<int>(input.shape[0]);
+    const bool ok = h.primary_tier == StorageTier::CUTLASS_NVFP4 && ctx.beta == 0.0f &&
+                    dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale,
+                                                   act, act_sf);
+    IMP_CHECK(ok, "gemm_nvfp4_prequant_: %s M=%d refused, no FP16 input to fall back on",
+              tensor_kind_name(h.kind), M);
 }
 
 // gemm.nvfp4_gdn_proj_prefill: an FP16-primary handle with an NVFP4 prefill copy (phase 3d,
@@ -732,20 +757,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 
     // ---- CUTLASS_NVFP4 tier prefill via GemmKernelRegistry (own tile GEMM, qscratch buffers) ----
     if (M > 1 && h.primary_tier == StorageTier::CUTLASS_NVFP4) {
-        {
-            CutlassNvFP4Weight cw;
-            cw.data = h.payload.cutlass_nvfp4.weight;
-            cw.scale_factors = h.payload.cutlass_nvfp4.sf;
-            cw.tensor_scale = h.payload.cutlass_nvfp4.global_scale
-                                  ? *h.payload.cutlass_nvfp4.global_scale
-                                  : 1.0f;
-            cw.N = h.shape[0];
-            cw.K = h.shape[1] * 2;
-            // Act-quant dedupe (QKV / gate-up share one normed input, see the
-            // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
-            if (dispatch_cutlass_nvfp4_prefill(cw, input, output, ctx, M, h.act_scale))
-                return;
-        }
+        // Act-quant dedupe (QKV / gate-up share one normed input, see the
+        // with_act_quant_hint call sites) and the beta=1 decline live in the helper.
+        if (dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale))
+            return;
         // FP8 fallback for CUTLASS_NVFP4 (legacy path)
         auto fp8_it = wcache_.fp8.find(h.source_data);
         if (fp8_it != wcache_.fp8.end()) {

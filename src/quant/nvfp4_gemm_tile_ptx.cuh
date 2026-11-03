@@ -127,6 +127,18 @@ __device__ __forceinline__ void tma_store_2d(const CUtensorMap* map, uint32_t sr
                  "r"(x), "r"(y), "r"(src)
                  : "memory");
 }
+__device__ __forceinline__ uint4 lds128(uint32_t addr) {
+    uint4 v;
+    asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                 : "r"(addr)
+                 : "memory");
+    return v;
+}
+// L2 prefetch of `bytes` (multiple of 16) at a 16 B-aligned global address.
+__device__ __forceinline__ void prefetch_l2(const void* p, uint32_t bytes) {
+    asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(p), "r"(bytes) : "memory");
+}
 __device__ __forceinline__ void fence_async_smem() {
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }

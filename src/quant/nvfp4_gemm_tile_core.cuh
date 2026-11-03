@@ -21,7 +21,8 @@ constexpr uint32_t kUe8m0One = 0x7F7F7F7Fu;
 // SF).
 enum class Fmt { kNv4, kMx4, kMx8, kF8 };
 
-template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4>
+template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4,
+          bool SQ = false>
 struct Cfg {
     static constexpr int kBN = BN;
     static constexpr int kBK = BK;
@@ -40,6 +41,9 @@ struct Cfg {
     // ptxas at 168 registers (128x256 spilled 140 B); without it thread 0 refills each slot.
     static constexpr bool kPw = TMA && PW;
     static constexpr bool kSk = SK;  // stream-K: grid = SMs over (tile, k-step) units, direct epilogue
+    // SQ: SwiGLU + NVFP4 quantize epilogue (gemm_nvfp4_tile_swiglu_quant), TMA configs of NVFP4 only.
+    static constexpr bool kSq = SQ;
+    static_assert(!SQ || (TMA && F == Fmt::kNv4), "SwiGLU-quant epilogue: NVFP4 TMA configs");
     static_assert(!SK || (TMA && PW), "stream-K runs on the producer-warp mainloop");
     // NVFP4 TMA: K % BK = r * 64 runs a partial last stage (r SfAtoms per slab).
     static constexpr bool kPartK = TMA && F == Fmt::kNv4;

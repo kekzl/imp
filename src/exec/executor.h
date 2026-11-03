@@ -448,6 +448,21 @@ public:
     // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
                                           TensorID consumer_id, int n, cudaStream_t stream);
+    // Gate + up GEMMs (NVFP4 act-quant dedupe). gemm.swiglu_quant_epilogue: the up epilogue writes the down
+    // input (packed + SfAtom in uo's buffer) into swiglu_epi_, uo / so stay unwritten; reset per run_ffn.
+    void gate_up_prefill_(const TransformerLayer& ly, const Tensor& no, Tensor& go, Tensor& uo, int n,
+                          const GemmContext& ctx);
+    [[nodiscard]] bool swiglu_epi_eligible_(const TransformerLayer& ly, const Tensor& no, const Tensor& go,
+                                            const Tensor& uo, int n) const;
+    struct SwigluEpi {
+        const void* act = nullptr;
+        const void* sf = nullptr;
+    } swiglu_epi_;
+    // FFN down GEMM: on swiglu_epi_ when set (gemm_nvfp4_prequant_), else gemm_via_handle_.
+    void ffn_down_gemm_(TensorID id, const Tensor& so, Tensor& fo, const GemmContext& ctx);
+    // NVFP4 tile GEMM on activation bytes quantized elsewhere (`input`: shape only); a refusal fails loud.
+    void gemm_nvfp4_prequant_(TensorID id, const Tensor& input, const void* act, const void* act_sf,
+                              Tensor& output, const GemmContext& ctx);
     // NVFP4 view of the LM head for the MTP draft chain's M=1 logits GEMV:
     // fills `out` from the secondary decode cache or the native-NVFP4 registry
     // tier (same sources the decode-path LM head uses). False when the LM head

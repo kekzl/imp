@@ -23,6 +23,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <cstring>
 
 namespace imp {
 namespace {
@@ -192,6 +193,7 @@ __global__ void __launch_bounds__(C::kThreads, 1) gemm_nvfp4_tile_kernel(
                 for (int r = 0; r < 4; ++r)
                     acc[i][j][r] = 0.0f;
 
+        sq_prefetch<C>(p, &map_d, g.m0, g.n0, true);
         if constexpr (C::kTma) {
             if (!tma_mainloop<C>(acc, g, p, &map_a, &map_w))
                 return;
@@ -255,7 +257,7 @@ bool encode_out(CUtensorMap* map, void* base, int M, int N, int ldd) {
 }
 
 template <class C>
-bool launch_tile(const TileArgs& p, cudaStream_t stream) {
+bool launch_tile(const TileArgs& p, cudaStream_t stream, const SqArgs* sq = nullptr) {
     if (p.K % C::kBK != 0 && !(C::kPartK && p.K % 64 == 0))
         return false;
     CUtensorMap map_a{};
@@ -266,11 +268,13 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
             !encode_operand(&map_a, p.a, p.M, static_cast<int>(C::row_bytes(p.K)), C::kRB, kBM) ||
             !encode_operand(&map_w, p.w, p.N, static_cast<int>(C::row_bytes(p.K)), C::kRB, C::kBN))
             return false;
-        if constexpr (!C::kSk || C::kSkStaged)
+        if constexpr (!C::kSq && (!C::kSk || C::kSkStaged))
             if (p.d32 == nullptr &&
                 (reinterpret_cast<uintptr_t>(p.d) % 16 != 0 || !encode_out(&map_d, p.d, p.M, p.N, p.ldd)))
                 return false;
     }
+    if constexpr (C::kSq)
+        std::memcpy(&map_d, sq, sizeof(SqArgs));  // the epilogue's operands in the unused store-map slot
     static const bool smem_ok = cudaFuncSetAttribute(gemm_nvfp4_tile_kernel<C>,
                                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                      C::kSmemBytes) == cudaSuccess;
@@ -309,9 +313,9 @@ int sm_count() {
 }
 
 // Shape and operands every config needs: SF slabs for the block-scaled formats, scale scalars for FP8.
-template <Fmt F>
+template <Fmt F, bool SQ = false>
 bool args_ok(const TileArgs& p) {
-    if (p.M <= 0 || p.N <= 0 || p.K <= 0 || p.N % 8 != 0 || !p.a || !p.w || (!p.d && !p.d32))
+    if (p.M <= 0 || p.N <= 0 || p.K <= 0 || p.N % 8 != 0 || !p.a || !p.w || (!SQ && !p.d && !p.d32))
         return false;
     if constexpr (F == Fmt::kF8)
         return p.a_scale != nullptr && p.w_scale != nullptr;
@@ -319,41 +323,45 @@ bool args_ok(const TileArgs& p) {
 }
 
 // One variant (see the header), falling through to the next simpler plan; false = every TMA config refused.
-template <Fmt F>
-bool launch_variant(const TileArgs& p, int variant, bool sk_fits, int sms, cudaStream_t stream) {
+template <Fmt F, bool SQ = false>
+bool launch_variant(const TileArgs& p, int variant, bool sk_fits, int sms, cudaStream_t stream,
+                    const SqArgs* sq = nullptr) {
     constexpr int kB1 = F == Fmt::kMx8 || F == Fmt::kF8 ? 64 : 128;
-    using Sk = Cfg<128, kB1, 3, true, true, true, F>;
+    using Sk = Cfg<128, kB1, 3, true, true, true, F, SQ>;
     const int kt = (p.K + Sk::kBK - 1) / Sk::kBK;
     switch (variant) {
         case 1:
-            if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))
+            if (launch_tile<Cfg<256, kB1, 3, true, false, false, F, SQ>>(p, stream, sq))
                 return true;
             break;
         case 2:
-            return launch_tile<Cfg<128, 2 * kB1, 2, false, false, false, F>>(p, stream);
+            if constexpr (SQ)
+                return false;  // sync mainloop: no SwiGLU-quant epilogue
+            else
+                return launch_tile<Cfg<128, 2 * kB1, 2, false, false, false, F>>(p, stream);
         case 6: {  // 128x64, every tile split in 2 k-pieces
             TileArgs h = p;
             if (sk_fits && hybrid_plan(h, sms, kt, 64) &&
-                launch_tile<Cfg<64, kB1, 4, true, true, true, F>>(h, stream))
+                launch_tile<Cfg<64, kB1, 4, true, true, true, F, SQ>>(h, stream, sq))
                 return true;
             [[fallthrough]];
         }
         case 5:
-            if (launch_tile<Cfg<64, kB1, 4, true, true, false, F>>(p, stream))
+            if (launch_tile<Cfg<64, kB1, 4, true, true, false, F, SQ>>(p, stream, sq))
                 return true;
             break;
         case 4: {
             TileArgs h = p;
-            if (sk_fits && hybrid_plan(h, sms, kt) && launch_tile<Sk>(h, stream))
+            if (sk_fits && hybrid_plan(h, sms, kt) && launch_tile<Sk>(h, stream, sq))
                 return true;
             [[fallthrough]];
         }
         case 3:
-            if (sk_fits && launch_tile<Sk>(p, stream))
+            if (sk_fits && launch_tile<Sk>(p, stream, sq))
                 return true;
             [[fallthrough]];
         default:
-            if (launch_tile<Cfg<128, kB1, 4, true, true, false, F>>(p, stream))
+            if (launch_tile<Cfg<128, kB1, 4, true, true, false, F, SQ>>(p, stream, sq))
                 return true;
             break;
     }
@@ -362,15 +370,16 @@ bool launch_variant(const TileArgs& p, int variant, bool sk_fits, int sms, cudaS
 
 // All formats run the same byte geometry: an MXFP8 stage of BK elements moves what an NVFP4 / MXFP4 stage
 // of 2 x BK does, so the NVFP4 tile choices carry over with BK halved.
-template <Fmt F>
-bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, size_t workspace_bytes) {
+template <Fmt F, bool SQ = false>
+bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, size_t workspace_bytes,
+              const SqArgs* sq = nullptr) {
     constexpr int kB1 = F == Fmt::kMx8 || F == Fmt::kF8 ? 64 : 128;
     constexpr int kB2 = 2 * kB1;
-    using Sk = Cfg<128, kB1, 3, true, true, true, F>;
+    using Sk = Cfg<128, kB1, 3, true, true, true, F, SQ>;
     const int M = p.M;
     const int N = p.N;
     const int K = p.K;
-    if (!args_ok<F>(p))
+    if (!args_ok<F, SQ>(p))
         return false;
     if (p.ldd == 0)
         p.ldd = N;
@@ -382,10 +391,13 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
     p.sk_per = (units + sms - 1) / sms;
     if (variant < 0)
         variant = pick_variant(M, N, (K + Sk::kBK - 1) / Sk::kBK, sms, sk_fits);
-    if (launch_variant<F>(p, variant, sk_fits, sms, stream))
+    if (launch_variant<F, SQ>(p, variant, sk_fits, sms, stream, sq))
         return true;
     // no TMA map (alignment): sync mainloop
-    return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
+    if constexpr (SQ)
+        return false;
+    else
+        return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
 }
 
 }  // namespace
@@ -409,6 +421,32 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      nullptr,
                      0.0f};
     return run_tile<Fmt::kNv4>(p, stream, variant, workspace, workspace_bytes);
+}
+
+bool gemm_nvfp4_tile_swiglu_quant(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
+                                  float alpha, const void* gate_fp16, void* q_packed, void* q_sf,
+                                  float q_act_scale, int M, int N, int K, cudaStream_t stream,
+                                  void* workspace, size_t workspace_bytes) {
+    if (N % 16 != 0 || gate_fp16 == nullptr || q_packed == nullptr || q_sf == nullptr ||
+        reinterpret_cast<uintptr_t>(gate_fp16) % 16 != 0 || reinterpret_cast<uintptr_t>(q_packed) % 8 != 0)
+        return false;
+    const TileArgs p{static_cast<const uint8_t*>(a_data),
+                     static_cast<const uint8_t*>(a_sf),
+                     static_cast<const uint8_t*>(w_data),
+                     static_cast<const uint8_t*>(w_sf),
+                     nullptr,
+                     alpha,
+                     M,
+                     N,
+                     K};
+    const SqArgs sq{static_cast<const half*>(gate_fp16), static_cast<uint8_t*>(q_packed),
+                    static_cast<uint8_t*>(q_sf), q_act_scale};
+    return run_tile<Fmt::kNv4, true>(p, stream, -1, workspace, workspace_bytes, &sq);
+}
+
+bool gemm_nvfp4_tile_scale_clipped() {
+    unsigned int v = 0;
+    return cudaMemcpyFromSymbol(&v, g_sq_clipped, sizeof(v)) == cudaSuccess && v != 0;
 }
 
 bool gemm_nvfp4_tile_f32(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
