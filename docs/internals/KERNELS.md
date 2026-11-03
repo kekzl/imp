@@ -19,7 +19,7 @@ Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB20
 |---|---|---|---|
 | `fmha_sm120_fa2_kernel` | `src/compute/attention_fmha_sm120.cu` | primary register-resident FA2 attention prefill, dispatched by `fmha_sm120_fa2_prefill` | shipped, optimization target |
 | `fmha_sm120_kernel` | `src/compute/attention_fmha_sm120.cu` | tiled-FMHA fallback | shipped, not an optimization target |
-| own dense NVFP4 / MXFP4 / MXFP8 / FP8 tile GEMM (TMA, `mma.sync` block-scaled) | `src/quant/nvfp4_gemm_tile.cu` | production dense GEMM (projections, FFN, LM head); replaced the CUTLASS GEMM, removed 2026-10-31 | shipped |
+| own dense NVFP4 / MXFP4 / MXFP8 / FP8 tile GEMM (TMA, `mma.sync` block-scaled) | `src/quant/nvfp4_gemm_tile.cu` | production dense GEMM (projections, FFN, LM head); replaced the CUTLASS GEMM, removed 2026-10-31; the prompt up GEMM applies SwiGLU and writes the down input in NVFP4 (`gemm.swiglu_quant_epilogue`) | shipped |
 | own grouped NVFP4 tile GEMM (TMA, producer warp, persistent CTAs) | `src/compute/gemm_grouped_nvfp4_tile.cu` | MoE prefill grouped GEMM; replaced the CUTLASS 3.x grouped GEMM (#2929) | shipped |
 | own grouped NVFP4 decode GEMM (16-row M tiles, 7-stage TMA ring) | `src/compute/gemm_grouped_nvfp4_decode.cu` | device-args MoE up to `moe.nvfp4_decode_rows` tokens: gate + up + GeGLU/SwiGLU/ReLU^2 + NVFP4 quantize in one launch, down in a second; per-row bits equal the tile path | shipped |
 | `gemm_grouped_nvfp4_smallM` | `src/compute/gemm_grouped_nvfp4_smallM.cu` | small-M / split-K grouped NVFP4 GEMM (MoE prefill) | shipped |
