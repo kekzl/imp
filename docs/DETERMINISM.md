@@ -78,7 +78,7 @@ Measured 2026-11-02 on `fix/moe-router-exact-sum`: `degen_suite.py` resend shape
 | Nemotron-3-Nano-30B-A3B, main and fix | 0 | none (hybrid snapshot split: both sends prefill 33 rows) |
 
 - Router: `moe_router_fused` summed fp16 k-tile partials in fp32 with a split-K count picked by M (225 rows split 8, 33 rows split 16). It now sums them exactly in int64 units of 2^-24 (`src/compute/moe_router_fused.cu`), `MoeRouterFusedTest.RowsIndependentOfMAndSplit`.
-- NVFP4 tile: 42 rows of Gemma-4's global q_proj (N 8192) ran split-2 stream-K, 218 rows data-parallel. `gemm.nvfp4_prompt_streamk=auto` keeps prompt rows (M >= 33) data-parallel on MoE, `Nvfp4PromptStreamK.PromptRowsInvariantToM`. Real activations often sum exactly in fp32, so the class shows on some prompts only (`MoePrefixHitE2ETest` text: router only).
+- NVFP4 tile: 42 rows of Gemma-4's global q_proj (N 8192) ran split-2 stream-K, 218 rows data-parallel. `gemm.nvfp4_prompt_streamk=auto` keeps prompt rows (M >= 33) data-parallel on MoE, `Nvfp4PromptStreamK.PromptRowsInvariantToM`. Up to 0.4 wave of 128x128 tiles that plan runs 128x64 tiles, the same k order per row (Qwen3-30B-A3B o_proj at M 512: 64 -> 128 CTAs), `Nvfp4PromptStreamK.NarrowTileRowsMatchWideTile`. Real activations often sum exactly in fp32, so the class shows on some prompts only (`MoePrefixHitE2ETest` text: router only).
 - Open: the cuBLAS router from 1024 rows under `gemm.cublas_fp16_acc` (Nemotron-H) and dense NVFP4 prompt stream-K.
 - Open, MLA (DeepSeek-V2-Lite `imp-quantize` export, 2026-11-03, hits 64 then 240, 32-token greedy text equal, logprobs not; `runtime.deterministic` and graphs off: still red): per-stage dumps put the first divergence at layer 0's FP16 `kv_a_proj_with_mqa` (N 576, uncached tier, cuBLASLt split-K 16/9/8/4 by M bucket); hd=192 prefill attention runs materialized cuBLAS, FA2 and FMHA decline hd=192. `MoePrefixHitE2ETest` skips MLA with this reason.
 
@@ -91,6 +91,7 @@ Cost, `imp-cli --bench` (pp512 + tg128, pp4096, `--prefill-chunk-size 0`) and `t
 | Qwen3-8B-NVFP4, prompt stream-K off | 48615 -> 47605 (-2.08 %) | 47293 -> 46980 (-0.66 %) | 283.11 -> 282.91 (-0.07 %) | - |
 
 - Dense keeps prompt stream-K (`auto` = on): every Qwen3-8B pp512 run off sat below every run on.
+- 2026-11-03, 128x64 tiles up to 0.4 wave without the workspace (Qwen3-Coder-30B-A3B NVFP4, FP8 KV, 5 rotations old / new / fix, medians): pp512 v0.61.0 33373.44, v0.62.0 32518.85, fix 33001.79 tok/s; `--bench-prompt-file ppl_4k.txt`, 4 rotations: 33274.94 / 32785.19 / 33147.62 [PROV: commit=1cc8e453+narrow-tile date=2026-11-03 hw=RTX5090 model=Qwen3-Coder-30B-A3B-Instruct-FP4 quant=NVFP4 cuda=13.4.3 path=own-tile cmd=imp-cli-bench n=5]. The rest is routing and FP8 KV rounding, [`audit/PERF_LOG.md`](audit/PERF_LOG.md).
 - Router kernel alone, K 2048, us main -> fix: M 2 8.59 -> 7.75, M 16 8.50 -> 7.76, M 512 10.29 -> 10.67, M 2048 19.86 -> 20.66, M 4096 26.20 -> 29.92 (`MoeRouterFusedBench`).
 
 ## FP8 KV PPL below FP16 KV
