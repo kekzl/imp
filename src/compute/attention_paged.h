@@ -4,6 +4,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <algorithm>
+
 namespace imp {
 
 // Paged attention decode (single query/sequence). Q:[batch,1,n_heads,hd]. block_tables:
@@ -132,6 +134,25 @@ int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
 
 // Resident CTAs per SM of the F16 split-K multitok instance for (head_dim, hpc); 0 = not served.
 int paged_attention_f16_multitok_splitk_ctas_per_sm(int head_dim, int hpc);
+
+// Split count of the F16 multitok decode, one wave (n_ctas * s <= ctas_per_sm * num_sms). A budget
+// <= 2 runs unsplit (Qwen3-8B 16 x 1131: unsplit 48.7 us, 2 splits 49.4, 3 = 1.13 waves 58.2).
+// Else the fewest s in [3, budget], >= 4 KV blocks per split, with the fewest per-warp block rounds.
+inline int paged_attention_f16_multitok_split_count(int n_ctas, int ctas_per_sm, int num_sms,
+                                                    int num_ctx_blocks, int warps_per_cta = 8) {
+    if (n_ctas <= 0 || ctas_per_sm <= 0 || num_sms <= 0 || num_ctx_blocks <= 0)
+        return 1;
+    const int budget = std::min((ctas_per_sm * num_sms) / n_ctas, 64);
+    if (budget <= 2)
+        return 1;
+    const int s_max = std::min(budget, std::max(num_ctx_blocks / 4, 1));
+    auto rounds = [&](int s) { return (((num_ctx_blocks + s - 1) / s) + warps_per_cta - 1) / warps_per_cta; };
+    int best_s = s_max;
+    for (int s = s_max - 1; s >= std::min(3, s_max); s--)
+        if (rounds(s) <= rounds(best_s))
+            best_s = s;
+    return best_s;
+}
 
 // F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
 // GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta

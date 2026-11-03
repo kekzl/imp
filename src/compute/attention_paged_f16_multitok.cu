@@ -97,94 +97,167 @@ struct HeadState {
     }
 };
 
-// One KV block for one warp: rows [first_tok, n_tok) in groups of TOK, each K
-// row loaded as one lane vector, converted once and dotted against HPC heads.
+// One TOK-token group already in registers: valid rows [0, n_valid), the rest are clamped
+// duplicates masked to p = 0. Arithmetic and order are those of the former per-block loop.
 template <int HEAD_DIM, int TOK, int HPC>
-__device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_block,
-                                                   const half* __restrict__ V_block, int first_tok, int n_tok,
-                                                   int kv_slot_stride,
-                                                   const float (&q_reg)[HPC][HEAD_DIM / WARP_SIZE],
-                                                   float scale, float softcap, HeadState<HEAD_DIM, HPC>& st) {
+__device__ __forceinline__ void f16_group_multitok(
+    const typename LaneVec<HEAD_DIM / WARP_SIZE>::type (&kp)[TOK],
+    const typename LaneVec<HEAD_DIM / WARP_SIZE>::type (&vp)[TOK], int n_valid,
+    const float (&q_reg)[HPC][HEAD_DIM / WARP_SIZE], float scale, float softcap,
+    HeadState<HEAD_DIM, HPC>& st) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    using Vec = typename LaneVec<ELEMS>::type;
-    for (int t = first_tok; t < n_tok; t += TOK) {
-        // K rows of TOK tokens in flight before any reduction; a partial
-        // group clamps to a valid row and is masked to p = 0 below.
-        Vec kp[TOK];
+    float dot[HPC][TOK];
 #pragma unroll
-        for (int i = 0; i < TOK; i++) {
-            const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            kp[i] = ldcs_lane(
-                reinterpret_cast<const Vec*>(K_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
-        }
-        float dot[HPC][TOK];
-#pragma unroll
-        for (int i = 0; i < TOK; i++) {
-            float kf[ELEMS];
-            lane_vec_to_float<ELEMS>(kp[i], kf);
-#pragma unroll
-            for (int h = 0; h < HPC; h++) {
-                float d = 0.0f;
-#pragma unroll
-                for (int e = 0; e < ELEMS; e++)
-                    d = fmaf(q_reg[h][e], kf[e], d);
-                dot[h][i] = d;
-            }
-        }
-        // HPC x TOK independent warp reductions; the shuffle chains interleave.
-#pragma unroll
-        for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
-#pragma unroll
-            for (int h = 0; h < HPC; h++)
-#pragma unroll
-                for (int i = 0; i < TOK; i++)
-                    dot[h][i] += __shfl_xor_sync(0xffffffffu, dot[h][i], off);
-        }
-        float p[HPC][TOK];
-        float alpha[HPC];
+    for (int i = 0; i < TOK; i++) {
+        float kf[ELEMS];
+        lane_vec_to_float<ELEMS>(kp[i], kf);
 #pragma unroll
         for (int h = 0; h < HPC; h++) {
-            float m_new = st.m[h];
+            float d = 0.0f;
 #pragma unroll
-            for (int i = 0; i < TOK; i++) {
-                dot[h][i] = apply_softcap(dot[h][i] * scale, softcap);
-                if (t + i >= n_tok)
-                    dot[h][i] = -FLT_MAX;
-                m_new = fmaxf(m_new, dot[h][i]);
-            }
-            alpha[h] = expf(st.m[h] - m_new);
-            float p_sum = 0.0f;
-#pragma unroll
-            for (int i = 0; i < TOK; i++) {
-                p[h][i] = (t + i < n_tok) ? expf(dot[h][i] - m_new) : 0.0f;
-                p_sum += p[h][i];
-            }
-            st.l[h] = alpha[h] * st.l[h] + p_sum;
-            st.m[h] = m_new;
+            for (int e = 0; e < ELEMS; e++)
+                d = fmaf(q_reg[h][e], kf[e], d);
+            dot[h][i] = d;
         }
-        // V rows of the group in flight together; masked tokens carry p = 0.
-        Vec vp[TOK];
+    }
+    // HPC x TOK independent warp reductions; the shuffle chains interleave.
+#pragma unroll
+    for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+#pragma unroll
+        for (int h = 0; h < HPC; h++)
+#pragma unroll
+            for (int i = 0; i < TOK; i++)
+                dot[h][i] += __shfl_xor_sync(0xffffffffu, dot[h][i], off);
+    }
+    float p[HPC][TOK];
+    float alpha[HPC];
+#pragma unroll
+    for (int h = 0; h < HPC; h++) {
+        float m_new = st.m[h];
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
-            const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vp[i] = ldcs_lane(
-                reinterpret_cast<const Vec*>(V_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
+            dot[h][i] = apply_softcap(dot[h][i] * scale, softcap);
+            if (i >= n_valid)
+                dot[h][i] = -FLT_MAX;
+            m_new = fmaxf(m_new, dot[h][i]);
         }
+        alpha[h] = expf(st.m[h] - m_new);
+        float p_sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < TOK; i++) {
+            p[h][i] = (i < n_valid) ? expf(dot[h][i] - m_new) : 0.0f;
+            p_sum += p[h][i];
+        }
+        st.l[h] = alpha[h] * st.l[h] + p_sum;
+        st.m[h] = m_new;
+    }
+#pragma unroll
+    for (int h = 0; h < HPC; h++)
+#pragma unroll
+        for (int e = 0; e < ELEMS; e++)
+            st.o[h][e] *= alpha[h];
+#pragma unroll
+    for (int i = 0; i < TOK; i++) {
+        float vf[ELEMS];
+        lane_vec_to_float<ELEMS>(vp[i], vf);
 #pragma unroll
         for (int h = 0; h < HPC; h++)
 #pragma unroll
             for (int e = 0; e < ELEMS; e++)
-                st.o[h][e] *= alpha[h];
+                st.o[h][e] = fmaf(p[h][i], vf[e], st.o[h][e]);
+    }
+}
+
+// A warp's position in its block walk: blocks blk_begin + warp_id + k * NUM_WARPS, rows
+// [t, n_tok) of the current one. bt_chunk holds 32 of the warp's physical ids, one per lane.
+struct WalkPos {
+    int k;         // warp-local block ordinal
+    int t;         // first row of the current group
+    int n_tok;     // rows in the current block
+    int64_t base;  // element offset of the current physical block
+};
+
+// Advances to the first block at ordinal >= pos.k with a row left; false = walk done.
+// tok_end: one past the last row the walk reads (ctx_len); tok_begin: sliding-window start.
+__device__ __forceinline__ bool walk_seek(WalkPos& pos, int& bt_chunk, int& chunk_k0,
+                                          const int* __restrict__ bt, int blk0, int n_blk, int block_size,
+                                          int tok_begin, int tok_end, int64_t kv_block_stride, int lane_id) {
+    for (; pos.k < n_blk; pos.k++) {
+        if (pos.k >= chunk_k0 + WARP_SIZE) {
+            chunk_k0 = pos.k;
+            const int kk = chunk_k0 + lane_id;
+            bt_chunk = (kk < n_blk) ? bt[blk0 + (kk * NUM_WARPS)] : -1;
+        }
+        const int phys = __shfl_sync(0xffffffffu, bt_chunk, pos.k - chunk_k0);
+        if (phys < 0)
+            continue;  // StreamingLLM sentinel, same guard as the plain kernels
+        const int tok_start = (blk0 + (pos.k * NUM_WARPS)) * block_size;
+        pos.n_tok = min(block_size, tok_end - tok_start);
+        pos.t = (tok_start < tok_begin) ? (tok_begin - tok_start) : 0;
+        pos.base = static_cast<int64_t>(phys) * kv_block_stride;
+        if (pos.t < pos.n_tok)
+            return true;
+    }
+    return false;
+}
+
+template <int TOK, typename Vec>
+__device__ __forceinline__ void walk_load(Vec (&kp)[TOK], Vec (&vp)[TOK], const half* __restrict__ K,
+                                          const half* __restrict__ V, const WalkPos& pos,
+                                          int kv_slot_stride) {
+#pragma unroll
+    for (int i = 0; i < TOK; i++) {
+        const int ti = (pos.t + i < pos.n_tok) ? (pos.t + i) : (pos.n_tok - 1);
+        const int64_t off = pos.base + (static_cast<int64_t>(ti) * kv_slot_stride);
+        kp[i] = ldcs_lane(reinterpret_cast<const Vec*>(K + off));
+        vp[i] = ldcs_lane(reinterpret_cast<const Vec*>(V + off));
+    }
+}
+
+// One warp's KV walk over blocks [blk_begin + warp_id, blk_end) step NUM_WARPS, rows
+// [tok_begin, tok_end). K and V of the next TOK-row group load while the current one
+// computes; group order per warp is unchanged, so the result is bit-identical.
+// K, V: cache base + kv_head * HEAD_DIM + lane offset.
+template <int HEAD_DIM, int TOK, int HPC>
+__device__ __forceinline__ void f16_walk_multitok(const half* __restrict__ K, const half* __restrict__ V,
+                                                  const int* __restrict__ bt, int blk_begin, int blk_end,
+                                                  int block_size, int tok_begin, int tok_end,
+                                                  int64_t kv_block_stride, int kv_slot_stride, int warp_id,
+                                                  int lane_id,
+                                                  const float (&q_reg)[HPC][HEAD_DIM / WARP_SIZE],
+                                                  float scale, float softcap, HeadState<HEAD_DIM, HPC>& st) {
+    using Vec = typename LaneVec<HEAD_DIM / WARP_SIZE>::type;
+    const int blk0 = blk_begin + warp_id;
+    const int n_blk = (blk0 < blk_end) ? ((blk_end - blk0 + NUM_WARPS - 1) / NUM_WARPS) : 0;
+    int bt_chunk = -1;
+    int chunk_k0 = -WARP_SIZE;
+    WalkPos cur{0, 0, 0, 0};
+    if (!walk_seek(cur, bt_chunk, chunk_k0, bt, blk0, n_blk, block_size, tok_begin, tok_end, kv_block_stride,
+                   lane_id))
+        return;
+    Vec kc[TOK], vc[TOK];
+    walk_load<TOK>(kc, vc, K, V, cur, kv_slot_stride);
+    while (true) {
+        WalkPos nxt = cur;
+        nxt.t += TOK;
+        bool more = nxt.t < nxt.n_tok;
+        if (!more) {
+            nxt.k++;
+            more = walk_seek(nxt, bt_chunk, chunk_k0, bt, blk0, n_blk, block_size, tok_begin, tok_end,
+                             kv_block_stride, lane_id);
+        }
+        Vec kn[TOK], vn[TOK];
+        if (more)
+            walk_load<TOK>(kn, vn, K, V, nxt, kv_slot_stride);
+        f16_group_multitok<HEAD_DIM, TOK, HPC>(kc, vc, cur.n_tok - cur.t, q_reg, scale, softcap, st);
+        if (!more)
+            break;
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
-            float vf[ELEMS];
-            lane_vec_to_float<ELEMS>(vp[i], vf);
-#pragma unroll
-            for (int h = 0; h < HPC; h++)
-#pragma unroll
-                for (int e = 0; e < ELEMS; e++)
-                    st.o[h][e] = fmaf(p[h][i], vf[e], st.o[h][e]);
+            kc[i] = kn[i];
+            vc[i] = vn[i];
         }
+        cur = nxt;
     }
 }
 
@@ -240,22 +313,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
     const int first_block = effective_start / block_size;
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
 
-    for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
-        const int phys_block = bt[blk];
-        if (phys_block < 0)
-            continue;  // StreamingLLM sentinel, same guard as the plain kernels
-        const int tok_start = blk * block_size;
-        int n_tok = block_size;
-        if (tok_start + n_tok > ctx_len)
-            n_tok = ctx_len - tok_start;
-        const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:209) = 2^21 (model_limits.h:24)
-        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + ((int64_t)phys_block * kv_block_stride) +
-                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               V_cache + ((int64_t)phys_block * kv_block_stride) +
-                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
-    }
+    // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert above) = 2^21 (model_limits.h:24)
+    const ptrdiff_t head_off = static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
+    f16_walk_multitok<HEAD_DIM, TOK, HPC>(K_cache + head_off, V_cache + head_off, bt, first_block,
+                                          num_ctx_blocks, block_size, effective_start, ctx_len,
+                                          kv_block_stride, kv_slot_stride, warp_id, lane_id, q_reg, scale,
+                                          softcap, st);
 
     pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     st.normalise();
@@ -323,22 +386,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     HeadState<HEAD_DIM, HPC> st;
     st.init();
 
-    for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
-        const int phys_block = bt[blk];
-        if (phys_block < 0)
-            continue;
-        const int tok_start = blk * block_size;
-        int n_tok = block_size;
-        if (tok_start + n_tok > ctx_len)
-            n_tok = ctx_len - tok_start;
-        const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:279) = 2^21 (model_limits.h:24)
-        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + ((int64_t)phys_block * kv_block_stride) +
-                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               V_cache + ((int64_t)phys_block * kv_block_stride) +
-                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
-    }
+    // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert above) = 2^21 (model_limits.h:24)
+    const ptrdiff_t head_off = static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
+    f16_walk_multitok<HEAD_DIM, TOK, HPC>(K_cache + head_off, V_cache + head_off, bt, split_start, split_end,
+                                          block_size, effective_start, ctx_len, kv_block_stride,
+                                          kv_slot_stride, warp_id, lane_id, q_reg, scale, softcap, st);
 
     pdl_trigger();  // KV walk done; the dependent may be scheduled during the reduce + partial store
     st.normalise();
