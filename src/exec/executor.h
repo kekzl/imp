@@ -967,6 +967,10 @@ private:
         CudaStream stream;
         CudaEvent resolved;
         CudaEvent gathered;
+        // moe.expert_prefetch: predict + prefetch resolve on pf_stream, the prefetch gather on `stream`.
+        CudaStream pf_stream;
+        CudaEvent pf_fork, pf_read, pf_ready, pf_gathered;
+        int pf_layer = -1;  // layer whose prefetch is in flight
     } gather_overlap_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
@@ -1333,7 +1337,10 @@ private:
     // on shexp_overlap_.stream; join waits for it and does the add. False = not forked.
     void init_shexp_overlap_();
     void free_shexp_overlap_();
-    void init_gather_overlap_();  // moe.expert_gather_overlap
+    void init_gather_overlap_();  // moe.expert_gather_overlap, moe.expert_prefetch
+    // Layer + 1's routing from layer's MoE input x; true = its prefetch resolve runs on pf_stream.
+    [[nodiscard]] bool predict_next_experts_(int layer, const void* x, cudaStream_t stream);
+    void join_expert_prefetch_(cudaStream_t stream);  // waits for an unconsumed prefetch
     [[nodiscard]] bool fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no);
     [[nodiscard]] bool join_shared_expert_(cudaStream_t stream, int n, int d, Tensor& h);
     // MoE decode fast-path (n=1, device-resident packed experts): dispatches
@@ -1348,7 +1355,8 @@ private:
     // Device expert cache staging of n_rows rows; true = the gather runs on gather_overlap_.stream and
     // the GEMVs of entries that missed wait on gather_overlap_.gathered (moe_.entry_miss() flags them).
     [[nodiscard]] bool stage_dev_experts_(int layer, const int32_t* expert_indices, int top_k, int n_rows,
-                                          bool non_gated_experts, size_t* ms_off, cudaStream_t stream);
+                                          bool non_gated_experts, size_t* ms_off, const void* x,
+                                          cudaStream_t stream);
     // Decode step for a layer whose NVFP4 experts live on host: stages the routed experts of n_rows
     // rows (n_rows > 1: device expert cache only) into the LRU cache's slot pool, runs fused NVFP4 GEMVs
     // against it. Called only when run_moe_decode_fast's dispatch predicate

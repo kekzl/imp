@@ -78,16 +78,21 @@ struct DevExpertLayer {
     int32_t* key_of_slot;        // [slots], -1 = empty
     uint32_t* stamp;             // [slots], LRU stamp (step clock at last use)
     uint32_t* clock;             // [1]
-    unsigned long long* stats;   // [2]: hits, misses
+    unsigned long long* stats;   // [4]: hits, misses, prefetched keys, prefetched keys the routing used
     char* pool;                  // layer pool base
     float* slot_scales;          // [slots]; null for GGUF slots (no per-slot scale)
     size_t slot_bytes;
     int n_experts;
     int slots;
+    // moe.expert_prefetch: slots the next-layer prefetch is still filling; resolve treats a hit on
+    // one as waiting for the gather and clears the list. Null when prefetch is off.
+    int32_t* pf_slots;  // [kDevExpertPrefetchMax]
+    int32_t* pf_count;  // [1]
 };
 
 inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per row
 inline constexpr int kDevExpertMaxRows = 8;   // decode rows one resolve serves (non-tiered layers)
+inline constexpr int kDevExpertPrefetchMax = 32;  // moe.expert_prefetch ceiling, keys per layer
 
 // GPU <-> host handshake for tiered decode layers, in mapped pinned memory. The resolve kernel
 // posts req_seq; the tier thread fills the misses' sources and acks; a one-thread kernel spins
@@ -150,6 +155,25 @@ public:
     [[nodiscard]] bool stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
                              size_t pb, size_t mb, int e0, int n, int proj0, int proj1, cudaStream_t stream);
 
+    // Next-layer prefetch (moe.expert_prefetch, expert_cache_prefetch.cu). enable_prefetch allocates the
+    // pending lists and the predict scratch; false = off. predict_topk: top_k ids of logits[ne] into
+    // pred_out, plus a trace record [1000 + layer, ids] when trace is set. prefetch_resolve stamps the
+    // predicted keys of `layer`, assigns LRU victims to up to `budget` absent ones and lists them as
+    // pending; prefetch_gather copies them (gather stream, before that layer's own gather).
+    [[nodiscard]] bool enable_prefetch(int budget);
+    [[nodiscard]] bool prefetch_on() const { return pf_budget_ > 0; }
+    [[nodiscard]] float* pf_logits() const { return pf_logits_; }
+    struct PredTrace {
+        int* trace = nullptr;
+        float* weights = nullptr;  // the predicted logit per id, same record order
+        unsigned int* cursor = nullptr;
+        unsigned long long capacity = 0;
+    };
+    void predict_topk(const float* logits, int ne, int top_k, int layer, PredTrace trace,
+                      cudaStream_t stream);
+    void prefetch_resolve(int layer, int top_k, cudaStream_t stream);
+    void prefetch_gather(int layer, cudaStream_t stream);
+
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
     size_t ms_off(int layer, int proj) const { return ms_off_[(static_cast<size_t>(layer) * 3) + proj]; }
 
@@ -188,6 +212,24 @@ private:
     unsigned long long* d_stats_ = nullptr;  // [2]
     uint64_t seen_host_generation_ = 0;
     int layers_ready_ = 0;
+    // Prefetch (enable_prefetch): one allocation for the per-layer pending lists, the prefetch miss
+    // list, its count, the predict logits [n_experts] and predicted ids [kDevExpertMaxTopK].
+    void* pf_tables_ = nullptr;
+    // [2][kDevExpertPrefetchMax] and [2] counts 64 B apart, by layer parity: layer L + 1's prefetch
+    // resolve runs while layer L's prefetch gather may still read its list.
+    DevMissEntry* pf_misses_ = nullptr;
+    int* pf_n_miss_ = nullptr;
+    [[nodiscard]] DevMissEntry* pf_misses_of_(int layer) const {
+        return pf_misses_ + (static_cast<ptrdiff_t>(layer & 1) * kDevExpertPrefetchMax);
+    }
+    [[nodiscard]] int* pf_n_miss_of_(int layer) const {
+        return pf_n_miss_ + (static_cast<ptrdiff_t>(layer & 1) * 16);
+    }
+    float* pf_logits_ = nullptr;
+    int32_t* pf_pred_ = nullptr;
+    int pf_budget_ = 0;
+    void free_prefetch_();
+    [[nodiscard]] DevGatherBytes gather_bytes_(int layer) const;
 
     // Host expert tier (tiered layers only).
     std::vector<char> tiered_;  // [n_layers]

@@ -699,6 +699,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LAUNCH();
     }
 
+    join_expert_prefetch_(stream);  // a skipped or exited layer left its prefetch unconsumed
     if (model_->profile().gated_residual) {
         // Qwen4Exp: fold the hc streams back to d_model for the final norm + LM head (mixer has no
         // inject weight; hidden_[n] is the mixed stream afterwards).

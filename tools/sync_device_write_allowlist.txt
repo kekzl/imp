@@ -32,6 +32,7 @@ src/exec/expert_cache_device.cu cudaMemset(d_n_miss_ init  # device expert cache
 src/exec/expert_cache_device.cu cudaMemset(d_slot_of init  # device expert cache init
 src/exec/expert_cache_device.cu cudaMemset(d_stamp init  # device expert cache init
 src/exec/expert_cache_device.cu cudaMemset(d_stats_ init  # device expert cache init
+src/exec/expert_cache_prefetch.cu cudaMemset(pf_tables_ init  # moe.expert_prefetch tables, allocated with the device expert cache before serving
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(d_alpha init  # pre-dequant at load
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)) init  # pre-dequant at load
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)) init  # pre-dequant at load
