@@ -8,6 +8,7 @@ vllm/vllm-openai, `parity` and `compare` need the stdlib only.
   ppl_vs_vllm.py parity <imp_tokens> <hf_tokens>          exit 1 on any id difference
   ppl_vs_vllm.py vllm <model_dir> <tokens> <out_nll> [<tokens> <out_nll>...] [opts]  prompt_logprobs=0
   ppl_vs_vllm.py compare <tokens> <imp_nll> <vllm_nll> [--first F] [--last L] [--json OUT]
+  ppl_vs_vllm.py band <tokens> <imp_nll> <vllm_nll>...   imp vs pooled vLLM starts + their spread
 
 Row i is the NLL of token i+1 given tokens 0..i, rows 0..n-2: imp `diagnostics.ppl_dump=<path>`
 writes "<row> <nll>", `vllm` writes "<row> <nll> <rank>". Token files: imp's
@@ -174,6 +175,38 @@ def cmd_compare(a):
             json.dump(res, f, indent=1)
 
 
+def cmd_band(a):
+    """imp against the run-to-run band of several vLLM starts (vLLM NVFP4 is not deterministic per start)."""
+    n = len(read_tokens(a.tokens))
+    last = n - 2 if a.last < 0 else min(a.last, n - 2)
+    rows = range(max(0, a.first), last + 1)
+    c = len(rows)
+    ni, _ = read_nll(a.imp_nll)
+    runs = [read_nll(p)[0] for p in a.vllm_nll]
+    xi = [ni[i] for i in rows]
+    xv = [[r[i] for i in rows] for r in runs]
+    pooled = [sum(v[k] for v in xv) / len(xv) for k in range(c)]
+    ppl = lambda x: math.exp(sum(x) / len(x))  # noqa: E731
+    pv = [ppl(v) for v in xv]
+    pi, pp = ppl(xi), ppl(pooled)
+
+    def sd(x, y):
+        d = [p - q for p, q in zip(x, y)]
+        m = sum(d) / len(d)
+        return math.sqrt(sum((t - m) ** 2 for t in d) / max(1, len(d) - 1))
+
+    vv = [sd(xv[i], xv[j]) for i in range(len(xv)) for j in range(i + 1, len(xv))]
+    iv = [sd(xi, v) for v in xv]
+    delta = 100.0 * (pi / pp - 1.0)
+    spread = 100.0 * (max(pv) / min(pv) - 1.0)
+    inside = min(pv) <= pi <= max(pv)
+    print(f"BAND imp={pi:.4f} vllm_pooled={pp:.4f} delta={delta:+.3f}% bar(+-{BAR_PCT}%)="
+          f"{'PASS' if abs(delta) <= BAR_PCT else 'FAIL'} vllm_runs={len(pv)} "
+          f"vllm_min={min(pv):.4f} vllm_max={max(pv):.4f} vllm_spread={spread:.3f}% imp_inside_band={inside} rows={c}")
+    print(f"per-row sd: imp-vs-vllm mean {sum(iv) / len(iv):.5f} | vllm-vs-vllm mean "
+          f"{(sum(vv) / len(vv)) if vv else float('nan'):.5f} | runs {' '.join(f'{p:.4f}' for p in pv)}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -201,8 +234,15 @@ def main():
     p.add_argument("--segment", type=int, default=2048)
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--json")
+    p = sub.add_parser("band")
+    p.add_argument("tokens")
+    p.add_argument("imp_nll")
+    p.add_argument("vllm_nll", nargs="+")
+    p.add_argument("--first", type=int, default=0)
+    p.add_argument("--last", type=int, default=-1)
     a = ap.parse_args()
-    rc = {"hf-tokens": cmd_hf_tokens, "parity": cmd_parity, "vllm": cmd_vllm, "compare": cmd_compare}[a.cmd](a)
+    cmds = {"hf-tokens": cmd_hf_tokens, "parity": cmd_parity, "vllm": cmd_vllm, "compare": cmd_compare, "band": cmd_band}
+    rc = cmds[a.cmd](a)
     sys.exit(rc or 0)
 
 
