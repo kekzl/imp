@@ -278,6 +278,22 @@ bool Engine::mtp_holds_eager_(const Request& req) const {
     return mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id);
 }
 
+bool Engine::mtp_takes_prompt_(const Request& req) const {
+    if (mtp_ws_storage_ == nullptr || !mtp_feed_wanted_(req))
+        return false;
+    return mtp_prompt_takes_head(mtp_bound(mtp_active_, mtp_pool_, req.id),
+                                 mtp_slot_available(mtp_active_, mtp_pool_,
+                                                    std::max(1, mtp_ws_storage_->n_kv_slots), req.id),
+                                 static_cast<int>(sched_prefill_batch_.size()));
+}
+
+// A lone step whose head cache is behind can never draft: unbind, so the request leaves the eager path.
+void Engine::mtp_unbind_if_behind_(int req_id, int cur_pos) {
+    const auto* ws = mtp_ws_storage_.get();
+    if (ws != nullptr && mtp_active_.req == req_id && mtp_cache_behind(ws->mtp_pos, cur_pos))
+        mtp_unbind_("head cache behind the context after batched decode");
+}
+
 SpecDrafterState Engine::spec_drafter_state_(const Request& req) const {
     SpecDrafterState s;
     s.model_capable = spec_ngram_model_capable_();

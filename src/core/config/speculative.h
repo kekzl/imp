@@ -168,13 +168,18 @@ struct Speculative {
     // MTP-head chain-draft length. 0=off, -1=auto (default), >0=fixed depth.
     // VRAM cost is per-checkpoint (read the load line, not this comment).
     // Independent of `ngram`: with ngram=false a fixed mtp_k drafts even where
-    // the matcher finds nothing. AUTO engages only for single-stream
-    // (max_batch_size==1) runs on a checkpoint with a loadable head, and leaves
-    // an explicit `ngram` alone. Auto stays OFF for concurrent serving (head
-    // VRAM comes out of the batch slot budget) and under runtime.deterministic
-    // (MTP greedy trajectories are not eager-equal, docs/LIMITATIONS.md).
+    // the matcher finds nothing. AUTO engages for single-stream
+    // (max_batch_size==1) runs on a checkpoint with a loadable head, and for
+    // concurrent GDN-hybrid servers via mtp_concurrent; it leaves an explicit
+    // `ngram` alone. Auto stays OFF for other concurrent servers and under
+    // runtime.deterministic (MTP greedy trajectories are not eager-equal,
+    // docs/LIMITATIONS.md).
     // Resolution lives in tools/common/mtp_auto.* (both tools decide before an engine exists).
     int mtp_k = -1;
+    // mtp_k=auto on a concurrent GDN-hybrid server (Qwen3.8-27B) loads the head too: the one
+    // request that prefills while the head is free binds it and verifies while it decodes alone;
+    // batch > 1 decodes plain. false = the pre-v0.63 rule (concurrent servers leave the head unloaded).
+    bool mtp_concurrent = true;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

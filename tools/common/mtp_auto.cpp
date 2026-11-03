@@ -12,11 +12,19 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
         return configured;  // explicit: off (0) or a pinned depth
     if (cfg.runtime.deterministic)
         return 0;  // MTP greedy trajectories are not eager-equal
-    // Concurrent serving: the head binds one request and costs slots - unless
-    // the batched verify is on, which drafts for every request in the batch.
-    if (configured_batch != 1 && !cfg.speculative.batch_verify)
+    // Concurrent serving: the head binds one request - unless the batched verify drafts for every
+    // request, or speculative.mtp_concurrent lets it draft while one request decodes (phase 2
+    // keeps that for GDN hybrids only, the request costs no VRAM before Engine::init).
+    if (configured_batch != 1 && !cfg.speculative.batch_verify && !cfg.speculative.mtp_concurrent)
         return 0;
     return kMtpAutoK;
+}
+
+MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid) {
+    if (configured_batch == 1 || cfg.speculative.batch_verify)
+        return MtpAutoServing::SingleStream;
+    return gdn_hybrid && cfg.speculative.mtp_concurrent ? MtpAutoServing::ConcurrentHybrid
+                                                        : MtpAutoServing::ConcurrentOther;
 }
 
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
@@ -32,10 +40,20 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
     return cfg.speculative.mtp_k;
 }
 
-void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, int head_auto_k_cap) {
+void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, int head_auto_k_cap,
+                       MtpAutoServing serving) {
     if (cfg.speculative.mtp_k >= 0)
         return;  // explicit configuration, nothing to resolve
 
+    if (requested_k > 0 && head_loaded && serving == MtpAutoServing::ConcurrentOther) {
+        // Not a GDN hybrid: batch > 1 round-robin verifies with the n-gram matcher, which the pair
+        // would turn off. Keep the documented concurrent default.
+        cfg.speculative.mtp_k = 0;
+        IMP_LOG_INFO(
+            "speculative.mtp_k: auto -> off (concurrent server on a model that is not a GDN hybrid). "
+            "Set speculative.mtp_k=2 with speculative.ngram=false to force it.");
+        return;
+    }
     if (requested_k > 0 && head_loaded && head_auto_k_cap < 0) {
         cfg.speculative.mtp_k = 0;
         IMP_LOG_INFO(
@@ -54,10 +72,13 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
         if (!ngram_explicit)
             cfg.speculative.ngram = false;
         IMP_LOG_INFO(
-            "speculative.mtp_k: auto -> %d with ngram=%s (single-stream run, checkpoint ships an "
+            "speculative.mtp_k: auto -> %d with ngram=%s (%s, checkpoint ships an "
             "MTP head; measured +27-30%% on thinking chats, +17-21%% plain decode on "
             "Qwen3.8-27B-NVFP4). Set speculative.mtp_k=0 to opt out.",
-            requested_k, cfg.speculative.ngram ? "true (explicitly set)" : "false");
+            requested_k, cfg.speculative.ngram ? "true (explicitly set)" : "false",
+            serving == MtpAutoServing::ConcurrentHybrid
+                ? "concurrent server: drafts while one request decodes, speculative.mtp_concurrent"
+                : "single-stream run");
         return;
     }
 

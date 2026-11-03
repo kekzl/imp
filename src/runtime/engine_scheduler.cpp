@@ -1715,6 +1715,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // the active one before the sync gate reads its cache position.
         if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
             mtp_activate_(valid_decode[0]->id);
+        // Decoded in a batch (or a loop burst) since the last feed: no hidden rows exist to catch up from.
+        mtp_unbind_if_behind_(valid_decode[0]->id, cur_pos);
         // Depth for THIS request: 0 when it declined the head
         // (`"speculative": {"mtp_k": 0}` or `"speculative": false`), which is
         // the one case where the process has a head armed and must not draft.

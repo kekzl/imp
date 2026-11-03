@@ -1191,12 +1191,18 @@ hybrid               = true
 # SINGLE-STREAM run - max_batch_size = 1, i.e. imp-cli or a server pinned to
 # one stream - and only with runtime.deterministic off. Measured on
 # Qwen3.8-27B-NVFP4 (2026-08-29, 3 alternating rounds): 95.8 -> 141.6 tok/s
-# on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. It stays off
-# for concurrent serving (MTP drafts for one request at a time, and the
-# head's VRAM comes out of every batch slot's budget) and under determinism
-# (chunk-greedy is not the eager trajectory). An explicitly set `ngram` is
-# never overruled by auto.
+# on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. A concurrent
+# GDN-hybrid server (Qwen3.8-27B) takes the pair too, see mtp_concurrent; other
+# concurrent servers and determinism (chunk-greedy is not the eager
+# trajectory) keep it off. An explicitly set `ngram` is never overruled by auto.
 mtp_k                = -1
+# mtp_k=auto on a concurrent GDN-hybrid server: load the head; a prompt that
+# prefills alone while the head is free binds it and verifies while it decodes
+# alone; batch > 1 decodes plain, and a bound request that decoded in a batch
+# unbinds (plain decode from there). Qwen3.8-27B-NVFP4, default server, 1
+# stream 96.87 -> 131.28 tok/s, c32 unchanged, own peak VRAM +2773 MiB.
+# false = concurrent servers leave the head unloaded (the rule before).
+mtp_concurrent       = true
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

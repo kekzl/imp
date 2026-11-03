@@ -1257,6 +1257,8 @@ private:
     [[nodiscard]] bool mtp_feed_wanted_(const Request& req) const;
     // The MTP head is bound to this request: its per-step feed needs every token on the host (no async loop).
     [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
+    [[nodiscard]] bool mtp_takes_prompt_(const Request& req) const;  // binds the head: serial prefill
+    void mtp_unbind_if_behind_(int req_id, int cur_pos);  // speculative.mtp_concurrent: batched steps unbind
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;

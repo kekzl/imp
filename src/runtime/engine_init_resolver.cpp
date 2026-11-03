@@ -78,6 +78,12 @@ bool host_pins_experts(const Model& model, int host_expert_pool_mib) {
     return !host_expert_pool_caps(bytes, host_expert_pool_mib) && host_ram_holds(bytes);
 }
 
+// The auto batch prices the MTP head only for the batched verify (one head KV slot per batch slot).
+bool mtp_head_priced_in_auto_batch(const RuntimeConfig& cfg, const Model* model) {
+    return cfg.speculative.mtp_k > 0 && model != nullptr && model->mtp_ && model->mtp_->loaded &&
+           batch_verify_on(cfg, model);
+}
+
 }  // namespace
 
 // IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
@@ -452,11 +458,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // not size workspaces into bytes the cache build will take.
             if (mcfg.is_nvfp4_prequant)
                 upload_bytes += native_cache_demand().total();
-            // MTP head (speculative.mtp_k > 0): uploaded AFTER the pools, so
-            // the auto batch must leave it room, else hybrid-aware sizing
-            // spends it on recurrent-state slots and the head upload fails.
-            // ~130 MiB on top for draft workspace + batched-feed scratch.
-            if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_ && model_->mtp_->loaded)
+            // MTP head with the batched verify: the auto batch leaves it room (+130 MiB draft workspace +
+            // batched-feed scratch). One head KV slot: the head comes out of the 40 % non-KV reserve
+            // and the KV pool planned after its upload; charging it here cut Qwen3.8-27B 32 -> 30 slots.
+            const bool mtp_priced = mtp_head_priced_in_auto_batch(runtime_config_, model_.get());
+            if (mtp_priced)
                 upload_bytes += mtp_upload_peak_bytes(*model_->mtp_) + (130ULL << 20);
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
@@ -507,18 +513,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
             if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
                                            static_cast<double>(per_slot));
-                // MTP head on a hybrid: uploads AFTER the recurrent state is
-                // priced into the reserve, so room for it comes out of state
-                // slots at the state price. 2x the head: the async pool
-                // doubles the first large request it serves, and the head is
-                // exactly that request.
-                if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_ && model_->mtp_->loaded &&
-                    per_slot_state > 0) {
-                    size_t mtp_cost = (2 * mtp_upload_peak_bytes(*model_->mtp_)) + (260ULL << 20);
-                    // Batched verify: the MTP KV slots share a 1 GiB budget
-                    // (engine_spec_mtp.cpp, enable_mtp_spec_decode).
-                    if (batch_verify_on(runtime_config_, model_.get()))
-                        mtp_cost += 1ull << 30;
+                // MTP head on a hybrid with the batched verify: its 1 GiB of MTP KV slots plus
+                // 2x the head (the async pool doubles its first large request) come out of state
+                // slots at the state price. One head KV slot: not charged, the batch-shaped upload
+                // reserve (#2393) clamps a batch that does not fit; Qwen3.8-27B batch 32 + head
+                // uploads and serves c32 2032.2 tok/s (this charge made auto 17).
+                if (mtp_priced && per_slot_state > 0) {
+                    const size_t mtp_cost = (2 * mtp_upload_peak_bytes(*model_->mtp_)) + (260ULL << 20) +
+                                            (1ull << 30);
                     fit -= static_cast<int>((mtp_cost + per_slot_state - 1) / per_slot_state);
                 }
                 // Slots the multi-candidate verify reserves past the batch

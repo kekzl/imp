@@ -31,7 +31,7 @@ namespace imp {
 bool Engine::prefill_ragged_enabled_() {
     if (!runtime_config_.runtime.prefill_batch)
         return false;
-    if (mtp_spec_decode_enabled() || ppl_capture_.active || swa_sizing_active_)
+    if (ppl_capture_.active || swa_sizing_active_)
         return false;
     if (kv_manager_ && kv_manager_->residual_enabled())
         return false;
@@ -64,10 +64,15 @@ bool Engine::prefill_ragged_enabled_() {
     return prefill_ragged_model_ok_ == 1;
 }
 
-bool Engine::prefill_ragged_req_ok_(const Request& req) const { return req.ragged_prefill_allowed(); }
+// The prompt that takes the MTP head prefills serially: the head feeds from its hidden rows per chunk.
+bool Engine::prefill_ragged_req_ok_(const Request& req) const {
+    return req.ragged_prefill_allowed() && !mtp_takes_prompt_(req);
+}
 
 bool Engine::mixed_rider_ok_(const Request& r) const {
-    if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !prefill_ragged_req_ok_(r))
+    // A decoder bound to the MTP head stays on the decode step, where its per-token feed runs.
+    if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !r.ragged_prefill_allowed() ||
+        mtp_holds_eager_(r))
         return false;
     // A hybrid rider needs its live recurrent slot in the ragged slot table.
     if (ssm_state_ && !recurrent_slot_of_.contains(r.id))

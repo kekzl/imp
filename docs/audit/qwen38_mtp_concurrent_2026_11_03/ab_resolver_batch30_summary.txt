@@ -1,0 +1,4 @@
+harness: md5=203ed973a856
+p1_main c1 96.90 drafted 64 accepted 0 c4 341.8 c32 2046.8 own_peak_mib 22034 kv_blocks 4950
+p1_new c1 130.94 drafted 3644 accepted 2552 c4 339.1 c32 1195.4 own_peak_mib 24659 kv_blocks 4968
+p2_main c1 96.88 drafted 64 accepted 0 c4 341.6 c32 2049.5 own_peak_mib 22034 kv_blocks 4950

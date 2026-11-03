@@ -36,13 +36,45 @@ TEST(MtpAuto, NoHeadFallsBackWithTheMatcherIntact) {
     EXPECT_TRUE(cfg.speculative.ngram) << "ngram off with nothing drafting is worse than the default";
 }
 
-TEST(MtpAuto, ConcurrentServingDeclines) {
+// speculative.mtp_concurrent: a concurrent GDN-hybrid server takes the pair (batch > 1 never verifies there).
+TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
-    EXPECT_EQ(k, 0) << "the head binds one request and costs every slot's budget";
-    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/false);
+    EXPECT_EQ(k, tools::kMtpAutoK) << "phase 1 asks for the head; phase 2 knows the model";
+    const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true);
+    EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
+    EXPECT_EQ(cfg.speculative.mtp_k, tools::kMtpAutoK);
+    EXPECT_FALSE(cfg.speculative.ngram);
+}
+
+// Off a GDN hybrid, batch > 1 round-robin verifies with the matcher: the pair would turn it off.
+TEST(MtpAuto, ConcurrentNonHybridDeclines) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/false);
+    EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentOther);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
     EXPECT_TRUE(cfg.speculative.ngram);
+}
+
+TEST(MtpAuto, ConcurrentOptOutRestoresTheDecline) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_concurrent=false"}).empty());
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kServingAutoBatch), 0) << "the head is not even loaded";
+    EXPECT_EQ(tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true),
+              tools::MtpAutoServing::ConcurrentOther);
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), tools::kMtpAutoK) << "single stream unchanged";
+}
+
+// A Qwen4Exp head declines on a concurrent hybrid exactly as on a single stream.
+TEST(MtpAuto, ConcurrentHybridKeepsTheHeadDecline) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/-1,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_EQ(cfg.speculative.mtp_k, 0);
 }
 
 TEST(MtpAuto, DeterminismOutranksTheSpeedup) {
