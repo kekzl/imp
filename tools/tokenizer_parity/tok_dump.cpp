@@ -81,6 +81,18 @@ int main(int argc, char** argv) {
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string all = ss.str();
+
+    // PPL=1: the whole file as the token stream `imp-cli --perplexity` scores, same "TOK <i> <id>"
+    // lines as diagnostics.dump_tokens. Mirrors tools/imp-cli/main.cpp: encode, then BOS if add_bos.
+    if (getenv("PPL")) {
+        auto ids = tok.encode(all);
+        if (tok.add_bos() && tok.bos_id() >= 0 && (ids.empty() || ids[0] != tok.bos_id()))
+            ids.insert(ids.begin(), tok.bos_id());
+        printf("[DUMP_PPL_TOKENS] n=%zu\n", ids.size());
+        for (size_t i = 0; i < ids.size(); ++i)
+            printf("TOK %zu %d\n", i, ids[i]);
+        return 0;
+    }
     double encode_ms = 0.0;  // "@@T <ms>": encode wall time over all records
     for (size_t pos = 0, end; (end = all.find('\x1e', pos)) != std::string::npos; pos = end + 1) {
         const std::string text = all.substr(pos, end - pos);

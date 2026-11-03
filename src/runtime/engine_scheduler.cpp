@@ -585,8 +585,18 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     // IMP_PPL_DUMP=full: every position, needed for cross-mode forensics:
     // the sparse form hid that per-position values diverge between chunked
     // and single-shot runs (#655).
-    if (!runtime_config_.diagnostics.ppl_dump.empty()) {
-        const char* dump = runtime_config_.diagnostics.ppl_dump.c_str();
+    // A value containing '/' is a file path: "<row> <nll>" per row 0..n-2, %.6f, no debug log level needed
+    // (tools/analysis/ppl_vs_vllm.py reads it).
+    if (const std::string& path = runtime_config_.diagnostics.ppl_dump; path.find('/') != std::string::npos) {
+        if (FILE* f = std::fopen(path.c_str(), "w")) {
+            for (int i = 0; i < n - 1; ++i)
+                std::fprintf(f, "%d %.6f\n", i, h_nll_pos[i]);
+            std::fclose(f);
+        } else {
+            IMP_LOG_WARN("diagnostics.ppl_dump: cannot open %s", path.c_str());
+        }
+    } else if (!path.empty()) {
+        const char* dump = path.c_str();
         const bool full = (strcmp(dump, "full") == 0);
         std::string nll_line;
         for (int i = 0; i < n - 1; ++i) {
