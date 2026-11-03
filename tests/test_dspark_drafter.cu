@@ -1,5 +1,7 @@
 // DSpark block drafter (src/runtime/dspark_drafter.cu) against the FP32 reference forward
 // tools/analysis/dspark_reference.py on deepseek-ai/dflash_qwen3_8b_block7, same deterministic inputs.
+#include "compute/gemm.h"
+#include "core/process_diag.h"
 #include "memory/vram_allocator.h"
 #include "runtime/dspark_drafter.h"
 
@@ -132,6 +134,16 @@ TEST(DFlashDrafterTest, BlockMatchesReference) {
     const std::string target = env_or("IMP_TEST_MODEL_DSPARK_TARGET", "/models/Qwen3-8B-NVFP4-cortecs");
     if (!std::filesystem::exists(dir + "/model.safetensors") || !std::filesystem::exists(target))
         GTEST_SKIP() << "no DFlash drafter at " << dir << " or target at " << target;
+    // The reference ids hold for a fresh process. After the test-e2e suites before this one (engine flags
+    // in ProcessDiag, cuBLASLt algos cached per M bucket) row 4 read 8, not 374; either reset alone fixed it.
+    struct FreshProcessState {
+        imp::ProcessDiag prev = imp::process_diag_current();
+        FreshProcessState() {
+            imp::process_diag_set(imp::ProcessDiag{});
+            imp::gemm_cleanup();
+        }
+        ~FreshProcessState() { imp::process_diag_set(prev); }
+    } const fresh;
     cudaStream_t stream = nullptr;
     ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
     imp::VRAMAllocator va;

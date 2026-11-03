@@ -12,6 +12,7 @@
 #include "core/logging.h"
 #include "quant/fp8_utils.cuh"
 #include "quant/nvfp4_gemm_tile_ptx.cuh"
+#include "quant/nvfp4_pack.cuh"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -295,13 +296,10 @@ __device__ __forceinline__ void quant_block(const float (&v)[4], bool valid, uin
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
     if (!valid)
         return;
-    const float scale_f = amax / (as * 6.0f);  // as: static act tensor scale, 1.0 = amax / 6
-    if (scale_f > 448.0f)
+    if (amax / (as * 6.0f) > 448.0f)  // as: static act tensor scale, 1.0 = amax / 6
         g_dec_clipped = 1u;
-    const uint8_t ue = float_to_fp8_e4m3(scale_f);
-    float actual = fp8_e4m3_to_float_fast(ue);
-    if (actual == 0.0f)
-        actual = 1.0f / 512.0f;
+    uint8_t ue;  // clamp to [2^-9, 448] like every NVFP4 act quantizer: a tiny block keeps 2^-9, never 0
+    const float actual = nvfp4_encode_micro_scale(amax, as, &ue);
     const float inv = 1.0f / (as * actual);
     prow[(col / 2)] = pack_fp4(v[0] * inv, v[1] * inv);
     prow[(col / 2) + 4] = pack_fp4(v[2] * inv, v[3] * inv);

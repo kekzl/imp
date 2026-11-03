@@ -3,6 +3,7 @@
 #include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (host reference)
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
+#include "death_test_exec.h"
 #include "test_alloc_inject.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -263,7 +264,7 @@ TEST(QuantizeMoeNative, EmptyExpertNocrash) {
 TEST(QuantizeMoeNative, FailedPointerUploadRefusesWithoutLaunch) {
     if (sm_major() < 12)
         GTEST_SKIP() << "SM120 required";
-    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    imp_test::threadsafe_death_tests();
     EXPECT_EXIT(quantize_under_exhausted_pool(), ::testing::ExitedWithCode(0),
                 "quantize alloc contract held");
 }

@@ -261,6 +261,13 @@ growable_initial_pct        = 25
 # it, so a request adopts backed blocks instead of waiting in the queue for the
 # driver mapping (35-65 ms per growth on Qwen3-8B). Same free-VRAM cap.
 grow_ahead                  = true
+# A pool capped by free VRAM below its ceiling: after a refused growth, skip
+# the free-VRAM reading for this many ms, so a prompt reclaiming prefix-cache
+# blocks does not read it once per block. 0 = read on every empty-list block.
+grow_retry_ms               = 100
+# Grow-ahead step at least the last admitted request (prompt + decode reserve),
+# not only max(64 blocks, 25 %): a second prompt that size finds it committed.
+grow_ahead_fit_last         = true
 # BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0
