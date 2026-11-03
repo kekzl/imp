@@ -851,6 +851,9 @@ nvfp4_norm_fold      = true
 # pre-norm, and the layer tail (branch post-norms, add, post_ffn_norm, layer
 # scale, next attn_norm + NVFP4 quantize) run as one launch each; bit-identical.
 fp32_residual_fuse   = true
+# Decode rows 2-32: the shared-MLP GeGLU (Gemma-4) also writes the down GEMM's
+# small-M NVFP4 input, one launch fewer per layer; bit-identical.
+geglu_quant_fuse     = true
 # Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
 # (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
 nvfp4_attn_proj      = false
