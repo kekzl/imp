@@ -66,8 +66,15 @@ int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_bat
                : std::max(1, cfg.speculative.mtp_history_slots);
 }
 
-int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_wants_bufs(cfg, model, max_batch_size) ? max_batch_size : 1;
+int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live) {
+    if (batch_verify_wants_bufs(cfg, model, max_batch_size))
+        return max_batch_size;
+    return cfg.speculative.mtp_carry && carry_live ? std::max(1, cfg.speculative.mtp_history_slots) : 1;
+}
+
+int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    return cfg.speculative.mtp_carry && !batch_verify_wants_bufs(cfg, model, max_batch_size) ? kMtpCarryRows
+                                                                                             : 0;
 }
 
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {

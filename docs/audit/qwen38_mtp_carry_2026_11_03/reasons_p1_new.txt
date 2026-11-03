@@ -1,0 +1,13 @@
+c0 turn1 t 0.0-16.3 drafted 242 tps 93.38 reasons -
+c1 turn1 t 2.8-18.5 drafted 207 tps 95.92 reasons -
+c0 turn2 t 18.3-33.3 drafted 571 tps 100.99 reasons -
+c1 turn2 t 24.5-38.1 drafted 179 tps 91.82 reasons -
+c0 turn3 t 35.3-49.1 drafted 603 tps 109.42 reasons -
+c1 turn3 t 44.1-58.8 drafted 222 tps 97.39 reasons -
+c0 turn4 t 51.1-66.3 drafted 535 tps 99.26 reasons -
+c1 turn4 t 64.8-74.6 drafted 174 tps 91.84 reasons -
+c0 turn5 t 68.3-80.1 drafted 468 tps 99.55 reasons -
+c1 turn5 t 80.6-97.0 drafted 199 tps 91.71 reasons -
+c0 turn6 t 82.1-96.2 drafted 0 tps 88.62 reasons -
+c1 turn6 t 103.0-108.3 drafted 487 tps 128.04 reasons -
+REASONS_TOTAL {'turns drafted': 11, 'turns not drafted': 1}

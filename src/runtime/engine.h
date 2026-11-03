@@ -1261,6 +1261,12 @@ private:
     [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
     [[nodiscard]] bool mtp_takes_prompt_(const Request& req) const;  // binds the head: serial prefill
     void mtp_unbind_if_behind_(int req_id, int cur_pos);  // speculative.mtp_concurrent: batched steps unbind
+    // speculative.mtp_carry: after a batched decode forward, copy each bound row's hidden row into its slot's
+    // carry (input position context_len - 1 + pos_bias; 1 = a chained pipeline step); a full carry feeds
+    // first.
+    void mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,
+                         cudaStream_t stream);
+    void mtp_carry_flush_(const Request& req);  // feed the carried rows whose next token is known
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;

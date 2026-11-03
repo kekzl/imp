@@ -1,0 +1,26 @@
+# /mnt/data/scratch/mtpcatchup_ab: 3 alternating pairs, main 6bca2fe2 (imp:mtpcu-main) vs this branch before the engine_spec_mtp_batched.cpp split (imp:mtpcu-new); ov = mtp_overlap_probe.py, side = mtp_multiturn_probe.py SIDE=1
+harness: md5=5c087000f7fb d742d48b6488 ca7d262552dc 
+p1_main_ov REASONS_TOTAL {'turns drafted': 2, 'turns not drafted': 10, 'unbind: head cache behind the context after batched decode': 9}
+p1_main_ov SUMMARY c0_mean_tps 90.76 c0_drafted_turns 1/6 c1_mean_tps 96.85 c1_drafted_turns 1/6 all_mean_tps 93.80 PASS
+p1_main_side SUMMARY turn1_tps 117.78 followup_mean_tps 120.60 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {'head cache behind the context after batched decode': 9} own_peak_mib 22856
+p1_new_ov REASONS_TOTAL {'turns drafted': 11, 'turns not drafted': 1}
+p1_new_ov SUMMARY c0_mean_tps 98.54 c0_drafted_turns 5/6 c1_mean_tps 99.45 c1_drafted_turns 6/6 all_mean_tps 99.00 PASS
+p1_new_side SUMMARY turn1_tps 117.45 followup_mean_tps 124.27 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {} own_peak_mib 24053
+p2_main_ov REASONS_TOTAL {'turns drafted': 2, 'turns not drafted': 10, 'unbind: head cache behind the context after batched decode': 9}
+p2_main_ov SUMMARY c0_mean_tps 90.71 c0_drafted_turns 1/6 c1_mean_tps 96.86 c1_drafted_turns 1/6 all_mean_tps 93.78 PASS
+p2_main_side SUMMARY turn1_tps 117.55 followup_mean_tps 120.43 followup_drafted_turns 5/5 PASS
+p2_main UNBIND_TOTAL {'head cache behind the context after batched decode': 9} own_peak_mib 22856
+p2_new_ov REASONS_TOTAL {'turns drafted': 12}
+p2_new_ov SUMMARY c0_mean_tps 97.75 c0_drafted_turns 6/6 c1_mean_tps 99.03 c1_drafted_turns 6/6 all_mean_tps 98.39 PASS
+p2_new_side SUMMARY turn1_tps 117.48 followup_mean_tps 117.60 followup_drafted_turns 5/5 PASS
+p2_new UNBIND_TOTAL {} own_peak_mib 22856
+p3_main_ov REASONS_TOTAL {'turns drafted': 2, 'turns not drafted': 10, 'unbind: head cache behind the context after batched decode': 9}
+p3_main_ov SUMMARY c0_mean_tps 90.70 c0_drafted_turns 1/6 c1_mean_tps 96.81 c1_drafted_turns 1/6 all_mean_tps 93.76 PASS
+p3_main_side SUMMARY turn1_tps 117.36 followup_mean_tps 120.08 followup_drafted_turns 5/5 PASS
+p3_main UNBIND_TOTAL {'head cache behind the context after batched decode': 9} own_peak_mib 22856
+p3_new_ov REASONS_TOTAL {'turns drafted': 12}
+p3_new_ov SUMMARY c0_mean_tps 96.39 c0_drafted_turns 6/6 c1_mean_tps 99.09 c1_drafted_turns 6/6 all_mean_tps 97.74 PASS
+p3_new_side SUMMARY turn1_tps 117.42 followup_mean_tps 118.03 followup_drafted_turns 5/5 PASS
+p3_new UNBIND_TOTAL {} own_peak_mib 22856
