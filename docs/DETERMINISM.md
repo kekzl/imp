@@ -166,6 +166,10 @@ Measured 2026-11-03 on main 87a61491 + this change, same harness (`--prefill-chu
 - Gemma-4 turn corpus, PPL over FP16 by headroom: shared h1 / h2 / h4 +2.35 / +2.98 / +2.76 %, split +0.30 / +0.69 / +2.58 %; legacy +1.92 %. Mean abs dNLL split h1 / h4 0.4757 / 0.4789.
 - Split removes the edge values (Gemma-4 K 17.98 % -> 0.16 %) and shifts Gemma-4 NLL down on both corpora (-0.0225 and -0.0160 nats/token vs shared), but the per-position distance to FP16 moves by less than its spread across headrooms (0.4659..0.4789): the rest of the FP8 KV gap is the 3-bit mantissa on normal values, which no power-of-two scale moves.
 - Qwen3 neutral: split distance sits between or below the other arms (Qwen3-30B 0.2536 vs 0.2518 / 0.2586, Qwen3-8B-FP8 0.1226 vs 0.1239 / 0.1250), PPL within -0.61..-0.08 % of FP16. `degen_suite.py --quick` on Gemma-4 split: 37 checks, 0 FAIL.
+- Decode cost, Gemma-4 FP8 KV, medians of 3 rotated trials, main legacy / own legacy / own split: tg128 299.15 / 299.13 / 299.25 tok/s, conc 16 aggregate 2281.3 / 2306.1 / 2403.0 tok/s (split ahead in all 3 trials, as `calibrate` in #3016, cause not isolated).
+
+[PROV: commit=87a61491+kvsplit date=2026-11-03 hw=RTX5090 model=Gemma-4-26B-A4B-it quant=NVFP4 cuda=13.4.3 path=imp-cli+server-api cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128`, `conc_client.py 16 3`
+       n=3 trials per arm note=kv_cache.dtype=fp8, runtime.max_batch_size=16, IGNORE_EOS=1]
 - Default stays `legacy`: the Gemma-4 gain does not hold at h4, and `calibrate` skips the persisted prefix-cache restore. For FP8 KV on Gemma-4: `kv_cache.fp8_scale=calibrate` with `kv_cache.fp8_scale_split=true`.
 
 ## Recipe: reproducible evals
