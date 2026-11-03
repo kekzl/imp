@@ -33,6 +33,10 @@ namespace imp::nvfp4_tile {
         return sk_fits ? 6 : 5;
     if (sk_fits && 2 * t128 <= sms)
         return 4;
+    // No workspace, <= 0.4 wave: 128x64 tiles, the k order per row of 128x128 (M-invariant). In situ, us:
+    // Qwen3-Coder o_proj 512x2048x4096 (64 tiles) 14.63 -> 11.83; Nemotron M 512 N 2688 (84) 14.04 -> 14.48.
+    if (!sk_fits && 5 * t128 <= 2 * sms)
+        return 5;
     if (sk_fits && idle >= 0.15f && t128 >= sms) {
         const int hybrid = ((t128 / sms) * kt) + ((kt + 2) / 3);
         const float uniform = (static_cast<float>(t128 * kt) / static_cast<float>(sms)) + 5.5f;

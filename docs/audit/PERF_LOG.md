@@ -4,6 +4,54 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-03 · Qwen3-Coder-30B-A3B pp512 v0.61.0 -> v0.62.0 -2.6 %: three causes, one fixed
+
+Protocol: `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --set speculative.ngram=false` (release_ab.sh shape), one process per run, arms rotated per trial; old = `ghcr.io/kekzl/imp:latest` v0.61.0 (e2109f84), new = v0.62.0 `make build` (tree a09cd68f), fix = new + 128x64 no-workspace plan. Coder runs FP8 KV (checkpoint `kv_cache_quant_algo`). Logs `/mnt/data/scratch/coderbisect_*`.
+
+Knob A/B on new, synthetic prompt (token ids 0..511), 5 rotations, pp512 median (min-max):
+
+| arm | pp512 tok/s |
+|---|---|
+| v0.61.0 | 33434.44 (33192.22-33600.57) |
+| v0.62.0 | 32547.17 (32439.37-32619.31) |
+| `gemm.nvfp4_prompt_streamk=on` | 32922.40 (32769.83-32999.00) |
+| `moe.router_fused=false` | 32606.05 (32325.89-32799.35) |
+| `gemm.nvfp4_static_act_scale=false` | 32619.82 (32479.54-32892.87) |
+| `gemm.swiglu_quant_epilogue=false` | 32579.20 (32404.47-32677.44) |
+| `runtime.prefill_graph_prewarm=0` | 32594.68 (32540.22-32720.94) |
+
+nsys `--cuda-graph-trace=node`, kernel sum per steady pp512 forward (11 forwards), us, v0.61.0 -> v0.62.0: total 14995.2 -> 15504.3 (+509.2).
+
+| class | v0.61.0 | v0.62.0 | delta | cause |
+|---|---:|---:|---:|---|
+| dense NVFP4 tile (q, k, v, o) | 1550.0 | 1706.9 | +156.9 | #3006 prompt stream-K off on MoE: o_proj (M 512, N 2048, K 4096) 64 tiles of 128x128 on 170 SMs, was split-2 stream-K on 128 CTAs |
+| MoE grouped expert GEMM | 8806.5 | 9078.2 | +271.7 | routing: same kernel source and grid (170); per-launch ratio 0.896-1.533 (median 1.020), 110 of 144 launch positions slower; M tiles (`diagnostics.moe_expert_hist`, ceil(rows / 128) per expert) 5240 -> 5298 (+1.11 %), per-layer correlation with the time ratio 0.767 |
+| router (cuBLAS + top-k -> fused) | 573.0 | 558.5 | -14.5 | #3001, neutral |
+| `round_kv_fp8_inplace_kernel` | 0 | 61.7 | +61.7 | #3002 FP8 KV prefill reads its own K/V at the cached E4M3 value (resend bit-equal), accepted |
+| NVFP4 MoE act quantize | 398.5 | 426.2 | +27.7 | #3015 static act scale |
+
+- Routing, not code: with `gemm.nvfp4_static_act_scale=false`, `moe.router_fused=false`, `gemm.nvfp4_prompt_streamk=on` the grouped GEMM gap halves (8806.5 -> 8942.4, total +241.8); the rest follows #3019's 2^-9 clamp (no knob). These are deliberate numerics fixes (PPL), and the synthetic prompt magnifies the shift: on real text (`--bench-prompt-file ppl_4k.txt`, 6 rotations) v0.61.0 33291.46 vs v0.62.0 32762.93 (-1.59 %), stream-K on 33156.94.
+- Fix: up to 0.4 wave of 128x128 tiles the no-workspace plan picks the 128x64 data-parallel tile (`nvfp4_gemm_tile_plan.h`), the same k order per row, so the #3006 resend property holds (`Nvfp4PromptStreamK.NarrowTileRowsMatchWideTile`, `Nvfp4GemmTile.DataParallelRowsInvariantToM`). Deterministic PPL (`ppl_4k.txt`, `runtime.deterministic=true`) 11.4972 on v0.62.0 and fix.
+- Per launch, nsys: Coder o_proj (M 512, N 2048, K 4096, 64 tiles) v0.61.0 stream-K 11.67 us, v0.62.0 14.63, 128x64 11.83. A first cut at half a wave also took Nemotron-3-Nano's N 2688 GEMMs (84 tiles): 14.04 -> 14.48 us, hence the 0.4-wave bound.
+
+| pp512 tok/s, median (min-max) | v0.61.0 | v0.62.0 | fix |
+|---|---|---|---|
+| synthetic, 5 rotations | 33373.44 (33322.33-33654.51) | 32518.85 (32456.03-32747.95) | 33001.79 (32933.11-33116.71) |
+| `ppl_4k.txt`, 4 rotations | 33274.94 (33228.20-33305.44) | 32785.19 (32626.00-32883.51) | 33147.62 (33095.18-33198.92) |
+
+Other MoE models, v0.62.0 -> fix, alternating pairs, medians (Qwen3-30B-A3B and Gemma-4 on the half-wave build, whose plan for their shapes, 64 and 68 tiles, equals the 0.4-wave one):
+
+| model, pairs | pp512 | tg128 | pp4096 |
+|---|---|---|---|
+| Qwen3-30B-A3B-NVFP4-Modelopt, 3 | 34262.19 -> 34414.19 | 386.10 -> 385.75 | 47309.68 -> 47466.96 |
+| Gemma-4-26B-A4B-it-NVFP4, 3 | 37256.60 -> 37544.63 | 302.22 -> 302.33 | 47395.21 -> 47475.84 |
+| Qwen3-Coder-30B-A3B, 0.4-wave build, 4 | 32707.62 -> 32904.67 | 384.93 -> 384.83 | 46373.18 -> 46572.61 |
+| Nemotron-3-Nano-30B-A3B, 0.4-wave build, 4 | 34530.45 -> 34400.31 | 415.51 -> 415.59 | 59284.35 -> 59263.03 |
+
+- Nemotron on the 0.4-wave build runs the same dense tile launches as v0.62.0 (nsys: 4 x 21 at 14.04 us, 4 x 29 at 11.16 us both), so its pp512 delta is process-start spread (fix range 34040.15-34520.40, v0.62.0 34379.61-34668.93).
+
+---
+
 ## 2026-11-01 · Block drafter priced per verify; z-lab DFlash b16 below DSpark (ROADMAP row 49)
 
 Protocol: `tools/analysis/block_drafter_ab.sh` (2026-10-19 protocol: Qwen3-8B-NVFP4-cortecs, `--max-batch 1`, greedy 256 tokens, `ignore_eos`, /no_think, one server start per arm and round, warmup, prose / code / list x 2), `build-dev` imp-server in `imp:toolchain`, 3 rounds, arm order reversed every round; tok/verify from the `/metrics` delta per request.

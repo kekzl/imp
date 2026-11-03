@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- NVFP4 MoE prompt GEMMs up to 0.4 wave of 128x128 tiles run 128x64 data-parallel tiles (no stream-K since #3006, rows stay M-invariant): o_proj 64 -> 128 CTAs. Qwen3-Coder-30B-A3B pp512 32518.85 -> 33001.79 tok/s (+1.49 %, 5 rotations); rest of the v0.62.0 drop is routing and FP8 KV rounding (`docs/audit/PERF_LOG.md`) (#3026).
+
 ## [0.62.0] - 2026-11-03
 
 ### Added
