@@ -198,6 +198,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
     B("kv_cache.grow_ahead", cfg.kv_cache.grow_ahead);
+    I("kv_cache.grow_retry_ms", cfg.kv_cache.grow_retry_ms);
+    B("kv_cache.grow_ahead_fit_last", cfg.kv_cache.grow_ahead_fit_last);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);

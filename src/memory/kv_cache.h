@@ -119,6 +119,16 @@ public:
     // per growth whatever its size (Qwen3-14B, 80 regions, 800-1920 MiB), so callers grow in
     // coarse steps, not per block.
     int try_grow_to(int wanted);
+    // try_grow_to that queries free VRAM even inside the retry window (a request that cannot fit
+    // the pool at all is cancelled on this answer).
+    int try_grow_to_now(int wanted);
+    // kv_cache.grow_retry_ms: after the free-VRAM cap refused all growth, try_grow_to and the
+    // grow-ahead tick skip the query for `ms` (0 = query every call).
+    void set_grow_retry_ms(int ms) { grow_retry_ms_ = ms; }
+    // cudaMemGetInfo readings taken to price growth (one per refused per-block try at retry 0).
+    [[nodiscard]] uint64_t free_vram_queries() const {
+        return free_vram_queries_.load(std::memory_order_relaxed);
+    }
 
     // Grow-ahead (kv_cache.grow_ahead): a worker thread commits the next growth step while the
     // GPU runs, so admission adopts backed blocks instead of waiting for the driver. Start after
@@ -127,6 +137,15 @@ public:
     // Once per scheduling round, never blocks: adopt staged blocks, then wake the worker when the
     // free list is below one growth step (max(64, total / 4)) and the pool below its ceiling.
     void grow_ahead_tick();
+    // kv_cache.grow_ahead_fit_last: the step also covers the last admitted request's blocks, so a
+    // second prompt of the same size finds them committed. Same thread as allocation.
+    void set_grow_ahead_fit_last(bool on) { grow_fit_last_ = on; }
+    void note_admitted(int blocks) { last_admit_blocks_ = blocks; }
+    // Both serving-phase growth knobs at once (engine, after warmup).
+    void set_serving_growth(int retry_ms, bool fit_last) {
+        grow_retry_ms_ = retry_ms > 0 ? retry_ms : 0;
+        grow_fit_last_ = fit_last;
+    }
     // Publish what the worker committed (block ids appended, capacity raised). Returns
     // total_blocks(). Same thread as allocation.
     int adopt_grown();
@@ -284,6 +303,14 @@ private:
     void zero_fence_();
     // try_grow_to's free-VRAM cap: target lowered to what fits above the allocator headroom.
     int cap_by_free_vram_(int target, int base);
+    int try_grow_to_(int wanted, bool honor_retry);
+    // True while a refused growth's retry window (grow_retry_ms_) is open.
+    [[nodiscard]] bool grow_refused_recently_() const;
+    int grow_retry_ms_ = 0;
+    bool grow_fit_last_ = false;
+    int last_admit_blocks_ = 0;
+    std::atomic<int64_t> grow_refused_at_ns_{0};  // steady_clock, 0 = never refused
+    std::atomic<uint64_t> free_vram_queries_{0};
 
     // Grow-ahead state. commit_mu_ serialises commit_blocks_ between try_grow_to and the worker;
     // staged_blocks_ is committed_blocks_ after the last commit, published by adopt_grown().
