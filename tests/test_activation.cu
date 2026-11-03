@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <limits>
 #include <algorithm>
 
@@ -514,11 +515,13 @@ TEST(SoftmaxTest, LargeRow) {
     free_gpu_tensor(d_out);
 }
 
-// SwigluNvfp4ProducerBitIdentity: fused swiglu+NVFP4 quantize producer must emit the same
-// FP16 bytes as swiglu() and the same packed nibbles/FP8 micro-scales as
-// quantize_fp16_to_nvfp4_into() on that output; inputs include near-zero and +-1000 range.
-TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
-    const int shapes[][2] = {{3, 4096}, {32, 17408}};
+// Gated NVFP4 producer bit identity: swiglu_quantize_nvfp4 / geglu_quantize_nvfp4 must emit the same
+// FP16 bytes as swiglu() / geglu() and the same nibbles + FP8 micro-scales as quantize_fp16_to_nvfp4_into()
+// on that output, at unit and at a static act scale; inputs cover zero blocks, blocks under the 2^-9
+// block-scale clamp (counted, must be > 0), and +-3000 outputs.
+void gated_nvfp4_producer_bit_identity(bool gelu, float act_scale) {
+    // {3, 4096} / {32, 17408}: SwiGLU dense shapes; 2112 / 2816: Gemma-4 shared down K, d_model.
+    const int shapes[][2] = {{3, 4096}, {32, 17408}, {2, 2112}, {16, 2112}, {32, 2112}, {5, 2816}};
     for (auto& sh : shapes) {
         const int rows = sh[0], cols = sh[1];
         const size_t n = (size_t)rows * cols;
@@ -526,10 +529,14 @@ TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
         for (size_t i = 0; i < n; i++) {
             const size_t mb = i / 16;
             if (mb % 7 == 3) {
-                h_g[i] = 0.0f;  // silu(0)*u = 0: low scale clamp
+                h_g[i] = 0.0f;  // act(0)*u = 0: zero block, clamped scale
                 h_u[i] = 1.0f;
+            } else if (mb % 7 == 1) {
+                // |out| ~ s * (5e-4 .. 1.8e-3): block scale under 2^-9, nibbles still nonzero
+                h_g[i] = 2.0f + (0.01f * static_cast<float>(i % 5));
+                h_u[i] = act_scale * 3e-4f * static_cast<float>((i % 3) + 1) * ((i & 1) ? -1.0f : 1.0f);
             } else if (mb % 7 == 5) {
-                h_g[i] = 40.0f;  // silu ~= identity here
+                h_g[i] = 40.0f;                            // act ~= identity here
                 h_u[i] = 25.0f * (((i * 13) % 7) - 3.0f);  // |out| up to ~3000
             } else {
                 h_g[i] = 0.05f * static_cast<float>((i * 37) % 101) - 2.5f;
@@ -550,28 +557,40 @@ TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
         cudaMemset(f_packed, 0xAA, packed_bytes);
         cudaMemset(f_scales, 0xAA, scale_bytes);
 
-        swiglu(d_g, d_u, d_out_ref, nullptr);
-        quantize_fp16_to_nvfp4_into(d_out_ref.data, rows, cols, ref_packed, ref_scales,
-                                    /*tensor_scale=*/1.0f, nullptr);
-        ASSERT_TRUE(swiglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr));
+        if (gelu)
+            geglu(d_g, d_u, d_out_ref, nullptr);
+        else
+            swiglu(d_g, d_u, d_out_ref, nullptr);
+        quantize_fp16_to_nvfp4_into(d_out_ref.data, rows, cols, ref_packed, ref_scales, act_scale, nullptr);
+        ASSERT_TRUE(
+            gelu ? geglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr, act_scale)
+                 : swiglu_quantize_nvfp4(d_g, d_u, d_out_fused, f_packed, f_scales, nullptr, act_scale));
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
+        const std::string where = std::string(gelu ? "geglu" : "swiglu") + " rows=" + std::to_string(rows) +
+                                  " cols=" + std::to_string(cols) + " s=" + std::to_string(act_scale);
         std::vector<uint8_t> h_ref_out(d_out_ref.nbytes()), h_f_out(d_out_fused.nbytes());
         cudaMemcpy(h_ref_out.data(), d_out_ref.data, d_out_ref.nbytes(), cudaMemcpyDeviceToHost);
         cudaMemcpy(h_f_out.data(), d_out_fused.data, d_out_fused.nbytes(), cudaMemcpyDeviceToHost);
         EXPECT_EQ(0, memcmp(h_ref_out.data(), h_f_out.data(), h_ref_out.size()))
-            << "FP16 out differs, rows=" << rows << " cols=" << cols;
+            << "FP16 out differs, " << where;
 
-        std::vector<uint8_t> h_rp(packed_bytes), h_fp(packed_bytes), h_rs(scale_bytes),
-            h_fs(scale_bytes);
+        std::vector<uint8_t> h_rp(packed_bytes), h_fp(packed_bytes), h_rs(scale_bytes), h_fs(scale_bytes);
         cudaMemcpy(h_rp.data(), ref_packed, packed_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_fp.data(), f_packed, packed_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_rs.data(), ref_scales, scale_bytes, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_fs.data(), f_scales, scale_bytes, cudaMemcpyDeviceToHost);
-        EXPECT_EQ(0, memcmp(h_rs.data(), h_fs.data(), scale_bytes))
-            << "micro-scales differ, rows=" << rows << " cols=" << cols;
-        EXPECT_EQ(0, memcmp(h_rp.data(), h_fp.data(), packed_bytes))
-            << "packed nibbles differ, rows=" << rows << " cols=" << cols;
+        EXPECT_EQ(0, memcmp(h_rs.data(), h_fs.data(), scale_bytes)) << "micro-scales differ, " << where;
+        EXPECT_EQ(0, memcmp(h_rp.data(), h_fp.data(), packed_bytes)) << "packed nibbles differ, " << where;
+        // The 2^-9 clamp (E4M3 0x01) must be hit by nonzero blocks, not only by the all-zero ones.
+        int clamped_nonzero = 0;
+        for (size_t b = 0; b < scale_bytes; ++b) {
+            bool nonzero = false;
+            for (int j = 0; j < 8; ++j)
+                nonzero = nonzero || (h_rp[(b * 8) + j] & 0x77) != 0;
+            clamped_nonzero += (h_rs[b] == 0x01 && nonzero) ? 1 : 0;
+        }
+        EXPECT_GT(clamped_nonzero, 0) << "no nonzero block at the 2^-9 scale clamp, " << where;
 
         cudaFree(ref_packed);
         cudaFree(ref_scales);
@@ -582,6 +601,17 @@ TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
         free_gpu_tensor(d_out_ref);
         free_gpu_tensor(d_out_fused);
     }
+}
+
+// 0.0123: a static input scale (#3015 gemm.nvfp4_static_act_scale), block scale = amax / (6 * s).
+TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
+    gated_nvfp4_producer_bit_identity(/*gelu=*/false, 1.0f);
+    gated_nvfp4_producer_bit_identity(/*gelu=*/false, 0.0123f);
+}
+
+TEST(ActivationTest, GegluNvfp4ProducerBitIdentity) {
+    gated_nvfp4_producer_bit_identity(/*gelu=*/true, 1.0f);
+    gated_nvfp4_producer_bit_identity(/*gelu=*/true, 0.0123f);
 }
 
 }  // namespace
