@@ -7,7 +7,10 @@
 # Usage: bash tools/analysis/vllm_gap_sweep.sh [MODELS="dir1 dir2"] [TRIALS=3] [CELLS="base long"] [OUT=/mnt/data/scratch/vllmgap]
 # Table: docker run --rm -v $OUT:/o -v tools/analysis:/t:ro imp:toolchain python3 /t/vllm_gap_table.py /o
 # imp A/B: IMG_BASE=<image> replaces the vLLM arm by a "base" imp arm (same flags); table with REF=base.
+# IMP_SET="k=v ...": extra imp-server --set pairs for both imp arms (e.g. kv_cache.dtype=fp8).
 set -u
+EXTRA=()
+for kv in ${IMP_SET:-}; do EXTRA+=(--set "$kv"); done
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODELS=${MODELS:-"Qwen3-8B-NVFP4-cortecs Qwen3-8B-FP8 Qwen3-30B-A3B-NVFP4-Modelopt Gemma-4-26B-A4B-it-NVFP4 Nemotron-3-Nano-30B-A3B-NVFP4"}
@@ -83,7 +86,7 @@ run_arm() {  # $1 = engine imp|vllm, $2 = model dir, $3 = trial
         imp|base) docker run "${common[@]}" "$([ "$eng" = base ] && echo "$IMG_BASE" || echo "$IMG_IMP")" \
                  imp-server --model "/models/$MODEL" --host 0.0.0.0 \
                  --port "$PORT" --max-concurrent "$MAXC" --set "runtime.max_batch_size=$MAXC" \
-                 --set speculative.mtp_k=0 --set speculative.ngram=false >/dev/null ;;
+                 --set speculative.mtp_k=0 --set speculative.ngram=false "${EXTRA[@]}" >/dev/null ;;
         vllm) docker run "${common[@]}" --ipc=host -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 "$IMG_VLLM" \
                  --model "/models/$MODEL" --served-model-name "$MODEL" --host 0.0.0.0 --port "$PORT" \
                  --max-model-len 16384 --max-num-seqs "$MAXC" >/dev/null ;;
