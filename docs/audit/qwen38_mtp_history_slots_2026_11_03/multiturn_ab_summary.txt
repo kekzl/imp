@@ -1,0 +1,33 @@
+# pairs 1-2: /mnt/data/scratch/mtpprefix_ab (pair 3 there interrupted by a GPU pause, discarded); pair 3: /mnt/data/scratch/mtpprefix_ab_p3, re-run in full.
+# new arm pairs 1-2 = build before mtp_bind_prompt_ was split out of mtp_prefill_feed_chunk (no behaviour change); greedy, side and convs2 transcripts byte-identical across the two builds (content+reasoning md5 85900c97cf / 6252a8552c / c7d705b1b8); main == new on the plain greedy chat.
+harness: md5=bd8d987066a2 d742d48b6488 
+p1_main_greedy SUMMARY turn1_tps 116.55 followup_mean_tps 120.08 followup_drafted_turns 5/5 PASS
+p1_main_sampled SUMMARY turn1_tps 108.94 followup_mean_tps 112.65 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 117.23 followup_mean_tps 102.12 followup_drafted_turns 1/5 PASS
+p1_main_convs2 SUMMARY turn1_tps 119.31 followup_mean_tps 101.64 followup_drafted_turns 2/10 PASS
+p1_main UNBIND_TOTAL {'hidden gap before chunk': 34} own_peak_mib 22856
+p1_new_greedy SUMMARY turn1_tps 116.69 followup_mean_tps 120.01 followup_drafted_turns 5/5 PASS
+p1_new_sampled SUMMARY turn1_tps 109.03 followup_mean_tps 113.00 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 117.33 followup_mean_tps 122.48 followup_drafted_turns 5/5 PASS
+p1_new_convs2 SUMMARY turn1_tps 119.22 followup_mean_tps 117.68 followup_drafted_turns 10/10 PASS
+p1_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22856
+p2_main_greedy SUMMARY turn1_tps 116.48 followup_mean_tps 119.95 followup_drafted_turns 5/5 PASS
+p2_main_sampled SUMMARY turn1_tps 108.89 followup_mean_tps 112.90 followup_drafted_turns 5/5 PASS
+p2_main_side SUMMARY turn1_tps 117.42 followup_mean_tps 102.25 followup_drafted_turns 1/5 PASS
+p2_main_convs2 SUMMARY turn1_tps 119.26 followup_mean_tps 101.75 followup_drafted_turns 2/10 PASS
+p2_main UNBIND_TOTAL {'hidden gap before chunk': 34} own_peak_mib 22856
+p2_new_greedy SUMMARY turn1_tps 116.69 followup_mean_tps 120.07 followup_drafted_turns 5/5 PASS
+p2_new_sampled SUMMARY turn1_tps 109.00 followup_mean_tps 112.98 followup_drafted_turns 5/5 PASS
+p2_new_side SUMMARY turn1_tps 117.75 followup_mean_tps 122.53 followup_drafted_turns 5/5 PASS
+p2_new_convs2 SUMMARY turn1_tps 119.49 followup_mean_tps 117.23 followup_drafted_turns 10/10 PASS
+p2_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22856
+p3_main_greedy SUMMARY turn1_tps 116.25 followup_mean_tps 119.75 followup_drafted_turns 5/5 PASS
+p3_main_sampled SUMMARY turn1_tps 108.24 followup_mean_tps 112.25 followup_drafted_turns 5/5 PASS
+p3_main_side SUMMARY turn1_tps 116.51 followup_mean_tps 101.27 followup_drafted_turns 1/5 PASS
+p3_main_convs2 SUMMARY turn1_tps 118.39 followup_mean_tps 101.16 followup_drafted_turns 2/10 PASS
+p3_main UNBIND_TOTAL {'hidden gap before chunk': 34} own_peak_mib 24485
+p3_new_greedy SUMMARY turn1_tps 115.47 followup_mean_tps 118.73 followup_drafted_turns 5/5 PASS
+p3_new_sampled SUMMARY turn1_tps 106.46 followup_mean_tps 112.16 followup_drafted_turns 5/5 PASS
+p3_new_side SUMMARY turn1_tps 117.48 followup_mean_tps 121.84 followup_drafted_turns 5/5 PASS
+p3_new_convs2 SUMMARY turn1_tps 118.02 followup_mean_tps 117.37 followup_drafted_turns 10/10 PASS
+p3_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 24145

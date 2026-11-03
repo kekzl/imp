@@ -80,7 +80,7 @@ void Engine::mtp_activate_(int req_id) {
     imp::mtp_select_slot(*mtp_ws_storage_, mtp_active_.slot);
 }
 
-int Engine::mtp_acquire_slot_(const Request& req) {
+int Engine::mtp_acquire_slot_(const Request& req, int offset) {
     if (mtp_ws_storage_ == nullptr)
         return -1;
     auto* ws = mtp_ws_storage_.get();
@@ -90,15 +90,17 @@ int Engine::mtp_acquire_slot_(const Request& req) {
         for (int s = n_slots - 1; s >= 0; --s)
             mtp_pool_.free_slots.push_back(s);
         mtp_pool_.slot_history.assign(static_cast<size_t>(n_slots), {});
+        mtp_pool_.slot_used.assign(static_cast<size_t>(n_slots), 0);
         // The active binding (if any) holds its slot.
         if (mtp_active_.req >= 0)
             mtp_pool_.free_slots.erase(std::remove(mtp_pool_.free_slots.begin(), mtp_pool_.free_slots.end(), ws->cur_slot),
                                   mtp_pool_.free_slots.end());
         mtp_pool_.initialized = true;
     }
-    if (mtp_pool_.free_slots.empty()) {
-        // Every slot is held: evict a parked binding (with one slot this is
-        // what the single workspace always did to the previous request).
+    const int held = (mtp_active_.req >= 0 ? 1 : 0) + static_cast<int>(mtp_pool_.binds.size());
+    if (mtp_pool_.free_slots.empty() || held >= mtp_pool_.bind_cap) {
+        // Every binding place is taken: evict a parked binding (with one slot
+        // this is what the single workspace always did to the previous request).
         if (mtp_pool_.binds.empty())
             return -1;
         auto it = mtp_pool_.binds.begin();
@@ -106,20 +108,18 @@ int Engine::mtp_acquire_slot_(const Request& req) {
         mtp_pool_.free_slots.push_back(it->second.slot);
         mtp_pool_.binds.erase(it);
     }
-    // The free slot whose cache covers the longest prefix of this prompt.
-    size_t best_i = 0, best_l = 0;
-    for (size_t i = 0; i < mtp_pool_.free_slots.size(); ++i) {
-        const auto& h = mtp_pool_.slot_history[static_cast<size_t>(mtp_pool_.free_slots[i])];
-        size_t L = 0;
-        while (L < h.size() && L < req.input_tokens.size() && h[L] == req.input_tokens[L])
-            ++L;
-        if (L > best_l) {
-            best_l = L;
-            best_i = i;
-        }
-    }
-    const int slot = mtp_pool_.free_slots[best_i];
-    mtp_pool_.free_slots.erase(mtp_pool_.free_slots.begin() + static_cast<std::ptrdiff_t>(best_i));
+    std::vector<MtpSlotCand> cands;
+    cands.reserve(mtp_pool_.free_slots.size());
+    for (const int s : mtp_pool_.free_slots)
+        cands.push_back({.pos = s == ws->cur_slot ? ws->mtp_pos : ws->slot_pos[static_cast<size_t>(s)],
+                         .history = &mtp_pool_.slot_history[static_cast<size_t>(s)],
+                         .last_use = mtp_pool_.slot_used[static_cast<size_t>(s)]});
+    const int pick = mtp_pick_slot(cands, req.input_tokens, offset);
+    if (pick < 0)
+        return -1;
+    const int slot = mtp_pool_.free_slots[static_cast<size_t>(pick)];
+    mtp_pool_.free_slots.erase(mtp_pool_.free_slots.begin() + pick);
+    mtp_pool_.slot_used[static_cast<size_t>(slot)] = ++mtp_pool_.use_clock;
     return slot;
 }
 
@@ -282,8 +282,7 @@ bool Engine::mtp_takes_prompt_(const Request& req) const {
     if (mtp_ws_storage_ == nullptr || !mtp_feed_wanted_(req))
         return false;
     return mtp_prompt_takes_head(mtp_bound(mtp_active_, mtp_pool_, req.id),
-                                 mtp_slot_available(mtp_active_, mtp_pool_,
-                                                    std::max(1, mtp_ws_storage_->n_kv_slots), req.id),
+                                 mtp_slot_available(mtp_active_, mtp_pool_, mtp_pool_.bind_cap, req.id),
                                  static_cast<int>(sched_prefill_batch_.size()));
 }
 
@@ -600,6 +599,59 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
         mtp_unbind_("verify feed failed (kv cap or forward error)");
 }
 
+// Bind req's first prefill chunk (at `offset`) to a head KV slot, resuming over the longest common
+// prefix of the slot's fed history and this prompt (multi-turn agent loops re-send the prior turn
+// verbatim, so the cache carries over). false = req drafts nothing; no slot's history is touched.
+bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
+    auto* ws = mtp_ws_storage_.get();
+    const auto& in = req.input_tokens;
+    if (!mtp_slot_available(mtp_active_, mtp_pool_, mtp_pool_.bind_cap, req.id))
+        return false;  // another request holds the head
+    // Past the head KV capacity the feed fails anyway: keep every slot's history.
+    const bool too_long = ws->max_seq_len > 0 && static_cast<int>(in.size()) + mtp_spec_k_ > ws->max_seq_len;
+    const int slot = too_long ? -1 : mtp_acquire_slot_(req, offset);
+    if (slot < 0) {
+        // No slot covers the prefix-cache resume (or none is free): draft nothing, wipe no history.
+        if (mtp_pool_.declined_req != req.id && (offset > 0 || too_long))
+            IMP_LOG_INFO("mtp-spec: no head cache covers req %d's prefix-cache resume at %d (%s)", req.id,
+                         offset,
+                         too_long ? "prompt exceeds the head KV capacity" : "no slot history reaches it");
+        mtp_pool_.declined_req = req.id;
+        return false;
+    }
+    mtp_activate_(-1);
+    imp::mtp_select_slot(*ws, slot);
+    mtp_active_.history = mtp_pool_.slot_history[static_cast<size_t>(slot)];
+    size_t L = 0;
+    while (L < mtp_active_.history.size() && L < in.size() && mtp_active_.history[L] == in[L])
+        ++L;
+    const int keep_pairs = std::max(0, static_cast<int>(L) - 1);
+    ws->mtp_pos = std::min(ws->mtp_pos, keep_pairs);
+    if (mtp_active_.history.size() > static_cast<size_t>(ws->mtp_pos) + 1)
+        mtp_active_.history.resize(static_cast<size_t>(ws->mtp_pos) + 1);
+    mtp_active_.req = req.id;
+    mtp_active_.stale_logged = false;
+    mtp_active_.pending.clear();
+    mtp_active_.chains.clear();
+    mtp_active_.draft_ctx = -1;
+    mtp_active_.econ_verifies = 0;
+    mtp_active_.econ_emitted = 0;
+    mtp_active_.econ_rows = 0;
+    mtp_active_.k_live = mtp_spec_k_;
+    if (!mtp_active_.history.empty() && ws->mtp_pos > 0)
+        return true;
+    // Nothing usable carried over, restart the cache. Pair 0 needs
+    // h_0, so the prompt must actually be forwarded from position 0.
+    ws->mtp_pos = 0;
+    mtp_active_.history.clear();
+    if (offset == 0 && !in.empty()) {
+        mtp_active_.history.push_back(in[0]);
+        return true;
+    }
+    mtp_unbind_("prefix-cache gap without matching MTP history");
+    return false;
+}
+
 void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_len,
                                     int next_token) {
     if (!mtp_feed_wanted_(req))
@@ -611,47 +663,11 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
     auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
 
-    // (Re)bind on this request's first chunk: resume over the longest common
-    // prefix of the slot's fed history and this prompt (multi-turn agent loops
-    // re-send the prior turn verbatim, so the cache carries over). A later chunk of a parked request only swaps its binding back in.
-    if (mtp_active_.req != req.id && mtp_bound(mtp_active_, mtp_pool_, req.id)) {
+    // A later chunk of a parked request only swaps its binding back in.
+    if (mtp_active_.req != req.id && mtp_bound(mtp_active_, mtp_pool_, req.id))
         mtp_activate_(req.id);
-    } else if (mtp_active_.req != req.id) {
-        const int slot = mtp_acquire_slot_(req);
-        if (slot < 0)
-            return;  // no KV slot for this request: it drafts nothing
-        mtp_activate_(-1);
-        imp::mtp_select_slot(*ws, slot);
-        mtp_active_.history = mtp_pool_.slot_history[static_cast<size_t>(slot)];
-        size_t L = 0;
-        while (L < mtp_active_.history.size() && L < in.size() && mtp_active_.history[L] == in[L])
-            ++L;
-        const int keep_pairs = std::max(0, static_cast<int>(L) - 1);
-        ws->mtp_pos = std::min(ws->mtp_pos, keep_pairs);
-        if (mtp_active_.history.size() > static_cast<size_t>(ws->mtp_pos) + 1)
-            mtp_active_.history.resize(static_cast<size_t>(ws->mtp_pos) + 1);
-        mtp_active_.req = req.id;
-        mtp_active_.stale_logged = false;
-        mtp_active_.pending.clear();
-        mtp_active_.chains.clear();
-        mtp_active_.draft_ctx = -1;
-        mtp_active_.econ_verifies = 0;
-        mtp_active_.econ_emitted = 0;
-        mtp_active_.econ_rows = 0;
-        mtp_active_.k_live = mtp_spec_k_;
-        if (mtp_active_.history.empty() || ws->mtp_pos == 0) {
-            // Nothing usable carried over, restart the cache. Pair 0 needs
-            // h_0, so the prompt must actually be forwarded from position 0.
-            ws->mtp_pos = 0;
-            mtp_active_.history.clear();
-            if (offset == 0 && !in.empty()) {
-                mtp_active_.history.push_back(in[0]);
-            } else {
-                mtp_unbind_("prefix-cache gap without matching MTP history");
-                return;
-            }
-        }
-    }
+    else if (mtp_active_.req != req.id && !mtp_bind_prompt_(req, offset))
+        return;
 
     // Pair i consumes h_i; this chunk holds h_i for i in [offset,
     // offset+chunk_len). Resume at the cache position.
@@ -882,17 +898,20 @@ bool Engine::enable_mtp_spec_decode(int k) {
     mtp_ws_storage_.reset(ws.release());
     const imp::MtpDraftWorkspace& live = *mtp_ws_storage_;  // ws is null after release()
     mtp_spec_k_ = k;
+    mtp_pool_.bind_cap = mtp_bind_cap(runtime_config_, model_.get(), config_.max_batch_size);
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
     mtp_pool_.slot_history.clear();
     mtp_pool_.initialized = false;
     IMP_LOG_INFO(
         "MTP spec-decode enabled (k=%d, hidden=%d, vocab=%d, experts=%d/top%d, d_ff_e=%d, "
-        "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d x %d slot(s), rope=%g/%d/%s, "
-        "mrope=[%d,%d,%d])",
+        "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d x %d slot(s) = %.1f MiB K+V, "
+        "rope=%g/%d/%s, mrope=[%d,%d,%d])",
         k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff, mtp_num_heads,
-        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, live.n_kv_slots, live.rope_theta, live.rope_dim,
-        live.rope_neox ? "neox" : "interleaved", live.mrope_sec0, live.mrope_sec1, live.mrope_sec2);
+        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, live.n_kv_slots,
+        2.0 * static_cast<double>(live.kv_slot_elems) * live.n_kv_slots * sizeof(__half) / (1024.0 * 1024.0),
+        live.rope_theta, live.rope_dim, live.rope_neox ? "neox" : "interleaved", live.mrope_sec0,
+        live.mrope_sec1, live.mrope_sec2);
     return true;
 }
 void Engine::mtp_accuracy_reset() noexcept {

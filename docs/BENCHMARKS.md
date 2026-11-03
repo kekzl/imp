@@ -150,6 +150,20 @@ Default `imp-server` (no `--max-batch`, auto batch), fresh server per arm, 3 alt
 - 1 stream +35.5 %, 70.0 % of drafts accepted (2552 / 3644); c4 -0.47 % (all 3 pairs lower, 900-token c4 +0.4 % in one pair), c32 -0.07 % (pairs mixed sign).
 - Forcing the head on main cost c32 45 %: the auto batch charged it at recurrent-state price (32 -> 17 slots). Without that charge the head comes out of the KV pool: 15651 -> 13230 blocks (all 32 slots fit 7825 -> 6615 tokens), own peak +2773 MiB.
 
+### MTP across chat turns (`speculative.mtp_history_slots`)
+
+Default `imp-server`, fresh server per arm, 3 alternating pairs, 6 user turns x up to 1500 tokens per conversation (`mtp_multiturn_probe.py`, thinking on, the assistant turn sent back as `content` only), follow-up = turns 2-6, tok/s = (completion tokens - 1) / stream time. On main the side request or the other chat overwrote the one head KV slot and the next turn's prefix-cache resume (464-2272 cached tokens) unbound the head (`hidden gap before chunk`: 34 per arm on main, 0 here).
+
+[PROV: commit=eb178985 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_multiturn_ab.sh` n=3 pairs
+       note=main vs this branch, images built from each tree; harness_md5=bd8d987066a2 probe_md5=d742d48b6488; raw summaries docs/audit/qwen38_mtp_history_slots_2026_11_03/]
+
+| conversation | main follow-up tok/s | this branch | turns drafting, main -> this branch |
+|---|---:|---:|---|
+| greedy | 119.93 (119.75-120.08) | 119.60 (118.73-120.07) | 15/15 -> 15/15 |
+| sampled | 112.60 (112.25-112.90) | 112.71 (112.16-113.00) | 15/15 -> 15/15 |
+| greedy + UI side request | 101.88 (101.27-102.25) | **122.28** (121.84-122.53) | 3/15 -> 15/15 |
+| two chats alternating | 101.52 (101.16-101.75) | **117.43** (117.23-117.68) | 6/30 -> 30/30 |
+
 ## imp vs vLLM at concurrency
 
 Same 19.6 GiB compressed-tensors NVFP4 checkpoint on both engines (`imp-quantize --format vllm`

@@ -1063,7 +1063,9 @@ private:
     MtpBind mtp_active_;  // the active binding (req >= 0)
     MtpBindPool mtp_pool_;
     void mtp_activate_(int req_id);   // park the active one, load req_id's (must be bound)
-    int mtp_acquire_slot_(const Request& req);  // free slot with the longest history prefix, -1 = none
+    int mtp_acquire_slot_(const Request& req, int offset);  // mtp_pick_slot over the free slots, -1 = none
+    // First prefill chunk takes a head slot; false = the request drafts nothing.
+    [[nodiscard]] bool mtp_bind_prompt_(const Request& req, int offset);
     void mtp_release_(int req_id);    // request end: binding dropped, slot freed, history kept
     // After a batched verify: one ragged head pass over every bound
     // request's emitted (token, hidden-row) pairs, then one LM-head pass over

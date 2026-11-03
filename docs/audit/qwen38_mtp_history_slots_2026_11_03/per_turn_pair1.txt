@@ -1,0 +1,48 @@
+p1_main_side.txt:p1_main_side c0 turn1 prompt 90 cached 0 gen 1500 ttft_ms 26 tps 117.23 drafted 1186 accepted 740 finish length max_run 1 ok
+p1_main_side.txt:p1_main_side side1 prompt 503 cached 0 gen 107
+p1_main_side.txt:p1_main_side c0 turn2 prompt 503 cached 0 gen 1500 ttft_ms 71 tps 125.42 drafted 1140 accepted 810 finish length max_run 1 ok
+p1_main_side.txt:p1_main_side side2 prompt 907 cached 464 gen 105
+p1_main_side.txt:p1_main_side c0 turn3 prompt 908 cached 464 gen 1500 ttft_ms 76 tps 96.70 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_side.txt:p1_main_side side3 prompt 1308 cached 864 gen 106
+p1_main_side.txt:p1_main_side c0 turn4 prompt 1314 cached 864 gen 1500 ttft_ms 68 tps 96.43 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_side.txt:p1_main_side side4 prompt 1708 cached 1264 gen 109
+p1_main_side.txt:p1_main_side c0 turn5 prompt 1719 cached 1280 gen 1500 ttft_ms 69 tps 96.17 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_side.txt:p1_main_side side5 prompt 2107 cached 1664 gen 112
+p1_main_side.txt:p1_main_side c0 turn6 prompt 2125 cached 1680 gen 1463 ttft_ms 70 tps 95.88 drafted 0 accepted 0 finish stop max_run 1 ok
+p1_main_side.txt:p1_main_side side6 prompt 2470 cached 2064 gen 116
+p1_main_convs2.txt:p1_main_convs2 c0 turn1 prompt 103 cached 0 gen 1500 ttft_ms 29 tps 116.09 drafted 1214 accepted 718 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn1 prompt 106 cached 0 gen 1500 ttft_ms 27 tps 122.53 drafted 1161 accepted 772 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c0 turn2 prompt 516 cached 0 gen 1500 ttft_ms 72 tps 117.76 drafted 1166 accepted 768 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn2 prompt 518 cached 0 gen 1500 ttft_ms 72 tps 128.75 drafted 1127 accepted 825 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c0 turn3 prompt 924 cached 480 gen 1500 ttft_ms 75 tps 96.68 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn3 prompt 926 cached 480 gen 1500 ttft_ms 68 tps 96.68 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c0 turn4 prompt 1330 cached 880 gen 1500 ttft_ms 68 tps 96.39 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn4 prompt 1332 cached 880 gen 1500 ttft_ms 69 tps 96.39 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c0 turn5 prompt 2336 cached 1296 gen 1500 ttft_ms 118 tps 95.82 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn5 prompt 1944 cached 1296 gen 1500 ttft_ms 81 tps 96.02 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c0 turn6 prompt 2742 cached 2288 gen 1500 ttft_ms 72 tps 96.23 drafted 0 accepted 0 finish length max_run 1 ok
+p1_main_convs2.txt:p1_main_convs2 c1 turn6 prompt 2350 cached 1904 gen 1288 ttft_ms 82 tps 95.71 drafted 0 accepted 0 finish stop max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn1 prompt 103 cached 0 gen 1500 ttft_ms 28 tps 116.13 drafted 1214 accepted 718 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn1 prompt 106 cached 0 gen 1500 ttft_ms 27 tps 122.31 drafted 1161 accepted 772 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn2 prompt 516 cached 0 gen 1500 ttft_ms 74 tps 121.13 drafted 1152 accepted 787 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn2 prompt 518 cached 0 gen 1500 ttft_ms 82 tps 129.22 drafted 1125 accepted 826 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn3 prompt 923 cached 480 gen 1500 ttft_ms 69 tps 127.55 drafted 1116 accepted 840 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn3 prompt 923 cached 480 gen 898 ttft_ms 78 tps 131.22 drafted 671 accepted 503 finish stop max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn4 prompt 1328 cached 880 gen 1500 ttft_ms 73 tps 113.63 drafted 1179 accepted 760 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn4 prompt 1257 cached 880 gen 577 ttft_ms 68 tps 110.28 drafted 457 accepted 284 finish stop max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn5 prompt 1732 cached 1280 gen 1500 ttft_ms 75 tps 96.17 drafted 21 accepted 8 finish length max_run 2 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn5 prompt 1710 cached 1216 gen 1500 ttft_ms 74 tps 113.21 drafted 1165 accepted 773 finish length max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c0 turn6 prompt 2138 cached 1696 gen 977 ttft_ms 73 tps 111.84 drafted 751 accepted 514 finish stop max_run 1 ok
+p1_new_convs2.txt:p1_new_convs2 c1 turn6 prompt 2116 cached 1664 gen 596 ttft_ms 73 tps 122.54 drafted 446 accepted 332 finish stop max_run 1 ok
+p1_new_side.txt:p1_new_side c0 turn1 prompt 90 cached 0 gen 1500 ttft_ms 26 tps 117.33 drafted 1186 accepted 740 finish length max_run 1 ok
+p1_new_side.txt:p1_new_side side1 prompt 503 cached 0 gen 107
+p1_new_side.txt:p1_new_side c0 turn2 prompt 503 cached 0 gen 1500 ttft_ms 71 tps 125.50 drafted 1140 accepted 810 finish length max_run 1 ok
+p1_new_side.txt:p1_new_side side2 prompt 907 cached 464 gen 116
+p1_new_side.txt:p1_new_side c0 turn3 prompt 908 cached 464 gen 1500 ttft_ms 70 tps 131.41 drafted 1100 accepted 857 finish length max_run 1 ok
+p1_new_side.txt:p1_new_side side3 prompt 1307 cached 864 gen 111
+p1_new_side.txt:p1_new_side c0 turn4 prompt 1313 cached 864 gen 1500 ttft_ms 72 tps 122.00 drafted 1130 accepted 819 finish length max_run 1 ok
+p1_new_side.txt:p1_new_side side4 prompt 1705 cached 1264 gen 113
+p1_new_side.txt:p1_new_side c0 turn5 prompt 1716 cached 1280 gen 1500 ttft_ms 75 tps 111.06 drafted 1162 accepted 771 finish length max_run 1 ok
+p1_new_side.txt:p1_new_side side5 prompt 2104 cached 1664 gen 114
+p1_new_side.txt:p1_new_side c0 turn6 prompt 2122 cached 1680 gen 1410 ttft_ms 73 tps 122.42 drafted 1049 accepted 795 finish stop max_run 1 ok
+p1_new_side.txt:p1_new_side side6 prompt 2469 cached 2064 gen 115

@@ -6,6 +6,7 @@
 
 #include "memory/host_pinned.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -87,6 +88,10 @@ struct MtpBindPool {
     std::vector<int> free_slots;
     bool initialized = false;
     std::vector<std::vector<int32_t>> slot_history;  // per KV slot: tokens its cache covers
+    std::vector<uint64_t> slot_used;                 // per KV slot: last acquire stamp (LRU), 0 = never
+    uint64_t use_clock = 0;
+    int bind_cap = 1;       // requests bound at once: mtp_bind_cap(); the other slots only keep history
+    int declined_req = -1;  // last request refused a slot (one log line, not one per prefill chunk)
     // Margin-gate tallies (mtp_tree_width > 1) and the legacy one-step
     // prediction the accuracy counter scores.
     long long tree_branched = 0;
@@ -99,16 +104,51 @@ struct MtpBindPool {
     return req_id >= 0 && (active.req == req_id || pool.binds.contains(req_id));
 }
 
-// Would req_id's prompt take a head KV slot (mtp_acquire_slot_): bound already, a free slot, or a
-// parked binding to evict. The ACTIVE binding never yields its slot, so a prompt arriving behind it
-// drafts nothing and may ride the ragged prefill forward instead of the serial one.
-[[nodiscard]] inline bool mtp_slot_available(const MtpBind& active, const MtpBindPool& pool, int n_slots,
+// Would req_id's prompt take a head KV slot (mtp_acquire_slot_): bound already, fewer than bind_cap
+// requests bound, or a parked binding to evict. The ACTIVE binding never yields its slot, so a prompt
+// arriving behind it drafts nothing and may ride the ragged prefill forward instead of the serial one.
+// History-only slots (bind_cap < slots) never let a second request bind.
+[[nodiscard]] inline bool mtp_slot_available(const MtpBind& active, const MtpBindPool& pool, int bind_cap,
                                              int req_id) {
     if (mtp_bound(active, pool, req_id))
         return true;
-    if (!pool.initialized)
-        return active.req < 0 || n_slots > 1;
-    return !pool.free_slots.empty() || !pool.binds.empty();
+    const int held = (active.req >= 0 ? 1 : 0) + static_cast<int>(pool.binds.size());
+    return held < bind_cap || !pool.binds.empty();
+}
+
+// Head-cache resume shorter than this on a fresh prompt (prefix-cache offset 0) is not worth a slot
+// whose history another chat may still resume: the chat template's first tokens match every slot.
+inline constexpr int kMtpResumeMinPairs = 64;
+
+// Head KV slot for a prompt whose prefill starts at `offset` (prefix-cache hit), or -1. A slot resumes
+// at min(pos, L - 1) pairs, L = common prefix of its history and the prompt; pairs below `offset` need
+// hidden rows the cached prefix never forwarded, so offset > 0 takes only a slot that covers it (-1 =
+// draft nothing and leave every history intact). Longest resume wins; a fresh prompt without a
+// kMtpResumeMinPairs resume takes the least recently used slot.
+struct MtpSlotCand {
+    int pos = 0;                                    // pairs its head KV holds
+    const std::vector<int32_t>* history = nullptr;  // tokens t_0..t_pos
+    uint64_t last_use = 0;
+};
+[[nodiscard]] inline int mtp_pick_slot(const std::vector<MtpSlotCand>& cands, const std::vector<int32_t>& in,
+                                       int offset) {
+    int best = -1, best_r = -1, lru = -1;
+    for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
+        const auto& h = *cands[i].history;
+        size_t L = 0;
+        while (L < h.size() && L < in.size() && h[L] == in[L])
+            ++L;
+        const int r = L > 0 ? std::min(cands[i].pos, static_cast<int>(L) - 1) : -1;
+        if (r > best_r || (r == best_r && best >= 0 && cands[i].last_use < cands[best].last_use)) {
+            best = i;
+            best_r = r;
+        }
+        if (lru < 0 || cands[i].last_use < cands[lru].last_use)
+            lru = i;
+    }
+    if (offset > 0)
+        return best_r >= offset ? best : -1;
+    return best_r >= kMtpResumeMinPairs ? best : lru;
 }
 
 // A prompt takes the head when it prefills alone (a lone chat) or already holds it; the prompts of
@@ -136,9 +176,12 @@ class Model;
 // refusal clears the flag, and everything downstream reads this, not the flag.
 [[nodiscard]] bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
-// MTP draft KV slots: one per batch slot whenever the batched verify runs, else 1.
+// MTP draft KV slots: one per batch slot whenever the batched verify runs, else
+// speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
 // Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes
 // that 0, and the pool fell to 1 slot (1 draft per verify step at 24 streams).
 int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// Requests bound to the head at once: one per batch slot under the batched verify, else 1.
+int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 
 }  // namespace imp

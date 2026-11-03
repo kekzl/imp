@@ -23,16 +23,22 @@ TEST(BatchVerifyPredicates, FactoredSpareKeepsOneMtpSlotPerBatchSlot) {
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 24), 24);
 }
 
-TEST(BatchVerifyPredicates, OneMtpSlotWhenTheBatchedVerifyDoesNotRun) {
+TEST(BatchVerifyPredicates, HistorySlotsWhenTheBatchedVerifyDoesNotRun) {
     Model hybrid;
     hybrid.config_.ssm_inner_size = 6144;
     RuntimeConfig cfg;
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), 1);  // batch_verify off
+    const int h = cfg.speculative.mtp_history_slots;
+    EXPECT_EQ(h, 4);
+    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), h);  // batch_verify off
+    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 1) << "history slots never bind a second request";
     cfg.speculative.batch_verify = true;
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 1), 1);  // batch of one
+    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 1), h);  // batch of one
+    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 24);
     Model dense;                                        // no recurrent state
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &dense, 24), 1);
+    EXPECT_EQ(mtp_draft_kv_slots(cfg, &dense, 24), h);
     cfg.speculative.hybrid = false;
+    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), h);
+    cfg.speculative.mtp_history_slots = 0;
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), 1);
 }
 
@@ -68,6 +74,57 @@ TEST(BatchVerifyPredicates, OnlyALonePromptTakesTheHead) {
 TEST(BatchVerifyPredicates, HeadCacheBehindAfterBatchedDecode) {
     EXPECT_FALSE(mtp_cache_behind(120, 120));
     EXPECT_TRUE(mtp_cache_behind(120, 135));
+}
+
+// Four head slots, bind cap 1: free history slots never let a prompt bind behind the active one.
+TEST(BatchVerifyPredicates, HistorySlotsDoNotBindASecondRequest) {
+    MtpBind active;
+    MtpBindPool pool;
+    pool.initialized = true;
+    pool.free_slots = {1, 2, 3};
+    active.req = 7;
+    EXPECT_FALSE(mtp_slot_available(active, pool, /*bind_cap=*/1, 8));
+    EXPECT_TRUE(mtp_slot_available(active, pool, /*bind_cap=*/4, 8)) << "batched verify: one per batch slot";
+    active.req = -1;
+    EXPECT_TRUE(mtp_slot_available(active, pool, 1, 8));
+}
+
+std::vector<int32_t> seq(int from, int n) {
+    std::vector<int32_t> v(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        v[static_cast<size_t>(i)] = from + i;
+    return v;
+}
+
+// Chat A (slot 0) decoded 1500 tokens over a 900-token prompt; a UI task request between two turns
+// shares only the template's first tokens with it. Qwen3.8-27B on main: the task request took A's only
+// slot and every later turn of A decoded without drafts (96 vs 120 tok/s).
+TEST(BatchVerifyPredicates, PickSlotKeepsAChatsHeadCacheAcrossASideRequest) {
+    const auto a_hist = seq(0, 2400);  // turn-3 transcript: prompt 0..899 + answer
+    std::vector<int32_t> empty;
+    std::vector<MtpSlotCand> c = {{.pos = 2399, .history = &a_hist, .last_use = 1},
+                                  {.pos = 0, .history = &empty, .last_use = 0}};
+    auto side = seq(0, 3);  // "<|im_start|>user\n" shared, then the task text
+    side.insert(side.end(), 500, 99999);
+    EXPECT_EQ(mtp_pick_slot(c, side, 0), 1) << "a 2-pair resume is not worth chat A's history";
+    // A's next turn: the template dropped the old thinking, so the match ends at the old prompt
+    // (900 tokens); the prefix cache resumes at its block-aligned snapshot 864.
+    auto a_next = seq(0, 900);
+    a_next.insert(a_next.end(), 600, 77777);
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 864), 0);
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 0), 0) << "a long resume wins on a fresh prompt too";
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 899), 0) << "resume min(pos, L - 1) = 899 covers offset 899";
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 900), -1) << "pair 899 needs h_899, the prefix never forwarded it";
+    // The side request took slot 1; its history is no match for A, the decline keeps slot 0 intact.
+    const auto side_hist = side;
+    c[1] = {.pos = 502, .history = &side_hist, .last_use = 2};
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 864), 0);
+    // A second chat B (fresh, short shared prefix) takes the least recently used slot, not A's.
+    auto b = seq(0, 3);
+    b.insert(b.end(), 200, 55555);
+    EXPECT_EQ(mtp_pick_slot(c, b, 0), 0) << "slot 0 is the LRU one here";
+    c[0].last_use = 3;
+    EXPECT_EQ(mtp_pick_slot(c, b, 0), 1);
 }
 
 }  // namespace

@@ -1203,6 +1203,11 @@ mtp_k                = -1
 # stream 96.87 -> 131.28 tok/s, c32 unchanged, own peak VRAM +2773 MiB.
 # false = concurrent servers leave the head unloaded (the rule before).
 mtp_concurrent       = true
+# MTP head KV slots when the batched verify is off: one request binds, the
+# others keep other chats' head caches, so a chat UI's title / follow-up
+# request between two turns no longer wipes it and the next turn drafts over
+# its prefix-cache hit. 64 MiB per slot on Qwen3.8-27B-NVFP4; 1 = one slot.
+mtp_history_slots    = 4
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.
