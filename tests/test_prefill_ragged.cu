@@ -298,6 +298,9 @@ TEST_F(RaggedPrefillTest, FfnGraphReplayMatchesEagerRows) {
     gemm_init();
     RuntimeConfig rc = ragged_runtime_config(/*prefill_batch=*/true);
     rc.runtime.prefill_ffn_graph = true;
+    // With the startup prefill-graph prewarm (#3017) the first wave already counted 60 FFN replays:
+    // off, so the first wave is the first sighting the capture lifecycle is measured from.
+    rc.runtime.prefill_graph_prewarm = 0;
     set_pending_runtime_config(rc);
     EngineConfig cfg = ragged_engine_config();
     cfg.use_cuda_graphs = true;

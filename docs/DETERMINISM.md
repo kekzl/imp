@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-02
-commit: 2c10bbe2
+verified: 2026-11-03
+commit: 006238cc
 -->
 
 # Determinism
@@ -80,6 +80,7 @@ Measured 2026-11-02 on `fix/moe-router-exact-sum`: `degen_suite.py` resend shape
 - Router: `moe_router_fused` summed fp16 k-tile partials in fp32 with a split-K count picked by M (225 rows split 8, 33 rows split 16). It now sums them exactly in int64 units of 2^-24 (`src/compute/moe_router_fused.cu`), `MoeRouterFusedTest.RowsIndependentOfMAndSplit`.
 - NVFP4 tile: 42 rows of Gemma-4's global q_proj (N 8192) ran split-2 stream-K, 218 rows data-parallel. `gemm.nvfp4_prompt_streamk=auto` keeps prompt rows (M >= 33) data-parallel on MoE, `Nvfp4PromptStreamK.PromptRowsInvariantToM`. Real activations often sum exactly in fp32, so the class shows on some prompts only (`MoePrefixHitE2ETest` text: router only).
 - Open: the cuBLAS router from 1024 rows under `gemm.cublas_fp16_acc` (Nemotron-H) and dense NVFP4 prompt stream-K.
+- Open, MLA (DeepSeek-V2-Lite `imp-quantize` export, 2026-11-03, hits 64 then 240, 32-token greedy text equal, logprobs not; `runtime.deterministic` and graphs off: still red): per-stage dumps put the first divergence at layer 0's FP16 `kv_a_proj_with_mqa` (N 576, uncached tier, cuBLASLt split-K 16/9/8/4 by M bucket); hd=192 prefill attention runs materialized cuBLAS, FA2 and FMHA decline hd=192. `MoePrefixHitE2ETest` skips MLA with this reason.
 
 Cost, `imp-cli --bench` (pp512 + tg128, pp4096, `--prefill-chunk-size 0`) and `two_image_conc_ab.sh` conc 16, 3 alternating pairs, medians main -> fix [PROV: commit=2c10bbe2 date=2026-11-02 hw=RTX5090 model=see-table quant=NVFP4 cuda=13.4 path=own-tile cmd=imp-cli-bench n=3]:
 

@@ -7,6 +7,7 @@
 #include "compute/dispatch_record.h"
 #include "core/cuda_errors.h"
 #include "runtime/config.h"
+#include "death_test_exec.h"
 #include "test_alloc_inject.h"
 #include "test_models.h"
 #include <cuda_runtime.h>
@@ -108,7 +109,7 @@ TEST(MoeAllocFailureTest, SmallMPrefillSurvivesFailedAsyncAlloc) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable_if_set(imp_test::kEnvModelNvfp4Moe));
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();
-    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    imp_test::threadsafe_death_tests();
     EXPECT_EXIT(run_smallm_prefill_under_alloc_failure(), ::testing::ExitedWithCode(kChildOk),
                 "alloc-failure contract held");
 }

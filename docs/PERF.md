@@ -174,6 +174,17 @@ sequence, rows 1..31 carry different content at different lengths.
 | A16 config alone, both M=1 | 3.433412 -> 3.429951 | 0.090 | 0.509 | 62/64 |
 | **W4A16 M=1 vs M=32** | 3.429951 -> 3.436889 | **0.021** | 0.130 | 62/64 |
 
+[PROV: commit=006238cc date=2026-11-03 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3
+ path=smallm_v2_a4 vs smallm_v2 FP16 activations cmd="test-e2e --gtest_filter=BatchInvarianceTest.NativeNvfp4DecodeSoloVsBatched" n=1
+ note=before = 0ef06c0a (parent of #3015); #3015 (static NVFP4 act scale) moved every W4A4 arm, #3019 none (5f7291f9 = 006238cc to the last digit)]
+
+| arm (2026-11-03) | mean NLL, before #3015 | mean NLL, main | mean \|delta logprob\| before -> main | top-1 flips of 64 before -> main |
+|---|---|---|---|---|
+| control M=1 vs M=1 | 3.431498 -> 3.431498 | 3.404146 -> 3.404146 | 0 -> 0 | 0 -> 0 |
+| W4A4 M=1 vs M=32 (default) | 3.431498 -> 3.473618 | 3.404146 -> 3.419924 | 0.2490 -> 0.2349 | 5 -> 8 |
+| A16 config alone, both M=1 | 3.431498 -> 3.445663 | 3.404146 -> 3.445663 | 0.0962 -> 0.0895 | 3 -> 1 |
+| W4A16 M=1 vs M=32 | 3.445663 -> 3.447581 | 3.445663 -> 3.447581 | 0.0242 -> 0.0242 | 0 -> 0 |
+
 The control arm is also the test's race detector: between #1954 and the
 2026-09-08 fix it read 1-3 flips of 64 (a stage barrier in the small-M
 pipeline completing before the prefetched weights landed, on the 544-CTA
