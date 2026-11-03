@@ -154,7 +154,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         // Grow for the whole request, not just its prompt: context_len()
                         // is NOW, so growing to exactly that leaves zero decode headroom
                         // and cancels anyway, one block short, after paying for the growth.
-                        cap = kv_manager_->kv_cache()->try_grow_to(blocks_needed + decode_blocks);
+                        cap = kv_manager_->kv_cache()->try_grow_to_now(blocks_needed + decode_blocks);
                     }
                     if (blocks_needed > cap) {
                         IMP_LOG_ERROR(
@@ -252,6 +252,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         continue;
                     }
                 }
+                // kv_cache.grow_ahead_fit_last: the next grow-ahead step covers a request this size.
+                kv_manager_->kv_cache()->note_admitted(admit_blocks);
             }
 
             hold_decode_reservation_(*req);

@@ -11,14 +11,30 @@
 
 namespace imp {
 
+namespace {
+int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
+
+bool KVCache::grow_refused_recently_() const {
+    const int64_t at = grow_refused_at_ns_.load(std::memory_order_relaxed);
+    return grow_retry_ms_ > 0 && at != 0 && steady_ns() - at < static_cast<int64_t>(grow_retry_ms_) * 1000000;
+}
+
 int KVCache::cap_by_free_vram_(int target, int base) {
     // The ceiling was sized from post-weight VRAM at init, before the library reserve and
     // forward scratch were claimed. A VMM commit does not fail when the card is full, it
     // spills into host memory at a fraction of the bandwidth (#1103), so growth is capped at
     // what is free above the headroom NOW; the planned commit stays the floor and nothing is
     // sized from it.
+    const bool wants_more = target > base;
     size_t free_now = 0, total_now = 0;
     const size_t per_block = bytes_per_block();
+    if (per_block > 0)
+        free_vram_queries_.fetch_add(1, std::memory_order_relaxed);
     if (per_block > 0 && vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
         // The reading already excludes what the lazy pools were charged for and
         // have not committed (vram_budget_mem_get_info): this growth is
@@ -37,10 +53,17 @@ int KVCache::cap_by_free_vram_(int target, int base) {
             target = capped;
         }
     }
+    // Nothing affordable: open the retry window, the next reading would say the same.
+    if (wants_more && target <= base)
+        grow_refused_at_ns_.store(steady_ns(), std::memory_order_relaxed);
     return target;
 }
 
-int KVCache::try_grow_to(int wanted) {
+int KVCache::try_grow_to(int wanted) { return try_grow_to_(wanted, /*honor_retry=*/true); }
+
+int KVCache::try_grow_to_now(int wanted) { return try_grow_to_(wanted, /*honor_retry=*/false); }
+
+int KVCache::try_grow_to_(int wanted, bool honor_retry) {
     if (!growable_)
         return blocks_.num_blocks();
     int have = adopt_grown();
@@ -48,6 +71,10 @@ int KVCache::try_grow_to(int wanted) {
         return have;
     int target = std::min(wanted, max_blocks_);
     if (target <= have)
+        return have;
+    // A refused growth a moment ago: one cudaMemGetInfo per block on an empty free list
+    // was the admission wait (Gemma-4 pp8192 at the cap: 504 blocks, 22.5-38.1 ms queue).
+    if (honor_retry && grow_refused_recently_())
         return have;
     // Waits out an in-flight grow-ahead commit, whose blocks may already cover the target.
     std::lock_guard<std::mutex> commit_lock(commit_mu_);
@@ -61,8 +88,10 @@ int KVCache::try_grow_to(int wanted) {
     last_zero_ms_ = 0.0;
     const int got = commit_blocks_(target);
     staged_blocks_.store(committed_blocks_, std::memory_order_release);
-    if (got <= have)
+    if (got <= have) {
+        grow_refused_at_ns_.store(steady_ns(), std::memory_order_relaxed);  // the driver refused
         return have;
+    }
     if (blocks_.grow_slots(got) != MemError::Ok)
         return have;
     const double grow_ms =
@@ -107,8 +136,8 @@ void KVCache::grow_ahead_tick() {
     const int have = adopt_grown();
     if (have >= max_blocks_)
         return;
-    const int step = std::max(64, have / 4);
-    if (blocks_.free_count() >= step)
+    const int step = std::max({64, have / 4, grow_fit_last_ ? last_admit_blocks_ : 0});
+    if (blocks_.free_count() >= step || grow_refused_recently_())
         return;
     {
         std::lock_guard<std::mutex> lk(grow_mu_);
@@ -145,8 +174,10 @@ void KVCache::grow_ahead_loop_() {
         const int got = commit_blocks_(target);
         zero_stream_ = nullptr;
         staged_blocks_.store(committed_blocks_, std::memory_order_release);
-        if (got <= base)
+        if (got <= base) {
+            grow_refused_at_ns_.store(steady_ns(), std::memory_order_relaxed);
             continue;
+        }
         growths_ahead_.fetch_add(1, std::memory_order_relaxed);
         IMP_LOG_INFO(
             "KV cache: grew ahead %d -> %d blocks (%.0f MiB committed of a %d-block ceiling) in "

@@ -53,6 +53,12 @@ struct KVCache {
     // list drops below it, so admission adopts backed blocks instead of waiting for the driver
     // mapping (Qwen3-8B: 35-65 ms per growth, the request's queue time). Same cap as growth.
     bool grow_ahead = true;
+    // Growable pool capped by free VRAM below its ceiling: after a refused growth, skip the
+    // free-VRAM query for this many ms. 0 = query on every block taken from an empty free list.
+    int grow_retry_ms = 100;
+    // Grow-ahead step at least the last admitted request's blocks (prompt + decode reserve), not
+    // only max(64, 25 %): a second prompt of that size finds its blocks committed.
+    bool grow_ahead_fit_last = true;
     // SWA-aware KV sizing: sliding-window layers allocate only the trailing
     // window instead of full-length KV. Auto-disabled for models without SWA,
     // INT8/INT4 KV, hybrids, MLA, StreamingLLM, deterministic mode. Numerically

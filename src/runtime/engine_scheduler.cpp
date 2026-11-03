@@ -665,7 +665,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             // not per byte.
             const int have = kv_cache_raw_->total_blocks();
             if (kv_cache_raw_->ceiling_blocks() > have) {
-                kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
+                kv_cache_raw_->try_grow_to_now(have + std::max(64, have / 4));
                 new_block = kv_manager_->append_block(req->id);
             }
         }
