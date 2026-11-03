@@ -1214,6 +1214,12 @@ mtp_history_slots    = 4
 # again once one decodes alone and keep their head caches for the next turn.
 # false = one binding, a batched step unbinds it (the rule before).
 mtp_carry            = true
+# With mtp_carry: while at most this many requests decode (capped at
+# mtp_history_slots), one forward verifies every bound request's MTP draft (2
+# rows per request; one spare recurrent slot per row, 79.5 MiB each on
+# Qwen3.8-27B, charged in the KV plan); a bigger batch decodes plain.
+# 0 = plain batched decode at any batch > 1.
+mtp_batch_verify     = 0
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

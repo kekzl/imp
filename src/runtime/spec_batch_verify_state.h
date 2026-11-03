@@ -22,6 +22,10 @@ struct BatchVerifyState {
     int cap_seq = 0;
     int cap_rows = 0;
     int table_cap = 0;
+    bool bound_only = false;  // speculative.mtp_batch_verify: cap_seq = its rows, bound rows draft
+    // Pipelined plain steps between two bound-verify attempts: 1 after a verify, doubling to 64 per decline.
+    int yield_every = 1;
+    int since_yield = 0;
     int32_t* d_stage = nullptr;
     int32_t* d_row_tables = nullptr;
     int32_t* d_argmax = nullptr;
@@ -184,13 +188,22 @@ class Model;
 [[nodiscard]] bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
 // Reserved recurrent slots the batched verify adds to the pool: one per
 // batch slot, 0 when off or at batch 1.
-// Whether the batched verify needs its staging buffers. Separate from the
-// spare-slot count because the factored form reserves no slots and still runs.
+// Whether the batched verify needs its staging buffers (the full batch_verify or the bound one). Separate
+// from the spare-slot count because the factored form reserves no slots and still runs.
 [[nodiscard]] bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // The factored path is live only once its rows exist: a geometry or allocation
 // refusal clears the flag, and everything downstream reads this, not the flag.
 [[nodiscard]] bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// speculative.mtp_batch_verify: the most decoding requests whose bound members verify their MTP draft in one
+// batched step (slot-swapping spares, one per row), 0 = never. Off under the full batch_verify, without a
+// loaded head or the carry (one binding), on a model without the grouped verify scan, at batch 1.
+[[nodiscard]] int mtp_bound_verify_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// Every decoding row is no wider than the bound verify takes, and the verify pays: at least one row drafts
+// and drafted rows are at least half the batch (an undrafted row forwards a pad that is never accepted).
+[[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted) {
+    return rows_cap >= 2 && decoding >= 2 && decoding <= rows_cap && drafted >= 1 && 2 * drafted >= decoding;
+}
 // MTP draft KV slots: one per batch slot whenever the batched verify runs, else
 // speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
 // Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes

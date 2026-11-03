@@ -189,6 +189,10 @@ struct Speculative {
     // batched decode steps feed its head slot in 256-row passes, so it drafts again once it decodes alone
     // and its chat's next turn resumes the head cache. false = one binding, a batched step unbinds it.
     bool mtp_carry = true;
+    // With mtp_carry: while at most this many requests decode (capped at mtp_history_slots), one
+    // forward verifies every bound request's MTP draft (2 rows per request, one spare recurrent slot
+    // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
+    int mtp_batch_verify = 0;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

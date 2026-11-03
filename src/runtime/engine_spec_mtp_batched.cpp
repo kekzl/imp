@@ -41,6 +41,8 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     std::vector<int> src, slots, pos, last_row, bound_g;
     for (int g = 0; g < N; ++g) {
         Request& req = *reqs[g];
+        // Plain batched steps before this verify (speculative.mtp_batch_verify); a failed feed unbinds.
+        mtp_carry_flush_(req);
         if (emitted[g] <= 0 || req.status != RequestStatus::DECODING ||
             !mtp_bound(mtp_active_, mtp_pool_, req.id))
             continue;
@@ -183,7 +185,7 @@ void Engine::mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, 
     }
 }
 
-void Engine::mtp_carry_flush_(const Request& req) {
+void Engine::mtp_carry_flush_(const Request& req, int draft_k) {
     auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr || ws->d_carry == nullptr || !mtp_bound(mtp_active_, mtp_pool_, req.id))
         return;
@@ -208,7 +210,13 @@ void Engine::mtp_carry_flush_(const Request& req) {
     const size_t row_bytes = static_cast<size_t>(imp::mtp_h_prev_cols(*ws)) * sizeof(__half);
     char* base = static_cast<char*>(ws->d_carry) +
                  (static_cast<size_t>(ws->cur_slot) * ws->carry_rows_cap * row_bytes);
-    if (!mtp_feed_pairs_(toks.data(), base, n, /*chain_after=*/false)) {
+    // The last carried row is h_{P-1} of context end P, so pair (t_P, h_{P-1}) drafts the token at P + 1.
+    const bool draft = draft_k > 0 && left == 0 && req.status == RequestStatus::DECODING;
+    const int k_live = mtp_active_.k_live;  // the chain depth the request's next lone verify resumes at
+    mtp_active_.k_live = draft ? draft_k : k_live;
+    const bool fed = mtp_feed_pairs_(toks.data(), base, n, /*chain_after=*/draft);
+    mtp_active_.k_live = k_live;
+    if (!fed) {
         mtp_unbind_("carried feed failed (kv cap or forward error)");
         return;
     }

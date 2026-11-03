@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "model/model.h"
+#include "model/mtp_head.h"
 #include "runtime/config.h"
 #include "runtime/spec_batch_verify_state.h"
 
@@ -153,6 +154,67 @@ TEST(BatchVerifyPredicates, PickSlotKeepsAChatsHeadCacheAcrossASideRequest) {
     EXPECT_EQ(mtp_pick_slot(c, b, 0), 0) << "slot 0 is the LRU one here";
     c[0].last_use = 3;
     EXPECT_EQ(mtp_pick_slot(c, b, 0), 1);
+}
+
+// speculative.mtp_batch_verify: two to four chats decoding on a default Qwen3.8-27B server verify their bound
+// drafts in one step; the head keeps its history slots and the carry, one slot-swapping spare per row.
+TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
+    Model m;
+    m.config_.ssm_inner_size = 6144;
+    m.mtp_ = std::make_unique<MtpHead>();
+    m.mtp_->loaded = true;
+    RuntimeConfig cfg;
+    cfg.speculative.mtp_batch_verify = 4;
+    const int h = cfg.speculative.mtp_history_slots;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "slot-swapping spares, one per row";
+    EXPECT_TRUE(batch_verify_wants_bufs(cfg, &m, 32));
+    EXPECT_FALSE(batch_verify_on(cfg, &m)) << "the full batch_verify stays off";
+    EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 32), h) << "not one head KV slot per batch slot";
+    EXPECT_EQ(mtp_bind_cap(cfg, &m, 32), h);
+    EXPECT_EQ(mtp_carry_rows(cfg, &m, 32), kMtpCarryRows) << "plain steps above the rows still carry";
+    cfg.speculative.factored_spare = true;
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "a factored row needs every next step to apply it";
+    cfg.speculative.mtp_batch_verify = 8;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), h) << "capped at the requests that can bind";
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 3), 3);
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 1), 0) << "batch of one: the single verify";
+    cfg.speculative.mtp_batch_verify = 1;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0);
+    EXPECT_FALSE(batch_verify_wants_bufs(cfg, &m, 32));
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 0);
+    cfg.speculative.mtp_batch_verify = 4;
+    cfg.speculative.mtp_carry = false;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "one binding: nothing to batch";
+    cfg.speculative.mtp_carry = true;
+    cfg.speculative.mtp_k = 0;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "imp-cli --bench pins mtp_k=0: no spares priced";
+    cfg.speculative.mtp_k = -1;
+    m.mtp_->loaded = false;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "no head, no spares";
+    m.mtp_->loaded = true;
+    cfg.speculative.batch_verify = true;
+    cfg.speculative.factored_spare = false;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "the full batch_verify owns the step";
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 32);
+    cfg.speculative.batch_verify = false;
+    Model dense;
+    dense.mtp_ = std::make_unique<MtpHead>();
+    dense.mtp_->loaded = true;
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &dense, 32), 0) << "no grouped verify scan to batch";
+}
+
+// An undrafted row forwards a pad that is never accepted: half the rows must draft.
+TEST(BatchVerifyPredicates, BoundVerifyRunsWhenHalfTheRowsDraft) {
+    EXPECT_TRUE(mtp_bound_verify_fits(4, 2, 1));
+    EXPECT_TRUE(mtp_bound_verify_fits(4, 2, 2));
+    EXPECT_FALSE(mtp_bound_verify_fits(4, 3, 1));
+    EXPECT_TRUE(mtp_bound_verify_fits(4, 3, 2));
+    EXPECT_TRUE(mtp_bound_verify_fits(4, 4, 2));
+    EXPECT_FALSE(mtp_bound_verify_fits(4, 5, 5)) << "above the rows: plain batched decode";
+    EXPECT_FALSE(mtp_bound_verify_fits(4, 2, 0));
+    EXPECT_FALSE(mtp_bound_verify_fits(4, 1, 1)) << "a lone request takes the single verify";
+    EXPECT_FALSE(mtp_bound_verify_fits(0, 2, 2)) << "off";
 }
 
 }  // namespace
