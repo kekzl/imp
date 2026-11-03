@@ -163,6 +163,7 @@ Default `imp-server`, fresh server per arm, 3 alternating pairs, 6 user turns x 
 | sampled | 112.60 (112.25-112.90) | 112.71 (112.16-113.00) | 15/15 -> 15/15 |
 | greedy + UI side request | 101.88 (101.27-102.25) | **122.28** (121.84-122.53) | 3/15 -> 15/15 |
 | two chats alternating | 101.52 (101.16-101.75) | **117.43** (117.23-117.68) | 6/30 -> 30/30 |
+| 6 fresh chats x 400, 1 stream (`mtp_concurrent_ab.sh`, 5 pairs) | 131.06 (130.34-131.41) | 130.95 (130.49-131.53) | c4 338.64 -> 338.14, c32 2022.6 -> 2018.2 (pairs mixed sign), own peak +162 to +219 MiB |
 
 ## imp vs vLLM at concurrency
 

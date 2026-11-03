@@ -1,0 +1,10 @@
+degen_suite rc=0
+multiturn_deep rc=0
+stderr hits 0
+declines 1
+============================================================
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (57s)
+report written to /out/suite.json
+  74  wrapup        6361    45    0.6  ok
+
+MULTITURN: all 74 turns clean, context grew to see table
