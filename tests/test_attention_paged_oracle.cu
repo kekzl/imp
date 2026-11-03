@@ -894,6 +894,120 @@ TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
     cudaStreamDestroy(stream);
 }
 
+// FP8 grouped kernel at batch 4 (one-wave rule: 32 CTAs x 8 splits at 1024 tokens), split-K
+// and forced unsplit, every row vs its fp64 ref, shuffled physical blocks. Row 0 must be
+// bit-identical when rows 1-3 change content and context (max context held at row 0).
+TEST(PagedFp8Multitok, GroupedSplitRowsMatchReferenceAndIgnoreNeighbours) {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    const int head_dim = 128, n_kv_heads = 8, batch = 4, max_blocks = 64;
+    const float scale = 1.0f / std::sqrt((float)head_dim);
+    size_t scratch_bytes = (size_t)batch * 40 * 64 * (2 + head_dim) * sizeof(float);
+    void* d_scratch = nullptr;
+    cudaMalloc(&d_scratch, scratch_bytes);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+    // Physical block of (row, logical block): a fixed shuffle of batch x max_blocks.
+    std::vector<int> bt((size_t)batch * max_blocks);
+    for (int i = 0; i < (int)bt.size(); i++)
+        bt[i] = i;
+    uint32_t rng = 0x5eedu;
+    for (int i = (int)bt.size() - 1; i > 0; i--) {
+        rng = rng * 1664525u + 1013904223u;
+        std::swap(bt[i], bt[rng % (uint32_t)(i + 1)]);
+    }
+    int* d_bt = (int*)up(bt.data(), bt.size() * sizeof(int));
+    const size_t slot = (size_t)n_kv_heads * head_dim;
+    const size_t cache_bytes = (size_t)batch * max_blocks * BLOCK_SIZE * slot;
+    for (int n_heads : {32, 40}) {
+        const size_t q_row = (size_t)n_heads * head_dim;
+        std::vector<half> Qh((size_t)batch * q_row);
+        lcg_fill(Qh, 0x6A01u + n_heads, 2.0f);
+        void* d_q = up(Qh.data(), Qh.size() * sizeof(half));
+        void* d_o = nullptr;
+        cudaMalloc(&d_o, Qh.size() * sizeof(half));
+        Tensor Q = f16_tensor(d_q, {batch, 1, n_heads, head_dim});
+        Tensor O = f16_tensor(d_o, {batch, 1, n_heads, head_dim});
+        // One arm: rows' contexts and KV seeds -> per-row O (and the fp64 check of every row).
+        auto run = [&](const int (&ctx)[4], uint32_t nb_seed, bool force_unsplit) {
+            const float kv_scale = 2.0f / 448.0f;
+            std::vector<uint8_t> Kq(cache_bytes, 0), Vq(cache_bytes, 0);
+            std::vector<std::vector<double>> refs(batch);
+            for (int r = 0; r < batch; r++) {
+                std::vector<half> Kh((size_t)ctx[r] * slot), Vh((size_t)ctx[r] * slot);
+                const uint32_t seed = (r == 0 ? 0x7100u : nb_seed) + 2 * r;
+                lcg_fill(Kh, seed, 2.0f);
+                lcg_fill(Vh, seed + 1, 1.0f);
+                // Quantize to e4m3 and use the dequantized values as the reference input.
+                for (int s = 0; s < ctx[r]; s++) {
+                    const size_t dst = ((size_t)bt[(size_t)r * max_blocks + s / BLOCK_SIZE] * BLOCK_SIZE +
+                                        s % BLOCK_SIZE) *
+                                       slot;
+                    for (size_t d = 0; d < slot; d++) {
+                        for (int kv = 0; kv < 2; kv++) {
+                            std::vector<half>& src = kv ? Vh : Kh;
+                            __nv_fp8_e4m3 q = __nv_fp8_e4m3(__half2float(src[s * slot + d]) / kv_scale);
+                            memcpy(&(kv ? Vq : Kq)[dst + d], &q, 1);
+                            src[s * slot + d] = __float2half(static_cast<float>(q) * kv_scale);
+                        }
+                    }
+                }
+                std::vector<half> Qr(Qh.begin() + r * q_row, Qh.begin() + (r + 1) * q_row);
+                ref_decode_f64(Qr, Kh, Vh, refs[r], ctx[r], n_heads, n_kv_heads, head_dim, scale);
+            }
+            void* d_k = up(Kq.data(), Kq.size());
+            void* d_v = up(Vq.data(), Vq.size());
+            int* d_ctx = (int*)up(ctx, sizeof(ctx));
+            Tensor K = raw_tensor(d_k, QType::FP8_E4M3,
+                                  {batch * max_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+            Tensor V = raw_tensor(d_v, QType::FP8_E4M3,
+                                  {batch * max_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+            cudaMemset(d_o, 0, Qh.size() * sizeof(half));
+            // No split-K scratch = one split (the FP8 launcher ignores force_splitk_fallback).
+            paged_attention_set_splitk_scratch(force_unsplit ? nullptr : d_scratch,
+                                               force_unsplit ? 0 : scratch_bytes);
+            paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_scale, ctx[0], 0, 0.0f,
+                                       stream, max_blocks);
+            cudaStreamSynchronize(stream);
+            paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
+            EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+            std::vector<half> o_h(Qh.size());
+            cudaMemcpy(o_h.data(), d_o, o_h.size() * sizeof(half), cudaMemcpyDeviceToHost);
+            for (int r = 0; r < batch; r++) {
+                std::vector<float> got(q_row);
+                for (size_t i = 0; i < q_row; i++)
+                    got[i] = __half2float(o_h[r * q_row + i]);
+                const ErrStats e = err_stats(got, refs[r]);
+                EXPECT_EQ(e.nan_count, 0);
+                EXPECT_LT(e.max_rel, 0.01f) << n_heads << "/8 row " << r << " ctx " << ctx[r]
+                                            << (force_unsplit ? " unsplit: " : " split: ") << e.str();
+            }
+            cudaFree(d_k);
+            cudaFree(d_v);
+            cudaFree(d_ctx);
+            return o_h;
+        };
+        const int ctx_a[4] = {1024, 333, 700, 64};
+        const int ctx_b[4] = {1024, 1000, 16, 500};
+        std::vector<half> row0[2];
+        for (bool unsplit : {false, true}) {
+            const std::vector<half> oa = run(ctx_a, 0x7100u, unsplit);
+            // Rows 1-3: other content and contexts; row 0 (seed 0x7100, 1024 tokens) unchanged.
+            const std::vector<half> ob = run(ctx_b, 0x9300u, unsplit);
+            EXPECT_EQ(memcmp(oa.data(), ob.data(), q_row * sizeof(half)), 0)
+                << n_heads << "/8 row 0 moved with its neighbours" << (unsplit ? " (unsplit)" : " (split)");
+            row0[unsplit ? 1 : 0].assign(oa.begin(), oa.begin() + q_row);
+        }
+        // The split arm ran the split kernel + reduce: its bits differ from the unsplit kernel's.
+        EXPECT_NE(memcmp(row0[0].data(), row0[1].data(), q_row * sizeof(half)), 0) << n_heads << "/8";
+        cudaFree(d_q);
+        cudaFree(d_o);
+    }
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaFree(d_bt);
+    cudaStreamDestroy(stream);
+}
+
 // Four-token NVFP4 kernels (attention.paged_nvfp4_multitok=4), plain and split-K, vs fp64
 // ref across kv_len {16,64,333,1024} x {split-K registered, fallback forced}; both routes
 // must stay inside the NVFP4 envelope.

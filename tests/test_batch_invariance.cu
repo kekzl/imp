@@ -639,4 +639,47 @@ TEST(BatchInvarianceTest, Fp8DenseDecodeRowIndependentOfNeighbours) {
     EXPECT_GT(dyn_vs_st.top1_agreement, 0.85);
 }
 
+// FP8 E4M3 KV (kv_cache.dtype=fp8, the grouped paged decode kernel): row 0 bit-identical when its
+// neighbours shift, at 32 rows and at 4 rows.
+TEST(BatchInvarianceTest, Fp8KvDecodeRowIndependentOfNeighbours) {
+    const char* env = getenv(imp_test::kEnvModelFp8);
+    const std::string path = env ? env : "/models/Qwen3-8B-FP8";
+    if (!fs::exists(path + "/config.json"))
+        GTEST_SKIP() << "native-FP8 checkpoint not present at " << path << " (set " << imp_test::kEnvModelFp8
+                     << ")";
+    if (device_free_mib() < kNeededMiB)
+        GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free";
+    setenv("IMP_DETERMINISTIC", "1", 1);
+    constexpr int kShift = 9;
+    std::shared_ptr<Model> model = load_safetensors(path, /*load_mtp_head=*/false);
+    ASSERT_NE(model, nullptr) << "failed to load " << path;
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr, 1ULL << 30));
+    gemm_init();
+    const int vocab = static_cast<int>(model->config().vocab_size);
+    const std::vector<int32_t> toks = model->tokenizer()->encode(kCorpus);
+    ASSERT_GT(static_cast<int>(toks.size()), 2 * kPromptLen + kDecodeSteps + kBatchRows + kShift + 8);
+    RuntimeConfig rc;
+    rc.runtime.deterministic = true;
+    rc.server.prefix_cache = false;
+    rc.kv_cache.dtype = "fp8";
+    set_pending_runtime_config(rc);
+    EngineConfig cfg = batch_invariance_config();
+    cfg.use_nvfp4_decode = -1;
+    Engine engine;
+    ASSERT_TRUE(engine.init(model, cfg));
+    KVCache* kv = engine.kv_cache();
+    ASSERT_EQ(kv->qtype(), QType::FP8_E4M3);
+    const int bps = (kPromptLen + kDecodeSteps + 2 + kv->block_size() - 1) / kv->block_size();
+    ASSERT_GE(kv->total_blocks(), kBatchRows * bps);
+    TeacherForcedDriver drv(*engine.executor(), *kv, kBatchRows, bps, vocab);
+    for (int rows : {kBatchRows, 4}) {
+        const ArmResult a = run_arm(drv, toks, rows, bps, vocab);
+        const ArmResult b = run_arm(drv, toks, rows, bps, vocab, kShift);
+        const Comparison nb = compare(a, b);
+        print_comparison(rows == kBatchRows ? "fp8 KV nb A/B, 32 rows" : "fp8 KV nb A/B, 4 rows", a, b, nb);
+        EXPECT_EQ(nb.max_abs_lp, 0.0) << rows << " rows: row 0 moved with its neighbours";
+        EXPECT_EQ(nb.top1_flips, 0);
+    }
+}
+
 }  // namespace imp

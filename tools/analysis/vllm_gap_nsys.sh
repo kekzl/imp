@@ -4,8 +4,11 @@
 # sqlite export, decode-step breakdown via vllm_gap_nsys.py.
 # Usage: bash tools/analysis/vllm_gap_nsys.sh MODEL_DIR [OUT=/mnt/data/scratch/vllmgap/nsys]
 # Env: CONC (16), WAVES (2), PLEN (0), GEN (300), MAXC (16), IMG (imp:test), NSYS (/opt/nvidia/nsight-systems/2026.1.3),
-#      ENGINE=vllm (profile vLLM instead; MARK=<regex of its per-step sampler kernel>)
+#      ENGINE=vllm (profile vLLM instead; MARK=<regex of its per-step sampler kernel>),
+#      IMP_SET="k=v ..." (extra imp-server --set pairs, e.g. kv_cache.dtype=fp8)
 set -uo pipefail
+EXTRA=()
+for kv in ${IMP_SET:-}; do EXTRA+=(--set "$kv"); done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODEL=$1
 CONC=${CONC:-16}; WAVES=${WAVES:-2}; PLEN=${PLEN:-0}; MAXC=${MAXC:-16}
@@ -30,7 +33,8 @@ else
         -v "$OUT":/out -v /opt/nvidia:/opt/nvidia:ro -p "$PORT:$PORT" \
         --entrypoint "$NSYS/target-linux-x64/nsys" "$IMG" "${NSYS_ARGS[@]}" \
         imp-server --model "/models/$MODEL" --host 0.0.0.0 --port "$PORT" --max-concurrent "$MAXC" \
-        --set "runtime.max_batch_size=$MAXC" --set speculative.mtp_k=0 --set speculative.ngram=false >/dev/null
+        --set "runtime.max_batch_size=$MAXC" --set speculative.mtp_k=0 --set speculative.ngram=false \
+        "${EXTRA[@]}" >/dev/null
 fi
 for _ in $(seq 1 300); do
     sleep 2

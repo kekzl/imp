@@ -391,14 +391,58 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
 
+// HD=128 GQA (ratio > 1) with attention.paged_fp8_multitok: the grouped kernel's split-K instance
+// when the one-wave rule on its CTAs (2 per SM) splits and every split holds >= 8 KV blocks.
+// False = not taken (the caller's routes: unsplit grouped kernel, tile split-K, plain).
+static bool fp8_gqa_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                           const int* block_tables, const int* context_lens, int block_size, float scale,
+                           float kv_scale, int max_context_len, int max_num_blocks, int sliding_window,
+                           float softcap, const half* sinks_h, cudaStream_t stream) {
+    const int batch_size = static_cast<int>(Q.shape[0]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
+    const int n_q_per_kv = (n_kv_heads > 0) ? n_heads / n_kv_heads : 0;
+    if (head_dim != 128 || n_q_per_kv < 2 || process_diag_paged_fp8_multitok() <= 1 ||
+        process_diag_paged_fp8_hpc() < 0)
+        return false;
+    const int hpc = paged_attention_fp8_multitok_heads_per_cta(head_dim, n_q_per_kv,
+                                                               process_diag_paged_fp8_hpc());
+    if (hpc == 0)
+        return false;
+    const auto* q = reinterpret_cast<const half*>(Q.data);
+    const auto* k = reinterpret_cast<const uint8_t*>(K_cache.data);
+    const auto* v = reinterpret_cast<const uint8_t*>(V_cache.data);
+    void* sk_ptr = nullptr;
+    size_t sk_size = 0;
+    paged_attention_get_splitk_scratch(&sk_ptr, &sk_size);
+    const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
+    const int s = paged_attention_f16_multitok_split_count(batch_size * (n_heads / hpc), 2, kpar_n_sms(),
+                                                           num_ctx_blocks);
+    const size_t needed = static_cast<size_t>(batch_size) * n_heads * s * (2 + head_dim) * sizeof(float);
+    // Split only with a block per warp in every split; else the caller's routes (unsplit: this
+    // kernel; short contexts: the tile split-K kernel).
+    if (s <= 1 || (num_ctx_blocks + s - 1) / s < NUM_WARPS || sk_ptr == nullptr || needed > sk_size)
+        return false;
+    float* partial = static_cast<float*>(sk_ptr);
+    if (!paged_attention_splitk_fp8_multitok_gqa_launch(q, k, v, partial, block_tables, context_lens,
+                                                        batch_size, n_heads, n_kv_heads, head_dim, block_size,
+                                                        scale, kv_scale, max_num_blocks, s, sliding_window,
+                                                        softcap, hpc, stream))
+        return false;
+    paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim, s,
+                                  stream, sinks_h);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Host launcher -- FP8 E4M3 variant (with Split-K support)
 // ---------------------------------------------------------------------------
-void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                const int* block_tables, const int* context_lens, int block_size, float scale,
-                                float kv_scale, int max_context_len, int sliding_window, float softcap,
-                                cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                const void* attn_sinks) {
+static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                              const int* block_tables, const int* context_lens, int block_size, float scale,
+                              float kv_scale, int max_context_len, int sliding_window, float softcap,
+                              cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
+                              const void* attn_sinks) {
     // StreamingLLM (n_sinks > 0): these kernels have no sink range, so attend every live block and let
     // the -1 sentinels of evict_middle_blocks define sinks + window. Learned sinks (attn_sinks,
     // gpt-oss) are wired since #1345.
@@ -563,6 +607,23 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
         }
 #undef LAUNCH_FP8_FALLBACK
     }
+}
+
+void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                const int* block_tables, const int* context_lens, int block_size, float scale,
+                                float kv_scale, int max_context_len, int sliding_window, float softcap,
+                                cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
+                                const void* attn_sinks) {
+    // n_sinks > 0 (StreamingLLM): every live block, as in fp8_decode_routes.
+    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
+                                                        : (max_context_len + block_size - 1) / block_size;
+    if (fp8_gqa_decode(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale, kv_scale,
+                       max_context_len, max_num_blocks, n_sinks > 0 ? 0 : sliding_window, softcap,
+                       reinterpret_cast<const half*>(attn_sinks), stream))
+        return;
+    fp8_decode_routes(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale, kv_scale,
+                      max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
+                      attn_sinks);
 }
 
 }  // namespace imp

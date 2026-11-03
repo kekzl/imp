@@ -30,7 +30,7 @@ static void print_usage(const char* prog) {
     printf("  q8imma      Q8_0 prefill GEMM: dequant + cuBLAS vs IMMA (#2267)\n");
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
-    printf("  decode-attn-batched  Batched paged decode at serving shapes (L2-rotated KV)\n");
+    printf("  decode-attn-batched  Batched paged decode at serving shapes, FP16 + FP8 KV (L2-rotated)\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
     printf("  all         Run all benchmarks\n");
     printf("\nDefault (no argument) runs gemm, attention, decode-attn and e2e;\n");
