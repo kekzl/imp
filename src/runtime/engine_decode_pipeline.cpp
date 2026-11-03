@@ -296,6 +296,8 @@ bool Engine::pipeline_enqueue_next_(int parity, cudaStream_t stream) {
     if (!runner.replay_only(stream))
         return false;  // abandoned chained forward is safe: the per-step path
                        // re-uploads batch state and rewrites the same KV slot
+    // The chained step's input is the in-flight token, one past the host-visible context.
+    mtp_carry_rows_(bd_pipe_.rows, 1, stream);
 
     executor_->set_sample_parity(parity);
     Tensor logits = executor_->get_logits_view(n);

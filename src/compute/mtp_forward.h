@@ -212,6 +212,11 @@ struct MtpDraftWorkspace {
     // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
     int prenorm_rows_cap = 0;
+    // speculative.mtp_carry: per KV slot [carry_rows_cap, h_prev cols] FP16, a bound request's target hidden
+    // rows from batched decode steps until the head takes them (engine_spec_mtp_batched.cpp, 2.5 MiB per
+    // slot on Qwen3.8).
+    void* d_carry = nullptr;
+    int carry_rows_cap = 0;
 
     // Qwen4Exp hyper-connection scratch (hc_count > 0): the head reads and writes an hc stream
     // [hc_count, hidden] instead of one hidden row. d_hc_x holds multi_hidden after a step.
@@ -311,6 +316,9 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
                             int expert_d_ff = 0, int shared_d_ff = 0,
                             int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
                             int max_seq_len = 0, int n_kv_slots = 1, int hc_count = 0, int hc_lowrank = 0);
+// speculative.mtp_carry scratch after mtp_workspace_allocate: `rows` per KV slot, needs the batched feed
+// (rows <= feed_rows_cap) and a plain head. false = none (rows <= 0 too); mtp_workspace_free releases it.
+[[nodiscard]] bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V

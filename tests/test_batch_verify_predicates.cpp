@@ -30,10 +30,17 @@ TEST(BatchVerifyPredicates, HistorySlotsWhenTheBatchedVerifyDoesNotRun) {
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(h, 4);
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), h);  // batch_verify off
-    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 1) << "history slots never bind a second request";
+    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), h) << "mtp_carry: every history slot can bind";
+    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24, /*carry_live=*/false), 1) << "carry scratch refused";
+    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), kMtpCarryRows);
+    cfg.speculative.mtp_carry = false;
+    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), 0);
+    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 1) << "without the carry a second binding dies in a batch";
     cfg.speculative.batch_verify = true;
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 1), h);  // batch of one
     EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 24);
+    cfg.speculative.mtp_carry = true;
+    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), 0) << "the batched verify feeds every bound row itself";
     Model dense;                                        // no recurrent state
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &dense, 24), h);
     cfg.speculative.hybrid = false;
@@ -74,6 +81,27 @@ TEST(BatchVerifyPredicates, OnlyALonePromptTakesTheHead) {
 TEST(BatchVerifyPredicates, HeadCacheBehindAfterBatchedDecode) {
     EXPECT_FALSE(mtp_cache_behind(120, 120));
     EXPECT_TRUE(mtp_cache_behind(120, 135));
+}
+
+// Two chats decoding together (Qwen3.8-27B on main: 2 of 12 overlapped turns drafted). Chat A bound at
+// mtp_pos 400; batched steps forward its inputs at 400, 401, ... and carry those hidden rows.
+TEST(BatchVerifyPredicates, CarryTakesEveryBatchedStepInOrder) {
+    EXPECT_EQ(mtp_carry_index(400, 0, 400), 0) << "first batched step after the lone feed";
+    EXPECT_EQ(mtp_carry_index(400, 3, 403), 3) << "the next step appends";
+    EXPECT_EQ(mtp_carry_index(400, 3, 402), 2) << "an abandoned chained step runs again: overwrite";
+    EXPECT_EQ(mtp_carry_index(400, 3, 404), -1) << "a step without a row (loop burst, rider) breaks it";
+    EXPECT_EQ(mtp_carry_index(400, 3, 399), -1) << "below the head cache";
+    EXPECT_EQ(mtp_carry_index(400, -1, 400), -1) << "broken stays broken";
+}
+
+// Pair p = (token p + 1, h_p): a per-step batch knows every carried row's next token, a chained
+// pipeline step (input = the in-flight token) one row less.
+TEST(BatchVerifyPredicates, CarryFeedsOnlyRowsWhoseNextTokenIsKnown) {
+    EXPECT_EQ(mtp_carry_feedable(400, 3, 404), 3) << "lone step at 403 after rows 400..402";
+    EXPECT_EQ(mtp_carry_feedable(400, 4, 404), 3) << "row 403 is the in-flight step's";
+    EXPECT_EQ(mtp_carry_feedable(400, 0, 404), 0);
+    EXPECT_EQ(mtp_carry_feedable(400, -1, 404), 0);
+    EXPECT_EQ(mtp_carry_feedable(400, 256, 900), 256) << "a finished request feeds the whole carry";
 }
 
 // Four head slots, bind cap 1: free history slots never let a prompt bind behind the active one.

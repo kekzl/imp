@@ -468,6 +468,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_dspark.cpp
     src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
+    src/runtime/engine_spec_mtp_batched.cpp
     src/runtime/engine_spec_batch_verify.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp

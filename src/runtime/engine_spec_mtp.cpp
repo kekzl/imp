@@ -141,128 +141,6 @@ void Engine::mtp_release_(int req_id) {
     mtp_pool_.binds.erase(it);
 }
 
-void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
-                               const std::vector<int>& emitted, cudaStream_t stream) {
-    auto* ws = mtp_ws_storage_.get();
-    if (ws == nullptr || !model_ || !model_->mtp_ || !model_->mtp_->loaded)
-        return;
-    const int N = static_cast<int>(reqs.size());
-    if (ws->feed_rows_cap <= 0 || ws->d_b_h_final == nullptr) {
-        for (int g = 0; g < N; ++g)
-            if (mtp_bound(mtp_active_, mtp_pool_, reqs[g]->id))
-                mtp_post_verify_update_(*reqs[g], emitted[g], rows[g]);
-        return;
-    }
-    int n_rows_total = 0;
-    for (int g = 0; g < N; ++g)
-        n_rows_total = std::max(n_rows_total, rows[g] + emitted[g]);
-    Tensor h = executor_->view_hidden(std::max(1, n_rows_total));
-    if (h.data == nullptr)
-        return;
-    std::vector<int32_t> toks;
-    std::vector<int> src, slots, pos, last_row, bound_g;
-    for (int g = 0; g < N; ++g) {
-        Request& req = *reqs[g];
-        if (emitted[g] <= 0 || req.status != RequestStatus::DECODING || !mtp_bound(mtp_active_, mtp_pool_, req.id))
-            continue;
-        mtp_activate_(req.id);
-        const int p0 = req.context_len() - emitted[g] - 1;
-        if (ws->mtp_pos != p0) {
-            mtp_unbind_("desync before batched feed");
-            continue;
-        }
-        if ((ws->max_seq_len > 0 && ws->mtp_pos + emitted[g] > ws->max_seq_len) ||
-            static_cast<int>(toks.size()) + emitted[g] > ws->feed_rows_cap) {
-            mtp_unbind_("kv cap reached");
-            continue;
-        }
-        const int32_t* t = req.output_tokens.data() + req.output_tokens.size() - static_cast<size_t>(emitted[g]);
-        for (int j = 0; j < emitted[g]; ++j) {
-            toks.push_back(t[j]);
-            src.push_back(rows[g] + j);
-            slots.push_back(ws->cur_slot);
-            pos.push_back(ws->mtp_pos + j);
-        }
-        last_row.push_back(static_cast<int>(toks.size()) - 1);
-        bound_g.push_back(g);
-    }
-    if (bound_g.empty())
-        return;
-    const int n = static_cast<int>(toks.size());
-    const int m = static_cast<int>(bound_g.size());
-    const int hidden_dim = model_->config_.d_model;
-    const int vocab_size = model_->config_.vocab_size;
-    auto fail_all = [&](const char* why) {
-        for (int g : bound_g) {
-            mtp_activate_(reqs[g]->id);
-            mtp_unbind_(why);
-        }
-    };
-    // Timing (host wall through the draft D2H sync below), logged every 100
-    // calls: the one number that says what the head costs per verify step.
-    static double t_head_ms = 0.0;
-    static long long t_calls = 0, t_rows = 0;
-    const auto t0 = std::chrono::steady_clock::now();
-    // diagnostics.mtp_prenorm_h (default on): the head takes the target's
-    // post-norm hidden, applied to the gathered rows inside the feed.
-    const Tensor* post_norm = runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr;
-    if (!imp::mtp_feed_rows_multislot(toks.data(), h.data, src.data(), n, slots.data(), pos.data(), *model_->mtp_,
-                                      model_->tok_emb_, *ws, hidden_dim, stream, post_norm,
-                                      model_->config_.rms_norm_eps, model_->config_.norm_weight_offset)) {
-        fail_all("batched feed failed");
-        return;
-    }
-    // The next draft per request: LM head over the last fed row of each.
-    if (m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
-        fail_all("batched draft: too many rows");
-        return;
-    }
-    if (cudaMemcpyAsync(ws->d_row_src, last_row.data(), static_cast<size_t>(m) * sizeof(int), cudaMemcpyHostToDevice,
-                        stream) != cudaSuccess) {
-        fail_all("batched draft: index H2D");
-        return;
-    }
-    imp::mtp_gather_rows(ws->d_b_h_final, ws->d_row_src, ws->d_b_gather, hidden_dim, m, stream);
-    if (!executor_->lm_head_rows_argmax(ws->d_b_gather, m, ws->d_chain_tokens, stream)) {
-        fail_all("batched draft: LM head unavailable");
-        return;
-    }
-    std::vector<int32_t> h_out(static_cast<size_t>(m));
-    if (cudaMemcpyAsync(h_out.data(), ws->d_chain_tokens, static_cast<size_t>(m) * sizeof(int32_t),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaStreamSynchronize(stream) != cudaSuccess) {
-        fail_all("batched draft: D2H");
-        return;
-    }
-    {
-        t_head_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        t_rows += n;
-        if (++t_calls % 100 == 0)
-            IMP_LOG_INFO("mtp-batched-feed: %lld calls, %.2f rows/call, %.2f ms/call (feed + LM head + sync)",
-                         t_calls, static_cast<double>(t_rows) / t_calls, t_head_ms / t_calls);
-    }
-    for (int i = 0; i < m; ++i) {
-        const int g = bound_g[i];
-        Request& req = *reqs[g];
-        mtp_activate_(req.id);
-        const int32_t* t = req.output_tokens.data() + req.output_tokens.size() - static_cast<size_t>(emitted[g]);
-        for (int j = 0; j < emitted[g]; ++j)
-            mtp_active_.history.push_back(t[j]);
-        ws->mtp_pos += emitted[g];
-        mtp_active_.chains.clear();
-        const int32_t tok = h_out[static_cast<size_t>(i)];
-        if (tok < 0 || tok >= vocab_size) {
-            mtp_active_.pending.clear();
-            mtp_active_.draft_ctx = -1;
-            mtp_pool_.pending_prediction = -1;
-        } else {
-            mtp_active_.pending.assign(1, tok);
-            mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
-            mtp_pool_.pending_prediction = tok;
-        }
-    }
-}
-
 bool Engine::spec_history_too_short_(const Request& req) const {
     const int n = runtime_config_.speculative.min_history;
     return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
@@ -577,6 +455,11 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
     auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr)
         return;
+    if (mtp_active_.carry_n > 0) {
+        mtp_carry_flush_(req);  // batched steps before this verify (pairs below p0 only)
+        if (mtp_active_.req != req.id)
+            return;
+    }
     // Sync check: the cache must cover exactly the pre-step context
     // (pos == p0 == context_len - emitted - 1).
     const int p0 = req.context_len() - emitted - 1;
@@ -638,6 +521,7 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     mtp_active_.econ_emitted = 0;
     mtp_active_.econ_rows = 0;
     mtp_active_.k_live = mtp_spec_k_;
+    mtp_active_.carry_n = 0;
     if (!mtp_active_.history.empty() && ws->mtp_pos > 0)
         return true;
     // Nothing usable carried over, restart the cache. Pair 0 needs
@@ -812,6 +696,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
+    // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8); refused = one binding, as without it.
+    (void)imp::mtp_carry_allocate(*ws, mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size));
     // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
     prewarm_spec_state_scratch_();
     // Post-norm feed scratch (diagnostics.mtp_prenorm_h), inside the same
@@ -898,7 +784,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
     mtp_ws_storage_.reset(ws.release());
     const imp::MtpDraftWorkspace& live = *mtp_ws_storage_;  // ws is null after release()
     mtp_spec_k_ = k;
-    mtp_pool_.bind_cap = mtp_bind_cap(runtime_config_, model_.get(), config_.max_batch_size);
+    mtp_pool_.bind_cap = mtp_bind_cap(runtime_config_, model_.get(), config_.max_batch_size,
+                                      live.carry_rows_cap > 0);
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
     mtp_pool_.slot_history.clear();
@@ -928,6 +815,7 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_active_.econ_emitted = 0;
     mtp_active_.econ_rows = 0;
     mtp_active_.k_live = mtp_spec_k_;
+    mtp_active_.carry_n = 0;
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
     mtp_pool_.slot_history.clear();

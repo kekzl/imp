@@ -137,9 +137,7 @@ Fresh server per arm, engine defaults (imp `--max-concurrent N --set runtime.max
 
 Default `imp-server` (no `--max-batch`, auto batch), fresh server per arm, 3 alternating pairs; 1 stream = 6 real chat prompts x 400 greedy tokens x 2 rounds (`seq_stream_client.py`, thinking on), c4 / c32 = `conc_client.py` 300-token bursts, median of waves 1-3. Harness `tools/analysis/mtp_concurrent_ab.sh`.
 
-[PROV: commit=d1765b68 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_concurrent_ab.sh`
-       n=3 pairs note=main d1765b68 vs this branch, images built from each tree; harness_md5=d264afa75dd4;
-       raw summaries docs/audit/qwen38_mtp_concurrent_2026_11_03/]
+[PROV: commit=d1765b68 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_concurrent_ab.sh` n=3 pairs note=main d1765b68 vs this branch, images built from each tree; harness_md5=d264afa75dd4; raw summaries docs/audit/qwen38_mtp_concurrent_2026_11_03/]
 
 | arm | max batch | 1 stream tok/s | c4 tok/s | c32 tok/s | own peak MiB | KV plan blocks |
 |---|---:|---:|---:|---:|---:|---:|
@@ -147,15 +145,13 @@ Default `imp-server` (no `--max-batch`, auto batch), fresh server per arm, 3 alt
 | main, `--set speculative.mtp_k=2 --set speculative.ngram=false` (1 trial) | 17 | 130.82 | 334.9 | 1116.7 | 22276 | 16954 |
 | this branch, default (auto takes the head) | 32 | **131.28** (131.10-131.43) | 339.7 (339.1-340.1) | 2042.0 (2039.9-2042.0) | 24807 | 13230 |
 
-- 1 stream +35.5 %, 70.0 % of drafts accepted (2552 / 3644); c4 -0.47 % (all 3 pairs lower, 900-token c4 +0.4 % in one pair), c32 -0.07 % (pairs mixed sign).
-- Forcing the head on main cost c32 45 %: the auto batch charged it at recurrent-state price (32 -> 17 slots). Without that charge the head comes out of the KV pool: 15651 -> 13230 blocks (all 32 slots fit 7825 -> 6615 tokens), own peak +2773 MiB.
+- 1 stream +35.5 %, 70.0 % of drafts accepted (2552 / 3644); c4 -0.47 % (all 3 pairs lower, 900-token c4 +0.4 % in one pair), c32 -0.07 % (pairs mixed sign). Forcing the head on main cost c32 45 %: the auto batch charged it at recurrent-state price (32 -> 17 slots); without that charge the head comes out of the KV pool: 15651 -> 13230 blocks (all 32 slots fit 7825 -> 6615 tokens), own peak +2773 MiB.
 
 ### MTP across chat turns (`speculative.mtp_history_slots`)
 
 Default `imp-server`, fresh server per arm, 3 alternating pairs, 6 user turns x up to 1500 tokens per conversation (`mtp_multiturn_probe.py`, thinking on, the assistant turn sent back as `content` only), follow-up = turns 2-6, tok/s = (completion tokens - 1) / stream time. On main the side request or the other chat overwrote the one head KV slot and the next turn's prefix-cache resume (464-2272 cached tokens) unbound the head (`hidden gap before chunk`: 34 per arm on main, 0 here).
 
-[PROV: commit=eb178985 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_multiturn_ab.sh` n=3 pairs
-       note=main vs this branch, images built from each tree; harness_md5=bd8d987066a2 probe_md5=d742d48b6488; raw summaries docs/audit/qwen38_mtp_history_slots_2026_11_03/]
+[PROV: commit=eb178985 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_multiturn_ab.sh` n=3 pairs note=main vs this branch, images built from each tree; harness_md5=bd8d987066a2 probe_md5=d742d48b6488; raw summaries docs/audit/qwen38_mtp_history_slots_2026_11_03/]
 
 | conversation | main follow-up tok/s | this branch | turns drafting, main -> this branch |
 |---|---:|---:|---|
@@ -164,6 +160,10 @@ Default `imp-server`, fresh server per arm, 3 alternating pairs, 6 user turns x 
 | greedy + UI side request | 101.88 (101.27-102.25) | **122.28** (121.84-122.53) | 3/15 -> 15/15 |
 | two chats alternating | 101.52 (101.16-101.75) | **117.43** (117.23-117.68) | 6/30 -> 30/30 |
 | 6 fresh chats x 400, 1 stream (`mtp_concurrent_ab.sh`, 5 pairs) | 131.06 (130.34-131.41) | 130.95 (130.49-131.53) | c4 338.64 -> 338.14, c32 2022.6 -> 2018.2 (pairs mixed sign), own peak +162 to +219 MiB |
+| `speculative.mtp_carry` vs 6bca2fe2: 2 overlapping chats, all 12 turns [PROV: commit=6bca2fe2 date=2026-11-03 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.4.3 path=server-api cmd=`tools/analysis/mtp_multiturn_ab.sh` + `tools/analysis/mtp_concurrent_ab.sh` n=3 pairs note=harness_md5=5c087000f7fb overlap_md5=ca7d262552dc concurrent_md5=f8ac61ec6cb4; raw summaries docs/audit/qwen38_mtp_carry_2026_11_03/] | 93.78 (93.76-93.80) | **98.38** (97.74-99.00) | 6/36 -> 35/36 |
+| `mtp_carry`: greedy + UI side request / 6 fresh chats x 400, 1 stream | 120.37 (120.08-120.60) / 131.50 (131.42-131.61) | 119.97 (117.60-124.27) / 131.59 (131.53-131.65) | 15/15 -> 15/15; c4 339.37 -> 338.60 (3/3 pairs lower), c32 2024.17 -> 2034.10 (3/3 higher), own peak 25059-25119 -> 25043-25073 MiB |
+
+- `mtp_carry` overlap (`mtp_overlap_probe.py`): chat 1 starts after chat 0's first 300 deltas, 2 s / 6 s think time; on main a chat bound at its lone prefill unbound at its first lone step after a batched one (`head cache behind the context after batched decode`: 9 per arm, 0 with the carry) and the second chat never bound. Cost per batched step: one 10 KiB hidden-row copy per bound row, one 256-row head pass per 256 steps, 10 MiB scratch; c4 / c32 bind nothing (spec counters equal in both arms).
 
 ## imp vs vLLM at concurrency
 

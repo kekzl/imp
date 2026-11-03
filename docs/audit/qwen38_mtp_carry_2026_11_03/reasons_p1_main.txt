@@ -1,0 +1,13 @@
+c0 turn1 t 0.0-16.1 drafted 242 tps 93.79 reasons -
+c1 turn1 t 2.6-19.4 drafted 0 tps 89.62 reasons -
+c0 turn2 t 18.1-35.4 drafted 0 tps 89.82 reasons {'unbind: head cache behind the context after batched decode': 1}
+c1 turn2 t 25.4-39.7 drafted 0 tps 87.37 reasons {'unbind: head cache behind the context after batched decode': 1}
+c0 turn3 t 37.4-54.2 drafted 0 tps 90.85 reasons {'unbind: head cache behind the context after batched decode': 1}
+c1 turn3 t 45.7-63.4 drafted 0 tps 88.08 reasons {'unbind: head cache behind the context after batched decode': 1}
+c0 turn4 t 56.2-73.6 drafted 0 tps 90.08 reasons {'unbind: head cache behind the context after batched decode': 1}
+c1 turn4 t 69.4-81.0 drafted 0 tps 89.08 reasons {'unbind: head cache behind the context after batched decode': 1}
+c0 turn5 t 75.6-92.5 drafted 0 tps 90.53 reasons {'unbind: head cache behind the context after batched decode': 1}
+c1 turn5 t 87.0-103.9 drafted 0 tps 87.65 reasons {'unbind: head cache behind the context after batched decode': 1}
+c0 turn6 t 94.5-109.7 drafted 0 tps 89.50 reasons {'unbind: head cache behind the context after batched decode': 1}
+c1 turn6 t 109.9-114.8 drafted 475 tps 139.27 reasons -
+REASONS_TOTAL {'turns drafted': 2, 'turns not drafted': 10, 'unbind: head cache behind the context after batched decode': 9}

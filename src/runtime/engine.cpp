@@ -448,6 +448,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);
+    mtp_carry_flush_(*req);  // the slot's history covers the whole answer for the chat's next turn
     mtp_release_(req->id);
     req->recurrent_restore.reset();  // release the snapshot buffer for recycling
     spec_suffix_idx_.erase(req->id);

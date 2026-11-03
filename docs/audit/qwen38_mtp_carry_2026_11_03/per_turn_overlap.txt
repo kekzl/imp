@@ -1,0 +1,15 @@
+chat turn | main tps (min-max) drafted | new tps (min-max) drafted accepted
+c0 turn1 | 93.70 (93.63-93.79) drafted 242 accepted 151 | 93.55 (93.38-93.68) drafted 242 accepted 151
+c0 turn2 | 89.78 (89.74-89.82) drafted 0 accepted 0 | 101.85 (99.54-105.03) drafted 572 accepted 380
+c0 turn3 | 90.82 (90.79-90.85) drafted 0 accepted 0 | 106.20 (104.34-109.42) drafted 583 accepted 451
+c0 turn4 | 90.05 (90.02-90.08) drafted 0 accepted 0 | 98.46 (97.69-99.26) drafted 494 accepted 346
+c0 turn5 | 90.51 (90.50-90.53) drafted 0 accepted 0 | 94.20 (89.89-99.55) drafted 293 accepted 199
+c0 turn6 | 89.48 (89.47-89.50) drafted 0 accepted 0 | 91.09 (88.62-92.61) drafted 95 accepted 81
+c1 turn1 | 89.74 (89.62-89.82) drafted 0 accepted 0 | 96.16 (95.92-96.41) drafted 209 accepted 188
+c1 turn2 | 87.35 (87.32-87.37) drafted 0 accepted 0 | 91.51 (90.97-91.82) drafted 181 accepted 111
+c1 turn3 | 88.07 (88.05-88.08) drafted 0 accepted 0 | 95.07 (92.32-97.39) drafted 206 accepted 171
+c1 turn4 | 89.10 (89.08-89.14) drafted 0 accepted 0 | 90.74 (90.14-91.84) drafted 139 accepted 89
+c1 turn5 | 87.62 (87.59-87.65) drafted 0 accepted 0 | 91.44 (90.36-92.25) drafted 212 accepted 146
+c1 turn6 | 139.16 (138.97-139.27) drafted 475 accepted 415 | 130.22 (128.04-133.47) drafted 400 accepted 331
+main mean_tps 93.78 drafted_turns 6/36
+new mean_tps 98.38 drafted_turns 35/36

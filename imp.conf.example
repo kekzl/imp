@@ -1208,6 +1208,12 @@ mtp_concurrent       = true
 # request between two turns no longer wipes it and the next turn drafts over
 # its prefix-cache hit. 64 MiB per slot on Qwen3.8-27B-NVFP4; 1 = one slot.
 mtp_history_slots    = 4
+# With mtp_history_slots: up to that many requests bind the head at once, and
+# a bound request's hidden rows from batched decode steps feed its head slot
+# in 256-row passes (2.5 MiB per slot), so two chats decoding together draft
+# again once one decodes alone and keep their head caches for the next turn.
+# false = one binding, a batched step unbinds it (the rule before).
+mtp_carry            = true
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

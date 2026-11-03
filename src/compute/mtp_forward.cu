@@ -310,15 +310,28 @@ static float* mtp_scan_part_of(int* pos) {
                           : nullptr;
 }
 
+static bool mtp_dev_alloc(void** p, size_t bytes) { return cudaMalloc(p, bytes) == cudaSuccess; }
+
+bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows) {
+    if (rows <= 0 || rows > ws.feed_rows_cap || ws.hc_count > 0 || ws.d_carry != nullptr)
+        return false;
+    const size_t bytes = static_cast<size_t>(std::max(1, ws.n_kv_slots)) * rows * ws.hidden_dim *
+                         sizeof(__half);
+    if (!mtp_dev_alloc(&ws.d_carry, bytes)) {
+        ws.d_carry = nullptr;
+        return false;
+    }
+    ws.carry_rows_cap = rows;
+    return true;
+}
+
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
                             int num_heads, int num_kv_heads, int head_dim,
                             int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank) {
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
     n_kv_slots = std::max(1, n_kv_slots);
-    auto alloc = [](void** p, size_t bytes) {
-        return cudaMalloc(p, bytes) == cudaSuccess;
-    };
+    auto alloc = [](void** p, size_t bytes) { return mtp_dev_alloc(p, bytes); };
     bool ok = true;
     // Phase 2.1 buffers (always allocated)
     ok &= alloc(&ws.d_emb_norm,   hidden_dim * sizeof(__half));
@@ -518,6 +531,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_expert_act);
     frfn(ws.d_prenorm_rows);
     ws.prenorm_rows_cap = 0;
+    frfn(ws.d_carry);
+    ws.carry_rows_cap = 0;
     frfn(ws.d_expert_outputs);
     frfn(ws.d_moe_out);
     frfn(ws.d_shared_gate);

@@ -1594,6 +1594,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             [this, &state, &logits_out](cudaStream_t s) { executor_->forward_logits(state, logits_out, s); });
         // false only without a decode fn; capture/replay failures fall back to eager inside execute().
         (void)graph_runner.execute(dec_stream);
+        mtp_carry_rows_(valid_decode, 0,
+                        dec_stream);  // before pipeline_enter_ chains a forward over the hidden
 
         if (logits_out.data == nullptr) {
             logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
@@ -1629,6 +1631,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             decode_logits_out = logits_out;
     } else {
         executor_->forward_logits(state, decode_logits_out, dec_stream);
+        mtp_carry_rows_(valid_decode, 0, dec_stream);
         cfg_combine_rows_(valid_decode, decode_logits_out, dec_stream);
         tokens = sample_decode_rows_(state, valid_decode, decode_logits_out, dec_stream);
     }
@@ -1715,7 +1718,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // the active one before the sync gate reads its cache position.
         if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
             mtp_activate_(valid_decode[0]->id);
-        // Decoded in a batch (or a loop burst) since the last feed: no hidden rows exist to catch up from.
+        // Decoded in a batch since the last feed: the carried rows catch the head up (speculative.mtp_carry);
+        // a step without a row (loop burst, carry off) leaves it behind for good.
+        mtp_carry_flush_(*valid_decode[0]);
         mtp_unbind_if_behind_(valid_decode[0]->id, cur_pos);
         // Depth for THIS request: 0 when it declined the head
         // (`"speculative": {"mtp_k": 0}` or `"speculative": false`), which is
