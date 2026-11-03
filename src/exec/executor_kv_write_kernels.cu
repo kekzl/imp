@@ -577,8 +577,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, __nv_fp8_e4m3* __restrict__ k_cache_base,
-    __nv_fp8_e4m3* __restrict__ v_cache_base, float inv_scale, int block_stride, int row_elems,
-    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
+    __nv_fp8_e4m3* __restrict__ v_cache_base, float inv_scale_k, float inv_scale_v, int block_stride,
+    int row_elems, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
     // PDL (no-op on a plain launch): K/V/positions come from the RoPE grid.
     pdl_wait();
@@ -610,6 +610,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     }
 
     // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
+    const float inv_scale = blockIdx.y == 0 ? inv_scale_k : inv_scale_v;
     const half inv_scale_h = __float2half(inv_scale);
     const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
     const int vec_elems = row_elems / 4;
@@ -636,11 +637,14 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
 __global__ __launch_bounds__(256) void round_kv_fp8_inplace_kernel(half* __restrict__ k, half* __restrict__ v,
                                                                    int64_t k_stride, int64_t v_stride,
                                                                    int row_elems, int n_tokens,
-                                                                   float inv_scale, float scale) {
+                                                                   float inv_scale_k, float scale_k,
+                                                                   float inv_scale_v, float scale_v) {
     const int token_idx = blockIdx.x;
     if (token_idx >= n_tokens)
         return;
     half* row = blockIdx.y == 0 ? k + (token_idx * k_stride) : v + (token_idx * v_stride);
+    const float inv_scale = blockIdx.y == 0 ? inv_scale_k : inv_scale_v;
+    const float scale = blockIdx.y == 0 ? scale_k : scale_v;
     const half inv_scale_h = __float2half(inv_scale);
     const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
     const int pairs = (row_elems / 4) * 2;  // the write kernel's vectorized span, as half2

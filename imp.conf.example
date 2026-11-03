@@ -239,6 +239,8 @@ fp8_auto_legacy             = false
 # Static modes round up to a power of two and stay fixed for the process.
 fp8_scale                   = "legacy"
 fp8_scale_headroom          = 2.0
+# Static modes only: separate K and V scales per layer instead of one shared value.
+fp8_scale_split             = false
 # BitDecoding TC path for NVFP4 paged-attention QK (experimental).
 # Experimental, expires: 2026-12-31 (remove or promote by then).
 bitdecoding_qk              = false

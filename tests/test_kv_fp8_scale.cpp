@@ -86,6 +86,108 @@ TEST(KvFp8Scale, FromAmaxBracketsTheHeadroom) {
     }
 }
 
+// kv_cache.fp8_scale_split: Gemma-4-26B calibration K amax 0.94-1.78, V 15.2-22.0 (docs/DETERMINISM.md).
+TEST(KvFp8Scale, SplitFromAmax) {
+    const Fp8KvScalePair shared = fp8_kv_scales_from_amax(1.6f, 16.0f, 2.0f, false);
+    EXPECT_EQ(shared.k, 0.125f);  // 16 * 2 / 448 -> 2^-3 for both
+    EXPECT_EQ(shared.v, 0.125f);
+    const Fp8KvScalePair split = fp8_kv_scales_from_amax(1.6f, 16.0f, 2.0f, true);
+    EXPECT_EQ(split.k, 0.0078125f);  // 1.6 * 2 / 448 -> 2^-7
+    EXPECT_EQ(split.v, 0.125f);
+    const Fp8KvScalePair k_only = fp8_kv_scales_from_amax(1.6f, 0.0f, 2.0f, true);
+    EXPECT_EQ(k_only.v, 1.0f);  // unwritten side keeps 1.0
+    EXPECT_EQ(fp8_kv_scales_from_amax(22.0f, 1.2f, 2.0f, false), (Fp8KvScalePair{0.125f, 0.125f}));
+    EXPECT_EQ(fp8_kv_scales_from_amax(22.0f, 1.2f, 2.0f, true), (Fp8KvScalePair{0.125f, 0.0078125f}));
+}
+
+TEST(KvFp8Scale, SplitFromCheckpoint) {
+    EXPECT_EQ(fp8_kv_scales_from_checkpoint(1.0f, 1.0f, true), (Fp8KvScalePair{1.0f, 1.0f}));
+    EXPECT_EQ(fp8_kv_scales_from_checkpoint(0.3f, 0.1f, false), (Fp8KvScalePair{0.5f, 0.5f}));
+    EXPECT_EQ(fp8_kv_scales_from_checkpoint(0.3f, 0.1f, true), (Fp8KvScalePair{0.5f, 0.125f}));
+    EXPECT_EQ(fp8_kv_scales_from_checkpoint(0.0f, 0.2f, true), (Fp8KvScalePair{1.0f, 0.25f}));
+    EXPECT_EQ(fp8_kv_scales_from_checkpoint(0.0f, 0.0f, true), (Fp8KvScalePair{1.0f, 1.0f}));
+}
+
+// The decode kernels form logits with softmax_scale * kv_scale and weight V with kv_scale: the fold must
+// reproduce softmax_scale * k and v exactly, and leave a shared pair untouched (legacy bit-equal).
+TEST(KvFp8Scale, DecodeFoldIsExact) {
+    for (float sm : {0.0883883476f, 0.0625f, 1.0f, 0.0441941738f}) {
+        for (int ek = -15; ek <= 15; ++ek) {
+            for (int ev = -15; ev <= 15; ++ev) {
+                const Fp8KvScalePair s{std::ldexp(1.0f, ek), std::ldexp(1.0f, ev)};
+                const Fp8KvDecodeScales d = fp8_kv_decode_scales(sm, s);
+                ASSERT_EQ(d.kv_scale, s.v);
+                ASSERT_EQ(d.softmax_scale * d.kv_scale, sm * s.k) << "ek " << ek << " ev " << ev;
+            }
+        }
+        const Fp8KvDecodeScales same = fp8_kv_decode_scales(sm, {0.3f, 0.3f});
+        EXPECT_EQ(same.softmax_scale, sm);
+        EXPECT_EQ(same.kv_scale, 0.3f);
+    }
+}
+
+float half_bits_to_float(uint16_t b) {
+    const int sign = (b >> 15) ? -1 : 1;
+    const int e = (b >> 10) & 0x1F;
+    const int m = b & 0x3FF;
+    if (e == 0)
+        return static_cast<float>(sign) * std::ldexp(static_cast<float>(m), -24);
+    if (e == 0x1F)
+        return m ? std::numeric_limits<float>::quiet_NaN()
+                 : static_cast<float>(sign) * std::numeric_limits<float>::infinity();
+    return static_cast<float>(sign) * std::ldexp(1.0f + (static_cast<float>(m) / 1024.0f), e - 15);
+}
+
+TEST(KvFp8Scale, HistBinIsFloorLog2OfEveryHalf) {
+    EXPECT_EQ(fp8_kv_hist_bin(0x0000), 0);
+    EXPECT_EQ(fp8_kv_hist_bin(0x8000), 0);   // -0
+    EXPECT_EQ(fp8_kv_hist_bin(0x0001), 1);   // 2^-24
+    EXPECT_EQ(fp8_kv_hist_bin(0x3C00), 25);  // 1.0
+    EXPECT_EQ(fp8_kv_hist_bin(0xBC00), 25);  // -1.0
+    EXPECT_EQ(fp8_kv_hist_bin(0x7BFF), 40);  // 65504
+    EXPECT_EQ(fp8_kv_hist_bin(0x7C00), kFp8KvHistBins - 1);
+    for (uint32_t b = 0; b < 0x10000u; ++b) {
+        const float x = half_bits_to_float(static_cast<uint16_t>(b));
+        if (x == 0.0f || !std::isfinite(x))
+            continue;
+        ASSERT_EQ(fp8_kv_hist_bin(static_cast<uint16_t>(b)) - 25, std::ilogb(x)) << std::hex << b;
+    }
+}
+
+// Histogram edges against a direct count of |x / s| over random values and every power-of-two scale.
+TEST(KvFp8Scale, EdgeCountsMatchDirectCount) {
+    std::mt19937 rng(3);
+    std::uniform_int_distribution<int> bits_dist(0, 0xFFFF);
+    std::vector<uint16_t> xs(20000);
+    for (auto& b : xs)
+        b = static_cast<uint16_t>(bits_dist(rng));
+    xs[0] = 0x0000;
+    xs[1] = 0x7C00;  // inf: saturates
+    std::vector<uint32_t> hist(kFp8KvHistBins, 0);
+    for (uint16_t b : xs)
+        if (((b >> 10) & 0x1F) != 0x1F || (b & 0x3FF) == 0)  // NaN excluded from both sides
+            ++hist[fp8_kv_hist_bin(b)];
+    for (int j = kFp8KvScaleMinExp; j <= kFp8KvScaleMaxExp; ++j) {
+        const float s = std::ldexp(1.0f, j);
+        Fp8KvEdgeCounts want;
+        for (uint16_t b : xs) {
+            const double x = std::fabs(static_cast<double>(half_bits_to_float(b)));
+            if (std::isnan(x) || x == 0.0)
+                continue;
+            const double r = x / s;
+            ++want.nonzero;
+            want.flushed += r < std::ldexp(1.0, -10) ? 1 : 0;
+            want.subnormal += (r >= std::ldexp(1.0, -10) && r < std::ldexp(1.0, -6)) ? 1 : 0;
+            want.saturated += r >= 512.0 ? 1 : 0;
+        }
+        const Fp8KvEdgeCounts got = fp8_kv_edge_counts(hist.data(), s);
+        ASSERT_EQ(got.nonzero, want.nonzero) << "j " << j;
+        ASSERT_EQ(got.flushed, want.flushed) << "j " << j;
+        ASSERT_EQ(got.subnormal, want.subnormal) << "j " << j;
+        ASSERT_EQ(got.saturated, want.saturated) << "j " << j;
+    }
+}
+
 TEST(KvScaleTensor, ParseNames) {
     auto p = [](const std::string& n) { return parse_kv_scale_tensor_name(split_dots(n)); };
     EXPECT_EQ(p("model.layers.3.self_attn.k_proj.k_scale"), KvScaleSlot::K);  // ModelOpt

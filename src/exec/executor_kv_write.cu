@@ -53,8 +53,20 @@ static void kv_layer_geometry(const ModelConfig& cfg, const KVCache& cache, int 
     }
 }
 
-float GraphExecutor::fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int row_elems,
-                                       cudaStream_t stream) {
+// kv_cache.fp8_scale=calibrate: FP16 exponent histogram of one calibration K or V view (one-time D2H).
+static void add_fp8_kv_hist(const Tensor& t, uint32_t* hist, cudaStream_t stream) {
+    std::vector<uint16_t> h(static_cast<size_t>(t.numel()));
+    if (h.empty())
+        return;
+    IMP_CUDA_CHECK_VOID(
+        cudaMemcpyAsync(h.data(), t.data, h.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+    for (uint16_t b : h)
+        ++hist[fp8_kv_hist_bin(b)];
+}
+
+Fp8KvScalePair GraphExecutor::fp8_kv_scales_(int kv_layer, int row_begin, int n, int row_elems,
+                                             cudaStream_t stream) {
     // FP8 E4M3 KV scale per layer: the first prefill after Engine::warmup() resets calibrated_
     // sets it (max with the 1.0 floor), every later prefill reuses it (cached FP8 blocks were
     // written with it). The reset avoids warmup pollution (synthetic BOS tokens give a too-small scale).
@@ -86,19 +98,24 @@ float GraphExecutor::fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int r
         if (kv_cal_collect_ && cal_k + 1 < kv_cal_amax_.size()) {
             kv_cal_amax_[cal_k] = k_scale * kFp8KvE4M3Max;
             kv_cal_amax_[cal_k + 1] = v_scale * kFp8KvE4M3Max;
+            if ((cal_k + 2) * kFp8KvHistBins <= kv_cal_hist_.size()) {
+                add_fp8_kv_hist(kv_cal, &kv_cal_hist_[cal_k * kFp8KvHistBins], stream);
+                add_fp8_kv_hist(vv_cal, &kv_cal_hist_[(cal_k + 1) * kFp8KvHistBins], stream);
+            }
         }
         float new_scale = std::max(k_scale, v_scale);
         if (new_scale < 1e-12f)
             new_scale = 1.0f;
         // Promote only — the high-water mark is the union of every
-        // prefill we've seen, so values fit FP8 dynamic range.
-        kv_scales_[kv_layer] = std::max(kv_scales_[kv_layer], new_scale);
+        // prefill we've seen, so values fit FP8 dynamic range. Legacy: one shared scale (k == v).
+        const float shared = std::max(kv_scales_[kv_layer].k, new_scale);
+        kv_scales_[kv_layer] = {shared, shared};
         kv_calibrated_[kv_layer] = true;
-        return 1.0f / kv_scales_[kv_layer];
+        return kv_scales_[kv_layer];
     }
     if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
-        return 1.0f / kv_scales_[kv_layer];
-    return 1.0f;
+        return kv_scales_[kv_layer];
+    return {};
 }
 
 void GraphExecutor::set_kv_layer_map(std::vector<int> map) {
@@ -106,7 +123,7 @@ void GraphExecutor::set_kv_layer_map(std::vector<int> map) {
     int n_kv = 0;
     for (int idx : kv_layer_map_)
         n_kv = std::max(n_kv, idx + 1);  // -1 = not an attention layer
-    kv_scales_.assign(n_kv, 1.0f);
+    kv_scales_.assign(n_kv, Fp8KvScalePair{});
     kv_calibrated_.assign(n_kv, false);
     kv_scales_static_ = false;
 }
@@ -114,7 +131,7 @@ void GraphExecutor::set_kv_layer_map(std::vector<int> map) {
 void GraphExecutor::reset_kv_calibration() {
     if (kv_scales_static_)
         return;  // kv_cache.fp8_scale checkpoint / calibrate: fixed for the process
-    std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
+    std::fill(kv_scales_.begin(), kv_scales_.end(), Fp8KvScalePair{});
     std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
     ++kv_calib_gen_;
 }
@@ -123,7 +140,7 @@ bool GraphExecutor::kv_scales_calibrated() const {
     return std::find(kv_calibrated_.begin(), kv_calibrated_.end(), false) == kv_calibrated_.end();
 }
 
-void GraphExecutor::set_static_kv_scales(const std::vector<float>& scales) {
+void GraphExecutor::set_static_kv_scales(const std::vector<Fp8KvScalePair>& scales) {
     IMP_CHECK(scales.size() == kv_scales_.size(), "set_static_kv_scales: %zu scales for %zu KV layers",
               scales.size(), kv_scales_.size());
     kv_scales_ = scales;
@@ -137,9 +154,10 @@ void GraphExecutor::begin_kv_scale_calibration() {
     // Scale 0 drops the 1.0 floor: the std::max above keeps the calibration prefill's own amax / 448.
     kv_scales_static_ = false;
     kv_cal_collect_ = true;
-    std::fill(kv_scales_.begin(), kv_scales_.end(), 0.0f);
+    std::fill(kv_scales_.begin(), kv_scales_.end(), Fp8KvScalePair{0.0f, 0.0f});
     std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
     kv_cal_amax_.assign(2 * kv_scales_.size(), 0.0f);
+    kv_cal_hist_.assign(2 * kv_scales_.size() * kFp8KvHistBins, 0u);
     ++kv_calib_gen_;
 }
 
@@ -156,12 +174,11 @@ void GraphExecutor::round_prefill_kv_to_cache(int layer, const InferenceState& s
     const int row_elems = nkv * hd;
     IMP_CHECK(seq_k.shape[1] >= row_elems && seq_v.shape[1] >= row_elems,
               "round_prefill_kv_to_cache: K/V rows narrower than nkv*hd=%d", row_elems);
-    const float inv_scale = fp8_kv_inv_scale_(kv_layer, row_begin, n_rows, row_elems, stream);
-    // The scale paged_kv_gather_fp8_to_fp16 reads (gather_past_kv_fp16).
-    const float scale = kv_layer < static_cast<int>(kv_scales_.size()) ? kv_scales_[kv_layer] : 1.0f;
+    // The scales paged_kv_gather_fp8_to_fp16 reads (gather_past_kv_fp16).
+    const Fp8KvScalePair s = fp8_kv_scales_(kv_layer, row_begin, n_rows, row_elems, stream);
     round_kv_fp8_inplace_kernel<<<dim3(n_rows, 2), std::min(row_elems, 256), 0, stream>>>(
         static_cast<half*>(seq_k.data), static_cast<half*>(seq_v.data), seq_k.shape[1], seq_v.shape[1],
-        row_elems, n_rows, inv_scale, scale);
+        row_elems, n_rows, 1.0f / s.k, s.k, 1.0f / s.v, s.v);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -275,7 +292,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
             kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {
-        const float inv_scale = fp8_kv_inv_scale_(kv_layer, row_begin, n, row_elems, stream);
+        const Fp8KvScalePair s = fp8_kv_scales_(kv_layer, row_begin, n, row_elems, stream);
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
         dim3 fp8_grid(n, 2);
@@ -283,8 +300,8 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         pdl::launch(write_kv_cache_fp8_fused_kernel, fp8_grid, dim3(threads), size_t(0), stream,
                     static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
                     block_tables, static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                    static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), inv_scale, block_stride,
-                    row_elems, kv_block_size, n, wr_max_blocks, wr_n_seq);
+                    static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)), 1.0f / s.k, 1.0f / s.v,
+                    block_stride, row_elems, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         // Standard FP16 KV cache write, fused K+V in one launch. MLA: V (v_) is
