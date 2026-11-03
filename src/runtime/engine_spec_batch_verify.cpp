@@ -430,7 +430,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             if (nb < 0 && kv_cache_raw_ != nullptr) {
                 const int have = kv_cache_raw_->total_blocks();
                 if (kv_cache_raw_->ceiling_blocks() > have) {
-                    kv_cache_raw_->try_grow_to(have + std::max(64, have / 4));
+                    kv_cache_raw_->try_grow_to_now(have + std::max(64, have / 4));
                     nb = kv_manager_->append_block(reqs[g]->id);
                 }
             }

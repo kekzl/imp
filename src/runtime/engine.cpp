@@ -61,8 +61,11 @@ namespace imp {
 
 namespace {
 // After warmup's raise_ceiling (it refuses once the worker runs). A "global" capture forbids the
-// worker's driver calls in every thread while the engine captures.
+// worker's driver calls in every thread while the engine captures. The retry window starts with
+// serving: init growth (replan) always reads free VRAM.
 void start_kv_grow_ahead(KVCache* kv, const RuntimeConfig& rc) {
+    if (kv != nullptr)
+        kv->set_serving_growth(rc.kv_cache.grow_retry_ms, rc.kv_cache.grow_ahead_fit_last);
     if (kv != nullptr && rc.kv_cache.grow_ahead && rc.runtime.graph_capture_mode != "global")
         kv->start_grow_ahead();
 }

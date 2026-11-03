@@ -1496,6 +1496,7 @@ if(IMP_BUILD_TESTS)
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_kv_cache_gpu.cpp
+        tests/test_kv_cache_grow_admission_gpu.cpp
         tests/test_recurrent_snapshot_store.cpp
         tests/test_vram_query.cpp
         tests/test_mtp_upload_budget.cpp
