@@ -311,8 +311,9 @@ public:
     // pointers when consumer_id's weight will take the small-M NVFP4 route for
     // [M,K] F16 activations and the scratch fits; nullptr otherwise (caller
     // runs unfused kernels). Never allocates while `stream` is capturing. *act_scale_out: quantize with it.
+    // k_align: K multiple the producer accepts (256 for the norm producers, 64 for GeGLU).
     uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
-                                 uint8_t** scales_out, float* act_scale_out);
+                                 uint8_t** scales_out, float* act_scale_out, int k_align = 256);
     // Tag the scratch as holding quantize(out[0..M,0..K), act_scale) written by a fused
     // producer kernel.
     void smallm_producer_tag_(const void* out_data, int M, int K, float act_scale);
@@ -445,9 +446,11 @@ public:
     const void* norm_fold_out_ = nullptr;
     unsigned long long* norm_fold_pending_ = nullptr;
     // Fused swiglu+quantize when the down projection takes the small-M
-    // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu().
+    // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
+    // small-M rows only (gemm.geglu_quant_fuse, K % 64: Gemma-4 shared down K 2112), else plain geglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
-                                          TensorID consumer_id, int n, cudaStream_t stream);
+                                          TensorID consumer_id, int n, cudaStream_t stream,
+                                          bool gelu = false);
     // Gate + up GEMMs (NVFP4 act-quant dedupe). gemm.swiglu_quant_epilogue: the up epilogue writes the down
     // input (packed + SfAtom in uo's buffer) into swiglu_epi_, uo / so stay unwritten; reset per run_ffn.
     void gate_up_prefill_(const TransformerLayer& ly, const Tensor& no, Tensor& go, Tensor& uo, int n,

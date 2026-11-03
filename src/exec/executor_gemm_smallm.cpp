@@ -134,11 +134,11 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 }
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
-                                            uint8_t** scales_out, float* act_scale_out) {
+                                            uint8_t** scales_out, float* act_scale_out, int k_align) {
     if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         overlap_prefill_active_)
         return nullptr;
-    if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
+    if (M < 2 || M > 32 || K <= 0 || (K % k_align) != 0)
         return nullptr;
     if (consumer_id == kInvalidTensorID)
         return nullptr;
@@ -246,13 +246,14 @@ void GraphExecutor::ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Te
 }
 
 bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
-                                       int n, cudaStream_t stream) {
+                                       int n, cudaStream_t stream, bool gelu) {
     if (swiglu_epi_.act != nullptr)  // the up GEMM's epilogue did it (gemm.swiglu_quant_epilogue)
         return false;
     const int K = static_cast<int>(so.shape[1]);
     // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
-    if (n > 32 && K % 16 == 0 && so.qtype == QType::F16 && prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+    if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
+        prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
         const float as = act_scale_of_(consumer_id);
         swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
                                               qscratch_.cutlass_act_sf, n, K, stream, as);
@@ -261,12 +262,20 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     }
     uint8_t* xq_scales = nullptr;
     float as = 1.0f;
-    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as);
-    if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as)) {
+    // GeGLU: K % 64 (the ws kernel's K; Gemma-4 shared down K 2112), behind gemm.geglu_quant_fuse.
+    uint8_t* xq_packed = nullptr;
+    if (!gelu || dispatch_policy().gemm.geglu_quant_fuse)
+        xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as, gelu ? 64 : 256);
+    if (xq_packed != nullptr &&
+        (gelu ? geglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as)
+              : swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as))) {
         smallm_producer_tag_(so.data, n, K, as);
         return false;
     }
-    swiglu(go, uo, so, stream);
+    if (gelu)
+        geglu(go, uo, so, stream);
+    else
+        swiglu(go, uo, so, stream);
     if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
         smallm_xq_from_producer_ = false;
     return false;
