@@ -29,6 +29,9 @@ struct KVCache {
     std::string fp8_scale = "legacy";
     // calibrate only: margin over the calibration amax before E4M3 saturates (448). Values < 1 act as 1.
     float fp8_scale_headroom = 2.0f;
+    // checkpoint / calibrate only: K and V each get their own power-of-two scale per layer (Gemma-4 K amax
+    // ~1.6, V ~16); false = one shared scale, max of the two. Legacy is always shared.
+    bool fp8_scale_split = false;
     // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
     // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
     // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.

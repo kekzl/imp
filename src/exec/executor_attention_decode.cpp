@@ -273,12 +273,12 @@
         } else if (cache_dtype == QType::FP8_E4M3) {
             dispatch_record::set_attn_decode(AttnDecodePath::FP8);
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
-            float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
-                                 ? kv_scales_[kv_layer]
-                                 : 1.0f;
+            // Separate K/V scales fold into (softmax scale, kv_scale): bit-equal when k == v.
+            const Fp8KvDecodeScales ds = fp8_kv_decode_scales(
+                scale, kv_layer < static_cast<int>(kv_scales_.size()) ? kv_scales_[kv_layer] : Fp8KvScalePair{});
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode_fp8(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, scale,
-                                       kv_scale, sub_state.max_context_len, layer_sliding_window,
+            paged_attention_decode_fp8(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, ds.softmax_scale,
+                                       ds.kv_scale, sub_state.max_context_len, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, attn_max_blocks,
                                        layer_n_sinks, attn_sinks);
         } else {

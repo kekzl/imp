@@ -589,13 +589,14 @@ TEST_F(PrefixCacheE2ETest, DenseFp8KvCalibratedScaleHitsAtTwoOffsetsBitEqual) {
     imp::Engine* engine = ctx_->engine.get();
     ASSERT_NE(engine, nullptr);
     ASSERT_EQ(engine->kv_cache()->qtype(), imp::QType::FP8_E4M3) << "FP8 KV was not applied: proves nothing";
-    const std::vector<float> scales = engine->executor()->kv_scales();
+    const std::vector<imp::Fp8KvScalePair> scales = engine->executor()->kv_scales();
     ASSERT_FALSE(scales.empty());
-    ASSERT_LT(*std::min_element(scales.begin(), scales.end()), 1.0f)
+    ASSERT_TRUE(std::any_of(scales.begin(), scales.end(), [](const auto& s) { return s.k < 1.0f; }))
         << "every layer on 1.0: calibrate did not run, the test would pass on legacy";
-    for (float s : scales) {
+    for (const auto& s : scales) {
         int e = 0;
-        ASSERT_EQ(std::frexp(s, &e), 0.5f) << "scale " << s << " is not a power of two";
+        ASSERT_EQ(std::frexp(s.k, &e), 0.5f) << "scale " << s.k << " is not a power of two";
+        ASSERT_EQ(s.k, s.v) << "shared mode (fp8_scale_split off) gave separate K/V scales";
     }
     const int kv_bs = engine->kv_cache()->block_size();
     std::vector<int32_t> full(4096);
