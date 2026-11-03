@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <algorithm>
 #include <vector>
 
 #include "compute/attention_fmha_sm120.h"
@@ -352,6 +353,169 @@ bool bench_paged_attention() {
         printf("\n");
     }
 
+    IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream));
+    return true;
+}
+
+// Batched paged decode (serving shape): B rows x ctx tokens, shuffled block tables, R disjoint
+// KV sets rotated per call so the working set (>= 512 MB) exceeds the 96 MB L2.
+struct BatchedDecodeShape {
+    const char* name;
+    int n_heads, n_kv_heads, head_dim, sliding_window, batch, ctx;
+};
+
+static double bench_paged_decode_batched_kernel(const BatchedDecodeShape& s, cudaStream_t stream,
+                                                uint64_t* out_hash) {
+    constexpr int kBlock = 16;
+    const int blocks_per_row = (s.ctx + kBlock - 1) / kBlock;
+    const int64_t slot_elems = static_cast<int64_t>(kBlock) * s.n_kv_heads * s.head_dim;
+    const double call_bytes = 2.0 * s.batch * s.ctx * s.n_kv_heads * s.head_dim * sizeof(__half);
+    const int n_sets = std::max(1, static_cast<int>((512.0 * 1024 * 1024) / call_bytes + 0.999));
+    const int n_blocks = n_sets * s.batch * blocks_per_row;
+    const int64_t kv_elems = static_cast<int64_t>(n_blocks) * slot_elems;
+    const int64_t q_elems = static_cast<int64_t>(s.batch) * s.n_heads * s.head_dim;
+
+    __half *d_q = nullptr, *d_k = nullptr, *d_v = nullptr, *d_o = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_q, q_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_o, q_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_k, kv_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_v, kv_elems * sizeof(__half)));
+    {
+        std::vector<__half> h(static_cast<size_t>(std::max<int64_t>(q_elems, slot_elems * 64)));
+        for (size_t i = 0; i < h.size(); i++)
+            h[i] = __float2half(0.01f * static_cast<float>(static_cast<int>((i * 11 + 17) % 1000) - 500));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_q, h.data(), q_elems * sizeof(__half), cudaMemcpyHostToDevice));
+        const int64_t chunk = static_cast<int64_t>(h.size());
+        for (int64_t off = 0; off < kv_elems; off += chunk) {
+            const int64_t n = std::min(chunk, kv_elems - off);
+            IMP_CUDA_CHECK_LOG(cudaMemcpy(d_k + off, h.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+            IMP_CUDA_CHECK_LOG(cudaMemcpy(d_v + off, h.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+        }
+    }
+    // Per set: a disjoint, shuffled slice of the physical blocks (LCG permutation, fixed seed).
+    std::vector<int> perm(n_blocks);
+    for (int i = 0; i < n_blocks; i++)
+        perm[i] = i;
+    uint32_t rng = 12345u;
+    for (int i = n_blocks - 1; i > 0; i--) {
+        rng = (rng * 1664525u) + 1013904223u;
+        std::swap(perm[i], perm[rng % static_cast<uint32_t>(i + 1)]);
+    }
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_bt, n_blocks * sizeof(int)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_ctx, s.batch * sizeof(int)));
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_bt, perm.data(), n_blocks * sizeof(int), cudaMemcpyHostToDevice));
+    std::vector<int> h_ctx(s.batch, s.ctx);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ctx, h_ctx.data(), s.batch * sizeof(int), cudaMemcpyHostToDevice));
+
+    void* d_scratch = nullptr;
+    const size_t scratch_size = static_cast<size_t>(s.batch) * s.n_heads * 128 * (2 + s.head_dim) *
+                                sizeof(float);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scratch, scratch_size));
+    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+
+    int64_t q_shape[4] = {s.batch, 1, s.n_heads, s.head_dim};
+    int64_t kv_shape[4] = {n_blocks, kBlock, s.n_kv_heads, s.head_dim};
+    Tensor Q(d_q, QType::F16, 4, q_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, q_shape, true);
+    const float scale = 1.0f / sqrtf(static_cast<float>(s.head_dim));
+    auto run = [&](int it) {
+        const int set = it % n_sets;
+        paged_attention_decode(Q, K, V, O, d_bt + (static_cast<int64_t>(set) * s.batch * blocks_per_row),
+                               d_ctx, kBlock, scale, s.ctx, s.sliding_window, 0.0f, stream, blocks_per_row);
+    };
+    // Warm > 1 s (idle downclock), then 400 timed calls.
+    cudaEvent_t e0, e1;
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&e0));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&e1));
+    float warm_ms = 0.0f;
+    for (int it = 0; warm_ms < 1200.0f; it += 50) {
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(e0, stream));
+        for (int j = 0; j < 50; j++)
+            run(it + j);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(e1, stream));
+        IMP_CUDA_CHECK_LOG(cudaEventSynchronize(e1));
+        float ms = 0.0f;
+        IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&ms, e0, e1));
+        warm_ms += ms;
+    }
+    // Timed: 100 calls captured into one graph (the decode step replays graphs; eager launches on
+    // WSL2 read up to 3x slow on sub-30 us shapes), replayed 4 times.
+    constexpr int kGraphCalls = 100;
+    constexpr int kReplays = 4;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t graph_exec = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+    for (int it = 0; it < kGraphCalls; it++)
+        run(it);
+    IMP_CUDA_CHECK_LOG(cudaStreamEndCapture(stream, &graph));
+    IMP_CUDA_CHECK_LOG(cudaGraphInstantiate(&graph_exec, graph, 0));
+    IMP_CUDA_CHECK_LOG(cudaGraphLaunch(graph_exec, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(e0, stream));
+    for (int r = 0; r < kReplays; r++)
+        IMP_CUDA_CHECK_LOG(cudaGraphLaunch(graph_exec, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(e1, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(e1));
+    constexpr int kIters = kGraphCalls * kReplays;
+    float total_ms = 0.0f;
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, e0, e1));
+    IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(graph_exec));
+    IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(e0));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(e1));
+    // FNV-1a over the last call's O: equal hashes across two builds = bit-identical output.
+    {
+        std::vector<__half> h_o(static_cast<size_t>(q_elems));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_o.data(), d_o, q_elems * sizeof(__half), cudaMemcpyDeviceToHost));
+        uint64_t hash = 1469598103934665603ull;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(h_o.data());
+        for (size_t i = 0; i < h_o.size() * sizeof(__half); i++)
+            hash = (hash ^ bytes[i]) * 1099511628211ull;
+        *out_hash = hash;
+    }
+
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scratch));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_ctx));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_q));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_o));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_k));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_v));
+    return 1000.0 * total_ms / kIters;  // us per call
+}
+
+bool bench_paged_attention_batched() {
+    int device_count = 0;
+    IMP_CUDA_CHECK_LOG(cudaGetDeviceCount(&device_count));
+    if (device_count == 0) {
+        printf("bench_paged_attention_batched: no CUDA device found, skipping\n");
+        return false;
+    }
+    printf("=== Paged Attention Decode: batched FP16 KV, block 16, L2-rotated ===\n");
+    printf("%-22s %5s %6s %10s %10s  %s\n", "shape", "batch", "ctx", "us/call", "KV GB/s", "O hash");
+    cudaStream_t stream = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaStreamCreate(&stream));
+    const BatchedDecodeShape shapes[] = {
+        {"qwen3-8b 32/8/128", 32, 8, 128, 0, 16, 1131},      {"qwen3-8b 32/8/128", 32, 8, 128, 0, 32, 1131},
+        {"qwen3-8b 32/8/128", 32, 8, 128, 0, 8, 1131},       {"qwen3-8b 32/8/128", 32, 8, 128, 0, 4, 1131},
+        {"qwen3-8b 32/8/128", 32, 8, 128, 0, 1, 1131},       {"qwen3-8b 32/8/128", 32, 8, 128, 0, 1, 640},
+        {"qwen3-8b 32/8/128", 32, 8, 128, 0, 1, 2048},       {"qwen3-8b 32/8/128", 32, 8, 128, 0, 2, 1131},
+        {"qwen3-8b 32/8/128", 32, 8, 128, 0, 16, 4096},      {"qwen3-8b 32/8/128", 32, 8, 128, 0, 1, 8192},
+        {"gemma4-swa 16/8/256", 16, 8, 256, 1024, 16, 1131}, {"gemma4-glb 16/2/512", 16, 2, 512, 0, 16, 1131},
+        {"gemma4-glb 16/2/512", 16, 2, 512, 0, 1, 8192},
+    };
+    for (const auto& s : shapes) {
+        uint64_t hash = 0;
+        const double us = bench_paged_decode_batched_kernel(s, stream, &hash);
+        const int read_ctx = (s.sliding_window > 0 && s.ctx > s.sliding_window) ? s.sliding_window : s.ctx;
+        const double bytes = 2.0 * s.batch * read_ctx * s.n_kv_heads * s.head_dim * sizeof(__half);
+        printf("%-22s %5d %6d %10.2f %10.1f  %016llx\n", s.name, s.batch, s.ctx, us,
+               bytes / (us * 1e-6) / 1e9, static_cast<unsigned long long>(hash));
+    }
     IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream));
     return true;
 }

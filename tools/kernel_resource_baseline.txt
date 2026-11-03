@@ -31,6 +31,7 @@ void apa::apa_kernel<256, true, false, false, __half, apa::PagedF16KV>	sm_120a	2
 void ra2::attn_kernel<256, 8, 2, false, __half, 1>	sm_120a	255	8	0
 void imp::(anonymous namespace)::nvfp4_smallm_ws_multi_kernel<2, 4, 2>	sm_120a	255	0	0
 void imp::(anonymous namespace)::nvfp4_smallm_ws_kernel<2, 4, 2>	sm_120a	254	0	0
+void imp::(anonymous namespace)::paged_attention_decode_f16_multitok_kernel<512, 4, 2>	sm_120a	254	0	0
 imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	252	0	0
 void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, false, false>	sm_120a	252	0	0
@@ -40,6 +41,7 @@ void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
+void imp::(anonymous namespace)::paged_attention_splitk_f16_multitok_kernel<512, 4, 2>	sm_120a	245	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, false> >	sm_120a	240	0	0

@@ -18,6 +18,7 @@ bool bench_gemm_nvfp4_cutlass();
 bool bench_q8_imma();
 bool bench_attention();
 bool bench_paged_attention();
+bool bench_paged_attention_batched();
 bool bench_e2e();
 }  // namespace imp
 
@@ -29,6 +30,7 @@ static void print_usage(const char* prog) {
     printf("  q8imma      Q8_0 prefill GEMM: dequant + cuBLAS vs IMMA (#2267)\n");
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
+    printf("  decode-attn-batched  Batched paged decode at serving shapes (L2-rotated KV)\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
     printf("  all         Run all benchmarks\n");
     printf("\nDefault (no argument) runs gemm, attention, decode-attn and e2e;\n");
@@ -60,6 +62,7 @@ int main(int argc, char** argv) {
     bool run_q8_imma = false;
     bool run_attention = false;
     bool run_decode_attn = false;
+    bool run_decode_attn_batched = false;
     bool run_e2e = false;
 
     // Every argument is examined; used to read only argv[1], so `imp-bench gemm --set
@@ -123,6 +126,8 @@ int main(int argc, char** argv) {
         run_attention = true;
     } else if (strcmp(benchmark, "decode-attn") == 0) {
         run_decode_attn = true;
+    } else if (strcmp(benchmark, "decode-attn-batched") == 0) {
+        run_decode_attn_batched = true;
     } else if (strcmp(benchmark, "e2e") == 0) {
         run_e2e = true;
     } else if (strcmp(benchmark, "all") == 0) {
@@ -171,6 +176,7 @@ int main(int argc, char** argv) {
     run_one(run_q8_imma, "q8imma", imp::bench_q8_imma);
     run_one(run_attention, "attention", imp::bench_attention);
     run_one(run_decode_attn, "decode-attn", imp::bench_paged_attention);
+    run_one(run_decode_attn_batched, "decode-attn-batched", imp::bench_paged_attention_batched);
     run_one(run_e2e, "e2e", imp::bench_e2e);
 
     auto wall_end = std::chrono::high_resolution_clock::now();

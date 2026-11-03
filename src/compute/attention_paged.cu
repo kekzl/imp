@@ -1187,7 +1187,13 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         int target_blocks = 2 * num_sms;
         if (total_blocks_nosplit >= target_blocks && gqa_fallback)
             total_blocks_nosplit = batch_size * n_kv_heads;
-        if (total_blocks_nosplit >= target_blocks) {
+        // GQA multitok: one-wave split rule; its unsplit kernel is the multitok decode (MHA
+        // ratio 1 unsplit falls to the per-head kernel, so it keeps the rule below).
+        if (mt_hpc > 0 && n_q_per_kv_mt > 1) {
+            num_splits = paged_attention_f16_multitok_split_count(
+                total_blocks_nosplit, paged_attention_f16_multitok_splitk_ctas_per_sm(head_dim, mt_hpc),
+                num_sms, num_ctx_blocks);
+        } else if (total_blocks_nosplit >= target_blocks) {
             num_splits = 1;  // already enough parallelism from batch*heads
         } else {
             num_splits = (target_blocks + total_blocks_nosplit - 1) / total_blocks_nosplit;

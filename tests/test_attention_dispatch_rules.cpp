@@ -49,3 +49,24 @@ TEST(AttentionDispatchRules, PagedDecodeRefusesMxfp4KvAtHeadDim96) {
     EXPECT_TRUE(paged_attention_serves_head_dim(QType::F16, 192));  // MLA (#2374)
     EXPECT_FALSE(paged_attention_serves_head_dim(QType::FP8_E4M3, 192));
 }
+
+// F16 multitok split rule on the RTX 5090 (170 SMs, 2 CTAs/SM at HD=128 x 4 heads): one wave,
+// unsplit at a budget <= 2, fewest splits with the fewest per-warp block rounds otherwise.
+TEST(AttentionDispatchRules, F16MultitokSplitCountIsOneWave) {
+    // Qwen3-8B 32/8 heads: 8 CTAs per row; 1131 tokens = 71 blocks of 16.
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(16 * 8, 2, 170, 71), 1);   // budget 2
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(32 * 8, 2, 170, 71), 1);   // budget 1
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(8 * 8, 2, 170, 71), 5);    // 15 blocks, 2 rounds
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(1 * 8, 2, 170, 71), 9);    // 8 blocks, 1 round
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(1 * 8, 2, 170, 512), 32);  // 16 blocks, 2 rounds
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(1 * 8, 2, 170, 11), 2);    // >= 4 blocks per split
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(1 * 8, 2, 170, 3), 1);
+    // Gemma-4 global HD=512 x 2 heads runs 1 CTA/SM: 16 rows x 8 CTAs never split.
+    EXPECT_EQ(paged_attention_f16_multitok_split_count(16 * 8, 1, 170, 71), 1);
+    for (int rows : {1, 2, 4, 8, 16, 32})
+        for (int blocks : {4, 71, 256, 512, 2048}) {
+            const int s = paged_attention_f16_multitok_split_count(rows * 8, 2, 170, blocks);
+            EXPECT_TRUE(s == 1 || rows * 8 * s <= 340) << rows << " rows " << blocks << " blocks: " << s;
+            EXPECT_LE(s, 64);
+        }
+}
