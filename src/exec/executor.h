@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/cuda_raii.h"
+#include "core/kv_fp8_scale.h"
 #include "core/dispatch_policy.h"
 
 #include "model/model.h"
@@ -490,12 +491,14 @@ public:
     // calibrated; the generation moves when reset_kv_calibration() drops the scales.
     [[nodiscard]] bool kv_scales_calibrated() const;
     uint64_t kv_calibration_generation() const { return kv_calib_gen_; }
-    // Static FP8 KV scales (executor_kv_write.cu): one per KV layer, never recalibrated afterwards.
-    void set_static_kv_scales(const std::vector<float>& scales);
-    // Next prefill records per-layer absmax (no 1.0 floor): kv_calibration_amax()[2l] K, [2l+1] V.
+    // Static FP8 KV scales (executor_kv_write.cu): one K/V pair per KV layer, never recalibrated afterwards.
+    void set_static_kv_scales(const std::vector<Fp8KvScalePair>& scales);
+    // Next prefill records per-layer absmax (no 1.0 floor): kv_calibration_amax()[2l] K, [2l+1] V, and
+    // the FP16 exponent histograms kv_calibration_hist()[(2l + {0 K, 1 V}) * kFp8KvHistBins + bin].
     void begin_kv_scale_calibration();
     [[nodiscard]] const std::vector<float>& kv_calibration_amax() const { return kv_cal_amax_; }
-    [[nodiscard]] const std::vector<float>& kv_scales() const { return kv_scales_; }
+    [[nodiscard]] const std::vector<uint32_t>& kv_calibration_hist() const { return kv_cal_hist_; }
+    [[nodiscard]] const std::vector<Fp8KvScalePair>& kv_scales() const { return kv_scales_; }
 
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
@@ -1121,11 +1124,12 @@ private:
 
     // Per-KV-layer FP8 scales for online calibration.
     // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
-    std::vector<float> kv_scales_;     // [n_kv_layers] per-layer FP8 scale
+    std::vector<Fp8KvScalePair> kv_scales_;  // [n_kv_layers] per-layer FP8 K and V scale
     std::vector<bool> kv_calibrated_;  // [n_kv_layers] whether scale has been calibrated
     bool kv_scales_static_ = false;    // set_static_kv_scales: reset_kv_calibration keeps them
     bool kv_cal_collect_ = false;      // begin_kv_scale_calibration: record amax, no floor
     std::vector<float> kv_cal_amax_;   // [2 * n_kv_layers] K, V absmax per layer
+    std::vector<uint32_t> kv_cal_hist_;  // [2 * n_kv_layers * kFp8KvHistBins] K, V exponent histograms
     uint64_t kv_calib_gen_ = 0;
 
     // YaRN correction dimension boundaries [2], precomputed at init.
@@ -1564,8 +1568,8 @@ private:
     // chunk starts. No-op for other KV dtypes.
     void round_prefill_kv_to_cache(int layer, const InferenceState& state, Tensor& seq_k, Tensor& seq_v,
                                    int row_begin, int n_rows, cudaStream_t stream);
-    // FP8 KV inverse scale of kv_layer; calibrates on rows [row_begin, row_begin+n) of k_/v_ first if unset.
-    float fp8_kv_inv_scale_(int kv_layer, int row_begin, int n, int row_elems, cudaStream_t stream);
+    // FP8 KV K/V scales of kv_layer; calibrates on rows [row_begin, row_begin+n) of k_/v_ first if unset.
+    Fp8KvScalePair fp8_kv_scales_(int kv_layer, int row_begin, int n, int row_elems, cudaStream_t stream);
 
     // Create a Tensor view of the first n_tokens rows of a max_tokens buffer.
     Tensor view_tokens(const Tensor& buf, int n_tokens) const;

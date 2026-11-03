@@ -133,7 +133,7 @@ Measured 2026-11-02 at 8ad05028 (main 65f984d0 + this change), same harness.
 | Gemma-4-26B-A4B NVFP4, `ppl_corpus_45k_gemma4_turn` | 17.8489 | 18.4248 | 17.6053 | 18.0085 | 17.7327 | 0.4952 / 0.4694 / 0.4808 / 0.4843 |
 
 - Qwen3: no arm wins. Every arm moves PPL and distance both ways within the spread of the arms themselves (8B-FP8 prose h2 0.1252, h4 0.1327); default stays `legacy`.
-- Gemma-4: every static arm beats legacy (h8 17.4282, 0.4787 too): legacy +3.23 % PPL over FP16, calibrate -2.4 % to +0.89 %. Its K is tiny (calibration K amax 0.94-1.78, V 15.2-22.0 = the unscaled `v_norm` bound sqrt(256)), so at scale 1 most K entries sit below the E4M3 normal floor 2^-6. Use `kv_cache.fp8_scale=calibrate` for FP8 KV on Gemma-4.
+- Gemma-4: every static arm beats legacy (h8 17.4282, 0.4787 too): legacy +3.23 % PPL over FP16, calibrate -2.4 % to +0.89 %. Its K is tiny (calibration K amax 0.94-1.78, V 15.2-22.0 = the unscaled `v_norm` bound sqrt(256)), so at scale 1 18.0 % of K entries sit below the E4M3 normal floor 2^-6 (edge counts below). At 87a61491 shared `calibrate` trails legacy on this corpus: [separate K/V scales](#separate-kv-scales-kv_cachefp8_scale_split).
 - Power-of-two scales keep the E4M3 normal-range grid of scale 1 (`Fp8KvStaticScale.PowerOfTwoKeepsTheUnitGridOnNormals`): the arms differ only in the subnormal and saturation edges, so the K rounding effect above is the same in all of them.
 - Unchanged elsewhere (Qwen3-8B-NVFP4, legacy vs calibrate h2): NIAH 8k/16k/32k x 3 depths 9/9 both; `degen_suite.py --quick` 37 checks, 0 FAIL calibrate (legacy 1 FAIL: the known dense-NVFP4 prefix-resend flip); tg128 452.9 vs 453.7 tok/s (3 runs each); conc 16 aggregate 3472 vs 3605 tok/s (6 pairs, both orders, calibrate ahead in all 6, cause not isolated).
 
@@ -141,6 +141,36 @@ Measured 2026-11-02 at 8ad05028 (main 65f984d0 + this change), same harness.
        n=3 runs (tg128), 6 trials x 3 waves (conc 16, CONC=16 MBS=16 SEQ=4096) note=kv_cache.dtype=fp8, speculative.mtp_k=0]
 - `calibrate` needs one prefill chunk for its 370-390 tokens: at `--prefill-chunk-size 1` it warns and keeps legacy.
 - `PrefixCacheE2ETest.DenseFp8Kv*HitsAtTwoOffsetsBitEqual` is red on Qwen3-1.7B BF16 in both modes and on main (identical greedy tokens), green on Qwen3-8B-NVFP4.
+
+### Separate K/V scales (`kv_cache.fp8_scale_split`)
+
+Measured 2026-11-03 on main 87a61491 + this change, same harness (`--prefill-chunk-size 2048`), all arms in one image; main's own image gives the same legacy and `calibrate` PPL on Gemma-4 (17.9006, 18.0870).
+
+- `split` (`checkpoint` / `calibrate` only, default off): K and V get their own power-of-two scale per layer instead of `max(K, V)`. Gemma-4 calibration: K scale 2^-7 (2^-6 on 2 layers), V 2^-3.
+- Decode kernels keep one `kv_scale`: `fp8_kv_decode_scales` passes `{softmax_scale * k / v, v}` (exact for powers of two, `KvFp8Scale.DecodeFoldIsExact`); write, prefill round trip and gather take both scales.
+- Edge counts: calibration prefill (390 tokens), E4M3 subnormal + flushed share of non-zero entries at each arm's scale (INFO line `fp8_scale=calibrate edges`).
+
+| Model, corpus | FP16 | legacy | cal h2 | split h2 | mean abs dNLL legacy / cal / split | mean dNLL legacy / cal / split |
+|---|---:|---:|---:|---:|---|---|
+| Gemma-4-26B-A4B NVFP4, `ppl_corpus_45k_gemma4_turn` | 17.5635 | 17.9006 | 18.0870 | 17.6854 | 0.4692 / 0.4739 / 0.4659 | +0.0190 / +0.0294 / +0.0069 |
+| Gemma-4-26B-A4B NVFP4, `calib_corpus_gemma4_turn` (37330 tok) | 30.7326 | 30.9120 | 30.8182 | 30.3282 | 0.6051 / 0.6043 / 0.5965 | +0.0058 / +0.0028 / -0.0132 |
+| Qwen3-30B-A3B NVFP4, `ppl_45k` | 10.9299 | 10.8848 | 10.9474 | 10.9211 | 0.2586 / 0.2518 / 0.2536 | -0.0041 / +0.0016 / -0.0008 |
+| Qwen3-8B-FP8, `ppl_45k` | 10.7786 | 10.7793 | 10.7376 | 10.7130 | 0.1250 / 0.1239 / 0.1226 | +0.0001 / -0.0038 / -0.0061 |
+
+| Model | K edges legacy / shared / split | V edges legacy / shared / split |
+|---|---|---|
+| Gemma-4-26B-A4B | 17.98 % / 2.35 % / 0.16 % | 1.89 % / 0.24 % / 0.24 % |
+| Qwen3-30B-A3B | (K amax > V: shared = split) | 22.14 % / 6.92 % / 0.21 % |
+| Qwen3-8B-FP8 | 1.77 % / 0.44 % / 0.35 % | 7.27 % / 3.01 % / 0.20 % |
+
+- Gemma-4 turn corpus, PPL over FP16 by headroom: shared h1 / h2 / h4 +2.35 / +2.98 / +2.76 %, split +0.30 / +0.69 / +2.58 %; legacy +1.92 %. Mean abs dNLL split h1 / h4 0.4757 / 0.4789.
+- Split removes the edge values (Gemma-4 K 17.98 % -> 0.16 %) and shifts Gemma-4 NLL down on both corpora (-0.0225 and -0.0160 nats/token vs shared), but the per-position distance to FP16 moves by less than its spread across headrooms (0.4659..0.4789): the rest of the FP8 KV gap is the 3-bit mantissa on normal values, which no power-of-two scale moves.
+- Qwen3 neutral: split distance sits between or below the other arms (Qwen3-30B 0.2536 vs 0.2518 / 0.2586, Qwen3-8B-FP8 0.1226 vs 0.1239 / 0.1250), PPL within -0.61..-0.08 % of FP16. `degen_suite.py --quick` on Gemma-4 split: 37 checks, 0 FAIL.
+- Decode cost, Gemma-4 FP8 KV, medians of 3 rotated trials, main legacy / own legacy / own split: tg128 299.15 / 299.13 / 299.25 tok/s, conc 16 aggregate 2281.3 / 2306.1 / 2403.0 tok/s (split ahead in all 3 trials, as `calibrate` in #3016, cause not isolated).
+
+[PROV: commit=87a61491+kvsplit date=2026-11-03 hw=RTX5090 model=Gemma-4-26B-A4B-it quant=NVFP4 cuda=13.4.3 path=imp-cli+server-api cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128`, `conc_client.py 16 3`
+       n=3 trials per arm note=kv_cache.dtype=fp8, runtime.max_batch_size=16, IGNORE_EOS=1]
+- Default stays `legacy`: the Gemma-4 gain does not hold at h4, and `calibrate` skips the persisted prefix-cache restore. For FP8 KV on Gemma-4: `kv_cache.fp8_scale=calibrate` with `kv_cache.fp8_scale_split=true`.
 
 ## Recipe: reproducible evals
 

@@ -20,6 +20,7 @@
 #include "memory/kv_cache.h"
 #include "core/tensor.h"
 #include "core/dispatch_policy.h"
+#include "core/kv_fp8_scale.h"
 #include "core/process_diag.h"
 
 #include <cuda_runtime.h>
@@ -82,7 +83,8 @@ template <typename A>
 // Chunked prefill: gather past paged KV [0, gather_cap) of the cache dtype into flat FP16 k_full / v_full.
 static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half* v_full, const int* past_bt,
                                 int gather_cap, int kv_bs, int nkv, int hd,
-                                const std::vector<float>& kv_scales, cudaStream_t stream, const int* d_past) {
+                                const std::vector<Fp8KvScalePair>& kv_scales, cudaStream_t stream,
+                                const int* d_past) {
     const QType kvt = cache->qtype();
     if (kvt == QType::F16) {
         paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)), past_bt, gather_cap,
@@ -90,11 +92,11 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
         paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, gather_cap,
                              kv_bs, nkv, hd, stream, d_past);
     } else if (kvt == QType::FP8_E4M3) {
-        const float kv_scale = kv_layer < (int)kv_scales.size() ? kv_scales[kv_layer] : 1.0f;
+        const Fp8KvScalePair s = kv_layer < (int)kv_scales.size() ? kv_scales[kv_layer] : Fp8KvScalePair{};
         paged_kv_gather_fp8_to_fp16(k_full, static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                                    past_bt, kv_scale, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                    past_bt, s.k, gather_cap, kv_bs, nkv, hd, stream, d_past);
         paged_kv_gather_fp8_to_fp16(v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-                                    past_bt, kv_scale, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                    past_bt, s.v, gather_cap, kv_bs, nkv, hd, stream, d_past);
     } else if (kvt == QType::NVFP4) {
         paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                       static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)), past_bt,
