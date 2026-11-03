@@ -157,9 +157,12 @@ struct MtpSlotCand {
 }
 
 // A prompt takes the head when it prefills alone (a lone chat) or already holds it; the prompts of
-// a burst ride the ragged forward unbound (binding one would cost it a serial forward of its own).
-[[nodiscard]] constexpr bool mtp_prompt_takes_head(bool bound, bool slot_available, int prompts_this_step) {
-    return bound || (slot_available && prompts_this_step == 1);
+// a burst ride the ragged forward unbound (binding one would cost it a serial forward of its own),
+// unless the burst is no wider than speculative.mtp_batch_verify's rows (burst_bind), which verify it.
+[[nodiscard]] constexpr bool mtp_prompt_takes_head(bool bound, bool slot_available, int prompts_this_step,
+                                                   int burst_bind = 1) {
+    return bound ||
+           (slot_available && prompts_this_step >= 1 && prompts_this_step <= std::max(1, burst_bind));
 }
 
 // A bound request drafts only while the head cache covers exactly its pre-step context. Tokens

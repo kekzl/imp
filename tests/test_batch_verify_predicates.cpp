@@ -76,6 +76,11 @@ TEST(BatchVerifyPredicates, OnlyALonePromptTakesTheHead) {
     EXPECT_FALSE(mtp_prompt_takes_head(false, true, 4)) << "binding one of a burst costs a serial forward";
     EXPECT_FALSE(mtp_prompt_takes_head(false, false, 1)) << "the active binding keeps the only slot";
     EXPECT_TRUE(mtp_prompt_takes_head(true, true, 4)) << "a bound prompt's later chunks stay serial";
+    // speculative.mtp_batch_verify (4 rows): a c4 burst binds and verifies together; c32 stays ragged.
+    EXPECT_TRUE(mtp_prompt_takes_head(false, true, 4, /*burst_bind=*/4));
+    EXPECT_FALSE(mtp_prompt_takes_head(false, true, 5, 4));
+    EXPECT_FALSE(mtp_prompt_takes_head(false, false, 2, 4)) << "every bind place taken";
+    EXPECT_FALSE(mtp_prompt_takes_head(false, true, 0, 4));
 }
 
 // A binding whose head cache lags its context (decoded in a batch) is dead; synced is not.
