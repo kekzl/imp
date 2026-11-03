@@ -92,6 +92,9 @@ ARG IMP_BUILD_BENCH=OFF
 ARG IMP_EXTRA_CMAKE=
 # Recorded in imp-quantize export recipes (#2481); scripts/build_image.sh passes it.
 ARG IMP_TREE_ID=
+# ON keeps /src/build in the layer (scripts/coverage_server.sh needs the .gcno files).
+# OFF drops it after the binaries are copied to /tmp: 312 of 476 MB per cached layer.
+ARG IMP_KEEP_BUILD_DIR=OFF
 
 # ccache in a BuildKit cache mount. Content-addressed: a hit is keyed on the
 # preprocessed source, the flags and the compiler binary, so it IS the object a
@@ -128,7 +131,8 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
               done; \
        fi \
     && ([ -f build/imp-bench ] && cp build/imp-bench /tmp/ || true) \
-    && ([ -f build/test-gdn ] && cp build/test-gdn /tmp/ || true)
+    && ([ -f build/test-gdn ] && cp build/test-gdn /tmp/ || true) \
+    && if [ "${IMP_KEEP_BUILD_DIR}" != "ON" ]; then rm -rf build; fi
 
 # Release tarball without Docker (roadmap row 55): `docker build --target bundle -o dist .`
 # writes imp-<version>-linux-x86_64.tar.gz (+ .sha256); scripts/bundle_release.sh.
