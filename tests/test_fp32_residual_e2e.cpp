@@ -1,7 +1,7 @@
-// gemm.fp32_residual_fuse (exec/executor_fp32_residual.cpp) changes launches, not bits: 16 greedy
-// requests stepped together through one engine (deterministic, prefix cache and CUDA graphs off, so
-// every step runs the host path of the policy in force), the policy flipped between rounds. Output
-// tokens and chosen-token logprobs must be equal; a fused-fused repeat is the control.
+// gemm.fp32_residual_fuse (exec/executor_fp32_residual.cpp) and gemm.geglu_quant_fuse change launches,
+// not bits: 16 greedy requests stepped together through one engine (deterministic, prefix cache and CUDA
+// graphs off, so every step runs the host path of the policy in force), the policy flipped between rounds.
+// Output tokens and chosen-token logprobs must be equal; a fused-fused repeat is the control.
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "api/imp_internal.h"
@@ -67,10 +67,11 @@ Round run_round(ImpModel model, imp::Engine* engine) {
     return out;
 }
 
-TEST(Fp32ResidualFuseE2ETest, BatchedDecodeBitEqualGemma4) {
+// One engine, the policy flipped by `knob` between rounds: fused, off, fused again (control).
+void expect_knob_bit_equal(bool imp::cfg::GEMM::* knob, const char* name) {
     const char* path = std::getenv(imp_test::kEnvModelGemma4Nvfp4);
     if (!path)
-        GTEST_SKIP() << "Set " << imp_test::kEnvModelGemma4Nvfp4 << " to run the fused-norm equivalence";
+        GTEST_SKIP() << "Set " << imp_test::kEnvModelGemma4Nvfp4 << " to run the " << name << " equivalence";
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModelGemma4Nvfp4));
     setenv("IMP_DETERMINISTIC", "1", 1);
     ImpModel model = nullptr;
@@ -87,8 +88,9 @@ TEST(Fp32ResidualFuseE2ETest, BatchedDecodeBitEqualGemma4) {
     const imp::DispatchPolicy& own = ex->dispatch_policy();
     const imp::DispatchPolicy fused = own;
     imp::DispatchPolicy unfused = own;
-    unfused.gemm.fp32_residual_fuse = false;
-    EXPECT_TRUE(fused.gemm.fp32_residual_fuse) << "default changed: the rounds below would not differ";
+    unfused.gemm.*knob = false;
+    EXPECT_TRUE(fused.gemm.*knob) << "default of gemm." << name
+                                  << " changed: the rounds below would not differ";
 
     ex->set_dispatch_policy(fused);
     (void)run_round(model, engine);  // warm: every measured round follows one identical round
@@ -100,9 +102,18 @@ TEST(Fp32ResidualFuseE2ETest, BatchedDecodeBitEqualGemma4) {
     ex->set_dispatch_policy(own);
 
     EXPECT_TRUE(a == again) << "control: fused vs fused differ, the comparison means nothing";
-    EXPECT_TRUE(a == off) << "fused vs unfused: tokens or chosen-token logprobs differ";
+    EXPECT_TRUE(a == off) << "gemm." << name << " on vs off: tokens or chosen-token logprobs differ";
     imp_context_free(ctx);
     imp_model_free(model);
+}
+
+TEST(Fp32ResidualFuseE2ETest, BatchedDecodeBitEqualGemma4) {
+    expect_knob_bit_equal(&imp::cfg::GEMM::fp32_residual_fuse, "fp32_residual_fuse");
+}
+
+// gemm.geglu_quant_fuse: shared-MLP GeGLU + the down GEMM's NVFP4 input quantize in one kernel.
+TEST(Fp32ResidualFuseE2ETest, GegluQuantFuseBitEqualGemma4) {
+    expect_knob_bit_equal(&imp::cfg::GEMM::geglu_quant_fuse, "geglu_quant_fuse");
 }
 
 }  // namespace

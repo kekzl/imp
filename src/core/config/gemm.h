@@ -90,6 +90,9 @@ struct GEMM {
     // layer tail (branch post-norms, add, post_ffn_norm, layer scale, next attn_norm + NVFP4
     // quantize) as one launch each. Bit-identical to the unfused chain.
     bool fp32_residual_fuse = true;
+    // Decode rows 2-32: the shared-MLP GeGLU writes the down GEMM's small-M NVFP4 input in the same
+    // kernel (Gemma-4, K % 64). Bit-identical to geglu() + the down GEMM's own quantize.
+    bool geglu_quant_fuse = true;
     // Small-M (<=32) NVFP4 GEMM for batched decode. v1 (W4A16 dequant+HMMA)
     // won isolated but lost the real 32-stream step: synchronous SIMT loads
     // are exposed to the GDN scan's L2 pressure. v2 uses native block-scaled

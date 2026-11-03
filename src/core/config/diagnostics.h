@@ -50,7 +50,8 @@ struct Diagnostics {
     // these keys at load, so --set and imp.conf reach them too.
     bool spec_trace = false;  // per-step speculative draft/verify trace
     bool jump_trace = false;  // conditional-graph jump trace
-    std::string ppl_dump;     // path: dump per-token NLL from --perplexity
+    // Per-row NLL from --perplexity: "1" sparse / "full" to the debug log, a path ('/') to a file.
+    std::string ppl_dump;
     std::string graph_dump_dir;
     // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
     // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
