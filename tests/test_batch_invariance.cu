@@ -493,11 +493,11 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     // equally cancels. A planted 2% smallM-A4 output-scale error left all five deltas inside
     // their fences while every absolute NLL moved 0.028 - only this anchor catches that class.
     // Pinned to the default checkpoint only; re-pin deliberately when a kernel change should
-    // move numerics.
+    // move numerics. #3015 (static NVFP4 act scale) moved it 3.431498 -> 3.404146; #3019 0.
     if (path == kDefaultModel) {
-        EXPECT_NEAR(solo_a4.mean_nll(), 3.4403, 0.02)
+        EXPECT_NEAR(solo_a4.mean_nll(), 3.4041, 0.02)
             << "teacher-forced M=1 NLL on " << kDefaultModel << " moved to " << solo_a4.mean_nll()
-            << " (pinned 3.4403 on 2026-09-06, docs/PERF.md). A uniform shift like this is a "
+            << " (pinned 3.4041 on 2026-11-03 after #3015, docs/PERF.md). A uniform shift like this is a "
                "kernel numerics change, which the solo-vs-batched deltas cannot see.";
     }
 }
