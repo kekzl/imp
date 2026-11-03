@@ -1,0 +1,14 @@
+# /mnt/data/scratch/mtpcatchup_gates/ident: fresh server per arm, main 6bca2fe2 vs final tree, MODES greedy, side, ov (in that order), 1 pair
+harness: md5=5c087000f7fb d742d48b6488 ca7d262552dc 
+p1_main_ov REASONS_TOTAL {'turns drafted': 1, 'turns not drafted': 11, 'unbind: head cache behind the context after batched decode': 9}
+p1_main_greedy SUMMARY turn1_tps 116.80 followup_mean_tps 120.23 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 117.70 followup_mean_tps 122.60 followup_drafted_turns 5/5 PASS
+p1_main_ov SUMMARY c0_mean_tps 90.86 c0_drafted_turns 1/6 c1_mean_tps 86.67 c1_drafted_turns 0/6 all_mean_tps 88.77 PASS
+p1_main UNBIND_TOTAL {'head cache behind the context after batched decode': 9} own_peak_mib 22856
+p1_final_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p1_final_greedy SUMMARY turn1_tps 116.82 followup_mean_tps 120.11 followup_drafted_turns 5/5 PASS
+p1_final_side SUMMARY turn1_tps 117.46 followup_mean_tps 122.53 followup_drafted_turns 5/5 PASS
+p1_final_ov SUMMARY c0_mean_tps 96.70 c0_drafted_turns 6/6 c1_mean_tps 98.03 c1_drafted_turns 6/6 all_mean_tps 97.36 PASS
+p1_final UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 24026
+IDENTICAL 6/6 /d/mtpcatchup_gates/ident/p1_main_greedy.json vs /d/mtpcatchup_gates/ident/p1_final_greedy.json
+IDENTICAL 6/6 /d/mtpcatchup_gates/ident/p1_main_side.json vs /d/mtpcatchup_gates/ident/p1_final_side.json
