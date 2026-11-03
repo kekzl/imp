@@ -9,6 +9,7 @@
 #include "model/model_config.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
+#include "quant/nvfp4_pack.cuh"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
 #include "core/logging.h"
@@ -155,21 +156,13 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
                                                                      float local_absmax,
                                                                      uint8_t* packed_out_row, int k_group,
                                                                      uint8_t* sfa_target, float act_scale) {
-    // Encode UE4M3 scale (positive — `float_to_fp8_e4m3` handles clamp + rounding
-    // and returns sign=0 for non-negative input, which is a valid UE4M3 byte).
-    // act_scale: static activation tensor scale (dequant form), 1.0 = none; 1.0 * 6 and 1 / (1.0 * s)
-    // are exact, so a unit scale writes the same bytes as before.
-    float scale_f = local_absmax / (act_scale * 6.0f);
-    if (scale_f > 448.0f)
+    // act_scale: static activation tensor scale (dequant form), 1.0 = none. The block scale encode is the
+    // plain quantizer's (nvfp4_encode_micro_scale): clamp to [2^-9, 448], so a block under 2^-9 keeps the
+    // byte 2^-9 instead of 0 (the GEMM read it as zero) and prompt rows quantize like decode rows.
+    if (local_absmax / (act_scale * 6.0f) > 448.0f)
         g_nvfp4_scale_clipped = 1u;
-    uint8_t ue4m3 = float_to_fp8_e4m3(scale_f);
-
-    // Reconstruct actual scale from UE4M3 for consistent quantization. If the
-    // scale rounds to zero, fall back to the smallest denorm (2^-9) to avoid
-    // division by zero — matches the >=2^-9 clamp used elsewhere in imp.
-    float actual_scale = fp8_e4m3_to_float_fast(ue4m3);
-    if (actual_scale == 0.0f)
-        actual_scale = 1.0f / 512.0f;
+    uint8_t ue4m3;
+    const float actual_scale = nvfp4_encode_micro_scale(local_absmax, act_scale, &ue4m3);
     float inv_scale = 1.0f / (act_scale * actual_scale);
 
     *sfa_target = ue4m3;

@@ -291,23 +291,28 @@ TEST_F(GroupedNvfp4DecodeTest, F16BitEqualToTileAndFp64) {
 }
 
 // Gated (SwiGLU, GeGLU) and ReLU^2 epilogues against the 4-launch path they replace: tile(gate), tile(up),
-// fused_act_quantize. Every valid row's packed bytes and UE4M3 scales must match bit for bit.
+// fused_act_quantize. Every valid row's packed bytes and UE4M3 scales must match bit for bit. up_amp 4e-5
+// puts most down-input blocks under the unit-scale UE4M3 floor (scale < 2^-9: both clamp to 2^-9, never write
+// 0).
 TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
     struct Case {
         MoeDecodeEpi epi;
         FFNActivation act;
         int N, K;
+        float up_amp = 0.08f;
     };
     for (const Case c : {Case{MoeDecodeEpi::kGeglu, FFNActivation::GEGLU, 704, 2816},
                          Case{MoeDecodeEpi::kSwiglu, FFNActivation::SWIGLU, 768, 2048},
                          Case{MoeDecodeEpi::kRelu2, FFNActivation::RELU_SQR, 1856, 2688},
-                         Case{MoeDecodeEpi::kSwiglu, FFNActivation::SWIGLU, 128, 320}})
+                         Case{MoeDecodeEpi::kSwiglu, FFNActivation::SWIGLU, 128, 320},
+                         Case{MoeDecodeEpi::kGeglu, FFNActivation::GEGLU, 704, 2816, 4e-5f},
+                         Case{MoeDecodeEpi::kSwiglu, FFNActivation::SWIGLU, 768, 2048, 4e-5f}})
         for (int tokens : {1, 4, 16, 32}) {
             const bool gated = c.epi != MoeDecodeEpi::kRelu2;
             Acts x;
             x.build(decode_routing(128, tokens, 8, 11 + tokens), c.K, s_);
             Weights up, gate;
-            up.build(x.ne, c.N, c.K, 0x500u, 0.08f, s_);
+            up.build(x.ne, c.N, c.K, 0x500u, c.up_amp, s_);
             if (gated)
                 gate.build(x.ne, c.N, c.K, 0x900u, 0.08f, s_);
             const size_t n_mid = size_t(x.M_total) * c.N;
@@ -354,7 +359,7 @@ TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
             cudaMemcpy(rs.data(), ref_sf, ref_sf_bytes, cudaMemcpyDeviceToHost);
             cudaMemcpy(ds.data(), static_cast<char*>(dec) + sf_at, ds.size(), cudaMemcpyDeviceToHost);
             cudaMemcpy(roff.data(), d_ref_off, (x.ne + 1) * sizeof(int64_t), cudaMemcpyDeviceToHost);
-            size_t bad_p = 0, bad_s = 0, nonzero = 0;
+            size_t bad_p = 0, bad_s = 0, nonzero = 0, sub_floor = 0;
             for (size_t i = 0; i < rp.size(); ++i) {
                 bad_p += rp[i] != dp[i] ? 1 : 0;
                 nonzero += rp[i] != 0 ? 1 : 0;
@@ -367,6 +372,7 @@ TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
                                          nvfp4_ref::sfatom_offset(r, kg, n_k_tiles);
                         bad_s += rs[o] != ds[m16_off[e] + gemm_grouped_nvfp4_decode_m16_sf(r, kg, c.N)] ? 1
                                                                                                         : 0;
+                        sub_floor += rs[o] <= 0x01 ? 1 : 0;  // byte 0x01 = 2^-9, the floor
                     }
             // Down projection on each input: tile GEMM on the reference (SfAtom) vs decode GEMM on the M16
             // output.
@@ -400,10 +406,12 @@ TEST_F(GroupedNvfp4DecodeTest, ActEpilogueBitEqualToUnfusedPath) {
             std::fprintf(
                 stderr,
                 "[decode act] epi %d N=%d K=%d tokens %d rows %d: packed bad %zu / %zu (nonzero %zu), "
-                "sf bad %zu, down bad %zu\n",
+                "sf bad %zu (at the 2^-9 floor %zu), down bad %zu\n",
                 static_cast<int>(c.epi), c.N, c.K, tokens, x.M_total, bad_p, rp.size(), nonzero, bad_s,
-                bad_d);
-            EXPECT_GT(nonzero, rp.size() / 2);
+                sub_floor, bad_d);
+            EXPECT_GT(nonzero, rp.size() / ((c.up_amp < 0.01f) ? 8 : 2));
+            if (c.up_amp < 0.01f)
+                EXPECT_GT(sub_floor, size_t(x.M_total) * c.N / 16 / 4) << "tiny case reaches no floor block";
             EXPECT_EQ(bad_p, 0u);
             EXPECT_EQ(bad_s, 0u);
             EXPECT_EQ(bad_d, 0u);
