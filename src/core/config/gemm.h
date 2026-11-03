@@ -112,6 +112,10 @@ struct GEMM {
     // moves with its chunk (prefix-cache resend). "auto": off on MoE (Gemma-4-26B resend 0.179 nats -> 0,
     // pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep stream-K.
     std::string nvfp4_prompt_streamk = "auto";
+    // Dense SwiGLU prompt rows (M > 32) on the own NVFP4 tile: the up GEMM's epilogue applies SwiGLU to the
+    // gate GEMM's fp16 output and writes the down GEMM's NVFP4 activation (gemm_nvfp4_tile_swiglu_quant),
+    // no up / SwiGLU fp16 tensors, no swiglu_quantize launch. Bit-equal to the unfused path.
+    bool swiglu_quant_epilogue = true;
     // Own FP16 GEMM (src/compute/gemm_f16_tile.cu) instead of cuBLASLt for F16 x F16 -> F16 with fp16
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
     // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.

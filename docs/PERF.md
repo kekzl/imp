@@ -52,13 +52,13 @@ because CI has no GPU runner.
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
 |---|---|---|
-| decode tg128 | **281.35 tok/s** | 8 % |
-| prefill pp128 | 23237.96 tok/s | 8 % |
-| prefill pp512 | **45852.06 tok/s** | 8 % |
-| prefill pp4096 | 44933.37 tok/s | 8 % |
+| decode tg128 | **282.84 tok/s** | 8 % |
+| prefill pp128 | 24779.14 tok/s | 8 % |
+| prefill pp512 | **50374.39 tok/s** | 8 % |
+| prefill pp4096 | 50318.99 tok/s | 8 % |
 | peak VRAM (own) | 6140 MiB | 10 % |
 
-[PROV: commit=f26bad0b date=2026-10-31 hw=RTX5090 model=Qwen3-8B-NVFP4-cortecs quant=NVFP4
+[PROV: commit=eb11fbd1 date=2026-11-03 hw=RTX5090 model=Qwen3-8B-NVFP4-cortecs quant=NVFP4
        cuda=13.5 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 

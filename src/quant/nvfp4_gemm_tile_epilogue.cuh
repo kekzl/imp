@@ -4,6 +4,7 @@
 // staged 16 B stores, direct fragment stores, stmatrix + TMA store. sm_120a.
 
 #include "quant/nvfp4_gemm_tile_core.cuh"
+#include "quant/nvfp4_sfatom_act.cuh"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -37,6 +38,17 @@ struct TileArgs {
     bool a_per_row;  // FP8 only: a_scale holds M per-token scales, D row m uses a_scale[m]
 };
 
+// Cfg::kSq: D is the up projection; writes quantize(swiglu(gate, D)) at scale as packed [M, N/2] + SfAtom
+// scales (K = N) instead of D; gate [M, N] fp16, row stride N. Passed in the kernel's store-map slot (no TMA
+// store), so TileArgs and every other kernel's parameters stay as they were.
+struct SqArgs {
+    const half* gate;
+    uint8_t* packed;
+    uint8_t* sf;
+    float scale;
+};
+static_assert(sizeof(SqArgs) <= sizeof(CUtensorMap), "SqArgs rides in the store map");
+
 // alpha, times col_scale[col], col + 1 for the MXFP8 row-scale view, times the FP8 tensor scales.
 template <class C>
 __device__ __forceinline__ float2 out_scale(const TileArgs& p, int col) {
@@ -69,6 +81,72 @@ struct Ring {
     uint32_t bars;  // full[s] at s*8, empty[s] after
     int m0, n0, KT, warp, lane, wm, wn;
 };
+
+// The SwiGLU-quant epilogue's clipped-scale flag (#1544): nvfp4_gemm_tile.cu is this header's only includer.
+__device__ unsigned int g_sq_clipped = 0;
+
+// Cfg::kSq: the CTA's rows of the gate tile into L2 while the mainloop runs (one bulk prefetch per row);
+// a no-op for other configs or !on.
+template <class C>
+__device__ __forceinline__ void sq_prefetch(const TileArgs& p, const CUtensorMap* md, int m0, int n0,
+                                            bool on) {
+    if constexpr (C::kSq) {
+        const int r = static_cast<int>(threadIdx.x);
+        if (on && r < kBM && m0 + r < p.M && n0 < p.N)
+            prefetch_l2(reinterpret_cast<const SqArgs*>(md)->gate + (static_cast<size_t>(m0 + r) * p.N) + n0,
+                        static_cast<uint32_t>(min(C::kBN, p.N - n0)) * 2u);
+    }
+}
+
+// Cfg::kSq epilogue on the fp16 tile staged by store_tma (boxes of 64 columns, 128B swizzle at g.s0): one
+// item per (row, 16 columns), all gate loads first; bytes of swiglu_quantize_fp16_nvfp4_cutlass_kernel.
+template <class C>
+__device__ __forceinline__ void store_swiglu_quant(const Ring& g, const TileArgs& p, const SqArgs& sq) {
+    constexpr int kMb = C::kBN / 16;
+    constexpr int kItems = (kBM * kMb) / kMmaThreads;
+    static_assert((kBM * kMb) % kMmaThreads == 0, "whole items per thread");
+    const int n_k_tiles = (p.N + 63) / 64;
+    float4 gv[kItems][2];
+#pragma unroll
+    for (int it = 0; it < kItems; ++it) {
+        const int i = static_cast<int>(threadIdx.x) + (it * kMmaThreads);
+        const int row = g.m0 + (i / kMb);
+        const int col = g.n0 + ((i % kMb) * 16);
+        if (row < p.M && col < p.N) {
+            const auto* src = reinterpret_cast<const float4*>(sq.gate + (static_cast<size_t>(row) * p.N) +
+                                                              col);
+            gv[it][0] = __ldcs(src);
+            gv[it][1] = __ldcs(src + 1);
+        }
+    }
+#pragma unroll
+    for (int it = 0; it < kItems; ++it) {
+        const int i = static_cast<int>(threadIdx.x) + (it * kMmaThreads);
+        const int r = i / kMb;
+        const int c = (i % kMb) * 16;  // tile column
+        const int row = g.m0 + r;
+        const int col = g.n0 + c;
+        if (row >= p.M || col >= p.N)
+            continue;
+        const uint32_t box = g.s0 + ((c >> 6) * (kBM * 128)) + (r * 128);
+        const int ch = (c & 63) >> 3;  // even 16 B chunk of the box row
+        const uint4 u0 = lds128(box + ((ch ^ (r & 7)) * 16));
+        const uint4 u1 = lds128(box + (((ch + 1) ^ (r & 7)) * 16));
+        const float4 uv[2] = {*reinterpret_cast<const float4*>(&u0), *reinterpret_cast<const float4*>(&u1)};
+        float vals[16];
+        float4 ov[2];
+        const float amax = swiglu_block16(gv[it], uv, vals, ov);
+        uint8_t ue;
+        uint8_t q[8];
+        if (nvfp4_quant_block16(vals, amax, sq.scale, &ue, q))
+            g_sq_clipped = 1u;
+        uint2 packed;
+        packed.x = q[0] | (q[1] << 8) | (q[2] << 16) | (static_cast<uint32_t>(q[3]) << 24);
+        packed.y = q[4] | (q[5] << 8) | (q[6] << 16) | (static_cast<uint32_t>(q[7]) << 24);
+        *reinterpret_cast<uint2*>(sq.packed + (static_cast<size_t>(row) * (p.N / 2)) + (col / 2)) = packed;
+        sq.sf[sfatom_offset(row, col / 16, n_k_tiles)] = ue;
+    }
+}
 
 template <class C>
 __device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], const TileArgs& p, int m0,
@@ -251,6 +329,11 @@ __device__ __forceinline__ void store_tma(const float (&acc)[4][C::kNF][4], cons
                     pack_half2(acc[mf][nf + 1][0] * s1a.x, acc[mf][nf + 1][1] * s1a.y),
                     pack_half2(acc[mf][nf + 1][2] * s1b.x, acc[mf][nf + 1][3] * s1b.y));
         }
+    if constexpr (C::kSq) {
+        asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
+        store_swiglu_quant<C>(g, p, *reinterpret_cast<const SqArgs*>(md));
+        return;
+    }
     fence_async_smem();
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
     if (threadIdx.x == 0) {

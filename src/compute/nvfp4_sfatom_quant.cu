@@ -10,6 +10,8 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
 #include "quant/nvfp4_pack.cuh"
+#include "quant/nvfp4_sfatom_act.cuh"
+#include "quant/nvfp4_gemm_tile.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
 #include "core/logging.h"
@@ -36,21 +38,7 @@ static constexpr int kAtomRows = 128;                          // 32 * 4
 static constexpr int kAtomKGroups = 4;                         // 4 scale groups per atom
 static constexpr int kAtomKElems = kSFVecSize * kAtomKGroups;  // 64
 static constexpr int kAtomSize = kAtomRows * kAtomKGroups;     // 512
-
-// Compute SfAtom offset for logical scale factor at (row, k_group).
-__device__ __host__ __forceinline__ int sfatom_offset(int row, int k_group, int n_k_tiles) {
-    int tile_row = row / kAtomRows;
-    int tile_k = k_group / kAtomKGroups;
-    int row_local = row % kAtomRows;
-    int k_local = k_group % kAtomKGroups;
-
-    int n0 = row_local % 32;  // within 32-row sub-block
-    int n1 = row_local / 32;  // which of 4 sub-blocks
-
-    int atom_offset = (n0 * 16) + (n1 * 4) + k_local;
-    int tile_base = ((tile_row * n_k_tiles) + tile_k) * kAtomSize;
-    return tile_base + atom_offset;
-}
+// sfatom_offset(row, k_group, n_k_tiles): quant/nvfp4_sfatom_act.cuh.
 
 size_t cutlass_nvfp4_sf_size(int rows, int K) {
     int n_row_tiles = (rows + kAtomRows - 1) / kAtomRows;
@@ -114,34 +102,6 @@ __global__ void convert_scales_sfatom_moe_kernel(const uint8_t* __restrict__ src
 // Activation quantization: FP16 [M, K] → NVFP4 packed + SfAtom UE4M3 scales
 // ---------------------------------------------------------------------------
 
-__device__ __forceinline__ uint8_t quantize_abs_to_fp4(float abs_val) {
-    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
-    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f) + (abs_val >= 1.75f) +
-                   (abs_val >= 2.5f) + (abs_val >= 3.5f) + (abs_val >= 5.0f);
-    return code;  // 0..7
-}
-
-// HW FP4 conversion: two scaled FP32 → packed byte (low=v0, high=v1).
-// IEEE RNE rounding; sm_120+ only.
-__device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
-#if __CUDA_ARCH__ >= 1200
-    uint32_t out;
-    asm volatile(
-        "{ .reg .b8 b;\n"
-        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
-        "  cvt.u32.u8 %0, b; }\n"
-        : "=r"(out)
-        : "f"(v0), "f"(v1));
-    return static_cast<uint8_t>(out);
-#else
-    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
-    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
-    uint8_t c0 = (sign0 << 3) | quantize_abs_to_fp4(fabsf(v0));
-    uint8_t c1 = (sign1 << 3) | quantize_abs_to_fp4(fabsf(v1));
-    return (c1 << 4) | c0;
-#endif
-}
-
 // Given 16 precomputed values + absmax, encodes UE4M3 scale and packs FP4 bytes
 // (reusable for fused paths like SwiGLU+quantize). UE4M3 scale saturates at 448: a
 // micro-block with absmax > 448*6=2688 gets a scale clipped silently
@@ -159,21 +119,17 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
     // act_scale: static activation tensor scale (dequant form), 1.0 = none. The block scale encode is the
     // plain quantizer's (nvfp4_encode_micro_scale): clamp to [2^-9, 448], so a block under 2^-9 keeps the
     // byte 2^-9 instead of 0 (the GEMM read it as zero) and prompt rows quantize like decode rows.
-    if (local_absmax / (act_scale * 6.0f) > 448.0f)
-        g_nvfp4_scale_clipped = 1u;
     uint8_t ue4m3;
-    const float actual_scale = nvfp4_encode_micro_scale(local_absmax, act_scale, &ue4m3);
-    float inv_scale = 1.0f / (act_scale * actual_scale);
+    uint8_t q[kSFVecSize / 2];
+    if (nvfp4_quant_block16(vals, local_absmax, act_scale, &ue4m3, q))
+        g_nvfp4_scale_clipped = 1u;
 
     *sfa_target = ue4m3;
 
     uint8_t* packed_at = packed_out_row + (static_cast<int64_t>(k_group) * (kSFVecSize / 2));
 #pragma unroll
-    for (int i = 0; i < kSFVecSize; i += 2) {
-        float s0 = vals[i] * inv_scale;
-        float s1 = vals[i + 1] * inv_scale;
-        packed_at[i / 2] = pack_fp4_pair_hw(s0, s1);
-    }
+    for (int i = 0; i < kSFVecSize / 2; ++i)
+        packed_at[i] = q[i];
 }
 
 // Direct FP16 quantize: load 16 FP16 values, pass to the above helper.
@@ -569,27 +525,12 @@ __global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict
     const int k_group = static_cast<int>(mb % k_groups);
     const int64_t base = mb * kSFVecSize;
     float vals[kSFVecSize];
-    float amax = 0.0f;
     float4 ov[2];
-#pragma unroll
-    for (int v = 0; v < 2; ++v) {
-        const float4 gv = reinterpret_cast<const float4*>(gate + base)[v];
-        const float4 uv = reinterpret_cast<const float4*>(up + base)[v];
-        const half2* g2 = reinterpret_cast<const half2*>(&gv);
-        const half2* u2 = reinterpret_cast<const half2*>(&uv);
-        half2* o2 = reinterpret_cast<half2*>(&ov[v]);
-#pragma unroll
-        for (int k = 0; k < 4; ++k) {
-            const float2 gf = __half22float2(g2[k]);
-            const float2 uf = __half22float2(u2[k]);
-            o2[k] = __float22half2_rn(
-                make_float2(gf.x / (1.0f + __expf(-gf.x)) * uf.x, gf.y / (1.0f + __expf(-gf.y)) * uf.y));
-            const float2 rf = __half22float2(o2[k]);
-            vals[(v * 8) + (k * 2)] = rf.x;
-            vals[(v * 8) + (k * 2) + 1] = rf.y;
-            amax = fmaxf(amax, fmaxf(fabsf(rf.x), fabsf(rf.y)));
-        }
-    }
+    const float4 gv[2] = {reinterpret_cast<const float4*>(gate + base)[0],
+                          reinterpret_cast<const float4*>(gate + base)[1]};
+    const float4 uv[2] = {reinterpret_cast<const float4*>(up + base)[0],
+                          reinterpret_cast<const float4*>(up + base)[1]};
+    const float amax = swiglu_block16(gv, uv, vals, ov);  // shared with the tile GEMM SwiGLU epilogue
     reinterpret_cast<float4*>(out + base)[0] = ov[0];
     reinterpret_cast<float4*>(out + base)[1] = ov[1];
     quantize_micro_block_nvfp4_from_vals(vals, amax, packed_out + (static_cast<int64_t>(row) * (K / 2)),
@@ -618,6 +559,9 @@ bool cutlass_sm120_nvfp4_available() { return true; }
 void nvfp4_report_scale_clipping() {
     if (gemm_grouped_nvfp4_decode_scale_clipped())
         IMP_LOG_WARN("[NVFP4] MoE decode act-quantize clipped a micro-block scale (absmax > 2688, #1544)");
+    if (gemm_nvfp4_tile_scale_clipped())
+        IMP_LOG_WARN(
+            "[NVFP4] prompt SwiGLU-quant epilogue clipped a micro-block scale (absmax > 2688, #1544)");
     unsigned int clipped = 0;
     if (cudaMemcpyFromSymbol(&clipped, g_nvfp4_scale_clipped, sizeof(clipped)) != cudaSuccess || clipped == 0)
         return;

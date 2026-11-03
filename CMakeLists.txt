@@ -1331,6 +1331,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_swiglu_quantize_cutlass.cu
+        tests/test_nvfp4_tile_swiglu_quant.cu
         tests/test_ffn_graph_cache_gpu.cu
         tests/test_rope.cu
         # The fused QK-norm + RoPE decode kernel (#1957) had no test reference

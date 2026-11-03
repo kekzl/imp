@@ -3,7 +3,8 @@
 # Per (model, image, trial): one --bench-pp 512 run (pp512 + tg128, the gate shape) and one
 # --bench-pp 4096 run, speculation off (bench pins + speculative.ngram=false), 5 reps each.
 # Usage: tools/analysis/release_ab.sh OLD_IMAGE NEW_IMAGE [TRIALS=3] > out.tsv. Rows: model image
-# trial pp512 tg128 pp4096. Qwen3.8-Flash-Next (host experts): tools/analysis/flashnext_tg_ab.sh.
+# trial pp512 tg128 pp4096 (LONG_PP="4096 8192": one column per length). Qwen3.8-Flash-Next (host
+# experts): tools/analysis/flashnext_tg_ab.sh.
 set -uo pipefail
 
 OLD="${1:?old image}"
@@ -23,7 +24,10 @@ bench() {  # image model pp -> "prefill_tps decode_tps" (FAILED on any error)
          | jq -er '\"\(.prefill_tps) \(.decode_tps)\"'" 2>/dev/null || echo "FAILED FAILED"
 }
 
-printf 'model\timage\ttrial\tpp512\ttg128\tpp4096\n'
+LONG_PP="${LONG_PP:-4096}"  # prompt-only columns after tg128, e.g. LONG_PP="4096 8192"
+printf 'model\timage\ttrial\tpp512\ttg128'
+for pp in $LONG_PP; do printf '\tpp%s' "$pp"; done
+printf '\n'
 for m in $MODELS; do
     for t in $(seq 1 "$TRIALS"); do
         # Alternate which arm goes first per trial so drift does not favour one image.
@@ -31,9 +35,15 @@ for m in $MODELS; do
         for arm in $order; do
             img=$OLD; [ "$arm" = new ] && img=$NEW
             read -r pp512 tg128 <<< "$(bench "$img" "$m" 512)"
-            read -r pp4096 _ <<< "$(bench "$img" "$m" 4096)"
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$m" "$arm" "$t" "$pp512" "$tg128" "$pp4096"
-            echo "$(date -u +%T) $m $arm t$t pp512=$pp512 tg128=$tg128 pp4096=$pp4096" >&2
+            row="$m	$arm	$t	$pp512	$tg128"
+            msg="pp512=$pp512 tg128=$tg128"
+            for pp in $LONG_PP; do
+                read -r tps _ <<< "$(bench "$img" "$m" "$pp")"
+                row="$row	$tps"
+                msg="$msg pp$pp=$tps"
+            done
+            printf '%s\n' "$row"
+            echo "$(date -u +%T) $m $arm t$t $msg" >&2
         done
     done
 done

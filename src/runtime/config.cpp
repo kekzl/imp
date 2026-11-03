@@ -365,6 +365,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("gemm.nvfp4_cublaslt_min_m", cfg.gemm.nvfp4_cublaslt_min_m);
     I("gemm.nvfp4_tile_min_m", cfg.gemm.nvfp4_tile_min_m);
     T("gemm.nvfp4_prompt_streamk", cfg.gemm.nvfp4_prompt_streamk);
+    B("gemm.swiglu_quant_epilogue", cfg.gemm.swiglu_quant_epilogue);
     B("gemm.f16_tile", cfg.gemm.f16_tile);
     B("gemm.q6k_tile", cfg.gemm.q6k_tile);
     B("gemm.mxfp4_tile", cfg.gemm.mxfp4_tile);

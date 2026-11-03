@@ -154,6 +154,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // GemmContext for all weight GEMM dispatches in this function.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    swiglu_epi_ = {};  // set by gate_up_prefill_ when the up epilogue wrote the down input
 
     // 3. Gate and Up projections
     //    For decode (n=1): fuse RMSNorm→Q8_1→GEMV to avoid redundant quantization.
@@ -289,17 +290,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Batched-decode sibling pair: gate and up in ONE smallm
                     // v2 launch (same quantized activation, two weight sets).
                 } else {
-                    // NVFP4-CUTLASS prefill gate/up share the normed input —
-                    // gate's dispatch quantizes it into the activation
-                    // scratch, up skips the re-quantize (act-quant hint).
-                    GemmContext up_ctx = ctx;
-                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.w_gate_id, n) &&
-                        prefill_routes_cutlass_nvfp4_(ly.w_up_id, n)) {
-                        up_ctx = ctx.with_act_quant_hint(no.data, n,
-                                                         static_cast<int>(no.shape[1]));
-                    }
-                    gemm_via_handle_(ly.w_gate_id, no, go, ctx);
-                    gemm_via_handle_(ly.w_up_id, no, uo, up_ctx);
+                    gate_up_prefill_(ly, no, go, uo, n, ctx);
                 }
             }
         }
@@ -522,7 +513,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else {
-                gemm_via_handle_(ly.w_down_id, so, fo, prequant_hint(ctx, down_prequant, so, n));
+                ffn_down_gemm_(ly.w_down_id, so, fo, prequant_hint(ctx, down_prequant, so, n));
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
