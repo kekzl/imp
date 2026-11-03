@@ -470,10 +470,16 @@ TEST_F(GroupedNvfp4DecodeTest, Bench) {
             int64_t* d_off2 = nullptr;
             uint8_t** d_bases = nullptr;
             const size_t act_bytes = gemm_grouped_nvfp4_decode_act_bytes(128, rows, mm.eff);
+            // Unfused down input is SfAtom (128-row slabs per active expert), not the decode M16 layout:
+            // sized by act_bytes the act quantize overran it and the down tile faulted, misaligned address
+            // (Gemma-4, 4 tokens: 163344 B needed, 35200 held).
+            size_t sfa_bytes = 16;
+            for (int v : x.M_per)
+                sfa_bytes += cutlass_nvfp4_sf_size(v, mm.eff);
             cudaMalloc(&g16, size_t(rows) * mm.eff * 2);
             cudaMalloc(&u16, size_t(rows) * mm.eff * 2);
             cudaMalloc(&dpk, size_t(rows) * mm.eff / 2 + 16);
-            cudaMalloc(&dsf, act_bytes);
+            cudaMalloc(&dsf, sfa_bytes);
             cudaMalloc(&dec, act_bytes);
             cudaMalloc(&out, size_t(rows) * mm.d * 2);
             cudaMalloc(&d_off2, 129 * sizeof(int64_t));
@@ -499,9 +505,14 @@ TEST_F(GroupedNvfp4DecodeTest, Bench) {
                 for (int i = 0; i < kIters; ++i)
                     fn(i % kCopies);
                 cudaEventRecord(e1, s_);
-                cudaEventSynchronize(e1);
                 float ms = 0.0f;
-                cudaEventElapsedTime(&ms, e0, e1);
+                // A device fault fails here: cudaEventElapsedTime after a sticky error segfaults in the WSL
+                // driver.
+                const cudaError_t sync = cudaEventSynchronize(e1);
+                if (sync != cudaSuccess)
+                    ADD_FAILURE() << "kernel fault in the timed loop: " << cudaGetErrorString(sync);
+                else
+                    cudaEventElapsedTime(&ms, e0, e1);
                 cudaEventDestroy(e0);
                 cudaEventDestroy(e1);
                 return 1000.0 * ms / kIters;
@@ -529,7 +540,7 @@ TEST_F(GroupedNvfp4DecodeTest, Bench) {
             });
             const double t_a = timed([&](int) {
                 compute_sfa_offsets_device(x.d_M, d_off2, 128, mm.eff, s_, d_bases, dsf);
-                bzero_sfa_active(dsf, d_off2, 128, act_bytes, s_);
+                bzero_sfa_active(dsf, d_off2, 128, sfa_bytes, s_);
                 fused_act_quantize_fp16_to_nvfp4_cutlass_moe(g16, u16, dpk, d_bases, x.d_off, rows, mm.eff,
                                                              128, mm.act, s_);
             });

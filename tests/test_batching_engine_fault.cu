@@ -11,6 +11,7 @@
 #include "model/model.h"
 #include "model/tokenizer.h"
 #include "runtime/engine.h"
+#include "death_test_exec.h"
 #include "test_models.h"
 #include <cuda_runtime.h>
 #include <chrono>
@@ -133,7 +134,7 @@ bool pop_until_last(ServerRequest& sr, TokenEvent& ev, int ms) {
 TEST(DeviceFaultSignalTest, FaultInsideAStepCancelsFaultsAndRefusesLaterRequests) {
     if (!model_exists())
         GTEST_SKIP() << "Model not found: " << model_path();
-    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    imp_test::threadsafe_death_tests();
     EXPECT_EXIT(run_faulted_engine_child(), ::testing::ExitedWithCode(kChildOk),
                 "faulted-engine contract held");
 }
