@@ -180,6 +180,11 @@ struct Speculative {
     // request that prefills while the head is free binds it and verifies while it decodes alone;
     // batch > 1 decodes plain. false = the pre-v0.63 rule (concurrent servers leave the head unloaded).
     bool mtp_concurrent = true;
+    // MTP head KV slots when the batched verify is off: one request binds, the others keep the head
+    // cache of other chats, so a chat UI's title / follow-up request between two turns no longer wipes
+    // it and the next turn drafts over its prefix-cache hit (Qwen3.8-27B-NVFP4: 64 MiB per slot).
+    // 1 = the pre-v0.63 single slot.
+    int mtp_history_slots = 4;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

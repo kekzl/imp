@@ -61,6 +61,12 @@ bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int m
 }
 
 int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    return batch_verify_wants_bufs(cfg, model, max_batch_size)
+               ? max_batch_size
+               : std::max(1, cfg.speculative.mtp_history_slots);
+}
+
+int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
     return batch_verify_wants_bufs(cfg, model, max_batch_size) ? max_batch_size : 1;
 }
 

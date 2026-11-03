@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- `speculative.mtp_history_slots` (default 4): the MTP head keeps 4 KV slots, one binds; a chat UI's side request or a second chat between turns no longer wipes a chat's head cache. Qwen3.8-27B-NVFP4, 6-turn chat + side request: follow-ups drafting 3/15 -> 15/15, 101.88 -> 122.28 tok/s; two alternating chats 101.52 -> 117.43.
 - `speculative.mtp_concurrent` (default on): `mtp_k=auto` also loads the MTP head on a concurrent GDN-hybrid server; a prompt prefilling alone binds it, batch > 1 decodes plain. Qwen3.8-27B-NVFP4 default server: 1 stream 96.87 -> 131.28 tok/s (6 chats x 400), c4 -0.47 %, c32 -0.07 %, own peak VRAM +2773 MiB, KV plan 15651 -> 13230 blocks.
 - FP8 KV paged decode (HD=128 GQA): the grouped kernel keeps two K/V row groups in flight and gets a split-K instance (one-wave rule, >= 8 KV blocks per split) in place of the tile split-K. Qwen3-8B FP8 KV 16 x ~1k decode attention 1207.1 -> 984.0 us per step, c16L +2.8 %, Qwen3-30B-A3B NVFP4 +5.1 % (#3028).
 - F16 paged decode: the multitok walk loads the next K/V group while one computes, GQA split count fills one wave (16 Qwen3-8B rows unsplit, no reduce). Qwen3-8B FP8 16 x ~1k decode attention 2244.1 -> 1709.5 us per step, c16L +4.9 %, NVFP4 +7.3 %, Gemma-4 +3.0 % (#3027).

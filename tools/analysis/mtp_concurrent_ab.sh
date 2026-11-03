@@ -14,7 +14,7 @@ WAVES=${WAVES:-4}
 LEVELS=${LEVELS:-"4 32"}
 NVFP4=${NVFP4:-Qwen3.8-27B-NVFP4-vllm}
 PORT=${PORT:-8210}
-NAME=${NAME:-mtpconc-$PORT}
+CTR=${CTR:-mtpconc-$PORT}  # not NAME: login shells export NAME=<hostname>
 OUT=${OUT:?OUT=dir for logs}
 mkdir -p "$OUT"
 ctr() {  # $1 = metrics text, $2 = metric name: sum of its samples
@@ -25,13 +25,13 @@ for pair in $(seq 1 "$PAIRS"); do
     for arm in $ARMS; do
         IFS='|' read -r label img sets <<< "$arm"
         tag="p${pair}_${label}"
-        docker rm -f "$NAME" >/dev/null 2>&1; sleep 5
+        docker rm -f "$CTR" >/dev/null 2>&1; sleep 5
         bash "$HERE/../../scripts/require_free_gpu.sh" "mtp_concurrent_ab $tag" >/dev/null || { echo "GPU BUSY before $tag"; exit 2; }
-        docker run -d --name "$NAME" --gpus all -v "$MODELS_DIR":/models -p "$PORT:$PORT" "$img" imp-server \
+        docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models -p "$PORT:$PORT" "$img" imp-server \
             --model "/models/$NVFP4" --host 0.0.0.0 --port "$PORT" \
             $(for s in ${sets//,/ }; do printf -- "--set %s " "$s"; done) >/dev/null
         for _ in $(seq 1 600); do sleep 2; curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break
-            [ -n "$(docker ps -q -f name="$NAME")" ] || { echo "$tag: server died"; docker logs "$NAME" 2>&1 | tail -5; exit 3; }; done
+            [ -n "$(docker ps -q -f name="$CTR")" ] || { echo "$tag: server died"; docker logs "$CTR" 2>&1 | tail -5; exit 3; }; done
         curl -s "http://127.0.0.1:$PORT/health" > "$OUT/$tag.health.json"
         docker run --rm --network host -e IGNORE_EOS=1 -e MODEL_NAME="$NVFP4" -v "$HERE":/t:ro imp:toolchain \
             python3 /t/conc_client.py "$PORT" 1 1 warm >/dev/null 2>&1
@@ -54,7 +54,7 @@ for pair in $(seq 1 "$PAIRS"); do
         peak=$(ctr "$m2" imp_vram_own_peak_bytes); blocks=$(ctr "$m2" imp_kv_blocks_total)
         line="$line own_peak_mib $(( peak / 1048576 )) kv_blocks $blocks"
         echo "$line" | tee -a "$OUT/summary.txt"
-        docker logs "$NAME" > "$OUT/$tag.server.log" 2>&1
-        docker rm -f "$NAME" >/dev/null 2>&1
+        docker logs "$CTR" > "$OUT/$tag.server.log" 2>&1
+        docker rm -f "$CTR" >/dev/null 2>&1
     done
 done

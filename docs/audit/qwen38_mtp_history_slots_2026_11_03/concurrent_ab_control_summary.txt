@@ -1,0 +1,8 @@
+# /mnt/data/scratch/mtpprefix_conc_ctrl: control, slots1 = this branch with speculative.mtp_history_slots=1
+harness: md5=f8ac61ec6cb4
+p1_main c1 131.37 drafted 3644 accepted 2552 c4 338.0 c32 2016.0 own_peak_mib 24851 kv_blocks 4812
+p1_slots1 c1 131.46 drafted 3644 accepted 2552 c4 339.1 c32 2012.8 own_peak_mib 24937 kv_blocks 4812
+p1_new c1 131.53 drafted 3644 accepted 2551 c4 339.8 c32 2022.2 own_peak_mib 25070 kv_blocks 4812
+p2_main c1 130.81 drafted 3644 accepted 2552 c4 339.5 c32 2014.0 own_peak_mib 24881 kv_blocks 4812
+p2_slots1 c1 131.47 drafted 3644 accepted 2552 c4 339.6 c32 2017.1 own_peak_mib 24881 kv_blocks 4812
+p2_new c1 131.46 drafted 3644 accepted 2551 c4 339.2 c32 2026.1 own_peak_mib 25043 kv_blocks 4812

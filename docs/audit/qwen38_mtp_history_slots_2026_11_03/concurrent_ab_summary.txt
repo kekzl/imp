@@ -1,0 +1,8 @@
+# /mnt/data/scratch/mtpprefix_conc (3 pairs main vs new; an earlier start was interrupted in pair 1 by a GPU pause and discarded)
+harness: md5=f8ac61ec6cb4
+p1_main c1 131.39 drafted 3644 accepted 2552 c4 337.9 c32 2034.2 own_peak_mib 24950 kv_blocks 4812
+p1_new c1 130.57 drafted 3644 accepted 2551 c4 338.2 c32 2007.6 own_peak_mib 25150 kv_blocks 4812
+p2_main c1 131.41 drafted 3644 accepted 2552 c4 339.1 c32 2035.0 own_peak_mib 24977 kv_blocks 4812
+p2_new c1 130.70 drafted 3644 accepted 2551 c4 336.4 c32 2009.9 own_peak_mib 25157 kv_blocks 4812
+p3_main c1 130.34 drafted 3644 accepted 2552 c4 338.7 c32 2013.8 own_peak_mib 24982 kv_blocks 4812
+p3_new c1 130.49 drafted 3644 accepted 2551 c4 337.1 c32 2025.3 own_peak_mib 25172 kv_blocks 4812
