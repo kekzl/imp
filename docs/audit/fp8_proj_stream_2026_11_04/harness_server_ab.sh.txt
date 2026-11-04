@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# imp-server A/B from binary copies (armA / armB dirs), conc_client waves per concurrency, arm order alternates.
+# Env: MODEL (dir under ~/models), CONCS ("2 4 8"), WAVES, TRIALS, EXTRA (server flags), MAXC (max-concurrent).
+set -u
+S=/mnt/data/scratch/fp8f16_2026_11_04
+WT=WT
+MODEL=${MODEL:-Qwen3.8-Flash-Next-NVFP4}
+CONCS=${CONCS:-"2 4 8"}
+PORT=${PORT:-8410}
+TRIALS=${TRIALS:-2}
+WAVES=${WAVES:-3}
+MAXC=${MAXC:-8}
+EXTRA=${EXTRA:-}
+NAME=imp-fp8f16-srv
+LOG=$S/server_ab_${MODEL}_$(date +%H%M%S).log
+start() {
+  docker rm -f $NAME >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  docker run -d --name $NAME --gpus all -v "$HOME/models":/models:ro -v "$1":/bin_arm:ro \
+    -p $PORT:$PORT --entrypoint /bin_arm/imp-server imp:toolchain --model /models/$MODEL --port $PORT \
+    --host 0.0.0.0 --max-concurrent $MAXC $EXTRA >/dev/null
+  for _ in $(seq 1 300); do
+    sleep 2
+    curl -sf http://127.0.0.1:$PORT/health >/dev/null 2>&1 && return 0
+    [ -z "$(docker ps -q -f name=$NAME)" ] && { docker logs $NAME 2>&1 | tail -20 >> "$LOG"; return 1; }
+  done
+  return 1
+}
+arm() {
+  ~/.claude/skills/gpu-stats/gpu-lock.sh status 2>/dev/null | grep -q "holder=imp-fp8f16" || { echo "lock lost before $1" | tee -a "$LOG"; exit 2; }
+  start "$2" || { echo "server failed $1" | tee -a "$LOG"; exit 3; }
+  # warmup wave, not counted
+  docker run --rm --network host -e MODEL_NAME="$MODEL" -e IGNORE_EOS=1 -e GEN=64 -v "$WT/tools/analysis:/h:ro" python:3.12-slim \
+    python -I /h/conc_client.py $PORT 2 1 warm >/dev/null 2>&1
+  for C in $CONCS; do
+    echo "== arm $1 trial $3 c$C ==" >> "$LOG"
+    docker run --rm --network host -e MODEL_NAME="$MODEL" -e IGNORE_EOS=1 -v "$WT/tools/analysis:/h:ro" python:3.12-slim \
+      python -I /h/conc_client.py $PORT $C $WAVES "$1$3c$C" >> "$LOG" 2>&1
+  done
+  docker logs $NAME 2>&1 | grep -E "fp8|FP8|released|GDN" | head -8 >> "$LOG"
+  docker rm -f $NAME >/dev/null 2>&1
+  sleep 3
+}
+for t in $(seq 1 "$TRIALS"); do
+  if [ $((t % 2)) -eq 1 ]; then arm A $S/armA "$t"; arm B $S/armB "$t"
+  else arm B $S/armB "$t"; arm A $S/armA "$t"; fi
+done
+echo "$LOG"
+grep -E "==|MEDIAN|failed|lost" "$LOG"
