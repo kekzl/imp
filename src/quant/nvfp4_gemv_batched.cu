@@ -21,6 +21,16 @@ namespace {
 // across all MR rows (x[m] streams from L2). Removes the per-sequence weight re-read of the
 // batched decode LM head (a single M=1 GEMV per sequence re-read the whole ~389 MiB
 // LM-head matrix from HBM, the #2 decode GPU consumer at batch>1).
+// f16 x f16 + f32 in one rounding (SASS FHFMA), equal to __fmaf_rn on the converted floats: an f16
+// product is exact in f32. Drops the HADD2.F32 per operand (MR 4: 368 -> 240 SASS instructions).
+__device__ __forceinline__ float fma_f16_f32(uint32_t a, uint32_t b, float c) {
+    float d;
+    asm("fma.rn.f32.f16 %0, %1, %2, %3;"
+        : "=f"(d)
+        : "h"(static_cast<uint16_t>(a)), "h"(static_cast<uint16_t>(b)), "f"(c));
+    return d;
+}
+
 template <int MR>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -40,52 +50,53 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         acc[m] = 0.0f;
 
     for (int mi = tid; mi < n_mb; mi += kKparThreads) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);  // weight read once
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        // Decode the 16 FP4 weights ONCE and reuse across all MR activation rows
-        // (the old per-row path re-decoded the weight byte per row — 16x cvt).
-        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
-        float wf[16];
-#pragma unroll
-        for (int b = 0; b < 8; ++b) {
-            uint32_t w_fp16x2;
-            asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
-                : "=r"(w_fp16x2)
-                : "r"(static_cast<uint32_t>(pb[b])));
-            float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
-            wf[(b * 2) + 1] = wf2.y;
-        }
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        const int byte_off = mi * 8;
         const int elem_base = byte_off * 2;
+        const uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);  // weight read once
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        // 16 FP4 weights decoded once as f16x2, reused across the MR activation rows.
+        uint32_t wh[8];
+#pragma unroll
+        for (int b = 0; b < 8; ++b)
+            asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+                : "=r"(wh[b])
+                : "r"(static_cast<uint32_t>(pb[b])));
+        const float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
 #pragma unroll
         for (int m = 0; m < MR; ++m) {
-            const half* xm = x + ((int64_t)m * K) + elem_base;
-            const uint4 xv0 = *reinterpret_cast<const uint4*>(xm);
-            const uint4 xv1 = *reinterpret_cast<const uint4*>(xm + 8);
-            half2 xh[8];
-            *reinterpret_cast<uint4*>(&xh[0]) = xv0;
-            *reinterpret_cast<uint4*>(&xh[4]) = xv1;
+            const uint4* xm = reinterpret_cast<const uint4*>(x + ((int64_t)m * K) + elem_base);
+            const uint4 xv0 = xm[0];
+            const uint4 xv1 = xm[1];
+            const uint32_t xw[8] = {xv0.x, xv0.y, xv0.z, xv0.w, xv1.x, xv1.y, xv1.z, xv1.w};
             float d = 0.0f;
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
-                float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
-                d = __fmaf_rn(wf[(b * 2) + 1], xf.y, d);
+                d = fma_f16_f32(wh[b], xw[b], d);
+                d = fma_f16_f32(wh[b] >> 16, xw[b] >> 16, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
         }
     }
 
     pdl_trigger();
-    __shared__ float warp_sums[kKparWarps];
+    // Same warp tree and warp order as reduce_kpar, all MR rows behind one barrier.
+    __shared__ float warp_sums[MR][kKparWarps];
 #pragma unroll
     for (int m = 0; m < MR; ++m) {
-        float total = reduce_kpar(acc[m], tid, warp_sums);
-        if (tid == 0)
-            y[((int64_t)m * N_out) + n] = total;
-        __syncthreads();  // reuse warp_sums for the next activation row
+        float v = acc[m];
+#pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            v += __shfl_down_sync(0xFFFFFFFF, v, offset);
+        if ((tid & 31) == 0)
+            warp_sums[m][tid / 32] = v;
+    }
+    __syncthreads();
+    if (tid < MR) {
+        float total = warp_sums[tid][0];
+#pragma unroll
+        for (int w = 1; w < kKparWarps; w++)
+            total += warp_sums[tid][w];
+        y[((int64_t)tid * N_out) + n] = total;
     }
 }
 
