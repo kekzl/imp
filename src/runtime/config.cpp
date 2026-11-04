@@ -518,9 +518,11 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("speculative.mtp_head", cfg.speculative.mtp_head);
     B("speculative.mtp_concurrent", cfg.speculative.mtp_concurrent);
     I("speculative.mtp_history_slots", cfg.speculative.mtp_history_slots);
+    I("speculative.mtp_kv_window", cfg.speculative.mtp_kv_window);
     B("speculative.mtp_carry", cfg.speculative.mtp_carry);
     I("speculative.mtp_batch_verify", cfg.speculative.mtp_batch_verify);
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
+    B("speculative.mtp_batch_verify_solo", cfg.speculative.mtp_batch_verify_solo);
     B("speculative.mtp_head_graph", cfg.speculative.mtp_head_graph);
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);

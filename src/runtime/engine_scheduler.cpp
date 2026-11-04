@@ -817,6 +817,16 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // gate fails. The draft may come from the n-gram/suffix matcher, the MTP
     // head or token recycling, so the entry gate asks whether ANY drafter is
     // enabled — gating this on the n-gram flag alone left MTP unreachable.
+    // Batched verify on the hybrid (speculative.batch_verify): every decoding
+    // request forwards its last token and one draft in a single step; the
+    // step emits for every row and replaces the batched decode below. Any
+    // gate failure (a non-greedy row, no spare slot, no draft anywhere) takes
+    // the plain path this step. A batch of one only as a lone bound request
+    // (speculative.mtp_batch_verify_solo): paged decode attention instead of the verify chunk's FA2.
+    if (ssm_state_ && batch_verify_refusal_(decode_batch) == nullptr) {
+        if (step_spec_verify_batched_(decode_batch, dec_stream))
+            return;
+    }
     if (decode_batch.size() == 1 && spec_any_drafter_enabled_(*decode_batch[0])) {
         spec_maybe_rearm_(*decode_batch[0]);
         if (spec_verify_gates_ok_(*decode_batch[0])) {
@@ -900,16 +910,6 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // matcher on": demanding speculative.ngram here breaks the MTP recipe
     // (`speculative.mtp_k=2` paired with `speculative.ngram=false`,
     // docs/MODELS.md).
-    // Batched verify on the hybrid (speculative.batch_verify): every decoding
-    // request forwards its last token and one draft in a single step; the
-    // step emits for every row and replaces the batched decode below. Any
-    // gate failure (a non-greedy row, no spare slot, no draft anywhere) takes
-    // the plain path this step.
-    if (ssm_state_ && decode_batch.size() > 1 && batch_verify_refusal_(decode_batch) == nullptr) {
-        if (step_spec_verify_batched_(decode_batch, dec_stream))
-            return;
-    }
-
     const SpecBatchRrState rr_state{
         runtime_config_.speculative.batch_rr, ssm_state_ != nullptr,
         static_cast<int>(decode_batch.size()),
@@ -1728,9 +1728,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         const int mtp_req_k = mtp_chain_k_(*valid_decode[0]);
         const bool mtp_synced = ws_gate != nullptr && mtp_req_k > 0 &&
                                 mtp_active_.req == valid_decode[0]->id &&
-                                ws_gate->mtp_pos == cur_pos &&
-                                (ws_gate->max_seq_len <= 0 ||
-                                 ws_gate->mtp_pos + mtp_req_k < ws_gate->max_seq_len);
+                                ws_gate->mtp_pos == cur_pos;  // the head KV ring takes any position
         Tensor h_view = executor_->view_mtp_hidden(1);  // [1, d_model], or [1, hc * d_model] (Qwen4Exp)
         if (h_view.data != nullptr && mtp_synced) {
             const int hidden_dim = model_->config_.d_model;

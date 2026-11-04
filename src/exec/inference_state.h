@@ -65,8 +65,11 @@ struct InferenceState {
     // a graph replay skips host code, so an executor flag outlived the step (#2150).
     bool ple_host_ready = false;
     [[nodiscard]] bool ssm_grouped_chunk() const {
-        return is_prefill && ssm_seq_slots != nullptr && ssm_n_seq > 1 && ssm_seq_tokens > 0;
+        return is_prefill && ssm_seq_slots != nullptr && (ssm_n_seq > 1 || ssm_group_verify) &&
+               ssm_seq_tokens > 0;
     }
+    // Batched verify sets it: a group of one (speculative.mtp_batch_verify_solo) is still a grouped chunk.
+    bool ssm_group_verify = false;
     // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md): a grouped
     // chunk whose groups are DIFFERENT requests. Group g reads slot ssm_seq_slots[g], commits
     // state at d_chunk_len rows into ssm_out_slots[g] and at d_snap_n rows into

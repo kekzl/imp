@@ -1,0 +1,15 @@
+harness: md5=9c48b9c76c5f client_md5=c26973421a02
+p1_solo1 own_peak_mib 22606 kv_blocks 6425 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_solo1 ctx 1000 rep 0 s0 prompt 938 comp 384 ttft_s 0.15 decode_tps 157.52 drafted 312 accepted 225 md5 024dc3a5611a
+REQ p1_solo1 ctx 2000 rep 0 s0 prompt 1887 comp 384 ttft_s 0.18 decode_tps 158.45 drafted 310 accepted 226 md5 9df15582d2ec
+REQ p1_solo1 ctx 4000 rep 0 s0 prompt 3998 comp 384 ttft_s 0.36 decode_tps 169.18 drafted 284 accepted 239 md5 abd33b5094c3
+REQ p1_solo1 ctx 8000 rep 0 s0 prompt 7707 comp 384 ttft_s 0.69 decode_tps 162.27 drafted 290 accepted 236 md5 4c3744ee20d1
+REQ p1_solo1 ctx 40000 rep 0 s0 prompt 39891 comp 384 ttft_s 3.76 decode_tps 90.72 drafted 318 accepted 222 md5 1bab31042e9c
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+p1_solo0 own_peak_mib 22606 kv_blocks 6425 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_solo0 ctx 1000 rep 0 s0 prompt 938 comp 384 ttft_s 0.14 decode_tps 130.06 drafted 277 accepted 220 md5 533bb016338e
+REQ p1_solo0 ctx 2000 rep 0 s0 prompt 1887 comp 384 ttft_s 0.18 decode_tps 131.27 drafted 279 accepted 224 md5 8e8cbb90247f
+REQ p1_solo0 ctx 4000 rep 0 s0 prompt 3998 comp 384 ttft_s 0.35 decode_tps 121.12 drafted 274 accepted 229 md5 1ddee735b11d
+REQ p1_solo0 ctx 8000 rep 0 s0 prompt 7707 comp 384 ttft_s 0.68 decode_tps 104.08 drafted 271 accepted 230 md5 930547af1113
+REQ p1_solo0 ctx 40000 rep 0 s0 prompt 39891 comp 384 ttft_s 3.80 decode_tps 70.64 drafted 285 accepted 214 md5 5a0d59f3e2af
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)

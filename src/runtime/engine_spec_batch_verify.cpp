@@ -60,18 +60,29 @@ int bound_rows(const std::vector<std::shared_ptr<Request>>& batch, const MtpBind
                                           [&](const auto& r) { return mtp_bound(active, pool, r->id); }));
 }
 
+// speculative.mtp_batch_verify_solo: a lone bound request verifies in the bound batched step, a group of one.
+bool bound_solo(const RuntimeConfig& cfg, const Model* model, const BatchVerifyState& bv,
+                const MtpBind& active, const MtpBindPool& pool,
+                const std::vector<std::shared_ptr<Request>>& batch) {
+    return bv.bound_only && !batch.empty() && !batch_verify_on(cfg, model) &&
+           mtp_bound_verify_solo(cfg.speculative.mtp_batch_verify_solo, static_cast<int>(batch.size()),
+                                 mtp_bound(active, pool, batch[0]->id));
+}
+
 // Mode and batch-shape gates ahead of the per-row ones: the full batch_verify takes any batch of two or more;
-// the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows.
-const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on) {
+// the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows; solo
+// = a lone bound request under speculative.mtp_batch_verify_solo.
+const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on,
+                               bool solo) {
     if (!full && !bv.bound_only)
         return "off";
-    if (rows < 2)
+    if (rows < 2 && (full || !solo))
         return "batch_of_one";
     if (full)
         return nullptr;
     if (!head_on || rows > bv.cap_seq)
         return kAboveBoundRows;
-    return mtp_bound_verify_fits(bv.cap_seq, rows, bound) ? nullptr : kTooFewBound;
+    return mtp_bound_verify_fits(bv.cap_seq, rows, bound, solo) ? nullptr : kTooFewBound;
 }
 
 bool refusal_logged(bool full, const BatchVerifyState& bv, const char* why) {
@@ -79,10 +90,11 @@ bool refusal_logged(bool full, const BatchVerifyState& bv, const char* why) {
 }
 
 // After drafting: nothing to verify, or (bound verify) too few drafted rows to pay for the pads.
-const char* draft_refusal(const BatchVerifyState& bv, int rows, int drafted) {
+const char* draft_refusal(const BatchVerifyState& bv, int rows, int drafted, bool solo) {
     if (drafted == 0)
         return "no_draft_in_batch";
-    return bv.bound_only && !mtp_bound_verify_fits(bv.cap_seq, rows, drafted) ? "too_few_drafts" : nullptr;
+    return bv.bound_only && !mtp_bound_verify_fits(bv.cap_seq, rows, drafted, solo) ? "too_few_drafts"
+                                                                                    : nullptr;
 }
 
 // Group g's T rows: t0 at p0, then its nd drafts; rows past them are pads (token t0, attending one token).
@@ -441,7 +453,9 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return "off";
         if (const char* mode = batch_mode_refusal(full, bv_, static_cast<int>(batch.size()),
                                                   bound_rows(batch, mtp_active_, mtp_pool_),
-                                                  mtp_spec_decode_enabled()))
+                                                  mtp_spec_decode_enabled(),
+                                                  bound_solo(runtime_config_, model_.get(), bv_, mtp_active_,
+                                                             mtp_pool_, batch)))
             return mode;
         // The factored form carries the drafted row as (g, k, delta) plus a
         // conv tap, so it reserves no slots by design; this gate must not
@@ -522,7 +536,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         return false;
     };
-    if (N < 2)
+    const bool solo = bound_solo(runtime_config_, model_.get(), bv_, mtp_active_, mtp_pool_, reqs);
+    if (N + static_cast<int>(solo) < 2)
         return decline("fewer_than_two_decoding");
 
     // Slots: the live one must exist (acquired at prefill), the spare is
@@ -555,7 +570,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         from_mtp[g] = mtp ? 1 : 0;
         n_drafted += static_cast<int>(n_draft[g] > 0);
     }
-    if (const char* why = draft_refusal(bv_, N, n_drafted))
+    if (const char* why = draft_refusal(bv_, N, n_drafted, solo))
         return decline(why);
 
     // Per-row penalties use the sampler's device history slots (host
@@ -708,7 +723,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Graph replay (engine_spec_capture.cpp): one graph per (rows, ctx tier).
     // Everything that varies per step is device data the H2D above refreshed;
     // the split-K grid bakes the tier ceiling.
-    const bool capture_on = spec_capture_ready_(max_ctx, T * N);
+    const bool capture_on = spec_capture_ready_(max_ctx, T * N, /*paged_attn=*/true);
 
     InferenceState state;
     state.token_ids = d_tok;
@@ -730,6 +745,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_seq_id = live[0];
     state.ssm_seq_slots = d_seq;
     state.ssm_n_seq = N;
+    state.ssm_group_verify = true;
     state.ssm_seq_tokens = T;
     // Factored spare: no second slot, so no commit destination. The drafted
     // row leaves as (g, k, delta) plus one conv tap per layer, both addressed
@@ -763,7 +779,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.d_chunk_len = d_misc;
     state.d_snap_n = d_misc + 1;
     if (capture_on) {
-        state.ctx_capacity = spec_capture_ctx_tier_(max_ctx);
+        state.ctx_capacity = spec_capture_ctx_tier_(max_ctx, /*paged_attn=*/true);
         state.max_context_len = state.ctx_capacity;
     }
 

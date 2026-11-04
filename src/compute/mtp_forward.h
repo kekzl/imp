@@ -107,13 +107,16 @@ struct MtpDraftWorkspace {
     int*  d_mtp_position  = nullptr;  // [1] int — current MTP cache position (for RoPE)
     float* d_scan_part = nullptr;     // [num_heads, 32, head_dim + 2] split-K partials, inside d_mtp_position
 
-    // Phase 2.2.Attn+KV: MTP-side KV cache (per-session, M=1 only). K/V accumulate across
-    // draft calls; each call appends one row at mtp_pos, then attends [0,mtp_pos+1).
-    // Qwen3.6 max_seq=16K: 16384*2*256*2 bytes = 16 MiB each, 32 MiB total. Reset via mtp_kv_reset().
+    // MTP-side KV cache, a ring of max_seq_len rows per slot: position p lives in row p % max_seq_len
+    // and a query at p attends mtp_ring_window (the last max_seq_len positions, minus rows a later
+    // position overwrote). Qwen3.8: 16384 rows x 4 KiB = 64 MiB per slot. Reset via mtp_kv_reset().
     void* d_k_cache       = nullptr;  // [max_seq_len, num_kv_heads, head_dim] FP16
     void* d_v_cache       = nullptr;  // [max_seq_len, num_kv_heads, head_dim] FP16
-    int   mtp_pos         = 0;        // next slot to write (0..max_seq_len-1)
-    int   max_seq_len     = 0;        // cache capacity
+    int mtp_pos = 0;                  // next position to write (absolute, unbounded)
+    int max_seq_len = 0;              // ring rows per slot
+    // [n_kv_slots] device: per slot the largest position written + 1 (atomicMax in the appends, read by the
+    // scans: rows a stale draft overwrote drop out of the window). Zeroed by mtp_kv_hi_reset.
+    int* d_slot_hi = nullptr;
     // Multi-slot KV (batched verify): n_kv_slots caches of max_seq_len rows in one
     // allocation. d_k_cache/d_v_cache/mtp_pos are the ACTIVE slot's view (mtp_select_slot);
     // slot_pos holds the other slots' positions.
@@ -123,6 +126,9 @@ struct MtpDraftWorkspace {
     int   cur_slot        = 0;
     size_t kv_slot_elems  = 0;        // max_seq_len * num_kv_heads * head_dim
     std::vector<int> slot_pos;        // [n_kv_slots] next write position per slot
+    // [n_kv_slots] host upper bound of d_slot_hi (mtp_slot_hi_bound), raised at each bind; decides whether a
+    // resume still finds a window (mtp_ring_resume_lost).
+    std::vector<int> slot_hi_bound;
     // Ragged multi-slot feed scratch: per-row slot/position tables, gather indices into the
     // caller's hidden buffer, gathered rows, final_norm of every fed row.
     // Aliases: int tables carve d_feed_tokens (12x feed_rows_cap ints); d_b_gather is
@@ -285,7 +291,8 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
                                                int hidden_dim, cudaStream_t stream,
                                                const Tensor* post_norm = nullptr, float post_norm_eps = 1e-6f,
                                                float post_norm_offset = 0.0f);
-// Every row's slot in [0, n_kv_slots) and position in [0, max_seq_len); *max_pos = the largest position.
+// Every row's slot in [0, n_kv_slots) and position >= 0 (the head KV is a ring); *max_pos = the largest
+// position.
 [[nodiscard]] bool mtp_feed_tables_valid(const MtpDraftWorkspace& ws, const int* h_slots, const int* h_pos,
                                          int n_rows, int* max_pos);
 
@@ -370,10 +377,19 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V
-// buffers retain their allocation; only the positions are zeroed.
+// buffers retain their allocation; only the positions are zeroed (d_slot_hi: mtp_kv_hi_reset).
 inline void mtp_kv_reset(MtpDraftWorkspace& ws) {
     ws.mtp_pos = 0;
     for (auto& p : ws.slot_pos) p = 0;
 }
+// Zero d_slot_hi and slot_hi_bound of `slot` (< 0: every slot) on `stream`: the slot restarts at position 0.
+[[nodiscard]] bool mtp_kv_hi_reset(MtpDraftWorkspace& ws, int slot, cudaStream_t stream);
+// The active slot's d_slot_hi entry (null without a head KV).
+inline int* mtp_active_hi(const MtpDraftWorkspace& ws) {
+    return ws.d_slot_hi != nullptr ? ws.d_slot_hi + ws.cur_slot : nullptr;
+}
+// Largest position + 1 a slot at `pos` can have written with chain depth k: the committed rows plus a
+// rolled-back chain and the batched chain row past them.
+constexpr int mtp_slot_hi_bound(int pos, int k) { return pos + std::max(k, kMtpMaxChainK) + 2; }
 
 }  // namespace imp

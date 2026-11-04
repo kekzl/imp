@@ -245,9 +245,9 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     const int hidden_dim = model_->config_.d_model;
     const int vocab_size = model_->config_.vocab_size;
     const int K = mtp_chain_k_();
-    // MTP KV capacity (kMtpKvCap clamp at enable time): past it the cache
-    // addressing is undefined, so stop drafting instead.
-    if (ws->max_seq_len > 0 && ws->mtp_pos + n_pairs + (chain_after ? K : 0) > ws->max_seq_len)
+    // The head KV is a ring of max_seq_len rows (speculative.mtp_kv_window): any position fits, a query
+    // attends the last max_seq_len of them.
+    if (ws->max_seq_len <= 0)
         return false;
 
     // Device-side chain: dense MTP heads have no host dependency between chain
@@ -491,15 +491,14 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     const auto& in = req.input_tokens;
     if (!mtp_slot_available(mtp_active_, mtp_pool_, mtp_pool_.bind_cap, req.id))
         return false;  // another request holds the head
-    // Past the head KV capacity the feed fails anyway: keep every slot's history.
-    const bool too_long = ws->max_seq_len > 0 && static_cast<int>(in.size()) + mtp_spec_k_ > ws->max_seq_len;
-    const int slot = too_long ? -1 : mtp_acquire_slot_(req, offset);
+    const int slot = mtp_acquire_slot_(req, offset);
     if (slot < 0) {
         // No slot covers the prefix-cache resume (or none is free): draft nothing, wipe no history.
-        if (mtp_pool_.declined_req != req.id && (offset > 0 || too_long))
-            IMP_LOG_INFO("mtp-spec: no head cache covers req %d's prefix-cache resume at %d (%s)", req.id,
-                         offset,
-                         too_long ? "prompt exceeds the head KV capacity" : "no slot history reaches it");
+        if (mtp_pool_.declined_req != req.id && offset > 0)
+            IMP_LOG_INFO(
+                "mtp-spec: no head cache covers req %d's prefix-cache resume at %d (no slot history "
+                "reaches it)",
+                req.id, offset);
         mtp_pool_.declined_req = req.id;
         return false;
     }
@@ -510,7 +509,15 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     while (L < mtp_active_.history.size() && L < in.size() && mtp_active_.history[L] == in[L])
         ++L;
     const int keep_pairs = std::max(0, static_cast<int>(L) - 1);
-    ws->mtp_pos = std::min(ws->mtp_pos, keep_pairs);
+    // The head KV ring: a resume behind every row the slot still holds keeps nothing (restart below).
+    auto& hi_bound = ws->slot_hi_bound[static_cast<size_t>(slot)];
+    hi_bound = std::max(hi_bound, imp::mtp_slot_hi_bound(ws->mtp_pos, mtp_spec_k_));
+    const bool ring_lost = imp::mtp_ring_resume_lost(hi_bound, keep_pairs, ws->max_seq_len);
+    if (ring_lost && keep_pairs > 0)
+        IMP_LOG_INFO(
+            "mtp-spec: req %d resumes slot %d at %d, behind its head KV ring (%d rows, written to %d)",
+            req.id, slot, keep_pairs, ws->max_seq_len, ws->mtp_pos);
+    ws->mtp_pos = ring_lost ? 0 : std::min(ws->mtp_pos, keep_pairs);
     if (mtp_active_.history.size() > static_cast<size_t>(ws->mtp_pos) + 1)
         mtp_active_.history.resize(static_cast<size_t>(ws->mtp_pos) + 1);
     mtp_active_.req = req.id;
@@ -530,6 +537,10 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     // h_0, so the prompt must actually be forwarded from position 0.
     ws->mtp_pos = 0;
     mtp_active_.history.clear();
+    if (!imp::mtp_kv_hi_reset(*ws, slot, decode_stream())) {
+        mtp_unbind_("head KV ring reset failed");
+        return false;
+    }
     if (offset == 0 && !in.empty()) {
         mtp_active_.history.push_back(in[0]);
         return true;
@@ -657,22 +668,19 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         return false;
     mtp_head_attn_dims(head, model_->config_, s);
 
-    // MTP KV-cache capacity: cap at the smaller of model's max_seq_len and 16K
-    // (Phase 2.2.Attn+KV budget, ~16 MiB each for K and V at Qwen3.6 dims).
-    constexpr int kMtpKvCap = 16384;
-    s.max_seq_len = std::min(model_->config_.max_seq_len, kMtpKvCap);
-    if (s.max_seq_len <= 0)
-        s.max_seq_len = kMtpKvCap;
+    // Head KV ring rows per slot (speculative.mtp_kv_window, at least 2 feed passes), at most the model
+    // context.
+    const int window = std::max(runtime_config_.speculative.mtp_kv_window, 2 * imp::kMtpFeedRows);
+    s.max_seq_len = model_->config_.max_seq_len > 0 ? std::min(model_->config_.max_seq_len, window) : window;
 
     // Batched verify: one KV slot per batch slot, else the single one. With
-    // many slots the per-slot capacity comes from a 1 GiB budget (floor 2048
-    // rows); a request past its slot's capacity stops drafting, verify continues on its own rows.
+    // many slots the per-slot ring comes from a 1 GiB budget (floor 2048 rows).
     s.n_kv_slots = mtp_draft_kv_slots(runtime_config_, model_.get(), config_.max_batch_size);
     if (s.n_kv_slots > 1 && s.num_kv_heads > 0 && s.head_dim > 0) {
         const size_t row_bytes = 2ull * s.num_kv_heads * s.head_dim * sizeof(__half);
         const size_t budget = 1ull << 30;
         const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(s.n_kv_slots)));
-        s.max_seq_len = std::clamp(fit, 2048, s.max_seq_len);
+        s.max_seq_len = std::min(std::max(fit, 2048), s.max_seq_len);
     }
     // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8).
     s.carry_rows = mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size);
@@ -878,6 +886,8 @@ void Engine::mtp_accuracy_reset() noexcept {
     if (mtp_ws_storage_) {
         auto* ws = mtp_ws_storage_.get();
         imp::mtp_kv_reset(*ws);
+        if (!imp::mtp_kv_hi_reset(*ws, -1, decode_stream()))
+            IMP_LOG_WARN("mtp_accuracy_reset: head KV ring reset failed");
         imp::mtp_select_slot(*ws, 0);
     }
 }

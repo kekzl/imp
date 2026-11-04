@@ -158,20 +158,22 @@ __global__ void mtp_gate_attn_out_kernel(
 
 // Append n_rows steps' k_proj/v_proj outputs (each [num_kv_heads, head_dim])
 // into the cache at positions pos..pos+n_rows.
-__global__ void mtp_kv_append_kernel(
-    const __half* __restrict__ k_step,   // [n_rows, num_kv_heads * head_dim]
-    const __half* __restrict__ v_step,
-    __half* __restrict__ k_cache,        // [max_seq, num_kv_heads, head_dim]
-    __half* __restrict__ v_cache,
-    int pos, int num_kv_heads, int head_dim, int n_rows) {
+__global__ void mtp_kv_append_kernel(const __half* __restrict__ k_step,  // [n_rows, num_kv_heads * head_dim]
+                                     const __half* __restrict__ v_step,
+                                     __half* __restrict__ k_cache,  // [max_seq, num_kv_heads, head_dim]
+                                     __half* __restrict__ v_cache, int pos, int num_kv_heads, int head_dim,
+                                     int n_rows, int ring, int* __restrict__ hi) {
     int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     int row_elems = num_kv_heads * head_dim;
     if (t >= n_rows * row_elems) return;
     int r   = t / row_elems;
     int rem = t % row_elems;
-    int64_t off = (static_cast<int64_t>(pos + r) * row_elems) + rem;
+    const int p = pos + r;  // ring > 0: row p % ring, hi = largest position written + 1
+    int64_t off = (static_cast<int64_t>(ring > 0 ? p % ring : p) * row_elems) + rem;
     k_cache[off] = k_step[t];
     v_cache[off] = v_step[t];
+    if (hi != nullptr && rem == 0)
+        atomicMax(hi, p + 1);
 }
 
 // MTP mrope (Qwen3-VL style, mrope_section=[11,11,10] half-counts): pair k in [0,11) ->
@@ -266,18 +268,22 @@ __global__ void mtp_gather_rows_kernel(const __half* __restrict__ src, const int
     dst[t] = src[(static_cast<int64_t>(idx[r]) * H) + c];
 }
 
-__global__ void mtp_kv_append_rows_kernel(const __half* __restrict__ k_step, const __half* __restrict__ v_step,
-                                          __half* __restrict__ k_base, __half* __restrict__ v_base,
-                                          const int* __restrict__ slots, const int* __restrict__ pos,
-                                          int64_t slot_elems, int row_elems, int n_rows) {
+__global__ void mtp_kv_append_rows_kernel(const __half* __restrict__ k_step,
+                                          const __half* __restrict__ v_step, __half* __restrict__ k_base,
+                                          __half* __restrict__ v_base, const int* __restrict__ slots,
+                                          const int* __restrict__ pos, int64_t slot_elems, int row_elems,
+                                          int n_rows, int ring, int* __restrict__ hi) {
     const int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= n_rows * row_elems) return;
     const int r = t / row_elems;
     const int rem = t % row_elems;
+    const int p = pos[r];
     const int64_t off = (static_cast<int64_t>(slots[r]) * slot_elems) +
-                        (static_cast<int64_t>(pos[r]) * row_elems) + rem;
+                        (static_cast<int64_t>(ring > 0 ? p % ring : p) * row_elems) + rem;
     k_base[off] = k_step[t];
     v_base[off] = v_step[t];
+    if (hi != nullptr && rem == 0)
+        atomicMax(hi + slots[r], p + 1);
 }
 
 void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream) {
@@ -296,6 +302,18 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
     ws.mtp_pos = ws.slot_pos[static_cast<size_t>(slot)];
     ws.d_k_cache = static_cast<__half*>(ws.d_k_cache_base) + (static_cast<size_t>(slot) * ws.kv_slot_elems);
     ws.d_v_cache = static_cast<__half*>(ws.d_v_cache_base) + (static_cast<size_t>(slot) * ws.kv_slot_elems);
+}
+
+bool mtp_kv_hi_reset(MtpDraftWorkspace& ws, int slot, cudaStream_t stream) {
+    if (ws.d_slot_hi == nullptr)
+        return true;
+    const bool all = slot < 0 || slot >= ws.n_kv_slots;
+    for (int s = 0; s < ws.n_kv_slots; ++s)
+        if (all || s == slot)
+            ws.slot_hi_bound[static_cast<size_t>(s)] = 0;
+    return cudaMemsetAsync(all ? ws.d_slot_hi : ws.d_slot_hi + slot, 0,
+                           (all ? static_cast<size_t>(ws.n_kv_slots) : 1) * sizeof(int),
+                           stream) == cudaSuccess;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,14 +408,20 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         }
         ok &= alloc(&ws.d_attn_out, sizeof(__half) * num_heads * head_dim);
         ok &= alloc(&ws.d_attn_residual, hidden_dim * sizeof(__half));
-        // Device int for RoPE position (single int); the split-K partials of the scan 256 B behind it.
+        // Device int for RoPE position (single int); the split-K partials of the scan 256 B behind it, then
+        // d_slot_hi [n_kv_slots].
         ok &= alloc(reinterpret_cast<void**>(&ws.d_mtp_position),
-                    kMtpScanPartOffset + mtp_scan_part_bytes(num_heads, head_dim));
+                    mtp_slot_hi_offset(num_heads, head_dim) +
+                        (static_cast<size_t>(n_kv_slots) * sizeof(int)));
         ws.d_scan_part = mtp_scan_part_of(ws.d_mtp_position);
         ok &= mtp_attn_scan_supported(head_dim);
     }
-    // Phase 2.2.Attn+KV buffers (cap max_seq_len)
+    // Phase 2.2.Attn+KV buffers: a ring of max_seq_len rows per slot
     if (ok && num_heads > 0 && head_dim > 0 && num_kv_heads > 0 && max_seq_len > 0) {
+        ws.d_slot_hi = reinterpret_cast<int*>(reinterpret_cast<char*>(ws.d_mtp_position) +
+                                              mtp_slot_hi_offset(num_heads, head_dim));
+        ok &= cudaMemset(ws.d_slot_hi, 0, static_cast<size_t>(n_kv_slots) * sizeof(int)) == cudaSuccess;
+        ws.slot_hi_bound.assign(static_cast<size_t>(n_kv_slots), 0);
         // n_kv_slots caches in one allocation; the active-slot view starts at
         // slot 0 (mtp_select_slot moves it).
         ws.kv_slot_elems = static_cast<size_t>(max_seq_len) * num_kv_heads * head_dim;
@@ -581,9 +605,11 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     // d_k_cache / d_v_cache are views into the slot allocation.
     frfn(ws.d_k_cache_base);
     frfn(ws.d_v_cache_base);
+    ws.d_slot_hi = nullptr;  // alias into the d_mtp_position allocation
     ws.d_k_cache = nullptr;
     ws.d_v_cache = nullptr;
     ws.slot_pos.clear();
+    ws.slot_hi_bound.clear();
     ws.n_kv_slots = 1;
     ws.cur_slot = 0;
     // Aliases into d_feed_tokens / the batch scratch, never freed on their own.
@@ -649,11 +675,10 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
     }
 
-    // Attention path: with KV cache present and capacity remaining, extract Q per-head,
-    // apply fused qk-norm+RoPE, append rotated K+V to cache, run softmax attention over
-    // [0,mtp_pos+1), apply silu(gate). Else fall back to the M=1 broadcast MVP.
-    bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr &&
-                        ws.max_seq_len > 0 && ws.mtp_pos < ws.max_seq_len);
+    // Attention path: with a KV ring present, extract Q per-head, apply fused qk-norm+RoPE,
+    // append rotated K+V at mtp_pos, run softmax attention over its window (mtp_ring_lo),
+    // apply silu(gate). Else fall back to the M=1 broadcast MVP.
+    bool use_kv_scan = (ws.d_k_cache != nullptr && ws.d_v_cache != nullptr && ws.max_seq_len > 0);
     if (use_kv_scan) {
         // Extract Q (no gate) from q_full[h,0..head_dim). Layout per head: [q(head_dim),
         // gate(head_dim)] when attn_output_gate=True (Qwen3.6). Nemotron has no gate half:
@@ -703,17 +728,17 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         {
             int block = 256;
             int grid = ((nkv * hdh) + block - 1) / block;
-            mtp_kv_append_kernel<<<grid, block, 0, stream>>>(
-                static_cast<const __half*>(ws.d_k_proj),
-                static_cast<const __half*>(ws.d_v_proj),
-                static_cast<__half*>(ws.d_k_cache),
-                static_cast<__half*>(ws.d_v_cache),
-                pos, nkv, hdh, /*n_rows=*/1);
+            mtp_kv_append_kernel<<<grid, block, 0, stream>>>(static_cast<const __half*>(ws.d_k_proj),
+                                                             static_cast<const __half*>(ws.d_v_proj),
+                                                             static_cast<__half*>(ws.d_k_cache),
+                                                             static_cast<__half*>(ws.d_v_cache), pos, nkv,
+                                                             hdh, /*n_rows=*/1, ws.max_seq_len,
+                                                             mtp_active_hi(ws));
             IMP_CUDA_CHECK_LAUNCH();
         }
         // Softmax attention scan over [0,pos+1); scores in dynamic smem (opted in at workspace allocate).
         mtp_attn_scan(ws.d_q_attn, ws.d_k_cache, ws.d_v_cache, ws.d_attn_out, /*base_ctx=*/pos, 1, nh, nkv,
-                      hdh, stream, ws.d_scan_part);
+                      hdh, stream, ws.d_scan_part, ws.max_seq_len, mtp_active_hi(ws));
         // 5.A.4.c — silu(gate) * attn_out (in-place). Only when the head
         // actually has a gate half; without one this would multiply the
         // output by a sigmoid of Q itself.
@@ -1479,8 +1504,7 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
         return false;
     if (!mtp_feed_dense_supported(mtp, ws))
         return false;
-    if (ws.d_k_cache == nullptr || ws.d_v_cache == nullptr ||
-        ws.mtp_pos + n_rows > ws.max_seq_len)
+    if (ws.d_k_cache == nullptr || ws.d_v_cache == nullptr || ws.max_seq_len <= 0 || n_rows > ws.max_seq_len)
         return false;
 
     const int H    = hidden_dim;
@@ -1506,16 +1530,15 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
     auto kv_attn = [&] {
         {
             int grid = ((n * nkv * hdh) + kBlock - 1) / kBlock;
-            mtp_kv_append_kernel<<<grid, kBlock, 0, stream>>>(
-                static_cast<const __half*>(ws.d_b_k),
-                static_cast<const __half*>(ws.d_b_v),
-                static_cast<__half*>(ws.d_k_cache),
-                static_cast<__half*>(ws.d_v_cache),
-                base, nkv, hdh, n);
+            mtp_kv_append_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(ws.d_b_k),
+                                                              static_cast<const __half*>(ws.d_b_v),
+                                                              static_cast<__half*>(ws.d_k_cache),
+                                                              static_cast<__half*>(ws.d_v_cache), base, nkv,
+                                                              hdh, n, ws.max_seq_len, mtp_active_hi(ws));
             IMP_CUDA_CHECK_LAUNCH();
         }
         mtp_attn_scan(ws.d_b_q_attn, ws.d_k_cache, ws.d_v_cache, ws.d_b_attn_out, /*base_ctx=*/base + n - 1,
-                      1, nh, nkv, hdh, stream, ws.d_scan_part);
+                      1, nh, nkv, hdh, stream, ws.d_scan_part, ws.max_seq_len, mtp_active_hi(ws));
     };
     if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/1, /*rope_pos=*/base,
                              /*d_rope_pos=*/nullptr, stream, kv_attn))
@@ -1607,11 +1630,12 @@ bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_a
             mtp_kv_append_rows_kernel<<<grid, kBlock, 0, stream>>>(
                 static_cast<const __half*>(ws.d_b_k), static_cast<const __half*>(ws.d_b_v),
                 static_cast<__half*>(ws.d_k_cache_base), static_cast<__half*>(ws.d_v_cache_base), d_slots,
-                d_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n);
+                d_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n, ws.max_seq_len, ws.d_slot_hi);
             IMP_CUDA_CHECK_LAUNCH();
         }
         mtp_attn_scan_slots(ws.d_b_q_attn, ws.d_k_cache_base, ws.d_v_cache_base, ws.d_b_attn_out, d_slots,
-                            d_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n, nh, nkv, hdh, stream);
+                            d_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n, nh, nkv, hdh, stream,
+                            ws.max_seq_len, ws.d_slot_hi);
     };
     if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/n, /*rope_pos=*/0, d_pos, stream,
                              kv_attn))

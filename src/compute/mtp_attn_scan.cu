@@ -23,11 +23,12 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
-// q.k * scale for cache rows [0, seq_len) into s_scores: one warp per row, lane = 8 contiguous dims.
+// q.k * scale for window rows [0, seq_len) (cache row mtp_ring_row(t0 + t, ring)) into s_scores: one warp per
+// row, lane = 8 contiguous dims.
 // Returns this warp's max (identical in every lane).
 __device__ __forceinline__ float scan_scores(const __half* __restrict__ q_row, const __half* __restrict__ k_h,
                                              int64_t row_stride, int seq_len, int head_dim, float scale,
-                                             float* s_scores) {
+                                             float* s_scores, int t0, int ring) {
     const int lane = static_cast<int>(threadIdx.x) % 32;
     const int warp = static_cast<int>(threadIdx.x) / 32;
     uint4 qv[kScanPasses];
@@ -38,7 +39,7 @@ __device__ __forceinline__ float scan_scores(const __half* __restrict__ q_row, c
     }
     float wmax = -1.0e30f;
     for (int t = warp; t < seq_len; t += kScanWarps) {
-        const __half* k_row = k_h + (t * row_stride);
+        const __half* k_row = k_h + (mtp_ring_row(t0 + t, ring) * row_stride);
         float acc = 0.0f;
 #pragma unroll
         for (int p = 0; p < kScanPasses; ++p) {
@@ -76,11 +77,12 @@ __device__ __forceinline__ float block_reduce(float warp_value, bool is_max, flo
     return r;
 }
 
-// sum_t p_t * V[t] over cache rows [0, seq_len): warps split the rows, lane = 8 dims, reduced in smem.
-// part != nullptr: unnormalized sums to part[2 + d]; else out_row[d] = sum * inv_denom.
+// sum_t p_t * V[t] over window rows [0, seq_len) (ring rows as scan_scores): warps split the rows, lane = 8
+// dims, reduced in smem. part != nullptr: unnormalized sums to part[2 + d]; else out_row[d] = sum *
+// inv_denom.
 __device__ __forceinline__ void scan_pv(const __half* __restrict__ v_h, int64_t row_stride, int seq_len,
                                         int head_dim, const float* s_scores, float inv_denom,
-                                        __half* __restrict__ out_row, float* part) {
+                                        __half* __restrict__ out_row, float* part, int t0, int ring) {
     __shared__ float s_part[kScanWarps][256];
     const int lane = static_cast<int>(threadIdx.x) % 32;
     const int warp = static_cast<int>(threadIdx.x) / 32;
@@ -89,7 +91,8 @@ __device__ __forceinline__ void scan_pv(const __half* __restrict__ v_h, int64_t 
         float acc[8] = {};
         if (d0 < head_dim) {
             for (int t = warp; t < seq_len; t += kScanWarps) {
-                const uint4 vv = __ldg(reinterpret_cast<const uint4*>(v_h + (t * row_stride) + d0));
+                const __half* v_row = v_h + (mtp_ring_row(t0 + t, ring) * row_stride);
+                const uint4 vv = __ldg(reinterpret_cast<const uint4*>(v_row + d0));
                 const auto* v2 = reinterpret_cast<const __half2*>(&vv);
                 const float pt = s_scores[t];
 #pragma unroll
@@ -120,18 +123,20 @@ __device__ __forceinline__ void scan_pv(const __half* __restrict__ v_h, int64_t 
     }
 }
 
-// One (query row, head) over cache rows [0, seq_len). part != nullptr: split-K partial instead of out_row:
-// part[0] max, part[1] sum of exp, part[2 + d] unnormalized P*V. blockDim.x == kMtpScanThreads.
+// One (query row, head) over window rows [0, seq_len), window row t = cache row mtp_ring_row(t0 + t, ring).
+// part != nullptr: split-K partial instead of out_row: part[0] max, part[1] sum of exp, part[2 + d]
+// unnormalized P*V (seq_len <= 0: an empty partial). blockDim.x == kMtpScanThreads.
 __device__ __forceinline__ void mtp_attn_scan_row(const __half* __restrict__ q_row,
                                                   const __half* __restrict__ k_cache,
                                                   const __half* __restrict__ v_cache,
                                                   __half* __restrict__ out_row, int seq_len, int kv_h,
                                                   int num_kv_heads, int head_dim, float scale,
-                                                  float* s_scores, float* part = nullptr) {
+                                                  float* s_scores, float* part, int t0, int ring) {
     __shared__ float s_red[kScanWarps];
     const int64_t row_stride = static_cast<int64_t>(num_kv_heads) * head_dim;
     const int64_t head_off = static_cast<int64_t>(kv_h) * head_dim;
-    const float wmax = scan_scores(q_row, k_cache + head_off, row_stride, seq_len, head_dim, scale, s_scores);
+    const float wmax = scan_scores(q_row, k_cache + head_off, row_stride, seq_len, head_dim, scale, s_scores,
+                                   t0, ring);
     const float gmax = block_reduce(wmax, true, s_red);
     float lsum = 0.0f;
     for (int t = static_cast<int>(threadIdx.x); t < seq_len; t += kMtpScanThreads) {
@@ -145,14 +150,21 @@ __device__ __forceinline__ void mtp_attn_scan_row(const __half* __restrict__ q_r
         part[1] = denom;
     }
     scan_pv(v_cache + head_off, row_stride, seq_len, head_dim, s_scores, denom > 0.0f ? 1.0f / denom : 0.0f,
-            out_row, part);
+            out_row, part, t0, ring);
 }
 
-// Query row r (grid y) attends cache rows [0, base_ctx + r + 1); GQA: q_head h -> kv_head h*NKV/NH.
+// Window of a query at position p: first ring row *t0 and length (mtp_ring_lo; ring <= 0 = [0, p]).
+__device__ __forceinline__ int ring_window(int p, const int* __restrict__ hi, int ring, int* t0) {
+    const int lo = mtp_ring_lo(p, hi != nullptr ? *hi : 0, ring);
+    *t0 = ring > 0 ? lo % ring : lo;
+    return p + 1 - lo;
+}
+
+// Query row r (grid y) at position base_ctx + r attends its window; GQA: q_head h -> kv_head h*NKV/NH.
 __global__ void mtp_attn_kv_scan_kernel(const __half* __restrict__ q_attn, const __half* __restrict__ k_cache,
                                         const __half* __restrict__ v_cache, __half* __restrict__ out,
                                         int base_ctx, int num_heads, int num_kv_heads, int head_dim,
-                                        float scale) {
+                                        float scale, int ring, const int* __restrict__ hi) {
     const int h = static_cast<int>(blockIdx.x);
     const int r = static_cast<int>(blockIdx.y);
     if (h >= num_heads)
@@ -160,26 +172,30 @@ __global__ void mtp_attn_kv_scan_kernel(const __half* __restrict__ q_attn, const
     extern __shared__ float s_scores[];  // [seq_len]
     const int kv_h = h / (num_heads / num_kv_heads);
     const int64_t o = ((static_cast<int64_t>(r) * num_heads) + h) * head_dim;
-    mtp_attn_scan_row(q_attn + o, k_cache, v_cache, out + o, base_ctx + r + 1, kv_h, num_kv_heads, head_dim,
-                      scale, s_scores);
+    int t0 = 0;
+    const int len = ring_window(base_ctx + r, hi, ring, &t0);
+    mtp_attn_scan_row(q_attn + o, k_cache, v_cache, out + o, len, kv_h, num_kv_heads, head_dim, scale,
+                      s_scores, nullptr, t0, ring);
 }
 
-// Split-K for one query row: CTA (h, s) scans cache rows [s * chunk, min(seq_len, (s + 1) * chunk)) into
-// part[(h * gridDim.y + s) * (head_dim + 2)].
+// Split-K for the query at position p: CTA (h, s) scans window rows [s * chunk, min(len, (s + 1) * chunk))
+// into part[(h * gridDim.y + s) * (head_dim + 2)]; chunk is sized for the longest window, a shorter one
+// leaves trailing CTAs empty.
 __global__ void mtp_attn_kv_scan_split_kernel(const __half* __restrict__ q,
                                               const __half* __restrict__ k_cache,
                                               const __half* __restrict__ v_cache, float* __restrict__ part,
-                                              int seq_len, int chunk, int num_heads, int num_kv_heads,
-                                              int head_dim, float scale) {
+                                              int p, int chunk, int num_heads, int num_kv_heads, int head_dim,
+                                              float scale, int ring, const int* __restrict__ hi) {
     const int h = static_cast<int>(blockIdx.x);
     const int s = static_cast<int>(blockIdx.y);
     extern __shared__ float s_chunk_scores[];  // [chunk]
+    int w0 = 0;
+    const int len = ring_window(p, hi, ring, &w0);
     const int t0 = s * chunk;
-    const int64_t row0 = static_cast<int64_t>(t0) * num_kv_heads * head_dim;
-    float* p = part + (((static_cast<int64_t>(h) * gridDim.y) + s) * (head_dim + 2));
-    mtp_attn_scan_row(q + (static_cast<int64_t>(h) * head_dim), k_cache + row0, v_cache + row0, nullptr,
-                      min(chunk, seq_len - t0), h / (num_heads / num_kv_heads), num_kv_heads, head_dim, scale,
-                      s_chunk_scores, p);
+    float* pt = part + (((static_cast<int64_t>(h) * gridDim.y) + s) * (head_dim + 2));
+    mtp_attn_scan_row(q + (static_cast<int64_t>(h) * head_dim), k_cache, v_cache, nullptr,
+                      min(chunk, len - t0), h / (num_heads / num_kv_heads), num_kv_heads, head_dim, scale,
+                      s_chunk_scores, pt, mtp_ring_row(w0 + t0, ring), ring);
 }
 
 // out[h, :] from head h's n_split partials: rescale each to the global max, sum, normalize.
@@ -203,28 +219,28 @@ __global__ void mtp_attn_kv_combine_kernel(const float* __restrict__ part, __hal
     }
 }
 
-// Row r over [0, pos[r] + 1) of slot slots[r].
-__global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn,
-                                             const __half* __restrict__ k_base,
-                                             const __half* __restrict__ v_base, __half* __restrict__ out,
-                                             const int* __restrict__ slots, const int* __restrict__ pos,
-                                             int64_t slot_elems, int num_heads, int num_kv_heads,
-                                             int head_dim, float scale) {
+// Row r at position pos[r] over its window of slot slots[r].
+__global__ void mtp_attn_kv_scan_rows_kernel(
+    const __half* __restrict__ q_attn, const __half* __restrict__ k_base, const __half* __restrict__ v_base,
+    __half* __restrict__ out, const int* __restrict__ slots, const int* __restrict__ pos, int64_t slot_elems,
+    int num_heads, int num_kv_heads, int head_dim, float scale, int ring, const int* __restrict__ hi) {
     const int h = static_cast<int>(blockIdx.x);
     const int r = static_cast<int>(blockIdx.y);
     if (h >= num_heads)
         return;
-    extern __shared__ float s_row_scores[];  // [pos[r] + 1]
+    extern __shared__ float s_row_scores[];  // [window length]
+    int t0 = 0;
+    const int len = ring_window(pos[r], hi != nullptr ? hi + slots[r] : nullptr, ring, &t0);
     // A replayed graph launches with the smem it was last given (mtp_scan_nodes_set_rows): short = trap.
     unsigned dyn_smem = 0;
     asm volatile("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
-    if (static_cast<unsigned>(pos[r] + 1) * sizeof(float) > dyn_smem)
+    if (static_cast<unsigned>(len) * sizeof(float) > dyn_smem)
         __trap();
     const int64_t slot = static_cast<int64_t>(slots[r]) * slot_elems;
     const int kv_h = h / (num_heads / num_kv_heads);
     const int64_t o = ((static_cast<int64_t>(r) * num_heads) + h) * head_dim;
-    mtp_attn_scan_row(q_attn + o, k_base + slot, v_base + slot, out + o, pos[r] + 1, kv_h, num_kv_heads,
-                      head_dim, scale, s_row_scores);
+    mtp_attn_scan_row(q_attn + o, k_base + slot, v_base + slot, out + o, len, kv_h, num_kv_heads, head_dim,
+                      scale, s_row_scores, nullptr, t0, ring);
 }
 
 }  // namespace
@@ -265,10 +281,11 @@ bool mtp_attn_scan_supported(int head_dim) {
 
 void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void* out, int base_ctx,
                    int n_rows, int num_heads, int num_kv_heads, int head_dim, cudaStream_t stream,
-                   float* split_part) {
+                   float* split_part, int ring, const int* d_hi) {
     (void)mtp_scan_smem_opt_in();  // false: a launch above 48 KiB fails at IMP_CUDA_CHECK_LAUNCH
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
-    const int seq_len = base_ctx + 1;
+    // Longest window (the device clips it to mtp_ring_lo): sizes the split and the scores.
+    const int seq_len = ring > 0 ? std::min(base_ctx + 1, ring) : base_ctx + 1;
     if (n_rows == 1 && split_part != nullptr && seq_len > kScanSplitRows) {
         const int n_split = std::min(kMtpScanMaxSplits, (seq_len + kScanSplitRows - 1) / kScanSplitRows);
         const int chunk = (seq_len + n_split - 1) / n_split;
@@ -276,31 +293,34 @@ void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void
         mtp_attn_kv_scan_split_kernel<<<dim3(num_heads, n_used), kMtpScanThreads, chunk * sizeof(float),
                                         stream>>>(static_cast<const __half*>(q),
                                                   static_cast<const __half*>(k_cache),
-                                                  static_cast<const __half*>(v_cache), split_part, seq_len,
-                                                  chunk, num_heads, num_kv_heads, head_dim, scale);
+                                                  static_cast<const __half*>(v_cache), split_part, base_ctx,
+                                                  chunk, num_heads, num_kv_heads, head_dim, scale, ring,
+                                                  d_hi);
         IMP_CUDA_CHECK_LAUNCH();
         mtp_attn_kv_combine_kernel<<<num_heads, 256, 0, stream>>>(split_part, static_cast<__half*>(out),
                                                                   n_used, head_dim);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
-    const size_t smem = static_cast<size_t>(base_ctx + n_rows) * sizeof(float);
+    const int rows = ring > 0 ? std::min(base_ctx + n_rows, ring) : base_ctx + n_rows;
+    const size_t smem = static_cast<size_t>(rows) * sizeof(float);
     mtp_attn_kv_scan_kernel<<<dim3(num_heads, n_rows), kMtpScanThreads, smem, stream>>>(
         static_cast<const __half*>(q), static_cast<const __half*>(k_cache),
         static_cast<const __half*>(v_cache), static_cast<__half*>(out), base_ctx, num_heads, num_kv_heads,
-        head_dim, scale);
+        head_dim, scale, ring, d_hi);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
                          const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
-                         int num_kv_heads, int head_dim, cudaStream_t stream) {
+                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring, const int* d_hi) {
     (void)mtp_scan_smem_opt_in();
-    const size_t smem = static_cast<size_t>(max_pos + 1) * sizeof(float);
+    const int rows = ring > 0 ? std::min(max_pos + 1, ring) : max_pos + 1;
+    const size_t smem = static_cast<size_t>(rows) * sizeof(float);
     mtp_attn_kv_scan_rows_kernel<<<dim3(num_heads, n_rows), kMtpScanThreads, smem, stream>>>(
         static_cast<const __half*>(q), static_cast<const __half*>(k_base), static_cast<const __half*>(v_base),
         static_cast<__half*>(out), d_slots, d_pos, slot_elems, num_heads, num_kv_heads, head_dim,
-        1.0f / sqrtf(static_cast<float>(head_dim)));
+        1.0f / sqrtf(static_cast<float>(head_dim)), ring, d_hi);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

@@ -185,6 +185,11 @@ struct Speculative {
     // it and the next turn drafts over its prefix-cache hit (Qwen3.8-27B-NVFP4: 64 MiB per slot).
     // 1 = the pre-v0.63 single slot.
     int mtp_history_slots = 4;
+    // MTP head KV rows per slot, a ring: past this many positions the head attends the last ones only and
+    // keeps drafting. Clamped to the model context; with many slots (batched verify) a 1 GiB budget caps it,
+    // floor 2048. Qwen3.8-27B: 4 KiB per row per slot; 40k prompt 222 / 276 drafts accepted (full: 222 /
+    // 277).
+    int mtp_kv_window = 16384;
     // With mtp_history_slots: up to that many requests bind at once, and a bound request's hidden rows from
     // batched decode steps feed its head slot in 256-row passes, so it drafts again once it decodes alone
     // and its chat's next turn resumes the head cache. false = one binding, a batched step unbinds it.
@@ -197,6 +202,10 @@ struct Speculative {
     // Drafts per bound request in that step: 2 = the last token plus a 2-token MTP chain (3 rows per request,
     // a second head pass, two spare recurrent slots per row); 1 = one draft (2 rows, one spare).
     int mtp_batch_verify_k = 2;
+    // With mtp_batch_verify: a bound request decoding alone verifies in that batched step too (rows on paged
+    // decode attention, split-K over the context) instead of the single verify chunk, whose prefill attention
+    // walks the whole context per CTA (Qwen3.8-27B-NVFP4 at 20k: 1 ms per layer). false = the single chunk.
+    bool mtp_batch_verify_solo = true;
     // That step's head pass (feed, draft LM head, chain) replays a CUDA graph per (fed rows, requests,
     // chain), at most 48: the second use of a shape captures it. Off = eager launches. Qwen3.8-27B-NVFP4:
     // head pass at 2 requests 2.66-2.77 -> 2.33-2.46 ms, 4 overlapping chats 140.40 -> 143.47 tok/s.

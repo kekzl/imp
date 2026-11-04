@@ -8,6 +8,7 @@ src/compute/gemm_batched.cpp cudaMemcpy(d_sb offline  # gemm_cublaslt_fp8_probe,
 src/compute/gemm_batched.cpp cudaMemset(d_a offline  # gemm_cublaslt_fp8_probe, no caller
 src/compute/gemm_batched.cpp cudaMemset(d_b offline  # gemm_cublaslt_fp8_probe, no caller
 src/compute/gemm_grouped_nvfp4_smallM.cu cudaMemset(s_dummy synced  # cudaStreamSynchronize(nullptr) right after
+src/compute/mtp_forward.cu cudaMemset(ws.d_slot_hi init  # MTP workspace allocate (engine init), before the warmup device syncs
 src/compute/sampling_penalties_history.cu cudaMemset(slab.data() init  # preallocated at engine init, before the warmup device syncs
 src/core/buffer.cpp cudaMemset(data_ offline  # Buffer::zero, no caller
 src/exec/executor_attention_internal.h cudaMemcpy(k_flat+static_cast<ptrdiff_t>(b*kv_bs*nkv*hd) debug  # cuBLAS attention debug path

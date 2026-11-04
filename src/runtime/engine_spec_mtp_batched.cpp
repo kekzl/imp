@@ -70,9 +70,8 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
             mtp_unbind_("desync before batched feed");
             continue;
         }
-        if ((ws->max_seq_len > 0 && ws->mtp_pos + emitted[g] > ws->max_seq_len) ||
-            static_cast<int>(toks.size()) + emitted[g] > ws->feed_rows_cap) {
-            mtp_unbind_("kv cap reached");
+        if (static_cast<int>(toks.size()) + emitted[g] > ws->feed_rows_cap) {
+            mtp_unbind_("batched feed rows full");
             continue;
         }
         const int32_t* t = req.output_tokens.data() + req.output_tokens.size() -
