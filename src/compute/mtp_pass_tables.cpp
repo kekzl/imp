@@ -1,5 +1,6 @@
 // The batched MTP head pass's tables: validated, packed into pinned staging and uploaded with one H2D
-// (mtp_head_pass_upload). Host code only; the feed kernels that read them live in mtp_forward.cu.
+// (mtp_head_pass_upload), and the scan nodes of its captured graph (mtp_scan_nodes_*). Host code only; the
+// feed kernels that read them live in mtp_forward.cu.
 
 #include "compute/mtp_forward.h"
 #include "compute/mtp_forward_internal.h"
@@ -63,6 +64,44 @@ bool mtp_head_pass_upload(MtpDraftWorkspace& ws, const int32_t* toks, const int*
     out.m = m;
     out.max_pos = max_pos;
     out.chain_max_pos = *std::max_element(chain_pos, chain_pos + m);
+    return true;
+}
+
+bool mtp_scan_nodes_find(cudaGraph_t graph, MtpScanNodes& out) {
+    out = MtpScanNodes{};
+    size_t count = 0;
+    if (cudaGraphGetNodes(graph, nullptr, &count) != cudaSuccess)
+        return false;
+    std::vector<cudaGraphNode_t> nodes(count);
+    if (count > 0 && cudaGraphGetNodes(graph, nodes.data(), &count) != cudaSuccess)
+        return false;
+    for (cudaGraphNode_t node : nodes) {
+        cudaGraphNodeType type{};
+        if (cudaGraphNodeGetType(node, &type) != cudaSuccess)
+            return false;
+        if (type != cudaGraphNodeTypeKernel)
+            continue;
+        cudaKernelNodeParams p{};
+        // Driver-API nodes (cuBLASLt) report no runtime func and set the last error: not a scan node.
+        if (cudaGraphKernelNodeGetParams(node, &p) != cudaSuccess || p.func != mtp_attn_scan_rows_fn()) {
+            (void)cudaGetLastError();
+            continue;
+        }
+        out.nodes.push_back(node);
+        out.params.push_back(p);
+    }
+    return true;
+}
+
+bool mtp_scan_nodes_set_rows(cudaGraphExec_t exec, MtpScanNodes& scan, int rows) {
+    const auto smem = static_cast<unsigned>(rows) * static_cast<unsigned>(sizeof(float));
+    for (size_t i = 0; i < scan.nodes.size(); ++i) {
+        if (scan.params[i].sharedMemBytes == smem)
+            continue;
+        scan.params[i].sharedMemBytes = smem;
+        if (cudaGraphExecKernelNodeSetParams(exec, scan.nodes[i], &scan.params[i]) != cudaSuccess)
+            return false;
+    }
     return true;
 }
 

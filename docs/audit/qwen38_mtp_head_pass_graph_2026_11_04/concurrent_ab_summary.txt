@@ -1,0 +1,8 @@
+# /mnt/data/scratch/mtpgraph_2026_11_04/concurrent_ab: main vs new, 3 alternating pairs, LEVELS 2 4 32
+harness: md5=f8ac61ec6cb4
+p1_main c1 132.95 drafted 1822 accepted 1275 c2 299.1 c4 508.7 c32 1948.1 own_peak_mib 25181 kv_blocks 4882
+p1_new c1 128.10 drafted 1822 accepted 1275 c2 292.9 c4 525.5 c32 1953.4 own_peak_mib 25197 kv_blocks 4882
+p2_main c1 127.68 drafted 1822 accepted 1275 c2 295.8 c4 523.5 c32 1948.2 own_peak_mib 25172 kv_blocks 4882
+p2_new c1 127.78 drafted 1822 accepted 1275 c2 299.7 c4 540.2 c32 1951.8 own_peak_mib 25196 kv_blocks 4882
+p3_main c1 127.27 drafted 1822 accepted 1275 c2 285.6 c4 503.3 c32 1933.7 own_peak_mib 25176 kv_blocks 4882
+p3_new c1 127.51 drafted 1822 accepted 1275 c2 293.6 c4 517.4 c32 1948.0 own_peak_mib 25194 kv_blocks 4882

@@ -196,6 +196,7 @@ A KV block has **two** refcount holders, not three (COW-fork does not exist, arc
 | `prefill_graphs_` (`PrefillGraphCache`) | (chunk_len, blocks, KV calibration generation, recurrent slot) | one per prompt length up to `runtime.prefill_graph_prewarm` (32) plus one shared; Gemma-4 ~4.7 MiB each |
 | `async_graph_runner_` | - | 1 (conditional-node loop) |
 | `spec_graphs_` | `(n_tokens, ctx_capacity, rec_slot)` | uncounted, ~1950 execs at `--max-batch 64`; cleared wholesale by `free_spec_graphs_()` |
+| `mtp_head_graphs_` (`runtime/mtp_head_graph.h`) | (fed rows, requests, chain) | `kMtpHeadGraphMax = 48` (19-24 held on Qwen3.8-27B-NVFP4 A/B servers, own peak +20 MiB); kernel and memcpy nodes only, no graph-pool allocation |
 
 `cudaDeviceGraphMemTrim`: measured 2026-07-29, `used=reserved=high_since_serving=0 MiB` after 12 serving requests - no captured region allocates today, so `cuda_graph.cu`'s trim calls are dead code and graph memory is not part of the residual.
 

@@ -1,0 +1,118 @@
+"""Batched MTP head pass windows from an nsys sqlite, eager or graph-replayed (--cuda-graph-trace=node).
+
+A pass = a cluster of mtp_gather_rows_kernel executions (feed, draft gather, chain feed) within 6 ms on the
+GPU. Host window (same definition as #3042's head_pass_nsys.py): from the API start of the table H2D (the
+last H2D memcpy starting <= 300 us before the first gather) to the end of the first cudaStreamSynchronize
+call after the draft D2H's API call. GPU busy / idle inside that window; gaps attributed to the activity that
+ends them. Usage: head_pass_nsys2.py file.sqlite [label]
+"""
+import bisect
+import collections
+import sqlite3
+import statistics
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+label = sys.argv[2] if len(sys.argv) > 2 else ""
+s = dict(db.execute("SELECT id, value FROM StringIds"))
+api = [(st, en, s[n], c) for st, en, n, c in
+       db.execute("SELECT start, end, nameId, correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME ORDER BY start")]
+api_by_corr = {a[3]: i for i, a in enumerate(api)}
+api_starts = [a[0] for a in api]
+kern = sorted((st, en, s.get(n, "?")) for st, en, n in
+              db.execute("SELECT start, end, shortName FROM CUPTI_ACTIVITY_KIND_KERNEL"))
+mem = sorted((st, en, b, k, c) for st, en, b, k, c in
+             db.execute("SELECT start, end, bytes, copyKind, correlationId FROM CUPTI_ACTIVITY_KIND_MEMCPY"))
+mem_starts = [m[0] for m in mem]
+acts_all = sorted([(k[0], k[1], k[2]) for k in kern] + [(m[0], m[1], f"memcpy kind {m[3]} {m[2]} B") for m in mem])
+act_starts = [a[0] for a in acts_all]
+
+gathers = [k for k in kern if k[2] == "mtp_gather_rows_kernel"]
+clusters, cur = [], []
+for g in gathers:
+    if cur and g[0] - cur[-1][0] > 6_000_000:
+        clusters.append(cur)
+        cur = []
+    cur.append(g)
+if cur:
+    clusters.append(cur)
+
+
+def busy(t0, t1):
+    lo = bisect.bisect_left(act_starts, t0 - 20_000_000)
+    tot, last = 0, t0
+    for st, en, _ in acts_all[lo:]:
+        if st >= t1:
+            break
+        if en <= t0:
+            continue
+        st, en = max(st, last), min(en, t1)
+        if en > st:
+            tot += en - st
+            last = en
+    return tot
+
+
+rows = []
+gaps = collections.Counter()
+for cl in clusters:
+    if len(cl) not in (2, 3):
+        continue
+    g0, g1 = cl[0][0], cl[-1][1]
+    i = bisect.bisect_left(mem_starts, g0) - 1
+    h2d = None
+    while i >= 0 and mem[i][0] > g0 - 300_000:
+        if mem[i][3] == 1:
+            h2d = mem[i]
+            break
+        i -= 1
+    j = bisect.bisect_left(mem_starts, g1)
+    d2h = None
+    while j < len(mem) and mem[j][0] < g1 + 3_000_000:
+        if mem[j][3] == 2:
+            d2h = mem[j]
+            break
+        j += 1
+    if h2d is None or d2h is None or h2d[4] not in api_by_corr or d2h[4] not in api_by_corr:
+        continue
+    a0 = api_by_corr[h2d[4]]
+    end = api_by_corr[d2h[4]]
+    while end < len(api) and not api[end][2].startswith("cudaStreamSynchronize"):
+        end += 1
+    if end == len(api):
+        continue
+    t0, t1 = api[a0][0], api[end][1]
+    calls = collections.Counter()
+    ctime = collections.Counter()
+    for a in api[a0:end + 1]:
+        name = a[2].split("_v")[0]
+        calls[name] += 1
+        ctime[name] += a[1] - a[0]
+    lo = bisect.bisect_left(act_starts, t0 - 20_000_000)
+    hi = bisect.bisect_right(act_starts, t1)
+    cursor = t0
+    for st, en, nm in acts_all[lo:hi]:
+        if en <= t0:
+            continue
+        if st > cursor:
+            gaps[nm[:60]] += st - cursor
+        cursor = max(cursor, en)
+    gaps["<tail to window end>"] += max(0, t1 - cursor)
+    gwin = d2h[1] - h2d[0]
+    rows.append((t1 - t0, busy(t0, t1), calls, ctime, api[end][1] - api[end][0], gwin, busy(h2d[0], d2h[1])))
+
+print(f"{label} passes {len(rows)} (of {len(clusters)} gather clusters)")
+if rows:
+    med = lambda xs: statistics.median(xs) / 1000.0
+    print(f"{label} host window median {med([r[0] for r in rows]):.1f} us, gpu busy {med([r[1] for r in rows]):.1f} us, "
+          f"gpu idle {med([r[0] - r[1] for r in rows]):.1f} us, final sync wait {med([r[4] for r in rows]):.1f} us")
+    print(f"{label} gpu window (table H2D start to draft D2H end) median {med([r[5] for r in rows]):.1f} us, "
+          f"idle in it {med([r[5] - r[6] for r in rows]):.1f} us")
+    print(f"{label} gpu idle per pass by the activity ending the gap (mean us/pass, top 12):")
+    for nm, t in gaps.most_common(12):
+        print(f"{label}   {t / len(rows) / 1000.0:8.1f}  {nm}")
+    names = sorted({n for r in rows for n in r[2]})
+    for n in names:
+        c = statistics.median([r[2][n] for r in rows])
+        t = statistics.median([r[3][n] for r in rows]) / 1000.0
+        print(f"{label}   {n:40s} calls/pass {c:5.1f}  host us/pass {t:.1f}")
