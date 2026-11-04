@@ -1,0 +1,9 @@
+# /mnt/data/scratch/vramc32_interpose: build-interpose/imp-server (13ec744e, -DIMP_ALLOC_INTERPOSE=ON), MTP default,
+# warm + c1 + c4 + 2 c32 waves (tools/analysis/serving_vram_phases.sh)
+[INFO] alloc_interpose.cpp:147: [alloc-interpose] steady state clean: 0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving
+ipmtp 0_boot own_mib 20994 own_peak_mib 22760 device_live_mib 22647 async_pool_mib 11424 untracked_mib 19126 kv_blocks 3625 smi_used_mib 22724
+ipmtp 1_warm own_mib 21000 own_peak_mib 22760 device_live_mib 22653 async_pool_mib 11424 untracked_mib 19132 kv_blocks 3625 smi_used_mib 22730
+ipmtp 2_c1 own_mib 21006 own_peak_mib 22760 device_live_mib 22659 async_pool_mib 11424 untracked_mib 19138 kv_blocks 3625 smi_used_mib 22736
+ipmtp 3_c4 own_mib 21600 own_peak_mib 22760 device_live_mib 23253 async_pool_mib 11424 untracked_mib 19732 kv_blocks 3625 smi_used_mib 23330
+ipmtp 4_c32w1 own_mib 24424 own_peak_mib 24344 device_live_mib 26077 async_pool_mib 11424 untracked_mib 22556 kv_blocks 3625 smi_used_mib 25570
+ipmtp 4_c32w2 own_mib 24424 own_peak_mib 24344 device_live_mib 26077 async_pool_mib 11424 untracked_mib 22556 kv_blocks 3625 smi_used_mib 25570
