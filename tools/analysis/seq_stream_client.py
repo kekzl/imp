@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Sequential streaming chat requests, one at a time, real prompts: per request TTFT (send -> first
 # delta) and decode tok/s ((completion_tokens - 1) / (last delta - first delta)); MEDIAN line at the end.
-# Usage: seq_stream_client.py PORT [TAG]; env MODEL_NAME, GEN (400), IGNORE_EOS (1), ROUNDS (1), THINK (0/1).
+# Usage: seq_stream_client.py PORT [TAG]; env MODEL_NAME, GEN (400), IGNORE_EOS (1), ROUNDS (1), THINK (0/1),
+# TEXT_DIR (writes each answer to TEXT_DIR/TAG.NAME.txt for byte compares between arms).
 import json
 import os
 import statistics
@@ -19,6 +20,7 @@ GEN = int(os.environ.get("GEN", "400"))
 IGNORE_EOS = os.environ.get("IGNORE_EOS", "1") == "1"
 ROUNDS = int(os.environ.get("ROUNDS", "1"))
 THINK = os.environ.get("THINK", "")  # "0" / "1" sets enable_thinking; unset = the model default
+TEXT_DIR = os.environ.get("TEXT_DIR", "")
 PROMPTS = [
     ("prose", "Write a detailed essay about the history of the Hanseatic League, its trade routes, its decline, "
      "and its legacy in northern European cities."),
@@ -49,6 +51,7 @@ def run(name, prompt):
     t0 = time.perf_counter()
     t_first = t_last = None
     deltas = 0
+    text = []
     usage = None
     with urllib.request.urlopen(req, timeout=600) as resp:
         for raw in resp:
@@ -60,6 +63,7 @@ def run(name, prompt):
                 usage = ev["usage"]
             for ch in ev.get("choices", []):
                 d = ch.get("delta", {})
+                text.append((d.get("reasoning_content") or "") + (d.get("content") or ""))
                 if d.get("content") or d.get("reasoning_content"):
                     now = time.perf_counter()
                     t_first = t_first or now
@@ -69,6 +73,9 @@ def run(name, prompt):
     ttft_ms = (t_first - t0) * 1e3
     tps = (n - 1) / (t_last - t_first) if t_last > t_first else 0.0
     print(f"{TAG} {name:8s} tokens {n:4d}  ttft {ttft_ms:8.1f} ms  decode {tps:7.2f} tok/s", flush=True)
+    if TEXT_DIR:
+        with open(os.path.join(TEXT_DIR, f"{TAG}.{name}.txt"), "w") as f:
+            f.write("".join(text))
     return ttft_ms, tps
 
 
