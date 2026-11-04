@@ -1,0 +1,38 @@
+# /mnt/data/scratch/mtphead_overlap_ab: imp:mtphead-main (15d35035) vs imp:mtphead-new (0a5e17cf), MODES ov ov4 side, 3 alternating pairs
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 2}
+p1_main_ov4 REASONS_TOTAL {'turns drafted': 24}
+p1_main_ov SUMMARY c0_mean_tps 114.28 c0_drafted_turns 6/6 c1_mean_tps 142.14 c1_drafted_turns 6/6 all_mean_tps 128.21 PASS
+p1_main_ov4 SUMMARY c0_mean_tps 136.38 c0_drafted_turns 6/6 c1_mean_tps 137.93 c1_drafted_turns 6/6 c2_mean_tps 136.69 c2_drafted_turns 6/6 c3_mean_tps 132.67 c3_drafted_turns 6/6 all_mean_tps 135.92 PASS
+p1_main_side SUMMARY turn1_tps 117.14 followup_mean_tps 122.34 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 2} own_peak_mib 23570
+p1_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 2}
+p1_new_ov4 REASONS_TOTAL {'turns drafted': 24, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p1_new_ov SUMMARY c0_mean_tps 135.91 c0_drafted_turns 6/6 c1_mean_tps 132.26 c1_drafted_turns 6/6 all_mean_tps 134.08 PASS
+p1_new_ov4 SUMMARY c0_mean_tps 140.09 c0_drafted_turns 6/6 c1_mean_tps 137.43 c1_drafted_turns 6/6 c2_mean_tps 137.38 c2_drafted_turns 6/6 c3_mean_tps 136.54 c3_drafted_turns 6/6 all_mean_tps 137.86 PASS
+p1_new_side SUMMARY turn1_tps 110.85 followup_mean_tps 121.26 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 3} own_peak_mib 23576
+p2_main_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p2_main_ov4 REASONS_TOTAL {'turns drafted': 24}
+p2_main_ov SUMMARY c0_mean_tps 131.18 c0_drafted_turns 6/6 c1_mean_tps 124.46 c1_drafted_turns 6/6 all_mean_tps 127.82 PASS
+p2_main_ov4 SUMMARY c0_mean_tps 132.21 c0_drafted_turns 6/6 c1_mean_tps 137.26 c1_drafted_turns 6/6 c2_mean_tps 130.28 c2_drafted_turns 6/6 c3_mean_tps 131.44 c3_drafted_turns 6/6 all_mean_tps 132.80 PASS
+p2_main_side SUMMARY turn1_tps 117.92 followup_mean_tps 123.41 followup_drafted_turns 5/5 PASS
+p2_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 24138
+p2_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p2_new_ov4 REASONS_TOTAL {'turns drafted': 24}
+p2_new_ov SUMMARY c0_mean_tps 129.64 c0_drafted_turns 6/6 c1_mean_tps 136.10 c1_drafted_turns 6/6 all_mean_tps 132.87 PASS
+p2_new_ov4 SUMMARY c0_mean_tps 138.91 c0_drafted_turns 6/6 c1_mean_tps 138.21 c1_drafted_turns 6/6 c2_mean_tps 142.52 c2_drafted_turns 6/6 c3_mean_tps 135.34 c3_drafted_turns 6/6 all_mean_tps 138.74 PASS
+p2_new_side SUMMARY turn1_tps 116.05 followup_mean_tps 123.51 followup_drafted_turns 5/5 PASS
+p2_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 23576
+p3_main_ov REASONS_TOTAL {'turns drafted': 12}
+p3_main_ov4 REASONS_TOTAL {'turns drafted': 24, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p3_main_ov SUMMARY c0_mean_tps 127.30 c0_drafted_turns 6/6 c1_mean_tps 138.67 c1_drafted_turns 6/6 all_mean_tps 132.98 PASS
+p3_main_ov4 SUMMARY c0_mean_tps 132.60 c0_drafted_turns 6/6 c1_mean_tps 125.48 c1_drafted_turns 6/6 c2_mean_tps 130.29 c2_drafted_turns 6/6 c3_mean_tps 133.62 c3_drafted_turns 6/6 all_mean_tps 130.50 PASS
+p3_main_side SUMMARY turn1_tps 117.27 followup_mean_tps 123.06 followup_drafted_turns 5/5 PASS
+p3_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 23568
+p3_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p3_new_ov4 REASONS_TOTAL {'turns drafted': 24}
+p3_new_ov SUMMARY c0_mean_tps 136.21 c0_drafted_turns 6/6 c1_mean_tps 141.00 c1_drafted_turns 6/6 all_mean_tps 138.60 PASS
+p3_new_ov4 SUMMARY c0_mean_tps 134.35 c0_drafted_turns 6/6 c1_mean_tps 143.86 c1_drafted_turns 6/6 c2_mean_tps 140.11 c2_drafted_turns 6/6 c3_mean_tps 133.12 c3_drafted_turns 6/6 all_mean_tps 137.86 PASS
+p3_new_side SUMMARY turn1_tps 115.62 followup_mean_tps 120.13 followup_drafted_turns 5/5 PASS
+p3_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 23580

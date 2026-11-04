@@ -7,8 +7,8 @@ table at the end carries the state of every stage.
 
 Status (2026-11-04): the same step runs by default for the BOUND requests while <= 4 decode
 (`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows"), with 2 drafts per request
-(`speculative.mtp_batch_verify_k`, section "Two drafts per bound request" at the end); the full
-`batch_verify` stays opt-in.
+(`speculative.mtp_batch_verify_k`, section "Two drafts per bound request"), both draft passes on the
+NVFP4 draft head (section at the end); the full `batch_verify` stays opt-in.
 
 ## Why
 
@@ -211,3 +211,29 @@ again); c2 241.3-255.0 -> 279.2-291.2, c4 457.6-469.6 -> 485.8-507.8, c1 and c32
 Next: the head pass, 3.73-3.80 ms of a 16.5-17.7 ms step: both passes read the 1213 MiB FP8 LM head; a
 multi-row NVFP4 draft head (682 MiB, built for MTP) would read it once per pass. The economics guard
 counts only lone verifies (1-2 unbinds per arm, main too).
+
+## NVFP4 draft head in the batched passes (2026-11-04)
+
+Both batched draft passes read the lone chain's NVFP4 draft head (`speculative.mtp_nvfp4_head`)
+through `gemv_nvfp4_kpar_batched_fp32` (one weight pass per 4 rows) instead of the FP8 head;
+verification stays on FP8. Evidence: docs/audit/qwen38_mtp_batched_draft_head_2026_11_04/.
+
+| per pass, [248320 x 5120] (`microbench.txt`) | 1 row | 2 rows | 3 rows | 4 rows |
+|---|---:|---:|---:|---:|
+| FP8 rowscale, 1213 MiB | 926.3 us | 927.4 us | 928.8 us | 930.3 us |
+| NVFP4 kpar_mb, 682 MiB | 425.3 us | 428.1 us | 504.1 us | 558.0 us |
+
+| requests (`step_price.txt`, 3 pairs) | main head | new head | tokens/step main -> new |
+|---:|---|---|---|
+| 2 | 3.74-3.93 ms | 2.73-3.07 ms | 4.41-4.68 -> 4.38-4.69 |
+| 3 | 3.77-3.97 ms | 2.91-3.19 ms | 6.92-7.01 -> 7.01-7.09 |
+| 4 | 3.78-4.02 ms | 3.14-3.31 ms | 9.28-9.36 -> 9.10-9.39 |
+
+Measured (3 alternating pairs vs 15d35035, `means.txt`): 2 overlapping chats 129.67 -> 135.18 tok/s,
+4 chats 133.07 -> 138.15, 3/3 pairs higher each; c2 269.90 -> 293.50, c4 501.43 -> 534.43, c32
+2023.50 -> 2033.67, c1 131.36 -> 131.31; accepted / drafted 68.34 -> 67.96 % (2 chats), 67.14 -> 67.20 %
+(4 chats); lone chat 6/6 byte-identical on fresh servers, follow-ups 122.45 / 122.48 tok/s (the
+side mode after the overlap modes, 122.94 -> 121.63, pairs mixed sign: 122.34 / 123.41 / 123.06 -> 121.26 / 123.51 / 120.13).
+
+Next: the NVFP4 kernel loses bandwidth at 3-4 rows (1419 / 1282 GB/s vs 1681 at 1 row); the rest of
+the head pass is the two BF16 MTP layer feeds (832 MiB weights each).

@@ -1,0 +1,19 @@
+# drafted / accepted summed over each probe JSON's turns, overlap A/B
+p1_main_ov4 drafted 26902 accepted 18211 rate 67.7 %
+p1_main_ov drafted 11819 accepted 8082 rate 68.4 %
+p1_main_side drafted 6249 accepted 4388 rate 70.2 %
+p1_new_ov4 drafted 26416 accepted 17647 rate 66.8 %
+p1_new_ov drafted 12210 accepted 8110 rate 66.4 %
+p1_new_side drafted 6249 accepted 4388 rate 70.2 %
+p2_main_ov4 drafted 28357 accepted 18945 rate 66.8 %
+p2_main_ov drafted 12284 accepted 8364 rate 68.1 %
+p2_main_side drafted 6444 accepted 4609 rate 71.5 %
+p2_new_ov4 drafted 26480 accepted 18020 rate 68.1 %
+p2_new_ov drafted 12804 accepted 8708 rate 68 %
+p2_new_side drafted 6471 accepted 4675 rate 72.2 %
+p3_main_ov4 drafted 26242 accepted 17567 rate 66.9 %
+p3_main_ov drafted 12510 accepted 8577 rate 68.6 %
+p3_main_side drafted 6800 accepted 4854 rate 71.4 %
+p3_new_ov4 drafted 26837 accepted 17910 rate 66.7 %
+p3_new_ov drafted 13417 accepted 9298 rate 69.3 %
+p3_new_side drafted 6249 accepted 4388 rate 70.2 %
