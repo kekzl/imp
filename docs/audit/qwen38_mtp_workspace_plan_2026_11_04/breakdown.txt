@@ -1,0 +1,29 @@
+# Qwen3.8-27B-NVFP4-vllm, default imp-server, MTP head on, RTX 5090 32 GB (WSL2); own = imp_vram_own_bytes MiB
+# main = 911ec49d (imp:mtpplan-main), branch = perf/mtp-workspace-plan-row a1bce0b1 (imp:mtpplan-new2)
+# tools/analysis/serving_vram_phases.sh, diagnostics.vram_audit=true, fresh server per arm
+row                                              main      branch
+plan row "MTP draft workspace"                   none      359 MiB (MTP workspace: 359.46 MiB allocated = the plan row)
+plan KV blocks (APPLIED)                         11380     10335
+KV committed at init (growable)                  2825      2575
+init_complete own                                20556     20840
+0_boot own (after the server's enable call)      20916     20840
+boot - init_complete                             +360      0
+init_complete audit: mtp_workspace pool          -         359.5 MiB, 50 allocations
+init_complete audit RESIDUAL                     432.4     433.0
+shutdown audit RESIDUAL                          1435.2    1079.7
+4_c32w4 own                                      24970     25204
+4_c32w4 kv_blocks                                4218      4882  (grow-ahead timing, KV pools +292 vs +598 MiB)
+growth init_complete -> c32w4                    +4414     +4364
+growth excl. KV pools (kv_cache, minmax, scales)  +4122     +3766  (-356)
+device free at c32w4                             5957 (18.3 %)  5723 (17.6 %)  >= 4 % allocator headroom
+
+# first branch build (mtp_workspace_bytes without 2 MiB page rounding, a row of 344 MiB): boot - init 0,
+# growth init -> c32w4 +4028 (-386 vs main), KV pools +272 MiB; 15 MiB unplanned per-allocation rounding
+# moved the row to the cudaMalloc footprint (mtp_alloc_footprint).
+
+# throughput, tools/analysis/mtp_concurrent_ab.sh PAIRS=3, alternating, ab_summary.txt (branch arm = first build)
+level   main p1/p2/p3 (median)           branch p1/p2/p3 (median)        delta
+c1      131.11 131.34 129.27 (131.11)    130.84 129.55 129.68 (129.68)   -1.1 %, pairs -0.2/-1.4/+0.3 %
+c4      502.3 504.7 472.1 (502.3)        507.5 500.2 492.2 (500.2)       -0.4 %
+c32     2026.3 2019.1 1994.6 (2019.1)    2030.7 2008.3 2011.8 (2011.8)   -0.4 %
+spec    drafted 1822 accepted 1275 in every arm
