@@ -39,6 +39,9 @@ struct ShadowPlanProbe {
     size_t recurrent_snapshot_bytes = 0;
     size_t spec_decode_bytes = 0;
     size_t residual_ring_bytes = 0;
+    // MTP draft head workspace (head KV slots + feed scratch), taken at the end of init
+    // (mtp_workspace_bytes).
+    size_t mtp_workspace_bytes = 0;
 
     // The charge the old pass cannot see (A1.5). 0 disables it.
     size_t library_reserve_bytes = 0;

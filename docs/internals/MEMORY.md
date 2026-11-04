@@ -113,7 +113,7 @@ Every graph-capturable kernel launch wrapper takes `StableSpan`, so a relocatabl
 - "Live blocks return to baseline" is what criterion 4 checks; "device-used returns to baseline" is not achievable here by any allocator design.
 - Bandwidth, not a `cudaMalloc` probe, tells resident from spilled (~1530 GB/s resident vs ~237 GB/s spilled).
 - `cudaMemGetInfo` steps ~585 MiB above `nvidia-smi` once device used crosses ~24.5 GB, with no allocation behind it (plain `cudaMalloc` loop, `tools/analysis/wddm_memgetinfo_probe.cu`). `imp_vram_own_bytes` and every free-VRAM reading carry the step; an A/B straddling it moves ~585 MiB without a code cause.
-- Qwen3.8-27B-NVFP4 default server with the MTP head, c32 vs `init_complete` (+4098 MiB own): 31 recurrent slots re-committed 2480, 4 batched-verify spares 320, KV grow-ahead 312 (all in the plan), MTP workspace taken after the plan 360, the WDDM step 585, residual 41. Serving allocates nothing else (interposer 0, CUPTI = slot commits): [`docs/audit/qwen38_c32_serving_vram_2026_11_04/`](../audit/qwen38_c32_serving_vram_2026_11_04/).
+- Qwen3.8-27B-NVFP4 default server with the MTP head, c32 vs `init_complete` (+4098 MiB own): 31 recurrent slots re-committed 2480, 4 batched-verify spares 320, KV grow-ahead 312 (all in the plan), MTP workspace taken after the plan 360 (a plan row since, taken before `init_complete`: [`qwen38_mtp_workspace_plan_2026_11_04/`](../audit/qwen38_mtp_workspace_plan_2026_11_04/)), the WDDM step 585, residual 41. Serving allocates nothing else (interposer 0, CUPTI = slot commits): [`docs/audit/qwen38_c32_serving_vram_2026_11_04/`](../audit/qwen38_c32_serving_vram_2026_11_04/).
 
 ---
 
@@ -220,6 +220,12 @@ Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, o
 ### A5.5 Speculative decoding
 
 Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculative.k`/`suffix_k_max`/MTP depth, invalidated together. Per-request spec toggling must not resize anything: buffers are planned for the config's maximum `k` and stay unused when a request does not qualify.
+
+MTP draft workspace (head KV slots, batched-feed scratch, carry, post-norm feed rows):
+
+- Plan row `MTP draft workspace`, priced by `mtp_workspace_bytes()` (`src/compute/mtp_workspace_bytes.h`, CPU) when `speculative.mtp_k > 0` and the head is uploaded.
+- Taken inside `Engine::init` before the Serving phase (`take_planned_mtp_workspace_`); audit pool `mtp_workspace`, and `MtpDraftWorkspace::device_bytes` must equal the row or enable logs a WARN.
+- Before this row it was allocated after the plan (Qwen3.8-27B-NVFP4: +360 MiB past `init_complete`, `docs/audit/qwen38_c32_serving_vram_2026_11_04/breakdown.txt`).
 
 ### A5.6 Weight forms: one resident copy
 

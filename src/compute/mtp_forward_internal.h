@@ -14,7 +14,7 @@ namespace imp {
 // MTP KV-cache attention (mtp_attn_scan.cu): one CTA of kMtpScanThreads per (query row, head).
 constexpr int kMtpScanThreads = 512;
 constexpr int kMtpScanMaxHeadDim = 512;  // head_dim % 8 == 0 and <= this (mtp_workspace_allocate)
-constexpr int kMtpScanMaxSplits = 32;    // ws.d_scan_part: [num_heads, kMtpScanMaxSplits, head_dim + 2] FP32
+// kMtpScanMaxSplits: compute/mtp_workspace_bytes.h (the plan prices ws.d_scan_part from it).
 
 // Both scan kernels opted into the device's largest dynamic smem, once per process (a per-workspace
 // value is process-wide: a smaller cache would lower it under a larger one). False: attribute call failed.

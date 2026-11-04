@@ -30,3 +30,7 @@ more warps and longer per-row streams do not lift a half-line load. sweep_cpasyn
 kNT x, stages y; 2043 shipped (kNT 4, 3 stages); 2014 loses at 4 rows, 2018 at >= 3 rows, every streamed config loses at 29-32 rows.
 Harness md5 (committed copies, host paths replaced by WT / $HOME): harness_e2e_ab.sh.txt c50361eb48c4ac657c0f24748b2f1d1f,
 harness_server_ab.sh.txt a5db560a74613d63e0674aa76ef6b559, harness_ncu.sh.txt f086b19a6e65de4c4e07e7aa79c058ca.
+
+Gates (verify_fast.txt, degen_quick_and_byte_ab.txt): make verify-fast OK, Qwen3-8B-NVFP4 tg128 291.80 vs pin 282.84 (+3.17 %),
+PPL 11.2352 unchanged; degen_suite --quick on Qwen3.8-27B 52 checks, 0 FAIL; greedy byte A/B with runtime.deterministic,
+3 prompts, max_tokens 400: arm A and arm B md5 identical.
