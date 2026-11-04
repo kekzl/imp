@@ -1,0 +1,10 @@
+# /mnt/data/scratch/mtpecon_2026_11_04/identity: lone chat greedy + side (no batched verify), main 173d66be vs this branch, 1 pair
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_greedy SUMMARY turn1_tps 113.30 followup_mean_tps 116.47 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 114.01 followup_mean_tps 118.65 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {} own_peak_mib 22606
+p1_new_greedy SUMMARY turn1_tps 112.73 followup_mean_tps 116.91 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 114.34 followup_mean_tps 118.97 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {} own_peak_mib 22606
+IDENTICAL 6/6 p1_main_greedy.json vs p1_new_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_new_side.json
