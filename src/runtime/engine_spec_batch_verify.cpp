@@ -1,11 +1,13 @@
 // engine_spec_batch_verify.cpp: batched speculative verify on the GDN hybrid.
 //
-// One forward per decode step for N requests, 2 rows each: the request's last
-// emitted token and its draft. Group g runs the GDN layers on its live slot
-// L_g, commits the 2-row state into the request's spare slot P_g and the
-// 1-row state in place into L_g (compute/gdn.h out_slots / snap_slots).
-// Accept swaps L_g and P_g on the host; reject keeps L_g. No state copies, no
-// replay: verify depth is 1 (docs/plans/2026-09-11-batched-mtp-verify.md).
+// One forward per decode step for N requests, D + 1 rows each: the request's
+// last emitted token and up to D drafts (D = 1; the bound verify takes
+// speculative.mtp_batch_verify_k, up to 2). Group g runs the GDN layers on its
+// live slot L_g, commits the (D + 1)-row state into the spare P_g, the 1-row
+// state in place into L_g and (D = 2) the 2-row state into a second spare Q_g
+// (compute/gdn.h out_slots / snap_slots / snap_rows). Accepting k drafts swaps
+// the slot holding 1 + k rows with L_g on the host. No state copies, no replay
+// (docs/plans/2026-09-11-batched-mtp-verify.md).
 // Attention rows take the decode-attention route with per-row block tables
 // and context lengths, the same shape as the multi-candidate chunk.
 
@@ -82,6 +84,52 @@ const char* draft_refusal(const BatchVerifyState& bv, int rows, int drafted) {
         return "no_draft_in_batch";
     return bv.bound_only && !mtp_bound_verify_fits(bv.cap_seq, rows, drafted) ? "too_few_drafts" : nullptr;
 }
+
+// Group g's T rows: t0 at p0, then its nd drafts; rows past them are pads (token t0, attending one token).
+void stage_group_rows(int32_t* tok, int32_t* pos, int32_t* ctx, int T, int g, int32_t t0, const int32_t* dr,
+                      int nd, int p0) {
+    for (int j = 0; j < T; ++j) {
+        const size_t r = (static_cast<size_t>(T) * g) + j;
+        const bool pad = j > nd;
+        tok[r] = j == 0 || pad ? t0 : dr[j - 1];
+        pos[r] = p0 + j;
+        ctx[r] = pad ? 1 : p0 + 1 + j;
+    }
+}
+
+// Step price per request count, logged every 100 verify steps: forward + argmax (host wall through the argmax
+// sync), the MTP head pass after it (feed, drafts, sync) and the tokens emitted per step.
+void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long long emitted) {
+    constexpr int kMaxN = 8;
+    struct Price {
+        double fwd_ms = 0.0, head_ms = 0.0;
+        long long steps = 0, emitted = 0;
+    };
+    static Price price[kMaxN + 1];
+    static long long total = 0;
+    Price& p = price[std::clamp(n, 0, kMaxN)];
+    p.fwd_ms += fwd_ms;
+    p.head_ms += head_ms;
+    p.emitted += emitted;
+    p.steps++;
+    if (++total % 100 != 0)
+        return;
+    for (int i = 2; i <= kMaxN; ++i) {
+        const Price& q = price[i];
+        if (q.steps > 0)
+            IMP_LOG_INFO(
+                "spec-batch price: %d requests x %d rows, %lld steps: forward+argmax %.2f ms, head %.2f "
+                "ms, %.2f tokens/step",
+                i, rows_per_req, q.steps, q.fwd_ms / q.steps, q.head_ms / q.steps,
+                static_cast<double>(q.emitted) / q.steps);
+    }
+}
+
+// Every row of group g attends through the request's block table.
+void stage_group_tables(int32_t* tab, int table_cap, int T, int g, const std::vector<int>& bt) {
+    for (int j = 0; j < T; ++j)
+        std::copy(bt.begin(), bt.end(), tab + (((static_cast<size_t>(T) * g) + j) * table_cap));
+}
 }  // namespace
 
 namespace {
@@ -132,8 +180,9 @@ int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_s
 }
 
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    if (!batch_verify_full(cfg, model, max_batch_size))
-        return mtp_bound_verify_rows(cfg, model, max_batch_size);  // slot-swapping: no factored rows to apply
+    if (!batch_verify_full(cfg, model, max_batch_size))  // slot-swapping: no factored rows to apply
+        return mtp_bound_verify_rows(cfg, model, max_batch_size) *
+               mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k);
     // The whole point of the factored form: the drafted row is (g, k, delta)
     // plus a conv tap, so the pool stops carrying a second slot per batch slot
     // and the planner stops charging one.
@@ -159,8 +208,9 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     const int table_cap = decode_batch_pool_.is_allocated() ? decode_batch_pool_.max_blocks_per_seq() : 0;
     if (cap_seq < 2 || table_cap <= 0)
         return false;
-    const int cap_rows = 2 * cap_seq;
-    const size_t stage_ints = (3ull * cap_rows) + (3ull * cap_seq) + 2;
+    const int depth = full ? 1 : mtp_bound_verify_depth(runtime_config_.speculative.mtp_batch_verify_k);
+    const int cap_rows = (depth + 1) * cap_seq;
+    const size_t stage_ints = batch_verify_stage_ints(cap_rows, cap_seq);
     const size_t table_ints = static_cast<size_t>(cap_rows) * table_cap;
     auto pin = [](PinnedBuffer& b, size_t bytes) {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
@@ -185,12 +235,13 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     bv_.cap_seq = cap_seq;
     bv_.cap_rows = cap_rows;
     bv_.table_cap = table_cap;
+    bv_.depth = depth;
     bv_.bound_only = !full;
     if (!full) {
         IMP_LOG_INFO(
-            "speculative.mtp_batch_verify: bound requests verify together while <= %d decode "
-            "(%d spare recurrent slots)",
-            cap_seq, batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size));
+            "speculative.mtp_batch_verify: bound requests verify together while <= %d decode, %d draft(s) "
+            "each (%d spare recurrent slots)",
+            cap_seq, depth, batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size));
         return true;  // slot-swapping spares: a factored row would need every following step to apply it
     }
     return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_,
@@ -289,13 +340,15 @@ void Engine::free_batch_verify_bufs_() {
     bv_.h_row_tables = PinnedBuffer{};
     bv_.h_argmax = PinnedBuffer{};
     bv_.cap_seq = bv_.cap_rows = bv_.table_cap = 0;
+    bv_.depth = 1;
 }
 
 // Spare slots are the reserved pool slots past the multi-candidate ones.
 // Committed on first use (lazy pool), held for the request's lifetime.
-int Engine::acquire_spare_slot_(int req_id) {
-    auto it = bv_.spare_of.find(req_id);
-    if (it != bv_.spare_of.end())
+int Engine::acquire_spare_slot_(int req_id, bool second) {
+    auto& spare_of = second ? bv_.spare2_of : bv_.spare_of;
+    auto it = spare_of.find(req_id);
+    if (it != spare_of.end())
         return it->second;
     if (!ssm_state_)
         return -1;
@@ -312,31 +365,52 @@ int Engine::acquire_spare_slot_(int req_id) {
     if (!ssm_state_->ensure_slot(slot))
         return -1;  // stays free; the step falls back to plain decode
     bv_.free.pop_back();
-    bv_.spare_of[req_id] = slot;
+    spare_of[req_id] = slot;
     return slot;
 }
 
-// One draft token for the request's next position: the pending MTP chain
-// (bound request), else the first token of the suffix / n-gram draft. -1 = no
-// draft (the request's second row is a pad that is never accepted).
-int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
+// A verify left the state after 1 + matched rows in `slot` (role from bound_verify_state_slot, 0 = the live
+// slot already): that slot becomes the live one and the old live slot takes its place among the spares.
+void Engine::bound_verify_adopt_slot_(int req_id, int role, int live, int slot) {
+    if (role == 0)
+        return;
+    recurrent_slot_of_[req_id] = slot;
+    (role == 1 ? bv_.spare_of : bv_.spare2_of)[req_id] = live;
+    if (async_parked_req_id_ == req_id) {  // its parked graph loop baked the old live slot
+        async_graph_runner_.cleanup();
+        release_async_block_tables_();
+        async_parked_req_id_ = -1;
+    }
+}
+
+// Up to bv_.depth draft tokens for the request's next positions: the pending
+// MTP chain (bound request), else the suffix / n-gram draft. 0 = no draft
+// (the request's draft rows are pads that are never accepted).
+int Engine::batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp) {
     from_mtp = false;
+    const int depth = bv_.depth;
+    auto take = [&](const std::vector<int32_t>& d) {
+        const int n = std::min(depth, static_cast<int>(d.size()));
+        std::copy_n(d.begin(), n, out);
+        return n;
+    };
     if (mtp_spec_decode_enabled()) {
         auto d = mtp_take_draft_(req);
         // Plain batched steps since its last draft (speculative.mtp_batch_verify): the carried rows catch
-        // the head up to the context end and draft the next token.
+        // the head up to the context end and draft the next tokens (the request's own mtp_k bounds the
+        // chain).
         if (d.empty() && bv_.bound_only && mtp_bound(mtp_active_, mtp_pool_, req.id) &&
             mtp_active_.carry_n > 0) {
-            mtp_carry_flush_(req, /*draft_k=*/1);
+            mtp_carry_flush_(req, /*draft_k=*/std::clamp(mtp_request_k_(req), 1, depth));
             d = mtp_take_draft_(req);
         }
         if (!d.empty()) {
             from_mtp = true;
-            return d[0];
+            return take(d);
         }
     }
     if (!spec_ngram_enabled_(req) || req.spec_ngram_given_up)
-        return -1;
+        return 0;
     const auto& scfg = runtime_config_.speculative;
     NgramDraft nd;
     if (scfg.suffix) {
@@ -345,16 +419,16 @@ int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
         const int out_indexed = std::clamp(idx.size() - pred_end, 0,
                                            static_cast<int>(req.output_tokens.size()));
         idx.append(std::span(req.output_tokens).subspan(static_cast<size_t>(out_indexed)));
-        nd = idx.draft(1, std::max(1, scfg.suffix_k_max));
+        nd = idx.draft(depth, std::max(depth, scfg.suffix_k_max));
     } else {
         std::vector<int32_t> history;
         history.reserve(req.input_tokens.size() + req.prediction_tokens.size() + req.output_tokens.size());
         history.insert(history.end(), req.input_tokens.begin(), req.input_tokens.end());
         history.insert(history.end(), req.prediction_tokens.begin(), req.prediction_tokens.end());
         history.insert(history.end(), req.output_tokens.begin(), req.output_tokens.end());
-        nd = ngram_draft(history, 1, std::max(1, scfg.min_match), scfg.max_match);
+        nd = ngram_draft(history, depth, std::max(1, scfg.min_match), scfg.max_match);
     }
-    return nd.tokens.empty() ? -1 : nd.tokens[0];
+    return take(nd.tokens);
 }
 
 // Which gate refuses the batched verify for this batch, or nullptr. Logged
@@ -453,7 +527,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
 
     // Slots: the live one must exist (acquired at prefill), the spare is
     // taken now and kept for the request's lifetime.
-    std::vector<int> live(N), spare(N);
+    // Rows per request: the last token plus up to D drafts (D = 2 only on the bound verify).
+    const int D = bv_.depth;
+    const int T = D + 1;
+    std::vector<int> live(N), spare(N), spare2(N, -1);
     for (int g = 0; g < N; ++g) {
         live[g] = recurrent_slot_for_(reqs[g]->id);
         if (live[g] < 0)
@@ -462,28 +539,32 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         spare[g] = factored_spare_active(runtime_config_, bv_) ? live[g] : acquire_spare_slot_(reqs[g]->id);
         if (spare[g] < 0)
             return decline("spare_slot_unavailable");
+        spare2[g] = D > 1 ? acquire_spare_slot_(reqs[g]->id, /*second=*/true) : spare[g];
+        if (spare2[g] < 0)
+            return decline("spare_slot_unavailable");
     }
 
     // Drafts. A batch without a single draft is a plain decode step.
-    std::vector<int32_t> draft(N, -1);
+    std::vector<int32_t> draft(static_cast<size_t>(N) * D, -1);
+    std::vector<int> n_draft(N, 0);
     std::vector<uint8_t> from_mtp(N, 0);
     int n_drafted = 0;
     for (int g = 0; g < N; ++g) {
         bool mtp = false;
-        draft[g] = batch_verify_draft_(*reqs[g], mtp);
+        n_draft[g] = batch_verify_draft_(*reqs[g], draft.data() + (static_cast<size_t>(g) * D), mtp);
         from_mtp[g] = mtp ? 1 : 0;
-        n_drafted += static_cast<int>(draft[g] >= 0);
+        n_drafted += static_cast<int>(n_draft[g] > 0);
     }
     if (const char* why = draft_refusal(bv_, N, n_drafted))
         return decline(why);
 
     // Per-row penalties use the sampler's device history slots (host
-    // output_tokens is the truth). Row 2g penalizes the history (ends with
-    // t0), row 2g+1 the history plus the draft (written at the slot's end
-    // below); emitted tokens land there afterward, keeping the slot in sync.
-    std::vector<const int32_t*> pen_hist(static_cast<size_t>(2 * N), nullptr);
-    std::vector<int> pen_n(static_cast<size_t>(2 * N), 0), pen_slot(N, -1), pen_need(N, 0);
-    std::vector<float> pen_v(static_cast<size_t>(6 * N), 0.0f);
+    // output_tokens is the truth). Row T*g + j penalizes the history (ends
+    // with t0) plus drafts 0..j-1 (written at the slot's end below); emitted
+    // tokens land there afterward, keeping the slot in sync.
+    std::vector<const int32_t*> pen_hist(static_cast<size_t>(T) * N, nullptr);
+    std::vector<int> pen_n(static_cast<size_t>(T) * N, 0), pen_slot(N, -1), pen_need(N, 0);
+    std::vector<float> pen_v(static_cast<size_t>(3 * T) * N, 0.0f);
     bool any_pen = false;
     for (int g = 0; g < N; ++g) {
         const Request& req = *reqs[g];
@@ -492,7 +573,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         if (!needs)
             continue;
         const int need = static_cast<int>(req.output_tokens.size());
-        if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0 || need + 2 > penalty_hist_cap_)
+        if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0 || need + T > penalty_hist_cap_)
             return decline("penalty_history_unavailable");
         const int slot = penalty_hist_slot_(req.id, reqs);
         if (slot < 0)
@@ -509,19 +590,18 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         pen_slot[g] = slot;
         pen_need[g] = need;
-        pen_hist[2 * static_cast<size_t>(g)] = base;
-        pen_n[2 * static_cast<size_t>(g)] = need;
-        pen_hist[(2 * g) + 1] = base;
-        pen_n[(2 * g) + 1] = need + 1;
-        for (int j = 0; j < 2; ++j) {
-            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 0] = req.repetition_penalty;
-            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 1] = req.frequency_penalty;
-            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 2] = req.presence_penalty;
+        for (int j = 0; j < T; ++j) {
+            const size_t r = (static_cast<size_t>(T) * g) + j;
+            pen_hist[r] = base;
+            pen_n[r] = need + j;
+            pen_v[(r * 3) + 0] = req.repetition_penalty;
+            pen_v[(r * 3) + 1] = req.frequency_penalty;
+            pen_v[(r * 3) + 2] = req.presence_penalty;
         }
         any_pen = true;
     }
 
-    // KV blocks for both rows of every request (positions p0, p0+1).
+    // KV blocks for every row of every request (positions p0 .. p0 + D).
     std::vector<int> p0(N);
     int max_ctx = 0;
     auto rollback_all = [&](int upto) {
@@ -530,7 +610,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     };
     for (int g = 0; g < N; ++g) {
         p0[g] = reqs[g]->context_len() - 1;
-        const int blocks_needed = (p0[g] + 2 + kv_bs - 1) / kv_bs;
+        const int blocks_needed = (p0[g] + T + kv_bs - 1) / kv_bs;
         while (static_cast<int>(kv_manager_->block_table(reqs[g]->id).size()) < blocks_needed) {
             int nb = kv_manager_->append_block(reqs[g]->id);
             if (nb < 0 && kv_cache_raw_ != nullptr) {
@@ -549,11 +629,12 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             rollback_all(g + 1);
             return false;
         }
-        max_ctx = std::max(max_ctx, p0[g] + 2);
+        max_ctx = std::max(max_ctx, p0[g] + T);
     }
 
     // Stage: [tokens | positions | row ctx lens | seq slots | out slots |
-    // snap slots | chunk_len, snap_n], one H2D; row tables, one H2D.
+    // snap slots x2 | chunk_len, snap_n x2], one H2D; row tables, one H2D.
+    // Second snapshot (D == 2): row 2's state into spare2, indexed N + g (the scan's n_seq).
     const int cap_rows = bv_.cap_rows, cap_seq = bv_.cap_seq, table_cap = bv_.table_cap;
     int32_t* h = bv_.h_stage.as<int32_t>();
     int32_t* h_tok = h;
@@ -562,28 +643,20 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* h_seq = h + (3ull * cap_rows);
     int32_t* h_out = h_seq + cap_seq;
     int32_t* h_snap = h_out + cap_seq;
-    int32_t* h_misc = h_snap + cap_seq;
+    int32_t* h_misc = h_snap + (2ull * cap_seq);
     int32_t* h_tab = bv_.h_row_tables.as<int32_t>();
     for (int g = 0; g < N; ++g) {
-        const int32_t t0 = reqs[g]->output_tokens.back();
-        const bool has = draft[g] >= 0;
-        h_tok[2 * static_cast<size_t>(g)] = t0;
-        h_tok[(2 * g) + 1] = has ? draft[g] : t0;
-        h_pos[2 * static_cast<size_t>(g)] = p0[g];
-        h_pos[(2 * g) + 1] = p0[g] + 1;
-        h_ctx[2 * static_cast<size_t>(g)] = p0[g] + 1;
-        h_ctx[(2 * g) + 1] = has ? p0[g] + 2 : 1;  // a pad row attends one token
+        stage_group_rows(h_tok, h_pos, h_ctx, T, g, reqs[g]->output_tokens.back(),
+                         draft.data() + (static_cast<size_t>(g) * D), n_draft[g], p0[g]);
         h_seq[g] = live[g];
         h_out[g] = spare[g];
         h_snap[g] = live[g];
-        const auto& bt = kv_manager_->block_table(reqs[g]->id);
-        for (int j = 0; j < 2; ++j) {
-            int32_t* row = h_tab + (static_cast<size_t>((2 * g) + j) * table_cap);
-            std::copy(bt.begin(), bt.end(), row);
-        }
+        h_snap[N + g] = spare2[g];  // read only at D == 2
+        stage_group_tables(h_tab, table_cap, T, g, kv_manager_->block_table(reqs[g]->id));
     }
-    h_misc[0] = 2;  // real rows per group
-    h_misc[1] = 1;  // snapshot row
+    h_misc[0] = T;  // real rows per group
+    h_misc[1] = 1;  // snapshot row (live slot, in place)
+    h_misc[2] = 2;  // second snapshot row (spare2, D == 2)
     int32_t* d = bv_.d_stage;
     int32_t* d_tok = d;
     int32_t* d_pos = d + cap_rows;
@@ -591,7 +664,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* d_seq = d + (3ull * cap_rows);
     int32_t* d_out = d_seq + cap_seq;
     int32_t* d_snap = d_out + cap_seq;
-    int32_t* d_misc = d_snap + cap_seq;
+    int32_t* d_misc = d_snap + (2ull * cap_seq);
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("spec-batch: %s failed: %s", op, cudaGetErrorString(err));
@@ -599,24 +672,24 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         return true;
     };
-    const size_t stage_ints = (3ull * cap_rows) + (3ull * cap_seq) + 2;
+    const size_t stage_ints = batch_verify_stage_ints(cap_rows, cap_seq);
     if (!check(cudaMemcpyAsync(d, h, stage_ints * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                "stage H2D") ||
         !check(cudaMemcpyAsync(bv_.d_row_tables, h_tab,
-                               static_cast<size_t>(2 * N) * table_cap * sizeof(int32_t),
+                               static_cast<size_t>(T) * N * table_cap * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream),
                "row tables H2D")) {
         rollback_all(N);
         return false;
     }
-    // The draft token behind each penalized request's history (pinned
+    // The draft tokens behind each penalized request's history (pinned
     // source: the staged chunk tokens).
     for (int g = 0; g < N && any_pen; ++g) {
         if (pen_slot[g] < 0)
             continue;
         int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
-        if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + (2 * static_cast<size_t>(g)) + 1,
-                                   sizeof(int32_t), cudaMemcpyHostToDevice, stream),
+        if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + (static_cast<size_t>(T) * g) + 1,
+                                   static_cast<size_t>(D) * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                    "penalty draft H2D")) {
             rollback_all(N);
             return false;
@@ -635,17 +708,17 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Graph replay (engine_spec_capture.cpp): one graph per (rows, ctx tier).
     // Everything that varies per step is device data the H2D above refreshed;
     // the split-K grid bakes the tier ceiling.
-    const bool capture_on = spec_capture_ready_(max_ctx, 2 * N);
+    const bool capture_on = spec_capture_ready_(max_ctx, T * N);
 
     InferenceState state;
     state.token_ids = d_tok;
     state.positions = d_pos;
-    state.n_tokens = 2 * N;
+    state.n_tokens = T * N;
     state.kv_cache = kv_cache_raw_;
     state.block_tables = bv_.d_row_tables;
     state.context_lens = d_ctx;
     state.max_context_len = max_ctx;
-    state.n_sequences = 2 * N;
+    state.n_sequences = T * N;
     state.max_blocks_per_seq = table_cap;
     state.is_prefill = true;
     state.prefill_offset = 0;
@@ -657,13 +730,14 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_seq_id = live[0];
     state.ssm_seq_slots = d_seq;
     state.ssm_n_seq = N;
-    state.ssm_seq_tokens = 2;
+    state.ssm_seq_tokens = T;
     // Factored spare: no second slot, so no commit destination. The drafted
     // row leaves as (g, k, delta) plus one conv tap per layer, both addressed
     // by the live slot; the snapshot at row 1 stays the in-place one.
     const bool factored = runtime_config_.speculative.factored_spare && bv_.d_fac != nullptr;
     state.ssm_out_slots = factored ? nullptr : d_out;
     state.ssm_snap_slots = factored ? d_seq : d_snap;
+    state.ssm_snap_rows = factored ? 1 : D;
     if (factored) {
         state.ssm_fac_out = bv_.d_fac;
         state.ssm_fac_stride = bv_.fac_stride;
@@ -707,11 +781,12 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
 
     // Argmax over every row. Rows of a request inside a budgeted think block
     // take the stop mask, the others the plain banned list.
-    std::vector<uint8_t> row_alt(static_cast<size_t>(2 * N), 0);
+    const int n_rows = T * N;
+    std::vector<uint8_t> row_alt(static_cast<size_t>(n_rows), 0);
     bool any_alt = false;
     for (int g = 0; g < N; ++g) {
         if (stop_mask_active(*reqs[g], think_end_id_)) {
-            row_alt[2 * static_cast<size_t>(g)] = row_alt[(2 * g) + 1] = 1;
+            std::fill_n(row_alt.begin() + (static_cast<ptrdiff_t>(T) * g), T, 1);
             any_alt = true;
         }
     }
@@ -719,12 +794,12 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const int n_ban = d_ban ? static_cast<int>(banned_token_ids_.size()) : 0;
     const int32_t* d_alt = (any_alt && stop_mask_.n() > 0) ? stop_mask_.device(vram_alloc_, stream) : nullptr;
     const int n_alt = d_alt ? stop_mask_.n() : 0;
-    executor_->greedy_argmax_all(2 * N, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr,
+    executor_->greedy_argmax_all(n_rows, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr,
                                  0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
                                  any_alt ? row_alt.data() : nullptr, any_pen ? pen_hist.data() : nullptr,
                                  any_pen ? pen_n.data() : nullptr, any_pen ? pen_v.data() : nullptr);
     int32_t* h_am = bv_.h_argmax.as<int32_t>();
-    if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax, static_cast<size_t>(2 * N) * sizeof(int32_t),
+    if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax, static_cast<size_t>(n_rows) * sizeof(int32_t),
                                cudaMemcpyDeviceToHost, stream),
                "argmax D2H") ||
         !check(cudaStreamSynchronize(stream), "verify sync")) {
@@ -736,18 +811,17 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         return false;
     }
 
-    long long acc_total = 0, emit_total = 0;
+    long long acc_total = 0, emit_total = 0, drafted_total = 0;
     bool any_mtp = false;
     std::vector<int> row0(N), emitted_of(N, 0);
     for (int g = 0; g < N; ++g) {
         auto& req = reqs[g];
-        const bool has = draft[g] >= 0;
+        const int nd = n_draft[g];
+        const int32_t* dr = draft.data() + (static_cast<size_t>(g) * D);
         const bool think_at_start = req->in_think_block;
         int matched = 0, emitted = 0;
-        for (int j = 0; j < 2; ++j) {
-            if (j == 1 && !has)
-                break;
-            const int32_t tok = h_am[(2 * g) + j];
+        for (int j = 0; j <= nd; ++j) {
+            const int32_t tok = h_am[(static_cast<size_t>(T) * g) + j];
             req->output_tokens.push_back(tok);
             track_think_state(*req, tok);
             emitted++;
@@ -759,20 +833,20 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
                 finish_request(req);
                 break;
             }
-            if (j == 1 || tok != draft[g])
+            if (j == nd || tok != dr[j])
                 break;  // bonus reached, or the draft diverged
             matched++;
             if (req->think_budget > 0.0f && req->in_think_block != think_at_start)
                 break;
         }
-        row0[g] = 2 * g;
+        row0[g] = T * g;
         emitted_of[g] = emitted;
-        // Device penalty history: the emitted tokens are rows 2g.. of the
+        // Device penalty history: the emitted tokens are rows T*g.. of the
         // pinned argmax buffer, in order.
         if (pen_slot[g] >= 0 && emitted > 0) {
             int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
             auto& hs = penalty_hist_state_[static_cast<size_t>(pen_slot[g])];
-            if (cudaMemcpyAsync(base + pen_need[g], h_am + (2 * static_cast<size_t>(g)),
+            if (cudaMemcpyAsync(base + pen_need[g], h_am + (static_cast<size_t>(T) * g),
                                 static_cast<size_t>(emitted) * sizeof(int32_t), cudaMemcpyHostToDevice,
                                 stream) == cudaSuccess)
                 hs.synced = pen_need[g] + emitted;
@@ -781,31 +855,25 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
-        // State: the spare holds [t0, draft], the live slot holds t0; accept
-        // swaps the spare in. Factored: no spare, the scan wrote a row for
-        // EVERY group, so accept keeps it for the next step and anything
-        // else must clear it (else state advances by a token nobody accepted).
-        const bool take = matched == 1 && req->status != RequestStatus::FINISHED;
+        // State after 1 + matched rows: the live slot holds row 1 (in-place snapshot), the spare all T rows,
+        // spare2 row 2 (D == 2); taking one swaps it with the live slot. Factored (D == 1): no spare, the
+        // scan wrote a row for EVERY group, so accept keeps it for the next step and anything else must
+        // clear it (else state advances by a token nobody accepted).
+        const int role = req->status == RequestStatus::FINISHED ? 0 : bound_verify_state_slot(matched, D);
         if (factored)
-            (take ? bv_.pending : bv_.clear_slots).push_back(live[g]);
-        else if (take) {
-            recurrent_slot_of_[req->id] = spare[g];
-            bv_.spare_of[req->id] = live[g];
-            if (async_parked_req_id_ == req->id) {  // its parked graph loop baked the old live slot
-                async_graph_runner_.cleanup();
-                release_async_block_tables_();
-                async_parked_req_id_ = -1;
-            }
-        }
-        if (has) {
+            (role != 0 ? bv_.pending : bv_.clear_slots).push_back(live[g]);
+        else
+            bound_verify_adopt_slot_(req->id, role, live[g], role == 1 ? spare[g] : spare2[g]);
+        if (nd > 0) {
             req->spec_verifies++;
-            req->spec_drafted += 1;
+            req->spec_drafted += nd;
             req->spec_accepted += matched;
             req->spec_emitted += emitted;
             req->spec_consecutive_misses = matched == 0 ? req->spec_consecutive_misses + 1 : 0;
         }
         acc_total += matched;
         emit_total += emitted;
+        drafted_total += nd;
         any_mtp = any_mtp || from_mtp[g];
     }
     // Factored: rows nobody may apply - this step's rejects, plus slots
@@ -826,23 +894,21 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
 
     // MTP: feed every bound request's emitted pairs and draft its next token
     // in one head pass (the chunk's hidden rows are still in place).
-    static double t_verify_ms = 0.0;
-    static long long t_steps = 0;
-    t_verify_ms +=
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count();
-    if (++t_steps % 100 == 0)
-        IMP_LOG_INFO("spec-batch: %lld steps, forward+argmax %.2f ms/step (before the MTP feed)", t_steps,
-                     t_verify_ms / t_steps);
+    const auto feed_t0 = std::chrono::steady_clock::now();
     if (mtp_spec_decode_enabled())
         mtp_batched_feed_(reqs, row0, emitted_of, stream);
+    log_step_price(
+        N, T, std::chrono::duration<double, std::milli>(feed_t0 - verify_t0).count(),
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_t0).count(),
+        emit_total);
     spec_stats_record_(
-        any_mtp, n_drafted, acc_total, emit_total,
+        any_mtp, drafted_total, acc_total, emit_total,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());
     static bool logged = false;
     if (!logged) {
         logged = true;
-        IMP_LOG_INFO("spec-batch: first batched verify n=%d drafted=%d accepted=%lld emitted=%lld", N,
-                     n_drafted, acc_total, emit_total);
+        IMP_LOG_INFO("spec-batch: first batched verify n=%d rows=%d drafted=%lld accepted=%lld emitted=%lld",
+                     N, n_rows, drafted_total, acc_total, emit_total);
     }
     bv_.yield_every = 1;
     return true;

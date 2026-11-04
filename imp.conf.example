@@ -1226,6 +1226,10 @@ mtp_carry            = true
 # tok/s per turn, c4 337.4 -> 460.3, c32 unchanged, KV plan 4812 -> 4531 blocks.
 # 0 = plain batched decode at any batch > 1.
 mtp_batch_verify     = 4
+# Drafts per bound request in that step: 2 = last token plus a 2-token MTP
+# chain (3 rows per request, a second head pass, two spare recurrent slots per
+# row); 1 = one draft (2 rows, one spare slot per row).
+mtp_batch_verify_k   = 2
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

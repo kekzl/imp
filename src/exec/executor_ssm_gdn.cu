@@ -472,7 +472,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 (conv_prev && !per_group) ? conv_snap : nullptr,
                 (!factored && (conv_prev || per_group)) ? state.d_snap_n : nullptr,
                 per_group ? nullptr : conv_prev, factored ? nullptr : state.ssm_out_slots,
-                per_group ? state.ssm_snap_slots : nullptr);
+                per_group ? state.ssm_snap_slots : nullptr, per_group ? state.ssm_snap_rows : 1);
             if (factored)
                 ssm_conv_tap_stash(static_cast<char*>(state.ssm_tap_out) +
                                        (state.ssm_tap_layer_stride * ssm_idx * 2),
@@ -805,29 +805,39 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 ragged_split = gdn_ragged_scan_split(gdn_ragged_rows(state), *state.ssm_state, ssm_idx, io,
                                                      stream);
             }
-            if (!ragged_split && state_bf16) {
-                gdn_scan_fused_bf16_batched(
-                    conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                    static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
-                    static_cast<const float*>(ly.ssm_dt_b.data),
-                    static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                    static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
-                    static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<__nv_bfloat16*>(snap), snap_n,
-                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr,
-                    fac_out, fac_in, state.ssm_fac_stride);
-            } else if (!ragged_split) {
-                gdn_scan_fused_f32_batched(
-                    conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                    static_cast<const half*>(beta_proj_out.data), static_cast<const float*>(ly.ssm_a.data),
-                    static_cast<const float*>(ly.ssm_dt_b.data),
-                    static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                    static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
-                    static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                    ssize, n_groups, stream, gl, real_n, row_offs, static_cast<float*>(snap), snap_n,
-                    grouped ? state.ssm_out_slots : nullptr, grouped ? state.ssm_snap_slots : nullptr,
-                    fac_out, fac_in, state.ssm_fac_stride);
-            }
+            auto scan = [&](const int* rows_n, void* snap_p, const int* snap_p_n, const int* outs,
+                            const int* snaps) {
+                if (state_bf16) {
+                    gdn_scan_fused_bf16_batched(
+                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                        static_cast<const half*>(beta_proj_out.data),
+                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
+                        static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)),
+                        state.ssm_seq_slots,
+                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
+                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
+                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<__nv_bfloat16*>(snap_p),
+                        snap_p_n, outs, snaps, fac_out, fac_in, state.ssm_fac_stride);
+                } else {
+                    gdn_scan_fused_f32_batched(
+                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
+                        static_cast<const half*>(beta_proj_out.data),
+                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
+                        static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
+                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
+                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
+                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<float*>(snap_p), snap_p_n,
+                        outs, snaps, fac_out, fac_in, state.ssm_fac_stride);
+                }
+            };
+            // Second snapshot (ssm_snap_rows 2): the state after d_snap_n[1] rows into ssm_snap_slots[n_seq +
+            // g], a commit-only pass BEFORE the main one rewrites the live slot in place (its y rows are
+            // identical).
+            if (!ragged_split && per_group_snap && state.ssm_snap_rows > 1)
+                scan(state.d_snap_n + 1, nullptr, nullptr, state.ssm_snap_slots + state.ssm_n_seq, nullptr);
+            if (!ragged_split)
+                scan(real_n, snap, snap_n, grouped ? state.ssm_out_slots : nullptr,
+                     grouped ? state.ssm_snap_slots : nullptr);
         } else {
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             // Chunk-parallel prefill scan (gdn.chunkpar_scan): per-chunk WY factors on

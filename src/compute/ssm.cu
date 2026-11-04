@@ -504,9 +504,11 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
                                          const Tensor& bias, float* x_out_f32, int conv_kernel,
                                          cudaStream_t stream, const int* d_real_n, void* conv_snap,
                                          const int* d_snap_n, const void* conv_prev, const int* out_slots,
-                                         const int* snap_slots) {
+                                         const int* snap_slots, int snap_rows) {
     if (n_seq <= 0)
         return;
+    if (snap_rows < 1 || snap_rows > 2 || (snap_rows > 1 && snap_slots == nullptr))
+        throw std::runtime_error("ssm_conv1d_prefill_f32_silu_grouped: snap_rows is 1, or 2 with snap_slots");
     if (snap_slots && !out_slots)
         throw std::runtime_error(
             "ssm_conv1d_prefill_f32_silu_grouped: snap_slots needs out_slots (an in-place commit would "
@@ -530,6 +532,12 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
     // the per-thread shift reads index k+1 before it writes index k).
     launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
                          d_real_n, seq_slots, slot_stride, n_seq, stream, out_slots);
+    // Second snapshot (d_snap_n[1] rows into snap_slots[n_seq + z]) before the in-place one rewrites
+    // seq_slots.
+    if (snap_rows > 1)
+        launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels,
+                             conv_kernel, d_snap_n + 1, seq_slots, slot_stride, n_seq, stream,
+                             snap_slots + n_seq);
     if (snap_slots)
         launch_conv1d_commit(conv_state_pool, static_cast<const half*>(x_in.data), n_tokens, channels,
                              conv_kernel, d_snap_n, seq_slots, slot_stride, n_seq, stream, snap_slots);

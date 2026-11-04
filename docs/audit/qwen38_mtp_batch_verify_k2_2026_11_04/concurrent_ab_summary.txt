@@ -1,0 +1,14 @@
+# /mnt/data/scratch/mtpdeep_concurrent_ab: main vs new, 3 alternating pairs; KV plan per server log
+harness: md5=f8ac61ec6cb4
+p1_main c1 130.70 drafted 1822 accepted 1275 c2 255.0 c4 469.6 c32 2031.5 own_peak_mib 24430 kv_blocks 4531
+p1_new c1 131.28 drafted 1822 accepted 1275 c2 279.2 c4 485.8 c32 2031.6 own_peak_mib 25346 kv_blocks 5272
+p2_main c1 131.73 drafted 1822 accepted 1275 c2 249.3 c4 457.6 c32 2028.4 own_peak_mib 25148 kv_blocks 4531
+p2_new c1 131.38 drafted 1822 accepted 1275 c2 283.9 c4 507.8 c32 2035.7 own_peak_mib 25350 kv_blocks 5272
+p3_main c1 131.53 drafted 1822 accepted 1275 c2 241.3 c4 467.1 c32 2022.3 own_peak_mib 24436 kv_blocks 4531
+p3_new c1 131.58 drafted 1822 accepted 1275 c2 291.2 c4 490.2 c32 2030.7 own_peak_mib 25336 kv_blocks 5272
+p1_main KV blocks: plan 12305
+p1_new KV blocks: plan 11380
+p2_main KV blocks: plan 12305
+p2_new KV blocks: plan 11380
+p3_main KV blocks: plan 12305
+p3_new KV blocks: plan 11380

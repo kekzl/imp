@@ -1518,6 +1518,7 @@ if(IMP_BUILD_TESTS)
         tests/test_moe_group_topk.cu
         tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
+        tests/test_gdn_verify_two_drafts.cu
         tests/test_mtp_feed_batch.cu
         tests/test_mtp_topw.cu
         tests/test_ssm.cu

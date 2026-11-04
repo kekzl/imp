@@ -1541,13 +1541,13 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
 
     // 1 - tables H2D, gather the hidden rows, batched embedding lookup
     if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens, static_cast<size_t>(n) * sizeof(int32_t),
-                        cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+                        cudaMemcpyDefault, stream) != cudaSuccess ||
         cudaMemcpyAsync(ws.d_row_slots, h_slots, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
                         stream) != cudaSuccess ||
         cudaMemcpyAsync(ws.d_row_pos, h_pos, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
                         stream) != cudaSuccess ||
-        cudaMemcpyAsync(ws.d_row_src, h_src_rows, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
-                        stream) != cudaSuccess)
+        cudaMemcpyAsync(ws.d_row_src, h_src_rows, static_cast<size_t>(n) * sizeof(int),
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess)
         return false;
     {
         const int64_t total = static_cast<int64_t>(n) * H;

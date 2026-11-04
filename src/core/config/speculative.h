@@ -194,6 +194,9 @@ struct Speculative {
     // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
     // Qwen3.8-27B-NVFP4, 4 overlapping chats: 83.72 -> 117.45 tok/s per turn, c32 unchanged.
     int mtp_batch_verify = 4;
+    // Drafts per bound request in that step: 2 = the last token plus a 2-token MTP chain (3 rows per request,
+    // a second head pass, two spare recurrent slots per row); 1 = one draft (2 rows, one spare).
+    int mtp_batch_verify_k = 2;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

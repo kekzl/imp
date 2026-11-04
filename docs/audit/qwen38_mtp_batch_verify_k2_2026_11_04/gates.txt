@@ -1,0 +1,14 @@
+# /mnt/data/scratch/mtpdeep_gates: imp:mtpdeep-new (tree 2388cba1), default server (mtp_batch_verify 4, mtp_batch_verify_k 2), Qwen3.8-27B-NVFP4-vllm
+degen_suite: url=http://127.0.0.1:8282 model=Qwen3.8-27B-NVFP4-vllm categories=repetition,think-leak,special-tokens,adherence,long-context,kv-growth,multi-turn,ple-isolation,stream,constrained,anthropic-thinking quick=False
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (40s)
+MULTITURN: all 74 turns clean, context grew to see table
+# 4 concurrent greedy requests (one burst, all bound, verified together, enable_thinking false)
+ok want=Paris tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of France is Paris.'
+ok want=Tokyo tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Japan is Tokyo.'
+ok want=Rome tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Italy is Rome.'
+ok want=Berlin tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Germany is Berlin.'
+FACTS4 PASS
+engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=4 rows=12 drafted=8 accepted=8 emitted=12
+stderr grep (CUDA error|capture failed|falling back|warmup.*invalid|NaN|is NaN|is Inf): 0 matches
+# test-moe-gdn --gtest_filter='*GdnVerifyTwoDrafts*:*GdnBatchedScan*:*GdnVerifySnapshot*'
+[  PASSED  ] 22 tests.

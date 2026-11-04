@@ -1073,6 +1073,10 @@ private:
     // request's first hidden row in the chunk, emitted[g] its emitted count.
     void mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
                            const std::vector<int>& emitted, cudaStream_t stream);
+    // speculative.mtp_batch_verify_k 2: one more head pass drafting each bound request's second token.
+    [[nodiscard]] bool mtp_batched_chain_(const std::vector<int>& last_row, const std::vector<int>& slots,
+                                          const std::vector<int>& pos, cudaStream_t stream);
+    void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap): drafting stays off for the request.
     // Economics guard: an MTP-filled verify step costs ~2x a loop step plus K
@@ -1367,8 +1371,10 @@ private:
     [[nodiscard]] bool ensure_batch_verify_bufs_(
         cudaStream_t stream);  // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
-    int acquire_spare_slot_(int req_id);
-    int32_t batch_verify_draft_(Request& req, bool& from_mtp);
+    int acquire_spare_slot_(int req_id, bool second = false);
+    void bound_verify_adopt_slot_(int req_id, int role, int live, int slot);
+    // Up to bv_.depth draft tokens for the request's next positions, written to out; returns the count.
+    int batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
     [[nodiscard]] bool pipeline_yields_(const std::vector<std::shared_ptr<Request>>& rows);  // ends a chain
     // Returns true when it handled the step (tokens emitted for every row).
