@@ -5,6 +5,7 @@
 #include "model/mtp_head.h"
 #include "runtime/config.h"
 #include "runtime/spec_batch_verify_state.h"
+#include "runtime/spec_gates.h"
 
 namespace imp {
 namespace {
@@ -81,6 +82,41 @@ TEST(BatchVerifyPredicates, OnlyALonePromptTakesTheHead) {
     EXPECT_FALSE(mtp_prompt_takes_head(false, true, 5, 4));
     EXPECT_FALSE(mtp_prompt_takes_head(false, false, 2, 4)) << "every bind place taken";
     EXPECT_FALSE(mtp_prompt_takes_head(false, true, 0, 4));
+}
+
+// Qwen3.8-27B-NVFP4, 2 overlapping chats: req 35 unbound at its 8th lone verify ("verifies=8 emitted=12
+// min_emit=1.60"); its response reported drafted 1138, accepted 659, almost all from batched verifies.
+TEST(BatchVerifyPredicates, EconomicsGuardCountsBatchedVerifies) {
+    EXPECT_FLOAT_EQ(mtp_econ_min_emit(8, 12, -1.0f), 1.60f);
+    EXPECT_TRUE(mtp_econ_uneconomic(8, 12, 12, -1.0f)) << "the lone tail alone looks uneconomic";
+    MtpBind active;
+    MtpBindPool pool;
+    active.req = 34;
+    pool.binds[35] = MtpBind{};
+    EXPECT_EQ(mtp_find_bind(active, pool, 34), &active);
+    ASSERT_EQ(mtp_find_bind(active, pool, 35), &pool.binds[35]);
+    EXPECT_EQ(mtp_find_bind(active, pool, 36), nullptr) << "a finished request has no tally";
+    EXPECT_EQ(mtp_find_bind(active, pool, -1), nullptr);
+    MtpBind& b = *mtp_find_bind(active, pool, 35);
+    for (int i = 0; i < 563; ++i)  // 563 batched verifies x 2 drafts, 655 accepted
+        mtp_econ_count(b, i < 92 ? 3 : 2, 2, /*batched=*/true);
+    for (int i = 0; i < 8; ++i)  // the lone tail of the log line: 12 rows, 12 emitted
+        mtp_econ_count(b, i < 4 ? 2 : 1, i < 4 ? 2 : 1, /*batched=*/false);
+    EXPECT_EQ(b.econ_verifies, 571);
+    EXPECT_EQ(b.econ_batched, 563);
+    EXPECT_EQ(b.econ_rows, 1138);
+    EXPECT_EQ(b.econ_emitted, 571 + 659);
+    EXPECT_FALSE(mtp_econ_uneconomic(b.econ_verifies, b.econ_emitted, b.econ_rows, -1.0f));
+    EXPECT_EQ(active.econ_verifies, 0) << "another binding's tally is untouched";
+}
+
+// speculative.mtp_econ_min_emit: 0 = off, positive = absolute floor, no verdict before 8 verifies.
+TEST(BatchVerifyPredicates, EconomicsGuardConfig) {
+    EXPECT_FALSE(mtp_econ_uneconomic(8, 8, 16, 0.0f));
+    EXPECT_TRUE(mtp_econ_uneconomic(8, 15, 16, 2.0f));
+    EXPECT_FALSE(mtp_econ_uneconomic(8, 16, 16, 2.0f));
+    EXPECT_FALSE(mtp_econ_uneconomic(7, 7, 14, -1.0f));
+    EXPECT_FLOAT_EQ(mtp_econ_min_emit(10, 30, -1.0f), 2.20f);
 }
 
 // A binding whose head cache lags its context (decoded in a batch) is dead; synced is not.

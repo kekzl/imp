@@ -1,0 +1,19 @@
+# drafted / accepted summed over every turn per overlap JSON
+p1_main_ov drafted 12752 accepted 8824 rate 69.2 %
+p1_new_ov drafted 13294 accepted 8898 rate 66.9 %
+p2_main_ov drafted 11809 accepted 7981 rate 67.6 %
+p2_new_ov drafted 13103 accepted 8848 rate 67.5 %
+p3_main_ov drafted 13388 accepted 9087 rate 67.9 %
+p3_new_ov drafted 12474 accepted 8643 rate 69.3 %
+p1_main_ov4 drafted 28035 accepted 18995 rate 67.8 %
+p1_new_ov4 drafted 27821 accepted 18841 rate 67.7 %
+p2_main_ov4 drafted 27859 accepted 18634 rate 66.9 %
+p2_new_ov4 drafted 27418 accepted 18621 rate 67.9 %
+p3_main_ov4 drafted 26433 accepted 17558 rate 66.4 %
+p3_new_ov4 drafted 28094 accepted 18609 rate 66.2 %
+p1_main_side drafted 6249 accepted 4388 rate 70.2 %
+p1_new_side drafted 6249 accepted 4388 rate 70.2 %
+p2_main_side drafted 6249 accepted 4388 rate 70.2 %
+p2_new_side drafted 6249 accepted 4388 rate 70.2 %
+p3_main_side drafted 6249 accepted 4388 rate 70.2 %
+p3_new_side drafted 6249 accepted 4388 rate 70.2 %

@@ -1,0 +1,12 @@
+# /mnt/data/scratch/mtpecon_2026_11_04/control: positive control, this branch with speculative.mtp_econ_min_emit=2.5, 2 overlapping chats: the guard fires and its tally holds the batched verifies
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_ctl_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 7}
+p1_ctl_ov SUMMARY c0_mean_tps 116.80 c0_drafted_turns 6/6 c1_mean_tps 109.66 c1_drafted_turns 6/6 all_mean_tps 113.23 PASS
+p1_ctl UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 7} own_peak_mib 22606
+[12:02:59.829][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=8 (batched 0) emitted=19 rows=14 min_emit=2.50 this_emitted=3 matched=2
+[12:03:20.280][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=12 (batched 0) emitted=29 rows=23 min_emit=2.50 this_emitted=1 matched=0
+[12:03:40.254][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=325 (batched 324) emitted=737 rows=650 min_emit=2.50 this_emitted=3 matched=2
+[12:03:49.317][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=174 (batched 173) emitted=431 rows=348 min_emit=2.50 this_emitted=2 matched=1
+[12:04:04.936][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=13 (batched 0) emitted=32 rows=24 min_emit=2.50 this_emitted=1 matched=0
+[12:04:35.281][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=581 (batched 580) emitted=1269 rows=1162 min_emit=2.50 this_emitted=3 matched=2
+[12:04:44.340][INFO] engine_spec_ngram.cpp:1201: [mtp-econ] verifies=12 (batched 0) emitted=29 rows=22 min_emit=2.50 this_emitted=1 matched=0

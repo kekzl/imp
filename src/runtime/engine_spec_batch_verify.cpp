@@ -841,6 +841,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         row0[g] = T * g;
         emitted_of[g] = emitted;
+        // The binding's economics tally (judged at its lone verifies); a finished request has none.
+        if (from_mtp[g] && nd > 0)
+            if (MtpBind* b = mtp_find_bind(mtp_active_, mtp_pool_, req->id))
+                mtp_econ_count(*b, emitted, nd, /*batched=*/true);
         // Device penalty history: the emitted tokens are rows T*g.. of the
         // pinned argmax buffer, in order.
         if (pen_slot[g] >= 0 && emitted > 0) {

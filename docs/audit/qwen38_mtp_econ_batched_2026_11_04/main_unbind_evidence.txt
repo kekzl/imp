@@ -1,0 +1,44 @@
+# /mnt/data/scratch/mtpfeed_overlap_ab (#3042 overlap A/B: imp:mtpfeed-main 11088fbb vs imp:mtpfeed-new): every [mtp-econ] unbind and the loop handoff after it
+p1_main [06:05:08.289][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p1_main [06:05:08.289][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p1_main [06:05:08.290][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p1_new [06:10:00.082][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p1_new [06:10:00.082][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p1_new [06:10:00.083][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p2_main [06:14:58.057][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p2_main [06:14:58.057][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p2_main [06:14:58.058][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p2_main [06:15:51.466][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=14 emitted=22 min_emit=1.60 this_emitted=1 matched=0
+p2_main [06:15:51.466][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 43 (uneconomic: avg emitted/verify below break-even)
+p2_main [06:15:51.467][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 41 remaining tokens
+p2_new [06:19:50.094][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p2_new [06:19:50.094][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p2_new [06:19:50.095][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p3_main [06:24:37.870][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p3_main [06:24:37.870][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p3_main [06:24:37.871][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p3_main [06:24:51.677][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=21 emitted=33 min_emit=1.59 this_emitted=1 matched=0
+p3_main [06:24:51.677][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 37 (uneconomic: avg emitted/verify below break-even)
+p3_main [06:24:51.679][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 44 remaining tokens
+p3_new [06:29:40.385][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
+p3_new [06:29:40.385][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 35 (uneconomic: avg emitted/verify below break-even)
+p3_new [06:29:40.386][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 17 remaining tokens
+p3_new [06:30:14.679][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=13 min_emit=1.65 this_emitted=1 matched=0
+p3_new [06:30:14.679][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 40 (uneconomic: avg emitted/verify below break-even)
+p3_new [06:30:14.681][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 40 remaining tokens
+p3_new [06:31:38.664][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=19 emitted=30 min_emit=1.59 this_emitted=1 matched=0
+p3_new [06:31:38.664][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 57 (uneconomic: avg emitted/verify below break-even)
+p3_new [06:31:38.665][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 39 remaining tokens
+# p1_main_ov.json per request: id completion drafted accepted
+imp-0 1500 1368 776
+imp-1 1500 1138 659
+imp-2 1500 1164 866
+imp-3 1393 1169 785
+# p1_main.server.log: req 35 = imp-1 decodes batched beside req 34 = imp-0, then alone
+459:[06:04:56.675][INFO] engine.cpp:1057: request imp-0 -> engine req 34
+466:[06:04:59.287][INFO] engine.cpp:1057: request imp-1 -> engine req 35
+476:[06:04:59.360][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=2 rows=6 drafted=4 accepted=2 emitted=4
+501:[06:05:08.134][INFO] stream_driver.cpp:708: [imp-0] 103 prompt + 1500 completion tokens, 11459.1 ms (ttft=66.5 ms, cached=0)
+502:[06:05:08.160][INFO] engine_spec_capture.cpp:314: [spec-capture] verify chunk graph cached (n_tokens=3, ctx_tier=4096, rec_slot=35): capture 0.9 ms, instantiate 6.0 ms, launch 0.4 ms
+517:[06:05:11.119][INFO] stream_driver.cpp:708: [imp-1] 106 prompt + 1500 completion tokens, 11845.8 ms (ttft=57.3 ms, cached=0)
+503:[06:05:08.289][INFO] engine_spec_ngram.cpp:1215: [mtp-econ] verifies=8 emitted=12 min_emit=1.60 this_emitted=1 matched=0
