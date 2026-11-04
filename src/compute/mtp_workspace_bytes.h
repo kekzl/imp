@@ -55,8 +55,22 @@ struct MtpWorkspaceShape {
     int prenorm_rows = 0;  // diagnostics.mtp_prenorm_h feed scratch rows
 };
 
+// Device footprint of one cudaMalloc: above 1 MiB it takes whole 2 MiB pages. Qwen3.8-27B head: 344.5 MiB
+// requested, 360 MiB measured (imp_vram_own_bytes boot - init_complete); with this rounding 359.5 MiB.
+constexpr size_t kMtpAllocGranule = size_t{2} << 20;
+inline size_t mtp_alloc_footprint(size_t bytes) {
+    return bytes > (size_t{1} << 20) ? (bytes + kMtpAllocGranule - 1) / kMtpAllocGranule * kMtpAllocGranule
+                                     : bytes;
+}
+
 namespace mtp_ws_detail {
 constexpr size_t kH2 = 2;  // sizeof(__half)
+
+// Sums buffers one allocation at a time, each at its device footprint.
+struct Tally {
+    size_t bytes = 0;
+    void add(size_t b) { bytes += mtp_alloc_footprint(b); }
+};
 
 inline bool has_attn(const MtpWorkspaceShape& s) { return s.num_heads > 0 && s.head_dim > 0; }
 inline bool has_kv(const MtpWorkspaceShape& s) {
@@ -73,75 +87,119 @@ inline size_t kv_elems(const MtpWorkspaceShape& s) {
 }
 
 // Phase 2.1 buffers, always allocated.
-inline size_t base_bytes(const MtpWorkspaceShape& s) {
+inline void base_bytes(const MtpWorkspaceShape& s, Tally& t) {
     const size_t H = static_cast<size_t>(s.hidden_dim);
-    size_t b = 7 * H * kH2;  // emb_norm, h_norm, fc_out, h_final, h_final_snap, fc_in (2x)
-    b += static_cast<size_t>(s.vocab_size) * (kH2 + sizeof(float));
-    b += ((H + 31) / 32) * (kMtpQ8_1BlockBytes + sizeof(float));
-    b += static_cast<size_t>(kMtpMaxTopW) * (sizeof(int) + sizeof(float));
-    b += static_cast<size_t>(kMtpTopWBlocks) * kMtpMaxTopW * (sizeof(float) + sizeof(int));
-    b += sizeof(int32_t) * kMtpMaxTopW * kMtpMaxChainK;
-    return b + sizeof(int) + sizeof(int32_t);  // d_argmax, d_tok
+    for (int i = 0; i < 5; ++i)  // emb_norm, h_norm, fc_out, h_final, h_final_snap
+        t.add(H * kH2);
+    t.add(2 * H * kH2);  // fc_in
+    t.add(static_cast<size_t>(s.vocab_size) * kH2);
+    t.add(static_cast<size_t>(s.vocab_size) * sizeof(float));
+    t.add(((H + 31) / 32) * kMtpQ8_1BlockBytes);
+    t.add(((H + 31) / 32) * sizeof(float));
+    t.add(static_cast<size_t>(kMtpMaxTopW) * sizeof(int));
+    t.add(static_cast<size_t>(kMtpTopWBlocks) * kMtpMaxTopW * sizeof(float));
+    t.add(static_cast<size_t>(kMtpTopWBlocks) * kMtpMaxTopW * sizeof(int));
+    t.add(static_cast<size_t>(kMtpMaxTopW) * sizeof(float));
+    t.add(sizeof(int32_t) * kMtpMaxTopW * kMtpMaxChainK);
+    t.add(sizeof(int));      // d_argmax
+    t.add(sizeof(int32_t));  // d_tok
 }
 
 // Attention row buffers, scan partials and the head KV slots.
-inline size_t attn_bytes(const MtpWorkspaceShape& s) {
+inline void attn_bytes(const MtpWorkspaceShape& s, Tally& t) {
     if (!has_attn(s))
-        return 0;
+        return;
     const size_t H = static_cast<size_t>(s.hidden_dim);
-    size_t b = (2 * H * kH2) +
-               (4 * q_elems(s) * kH2);  // input_norm, attn_residual; q_full 2x, q_attn, attn_out
-    b += 2 * kv_elems(s) * kH2;
-    b += kMtpScanPartOffset + mtp_scan_part_bytes(s.num_heads, s.head_dim);
-    if (has_kv(s))
-        b += 2 * static_cast<size_t>(s.max_seq_len) * kv_elems(s) *
-             static_cast<size_t>(std::max(1, s.n_kv_slots)) * kH2;
-    return b;
+    t.add(H * kH2);               // input_norm
+    t.add(2 * q_elems(s) * kH2);  // q_full (incl. gate half)
+    t.add(q_elems(s) * kH2);      // q_attn
+    if (s.num_kv_heads > 0) {
+        t.add(kv_elems(s) * kH2);  // k_proj
+        t.add(kv_elems(s) * kH2);  // v_proj
+    }
+    t.add(q_elems(s) * kH2);  // attn_out
+    t.add(H * kH2);           // attn_residual
+    t.add(kMtpScanPartOffset + mtp_scan_part_bytes(s.num_heads, s.head_dim));
+    if (has_kv(s)) {
+        const size_t slot_kv = static_cast<size_t>(s.max_seq_len) * kv_elems(s) * kH2;
+        t.add(slot_kv * static_cast<size_t>(std::max(1, s.n_kv_slots)));  // K, all slots
+        t.add(slot_kv * static_cast<size_t>(std::max(1, s.n_kv_slots)));  // V
+    }
 }
 
 // MoE block, MLP in/out, hyper-connection stream, shared expert / dense MLP.
-inline size_t mlp_bytes(const MtpWorkspaceShape& s) {
+inline void mlp_bytes(const MtpWorkspaceShape& s, Tally& t) {
     const size_t H = static_cast<size_t>(s.hidden_dim);
     const size_t dff = static_cast<size_t>(std::max(0, s.shared_d_ff));
-    size_t b = 0;
     if (has_moe(s)) {
         const size_t es = s.hc_count > 0 ? static_cast<size_t>(s.top_k) : 1;
-        b += (es * 3 * static_cast<size_t>(s.expert_d_ff) * kH2) + (static_cast<size_t>(s.top_k) * H * kH2);
+        t.add(es * 2 * static_cast<size_t>(s.expert_d_ff) * kH2);  // expert gate|up
+        t.add(es * static_cast<size_t>(s.expert_d_ff) * kH2);      // expert act
+        t.add(static_cast<size_t>(s.top_k) * H * kH2);             // expert outputs
     }
-    if (has_moe(s) || dff > 0)
-        b += 2 * H * kH2;
-    if (s.hc_count > 0 && s.hc_lowrank > 0)
-        b += ((3 * H + 1) * static_cast<size_t>(s.hc_count) * kH2) +
-             (static_cast<size_t>(s.hc_lowrank) * kH2);
-    if (dff > 0)
-        b += (3 * dff * kH2) + (H * kH2);
-    return b;
+    if (has_moe(s) || dff > 0) {
+        t.add(H * kH2);  // post_norm
+        t.add(H * kH2);  // moe_out
+    }
+    if (s.hc_count > 0 && s.hc_lowrank > 0) {
+        const size_t hw = static_cast<size_t>(s.hc_count) * H * kH2;
+        t.add(hw);
+        t.add(hw);
+        t.add(hw);
+        t.add(static_cast<size_t>(s.hc_lowrank) * kH2);
+        t.add(static_cast<size_t>(s.hc_count) * kH2);
+    }
+    if (dff > 0) {
+        t.add(dff * kH2);  // shared gate
+        t.add(dff * kH2);  // shared up
+        t.add(dff * kH2);  // shared act
+        t.add(H * kH2);    // shared out
+    }
 }
 
 // Batched prefill feed (dense-MLP heads with attention + KV only) and the mtp_carry rows it enables.
-inline size_t feed_bytes(const MtpWorkspaceShape& s) {
+inline void feed_bytes(const MtpWorkspaceShape& s, Tally& t) {
     const size_t dff = static_cast<size_t>(std::max(0, s.shared_d_ff));
     if (has_moe(s) || dff == 0 || !has_kv(s))
-        return 0;
+        return;
     const size_t H = static_cast<size_t>(s.hidden_dim);
     const size_t n = kMtpFeedRows;
-    size_t b = 4 * n * sizeof(int32_t);
-    b += n * kH2 * ((7 * H) + (4 * q_elems(s)) + (2 * kv_elems(s)) + (3 * dff));
+    t.add(4 * n * sizeof(int32_t));
+    const size_t rows[] = {H,
+                           H,
+                           2 * H,
+                           H,
+                           H,  // emb, h_norm, fc_in, fc_out, norm
+                           2 * q_elems(s),
+                           q_elems(s),
+                           kv_elems(s),
+                           kv_elems(s),
+                           q_elems(s),  // q_full .. attn_out
+                           H,
+                           dff,
+                           dff,
+                           dff};  // res, gate, up, act
+    for (size_t r : rows)
+        t.add(n * r * kH2);
     if (s.carry_rows > 0 && s.carry_rows <= kMtpFeedRows && s.hc_count == 0)
-        b += static_cast<size_t>(std::max(1, s.n_kv_slots)) * static_cast<size_t>(s.carry_rows) * H * kH2;
-    return b;
+        t.add(static_cast<size_t>(std::max(1, s.n_kv_slots)) * static_cast<size_t>(s.carry_rows) * H * kH2);
 }
 }  // namespace mtp_ws_detail
 
-// Device bytes the head takes. Excludes the MoE routing pool (1 token, < 64 KiB) and pinned host.
+// Device bytes the head takes, at cudaMalloc footprint. Excludes the MoE routing pool (1 token,
+// < 64 KiB) and pinned host.
 inline size_t mtp_workspace_bytes(const MtpWorkspaceShape& s) {
     using namespace mtp_ws_detail;
     if (s.hidden_dim <= 0 || s.vocab_size <= 0)
         return 0;
-    size_t b = base_bytes(s) + attn_bytes(s) + mlp_bytes(s) + feed_bytes(s);
+    Tally t;
+    base_bytes(s, t);
+    attn_bytes(s, t);
+    mlp_bytes(s, t);
+    feed_bytes(s, t);
     if (s.prenorm_rows > 0 && s.hc_count == 0)
-        b += static_cast<size_t>(s.prenorm_rows) * static_cast<size_t>(s.hidden_dim) * kH2;
-    return b;
+        t.add(static_cast<size_t>(s.prenorm_rows) * static_cast<size_t>(s.hidden_dim) * kH2);
+    return t.bytes;
 }
 
 }  // namespace imp

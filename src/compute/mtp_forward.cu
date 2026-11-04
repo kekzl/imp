@@ -313,8 +313,9 @@ static_assert(sizeof(block_q8_1) == kMtpQ8_1BlockBytes, "mtp_workspace_bytes pri
 static bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
     if (cudaMalloc(p, bytes) != cudaSuccess)
         return false;
-    ws.device_bytes += bytes;
-    MemAccount::instance().note("mtp_workspace", static_cast<std::ptrdiff_t>(bytes));
+    const size_t footprint = mtp_alloc_footprint(bytes);
+    ws.device_bytes += footprint;
+    MemAccount::instance().note("mtp_workspace", static_cast<std::ptrdiff_t>(footprint));
     return true;
 }
 

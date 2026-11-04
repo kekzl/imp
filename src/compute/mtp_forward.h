@@ -22,7 +22,8 @@ struct NvFP4QuantResult;
 // Workspace tensors needed for one draft step. Caller pre-allocates these so
 // the draft step is graph-safe (no cudaMalloc inside captured graph).
 struct MtpDraftWorkspace {
-    // Device bytes requested by the mtp_dev_alloc sites; equals mtp_workspace_bytes() of the planned shape.
+    // Device footprint of the mtp_dev_alloc sites (mtp_alloc_footprint each); equals mtp_workspace_bytes() of
+    // the shape.
     size_t device_bytes = 0;
     // ---- Phase 2.1 reduced-forward scratch ----
     // [hidden_dim] FP16 — normalized embedding input
