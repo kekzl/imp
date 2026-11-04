@@ -108,6 +108,7 @@ Padding two access patterns at once may not fit (chunkpar histories at stride 13
 | Pointer advance without `sizeof(T)` | known-issues (FP8 FMHA S_tile) |
 | PDL registration without `griddepcontrol.wait` | race on the producer's output; `pdl::launch` has no default args, register at the launch site (`pdl::enable_kernel`) |
 | Isolated bench without an L2-defeating ring | reads L2; rotate >= 4 x 100 MB slabs, warm per shape |
+| `mma.sync` fragments loaded straight from global: a warp instruction reads 8 rows x 64 B (half lines) | caps an HBM stream at ~1390 GB/s, more warps do not help; cp.async full 128 B lines into smem: ~1650 (FP8 LM head 926.6 -> 771.5 us) |
 | "perf-neutral" without a SASS diff | `cuobjdump -sass`; byte-identical = proof |
 | tf32 on a recurrent state path checked only by MoE PPL | unit-test state diff + Qwen3.8 deterministic PPL |
 | One CTA per row walking a context-length loop (`qsa_select` before #2074: 128.4 us/layer at 13.9k) | score across the grid (one warp per 256 B key, two waves), then a 1024-thread select with ballot ranks: 9.1 us |

@@ -24,6 +24,7 @@ Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB20
 | own grouped NVFP4 decode GEMM (16-row M tiles, 7-stage TMA ring) | `src/compute/gemm_grouped_nvfp4_decode.cu` | device-args MoE up to `moe.nvfp4_decode_rows` tokens: gate + up + GeGLU/SwiGLU/ReLU^2 + NVFP4 quantize in one launch, down in a second; per-row bits equal the tile path | shipped |
 | `gemm_grouped_nvfp4_smallM` | `src/compute/gemm_grouped_nvfp4_smallM.cu` | small-M / split-K grouped NVFP4 GEMM (MoE prefill) | shipped |
 | own FP16 tile GEMM (128x256, TMA) | `src/compute/gemm_f16_tile.cu` | `gemm()` F16 x F16 -> F16 with fp16 accumulation when K >= N, >= one wave of tiles and tiles >= 80 % of the rounded-up wave slots (`gemm_f16_tile_route`); cuBLASLt otherwise (`gemm.f16_tile`) | shipped |
+| FP8 per-row LM head (`fp8_head_cpasync_kernel` <= 16 rows, `fp8_head_mma_kernel` split-K above) | `src/compute/gemv_fp8_rowscale_fp32.cu` | `gemm.nvfp4_lm_head=fp8` head for decode, verify, MTP drafts, prefill and PPL; both kernels produce the same bits; streamed head 93.57 % DRAM at 1 row (ncu, `docs/audit/fp8_lm_head_stream_2026_11_04/`) | shipped |
 | decode FFN GEMV | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV, HBM-bound at the GDDR7 ceiling; decode levers: [`MEMORY.md`](MEMORY.md) | shipped |
 | `fa2_sm120a_optimal.cu` | `tools/standalone/fa2_sm120a_optimal.cu` | bit-exact standalone FA2 reference, no imp/CUTLASS deps | reference only, not wired into imp |
 | `gemm_nvfp4_sm120a.cu` | `tools/standalone/gemm_nvfp4_sm120a.cu` | standalone NVFP4 GEMM, cp.async + L2-layout tricks | reference only; production runs the own TMA tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) |
@@ -104,6 +105,7 @@ Barriers:      1x __syncthreads / KV tile (cp.async.wait)
 | Bq=128 / 2-CTA / occupancy push | REFUTED | reg-squeeze succeeded (16.5->30.6 %) but +11 % regression, SOL flat |
 | FP4-QK inside attention | REFUTED | #511 PPL 5722, format-intrinsic |
 | CUTLASS TMA+warp-spec occupancy tax on prod GEMM | REFUTED | prod wins at peak shapes despite lower occupancy; full detail in archive |
+| FP8 LM head: more warps / longer row streams with direct fragment loads | REFUTED | row-sequential kernel, 48-180 regs, up to 62 % warps active: 1085-1093 GB/s at 8-32 rows per warp, 1390 at 64, vs 1373 split-K (64 B half-line loads cap all); full-line cp.async staging shipped instead (`docs/audit/fp8_lm_head_stream_2026_11_04/`) |
 
 The register-resident-O + Q-in-registers + Bq=128 config is the shipped large-seq path in `fmha_sm120_fa2_prefill` (selected when `blocks_128 >= sm_count`); the underfill band (`sm_count/2 <= blocks_128 < sm_count`) drops to Bq=64 + TWOSLOT to put 2 CTAs/SM resident where the grid would underfill the 170 SMs. Refuted levers were measured against this exact kernel family (#597/#648/#653/#674).
 

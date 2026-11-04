@@ -1,0 +1,20 @@
+== nt0.csv void unnamed>::fp8_head_cpasync_kernel<1, 4, 3, float>(const
+  gpu__time_duration.sum                                                           780896 ns
+  dram__throughput.avg.pct_of_peak_sustained_elapsed                               93.57 %
+  dram__bytes.sum                                                                  1289493504 byte
+  lts__t_sector_hit_rate.pct                                                       0.29 %
+  l1tex__t_sector_hit_rate.pct                                                     11.12 %
+  sm__throughput.avg.pct_of_peak_sustained_elapsed                                 21.37 %
+  sm__warps_active.avg.pct_of_peak_sustained_active                                7.98 %
+  launch__grid_size                                                                1940 
+  launch__registers_per_thread                                                     122 register/thread
+  launch__occupancy_limit_registers                                                4 block
+  launch__waves_per_multiprocessor                                                 11.41 
+  smsp__issue_active.avg.pct_of_peak_sustained_active                              7.23 %
+  smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         9.56 inst
+  smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        0.09 inst
+  smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             0.01 inst
+  smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            0.01 inst
+  smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio      1.48 inst
+  smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 0 inst
+  smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    1.43 inst

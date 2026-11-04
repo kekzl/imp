@@ -1,0 +1,86 @@
+degen_suite: url=http://127.0.0.1:8361 model=Qwen3.8-27B-NVFP4-vllm categories=repetition,think-leak,special-tokens,adherence,long-context,kv-growth,multi-turn,ple-isolation,stream,constrained,anthropic-thinking quick=True
+Model emits reasoning_content: True
+
+== repetition ==
+  [PASS] no stuck token (run<=6)
+  [PASS] no 4-gram loop
+  [PASS] no char-level loop
+  [PASS] vocabulary diversity > 0.25
+  [PASS] temp=1.2 loop-free
+  [PASS] temp=1.2 finish_reason set
+  [PASS] top_k=129 (CUB path) loop-free
+  [PASS] top_k=129 vocabulary diversity > 0.25
+  [PASS] top_k=2000 (CUB path) loop-free
+  [PASS] top_k=2000 vocabulary diversity > 0.25
+
+== think-leak ==
+  [PASS] non-stream: no think tags in content
+  [PASS] non-stream: content is answer, not reasoning
+  [PASS] non-stream: reasoning separated
+  [PASS] truncated think does not spill into content
+  [PASS] stream: no think tags in content deltas
+  [PASS] stream: content deltas are answer, not reasoning
+  [PASS] enable_thinking=false: clean content
+
+== special-tokens ==
+  [PASS] no raw markers (probe 1)
+  [PASS] no raw markers (probe 2)
+  [PASS] no raw markers (probe 3)
+
+== adherence ==
+  [PASS] echo literal: answer contains 'BANANA42'
+  [PASS] arithmetic: answer contains '42'
+  [PASS] extraction: answer contains '7391'
+  [PASS] instruction: answer contains 'Paris'
+
+== long-context ==
+  [PASS] needle echo across ~420 filler tokens
+
+== kv-growth ==
+  [PASS] greedy answer identical across growth (3375 -> 11509 blocks)
+
+== multi-turn ==
+  [PASS] turn 2 not garbled
+  [PASS] turn 3 recalls turn-1 fact (271)
+  [PASS] turn 2 resent from a prefix snapshot gives the same answer
+
+== ple-isolation ==
+  [PASS] seq 0 identical across different batch neighbours
+
+== stream ==
+  [PASS] SSE terminates with [DONE]
+  [PASS] finish_reason chunk present
+  [PASS] stream produced visible content
+  [PASS] stream == non-stream at temp=0
+
+== constrained ==
+  [PASS] json_object: parses as JSON
+  [PASS] json_schema greedy: schema-valid
+  [PASS] json_schema temp=1.3: schema-valid
+  [PASS] json_schema min_p (eager path): schema-valid
+  [PASS] forced tool_choice: emits a tool_call
+  [PASS] tool_call: arguments parse as JSON
+  [PASS] tool_call: required args present (informational)
+  [PASS] strict tool_choice=auto is optional (no forced call)
+
+== anthropic-thinking ==
+  [PASS] default non-stream: no thinking block (opt-in)
+  [PASS] default non-stream: text block is the answer
+  [PASS] default non-stream: no literal think tags
+  [PASS] default non-stream: usage tokens present
+  [PASS] default stream: no thinking_delta (opt-in)
+  [PASS] default stream: text deltas are answer
+  [PASS] thinking=enabled non-stream: thinking block present
+  [PASS] thinking=enabled non-stream: text is still the answer
+  [PASS] thinking=enabled stream: thinking_delta events
+  [PASS] display=omitted: no thinking block, answer intact
+
+============================================================
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (34s)
+degen_suite exit=0
+A md5=6fc5fff9416a len=135 prompt=What is the capital of France?
+A md5=3c121fe15f58 len=1062 prompt=Write a Python function that merges two sorted lists.
+A md5=d00e2acfea7d len=903 prompt=Explain why the sky is blue in three sentences.
+B md5=6fc5fff9416a len=135 prompt=What is the capital of France?
+B md5=3c121fe15f58 len=1062 prompt=Write a Python function that merges two sorted lists.
+B md5=d00e2acfea7d len=903 prompt=Explain why the sky is blue in three sentences.

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# imp-cli --bench A/B, alternating arms A B B A A B, one process per run. Args: <model dir name> [tg tokens]
+set -u
+MODEL=$1
+TG=${2:-256}
+A=/mnt/data/scratch/fp8head_armA
+B=/mnt/data/scratch/fp8head_armB
+OUT=/mnt/data/scratch/fp8head_e2e_${MODEL}_$(date +%H%M%S).log
+run() {
+  local arm=$1 dir=$2
+  local js
+  : > /mnt/data/scratch/fp8head_clk.txt
+  (for i in $(seq 1 40); do nvidia-smi --query-gpu=power.draw,clocks.sm,clocks.mem --format=csv,noheader,nounits | tr -d ' ' >> /mnt/data/scratch/fp8head_clk.txt; sleep 2; done) &
+  local smp=$!
+  js=$(docker run --rm --gpus all -e CUBLAS_WORKSPACE_CONFIG=:4096:8 -v $HOME/models:/models:ro -v "$dir":/bin_arm:ro \
+    --entrypoint /bin_arm/imp-cli imp:toolchain --model /models/$MODEL --bench --bench-pp 512 --bench-reps 5 \
+    --prefill-chunk-size 0 --max-tokens $TG --temperature 0 --json --set speculative.ngram=false 2>/dev/null)
+  local clk
+  kill $smp 2>/dev/null; wait 2>/dev/null
+  clk=$(sort -t, -k1 -n -r /mnt/data/scratch/fp8head_clk.txt | head -1)
+  echo "$arm tg=$(echo "$js" | jq -r '.decode_tps') pp=$(echo "$js" | jq -r '.prefill_tps') peak_W,sm,mem=$clk" | tee -a "$OUT"
+}
+for arm in A B B A A B; do
+  if [ $arm = A ]; then run A $A; else run B $B; fi
+done
+echo "$OUT"

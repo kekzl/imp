@@ -1,0 +1,20 @@
+PASS fast gtest filter
+  decode  tg128 =  291.80 tok/s  (baseline  282.84, delta 3.17%)
+  prefill pp512 = 50177.31 tok/s  (baseline 50374.39, delta -0.39%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 49835.88 tok/s  (baseline 50318.99, delta -0.96%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  173.89 tok/s
+  graphs ON  tg256 =  296.23 tok/s   (1.70x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1946.77 tok/s, slowest request 516 ms  (baseline 1899.81, delta 2.47%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 05:58:18Z, ended 05:59:53Z)
