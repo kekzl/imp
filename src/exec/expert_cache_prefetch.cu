@@ -88,7 +88,7 @@ __global__ void expert_predict_topk_kernel(const float* __restrict__ logits, int
 
 // One block: entries rank-major (expert k, then gate / up / down). Predicted keys that are resident
 // get restamped (no prefetch victim takes them); the first `budget` absent ones take LRU victims, are
-// committed like misses and listed as pending for the layer's resolve.
+// committed like misses and listed as pending for the layer's resolve; pf_done restarts at 0.
 __global__ void expert_prefetch_resolve_kernel(DevExpertLayer L, const int32_t* __restrict__ pred, int top_k,
                                                int budget, DevMissEntry* __restrict__ misses,
                                                int* __restrict__ n_miss_out) {
@@ -149,13 +149,55 @@ __global__ void expert_prefetch_resolve_kernel(DevExpertLayer L, const int32_t* 
     if (tid == 0) {
         *n_miss_out = s_n;
         *L.pf_count = s_n;
+        *L.pf_done = 0;  // the previous round of this layer finished: its gather precedes this fork
         atomicAdd(&L.stats[2], static_cast<unsigned long long>(s_n));
     }
 }
 
+constexpr int kPfCopyUnroll = 4;  // int4 loads in flight per thread (host and pool never alias)
+
+__device__ __forceinline__ void pf_copy(const int4* __restrict__ s, int4* __restrict__ d, size_t n16,
+                                        size_t t0, size_t stride) {
+    for (size_t j = t0; j < n16; j += kPfCopyUnroll * stride) {
+        int4 v[kPfCopyUnroll];
+#pragma unroll
+        for (int u = 0; u < kPfCopyUnroll; ++u)
+            if (j + (u * stride) < n16)
+                v[u] = s[j + (u * stride)];
+#pragma unroll
+        for (int u = 0; u < kPfCopyUnroll; ++u)
+            if (j + (u * stride) < n16)
+                d[j + (u * stride)] = v[u];
+    }
+}
+
+// grid (blocks per key, budget): block y copies pending key y (non-tiered layers only: no write-back),
+// then counts itself in done once its stores are fenced.
+__global__ void expert_prefetch_gather_kernel(const DevMissEntry* __restrict__ misses,
+                                              const int* __restrict__ n_miss, DevGatherBytes sz,
+                                              uint32_t* __restrict__ done) {
+    const int i = blockIdx.y;
+    if (i >= *n_miss)
+        return;
+    const DevMissEntry m = misses[i];
+    const int proj = m.key / sz.n_experts;
+    const auto pick = [proj](const size_t (&v)[3]) { return proj == 0 ? v[0] : (proj == 1 ? v[1] : v[2]); };
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    const size_t t0 = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    pf_copy(reinterpret_cast<const int4*>(m.packed), reinterpret_cast<int4*>(m.dst), pick(sz.packed) / 16, t0,
+            stride);
+    if (m.ms != nullptr)
+        pf_copy(reinterpret_cast<const int4*>(m.ms), reinterpret_cast<int4*>(m.dst + pick(sz.ms_off)),
+                pick(sz.ms) / 16, t0, stride);
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0)
+        atomicAdd(done, 1u);
+}
+
 }  // namespace
 
-bool DeviceExpertCache::enable_prefetch(int budget) {
+bool DeviceExpertCache::enable_prefetch(int budget, int blocks_per_key) {
     free_prefetch_();
     if (budget <= 0 || layers_ready_ == 0 || n_experts_ > kTopkThreads * kTopkPerThread)
         return false;
@@ -166,8 +208,8 @@ bool DeviceExpertCache::enable_prefetch(int budget) {
     const size_t count_b = al(static_cast<size_t>(n_layers) * sizeof(int32_t));
     const size_t miss_b = al(static_cast<size_t>(2) * kDevExpertPrefetchMax * sizeof(DevMissEntry));
     const size_t logits_b = al(static_cast<size_t>(n_experts_) * sizeof(float));
-    const size_t bytes = slots_b + count_b + miss_b + 256 + logits_b +
-                         al(kDevExpertMaxTopK * sizeof(int32_t));
+    const size_t pred_b = al(kDevExpertMaxTopK * sizeof(int32_t));
+    const size_t bytes = slots_b + count_b + miss_b + 256 + logits_b + pred_b + count_b;  // last: pf_done
     pf_tables_ = vram_alloc(alloc_, bytes, "expert_prefetch");
     if (!pf_tables_)
         return false;
@@ -179,16 +221,20 @@ bool DeviceExpertCache::enable_prefetch(int budget) {
     pf_n_miss_ = reinterpret_cast<int*>(base + slots_b + count_b + miss_b);
     pf_logits_ = reinterpret_cast<float*>(base + slots_b + count_b + miss_b + 256);
     pf_pred_ = reinterpret_cast<int32_t*>(base + slots_b + count_b + miss_b + 256 + logits_b);
+    auto* done = reinterpret_cast<uint32_t*>(base + slots_b + count_b + miss_b + 256 + logits_b + pred_b);
     for (int l = 0; l < n_layers; ++l) {
         if (!layer_ready(l) || layer_tiered(l))
             continue;
         layers_[l].pf_slots = slots + (static_cast<size_t>(l) * kDevExpertPrefetchMax);
         layers_[l].pf_count = counts + l;
+        layers_[l].pf_done = done + l;
+        layers_[l].pf_blocks = std::clamp(blocks_per_key, 1, kDevExpertGatherBlocks * 4);
     }
     pf_budget_ = budget;
     IMP_LOG_INFO(
-        "moe.expert_prefetch: up to %d keys per layer predicted from the previous layer's router input",
-        budget);
+        "moe.expert_prefetch: up to %d keys per layer predicted from the previous layer's router input, "
+        "%d copy blocks per key",
+        budget, std::clamp(blocks_per_key, 1, kDevExpertGatherBlocks * 4));
     return true;
 }
 
@@ -204,6 +250,7 @@ void DeviceExpertCache::free_prefetch_() {
     for (DevExpertLayer& L : layers_) {
         L.pf_slots = nullptr;
         L.pf_count = nullptr;
+        L.pf_done = nullptr;
     }
 }
 
@@ -219,6 +266,14 @@ void DeviceExpertCache::prefetch_resolve(int layer, int top_k, cudaStream_t stre
     expert_prefetch_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(layers_[layer], pf_pred_, top_k,
                                                                       pf_budget_, pf_misses_of_(layer),
                                                                       pf_n_miss_of_(layer));
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void DeviceExpertCache::prefetch_gather(int layer, cudaStream_t stream) {
+    const DevExpertLayer& L = layers_[layer];
+    const dim3 grid(L.pf_blocks, pf_budget_);
+    expert_prefetch_gather_kernel<<<grid, 256, 0, stream>>>(pf_misses_of_(layer), pf_n_miss_of_(layer),
+                                                            gather_bytes_(layer), L.pf_done);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

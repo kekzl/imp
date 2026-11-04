@@ -703,6 +703,9 @@ expert_prefetch = 2
 # Qwen4Exp: the prediction reads the hc streams normed with layer L+1's mlp norm and summed instead
 # of L's MoE input (recall 66.0 -> 71.4 % of top-10); output bits unchanged.
 expert_prefetch_hc_norm = true
+# Copy blocks per prefetched key (1-64): the zero-copy blocks run beside the next layer's
+# attention and slow its kernels.
+expert_prefetch_blocks = 16
 # Router of n >= 2 rows as one launch (GEMM + softmax / sigmoid + top-k + renorm), F16 router,
 # <= 128 experts, no group limit; off under runtime.deterministic.
 router_fused         = true

@@ -76,7 +76,9 @@ void GraphExecutor::init_gather_overlap_() {
     // (main stream, in trace order) without prefetching.
     const int budget = std::clamp(dispatch_policy().moe.expert_prefetch, 0, kDevExpertPrefetchMax);
     const bool trace = !dispatch_policy().diagnostics.moe_expert_trace.empty();
-    if ((budget > 0 || trace) && !dev_expert_cache_.enable_prefetch(budget > 0 ? budget : 1))
+    if ((budget > 0 || trace) &&
+        !dev_expert_cache_.enable_prefetch(budget > 0 ? budget : 1,
+                                           dispatch_policy().moe.expert_prefetch_blocks))
         IMP_LOG_WARN("moe.expert_prefetch: tables not allocated, no next-layer prediction");
     if (budget > 0 && dev_expert_cache_.prefetch_on() &&
         (!g.pf_stream.create() || !g.pf_fork.create() || !g.pf_read.create() || !g.pf_ready.create() ||

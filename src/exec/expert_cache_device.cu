@@ -48,13 +48,18 @@ __device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, i
         *L.pf_count = 0;  // every pending slot is covered by this layer's gather event from here on
 }
 
-// Slot s is still being filled by the next-layer prefetch (moe.expert_prefetch).
-__device__ __forceinline__ bool pf_pending(const DevExpertLayer& L, int s) {
+// Slot s in the next-layer prefetch list (moe.expert_prefetch): 0 not listed, 2 still copying, 3 landed
+// (every copy block counted in pf_done; its stores were fenced before the count).
+__device__ __forceinline__ int pf_state(const DevExpertLayer& L, int s) {
     const int c = L.pf_count ? *L.pf_count : 0;
-    for (int q = 0; q < c; ++q)
-        if (L.pf_slots[q] == s)
-            return true;
-    return false;
+    for (int q = 0; q < c; ++q) {
+        if (L.pf_slots[q] != s)
+            continue;
+        const uint32_t done = *static_cast<volatile uint32_t*>(L.pf_done);
+        __threadfence();
+        return done >= static_cast<uint32_t>(c * L.pf_blocks) ? 3 : 2;
+    }
+    return 0;
 }
 
 // Phase 3 of the resolve for entry i: commit a miss, write its slot, flag the waiting entries.
@@ -69,11 +74,13 @@ __device__ __forceinline__ void resolve_commit_entry(const DevExpertLayer& L, in
     if (s_miss[i] == 1 && tiered)
         __threadfence_system();  // tiered: the host thread reads this entry after the mailbox post
     slot_idx_out[i] = s_victim[src];
-    // A miss, or a hit on a pending prefetch: the caller waits on the gather event, which follows both.
-    if (entry_miss && s_miss[src] >= 1)
+    // A miss, or a hit on a prefetch still copying: the caller waits on the gather event, which follows both.
+    if (entry_miss && (s_miss[src] == 1 || s_miss[src] == 2))
         entry_miss[i % nk] = 1;
-    if (s_miss[i] == 2)
+    if (s_miss[i] >= 2)
         atomicAdd(&L.stats[3], 1ull);
+    if (s_miss[i] == 2)
+        atomicAdd(&L.stats[4], 1ull);
 }
 
 // One block for n_rows decode rows: expert_indices [n_rows * top_k], slot_idx_out [3][n_rows * top_k].
@@ -87,7 +94,7 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
                                             TierMailbox* mb, uint32_t* tier_seq, int layer,
                                             int32_t* __restrict__ entry_miss) {
     __shared__ int s_key[kMaxEntries];
-    __shared__ int s_miss[kMaxEntries];    // 1 miss, 0 hit, 2 hit on a pending prefetch, -1 alias
+    __shared__ int s_miss[kMaxEntries];    // 1 miss, 0 hit, 2 / 3 prefetch copying / landed, -1 alias
     __shared__ int s_victim[kMaxEntries];  // slot of a hit or a miss
     __shared__ int s_ord[kMaxEntries];     // miss ordinal in the gather list; alias: the entry it copies
     __shared__ int s_best[kResolveThreads / 32];
@@ -121,7 +128,7 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
             continue;
         }
         const int s = L.slot_of[key];
-        s_miss[i] = s < 0 ? 1 : (pf_pending(L, s) ? 2 : 0);
+        s_miss[i] = s < 0 ? 1 : pf_state(L, s);
         s_victim[i] = s;
         if (s >= 0) {
             L.stamp[s] = s_clock;
@@ -343,7 +350,7 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
     const size_t key_b = static_cast<size_t>(n_layers) * slots * sizeof(int32_t);
     const size_t stamp_b = static_cast<size_t>(n_layers) * slots * sizeof(uint32_t);
     const size_t clock_b = static_cast<size_t>(n_layers) * sizeof(uint32_t);
-    const size_t stats_b = 4 * sizeof(unsigned long long);
+    const size_t stats_b = 5 * sizeof(unsigned long long);
     const size_t miss_b = (static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry)) + 256;
     auto al = [](size_t v) { return (v + 255) / 256 * 256; };
     tables_bytes_ = al(src_b) + al(slot_of_b) + al(key_b) + al(stamp_b) + al(clock_b) + al(stats_b) +
@@ -518,7 +525,7 @@ void DeviceExpertCache::gather(int layer, int top_k, int n_rows, cudaStream_t st
         expert_tier_wait_kernel<<<1, 1, 0, stream>>>(tier_mb_d_, d_tier_seq_);
         IMP_CUDA_CHECK_LAUNCH();
     }
-    const dim3 grid(16, 3 * top_k * n_rows);
+    const dim3 grid(kDevExpertGatherBlocks, 3 * top_k * n_rows);
     expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(tier ? tier_misses_d_ : d_misses_,
                                                          tier ? tier_n_miss_d_ : d_n_miss_,
                                                          gather_bytes_(layer));
@@ -539,22 +546,16 @@ DevGatherBytes DeviceExpertCache::gather_bytes_(int layer) const {
     return sz;
 }
 
-void DeviceExpertCache::prefetch_gather(int layer, cudaStream_t stream) {
-    const dim3 grid(16, pf_budget_);
-    expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(pf_misses_of_(layer), pf_n_miss_of_(layer),
-                                                         gather_bytes_(layer));
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
 void DeviceExpertCache::destroy() {
     if (d_stats_) {
-        unsigned long long h[4] = {0, 0, 0, 0};
+        unsigned long long h[5] = {0, 0, 0, 0, 0};
         if (cudaMemcpy(h, d_stats_, sizeof(h), cudaMemcpyDeviceToHost) == cudaSuccess &&
             h[0] + h[1] > 0)
             IMP_LOG_INFO(
                 "Device expert cache stats: %llu hits, %llu misses (%.1f%% hit rate), %llu prefetched, "
-                "%llu of them routed",
-                h[0], h[1], 100.0 * static_cast<double>(h[0]) / static_cast<double>(h[0] + h[1]), h[2], h[3]);
+                "%llu of them routed (%llu still copying)",
+                h[0], h[1], 100.0 * static_cast<double>(h[0]) / static_cast<double>(h[0] + h[1]), h[2], h[3],
+                h[4]);
     }
     free_prefetch_();
     if (tier_) {
