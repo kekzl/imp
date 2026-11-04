@@ -344,37 +344,36 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
 }
 
 // The head pass as a captured graph (speculative.mtp_head_graph): feed + chain captured with 1-row scan
-// smem, replayed after mtp_scan_nodes_set_rows widened both scan nodes to the pass's largest position.
-// Same KV rows and final_norm rows bytewise as the eager pass; 1-row smem left in place corrupts the scores.
+// smem, replayed after mtp_scan_nodes_set_rows widened both scan nodes to the pass's largest position (2002:
+// 8 KiB of scores). KV slots and final_norm rows bytewise equal to the eager pass; 1-row smem left in place
+// traps in the scan kernel.
 TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     SyntheticHead s;
     s.build(/*seed=*/31);
     constexpr int kSlots = 2;
+    constexpr int kSeqLong = 4096;
     imp::MtpDraftWorkspace ws_e, ws_g;
     for (auto* ws : {&ws_e, &ws_g}) {
         ASSERT_TRUE(
-            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeqLong, kSlots));
         configure_ws(*ws);
+        // Zero prefix rows on both sides: the scans read every row below each position.
+        const size_t kv_bytes = static_cast<size_t>(kSlots) * ws->kv_slot_elems * sizeof(__half);
+        ASSERT_EQ(cudaMemset(ws->d_k_cache_base, 0, kv_bytes), cudaSuccess);
+        ASSERT_EQ(cudaMemset(ws->d_v_cache_base, 0, kv_bytes), cudaSuccess);
     }
     cudaStream_t stream = nullptr;
     ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
-    const int pre[kSlots] = {30, 12};
-    for (auto* ws : {&ws_e, &ws_g})
-        for (int sl = 0; sl < kSlots; ++sl) {
-            imp::mtp_select_slot(*ws, sl);
-            ASSERT_TRUE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, pre[sl], s.head, s.tok_emb, *ws, kH,
-                                            stream));
-        }
     const int n = 3, m = 2;
     const int slot[n] = {0, 0, 1};
-    const int pos[n] = {30, 31, 12};
+    const int pos[n] = {2000, 2001, 700};
     const int src[n] = {20, 21, 25};
     int32_t tok[n];
     for (int r = 0; r < n; ++r)
         tok[r] = s.tokens[static_cast<size_t>(src[r])];
     const int last[m] = {1, 2};
     const int cslot[m] = {0, 1};
-    const int cpos[m] = {32, 13};
+    const int cpos[m] = {2002, 701};
     const int32_t ctok[m] = {7, 101};
     int32_t* d_ctok = nullptr;
     ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
@@ -404,7 +403,8 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     EXPECT_EQ(scan.params[0].sharedMemBytes, sizeof(float));
     cudaGraphExec_t exec = nullptr;
     ASSERT_EQ(cudaGraphInstantiate(&exec, graph, 0), cudaSuccess);
-    const int rows = imp::mtp_scan_smem_rows(std::max(tab_g.max_pos, tab_g.chain_max_pos), kSeq);
+    const int rows = imp::mtp_scan_smem_rows(std::max(tab_g.max_pos, tab_g.chain_max_pos), kSeqLong);
+    EXPECT_EQ(rows, 2048);
     ASSERT_TRUE(imp::mtp_scan_nodes_set_rows(exec, scan, rows));
     ASSERT_EQ(cudaGraphLaunch(exec, stream), cudaSuccess);
     ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
@@ -415,18 +415,10 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
         EXPECT_EQ(cudaMemcpy(hb.data(), b, nb, cudaMemcpyDeviceToHost), cudaSuccess);
         return ha == hb;
     };
-    const int written[kSlots] = {33, 14};  // prefix + feed + chain rows
-    const size_t row_bytes = static_cast<size_t>(kNkv) * kHd * sizeof(__half);
-    for (int sl = 0; sl < kSlots; ++sl) {
-        const size_t off = static_cast<size_t>(sl) * ws_e.kv_slot_elems * sizeof(__half);
-        const size_t nb = static_cast<size_t>(written[sl]) * row_bytes;
-        EXPECT_TRUE(same(static_cast<char*>(ws_e.d_k_cache_base) + off,
-                         static_cast<char*>(ws_g.d_k_cache_base) + off, nb))
-            << "K slot " << sl;
-        EXPECT_TRUE(same(static_cast<char*>(ws_e.d_v_cache_base) + off,
-                         static_cast<char*>(ws_g.d_v_cache_base) + off, nb))
-            << "V slot " << sl;
-    }
+    // Whole caches: zero prefix plus the feed and chain rows of both slots.
+    const size_t kv_bytes = static_cast<size_t>(kSlots) * ws_e.kv_slot_elems * sizeof(__half);
+    EXPECT_TRUE(same(ws_e.d_k_cache_base, ws_g.d_k_cache_base, kv_bytes)) << "K";
+    EXPECT_TRUE(same(ws_e.d_v_cache_base, ws_g.d_v_cache_base, kv_bytes)) << "V";
     EXPECT_TRUE(same(ws_e.d_b_h_final, ws_g.d_b_h_final, static_cast<size_t>(m) * kH * sizeof(__half)))
         << "chain final_norm rows";
     EXPECT_EQ(cudaGraphExecDestroy(exec), cudaSuccess);
