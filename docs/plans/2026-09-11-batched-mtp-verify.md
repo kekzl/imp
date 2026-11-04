@@ -343,5 +343,7 @@ arm label, so acceptance differs by prompt, not by kernel. Lone chat and side mo
 to main; two overlapping chats match main 1-2/12 turns, main against main 2/12 (`identity_summary.txt`).
 
 Next: one pass for 5-8 rows (MR 8, 4 rows per block: rows 8 667.9 us vs 947.9 for 4 + 4) serves the
-batched decode LM head and `gemm_nvfp4` at M <= 16, not the draft head (<= 4 rows); the FP16 twin
-`gemv_nvfp4_kpar_mb_fp16_kernel` (verify chunks) has the same one-row-per-block shape.
+batched decode LM head and `gemm_nvfp4` at M <= 16, not the draft head (<= 4 rows). The FP16 twin
+`gemv_nvfp4_kpar_mb_fp16_kernel` is refuted as a lever: 0 launches on Qwen3.8-27B-NVFP4 at c1 / c4 / c32
+and a 33612-token prompt (captured verify chunks take the small-M kernel, MTP stops past its 16384-row
+head KV); `docs/audit/qwen38_kpar_fp16_verify_share_2026_11_04/`, SETTLED.md section H.

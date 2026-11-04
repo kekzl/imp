@@ -1,0 +1,28 @@
+window 0: t=0.0s wall 5131.3 ms, 119787 kernels, kernel sum 2000.78 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=      0 sum      0.00 ms share   0.00 %
+  smallm                       n=  29792 sum    991.28 ms share  49.54 %
+  gemv_nvfp4                   n=   2304 sum     81.53 ms share   4.07 %
+    top  31.95 %    639.34 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_multi_kernel<
+    top  15.95 %    319.06 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<
+    top  12.04 %    240.81 ms void imp::gdn_scan_fused_kernel<
+    top   5.88 %    117.73 ms imp::elementwise_add_store_fp16_kernel
+    top   5.18 %    103.65 ms void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<
+    top   3.73 %     74.69 ms void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<
+    top   3.22 %     64.45 ms void imp::gated_fp16_nvfp4_kernel<
+    top   2.92 %     58.47 ms imp::device_copy_v4_kernel
+window 1: t=13.7s wall 6682.2 ms, 212996 kernels, kernel sum 6572.10 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=      0 sum      0.00 ms share   0.00 %
+  smallm                       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4                   n=  76544 sum   2820.16 ms share  42.91 %
+    top  23.08 %   1517.15 ms void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<
+    top  18.89 %   1241.46 ms void imp::gemv_nvfp4_gate_up_fused_mr_kernel<
+    top  14.15 %    930.06 ms imp::gemv_nvfp4_residual_kernel
+    top   7.63 %    501.43 ms imp::<unnamed>::gemv_nvfp4_gdn_input_kernel
+    top   7.48 %    491.59 ms void imp::fmha_sm120_fa2_kernel<
+    top   5.08 %    333.89 ms void imp::chunkpar::<unnamed>::gdn_chunkpar_pass_kernel<
+    top   5.05 %    332.03 ms void imp::chunkpar::<unnamed>::gdn_chunkpar_intra_kernel<
+    top   3.90 %    256.03 ms void imp::<unnamed>::fp8_head_cpasync_kernel<
