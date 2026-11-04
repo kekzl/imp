@@ -93,7 +93,7 @@ struct MoE {
     int expert_prefetch = 2;
     // Qwen4Exp (gated residual): that router reads the hc streams normed with layer L+1's mlp norm and
     // summed, not L's MoE input. Predictor recall 66.0 -> 71.4 % of top-10; server 6 prompts at N=2
-    // 94.60-95.00 -> 95.57-96.02 tok/s. Output bits unchanged.
+    // 94.42-94.88 -> 95.84-96.11 tok/s. Output bits unchanged.
     bool expert_prefetch_hc_norm = true;
     // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
     // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +
