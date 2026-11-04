@@ -261,6 +261,19 @@ TEST(BatchVerifyPredicates, BoundVerifyRunsWhenHalfTheRowsDraft) {
     EXPECT_FALSE(mtp_bound_verify_fits(0, 2, 2)) << "off";
 }
 
+// speculative.mtp_batch_verify_solo: a lone bound request with a draft is a group of one; no draft, no step.
+TEST(BatchVerifyPredicates, LoneBoundRequestVerifiesAsAGroupOfOne) {
+    EXPECT_TRUE(mtp_bound_verify_fits(4, 1, 1, /*solo=*/true));
+    EXPECT_FALSE(mtp_bound_verify_fits(4, 1, 0, /*solo=*/true));
+    EXPECT_FALSE(mtp_bound_verify_fits(0, 1, 1, /*solo=*/true)) << "bound verify off";
+    EXPECT_TRUE(mtp_bound_verify_solo(true, 1, true));
+    EXPECT_FALSE(mtp_bound_verify_solo(false, 1, true)) << "key off";
+    EXPECT_FALSE(mtp_bound_verify_solo(true, 2, true)) << "two decode: the plain bound verify";
+    EXPECT_FALSE(mtp_bound_verify_solo(true, 1, false)) << "not bound: nothing drafts";
+    RuntimeConfig cfg;
+    EXPECT_TRUE(cfg.speculative.mtp_batch_verify_solo);
+}
+
 // speculative.mtp_batch_verify_k: 1 + k accepted rows name the slot that holds the state after them.
 TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(mtp_bound_verify_depth(0), 1);

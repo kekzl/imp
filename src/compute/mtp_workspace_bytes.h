@@ -35,6 +35,26 @@ constexpr size_t kMtpScanPartOffset = 256;
 inline size_t mtp_scan_part_bytes(int num_heads, int head_dim) {
     return sizeof(float) * num_heads * kMtpScanMaxSplits * (static_cast<size_t>(head_dim) + 2);
 }
+// ws.d_slot_hi [n_kv_slots] int follows the scan partials in the same allocation.
+inline size_t mtp_slot_hi_offset(int num_heads, int head_dim) {
+    return kMtpScanPartOffset + mtp_scan_part_bytes(num_heads, head_dim);
+}
+
+// Head KV ring (speculative.mtp_kv_window): position p lives in row p % ring. A query at p attends
+// [mtp_ring_lo, p]: the last `ring` positions minus rows a later position overwrote (hi = largest position
+// written + 1, stale drafts included). ring <= 0 = linear cache [0, p]. Always includes p itself.
+constexpr int mtp_ring_lo(int p, int hi, int ring) {
+    if (ring <= 0)
+        return 0;
+    const int lo = std::max({0, p - ring + 1, hi - ring});
+    return lo > p ? p : lo;
+}
+// Ring row of window offset i in [0, 2 * ring): i, or i - ring past the end.
+constexpr int mtp_ring_row(int i, int ring) { return ring > 0 && i >= ring ? i - ring : i; }
+// A slot whose writes reached position hi_bound - 1, resumed at `keep`, kept no row at or below keep.
+constexpr bool mtp_ring_resume_lost(int hi_bound, int keep, int ring) {
+    return ring > 0 && hi_bound - ring > keep;
+}
 
 // sizeof(block_q8_1) (compute/gemm.h, static_assert in mtp_forward.cu).
 constexpr size_t kMtpQ8_1BlockBytes = 48;
@@ -122,7 +142,9 @@ inline void attn_bytes(const MtpWorkspaceShape& s, Tally& t) {
     }
     t.add(q_elems(s) * kH2);  // attn_out
     t.add(H * kH2);           // attn_residual
-    t.add(kMtpScanPartOffset + mtp_scan_part_bytes(s.num_heads, s.head_dim));
+    // d_mtp_position: position int, scan partials at kMtpScanPartOffset, then d_slot_hi [n_kv_slots]
+    t.add(mtp_slot_hi_offset(s.num_heads, s.head_dim) +
+          (static_cast<size_t>(std::max(1, s.n_kv_slots)) * sizeof(int)));
     if (has_kv(s)) {
         const size_t slot_kv = static_cast<size_t>(s.max_seq_len) * kv_elems(s) * kH2;
         t.add(slot_kv * static_cast<size_t>(std::max(1, s.n_kv_slots)));  // K, all slots

@@ -92,11 +92,14 @@ int Engine::spec_capture_bucket_max_() const {
 
 // Context tier: power of two >= ctx (floor 4096), clamped to the resolved
 // capacity. Sizes the baked gather grids close to the real context.
-int Engine::spec_capture_ctx_tier_(int ctx_padded) const {
+// paged_attn: the batched verify (rows on paged decode attention, no K/V gather scratch) captures up to the
+// context, not speculative.capture_ctx_cap. Qwen3.8-27B-NVFP4, 1 chat at 40k: eager 92.52 -> 126.77 tok/s.
+int Engine::spec_capture_ctx_tier_(int ctx_padded, bool paged_attn) const {
     int tier = 4096;
     while (tier < ctx_padded)
         tier <<= 1;
-    return std::min(tier, std::max(spec_capture_ctx_cap_, ctx_padded));
+    const int cap = paged_attn ? std::max(spec_capture_ctx_cap_, config_.max_seq_len) : spec_capture_ctx_cap_;
+    return std::min(tier, std::max(cap, ctx_padded));
 }
 
 int Engine::spec_capture_bucket_(int chunk_len) const {
@@ -115,7 +118,7 @@ int Engine::spec_capture_bucket_(int chunk_len) const {
     return cap;
 }
 
-bool Engine::spec_capture_ready_(int ctx_padded, int rows) {
+bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
     const auto& scfg = runtime_config_.speculative;
     if (!scfg.capture || spec_capture_doomed_)
         return false;
@@ -147,8 +150,9 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows) {
                      spec_capture_ctx_cap_);
     }
     const int max_rows = executor_->moe_host_rows_capture_max();  // 0 = no row cap
-    return spec_capture_ctx_cap_ > 0 && ctx_padded <= spec_capture_ctx_cap_ &&
-           (max_rows == 0 || rows <= max_rows);
+    const int ctx_cap = paged_attn ? std::max(spec_capture_ctx_cap_, config_.max_seq_len)
+                                   : spec_capture_ctx_cap_;
+    return spec_capture_ctx_cap_ > 0 && ctx_padded <= ctx_cap && (max_rows == 0 || rows <= max_rows);
 }
 
 void Engine::free_spec_graphs_() {

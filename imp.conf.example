@@ -1212,6 +1212,11 @@ mtp_concurrent       = true
 # request between two turns no longer wipes it and the next turn drafts over
 # its prefix-cache hit. 64 MiB per slot on Qwen3.8-27B-NVFP4; 1 = one slot.
 mtp_history_slots    = 4
+# MTP head KV rows per slot, a ring: past this many positions the head attends
+# the last ones only and keeps drafting.
+# Clamped to the model context; with many slots (batched verify) a 1 GiB budget
+# caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
+mtp_kv_window        = 16384
 # With mtp_history_slots: up to that many requests bind the head at once, and
 # a bound request's hidden rows from batched decode steps feed its head slot
 # in 256-row passes (2.5 MiB per slot), so two chats decoding together draft
@@ -1230,6 +1235,11 @@ mtp_batch_verify     = 4
 # chain (3 rows per request, a second head pass, two spare recurrent slots per
 # row); 1 = one draft (2 rows, one spare slot per row).
 mtp_batch_verify_k   = 2
+# A bound request decoding alone verifies in that batched step too (rows on
+# paged decode attention, split-K over the context) instead of the single
+# verify chunk, whose prefill attention walks the whole context per CTA.
+# false = the single chunk.
+mtp_batch_verify_solo = true
 # That step's head pass (feed, draft LM head, chain) replays a CUDA graph per
 # (fed rows, requests, chain), at most 48; the second use of a shape captures
 # it. false = eager launches. Qwen3.8-27B-NVFP4: head pass at 2 requests

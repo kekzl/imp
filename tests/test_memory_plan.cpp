@@ -905,7 +905,7 @@ TEST(ShadowPlan, MtpWorkspaceReachesThePlanAndTheReport) {
 }
 
 // Qwen3.8-27B-NVFP4 head (H 5120, vocab 248320, 24/4 heads x 256, SwiGLU 17408), server defaults:
-// 4 head KV slots x 16384 rows, carry 256 rows. KV 256 MiB + feed 56 MiB + carry 10 MiB + small.
+// 4 head KV ring slots x 16384 rows, carry 256 rows. KV 256 MiB + feed 56 MiB + carry 10 MiB + small.
 static MtpWorkspaceShape qwen38_27b_head() {
     MtpWorkspaceShape s;
     s.hidden_dim = 5120;
@@ -922,7 +922,7 @@ static MtpWorkspaceShape qwen38_27b_head() {
 
 TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     const auto s = qwen38_27b_head();
-    EXPECT_EQ(mtp_workspace_bytes(s), 355958728u);  // 324.5 MiB requested + 15 MiB of 2 MiB page rounding
+    EXPECT_EQ(mtp_workspace_bytes(s), 355958744u);  // 324.5 MiB requested + 15 MiB of 2 MiB page rounding
     EXPECT_EQ(mtp_alloc_footprint(size_t{1} << 20), size_t{1} << 20);
     EXPECT_EQ(mtp_alloc_footprint(2621440), size_t{4} << 20);
     auto no_kv = s;

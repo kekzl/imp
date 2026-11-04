@@ -170,8 +170,8 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     }
     MtpHeadGraphs& G = *mtp_head_graphs_;
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
-    const int max_seq = mtp_ws_storage_->max_seq_len;
-    const bool chain = bv_.depth > 1 && (max_seq <= 0 || tab.chain_max_pos + 1 <= max_seq);
+    const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
+    const bool chain = bv_.depth > 1;
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
     const HeadPassInputs in{
         *model_, *executor_, *mtp_ws_storage_,

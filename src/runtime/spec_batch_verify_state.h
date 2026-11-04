@@ -228,8 +228,14 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 [[nodiscard]] int mtp_bound_verify_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // Every decoding row is no wider than the bound verify takes, and the verify pays: at least one row drafts
 // and drafted rows are at least half the batch (an undrafted row forwards a pad that is never accepted).
-[[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted) {
-    return rows_cap >= 2 && decoding >= 2 && decoding <= rows_cap && drafted >= 1 && 2 * drafted >= decoding;
+[[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted,
+                                                   bool solo = false) {
+    return rows_cap >= 2 && decoding >= (solo ? 1 : 2) && decoding <= rows_cap && drafted >= 1 &&
+           2 * drafted >= decoding;
+}
+// speculative.mtp_batch_verify_solo: a lone bound request takes the batched verify step as a group of one.
+[[nodiscard]] constexpr bool mtp_bound_verify_solo(bool solo_on, int decoding, bool bound) {
+    return solo_on && decoding == 1 && bound;
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 1 or 2 drafts per request.
 [[nodiscard]] constexpr int mtp_bound_verify_depth(int key) { return std::clamp(key, 1, 2); }

@@ -1,0 +1,51 @@
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p1main own_peak_mib 24550 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p1main ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.73 decode_tps 104.89 drafted 270 accepted 232 md5 9e474d7579b0
+REQ p1_p1main ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.74 decode_tps 90.45 drafted 0 accepted 0 md5 5e2c4b2f4c0a
+REQ p1_p1main ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.58 decode_tps 89.01 drafted 0 accepted 0 md5 9322fb1bda60
+REQ p1_p1main ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.25 decode_tps 87.44 drafted 0 accepted 0 md5 52e949e79810
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [14:19:03.255][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 37's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:18:54.953][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 36's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:18:48.601][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 35's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p1branch own_peak_mib 24472 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p1branch ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.72 decode_tps 153.14 drafted 302 accepted 230 md5 cf9ff22092ab
+REQ p1_p1branch ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.83 decode_tps 143.67 drafted 300 accepted 231 md5 f81a7059c66d
+REQ p1_p1branch ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.75 decode_tps 133.68 drafted 314 accepted 224 md5 97bd88378575
+REQ p1_p1branch ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.59 decode_tps 140.99 drafted 296 accepted 233 md5 ee35a6e653eb
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p2main own_peak_mib 24606 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p2main ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.74 decode_tps 105.00 drafted 270 accepted 232 md5 9e474d7579b0
+REQ p1_p2main ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.74 decode_tps 90.29 drafted 0 accepted 0 md5 5e2c4b2f4c0a
+REQ p1_p2main ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.60 decode_tps 88.55 drafted 0 accepted 0 md5 9322fb1bda60
+REQ p1_p2main ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.28 decode_tps 86.56 drafted 0 accepted 0 md5 52e949e79810
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [14:25:18.795][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 37's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:25:10.462][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 36's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:25:04.097][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 35's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p2branch own_peak_mib 24520 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p2branch ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.72 decode_tps 154.33 drafted 302 accepted 230 md5 cf9ff22092ab
+REQ p1_p2branch ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.82 decode_tps 143.51 drafted 300 accepted 231 md5 f81a7059c66d
+REQ p1_p2branch ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.75 decode_tps 134.76 drafted 314 accepted 224 md5 97bd88378575
+REQ p1_p2branch ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.58 decode_tps 141.05 drafted 296 accepted 233 md5 ee35a6e653eb
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p3main own_peak_mib 24577 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p3main ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.80 decode_tps 104.10 drafted 270 accepted 232 md5 9e474d7579b0
+REQ p1_p3main ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.75 decode_tps 89.53 drafted 0 accepted 0 md5 5e2c4b2f4c0a
+REQ p1_p3main ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.62 decode_tps 88.61 drafted 0 accepted 0 md5 9322fb1bda60
+REQ p1_p3main ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.31 decode_tps 86.73 drafted 0 accepted 0 md5 52e949e79810
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [14:31:37.062][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 37's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:31:28.668][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 36's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [14:31:22.220][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 35's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_p3branch own_peak_mib 24521 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_p3branch ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.72 decode_tps 154.98 drafted 302 accepted 230 md5 cf9ff22092ab
+REQ p1_p3branch ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.82 decode_tps 143.35 drafted 300 accepted 231 md5 f81a7059c66d
+REQ p1_p3branch ctx 40000 rep 0 s0 prompt 39854 comp 384 ttft_s 3.77 decode_tps 134.31 drafted 314 accepted 224 md5 97bd88378575
+REQ p1_p3branch ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.61 decode_tps 141.46 drafted 296 accepted 233 md5 ee35a6e653eb
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)

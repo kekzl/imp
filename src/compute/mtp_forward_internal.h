@@ -23,18 +23,20 @@ constexpr int kMtpScanMaxHeadDim = 512;  // head_dim % 8 == 0 and <= this (mtp_w
 // head_dim % 8 == 0 and <= kMtpScanMaxHeadDim, smem opted in; false logs which (mtp_workspace_allocate).
 [[nodiscard]] bool mtp_attn_scan_supported(int head_dim);
 
-// FP16: query row r of q [n_rows, num_heads, head_dim] attends cache rows [0, base_ctx + r + 1) of
-// k/v [*, num_kv_heads, head_dim] -> out [n_rows, num_heads, head_dim]. split_part (ws.d_scan_part):
-// one row over > 512 cache rows runs split-K.
+// FP16: query row r of q [n_rows, num_heads, head_dim] at position base_ctx + r attends cache rows
+// [0, base_ctx + r + 1) of k/v [*, num_kv_heads, head_dim] -> out [n_rows, num_heads, head_dim]; ring > 0:
+// a ring of `ring` rows, window mtp_ring_lo with d_hi (the slot's largest position written + 1, may be null).
+// split_part (ws.d_scan_part): one row over > 512 cache rows runs split-K.
 void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void* out, int base_ctx,
                    int n_rows, int num_heads, int num_kv_heads, int head_dim, cudaStream_t stream,
-                   float* split_part = nullptr);
+                   float* split_part = nullptr, int ring = 0, const int* d_hi = nullptr);
 
-// Multi-slot rows: row r attends [0, d_pos[r] + 1) of slot d_slots[r] (k/v base + slot * slot_elems);
-// max_pos = max over d_pos sizes the scores.
+// Multi-slot rows: row r at d_pos[r] attends its window of slot d_slots[r] (k/v base + slot * slot_elems,
+// ring and d_hi[slot] as mtp_attn_scan); max_pos = max over d_pos sizes the scores.
 void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
                          const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
-                         int num_kv_heads, int head_dim, cudaStream_t stream);
+                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring = 0,
+                         const int* d_hi = nullptr);
 // The kernel mtp_attn_scan_slots launches: the func of its node in a captured graph (mtp_scan_nodes_find).
 const void* mtp_attn_scan_rows_fn();
 
