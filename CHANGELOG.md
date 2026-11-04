@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-11-04
+
 ### Changed
 - MTP keeps drafting past 16384 tokens: the head KV is a 16384-row ring (`speculative.mtp_kv_window`), and a request decoding alone verifies in the batched step (`speculative.mtp_batch_verify_solo`). Qwen3.8-27B-NVFP4, 1 chat at 20k / 80k: 89.53-90.45 / 86.56-87.44 -> 143.35-143.67 / 140.99-141.46 tok/s, 6 short chats 127.55-128.05 -> 149.14-149.85.
 - The MTP economics guard also counts a request's batched verifies (`speculative.mtp_batch_verify`), not only its lone ones. Qwen3.8-27B-NVFP4, 2 overlapping chats: unbinds 1-2 -> 0 per server, 134.02 -> 138.55 tok/s (3 of 3 pairs), the chat finishing alone 3.06-3.09 -> 2.23-2.24 s for its tail; 4 chats and c1-c32 within spread.
