@@ -1,0 +1,10 @@
+# /mnt/data/scratch/mtphead_identity: fresh server per arm, MODES greedy + side, main vs new, 1 pair
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_greedy SUMMARY turn1_tps 116.53 followup_mean_tps 119.99 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 117.32 followup_mean_tps 122.45 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {} own_peak_mib 22682
+p1_new_greedy SUMMARY turn1_tps 116.61 followup_mean_tps 120.01 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 117.09 followup_mean_tps 122.48 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {} own_peak_mib 22682
+IDENTICAL 6/6 p1_main_greedy.json vs p1_new_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_new_side.json

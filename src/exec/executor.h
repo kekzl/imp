@@ -190,10 +190,12 @@ public:
                            const float* h_row_pens = nullptr);
 
     // LM head + argmax over EXTERNAL, already-normed rows ([n_rows,d_model]
-    // FP16, e.g. MTP head output): the batched-decode W4A4 LM head, else the
-    // FP8 head, no output norm applied. False (nothing written) when neither is
-    // built or on a GEMM failure.
-    [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream);
+    // FP16, e.g. MTP head output): draft_nvfp4 (W4A16, one weight pass per 4 rows) when given, else the
+    // batched-decode W4A4 LM head, else the FP8 head, no output norm applied. False (nothing written) when
+    // none is built or on a GEMM failure.
+    [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out,
+                                           cudaStream_t stream,
+                                           const NvFP4QuantResult* draft_nvfp4 = nullptr);
 
     // Materializes the LM-head projection of hidden_[0..n_rows) into
     // d_out[n_rows,vocab_size] fp32 (same re-projection as greedy_argmax_all,

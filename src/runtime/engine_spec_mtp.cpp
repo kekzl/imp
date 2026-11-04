@@ -879,6 +879,12 @@ void Engine::mtp_accuracy_reset() noexcept {
         imp::mtp_select_slot(*ws, 0);
     }
 }
+const imp::NvFP4QuantResult* Engine::mtp_draft_lm_head_nvfp4_(imp::NvFP4QuantResult& view) const {
+    return runtime_config_.speculative.mtp_nvfp4_head && executor_ && executor_->lm_head_nvfp4_view(view)
+               ? &view
+               : nullptr;
+}
+
 bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_dim, int vocab_size,
                            int* out_token_id, int* out_topk_ids, int top_w, const int32_t* d_prev_token,
                            int32_t* d_out_token) {
@@ -896,9 +902,8 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     // (verify stays lossless); without a cache entry: the FP8 head, a dp4a GEMV on a GGUF head, else FP16
     // GEMV.
     imp::NvFP4QuantResult lm_nvfp4;
-    const imp::NvFP4QuantResult* lm_nvfp4_p = nullptr;
-    if (runtime_config_.speculative.mtp_nvfp4_head && executor_ && executor_->lm_head_nvfp4_view(lm_nvfp4)) {
-        lm_nvfp4_p = &lm_nvfp4;
+    const imp::NvFP4QuantResult* lm_nvfp4_p = mtp_draft_lm_head_nvfp4_(lm_nvfp4);
+    if (lm_nvfp4_p != nullptr) {
         static bool logged = false;  // once-per-process path attribution
         if (!logged) {
             logged = true;
