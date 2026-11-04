@@ -166,11 +166,7 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
                            cudaStream_t stream, const int32_t** drafts) {
     if (mtp_head_graphs_ == nullptr) {
         mtp_head_graphs_.reset(new MtpHeadGraphs{});
-        mtp_head_graphs_->h_out = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
-                                                        static_cast<size_t>(kMtpHeadOutInts) *
-                                                            sizeof(int32_t));
-        if (mtp_head_graphs_->h_out.empty())
-            mtp_head_graphs_->h_out_pageable.resize(kMtpHeadOutInts);
+        mtp_head_graphs_->h_out.resize(kMtpHeadOutInts);
     }
     MtpHeadGraphs& G = *mtp_head_graphs_;
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
@@ -205,8 +201,8 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
         n_out = run(tab.max_pos, tab.chain_max_pos);
     if (n_out < 0)
         return n_out;
-    // Pinned destination: the D2H is one DMA, not a staged pageable copy.
-    int32_t* out = G.h_out.empty() ? G.h_out_pageable.data() : G.h_out.as<int32_t>();
+    // Pageable: a pinned destination priced no gain (nsys c2 host window 2561.8 -> 2687.2 us, n=1).
+    int32_t* out = G.h_out.data();
     if (cudaMemcpyAsync(out, mtp_ws_storage_->d_chain_tokens, static_cast<size_t>(n_out) * sizeof(int32_t),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
         cudaStreamSynchronize(stream) != cudaSuccess)

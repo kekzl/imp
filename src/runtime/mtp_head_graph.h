@@ -6,7 +6,6 @@
 
 #include "compute/mtp_forward.h"  // MtpScanNodes
 #include "core/cuda_raii.h"
-#include "memory/host_pinned.h"
 
 #include <compare>
 #include <cstddef>
@@ -58,8 +57,7 @@ struct MtpHeadGraphs {
     int failures = 0;
     bool doomed = false;
     long long replays = 0;
-    PinnedBuffer h_out;                   // the drafts' D2H destination (kMtpMaxTopW * kMtpMaxChainK ints)
-    std::vector<int32_t> h_out_pageable;  // the destination when the pinned allocation failed
+    std::vector<int32_t> h_out;  // the drafts' D2H destination (kMtpMaxTopW * kMtpMaxChainK ints)
 };
 
 }  // namespace imp
