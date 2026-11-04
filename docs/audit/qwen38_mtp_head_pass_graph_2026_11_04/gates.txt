@@ -1,0 +1,24 @@
+# /mnt/data/scratch/mtpgraph_2026_11_04/gates: imp:mtpgraph-new (be08212c), default server, Qwen3.8-27B-NVFP4-vllm
+degen_suite exit=0
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (39s)
+multiturn_deep exit=0
+MULTITURN: all 74 turns clean, context grew to see table
+facts4 exit=0
+ok want=Paris tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of France is Paris.'
+ok want=Tokyo tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Japan is Tokyo.'
+ok want=Rome tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Italy is Rome.'
+ok want=Berlin tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Germany is Berlin.'
+FACTS4 PASS
+[10:07:09.573][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=2 rows=6 drafted=4 accepted=4 emitted=6
+[10:07:09.661][INFO] engine_spec_mtp_head_graph.cpp:118: [mtp-head-graph] captured n=12 m=4 chain=1 (2 scan nodes, 1 graphs): 0.5 ms
+[10:07:10.181][INFO] engine_spec_mtp_head_graph.cpp:118: [mtp-head-graph] captured n=9 m=3 chain=1 (2 scan nodes, 2 graphs): 0.5 ms
+[10:07:10.568][INFO] engine_spec_mtp_head_graph.cpp:118: [mtp-head-graph] captured n=6 m=2 chain=1 (2 scan nodes, 3 graphs): 0.4 ms
+[10:07:16.568][INFO] engine_spec_mtp_head_graph.cpp:118: [mtp-head-graph] captured n=11 m=4 chain=1 (2 scan nodes, 4 graphs): 0.5 ms
+[10:07:17.964][INFO] engine_spec_mtp_head_graph.cpp:118: [mtp-head-graph] captured n=3 m=1 chain=1 (2 scan nodes, 5 graphs): 0.5 ms
+graph captured: 5 failed: 0
+stderr matches: 0
+GATES DONE
+# MtpFeedBatch GPU tests (build-dev, test-moe-gdn), 8e7ede43:
+[  PASSED  ] 8 tests (incl. MtpFeedBatchTest.CapturedHeadPassMatchesEagerBytewise)
+# mutant: mtp_scan_nodes_set_rows skips the exec update (smem stays 4 B as captured):
+MtpFeedBatchTest.CapturedHeadPassMatchesEagerBytewise left a CUDA error: unspecified launch failure (scan kernel trap), test_exit=1

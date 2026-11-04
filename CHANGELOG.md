@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- `speculative.mtp_head_graph` (default on): the batched MTP head pass replays one CUDA graph per (rows, requests, chain), at most 48. Qwen3.8-27B-NVFP4: head pass 2 / 4 requests 2.66-2.77 / 2.99-3.13 -> 2.33-2.46 / 2.67-2.77 ms, GPU idle per pass (nsys c2) 433 -> 145 us, 2 / 4 overlapping chats 134.75 / 140.40 -> 140.92 / 143.47 tok/s.
 - The batched MTP head pass uploads its 7 feed and chain tables in one pinned H2D instead of 8 pageable copies. Qwen3.8-27B-NVFP4: head pass 2 / 4 requests 2.74-2.77 / 3.09-3.15 -> 2.69-2.73 / 3.00-3.05 ms, GPU idle per pass (nsys c2) 715 -> 393 us; tok/s within pair spread.
 - FP8 LM head: passes of <= 16 rows stream the weight through a per-warp cp.async ring in full 128 B lines (fragment loads read 64 B half lines, ~1390 GB/s cap); bit-identical. Qwen3.8-27B head, 1 row: 926.6 -> 771.5 us; tg256 Qwen3.8-27B-NVFP4 96.54 -> 97.98, Qwen3-8B-NVFP4 286.94 -> 291.48 tok/s.
 - MTP draft workspace is a capacity-plan row (`MTP draft workspace`, audit pool `mtp_workspace`) taken inside init, not after the plan. Qwen3.8-27B-NVFP4 default server: +360 MiB after `init_complete` -> 0, plan KV 11380 -> 10335 blocks, shutdown audit residual 1435 -> 1080 MiB; c1/c4/c32 tok/s -1.1/-0.4/-0.4 % (3 pairs, noise).
