@@ -163,7 +163,7 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain
 }  // namespace
 
 int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const NvFP4QuantResult* head,
-                           bool chain, cudaStream_t stream, const int32_t** drafts) {
+                           cudaStream_t stream, const int32_t** drafts) {
     if (mtp_head_graphs_ == nullptr) {
         mtp_head_graphs_.reset(new MtpHeadGraphs{});
         mtp_head_graphs_->h_out.resize(kMtpHeadOutInts);
@@ -171,6 +171,7 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     MtpHeadGraphs& G = *mtp_head_graphs_;
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
+    const bool chain = bv_.depth > 1;
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
     const HeadPassInputs in{
         *model_, *executor_, *mtp_ws_storage_,

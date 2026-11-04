@@ -1087,11 +1087,12 @@ private:
                            const std::vector<int>& emitted, cudaStream_t stream);
     // The NVFP4 draft LM head (speculative.mtp_nvfp4_head) the lone and batched chains read, or nullptr.
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
-    // The batched head pass on device tables: feed, draft LM head, with chain (and KV room) one more feed +
-    // LM head per request's second draft (graph replay: speculative.mtp_head_graph), drafts D2H + sync into
-    // *drafts. Returns the draft count (m, 2m); -1 = feed, -2 = LM head, -3 = D2H failed.
+    // The batched head pass over tables already on the device: feed, draft LM head and, when bv_.depth > 1
+    // and the KV has room, one more feed + LM head per request's second draft (a graph replay with
+    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m, 2m);
+    // -1 = feed, -2 = LM head, -3 = D2H failed.
     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
-                                     const NvFP4QuantResult* head, bool chain, cudaStream_t stream,
+                                     const NvFP4QuantResult* head, cudaStream_t stream,
                                      const int32_t** drafts);
     std::unique_ptr<MtpHeadGraphs, MtpHeadGraphsDeleter> mtp_head_graphs_;
     void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
@@ -1386,11 +1387,11 @@ private:
     // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
     // state types in spec_batch_verify_state.h.
     BatchVerifyState bv_;
-    [[nodiscard]] bool ensure_batch_verify_bufs_(cudaStream_t stream);  // init-time, from max_batch_size
+    [[nodiscard]] bool ensure_batch_verify_bufs_(
+        cudaStream_t stream);  // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
     int acquire_spare_slot_(int req_id, bool second = false);
     void bound_verify_adopt_slot_(int req_id, int role, int live, int slot);
-    void bound_verify_tally_(const Request& req, int n, int p0, int nd, int matched, int emitted, bool mtp);
     // Up to bv_.depth draft tokens for the request's next positions, written to out; returns the count.
     int batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;

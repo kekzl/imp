@@ -217,8 +217,7 @@ struct Speculative {
     // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
     // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
     // The economics guard prices the average depth that actually ran, not the
-    // configured ceiling. Off = fixed depth mtp_k (A/B kill switch). The bound batched verify follows it per
-    // request (ceiling mtp_batch_verify_k): a 1-draft step pads its second row and skips the chain head pass.
+    // configured ceiling. Off = fixed depth mtp_k (A/B kill switch).
     bool mtp_adaptive_k = true;
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3): the chain re-reads the LM

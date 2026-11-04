@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Price the MTP draft depth of the lone batched verify from diagnostics.spec_trace server logs.
 
-Reads the [bv-verify] (per request) and [bv-step] (per step) lines of Engine::step_spec_verify_batched_,
-lone steps only (n=1). Per request: the accept distribution at each draft depth, the same conditioned on the
-previous step's outcome, step prices split by the depth that ran (forward) and by the chain the head pass ran
-(= the next step's depth), and an AIMD estimate (depth 1 after a rejection, 2 after a full accept) priced from
-a fixed-depth-2 trace: a Markov chain over the previous outcome, each step's accept from that conditional.
+Reads the [bv-verify] (per request) and [bv-step] (per step) lines that
+docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/adaptive_depth.diff.txt adds to the batched verify (main has
+none), lone steps only (n=1). Per request: the accept distribution at each draft depth, the same conditioned on
+the previous step's outcome, step prices split by the depth that ran (forward) and by the chain the head pass
+ran (= the next step's depth), and an AIMD estimate (depth 1 after a rejection, 2 after a full accept) priced
+from a fixed-depth-2 trace over a grid of per-step savings (aimd_estimate).
 
 Usage: mtp_bv_depth_price.py SERVER_LOG [SERVER_LOG ...]
 """
@@ -78,46 +79,37 @@ def report(label, steps):
 
 
 def aimd_estimate(cond, t2, t1):
-    """Markov chain over the previous outcome. t2 / t1: step ms at depth 2 / 1. Returns tok/s fixed, AIMD."""
-    p = {}
-    for k, ms in cond.items():
-        if ms:
-            p[k] = [ms.count(j) / len(ms) for j in range(3)]
-    if not all(k in p for k in ("full", "part", "zero")):
+    """Fixed depth 2 vs AIMD, tok/s. t2 / t1: step ms at depth 2 / 1.
+
+    Hidden class of a step = what a depth-2 verify accepts there (m 0 / 1 / 2), drawn from p[class of the
+    previous step]. Depth 2 emits 1 + m and sees full iff m = 2; depth 1 emits 1 + min(m, 1) and sees full iff
+    m >= 1. AIMD: full -> depth 2 next, else depth 1. States (depth, previous hidden class).
+    """
+    cls = ("zero", "part", "full")
+    p = {k: [ms.count(j) / len(ms) for j in range(3)] for k, ms in cond.items() if ms}
+    if not all(k in p for k in cls):
         return None
-    # States: (depth, prev outcome). Depth 2 after full; depth 1 after part / zero (AIMD sheds on any reject).
-    # Depth 1 accept = P(m >= 1 | prev); its full accept (m >= 1) leads to depth 2 with prev = full.
-    states = [("2", "full"), ("1", "part"), ("1", "zero")]
-    pi = {s: 1.0 / 3 for s in states}
-    for _ in range(500):
-        nxt = dict.fromkeys(states, 0.0)
+    pi = {(d, c): 1.0 / 6 for d in (1, 2) for c in cls}
+    for _ in range(1000):
+        nxt = dict.fromkeys(pi, 0.0)
         for (d, prev), w in pi.items():
-            q = p[prev]
-            if d == "2":
-                nxt[("2", "full")] += w * q[2]
-                nxt[("1", "part")] += w * q[1]
-                nxt[("1", "zero")] += w * q[0]
-            else:
-                nxt[("2", "full")] += w * (q[1] + q[2])
-                nxt[("1", "zero")] += w * q[0]
+            for m, q in enumerate(p[prev]):
+                full = m == 2 if d == 2 else m >= 1
+                nxt[(2 if full else 1, cls[m])] += w * q
         pi = nxt
-    tok = time = 0.0
-    for (d, prev), w in pi.items():
-        q = p[prev]
-        tok += w * (1 + (q[1] + 2 * q[2] if d == "2" else q[1] + q[2]))
-        time += w * (t2 if d == "2" else t1)
-    # Fixed depth 2: the same chain without shedding.
-    fx = {"full": 1 / 3, "part": 1 / 3, "zero": 1 / 3}
-    for _ in range(500):
-        n2 = dict.fromkeys(fx, 0.0)
+    tok = sum(w * sum(q * (1 + (m if d == 2 else min(m, 1))) for m, q in enumerate(p[prev]))
+              for (d, prev), w in pi.items())
+    time = sum(w * (t2 if d == 2 else t1) for (d, _), w in pi.items())
+    fx = dict.fromkeys(cls, 1.0 / 3)
+    for _ in range(1000):
+        n2 = dict.fromkeys(cls, 0.0)
         for prev, w in fx.items():
-            q = p[prev]
-            n2["full"] += w * q[2]
-            n2["part"] += w * q[1]
-            n2["zero"] += w * q[0]
+            for m, q in enumerate(p[prev]):
+                n2[cls[m]] += w * q
         fx = n2
     tok_fx = sum(w * (1 + p[k][1] + 2 * p[k][2]) for k, w in fx.items())
-    return 1000.0 * tok_fx / t2, 1000.0 * tok / time, pi
+    share1 = sum(w for (d, _), w in pi.items() if d == 1)
+    return 1000.0 * tok_fx / t2, 1000.0 * tok / time, share1
 
 
 def main():
@@ -135,7 +127,7 @@ def main():
                 est = aimd_estimate(cond, t2, t2 - saved)
                 if est:
                     print(f"  depth-1 step saves {saved:.1f} ms: fixed-2 {est[0]:.2f} tok/s, AIMD {est[1]:.2f} tok/s "
-                          f"(depth-1 share {est[2][('1', 'part')] + est[2][('1', 'zero')]:.3f})")
+                          f"(depth-1 share {est[2]:.3f})")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,54 @@
+harness: tools/analysis/mtp_bv_depth_price.py md5=71f3d80ff5f3 (docstring-only edit after the run: 2853b62cda21), traces: imp:mtpdepth-br (adaptive_depth.diff.txt on 1346f2c4) with diagnostics.spec_trace=true, fix = speculative.mtp_adaptive_k=false (byte-identical outputs to main), ada = default
+== /d/p1_fix.server.log: 3 requests with lone MTP steps
+req 34 ctx 7696 steps 151 emitted 381 tok/step 2.523 step_ms 15.764 tok_per_s_in_steps 160.06
+  nd=2 steps 151 m0 0.146 m1 0.185 m2 0.669 fwd_ms 12.653
+  head_ms before nd=2: 3.131 (n=150)
+  nd=2 after full: n=101 m0 0.099 m1 0.149 m2 0.752
+  nd=2 after part: n=27 m0 0.296 m1 0.185 m2 0.519
+  nd=2 after zero: n=22 m0 0.182 m1 0.364 m2 0.455
+  depth-1 step saves 0.5 ms: fixed-2 159.63 tok/s, AIMD 152.91 tok/s (depth-1 share 0.261)
+  depth-1 step saves 1.0 ms: fixed-2 159.63 tok/s, AIMD 154.20 tok/s (depth-1 share 0.261)
+  depth-1 step saves 1.5 ms: fixed-2 159.63 tok/s, AIMD 155.51 tok/s (depth-1 share 0.261)
+  depth-1 step saves 2.0 ms: fixed-2 159.63 tok/s, AIMD 156.84 tok/s (depth-1 share 0.261)
+  depth-1 step saves 3.0 ms: fixed-2 159.63 tok/s, AIMD 159.57 tok/s (depth-1 share 0.261)
+req 35 ctx 19773 steps 150 emitted 381 tok/step 2.540 step_ms 16.893 tok_per_s_in_steps 150.36
+  nd=2 steps 150 m0 0.153 m1 0.153 m2 0.693 fwd_ms 12.991
+  head_ms before nd=2: 3.928 (n=149)
+  nd=2 after full: n=104 m0 0.125 m1 0.125 m2 0.750
+  nd=2 after part: n=23 m0 0.261 m1 0.174 m2 0.565
+  nd=2 after zero: n=22 m0 0.182 m1 0.273 m2 0.545
+  depth-1 step saves 0.5 ms: fixed-2 150.05 tok/s, AIMD 142.88 tok/s (depth-1 share 0.251)
+  depth-1 step saves 1.0 ms: fixed-2 150.05 tok/s, AIMD 143.96 tok/s (depth-1 share 0.251)
+  depth-1 step saves 1.5 ms: fixed-2 150.05 tok/s, AIMD 145.05 tok/s (depth-1 share 0.251)
+  depth-1 step saves 2.0 ms: fixed-2 150.05 tok/s, AIMD 146.17 tok/s (depth-1 share 0.251)
+  depth-1 step saves 3.0 ms: fixed-2 150.05 tok/s, AIMD 148.44 tok/s (depth-1 share 0.251)
+req 36 ctx 80043 steps 148 emitted 381 tok/step 2.574 step_ms 17.596 tok_per_s_in_steps 146.30
+  nd=2 steps 148 m0 0.135 m1 0.155 m2 0.709 fwd_ms 13.685
+  head_ms before nd=2: 3.938 (n=147)
+  nd=2 after full: n=105 m0 0.133 m1 0.114 m2 0.752
+  nd=2 after part: n=22 m0 0.091 m1 0.182 m2 0.727
+  nd=2 after zero: n=20 m0 0.200 m1 0.350 m2 0.450
+  depth-1 step saves 0.5 ms: fixed-2 146.15 tok/s, AIMD 139.76 tok/s (depth-1 share 0.228)
+  depth-1 step saves 1.0 ms: fixed-2 146.15 tok/s, AIMD 140.68 tok/s (depth-1 share 0.228)
+  depth-1 step saves 1.5 ms: fixed-2 146.15 tok/s, AIMD 141.61 tok/s (depth-1 share 0.228)
+  depth-1 step saves 2.0 ms: fixed-2 146.15 tok/s, AIMD 142.55 tok/s (depth-1 share 0.228)
+  depth-1 step saves 3.0 ms: fixed-2 146.15 tok/s, AIMD 144.48 tok/s (depth-1 share 0.228)
+== /d/p1_ada.server.log: 3 requests with lone MTP steps
+req 34 ctx 7696 steps 146 emitted 381 tok/step 2.610 step_ms 15.334 tok_per_s_in_steps 170.19
+  nd=1 steps 25 m0 0.280 m1 0.720 fwd_ms 12.421
+  nd=2 steps 121 m0 0.050 m1 0.107 m2 0.843 fwd_ms 12.575
+  head_ms before nd=1: 1.606 (n=25)
+  head_ms before nd=2: 3.054 (n=120)
+  nd=2 after full: n=120 m0 0.050 m1 0.108 m2 0.842
+req 35 ctx 19773 steps 161 emitted 381 tok/step 2.366 step_ms 16.564 tok_per_s_in_steps 142.87
+  nd=1 steps 44 m0 0.250 m1 0.750 fwd_ms 12.878
+  nd=2 steps 117 m0 0.111 m1 0.179 m2 0.709 fwd_ms 13.203
+  head_ms before nd=1: 2.186 (n=44)
+  head_ms before nd=2: 3.958 (n=116)
+  nd=2 after full: n=116 m0 0.112 m1 0.181 m2 0.707
+req 36 ctx 80043 steps 172 emitted 381 tok/step 2.215 step_ms 17.012 tok_per_s_in_steps 130.21
+  nd=1 steps 58 m0 0.276 m1 0.724 fwd_ms 13.450
+  nd=2 steps 114 m0 0.167 m1 0.202 m2 0.632 fwd_ms 13.763
+  head_ms before nd=1: 2.050 (n=58)
+  head_ms before nd=2: 4.053 (n=113)
+  nd=2 after full: n=113 m0 0.168 m1 0.204 m2 0.628

@@ -1,0 +1,11 @@
+harness: md5=5454cd8bd776 client_md5=c26973421a02
+p1_fix own_peak_mib 22788 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_fix ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.73 decode_tps 158.62 drafted 302 accepted 230 md5 cf9ff22092ab
+REQ p1_fix ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.75 decode_tps 149.08 drafted 300 accepted 231 md5 f81a7059c66d
+REQ p1_fix ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.25 decode_tps 145.12 drafted 296 accepted 233 md5 ee35a6e653eb
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+p1_ada own_peak_mib 22788 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_ada ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 0.69 decode_tps 168.59 drafted 267 accepted 235 md5 aa1f38c8a149
+REQ p1_ada ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.74 decode_tps 141.58 drafted 278 accepted 220 md5 7c19491d5532
+REQ p1_ada ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 7.33 decode_tps 129.33 drafted 286 accepted 209 md5 707020752654
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
