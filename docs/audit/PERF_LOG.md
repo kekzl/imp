@@ -4,6 +4,22 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-04 · Nemotron-3-Nano-30B-A3B-NVFP4 pp512 v0.62.0 -> v0.63.0 -1.01 %: does not reproduce
+
+Protocol: `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --temperature 0 --set speculative.ngram=false`, one `--rm` process per run, arms alternating, `CUBLAS_WORKSPACE_CONFIG=:4096:8`; old = `ghcr.io/kekzl/imp:0.62.0` (1cc8e453), new = `ghcr.io/kekzl/imp:0.63.0` (ed26f253). Both images resolve cuBLASLt 13.8.0.4 and cudart 13.4.92 (#3035 moved no library). KV FP8_E4M3 (checkpoint `kv_cache_quant_algo`). Logs `/mnt/data/scratch/nemobisect_2026_11_04`.
+
+| run | pairs | pp512 old median (min-max) | pp512 new median (min-max) | new > old | tg128 old -> new |
+|---|---|---|---|---|---|
+| release sweep, new = `imp:rel-0.63-cand` | 3 | 34406.70 (34167.38-34476.51) | 34058.33 (33965.28-34076.84) | 0/3 | 414.85 -> 415.28 |
+| pp512 only | 8 | 34277.40 (34053.08-34422.79) | 34313.60 (34135.84-34451.77) | 6/8 | 414.71 -> 414.81 |
+| `tools/analysis/release_ab.sh` (md5 c5346186), `LONG_PP="4096 8192"` | 4 | 34268.26 (34210.79-34353.46) | 34411.18 (33587.37-34458.19) | 3/4 | 414.70 -> 414.86 |
+
+- The 33587.37 new arm is a whole-process outlier (tg128 409.21 vs 414.03-415.47 in the other 7 arms of that run, cause not identified); the other 11 new arms read 34135.84-34458.19.
+- pp4096 / pp8192 in the release_ab.sh run, old -> new medians: 58929.10 -> 58791.92, 55369.04 -> 55427.93.
+- Verdict: no Nemotron prompt regression in v0.63.0; the release-sweep delta belongs to the candidate image or that sweep's host state. #3026 was cleared for Nemotron the day before (identical dense tile launches, entry below).
+
+---
+
 ## 2026-11-03 · Qwen3-Coder-30B-A3B pp512 v0.61.0 -> v0.62.0 -2.6 %: three causes, one fixed
 
 Protocol: `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --set speculative.ngram=false` (release_ab.sh shape), one process per run, arms rotated per trial; old = `ghcr.io/kekzl/imp:latest` v0.61.0 (e2109f84), new = v0.62.0 `make build` (tree a09cd68f), fix = new + 128x64 no-workspace plan. Coder runs FP8 KV (checkpoint `kv_cache_quant_algo`). Logs `/mnt/data/scratch/coderbisect_*`.
