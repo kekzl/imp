@@ -30,7 +30,11 @@ struct BatchVerifyState {
     int32_t* d_row_tables = nullptr;
     int32_t* d_argmax = nullptr;
     PinnedBuffer h_stage, h_row_tables, h_argmax;
-    std::unordered_map<int, int> spare_of;  // req.id -> spare slot
+    // Drafts per request (rows per request = depth + 1): 1, or speculative.mtp_batch_verify_k on the bound
+    // verify.
+    int depth = 1;
+    std::unordered_map<int, int> spare_of;   // req.id -> spare slot (state after all depth + 1 rows)
+    std::unordered_map<int, int> spare2_of;  // req.id -> second spare (state after 2 rows), depth 2 only
     std::vector<int> free;
     // Factored spare (speculative.factored_spare,
     // docs/plans/2026-09-12-factored-verify-spare.md): drafted row as (g, k,
@@ -206,6 +210,17 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 // and drafted rows are at least half the batch (an undrafted row forwards a pad that is never accepted).
 [[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted) {
     return rows_cap >= 2 && decoding >= 2 && decoding <= rows_cap && drafted >= 1 && 2 * drafted >= decoding;
+}
+// speculative.mtp_batch_verify_k clamped to what the step stages: 1 or 2 drafts per request.
+[[nodiscard]] constexpr int mtp_bound_verify_depth(int key) { return std::clamp(key, 1, 2); }
+// Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
+// snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).
+[[nodiscard]] constexpr int bound_verify_state_slot(int matched, int depth) {
+    return matched <= 0 ? 0 : (matched >= depth ? 1 : 2);
+}
+// Staged ints: [tok | pos | row ctx] per row, [seq | out | snap x2] per request, [chunk_len, snap_n x2].
+[[nodiscard]] constexpr size_t batch_verify_stage_ints(int cap_rows, int cap_seq) {
+    return (3ull * cap_rows) + (4ull * cap_seq) + 3;
 }
 // MTP draft KV slots: one per batch slot whenever the batched verify runs, else
 // speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).

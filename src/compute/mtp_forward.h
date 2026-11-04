@@ -275,7 +275,8 @@ constexpr int kMtpFeedRows = 256;
 // Rows of one slot must be in ascending position order (append precedes the scan that reads
 // it). Writes final_norm of every row to ws.d_b_h_final[n_rows,H]; caller advances
 // mtp_pos/slot_pos. post_norm (optional): apply target's final norm before feed
-// (diagnostics.mtp_prenorm_h, upstream convention).
+// (diagnostics.mtp_prenorm_h, upstream convention). h_tokens may be a device pointer (cudaMemcpyDefault):
+// the bound verify's chained second draft feeds draft 1 without a sync.
 [[nodiscard]] bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
                              int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
                              const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,

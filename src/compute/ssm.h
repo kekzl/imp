@@ -78,14 +78,15 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
 // (conv_snap/d_snap_n/conv_prev) is written from group 0 only.
 // out_slots/snap_slots (batched speculative verify): group z commits at d_real_n rows into
 // out_slots[z] instead of in place, and at d_snap_n rows into snap_slots[z]. snap_slots
-// requires out_slots; snap_slots[z] may equal seq_slots[z].
+// requires out_slots; snap_slots[z] may equal seq_slots[z]. snap_rows 2: also d_snap_n[1] rows
+// into snap_slots[n_seq + z] (the 3-row bound verify).
 void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
                                          int n_seq, const Tensor& x_in, const Tensor& weight,
                                          const Tensor& bias, float* x_out_f32, int conv_kernel,
                                          cudaStream_t stream, const int* d_real_n = nullptr,
                                          void* conv_snap = nullptr, const int* d_snap_n = nullptr,
                                          const void* conv_prev = nullptr, const int* out_slots = nullptr,
-                                         const int* snap_slots = nullptr);
+                                         const int* snap_slots = nullptr, int snap_rows = 1);
 
 // Mamba2 SSM scan decode (single step/sequence). x:[inner_size]; B,C:[n_groups*state_size];
 // dt:[n_heads] (raw, pre-softplus); A_log/D/dt_bias:[n_heads] float;

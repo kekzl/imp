@@ -39,6 +39,8 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     std::vector<int32_t> toks;
     std::vector<int> src, slots, pos, last_row, bound_g;
+    // Second draft (bv_.depth 2): one chained head row per bound request at its next position.
+    std::vector<int> chain_slot, chain_pos;
     for (int g = 0; g < N; ++g) {
         Request& req = *reqs[g];
         // Plain batched steps before this verify (speculative.mtp_batch_verify); a failed feed unbinds.
@@ -67,13 +69,14 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         }
         last_row.push_back(static_cast<int>(toks.size()) - 1);
         bound_g.push_back(g);
+        chain_slot.push_back(ws->cur_slot);
+        chain_pos.push_back(ws->mtp_pos + emitted[g]);
     }
     if (bound_g.empty())
         return;
     const int n = static_cast<int>(toks.size());
     const int m = static_cast<int>(bound_g.size());
     const int hidden_dim = model_->config_.d_model;
-    const int vocab_size = model_->config_.vocab_size;
     auto fail_all = [&](const char* why) {
         for (int g : bound_g) {
             mtp_activate_(reqs[g]->id);
@@ -95,7 +98,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     }
     // The next draft per request: LM head over the last fed row of each.
-    if (m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
+    if (2 * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
         fail_all("batched draft: too many rows");
         return;
     }
@@ -109,8 +112,10 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         fail_all("batched draft: LM head unavailable");
         return;
     }
-    std::vector<int32_t> h_out(static_cast<size_t>(m));
-    if (cudaMemcpyAsync(h_out.data(), ws->d_chain_tokens, static_cast<size_t>(m) * sizeof(int32_t),
+    const bool chain = bv_.depth > 1 && mtp_batched_chain_(last_row, chain_slot, chain_pos, stream);
+    const int n_out = chain ? 2 * m : m;
+    std::vector<int32_t> h_out(static_cast<size_t>(n_out));
+    if (cudaMemcpyAsync(h_out.data(), ws->d_chain_tokens, static_cast<size_t>(n_out) * sizeof(int32_t),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
         cudaStreamSynchronize(stream) != cudaSuccess) {
         fail_all("batched draft: D2H");
@@ -125,25 +130,47 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     }
     for (int i = 0; i < m; ++i) {
         const int g = bound_g[i];
-        Request& req = *reqs[g];
-        mtp_activate_(req.id);
-        const int32_t* t = req.output_tokens.data() + req.output_tokens.size() -
-                           static_cast<size_t>(emitted[g]);
-        for (int j = 0; j < emitted[g]; ++j)
-            mtp_active_.history.push_back(t[j]);
-        ws->mtp_pos += emitted[g];
-        mtp_active_.chains.clear();
-        const int32_t tok = h_out[static_cast<size_t>(i)];
-        if (tok < 0 || tok >= vocab_size) {
-            mtp_active_.pending.clear();
-            mtp_active_.draft_ctx = -1;
-            mtp_pool_.pending_prediction = -1;
-        } else {
-            mtp_active_.pending.assign(1, tok);
-            mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
-            mtp_pool_.pending_prediction = tok;
-        }
+        const int32_t tok2 = chain ? h_out[static_cast<size_t>(m) + i] : -1;
+        mtp_batched_set_draft_(*reqs[g], emitted[g], h_out[static_cast<size_t>(i)], tok2);
     }
+}
+
+// Second draft per bound request: (draft 1, the head's own final-norm row) at the request's next position in
+// one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (draft 1 never leaves the
+// device). The chained KV row is speculative: the next feed starts at that position and overwrites it.
+bool Engine::mtp_batched_chain_(const std::vector<int>& last_row, const std::vector<int>& slots,
+                                const std::vector<int>& pos, cudaStream_t stream) {
+    auto* ws = mtp_ws_storage_.get();
+    const int m = static_cast<int>(last_row.size());
+    if (ws->max_seq_len > 0 && *std::max_element(pos.begin(), pos.end()) + 1 > ws->max_seq_len)
+        return false;
+    return imp::mtp_feed_rows_multislot(ws->d_chain_tokens, ws->d_b_h_final, last_row.data(), m, slots.data(),
+                                        pos.data(), *model_->mtp_, model_->tok_emb_, *ws,
+                                        model_->config_.d_model, stream) &&
+           executor_->lm_head_rows_argmax(ws->d_b_h_final, m, ws->d_chain_tokens + m, stream);
+}
+
+// A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =
+// one draft; the request's own mtp_k bounds the chain) become its pending chain for the next verify.
+void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2) {
+    auto* ws = mtp_ws_storage_.get();
+    const int vocab_size = model_->config_.vocab_size;
+    mtp_activate_(req.id);
+    const int32_t* t = req.output_tokens.data() + req.output_tokens.size() - static_cast<size_t>(emitted);
+    mtp_active_.history.insert(mtp_active_.history.end(), t, t + emitted);
+    ws->mtp_pos += emitted;
+    mtp_active_.chains.clear();
+    if (tok < 0 || tok >= vocab_size) {
+        mtp_active_.pending.clear();
+        mtp_active_.draft_ctx = -1;
+        mtp_pool_.pending_prediction = -1;
+        return;
+    }
+    mtp_active_.pending.assign(1, tok);
+    if (tok2 >= 0 && tok2 < vocab_size && mtp_request_k_(req) >= 2)
+        mtp_active_.pending.push_back(tok2);
+    mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
+    mtp_pool_.pending_prediction = tok;
 }
 
 void Engine::mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,

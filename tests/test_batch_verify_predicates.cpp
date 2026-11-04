@@ -172,7 +172,10 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     EXPECT_EQ(cfg.speculative.mtp_batch_verify, 4) << "default on: 2-4 chats verify together";
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "slot-swapping spares, one per row";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2) << "default: 2 drafts, 3 rows per request";
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 8) << "slot-swapping spares, two per row at 2 drafts";
+    cfg.speculative.mtp_batch_verify_k = 1;
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "one draft: one spare per row";
     EXPECT_TRUE(batch_verify_wants_bufs(cfg, &m, 32));
     EXPECT_FALSE(batch_verify_on(cfg, &m)) << "the full batch_verify stays off";
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 32), h) << "not one head KV slot per batch slot";
@@ -220,6 +223,22 @@ TEST(BatchVerifyPredicates, BoundVerifyRunsWhenHalfTheRowsDraft) {
     EXPECT_FALSE(mtp_bound_verify_fits(4, 2, 0));
     EXPECT_FALSE(mtp_bound_verify_fits(4, 1, 1)) << "a lone request takes the single verify";
     EXPECT_FALSE(mtp_bound_verify_fits(0, 2, 2)) << "off";
+}
+
+// speculative.mtp_batch_verify_k: 1 + k accepted rows name the slot that holds the state after them.
+TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
+    EXPECT_EQ(mtp_bound_verify_depth(0), 1);
+    EXPECT_EQ(mtp_bound_verify_depth(2), 2);
+    EXPECT_EQ(mtp_bound_verify_depth(5), 2) << "the step stages two snapshots at most";
+    // One draft: reject keeps the live slot (row-1 snapshot), accept takes the spare (both rows).
+    EXPECT_EQ(bound_verify_state_slot(0, 1), 0);
+    EXPECT_EQ(bound_verify_state_slot(1, 1), 1);
+    // Two drafts: 1 accepted takes the second spare (row-2 snapshot), 2 the spare (all 3 rows).
+    EXPECT_EQ(bound_verify_state_slot(0, 2), 0);
+    EXPECT_EQ(bound_verify_state_slot(1, 2), 2);
+    EXPECT_EQ(bound_verify_state_slot(2, 2), 1);
+    // Stage: 3 ints per row, 4 per request (seq, out, 2 snapshots), 3 row counts.
+    EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
 }
 
 }  // namespace
