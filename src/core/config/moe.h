@@ -86,6 +86,11 @@ struct MoE {
     // Decode on the device expert cache: the miss gather runs on a side stream while the routed
     // experts that hit run their GEMVs; the misses follow once the gather lands. Output bits unchanged.
     bool expert_gather_overlap = true;
+    // Decode (n = 1) on the device expert cache with expert_gather_overlap: layer L's MoE input through
+    // layer L+1's router predicts L+1's top-k, and up to this many predicted keys that are not resident are
+    // gathered behind L's misses. 0 = off; at most 32. Output bits unchanged (pending keys wait on the
+    // gather). Flash-Next server, 6 prompts: 0 / 1 / 2 / 3 / 4 = 91.5 / 92.3 / 93.7 / 91.9 / 90.3 tok/s.
+    int expert_prefetch = 2;
     // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
     // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +
     // top-k. F16 router, <= 128 experts, no group limit; off under runtime.deterministic.

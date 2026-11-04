@@ -26,7 +26,8 @@ def records(raw, top_k):
     """Yield (layer, [experts]) from either list-of-lists or a flat int stream."""
     if raw and isinstance(raw[0], (list, tuple)):
         for r in raw:
-            yield int(r[0]), [int(x) for x in r[1:]]
+            if int(r[0]) < 1000:  # 1000 + layer: next-layer predictions (expert_prefetch_sim.py)
+                yield int(r[0]), [int(x) for x in r[1:]]
         return
     stride = top_k + 1
     for i in range(0, len(raw) - stride + 1, stride):

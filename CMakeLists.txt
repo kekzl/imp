@@ -570,6 +570,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
+    src/exec/expert_cache_prefetch.cu
     src/exec/expert_cache_device_tier.cpp
     src/exec/executor_qsa.cpp
     src/compute/qsa_indexer.cu
