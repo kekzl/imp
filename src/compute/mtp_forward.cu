@@ -1644,7 +1644,7 @@ bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_a
         }
         mtp_attn_scan_slots(ws.d_b_q_attn, ws.d_k_cache_base, ws.d_v_cache_base, ws.d_b_attn_out, d_slots,
                             d_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n, nh, nkv, hdh, stream,
-                            ws.max_seq_len, ws.d_slot_hi);
+                            ws.max_seq_len, ws.d_slot_hi, ws.d_scan_part);
     };
     if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/n, /*rope_pos=*/0, d_pos, stream,
                              kv_attn))
