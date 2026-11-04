@@ -1,0 +1,8 @@
+[ PROBE    ] C=64 kU=8 tpb=128: 910.1 us, 1397 GB/s
+[ PROBE    ] C=128 kU=8 tpb=128: 763.8 us, 1665 GB/s
+[ PROBE    ] C=256 kU=8 tpb=128: 760.9 us, 1671 GB/s
+[ PROBE    ] C=512 kU=8 tpb=128: 772.2 us, 1646 GB/s
+[ PROBE    ] C=64 kU=4 tpb=128: 902.5 us, 1409 GB/s
+[ PROBE    ] C=512 kU=4 tpb=128: 758.5 us, 1676 GB/s
+[ PROBE    ] C=512 kU=2 tpb=128: 764.2 us, 1664 GB/s
+[ PROBE    ] C=512 kU=8 tpb=256: 775.4 us, 1640 GB/s

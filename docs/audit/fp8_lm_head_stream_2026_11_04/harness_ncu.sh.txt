@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ncu on one FP8 head variant (sweep test, M=248320): ./fp8head_ncu.sh <rows> <nt-code> ...
+set -u
+WT=${WT:-$PWD}
+R=${1:-1}
+shift
+OUT=/mnt/data/scratch/fp8head_ncu_r${R}_$(date +%H%M%S)
+mkdir -p "$OUT" && chmod 777 "$OUT"
+METRICS=sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,dram__bytes.sum,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active,launch__grid_size,launch__registers_per_thread,launch__occupancy_limit_registers,launch__waves_per_multiprocessor,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio,smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio,smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,smsp__issue_active.avg.pct_of_peak_sustained_active
+for NT in "$@"; do
+  docker run --rm --gpus all --user root -v "$WT":/src -w /src \
+    -v /opt/nvidia/nsight-compute/2026.2.1:/ncu -v "$OUT":/out \
+    -e IMP_FP8_HEAD_SWEEP=1 -e IMP_FP8_HEAD_M=248320 -e IMP_FP8_HEAD_ROWS=$R -e IMP_FP8_HEAD_NT=$NT imp:toolchain \
+    /ncu/ncu --clock-control none --kernel-name "regex:fp8_head_.*" --launch-skip 1500 --launch-count 1 \
+      --metrics "$METRICS" --csv --page raw \
+      build-dev/test-compute --gtest_filter='*RowscaleFp32HeadRowTileSweep*' > "$OUT/nt$NT.csv" 2> "$OUT/nt$NT.err"
+done
+echo "$OUT"

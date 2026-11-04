@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# imp-server A/B from binary copies (arm A / arm B), Qwen3.8-27B-NVFP4-vllm defaults (MTP on), c1 + c4 per server.
+set -u
+WT=${WT:-$PWD}
+MODEL=${MODEL:-Qwen3.8-27B-NVFP4-vllm}
+PORT=8360
+TRIALS=${TRIALS:-3}
+WAVES=${WAVES:-3}
+LOG=/mnt/data/scratch/fp8head_server_ab_$(date +%H%M%S).log
+start() {
+  docker rm -f imp-fp8head-srv >/dev/null 2>&1
+  docker run -d --name imp-fp8head-srv --gpus all -v $HOME/models:/models:ro -v "$1":/bin_arm:ro \
+    -p $PORT:$PORT --entrypoint /bin_arm/imp-server imp:toolchain --model /models/$MODEL --port $PORT \
+    --host 0.0.0.0 --max-concurrent 4 --set runtime.max_batch_size=32 --set runtime.max_seq_len=4096 \
+    --set kv_cache.max_blocks=2387 >/dev/null
+  for _ in $(seq 1 180); do
+    sleep 2
+    curl -sf http://127.0.0.1:$PORT/health >/dev/null 2>&1 && return 0
+    [ -z "$(docker ps -q -f name=imp-fp8head-srv)" ] && { docker logs imp-fp8head-srv 2>&1 | tail -20 >> "$LOG"; return 1; }
+  done
+  return 1
+}
+arm() {
+  ~/.claude/skills/gpu-stats/gpu-busy-check.sh >/dev/null || { echo "GPU BUSY before $1" | tee -a "$LOG"; exit 2; }
+  start "$2" || { echo "server failed $1" | tee -a "$LOG"; exit 3; }
+  for C in 1 4; do
+    echo "== arm $1 trial $3 c$C ==" >> "$LOG"
+    docker run --rm --network host -e MODEL_NAME="$MODEL" -v "$WT/tools/analysis:/h:ro" python:3.12-slim \
+      python -I /h/conc_client.py $PORT $C $WAVES "$1$3c$C" >> "$LOG" 2>&1
+  done
+  docker rm -f imp-fp8head-srv >/dev/null 2>&1
+  sleep 3
+}
+for t in $(seq 1 $TRIALS); do
+  if [ $((t % 2)) -eq 1 ]; then arm A /mnt/data/scratch/fp8head_armA $t; arm B /mnt/data/scratch/fp8head_armB $t
+  else arm B /mnt/data/scratch/fp8head_armB $t; arm A /mnt/data/scratch/fp8head_armA $t; fi
+done
+echo "$LOG"
+grep -E "==|MEDIAN|BUSY|failed" "$LOG"

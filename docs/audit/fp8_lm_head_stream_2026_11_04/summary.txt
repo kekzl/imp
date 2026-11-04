@@ -1,0 +1,32 @@
+# FP8 LM head streamed through shared memory (2026-11-04), base d72a4aa1, RTX 5090, live clocks 2850-2887 / 13801 MHz
+# Mechanism: fp8_head_mma_kernel loads mma fragments from global, one warp instruction = 8 rows x 64 B (half lines).
+# probe_read_shape.txt: same matrix, 64 B per row per instruction 1397-1409 GB/s, >= 128 B 1640-1676 GB/s.
+# Fix: fp8_head_cpasync_kernel<1, 4, 3> (32 rows per warp, 3-stage cp.async ring, 4 rows x 128 B per instruction),
+# passes of <= 16 rows; quarters folded like the split-K reduction, bit-identical (FP8GemmTest.Rowscale*).
+
+isolated [248320 x 5120], cudaEvent, 200 iters x 5, best   split-K us    streamed us
+rows 1                                                    926.6         771.5
+rows 4                                                    930.4         777.4
+rows 16                                                   960.0         791.6
+rows 29 (split-K both)                                    905.8         906.3
+
+ncu rows 1 (ncu_rows1*.txt)               split-K      streamed
+dram throughput % of peak                 78.53        93.57
+long_scoreboard stalls per issue          55.29        9.56
+warps active %                            23.41        7.98
+
+e2e imp-cli --bench, pp512, tg256, ngram off, A B B A A B (e2e_*.txt)   arm A   arm B   delta
+Qwen3.8-27B-NVFP4-vllm tg256 mean                                       96.54   97.98   +1.49 %, 3/3
+Qwen3-8B-NVFP4-cortecs tg256 mean                                       286.94  291.48  +1.58 %, 3/3
+
+imp-server Qwen3.8-27B defaults (MTP on), conc_client 10 waves, 3 alternating trials (server_c1_c4_waves10.txt)
+c1 medians A 135.6 / 130.0 / 126.6, B 134.2 / 132.1 / 134.2 (B ahead 2/3 pairs)
+c4 medians A 495.6 / 494.7 / 506.7, B 519.8 / 490.5 / 514.3 (B ahead 2/3 pairs)
+MTP acceptance noise per wave exceeds the ~1.5 % head saving; the spec-off imp-cli arm is the resolving signal.
+
+Refuted on the way (sweep_rowseq_refuted.txt; codes 10xy = row-sequential direct-load kernel, kNT x, kU y):
+8-32 rows per warp 1085-1093 GB/s, 64 rows 1390, at 48-180 regs and up to 61.82 % warps active (ncu_rows1.txt):
+more warps and longer per-row streams do not lift a half-line load. sweep_cpasync*.txt codes 20xy = streamed kernel,
+kNT x, stages y; 2043 shipped (kNT 4, 3 stages); 2014 loses at 4 rows, 2018 at >= 3 rows, every streamed config loses at 29-32 rows.
+Harness md5 (committed copies, host paths replaced by WT / $HOME): harness_e2e_ab.sh.txt c50361eb48c4ac657c0f24748b2f1d1f,
+harness_server_ab.sh.txt a5db560a74613d63e0674aa76ef6b559, harness_ncu.sh.txt f086b19a6e65de4c4e07e7aa79c058ca.
