@@ -24,6 +24,9 @@ constexpr int kMtpTopWBlocks = 64;
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
 // scratch: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
 constexpr int kMtpFeedRows = 256;
+// Ints of the batched head pass's packed tables (4n + 3m, m <= n <= kMtpFeedRows), after the
+// 4 x kMtpFeedRows host-table feed tables in the same allocation.
+constexpr int kMtpPassTableInts = 8 * kMtpFeedRows;
 
 // ws.d_scan_part: [num_heads, kMtpScanMaxSplits, head_dim + 2] FP32, kMtpScanPartOffset bytes into
 // the d_mtp_position allocation.
@@ -164,7 +167,7 @@ inline void feed_bytes(const MtpWorkspaceShape& s, Tally& t) {
         return;
     const size_t H = static_cast<size_t>(s.hidden_dim);
     const size_t n = kMtpFeedRows;
-    t.add(4 * n * sizeof(int32_t));
+    t.add(((4 * n) + kMtpPassTableInts) * sizeof(int32_t));
     const size_t rows[] = {H,
                            H,
                            2 * H,

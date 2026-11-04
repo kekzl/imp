@@ -1,0 +1,32 @@
+# /mnt/data/scratch/mtpfeed_gates: imp:mtpfeed-new, default server, Qwen3.8-27B-NVFP4-vllm
+degen_suite exit=0
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (40s)
+multiturn_deep exit=0
+MULTITURN: all 74 turns clean, context grew to see table
+facts4 exit=0
+ok want=Paris tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of France is Paris.'
+ok want=Tokyo tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Japan is Tokyo.'
+ok want=Rome tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Italy is Rome.'
+ok want=Berlin tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Germany is Berlin.'
+FACTS4 PASS
+[06:50:05.691][INFO] pre_dequant_phase3_nvfp4_decode.cpp:263: MTP draft LM head: NVFP4 copy of the FP16 head (682.0 MiB), verification stays on FP8
+[06:50:10.967][INFO] engine_spec_mtp.cpp:910: MTP chain lm_head: NVFP4 decode-cache view engaged (N=248320 K=5120)
+[06:50:40.280][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=4 rows=12 drafted=8 accepted=8 emitted=12
+stderr matches: 0
+GATES DONE
+# MtpFeedBatch GPU tests (build-dev, test-moe-gdn):
+[       OK ] MtpFeedBatchTest.BatchedFeedMatchesPerPairLoop (352 ms)
+[       OK ] MtpFeedBatchTest.MultiSlotFeedMatchesPerSlotBatches (5 ms)
+[       OK ] MtpFeedBatchTest.PackedPassTablesMatchHostTablesBytewise (7 ms)
+[       OK ] MtpFeedBatchTest.SecondBatchContinuesAtCorrectPosition (8 ms)
+[       OK ] MtpFeedBatchTest.RefusesUnsupportedOrOverCapacity (4 ms)
+[       OK ] MtpFeedBatchTest.AllocatedBytesEqualThePlanMirror (4 ms)
+[       OK ] MtpFeedBatchTest.AttnScanMatchesSoftmaxReference (4359 ms)
+[  PASSED  ] 7 tests.
+# mutant: out.chain_pos = the last-row table (mtp_pass_tables.cpp):
+[  FAILED  ] MtpFeedBatchTest.PackedPassTablesMatchHostTablesBytewise
+[  FAILED  ] MtpFeedBatchTest.PackedPassTablesMatchHostTablesBytewise (5 ms)
+K slot 1
+K slot 2
+V slot 1
+V slot 2

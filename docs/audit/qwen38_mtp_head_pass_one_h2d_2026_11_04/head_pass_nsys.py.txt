@@ -1,0 +1,103 @@
+"""Batched MTP head pass windows from an nsys sqlite: per pass host wall, API call counts/time, GPU busy.
+
+A pass = a cluster of mtp_gather_rows_kernel launches (feed, draft gather, chain feed) within 6 ms, from
+the first H2D memcpy API call <= 300 us before the first gather launch to the end of the first
+cudaStreamSynchronize after the last gather launch. Usage: head_pass_nsys.py file.sqlite [label]
+"""
+import bisect
+import collections
+import sqlite3
+import statistics
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+label = sys.argv[2] if len(sys.argv) > 2 else ""
+s = dict(db.execute("SELECT id, value FROM StringIds"))
+api = [(st, en, s[n], c) for st, en, n, c in
+       db.execute("SELECT start, end, nameId, correlationId FROM CUPTI_ACTIVITY_KIND_RUNTIME ORDER BY start")]
+kern = {c: (st, en, s.get(n, "?")) for st, en, n, c in
+        db.execute("SELECT start, end, shortName, correlationId FROM CUPTI_ACTIVITY_KIND_KERNEL")}
+mem = {c: (st, en, b, k, sk) for st, en, b, k, sk, c in
+       db.execute("SELECT start, end, bytes, copyKind, srcKind, correlationId FROM CUPTI_ACTIVITY_KIND_MEMCPY")}
+gpu = sorted([(v[0], v[1]) for v in kern.values()] + [(v[0], v[1]) for v in mem.values()])
+acts_all = sorted([(v[0], v[1], v[2]) for v in kern.values()] +
+                  [(v[0], v[1], f"memcpy kind {v[3]} {v[2]} B") for v in mem.values()])
+act_starts = [a[0] for a in acts_all]
+
+gathers = [i for i, a in enumerate(api) if a[3] in kern and kern[a[3]][2] == "mtp_gather_rows_kernel"]
+clusters, cur = [], []
+for i in gathers:
+    if cur and api[i][0] - api[cur[-1]][0] > 6_000_000:
+        clusters.append(cur)
+        cur = []
+    cur.append(i)
+if cur:
+    clusters.append(cur)
+
+
+def busy(t0, t1):
+    tot, last = 0, t0
+    for st, en in gpu:
+        if en <= t0 or st >= t1:
+            continue
+        st, en = max(st, last), min(en, t1)
+        if en > st:
+            tot += en - st
+            last = en
+    return tot
+
+
+rows = []
+gaps = collections.Counter()
+for cl in clusters:
+    if len(cl) not in (2, 3):
+        continue
+    first, last = cl[0], cl[-1]
+    j = first
+    k = first
+    while k > 0 and api[k - 1][0] > api[first][0] - 300_000:
+        k -= 1
+        a = api[k]
+        if a[2].startswith("cudaMemcpyAsync") and a[3] in mem and mem[a[3]][3] == 1:
+            j = k
+    end = last
+    while end < len(api) and not api[end][2].startswith("cudaStreamSynchronize"):
+        end += 1
+    if end == len(api):
+        continue
+    t0, t1 = api[j][0], api[end][1]
+    calls = collections.Counter()
+    ctime = collections.Counter()
+    pageable_h2d = 0
+    for a in api[j:end + 1]:
+        name = a[2].split("_v")[0]
+        calls[name] += 1
+        ctime[name] += a[1] - a[0]
+        if a[3] in mem and mem[a[3]][3] == 1 and mem[a[3]][4] == 1:
+            pageable_h2d += 1
+    sync_wait = api[end][1] - api[end][0]
+    # GPU idle gaps inside the window, attributed to the activity that ends the gap
+    lo = bisect.bisect_left(act_starts, t0 - 20_000_000)
+    hi = bisect.bisect_right(act_starts, t1)
+    acts = [a for a in acts_all[lo:hi] if a[1] > t0]
+    cursor = t0
+    for st, en, nm in acts:
+        if st > cursor:
+            gaps[nm[:60]] += st - cursor
+        cursor = max(cursor, en)
+    gaps["<tail to window end>"] += max(0, t1 - cursor)
+    rows.append((t1 - t0, busy(t0, t1), calls, ctime, sync_wait, pageable_h2d))
+
+print(f"{label} passes {len(rows)} (of {len(clusters)} gather clusters)")
+if rows:
+    med = lambda xs: statistics.median(xs) / 1000.0
+    print(f"{label} wall median {med([r[0] for r in rows]):.1f} us, gpu busy {med([r[1] for r in rows]):.1f} us, "
+          f"gpu idle {med([r[0] - r[1] for r in rows]):.1f} us, final sync wait {med([r[4] for r in rows]):.1f} us")
+    print(f"{label} gpu idle per pass by the activity ending the gap (mean us/pass, top 12):")
+    for nm, t in gaps.most_common(12):
+        print(f"{label}   {t / len(rows) / 1000.0:8.1f}  {nm}")
+    names = sorted({n for r in rows for n in r[2]})
+    for n in names:
+        c = statistics.median([r[2][n] for r in rows])
+        t = statistics.median([r[3][n] for r in rows]) / 1000.0
+        print(f"{label}   {n:40s} calls/pass {c:5.1f}  host us/pass {t:.1f}")

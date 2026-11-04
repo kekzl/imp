@@ -48,4 +48,7 @@ void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, 
 [[nodiscard]] bool mtp_qwen4exp_layer(const void* d_h_prev, const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim,
                         cudaStream_t stream);
 
+// Pinned staging + copy event of the batched head pass's tables (mtp_pass_tables.cpp); false = none.
+[[nodiscard]] bool mtp_pass_staging_create(MtpDraftWorkspace& ws);
+
 }  // namespace imp

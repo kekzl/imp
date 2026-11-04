@@ -57,6 +57,7 @@ struct Request;          // runtime/request.h: complete only in the TUs that rea
 struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
 struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
+struct MtpPassTables;      // src/compute/mtp_forward.h
 struct MtpWorkspaceShape;  // src/compute/mtp_workspace_bytes.h
 struct EncoderWorkspace;   // src/compute/encoder_forward.h
 struct NvFP4QuantResult;   // src/quant/nvfp4_quant.h
@@ -1083,8 +1084,8 @@ private:
     // The NVFP4 draft LM head (speculative.mtp_nvfp4_head) the lone and batched chains read, or nullptr.
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
     // speculative.mtp_batch_verify_k 2: one more head pass drafting each bound request's second token.
-    [[nodiscard]] bool mtp_batched_chain_(const std::vector<int>& last_row, const std::vector<int>& slots,
-                                          const std::vector<int>& pos, const NvFP4QuantResult* head,
+    // tab: the pass's tables, already on the device.
+    [[nodiscard]] bool mtp_batched_chain_(const MtpPassTables& tab, const NvFP4QuantResult* head,
                                           cudaStream_t stream);
     void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
     // True when the request's context advanced without MTP pairs (async-loop
