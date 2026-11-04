@@ -46,6 +46,9 @@ namespace imp {
 // their maxima; a later call with a smaller request hits the >= guards inside
 // ensure_* and allocates nothing.
 void Engine::prewarm_spec_scratch_() {
+    // Plan row "MTP draft workspace", taken before Serving (Qwen3.8-27B: 360 MiB after init_complete
+    // until #3038); arms MTP, so the scratch below is prewarmed for it too.
+    take_planned_mtp_workspace_();
     const auto& scfg = runtime_config_.speculative;
     const bool spec_on = scfg.ngram || scfg.suffix || scfg.capture || mtp_spec_decode_enabled();
     if (!spec_on || !executor_)

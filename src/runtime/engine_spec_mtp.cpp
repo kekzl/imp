@@ -591,6 +591,114 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         mtp_unbind_("prefill feed failed (kv cap or forward error)");
 }
 
+// MLP dims come from the HEAD tensors, not the main-model config: the dense 27B checkpoint pairs a
+// MoE-free MTP head with a plain SwiGLU MLP (mapped onto shared_expert fields); the 35B head's expert
+// d_ff differs from the main model's. false = qwen4_exp head without device FP8 experts or hc width.
+static bool mtp_head_mlp_dims(const MtpHead& head, int n_experts_active, MtpWorkspaceShape& s) {
+    // Two expert layouts. Qwen packs gate+up into one 3-D stack, so its per-expert
+    // d_ff is half the packed row count; Nemotron keeps per-expert 2-D weights and
+    // has no gate half, so d_ff is the up_proj row count as-is.
+    const bool head_moe_packed = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
+    const bool head_moe_per_expert = head.router.data != nullptr && !head.experts_up.empty() &&
+                                     head.experts_up[0].data != nullptr;
+    // Qwen4Exp: per-expert FP8 gate/up/down, uploaded behind device pointer tables.
+    const bool head_moe_fp8 = head.router.data != nullptr && head.fp8_gate_up_tab != nullptr &&
+                              !head.experts_fp8.empty();
+    const bool head_moe = head_moe_packed || head_moe_per_expert || head_moe_fp8;
+    s.n_experts = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
+    s.top_k = head_moe ? n_experts_active : 0;
+    s.expert_d_ff = head_moe_packed       ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
+                    : head_moe_per_expert ? static_cast<int>(head.experts_up[0].shape[0])
+                    : head_moe_fp8        ? static_cast<int>(head.experts_fp8[0].gate_proj.shape[0])
+                                          : 0;
+    if (head.layout == MtpLayout::Qwen4Exp && (!head_moe_fp8 || head.hc_count <= 0))
+        return false;
+    s.hc_count = head.hc_count;
+    s.hc_lowrank = head.hc_count > 0 ? static_cast<int>(head.attn_hc.mix_down.shape[0]) : 0;
+    // The shared expert is sized off gate_proj on the Qwen layout; the Nemotron
+    // one is non-gated, so up_proj is the only tensor that carries the width.
+    s.shared_d_ff = head.shared_expert_gate_proj.data != nullptr
+                        ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
+                    : head.shared_expert_up_proj.data != nullptr
+                        ? static_cast<int>(head.shared_expert_up_proj.shape[0])
+                        : 0;
+    return true;
+}
+
+// MTP attention dims derive from the head's q_proj/v_proj shapes (the MTP
+// attention config differs from the main model: Qwen3.6 doubles Q per head
+// for attn_output_gate). q_proj shape [2*num_heads*head_dim, hidden_dim];
+// v_proj shape [num_kv_heads*head_dim, hidden_dim]; head_dim comes from the main model, head counts are
+// back-computed.
+static void mtp_head_attn_dims(const MtpHead& head, const ModelConfig& cfg, MtpWorkspaceShape& s) {
+    if (head.q_proj.data == nullptr || head.v_proj.data == nullptr || cfg.head_dim <= 0)
+        return;
+    s.head_dim = cfg.head_dim;
+    // Qwen3.6 doubles Q per head for attn_output_gate; Nemotron does not.
+    // Assuming the doubling unconditionally can halve the wrong model's
+    // head count, which still runs and drafts from the wrong half of Q
+    // (nothing ever accepted). Decide from the tensor: match the main model's head count first, fall back to
+    // the gated reading only if that fails.
+    const int plain = static_cast<int>(head.q_proj.shape[0]) / s.head_dim;
+    const bool gated = (plain != cfg.n_heads) && (plain % 2 == 0) && (plain / 2 == cfg.n_heads);
+    s.num_heads = gated ? plain / 2 : plain;
+    s.num_kv_heads = static_cast<int>(head.v_proj.shape[0]) / s.head_dim;
+}
+
+// Every input the head's workspace is sized from; enable_mtp_spec_decode allocates it and the capacity
+// plan prices it (mtp_workspace_plan_bytes_), so the two cannot drift. false = see mtp_head_mlp_dims.
+bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
+    s = MtpWorkspaceShape{};
+    s.hidden_dim = model_->config_.d_model;
+    s.vocab_size = model_->config_.vocab_size;
+    const auto& head = *model_->mtp_;
+    if (!mtp_head_mlp_dims(head, model_->config_.n_experts_active, s))
+        return false;
+    mtp_head_attn_dims(head, model_->config_, s);
+
+    // MTP KV-cache capacity: cap at the smaller of model's max_seq_len and 16K
+    // (Phase 2.2.Attn+KV budget, ~16 MiB each for K and V at Qwen3.6 dims).
+    constexpr int kMtpKvCap = 16384;
+    s.max_seq_len = std::min(model_->config_.max_seq_len, kMtpKvCap);
+    if (s.max_seq_len <= 0)
+        s.max_seq_len = kMtpKvCap;
+
+    // Batched verify: one KV slot per batch slot, else the single one. With
+    // many slots the per-slot capacity comes from a 1 GiB budget (floor 2048
+    // rows); a request past its slot's capacity stops drafting, verify continues on its own rows.
+    s.n_kv_slots = mtp_draft_kv_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    if (s.n_kv_slots > 1 && s.num_kv_heads > 0 && s.head_dim > 0) {
+        const size_t row_bytes = 2ull * s.num_kv_heads * s.head_dim * sizeof(__half);
+        const size_t budget = 1ull << 30;
+        const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(s.n_kv_slots)));
+        s.max_seq_len = std::clamp(fit, 2048, s.max_seq_len);
+    }
+    // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8).
+    s.carry_rows = mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size);
+    // Post-norm feed scratch (diagnostics.mtp_prenorm_h): sized to the executor's token cap, the
+    // widest feed a prefill chunk can hand mtp_feed_pairs_.
+    if (runtime_config_.diagnostics.mtp_prenorm_h && head.hc_count == 0)
+        s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
+    return true;
+}
+
+size_t Engine::mtp_workspace_plan_bytes_() const {
+    // The resolved depth (server and imp-cli auto re-publish it before Engine::init) and an uploaded
+    // head: init() then takes the workspace itself (take_planned_mtp_workspace_).
+    if (runtime_config_.speculative.mtp_k <= 0 || !model_ || !model_->mtp_ || !model_->mtp_->loaded)
+        return 0;
+    MtpWorkspaceShape s;
+    return mtp_workspace_shape_(s) ? mtp_workspace_bytes(s) : 0;
+}
+
+void Engine::take_planned_mtp_workspace_() {
+    if (mtp_workspace_planned_bytes_ == 0 || mtp_ws_storage_ != nullptr)
+        return;
+    if (!enable_mtp_spec_decode(runtime_config_.speculative.mtp_k))
+        IMP_LOG_WARN("MTP workspace: the plan reserved %.1f MiB but enable failed; the server retries once",
+                     static_cast<double>(mtp_workspace_planned_bytes_) / (1024.0 * 1024.0));
+}
+
 // ── MTP spec-decode API (Phase 3 scaffolding) ─────────────────────────
 bool Engine::enable_mtp_spec_decode(int k) {
     if (k <= 0) {
@@ -606,116 +714,60 @@ bool Engine::enable_mtp_spec_decode(int k) {
         return false;
     }
     if (mtp_ws_storage_ != nullptr) {
-        IMP_LOG_WARN("enable_mtp_spec_decode: already enabled, k=%d -> %d", mtp_spec_k_, k);
+        // init() took the planned workspace at this depth already; the server's call lands here.
+        if (k != mtp_spec_k_)
+            IMP_LOG_WARN("enable_mtp_spec_decode: already enabled, k=%d -> %d", mtp_spec_k_, k);
         mtp_spec_k_ = k;
         return true;
     }
-    const int hidden_dim = model_->config_.d_model;
-    const int vocab_size = model_->config_.vocab_size;
-    // MLP dims come from the HEAD tensors, not the main-model config: the dense
-    // 27B checkpoint pairs a MoE-free MTP head with a plain SwiGLU MLP (mapped
-    // onto shared_expert fields); the 35B head's expert d_ff differs from the main model's.
-    const auto& head = *model_->mtp_;
-    // Two expert layouts. Qwen packs gate+up into one 3-D stack, so its per-expert
-    // d_ff is half the packed row count; Nemotron keeps per-expert 2-D weights and
-    // has no gate half, so d_ff is the up_proj row count as-is.
-    const bool head_moe_packed = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
-    const bool head_moe_per_expert = head.router.data != nullptr && !head.experts_up.empty() &&
-                                     head.experts_up[0].data != nullptr;
-    // Qwen4Exp: per-expert FP8 gate/up/down, uploaded behind device pointer tables.
-    const bool head_moe_fp8 = head.router.data != nullptr && head.fp8_gate_up_tab != nullptr &&
-                              !head.experts_fp8.empty();
-    const bool head_moe = head_moe_packed || head_moe_per_expert || head_moe_fp8;
-    const int n_experts = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
-    const int top_k = head_moe ? model_->config_.n_experts_active : 0;
-    const int expert_d_ff = head_moe_packed       ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
-                            : head_moe_per_expert ? static_cast<int>(head.experts_up[0].shape[0])
-                            : head_moe_fp8        ? static_cast<int>(head.experts_fp8[0].gate_proj.shape[0])
-                                                  : 0;
-    if (head.layout == MtpLayout::Qwen4Exp && (!head_moe_fp8 || head.hc_count <= 0)) {
+    MtpWorkspaceShape shape;
+    if (!mtp_workspace_shape_(shape)) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: qwen4_exp head without device FP8 experts or hc width");
         return false;
     }
-    const int hc_lowrank = head.hc_count > 0 ? static_cast<int>(head.attn_hc.mix_down.shape[0]) : 0;
-    // The shared expert is sized off gate_proj on the Qwen layout; the Nemotron
-    // one is non-gated, so up_proj is the only tensor that carries the width.
-    const int shared_d_ff = head.shared_expert_gate_proj.data != nullptr
-                                ? static_cast<int>(head.shared_expert_gate_proj.shape[0])
-                            : head.shared_expert_up_proj.data != nullptr
-                                ? static_cast<int>(head.shared_expert_up_proj.shape[0])
-                                : 0;
-
-    // MTP attention dims derive from the head's q_proj/v_proj shapes (the MTP
-    // attention config differs from the main model: Qwen3.6 doubles Q per head
-    // for attn_output_gate). q_proj shape [2*num_heads*head_dim, hidden_dim];
-    // v_proj shape [num_kv_heads*head_dim, hidden_dim]; head_dim comes from the main model, head counts are back-computed.
-    int mtp_num_heads = 0, mtp_num_kv_heads = 0, mtp_head_dim = 0;
-    if (model_->mtp_ && model_->mtp_->loaded && model_->mtp_->q_proj.data != nullptr &&
-        model_->mtp_->v_proj.data != nullptr) {
-        const int q_out = static_cast<int>(model_->mtp_->q_proj.shape[0]);
-        const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
-        mtp_head_dim = model_->config_.head_dim;
-        if (mtp_head_dim > 0) {
-            // Qwen3.6 doubles Q per head for attn_output_gate; Nemotron does not.
-            // Assuming the doubling unconditionally can halve the wrong model's
-            // head count, which still runs and drafts from the wrong half of Q
-            // (nothing ever accepted). Decide from the tensor: match the main model's head count first, fall back to the gated reading only if that fails.
-            const int plain = q_out / mtp_head_dim;
-            const bool gated = (plain != model_->config_.n_heads) && (plain % 2 == 0) &&
-                               (plain / 2 == model_->config_.n_heads);
-            mtp_num_heads = gated ? plain / 2 : plain;
-            mtp_num_kv_heads = v_out / mtp_head_dim;
-        }
-    }
-
-    // MTP KV-cache capacity: cap at the smaller of model's max_seq_len and 16K
-    // (Phase 2.2.Attn+KV budget, ~16 MiB each for K and V at Qwen3.6 dims).
-    constexpr int kMtpKvCap = 16384;
-    int mtp_kv_max = std::min(model_->config_.max_seq_len, kMtpKvCap);
-    if (mtp_kv_max <= 0)
-        mtp_kv_max = kMtpKvCap;
-
-    // Batched verify: one KV slot per batch slot, else the single one. With
-    // many slots the per-slot capacity comes from a 1 GiB budget (floor 2048
-    // rows); a request past its slot's capacity stops drafting, verify continues on its own rows.
-    const int n_kv_slots = mtp_draft_kv_slots(runtime_config_, model_.get(), config_.max_batch_size);
-    if (n_kv_slots > 1 && mtp_num_kv_heads > 0 && mtp_head_dim > 0) {
-        const size_t row_bytes = 2ull * mtp_num_kv_heads * mtp_head_dim * sizeof(__half);
-        const size_t budget = 1ull << 30;
-        const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(n_kv_slots)));
-        mtp_kv_max = std::clamp(fit, 2048, mtp_kv_max);
-    }
+    const int hidden_dim = shape.hidden_dim;
+    const int vocab_size = shape.vocab_size;
+    const int n_experts = shape.n_experts;
+    const int top_k = shape.top_k;
+    const int expert_d_ff = shape.expert_d_ff;
+    const int shared_d_ff = shape.shared_d_ff;
+    const int mtp_num_heads = shape.num_heads;
+    const int mtp_num_kv_heads = shape.num_kv_heads;
+    const int mtp_head_dim = shape.head_dim;
+    const int mtp_kv_max = shape.max_seq_len;
     auto ws = std::make_unique<imp::MtpDraftWorkspace>();
-    // set_alloc_phase(Serving) fires at the end of engine init, but this API
-    // is exposed AFTER context creation and the server calls it before any
-    // request: init traffic sitting on the wrong side of the boundary, not an
-    // invariant breach. Labelled (not exempted) via AllocPhaseScope, so it stays visible in `make check-alloc-interpose` rather than masked.
+    // Taken inside Engine::init when the plan reserved it (take_planned_mtp_workspace_); an API caller
+    // enabling later lands after set_alloc_phase(Serving): init traffic on the wrong side of the
+    // boundary, labelled (not exempted) via AllocPhaseScope so `make check-alloc-interpose` sees it.
     AllocPhaseScope mtp_alloc_phase(AllocPhase::Planning, "mtp workspace");
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, n_kv_slots, head.hc_count,
-                                     hc_lowrank)) {
+                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
+                                     shape.n_kv_slots, shape.hc_count, shape.hc_lowrank)) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
-    // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8); refused = one binding, as without it.
-    (void)imp::mtp_carry_allocate(*ws, mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size));
+    // speculative.mtp_carry scratch; refused = one binding, as without it.
+    (void)imp::mtp_carry_allocate(*ws, shape.carry_rows);
     // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
     prewarm_spec_state_scratch_();
-    // Post-norm feed scratch (diagnostics.mtp_prenorm_h), inside the same
-    // labelled init scope: sized to the executor's token cap, the widest feed
-    // a prefill chunk can hand mtp_feed_pairs_.
-    if (runtime_config_.diagnostics.mtp_prenorm_h && head.hc_count == 0) {
-        const int rows = std::max(1, executor_ ? executor_->max_tokens() : mtp_kv_max);
-        const size_t bytes = static_cast<size_t>(rows) * hidden_dim * sizeof(__half);
-        if (cudaMalloc(&ws->d_prenorm_rows, bytes) == cudaSuccess) {
-            ws->prenorm_rows_cap = rows;
-        } else {
-            ws->d_prenorm_rows = nullptr;
+    if (shape.prenorm_rows > 0 && !imp::mtp_prenorm_allocate(*ws, shape.prenorm_rows))
+        IMP_LOG_WARN(
+            "enable_mtp_spec_decode: post-norm feed scratch (%d rows, %.1f MiB) failed; "
+            "feeds will refuse and drafting unbinds",
+            shape.prenorm_rows,
+            static_cast<double>(shape.prenorm_rows) * hidden_dim * sizeof(__half) / 1048576.0);
+    {
+        // Reconciliation: what the allocator took vs the plan's mirror of it.
+        const size_t want = mtp_workspace_bytes(shape);
+        const double mib = 1024.0 * 1024.0;
+        if (ws->device_bytes != want)
             IMP_LOG_WARN(
-                "enable_mtp_spec_decode: post-norm feed scratch (%d rows, %.1f MiB) failed; "
-                "feeds will refuse and drafting unbinds",
-                rows, bytes / (1024.0 * 1024.0));
-        }
+                "MTP workspace: allocated %.2f MiB, mtp_workspace_bytes prices %.2f MiB (plan row %.2f MiB)",
+                ws->device_bytes / mib, want / mib, mtp_workspace_planned_bytes_ / mib);
+        else
+            IMP_LOG_INFO("MTP workspace: %.2f MiB allocated = %s", ws->device_bytes / mib,
+                         mtp_workspace_planned_bytes_ == want ? "the plan row"
+                                                              : "mtp_workspace_bytes (not planned)");
     }
     // Configure RoPE for the MTP attention (Phase 2.2.Attn+RoPE).
     // Qwen3.5/3.6 uses partial rope (factor 0.25 -> rope_dim=64 of head_dim=256),

@@ -369,6 +369,7 @@ TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
     in.features.residual_ring_bytes = 103 * kMiB;
     in.features.spec_decode_bytes = 104 * kMiB;
     in.features.vision_tower_bytes = 105 * kMiB;
+    in.features.mtp_workspace_bytes = 106 * kMiB;
 
     auto res = plan_memory(in);
     ASSERT_TRUE(res) << res.failure.report();
@@ -385,6 +386,45 @@ TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
     EXPECT_NE(line_with(103 * kMiB), nullptr) << "features.residual_ring_bytes";
     EXPECT_NE(line_with(104 * kMiB), nullptr) << "features.spec_decode_bytes";
     EXPECT_NE(line_with(105 * kMiB), nullptr) << "features.vision_tower_bytes";
+    EXPECT_NE(line_with(106 * kMiB), nullptr) << "features.mtp_workspace_bytes";
+}
+
+// The MTP draft workspace (Qwen3.8-27B: 360 MiB) was taken after the plan with no row (#3038): KV
+// was sized over it. Its row must exist by name and cost KV exactly its bytes.
+TEST(MemoryPlan, MtpWorkspaceRowIsChargedBeforeKv) {
+    auto in = dense_input();
+    in.limits.max_batch_size = 64;
+    in.limits.max_seq_len = 131072;  // residual-bound, not want-bound: the charge must show in blocks
+    const auto without = plan_memory(in);
+    ASSERT_TRUE(without) << without.failure.report();
+    in.features.mtp_workspace_bytes = 360 * kMiB;
+    const auto with = plan_memory(in);
+    ASSERT_TRUE(with) << with.failure.report();
+
+    const PlanLine* row = nullptr;
+    for (const auto& l : with.plan.lines())
+        if (std::string(l.name) == "MTP draft workspace")
+            row = &l;
+    ASSERT_NE(row, nullptr) << "the MTP workspace lost its plan row";
+    EXPECT_EQ(row->bytes, 360 * kMiB);
+
+    const size_t per_block = in.limits.kv_block_bytes_per_layer * static_cast<size_t>(in.model.n_kv_layers);
+    const size_t freed = without.plan.kv.bytes - with.plan.kv.bytes;
+    EXPECT_GE(freed, 360 * kMiB);
+    EXPECT_LT(freed, (360 * kMiB) + per_block) << "KV gave up more than the workspace costs";
+    EXPECT_EQ(with.plan.total(), without.plan.total() - freed + (360 * kMiB));
+}
+
+TEST(MemoryPlan, MtpWorkspaceIsALeverWhenThePlanFails) {
+    auto in = dense_input();
+    in.budget_bytes = 10 * kGiB;  // under the fixed charges
+    in.features.mtp_workspace_bytes = 360 * kMiB;
+    const auto res = plan_memory(in);
+    ASSERT_FALSE(res);
+    bool named = false;
+    for (const auto& l : res.failure.lines)
+        named |= std::string(l.name) == "MTP draft workspace";
+    EXPECT_TRUE(named) << res.failure.report();
 }
 
 TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
@@ -843,4 +883,54 @@ TEST(MemoryPlan, SparseMinmaxRuleCoversEveryDtypeTheGateAdmits) {
     EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, true, false, false), nullptr);
     EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, false, true, false), nullptr);
     EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, false, false, true), nullptr);
+}
+
+// ── MTP draft workspace: the probe carries it into the plan and the report ──
+
+#include "compute/mtp_workspace_bytes.h"
+
+TEST(ShadowPlan, MtpWorkspaceReachesThePlanAndTheReport) {
+    auto p = dense_probe();
+    p.max_batch_size = 64;
+    p.max_seq_len = 32768;  // residual-bound with the optional caches granted whole
+    const auto without = plan_memory(shadow_plan_input(p));
+    p.mtp_workspace_bytes = 360 * kMiB;
+    const auto with = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(without);
+    ASSERT_TRUE(with);
+    EXPECT_LT(with.plan.kv.blocks, without.plan.kv.blocks) << "KV still sized over the MTP workspace";
+    const std::string r = shadow_plan_report(p, with, /*live_kv_blocks=*/4096);
+    EXPECT_NE(r.find("MTP draft workspace"), std::string::npos) << r;
+}
+
+// Qwen3.8-27B-NVFP4 head (H 5120, vocab 248320, 24/4 heads x 256, SwiGLU 17408), server defaults:
+// 4 head KV slots x 16384 rows, carry 256 rows. KV 256 MiB + feed 56 MiB + carry 10 MiB + small.
+static MtpWorkspaceShape qwen38_27b_head() {
+    MtpWorkspaceShape s;
+    s.hidden_dim = 5120;
+    s.vocab_size = 248320;
+    s.shared_d_ff = 17408;
+    s.num_heads = 24;
+    s.num_kv_heads = 4;
+    s.head_dim = 256;
+    s.max_seq_len = 16384;
+    s.n_kv_slots = 4;
+    s.carry_rows = 256;
+    return s;
+}
+
+TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
+    const auto s = qwen38_27b_head();
+    EXPECT_EQ(mtp_workspace_bytes(s), 340221896u);
+    auto no_kv = s;
+    no_kv.max_seq_len = 0;  // also drops the batched feed and the carry that needs it
+    EXPECT_EQ(mtp_workspace_bytes(s) - mtp_workspace_bytes(no_kv),
+              268435456u + 58720256u + 4096u + 10485760u);
+    auto prenorm = s;
+    prenorm.prenorm_rows = 4096;
+    EXPECT_EQ(mtp_workspace_bytes(prenorm) - mtp_workspace_bytes(s), 4096u * 5120 * 2);
+    auto hc = prenorm;
+    hc.hc_count = 4;  // Qwen4Exp layout: no carry, no prenorm scratch
+    hc.hc_lowrank = 0;
+    EXPECT_EQ(mtp_workspace_bytes(hc), mtp_workspace_bytes(s) - 10485760u);
 }

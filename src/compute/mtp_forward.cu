@@ -21,6 +21,7 @@
 #include "compute/rope.h"           // qknorm_rope_fused
 #include "compute/rope_yarn.cuh"    // rope_yarn (shared YaRN device math)
 #include "core/logging.h"
+#include "memory/mem_account.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -300,28 +301,44 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
 // ---------------------------------------------------------------------------
 // Workspace alloc/free
 // ---------------------------------------------------------------------------
-// ws.d_scan_part lives kScanPartOffset bytes into the d_mtp_position allocation.
-constexpr size_t kScanPartOffset = 256;
-static size_t mtp_scan_part_bytes(int num_heads, int head_dim) {
-    return sizeof(float) * num_heads * kMtpScanMaxSplits * (static_cast<size_t>(head_dim) + 2);
-}
+// ws.d_scan_part lives kMtpScanPartOffset bytes into the d_mtp_position allocation.
 static float* mtp_scan_part_of(int* pos) {
-    return pos != nullptr ? reinterpret_cast<float*>(reinterpret_cast<char*>(pos) + kScanPartOffset)
+    return pos != nullptr ? reinterpret_cast<float*>(reinterpret_cast<char*>(pos) + kMtpScanPartOffset)
                           : nullptr;
 }
+static_assert(sizeof(block_q8_1) == kMtpQ8_1BlockBytes, "mtp_workspace_bytes prices d_q8_1 at this stride");
 
-static bool mtp_dev_alloc(void** p, size_t bytes) { return cudaMalloc(p, bytes) == cudaSuccess; }
+// Every device buffer of the head goes through here: ws.device_bytes is checked against the plan's
+// mtp_workspace_bytes, and the VRAM audit shows the pool as mtp_workspace.
+static bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
+    if (cudaMalloc(p, bytes) != cudaSuccess)
+        return false;
+    ws.device_bytes += bytes;
+    MemAccount::instance().note("mtp_workspace", static_cast<std::ptrdiff_t>(bytes));
+    return true;
+}
 
 bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows) {
     if (rows <= 0 || rows > ws.feed_rows_cap || ws.hc_count > 0 || ws.d_carry != nullptr)
         return false;
     const size_t bytes = static_cast<size_t>(std::max(1, ws.n_kv_slots)) * rows * ws.hidden_dim *
                          sizeof(__half);
-    if (!mtp_dev_alloc(&ws.d_carry, bytes)) {
+    if (!mtp_dev_alloc(ws, &ws.d_carry, bytes)) {
         ws.d_carry = nullptr;
         return false;
     }
     ws.carry_rows_cap = rows;
+    return true;
+}
+
+bool mtp_prenorm_allocate(MtpDraftWorkspace& ws, int rows) {
+    if (rows <= 0 || ws.hc_count > 0 || ws.d_prenorm_rows != nullptr)
+        return false;
+    if (!mtp_dev_alloc(ws, &ws.d_prenorm_rows, static_cast<size_t>(rows) * ws.hidden_dim * sizeof(__half))) {
+        ws.d_prenorm_rows = nullptr;
+        return false;
+    }
+    ws.prenorm_rows_cap = rows;
     return true;
 }
 
@@ -331,7 +348,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
                             int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank) {
     if (hidden_dim <= 0 || vocab_size <= 0) return false;
     n_kv_slots = std::max(1, n_kv_slots);
-    auto alloc = [](void** p, size_t bytes) { return mtp_dev_alloc(p, bytes); };
+    auto alloc = [&ws](void** p, size_t bytes) { return mtp_dev_alloc(ws, p, bytes); };
     bool ok = true;
     // Phase 2.1 buffers (always allocated)
     ok &= alloc(&ws.d_emb_norm,   hidden_dim * sizeof(__half));
@@ -374,7 +391,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         ok &= alloc(&ws.d_attn_residual, hidden_dim * sizeof(__half));
         // Device int for RoPE position (single int); the split-K partials of the scan 256 B behind it.
         ok &= alloc(reinterpret_cast<void**>(&ws.d_mtp_position),
-                    kScanPartOffset + mtp_scan_part_bytes(num_heads, head_dim));
+                    kMtpScanPartOffset + mtp_scan_part_bytes(num_heads, head_dim));
         ws.d_scan_part = mtp_scan_part_of(ws.d_mtp_position);
         ok &= mtp_attn_scan_supported(head_dim);
     }
@@ -584,6 +601,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_b_up);
     frfn(ws.d_b_act);
     ws.feed_rows_cap = 0;
+    MemAccount::instance().note("mtp_workspace", -static_cast<std::ptrdiff_t>(ws.device_bytes));
+    ws.device_bytes = 0;
     ws.mtp_pos = 0;
     ws.max_seq_len = 0;
     ws.hidden_dim = ws.n_experts = ws.top_k = ws.expert_d_ff = ws.shared_d_ff = 0;
