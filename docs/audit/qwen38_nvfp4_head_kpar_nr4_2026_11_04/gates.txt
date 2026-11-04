@@ -1,0 +1,16 @@
+# /mnt/data/scratch/kpar_2026_11_04/degen_new2: imp:kpar-new (branch merged with main 173d66be), default server,
+# Qwen3.8-27B-NVFP4-vllm
+degen_suite exit=0
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (35s)
+[11:55:38.366][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=4 rows=12 drafted=8 accepted=8 emitted=12
+[11:55:39.958][INFO] engine_spec_mtp_batched.cpp:130: mtp-batched-feed: 100 calls, 8.64 rows/call, 2.42 ms/call (feed + LM head + sync)
+# make verify-fast (imp:kpar-new, IMP_VERIFY_MODELS=$HOME/models): verify fast: OK
+  decode  tg128 =  282.20 tok/s  (baseline  282.84, delta -0.23%)
+  prefill pp512 = 48015.66 tok/s  (baseline 50374.39, delta -4.68%)
+  prefill pp4096 = 48610.17 tok/s  (baseline 50318.99, delta -3.40%, FA2)
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+  graphs ON  tg256 =  283.81 tok/s   (1.65x, threshold 1.3x)
+  server c8 = 1851.72 tok/s, slowest request 544 ms  (baseline 1899.81, delta -2.53%)
+# make dev-test after merging main 173d66be: 100% tests passed, 0 tests failed out of 13
+# test-quant '*LmHeadDraftRows*:*GemmNvfp4Batched*:*KparLoop*:*Nvfp4VerifyRowParity*' (build-dev): 12 tests PASSED

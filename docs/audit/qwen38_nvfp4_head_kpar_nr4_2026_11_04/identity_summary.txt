@@ -1,0 +1,16 @@
+# /mnt/data/scratch/kpar_2026_11_04/identity: fresh server per arm, MODES greedy + side, imp:kpar-main (173d66be) vs imp:kpar-new, 1 pair
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_greedy SUMMARY turn1_tps 113.69 followup_mean_tps 117.35 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 114.90 followup_mean_tps 119.29 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {} own_peak_mib 22606
+p1_new_greedy SUMMARY turn1_tps 113.40 followup_mean_tps 116.81 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 114.30 followup_mean_tps 119.56 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {} own_peak_mib 22606
+IDENTICAL 6/6 p1_main_greedy.json vs p1_new_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_new_side.json
+DIFFER 1/12 p1_main_ov.json vs p1_new_ov.json
+DIFFER 2/12 p2_main_ov.json vs p2_new_ov.json
+DIFFER 2/12 p3_main_ov.json vs p3_new_ov.json
+DIFFER 2/12 p1_main_ov.json vs p2_main_ov.json
+DIFFER 2/12 p2_main_ov.json vs p3_main_ov.json
+DIFFER 1/12 p1_new_ov.json vs p2_new_ov.json

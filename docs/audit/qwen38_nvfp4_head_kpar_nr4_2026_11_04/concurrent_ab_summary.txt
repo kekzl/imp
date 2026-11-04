@@ -1,0 +1,16 @@
+# /mnt/data/scratch/kpar_2026_11_04/concurrent: main vs new, 3 alternating pairs, LEVELS 2 4
+harness: md5=f8ac61ec6cb4
+p1_main c1 132.70 drafted 1822 accepted 1275 c2 312.2 c4 543.5 own_peak_mib 22606 kv_blocks 3125
+p1_new c1 132.85 drafted 1822 accepted 1275 c2 302.5 c4 566.8 own_peak_mib 22606 kv_blocks 3125
+p2_main c1 133.03 drafted 1822 accepted 1275 c2 311.2 c4 534.0 own_peak_mib 22606 kv_blocks 3125
+p2_new c1 132.87 drafted 1822 accepted 1275 c2 312.5 c4 574.2 own_peak_mib 22606 kv_blocks 3125
+p3_main c1 132.85 drafted 1822 accepted 1275 c2 304.0 c4 525.0 own_peak_mib 22606 kv_blocks 3125
+p3_new c1 133.18 drafted 1822 accepted 1275 c2 297.6 c4 552.0 own_peak_mib 22606 kv_blocks 3125
+# /mnt/data/scratch/kpar_2026_11_04/concurrent_c2: new vs main (new first), 3 alternating pairs, LEVELS 2
+harness: md5=f8ac61ec6cb4
+p1_new c1 127.09 drafted 1822 accepted 1275 c2 313.1 own_peak_mib 22606 kv_blocks 3125
+p1_main c1 128.83 drafted 1822 accepted 1275 c2 296.4 own_peak_mib 22606 kv_blocks 3125
+p2_new c1 128.33 drafted 1822 accepted 1275 c2 313.3 own_peak_mib 22606 kv_blocks 3125
+p2_main c1 128.43 drafted 1822 accepted 1275 c2 305.7 own_peak_mib 22606 kv_blocks 3125
+p3_new c1 127.38 drafted 1822 accepted 1275 c2 280.0 own_peak_mib 22606 kv_blocks 3125
+p3_main c1 128.00 drafted 1822 accepted 1275 c2 287.3 own_peak_mib 22606 kv_blocks 3125
