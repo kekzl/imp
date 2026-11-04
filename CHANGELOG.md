@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- Runtime image builds on CUDA `base` plus cuBLASLt and cudart from the toolchain stage instead of CUDA `runtime` (every binary links only those two): release-shaped image 5.46 GB -> 2.06 GB unpacked, 2.02 GB -> 0.66 GB gzip; the build fails when a shipped binary misses a shared library.
 - Image build drops `/src/build` after copying the binaries out (`IMP_KEEP_BUILD_DIR=ON` keeps it, set by `scripts/coverage_server.sh`; `make sanitize` runs `/tmp/test-*`): the cached builder layer of a tests-on build shrinks from 1.29 GB to 499 MB.
 - `.dockerignore` skips local build dirs, `.claude/`, `.codegraph/` and the roofline raw history: the image build context of a working checkout shrinks from 2.69 GB to 45 MB, and writes there no longer re-key `COPY . .` (each re-key left a ~1.2 GB build layer in the BuildKit cache).
 - `speculative.mtp_carry` (default on): up to `mtp_history_slots` requests bind the MTP head and feed it the hidden rows of their batched decode steps, so overlapping chats draft again once one decodes alone. Qwen3.8-27B-NVFP4, 2 chats x 6 overlapping turns: turns drafting 6/36 -> 35/36, 93.78 -> 98.38 tok/s; c32 2024.17 -> 2034.10.

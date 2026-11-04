@@ -145,10 +145,10 @@ COPY --from=bundle-build /dist/*.tar.gz* /
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
-# Native CUDA 13.4.3 runtime image already ships the matching cudart + cuBLAS
-# (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
-# entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.4.3-runtime-ubuntu26.04@sha256:83b873636b7ad03b418984f38f6b8a09e6f3c3a105d5cdab8088e998e8ed93f1
+# CUDA `base` (cudart only) + cuBLASLt from the toolchain stage: every binary links
+# exactly libcudart.so.13 + libcublasLt.so.13 (ldd); `runtime` carried 2.1 GB of
+# CUDA libs, 1.6 GB unused (cuFFT, cuSPARSE, cuSOLVER, NPP, nvrtc, ...).
+FROM nvidia/cuda:13.4.3-base-ubuntu26.04@sha256:e2eb43e25d404e2c48716f80afdb8989a84c4da588f5509330322842084d97b0
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here
@@ -177,6 +177,12 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list \
         jq \
     && rm -rf /var/lib/apt/lists/*
 
+# The same bytes the binaries were linked against: cudart is re-copied too (identical
+# today, guaranteed if the base and devel tags ever drift). ldconfig -n adds the
+# SONAME links.
+COPY --from=toolchain /usr/local/cuda/lib64/libcudart.so.13.* /usr/local/cuda/lib64/libcublasLt.so.13.* /usr/local/cuda/lib64/
+RUN ldconfig -n /usr/local/cuda/lib64 && ldconfig
+
 # Copy built binaries
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
@@ -202,7 +208,12 @@ COPY --from=builder /src/tests/fixtures /src/tests/fixtures
 
 # Copy entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Fails the build when any shipped binary misses a shared library.
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && for b in /usr/local/bin/imp-* /usr/local/bin/test-*; do \
+           [ -f "$b" ] || continue; \
+           if ldd "$b" | grep -q "not found"; then echo "missing lib: $b"; ldd "$b" | grep "not found"; exit 1; fi; \
+       done
 
 # Non-root user with write access to /models and to the cache directory.
 #
