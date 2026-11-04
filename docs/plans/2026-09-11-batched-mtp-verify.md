@@ -6,7 +6,8 @@ Status (2026-09-13): stages 1-4 DONE, shipped opt-in as `speculative.batch_verif
 table at the end carries the state of every stage.
 
 Status (2026-11-04): the same step runs by default for the BOUND requests while <= 4 decode
-(`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows" at the end); the full
+(`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows"), with 2 drafts per request
+(`speculative.mtp_batch_verify_k`, section "Two drafts per bound request" at the end); the full
 `batch_verify` stays opt-in.
 
 ## Why
@@ -182,6 +183,31 @@ Two defects found on the way, both in the opt-in `batch_verify` too: the step ca
 `runtime.max_batch_size`, 0 = auto on a default server, so it declined every batch; and
 `lm_head_rows_argmax` needed the W4A4 batched-decode head, which an FP8-served head never builds.
 
-Next: deeper drafts (3 rows per request, a second head pass per step) and the head pass itself
-(2.0-2.6 ms of a 15 ms step); a turn whose first 8 lone verifies emit below 1 + 0.4 k still
-unbinds on the economics guard (1-2 turns per arm, main too).
+Next: deeper drafts (3 rows per request, a second head pass per step), section below.
+
+## Two drafts per bound request (2026-11-04, `speculative.mtp_batch_verify_k`, default 2)
+
+Each bound request forwards its last token plus a 2-token MTP chain (3 rows). Per-step price on the
+same image, `spec-batch price` log lines, cumulative per arm (`overlap_and_step_price.txt` in
+docs/audit/qwen38_mtp_batch_verify_k2_2026_11_04/):
+
+| requests | k 1: rows, forward + argmax, head, tokens/step | k 2: rows, forward + argmax, head, tokens/step |
+|---:|---|---|
+| 2 | 4, 12.14-12.15 ms, 1.96-1.99 ms, 3.39-3.48 | 6, 12.75-12.76 ms, 3.73-3.78 ms, 4.59-4.74 |
+| 3 | 6, 12.41-12.43 ms, 1.99-2.02 ms, 5.30-5.42 | 9, 13.12-13.15 ms, 3.71-3.74 ms, 6.66-6.98 |
+| 4 | 8, 12.86-12.89 ms, 2.02-2.03 ms, 6.87-7.16 | 12, 13.87-13.93 ms, 3.79-3.80 ms, 9.24-9.42 |
+
+| piece | rule |
+|---|---|
+| state | three recurrent states per request: row 1 in place in the live slot, rows 1-2 in a second spare (a commit-only scan pass before the main one, a third conv commit, `InferenceState::ssm_snap_rows`), all 3 rows in the spare; k accepted drafts swap the slot holding 1 + k rows in (`bound_verify_state_slot`). 2 spares per row: 8 x 79.5 MiB charged, KV plan 12305 -> 11380 blocks |
+| drafts | the batched head pass drafts token 1 per request, a second ragged pass (draft 1 on device, the head's own final-norm row) drafts token 2 at the next head position, overwritten by the next feed; a request whose own `mtp_k` is 1 keeps one draft |
+| kernels | no scan kernel change: the 2-row state is a second launch of `gdn_scan_fused_*_batched` with `out_slots` = the second spares, its y rows equal to the main pass's (`GdnVerifyTwoDraftsTest`) |
+
+Measured (3 alternating pairs, main daa62a92 vs k 2 vs k 1 on this branch): 2 overlapping chats
+119.44 -> 132.79 tok/s per turn, 4 chats 121.59 -> 134.17; k 1 on this branch 119.44 / 120.81 (main
+again); c2 241.3-255.0 -> 279.2-291.2, c4 457.6-469.6 -> 485.8-507.8, c1 and c32 unchanged; lone chat
+6/6 byte-identical to main on fresh servers.
+
+Next: the head pass, 3.73-3.80 ms of a 16.5-17.7 ms step: both passes read the 1213 MiB FP8 LM head; a
+multi-row NVFP4 draft head (682 MiB, built for MTP) would read it once per pass. The economics guard
+counts only lone verifies (1-2 unbinds per arm, main too).

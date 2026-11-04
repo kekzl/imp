@@ -1,0 +1,10 @@
+# /mnt/data/scratch/mtpdeep_identity: fresh server per arm, MODES greedy + side (a lone chat), main vs new, 1 pair
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_greedy SUMMARY turn1_tps 116.33 followup_mean_tps 120.20 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 117.35 followup_mean_tps 122.56 followup_drafted_turns 5/5 PASS
+p1_main UNBIND_TOTAL {} own_peak_mib 22760
+p1_new_greedy SUMMARY turn1_tps 116.55 followup_mean_tps 120.21 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 117.55 followup_mean_tps 122.48 followup_drafted_turns 5/5 PASS
+p1_new UNBIND_TOTAL {} own_peak_mib 22682
+IDENTICAL 6/6 p1_main_greedy.json vs p1_new_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_new_side.json

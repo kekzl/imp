@@ -1,0 +1,28 @@
+# mean all_mean_tps (ov = 2 overlapping chats, ov4 = 4) and follow-up tps (side) per arm over 3 pairs; last 'spec-batch price' line per request count and server (cumulative over the arm)
+k1    ov   mean  119.44 per-pair 118.55 117.88 121.90
+k1    ov4  mean  120.81 per-pair 122.40 118.91 121.11
+k1    side mean  123.62 per-pair 122.44 125.36 123.07
+main  ov   mean  119.44 per-pair 118.81 118.84 120.67
+main  ov4  mean  121.59 per-pair 121.91 121.10 121.75
+main  side mean  122.65 per-pair 123.45 122.13 122.36
+new   ov   mean  132.79 per-pair 134.13 130.44 133.81
+new   ov4  mean  134.17 per-pair 131.51 135.86 135.15
+new   side mean  124.27 per-pair 125.26 122.24 125.32
+p1_k1.server.log       n=2 rows/req=2 steps=4687 fwd=12.14 head=1.96 tok/step=3.39
+p1_k1.server.log       n=3 rows/req=2 steps=3159 fwd=12.43 head=2.01 tok/step=5.42
+p1_k1.server.log       n=4 rows/req=2 steps=1254 fwd=12.89 head=2.02 tok/step=7.16
+p1_new.server.log      n=2 rows/req=3 steps=3414 fwd=12.75 head=3.75 tok/step=4.68
+p1_new.server.log      n=3 rows/req=3 steps=1442 fwd=13.13 head=3.72 tok/step=6.66
+p1_new.server.log      n=4 rows/req=3 steps=1644 fwd=13.87 head=3.80 tok/step=9.24
+p2_k1.server.log       n=2 rows/req=2 steps=4487 fwd=12.15 head=1.98 tok/step=3.40
+p2_k1.server.log       n=3 rows/req=2 steps=2791 fwd=12.41 head=1.99 tok/step=5.30
+p2_k1.server.log       n=4 rows/req=2 steps=1622 fwd=12.87 head=2.03 tok/step=6.87
+p2_new.server.log      n=2 rows/req=3 steps=3985 fwd=12.75 head=3.73 tok/step=4.59
+p2_new.server.log      n=3 rows/req=3 steps=1654 fwd=13.12 head=3.71 tok/step=6.98
+p2_new.server.log      n=4 rows/req=3 steps=1061 fwd=13.93 head=3.80 tok/step=9.42
+p3_k1.server.log       n=2 rows/req=2 steps=4760 fwd=12.15 head=1.99 tok/step=3.48
+p3_k1.server.log       n=3 rows/req=2 steps=2356 fwd=12.41 head=2.02 tok/step=5.39
+p3_k1.server.log       n=4 rows/req=2 steps=1584 fwd=12.86 head=2.03 tok/step=7.14
+p3_new.server.log      n=2 rows/req=3 steps=3804 fwd=12.76 head=3.78 tok/step=4.74
+p3_new.server.log      n=3 rows/req=3 steps=2082 fwd=13.15 head=3.74 tok/step=6.93
+p3_new.server.log      n=4 rows/req=3 steps=914 fwd=13.93 head=3.79 tok/step=9.37
