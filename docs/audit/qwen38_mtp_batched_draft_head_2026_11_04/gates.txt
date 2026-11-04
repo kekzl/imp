@@ -14,3 +14,10 @@ FACTS4 PASS
 [04:32:39.724][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=4 rows=12 drafted=8 accepted=8 emitted=12
 stderr matches: 0
 GATES DONE
+# make verify-fast (imp:mtphead-final, tree of 8575920c): verify fast: OK
+  decode  tg128 =  287.28 tok/s  (baseline  282.84, delta 1.57%)
+  prefill pp512 = 50354.11 tok/s  (baseline 50374.39, delta -0.04%)
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+  graphs ON  tg256 =  290.97 tok/s   (1.56x, threshold 1.3x)
+  server c8 = 1928.44 tok/s, slowest request 522 ms  (baseline 1899.81, delta 1.51%)
