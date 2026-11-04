@@ -110,8 +110,13 @@ void stage_group_rows(int32_t* tok, int32_t* pos, int32_t* ctx, int T, int g, in
 }
 
 // Step price per request count, logged every 100 verify steps: forward + argmax (host wall through the argmax
-// sync), the MTP head pass after it (feed, drafts, sync) and the tokens emitted per step.
-void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long long emitted) {
+// sync), the MTP head pass after it (feed, drafts, sync) and the tokens emitted per step. trace_ctx >= 0
+// (diagnostics.spec_trace): one [bv-step] line per step too, tools/analysis/mtp_bv_depth_price.py reads it.
+void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long long emitted, int trace_ctx,
+                    long long drafted) {
+    if (trace_ctx >= 0)
+        IMP_LOG_INFO("[bv-step] n=%d ctx=%d drafted=%lld emitted=%lld fwd_ms=%.3f head_ms=%.3f", n, trace_ctx,
+                     drafted, emitted, fwd_ms, head_ms);
     constexpr int kMaxN = 8;
     struct Price {
         double fwd_ms = 0.0, head_ms = 0.0;
@@ -126,7 +131,7 @@ void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long
     p.steps++;
     if (++total % 100 != 0)
         return;
-    for (int i = 2; i <= kMaxN; ++i) {
+    for (int i = 1; i <= kMaxN; ++i) {
         const Price& q = price[i];
         if (q.steps > 0)
             IMP_LOG_INFO(
@@ -857,10 +862,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         row0[g] = T * g;
         emitted_of[g] = emitted;
-        // The binding's economics tally (judged at its lone verifies); a finished request has none.
-        if (from_mtp[g] && nd > 0)
-            if (MtpBind* b = mtp_find_bind(mtp_active_, mtp_pool_, req->id))
-                mtp_econ_count(*b, emitted, nd, /*batched=*/true);
+        bound_verify_tally_(*req, N, p0[g], nd, matched, emitted, from_mtp[g] != 0);
         // Device penalty history: the emitted tokens are rows T*g.. of the
         // pinned argmax buffer, in order.
         if (pen_slot[g] >= 0 && emitted > 0) {
@@ -920,7 +922,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     log_step_price(
         N, T, std::chrono::duration<double, std::milli>(feed_t0 - verify_t0).count(),
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_t0).count(),
-        emit_total);
+        emit_total, runtime_config_.diagnostics.spec_trace ? max_ctx : -1, drafted_total);
     spec_stats_record_(
         any_mtp, drafted_total, acc_total, emit_total,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());

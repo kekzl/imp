@@ -55,8 +55,10 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     std::vector<int32_t> toks;
     std::vector<int> src, slots, pos, last_row, bound_g;
-    // Second draft (bv_.depth 2): one chained head row per bound request at its next position.
+    // Second draft (bv_.depth 2): one chained head row per bound request at its next position, run when one
+    // of them drafts 2 tokens next (its live depth, speculative.mtp_adaptive_k).
     std::vector<int> chain_slot, chain_pos;
+    bool chain = false;
     for (int g = 0; g < N; ++g) {
         Request& req = *reqs[g];
         // Plain batched steps before this verify (speculative.mtp_batch_verify); a failed feed unbinds.
@@ -86,6 +88,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         bound_g.push_back(g);
         chain_slot.push_back(ws->cur_slot);
         chain_pos.push_back(ws->mtp_pos + emitted[g]);
+        chain = chain || (bv_.depth > 1 && mtp_chain_k_(req) >= 2);
     }
     if (bound_g.empty())
         return;
@@ -117,7 +120,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     // The lone chain's draft head: 682 MiB per pass instead of the 1213 MiB FP8 head.
     imp::NvFP4QuantResult head_view;
     const int32_t* h_out = nullptr;
-    const int n_out = mtp_head_pass_(tab, h.data, mtp_draft_lm_head_nvfp4_(head_view), stream, &h_out);
+    const int n_out = mtp_head_pass_(tab, h.data, mtp_draft_lm_head_nvfp4_(head_view), chain, stream, &h_out);
     if (n_out < 0) {
         fail_all(mtp_head_pass_failure(n_out));
         return;
@@ -137,8 +140,23 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     }
 }
 
+// A batched verify group's outcome into its binding: econ tally, live depth (mtp_adaptive_k), spec_trace.
+void Engine::bound_verify_tally_(const Request& req, int n, int p0, int nd, int matched, int emitted,
+                                 bool from_mtp) {
+    if (runtime_config_.diagnostics.spec_trace)
+        IMP_LOG_INFO("[bv-verify] req=%d n=%d p0=%d nd=%d matched=%d emitted=%d mtp=%d", req.id, n, p0, nd,
+                     matched, emitted, from_mtp ? 1 : 0);
+    // The binding's economics tally (judged at its lone verifies); a finished request has none.
+    MtpBind* b = from_mtp && nd > 0 ? mtp_find_bind(mtp_active_, mtp_pool_, req.id) : nullptr;
+    if (b == nullptr)
+        return;
+    mtp_econ_count(*b, emitted, nd, /*batched=*/true);
+    if (runtime_config_.speculative.mtp_adaptive_k)
+        b->k_live = mtp_bound_verify_next_depth(nd, matched, std::min(bv_.depth, mtp_request_k_(req)));
+}
+
 // A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =
-// one draft; the request's own mtp_k bounds the chain) become its pending chain for the next verify.
+// one draft; its live depth mtp_chain_k_ bounds the chain) become its pending chain for the next verify.
 void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2) {
     auto* ws = mtp_ws_storage_.get();
     const int vocab_size = model_->config_.vocab_size;
@@ -154,7 +172,7 @@ void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok
         return;
     }
     mtp_active_.pending.assign(1, tok);
-    if (tok2 >= 0 && tok2 < vocab_size && mtp_request_k_(req) >= 2)
+    if (tok2 >= 0 && tok2 < vocab_size && mtp_chain_k_(req) >= 2)
         mtp_active_.pending.push_back(tok2);
     mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
     mtp_pool_.pending_prediction = tok;

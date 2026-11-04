@@ -290,5 +290,16 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
 }
 
+// speculative.mtp_adaptive_k on the bound verify: AIMD between 1 and the ceiling (the chunk path's rule).
+TEST(BatchVerifyPredicates, AdaptiveDepthShedsOnRejectAndGrowsOnFullAccept) {
+    EXPECT_EQ(mtp_bound_verify_next_depth(2, 2, 2), 2) << "full accept at the ceiling stays";
+    EXPECT_EQ(mtp_bound_verify_next_depth(2, 1, 2), 1) << "second draft rejected: one draft next";
+    EXPECT_EQ(mtp_bound_verify_next_depth(2, 0, 2), 1);
+    EXPECT_EQ(mtp_bound_verify_next_depth(1, 1, 2), 2) << "one draft accepted: the chain comes back";
+    EXPECT_EQ(mtp_bound_verify_next_depth(1, 0, 2), 1) << "floor 1";
+    EXPECT_EQ(mtp_bound_verify_next_depth(1, 1, 1), 1) << "a request that asked for mtp_k=1 stays at 1";
+    EXPECT_EQ(mtp_bound_verify_next_depth(2, 2, 0), 1) << "floor holds against a zero ceiling";
+}
+
 }  // namespace
 }  // namespace imp

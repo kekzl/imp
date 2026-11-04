@@ -239,6 +239,11 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 1 or 2 drafts per request.
 [[nodiscard]] constexpr int mtp_bound_verify_depth(int key) { return std::clamp(key, 1, 2); }
+// speculative.mtp_adaptive_k on the bound verify: a fully accepted draft of `ran` tokens grows the next by
+// one (up to ceiling), a rejection sheds one (floor 1). A 1-token draft skips the chain pass, pads its row.
+[[nodiscard]] constexpr int mtp_bound_verify_next_depth(int ran, int matched, int ceiling) {
+    return std::max(1, matched >= ran ? std::min(ceiling, ran + 1) : ran - 1);
+}
 // Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
 // snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).
 [[nodiscard]] constexpr int bound_verify_state_slot(int matched, int depth) {
