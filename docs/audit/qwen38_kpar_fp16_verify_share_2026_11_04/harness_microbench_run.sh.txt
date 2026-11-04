@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Microbench main vs branch, Qwen3.8-27B verify GEMM shapes, alternating arms per shape, bit identity.
+# Usage: run.sh OUT.txt
+set -uo pipefail
+D=/mnt/data/scratch/kparf16_2026_11_04/bench
+OUT=$1
+: > "$OUT"
+run_arm() {  # arm N K M ACC
+  docker run --rm --gpus all -v "$D":/b -w /b imp:toolchain ./bench_$1 "$2" "$3" "$4" "$5" 8 "/b/y_$1_$2_$3_$4_$5.bin" 2>&1 \
+    | grep "^N=" | sed "s/^/$1 /" >> "$OUT"
+}
+for shape in "17408 5120 0" "5120 17408 1" "10240 5120 0" "12288 5120 0" "6144 5120 0" "5120 6144 1"; do
+  read -r N K ACC <<< "$shape"
+  for M in 1 2 3 4; do
+    run_arm main "$N" "$K" "$M" "$ACC"
+    run_arm branch "$N" "$K" "$M" "$ACC"
+    run_arm branch "$N" "$K" "$M" "$ACC"
+    run_arm main "$N" "$K" "$M" "$ACC"
+    if cmp -s "$D/y_main_${N}_${K}_${M}_${ACC}.bin" "$D/y_branch_${N}_${K}_${M}_${ACC}.bin"; then
+      echo "bits N=$N K=$K M=$M acc=$ACC identical" >> "$OUT"
+    else
+      echo "bits N=$N K=$K M=$M acc=$ACC DIFFER" >> "$OUT"
+    fi
+  done
+done
+cat "$OUT"

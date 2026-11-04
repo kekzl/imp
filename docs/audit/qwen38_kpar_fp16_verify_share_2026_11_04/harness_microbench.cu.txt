@@ -1,0 +1,85 @@
+// Standalone microbench for gemm_nvfp4_batched(_acc) (FP16 out, spec-verify chunks).
+// Links one copy of src/quant/nvfp4_gemv_batched.cu (main or branch). Weight slabs rotate past L2.
+// Usage: bench_fp16 N K M ACC ROUNDS OUT_FILE   (prints median per-launch us over ROUNDS x 50 launches)
+#include "quant/nvfp4_gemm.h"
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+namespace imp {
+bool process_diag_verify_row_parity() { return false; }
+void nvfp4_gemv_batched_pdl_register();
+}  // namespace imp
+
+static uint32_t rng = 12345u;
+static uint32_t next() { rng = rng * 1664525u + 1013904223u; return rng >> 8; }
+
+int main(int argc, char** argv) {
+    if (argc < 7) return 2;
+    const int N = atoi(argv[1]), K = atoi(argv[2]), M = atoi(argv[3]), acc = atoi(argv[4]),
+              rounds = atoi(argv[5]);
+    imp::nvfp4_gemv_batched_pdl_register();
+    const size_t wb = (size_t)N * K / 2, sb = (size_t)N * K / 16;
+    const int nslab = std::max(4, (int)((512ull << 20) / (wb + sb)) + 1);
+    std::vector<uint8_t> hw(wb), hs(sb);
+    std::vector<half> hx((size_t)M * K), hy0((size_t)M * N);
+    for (auto& b : hw) b = (uint8_t)next();
+    for (auto& b : hs) b = (uint8_t)(0x28 + (next() % 24));  // finite E4M3 scales
+    for (auto& v : hx) v = __float2half(((int)(next() % 2001) - 1000) / 1000.0f);
+    for (auto& v : hy0) v = __float2half(((int)(next() % 2001) - 1000) / 250.0f);
+    std::vector<imp::NvFP4QuantResult> A(nslab);
+    for (int s = 0; s < nslab; ++s) {
+        cudaMalloc(&A[s].packed_data, wb);
+        cudaMalloc(&A[s].micro_scales, sb);
+        cudaMemcpy(A[s].packed_data, hw.data(), wb, cudaMemcpyHostToDevice);
+        cudaMemcpy(A[s].micro_scales, hs.data(), sb, cudaMemcpyHostToDevice);
+        A[s].tensor_scale = 0.0123f;
+        A[s].N = N;
+        A[s].K = K;
+    }
+    half *x, *y;
+    cudaMalloc(&x, hx.size() * 2);
+    cudaMalloc(&y, hy0.size() * 2);
+    cudaMemcpy(x, hx.data(), hx.size() * 2, cudaMemcpyHostToDevice);
+    auto run = [&](int s) {
+        if (acc) imp::gemm_nvfp4_batched_acc(A[s], x, y, N, K, M, nullptr);
+        else imp::gemm_nvfp4_batched(A[s], x, y, N, K, M, nullptr);
+    };
+    // Output of one launch from the seeded y (bit-identity check).
+    cudaMemcpy(y, hy0.data(), hy0.size() * 2, cudaMemcpyHostToDevice);
+    run(0);
+    std::vector<half> hy(hy0.size());
+    cudaMemcpy(hy.data(), y, hy.size() * 2, cudaMemcpyDeviceToHost);
+    FILE* f = fopen(argv[6], "wb");
+    fwrite(hy.data(), 2, hy.size(), f);
+    fclose(f);
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    // >1 s warmup.
+    cudaEventRecord(e0);
+    float ms = 0;
+    for (int it = 0; ms < 1200.0f; ++it) {
+        for (int j = 0; j < 50; ++j) run((it * 50 + j) % nslab);
+        cudaEventRecord(e1);
+        cudaEventSynchronize(e1);
+        cudaEventElapsedTime(&ms, e0, e1);
+    }
+    std::vector<float> t;
+    for (int r = 0; r < rounds; ++r) {
+        cudaEventRecord(e0);
+        for (int j = 0; j < 50; ++j) run(j % nslab);
+        cudaEventRecord(e1);
+        cudaEventSynchronize(e1);
+        cudaEventElapsedTime(&ms, e0, e1);
+        t.push_back(ms * 1000.0f / 50);
+    }
+    std::sort(t.begin(), t.end());
+    printf("N=%d K=%d M=%d acc=%d slabs=%d min %.1f median %.1f max %.1f us err=%s\n", N, K, M, acc, nslab,
+           t.front(), t[t.size() / 2], t.back(), cudaGetErrorString(cudaGetLastError()));
+    return 0;
+}

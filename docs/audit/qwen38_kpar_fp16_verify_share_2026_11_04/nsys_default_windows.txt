@@ -1,0 +1,56 @@
+window 0: t=0.0s wall 5091.4 ms, 119787 kernels, kernel sum 2118.93 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=      0 sum      0.00 ms share   0.00 %
+  smallm                       n=  29792 sum    995.56 ms share  46.98 %
+  gemv_nvfp4                   n=   2304 sum     86.09 ms share   4.06 %
+    top  30.33 %    642.78 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_multi_kernel<
+    top  15.08 %    319.64 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<
+    top  11.39 %    241.38 ms void imp::gdn_scan_fused_kernel<
+    top   5.67 %    120.20 ms imp::elementwise_add_store_fp16_kernel
+    top   4.93 %    104.37 ms void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<
+    top   3.45 %     73.11 ms void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<
+    top   2.99 %     63.44 ms void imp::gated_fp16_nvfp4_kernel<
+    top   2.86 %     60.58 ms imp::quantize_fp8_rows_kernel
+window 1: t=13.7s wall 4484.9 ms, 371399 kernels, kernel sum 5873.26 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=      0 sum      0.00 ms share   0.00 %
+  smallm                       n= 121856 sum   3228.16 ms share  54.96 %
+  gemv_nvfp4                   n=    407 sum    182.53 ms share   3.11 %
+    top  49.69 %   2918.16 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<
+    top   8.07 %    474.25 ms imp::elementwise_add_store_fp16_kernel
+    top   6.50 %    381.77 ms void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<
+    top   6.28 %    368.90 ms imp::gemv_fp16_kernel
+    top   4.56 %    267.54 ms void imp::gated_fp16_nvfp4_kernel<
+    top   3.91 %    229.62 ms imp::<unnamed>::gemm_f16_narrow_smallm_kernel
+    top   3.55 %    208.39 ms void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<
+    top   3.36 %    197.60 ms void imp::<unnamed>::fp8_head_cpasync_kernel<
+window 2: t=26.8s wall 5091.7 ms, 412136 kernels, kernel sum 6656.53 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=    506 sum    306.65 ms share   4.61 %
+  smallm                       n= 119168 sum   3274.37 ms share  49.19 %
+  gemv_nvfp4                   n=    541 sum    327.10 ms share   4.91 %
+    top  44.16 %   2939.77 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<
+    top   7.22 %    480.60 ms imp::elementwise_add_store_fp16_kernel
+    top   5.78 %    384.97 ms void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<
+    top   5.72 %    380.63 ms void imp::gdn_scan_fused_kernel<
+    top   4.61 %    306.65 ms void imp::<unnamed>::gemv_nvfp4_kpar_mb_fp32_kernel<
+    top   4.34 %    288.82 ms imp::device_copy_v4_kernel
+    top   4.04 %    268.76 ms void imp::gated_fp16_nvfp4_kernel<
+    top   3.46 %    230.27 ms imp::<unnamed>::gemm_f16_narrow_smallm_kernel
+window 3: t=40.7s wall 10119.1 ms, 671664 kernels, kernel sum 13426.42 ms
+  gemv_nvfp4_kpar_mb_fp16      n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_multirow_mb       n=      0 sum      0.00 ms share   0.00 %
+  gemv_nvfp4_kpar_mb_fp32      n=      0 sum      0.00 ms share   0.00 %
+  smallm                       n= 182688 sum   6429.01 ms share  47.88 %
+  gemv_nvfp4                   n=      8 sum      3.67 ms share   0.03 %
+    top  30.60 %   4108.23 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_multi_kernel<
+    top  15.36 %   2062.15 ms void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<
+    top  13.80 %   1852.77 ms void imp::gdn_scan_fused_kernel<
+    top   8.23 %   1105.10 ms imp::elementwise_add_store_fp16_kernel
+    top   6.67 %    895.42 ms void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<
+    top   4.54 %    609.75 ms void imp::gated_fp16_nvfp4_kernel<
+    top   4.42 %    593.36 ms void imp::<unnamed>::fp8_head_mma_kernel<
+    top   3.66 %    492.06 ms imp::device_copy_v4_kernel

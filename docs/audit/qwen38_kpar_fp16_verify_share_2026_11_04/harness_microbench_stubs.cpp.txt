@@ -1,0 +1,24 @@
+// Link stubs for the standalone microbench: logging off, PDL registry as in src/core/pdl.cpp.
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <mutex>
+#include <set>
+
+namespace imp {
+enum class LogLevel : int { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3, FATAL = 4 };
+std::atomic<LogLevel> g_log_level{LogLevel::ERROR};
+void log_message(LogLevel, const char*, int, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+int device_sm_count_or_0() { return 170; }
+namespace pdl {
+static std::set<const void*> g_set;
+void enable(const void* f) { g_set.insert(f); }
+bool is_enabled(const void* f) { return g_set.count(f) != 0; }
+}  // namespace pdl
+}  // namespace imp
