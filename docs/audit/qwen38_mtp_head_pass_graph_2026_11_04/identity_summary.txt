@@ -1,0 +1,22 @@
+# /mnt/data/scratch/mtpgraph_2026_11_04/identity: fresh server per arm, MODES greedy (lone chat, 6 turns) + side + ov (2 overlapping chats),
+# main (0989c2bb) / new (be08212c) / main2 (main again: run-to-run control), 1 pass
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_greedy SUMMARY turn1_tps 113.52 followup_mean_tps 116.85 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 114.65 followup_mean_tps 119.53 followup_drafted_turns 5/5 PASS
+p1_main_ov SUMMARY c0_mean_tps 134.95 c0_drafted_turns 6/6 c1_mean_tps 128.33 c1_drafted_turns 6/6 all_mean_tps 131.64 PASS
+p1_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 2} own_peak_mib 22606
+p1_new_greedy SUMMARY turn1_tps 117.91 followup_mean_tps 121.30 followup_drafted_turns 5/5 PASS
+p1_new_side SUMMARY turn1_tps 118.91 followup_mean_tps 123.86 followup_drafted_turns 5/5 PASS
+p1_new_ov SUMMARY c0_mean_tps 142.78 c0_drafted_turns 6/6 c1_mean_tps 145.02 c1_drafted_turns 6/6 all_mean_tps 143.90 PASS
+p1_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22606
+p1_main2_greedy SUMMARY turn1_tps 117.74 followup_mean_tps 121.32 followup_drafted_turns 5/5 PASS
+p1_main2_side SUMMARY turn1_tps 119.00 followup_mean_tps 124.00 followup_drafted_turns 5/5 PASS
+p1_main2_ov SUMMARY c0_mean_tps 131.41 c0_drafted_turns 6/6 c1_mean_tps 136.53 c1_drafted_turns 6/6 all_mean_tps 133.97 PASS
+p1_main2 UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22606
+IDENTICAL 6/6 p1_main_greedy.json vs p1_new_greedy.json
+IDENTICAL 6/6 p1_main_greedy.json vs p1_main2_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_new_side.json
+IDENTICAL 6/6 p1_main_side.json vs p1_main2_side.json
+IDENTICAL 1/12 p1_main_ov.json vs p1_new_ov.json
+IDENTICAL 1/12 p1_main_ov.json vs p1_main2_ov.json
+graph lines in new log: 8 failures: 0

@@ -215,6 +215,11 @@ __global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn,
     if (h >= num_heads)
         return;
     extern __shared__ float s_row_scores[];  // [pos[r] + 1]
+    // A replayed graph launches with the smem it was last given (mtp_scan_nodes_set_rows): short = trap.
+    unsigned dyn_smem = 0;
+    asm volatile("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
+    if (static_cast<unsigned>(pos[r] + 1) * sizeof(float) > dyn_smem)
+        __trap();
     const int64_t slot = static_cast<int64_t>(slots[r]) * slot_elems;
     const int kv_h = h / (num_heads / num_kv_heads);
     const int64_t o = ((static_cast<int64_t>(r) * num_heads) + h) * head_dim;
@@ -223,6 +228,8 @@ __global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn,
 }
 
 }  // namespace
+
+const void* mtp_attn_scan_rows_fn() { return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_kernel); }
 
 bool mtp_scan_smem_opt_in() {
     static const bool ok = [] {

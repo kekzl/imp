@@ -8,8 +8,9 @@ table at the end carries the state of every stage.
 Status (2026-11-04): the same step runs by default for the BOUND requests while <= 4 decode
 (`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows"), with 2 drafts per request
 (`speculative.mtp_batch_verify_k`, section "Two drafts per bound request"), both draft passes on the
-NVFP4 draft head (section "NVFP4 draft head in the batched passes"), their tables in one H2D (section at
-the end); the full `batch_verify` stays opt-in.
+NVFP4 draft head (section "NVFP4 draft head in the batched passes"), their tables in one H2D (section "One
+table upload per head pass"), the pass replayed as a CUDA graph (section at the end); the full
+`batch_verify` stays opt-in.
 
 ## Why
 
@@ -267,3 +268,40 @@ on fresh servers (`identity_summary.txt`).
 
 Next: the 393 us of GPU idle left per pass are launch gaps between 56 kernel launches (rmsnorm, scan,
 mrope, gather, split-K reduce); a captured graph per (rows, requests, scan tier) would replay them.
+
+## The head pass as a CUDA graph (2026-11-04)
+
+`speculative.mtp_head_graph` (default on): the pass after the table upload (feed, draft LM head, chain feed,
+chain LM head) replays one graph per (fed rows, requests, chain), `src/runtime/mtp_head_graph.h`. First use of
+a shape runs eager (cuBLASLt picks and caches the algos), the second captures it with Lt allowed in the
+capture, later uses replay. No scan tier: before each replay `mtp_scan_nodes_set_rows` sets the two scan
+nodes' dynamic smem to the pass's largest position + 1, rounded up to 256 rows
+(`cudaGraphExecKernelNodeSetParams`), and the scan kernel traps when a row's scores exceed it. Bound: 48
+graphs (4 requests x 1-3 rows x chain); the A/B servers held 19-24. The pinned draft D2H was priced and
+dropped (nsys c2 host window 2561.8 -> 2687.2 us, n=1). Evidence:
+docs/audit/qwen38_mtp_head_pass_graph_2026_11_04/.
+
+| per head pass, nsys c2 (`nsys_head_pass.txt`, ~360 passes) | main 0989c2bb | this branch |
+|---|---:|---:|
+| host window, table H2D to draft sync | 2561.8 us | 2244.0 us |
+| GPU busy in that window | 2101.3 us | 2087.6 us |
+| GPU idle in that window | 433.4 us | 145.2 us |
+| launch calls (`cudaLaunchKernel` + `cudaLaunchKernelExC`) | 25 + 31 | 1 `cudaGraphLaunch` |
+
+| requests (`step_price.txt`, 3 pairs, overlap A/B) | main head | new head |
+|---:|---|---|
+| 2 | 2.66-2.77 ms | 2.33-2.46 ms |
+| 3 | 2.87-2.96 ms | 2.48-2.64 ms |
+| 4 | 2.99-3.13 ms | 2.67-2.77 ms |
+
+End to end (3 alternating pairs, `means.txt`): 2 overlapping chats 134.75 -> 140.92 tok/s (pairs 136.62 /
+132.63 / 135.00 vs 134.82 / 141.97 / 145.96), 4 chats 140.40 -> 143.47 (3/3 pairs higher), side follow-ups
+122.43 -> 122.99; c1 / c2 / c4 / c32 129.30 / 293.50 / 511.83 / 1943.33 -> 127.80 / 295.40 / 527.70 /
+1951.07 (c1 main pairs 132.95 / 127.68 / 127.27 vs 128.10 / 127.78 / 127.51), drafted / accepted 1822 / 1275
+in every arm, own peak 25176 -> 25196 MiB. Lone chat and side mode 6/6 + 6/6 byte-identical to main; two
+overlapping chats match main 1/12 turns, the same 1/12 as main against a second main server
+(`identity_summary.txt`).
+
+Next: the 145 us left per pass are host time before the graph's first node (86 us ends at the first
+gather: table H2D issue plus `cudaGraphLaunch`, 45.5 us host); moving the table upload into the graph
+(a memcpy node from fixed pinned staging) would remove the H2D call.

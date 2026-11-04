@@ -1,0 +1,8 @@
+# [mtp-head-graph] lines per new-arm server (overlap A/B, concurrent A/B, gates); bound kMtpHeadGraphMax = 48
+overlap_ab/p1_new.server.log captured 23 failed 0 last: 6000 replays, 23 graphs
+overlap_ab/p2_new.server.log captured 24 failed 0 last: 6000 replays, 24 graphs
+overlap_ab/p3_new.server.log captured 24 failed 0 last: 6000 replays, 23 graphs
+concurrent_ab/p1_new.server.log captured 19 failed 0 last: none
+concurrent_ab/p2_new.server.log captured 20 failed 0 last: none
+concurrent_ab/p3_new.server.log captured 21 failed 0 last: none
+gates/server.log captured 5 failed 0 last: none
