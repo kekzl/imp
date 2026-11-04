@@ -7,6 +7,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"
+#include "quant/nvfp4_quant.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
 
@@ -108,11 +109,14 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     }
     imp::mtp_gather_rows(ws->d_b_h_final, ws->d_row_src, ws->d_b_gather, hidden_dim, m, stream);
-    if (!executor_->lm_head_rows_argmax(ws->d_b_gather, m, ws->d_chain_tokens, stream)) {
+    // The lone chain's draft head: 682 MiB per pass instead of the 1213 MiB FP8 head.
+    imp::NvFP4QuantResult head_view;
+    const imp::NvFP4QuantResult* head = mtp_draft_lm_head_nvfp4_(head_view);
+    if (!executor_->lm_head_rows_argmax(ws->d_b_gather, m, ws->d_chain_tokens, stream, head)) {
         fail_all("batched draft: LM head unavailable");
         return;
     }
-    const bool chain = bv_.depth > 1 && mtp_batched_chain_(last_row, chain_slot, chain_pos, stream);
+    const bool chain = bv_.depth > 1 && mtp_batched_chain_(last_row, chain_slot, chain_pos, head, stream);
     const int n_out = chain ? 2 * m : m;
     std::vector<int32_t> h_out(static_cast<size_t>(n_out));
     if (cudaMemcpyAsync(h_out.data(), ws->d_chain_tokens, static_cast<size_t>(n_out) * sizeof(int32_t),
@@ -139,7 +143,8 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
 // one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (draft 1 never leaves the
 // device). The chained KV row is speculative: the next feed starts at that position and overwrites it.
 bool Engine::mtp_batched_chain_(const std::vector<int>& last_row, const std::vector<int>& slots,
-                                const std::vector<int>& pos, cudaStream_t stream) {
+                                const std::vector<int>& pos, const imp::NvFP4QuantResult* head,
+                                cudaStream_t stream) {
     auto* ws = mtp_ws_storage_.get();
     const int m = static_cast<int>(last_row.size());
     if (ws->max_seq_len > 0 && *std::max_element(pos.begin(), pos.end()) + 1 > ws->max_seq_len)
@@ -147,7 +152,7 @@ bool Engine::mtp_batched_chain_(const std::vector<int>& last_row, const std::vec
     return imp::mtp_feed_rows_multislot(ws->d_chain_tokens, ws->d_b_h_final, last_row.data(), m, slots.data(),
                                         pos.data(), *model_->mtp_, model_->tok_emb_, *ws,
                                         model_->config_.d_model, stream) &&
-           executor_->lm_head_rows_argmax(ws->d_b_h_final, m, ws->d_chain_tokens + m, stream);
+           executor_->lm_head_rows_argmax(ws->d_b_h_final, m, ws->d_chain_tokens + m, stream, head);
 }
 
 // A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =

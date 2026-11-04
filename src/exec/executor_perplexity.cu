@@ -530,16 +530,19 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     });
 }
 
-bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream) {
+bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream,
+                                        const NvFP4QuantResult* draft_nvfp4) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
-    // An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4 head: one FP8 GEMV over all rows reads the
-    // 1213 MiB head once (per-row NVFP4 draft GEMVs read 682 MiB per row).
+    // Draft copy first: 682 MiB read once per 4 rows. An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4
+    // head: one FP8 GEMV over all rows reads the 1213 MiB head once.
+    const bool w4a16 = draft_nvfp4 != nullptr && draft_nvfp4->packed_data != nullptr;
     const void* w8 = nullptr;
     const float* s8 = nullptr;
-    const bool fp8 = !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
-    if (!fp8 && (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr ||
-                 qscratch_.cutlass_act_sf == nullptr))
+    const bool fp8 = !w4a16 && !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
+    if (!w4a16 && !fp8 &&
+        (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr ||
+         qscratch_.cutlass_act_sf == nullptr))
         return false;
     const auto& cfg = model_->config();
     const int V = cfg.vocab_size;
@@ -553,7 +556,10 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         const void* rows = static_cast<const char*>(d_rows) +
                            (static_cast<size_t>(c) * cfg.d_model * sizeof(half));
         Tensor lg = view_tokens(logits_, csz);
-        if (fp8) {
+        if (w4a16) {
+            gemv_nvfp4_kpar_batched_fp32(*draft_nvfp4, static_cast<const half*>(rows),
+                                         static_cast<float*>(lg.data), V, cfg.d_model, csz, stream);
+        } else if (fp8) {
             if (!gemv_fp8_rowscale_fp32(w8, s8, static_cast<const half*>(rows), static_cast<float*>(lg.data),
                                         V, cfg.d_model, csz, stream))
                 return false;
