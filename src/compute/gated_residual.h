@@ -12,6 +12,7 @@
 //
 // The two GEMMs go through gemm(); everything else is here. FP16 in and out, FP32 arithmetic.
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include "core/tensor.h"
@@ -21,6 +22,11 @@ namespace imp {
 // out[t, s*d + j] = x[t, s*d + j] / rms(x[t, s*d : s*d + d]) * (1 + w[s*d + j]).
 void hc_grouped_rmsnorm(const Tensor& x, const Tensor& w, Tensor& out, int hc, int d, float eps,
                         cudaStream_t stream);
+
+// One row: out[j] = sum over s of grouped_rmsnorm(x, w)[s*d + j], the streams normed with a block's
+// weights and mixed uniformly (moe.expert_prefetch next-layer router input). False: nothing launched.
+[[nodiscard]] bool hc_norm_sum(const half* x, const half* w, half* out, int hc, int d, float eps,
+                               cudaStream_t stream);
 
 // x = silu(x / hc), in place. [n, lowrank] FP16.
 void hc_silu_div(Tensor& x, int hc, cudaStream_t stream);

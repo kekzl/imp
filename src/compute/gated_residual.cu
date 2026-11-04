@@ -52,6 +52,40 @@ __global__ void hc_grouped_rmsnorm_kernel(const half* __restrict__ x, const half
         orow[j] = __float2half(__half2float(xr[j]) * inv * (1.0f + __half2float(wr[j])));
 }
 
+// One block, one row: out[j] = sum over s of x[s*d + j] / rms(x[s]) * (1 + w[s*d + j]).
+__global__ void hc_norm_sum_kernel(const half* __restrict__ x, const half* __restrict__ w,
+                                   half* __restrict__ out, int hc, int d, float eps) {
+    __shared__ float red[kThreads / 32];
+    __shared__ float inv[kMaxHc];
+    for (int s = 0; s < hc; ++s) {
+        float sum = 0.0f;
+        for (int j = threadIdx.x; j < d; j += blockDim.x) {
+            const float v = __half2float(x[(static_cast<size_t>(s) * d) + j]);
+            sum += v * v;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+            sum += __shfl_xor_sync(0xffffffffu, sum, off);
+        if ((threadIdx.x & 31) == 0)
+            red[threadIdx.x >> 5] = sum;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float v = 0.0f;
+            for (int q = 0; q < kThreads / 32; ++q)
+                v += red[q];
+            inv[s] = rsqrtf((v / static_cast<float>(d)) + eps);
+        }
+        __syncthreads();
+    }
+    for (int j = threadIdx.x; j < d; j += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < hc; ++s) {
+            const size_t k = (static_cast<size_t>(s) * d) + j;
+            acc += __half2float(x[k]) * inv[s] * (1.0f + __half2float(w[k]));
+        }
+        out[j] = __float2half(acc);
+    }
+}
+
 // Decode (n = 1) hc_read front end: grouped RMSNorm + [down; inject] GEMV + silu / 2*sigmoid.
 // grid ceil((lowrank + n_inj) / rows_per_block), 256 threads, smem = K halves; warps past
 // rows_per_block only help the norm. Same op order as hc_grouped_rmsnorm_kernel +
@@ -248,6 +282,14 @@ void hc_grouped_rmsnorm(const Tensor& x, const Tensor& w, Tensor& out, int hc, i
         static_cast<const half*>(x.data), static_cast<const half*>(w.data), static_cast<half*>(out.data), hc, d,
         eps);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+bool hc_norm_sum(const half* x, const half* w, half* out, int hc, int d, float eps, cudaStream_t stream) {
+    if (x == nullptr || w == nullptr || out == nullptr || hc <= 0 || hc > kMaxHc || d <= 0)
+        return false;
+    hc_norm_sum_kernel<<<1, kThreads, 0, stream>>>(x, w, out, hc, d, eps);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
 }
 
 void hc_silu_div(Tensor& x, int hc, cudaStream_t stream) {

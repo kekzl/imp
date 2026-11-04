@@ -91,6 +91,10 @@ struct MoE {
     // gathered behind L's misses. 0 = off; at most 32. Output bits unchanged (pending keys wait on the
     // gather). Flash-Next server, 6 prompts: 0 / 1 / 2 / 3 / 4 = 91.5 / 92.3 / 93.7 / 91.9 / 90.3 tok/s.
     int expert_prefetch = 2;
+    // Qwen4Exp (gated residual): that router reads the hc streams normed with layer L+1's mlp norm and
+    // summed, not L's MoE input. Predictor recall 66.0 -> 71.4 % of top-10; server 6 prompts at N=2
+    // 94.60-95.00 -> 95.57-96.02 tok/s. Output bits unchanged.
+    bool expert_prefetch_hc_norm = true;
     // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
     // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +
     // top-k. F16 router, <= 128 experts, no group limit; off under runtime.deterministic.

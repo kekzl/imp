@@ -973,6 +973,7 @@ private:
         CudaStream pf_stream;
         CudaEvent pf_fork, pf_read, pf_ready, pf_gathered;
         int pf_layer = -1;  // layer whose prefetch is in flight
+        VramOwned<char> pf_x;  // [d_model] FP16, moe.expert_prefetch_hc_norm router input (Qwen4Exp)
     } gather_overlap_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
@@ -1340,7 +1341,8 @@ private:
     void init_shexp_overlap_();
     void free_shexp_overlap_();
     void init_gather_overlap_();  // moe.expert_gather_overlap, moe.expert_prefetch
-    // Layer + 1's routing from layer's MoE input x; true = its prefetch resolve runs on pf_stream.
+    // Layer + 1's routing from layer's MoE input x (Qwen4Exp with moe.expert_prefetch_hc_norm: the hc
+    // streams normed for layer + 1); true = its prefetch resolve runs on pf_stream.
     [[nodiscard]] bool predict_next_experts_(int layer, const void* x, cudaStream_t stream);
     void join_expert_prefetch_(cudaStream_t stream);  // waits for an unconsumed prefetch
     [[nodiscard]] bool fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no);

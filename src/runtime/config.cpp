@@ -307,6 +307,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("moe.router_fused", cfg.moe.router_fused);
     B("moe.expert_gather_overlap", cfg.moe.expert_gather_overlap);
     I("moe.expert_prefetch", cfg.moe.expert_prefetch);
+    B("moe.expert_prefetch_hc_norm", cfg.moe.expert_prefetch_hc_norm);
     I("moe.host_expert_pool_mib", cfg.moe.host_expert_pool_mib);
     I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
     I("moe.mr_nr", cfg.moe.mr_nr);

@@ -7,6 +7,7 @@
 #include "core/logging.h"
 #include "exec/expert_batch_policy.h"
 #include "compute/gemm.h"
+#include "compute/gated_residual.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -83,6 +84,10 @@ void GraphExecutor::init_gather_overlap_() {
         IMP_LOG_WARN("moe.expert_prefetch: side stream setup failed, no prefetch");
         g.pf_stream.reset();
     }
+    g.pf_x = {};
+    if (dev_expert_cache_.prefetch_on() && dispatch_policy().moe.expert_prefetch_hc_norm &&
+        model_->profile().gated_residual && vram_alloc_ != nullptr)
+        g.pf_x = VramOwned<char>(*vram_alloc_, model_->config().d_model * sizeof(half), "expert_prefetch_x");
 }
 
 bool GraphExecutor::predict_next_experts_(int layer, const void* x, cudaStream_t stream) {
@@ -103,10 +108,16 @@ bool GraphExecutor::predict_next_experts_(int layer, const void* x, cudaStream_t
         IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_fork, stream));
         IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(ps, g.pf_fork, 0));
     }
+    // Qwen4Exp: the hc streams this MoE block read, normed with the next block's mlp weights and summed.
+    const auto& nly = model_->layer(next);
+    if (g.pf_x && nly.hc_mlp_norm.data != nullptr &&
+        hc_norm_sum(static_cast<const half*>(hc_hidden_.data), static_cast<const half*>(nly.hc_mlp_norm.data),
+                    reinterpret_cast<half*>(g.pf_x.get()), cfg.hc_count, cfg.d_model, cfg.rms_norm_eps, ps))
+        x = g.pf_x.get();
     gemv_gate_fp32(static_cast<const half*>(gate.data), static_cast<const half*>(x),
                    dev_expert_cache_.pf_logits(), cfg.n_experts, cfg.d_model, ps);
-    if (issue)
-        IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_read, ps));  // x (norm_out_) read: main may overwrite after
+    if (issue)  // x (norm_out_) and hc_hidden_ read: main may overwrite after (it waits on the gather)
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_read, ps));
     DeviceExpertCache::PredTrace tr;
     if (moe_.expert_trace != nullptr && moe_.trace_top_k == cfg.n_experts_active)
         tr = {moe_.expert_trace, moe_.trace_weights, moe_.trace_cursor,
@@ -182,9 +193,9 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
                               stream);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.resolved, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.resolved, 0));
-    if (pf_next)  // main overwrites x only after it waited for this gather
-        IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.pf_read, 0));
     dev_expert_cache_.gather(layer, top_k, n_rows, g.stream);
+    if (pf_next)  // main overwrites the predictor's inputs only after `gathered`; the copy does not wait
+        IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.pf_read, 0));
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.gathered, g.stream));
     if (pf_next) {  // behind this layer's misses on the same stream: the next layer's gather follows it
         IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.pf_ready, 0));
