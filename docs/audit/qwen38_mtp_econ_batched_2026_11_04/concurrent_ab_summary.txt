@@ -1,0 +1,10 @@
+# /mnt/data/scratch/mtpecon_2026_11_04/concurrent_ab: imp:mtpecon-main (173d66be) vs imp:mtpecon-new, c1 c2 c4 c32, 3 alternating pairs
+# [mtp-econ] lines per server log: 0 over all 6
+# conc_client.py puts the arm tag into the burst prompts: c2/c4 acceptance differs per arm by prompt
+harness: md5=f8ac61ec6cb4
+p1_main c1 128.09 drafted 1822 accepted 1275 c2 294.4 c4 523.7 c32 1963.2 own_peak_mib 25218 kv_blocks 4882
+p1_new c1 128.39 drafted 1822 accepted 1275 c2 297.5 c4 540.3 c32 1961.8 own_peak_mib 25226 kv_blocks 4882
+p2_main c1 128.50 drafted 1822 accepted 1275 c2 296.1 c4 514.6 c32 1956.1 own_peak_mib 25226 kv_blocks 4882
+p2_new c1 127.76 drafted 1822 accepted 1275 c2 300.9 c4 498.5 c32 1962.3 own_peak_mib 25223 kv_blocks 4882
+p3_main c1 128.66 drafted 1822 accepted 1275 c2 295.3 c4 516.7 c32 1946.2 own_peak_mib 25225 kv_blocks 4882
+p3_new c1 128.22 drafted 1822 accepted 1275 c2 286.4 c4 526.3 c32 1956.5 own_peak_mib 25234 kv_blocks 4882

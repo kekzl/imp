@@ -1172,9 +1172,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // replay). Below ~4 emitted/verify the step loses outright: doom MTP
     // drafting for this request; the suffix matcher and miss bursts carry on.
     if (draft_from_mtp) {
-        mtp_active_.econ_verifies++;
-        mtp_active_.econ_emitted += emitted;
-        mtp_active_.econ_rows += K;
+        mtp_econ_count(mtp_active_, emitted, K, /*batched=*/false);
         // Adaptive chain depth (AIMD): a fully accepted chain earns one more
         // row next draft (up to the configured k), any rejection sheds one.
         // Draft-poor prompts converge to k=1 verifies instead of paying the
@@ -1189,31 +1187,22 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             else
                 mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
         }
-        constexpr int kMtpEconSample = 8;  // fair sample before judging
         // Break-even avg emitted/verify is configurable (0 disables): the
         // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
         // the verify-chunk cost, both of which have moved since #852.
-        // Negative selects the k-aware default; see dispatch_policy.h for the
-        // measurement it comes from and for why an absolute value doomed every
-        // chain length this engine runs.
+        // Negative selects the k-aware default 1 + f*k, a draft-acceptance
+        // threshold because a verify emits exactly 1 + accepted; k is the
+        // k that RAN (avg rows/verify), not the configured ceiling, so a
+        // request parked at k_live=1 meets the k=1 break-even. The tally
+        // holds the binding's batched verifies too (mtp_econ_count).
         const float cfg_min = runtime_config_.speculative.mtp_econ_min_emit;
-        // 1 + f*k IS a draft-acceptance threshold, because a verify emits
-        // exactly 1 + accepted. f = 0.40 sits on the measured break-even
-        // acceptance (39.0 / 37.5 / 47.7 % at k = 1 / 2 / 3); see
-        // dispatch_policy.h for the derivation and for why permissive at k=3
-        // is the deliberate direction.
-        constexpr float kMtpEconAccept = 0.40f;
-        // Price the k that RAN (avg rows/verify), not the configured ceiling:
-        // with the adaptive depth above, a request parked at k_live=1 must be
-        // judged against the k=1 break-even or the deeper config dooms it.
-        const float k_ran = static_cast<float>(mtp_active_.econ_rows) /
-                            static_cast<float>(mtp_active_.econ_verifies);
-        const float min_emit = cfg_min < 0.0f ? 1.0f + (kMtpEconAccept * k_ran) : cfg_min;
-        if (min_emit > 0.0f && mtp_active_.econ_verifies >= kMtpEconSample &&
-            static_cast<float>(mtp_active_.econ_emitted) <
-                static_cast<float>(mtp_active_.econ_verifies) * min_emit) {
-            IMP_LOG_INFO("[mtp-econ] verifies=%d emitted=%lld min_emit=%.2f this_emitted=%d matched=%d",
-                         mtp_active_.econ_verifies, mtp_active_.econ_emitted, min_emit, emitted, matched);
+        const MtpBind& b = mtp_active_;
+        if (mtp_econ_uneconomic(b.econ_verifies, b.econ_emitted, b.econ_rows, cfg_min)) {
+            IMP_LOG_INFO(
+                "[mtp-econ] verifies=%d (batched %d) emitted=%lld rows=%lld min_emit=%.2f "
+                "this_emitted=%d matched=%d",
+                b.econ_verifies, b.econ_batched, b.econ_emitted, b.econ_rows,
+                mtp_econ_min_emit(b.econ_verifies, b.econ_rows, cfg_min), emitted, matched);
             mtp_unbind_("uneconomic: avg emitted/verify below break-even");
         }
     }

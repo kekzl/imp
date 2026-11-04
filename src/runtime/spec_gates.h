@@ -103,4 +103,22 @@ constexpr SpecEconVerdict spec_economics(const SpecEconState& s) {
     return {.stop = s.accepted * 100 < s.drafted * 15, .final = true};
 }
 
+// MTP economics guard over a binding's MTP verifies, lone and batched (engine_spec_ngram.cpp).
+// cfg_min = speculative.mtp_econ_min_emit: < 0 = 1 + 0.40 * k_ran (k_ran = rows / verify), 0 = off.
+// f = 0.40 is the measured break-even acceptance at k = 1 / 2 / 3 (dispatch_policy.h).
+constexpr float mtp_econ_min_emit(int verifies, long long rows, float cfg_min) {
+    constexpr float kAccept = 0.40f;
+    if (cfg_min >= 0.0f || verifies <= 0)
+        return cfg_min;
+    return 1.0f + (kAccept * (static_cast<float>(rows) / static_cast<float>(verifies)));
+}
+
+// Unbind MTP for the request: after 8 verifies, average emitted per verify below the break-even.
+constexpr bool mtp_econ_uneconomic(int verifies, long long emitted, long long rows, float cfg_min) {
+    constexpr int kSample = 8;
+    const float min_emit = mtp_econ_min_emit(verifies, rows, cfg_min);
+    return min_emit > 0.0f && verifies >= kSample &&
+           static_cast<float>(emitted) < static_cast<float>(verifies) * min_emit;
+}
+
 }  // namespace imp

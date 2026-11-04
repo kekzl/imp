@@ -521,6 +521,7 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     mtp_active_.econ_verifies = 0;
     mtp_active_.econ_emitted = 0;
     mtp_active_.econ_rows = 0;
+    mtp_active_.econ_batched = 0;
     mtp_active_.k_live = mtp_spec_k_;
     mtp_active_.carry_n = 0;
     if (!mtp_active_.history.empty() && ws->mtp_pos > 0)
@@ -867,6 +868,7 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_active_.econ_verifies = 0;
     mtp_active_.econ_emitted = 0;
     mtp_active_.econ_rows = 0;
+    mtp_active_.econ_batched = 0;
     mtp_active_.k_live = mtp_spec_k_;
     mtp_active_.carry_n = 0;
     mtp_pool_.binds.clear();

@@ -87,6 +87,7 @@ struct MtpBind {
     // (AIMD, 0 = not bound yet).
     int econ_verifies = 0;
     long long econ_emitted = 0, econ_rows = 0;
+    int econ_batched = 0;  // of econ_verifies, from the batched verify (speculative.mtp_batch_verify)
     int k_live = 0;
     bool stale_logged = false;  // "drafting off" logged once per binding
     int carry_n = 0;  // speculative.mtp_carry: hidden rows waiting in the slot's carry, -1 = a step missed
@@ -111,6 +112,25 @@ struct MtpBindPool {
 // Is req_id bound: the active binding or a parked one.
 [[nodiscard]] inline bool mtp_bound(const MtpBind& active, const MtpBindPool& pool, int req_id) {
     return req_id >= 0 && (active.req == req_id || pool.binds.contains(req_id));
+}
+
+// req_id's binding, active or parked, without activating it; nullptr = not bound.
+[[nodiscard]] inline MtpBind* mtp_find_bind(MtpBind& active, MtpBindPool& pool, int req_id) {
+    if (req_id < 0)
+        return nullptr;
+    if (active.req == req_id)
+        return &active;
+    auto it = pool.binds.find(req_id);
+    return it == pool.binds.end() ? nullptr : &it->second;
+}
+
+// One MTP-drafted verify of the binding: `rows` drafts, `emitted` tokens. The economics guard judges
+// lone and batched verifies together; lone-only made 8 lone verifies after ~700 batched ones the sample.
+inline void mtp_econ_count(MtpBind& b, int emitted, int rows, bool batched) {
+    b.econ_verifies++;
+    b.econ_emitted += emitted;
+    b.econ_rows += rows;
+    b.econ_batched += batched ? 1 : 0;
 }
 
 // Would req_id's prompt take a head KV slot (mtp_acquire_slot_): bound already, fewer than bind_cap
