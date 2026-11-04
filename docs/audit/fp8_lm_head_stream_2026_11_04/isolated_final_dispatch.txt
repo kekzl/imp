@@ -1,0 +1,8 @@
+[ HEAD     ] M=248320 K=5120 rows=1 nt=8: 926.6 us/call, 1373 GB/s
+[ HEAD     ] M=248320 K=5120 rows=1 nt=0: 771.5 us/call, 1649 GB/s
+[ HEAD     ] M=248320 K=5120 rows=4 nt=8: 930.4 us/call, 1368 GB/s
+[ HEAD     ] M=248320 K=5120 rows=4 nt=0: 777.4 us/call, 1637 GB/s
+[ HEAD     ] M=248320 K=5120 rows=16 nt=8: 960.0 us/call, 1325 GB/s
+[ HEAD     ] M=248320 K=5120 rows=16 nt=0: 791.6 us/call, 1607 GB/s
+[ HEAD     ] M=248320 K=5120 rows=29 nt=8: 905.8 us/call, 1405 GB/s
+[ HEAD     ] M=248320 K=5120 rows=29 nt=0: 906.3 us/call, 1404 GB/s

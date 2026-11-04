@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 namespace imp {
 namespace {
@@ -411,7 +412,7 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
         }
     }
     // Every row-tile variant reproduces the default bits (same per-row MMA chain).
-    for (int nt : {4}) {
+    for (int nt : {4, 8}) {
         std::vector<float> out(y_elems);
         cudaMemset(d_y, 0xff, y_elems * sizeof(float));
         for (int r = 0; r < N; r += 32)
@@ -430,6 +431,76 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
         cudaFree(p);
     cudaFree(d_s);
     cudaFree(d_y);
+}
+
+// Streamed head (passes of <= 16 rows) at the K of Qwen3-8B (4096) and Qwen3.8-27B (5120): every bit equals
+// the split-K kernel's, and both sit within FP32 accumulation error of an fp64 dot over the codes.
+TEST_F(FP8GemmTest, RowscaleFp32StreamedHeadMatchesSplitKAndReference) {
+    for (const auto [M, K] : {std::pair{2051, 4096}, std::pair{1155, 5120}}) {
+        constexpr int NMAX = 16;
+        std::vector<half> w(static_cast<size_t>(M) * K), x(static_cast<size_t>(NMAX) * K);
+        uint32_t s = 41u + static_cast<uint32_t>(K);
+        auto rnd = [&s] {
+            s = s * 1664525u + 1013904223u;
+            return static_cast<float>(s >> 8) / 16777216.0f - 0.5f;
+        };
+        for (size_t i = 0; i < w.size(); ++i)
+            w[i] = __float2half(0.02f * static_cast<float>(1 + (i / K) % 7) * rnd());
+        for (auto& v : x)
+            v = __float2half(4.0f * rnd());
+        void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr;
+        float *d_s = nullptr, *d_y = nullptr;
+        const size_t y_elems = static_cast<size_t>(NMAX) * M;
+        ASSERT_EQ(cudaMalloc(&d_w, w.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_q, w.size()), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_y, y_elems * sizeof(float)), cudaSuccess);
+        cudaMemcpy(d_w, w.data(), w.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+        quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+        const half* hx = static_cast<const half*>(d_x);
+        auto run = [&](int n, int nt) {
+            std::vector<float> out(static_cast<size_t>(n) * M);
+            cudaMemset(d_y, 0xff, y_elems * sizeof(float));  // NaN fill: an unwritten logit fails below
+            EXPECT_TRUE(gemv_fp8_rowscale_fp32_tuned(d_q, d_s, hx, d_y, M, K, n, nt, stream_));
+            EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+            cudaMemcpy(out.data(), d_y, out.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            return out;
+        };
+        std::vector<uint8_t> q(w.size());
+        std::vector<float> sc(M);
+        cudaMemcpy(q.data(), d_q, q.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(sc.data(), d_s, M * sizeof(float), cudaMemcpyDeviceToHost);
+        for (int n : {1, 4, NMAX}) {
+            const std::vector<float> streamed = run(n, 0);
+            EXPECT_EQ(0, std::memcmp(streamed.data(), run(n, 8).data(), streamed.size() * sizeof(float)))
+                << "M=" << M << " K=" << K << " n=" << n << ": streamed head bits differ from split-K";
+            double max_rel = 0.0;
+            bool finite = true;
+            for (int r = 0; r < n; ++r)
+                for (int m = 0; m < M; ++m) {
+                    double acc = 0.0, mag = 0.0;
+                    for (int k = 0; k < K; ++k) {
+                        bool nan = false;
+                        const double wv = e4m3_decode_ref(q[static_cast<size_t>(m) * K + k], nan) * sc[m];
+                        const double xv = __half2float(x[static_cast<size_t>(r) * K + k]);
+                        acc += wv * xv;
+                        mag += std::fabs(wv * xv);
+                    }
+                    const float got = streamed[static_cast<size_t>(r) * M + m];
+                    finite = finite && std::isfinite(got);
+                    max_rel = std::max(max_rel, std::fabs(got - acc) / std::max(mag, 1e-30));
+                }
+            EXPECT_TRUE(finite) << "M=" << M << " K=" << K << " n=" << n << ": unwritten or non-finite logit";
+            // FP32 accumulation: <= ~K * 2^-24 of sum|w*x| (2.4e-4 at K 4096); layout bugs are O(1).
+            EXPECT_LT(max_rel, 2.5e-4) << "M=" << M << " K=" << K << " n=" << n;
+        }
+        for (void* p : {d_w, d_q, d_x})
+            cudaFree(p);
+        cudaFree(d_s);
+        cudaFree(d_y);
+    }
 }
 
 // FP16 twin (GDN projections at 2 <= M <= 32): every output equals the FP32 head's value rounded to
@@ -484,11 +555,87 @@ TEST_F(FP8GemmTest, RowscaleF16MatchesFp32HeadRounded) {
     }
 }
 
-// Qwen3-14B FP8 head (151936 x 5120, 778 MB > L2) at 29 rows: us/call per row tile vs 1628 GB/s.
+// Read-shape probe behind the streamed FP8 head (IMP_FP8_PROBE=1): read bandwidth of a [248320 x 5120]
+// byte matrix when a warp instruction reads C contiguous bytes of 512 / C rows (64 B: 1397 GB/s, 128: 1665).
+template <int C, int kU>
+__global__ void probe_read_kernel(const uint4* __restrict__ W, int M, int K, uint32_t* out) {
+    const int lane = threadIdx.x & 31;
+    const int warp = (blockIdx.x * (blockDim.x >> 5)) + (threadIdx.x >> 5);
+    constexpr int lpr = C / 16;    // lanes per row
+    constexpr int rpi = 32 / lpr;  // rows per instruction
+    const int row0 = warp * 16;
+    if (row0 >= M)
+        return;
+    const int segs = K / C;
+    const int n_inst = (16 / rpi) * segs;
+    uint32_t acc = 0;
+    for (int i0 = 0; i0 < n_inst; i0 += kU) {
+        uint4 v[kU];
+#pragma unroll
+        for (int u = 0; u < kU; ++u) {
+            const int i = i0 + u;
+            const int row = row0 + ((i / segs) * rpi) + (lane / lpr);
+            const int64_t off = (static_cast<int64_t>(row) * K) + ((i % segs) * C) + ((lane % lpr) * 16);
+            v[u] = __ldcs(W + (off >> 4));
+        }
+#pragma unroll
+        for (int u = 0; u < kU; ++u)
+            acc ^= v[u].x ^ v[u].y ^ v[u].z ^ v[u].w;
+    }
+    if (acc == 0x12345678u)
+        out[0] = acc;
+}
+
+TEST_F(FP8GemmTest, HeadReadShapeProbe) {
+    if (getenv("IMP_FP8_PROBE") == nullptr)
+        GTEST_SKIP() << "set IMP_FP8_PROBE=1 to run the read-shape probe";
+    constexpr int M = 248320, K = 5120;
+    void* d = nullptr;
+    uint32_t* o = nullptr;
+    ASSERT_EQ(cudaMalloc(&d, static_cast<size_t>(M) * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&o, 4), cudaSuccess);
+    cudaMemset(d, 0x2a, static_cast<size_t>(M) * K);
+    const auto* W = static_cast<const uint4*>(d);
+    const int warps = M / 16;
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    auto bench = [&](const char* name, auto launch) {
+        for (int i = 0; i < 1500; ++i)
+            launch();
+        float ms = 0.0f;
+        cudaEventRecord(t0, stream_);
+        for (int i = 0; i < 300; ++i)
+            launch();
+        cudaEventRecord(t1, stream_);
+        ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+        cudaEventElapsedTime(&ms, t0, t1);
+        const double us = ms * 1000.0 / 300;
+        printf("[ PROBE    ] %s: %.1f us, %.0f GB/s\n", name, us, static_cast<double>(M) * K / us / 1e3);
+    };
+#define PROBE(C, U, TPB)                  \
+    bench("C=" #C " kU=" #U " tpb=" #TPB, \
+          [&] { probe_read_kernel<C, U><<<(warps * 32 + TPB - 1) / TPB, TPB, 0, stream_>>>(W, M, K, o); })
+    PROBE(64, 8, 128);
+    PROBE(128, 8, 128);
+    PROBE(256, 8, 128);
+    PROBE(512, 8, 128);
+    PROBE(64, 4, 128);
+    PROBE(512, 4, 128);
+    PROBE(512, 2, 128);
+    PROBE(512, 8, 256);
+#undef PROBE
+    cudaFree(d);
+    cudaFree(o);
+}
+
+// FP8 head sweep, us/call per variant (nt 8 / 4 split-K, 0 default) vs 1628 GB/s. Env IMP_FP8_HEAD_M (151936
+// = Qwen3-14B, 778 MB > L2), IMP_FP8_HEAD_ROWS (29), IMP_FP8_HEAD_NT (one variant).
 TEST_F(FP8GemmTest, RowscaleFp32HeadRowTileSweep) {
     if (getenv("IMP_FP8_HEAD_SWEEP") == nullptr)
         GTEST_SKIP() << "set IMP_FP8_HEAD_SWEEP=1 to run the head sweep";
-    constexpr int M = 151936, K = 5120;
+    const int M = getenv("IMP_FP8_HEAD_M") ? atoi(getenv("IMP_FP8_HEAD_M")) : 151936;
+    constexpr int K = 5120;
     const int N = getenv("IMP_FP8_HEAD_ROWS") ? atoi(getenv("IMP_FP8_HEAD_ROWS")) : 29;
     void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr;
     float *d_s = nullptr, *d_y = nullptr;
@@ -506,7 +653,10 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadRowTileSweep) {
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
     cudaEventCreate(&t1);
-    for (int nt : {4, 8}) {
+    std::vector<int> nts = {8, 4, 0, 8};
+    if (getenv("IMP_FP8_HEAD_NT") != nullptr)
+        nts = {atoi(getenv("IMP_FP8_HEAD_NT"))};
+    for (int nt : nts) {
         for (int i = 0; i < 2000; ++i)  // >1 s clock ramp
             ASSERT_TRUE(gemv_fp8_rowscale_fp32_tuned(d_q, d_s, hx, d_y, M, K, N, nt, stream_));
         double best = 1e30;

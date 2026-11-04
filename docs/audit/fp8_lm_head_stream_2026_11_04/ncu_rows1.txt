@@ -1,0 +1,60 @@
+== nt1028.csv void unnamed>::fp8_head_rowseq_kernel<1, 2, 8, float>(const 
+  gpu__time_duration.sum                                                           1167008 ns
+  dram__throughput.avg.pct_of_peak_sustained_elapsed                               61.90 %
+  dram__bytes.sum                                                                  1274798080 byte
+  lts__t_sector_hit_rate.pct                                                       1.40 %
+  l1tex__t_sector_hit_rate.pct                                                     19.08 %
+  sm__throughput.avg.pct_of_peak_sustained_elapsed                                 14.09 %
+  sm__warps_active.avg.pct_of_peak_sustained_active                                61.82 %
+  launch__grid_size                                                                3880 
+  launch__registers_per_thread                                                     62 register/thread
+  launch__occupancy_limit_registers                                                8 block
+  launch__waves_per_multiprocessor                                                 2.85 
+  smsp__issue_active.avg.pct_of_peak_sustained_active                              5.12 %
+  smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         141.39 inst
+  smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        0.06 inst
+  smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             0.00 inst
+  smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            0.00 inst
+  smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio      1.15 inst
+  smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 0 inst
+  smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    1.51 inst
+== nt1082.csv void unnamed>::fp8_head_rowseq_kernel<1, 8, 2, float>(const 
+  gpu__time_duration.sum                                                           917472 ns
+  dram__throughput.avg.pct_of_peak_sustained_elapsed                               78.75 %
+  dram__bytes.sum                                                                  1275040256 byte
+  lts__t_sector_hit_rate.pct                                                       0.84 %
+  l1tex__t_sector_hit_rate.pct                                                     5.43 %
+  sm__throughput.avg.pct_of_peak_sustained_elapsed                                 17.92 %
+  sm__warps_active.avg.pct_of_peak_sustained_active                                15.63 %
+  launch__grid_size                                                                970 
+  launch__registers_per_thread                                                     180 register/thread
+  launch__occupancy_limit_registers                                                2 block
+  launch__waves_per_multiprocessor                                                 2.85 
+  smsp__issue_active.avg.pct_of_peak_sustained_active                              5.12 %
+  smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         32.43 inst
+  smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        0.05 inst
+  smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             0.01 inst
+  smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            0.00 inst
+  smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio      1.85 inst
+  smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 0 inst
+  smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    1.69 inst
+== nt8.csv void unnamed>::fp8_head_mma_kernel<1, 8, 2, float>(const uns
+  gpu__time_duration.sum                                                           930400 ns
+  dram__throughput.avg.pct_of_peak_sustained_elapsed                               78.53 %
+  dram__bytes.sum                                                                  1289472512 byte
+  lts__t_sector_hit_rate.pct                                                       4.19 %
+  l1tex__t_sector_hit_rate.pct                                                     2.07 %
+  sm__throughput.avg.pct_of_peak_sustained_elapsed                                 17.56 %
+  sm__warps_active.avg.pct_of_peak_sustained_active                                23.41 %
+  launch__grid_size                                                                3880 
+  launch__registers_per_thread                                                     144 register/thread
+  launch__occupancy_limit_registers                                                3 block
+  launch__waves_per_multiprocessor                                                 7.61 
+  smsp__issue_active.avg.pct_of_peak_sustained_active                              4.48 %
+  smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         55.29 inst
+  smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        0.06 inst
+  smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             0.91 inst
+  smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            0.11 inst
+  smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio      2.12 inst
+  smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 1.39 inst
+  smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    1.86 inst

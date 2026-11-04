@@ -1,0 +1,5 @@
+[draft head] rows=1 fp8 772.2 us (1647 GB/s)  nvfp4 425.0 us (1683 GB/s)
+[draft head] rows=2 fp8 774.3 us (1642 GB/s)  nvfp4 432.5 us (1654 GB/s)
+[draft head] rows=3 fp8 776.1 us (1638 GB/s)  nvfp4 511.8 us (1397 GB/s)
+[draft head] rows=4 fp8 777.5 us (1635 GB/s)  nvfp4 572.2 us (1250 GB/s)
+[       OK ] LmHeadDraftRows.Nvfp4MultiRowIsRowCountInvariantAndPriced (215 ms)

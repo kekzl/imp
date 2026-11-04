@@ -67,7 +67,8 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
 // FP8 sidecar once instead of rebuilding the F16 weight per call.
 [[nodiscard]] bool gemv_fp8_rowscale_f16(const void* W_fp8, const float* d_row_scales, const half* x, half* y,
                                          int M, int K, int n_rows, cudaStream_t stream = nullptr);
-// Tests only: nt * 8 vocab rows per block (nt in {4, 8}; 8 = the default), bit-identical output.
+// Tests only: nt 4 / 8 = split-K kernel with nt * 8 vocab rows per block, 0 = default dispatch;
+// bit-identical.
 [[nodiscard]] bool gemv_fp8_rowscale_fp32_tuned(const void* W_fp8, const float* d_row_scales, const half* x,
                                                 float* y, int M, int K, int n_rows, int nt,
                                                 cudaStream_t stream = nullptr);
