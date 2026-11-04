@@ -286,7 +286,6 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
     const int cslot[m] = {0, 1, 2};
     const int cpos[m] = {2, 1, 2};
     const int32_t ctok[m] = {5, 17, 99};
-    size_t bytes = 0;
     {
         int32_t* d_ctok = nullptr;
         ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
@@ -310,7 +309,6 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
         ASSERT_EQ(cudaMemcpy(back, tab.chain_pos, sizeof(back), cudaMemcpyDeviceToHost), cudaSuccess);
         EXPECT_TRUE(std::equal(back, back + m, cpos));
         cudaFree(d_ctok);
-        bytes = static_cast<size_t>(kSlots) * ws_host.kv_slot_elems * sizeof(__half);
     }
     auto same = [](const void* a, const void* b, size_t nb) {
         std::vector<char> ha(nb), hb(nb);
@@ -318,8 +316,19 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
         EXPECT_EQ(cudaMemcpy(hb.data(), b, nb, cudaMemcpyDeviceToHost), cudaSuccess);
         return ha == hb;
     };
-    EXPECT_TRUE(same(ws_host.d_k_cache_base, ws_pass.d_k_cache_base, bytes)) << "K slots";
-    EXPECT_TRUE(same(ws_host.d_v_cache_base, ws_pass.d_v_cache_base, bytes)) << "V slots";
+    // Written rows only (fresh cudaMalloc memory is not zeroed): feed + chain rows per slot.
+    const int written[kSlots] = {3, 2, 3};
+    const size_t row_bytes = static_cast<size_t>(kNkv) * kHd * sizeof(__half);
+    for (int sl = 0; sl < kSlots; ++sl) {
+        const size_t off = static_cast<size_t>(sl) * ws_host.kv_slot_elems * sizeof(__half);
+        const size_t nb = static_cast<size_t>(written[sl]) * row_bytes;
+        EXPECT_TRUE(same(static_cast<char*>(ws_host.d_k_cache_base) + off,
+                         static_cast<char*>(ws_pass.d_k_cache_base) + off, nb))
+            << "K slot " << sl;
+        EXPECT_TRUE(same(static_cast<char*>(ws_host.d_v_cache_base) + off,
+                         static_cast<char*>(ws_pass.d_v_cache_base) + off, nb))
+            << "V slot " << sl;
+    }
     EXPECT_TRUE(same(ws_host.d_b_h_final, ws_pass.d_b_h_final, static_cast<size_t>(m) * kH * sizeof(__half)))
         << "chain final_norm rows";
     // m > n, or a row past the slot count: refused before touching the staging.

@@ -8,7 +8,8 @@ table at the end carries the state of every stage.
 Status (2026-11-04): the same step runs by default for the BOUND requests while <= 4 decode
 (`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows"), with 2 drafts per request
 (`speculative.mtp_batch_verify_k`, section "Two drafts per bound request"), both draft passes on the
-NVFP4 draft head (section at the end); the full `batch_verify` stays opt-in.
+NVFP4 draft head (section "NVFP4 draft head in the batched passes"), their tables in one H2D (section at
+the end); the full `batch_verify` stays opt-in.
 
 ## Why
 
@@ -237,3 +238,32 @@ side mode after the overlap modes, 122.94 -> 121.63, pairs mixed sign: 122.34 / 
 
 Next: the NVFP4 kernel loses bandwidth at 3-4 rows (1419 / 1282 GB/s vs 1681 at 1 row); the rest of
 the head pass is the two BF16 MTP layer feeds (832 MiB weights each).
+
+## One table upload per head pass (2026-11-04)
+
+The batched head pass copied 8 pageable host tables per step (feed tokens / slots / positions /
+source rows, the draft gather rows, the chain's source rows / slots / positions); `mtp_head_pass_upload`
+packs all 7 (4n + 3m ints) into a pinned buffer, one H2D, and both feeds read them on the device
+(`mtp_feed_rows_multislot_dev`). Evidence: docs/audit/qwen38_mtp_head_pass_one_h2d_2026_11_04/.
+
+| per head pass, nsys c2 (`nsys_head_pass.txt`, ~375 passes) | main 11088fbb | this branch |
+|---|---:|---:|
+| host wall, first table H2D to draft sync | 2813.0 us | 2498.0 us |
+| GPU busy in that window | 2102.2 us | 2098.7 us |
+| GPU idle in that window | 715.2 us | 393.1 us |
+| `cudaMemcpyAsync` calls | 10 | 2 |
+
+| requests (`step_price.txt`, 3 pairs, overlap A/B) | main head | new head |
+|---:|---|---|
+| 2 | 2.74-2.77 ms | 2.69-2.73 ms |
+| 3 | 2.95-2.96 ms | 2.82-2.89 ms |
+| 4 | 3.09-3.15 ms | 3.00-3.05 ms |
+
+End to end (3 alternating pairs, `means.txt`): 2 overlapping chats 134.31 -> 137.35 tok/s (3/3 pairs
+higher, but accepted / drafted also moved 65.7-67.8 -> 68.0-69.4 %, `acceptance.txt`), 4 chats 140.32 ->
+140.37, side follow-ups 121.83 -> 122.21; c1 / c2 / c4 / c32 131.02 / 297.70 / 524.27 / 2024.20 ->
+131.15 / 298.13 / 525.33 / 2035.40, within the pair spread. Lone chat 6/6 + 6/6 byte-identical to main
+on fresh servers (`identity_summary.txt`).
+
+Next: the 393 us of GPU idle left per pass are launch gaps between 56 kernel launches (rmsnorm, scan,
+mrope, gather, split-K reduce); a captured graph per (rows, requests, scan tier) would replay them.

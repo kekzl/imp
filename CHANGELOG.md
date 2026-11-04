@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- The batched MTP head pass uploads its 7 feed and chain tables in one pinned H2D instead of 8 pageable copies. Qwen3.8-27B-NVFP4: head pass 2 / 4 requests 2.74-2.77 / 3.09-3.15 -> 2.69-2.73 / 3.00-3.05 ms, GPU idle per pass (nsys c2) 715 -> 393 us; tok/s within pair spread.
 - MTP draft workspace is a capacity-plan row (`MTP draft workspace`, audit pool `mtp_workspace`) taken inside init, not after the plan. Qwen3.8-27B-NVFP4 default server: +360 MiB after `init_complete` -> 0, plan KV 11380 -> 10335 blocks, shutdown audit residual 1435 -> 1080 MiB; c1/c4/c32 tok/s -1.1/-0.4/-0.4 % (3 pairs, noise).
 - Batched MTP drafts (`speculative.mtp_batch_verify`) read the 682 MiB NVFP4 draft LM head, one weight pass per 4 rows, instead of the 1213 MiB FP8 head; verification stays FP8. Qwen3.8-27B-NVFP4: head pass 3.74-3.93 -> 2.73-3.07 ms at 2 requests, 2 / 4 overlapping chats 129.67 -> 135.18 / 133.07 -> 138.15 tok/s, c2 269.90 -> 293.50.
 - Docs: c32 VRAM growth of a default Qwen3.8-27B-NVFP4 server with the MTP head is planned recurrent slots (2480 MiB), batched-verify spares (320) and KV grow-ahead (312); the other ~585 MiB is a WSL2 `cudaMemGetInfo` step at ~24.5 GB device used that `nvidia-smi` does not show. New: `tools/analysis/serving_vram_phases.sh` (#3038)

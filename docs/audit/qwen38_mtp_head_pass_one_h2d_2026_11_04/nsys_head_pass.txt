@@ -1,0 +1,57 @@
+# nsys --cuda-graph-trace=node, default server, conc_client c2 x 3 waves x 300 tokens; head_pass_nsys.py:
+# a pass = first table H2D before the feed's gather to the end of the draft sync; gaps = GPU idle in it
+main passes 376 (of 376 gather clusters)
+main wall median 2813.0 us, gpu busy 2102.2 us, gpu idle 715.2 us, final sync wait 4.1 us
+main gpu idle per pass by the activity ending the gap (mean us/pass, top 12):
+main      115.4  rmsnorm_fp16_rowblock_kernel
+main       73.4  nvjet_sm120_hhh_mma_128x128x64_3_32x64x64_tmaAB_alignCD4_spl
+main       53.6  mtp_attn_kv_scan_rows_kernel
+main       38.2  nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_alignCD4_bz_TN
+main       37.2  memcpy kind 1 16 B
+main       35.0  splitKreduce_kernel
+main       34.9  memcpy kind 1 24 B
+main       34.4  embedding_lookup_vec_kernel
+main       34.1  rmsnorm_fp16_warp_kernel
+main       32.1  mtp_mrope_kernel
+main       31.5  nvjet_sm120_hhh_mma_256x8x64_2_64x8x64_tmaAB_alignCD4_splitK
+main       28.3  mtp_gather_rows_kernel
+main   cuKernelGetName                          calls/pass  25.0  host us/pass 7.6
+main   cuKernelSetAttribute                     calls/pass  16.0  host us/pass 9.6
+main   cuLaunchKernelEx                         calls/pass  16.0  host us/pass 196.4
+main   cuLibraryGetKernel                       calls/pass   0.0  host us/pass 0.0
+main   cuLibraryLoadData                        calls/pass   0.0  host us/pass 0.0
+main   cuStreamGetGreenCtx                      calls/pass  16.0  host us/pass 4.0
+main   cudaLaunchKernel                         calls/pass  25.0  host us/pass 389.3
+main   cudaLaunchKernelExC                      calls/pass  31.0  host us/pass 489.2
+main   cudaMemcpy2DAsync                        calls/pass   2.0  host us/pass 31.0
+main   cudaMemcpyAsync                          calls/pass  10.0  host us/pass 1420.0
+main   cudaStreamIsCapturing                    calls/pass  32.0  host us/pass 15.1
+main   cudaStreamSynchronize                    calls/pass   1.0  host us/pass 4.1
+new passes 371 (of 371 gather clusters)
+new wall median 2498.0 us, gpu busy 2098.7 us, gpu idle 393.1 us, final sync wait 3.7 us
+new gpu idle per pass by the activity ending the gap (mean us/pass, top 12):
+new       74.0  rmsnorm_fp16_rowblock_kernel
+new       58.9  mtp_attn_kv_scan_rows_kernel
+new       54.1  mtp_gather_rows_kernel
+new       41.5  rmsnorm_fp16_warp_kernel
+new       37.5  mtp_mrope_kernel
+new       35.9  splitKreduce_kernel
+new       33.8  nvjet_sm120_hhh_mma_128x128x64_3_32x64x64_tmaAB_alignCD4_spl
+new       30.2  nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_alignCD4_bz_TN
+new       27.6  nvjet_sm120_hhh_mma_256x8x64_2_64x8x64_tmaAB_alignCD4_splitK
+new       23.1  embedding_lookup_vec_kernel
+new       21.3  rowwise_argmax_partial_kernel
+new       20.4  memcpy kind 1 120 B
+new   cuKernelGetName                          calls/pass  25.0  host us/pass 3.5
+new   cuKernelSetAttribute                     calls/pass  16.0  host us/pass 4.8
+new   cuLaunchKernelEx                         calls/pass  16.0  host us/pass 85.9
+new   cuLibraryGetKernel                       calls/pass   0.0  host us/pass 0.0
+new   cuLibraryLoadData                        calls/pass   0.0  host us/pass 0.0
+new   cuStreamGetGreenCtx                      calls/pass  16.0  host us/pass 2.5
+new   cudaEventRecord                          calls/pass   1.0  host us/pass 2.6
+new   cudaLaunchKernel                         calls/pass  25.0  host us/pass 154.9
+new   cudaLaunchKernelExC                      calls/pass  31.0  host us/pass 168.1
+new   cudaMemcpy2DAsync                        calls/pass   2.0  host us/pass 22.5
+new   cudaMemcpyAsync                          calls/pass   2.0  host us/pass 1896.5
+new   cudaStreamIsCapturing                    calls/pass  32.0  host us/pass 8.6
+new   cudaStreamSynchronize                    calls/pass   1.0  host us/pass 3.7
