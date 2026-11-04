@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Block drafter A/B between two imp-server binaries (armA / armB dirs), protocol of
+# tools/analysis/block_drafter_ab.sh: Qwen3-8B-NVFP4-cortecs, --max-batch 1, greedy 256 tokens ignore_eos,
+# /no_think, one server start per arm and round, warmup, prose / code / list x 2, arm order reversed per round.
+# Arms: A_dspark B_dspark A_dflash B_dflash (binary _ drafter). Output TSV like block_drafter_ab.sh.
+set -uo pipefail
+S=/mnt/data/scratch/fp8f16_2026_11_04
+MODEL=/models/Qwen3-8B-NVFP4-cortecs
+ROUNDS=${ROUNDS:-3}
+ARMS=${ARMS:-"A_dspark B_dspark A_dflash B_dflash"}
+PORT=${PORT:-8430}
+NAME=imp-fp8f16-draft
+exec > "$S/drafter_ab.tsv" 2> "$S/drafter_ab.err"
+
+drafter() {
+    case "$1" in
+        dspark) echo "/models/dflash_qwen3_8b_block7" ;;
+        dflash) echo "/models/Qwen3-8B-DFlash-b16" ;;
+    esac
+}
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1; }
+trap cleanup EXIT
+
+start_server() {
+    cleanup
+    local bin=${1%%_*} dr=${1#*_}
+    docker run -d --name "$NAME" --gpus all -p "$PORT:8080" -v "$HOME/models:/models:ro" -v "$S/arm$bin:/bin_arm:ro" \
+        --entrypoint /bin_arm/imp-server imp:toolchain --host 0.0.0.0 --port 8080 --model "$MODEL" --max-batch 1 \
+        --set speculative.dspark_model="$(drafter "$dr")" >/dev/null || return 1
+    for _ in $(seq 1 200); do
+        curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
+        docker ps --format '{{.Names}}' | grep -qx "$NAME" || { docker logs "$NAME" 2>&1 | tail -20 >&2; return 1; }
+        sleep 2
+    done
+    return 1
+}
+
+metric() { curl -s "http://127.0.0.1:$PORT/metrics" | awk -v k="$1" '$1 == k {print $2}'; }
+
+declare -A PROMPT=(
+    [prose]="Write a short story about a lighthouse keeper who finds a message in a bottle. /no_think"
+    [code]="Write a Python class implementing an LRU cache with get and put methods, with type hints and docstrings. /no_think"
+    [list]="List 40 countries with their capital cities, one per line, formatted as Country: Capital. /no_think"
+)
+
+ask() {
+    local body t0 t1 r
+    body="{\"model\":\"$(basename "$MODEL")\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}],\"max_tokens\":256,\"temperature\":0,\"ignore_eos\":true,\"stream\":false}"
+    t0=$(date +%s%N)
+    r=$(curl -s "http://127.0.0.1:$PORT/v1/chat/completions" -H 'Content-Type: application/json' -d "$body")
+    t1=$(date +%s%N)
+    echo "$(grep -oP '"completion_tokens":\K[0-9]+' <<<"$r" || echo 0) $(((t1 - t0) / 1000000)) $(grep -oP '"content":"\K[^"]{0,400}' <<<"$r" | md5sum | cut -c1-8)"
+}
+
+printf 'round\tarm\tworkload\trep\ttokens\tms\ttok_s\tverify_steps\temitted\ttok_verify\tmd5\n'
+for r in $(seq 1 "$ROUNDS"); do
+    st=$(~/.claude/skills/gpu-stats/gpu-lock.sh status 2>/dev/null)
+    [[ "$st" == *"holder=imp-fp8f16"* ]] || { echo "# lock lost" >&2; exit 2; }
+    order=$ARMS
+    ((r % 2 == 0)) && order=$(tr ' ' '\n' <<<"$ARMS" | tac | tr '\n' ' ')
+    for arm in $order; do
+        start_server "$arm" || { echo "# $arm round $r: server failed" >&2; continue; }
+        ask "${PROMPT[prose]}" >/dev/null
+        for w in prose code list; do
+            for rep in 1 2; do
+                v0=$(metric imp_spec_ngram_verify_steps_total) e0=$(metric imp_spec_ngram_emitted_total)
+                read -r tk ms md <<<"$(ask "${PROMPT[$w]}")"
+                v1=$(metric imp_spec_ngram_verify_steps_total) e1=$(metric imp_spec_ngram_emitted_total)
+                awk -v r="$r" -v a="$arm" -v w="$w" -v p="$rep" -v tk="$tk" -v ms="$ms" -v md="$md" \
+                    -v v="$(( ${v1:-0} - ${v0:-0} ))" -v e="$(( ${e1:-0} - ${e0:-0} ))" \
+                    'BEGIN {ts = ms > 0 ? tk * 1000 / ms : 0; tv = v > 0 ? e / v : 0
+                            printf "%s\t%s\t%s\t%s\t%d\t%d\t%.2f\t%d\t%d\t%.2f\t%s\n", r, a, w, p, tk, ms, ts, v, e, tv, md}'
+            done
+        done
+        docker logs "$NAME" 2>&1 | grep -E "dspark: /models|\[dspark\] [0-9]+ drafts|propose" | tail -3 >&2
+    done
+done

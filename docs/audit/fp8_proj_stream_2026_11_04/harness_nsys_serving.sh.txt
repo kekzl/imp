@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# nsys (graph nodes traced) of imp-server from a binary dir under a conc_client burst, then per-kernel sums.
+# Usage: nsys_serving.sh <bin_dir> <model_dir_name> <conc> <waves> <outdir> [extra server flags...]
+set -u
+WT=WT
+BIN=$1
+MODEL=$2
+CONC=$3
+WAVES=$4
+OUT=$5
+shift 5
+PORT=8420
+NAME=imp-fp8f16-nsys
+mkdir -p "$OUT"
+chmod 777 "$OUT"
+~/.claude/skills/gpu-stats/gpu-lock.sh status 2>/dev/null | grep -q "holder=imp-fp8f16" || { echo "no own lock"; exit 2; }
+docker rm -f $NAME >/dev/null 2>&1
+docker run -d --name $NAME --gpus all -v "$HOME/models":/models:ro -v "$BIN":/bin_arm:ro -v "$OUT":/out \
+    -w /tmp -p $PORT:$PORT imp:toolchain \
+    nsys profile --sample=none --cpuctxsw=none --backtrace=none -t cuda --cuda-graph-trace=node \
+    -o /out/serving --force-overwrite=true \
+    /bin_arm/imp-server --model /models/"$MODEL" --port $PORT --host 0.0.0.0 --max-concurrent "$CONC" "$@" >/dev/null
+for _ in $(seq 1 300); do
+    sleep 2
+    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+    [ -z "$(docker ps -q -f name=$NAME)" ] && { echo "server died"; docker logs $NAME 2>&1 | tail -20; exit 3; }
+done
+docker run --rm --network host -e MODEL_NAME="$MODEL" -e IGNORE_EOS=1 -e GEN=128 -v "$WT/tools/analysis":/a:ro \
+    python:3.13-slim python3 -I /a/conc_client.py $PORT "$CONC" "$WAVES" nsys 2>&1 | tee "$OUT/client.log"
+docker kill --signal=SIGINT $NAME >/dev/null 2>&1
+for _ in $(seq 1 90); do
+    sleep 2
+    [ -z "$(docker ps -q -f name=$NAME)" ] && break
+done
+docker logs $NAME > "$OUT/server.log" 2>&1
+docker rm -f $NAME >/dev/null 2>&1
+if [ ! -f "$OUT/serving.nsys-rep" ] && ls "$OUT"/*.qdstrm >/dev/null 2>&1; then
+    IMP=$(ls /opt/nvidia/nsight-systems/*/host-linux-x64/QdstrmImporter 2>/dev/null | head -1)
+    [ -n "$IMP" ] && "$IMP" -i "$OUT"/serving.qdstrm -o "$OUT/serving.nsys-rep"
+fi
+nsys stats --report cuda_gpu_kern_sum --format csv --output "$OUT/kern" "$OUT/serving.nsys-rep" >/dev/null 2>&1
+ls "$OUT"

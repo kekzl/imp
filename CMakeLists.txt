@@ -363,6 +363,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
+    src/compute/gemv_fp8_rowscale_f16.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cpp
     src/compute/gemm_lt_ex.cpp
@@ -1362,6 +1363,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_kernel_registry.cu
         tests/test_nvfp4_prompt_streamk.cu
         tests/test_fp8_gemm.cu
+        tests/test_fp8_proj_stream.cu
         tests/test_mmvq.cu
         tests/test_softmax.cu
         tests/test_sampling.cu
