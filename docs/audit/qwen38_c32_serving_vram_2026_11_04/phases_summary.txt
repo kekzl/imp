@@ -1,0 +1,26 @@
+# /mnt/data/scratch/vramc32_phases: tools/analysis/serving_vram_phases.sh, image from main daa62a92, fresh default server per arm;
+# mtp = defaults, nomtp = speculative.mtp_k=0, nocap = speculative.capture=false
+mtp 0_boot own_mib 20994 own_peak_mib 22760 device_live_mib 22647 async_pool_mib 11424 untracked_mib 19126 kv_blocks 3625 smi_used_mib 22724
+mtp 1_warm own_mib 21000 own_peak_mib 22760 device_live_mib 22653 async_pool_mib 11424 untracked_mib 19132 kv_blocks 3625 smi_used_mib 22730
+mtp 2_c1 own_mib 21006 own_peak_mib 22760 device_live_mib 22659 async_pool_mib 11424 untracked_mib 19138 kv_blocks 3625 smi_used_mib 22736
+mtp 3_c4 own_mib 21596 own_peak_mib 22760 device_live_mib 23249 async_pool_mib 11424 untracked_mib 19728 kv_blocks 3625 smi_used_mib 23326
+mtp 4_c32w1 own_mib 24414 own_peak_mib 24334 device_live_mib 26067 async_pool_mib 11424 untracked_mib 22546 kv_blocks 3625 smi_used_mib 25566
+mtp 4_c32w2 own_mib 24414 own_peak_mib 24334 device_live_mib 26067 async_pool_mib 11424 untracked_mib 22546 kv_blocks 3625 smi_used_mib 25566
+mtp 4_c32w3 own_mib 24420 own_peak_mib 24334 device_live_mib 26073 async_pool_mib 11424 untracked_mib 22552 kv_blocks 3625 smi_used_mib 25572
+mtp 4_c32w4 own_mib 24732 own_peak_mib 24732 device_live_mib 26385 async_pool_mib 11424 untracked_mib 22864 kv_blocks 4531 smi_used_mib 25884
+nomtp 0_boot own_mib 19616 own_peak_mib 21738 device_live_mib 21269 async_pool_mib 10624 untracked_mib 17746 kv_blocks 4950 smi_used_mib 21346
+nomtp 1_warm own_mib 19622 own_peak_mib 21738 device_live_mib 21275 async_pool_mib 10624 untracked_mib 17752 kv_blocks 4950 smi_used_mib 21352
+nomtp 2_c1 own_mib 19628 own_peak_mib 21738 device_live_mib 21281 async_pool_mib 10624 untracked_mib 17758 kv_blocks 4950 smi_used_mib 21358
+nomtp 3_c4 own_mib 19874 own_peak_mib 21738 device_live_mib 21527 async_pool_mib 10624 untracked_mib 18004 kv_blocks 4950 smi_used_mib 21604
+nomtp 4_c32w1 own_mib 22114 own_peak_mib 22034 device_live_mib 23767 async_pool_mib 10624 untracked_mib 20244 kv_blocks 4950 smi_used_mib 23844
+nomtp 4_c32w2 own_mib 22114 own_peak_mib 22034 device_live_mib 23767 async_pool_mib 10624 untracked_mib 20244 kv_blocks 4950 smi_used_mib 23844
+nomtp 4_c32w3 own_mib 22120 own_peak_mib 22034 device_live_mib 23773 async_pool_mib 10624 untracked_mib 20250 kv_blocks 4950 smi_used_mib 23850
+nomtp 4_c32w4 own_mib 22120 own_peak_mib 22034 device_live_mib 23773 async_pool_mib 10624 untracked_mib 20250 kv_blocks 4950 smi_used_mib 23850
+nocap 0_boot own_mib 20910 own_peak_mib 22804 device_live_mib 22563 async_pool_mib 11424 untracked_mib 19042 kv_blocks 3725 smi_used_mib 22640
+nocap 1_warm own_mib 20910 own_peak_mib 22804 device_live_mib 22563 async_pool_mib 11424 untracked_mib 19042 kv_blocks 3725 smi_used_mib 22640
+nocap 2_c1 own_mib 20918 own_peak_mib 22804 device_live_mib 22571 async_pool_mib 11424 untracked_mib 19050 kv_blocks 3725 smi_used_mib 22648
+nocap 3_c4 own_mib 21484 own_peak_mib 22804 device_live_mib 23137 async_pool_mib 11424 untracked_mib 19616 kv_blocks 3725 smi_used_mib 23214
+nocap 4_c32w1 own_mib 24308 own_peak_mib 24228 device_live_mib 25961 async_pool_mib 11424 untracked_mib 22440 kv_blocks 3725 smi_used_mib 25454
+nocap 4_c32w2 own_mib 24308 own_peak_mib 24228 device_live_mib 25961 async_pool_mib 11424 untracked_mib 22440 kv_blocks 3725 smi_used_mib 25454
+nocap 4_c32w3 own_mib 24314 own_peak_mib 24228 device_live_mib 25967 async_pool_mib 11424 untracked_mib 22446 kv_blocks 3725 smi_used_mib 25460
+nocap 4_c32w4 own_mib 24314 own_peak_mib 24228 device_live_mib 25967 async_pool_mib 11424 untracked_mib 22446 kv_blocks 3725 smi_used_mib 25460
