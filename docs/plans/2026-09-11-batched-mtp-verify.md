@@ -5,6 +5,10 @@ Status (2026-09-13): stages 1-4 DONE, shipped opt-in as `speculative.batch_verif
 [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md). Stage
 table at the end carries the state of every stage.
 
+Status (2026-11-04): the same step runs by default for the BOUND requests while <= 4 decode
+(`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows" at the end); the full
+`batch_verify` stays opt-in.
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -151,3 +155,33 @@ instead of the CUTLASS 128-row tile, gated to N <= 8704 (no flag shipped).
 At 33..64 rows the CUTLASS tile reads each weight once at the rate two small-M sweeps reach
 together; its row padding costs math, and these GEMMs are weight-bound. The verify's price at
 24 streams is draft coverage and acceptance: `2026-09-12-factored-verify-spare.md`, correction.
+
+## Bound verify at 2-4 rows (2026-11-04, `speculative.mtp_batch_verify`, default 4)
+
+Qwen3.8-27B-NVFP4-vllm, default `imp-server`. Since #3029-#3031 up to 4 requests bind the head and
+carry their hidden rows through batched decode, but they decoded one row per step while they
+overlapped. At 2-4 rows a step is weight-bound, so doubling the rows is cheap:
+
+| rows per step | plain decode (main, no head) | bound verify (2 rows per request) |
+|---:|---:|---:|
+| 2 / 4 | 11.34 ms, 2 tokens | 12.57-13.04 ms forward + argmax, 2.00-2.64 ms head feed + draft, 3.66 tokens |
+| 4 / 8 | 11.72 ms, 4 tokens | 13.12-13.65 ms + 2.02-2.65 ms, 7.15-7.20 tokens |
+
+| piece | rule |
+|---|---|
+| when | 2..`mtp_bound_verify_rows` (min of the key, `mtp_history_slots`, the batch) decoding requests, at least half of them bound and drafted (`mtp_bound_verify_fits`); an undrafted row forwards a pad |
+| state | slot-swapping spares, one per row (4 x 79.5 MiB charged in the KV plan, 4812 -> 4531 blocks); the factored spare is not used: its row must be applied by whatever step runs next, and a plain step does not |
+| drafts | the request's pending chain (first token), else its carried rows flushed with a 1-token draft; after the step one ragged head pass feeds every bound row and drafts the next token over the FP8 LM head |
+| plain chain | a pipelined plain chain yields to the verify (`pipeline_yields_`, backoff 1 -> 64 steps per decline) |
+| bursts | a burst of <= 4 prompts binds (each prefills serially), a wider one stays ragged and unbound |
+
+Measured (BENCHMARKS.md "MTP verify while chats decode together", 3 pairs): 2 overlapping chats
+94.21 -> 117.06 tok/s, 4 chats 83.72 -> 117.45, turns drafting 13/72 -> 72/72.
+
+Two defects found on the way, both in the opt-in `batch_verify` too: the step capped its rows at
+`runtime.max_batch_size`, 0 = auto on a default server, so it declined every batch; and
+`lm_head_rows_argmax` needed the W4A4 batched-decode head, which an FP8-served head never builds.
+
+Next: deeper drafts (3 rows per request, a second head pass per step) and the head pass itself
+(2.0-2.6 ms of a 15 ms step); a turn whose first 8 lone verifies emit below 1 + 0.4 k still
+unbinds on the economics guard (1-2 turns per arm, main too).

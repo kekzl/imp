@@ -19,7 +19,7 @@ trap cleanup EXIT
 
 echo "== 1/5 build instrumented imp-server (gcov, server TUs only) =="
 docker build --target builder --build-arg IMP_BUILD_TESTS=OFF \
-    --build-arg IMP_EXTRA_CMAKE="-DIMP_COVERAGE=ON" -t "$IMG" .
+    --build-arg IMP_EXTRA_CMAKE="-DIMP_COVERAGE=ON" --build-arg IMP_KEEP_BUILD_DIR=ON -t "$IMG" .
 
 echo "== 2/5 launch container + server =="
 docker rm -f "$CTR" >/dev/null 2>&1 || true

@@ -22,6 +22,10 @@ struct BatchVerifyState {
     int cap_seq = 0;
     int cap_rows = 0;
     int table_cap = 0;
+    bool bound_only = false;  // speculative.mtp_batch_verify: cap_seq = its rows, bound rows draft
+    // Pipelined plain steps between two bound-verify attempts: 1 after a verify, doubling to 64 per decline.
+    int yield_every = 1;
+    int since_yield = 0;
     int32_t* d_stage = nullptr;
     int32_t* d_row_tables = nullptr;
     int32_t* d_argmax = nullptr;
@@ -153,9 +157,12 @@ struct MtpSlotCand {
 }
 
 // A prompt takes the head when it prefills alone (a lone chat) or already holds it; the prompts of
-// a burst ride the ragged forward unbound (binding one would cost it a serial forward of its own).
-[[nodiscard]] constexpr bool mtp_prompt_takes_head(bool bound, bool slot_available, int prompts_this_step) {
-    return bound || (slot_available && prompts_this_step == 1);
+// a burst ride the ragged forward unbound (binding one would cost it a serial forward of its own),
+// unless the burst is no wider than speculative.mtp_batch_verify's rows (burst_bind), which verify it.
+[[nodiscard]] constexpr bool mtp_prompt_takes_head(bool bound, bool slot_available, int prompts_this_step,
+                                                   int burst_bind = 1) {
+    return bound ||
+           (slot_available && prompts_this_step >= 1 && prompts_this_step <= std::max(1, burst_bind));
 }
 
 // A bound request drafts only while the head cache covers exactly its pre-step context. Tokens
@@ -184,13 +191,22 @@ class Model;
 [[nodiscard]] bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
 // Reserved recurrent slots the batched verify adds to the pool: one per
 // batch slot, 0 when off or at batch 1.
-// Whether the batched verify needs its staging buffers. Separate from the
-// spare-slot count because the factored form reserves no slots and still runs.
+// Whether the batched verify needs its staging buffers (the full batch_verify or the bound one). Separate
+// from the spare-slot count because the factored form reserves no slots and still runs.
 [[nodiscard]] bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // The factored path is live only once its rows exist: a geometry or allocation
 // refusal clears the flag, and everything downstream reads this, not the flag.
 [[nodiscard]] bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// speculative.mtp_batch_verify: the most decoding requests whose bound members verify their MTP draft in one
+// batched step (slot-swapping spares, one per row), 0 = never. Off under the full batch_verify, without a
+// loaded head or the carry (one binding), on a model without the grouped verify scan, at batch 1.
+[[nodiscard]] int mtp_bound_verify_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// Every decoding row is no wider than the bound verify takes, and the verify pays: at least one row drafts
+// and drafted rows are at least half the batch (an undrafted row forwards a pad that is never accepted).
+[[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted) {
+    return rows_cap >= 2 && decoding >= 2 && decoding <= rows_cap && drafted >= 1 && 2 * drafted >= decoding;
+}
 // MTP draft KV slots: one per batch slot whenever the batched verify runs, else
 // speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
 // Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes

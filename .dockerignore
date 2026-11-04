@@ -36,3 +36,17 @@ logo.svg
 compile_commands.json
 imp.conf
 build-dev/
+# Local, git-ignored state: 2.69 GB of the context before, and any write
+# there (agent worktrees, tidy/preflight build dirs) re-keyed `COPY . .`.
+build-*/
+.claude/
+.codegraph/
+codegraph.json
+loop/
+prompts/
+docs/launch/
+tools/roofline/history/raw/
+tools/roofline/*/out/
+tools/roofline/plots/
+**/__pycache__/
+**/.pytest_cache/

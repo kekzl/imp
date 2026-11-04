@@ -440,17 +440,9 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     // `speculative.ngram` (dense model + mtp_k=2 + ngram=false is valid).
     // `runtime.decode_pipeline` defaults on, so this gate, not the RR
     // branch, decides whether batch>1 speculation happens at all.
-    if (cont && runtime_config_.speculative.batch_rr && !ssm_state_ &&
-        ++bd_pipe_.steps_since_spec_yield >= spec_rr_yield_interval_) {
-        bd_pipe_.steps_since_spec_yield = 0;
-        for (const auto& r : bd_pipe_.rows) {
-            if (r->status == RequestStatus::DECODING && spec_any_drafter_enabled_(*r) &&
-                !r->spec_ngram_given_up) {
-                cont = false;
-                break;
-            }
-        }
-    }
+    // speculative.mtp_batch_verify hands the step back the same way when the bound rows can verify together.
+    if (cont && pipeline_yields_(bd_pipe_.rows))
+        cont = false;
 
     const int next_parity = bd_pipe_.parity ^ 1;
     const bool chained = cont && pipeline_enqueue_next_(next_parity, stream);
