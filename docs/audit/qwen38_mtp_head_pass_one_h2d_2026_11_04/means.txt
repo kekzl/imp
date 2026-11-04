@@ -1,0 +1,23 @@
+# mean over 3 pairs: overlap all_mean_tps (side: followup_mean_tps); concurrent per field
+main ov4 mean 140.32 per-pair 139.49 141.64 139.83
+main ov mean 134.31 per-pair 137.47 132.29 133.16
+main side mean 121.83 per-pair 122.41 120.84 122.24
+new ov4 mean 140.37 per-pair 141.53 140.98 138.61
+new ov mean 137.35 per-pair 139.23 138.33 134.50
+new side mean 122.21 per-pair 122.28 122.10 122.24
+main accepted 1275.00
+main c1 131.02
+main c2 297.70
+main c32 2024.20
+main c4 524.27
+main drafted 1822.00
+main kv_blocks 4882.00
+main own_peak_mib 25213.67
+new accepted 1275.00
+new c1 131.15
+new c2 298.13
+new c32 2035.40
+new c4 525.33
+new drafted 1822.00
+new kv_blocks 4882.00
+new own_peak_mib 25209.00
