@@ -469,6 +469,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_mtp_batched.cpp
+    src/runtime/engine_spec_mtp_head_graph.cpp
     src/runtime/engine_spec_batch_verify.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp
@@ -964,6 +965,8 @@ if(IMP_BUILD_TESTS)
         # GGUF MoE NVFP4 decode cache: whole layer or nothing.
         tests/test_moe_nvfp4_cache_rule.cpp
         tests/test_batch_verify_predicates.cpp
+        # Batched MTP head pass graph cache: replay / capture / eager, scan smem rows.
+        tests/test_mtp_head_graph.cpp
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
         tests/test_control_vector.cpp

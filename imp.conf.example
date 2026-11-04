@@ -1230,6 +1230,10 @@ mtp_batch_verify     = 4
 # chain (3 rows per request, a second head pass, two spare recurrent slots per
 # row); 1 = one draft (2 rows, one spare slot per row).
 mtp_batch_verify_k   = 2
+# That step's head pass (feed, draft LM head, chain) replays a CUDA graph per
+# (fed rows, requests, chain), at most 48; the second use of a shape captures
+# it. false = eager launches.
+mtp_head_graph       = true
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

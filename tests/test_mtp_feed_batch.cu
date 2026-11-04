@@ -10,6 +10,7 @@
 #include <random>
 #include <vector>
 
+#include "compute/gemm.h"
 #include "compute/mtp_forward.h"
 #include "compute/mtp_forward_internal.h"
 #include "core/tensor.h"
@@ -340,6 +341,100 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
         imp::mtp_head_pass_upload(ws_pass, tok, src, bad_slot, pos, n, last, cslot, cpos, m, stream, tab));
     imp::mtp_workspace_free(ws_host);
     imp::mtp_workspace_free(ws_pass);
+}
+
+// The head pass as a captured graph (speculative.mtp_head_graph): feed + chain captured with 1-row scan
+// smem, replayed after mtp_scan_nodes_set_rows widened both scan nodes to the pass's largest position.
+// Same KV rows and final_norm rows bytewise as the eager pass; 1-row smem left in place corrupts the scores.
+TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
+    SyntheticHead s;
+    s.build(/*seed=*/31);
+    constexpr int kSlots = 2;
+    imp::MtpDraftWorkspace ws_e, ws_g;
+    for (auto* ws : {&ws_e, &ws_g}) {
+        ASSERT_TRUE(
+            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+        configure_ws(*ws);
+    }
+    cudaStream_t stream = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+    const int pre[kSlots] = {30, 12};
+    for (auto* ws : {&ws_e, &ws_g})
+        for (int sl = 0; sl < kSlots; ++sl) {
+            imp::mtp_select_slot(*ws, sl);
+            ASSERT_TRUE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, pre[sl], s.head, s.tok_emb, *ws, kH,
+                                            stream));
+        }
+    const int n = 3, m = 2;
+    const int slot[n] = {0, 0, 1};
+    const int pos[n] = {30, 31, 12};
+    const int src[n] = {20, 21, 25};
+    int32_t tok[n];
+    for (int r = 0; r < n; ++r)
+        tok[r] = s.tokens[static_cast<size_t>(src[r])];
+    const int last[m] = {1, 2};
+    const int cslot[m] = {0, 1};
+    const int cpos[m] = {32, 13};
+    const int32_t ctok[m] = {7, 101};
+    int32_t* d_ctok = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_ctok, ctok, sizeof(ctok), cudaMemcpyHostToDevice), cudaSuccess);
+    auto pass = [&](imp::MtpDraftWorkspace& ws, const imp::MtpPassTables& tab, int feed_max, int chain_max) {
+        return imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos, feed_max,
+                                                s.head, s.tok_emb, ws, kH, stream) &&
+               imp::mtp_feed_rows_multislot_dev(d_ctok, ws.d_b_h_final, tab.last, m, tab.chain_slots,
+                                                tab.chain_pos, chain_max, s.head, s.tok_emb, ws, kH, stream);
+    };
+    imp::MtpPassTables tab_e, tab_g;
+    ASSERT_TRUE(imp::mtp_head_pass_upload(ws_e, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab_e));
+    ASSERT_TRUE(pass(ws_e, tab_e, tab_e.max_pos, tab_e.chain_max_pos));  // also warms cuBLASLt's shapes
+    ASSERT_TRUE(imp::mtp_head_pass_upload(ws_g, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab_g));
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    ASSERT_EQ(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    imp::gemm_set_lt_capture_allowed(true);
+    const bool captured = pass(ws_g, tab_g, 0, 0);
+    imp::gemm_set_lt_capture_allowed(false);
+    cudaGraph_t graph = nullptr;
+    ASSERT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);
+    ASSERT_TRUE(captured);
+    imp::MtpScanNodes scan;
+    ASSERT_TRUE(imp::mtp_scan_nodes_find(graph, scan));
+    ASSERT_EQ(scan.nodes.size(), 2u) << "feed scan + chain scan";
+    EXPECT_EQ(scan.params[0].sharedMemBytes, sizeof(float));
+    cudaGraphExec_t exec = nullptr;
+    ASSERT_EQ(cudaGraphInstantiate(&exec, graph, 0), cudaSuccess);
+    const int rows = imp::mtp_scan_smem_rows(std::max(tab_g.max_pos, tab_g.chain_max_pos), kSeq);
+    ASSERT_TRUE(imp::mtp_scan_nodes_set_rows(exec, scan, rows));
+    ASSERT_EQ(cudaGraphLaunch(exec, stream), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+
+    auto same = [](const void* a, const void* b, size_t nb) {
+        std::vector<char> ha(nb), hb(nb);
+        EXPECT_EQ(cudaMemcpy(ha.data(), a, nb, cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(hb.data(), b, nb, cudaMemcpyDeviceToHost), cudaSuccess);
+        return ha == hb;
+    };
+    const int written[kSlots] = {33, 14};  // prefix + feed + chain rows
+    const size_t row_bytes = static_cast<size_t>(kNkv) * kHd * sizeof(__half);
+    for (int sl = 0; sl < kSlots; ++sl) {
+        const size_t off = static_cast<size_t>(sl) * ws_e.kv_slot_elems * sizeof(__half);
+        const size_t nb = static_cast<size_t>(written[sl]) * row_bytes;
+        EXPECT_TRUE(same(static_cast<char*>(ws_e.d_k_cache_base) + off,
+                         static_cast<char*>(ws_g.d_k_cache_base) + off, nb))
+            << "K slot " << sl;
+        EXPECT_TRUE(same(static_cast<char*>(ws_e.d_v_cache_base) + off,
+                         static_cast<char*>(ws_g.d_v_cache_base) + off, nb))
+            << "V slot " << sl;
+    }
+    EXPECT_TRUE(same(ws_e.d_b_h_final, ws_g.d_b_h_final, static_cast<size_t>(m) * kH * sizeof(__half)))
+        << "chain final_norm rows";
+    EXPECT_EQ(cudaGraphExecDestroy(exec), cudaSuccess);
+    EXPECT_EQ(cudaGraphDestroy(graph), cudaSuccess);
+    cudaFree(d_ctok);
+    cudaStreamDestroy(stream);
+    imp::mtp_workspace_free(ws_e);
+    imp::mtp_workspace_free(ws_g);
 }
 
 // A second batch call must continue at the right cache position and RoPE

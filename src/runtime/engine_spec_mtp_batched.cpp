@@ -9,6 +9,7 @@
 #include "model/model.h"
 #include "quant/nvfp4_quant.h"
 #include "runtime/engine.h"
+#include "runtime/mtp_head_graph.h"
 #include "runtime/request.h"
 
 #include <cuda_fp16.h>
@@ -77,7 +78,6 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     const int n = static_cast<int>(toks.size());
     const int m = static_cast<int>(bound_g.size());
-    const int hidden_dim = model_->config_.d_model;
     auto fail_all = [&](const char* why) {
         for (int g : bound_g) {
             mtp_activate_(reqs[g]->id);
@@ -89,36 +89,36 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     static double t_head_ms = 0.0;
     static long long t_calls = 0, t_rows = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    // diagnostics.mtp_prenorm_h (default on): the head takes the target's
-    // post-norm hidden, applied to the gathered rows inside the feed.
-    const Tensor* post_norm = runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr;
-    // Every table of the pass (feed rows, draft gather rows, chain rows) in one pinned H2D.
-    imp::MtpPassTables tab;
-    if (!imp::mtp_head_pass_upload(*ws, toks.data(), src.data(), slots.data(), pos.data(), n, last_row.data(),
-                                   chain_slot.data(), chain_pos.data(), m, stream, tab) ||
-        !imp::mtp_feed_rows_multislot_dev(tab.tokens, h.data, tab.src, n, tab.slots, tab.pos, tab.max_pos,
-                                          *model_->mtp_, model_->tok_emb_, *ws, hidden_dim, stream, post_norm,
-                                          model_->config_.rms_norm_eps, model_->config_.norm_weight_offset)) {
-        fail_all("batched feed failed");
-        return;
-    }
-    // The next draft per request: LM head over the last fed row of each.
+    // The next draft per request lands in ws->d_chain_tokens: m rows, m more with the chain.
     if (2 * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
         fail_all("batched draft: too many rows");
         return;
     }
-    imp::mtp_gather_rows(ws->d_b_h_final, tab.last, ws->d_b_gather, hidden_dim, m, stream);
+    // Every table of the pass (feed rows, draft gather rows, chain rows) in one pinned H2D.
+    imp::MtpPassTables tab;
+    if (!imp::mtp_head_pass_upload(*ws, toks.data(), src.data(), slots.data(), pos.data(), n, last_row.data(),
+                                   chain_slot.data(), chain_pos.data(), m, stream, tab)) {
+        fail_all("batched feed failed");
+        return;
+    }
     // The lone chain's draft head: 682 MiB per pass instead of the 1213 MiB FP8 head.
     imp::NvFP4QuantResult head_view;
     const imp::NvFP4QuantResult* head = mtp_draft_lm_head_nvfp4_(head_view);
-    if (!executor_->lm_head_rows_argmax(ws->d_b_gather, m, ws->d_chain_tokens, stream, head)) {
-        fail_all("batched draft: LM head unavailable");
+    // The chained KV row is speculative: the next feed starts at that position and overwrites it.
+    const bool chain = bv_.depth > 1 && (ws->max_seq_len <= 0 || tab.chain_max_pos + 1 <= ws->max_seq_len);
+    const int n_out = mtp_head_pass_(tab, h.data, head, chain, stream);
+    if (n_out < 0) {
+        fail_all(n_out == -1 ? "batched feed failed" : "batched draft: LM head unavailable");
         return;
     }
-    const bool chain = bv_.depth > 1 && mtp_batched_chain_(tab, head, stream);
-    const int n_out = chain ? 2 * m : m;
-    std::vector<int32_t> h_out(static_cast<size_t>(n_out));
-    if (cudaMemcpyAsync(h_out.data(), ws->d_chain_tokens, static_cast<size_t>(n_out) * sizeof(int32_t),
+    // Pinned destination when the graph cache holds one: the D2H is a DMA, not a staged pageable copy.
+    std::vector<int32_t> h_out_pageable;
+    int32_t* h_out = mtp_head_graphs_ != nullptr ? mtp_head_graphs_->h_out.as<int32_t>() : nullptr;
+    if (h_out == nullptr) {
+        h_out_pageable.resize(static_cast<size_t>(n_out));
+        h_out = h_out_pageable.data();
+    }
+    if (cudaMemcpyAsync(h_out, ws->d_chain_tokens, static_cast<size_t>(n_out) * sizeof(int32_t),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
         cudaStreamSynchronize(stream) != cudaSuccess) {
         fail_all("batched draft: D2H");
@@ -131,25 +131,41 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
             IMP_LOG_INFO("mtp-batched-feed: %lld calls, %.2f rows/call, %.2f ms/call (feed + LM head + sync)",
                          t_calls, static_cast<double>(t_rows) / t_calls, t_head_ms / t_calls);
     }
+    const bool two = n_out == 2 * m;
     for (int i = 0; i < m; ++i) {
         const int g = bound_g[i];
-        const int32_t tok2 = chain ? h_out[static_cast<size_t>(m) + i] : -1;
+        const int32_t tok2 = two ? h_out[static_cast<size_t>(m) + i] : -1;
         mtp_batched_set_draft_(*reqs[g], emitted[g], h_out[static_cast<size_t>(i)], tok2);
     }
 }
 
-// Second draft per bound request: (draft 1, the head's own final-norm row) at the request's next position in
-// one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (draft 1 never leaves the
-// device). The chained KV row is speculative: the next feed starts at that position and overwrites it.
-bool Engine::mtp_batched_chain_(const imp::MtpPassTables& tab, const imp::NvFP4QuantResult* head,
-                                cudaStream_t stream) {
+int Engine::mtp_head_pass_run_(const imp::MtpPassTables& tab, const void* hidden,
+                               const imp::NvFP4QuantResult* head, bool chain, int feed_max, int chain_max,
+                               cudaStream_t stream) {
     auto* ws = mtp_ws_storage_.get();
-    if (ws->max_seq_len > 0 && tab.chain_max_pos + 1 > ws->max_seq_len)
-        return false;
-    return imp::mtp_feed_rows_multislot_dev(ws->d_chain_tokens, ws->d_b_h_final, tab.last, tab.m,
-                                            tab.chain_slots, tab.chain_pos, tab.chain_max_pos, *model_->mtp_,
-                                            model_->tok_emb_, *ws, model_->config_.d_model, stream) &&
-           executor_->lm_head_rows_argmax(ws->d_b_h_final, tab.m, ws->d_chain_tokens + tab.m, stream, head);
+    const int hidden_dim = model_->config_.d_model;
+    const int m = tab.m;
+    // diagnostics.mtp_prenorm_h (default on): the head takes the target's
+    // post-norm hidden, applied to the gathered rows inside the feed.
+    const Tensor* post_norm = runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr;
+    if (!imp::mtp_feed_rows_multislot_dev(tab.tokens, hidden, tab.src, tab.n, tab.slots, tab.pos, feed_max,
+                                          *model_->mtp_, model_->tok_emb_, *ws, hidden_dim, stream, post_norm,
+                                          model_->config_.rms_norm_eps, model_->config_.norm_weight_offset))
+        return -1;
+    // The next draft per request: LM head over the last fed row of each.
+    imp::mtp_gather_rows(ws->d_b_h_final, tab.last, ws->d_b_gather, hidden_dim, m, stream);
+    if (!executor_->lm_head_rows_argmax(ws->d_b_gather, m, ws->d_chain_tokens, stream, head))
+        return -2;
+    if (!chain)
+        return m;
+    // Second draft per bound request: (draft 1, the head's own final-norm row) at the request's next position
+    // in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (draft 1 never leaves
+    // the device).
+    const bool two = imp::mtp_feed_rows_multislot_dev(ws->d_chain_tokens, ws->d_b_h_final, tab.last, m,
+                                                      tab.chain_slots, tab.chain_pos, chain_max, *model_->mtp_,
+                                                      model_->tok_emb_, *ws, hidden_dim, stream) &&
+                     executor_->lm_head_rows_argmax(ws->d_b_h_final, m, ws->d_chain_tokens + m, stream, head);
+    return two ? 2 * m : m;
 }
 
 // A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =

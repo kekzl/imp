@@ -35,6 +35,8 @@ void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void
 void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
                          const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
                          int num_kv_heads, int head_dim, cudaStream_t stream);
+// The kernel mtp_attn_scan_slots launches: the func of its node in a captured graph (mtp_scan_nodes_find).
+const void* mtp_attn_scan_rows_fn();
 
 // lm_head over ws.d_h_final, then argmax / top-W into the caller's slot (mtp_draft_step contract).
 [[nodiscard]] bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
