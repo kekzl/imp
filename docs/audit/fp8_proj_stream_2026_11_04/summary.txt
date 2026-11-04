@@ -51,12 +51,14 @@ Flash-Next tok/s is not the resolving signal; the nsys kernel totals above are.
 
 Gates: bit_identity_and_mutant.txt (FP8ProjStreamTest + FP8GemmTest.Rowscale* 5/5 run, the quarter-order mutant fails
 FP8ProjStreamTest.StreamedMatchesSplitK); split-K and head kernels SASS byte-identical to main after the helper move
-(gemv_fp8_rowscale_mma.cuh). VERIFY_PLACEHOLDER
+(gemv_fp8_rowscale_mma.cuh). make verify-fast OK (verify_fast.txt): Qwen3-8B-NVFP4 tg128 293.25 vs pin 282.84,
+PPL 11.2352 unchanged, server c8 1946.77 vs 1899.81 (that baseline model does not reach this kernel).
 
 Next levers, kernels with MMA operands from global straight to registers (sass_direct_load_kernels.tsv), not changed here:
 - quant/nvfp4_gemm_smallm_ws.cu: quad per row, LDG.128 per lane = 8 rows x 64 B per instruction, warp w owns
   k-steps ks % 8 == w (a 128 B line split across two warps). Serves Gemma-4 / Qwen3-30B-A3B shapes; Qwen3.8-27B
-  c4 0.9 % of kernel time (v2, the producer-warp cp.async kernel, carries 45.4 %).
+  c4 0.9 % of kernel time. v2 (45.4 %) already loads 4 rows x 128 B per producer instruction
+  (nvfp4_gemm_smallm_v2.cu issue_w: r = c / 8, j = c % 8): Qwen3.8-27B c2..c32 (smallm_policy.h picks by shape only) has no half-line weight stream left.
 - quant/fp8_gemm_smallm.cu (W8A8 FP8 small-M, M 1..32): same 8 rows x 64 B shape, rows g and g + 8 per lane.
 - compute/gemm_f16_narrow_smallm.cu: u32 per lane from global (L2-resident operands); Qwen3.8-27B c4 2.6 %.
 - attention_paged_nvfp4_mma, gdn_scan_chunkpar*, ssm_scan_ssd: direct loads of KV / state, not weight streams.

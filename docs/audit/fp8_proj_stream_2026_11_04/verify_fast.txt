@@ -1,0 +1,30 @@
+== tests ==
+PASS fast gtest filter
+== perf vs baseline ==
+  pin: 2026-11-03T07:04:57Z (1 days old), model Qwen3-8B-NVFP4-cortecs
+  perf gate: median of 3 independent runs (spread 0.14%)
+  decode  tg128 =  293.25 tok/s  (baseline  282.84, delta 3.68%)
+  prefill pp512 = 49613.61 tok/s  (baseline 50374.39, delta -1.51%)
+  GPU during bench: sm=2887MHz(med) mem=13801MHz(med) power=539W(max) n=14
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 49985.94 tok/s  (baseline 50318.99, delta -0.66%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+== peak VRAM vs baseline ==
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+== graphs ON vs OFF decode gate ==
+  graphs OFF tg256 =  192.83 tok/s
+  graphs ON  tg256 =  295.92 tok/s   (1.53x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+== server throughput vs baseline ==
+  server c8 = 1946.77 tok/s, slowest request 517 ms  (baseline 1899.81, delta 2.47%)
+PASS server throughput within 8% of baseline
+== smoke prompts (degeneration check) ==
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 08:46:58Z, ended 08:48:32Z)
