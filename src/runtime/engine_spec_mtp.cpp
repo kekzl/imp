@@ -161,7 +161,8 @@ bool Engine::mtp_takes_prompt_(const Request& req) const {
         return false;
     return mtp_prompt_takes_head(mtp_bound(mtp_active_, mtp_pool_, req.id),
                                  mtp_slot_available(mtp_active_, mtp_pool_, mtp_pool_.bind_cap, req.id),
-                                 static_cast<int>(sched_prefill_batch_.size()));
+                                 static_cast<int>(sched_prefill_batch_.size()),
+                                 bv_.bound_only ? bv_.cap_seq : 1);
 }
 
 // A lone step whose head cache is behind can never draft: unbind, so the request leaves the eager path.

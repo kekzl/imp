@@ -12,6 +12,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
+#include "model/mtp_head.h"
 #include "runtime/engine.h"
 #include "compute/gdn_factor.cuh"
 #include "runtime/ngram_draft.h"
@@ -46,40 +47,93 @@ bool batch_verify_row_ok(const Request& r) {
         return false;
     return r.status == RequestStatus::DECODING && !r.output_tokens.empty();
 }
+
+// speculative.mtp_batch_verify refusals that flip from step to step: never logged.
+constexpr const char* kAboveBoundRows = "above_bound_rows";
+constexpr const char* kTooFewBound = "too_few_bound";
+
+int bound_rows(const std::vector<std::shared_ptr<Request>>& batch, const MtpBind& active,
+               const MtpBindPool& pool) {
+    return static_cast<int>(std::count_if(batch.begin(), batch.end(),
+                                          [&](const auto& r) { return mtp_bound(active, pool, r->id); }));
+}
+
+// Mode and batch-shape gates ahead of the per-row ones: the full batch_verify takes any batch of two or more;
+// the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows.
+const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on) {
+    if (!full && !bv.bound_only)
+        return "off";
+    if (rows < 2)
+        return "batch_of_one";
+    if (full)
+        return nullptr;
+    if (!head_on || rows > bv.cap_seq)
+        return kAboveBoundRows;
+    return mtp_bound_verify_fits(bv.cap_seq, rows, bound) ? nullptr : kTooFewBound;
+}
+
+bool refusal_logged(bool full, const BatchVerifyState& bv, const char* why) {
+    return full || (bv.bound_only && why != kAboveBoundRows && why != kTooFewBound);
+}
+
+// After drafting: nothing to verify, or (bound verify) too few drafted rows to pay for the pads.
+const char* draft_refusal(const BatchVerifyState& bv, int rows, int drafted) {
+    if (drafted == 0)
+        return "no_draft_in_batch";
+    return bv.bound_only && !mtp_bound_verify_fits(bv.cap_seq, rows, drafted) ? "too_few_drafts" : nullptr;
+}
+}  // namespace
+
+namespace {
+// Mamba2 layers have no grouped verify scan (run_ssm decodes the slot table one token per row).
+bool grouped_verify_model(const RuntimeConfig& cfg, const Model* model) {
+    return cfg.speculative.hybrid && model != nullptr && model->config().ssm_inner_size > 0 &&
+           !model->profile().has_pure_ssm;
+}
+
+// The full batch_verify (every decoding row, one head KV slot per batch slot) at a batch above one.
+bool batch_verify_full(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
+    return batch_verify_on(cfg, model) && max_batch_size > 1;
+}
 }  // namespace
 
 bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
+    return cfg.speculative.batch_verify && grouped_verify_model(cfg, model);
+}
+
+int mtp_bound_verify_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
     const auto& scfg = cfg.speculative;
-    if (!scfg.batch_verify || !scfg.hybrid)
-        return false;
-    // Mamba2 layers have no grouped verify scan (run_ssm decodes the slot table one token per row).
-    return model != nullptr && model->config().ssm_inner_size > 0 && !model->profile().has_pure_ssm;
+    if (scfg.mtp_batch_verify < 2 || scfg.mtp_k == 0 || !scfg.mtp_carry || max_batch_size <= 1 ||
+        batch_verify_on(cfg, model) || !grouped_verify_model(cfg, model) || !model->mtp_ ||
+        !model->mtp_->loaded)
+        return 0;
+    const int rows = std::min({scfg.mtp_batch_verify, std::max(1, scfg.mtp_history_slots), max_batch_size});
+    return rows >= 2 ? rows : 0;
 }
 
 bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_on(cfg, model) && max_batch_size > 1;
+    return batch_verify_full(cfg, model, max_batch_size) ||
+           mtp_bound_verify_rows(cfg, model, max_batch_size) > 0;
 }
 
 int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_wants_bufs(cfg, model, max_batch_size)
-               ? max_batch_size
-               : std::max(1, cfg.speculative.mtp_history_slots);
+    return batch_verify_full(cfg, model, max_batch_size) ? max_batch_size
+                                                         : std::max(1, cfg.speculative.mtp_history_slots);
 }
 
 int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live) {
-    if (batch_verify_wants_bufs(cfg, model, max_batch_size))
+    if (batch_verify_full(cfg, model, max_batch_size))
         return max_batch_size;
     return cfg.speculative.mtp_carry && carry_live ? std::max(1, cfg.speculative.mtp_history_slots) : 1;
 }
 
 int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return cfg.speculative.mtp_carry && !batch_verify_wants_bufs(cfg, model, max_batch_size) ? kMtpCarryRows
-                                                                                             : 0;
+    return cfg.speculative.mtp_carry && !batch_verify_full(cfg, model, max_batch_size) ? kMtpCarryRows : 0;
 }
 
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    if (!batch_verify_on(cfg, model) || max_batch_size <= 1)
-        return 0;
+    if (!batch_verify_full(cfg, model, max_batch_size))
+        return mtp_bound_verify_rows(cfg, model, max_batch_size);  // slot-swapping: no factored rows to apply
     // The whole point of the factored form: the drafted row is (g, k, delta)
     // plus a conv tap, so the pool stops carrying a second slot per batch slot
     // and the planner stops charging one.
@@ -99,7 +153,9 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
         return true;  // nothing to stage, and that is not a failure
     if (bv_.d_stage != nullptr)
         return true;
-    const int cap_seq = config_.max_batch_size;
+    const bool full = batch_verify_full(runtime_config_, model_.get(), config_.max_batch_size);
+    const int cap_seq = full ? config_.max_batch_size
+                             : mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size);
     const int table_cap = decode_batch_pool_.is_allocated() ? decode_batch_pool_.max_blocks_per_seq() : 0;
     if (cap_seq < 2 || table_cap <= 0)
         return false;
@@ -129,6 +185,14 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     bv_.cap_seq = cap_seq;
     bv_.cap_rows = cap_rows;
     bv_.table_cap = table_cap;
+    bv_.bound_only = !full;
+    if (!full) {
+        IMP_LOG_INFO(
+            "speculative.mtp_batch_verify: bound requests verify together while <= %d decode "
+            "(%d spare recurrent slots)",
+            cap_seq, batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size));
+        return true;  // slot-swapping spares: a factored row would need every following step to apply it
+    }
     return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_,
                                 stream);
 }
@@ -259,6 +323,13 @@ int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
     from_mtp = false;
     if (mtp_spec_decode_enabled()) {
         auto d = mtp_take_draft_(req);
+        // Plain batched steps since its last draft (speculative.mtp_batch_verify): the carried rows catch
+        // the head up to the context end and draft the next token.
+        if (d.empty() && bv_.bound_only && mtp_bound(mtp_active_, mtp_pool_, req.id) &&
+            mtp_active_.carry_n > 0) {
+            mtp_carry_flush_(req, /*draft_k=*/1);
+            d = mtp_take_draft_(req);
+        }
         if (!d.empty()) {
             from_mtp = true;
             return d[0];
@@ -290,11 +361,14 @@ int32_t Engine::batch_verify_draft_(Request& req, bool& from_mtp) {
 // once per reason: a batch that never verifies must not look like one that
 // does (the pipeline gates had the same blind spot, #1646).
 const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const {
+    const bool full = batch_verify_on(runtime_config_, model_.get());
     const char* why = [&]() -> const char* {
-        if (!ssm_state_ || !batch_verify_on(runtime_config_, model_.get()))
+        if (!ssm_state_)
             return "off";
-        if (batch.size() < 2)
-            return "batch_of_one";
+        if (const char* mode = batch_mode_refusal(full, bv_, static_cast<int>(batch.size()),
+                                                  bound_rows(batch, mtp_active_, mtp_pool_),
+                                                  mtp_spec_decode_enabled()))
+            return mode;
         // The factored form carries the drafted row as (g, k, delta) plus a
         // conv tap, so it reserves no slots by design; this gate must not
         // refuse every batch on that basis alone.
@@ -324,12 +398,30 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
         }
         return nullptr;
     }();
-    if (why != nullptr && batch.size() >= 2 && bv_.last_refusal != why &&
-        batch_verify_on(runtime_config_, model_.get())) {
+    if (why != nullptr && batch.size() >= 2 && bv_.last_refusal != why && refusal_logged(full, bv_, why)) {
         bv_.last_refusal = why;
         IMP_LOG_INFO("spec-batch: batched verify refused by '%s' (n=%zu)", why, batch.size());
     }
     return why;
+}
+
+// A pipelined plain chain never reaches the per-step verify entries: #1003 yields it periodically for the
+// round-robin spec verify (dense models), speculative.mtp_batch_verify when the bound rows could verify
+// together (every yield_every-th continuation).
+bool Engine::pipeline_yields_(const std::vector<std::shared_ptr<Request>>& rows) {
+    if (bv_.bound_only && ++bv_.since_yield >= bv_.yield_every) {
+        bv_.since_yield = 0;
+        if (batch_verify_refusal_(rows) == nullptr)
+            return true;
+    }
+    if (!runtime_config_.speculative.batch_rr || ssm_state_ ||
+        ++bd_pipe_.steps_since_spec_yield < spec_rr_yield_interval_)
+        return false;
+    bd_pipe_.steps_since_spec_yield = 0;
+    return std::any_of(rows.begin(), rows.end(), [this](const auto& r) {
+        return r->status == RequestStatus::DECODING && spec_any_drafter_enabled_(*r) &&
+               !r->spec_ngram_given_up;
+    });
 }
 
 bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream) {
@@ -337,7 +429,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     if (!ensure_batch_verify_bufs_(stream))
         return false;
-    const int max_bs = std::min(runtime_config_.runtime.max_batch_size, bv_.cap_seq);
+    // The resolved batch: runtime.max_batch_size 0 = auto (a default server) took no row at all.
+    const int max_bs = std::min(config_.max_batch_size, bv_.cap_seq);
     std::vector<std::shared_ptr<Request>> reqs;
     for (auto& r : batch) {
         if (static_cast<int>(reqs.size()) >= max_bs)
@@ -348,6 +441,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     }
     const int N = static_cast<int>(reqs.size());
     auto decline = [&](const char* why) {
+        bv_.yield_every = std::min(64, 2 * bv_.yield_every);
         if (bv_.last_refusal != why) {
             bv_.last_refusal = why;
             IMP_LOG_INFO("spec-batch: step declined by '%s' (n=%d)", why, N);
@@ -378,11 +472,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         bool mtp = false;
         draft[g] = batch_verify_draft_(*reqs[g], mtp);
         from_mtp[g] = mtp ? 1 : 0;
-        if (draft[g] >= 0)
-            ++n_drafted;
+        n_drafted += static_cast<int>(draft[g] >= 0);
     }
-    if (n_drafted == 0)
-        return decline("no_draft_in_batch");
+    if (const char* why = draft_refusal(bv_, N, n_drafted))
+        return decline(why);
 
     // Per-row penalties use the sampler's device history slots (host
     // output_tokens is the truth). Row 2g penalizes the history (ends with
@@ -698,6 +791,11 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         else if (take) {
             recurrent_slot_of_[req->id] = spare[g];
             bv_.spare_of[req->id] = live[g];
+            if (async_parked_req_id_ == req->id) {  // its parked graph loop baked the old live slot
+                async_graph_runner_.cleanup();
+                release_async_block_tables_();
+                async_parked_req_id_ = -1;
+            }
         }
         if (has) {
             req->spec_verifies++;
@@ -746,6 +844,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         IMP_LOG_INFO("spec-batch: first batched verify n=%d drafted=%d accepted=%lld emitted=%lld", N,
                      n_drafted, acc_total, emit_total);
     }
+    bv_.yield_every = 1;
     return true;
 }
 

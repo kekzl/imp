@@ -46,8 +46,8 @@ check() {
 
 check src/runtime/engine_scheduler.cpp "SpecBatchRrState rr_state" "spec_rr_yield_interval_ =" \
       "the scheduler round-robin branch"
-check src/runtime/engine_decode_pipeline.cpp "speculative.batch_rr" "const int next_parity" \
-      "the #1003 pipeline spec yield"
+check src/runtime/engine_spec_batch_verify.cpp "speculative.batch_rr" "bool Engine::step_spec_verify_batched_" \
+      "the #1003 pipeline spec yield (pipeline_yields_)"
 
 if [ "$FAIL" -ne 0 ]; then
     exit 1

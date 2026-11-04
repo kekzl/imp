@@ -1,0 +1,21 @@
+# /mnt/data/scratch/mtpbatchv_gates: imp:mtpbatchv-new (tree 1643e7b7), default server (mtp_batch_verify 4), Qwen3.8-27B-NVFP4-vllm
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (41s)
+MULTITURN: all 74 turns clean, context grew to see table
+# 4 concurrent greedy requests (one burst, all bound, verified together)
+ok want=Paris tokens=55 drafted=31 accepted=27 content='The capital of France is Paris.'
+ok want=Tokyo tokens=53 drafted=28 accepted=26 content='The capital of Japan is Tokyo.'
+ok want=Rome tokens=42 drafted=22 accepted=21 content='Rome is the capital of Italy.'
+ok want=Berlin tokens=50 drafted=26 accepted=24 content='The capital of Germany is Berlin.'
+FACTS4 PASS
+stderr grep (CUDA error|capture failed|falling back|warmup.*invalid|NaN|is NaN|is Inf): 0 matches
+# fresh server per arm, main 288b9c52 vs final, MODES greedy, side (a lone chat), 1 pair
+p1_main_greedy SUMMARY turn1_tps 116.69 followup_mean_tps 120.30 followup_drafted_turns 5/5 PASS
+p1_main_side SUMMARY turn1_tps 117.74 followup_mean_tps 122.68 followup_drafted_turns 5/5 PASS
+p1_final_greedy SUMMARY turn1_tps 116.47 followup_mean_tps 120.25 followup_drafted_turns 5/5 PASS
+p1_final_side SUMMARY turn1_tps 117.32 followup_mean_tps 122.34 followup_drafted_turns 5/5 PASS
+IDENTICAL 6/6 p1_main_greedy.json vs p1_final_greedy.json
+IDENTICAL 6/6 p1_main_side.json vs p1_final_side.json
+# make verify-fast (imp:mtpbatchv-new): verify fast: OK
+decode tg128 = 287.52 tok/s (baseline 282.84, delta 1.65%); prefill pp512 = 49705.88 (baseline 50374.39, delta -1.33%)
+own peak VRAM = 6140 MiB (baseline 6140, delta 0.00%); PPL ppl_corpus_45k = 11.2352 (delta 0.000%)
+graphs ON tg256 290.82 vs OFF 183.17 (1.59x); server c8 = 1825.31 tok/s (baseline 1899.81, delta -3.92%)

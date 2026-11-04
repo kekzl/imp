@@ -533,7 +533,13 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
 bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
-    if (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr || qscratch_.cutlass_act_sf == nullptr)
+    // An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4 head: one FP8 GEMV over all rows reads the
+    // 1213 MiB head once (per-row NVFP4 draft GEMVs read 682 MiB per row).
+    const void* w8 = nullptr;
+    const float* s8 = nullptr;
+    const bool fp8 = !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
+    if (!fp8 && (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr ||
+                 qscratch_.cutlass_act_sf == nullptr))
         return false;
     const auto& cfg = model_->config();
     const int V = cfg.vocab_size;
@@ -547,10 +553,16 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         const void* rows = static_cast<const char*>(d_rows) +
                            (static_cast<size_t>(c) * cfg.d_model * sizeof(half));
         Tensor lg = view_tokens(logits_, csz);
-        quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz, cfg.d_model,
-                                       stream);
-        if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
-            return false;
+        if (fp8) {
+            if (!gemv_fp8_rowscale_fp32(w8, s8, static_cast<const half*>(rows), static_cast<float*>(lg.data),
+                                        V, cfg.d_model, csz, stream))
+                return false;
+        } else {
+            quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz,
+                                           cfg.d_model, stream);
+            if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
+                return false;
+        }
         dim3 grid(csz, kArgmaxSplits);
         rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals, pidxs);
         IMP_CUDA_CHECK_LAUNCH();

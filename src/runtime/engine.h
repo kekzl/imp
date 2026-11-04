@@ -1266,7 +1266,8 @@ private:
     // first.
     void mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,
                          cudaStream_t stream);
-    void mtp_carry_flush_(const Request& req);  // feed the carried rows whose next token is known
+    // Feed the carried rows whose next token is known; draft_k > 0: when that is all of them, draft too.
+    void mtp_carry_flush_(const Request& req, int draft_k = 0);
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;
@@ -1369,6 +1370,7 @@ private:
     int acquire_spare_slot_(int req_id);
     int32_t batch_verify_draft_(Request& req, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
+    [[nodiscard]] bool pipeline_yields_(const std::vector<std::shared_ptr<Request>>& rows);  // ends a chain
     // Returns true when it handled the step (tokens emitted for every row).
     [[nodiscard]] bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
     // Session telemetry (logged when a request finishes).
