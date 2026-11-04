@@ -363,6 +363,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
+    src/compute/gemv_fp8_rowscale_f16.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cpp
     src/compute/gemm_lt_ex.cpp
@@ -469,6 +470,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_mtp_batched.cpp
+    src/runtime/engine_spec_mtp_head_graph.cpp
     src/runtime/engine_spec_batch_verify.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp
@@ -964,6 +966,8 @@ if(IMP_BUILD_TESTS)
         # GGUF MoE NVFP4 decode cache: whole layer or nothing.
         tests/test_moe_nvfp4_cache_rule.cpp
         tests/test_batch_verify_predicates.cpp
+        # Batched MTP head pass graph cache: replay / capture / eager, scan smem rows.
+        tests/test_mtp_head_graph.cpp
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
         tests/test_control_vector.cpp
@@ -1363,6 +1367,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_kernel_registry.cu
         tests/test_nvfp4_prompt_streamk.cu
         tests/test_fp8_gemm.cu
+        tests/test_fp8_proj_stream.cu
         tests/test_mmvq.cu
         tests/test_softmax.cu
         tests/test_sampling.cu

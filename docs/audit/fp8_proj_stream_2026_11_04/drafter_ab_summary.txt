@@ -1,0 +1,12 @@
+A_dflash|code	n=6	min 432.43	med 486.28	max 497.09	tok/verify 3.70	md5 8484b0a7
+A_dflash|list	n=6	min 280.39	med 286.06	max 289.59	tok/verify 1.60	md5 8dbb9f65
+A_dflash|prose	n=6	min 248.06	med 272.06	max 284.13	tok/verify 2.04	md5 58e5a574
+A_dspark|code	n=6	min 552.92	med 581.19	max 596.74	tok/verify 3.98	md5 8484b0a7
+A_dspark|list	n=6	min 316.44	med 370.24	max 379.82	tok/verify 2.50	md5 3f15583a
+A_dspark|prose	n=6	min 333.33	med 337.73	max 340.88	tok/verify 2.22	md5 4f8f21b1
+B_dflash|code	n=6	min 468.86	med 499.62	max 519.27	tok/verify 3.70	md5 8484b0a7
+B_dflash|list	n=6	min 274.68	med 286.04	max 289.92	tok/verify 1.60	md5 8dbb9f65
+B_dflash|prose	n=6	min 259.90	med 283.05	max 290.91	tok/verify 2.04	md5 58e5a574
+B_dspark|code	n=6	min 612.44	med 624.40	max 636.82	tok/verify 3.98	md5 8484b0a7
+B_dspark|list	n=6	min 374.82	med 390.85	max 399.38	tok/verify 2.50	md5 3f15583a
+B_dspark|prose	n=6	min 349.73	med 357.55	max 361.07	tok/verify 2.22	md5 4f8f21b1

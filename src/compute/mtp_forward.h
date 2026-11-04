@@ -310,6 +310,23 @@ struct MtpPassTables {
                                         const int* slots, const int* pos, int n, const int* last,
                                         const int* chain_slots, const int* chain_pos, int m,
                                         cudaStream_t stream, MtpPassTables& out);
+// A captured head pass sizes its scan scores for the largest position + 1, rounded up to this many rows and
+// clamped to max_seq_len: smem only, the kernel reads pos[r] + 1 scores per row (numerics unchanged).
+inline constexpr int kMtpScanSmemRowStep = 256;
+constexpr int mtp_scan_smem_rows(int max_pos, int max_seq_len) {
+    const int rows = ((max_pos + kMtpScanSmemRowStep) / kMtpScanSmemRowStep) * kMtpScanSmemRowStep;
+    return max_seq_len > 0 && rows > max_seq_len ? max_seq_len : rows;
+}
+// The scan kernel nodes (mtp_attn_scan_slots) of a captured head pass and their captured params; the params'
+// kernelParams point into `graph`, which must outlive them.
+struct MtpScanNodes {
+    std::vector<cudaGraphNode_t> nodes;
+    std::vector<cudaKernelNodeParams> params;
+};
+// Every scan kernel node of `graph` into out; false = a graph API call failed.
+[[nodiscard]] bool mtp_scan_nodes_find(cudaGraph_t graph, MtpScanNodes& out);
+// Sets every scan node of `exec` to `rows` scores of dynamic smem (mtp_scan_smem_rows); no-op when unchanged.
+[[nodiscard]] bool mtp_scan_nodes_set_rows(cudaGraphExec_t exec, MtpScanNodes& scan, int rows);
 // Make `slot` the active KV slot: saves the current slot's position, loads
 // the new one, re-points d_k_cache / d_v_cache. No-op for the active slot.
 void mtp_select_slot(MtpDraftWorkspace& ws, int slot);

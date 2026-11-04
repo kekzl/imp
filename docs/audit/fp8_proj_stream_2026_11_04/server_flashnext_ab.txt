@@ -1,0 +1,41 @@
+== arm A trial 1 c2 ==
+wave0: 600 tok in 5.59s = 107.3 tok/s aggregate (prompt 37 tok avg)
+wave1: 600 tok in 5.53s = 108.5 tok/s aggregate (prompt 37 tok avg)
+wave2: 600 tok in 5.27s = 113.8 tok/s aggregate (prompt 37 tok avg)
+MEDIAN 108.5
+== arm A trial 1 c4 ==
+wave0: 1200 tok in 8.19s = 146.5 tok/s aggregate (prompt 38 tok avg)
+wave1: 1200 tok in 7.83s = 153.3 tok/s aggregate (prompt 38 tok avg)
+wave2: 1200 tok in 7.68s = 156.2 tok/s aggregate (prompt 38 tok avg)
+MEDIAN 153.3
+== arm A trial 1 c8 ==
+wave0: 2400 tok in 13.60s = 176.4 tok/s aggregate (prompt 38 tok avg)
+wave1: 2400 tok in 13.60s = 176.5 tok/s aggregate (prompt 38 tok avg)
+wave2: 2400 tok in 12.25s = 195.9 tok/s aggregate (prompt 38 tok avg)
+MEDIAN 176.5
+== arm B trial 1 c2 ==
+wave0: 600 tok in 4.88s = 123.1 tok/s aggregate (prompt 37 tok avg)
+wave1: 600 tok in 5.36s = 112.0 tok/s aggregate (prompt 37 tok avg)
+wave2: 600 tok in 5.20s = 115.5 tok/s aggregate (prompt 37 tok avg)
+MEDIAN 115.5
+== arm B trial 1 c4 ==
+wave0: 1200 tok in 8.29s = 144.8 tok/s aggregate (prompt 38 tok avg)
+wave1: 1200 tok in 8.12s = 147.8 tok/s aggregate (prompt 38 tok avg)
+wave2: 1200 tok in 8.63s = 139.1 tok/s aggregate (prompt 38 tok avg)
+MEDIAN 144.8
+== arm B trial 1 c8 ==
+wave0: 2400 tok in 13.34s = 180.0 tok/s aggregate (prompt 38 tok avg)
+wave1: 2400 tok in 12.91s = 185.9 tok/s aggregate (prompt 38 tok avg)
+wave2: 2400 tok in 15.20s = 157.9 tok/s aggregate (prompt 38 tok avg)
+MEDIAN 180.0
+== arm B trial 2 c2 ==
+wave0: 600 tok in 13.06s = 46.0 tok/s aggregate (prompt 37 tok avg)
+wave1: 600 tok in 10.51s = 57.1 tok/s aggregate (prompt 37 tok avg)
+wave2: 600 tok in 10.78s = 55.6 tok/s aggregate (prompt 37 tok avg)
+MEDIAN 55.6
+== arm B trial 2 c4 ==
+wave0: 1200 tok in 20.92s = 57.4 tok/s aggregate (prompt 38 tok avg)
+wave1: 1200 tok in 18.68s = 64.2 tok/s aggregate (prompt 38 tok avg)
+wave2: 1200 tok in 19.49s = 61.6 tok/s aggregate (prompt 38 tok avg)
+MEDIAN 61.6
+== arm B trial 2 c8 ==
