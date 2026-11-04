@@ -169,7 +169,7 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     m.mtp_ = std::make_unique<MtpHead>();
     m.mtp_->loaded = true;
     RuntimeConfig cfg;
-    cfg.speculative.mtp_batch_verify = 4;
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify, 4) << "default on: 2-4 chats verify together";
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "slot-swapping spares, one per row";

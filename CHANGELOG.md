@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- `speculative.mtp_batch_verify` (default 4): while <= 4 requests decode, the MTP-bound ones verify their drafts in one batched step; a burst of <= 4 prompts binds. Qwen3.8-27B-NVFP4: 4 overlapping chats 83.72 -> 117.45 tok/s, 2 chats 94.21 -> 117.06, c4 337.4 -> 460.3, c32 unchanged, KV plan 4812 -> 4531 blocks.
 - `speculative.mtp_carry` (default on): up to `mtp_history_slots` requests bind the MTP head and feed it the hidden rows of their batched decode steps, so overlapping chats draft again once one decodes alone. Qwen3.8-27B-NVFP4, 2 chats x 6 overlapping turns: turns drafting 6/36 -> 35/36, 93.78 -> 98.38 tok/s; c32 2024.17 -> 2034.10.
 - `speculative.mtp_history_slots` (default 4): the MTP head keeps 4 KV slots, one binds; a chat UI's side request or a second chat between turns no longer wipes a chat's head cache. Qwen3.8-27B-NVFP4, 6-turn chat + side request: follow-ups drafting 3/15 -> 15/15, 101.88 -> 122.28 tok/s; two alternating chats 101.52 -> 117.43.
 - `speculative.mtp_concurrent` (default on): `mtp_k=auto` also loads the MTP head on a concurrent GDN-hybrid server; a prompt prefilling alone binds it, batch > 1 decodes plain. Qwen3.8-27B-NVFP4 default server: 1 stream 96.87 -> 131.28 tok/s (6 chats x 400), c4 -0.47 %, c32 -0.07 %, own peak VRAM +2773 MiB, KV plan 15651 -> 13230 blocks.

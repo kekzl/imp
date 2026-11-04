@@ -1,0 +1,7 @@
+harness: md5=f8ac61ec6cb4
+p1_main c1 126.98 drafted 1822 accepted 1275 c2 166.6 c4 322.9 c32 1935.3 own_peak_mib 25217 kv_blocks 4812
+p1_new c1 125.74 drafted 1822 accepted 1275 c2 242.4 c4 445.0 c32 1951.5 own_peak_mib 25090 kv_blocks 4531
+p2_main c1 125.04 drafted 1822 accepted 1275 c2 166.8 c4 321.9 c32 1934.3 own_peak_mib 25133 kv_blocks 4812
+p2_new c1 116.26 drafted 1822 accepted 1275 c2 230.6 c4 424.6 c32 1863.6 own_peak_mib 25102 kv_blocks 4531
+p3_main c1 120.45 drafted 1822 accepted 1275 c2 165.3 c4 319.3 c32 1881.5 own_peak_mib 25152 kv_blocks 4812
+p3_new c1 119.58 drafted 1822 accepted 1275 c2 225.9 c4 423.6 c32 1881.5 own_peak_mib 25436 kv_blocks 4531

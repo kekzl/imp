@@ -1,0 +1,15 @@
+==========
+== CUDA ==
+==========
+== p1_new
+2 requests (4 rows): windows 5 forward+argmax median 12.57 ms/step, head feed+draft median 2.00 ms/step, fed rows/step median 3.66
+3 requests: windows 1 forward+argmax median 13.06 ms/step, head feed+draft median 2.08 ms/step, fed rows/step median 5.90
+4 requests (8 rows): windows 5 forward+argmax median 13.12 ms/step, head feed+draft median 2.02 ms/step, fed rows/step median 7.18
+== p2_new
+2 requests (4 rows): windows 5 forward+argmax median 12.89 ms/step, head feed+draft median 2.45 ms/step, fed rows/step median 3.66
+3 requests: windows 1 forward+argmax median 13.36 ms/step, head feed+draft median 2.35 ms/step, fed rows/step median 5.54
+4 requests (8 rows): windows 6 forward+argmax median 13.65 ms/step, head feed+draft median 2.43 ms/step, fed rows/step median 7.20
+== p3_new
+2 requests (4 rows): windows 5 forward+argmax median 13.04 ms/step, head feed+draft median 2.64 ms/step, fed rows/step median 3.65
+3 requests: windows 1 forward+argmax median 13.37 ms/step, head feed+draft median 2.42 ms/step, fed rows/step median 5.68
+4 requests (8 rows): windows 6 forward+argmax median 13.62 ms/step, head feed+draft median 2.65 ms/step, fed rows/step median 7.15

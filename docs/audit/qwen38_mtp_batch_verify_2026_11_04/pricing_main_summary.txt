@@ -1,0 +1,5 @@
+harness: md5=f8ac61ec6cb4
+p1_plain c1 96.52 drafted 32 accepted 0 c2 176.4 c4 341.3 c8 647.3 own_peak_mib 21738 kv_blocks 4950
+p1_default c1 131.00 drafted 1822 accepted 1275 c2 174.8 c4 338.8 c8 642.5 own_peak_mib 24101 kv_blocks 3850
+p1_bvfac c1 131.14 drafted 1822 accepted 1275 c2 175.5 c4 339.3 c8 340.3 own_peak_mib 21742 kv_blocks 5500
+p1_bvswap c1 130.74 drafted 1822 accepted 1275 c2 175.1 c4 338.7 c8 340.2 own_peak_mib 21706 kv_blocks 5225
