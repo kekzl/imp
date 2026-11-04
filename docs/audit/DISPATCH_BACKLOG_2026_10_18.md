@@ -424,3 +424,11 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-62 | DONE | `BigIQ3S::piece_off` from packed immediates (base offset per piece, j0 factor in 5-bit fields) instead of a ternary chain: BSSY / BRA 35 / 95 -> 16 / 22. Qwen3.8-27B-UD-Q4_K_M pp512 nsys, 4 alternating pairs: BigIQ3S kernel sum 15.38 / 15.79 / 15.35 / 15.42 -> 12.03 / 12.39 / 12.71 / 12.05 ms (45 launches), pp512 3903-4019 -> 4000-4023 tok/s. PPL 45k deterministic 4.4968 both (bit-identical offsets). |
+
+## 2026-11-04 Batch 46: B-63 Qwen3.8-Flash-Next next-layer expert prefetch
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-63 | DONE | `moe.expert_prefetch` (default 2): layer L's MoE input through layer L+1's router, top-10, up to N absent keys get LRU victims and are gathered behind L's misses on the gather stream; a hit on a pending slot waits for L+1's gather event. imp-server, `tools/analysis/flashnext_prefetch_ab.sh`, 6 prompts x 400, medians: N=0 91.69 / 91.42 / 91.62 / 91.32, N=1 92.37 / 92.29, N=2 93.72 / 93.32 / 93.48 / 94.17, N=3 91.69 / 92.09, N=4 90.19 / 90.36 tok/s. N=2: hits 87.8 -> 89.5 %, misses 490487 -> 421538, 151606 prefetched, 80116 routed (52.8 %). Decode-path PPL ppl_4k deterministic 5.0285 both (235571 keys prefetched) |
+| B-63 levers | REFUTED | N >= 3: N=4 cuts misses to 368303 (-24.9 %) and decodes -1.3 %; half the prefetches are wrong and their PCIe time lands before L+1's own gather. Offline price (`tools/analysis/expert_prefetch_sim.py` on a trace with prediction records, 424 slots): predictor recall 66.0 % of top-10, LRU replay 87.0 % vs live 87.8 % |
+| B-63 open | OPEN | Wrong prefetches cost the next layer's critical gather: a better predictor (hc-mixed L+1 input instead of L's MoE input) or issuing from layer L-1 widens the window; the gather of L+1 is FIFO behind the prefetch on one stream |
