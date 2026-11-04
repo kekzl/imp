@@ -49,6 +49,8 @@ struct FeatureSet {
     size_t ssm_state_bytes = 0;         // batch-shaped, computed by the caller
     size_t recurrent_snapshot_bytes = 0;
     size_t residual_ring_bytes = 0;
+    // MTP draft head workspace (head KV slots, batched-feed scratch, carry), 0 = no head armed.
+    size_t mtp_workspace_bytes = 0;
     // SWA-aware sizing: sliding-window layers hold a fixed live span instead
     // of full context. 0/0 = feature off.
     int swa_live_tokens = 0;

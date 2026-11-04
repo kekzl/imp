@@ -116,6 +116,7 @@ PlanResult plan_memory(const PlanInput& in) {
     push(p.pools, "vision tower", RegionTag::EnginePersistent, in.features.vision_tower_bytes);
     push(p.pools, "speculative decode staging", RegionTag::EnginePersistent,
          in.features.spec_decode_bytes);
+    push(p.pools, "MTP draft workspace", RegionTag::EnginePersistent, in.features.mtp_workspace_bytes);
 
     // ── 4. SWA group: batch-shaped, charged before the global pool. ──
     int n_global_layers = in.model.n_kv_layers;
@@ -229,6 +230,8 @@ PlanResult plan_memory(const PlanInput& in) {
     }
     if (p.optional_caches > 0)
         f.levers.push_back(PlanLever{std::string("drop the optional weight caches"), p.optional_caches});
+    if (in.features.mtp_workspace_bytes > 0)
+        f.levers.push_back(PlanLever{std::string("speculative.mtp_k -> 0"), in.features.mtp_workspace_bytes});
     std::erase_if(f.levers, [](const PlanLever& lv) { return lv.frees == 0; });
     // Nothing negotiable is charged: the fixed lines alone overrun, and only more budget helps.
     if (f.levers.empty() && f.over_by > 0)

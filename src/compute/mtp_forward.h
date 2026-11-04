@@ -7,6 +7,7 @@
 // mismatch vs standard GQA, needs upstream-reference investigation). 2.2.Attn: future.
 
 #include "compute/moe_routing.h"  // MoeRoutingBuffers
+#include "compute/mtp_workspace_bytes.h"  // kMtp* sizes, mtp_workspace_bytes (the plan's mirror)
 #include "memory/host_pinned.h"
 #include "core/tensor.h"
 #include "model/mtp_head.h"
@@ -18,21 +19,12 @@ namespace imp {
 class Model;
 struct NvFP4QuantResult;
 
-// Max top-W width the MTP draft step can emit per position (tree-ceiling
-// measurement, Stage 0). The draft argmax is top-0.
-constexpr int kMtpMaxTopW = 8;
-
-// Max device-side chain length (per-chain stride of
-// MtpDraftWorkspace::d_chain_tokens). Longer speculative.mtp_k values fall
-// back to the host chain loop.
-constexpr int kMtpMaxChainK = 16;
-
-// Blocks in pass 1 of the two-pass serving top-W kernel.
-constexpr int kMtpTopWBlocks = 64;
-
 // Workspace tensors needed for one draft step. Caller pre-allocates these so
 // the draft step is graph-safe (no cudaMalloc inside captured graph).
 struct MtpDraftWorkspace {
+    // Device footprint of the mtp_dev_alloc sites (mtp_alloc_footprint each); equals mtp_workspace_bytes() of
+    // the shape.
+    size_t device_bytes = 0;
     // ---- Phase 2.1 reduced-forward scratch ----
     // [hidden_dim] FP16 — normalized embedding input
     void* d_emb_norm = nullptr;
@@ -238,10 +230,6 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
     return ws.hc_count > 0 ? ws.d_hc_x : ws.d_h_final;
 }
 
-// Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
-// scratch above: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
-constexpr int kMtpFeedRows = 256;
-
 // One MTP draft step; returns the draft token id via out_token_id.
 // d_h_prev: main-model final hidden [hidden_dim] FP16 GPU. mtp.loaded must be true.
 // out_token_id=nullptr: skip lm_head GEMV+argmax+sync (feed-only step, ~10x cheaper;
@@ -320,6 +308,8 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 // speculative.mtp_carry scratch after mtp_workspace_allocate: `rows` per KV slot, needs the batched feed
 // (rows <= feed_rows_cap) and a plain head. false = none (rows <= 0 too); mtp_workspace_free releases it.
 [[nodiscard]] bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows);
+// diagnostics.mtp_prenorm_h feed scratch [rows, hidden] FP16 on a plain head; false = none.
+[[nodiscard]] bool mtp_prenorm_allocate(MtpDraftWorkspace& ws, int rows);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V

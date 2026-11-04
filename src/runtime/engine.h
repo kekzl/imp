@@ -57,6 +57,7 @@ struct Request;          // runtime/request.h: complete only in the TUs that rea
 struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
 struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
+struct MtpWorkspaceShape;  // src/compute/mtp_workspace_bytes.h
 struct EncoderWorkspace;   // src/compute/encoder_forward.h
 struct NvFP4QuantResult;   // src/quant/nvfp4_quant.h
 class DSparkDrafter;       // src/runtime/dspark_drafter.h
@@ -1016,6 +1017,11 @@ private:
     // when mtp_spec_k_ > 0 AND the loaded model has model->mtp_->loaded.
     // Defined in <compute/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
+    // Plan row "MTP draft workspace" (init_kv_cache), taken before Serving by take_planned_mtp_workspace_.
+    size_t mtp_workspace_planned_bytes_ = 0;
+    [[nodiscard]] bool mtp_workspace_shape_(MtpWorkspaceShape& s) const;
+    [[nodiscard]] size_t mtp_workspace_plan_bytes_() const;
+    void take_planned_mtp_workspace_();
     // Device buffers: mtp_workspace_free / encoder_workspace_free in ~Engine.
     std::unique_ptr<MtpDraftWorkspace, MtpDraftWorkspaceDeleter> mtp_ws_storage_;
     std::unique_ptr<EncoderWorkspace, EncoderWorkspaceDeleter> encoder_ws_storage_;  // #836

@@ -328,6 +328,45 @@ TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
     EXPECT_EQ(ws_moe.feed_rows_cap, 0);
     imp::mtp_workspace_free(ws_moe);
 }
+
+// The capacity plan prices the workspace with mtp_workspace_bytes (CPU, no allocator); the bytes
+// the allocator actually requests must equal it, dense (feed + carry + prenorm) and MoE.
+TEST_F(MtpFeedBatchTest, AllocatedBytesEqualThePlanMirror) {
+    imp::MtpWorkspaceShape d;
+    d.hidden_dim = kH;
+    d.vocab_size = kVocab;
+    d.shared_d_ff = kDff;
+    d.num_heads = kNh;
+    d.num_kv_heads = kNkv;
+    d.head_dim = kHd;
+    d.max_seq_len = kSeq;
+    d.n_kv_slots = 4;
+    d.carry_rows = 16;
+    d.prenorm_rows = 64;
+    imp::MtpDraftWorkspace ws;
+    ASSERT_TRUE(imp::mtp_workspace_allocate(ws, d.hidden_dim, d.vocab_size, 0, 0, 0, d.shared_d_ff,
+                                            d.num_heads, d.num_kv_heads, d.head_dim, d.max_seq_len,
+                                            d.n_kv_slots));
+    ASSERT_TRUE(imp::mtp_carry_allocate(ws, d.carry_rows));
+    ASSERT_TRUE(imp::mtp_prenorm_allocate(ws, d.prenorm_rows));
+    EXPECT_EQ(ws.device_bytes, imp::mtp_workspace_bytes(d));
+    imp::mtp_workspace_free(ws);
+    EXPECT_EQ(ws.device_bytes, 0u);
+
+    imp::MtpWorkspaceShape m = d;
+    m.n_experts = 4;
+    m.top_k = 2;
+    m.expert_d_ff = 32;
+    m.n_kv_slots = 1;
+    m.carry_rows = 0;
+    m.prenorm_rows = 0;
+    imp::MtpDraftWorkspace ws_moe;
+    ASSERT_TRUE(imp::mtp_workspace_allocate(ws_moe, m.hidden_dim, m.vocab_size, m.n_experts, m.top_k,
+                                            m.expert_d_ff, m.shared_d_ff, m.num_heads, m.num_kv_heads,
+                                            m.head_dim, m.max_seq_len));
+    EXPECT_EQ(ws_moe.device_bytes, imp::mtp_workspace_bytes(m));
+    imp::mtp_workspace_free(ws_moe);
+}
 // mtp_attn_scan vs an FP64 softmax reference: Qwen3.8 shape (24/4 heads, head_dim 256) and a
 // 128-dim one, 1 row (direct and split-K) and 3 rows, contexts 1..20003 rows (warp, pass, split tails, split
 // cap).

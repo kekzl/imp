@@ -220,7 +220,14 @@ bool Engine::init_kv_cache() {
                                               experts_on_host_ && executor_ &&
                                                   executor_->expert_cache_nvfp4_slots());
     config_.mxfp4_fp16_cache = runtime_config_.attention.mxfp4_fp16_fallback;  // FP16 decode cache reserve
-    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram(),
+    // MTP draft workspace: allocated at the end of init (take_planned_mtp_workspace_), so both passes
+    // size KV without it; the live pass sees it as already spent.
+    mtp_workspace_planned_bytes_ = mtp_workspace_plan_bytes_();
+    const size_t live_free = effective_free_vram();
+    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
+                                           live_free > mtp_workspace_planned_bytes_
+                                               ? live_free - mtp_workspace_planned_bytes_
+                                               : 0,
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
                                            ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
                                            runtime_config_.gemm.moe_imma_prefill);
@@ -276,6 +283,7 @@ bool Engine::init_kv_cache() {
         // Hybrid verify state scratch (#2452): 2 x one sequence's recurrent state, taken at init.
         probe.spec_decode_bytes = spec_state_scratch_plan_bytes_(vram_budget.ssm_footprint_bytes,
                                                                  ssm_reserved_slots);
+        probe.mtp_workspace_bytes = mtp_workspace_planned_bytes_;
         if (executor_) {
             // allocate_workspaces() ran before distributable was read: charge only the part of the
             // estimate not yet resident (Qwen3.8-27B: 887 estimated, 749 held, #2365).
