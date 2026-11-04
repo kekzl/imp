@@ -1,0 +1,30 @@
+harness: md5=bd419df7e9bd client_md5=c26973421a02
+p1_main own_peak_mib 24556 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_main ctx 8000 rep 0 s0 prompt 7705 comp 384 ttft_s 0.71 decode_tps 105.43 drafted 273 accepted 229 md5 1f7eb90fc672
+REQ p1_main ctx 20000 rep 0 s0 prompt 19792 comp 384 ttft_s 1.69 decode_tps 93.84 drafted 0 accepted 0 md5 75ef45bcb22f
+REQ p1_main ctx 40000 rep 0 s0 prompt 39882 comp 384 ttft_s 3.50 decode_tps 92.54 drafted 0 accepted 0 md5 94f63e275a87
+REQ p1_main ctx 80000 rep 0 s0 prompt 79671 comp 384 ttft_s 7.01 decode_tps 90.83 drafted 0 accepted 0 md5 d43170b91353
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [13:42:40.815][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 37's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [13:42:32.771][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 36's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+      1 [13:42:26.630][INFO] engine_spec_mtp.cpp:500: mtp-spec: no head cache covers req 35's prefix-cache resume at 0 (prompt exceeds the head KV capacity)
+p1_ring own_peak_mib 24573 kv_blocks 12537 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_ring ctx 8000 rep 0 s0 prompt 7705 comp 384 ttft_s 0.69 decode_tps 105.09 drafted 273 accepted 229 md5 1f7eb90fc672
+REQ p1_ring ctx 20000 rep 0 s0 prompt 19792 comp 384 ttft_s 1.75 decode_tps 66.48 drafted 276 accepted 221 md5 23330f678c64
+REQ p1_ring ctx 40000 rep 0 s0 prompt 39882 comp 384 ttft_s 3.62 decode_tps 68.14 drafted 276 accepted 222 md5 077ad0e9002e
+REQ p1_ring ctx 80000 rep 0 s0 prompt 79671 comp 384 ttft_s 7.26 decode_tps 88.45 drafted 11 accepted 3 md5 ab6902e6585a
+      1   MTP draft workspace           359 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [13:43:44.793][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 37 (uneconomic: avg emitted/verify below break-even)
+p1_full own_peak_mib 23992 kv_blocks 13660 kv_cap=131072 x 1 slot(s) = 512.0 MiB
+REQ p1_full ctx 8000 rep 0 s0 prompt 7705 comp 384 ttft_s 0.75 decode_tps 104.13 drafted 273 accepted 229 md5 1f7eb90fc672
+REQ p1_full ctx 20000 rep 0 s0 prompt 19792 comp 384 ttft_s 1.77 decode_tps 69.86 drafted 277 accepted 224 md5 3a956ef78d6d
+REQ p1_full ctx 40000 rep 0 s0 prompt 39882 comp 384 ttft_s 3.64 decode_tps 73.86 drafted 277 accepted 222 md5 741531ebfc13
+REQ p1_full ctx 80000 rep 0 s0 prompt 79671 comp 384 ttft_s 7.27 decode_tps 67.44 drafted 285 accepted 212 md5 e8b20b517418
+      1   MTP draft workspace           609 MiB  (head KV slots + feed scratch, taken before serving)
+p1_ring4k own_peak_mib 24554 kv_blocks 13095 kv_cap=4096 x 4 slot(s) = 64.0 MiB
+REQ p1_ring4k ctx 8000 rep 0 s0 prompt 7705 comp 384 ttft_s 0.69 decode_tps 97.90 drafted 286 accepted 212 md5 4fe94d36bfda
+REQ p1_ring4k ctx 20000 rep 0 s0 prompt 19792 comp 384 ttft_s 1.74 decode_tps 60.87 drafted 284 accepted 209 md5 7f5619143c67
+REQ p1_ring4k ctx 40000 rep 0 s0 prompt 39882 comp 384 ttft_s 3.61 decode_tps 70.17 drafted 282 accepted 215 md5 32dbccd7d073
+REQ p1_ring4k ctx 80000 rep 0 s0 prompt 79671 comp 384 ttft_s 7.30 decode_tps 88.63 drafted 11 accepted 3 md5 ab6902e6585a
+      1   MTP draft workspace           167 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [13:45:40.523][INFO] engine_spec_mtp.cpp:34: mtp-spec: drafting off for req 37 (uneconomic: avg emitted/verify below break-even)

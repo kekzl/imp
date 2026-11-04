@@ -472,8 +472,8 @@ TEST_F(MtpFeedBatchTest, SecondBatchContinuesAtCorrectPosition) {
     imp::mtp_workspace_free(ws_bat);
 }
 
-// Guardrails: a MoE-shaped workspace must report no batch capability, and a
-// feed beyond the KV capacity must refuse rather than write out of bounds.
+// Guardrails: a MoE-shaped workspace must report no batch capability; the head KV is a ring of kSeq rows:
+// a feed past its end wraps (and raises the slot's d_slot_hi), a feed wider than the ring refuses.
 TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
     SyntheticHead s;
     s.build(/*seed=*/13);
@@ -482,10 +482,20 @@ TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
     ASSERT_TRUE(imp::mtp_workspace_allocate(ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd,
                                             kSeq));
     configure_ws(ws);
-    ws.mtp_pos = kSeq - 4;  // only 4 slots left
-    EXPECT_FALSE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, 8, s.head, s.tok_emb, ws,
-                                     kH, nullptr));
-    EXPECT_EQ(ws.mtp_pos, kSeq - 4) << "failed feed must not advance the cache";
+    ws.mtp_pos = kSeq - 4;  // 4 rows to the ring end
+    EXPECT_TRUE(imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, 8, s.head, s.tok_emb, ws, kH, nullptr));
+    EXPECT_EQ(ws.mtp_pos, kSeq + 4);
+    int hi = 0;
+    ASSERT_EQ(cudaMemcpy(&hi, ws.d_slot_hi, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(hi, kSeq + 4);
+    if (ws.feed_rows_cap > kSeq) {
+        EXPECT_FALSE(
+            imp::mtp_feed_batch(s.tokens.data(), s.d_hidden, kSeq + 1, s.head, s.tok_emb, ws, kH, nullptr));
+        EXPECT_EQ(ws.mtp_pos, kSeq + 4) << "failed feed must not advance the cache";
+    }
+    ASSERT_TRUE(imp::mtp_kv_hi_reset(ws, -1, nullptr));
+    ASSERT_EQ(cudaMemcpy(&hi, ws.d_slot_hi, sizeof(int), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(hi, 0);
     imp::mtp_workspace_free(ws);
 
     // MoE-shaped alloc (n_experts > 0) gets no batch scratch.
@@ -597,6 +607,94 @@ TEST_F(MtpFeedBatchTest, AttnScanMatchesSoftmaxReference) {
                     << "nh=" << s.nh << " hd=" << s.hd << " base=" << base << " mode=" << mode;
                 ASSERT_EQ(cudaFree(part), cudaSuccess);
             }
+        }
+    }
+}
+
+// Head KV ring (speculative.mtp_kv_window): position t lives in row t % ring. The query at p attends
+// [max(p - ring + 1, hi - ring), p] (hi - 1 = a stale draft past p); FP64 reference over those positions, for
+// the direct, split-K and multi-slot scans, before the wrap (lo 0) and after it (lo > 0, window wraps the
+// ring end).
+TEST_F(MtpFeedBatchTest, AttnScanRingWindowMatchesReference) {
+    const int nh = 8, nkv = 2, hd = 128, ring = 1024;
+    const size_t row = static_cast<size_t>(nkv) * hd;
+    for (const int p : {700, 3000, 5000}) {
+        for (const int stale : {0, 5, 300}) {
+            const int hi = p + 1 + stale;
+            const int lo = imp::mtp_ring_lo(p, hi, ring);
+            std::mt19937 rng(static_cast<unsigned>(p + stale));
+            const auto q = random_h(rng, static_cast<size_t>(nh) * hd, 1.0f);
+            const auto k_pos = random_h(rng, static_cast<size_t>(hi) * row, 1.0f);  // K of positions [0, hi)
+            const auto v_pos = random_h(rng, static_cast<size_t>(hi) * row, 1.0f);
+            // Two slots, the query's in slot 1: rows written in position order, the last write wins.
+            std::vector<__half> k_ring(2 * ring * row, __float2half(0.0f)), v_ring = k_ring;
+            for (int t = 0; t < hi; ++t)
+                for (size_t e = 0; e < row; ++e) {
+                    const size_t dst = ((static_cast<size_t>(ring) + (t % ring)) * row) + e;
+                    k_ring[dst] = k_pos[(static_cast<size_t>(t) * row) + e];
+                    v_ring[dst] = v_pos[(static_cast<size_t>(t) * row) + e];
+                }
+            std::vector<double> ref(static_cast<size_t>(nh) * hd);
+            for (int h = 0; h < nh; ++h) {
+                const int kv_h = h / (nh / nkv);
+                std::vector<double> s(static_cast<size_t>(p + 1 - lo));
+                double mx = -1e300, sum = 0.0;
+                for (int t = lo; t <= p; ++t) {
+                    double dot = 0.0;
+                    for (int d = 0; d < hd; ++d)
+                        dot += static_cast<double>(__half2float(q[(h * hd) + d])) *
+                               __half2float(k_pos[(static_cast<size_t>(t) * row) + (kv_h * hd) + d]);
+                    s[t - lo] = dot / std::sqrt(static_cast<double>(hd));
+                    mx = std::max(mx, s[t - lo]);
+                }
+                for (double& x : s)
+                    sum += (x = std::exp(x - mx));
+                for (int t = lo; t <= p; ++t)
+                    for (int d = 0; d < hd; ++d)
+                        ref[(h * hd) + d] += s[t - lo] / sum *
+                                             __half2float(
+                                                 v_pos[(static_cast<size_t>(t) * row) + (kv_h * hd) + d]);
+            }
+            const imp::Tensor dq = upload(q, {1, nh * hd});
+            const imp::Tensor dk = upload(k_ring, {2 * ring, static_cast<int64_t>(row)});
+            const imp::Tensor dv = upload(v_ring, {2 * ring, static_cast<int64_t>(row)});
+            const std::vector<int> host_tab = {0, hi, 1,
+                                               p};  // d_hi [2], then the slots row's slot and position
+            int* d_hi = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_hi, host_tab.size() * sizeof(int)), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(d_hi, host_tab.data(), host_tab.size() * sizeof(int),
+                                 cudaMemcpyHostToDevice),
+                      cudaSuccess);
+            float* part = nullptr;
+            ASSERT_EQ(cudaMalloc(&part, static_cast<size_t>(nh) * 32 * (hd + 2) * sizeof(float)),
+                      cudaSuccess);
+            const auto* k1 = static_cast<const __half*>(dk.data) + (ring * row);
+            const auto* v1 = static_cast<const __half*>(dv.data) + (ring * row);
+            for (const int mode : {0, 1, 2}) {  // direct, split-K, multi-slot
+                std::vector<__half> out(q.size());
+                const imp::Tensor dout = upload(out, {1, nh * hd});
+                if (mode == 2)
+                    imp::mtp_attn_scan_slots(dq.data, dk.data, dv.data, dout.data, d_hi + 2, d_hi + 3,
+                                             static_cast<int64_t>(ring) * row, p, 1, nh, nkv, hd, nullptr,
+                                             ring, d_hi);
+                else
+                    imp::mtp_attn_scan(dq.data, k1, v1, dout.data, p, 1, nh, nkv, hd, nullptr,
+                                       mode == 1 ? part : nullptr, ring, d_hi + 1);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                ASSERT_EQ(cudaMemcpy(out.data(), dout.data, out.size() * sizeof(__half),
+                                     cudaMemcpyDeviceToHost),
+                          cudaSuccess);
+                double diff2 = 0.0, ref2 = 0.0;
+                for (size_t i = 0; i < out.size(); ++i) {
+                    const double got = __half2float(out[i]);
+                    diff2 += (got - ref[i]) * (got - ref[i]);
+                    ref2 += ref[i] * ref[i];
+                }
+                EXPECT_LT(std::sqrt(diff2 / ref2), 2e-3)
+                    << "p=" << p << " stale=" << stale << " mode=" << mode;
+            }
+            ASSERT_EQ(cudaFree(part), cudaSuccess);
+            ASSERT_EQ(cudaFree(d_hi), cudaSuccess);
         }
     }
 }

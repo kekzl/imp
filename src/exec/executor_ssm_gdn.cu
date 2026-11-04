@@ -754,7 +754,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
                                    stream, gl, state.d_chunk_len);
-        } else if (state.ssm_seq_slots && state.ssm_n_seq > 1) {
+        } else if ((state.ssm_seq_slots && state.ssm_n_seq > 1) || state.ssm_grouped_chunk()) {
             // Batched over independent sequences. Two callers: batched decode (n rows
             // = n sequences, one token each) and ragged cross-sequence prefill (rows =
             // concatenated sequence chunks, seq_offsets carries prefix sums,

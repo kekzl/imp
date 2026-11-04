@@ -1,0 +1,12 @@
+p1_solo1 ctx 1000 common_chars 93/1818 common_words 16/281
+p1_solo0 ctx 1000 common_chars 416/1818 common_words 65/281
+p1_solo1 ctx 4000 common_chars 635/1565 common_words 70/200
+p1_solo0 ctx 4000 common_chars 710/1565 common_words 82/200
+p1_solo1 ctx 8000 common_chars 36/1585 common_words 6/189
+p1_solo0 ctx 8000 common_chars 36/1585 common_words 6/189
+p1_solo1 ctx 20000 common_chars 116/1476 common_words 17/182
+p1_solo0 ctx 20000 common_chars 29/1476 common_words 5/182
+p1_solo1 ctx 40000 common_chars 91/1545 common_words 13/195
+p1_solo0 ctx 40000 common_chars 248/1545 common_words 37/195
+p1_solo1 ctx 80000 common_chars 824/1567 common_words 103/211
+p1_solo0 ctx 80000 common_chars 121/1567 common_words 25/211

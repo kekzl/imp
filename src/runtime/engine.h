@@ -1176,7 +1176,7 @@ private:
     // the grouped recurrent geometry (rows per candidate group on a hybrid,
     // 0 = linear): the scan bakes gridDim.y = W and the per-group row count.
     std::map<std::tuple<int, int, int, int>, SpecVerifyGraph> spec_graphs_;
-    int spec_capture_ctx_tier_(int ctx_padded) const;
+    int spec_capture_ctx_tier_(int ctx_padded, bool paged_attn = false) const;
     int* d_spec_past_len_ = nullptr;   // device int: p0 (cached-prefix length)
     int* d_spec_chunk_len_ = nullptr;  // device int: real (unpadded) chunk length
     int spec_capture_ctx_cap_ = -1;    // resolved capacity; -1 = unresolved, 0 = disabled
@@ -1190,7 +1190,7 @@ private:
     // eligible use. Hybrids with SSMState qualify: the recurrent chunk
     // kernels read the real chunk length from device (d_chunk_len) so pad
     // rows never advance the committed state.
-    [[nodiscard]] bool spec_capture_ready_(int ctx_padded, int rows);
+    [[nodiscard]] bool spec_capture_ready_(int ctx_padded, int rows, bool paged_attn = false);
     // Round the real chunk length up to its capture bucket.
     int spec_capture_bucket_(int chunk_len) const;
     int spec_capture_bucket_max_() const;

@@ -1,0 +1,18 @@
+model=Qwen3.8-27B-NVFP4-vllm
+degen exit=0
+  [PASS] thinking=enabled stream: thinking_delta events
+  [PASS] display=omitted: no thinking block, answer intact
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (35s)
+niah exit=0
+spec before niah: imp_spec_drafted_total=3731 imp_spec_accepted_total=3235 
+spec after niah:  imp_spec_drafted_total=4037 imp_spec_accepted_total=3495 
+  [PASS] len~32000 depth=0.1 ptok=26269: want ZEBRA-32000-10 got 'ZEBRA-32000-10'
+  [PASS] len~32000 depth=0.5 ptok=26269: want ZEBRA-32000-50 got 'ZEBRA-32000-50'
+  [PASS] len~32000 depth=0.9 ptok=26269: want ZEBRA-32000-90 got 'ZEBRA-32000-90'
+  [PASS] len~64000 depth=0.1 ptok=52459: want ZEBRA-64000-10 got 'ZEBRA-64000-10'
+  [PASS] len~64000 depth=0.5 ptok=52459: want ZEBRA-64000-50 got 'ZEBRA-64000-50'
+  [PASS] len~64000 depth=0.9 ptok=52459: want ZEBRA-64000-90 got 'ZEBRA-64000-90'
+  [PASS] len~100000 depth=0.1 ptok=81908: want ZEBRA-100000-10 got 'ZEBRA-100000-10'
+  [PASS] len~100000 depth=0.5 ptok=81908: want ZEBRA-100000-50 got 'ZEBRA-100000-50'
+  [PASS] len~100000 depth=0.9 ptok=81908: want ZEBRA-100000-90 got 'ZEBRA-100000-90'
+niah_check: 9 probes, 0 FAIL (47s)

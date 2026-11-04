@@ -20,7 +20,7 @@ bool mtp_feed_tables_valid(const MtpDraftWorkspace& ws, const int* h_slots, cons
                            int* max_pos) {
     *max_pos = 0;
     for (int r = 0; r < n_rows; ++r) {
-        if (h_slots[r] < 0 || h_slots[r] >= ws.n_kv_slots || h_pos[r] < 0 || h_pos[r] >= ws.max_seq_len)
+        if (h_slots[r] < 0 || h_slots[r] >= ws.n_kv_slots || h_pos[r] < 0)
             return false;
         *max_pos = std::max(*max_pos, h_pos[r]);
     }
