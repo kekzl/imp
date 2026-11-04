@@ -636,7 +636,7 @@ sanitize:
 		echo "== compute-sanitizer memcheck: $$b =="; \
 		docker run --rm --gpus all -v $(HOME)/models:/models imp:sanitize \
 			/usr/local/cuda/bin/compute-sanitizer --tool memcheck --error-exitcode 1 \
-			/src/build/$$b || exit 1; \
+			/tmp/$$b || exit 1; \
 	done
 
 # Apply clang-format in place across src/, include/, tools/, tests/.
