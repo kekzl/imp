@@ -1411,6 +1411,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_outlier_ref.cu
         tests/test_nvfp4_gemv_kpar_loop.cu
         tests/test_nvfp4_gemm_batched.cu
+        tests/test_lm_head_draft_rows.cu
         tests/test_nvfp4_gemv_gemma3_dims.cu
         tests/test_nvfp4_norm_fold.cu
         tests/test_nvfp4_gemv_gdn_input.cu

@@ -1,0 +1,23 @@
+# /mnt/data/scratch/mtphead_gates: imp:mtphead-new (0a5e17cf), default server, Qwen3.8-27B-NVFP4-vllm
+degen_suite exit=0
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (44s)
+multiturn_deep exit=0
+MULTITURN: all 74 turns clean, context grew to see table
+facts4 exit=0
+ok want=Paris tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of France is Paris.'
+ok want=Tokyo tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Japan is Tokyo.'
+ok want=Rome tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Italy is Rome.'
+ok want=Berlin tokens=7 {'imp_spec_accepted': 4, 'imp_spec_drafted': 6, 'imp_spec_emitted': 7, 'imp_spec_verify_steps': 3} 'The capital of Germany is Berlin.'
+FACTS4 PASS
+[04:32:04.765][INFO] pre_dequant_phase3_nvfp4_decode.cpp:263: MTP draft LM head: NVFP4 copy of the FP16 head (682.0 MiB), verification stays on FP8
+[04:32:09.978][INFO] engine_spec_mtp.cpp:858: MTP chain lm_head: NVFP4 decode-cache view engaged (N=248320 K=5120)
+[04:32:39.724][INFO] engine_spec_batch_verify.cpp:910: spec-batch: first batched verify n=4 rows=12 drafted=8 accepted=8 emitted=12
+stderr matches: 0
+GATES DONE
+# make verify-fast (imp:mtphead-final, tree of 8575920c): verify fast: OK
+  decode  tg128 =  287.28 tok/s  (baseline  282.84, delta 1.57%)
+  prefill pp512 = 50354.11 tok/s  (baseline 50374.39, delta -0.04%)
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+  graphs ON  tg256 =  290.97 tok/s   (1.56x, threshold 1.3x)
+  server c8 = 1928.44 tok/s, slowest request 522 ms  (baseline 1899.81, delta 1.51%)

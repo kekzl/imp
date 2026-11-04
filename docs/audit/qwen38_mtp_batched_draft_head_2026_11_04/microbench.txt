@@ -1,0 +1,6 @@
+# test-quant LmHeadDraftRows (build-dev 0a5e17cf): synthetic [248320 x 5120] head, 20 iters per point
+[draft head] rows=1 fp8 926.3 us (1373 GB/s)  nvfp4 425.3 us (1681 GB/s)
+[draft head] rows=2 fp8 927.4 us (1371 GB/s)  nvfp4 428.1 us (1671 GB/s)
+[draft head] rows=3 fp8 928.8 us (1369 GB/s)  nvfp4 504.1 us (1419 GB/s)
+[draft head] rows=4 fp8 930.3 us (1367 GB/s)  nvfp4 558.0 us (1282 GB/s)
+[       OK ] LmHeadDraftRows.Nvfp4MultiRowIsRowCountInvariantAndPriced (208 ms)

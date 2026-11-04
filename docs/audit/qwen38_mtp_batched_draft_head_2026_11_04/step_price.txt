@@ -1,0 +1,19 @@
+# last cumulative 'spec-batch price' line per request count and server, overlap A/B
+p1_main.server.log 2 requests x 3 rows, 4110 steps: forward+argmax 12.74 ms, head 3.74 ms, 4.41 tokens/step
+p1_new.server.log 2 requests x 3 rows, 3832 steps: forward+argmax 12.75 ms, head 2.73 ms, 4.38 tokens/step
+p2_main.server.log 2 requests x 3 rows, 3609 steps: forward+argmax 12.76 ms, head 3.76 ms, 4.45 tokens/step
+p2_new.server.log 2 requests x 3 rows, 3819 steps: forward+argmax 12.83 ms, head 3.07 ms, 4.69 tokens/step
+p3_main.server.log 2 requests x 3 rows, 3634 steps: forward+argmax 12.82 ms, head 3.93 ms, 4.68 tokens/step
+p3_new.server.log 2 requests x 3 rows, 3916 steps: forward+argmax 12.81 ms, head 2.96 ms, 4.68 tokens/step
+p1_main.server.log 3 requests x 3 rows, 2495 steps: forward+argmax 13.15 ms, head 3.79 ms, 7.01 tokens/step
+p1_new.server.log 3 requests x 3 rows, 2113 steps: forward+argmax 13.14 ms, head 2.91 ms, 7.09 tokens/step
+p2_main.server.log 3 requests x 3 rows, 1763 steps: forward+argmax 13.15 ms, head 3.77 ms, 6.92 tokens/step
+p2_new.server.log 3 requests x 3 rows, 1415 steps: forward+argmax 13.19 ms, head 2.97 ms, 7.03 tokens/step
+p3_main.server.log 3 requests x 3 rows, 2303 steps: forward+argmax 13.23 ms, head 3.97 ms, 6.92 tokens/step
+p3_new.server.log 3 requests x 3 rows, 2102 steps: forward+argmax 13.25 ms, head 3.19 ms, 7.01 tokens/step
+p1_main.server.log 4 requests x 3 rows, 695 steps: forward+argmax 13.91 ms, head 3.78 ms, 9.28 tokens/step
+p1_new.server.log 4 requests x 3 rows, 955 steps: forward+argmax 13.88 ms, head 3.14 ms, 9.10 tokens/step
+p2_main.server.log 4 requests x 3 rows, 1428 steps: forward+argmax 13.96 ms, head 3.85 ms, 9.36 tokens/step
+p2_new.server.log 4 requests x 3 rows, 1266 steps: forward+argmax 13.92 ms, head 3.19 ms, 9.39 tokens/step
+p3_main.server.log 4 requests x 3 rows, 763 steps: forward+argmax 14.00 ms, head 4.02 ms, 9.34 tokens/step
+p3_new.server.log 4 requests x 3 rows, 882 steps: forward+argmax 13.99 ms, head 3.31 ms, 9.16 tokens/step
