@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Flash-Next server decode A/B for moe.expert_prefetch: fresh imp-server per arm, one warm request, then
-# seq_stream_client.py (6 real prompts x GEN greedy tokens, decode tok/s per request + MEDIAN), graceful stop so
+# seq_stream_client.py (6 real prompts x GEN greedy tokens, decode tok/s per request + MEDIAN, answers in
+# OUT/TAG.NAME.txt for byte compares), graceful stop so
 # the device expert cache stats line (hits, misses, prefetched, routed) reaches the log. Arms alternate PAIRS times.
 # Usage: ARMS="label|image|k=v,k=v ..." OUT=/mnt/data/scratch/dir [PAIRS=2] [PORT=8260] [GEN=400] \
 #        tools/analysis/flashnext_prefetch_ab.sh
@@ -30,7 +31,7 @@ for pair in $(seq 1 "$PAIRS"); do
             [ -n "$(docker ps -q -f name="$CTR")" ] || { echo "$tag: server died"; docker logs "$CTR" 2>&1 | tail -5; exit 3; }; done
         docker run --rm --network host -e GEN=32 -v "$HERE":/t:ro imp:toolchain \
             python3 /t/seq_stream_client.py "$PORT" warm > "$OUT/$tag.warm.txt" 2>&1
-        docker run --rm --network host -e GEN="$GEN" -v "$HERE":/t:ro imp:toolchain \
+        docker run --rm --network host -e GEN="$GEN" -e TEXT_DIR=/o -v "$OUT":/o -v "$HERE":/t:ro imp:toolchain \
             python3 /t/seq_stream_client.py "$PORT" "$tag" > "$OUT/$tag.c1.txt" 2>&1
         docker stop -t 120 "$CTR" >/dev/null 2>&1
         docker logs "$CTR" > "$OUT/$tag.server.log" 2>&1
