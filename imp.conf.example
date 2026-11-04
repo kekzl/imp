@@ -696,6 +696,10 @@ shared_expert_overlap = true
 # Decode on the device expert cache: the miss gather crosses PCIe on a side stream while the
 # routed experts that hit run their GEMVs; output bits unchanged.
 expert_gather_overlap = true
+# Decode on the device expert cache: layer L's MoE input through layer L+1's router predicts L+1's
+# experts; up to this many absent predicted keys cross PCIe behind L's misses. 0 = off, max 32.
+# Past 2 the wasted half of the prefetches delays the next layer's own gather.
+expert_prefetch = 2
 # Router of n >= 2 rows as one launch (GEMM + softmax / sigmoid + top-k + renorm), F16 router,
 # <= 128 experts, no group limit; off under runtime.deterministic.
 router_fused         = true

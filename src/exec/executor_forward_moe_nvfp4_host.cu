@@ -489,7 +489,8 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     if (use_dev) {
         // Routing -> slots -> gather on the device; nothing of this layer's staging touches
         // the host (expert_cache_device.h).
-        overlap = stage_dev_experts_(layer, expert_indices, top_k, n_rows, non_gated_experts, ms_off, stream);
+        overlap = stage_dev_experts_(layer, expert_indices, top_k, n_rows, non_gated_experts, ms_off,
+                                     norm_ptr, stream);
     } else {
     // Establishing residency needs the routing on the host, so this path pays
     // one D2H + sync per layer - the same one the GGUF slot path pays, and the
