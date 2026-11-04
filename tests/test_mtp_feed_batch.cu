@@ -670,13 +670,13 @@ TEST_F(MtpFeedBatchTest, AttnScanRingWindowMatchesReference) {
                       cudaSuccess);
             const auto* k1 = static_cast<const __half*>(dk.data) + (ring * row);
             const auto* v1 = static_cast<const __half*>(dv.data) + (ring * row);
-            for (const int mode : {0, 1, 2}) {  // direct, split-K, multi-slot
+            for (const int mode : {0, 1, 2, 3}) {  // direct, split-K, multi-slot, multi-slot split-K
                 std::vector<__half> out(q.size());
                 const imp::Tensor dout = upload(out, {1, nh * hd});
-                if (mode == 2)
+                if (mode >= 2)
                     imp::mtp_attn_scan_slots(dq.data, dk.data, dv.data, dout.data, d_hi + 2, d_hi + 3,
                                              static_cast<int64_t>(ring) * row, p, 1, nh, nkv, hd, nullptr,
-                                             ring, d_hi);
+                                             ring, d_hi, mode == 3 ? part : nullptr);
                 else
                     imp::mtp_attn_scan(dq.data, k1, v1, dout.data, p, 1, nh, nkv, hd, nullptr,
                                        mode == 1 ? part : nullptr, ring, d_hi + 1);
@@ -697,6 +697,59 @@ TEST_F(MtpFeedBatchTest, AttnScanRingWindowMatchesReference) {
             ASSERT_EQ(cudaFree(d_hi), cudaSuccess);
         }
     }
+}
+
+// Multi-slot split-K (kMtpScanSlotSplits CTAs per row and head) vs the direct multi-slot scan: Qwen3.8 head
+// shape, 1 / 3 / kMtpScanSlotSplitRows rows over two ring slots, windows 1 (fewer rows than splits), 37, 1024
+// (full ring) and wrapped; relative RMS < 1e-3 (summation order only).
+TEST_F(MtpFeedBatchTest, AttnScanSlotsSplitMatchesDirect) {
+    const int nh = 24, nkv = 4, hd = 256, ring = 1024;
+    const int64_t slot_elems = static_cast<int64_t>(ring) * nkv * hd;
+    std::mt19937 rng(77);
+    const auto kv = random_h(rng, static_cast<size_t>(2 * slot_elems), 1.0f);
+    const imp::Tensor dk = upload(kv, {2 * ring, nkv * hd});
+    const auto kv2 = random_h(rng, static_cast<size_t>(2 * slot_elems), 1.0f);
+    const imp::Tensor dv = upload(kv2, {2 * ring, nkv * hd});
+    float* part = nullptr;
+    ASSERT_EQ(cudaMalloc(&part, imp::mtp_scan_part_bytes(nh, hd)), cudaSuccess);
+    for (const int rows : {1, 3, imp::kMtpScanSlotSplitRows}) {
+        std::vector<int> tab(2 + (2 * static_cast<size_t>(rows)));  // d_hi [2], slots [rows], pos [rows]
+        const int pos_of[4] = {0, 36, 1023, 2900};
+        int max_pos = 0;
+        for (int r = 0; r < rows; ++r) {
+            tab[2 + r] = r % 2;
+            tab[2 + rows + r] = pos_of[r % 4] + (r / 4);
+            max_pos = std::max(max_pos, tab[2 + rows + r]);
+        }
+        tab[0] = tab[1] = max_pos + 1;
+        int* d_tab = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_tab, tab.size() * sizeof(int)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_tab, tab.data(), tab.size() * sizeof(int), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        const auto q = random_h(rng, static_cast<size_t>(rows) * nh * hd, 1.0f);
+        const imp::Tensor dq = upload(q, {rows, nh * hd});
+        std::vector<__half> direct(q.size()), split(q.size());
+        for (const bool use_split : {false, true}) {
+            const imp::Tensor dout = upload(direct, {rows, nh * hd});
+            imp::mtp_attn_scan_slots(dq.data, dk.data, dv.data, dout.data, d_tab + 2, d_tab + 2 + rows,
+                                     slot_elems, max_pos, rows, nh, nkv, hd, nullptr, ring, d_tab,
+                                     use_split ? part : nullptr);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            auto& dst = use_split ? split : direct;
+            ASSERT_EQ(cudaMemcpy(dst.data(), dout.data, dst.size() * sizeof(__half), cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+        }
+        double diff2 = 0.0, ref2 = 0.0;
+        for (size_t i = 0; i < q.size(); ++i) {
+            const double a = __half2float(direct[i]), b = __half2float(split[i]);
+            diff2 += (a - b) * (a - b);
+            ref2 += a * a;
+        }
+        EXPECT_GT(ref2, 0.0);
+        EXPECT_LT(std::sqrt(diff2 / ref2), 1e-3) << "rows=" << rows;
+        ASSERT_EQ(cudaFree(d_tab), cudaSuccess);
+    }
+    ASSERT_EQ(cudaFree(part), cudaSuccess);
 }
 
 }  // namespace

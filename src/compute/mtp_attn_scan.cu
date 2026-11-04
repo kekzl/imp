@@ -198,12 +198,13 @@ __global__ void mtp_attn_kv_scan_split_kernel(const __half* __restrict__ q,
                       s_chunk_scores, pt, mtp_ring_row(w0 + t0, ring), ring);
 }
 
-// out[h, :] from head h's n_split partials: rescale each to the global max, sum, normalize.
+// out[r, h, :] (r = blockIdx.y, h = blockIdx.x) from its n_split partials: rescale each to the global max,
+// sum, normalize.
 __global__ void mtp_attn_kv_combine_kernel(const float* __restrict__ part, __half* __restrict__ out,
                                            int n_split, int head_dim) {
-    const int h = static_cast<int>(blockIdx.x);
+    const int64_t rh = (static_cast<int64_t>(blockIdx.y) * gridDim.x) + blockIdx.x;
     const int64_t stride = head_dim + 2;
-    const float* p = part + (static_cast<int64_t>(h) * n_split * stride);
+    const float* p = part + (rh * n_split * stride);
     float m = -1.0e30f;
     for (int s = 0; s < n_split; ++s)
         m = fmaxf(m, p[s * stride]);
@@ -215,7 +216,7 @@ __global__ void mtp_attn_kv_combine_kernel(const float* __restrict__ part, __hal
         float o = 0.0f;
         for (int s = 0; s < n_split; ++s)
             o += p[(s * stride) + 2 + d] * expf(p[s * stride] - m);
-        out[(static_cast<int64_t>(h) * head_dim) + d] = __float2half(o * inv_l);
+        out[(rh * head_dim) + d] = __float2half(o * inv_l);
     }
 }
 
@@ -243,9 +244,40 @@ __global__ void mtp_attn_kv_scan_rows_kernel(
                       scale, s_row_scores, nullptr, t0, ring);
 }
 
+// Split-K of mtp_attn_kv_scan_rows_kernel: CTA (h, s, r) scans window rows [s * c, min(len, (s + 1) * c)),
+// c = ceil(len / gridDim.y), into part[((r * num_heads + h) * gridDim.y + s) * (head_dim + 2)]; heads vary
+// fastest so the CTAs sharing a KV head and chunk run together.
+__global__ void mtp_attn_kv_scan_rows_split_kernel(
+    const __half* __restrict__ q_attn, const __half* __restrict__ k_base, const __half* __restrict__ v_base,
+    float* __restrict__ part, const int* __restrict__ slots, const int* __restrict__ pos, int64_t slot_elems,
+    int num_heads, int num_kv_heads, int head_dim, float scale, int ring, const int* __restrict__ hi) {
+    const int h = static_cast<int>(blockIdx.x);
+    const int s = static_cast<int>(blockIdx.y);
+    const int r = static_cast<int>(blockIdx.z);
+    const int n_split = static_cast<int>(gridDim.y);
+    extern __shared__ float s_split_scores[];  // [chunk]
+    int w0 = 0;
+    const int len = ring_window(pos[r], hi != nullptr ? hi + slots[r] : nullptr, ring, &w0);
+    const int chunk = (len + n_split - 1) / n_split;
+    unsigned dyn_smem = 0;
+    asm volatile("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
+    if (static_cast<unsigned>(chunk) * sizeof(float) > dyn_smem)
+        __trap();
+    const int t0 = s * chunk;
+    const int64_t slot = static_cast<int64_t>(slots[r]) * slot_elems;
+    const int64_t rh = (static_cast<int64_t>(r) * num_heads) + h;
+    float* pt = part + (((rh * n_split) + s) * (head_dim + 2));
+    mtp_attn_scan_row(q_attn + (rh * head_dim), k_base + slot, v_base + slot, nullptr, min(chunk, len - t0),
+                      h / (num_heads / num_kv_heads), num_kv_heads, head_dim, scale, s_split_scores, pt,
+                      mtp_ring_row(w0 + t0, ring), ring);
+}
+
 }  // namespace
 
 const void* mtp_attn_scan_rows_fn() { return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_kernel); }
+const void* mtp_attn_scan_rows_split_fn() {
+    return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_split_kernel);
+}
 
 bool mtp_scan_smem_opt_in() {
     static const bool ok = [] {
@@ -260,7 +292,9 @@ bool mtp_scan_smem_opt_in() {
         return cudaFuncSetAttribute(mtp_attn_kv_scan_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     dyn) == cudaSuccess &&
                cudaFuncSetAttribute(mtp_attn_kv_scan_rows_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                    dyn) == cudaSuccess;
+                                    dyn) == cudaSuccess &&
+               cudaFuncSetAttribute(mtp_attn_kv_scan_rows_split_kernel,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, dyn) == cudaSuccess;
     }();
     return ok;
 }
@@ -313,14 +347,34 @@ void mtp_attn_scan(const void* q, const void* k_cache, const void* v_cache, void
 
 void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, void* out, const int* d_slots,
                          const int* d_pos, int64_t slot_elems, int max_pos, int n_rows, int num_heads,
-                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring, const int* d_hi) {
+                         int num_kv_heads, int head_dim, cudaStream_t stream, int ring, const int* d_hi,
+                         float* split_part) {
     (void)mtp_scan_smem_opt_in();
     const int rows = ring > 0 ? std::min(max_pos + 1, ring) : max_pos + 1;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+    // A few decode rows give heads x rows CTAs walking up to the whole ring each: split the window (the grid
+    // depends on n_rows only, so a captured pass replays it at any window).
+    if (split_part != nullptr && n_rows <= kMtpScanSlotSplitRows) {
+        constexpr int kSplits = kMtpScanSlotSplits;
+        const size_t smem = static_cast<size_t>(mtp_scan_split_chunk(rows)) * sizeof(float);
+        mtp_attn_kv_scan_rows_split_kernel<<<dim3(num_heads, kSplits, n_rows), kMtpScanThreads, smem,
+                                             stream>>>(static_cast<const __half*>(q),
+                                                       static_cast<const __half*>(k_base),
+                                                       static_cast<const __half*>(v_base), split_part,
+                                                       d_slots, d_pos, slot_elems, num_heads, num_kv_heads,
+                                                       head_dim, scale, ring, d_hi);
+        IMP_CUDA_CHECK_LAUNCH();
+        mtp_attn_kv_combine_kernel<<<dim3(num_heads, n_rows), 256, 0, stream>>>(split_part,
+                                                                                static_cast<__half*>(out),
+                                                                                kSplits, head_dim);
+        IMP_CUDA_CHECK_LAUNCH();
+        return;
+    }
     const size_t smem = static_cast<size_t>(rows) * sizeof(float);
     mtp_attn_kv_scan_rows_kernel<<<dim3(num_heads, n_rows), kMtpScanThreads, smem, stream>>>(
         static_cast<const __half*>(q), static_cast<const __half*>(k_base), static_cast<const __half*>(v_base),
-        static_cast<__half*>(out), d_slots, d_pos, slot_elems, num_heads, num_kv_heads, head_dim,
-        1.0f / sqrtf(static_cast<float>(head_dim)), ring, d_hi);
+        static_cast<__half*>(out), d_slots, d_pos, slot_elems, num_heads, num_kv_heads, head_dim, scale, ring,
+        d_hi);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
