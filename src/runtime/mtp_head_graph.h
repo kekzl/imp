@@ -1,7 +1,8 @@
 #pragma once
 // CUDA graphs of the batched MTP head pass (Engine::mtp_head_pass_, speculative.mtp_head_graph): one per
 // (fed rows, requests, chain). First use eager (cuBLASLt picks and caches the shapes' algos), second use
-// captured, then replayed; the scan nodes' smem follows the pass's largest position (mtp_scan_nodes_set_rows).
+// captured, then replayed; the scan nodes' smem follows the pass's largest position
+// (mtp_scan_nodes_set_rows).
 
 #include "compute/mtp_forward.h"  // MtpScanNodes
 #include "core/cuda_raii.h"
@@ -9,7 +10,9 @@
 
 #include <compare>
 #include <cstddef>
+#include <cstdint>
 #include <map>
+#include <vector>
 
 namespace imp {
 
@@ -34,7 +37,8 @@ constexpr MtpHeadGraphStep mtp_head_graph_step(bool cached, int eager_uses, size
         return MtpHeadGraphStep::Eager;
     if (cached)
         return MtpHeadGraphStep::Replay;
-    return eager_uses >= 1 && n_graphs < kMtpHeadGraphMax ? MtpHeadGraphStep::Capture : MtpHeadGraphStep::Eager;
+    return eager_uses >= 1 && n_graphs < kMtpHeadGraphMax ? MtpHeadGraphStep::Capture
+                                                          : MtpHeadGraphStep::Eager;
 }
 
 struct MtpHeadGraph {
@@ -54,7 +58,8 @@ struct MtpHeadGraphs {
     int failures = 0;
     bool doomed = false;
     long long replays = 0;
-    PinnedBuffer h_out;  // the drafts' D2H destination (kMtpMaxTopW * kMtpMaxChainK ints)
+    PinnedBuffer h_out;                   // the drafts' D2H destination (kMtpMaxTopW * kMtpMaxChainK ints)
+    std::vector<int32_t> h_out_pageable;  // the destination when the pinned allocation failed
 };
 
 }  // namespace imp

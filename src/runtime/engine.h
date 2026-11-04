@@ -67,7 +67,9 @@ class DSparkDrafter;       // src/runtime/dspark_drafter.h
 // Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
 struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
 struct EncoderWorkspaceDeleter { void operator()(EncoderWorkspace* ws) const noexcept; };
-struct MtpHeadGraphsDeleter { void operator()(MtpHeadGraphs* g) const noexcept; };  // engine_spec_mtp_head_graph.cpp
+struct MtpHeadGraphsDeleter {
+    void operator()(MtpHeadGraphs* g) const noexcept;
+};  // engine_spec_mtp_head_graph.cpp
 
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
@@ -1085,15 +1087,13 @@ private:
                            const std::vector<int>& emitted, cudaStream_t stream);
     // The NVFP4 draft LM head (speculative.mtp_nvfp4_head) the lone and batched chains read, or nullptr.
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
-    // The batched head pass over tables already on the device: feed, draft LM head and, with chain
-    // (speculative.mtp_batch_verify_k 2), one more feed + LM head for each request's second draft. Drafts land
-    // in ws->d_chain_tokens; returns their count (m, 2m), -1 = feed failed, -2 = LM head failed. Scans size
-    // their scores for feed_max / chain_max. mtp_head_pass_ replays it as a graph (mtp_head_graph.h).
-    [[nodiscard]] int mtp_head_pass_run_(const MtpPassTables& tab, const void* hidden,
-                                         const NvFP4QuantResult* head, bool chain, int feed_max, int chain_max,
-                                         cudaStream_t stream);
-    [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const NvFP4QuantResult* head,
-                                     bool chain, cudaStream_t stream);
+    // The batched head pass over tables already on the device: feed, draft LM head and, when bv_.depth > 1
+    // and the KV has room, one more feed + LM head per request's second draft (a graph replay with
+    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m, 2m);
+    // -1 = feed, -2 = LM head, -3 = D2H failed.
+    [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
+                                     const NvFP4QuantResult* head, cudaStream_t stream,
+                                     const int32_t** drafts);
     std::unique_ptr<MtpHeadGraphs, MtpHeadGraphsDeleter> mtp_head_graphs_;
     void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
     // True when the request's context advanced without MTP pairs (async-loop

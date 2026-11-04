@@ -224,9 +224,7 @@ __global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn,
 
 }  // namespace
 
-const void* mtp_attn_scan_rows_fn() {
-    return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_kernel);
-}
+const void* mtp_attn_scan_rows_fn() { return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_kernel); }
 
 bool mtp_scan_smem_opt_in() {
     static const bool ok = [] {

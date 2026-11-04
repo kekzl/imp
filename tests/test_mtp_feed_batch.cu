@@ -380,8 +380,8 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_ctok, ctok, sizeof(ctok), cudaMemcpyHostToDevice), cudaSuccess);
     auto pass = [&](imp::MtpDraftWorkspace& ws, const imp::MtpPassTables& tab, int feed_max, int chain_max) {
-        return imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos, feed_max,
-                                                s.head, s.tok_emb, ws, kH, stream) &&
+        return imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
+                                                feed_max, s.head, s.tok_emb, ws, kH, stream) &&
                imp::mtp_feed_rows_multislot_dev(d_ctok, ws.d_b_h_final, tab.last, m, tab.chain_slots,
                                                 tab.chain_pos, chain_max, s.head, s.tok_emb, ws, kH, stream);
     };
