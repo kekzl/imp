@@ -1,0 +1,35 @@
+# nsys --cuda-graph-trace=node, Qwen3.8-27B-NVFP4-vllm imp-server c4 x 2 waves (arm B build), cuda_gpu_kern_sum
+# Time(%),Total(ns),Instances,Avg(ns),Name (top 25, then every FP8 row-scale / small-M kernel)
+32.1,1526358978,54864,27820.8,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<(int)6
+13.3,634966706,12544,50619.2,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_multi_kernel<(int)6>(imp::<unnamed>::SmallMV2MultiArgs
+7.9,374683144,14256,26282.5,"void imp::gdn_scan_fused_kernel<(int)128
+6.4,306554338,11024,27807.9,"imp::elementwise_add_store_fp16_kernel(const __half *
+3.7,176522473,42272,4175.9,"imp::device_copy_v4_kernel(const uint4 *
+3.6,170623333,6816,25032.8,"void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<(int)2
+3.6,169662455,13632,12445.9,"void imp::gated_fp16_nvfp4_kernel<(bool)0>(const __half *
+3.0,143611980,179,802301.6,"void imp::<unnamed>::fp8_head_cpasync_kernel<(int)1
+2.6,126020364,10224,12325.9,imp::<unnamed>::gemm_f16_narrow_smallm_kernel(imp::<unnamed>::NarrowArgs)
+2.5,118365132,10704,11058.0,"imp::elementwise_add_fp16_kernel(__half *
+2.4,115560655,196,589595.2,"void imp::<unnamed>::gemv_nvfp4_kpar_mb_fp32_kernel<(int)4>(const unsigned char *
+1.9,90214086,20448,4411.9,"void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<(int)2
+1.1,51098167,896,57029.2,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)128
+1.0,48589571,53,916784.4,"void imp::<unnamed>::fp8_head_mma_kernel<(int)2
+1.0,48395645,434,111510.7,nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_alignCD4_bz_TNNN
+0.9,42936596,576,74542.7,"void imp::gemv_nvfp4_gate_up_fused_mr_kernel<(int)8>(const unsigned char *
+0.8,40016448,1440,27789.2,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)64
+0.8,38895002,3232,12034.3,"void imp::<unnamed>::nvfp4_smallm_ws_kernel<(int)2
+0.7,31913639,2112,15110.6,"void imp::gdn_scan_fused_kernel<(int)128
+0.7,31465538,1152,27313.8,"imp::gemv_nvfp4_residual_kernel(const unsigned char *
+0.6,30214832,18048,1674.1,"imp::ssm_conv1d_commit_kernel(float *
+0.6,26363496,3392,7772.3,"void imp::<unnamed>::paged_attention_splitk_nvfp4_mma_kernel<(int)256>(const __half *
+0.5,24623359,576,42748.9,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)128
+0.5,24429470,912,26786.7,"void imp::<unnamed>::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<(int)128
+0.5,23082558,7584,3043.6,"imp::ssm_conv1d_prefill_f32_silu_kernel(float *
+# FP8 row-scale and small-M rows:
+32.1,1526358978,54864,27820.8,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<(int)6
+13.3,634966706,12544,50619.2,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_multi_kernel<(int)6>(imp::<unnamed>::SmallMV2MultiArgs
+3.0,143611980,179,802301.6,"void imp::<unnamed>::fp8_head_cpasync_kernel<(int)1
+2.6,126020364,10224,12325.9,imp::<unnamed>::gemm_f16_narrow_smallm_kernel(imp::<unnamed>::NarrowArgs)
+1.0,48589571,53,916784.4,"void imp::<unnamed>::fp8_head_mma_kernel<(int)2
+0.8,38895002,3232,12034.3,"void imp::<unnamed>::nvfp4_smallm_ws_kernel<(int)2
+0.1,3860120,448,8616.3,"void imp::<unnamed>::nvfp4_smallm_ws_kernel<(int)2

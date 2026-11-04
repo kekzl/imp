@@ -1,0 +1,19 @@
+# nsys --cuda-graph-trace=node, Qwen3.8-Flash-Next-NVFP4 imp-server defaults, c4 x 2 waves, arm A (main) vs arm B
+# server log: max_batch_size auto 8 -> 1 (host experts unpinned): decode runs 1 row, the FP16 kernel serves prefill chunks
+## arm A: FP16-output FP8 row-scale kernels (Time%, Total ns, Instances, Avg ns, Name)
+0.4,107254736,4752,22570.4,fp8_head_mma_kernel<(int)2, (int)2, (int)4, __half>
+0.3,80692932,4464,18076.4,fp8_head_mma_kernel<(int)1, (int)2, (int)4, __half>
+0.0,12418254,396,31359.2,fp8_head_mma_kernel<(int)2, (int)4, (int)4, __half>
+0.0,10609207,372,28519.4,fp8_head_mma_kernel<(int)1, (int)4, (int)4, __half>
+all kernels total ns 28171179694
+wave0: 512 tok in 16.11s = 31.8 tok/s aggregate (prompt 36 tok avg)
+wave1: 512 tok in 9.56s = 53.6 tok/s aggregate (prompt 36 tok avg)
+MEDIAN 53.6
+## arm B: FP16-output FP8 row-scale kernels (Time%, Total ns, Instances, Avg ns, Name)
+0.3,95032056,5148,18460.0,fp8_proj_cpasync_kernel<(int)2, (int)4, (int)2>
+0.1,39407392,2652,14859.5,fp8_proj_cpasync_kernel<(int)1, (int)2, (int)2>
+0.1,27323112,2184,12510.6,fp8_proj_cpasync_kernel<(int)1, (int)1, (int)2>
+all kernels total ns 28481326762
+wave0: 512 tok in 16.76s = 30.5 tok/s aggregate (prompt 36 tok avg)
+wave1: 512 tok in 9.60s = 53.3 tok/s aggregate (prompt 36 tok avg)
+MEDIAN 53.3

@@ -1,7 +1,7 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-30
+verified: 2026-11-04
 commit: a4070e6a
 -->
 
@@ -53,7 +53,7 @@ make verify                # full
 
 ## Conventions
 
-- English in the repo, German in chat. No em dashes in the repo.
+- English in the repo; chat in the user's language. No em dashes in the repo.
 - SafeTensors (NVFP4, FP8) first; GGUF is legacy (`docs/DESIGN_DECISIONS.md`): keep it loading, no new GGUF kernel or perf work, GPU gates and test models are SafeTensors only. Competitor reference: vLLM on the same SafeTensors checkpoint.
 - CHANGELOG: 1-3 lines, <= 360 characters per entry (gated), plus the checkable number. Investigation goes to `docs/`.
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.

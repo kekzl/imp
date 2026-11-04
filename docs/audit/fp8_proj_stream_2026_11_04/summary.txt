@@ -1,0 +1,66 @@
+# FP8 row-scale FP16 GEMM streamed in full lines (2026-11-04), base 14015151, RTX 5090, harnesses harness_*.sh.txt
+# Mechanism: the split-K FP16 twin (fp8_head_mma_kernel<MT, 2|4|8, kU, __half>) loads mma fragments from global,
+# one warp instruction = 8 rows x 64 B (LDG.E.EF.128, half lines; #3041 probe: 1397-1409 GB/s vs >= 128 B 1640-1676).
+# Fix: fp8_proj_cpasync_kernel<MT, kNT, 2> (src/compute/gemv_fp8_rowscale_f16.cu): the same 4 K quarters per block,
+# each warp streams its quarter through a 2-stage cp.async ring (LDGSTS.128, 4 rows x 128 B per instruction) and
+# loads activations one stage ahead; same chunk MMAs and w0 + w1 + w2 + w3 fold, bit-identical. Rows per block by
+# pass: <= 8 rows 8, 9..16 rows 16, 17..32 rows 32. K % 512 != 0 keeps the split-K kernel.
+
+Who reaches it (code + nsys --cuda-graph-trace=node):
+- Qwen3.8-27B-NVFP4-vllm: never. linear_attn in_proj_qkv / in_proj_z / out_proj are NVFP4 in the checkpoint
+  (weight_packed U8 + F8 weight_scale) and run native NVFP4; nsys_qwen38_27b_c4.txt lists no FP16 FP8 row-scale kernel,
+  small-M time is gemm_nvfp4_smallm_v2 (45.4 % of kernel time) and nvfp4_smallm_ws (0.9 %).
+- Qwen3.8-Flash-Next-NVFP4 (BF16 linear_attn + attention, FP8 sidecar, sources released): prefill chunks <= 32 rows;
+  decode runs 1 row there (max_batch_size auto 8 -> 1, host experts unpinned), so the M = 1 GEMV serves decode.
+- DSpark / DFlash drafter (speculative.dspark_fp8, default with a drafter): q / o / gate / up / down / lm_head at
+  block rows (7 or 16) every propose.
+
+Isolated, best of 11 x 200 calls, variants interleaved per rep, 320 MB rotating weight pool (> 96 MB L2)
+(sweep_dispatch_table.txt; split-K -> shipped dispatch, us)          rows 2         rows 8         rows 16        rows 32
+Flash-Next GDN out   2560 x 6144                                     24.35 -> 12.84  24.75 -> 12.62  26.37 -> 14.38  30.75 -> 17.24
+Flash-Next GDN in   10240 x 2560                                     20.25 -> 18.57  35.11 -> 34.67  20.47 -> 20.61  32.68 -> 23.77
+Flash-Next GDN gate  6144 x 2560                                     14.23 -> 12.57  14.29 -> 13.67  15.29 -> 13.17  24.50 -> 20.57
+Flash-Next attn q   12288 x 2560                                     26.67 -> 22.62  27.90 -> 22.54  29.43 -> 22.73  33.22 -> 30.09
+drafter q / o        4096 x 4096                                     18.24 -> 13.51  18.75 -> 13.85  18.38 -> 14.43  24.59 -> 15.95
+drafter gate|up     24576 x 4096                                     75.96 -> 63.51  76.70 -> 63.58  78.14 -> 65.28  85.82 -> 73.29
+drafter down         4096 x 12288                                    56.54 -> 38.80  57.39 -> 34.88  58.70 -> 35.34  76.35 -> 39.14
+drafter lm_head    151936 x 4096                                    433.82 -> 371.12 438.23 -> 373.80 443.65 -> 375.52 416.81 -> 394.51
+48 cells: geomean 0.764x, range 0.510-1.008x (10240 x 2560 at 12 / 16 rows 1.008 / 1.007: parity).
+10240 x 2560 rows 8 read 35 us in both arms of this run (20.35 / 18.53 in the run before, sweep_variants.txt).
+
+Variant sweep (sweep_variants*.txt; codes 3xy / 4xy = kNT x, stages y, 4 = activations one stage ahead):
+geomean vs split-K, rows <= 16 / rows 32: 412 0.778 / 0.926, 422 0.779 / 0.819, 442 0.835 / 0.748, 312 0.843 / 0.941,
+413 0.783 / 1.228; 3 or 4 stages lose to 2 stages in geomean at every kNT; kNT 1 at 32 rows re-reads the activations per 8 weight rows (412 r32
+lm_head 578.50 vs 412.63 split-K).
+
+In situ, Flash-Next imp-server c4 x 2 waves, nsys (nsys_flashnext_c4.txt): FP16 FP8 row-scale kernels
+210975129 -> 161762560 ns over 9984 calls (-23.3 %), 0.75 % -> 0.57 % of all kernel time.
+
+End to end, Qwen3-8B-NVFP4-cortecs imp-server --max-batch 1, greedy 256 tokens ignore_eos, 3 rounds x 2 reps, arm
+order reversed per round, one server start per arm and round (drafter_ab*.txt), tok/s median (min-max):
+DSpark block7  prose 337.73 (333.33-340.88) -> 357.55 (349.73-361.07) +5.9 %, code 581.19 (552.92-596.74) ->
+               624.40 (612.44-636.82) +7.4 %, list 370.24 (316.44-379.82) -> 390.85 (374.82-399.38) +5.6 %
+DFlash b16     prose 272.06 -> 283.05 +4.0 %, code 486.28 -> 499.62 +2.7 %, list 286.06 -> 286.04 0.0 %
+tok/verify and output md5 equal per workload in both arms; propose ms per draft (drafter_propose_by_arm.txt):
+DSpark 1.70-2.86 -> 1.43-1.51, DFlash 1.84-2.06 -> 1.57-1.85.
+
+Flash-Next imp-server defaults, conc_client 3 waves (server_flashnext_ab.txt), trial 1 medians A -> B:
+c2 108.5 -> 115.5, c4 153.3 -> 144.8, c8 176.5 -> 180.0 tok/s: wave spread (c8 B 157.9-185.9) exceeds the in-situ
+0.17 % of kernel time saved; trial 2 is void (free -g 0 GB while another build's cc1plus ran beside the 69 GB server RSS, B c2 55.6, run stopped).
+Flash-Next tok/s is not the resolving signal; the nsys kernel totals above are.
+
+Gates: bit_identity_and_mutant.txt (FP8ProjStreamTest + FP8GemmTest.Rowscale* 5/5 run, the quarter-order mutant fails
+FP8ProjStreamTest.StreamedMatchesSplitK); split-K and head kernels SASS byte-identical to main after the helper move
+(gemv_fp8_rowscale_mma.cuh). make verify-fast OK (verify_fast.txt): Qwen3-8B-NVFP4 tg128 293.25 vs pin 282.84,
+PPL 11.2352 unchanged, server c8 1946.77 vs 1899.81 (that baseline model does not reach this kernel).
+
+Next levers, kernels with MMA operands from global straight to registers (sass_direct_load_kernels.tsv), not changed here:
+- quant/nvfp4_gemm_smallm_ws.cu: quad per row, LDG.128 per lane = 8 rows x 64 B per instruction, warp w owns
+  k-steps ks % 8 == w (a 128 B line split across two warps). Serves Gemma-4 / Qwen3-30B-A3B shapes; Qwen3.8-27B
+  c4 0.9 % of kernel time. v2 (45.4 %) already loads 4 rows x 128 B per producer instruction
+  (nvfp4_gemm_smallm_v2.cu issue_w: r = c / 8, j = c % 8): Qwen3.8-27B c2..c32 (smallm_policy.h picks by shape only) has no half-line weight stream left.
+- quant/fp8_gemm_smallm.cu (W8A8 FP8 small-M, M 1..32): same 8 rows x 64 B shape, rows g and g + 8 per lane.
+- compute/gemm_f16_narrow_smallm.cu: u32 per lane from global (L2-resident operands); Qwen3.8-27B c4 2.6 %.
+- attention_paged_nvfp4_mma, gdn_scan_chunkpar*, ssm_scan_ssd: direct loads of KV / state, not weight streams.
+Not a load-shape lever: gemv_fp8_e4m3_kernel (M = 1 FP8 GEMV, Flash-Next decode 6.7 %) reads 512 B per row per
+instruction already.

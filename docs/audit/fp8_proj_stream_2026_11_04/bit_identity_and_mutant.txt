@@ -1,0 +1,19 @@
+# shipped build: FP8ProjStreamTest.* + FP8GemmTest.Rowscale*
+[       OK ] FP8GemmTest.RowscaleGemvFromQ8SourceMatchesReference (13 ms)
+[       OK ] FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (928 ms)
+[       OK ] FP8GemmTest.RowscaleFp32StreamedHeadMatchesSplitKAndReference (2765 ms)
+[       OK ] FP8GemmTest.RowscaleF16MatchesFp32HeadRounded (716 ms)
+[  SKIPPED ] FP8GemmTest.RowscaleFp32HeadRowTileSweep (0 ms)
+[       OK ] FP8ProjStreamTest.StreamedMatchesSplitK (491 ms)
+[  SKIPPED ] FP8ProjStreamTest.Sweep (0 ms)
+[  PASSED  ] 5 tests.
+[  SKIPPED ] 2 tests, listed below:
+[  SKIPPED ] FP8GemmTest.RowscaleFp32HeadRowTileSweep
+[  SKIPPED ] FP8ProjStreamTest.Sweep
+# mutant k_begin = (kWarps - 1 - warp) * (K / kWarps) in fp8_proj_cpasync_kernel, same test body before the
+# move to tests/test_fp8_proj_stream.cu (then named FP8GemmTest.RowscaleF16StreamedMatchesSplitK):
+differing-output assertions: 56
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] FP8GemmTest.RowscaleF16StreamedMatchesSplitK
+[  FAILED  ] FP8GemmTest.RowscaleF16StreamedMatchesSplitK (526 ms)
+[  PASSED  ] 0 tests.
