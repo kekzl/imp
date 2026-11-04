@@ -1,0 +1,41 @@
+# /mnt/data/scratch/vramc32_nsys: build-dev/imp-server (13ec744e) under nsys -t cuda --cuda-memory-usage=true;
+# warm, c4 x2 waves, c32 x1 wave; own = imp_vram_own_bytes; CUPTI = device alloc minus free in the window
+== mtp
+boot->warm [12.19,16.28] own +6 MiB, CUPTI device alloc-free +0.0 MiB, unexplained +6.0 MiB | [('cuLibraryLoadData', 12), ('cudaGraphInstantiate_v12000', 1)]
+warm->c4 [16.28,22.15] own +584 MiB, CUPTI device alloc-free +560.0 MiB, unexplained +24.0 MiB | [('cuLibraryLoadData', 4), ('cuMemCreate', 14), ('cudaGraphInstantiate_v12000', 68)]
+c4->c32 [22.15,27.48] own +2826 MiB, CUPTI device alloc-free +2240.0 MiB, unexplained +586.0 MiB | [('cuLibraryLoadData', 2), ('cuMemCreate', 56), ('cudaGraphInstantiate_v12000', 64), ('cudaMalloc_v3020', 1)]
+== nomtp
+boot->warm [12.21,17.14] own +6 MiB, CUPTI device alloc-free +0.0 MiB, unexplained +6.0 MiB | [('cuLibraryLoadData', 2), ('cudaGraphInstantiate_v12000', 1)]
+warm->c4 [17.14,24.75] own +252 MiB, CUPTI device alloc-free +240.0 MiB, unexplained +12.0 MiB | [('cuMemCreate', 6), ('cudaGraphInstantiate_v12000', 128)]
+c4->c32 [24.75,30.03] own +2240 MiB, CUPTI device alloc-free +2240.0 MiB, unexplained +0.0 MiB | [('cuMemCreate', 56)]
+== noffn
+boot->warm [12.58,16.57] own +6 MiB, CUPTI device alloc-free +0.0 MiB, unexplained +6.0 MiB | [('cuLibraryLoadData', 12), ('cudaGraphInstantiate_v12000', 1)]
+warm->c4 [16.57,22.64] own +584 MiB, CUPTI device alloc-free +560.0 MiB, unexplained +24.0 MiB | [('cuLibraryLoadData', 4), ('cuMemCreate', 14), ('cudaGraphInstantiate_v12000', 5)]
+c4->c32 [22.64,27.99] own +2824 MiB, CUPTI device alloc-free +2240.0 MiB, unexplained +584.0 MiB | [('cuLibraryLoadData', 2), ('cuMemCreate', 56), ('cudaMalloc_v3020', 1)]
+(noffn = MTP default + runtime.prefill_ffn_graph=false)
+== CUDA API calls c4->c32 whose count differs: mtp count, nomtp count
+    5883     6020  cuKernelGetName
+      21        0  cuKernelSetAttribute
+      21        0  cuLaunchKernelEx
+       2        0  cuLibraryGetKernel
+       2        0  cuLibraryLoadData
+      31        0  cuStreamGetGreenCtx
+    2896     3520  cuTensorMapEncodeTiled
+     304      303  cudaEventRecord_v3020
+     304      303  cudaEventSynchronize_v3020
+      64        0  cudaGraphDestroy_v10000
+      64        0  cudaGraphInstantiate_v12000
+     430      427  cudaGraphLaunch_v10000
+    4214     3599  cudaLaunchKernelExC_v11060
+    5883     6020  cudaLaunchKernel_v7000
+       1        0  cudaMalloc_v3020
+     309      301  cudaMemcpy2DAsync_v3020
+    1273      996  cudaMemcpyAsync_v3020
+      41       44  cudaMemsetAsync_v3020
+      64        0  cudaStreamBeginCapture_v10000
+      64        0  cudaStreamEndCapture_v10000
+      37        4  cudaStreamIsCapturing_v10000
+     384      304  cudaStreamSetAttribute_v11000
+      61       62  cudaStreamSynchronize_v3020
+== mtp with --cuda-graph-trace=node: distinct driver localMemoryTotal values (MiB)
+143.4 201.9 207.2 

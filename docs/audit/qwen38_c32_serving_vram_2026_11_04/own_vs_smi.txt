@@ -1,0 +1,11 @@
+# /mnt/data/scratch/vramc32_poll: build-dev/imp-server (13ec744e); own = imp_vram_own_bytes (MiB) at boot, c4 end, c32 end;
+# smi = nvidia-smi memory.used every 10 ms over the c32 wave (first, last sample)
+# plainsmi: speculative.mtp_history_slots=1, mtp_carry=false, mtp_batch_verify=0
+# nomtpbig: speculative.mtp_k=0, kv_cache.growable_initial_pct=60
+# nolazy:   MTP default, vram.lazy_commit=false
+== plainsmi: boot 20888 c4 21146 c32 23970 
+   smi first  22876 last  25116
+== nomtpbig: boot 21998 c4 22256 c32 25080 
+   smi first  23986 last  26226
+== nolazy: boot 25690 c4 25720 c32 25720 
+   smi first  26866 last  26866

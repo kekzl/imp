@@ -1,0 +1,23 @@
+# Qwen3.8-27B-NVFP4-vllm, default imp-server, MTP head on (main daa62a92), own = imp_vram_own_bytes MiB
+# sources: phases_summary.txt (arm mtp), audits_init_vs_shutdown.txt, wddm_memgetinfo_probe.txt
+step                                                        own_MiB  planned
+init_complete audit                                           20634
+MTP workspace after the plan (kv_cap 16384 x 4 slots 256 MiB)  +360  no (enable_mtp_spec_decode runs after the plan)
+31 recurrent slots re-committed (ssm_state 80 -> 2880)        +2480  yes (SSM/GDN state 2862 MiB = 36 x 79.5)
+4 batched-verify spare slots                                   +320  yes (same line)
+KV grow-ahead 3625 -> 4531 blocks (kv 234, minmax 52, sc 26)   +312  yes (ceiling 14508 blocks)
+WDDM cudaMemGetInfo step at ~24.5 GB device used               +585  not memory (nvidia-smi and CUPTI do not see it)
+residual                                                        +41
+end of 4th c32 wave                                           24732
+
+# refuted candidates
+captured verify graphs per recurrent slot   speculative.capture=false grows the same (phases_summary.txt arm nocap)
+FFN prefill graphs per row bucket           runtime.prefill_ffn_graph=false grows the same (nsys_windows.txt noffn)
+cuBLASLt lazy kernel loads                  8 heuristic algos x M 1..1024 on the MTP feed shapes: 4 MiB total (standalone probe)
+async pool high-water                       async_pool reserved 11424 MiB at boot and after c32
+graph memory pool                           graphmem high_since_serving=0.0 MiB at shutdown
+driver local memory                         localMemoryTotal max 207.2 MiB, flat during c32 (nsys_windows.txt)
+mtp_history_slots / mtp_carry / batch_verify  all off: c4 -> c32 own +2824 (own_vs_smi.txt plainsmi)
+serving-phase cudaMalloc in imp             interposer: 0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host (interposer.txt)
+
+# why it looked MTP-specific: MTP off peaks at smi 23850 MiB (below the step), MTP on reaches 25566 MiB at c32

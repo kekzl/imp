@@ -112,6 +112,8 @@ Every graph-capturable kernel launch wrapper takes `StableSpan`, so a relocatabl
 - After a load -> generate -> free cycle every CUDA-level release succeeds (async pool trims to 0, graph memory zero) but `cudaMemGetInfo` never recovers for the process's life, WSL2/WDDM does not hand a process's peak commitment back.
 - "Live blocks return to baseline" is what criterion 4 checks; "device-used returns to baseline" is not achievable here by any allocator design.
 - Bandwidth, not a `cudaMalloc` probe, tells resident from spilled (~1530 GB/s resident vs ~237 GB/s spilled).
+- `cudaMemGetInfo` steps ~585 MiB above `nvidia-smi` once device used crosses ~24.5 GB, with no allocation behind it (plain `cudaMalloc` loop, `tools/analysis/wddm_memgetinfo_probe.cu`). `imp_vram_own_bytes` and every free-VRAM reading carry the step; an A/B straddling it moves ~585 MiB without a code cause.
+- Qwen3.8-27B-NVFP4 default server with the MTP head, c32 vs `init_complete` (+4098 MiB own): 31 recurrent slots re-committed 2480, 4 batched-verify spares 320, KV grow-ahead 312 (all in the plan), MTP workspace taken after the plan 360, the WDDM step 585, residual 41. Serving allocates nothing else (interposer 0, CUPTI = slot commits): [`docs/audit/qwen38_c32_serving_vram_2026_11_04/`](../audit/qwen38_c32_serving_vram_2026_11_04/).
 
 ---
 

@@ -1,0 +1,70 @@
+== mtp
+===== VRAM AUDIT [init_complete] =====
+device: total=32580 MiB  used=22287 MiB  free=10293 MiB  peak_used=22287 MiB
+budget: cap=none  own=20634 MiB  own_peak=22760 MiB  ctx_at_install=1653 MiB
+ssm_state                          80.0       2560.0         32
+kv_cache                          960.0       1668.0          3
+kv_cache_minmax                   256.0        448.0          3
+kv_cache_scales                   174.0        284.0          3
+RESIDUAL (unattributed)           432.4    1.9% of device used
+===== END VRAM AUDIT [init_complete] =====
+===== VRAM AUDIT [shutdown] =====
+device: total=32580 MiB  used=26385 MiB  free=6195 MiB  peak_used=26385 MiB
+budget: cap=none  own=24732 MiB  own_peak=24732 MiB  ctx_at_install=1653 MiB
+ssm_state                        2880.0       2880.0         67
+kv_cache                         1194.0       1668.0          4
+kv_cache_minmax                   308.0        448.0          4
+kv_cache_scales                   200.0        284.0          4
+RESIDUAL (unattributed)          1419.0    5.4% of device used
+===== END VRAM AUDIT [shutdown] =====
+  SSM/GDN state                2862 MiB  (32 slots)
+  speculative staging           159 MiB  (hybrid verify state scratch, 2 x 1 slot)
+  KV: live pass 8682 blocks -> plan 12305 blocks, APPLIED (2442 -> 3461 MiB)
+[INFO] engine_kv_cache_init.cpp:801: SSM state: 4 slot(s) reserved past max_batch_size=32: 0 multi-candidate verify (mtp_tree_width=1), 4 batched-verify spares (lazy), 79.5 MiB each
+[INFO] engine_spec_mtp.cpp:794: MTP spec-decode enabled (k=2, hidden=5120, vocab=248320, experts=0/top0, d_ff_e=0, d_ff_shared=17408, num_heads=24/4, head_dim=256, kv_cap=16384 x 4 slot(s) = 256.0 MiB K+V, rope=1e+07/64/
+== nomtp
+===== VRAM AUDIT [init_complete] =====
+device: total=32580 MiB  used=21269 MiB  free=11311 MiB  peak_used=21269 MiB
+budget: cap=none  own=19616 MiB  own_peak=21738 MiB  ctx_at_install=1653 MiB
+ssm_state                          80.0       2560.0         32
+kv_cache                         1296.0       2070.0          3
+kv_cache_minmax                   340.0        552.0          3
+kv_cache_scales                   214.0        364.0          3
+RESIDUAL (unattributed)           434.4    2.0% of device used
+===== END VRAM AUDIT [init_complete] =====
+===== VRAM AUDIT [shutdown] =====
+device: total=32580 MiB  used=23773 MiB  free=8807 MiB  peak_used=23773 MiB
+budget: cap=none  own=22120 MiB  own_peak=22034 MiB  ctx_at_install=1653 MiB
+ssm_state                        2560.0       2560.0         63
+kv_cache                         1296.0       2070.0          3
+kv_cache_minmax                   340.0        552.0          3
+kv_cache_scales                   214.0        364.0          3
+RESIDUAL (unattributed)           458.4    1.9% of device used
+===== END VRAM AUDIT [shutdown] =====
+  SSM/GDN state                2544 MiB  (32 slots)
+  speculative staging           159 MiB  (hybrid verify state scratch, 2 x 1 slot)
+  KV: live pass 12771 blocks -> plan 15651 blocks, APPLIED (3592 -> 4402 MiB)
+== nocap
+===== VRAM AUDIT [init_complete] =====
+device: total=32580 MiB  used=22203 MiB  free=10377 MiB  peak_used=22203 MiB
+budget: cap=none  own=20550 MiB  own_peak=22804 MiB  ctx_at_install=1653 MiB
+ssm_state                          80.0       2560.0         32
+kv_cache                          992.0       1714.0          3
+kv_cache_minmax                   264.0        462.0          3
+kv_cache_scales                   178.0        324.0          3
+RESIDUAL (unattributed)           432.4    1.9% of device used
+===== END VRAM AUDIT [init_complete] =====
+===== VRAM AUDIT [shutdown] =====
+device: total=32580 MiB  used=25967 MiB  free=6613 MiB  peak_used=25967 MiB
+budget: cap=none  own=24314 MiB  own_peak=24228 MiB  ctx_at_install=1653 MiB
+ssm_state                        2880.0       2880.0         67
+kv_cache                          992.0       1714.0          3
+kv_cache_minmax                   264.0        462.0          3
+kv_cache_scales                   178.0        324.0          3
+RESIDUAL (unattributed)          1397.1    5.4% of device used
+===== END VRAM AUDIT [shutdown] =====
+  SSM/GDN state                2862 MiB  (32 slots)
+  speculative staging           159 MiB  (hybrid verify state scratch, 2 x 1 slot)
+  KV: live pass 9194 blocks -> plan 12724 blocks, APPLIED (2586 -> 3579 MiB)
+[INFO] engine_kv_cache_init.cpp:801: SSM state: 4 slot(s) reserved past max_batch_size=32: 0 multi-candidate verify (mtp_tree_width=1), 4 batched-verify spares (lazy), 79.5 MiB each
+[INFO] engine_spec_mtp.cpp:794: MTP spec-decode enabled (k=2, hidden=5120, vocab=248320, experts=0/top0, d_ff_e=0, d_ff_shared=17408, num_heads=24/4, head_dim=256, kv_cap=16384 x 4 slot(s) = 256.0 MiB K+V, rope=1e+07/64/
