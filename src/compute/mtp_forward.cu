@@ -465,10 +465,12 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         head_dim > 0 && max_seq_len > 0) {
         const size_t n = kMtpFeedRows;
         bool bok = true;
-        // [tokens | row slots | row pos | row src] for the multi-slot feed in
-        // one block; its gathered rows and final_norm rows alias batch
-        // scratch that is free at those points (see mtp_feed_rows_multislot).
-        bok &= alloc(reinterpret_cast<void**>(&ws.d_feed_tokens), 4 * n * sizeof(int32_t));
+        // [tokens | row slots | row pos | row src | head pass tables] for the
+        // multi-slot feed in one block; its gathered rows and final_norm rows
+        // alias batch scratch that is free at those points (see mtp_feed_rows_multislot).
+        bok &= alloc(reinterpret_cast<void**>(&ws.d_feed_tokens),
+                     ((4 * n) + kMtpPassTableInts) * sizeof(int32_t));
+        bok &= mtp_pass_staging_create(ws);
         bok &= alloc(&ws.d_b_emb,      n * hidden_dim * sizeof(__half));
         bok &= alloc(&ws.d_b_h_norm,   n * hidden_dim * sizeof(__half));
         bok &= alloc(&ws.d_b_fc_in,    n * 2 * hidden_dim * sizeof(__half));
@@ -488,6 +490,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
             ws.d_row_slots = ws.d_feed_tokens + n;
             ws.d_row_pos = ws.d_feed_tokens + (2 * n);
             ws.d_row_src = ws.d_feed_tokens + (3 * n);
+            ws.d_pass_tables = ws.d_feed_tokens + (4 * n);
             ws.d_b_gather = ws.d_b_h_norm;   // gathered rows, normed in place
             ws.d_b_h_final = ws.d_b_norm;    // free once the MLP consumed the post-norm
         } else {
@@ -584,7 +587,9 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.n_kv_slots = 1;
     ws.cur_slot = 0;
     // Aliases into d_feed_tokens / the batch scratch, never freed on their own.
-    ws.d_row_slots = ws.d_row_pos = ws.d_row_src = nullptr;
+    ws.d_row_slots = ws.d_row_pos = ws.d_row_src = ws.d_pass_tables = nullptr;
+    ws.h_pass_tables.reset();
+    ws.pass_tables_copied.reset();
     ws.d_b_gather = ws.d_b_h_final = nullptr;
     if (ws.d_feed_tokens) { cudaFree(ws.d_feed_tokens); ws.d_feed_tokens = nullptr; }
     frfn(ws.d_b_emb);
@@ -1530,28 +1535,46 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
     return true;
 }
 
+namespace {
+bool mtp_feed_multislot_ready(const MtpHead& mtp, const MtpDraftWorkspace& ws, int n_rows,
+                              const void* d_hidden_all, const Tensor& main_tok_emb) {
+    if (!mtp.loaded || n_rows <= 0 || n_rows > ws.feed_rows_cap || d_hidden_all == nullptr ||
+        main_tok_emb.data == nullptr || !mtp_feed_dense_supported(mtp, ws))
+        return false;
+    return ws.d_k_cache_base != nullptr && ws.d_v_cache_base != nullptr && ws.d_row_slots != nullptr &&
+           ws.d_b_gather != nullptr && ws.d_b_h_final != nullptr;
+}
+}  // namespace
+
 bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
                              int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
                              const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
                              cudaStream_t stream, const Tensor* post_norm, float post_norm_eps,
                              float post_norm_offset) {
-    if (!mtp.loaded || n_rows <= 0 || n_rows > ws.feed_rows_cap)
-        return false;
-    if (h_tokens == nullptr || d_hidden_all == nullptr || h_src_rows == nullptr || h_slots == nullptr ||
-        h_pos == nullptr || main_tok_emb.data == nullptr)
-        return false;
-    if (!mtp_feed_dense_supported(mtp, ws))
-        return false;
-    if (ws.d_k_cache_base == nullptr || ws.d_v_cache_base == nullptr || ws.d_row_slots == nullptr ||
-        ws.d_b_gather == nullptr || ws.d_b_h_final == nullptr)
-        return false;
     int max_pos = 0;
-    for (int r = 0; r < n_rows; ++r) {
-        if (h_slots[r] < 0 || h_slots[r] >= ws.n_kv_slots || h_pos[r] < 0 || h_pos[r] >= ws.max_seq_len)
-            return false;
-        max_pos = std::max(max_pos, h_pos[r]);
-    }
+    if (h_tokens == nullptr || h_src_rows == nullptr || h_slots == nullptr || h_pos == nullptr ||
+        !mtp_feed_multislot_ready(mtp, ws, n_rows, d_hidden_all, main_tok_emb) ||
+        !mtp_feed_tables_valid(ws, h_slots, h_pos, n_rows, &max_pos))
+        return false;
+    const size_t bytes = static_cast<size_t>(n_rows) * sizeof(int);
+    if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens, bytes, cudaMemcpyDefault, stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_slots, h_slots, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_pos, h_pos, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(ws.d_row_src, h_src_rows, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        return false;
+    return mtp_feed_rows_multislot_dev(ws.d_feed_tokens, d_hidden_all, ws.d_row_src, n_rows, ws.d_row_slots,
+                                       ws.d_row_pos, max_pos, mtp, main_tok_emb, ws, hidden_dim, stream,
+                                       post_norm, post_norm_eps, post_norm_offset);
+}
 
+bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_all, const int* d_src_rows,
+                                 int n_rows, const int* d_slots, const int* d_pos, int max_pos,
+                                 const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws,
+                                 int hidden_dim, cudaStream_t stream, const Tensor* post_norm,
+                                 float post_norm_eps, float post_norm_offset) {
+    if (d_tokens == nullptr || d_src_rows == nullptr || d_slots == nullptr || d_pos == nullptr ||
+        !mtp_feed_multislot_ready(mtp, ws, n_rows, d_hidden_all, main_tok_emb))
+        return false;
     const int H = hidden_dim;
     const int n = n_rows;
     const int nh = ws.num_heads;
@@ -1559,26 +1582,18 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     const int hdh = ws.head_dim;
     const int kBlock = 256;
 
-    // 1 - tables H2D, gather the hidden rows, batched embedding lookup
-    if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens, static_cast<size_t>(n) * sizeof(int32_t),
-                        cudaMemcpyDefault, stream) != cudaSuccess ||
-        cudaMemcpyAsync(ws.d_row_slots, h_slots, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
-                        stream) != cudaSuccess ||
-        cudaMemcpyAsync(ws.d_row_pos, h_pos, static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice,
-                        stream) != cudaSuccess ||
-        cudaMemcpyAsync(ws.d_row_src, h_src_rows, static_cast<size_t>(n) * sizeof(int),
-                        cudaMemcpyHostToDevice, stream) != cudaSuccess)
-        return false;
+    // 1 - gather the hidden rows, batched embedding lookup
     {
         const int64_t total = static_cast<int64_t>(n) * H;
         const int grid = static_cast<int>((total + kBlock - 1) / kBlock);
-        mtp_gather_rows_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(d_hidden_all), ws.d_row_src,
-                                                            static_cast<__half*>(ws.d_b_gather), H, n);
+        mtp_gather_rows_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(d_hidden_all),
+                                                            d_src_rows, static_cast<__half*>(ws.d_b_gather),
+                                                            H, n);
         IMP_CUDA_CHECK_LAUNCH();
     }
     int64_t nH[2] = {n, H};
     Tensor emb_view(ws.d_b_emb, QType::F16, 2, nH, /*on_device=*/true);
-    imp::embedding_lookup(main_tok_emb, ws.d_feed_tokens, n, emb_view, main_tok_emb.qtype, stream);
+    imp::embedding_lookup(main_tok_emb, d_tokens, n, emb_view, main_tok_emb.qtype, stream);
 
     // Target's final norm on the gathered rows when asked, before the pre-fc norms
     Tensor h_view(ws.d_b_gather, QType::F16, 2, nH, true);
@@ -1591,15 +1606,14 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
             int grid = ((n * nkv * hdh) + kBlock - 1) / kBlock;
             mtp_kv_append_rows_kernel<<<grid, kBlock, 0, stream>>>(
                 static_cast<const __half*>(ws.d_b_k), static_cast<const __half*>(ws.d_b_v),
-                static_cast<__half*>(ws.d_k_cache_base), static_cast<__half*>(ws.d_v_cache_base), ws.d_row_slots,
-                ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n);
+                static_cast<__half*>(ws.d_k_cache_base), static_cast<__half*>(ws.d_v_cache_base), d_slots,
+                d_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        mtp_attn_scan_slots(ws.d_b_q_attn, ws.d_k_cache_base, ws.d_v_cache_base, ws.d_b_attn_out,
-                            ws.d_row_slots, ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n,
-                            nh, nkv, hdh, stream);
+        mtp_attn_scan_slots(ws.d_b_q_attn, ws.d_k_cache_base, ws.d_v_cache_base, ws.d_b_attn_out, d_slots,
+                            d_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n, nh, nkv, hdh, stream);
     };
-    if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/n, /*rope_pos=*/0, ws.d_row_pos, stream,
+    if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/n, /*rope_pos=*/0, d_pos, stream,
                              kv_attn))
         return false;
 

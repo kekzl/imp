@@ -9,6 +9,7 @@
 #include "compute/moe_routing.h"  // MoeRoutingBuffers
 #include "compute/mtp_workspace_bytes.h"  // kMtp* sizes, mtp_workspace_bytes (the plan's mirror)
 #include "memory/host_pinned.h"
+#include "core/cuda_raii.h"  // CudaEvent
 #include "core/tensor.h"
 #include "model/mtp_head.h"
 #include <cuda_runtime.h>
@@ -124,11 +125,16 @@ struct MtpDraftWorkspace {
     std::vector<int> slot_pos;        // [n_kv_slots] next write position per slot
     // Ragged multi-slot feed scratch: per-row slot/position tables, gather indices into the
     // caller's hidden buffer, gathered rows, final_norm of every fed row.
-    // Aliases: int tables carve d_feed_tokens (4x feed_rows_cap ints); d_b_gather is
+    // Aliases: int tables carve d_feed_tokens (12x feed_rows_cap ints); d_b_gather is
     // d_b_h_norm; d_b_h_final is d_b_norm (freed once MLP consumes post-norm). Never freed alone.
     int*  d_row_slots     = nullptr;  // [feed_rows_cap]
     int*  d_row_pos       = nullptr;  // [feed_rows_cap]
     int*  d_row_src       = nullptr;  // [feed_rows_cap]
+    // Batched head pass (mtp_head_pass_upload): its feed and chain tables packed for ONE pinned H2D,
+    // h_pass_tables staged, pass_tables_copied guards reuse of the staging. [kMtpPassTableInts] each.
+    int* d_pass_tables = nullptr;
+    PinnedBuffer h_pass_tables;
+    CudaEvent pass_tables_copied;
     void* d_b_gather      = nullptr;  // [feed_rows_cap, H]
     void* d_b_h_final     = nullptr;  // [feed_rows_cap, H]
 
@@ -270,6 +276,40 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
                              const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
                              cudaStream_t stream, const Tensor* post_norm = nullptr,
                              float post_norm_eps = 1e-6f, float post_norm_offset = 0.0f);
+// Same feed with every table already on the device in stream order (d_tokens [n_rows] ids, d_src_rows,
+// d_slots, d_pos); max_pos = the largest h_pos, checked by mtp_feed_tables_valid. No copy, no host read.
+[[nodiscard]] bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_all,
+                                               const int* d_src_rows, int n_rows, const int* d_slots,
+                                               const int* d_pos, int max_pos, const MtpHead& mtp,
+                                               const Tensor& main_tok_emb, MtpDraftWorkspace& ws,
+                                               int hidden_dim, cudaStream_t stream,
+                                               const Tensor* post_norm = nullptr, float post_norm_eps = 1e-6f,
+                                               float post_norm_offset = 0.0f);
+// Every row's slot in [0, n_kv_slots) and position in [0, max_seq_len); *max_pos = the largest position.
+[[nodiscard]] bool mtp_feed_tables_valid(const MtpDraftWorkspace& ws, const int* h_slots, const int* h_pos,
+                                         int n_rows, int* max_pos);
+
+// The batched head pass's tables on the device: the feed's n rows, then per bound request (m) the last fed
+// row (draft gather and chain hidden source), the chain slot and the chain position.
+struct MtpPassTables {
+    const int32_t* tokens = nullptr;
+    const int* src = nullptr;
+    const int* slots = nullptr;
+    const int* pos = nullptr;
+    const int* last = nullptr;
+    const int* chain_slots = nullptr;
+    const int* chain_pos = nullptr;
+    int n = 0, m = 0;
+    int max_pos = 0;        // largest feed position (validated by the upload)
+    int chain_max_pos = 0;  // largest chain position (not validated: the chain checks it)
+};
+// Validates the feed rows (mtp_feed_tables_valid), packs the 7 tables into ws.h_pass_tables and uploads
+// them with one async H2D on `stream` (4n + 3m ints, m <= n <= feed_rows_cap). Waits for the previous pass's
+// copy before reusing the staging.
+[[nodiscard]] bool mtp_head_pass_upload(MtpDraftWorkspace& ws, const int32_t* toks, const int* src,
+                                        const int* slots, const int* pos, int n, const int* last,
+                                        const int* chain_slots, const int* chain_pos, int m,
+                                        cudaStream_t stream, MtpPassTables& out);
 // Make `slot` the active KV slot: saves the current slot's position, loads
 // the new one, re-points d_k_cache / d_v_cache. No-op for the active slot.
 void mtp_select_slot(MtpDraftWorkspace& ws, int slot);

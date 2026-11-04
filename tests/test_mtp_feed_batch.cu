@@ -262,6 +262,77 @@ TEST_F(MtpFeedBatchTest, MultiSlotFeedMatchesPerSlotBatches) {
     imp::mtp_workspace_free(ws_ms);
 }
 
+// The batched head pass: its 7 packed tables in one H2D, then the device-table feed and the chain feed.
+// Same kernels and inputs as the host-table feeds: KV slots and final_norm rows byte-identical.
+TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
+    SyntheticHead s;
+    s.build(/*seed=*/29);
+    constexpr int kSlots = 3;
+    imp::MtpDraftWorkspace ws_host, ws_pass;
+    for (auto* ws : {&ws_host, &ws_pass}) {
+        ASSERT_TRUE(
+            imp::mtp_workspace_allocate(*ws, kH, kVocab, 0, 0, 0, kDff, kNh, kNkv, kHd, kSeq, kSlots));
+        configure_ws(*ws);
+    }
+    cudaStream_t stream = nullptr;
+    const int n = 5, m = 3;
+    const int slot[n] = {2, 0, 0, 1, 2};
+    const int pos[n] = {0, 0, 1, 0, 1};
+    const int src[n] = {7, 3, 4, 9, 8};
+    int32_t tok[n];
+    for (int r = 0; r < n; ++r)
+        tok[r] = s.tokens[static_cast<size_t>(src[r])];
+    const int last[m] = {2, 3, 4};  // last fed row of slots 0, 1, 2
+    const int cslot[m] = {0, 1, 2};
+    const int cpos[m] = {2, 1, 2};
+    const int32_t ctok[m] = {5, 17, 99};
+    size_t bytes = 0;
+    {
+        int32_t* d_ctok = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_ctok, ctok, sizeof(ctok), cudaMemcpyHostToDevice), cudaSuccess);
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot(tok, s.d_hidden, src, n, slot, pos, s.head, s.tok_emb,
+                                                 ws_host, kH, stream));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot(d_ctok, ws_host.d_b_h_final, last, m, cslot, cpos, s.head,
+                                                 s.tok_emb, ws_host, kH, stream));
+        imp::MtpPassTables tab;
+        ASSERT_TRUE(
+            imp::mtp_head_pass_upload(ws_pass, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab));
+        EXPECT_EQ(tab.max_pos, 1);
+        EXPECT_EQ(tab.chain_max_pos, 2);
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
+                                                     tab.max_pos, s.head, s.tok_emb, ws_pass, kH, stream));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(d_ctok, ws_pass.d_b_h_final, tab.last, m,
+                                                     tab.chain_slots, tab.chain_pos, tab.chain_max_pos,
+                                                     s.head, s.tok_emb, ws_pass, kH, stream));
+        ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+        int back[m];
+        ASSERT_EQ(cudaMemcpy(back, tab.chain_pos, sizeof(back), cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_TRUE(std::equal(back, back + m, cpos));
+        cudaFree(d_ctok);
+        bytes = static_cast<size_t>(kSlots) * ws_host.kv_slot_elems * sizeof(__half);
+    }
+    auto same = [](const void* a, const void* b, size_t nb) {
+        std::vector<char> ha(nb), hb(nb);
+        EXPECT_EQ(cudaMemcpy(ha.data(), a, nb, cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(hb.data(), b, nb, cudaMemcpyDeviceToHost), cudaSuccess);
+        return ha == hb;
+    };
+    EXPECT_TRUE(same(ws_host.d_k_cache_base, ws_pass.d_k_cache_base, bytes)) << "K slots";
+    EXPECT_TRUE(same(ws_host.d_v_cache_base, ws_pass.d_v_cache_base, bytes)) << "V slots";
+    EXPECT_TRUE(same(ws_host.d_b_h_final, ws_pass.d_b_h_final, static_cast<size_t>(m) * kH * sizeof(__half)))
+        << "chain final_norm rows";
+    // m > n, or a row past the slot count: refused before touching the staging.
+    imp::MtpPassTables tab;
+    EXPECT_FALSE(
+        imp::mtp_head_pass_upload(ws_pass, tok, src, slot, pos, 2, last, cslot, cpos, 3, stream, tab));
+    const int bad_slot[n] = {2, 0, 0, kSlots, 2};
+    EXPECT_FALSE(
+        imp::mtp_head_pass_upload(ws_pass, tok, src, bad_slot, pos, n, last, cslot, cpos, m, stream, tab));
+    imp::mtp_workspace_free(ws_host);
+    imp::mtp_workspace_free(ws_pass);
+}
+
 // A second batch call must continue at the right cache position and RoPE
 // phase: 10 + 23 batched pairs vs 33 per-pair. A base-offset bug (rows
 // rotated or appended from position 0 again) fails this immediately.
