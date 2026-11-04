@@ -1,0 +1,12 @@
+main ov pairs 142.13 134.69 135.90 mean 137.57
+main ov4 pairs 140.04 138.22 145.52 mean 141.26
+main c2 both runs (6 pairs) 312.2 311.2 304.0 296.4 305.7 287.3 mean 302.80
+main c1 pairs 132.70 133.03 132.85 mean 132.86
+main c2 pairs 312.2 311.2 304.0 mean 309.13
+main c4 pairs 543.5 534.0 525.0 mean 534.17
+new ov pairs 137.88 129.60 135.93 mean 134.47
+new ov4 pairs 143.27 138.94 146.06 mean 142.76
+new c2 both runs (6 pairs) 302.5 312.5 297.6 313.1 313.3 280.0 mean 303.17
+new c1 pairs 132.85 132.87 133.18 mean 132.97
+new c2 pairs 302.5 312.5 297.6 mean 304.20
+new c4 pairs 566.8 574.2 552.0 mean 564.33

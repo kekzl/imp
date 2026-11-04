@@ -1,0 +1,39 @@
+# last cumulative 'spec-batch price' line per request count and server
+# overlap A/B
+p1_main.server.log 2 requests x 3 rows, 3602 steps: forward+argmax 13.02 ms, head 2.44 ms, 4.63 tokens/step
+p1_new.server.log 2 requests x 3 rows, 3823 steps: forward+argmax 13.06 ms, head 2.43 ms, 4.64 tokens/step
+p2_main.server.log 2 requests x 3 rows, 3180 steps: forward+argmax 13.02 ms, head 2.45 ms, 4.59 tokens/step
+p2_new.server.log 2 requests x 3 rows, 3859 steps: forward+argmax 13.12 ms, head 2.46 ms, 4.38 tokens/step
+p3_main.server.log 2 requests x 3 rows, 3554 steps: forward+argmax 12.98 ms, head 2.44 ms, 4.61 tokens/step
+p3_new.server.log 2 requests x 3 rows, 4090 steps: forward+argmax 12.64 ms, head 2.32 ms, 4.46 tokens/step
+p1_main.server.log 3 requests x 3 rows, 2268 steps: forward+argmax 13.39 ms, head 2.64 ms, 7.13 tokens/step
+p1_new.server.log 3 requests x 3 rows, 1800 steps: forward+argmax 13.38 ms, head 2.43 ms, 7.12 tokens/step
+p2_main.server.log 3 requests x 3 rows, 1950 steps: forward+argmax 13.37 ms, head 2.62 ms, 7.07 tokens/step
+p2_new.server.log 3 requests x 3 rows, 2328 steps: forward+argmax 13.55 ms, head 2.50 ms, 7.06 tokens/step
+p3_main.server.log 3 requests x 3 rows, 2361 steps: forward+argmax 13.02 ms, head 2.55 ms, 7.10 tokens/step
+p3_new.server.log 3 requests x 3 rows, 2259 steps: forward+argmax 13.03 ms, head 2.35 ms, 7.00 tokens/step
+p1_main.server.log 4 requests x 3 rows, 930 steps: forward+argmax 14.23 ms, head 2.80 ms, 9.22 tokens/step
+p1_new.server.log 4 requests x 3 rows, 1177 steps: forward+argmax 14.20 ms, head 2.51 ms, 9.37 tokens/step
+p2_main.server.log 4 requests x 3 rows, 1270 steps: forward+argmax 14.20 ms, head 2.77 ms, 8.82 tokens/step
+p2_new.server.log 4 requests x 3 rows, 713 steps: forward+argmax 14.28 ms, head 2.51 ms, 9.02 tokens/step
+p3_main.server.log 4 requests x 3 rows, 785 steps: forward+argmax 13.94 ms, head 2.72 ms, 9.29 tokens/step
+p3_new.server.log 4 requests x 3 rows, 751 steps: forward+argmax 13.78 ms, head 2.41 ms, 9.44 tokens/step
+# concurrent A/B
+p1_main.server.log 2 requests x 3 rows, 431 steps: forward+argmax 12.63 ms, head 2.24 ms, 5.27 tokens/step
+p1_new.server.log 2 requests x 3 rows, 476 steps: forward+argmax 12.58 ms, head 2.21 ms, 4.91 tokens/step
+p2_main.server.log 2 requests x 3 rows, 449 steps: forward+argmax 12.58 ms, head 2.23 ms, 5.12 tokens/step
+p2_new.server.log 2 requests x 3 rows, 491 steps: forward+argmax 12.56 ms, head 2.22 ms, 4.86 tokens/step
+p3_main.server.log 2 requests x 3 rows, 478 steps: forward+argmax 12.57 ms, head 2.26 ms, 4.95 tokens/step
+p3_new.server.log 2 requests x 3 rows, 510 steps: forward+argmax 12.58 ms, head 2.21 ms, 4.65 tokens/step
+p1_main.server.log 3 requests x 3 rows, 63 steps: forward+argmax 13.20 ms, head 2.45 ms, 7.27 tokens/step
+p1_new.server.log 3 requests x 3 rows, 13 steps: forward+argmax 14.93 ms, head 2.55 ms, 7.54 tokens/step
+p2_main.server.log 3 requests x 3 rows, 32 steps: forward+argmax 13.43 ms, head 2.51 ms, 7.47 tokens/step
+p2_new.server.log 3 requests x 3 rows, 10 steps: forward+argmax 14.63 ms, head 2.42 ms, 6.70 tokens/step
+p3_main.server.log 3 requests x 3 rows, 32 steps: forward+argmax 13.40 ms, head 2.55 ms, 7.12 tokens/step
+p3_new.server.log 3 requests x 3 rows, 16 steps: forward+argmax 14.11 ms, head 2.47 ms, 6.94 tokens/step
+p1_main.server.log 4 requests x 3 rows, 406 steps: forward+argmax 13.57 ms, head 2.55 ms, 10.22 tokens/step
+p1_new.server.log 4 requests x 3 rows, 411 steps: forward+argmax 13.57 ms, head 2.24 ms, 9.81 tokens/step
+p2_main.server.log 4 requests x 3 rows, 419 steps: forward+argmax 13.62 ms, head 2.54 ms, 9.82 tokens/step
+p2_new.server.log 4 requests x 3 rows, 399 steps: forward+argmax 13.57 ms, head 2.24 ms, 9.68 tokens/step
+p3_main.server.log 4 requests x 3 rows, 390 steps: forward+argmax 13.58 ms, head 2.54 ms, 9.65 tokens/step
+p3_new.server.log 4 requests x 3 rows, 474 steps: forward+argmax 13.57 ms, head 2.24 ms, 9.55 tokens/step

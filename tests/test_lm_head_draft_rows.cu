@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -27,6 +28,52 @@ __global__ void fill_head_kernel(half* w, int64_t n, uint32_t seed) {
         s ^= s >> 15;
         w[i] = __float2half((static_cast<float>(s >> 8) / 16777216.0f - 0.5f) * 0.05f);
     }
+}
+
+float e4m3_host(uint8_t bits) {  // = fp8_e4m3_to_float_fast
+    const uint32_t sign = (bits >> 7) & 1, exp = (bits >> 3) & 0x0F, man = bits & 0x07;
+    uint32_t u = 0;
+    if (exp == 0) {
+        const float v = static_cast<float>(man) * (1.0f / 512.0f);
+        std::memcpy(&u, &v, sizeof(u));
+        u |= sign << 31;
+    } else {
+        u = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
+    }
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+// Host replica of gemv_nvfp4_kpar_mb_fp32_kernel's float op order for one (weight row, x row): lane t
+// sums micro-blocks t, t + 128, ...; per warp the 5-step shuffle-down tree; warps added 0..3.
+float kpar_row_ref(const uint8_t* packed, const uint8_t* ms, float ts, const half* x, int K) {
+    static constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    const int n_mb = K / 16;
+    float part[128];
+    for (int t = 0; t < 128; ++t) {
+        float acc = 0.0f;
+        for (int mi = t; mi < n_mb; mi += 128) {
+            float d = 0.0f;
+            for (int i = 0; i < 16; ++i) {
+                const uint8_t byte = packed[(mi * 8) + (i / 2)];
+                const uint8_t nib = (i & 1) ? (byte >> 4) : (byte & 0x0F);
+                const float w = (nib & 8) ? -kMag[nib & 7] : kMag[nib & 7];
+                d = std::fma(w, __half2float(x[(mi * 16) + i]), d);
+            }
+            acc = std::fma(d, ts * e4m3_host(ms[mi]), acc);
+        }
+        part[t] = acc;
+    }
+    float total = 0.0f;
+    for (int w = 0; w < 4; ++w) {
+        float* v = part + (w * 32);
+        for (int off = 16; off > 0; off >>= 1)
+            for (int l = 0; l + off < 32; ++l)
+                v[l] += v[l + off];
+        total = (w == 0) ? v[0] : total + v[0];
+    }
+    return total;
 }
 
 bool gpu_available() {
@@ -79,6 +126,30 @@ TEST(LmHeadDraftRows, Nvfp4MultiRowIsRowCountInvariantAndPriced) {
     ASSERT_EQ(cudaMemcpyAsync(one.data(), d_y1, y_elems * sizeof(float), cudaMemcpyDeviceToHost, st),
               cudaSuccess);
     ASSERT_EQ(cudaStreamSynchronize(st), cudaSuccess);
+    // Row bits equal the host replica of the float op order (pins the kernel's arithmetic across rewrites).
+    {
+        std::vector<uint8_t> pk(K / 2), sc(K / 16);
+        int bad = 0;
+        for (int n = 0; n < V; n += 6719) {
+            ASSERT_EQ(cudaMemcpy(pk.data(),
+                                 static_cast<const uint8_t*>(q4.packed_data) +
+                                     (static_cast<size_t>(n) * K / 2),
+                                 pk.size(), cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(sc.data(),
+                                 static_cast<const uint8_t*>(q4.micro_scales) +
+                                     (static_cast<size_t>(n) * K / 16),
+                                 sc.size(), cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+            for (int r = 0; r < kMaxRows; ++r) {
+                const float ref = kpar_row_ref(pk.data(), sc.data(), q4.tensor_scale,
+                                               hx.data() + (static_cast<size_t>(r) * K), K);
+                const float got = one[(static_cast<size_t>(r) * V) + n];
+                bad += std::memcmp(&ref, &got, sizeof(float)) != 0;
+            }
+        }
+        EXPECT_EQ(bad, 0) << "NVFP4 kpar row bits differ from the host float-order replica";
+    }
     for (int rows = 2; rows <= kMaxRows; ++rows) {
         ASSERT_EQ(cudaMemsetAsync(d_y, 0xff, y_elems * sizeof(float), st), cudaSuccess);
         gemv_nvfp4_kpar_batched_fp32(q4, d_x, d_y, V, K, rows, st);

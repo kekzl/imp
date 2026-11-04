@@ -237,8 +237,9 @@ Measured (3 alternating pairs vs 15d35035, `means.txt`): 2 overlapping chats 129
 (4 chats); lone chat 6/6 byte-identical on fresh servers, follow-ups 122.45 / 122.48 tok/s (the
 side mode after the overlap modes, 122.94 -> 121.63, pairs mixed sign: 122.34 / 123.41 / 123.06 -> 121.26 / 123.51 / 120.13).
 
-Next: the NVFP4 kernel loses bandwidth at 3-4 rows (1419 / 1282 GB/s vs 1681 at 1 row); the rest of
-the head pass is the two BF16 MTP layer feeds (832 MiB weights each).
+Next: the NVFP4 kernel loses bandwidth at 3-4 rows (1419 / 1282 GB/s vs 1681 at 1 row; closed in section
+"Four weight rows per draft head block"); the rest of the head pass is the two BF16 MTP layer feeds (832 MiB
+weights each).
 
 ## One table upload per head pass (2026-11-04)
 
@@ -305,3 +306,42 @@ overlapping chats match main 1/12 turns, the same 1/12 as main against a second 
 Next: the 145 us left per pass are host time before the graph's first node (86 us ends at the first
 gather: table H2D issue plus `cudaGraphLaunch`, 45.5 us host); moving the table upload into the graph
 (a memcpy node from fixed pinned staging) would remove the H2D call.
+
+## Four weight rows per draft head block (2026-11-04)
+
+`gemv_nvfp4_kpar_mb_fp32_kernel` (`src/quant/nvfp4_gemv_batched.cu`) gave each 128-thread block one weight
+row: per weight byte it re-read MR x 4 bytes of x from L1 and converted every f16 operand (`HADD2.F32`)
+before the `FFMA`. Now a block takes `kKparNR` = 4 weight rows against x fragments held in registers,
+multiplies with `fma.rn.f32.f16` (SASS `FHFMA`, one rounding, equal to `__fmaf_rn` on the converted halves)
+and reduces all rows behind one barrier. Per (row, x row) the float op order is unchanged: bit-identical,
+pinned by `LmHeadDraftRows` against a host replica of that order (red under a swapped-FMA mutant).
+Evidence: docs/audit/qwen38_nvfp4_head_kpar_nr4_2026_11_04/.
+
+| [248320 x 5120], per pass (`microbench.txt`) | 1 row | 2 rows | 3 rows | 4 rows |
+|---|---:|---:|---:|---:|
+| main, median of 8 alternating rounds | 445.9 us | 461.8 us | 583.1 us | 659.8 us |
+| this branch | 436.3 us | 447.9 us | 463.0 us | 456.6 us |
+| ncu, locked clocks: main / branch | 456.8 / 456.9 us | 469.1 / 455.8 us | 568.0 / 457.1 us | 629.1 / 470.9 us |
+| ncu DRAM throughput: main / branch | 89.40 / 89.25 % | 86.76 / 89.27 % | 74.66 / 88.97 % | 64.82 / 86.47 % |
+
+Registers MR 1-4: 40 / 40 / 48 (4 B spill) / 52 -> 80 / 92 / 122 / 128; SASS instructions at MR 4 642M ->
+343M. Refuted in the same harness (rows 3-4 slower than 4 rows per block): front-loading one row's weights,
+a persistent grid prefetching the next row, `FHFMA` alone, 8 rows per block (8 B spill at MR 4).
+
+| requests, head pass (`step_price.txt`, 3 pairs) | main 173d66be | this branch |
+|---:|---|---|
+| 2 (overlap A/B) | 2.44-2.45 ms | 2.32-2.46 ms |
+| 3 (overlap A/B) | 2.55-2.64 ms | 2.35-2.50 ms |
+| 4 (overlap A/B) | 2.72-2.80 ms | 2.41-2.51 ms |
+| 4 (c4 bursts) | 2.54-2.55 ms | 2.24 ms |
+
+End to end (3 alternating pairs, `means.txt`): 4 overlapping chats 141.26 -> 142.76 tok/s (3/3 pairs
+higher), c4 534.17 -> 564.33 (3/3), c1 132.86 -> 132.97. At 2 requests the head pass does not move, and
+neither does tok/s beyond spread: 2 chats 137.57 -> 134.47 (pairs 142.13 / 134.69 / 135.90 vs 137.88 /
+129.60 / 135.93), c2 302.80 -> 303.17 over 6 pairs (second run arms reversed). The burst prompts carry the
+arm label, so acceptance differs by prompt, not by kernel. Lone chat and side mode 6/6 + 6/6 byte-identical
+to main; two overlapping chats match main 1-2/12 turns, main against main 2/12 (`identity_summary.txt`).
+
+Next: one pass for 5-8 rows (MR 8, 4 rows per block: rows 8 667.9 us vs 947.9 for 4 + 4) serves the
+batched decode LM head and `gemm_nvfp4` at M <= 16, not the draft head (<= 4 rows); the FP16 twin
+`gemv_nvfp4_kpar_mb_fp16_kernel` (verify chunks) has the same one-row-per-block shape.
