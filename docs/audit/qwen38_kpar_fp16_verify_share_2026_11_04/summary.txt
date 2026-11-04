@@ -1,0 +1,41 @@
+# gemv_nvfp4_kpar_mb_fp16_kernel (FP16 verify-chunk GEMV) on Qwen3.8-27B-NVFP4-vllm serving: REFUTED as a lever,
+# the kernel does not run on the target. 2026-11-04, RTX 5090, main binaries built 10:51 (before #3045 / #3047;
+# neither touches the FP16 kernel or the verify GEMM route).
+#
+# Route (code): gemm_nvfp4_batched(_acc) serves native ST-NVFP4 verify chunks only at M <= 4 with !verify_smallm
+# (src/exec/executor_gemm_dispatch.cpp). speculative.verify_smallm_captured=true (#2802) sends every captured verify
+# chunk to the small-M kernel. Batched verify (>= 2 requests) has M = 3 x N >= 6. MTP drafts only up to the head
+# KV capacity kMtpKvCap 16384 (src/runtime/engine_spec_mtp.cpp), below capture_ctx_cap 32768, so no MTP verify
+# chunk is eager by context length. Eager only with speculative.capture=false or a doomed capture.
+#
+# nsys --cuda-graph-trace=node, tools/analysis/verify_gemv_share_nsys.sh (md5 1b64899b7a885c48984f047ef459b80b)
+# + tools/analysis/nsys_kernel_windows.py (md5 f862916cd02d03c34da055a2b6e90fbd), mtp_k auto -> 2 (3 rows/verify).
+
+| run | level | kpar_mb_fp16 launches | kpar_mb_fp16 share | smallm share | client MEDIAN tok/s |
+|---|---|---:|---:|---:|---:|
+| default (max_seq_len 4096, ctx_cap 4096) | c1 | 0 | 0.00 % | 54.96 % | 123.4 |
+| default | c4 | 0 | 0.00 % | 49.19 % | 504.5 |
+| default | c32 | 0 | 0.00 % | 47.88 % | 1943.2 |
+| control speculative.capture=false | c1 | 120400 | 67.25 % | 1.31 % | 89.5 |
+| control speculative.capture=false | c4 | 10400 | 3.96 % | 0.88 % | 262.1 |
+| max_seq_len 40960, prompt 33612 tok (ctx_cap 32768) | c1 | 0 | 0.00 % | 0.00 % | 44.7 |
+
+# Long prompt: "mtp-spec: no head cache covers req 34's prefix-cache resume at 0 (prompt exceeds the head KV
+# capacity)", [spec-ngram] verify_steps=0: plain M=1 decode, no verify chunk at all.
+
+# Lever as built (kernel_nr4.diff.txt): the #3047 body (4 weight rows per block, x fragments in registers, FHFMA,
+# one epilogue barrier) shared by the FP32 and FP16 kernels. SASS: FP32 <1,2,4> identical to main, <3> differs in
+# the epilogue tid/MR divide only; FP16 regs 40/40/48/52 -> 80/92/122/128, <3> stack 8 -> 0, BAR.SYNC 6 -> 1.
+# Microbench (microbench.txt, 2 runs per arm, medians, us): bit-identical to main at 24/24 (shape, M) points.
+
+| shape N x K | M | main | branch |
+|---|---:|---|---|
+| 17408 x 5120 | 1 | 33.5 / 33.2 | 43.7 / 42.0 |
+| 17408 x 5120 | 3 | 48.5 / 42.7 | 35.4 / 35.5 |
+| 17408 x 5120 | 4 | 46.5 / 47.0 | 37.3 / 38.1 |
+| 5120 x 17408 acc | 4 | 54.9 / 50.0 | 37.5 / 36.7 |
+| 12288 x 5120 | 3 | 42.0 / 30.8 | 26.8 / 28.5 |
+
+# Smaller shapes (6144 / 10240 rows) are bistable between runs (e.g. 6144 x 5120 M=4 branch 34.9 / 18.4).
+# Not shipped: zero launches on the target, M=1 slower on 17408 x 5120. Revive from kernel_nr4.diff.txt only for
+# a path that runs eager verify at M <= 4 (capture off, GGUF NVFP4 overlay M <= 33 is legacy).
