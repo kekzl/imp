@@ -16,76 +16,123 @@
 namespace imp {
 namespace {
 
-// Batched-M K-parallel GEMV (FP32 out): y[m,n]=A_nvfp4[n,:]@x[m,:] for the MR activation
-// rows in this launch. One block per output row n; the weight row loads ONCE and is reused
-// across all MR rows (x[m] streams from L2). Removes the per-sequence weight re-read of the
-// batched decode LM head (a single M=1 GEMV per sequence re-read the whole ~389 MiB
-// LM-head matrix from HBM, the #2 decode GPU consumer at batch>1).
+// f16 x f16 + f32 in one rounding (SASS FHFMA), equal to __fmaf_rn on the converted floats: an f16
+// product is exact in f32, so the HADD2.F32 per operand goes.
+__device__ __forceinline__ float fma_f16_f32(uint32_t a, uint32_t b, float c) {
+    float d;
+    asm("fma.rn.f32.f16 %0, %1, %2, %3;"
+        : "=f"(d)
+        : "h"(static_cast<uint16_t>(a)), "h"(static_cast<uint16_t>(b)), "f"(c));
+    return d;
+}
+
+// Weight rows per block / micro-blocks a thread loads ahead (Qwen3.8 head [248320 x 5120], 3-4 rows:
+// one row per block 600 / 660 us -> 430 / 450 us; the x fragments serve all kKparNR weight rows).
+constexpr int kKparNR = 4;
+constexpr int kKparAhead = 3;
+
+// Batched-M K-parallel GEMV (FP32 out): y[m,n]=A_nvfp4[n,:]@x[m,:] for the MR activation rows in this
+// launch, kKparNR weight rows n per block, each weight read once for all MR rows. Per (n, m) the float
+// op order is the 128-lane one of reduce_kpar (lane t: micro-blocks t, t+128, ...): every row's bits
+// are independent of MR and kKparNR (tests/test_lm_head_draft_rows.cu pins them against a host replica).
 template <int MR>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
     const half* __restrict__ x, float* __restrict__ y, int N_out, int K) {
-    const int n = blockIdx.x;
-    if (n >= N_out)
-        return;
+    const int n0 = blockIdx.x * kKparNR;
     pdl_wait();
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
-    const uint8_t* row_packed = packed_data + ((int64_t)n * (K / 2));
-    const uint8_t* row_ms = micro_scales + ((int64_t)n * n_mb);
 
-    float acc[MR];
+    float acc[kKparNR][MR];
 #pragma unroll
-    for (int m = 0; m < MR; ++m)
-        acc[m] = 0.0f;
+    for (int r = 0; r < kKparNR; ++r)
+#pragma unroll
+        for (int m = 0; m < MR; ++m)
+            acc[r][m] = 0.0f;
 
-    for (int mi = tid; mi < n_mb; mi += kKparThreads) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);  // weight read once
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        // Decode the 16 FP4 weights ONCE and reuse across all MR activation rows
-        // (the old per-row path re-decoded the weight byte per row — 16x cvt).
-        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
-        float wf[16];
+    for (int base = tid; base < n_mb; base += kKparAhead * kKparThreads) {
+        uint2 w[kKparNR][kKparAhead];
+        uint32_t sb[kKparNR][kKparAhead];
 #pragma unroll
-        for (int b = 0; b < 8; ++b) {
-            uint32_t w_fp16x2;
-            asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
-                : "=r"(w_fp16x2)
-                : "r"(static_cast<uint32_t>(pb[b])));
-            float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
-            wf[(b * 2) + 1] = wf2.y;
-        }
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        const int elem_base = byte_off * 2;
+        for (int r = 0; r < kKparNR; ++r) {
+            const int n = min(n0 + r, N_out - 1);  // clamped rows are never stored
+            const uint8_t* row_packed = packed_data + ((int64_t)n * (K / 2));
+            const uint8_t* row_ms = micro_scales + ((int64_t)n * n_mb);
 #pragma unroll
-        for (int m = 0; m < MR; ++m) {
-            const half* xm = x + ((int64_t)m * K) + elem_base;
-            const uint4 xv0 = *reinterpret_cast<const uint4*>(xm);
-            const uint4 xv1 = *reinterpret_cast<const uint4*>(xm + 8);
-            half2 xh[8];
-            *reinterpret_cast<uint4*>(&xh[0]) = xv0;
-            *reinterpret_cast<uint4*>(&xh[4]) = xv1;
-            float d = 0.0f;
-#pragma unroll
-            for (int b = 0; b < 8; ++b) {
-                float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
-                d = __fmaf_rn(wf[(b * 2) + 1], xf.y, d);
+            for (int j = 0; j < kKparAhead; ++j) {
+                const int mi = base + (j * kKparThreads);
+                if (mi < n_mb) {
+                    const int byte_off = mi * 8;
+                    w[r][j] = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+                    sb[r][j] = row_ms[mi];
+                }
             }
-            acc[m] = __fmaf_rn(d, cs, acc[m]);
+        }
+#pragma unroll
+        for (int j = 0; j < kKparAhead; ++j) {
+            const int mi = base + (j * kKparThreads);
+            if (mi < n_mb) {
+                const int elem_base = mi * kMicroBlockSize;
+                uint4 xv[MR][2];
+#pragma unroll
+                for (int m = 0; m < MR; ++m) {
+                    const uint4* xm = reinterpret_cast<const uint4*>(x + ((int64_t)m * K) + elem_base);
+                    xv[m][0] = xm[0];
+                    xv[m][1] = xm[1];
+                }
+#pragma unroll
+                for (int r = 0; r < kKparNR; ++r) {
+                    // 16 FP4 weights decoded once as f16x2, reused across the MR activation rows.
+                    const uint8_t* pb = reinterpret_cast<const uint8_t*>(&w[r][j]);
+                    uint32_t wh[8];
+#pragma unroll
+                    for (int b = 0; b < 8; ++b)
+                        asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+                            : "=r"(wh[b])
+                            : "r"(static_cast<uint32_t>(pb[b])));
+                    const float cs = tensor_scale * fp8_e4m3_to_float_fast(static_cast<uint8_t>(sb[r][j]));
+#pragma unroll
+                    for (int m = 0; m < MR; ++m) {
+                        const uint32_t xw[8] = {xv[m][0].x, xv[m][0].y, xv[m][0].z, xv[m][0].w,
+                                                xv[m][1].x, xv[m][1].y, xv[m][1].z, xv[m][1].w};
+                        float d = 0.0f;
+#pragma unroll
+                        for (int b = 0; b < 8; ++b) {
+                            d = fma_f16_f32(wh[b], xw[b], d);
+                            d = fma_f16_f32(wh[b] >> 16, xw[b] >> 16, d);
+                        }
+                        acc[r][m] = __fmaf_rn(d, cs, acc[r][m]);
+                    }
+                }
+            }
         }
     }
 
     pdl_trigger();
-    __shared__ float warp_sums[kKparWarps];
+    // Same warp tree and warp order as reduce_kpar, all kKparNR x MR sums behind one barrier.
+    __shared__ float warp_sums[kKparNR * MR][kKparWarps];
 #pragma unroll
-    for (int m = 0; m < MR; ++m) {
-        float total = reduce_kpar(acc[m], tid, warp_sums);
-        if (tid == 0)
-            y[((int64_t)m * N_out) + n] = total;
-        __syncthreads();  // reuse warp_sums for the next activation row
+    for (int r = 0; r < kKparNR; ++r)
+#pragma unroll
+        for (int m = 0; m < MR; ++m) {
+            float v = acc[r][m];
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                v += __shfl_down_sync(0xFFFFFFFF, v, offset);
+            if ((tid & 31) == 0)
+                warp_sums[(r * MR) + m][tid / 32] = v;
+        }
+    __syncthreads();
+    if (tid < kKparNR * MR) {
+        const int r = tid / MR;
+        const int m = tid % MR;
+        float total = warp_sums[tid][0];
+#pragma unroll
+        for (int w = 1; w < kKparWarps; w++)
+            total += warp_sums[tid][w];
+        if (n0 + r < N_out)
+            y[((int64_t)m * N_out) + n0 + r] = total;
     }
 }
 
@@ -264,6 +311,7 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
     // (measured 91 us/row at MR=4 vs 118 us/row at MR=16). For M>4 the weight re-reads per
     // MR=4 tile, but tiled still beats a larger-MR spill (M=16: 4x MR=4=1.45ms < 1x MR=16=1.89ms)
     // and the old per-row loop (16x M=1=4.2ms).
+    const dim3 grid((N_out + kKparNR - 1) / kKparNR);
     int done = 0;
     while (done < n_act) {
         const int rem = n_act - done;
@@ -271,21 +319,21 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
         float* ym = y + ((int64_t)done * N_out);
         int used;
         if (rem >= 4) {
-            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
-                        pd, ms, ts, xm, ym, N_out, K);
+            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<4>, grid, dim3(kKparThreads), size_t(0), stream, pd,
+                        ms, ts, xm, ym, N_out, K);
             used = 4;
         } else if (rem == 3) {
             // Bucket-3 verify lm_head: one sweep instead of <2>+<1> (#1055).
-            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<3>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
-                        pd, ms, ts, xm, ym, N_out, K);
+            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<3>, grid, dim3(kKparThreads), size_t(0), stream, pd,
+                        ms, ts, xm, ym, N_out, K);
             used = 3;
         } else if (rem >= 2) {
-            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<2>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
-                        pd, ms, ts, xm, ym, N_out, K);
+            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<2>, grid, dim3(kKparThreads), size_t(0), stream, pd,
+                        ms, ts, xm, ym, N_out, K);
             used = 2;
         } else {
-            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<1>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
-                        pd, ms, ts, xm, ym, N_out, K);
+            pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<1>, grid, dim3(kKparThreads), size_t(0), stream, pd,
+                        ms, ts, xm, ym, N_out, K);
             used = 1;
         }
         done += used;

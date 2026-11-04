@@ -1,0 +1,32 @@
+# /mnt/data/scratch/kpar_2026_11_04/overlap: imp:kpar-main (173d66be) vs imp:kpar-new, MODES ov ov4, 3 alternating pairs
+harness: md5=1407282084d4 d742d48b6488 6bd477985f61 
+p1_main_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p1_main_ov4 REASONS_TOTAL {'turns drafted': 24}
+p1_main_ov SUMMARY c0_mean_tps 139.63 c0_drafted_turns 6/6 c1_mean_tps 144.64 c1_drafted_turns 6/6 all_mean_tps 142.13 PASS
+p1_main_ov4 SUMMARY c0_mean_tps 140.36 c0_drafted_turns 6/6 c1_mean_tps 141.81 c1_drafted_turns 6/6 c2_mean_tps 138.92 c2_drafted_turns 6/6 c3_mean_tps 139.05 c3_drafted_turns 6/6 all_mean_tps 140.04 PASS
+p1_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22830
+p1_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p1_new_ov4 REASONS_TOTAL {'turns drafted': 24}
+p1_new_ov SUMMARY c0_mean_tps 139.92 c0_drafted_turns 6/6 c1_mean_tps 135.83 c1_drafted_turns 6/6 all_mean_tps 137.88 PASS
+p1_new_ov4 SUMMARY c0_mean_tps 143.30 c0_drafted_turns 6/6 c1_mean_tps 146.77 c1_drafted_turns 6/6 c2_mean_tps 141.02 c2_drafted_turns 6/6 c3_mean_tps 141.98 c3_drafted_turns 6/6 all_mean_tps 143.27 PASS
+p1_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 23490
+p2_main_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p2_main_ov4 REASONS_TOTAL {'turns drafted': 24, 'unbind: uneconomic: avg emitted/verify below break-even': 2}
+p2_main_ov SUMMARY c0_mean_tps 134.05 c0_drafted_turns 6/6 c1_mean_tps 135.34 c1_drafted_turns 6/6 all_mean_tps 134.69 PASS
+p2_main_ov4 SUMMARY c0_mean_tps 139.66 c0_drafted_turns 6/6 c1_mean_tps 142.63 c1_drafted_turns 6/6 c2_mean_tps 127.92 c2_drafted_turns 6/6 c3_mean_tps 142.66 c3_drafted_turns 6/6 all_mean_tps 138.22 PASS
+p2_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 3} own_peak_mib 22838
+p2_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 2}
+p2_new_ov4 REASONS_TOTAL {'turns drafted': 24}
+p2_new_ov SUMMARY c0_mean_tps 135.07 c0_drafted_turns 6/6 c1_mean_tps 124.14 c1_drafted_turns 6/6 all_mean_tps 129.60 PASS
+p2_new_ov4 SUMMARY c0_mean_tps 140.52 c0_drafted_turns 6/6 c1_mean_tps 141.32 c1_drafted_turns 6/6 c2_mean_tps 141.43 c2_drafted_turns 6/6 c3_mean_tps 132.48 c3_drafted_turns 6/6 all_mean_tps 138.94 PASS
+p2_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 2} own_peak_mib 22606
+p3_main_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p3_main_ov4 REASONS_TOTAL {'turns drafted': 24}
+p3_main_ov SUMMARY c0_mean_tps 136.22 c0_drafted_turns 6/6 c1_mean_tps 135.58 c1_drafted_turns 6/6 all_mean_tps 135.90 PASS
+p3_main_ov4 SUMMARY c0_mean_tps 146.26 c0_drafted_turns 6/6 c1_mean_tps 147.24 c1_drafted_turns 6/6 c2_mean_tps 146.02 c2_drafted_turns 6/6 c3_mean_tps 142.56 c3_drafted_turns 6/6 all_mean_tps 145.52 PASS
+p3_main UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 1} own_peak_mib 22820
+p3_new_ov REASONS_TOTAL {'turns drafted': 12, 'unbind: uneconomic: avg emitted/verify below break-even': 2}
+p3_new_ov4 REASONS_TOTAL {'turns drafted': 24, 'unbind: uneconomic: avg emitted/verify below break-even': 1}
+p3_new_ov SUMMARY c0_mean_tps 139.93 c0_drafted_turns 6/6 c1_mean_tps 131.92 c1_drafted_turns 6/6 all_mean_tps 135.93 PASS
+p3_new_ov4 SUMMARY c0_mean_tps 146.37 c0_drafted_turns 6/6 c1_mean_tps 154.54 c1_drafted_turns 6/6 c2_mean_tps 149.12 c2_drafted_turns 6/6 c3_mean_tps 134.20 c3_drafted_turns 6/6 all_mean_tps 146.06 PASS
+p3_new UNBIND_TOTAL {'uneconomic: avg emitted/verify below break-even': 3} own_peak_mib 22838

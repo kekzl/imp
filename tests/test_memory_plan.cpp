@@ -402,7 +402,8 @@ TEST(MemoryPlan, MtpWorkspaceRowIsChargedBeforeKv) {
     ASSERT_TRUE(with) << with.failure.report();
 
     const PlanLine* row = nullptr;
-    for (const auto& l : with.plan.lines())
+    const auto lines = with.plan.lines();  // by value: `row` must not outlive the vector
+    for (const auto& l : lines)
         if (std::string(l.name) == "MTP draft workspace")
             row = &l;
     ASSERT_NE(row, nullptr) << "the MTP workspace lost its plan row";

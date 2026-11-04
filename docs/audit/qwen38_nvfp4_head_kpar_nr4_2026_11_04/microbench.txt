@@ -1,0 +1,35 @@
+# Isolated microbench (standalone nvcc harness, scratch), [248320 x 5120] NVFP4 head, random bytes,
+# DRAM-resident (682 MiB > 96 MB L2). main = gemv_nvfp4_kpar_mb_fp32_kernel before (verbatim copy),
+# branch = kKparNR 4 rows per block, FHFMA, one epilogue barrier. 8 alternating rounds x 50 launches.
+bit identity vs main: ok (0 mismatches, rows 1..8)
+rows=1 main       n=8 min 425.7 median 445.9 max 469.6 us
+rows=1 branch     n=8 min 426.6 median 436.3 max 469.0 us
+rows=2 main       n=8 min 435.3 median 461.8 max 484.1 us
+rows=2 branch     n=8 min 428.4 median 447.9 max 474.7 us
+rows=3 main       n=8 min 517.1 median 583.1 max 599.2 us
+rows=3 branch     n=8 min 439.4 median 463.0 max 473.9 us
+rows=4 main       n=8 min 628.6 median 659.8 max 680.3 us
+rows=4 branch     n=8 min 442.0 median 456.6 max 483.4 us
+
+# ncu (locked clocks), one launch per MR instance
+main   MR1 dram%=89.40 t_ns=456832 occ_lim=12 reg=40 inst=310400000 warps%=96.09
+main   MR2 dram%=86.76 t_ns=469120 occ_lim=12 reg=40 inst=416680960 warps%=96.17
+main   MR3 dram%=74.66 t_ns=567968 occ_lim=10 reg=48 inst=531156480 warps%=80.34
+main   MR4 dram%=64.82 t_ns=629120 occ_lim=9 reg=52 inst=641658880 warps%=72.19
+branch MR1 dram%=89.25 t_ns=456896 occ_lim=6 reg=80 inst=180342400 warps%=48.65
+branch MR2 dram%=89.27 t_ns=455776 occ_lim=5 reg=92 inst=233358720 warps%=40.36
+branch MR3 dram%=88.97 t_ns=457120 occ_lim=4 reg=122 inst=285754240 warps%=31.93
+branch MR4 dram%=86.47 t_ns=470944 occ_lim=4 reg=128 inst=342867840 warps%=32.07
+
+# Refuted in the same harness (rows 3 / 4, bit-identical, slower than kKparNR 4): front-loading the
+# weights of one row per block (kIt 2/3/4), a persistent grid prefetching the next row, FHFMA alone
+# (rows 4 527-605 us), 8 rows per block (168 regs, 8 B spill at MR 4).
+# Not taken: one pass for 5-8 rows (MR 8, rows 8: 667.9 us median vs 947.9 for 4 + 4); the batched
+# draft head calls <= 4 rows.
+
+# test-quant LmHeadDraftRows (build-dev, branch), 20 launches per point; host float-order replica check
+# red under a swapped-FMA mutant, green on the branch
+[draft head] rows=1 fp8 846.5 us (1502 GB/s)  nvfp4 426.2 us (1678 GB/s)
+[draft head] rows=2 fp8 772.9 us (1645 GB/s)  nvfp4 481.3 us (1486 GB/s)
+[draft head] rows=3 fp8 776.8 us (1637 GB/s)  nvfp4 429.3 us (1666 GB/s)
+[draft head] rows=4 fp8 854.2 us (1488 GB/s)  nvfp4 432.8 us (1652 GB/s)
