@@ -130,7 +130,8 @@ class TestResponsesNonStream:
             assert r.status_code != 400, r.text
 
     # #2807: the request shape of Codex CLI 0.163.0 (captured): custom apply_patch with a Lark
-    # grammar, a namespace, the hosted tool_search / web_search, Codex's extra top-level fields.
+    # grammar, a namespace, the client tool_search, the hosted web_search, Codex's extra top-level
+    # fields; local_shell (#3056) is the API reference's shape.
     # The released server answered 400 "unsupported tool type: custom (only function tools)".
     @pytest.mark.nomodel
     def test_codex_request_is_not_refused(self, model):
@@ -158,6 +159,7 @@ class TestResponsesNonStream:
                  "tools": [{"type": "function", "name": "spawn_agent", "description": "Spawn",
                             "strict": False, "parameters": {"type": "object", "properties": {}}}]},
                 {"type": "tool_search", "execution": "client", "description": "Tool discovery"},
+                {"type": "local_shell"},
                 {"type": "web_search", "external_web_access": False},
             ],
             "tool_choice": "auto",
@@ -168,6 +170,32 @@ class TestResponsesNonStream:
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": "01a15380-4e85-7730-b31a-45a691795e47",
             "text": {"verbosity": "low"},
+        }
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses", json=body)
+            assert r.status_code != 400, r.text
+
+    # #3056: the items Codex 0.166.0 replays after a tool_search call (captured), and local_shell's.
+    @pytest.mark.nomodel
+    def test_codex_replay_items_are_not_refused(self, model):
+        body = {
+            "model": model,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "tool_search_call", "id": "tsc_1", "call_id": "s1", "status": "completed",
+                 "execution": "client", "arguments": {"query": "terminal", "limit": 8}},
+                {"type": "tool_search_output", "id": "tso_1", "call_id": "s1", "status": "completed",
+                 "execution": "client",
+                 "tools": [{"type": "namespace", "name": "mcp__t", "description": "Tools.",
+                            "tools": [{"type": "function", "name": "run", "strict": False,
+                                       "defer_loading": True,
+                                       "parameters": {"type": "object", "properties": {}}}]}]},
+                {"type": "local_shell_call", "id": "lsc_1", "call_id": "l1", "status": "completed",
+                 "action": {"type": "exec", "command": ["ls"], "env": {}}},
+                {"type": "local_shell_call_output", "id": "l1", "output": "a.txt"},
+            ],
+            "tools": [{"type": "tool_search", "execution": "client", "description": "Tool discovery"},
+                      {"type": "local_shell"}],
         }
         with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
             r = c.post("/v1/responses", json=body)
