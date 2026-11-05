@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
+### Fixed
+- Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).
+
 ## [0.64.0] - 2026-11-05
 
 ### Changed

@@ -1262,6 +1262,7 @@ if(IMP_BUILD_TESTS)
             tests/test_tool_stream_filter.cpp
             tests/test_tool_call_dialect_golden.cpp
             tests/test_tool_call_dialect_registry.cpp
+            tests/test_tool_call_xml_params.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp

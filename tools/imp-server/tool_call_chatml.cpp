@@ -52,6 +52,16 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         size_t val_start = pk_end + 1;
         size_t pv_end = body.find("\n</parameter>", val_start);
         size_t pv_adv = 13;
+        // A bare close tag right before the next <parameter= ends this value: the anchored find
+        // would swallow that parameter ("offset" eating "path" = missing required argument).
+        const size_t bare = body.find("</parameter>", val_start);
+        const size_t after_bare = bare == std::string::npos ? bare
+                                                            : body.find_first_not_of("\n\r\t ", bare + 12);
+        if (bare < pv_end && after_bare != std::string::npos &&
+            body.compare(after_bare, 11, "<parameter=") == 0) {
+            pv_end = bare;
+            pv_adv = 12;
+        }
         if (pv_end == std::string::npos || pv_end > scan_end) {
             pv_end = body.find("</parameter>", val_start);
             pv_adv = 12;

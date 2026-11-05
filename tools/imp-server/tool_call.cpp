@@ -320,13 +320,23 @@ void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
     bool changed = false;
     for (const auto& [key, raw] : tc.raw_params) {
         const json& p = schema["properties"].value(key, json::object());
-        if (!p.is_object() || !args.contains(key) || args[key].is_string())
+        if (!p.is_object() || !args.contains(key))
             continue;
         const json types = p.contains("type") ? p["type"] : json();
         const auto allows = [&](const char* t) {
             return types == t ||
                    (types.is_array() && std::find(types.begin(), types.end(), t) != types.end());
         };
+        if (args[key].is_string()) {
+            if (allows("string"))
+                continue;
+            json parsed = json::parse(raw, nullptr, false);
+            if ((parsed.is_array() && allows("array")) || (parsed.is_object() && allows("object"))) {
+                args[key] = std::move(parsed);
+                changed = true;
+            }
+            continue;
+        }
         if (!allows("string"))
             continue;
         bool other_ok = false;
