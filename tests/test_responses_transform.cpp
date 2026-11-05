@@ -12,6 +12,8 @@
 using imp_server::responses::json;
 using imp_server::responses::openai_to_responses_response;
 using imp_server::responses::responses_to_openai_body;
+using imp_server::responses::tool_call_item;
+using imp_server::responses::tool_kinds;
 
 // ---------------------------------------------------------------------------
 // Request transform
@@ -386,7 +388,8 @@ json codex_tools() {
 
 TEST(ResponsesTransform, CodexToolsBecomeChatFunctions) {
     json oai = responses_to_openai_body(json{{"model", "m"}, {"input", "x"}, {"tools", codex_tools()}});
-    ASSERT_EQ(oai["tools"].size(), 3u) << oai["tools"].dump();
+    ASSERT_EQ(oai["tools"].size(), 4u) << oai["tools"].dump();
+    EXPECT_EQ(oai["tools"][3]["function"]["name"], "tool_search");  // web_search dropped
     EXPECT_EQ(oai["tools"][0]["function"]["name"], "exec_command");
     EXPECT_EQ(oai["tools"][0]["function"]["strict"], false);
     const json& patch = oai["tools"][1]["function"];
@@ -413,12 +416,140 @@ TEST(ResponsesTransform, NonObjectToolEntryIsRefused) {
 }
 
 TEST(ResponsesTransform, UnknownToolTypeIsStillRefused) {
-    for (const char* t : {"local_shell", "nonsense_value"})
+    for (const char* t : {"computer", "nonsense_value"})
         EXPECT_THROW(responses_to_openai_body(json{{"model", "m"},
                                                    {"input", "x"},
                                                    {"tools", json::array({{{"type", t}, {"name", "f"}}})}}),
                      std::invalid_argument)
             << t;
+}
+
+// #3056. Item shapes captured from codex 0.166.0: it runs tool_search_call, answers with
+// tool_search_output, keeps the found tools out of `tools`.
+TEST(ResponsesTransform, LocalShellIsAShellFunctionAndComesBackAsItsItem) {
+    const json body = {{"model", "m"}, {"input", "x"}, {"tools", json::array({{{"type", "local_shell"}}})}};
+    const json oai = responses_to_openai_body(body);
+    ASSERT_EQ(oai["tools"].size(), 1u);
+    EXPECT_EQ(oai["tools"][0]["function"]["name"], "shell");
+    EXPECT_EQ(oai["tools"][0]["function"]["parameters"]["required"], json::array({"command"}));
+
+    const auto kinds = tool_kinds(body);
+    const json item = tool_call_item(kinds, "fc_1", "call_1", "shell",
+                                     R"({"command":["ls","-l"],"workdir":"/w","timeout_ms":500})",
+                                     "completed");
+    EXPECT_EQ(item["type"], "local_shell_call");
+    EXPECT_FALSE(item.contains("name"));
+    EXPECT_EQ(item["call_id"], "call_1");
+    EXPECT_EQ(item["action"]["type"], "exec");
+    EXPECT_EQ(item["action"]["command"], json::array({"ls", "-l"}));
+    EXPECT_EQ(item["action"]["working_directory"], "/w");
+    EXPECT_EQ(item["action"]["timeout_ms"], 500);
+    const json bare = tool_call_item(kinds, "fc_2", "call_2", "shell", R"({"command":"ls | wc"})",
+                                     "completed");
+    EXPECT_EQ(bare["action"]["command"], json::array({"bash", "-lc", "ls | wc"}));
+    // A plain function named shell stays one when the client did not offer local_shell.
+    EXPECT_EQ(tool_call_item({}, "fc_3", "call_3", "shell", "{}", "completed")["type"], "function_call");
+}
+
+TEST(ResponsesTransform, LocalShellItemsReplayAsOneCallAndItsOutput) {
+    const json input = json::array(
+        {{{"role", "user"}, {"content", "go"}},
+         {{"type", "local_shell_call"},
+          {"call_id", "c1"},
+          {"action",
+           {{"type", "exec"},
+            {"command", json::array({"ls"})},
+            {"working_directory", "/w"},
+            {"timeout_ms", 500}}}},
+         {{"type", "local_shell_call_output"}, {"id", "c1"}, {"output", "a.txt"}}});
+    const json m = responses_to_openai_body(json{{"model", "m"}, {"input", input}})["messages"];
+    ASSERT_EQ(m.size(), 3u) << m.dump();
+    const json& fn = m[1]["tool_calls"][0]["function"];
+    EXPECT_EQ(fn["name"], "shell");
+    EXPECT_EQ(json::parse(fn["arguments"].get<std::string>()),
+              (json{{"command", json::array({"ls"})}, {"workdir", "/w"}, {"timeout_ms", 500}}));
+    EXPECT_EQ(m[2]["role"], "tool");
+    EXPECT_EQ(m[2]["tool_call_id"], "c1");
+    EXPECT_EQ(m[2]["content"], "a.txt");
+}
+
+TEST(ResponsesTransform, ClientToolSearchReachesTheModelHostedOneDoesNot) {
+    const json search = {{"type", "tool_search"},
+                         {"execution", "client"},
+                         {"description", "Tool discovery"},
+                         {"parameters", {{"type", "object"}, {"required", json::array({"query"})}}}};
+    const json client = {{"model", "m"}, {"input", "x"}, {"tools", json::array({search})}};
+    const json oai = responses_to_openai_body(client);
+    ASSERT_EQ(oai["tools"].size(), 1u);
+    EXPECT_EQ(oai["tools"][0]["function"]["name"], "tool_search");
+    EXPECT_EQ(oai["tools"][0]["function"]["description"], "Tool discovery");
+
+    const json item = tool_call_item(tool_kinds(client), "fc_1", "call_1", "tool_search",
+                                     R"({"query":"ls","limit":8})", "completed");
+    EXPECT_EQ(item["type"], "tool_search_call");
+    EXPECT_EQ(item["execution"], "client");
+    EXPECT_EQ(item["arguments"], (json{{"query", "ls"}, {"limit", 8}}));
+
+    EXPECT_FALSE(
+        responses_to_openai_body(
+            json{{"model", "m"}, {"input", "x"}, {"tools", json::array({{{"type", "tool_search"}}})}})
+            .contains("tools"));
+}
+
+TEST(ResponsesTransform, SearchedToolsJoinTheToolListOnce) {
+    const json found = json::array({{{"type", "namespace"},
+                                     {"name", "mcp__agentscape_terminal"},
+                                     {"tools", json::array({{{"type", "function"},
+                                                             {"name", "execute_command"},
+                                                             {"defer_loading", true},
+                                                             {"parameters", {{"type", "object"}}}}})}}});
+    const json call = {{"type", "tool_search_call"},
+                       {"call_id", "s1"},
+                       {"execution", "client"},
+                       {"arguments", {{"query", "terminal"}}}};
+    const json output = {{"type", "tool_search_output"}, {"call_id", "s1"}, {"tools", found}};
+    const json body = {{"model", "m"},
+                       {"input",
+                        json::array({{{"role", "user"}, {"content", "go"}}, call, output, call, output})},
+                       {"tools", json::array({{{"type", "tool_search"}, {"execution", "client"}}})}};
+    const json oai = responses_to_openai_body(body);
+    ASSERT_EQ(oai["tools"].size(), 2u) << oai["tools"].dump();
+    EXPECT_EQ(oai["tools"][1]["function"]["name"], "execute_command");
+    const json& m = oai["messages"];
+    EXPECT_EQ(m[1]["tool_calls"][0]["function"]["name"], "tool_search");
+    EXPECT_EQ(json::parse(m[1]["tool_calls"][0]["function"]["arguments"].get<std::string>()),
+              (json{{"query", "terminal"}}));
+    EXPECT_NE(m[2]["content"].get<std::string>().find("execute_command"), std::string::npos) << m[2].dump();
+    // The call the model makes next routes back into its namespace.
+    const json item = tool_call_item(tool_kinds(body), "fc_1", "c", "execute_command", "{}", "completed");
+    EXPECT_EQ(item["namespace"], "mcp__agentscape_terminal");
+}
+
+TEST(ResponsesTransform, QualifiedToolNamesRouteToTheirNamespace) {
+    const auto kinds = tool_kinds(
+        json{{"tools",
+              json::array({{{"type", "namespace"},
+                            {"name", "mcp__agentscape_terminal"},
+                            {"tools", json::array({{{"type", "function"}, {"name", "execute_command"}}})}},
+                           {{"type", "namespace"},
+                            {"name", "multi_agent_v1"},
+                            {"tools", json::array({{{"type", "custom"}, {"name", "spawn_agent"}}})}}})}});
+    for (const char* spelled : {"mcp__agentscape_terminal__execute_command",
+                                "mcp__agentscape-terminal__execute_command", "execute_command"}) {
+        const json item = tool_call_item(kinds, "fc", "c", spelled, "{}", "completed");
+        EXPECT_EQ(item["type"], "function_call") << spelled;
+        EXPECT_EQ(item["name"], "execute_command") << spelled;
+        EXPECT_EQ(item["namespace"], "mcp__agentscape_terminal") << spelled;
+    }
+    const json agent = tool_call_item(kinds, "fc", "c", "multi_agent_v1_spawn_agent", R"({"input":"x"})",
+                                      "completed");
+    EXPECT_EQ(agent["type"], "custom_tool_call");
+    EXPECT_EQ(agent["name"], "spawn_agent");
+    EXPECT_EQ(agent["namespace"], "multi_agent_v1");
+    // An invented name is the model's: left for the client to refuse.
+    const json invented = tool_call_item(kinds, "fc", "c", "exec", "{}", "completed");
+    EXPECT_EQ(invented["name"], "exec");
+    EXPECT_FALSE(invented.contains("namespace"));
 }
 
 // #2807: Codex replays one response as separate items (preamble message, calls). Two assistant turns

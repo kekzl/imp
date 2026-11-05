@@ -202,13 +202,16 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     std::string acc_text, acc_reasoning;
     json final_output = json::array();
 
-    // A custom tool's input is one string: sent whole at the close, not as JSON argument deltas.
-    bool cur_custom = false;
+    // Only function calls stream JSON argument deltas. A custom tool's input is one string, sent
+    // whole at the close; local_shell_call and tool_search_call carry theirs in output_item.done.
+    rsp::CallShape cur_shape = rsp::CallShape::kFunction;
     auto close_call_args = [&](const ParsedToolCall& tc) -> bool {
-        if (!cur_custom)
+        if (cur_shape == rsp::CallShape::kFunction)
             return out.emit("response.function_call_arguments.done", json{{"item_id", cur_item_id},
                                                                           {"output_index", output_index},
                                                                           {"arguments", tc.arguments}});
+        if (cur_shape != rsp::CallShape::kCustom)
+            return true;
         const std::string input = rsp::custom_tool_input(tc.arguments);
         return out.emit("response.custom_tool_call_input.delta",
                         json{{"item_id", cur_item_id}, {"output_index", output_index}, {"delta", input}}) &&
@@ -340,14 +343,14 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         ++output_index;
         open_item = RspItem::FUNCTION_CALL;
         cur_item_id = rsp::make_item_id("fc", item_counter++);
-        cur_custom = kinds.custom.count(tc.name) != 0;
+        cur_shape = kinds.shape(tc.name);
         json item = rsp::tool_call_item(kinds, cur_item_id, tc.id, tc.name, "", "in_progress");
         return out.emit("response.output_item.added",
                         json{{"output_index", output_index}, {"item", item}});
     };
     auto emit_args_delta = [&](const std::string& partial) -> bool {
-        if (cur_custom)
-            return true;  // close_call_args sends the whole input
+        if (cur_shape != rsp::CallShape::kFunction)
+            return true;  // whole at the close
         return out.emit("response.function_call_arguments.delta",
                         json{{"item_id", cur_item_id},
                              {"output_index", output_index},

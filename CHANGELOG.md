@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - `/v1/messages` usage: `input_tokens` no longer counts what `cache_creation_input_tokens` reports, so the three prompt fields sum to the prompt as on the Anthropic API. Prompt 100, cached 32, created 64: input 68 -> 4, sum 164 -> 100; a cold pinned turn no longer shows up to twice its size.
+- `/v1/responses` tools: `local_shell` was a 400 and client `tool_search` was dropped, which hid Codex 0.166.0's MCP and agent tools on slugs with search. Both now reach the model and return as their own items, tools found join the list, and `<namespace>__<name>` calls no longer end in Codex's `unsupported call`.
 
 ## [0.63.0] - 2026-11-04
 
