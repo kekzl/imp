@@ -36,7 +36,7 @@ struct ServerArgs : CommonArgs {
                // rambling reasoning model eats max_tokens and returns empty content.
     // Server limits
     int max_concurrent = 64;        // --max-concurrent: max simultaneous requests (0=unlimited)
-    int request_timeout = 300;      // --request-timeout: per-request timeout in seconds (0=unlimited)
+    int request_timeout = 1800;     // --request-timeout: per-request timeout in seconds (0=unlimited)
     int rate_limit = 0;             // --rate-limit: max requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;       // --max-input-tokens: reject prompts longer than this (0=unlimited)
     // --max-queued-tokens (#2408): 429 past this many queued prompt tokens (0=off).

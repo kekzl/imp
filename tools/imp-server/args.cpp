@@ -54,7 +54,7 @@ void print_server_usage(const char* prog) {
             "                        the GPU only had this much (multi-server on one GPU)\n"
             "  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)\n"
             "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
-            "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
+            "  --request-timeout <s> Per-request timeout in seconds (default: 1800, 0=unlimited)\n"
             "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
             "  --max-input-tokens <n> Reject prompts longer than n tokens with HTTP 400 (0=unlimited)\n"
             "  --max-queued-tokens <n> 429 when queued prompt tokens + this prompt exceed n (0=off)\n"
