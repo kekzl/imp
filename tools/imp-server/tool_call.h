@@ -28,7 +28,8 @@ struct ParsedToolCall {
 void validate_tool_call(ParsedToolCall& tc, const json& tools);
 
 // A raw_params value coerced to a type its schema does not allow, where the schema allows
-// "string", goes back to the emitted text: "0600" for {"type":"string"}, not 600 (#2103).
+// "string", goes back to the emitted text: "0600" for {"type":"string"}, not 600 (#2103). A value
+// left as text where the schema allows array or object, not "string", parses as JSON.
 void restore_raw_string_params(ParsedToolCall& tc, const json& tools);
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
