@@ -653,9 +653,8 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
         const auto& u = oai["usage"];
         int prompt_tokens = u.value("prompt_tokens", 0);
         usage_out["output_tokens"] = u.value("completion_tokens", 0);
-        // Anthropic splits the prompt token count: tokens served from the prefix cache are reported
-        // separately (cache_read_input_tokens) and excluded from input_tokens. imp surfaces this via
-        // OpenAI's prompt_tokens_details.cached_tokens; passed through here.
+        // OpenAI's cached_tokens and imp's cache_creation_tokens are subsets of prompt_tokens;
+        // Anthropic reports the three parts side by side (split_prompt_usage).
         int cached = 0;
         int creation = 0;
         int evicted = 0;
@@ -664,10 +663,10 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
             creation = u["prompt_tokens_details"].value("cache_creation_tokens", 0);
             evicted = u["prompt_tokens_details"].value("evicted_tokens", 0);
         }
-        cached = std::min(cached, prompt_tokens);
-        usage_out["input_tokens"] = prompt_tokens - cached;
-        usage_out["cache_read_input_tokens"] = cached;
-        usage_out["cache_creation_input_tokens"] = creation;
+        const PromptUsage split = split_prompt_usage(prompt_tokens, cached, creation);
+        usage_out["input_tokens"] = split.input;
+        usage_out["cache_read_input_tokens"] = split.cache_read;
+        usage_out["cache_creation_input_tokens"] = split.cache_creation;
         // imp extension (C-6): per-request speculation counters ride under the same vendor-prefixed
         // keys the OpenAI shape carries. Key list is shared (spec_usage_keys.h), not copied: a
         // hand-copied version once dropped imp_spec_emitted and the decline reason, reported only on

@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- `/v1/messages` usage: `input_tokens` no longer counts what `cache_creation_input_tokens` reports, so the three prompt fields sum to the prompt as on the Anthropic API. Prompt 100, cached 32, created 64: input 68 -> 4, sum 164 -> 100; a cold pinned turn no longer shows up to twice its size.
+
 ## [0.63.0] - 2026-11-04
 
 ### Changed

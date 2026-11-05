@@ -272,8 +272,8 @@ TEST(AnthropicCacheUsage, CacheReadAndCreationMapped) {
     });
     json anth = openai_to_anthropic_response(oai, "claude-x");
     const auto& u = anth["usage"];
-    // Anthropic splits the prompt: input excludes cache reads.
-    EXPECT_EQ(u.value("input_tokens", -1), 68);
+    // Disjoint fields: input excludes cache reads and cache writes, the three sum to the prompt (#3055).
+    EXPECT_EQ(u.value("input_tokens", -1), 4);
     EXPECT_EQ(u.value("cache_read_input_tokens", -1), 32);
     EXPECT_EQ(u.value("cache_creation_input_tokens", -1), 64);
     EXPECT_EQ(u.value("output_tokens", -1), 5);
@@ -662,7 +662,7 @@ TEST(AnthropicResponse, UsageSplitsCacheReadFromInput) {
     json oai = oai_response(json{{"content", "x"}});
     oai["usage"] = usage;
     json u = openai_to_anthropic_response(oai, "m")["usage"];
-    EXPECT_EQ(u["input_tokens"], 70);  // prompt - cached
+    EXPECT_EQ(u["input_tokens"], 65);  // prompt - cached - creation
     EXPECT_EQ(u["cache_read_input_tokens"], 30);
     EXPECT_EQ(u["cache_creation_input_tokens"], 5);
     EXPECT_EQ(u["output_tokens"], 20);
