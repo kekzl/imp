@@ -145,8 +145,8 @@ nothing else in `/metrics`.
 ✅ by default. Prefix blocks reused across requests sharing a prefix.
 
 `cache_control` is honoured per breakpoint: the **last** marked block bounds the
-pinned region, rather than pinning the whole prompt. Usage reporting carries
-`cache_read_input_tokens` and `cache_creation_input_tokens`.
+pinned region, rather than pinning the whole prompt. `input_tokens`, `cache_read_input_tokens`
+and `cache_creation_input_tokens` are disjoint and sum to the prompt, as on the Anthropic API.
 
 The cache is keyed on the picture as well as the token ids for image requests,
 and it is model-fingerprint-gated on disk, so a cache file from another model is

@@ -88,10 +88,11 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         // vs 11.4 ms, 8 streams, #1558). message_delta re-reports the final, corrective count.
         const int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
         const int creation = active_req ? cache_creation_tokens_(active_req, n_prompt_tokens) : 0;
-        json usage = {{"input_tokens", n_prompt_tokens - cached},
+        const anth::PromptUsage split = anth::split_prompt_usage(n_prompt_tokens, cached, creation);
+        json usage = {{"input_tokens", split.input},
                       {"output_tokens", 0},
-                      {"cache_read_input_tokens", cached},
-                      {"cache_creation_input_tokens", creation}};
+                      {"cache_read_input_tokens", split.cache_read},
+                      {"cache_creation_input_tokens", split.cache_creation}};
         json msg = {
             {"id", msg_id},
             {"type", "message"},
@@ -288,9 +289,10 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
         int cached_now = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
         int creation = cache_creation_tokens_(active_req, n_prompt_tokens);
         if (cached_now > 0 || creation > 0) {
-            delta_usage["input_tokens"] = n_prompt_tokens - cached_now;
-            delta_usage["cache_read_input_tokens"] = cached_now;
-            delta_usage["cache_creation_input_tokens"] = creation;
+            const anth::PromptUsage split = anth::split_prompt_usage(n_prompt_tokens, cached_now, creation);
+            delta_usage["input_tokens"] = split.input;
+            delta_usage["cache_read_input_tokens"] = split.cache_read;
+            delta_usage["cache_creation_input_tokens"] = split.cache_creation;
         }
     }
     // The exhaustion detail rides in the same delta as stop_reason, which keeps

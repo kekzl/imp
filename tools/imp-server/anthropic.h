@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -24,6 +25,22 @@ json anthropic_to_openai_body(const json& anth);
 // (#1560); the model still reasons, the client just isn't shown it.
 json openai_to_anthropic_response(const json& oai, const std::string& anth_model,
                                   const std::string& stop_sequence = {}, bool omit_thinking = false);
+
+// Anthropic's three prompt fields are disjoint: input + cache_read + cache_creation == prompt (#3055).
+struct PromptUsage {
+    int input = 0;
+    int cache_read = 0;
+    int cache_creation = 0;
+};
+
+// `cached` and `creation` count from the same prompt: each is clamped to what is left of it.
+inline PromptUsage split_prompt_usage(int prompt_tokens, int cached, int creation) {
+    PromptUsage u;
+    u.cache_read = std::clamp(cached, 0, prompt_tokens);
+    u.cache_creation = std::clamp(creation, 0, prompt_tokens - u.cache_read);
+    u.input = prompt_tokens - u.cache_read - u.cache_creation;
+    return u;
+}
 
 // The `signature` a thinking block carries: Anthropic SDKs round-trip and expect the field;
 // imp cannot attest anything, so this is a deterministic digest of the block text (#1555),
