@@ -59,7 +59,7 @@ TEST(KvAdmission, ExpectedLengthAdmitsMoreThanMaxTokens) {
     }
 }
 
-// A max_tokens as large as the remaining context; plan_tokens keeps admission at the
+// imp-server's default max_tokens is the remaining context; plan_tokens keeps admission at the old
 // 8192 plan, so no-swap pools (mode -1: SWA, StreamingLLM) admit as many requests as before.
 TEST(KvAdmission, RemainingContextDefaultPlansWithPlanTokens) {
     EXPECT_EQ(planning_max_tokens(131040, 8192, 0), 8192);

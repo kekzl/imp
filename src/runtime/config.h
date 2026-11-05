@@ -168,7 +168,7 @@ struct RuntimeConfig {
         // structured answers, lower for a short-verdict agent loop.
         int think_answer_reserve = 256;
         // Upper bound on reasoning tokens before the engine injects `</think>`, whatever
-        // max_tokens is; binds when a request sets a larger max_tokens than the 16384 default. 0 = no cap.
+        // max_tokens is (imp-server defaults max_tokens to the remaining context). 0 = no cap.
         int think_max_tokens = 32768;
         // Hybrid (SSM/GDN) decode time-slice length in tokens: the recurrent
         // scan is single-sequence, so the engine round-robins DECODING

@@ -326,13 +326,12 @@ TEST(ThinkLimit, FollowsTheConfiguredReserve) {
     EXPECT_EQ(think_limit(2000, 0.1f, /*reserve=*/0), 1500);     // no flat floor
 }
 
-// runtime.think_max_tokens: a request for the whole context (131072 on Qwen3.8-Flash-Next) would
+// runtime.think_max_tokens: max_tokens = the remaining context (131072 on Qwen3.8-Flash-Next) would
 // otherwise allow 98304 reasoning tokens.
-TEST(ThinkLimit, CapBoundsAWholeContextRequest) {
+TEST(ThinkLimit, CapBoundsTheRemainingContextDefault) {
     EXPECT_EQ(think_limit(131072, 0.5f, 256), 98304);
     EXPECT_EQ(think_limit(131072, 0.5f, 256, 32768), 32768);
-    EXPECT_EQ(think_limit(16384, 0.5f, 256, 32768), 12288)
-        << "the default max_tokens; the cap changes nothing";
+    EXPECT_EQ(think_limit(8192, 0.5f, 256, 32768), 6144) << "a cap above the limit changes nothing";
     std::vector<int32_t> out(32768, 7);
     EXPECT_TRUE(should_force_think_end(0.5f, /*end=*/9, 131072, out, /*start=*/8, /*started_in_think=*/true,
                                        256, 32768));
