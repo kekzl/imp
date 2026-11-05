@@ -7,7 +7,7 @@
 namespace imp {
 
 // Native sm_120 FMHA for prefill: WMMA HMMA fragments (mma.sync.m16n8k16.f16,
-// mma.sync.m16n8k32.e4m3) - NOT wgmma/TMEM/tcgen05 (sm_90+/sm_100+ only, unavailable on sm_120a).
+// mma.sync.m16n8k32.e4m3) - NOT wgmma/TMEM/tcgen05 (sm_90a, sm_100+ only, unavailable on sm_120a).
 // Supports FP16, causal, softcap, sliding window, GQA. Head dims 64/96/128/256; falls back
 // otherwise. Q:[batch,seq_q,n_heads,hd] K,V:[batch,seq_kv,n_kv_heads,hd] O: same as Q.
 // sinks (gpt-oss #547): optional [n_heads] FP16, virtual extra logit column with no V

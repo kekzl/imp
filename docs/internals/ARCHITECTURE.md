@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-31
-commit: e08db9d2
+verified: 2026-11-05
+commit: 8623a6aa
 -->
 
 # imp - Architecture
@@ -19,7 +19,7 @@ imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode
 |---|---|---|
 | `tcgen05` async MMA | datacenter Blackwell (`sm_100`, B200) | the MMA always blocks the issuing warp; no producer/consumer pipeline around it |
 | TMEM | `sm_100` | no tensor-memory accumulator ring; accumulators live in registers |
-| `wgmma` | Hopper, `sm_100` | tensor-core path is register-based `mma.sync`; the FA4-style warpgroup split is not expressible |
+| `wgmma` | Hopper (`sm_90a` only, not `sm_100`) | tensor-core path is register-based `mma.sync`; the FA4-style warpgroup split is not expressible |
 
 | Present on `sm_120a`, and used | Detail |
 |---|---|
