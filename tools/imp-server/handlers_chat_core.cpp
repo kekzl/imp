@@ -947,6 +947,10 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                 // surface it rather than silently shipping bad arguments.
                 for (auto& tc : tool_calls) {
                     validate_tool_call(tc, ctx.params.tools);
+                    if (const std::string fault = tool_call_fault(tc, ctx.params.tools, state.tool_fault_raw);
+                        !fault.empty())
+                        IMP_LOG_INFO("[%s] tool-call arg validation failed: %s", ctx.req_id.c_str(),
+                                     fault.c_str());
                     if (!tc.valid) {
                         if (!tool_validation_error.empty())
                             tool_validation_error += "; ";

@@ -15,6 +15,7 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     size_t fn_end = body.find('>', fn);
     if (fn_end == std::string::npos)
         return false;
+    tc.raw_body = body;
     tc.name = body.substr(fn, fn_end - fn);
     auto trim = [](std::string& s) {
         auto a = s.find_first_not_of("\n\r\t ");

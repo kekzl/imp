@@ -755,6 +755,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     if (state.max_seq_len <= 0)
         state.max_seq_len = config.max_seq_len;
 
+    state.tool_fault_raw = state.ctx->engine->runtime_config().diagnostics.tool_fault_raw;
     state.sampling_defaults = imp::resolve_sampling_defaults(state.model->model->config().arch,
                                                              state.model->model->generation_config());
 

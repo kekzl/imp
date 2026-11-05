@@ -1436,6 +1436,9 @@ step_timing          = false
 # imp-server worker-loop phase attribution (admission / step / delivery
 # staging), logged every 256 loops. Legacy env: IMP_WORKER_TIMING=1.
 worker_timing        = false
+# imp-server: a failed tool call logs the model's raw call text, first 2000 bytes.
+# Off by default, the text can hold request content.
+tool_fault_raw       = false
 # Attempt prefill graph capture even when the dequant scratch exceeds the cap
 # (the fail-loud in gemm_nvfp4 then answers whether the M>1 fallback fires).
 prefill_graph_ignore_dequant_cap = false

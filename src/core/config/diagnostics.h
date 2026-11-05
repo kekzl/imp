@@ -84,6 +84,9 @@ struct Diagnostics {
     // delivery), aggregated every 256 loops; companion to step_timing
     // (engine-phase vs worker-around-it). Env IMP_WORKER_TIMING seeded into this key at load.
     bool worker_timing = false;
+    // imp-server: a failed tool call logs the model's raw call text, first 2000 bytes. Off by default,
+    // the text can hold request content.
+    bool tool_fault_raw = false;
     // Stage 0 tree-ceiling probe: for every chain step, ask the MTP head for
     // top-4 candidates and tally whether the true next token was in top-w per
     // depth. Off by default: costs a full vocab-scan kernel plus a per-draft
