@@ -587,13 +587,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // max_tokens <= 0 (no field, no --max-tokens) = the remaining context, as OpenAI and vLLM do;
-    // a larger request value is clamped to it.
-    int remaining = ctx.snap.max_seq_len - ctx.snap.n_prompt_tokens;
-    if (ctx.params.max_tokens <= 0)
-        ctx.params.plan_tokens = kAutoMaxTokensPlan;
-    if (ctx.params.max_tokens <= 0 || ctx.params.max_tokens > remaining)
-        ctx.params.max_tokens = remaining;
+    const GenerationLimit limit = resolve_max_tokens(ctx.params.max_tokens,
+                                                     ctx.snap.max_seq_len - ctx.snap.n_prompt_tokens);
+    ctx.params.max_tokens = limit.max_tokens;
+    ctx.params.plan_tokens = limit.plan_tokens;
 
     // Start timing
     ctx.t_start = std::chrono::high_resolution_clock::now();

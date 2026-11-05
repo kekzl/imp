@@ -501,6 +501,25 @@ TEST(ParseMaxTokensField, NullAndNonNumberIgnored) {
     EXPECT_EQ(parse_max_tokens_field(body, 8192), 8192);
 }
 
+TEST(ResolveMaxTokens, DefaultIs16384PlannedIn8192Steps) {
+    const GenerationLimit limit = resolve_max_tokens(0, 100000);
+    EXPECT_EQ(limit.max_tokens, 16384);
+    EXPECT_EQ(limit.plan_tokens, 8192);
+}
+
+TEST(ResolveMaxTokens, DefaultClampsToTheRemainingContext) {
+    const GenerationLimit limit = resolve_max_tokens(0, 5000);
+    EXPECT_EQ(limit.max_tokens, 5000);
+    EXPECT_EQ(limit.plan_tokens, 8192);
+}
+
+TEST(ResolveMaxTokens, RequestValueStaysUnplannedAndClamps) {
+    EXPECT_EQ(resolve_max_tokens(100, 5000).max_tokens, 100);
+    EXPECT_EQ(resolve_max_tokens(100, 5000).plan_tokens, 0);
+    EXPECT_EQ(resolve_max_tokens(90000, 100000).max_tokens, 90000) << "the default is no ceiling";
+    EXPECT_EQ(resolve_max_tokens(9000, 5000).max_tokens, 5000);
+}
+
 TEST(ParseStopField, AbsentAndNull) {
     std::vector<std::string> out;
     EXPECT_FALSE(parse_stop_field(json::object(), 16, out));

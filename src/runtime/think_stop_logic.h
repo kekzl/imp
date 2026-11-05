@@ -81,7 +81,7 @@ constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve
 // Reasoning-token limit shared by all enforcement paths (eager sampler,
 // CUDA-graph device counter, n-gram/scheduler gates): the LATER of the
 // fractional budget and max_tokens minus the answer reserve.
-// think_cap > 0 bounds the result (runtime.think_max_tokens): max_tokens defaults to the remaining
+// think_cap > 0 bounds the result (runtime.think_max_tokens): a request may ask for the whole
 // context, where 3/4 of it would be ~90k reasoning tokens on a 131072-token context.
 constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve,
                           int think_cap = 0) {

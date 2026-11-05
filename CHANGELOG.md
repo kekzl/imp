@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- `max_tokens` defaults to 16384, clamped to the remaining context, on every server dialect, in `imp-cli` and the web UI (was the remaining context; `--max-tokens N` sets another default). KV admission still plans in 8192-token steps. Reasoning at the default ends at 12288 tokens (was 32768) (#3061).
+
 ## [0.64.0] - 2026-11-05
 
 ### Changed

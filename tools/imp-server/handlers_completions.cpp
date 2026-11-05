@@ -639,10 +639,10 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     if (!queued_lease)
         return;
 
-    int remaining = snap_max_seq_len - n_prompt_tokens;
-    const int plan_tokens = max_tokens <= 0 ? kAutoMaxTokensPlan : 0;
-    if (max_tokens <= 0 || max_tokens > remaining)
-        max_tokens = remaining;  // <= 0 = the remaining context
+    const int remaining = snap_max_seq_len - n_prompt_tokens;
+    const GenerationLimit limit = resolve_max_tokens(max_tokens, remaining);
+    max_tokens = limit.max_tokens;
+    const int plan_tokens = limit.plan_tokens;
 
     auto t_start = std::chrono::high_resolution_clock::now();
 

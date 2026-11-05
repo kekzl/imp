@@ -94,7 +94,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--config <path>`, `--set sec.key=val` | - | see `imp.conf` above |
 | `--json` | off | one JSON document on stdout, human lines on stderr - see `--json` below |
 | `--prompt <text>` / `--prompt-file <path>` | - | mutually exclusive; `--prompt-file` reads the whole file verbatim (argv is capped at ~128 KiB, ~32k tokens) |
-| `--max-tokens <n>` | the context end (`--bench`: `8192` decode tokens) | max tokens to generate; `imp-server` defaults to each request's remaining context the same way |
+| `--max-tokens <n>` | `16384`, clamped to the context (`--bench`: `8192` decode tokens) | max tokens to generate; `imp-server` applies the same default per request |
 | `--max-seq-len <n>` / `--min-kv-tokens <n>` | auto | KV context ceiling / floor in tokens |
 | `--vram-budget <mb>` | `0` (uncapped) | hard per-process VRAM cap, see below |
 | `--interactive` | off | interactive chat; refuses `--json` (a token stream is not one document) |
