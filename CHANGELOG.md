@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `diagnostics.tool_fault_raw` (default off): a failed tool call logs the model's raw call text, first 2000 bytes. A call naming a tool the request did not offer now logs a line too, and non-streamed requests log validation failures (#3063).
+
 ### Changed
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 

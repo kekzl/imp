@@ -454,6 +454,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
     B("diagnostics.step_timing", cfg.diagnostics.step_timing);
     B("diagnostics.worker_timing", cfg.diagnostics.worker_timing);
+    B("diagnostics.tool_fault_raw", cfg.diagnostics.tool_fault_raw);
     B("diagnostics.mtp_tree_probe", cfg.diagnostics.mtp_tree_probe);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);

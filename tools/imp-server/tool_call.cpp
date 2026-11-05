@@ -397,6 +397,19 @@ void validate_tool_call(ParsedToolCall& tc, const json& tools) {
     }
 }
 
+std::string tool_call_fault(const ParsedToolCall& tc, const json& tools, bool with_raw) {
+    constexpr size_t kMaxRawBytes = 2000;
+    const std::vector<std::string> offered = tool_names_from_request(tools);
+    std::string line;
+    if (!tc.valid)
+        line = tc.name + ": " + tc.error;
+    else if (!offered.empty() && std::find(offered.begin(), offered.end(), tc.name) == offered.end())
+        line = dump_safe(json(tc.name)) + ": tool not offered";
+    if (!line.empty() && with_raw && !tc.raw_body.empty())
+        line += " raw=" + dump_safe(json(tc.raw_body.substr(0, kMaxRawBytes)));
+    return line;
+}
+
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {
     // Tool responses arrive as either a plain string (OpenAI canonical) or structured JSON;
     // msg.value("content","") silently drops the whole payload for the non-string case - serialize it

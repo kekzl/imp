@@ -4,6 +4,50 @@
 
 #include <string>
 
+namespace {
+json read_file_tools() {
+    return json::parse(R"([{"type":"function","function":{"name":"read_file","parameters":{
+        "type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}}])");
+}
+}  // namespace
+
+TEST(ToolCallFault, CleanCallHasNoLine) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=read_file><parameter=path>a.py</parameter></function>", tc));
+    validate_tool_call(tc, read_file_tools());
+    EXPECT_EQ(tool_call_fault(tc, read_file_tools(), true), "");
+}
+
+TEST(ToolCallFault, RawTextOnlyOnRequest) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=read_file>\n<parameter=limit>40</parameter>\n</function>", tc));
+    validate_tool_call(tc, read_file_tools());
+    EXPECT_EQ(tool_call_fault(tc, read_file_tools(), false), "read_file: missing required argument \"path\"");
+    const std::string line = tool_call_fault(tc, read_file_tools(), true);
+    EXPECT_NE(line.find(" raw=\"<function=read_file>\\n<parameter=limit>40"), std::string::npos) << line;
+}
+
+TEST(ToolCallFault, NameTheRequestDidNotOfferIsAFault) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=run_tests.py\n</parameter>\n</function>", tc));
+    validate_tool_call(tc, read_file_tools());
+    EXPECT_TRUE(tc.valid);
+    EXPECT_EQ(tool_call_fault(tc, read_file_tools(), false),
+              "\"run_tests.py\\n</parameter\": tool not offered");
+    EXPECT_EQ(tool_call_fault(tc, json::array(), false), "") << "no tools in the request: nothing to compare";
+}
+
+TEST(ToolCallFault, RawTextIsCappedAt2000Bytes) {
+    ParsedToolCall tc;
+    tc.name = "read_file";
+    tc.valid = false;
+    tc.error = "x";
+    tc.raw_body = std::string(5000, 'a');
+    const std::string line = tool_call_fault(tc, read_file_tools(), true);
+    EXPECT_EQ(line, "read_file: x raw=\"" + std::string(2000, 'a') + "\"");
+}
+
 TEST(ToolCallQwen36Xml, ArrayAndObjectSchemasParseTheEmittedText) {
     const json tools = json::parse(R"([{"type":"function","function":{"name":"multi_edit","parameters":{
         "type":"object","required":["path","edits"],"properties":{"path":{"type":"string"},
