@@ -4,10 +4,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
-## [0.63.0] - 2026-11-04
+## [0.64.0] - 2026-11-05
 
 ### Changed
 - `moe.expert_prefetch_hc_norm` (default on, Qwen4Exp): the next-layer expert prediction reads the hc streams normed with layer L+1's mlp norm (top-10 recall 66.0 -> 71.4 %), and L's gather no longer waits on it; output bits unchanged. Qwen3.8-Flash-Next-NVFP4 server, 6 prompts x 400: 94.42-94.88 -> 95.84-96.11 tok/s, misses 421538 -> 405125.
+
+### Fixed
+- `/v1/messages` usage: `input_tokens` no longer counts what `cache_creation_input_tokens` reports, so the three prompt fields sum to the prompt as on the Anthropic API. Prompt 100, cached 32, created 64: input 68 -> 4, sum 164 -> 100; a cold pinned turn no longer shows up to twice its size.
+- `/v1/responses` tools: `local_shell` was a 400 and client `tool_search` was dropped, which hid Codex 0.166.0's MCP and agent tools on slugs with search. Both now reach the model and return as their own items, tools found join the list, and `<namespace>__<name>` calls no longer end in Codex's `unsupported call`.
+
+## [0.63.0] - 2026-11-04
+
+### Changed
 - MTP keeps drafting past 16384 tokens: the head KV is a 16384-row ring (`speculative.mtp_kv_window`), and a request decoding alone verifies in the batched step (`speculative.mtp_batch_verify_solo`). Qwen3.8-27B-NVFP4, 1 chat at 20k / 80k: 89.53-90.45 / 86.56-87.44 -> 143.35-143.67 / 140.99-141.46 tok/s, 6 short chats 127.55-128.05 -> 149.14-149.85.
 - The MTP economics guard also counts a request's batched verifies (`speculative.mtp_batch_verify`), not only its lone ones. Qwen3.8-27B-NVFP4, 2 overlapping chats: unbinds 1-2 -> 0 per server, 134.02 -> 138.55 tok/s (3 of 3 pairs), the chat finishing alone 3.06-3.09 -> 2.23-2.24 s for its tail; 4 chats and c1-c32 within spread.
 - Batched NVFP4 FP32 GEMV (MTP draft head, batched LM head): 4 weight rows per block against register-held x, f16 x f16 -> f32 FMA; bit-identical. Qwen3.8-27B head 3 / 4 rows 583.1 / 659.8 -> 463.0 / 456.6 us, head pass at 4 requests 2.72-2.80 -> 2.41-2.51 ms; 4 overlapping chats 141.26 -> 142.76 tok/s, c4 534.17 -> 564.33.

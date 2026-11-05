@@ -1,0 +1,224 @@
+diff --git a/src/core/config/speculative.h b/src/core/config/speculative.h
+index ef5d420a..f334c521 100644
+--- a/src/core/config/speculative.h
++++ b/src/core/config/speculative.h
+@@ -217,7 +217,8 @@ struct Speculative {
+     // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
+     // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
+     // The economics guard prices the average depth that actually ran, not the
+-    // configured ceiling. Off = fixed depth mtp_k (A/B kill switch).
++    // configured ceiling. Off = fixed depth mtp_k (A/B kill switch). The bound batched verify follows it per
++    // request (ceiling mtp_batch_verify_k): a 1-draft step pads its second row and skips the chain head pass.
+     bool mtp_adaptive_k = true;
+     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
+     // decode cache when one exists (#847 lever 3): the chain re-reads the LM
+diff --git a/src/runtime/engine.h b/src/runtime/engine.h
+index 2f3beb58..2627f5e0 100644
+--- a/src/runtime/engine.h
++++ b/src/runtime/engine.h
+@@ -1087,12 +1087,11 @@ private:
+                            const std::vector<int>& emitted, cudaStream_t stream);
+     // The NVFP4 draft LM head (speculative.mtp_nvfp4_head) the lone and batched chains read, or nullptr.
+     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
+-    // The batched head pass over tables already on the device: feed, draft LM head and, when bv_.depth > 1
+-    // and the KV has room, one more feed + LM head per request's second draft (a graph replay with
+-    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m, 2m);
+-    // -1 = feed, -2 = LM head, -3 = D2H failed.
++    // The batched head pass on device tables: feed, draft LM head, with chain (and KV room) one more feed +
++    // LM head per request's second draft (graph replay: speculative.mtp_head_graph), drafts D2H + sync into
++    // *drafts. Returns the draft count (m, 2m); -1 = feed, -2 = LM head, -3 = D2H failed.
+     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
+-                                     const NvFP4QuantResult* head, cudaStream_t stream,
++                                     const NvFP4QuantResult* head, bool chain, cudaStream_t stream,
+                                      const int32_t** drafts);
+     std::unique_ptr<MtpHeadGraphs, MtpHeadGraphsDeleter> mtp_head_graphs_;
+     void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
+@@ -1387,11 +1386,11 @@ private:
+     // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
+     // state types in spec_batch_verify_state.h.
+     BatchVerifyState bv_;
+-    [[nodiscard]] bool ensure_batch_verify_bufs_(
+-        cudaStream_t stream);  // init-time; sized from max_batch_size
++    [[nodiscard]] bool ensure_batch_verify_bufs_(cudaStream_t stream);  // init-time, from max_batch_size
+     void free_batch_verify_bufs_();
+     int acquire_spare_slot_(int req_id, bool second = false);
+     void bound_verify_adopt_slot_(int req_id, int role, int live, int slot);
++    void bound_verify_tally_(const Request& req, int n, int p0, int nd, int matched, int emitted, bool mtp);
+     // Up to bv_.depth draft tokens for the request's next positions, written to out; returns the count.
+     int batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp);
+     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
+diff --git a/src/runtime/engine_spec_batch_verify.cpp b/src/runtime/engine_spec_batch_verify.cpp
+index 0253e211..28568016 100644
+--- a/src/runtime/engine_spec_batch_verify.cpp
++++ b/src/runtime/engine_spec_batch_verify.cpp
+@@ -110,8 +110,13 @@ void stage_group_rows(int32_t* tok, int32_t* pos, int32_t* ctx, int T, int g, in
+ }
+ 
+ // Step price per request count, logged every 100 verify steps: forward + argmax (host wall through the argmax
+-// sync), the MTP head pass after it (feed, drafts, sync) and the tokens emitted per step.
+-void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long long emitted) {
++// sync), the MTP head pass after it (feed, drafts, sync) and the tokens emitted per step. trace_ctx >= 0
++// (diagnostics.spec_trace): one [bv-step] line per step too, tools/analysis/mtp_bv_depth_price.py reads it.
++void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long long emitted, int trace_ctx,
++                    long long drafted) {
++    if (trace_ctx >= 0)
++        IMP_LOG_INFO("[bv-step] n=%d ctx=%d drafted=%lld emitted=%lld fwd_ms=%.3f head_ms=%.3f", n, trace_ctx,
++                     drafted, emitted, fwd_ms, head_ms);
+     constexpr int kMaxN = 8;
+     struct Price {
+         double fwd_ms = 0.0, head_ms = 0.0;
+@@ -126,7 +131,7 @@ void log_step_price(int n, int rows_per_req, double fwd_ms, double head_ms, long
+     p.steps++;
+     if (++total % 100 != 0)
+         return;
+-    for (int i = 2; i <= kMaxN; ++i) {
++    for (int i = 1; i <= kMaxN; ++i) {
+         const Price& q = price[i];
+         if (q.steps > 0)
+             IMP_LOG_INFO(
+@@ -857,10 +862,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
+         }
+         row0[g] = T * g;
+         emitted_of[g] = emitted;
+-        // The binding's economics tally (judged at its lone verifies); a finished request has none.
+-        if (from_mtp[g] && nd > 0)
+-            if (MtpBind* b = mtp_find_bind(mtp_active_, mtp_pool_, req->id))
+-                mtp_econ_count(*b, emitted, nd, /*batched=*/true);
++        bound_verify_tally_(*req, N, p0[g], nd, matched, emitted, from_mtp[g] != 0);
+         // Device penalty history: the emitted tokens are rows T*g.. of the
+         // pinned argmax buffer, in order.
+         if (pen_slot[g] >= 0 && emitted > 0) {
+@@ -920,7 +922,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
+     log_step_price(
+         N, T, std::chrono::duration<double, std::milli>(feed_t0 - verify_t0).count(),
+         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_t0).count(),
+-        emit_total);
++        emit_total, runtime_config_.diagnostics.spec_trace ? max_ctx : -1, drafted_total);
+     spec_stats_record_(
+         any_mtp, drafted_total, acc_total, emit_total,
+         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());
+diff --git a/src/runtime/engine_spec_mtp_batched.cpp b/src/runtime/engine_spec_mtp_batched.cpp
+index 204d5d31..0ce8def3 100644
+--- a/src/runtime/engine_spec_mtp_batched.cpp
++++ b/src/runtime/engine_spec_mtp_batched.cpp
+@@ -55,8 +55,10 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
+         return;
+     std::vector<int32_t> toks;
+     std::vector<int> src, slots, pos, last_row, bound_g;
+-    // Second draft (bv_.depth 2): one chained head row per bound request at its next position.
++    // Second draft (bv_.depth 2): one chained head row per bound request at its next position, run when one
++    // of them drafts 2 tokens next (its live depth, speculative.mtp_adaptive_k).
+     std::vector<int> chain_slot, chain_pos;
++    bool chain = false;
+     for (int g = 0; g < N; ++g) {
+         Request& req = *reqs[g];
+         // Plain batched steps before this verify (speculative.mtp_batch_verify); a failed feed unbinds.
+@@ -86,6 +88,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
+         bound_g.push_back(g);
+         chain_slot.push_back(ws->cur_slot);
+         chain_pos.push_back(ws->mtp_pos + emitted[g]);
++        chain = chain || (bv_.depth > 1 && mtp_chain_k_(req) >= 2);
+     }
+     if (bound_g.empty())
+         return;
+@@ -117,7 +120,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
+     // The lone chain's draft head: 682 MiB per pass instead of the 1213 MiB FP8 head.
+     imp::NvFP4QuantResult head_view;
+     const int32_t* h_out = nullptr;
+-    const int n_out = mtp_head_pass_(tab, h.data, mtp_draft_lm_head_nvfp4_(head_view), stream, &h_out);
++    const int n_out = mtp_head_pass_(tab, h.data, mtp_draft_lm_head_nvfp4_(head_view), chain, stream, &h_out);
+     if (n_out < 0) {
+         fail_all(mtp_head_pass_failure(n_out));
+         return;
+@@ -137,8 +140,23 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
+     }
+ }
+ 
++// A batched verify group's outcome into its binding: econ tally, live depth (mtp_adaptive_k), spec_trace.
++void Engine::bound_verify_tally_(const Request& req, int n, int p0, int nd, int matched, int emitted,
++                                 bool from_mtp) {
++    if (runtime_config_.diagnostics.spec_trace)
++        IMP_LOG_INFO("[bv-verify] req=%d n=%d p0=%d nd=%d matched=%d emitted=%d mtp=%d", req.id, n, p0, nd,
++                     matched, emitted, from_mtp ? 1 : 0);
++    // The binding's economics tally (judged at its lone verifies); a finished request has none.
++    MtpBind* b = from_mtp && nd > 0 ? mtp_find_bind(mtp_active_, mtp_pool_, req.id) : nullptr;
++    if (b == nullptr)
++        return;
++    mtp_econ_count(*b, emitted, nd, /*batched=*/true);
++    if (runtime_config_.speculative.mtp_adaptive_k)
++        b->k_live = mtp_bound_verify_next_depth(nd, matched, std::min(bv_.depth, mtp_request_k_(req)));
++}
++
+ // A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =
+-// one draft; the request's own mtp_k bounds the chain) become its pending chain for the next verify.
++// one draft; its live depth mtp_chain_k_ bounds the chain) become its pending chain for the next verify.
+ void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2) {
+     auto* ws = mtp_ws_storage_.get();
+     const int vocab_size = model_->config_.vocab_size;
+@@ -154,7 +172,7 @@ void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok
+         return;
+     }
+     mtp_active_.pending.assign(1, tok);
+-    if (tok2 >= 0 && tok2 < vocab_size && mtp_request_k_(req) >= 2)
++    if (tok2 >= 0 && tok2 < vocab_size && mtp_chain_k_(req) >= 2)
+         mtp_active_.pending.push_back(tok2);
+     mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
+     mtp_pool_.pending_prediction = tok;
+diff --git a/src/runtime/engine_spec_mtp_head_graph.cpp b/src/runtime/engine_spec_mtp_head_graph.cpp
+index abc653eb..31665e65 100644
+--- a/src/runtime/engine_spec_mtp_head_graph.cpp
++++ b/src/runtime/engine_spec_mtp_head_graph.cpp
+@@ -163,7 +163,7 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain
+ }  // namespace
+ 
+ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const NvFP4QuantResult* head,
+-                           cudaStream_t stream, const int32_t** drafts) {
++                           bool chain, cudaStream_t stream, const int32_t** drafts) {
+     if (mtp_head_graphs_ == nullptr) {
+         mtp_head_graphs_.reset(new MtpHeadGraphs{});
+         mtp_head_graphs_->h_out.resize(kMtpHeadOutInts);
+@@ -171,7 +171,6 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
+     MtpHeadGraphs& G = *mtp_head_graphs_;
+     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
+     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
+-    const bool chain = bv_.depth > 1;
+     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
+     const HeadPassInputs in{
+         *model_, *executor_, *mtp_ws_storage_,
+diff --git a/src/runtime/spec_batch_verify_state.h b/src/runtime/spec_batch_verify_state.h
+index bdd97bc6..7de7be54 100644
+--- a/src/runtime/spec_batch_verify_state.h
++++ b/src/runtime/spec_batch_verify_state.h
+@@ -239,6 +239,11 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
+ }
+ // speculative.mtp_batch_verify_k clamped to what the step stages: 1 or 2 drafts per request.
+ [[nodiscard]] constexpr int mtp_bound_verify_depth(int key) { return std::clamp(key, 1, 2); }
++// speculative.mtp_adaptive_k on the bound verify: a fully accepted draft of `ran` tokens grows the next by
++// one (up to ceiling), a rejection sheds one (floor 1). A 1-token draft skips the chain pass, pads its row.
++[[nodiscard]] constexpr int mtp_bound_verify_next_depth(int ran, int matched, int ceiling) {
++    return std::max(1, matched >= ran ? std::min(ceiling, ran + 1) : ran - 1);
++}
+ // Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
+ // snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).
+ [[nodiscard]] constexpr int bound_verify_state_slot(int matched, int depth) {
+diff --git a/tests/test_batch_verify_predicates.cpp b/tests/test_batch_verify_predicates.cpp
+index 63eccc57..862cdb4b 100644
+--- a/tests/test_batch_verify_predicates.cpp
++++ b/tests/test_batch_verify_predicates.cpp
+@@ -290,5 +290,16 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
+     EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
+ }
+ 
++// speculative.mtp_adaptive_k on the bound verify: AIMD between 1 and the ceiling (the chunk path's rule).
++TEST(BatchVerifyPredicates, AdaptiveDepthShedsOnRejectAndGrowsOnFullAccept) {
++    EXPECT_EQ(mtp_bound_verify_next_depth(2, 2, 2), 2) << "full accept at the ceiling stays";
++    EXPECT_EQ(mtp_bound_verify_next_depth(2, 1, 2), 1) << "second draft rejected: one draft next";
++    EXPECT_EQ(mtp_bound_verify_next_depth(2, 0, 2), 1);
++    EXPECT_EQ(mtp_bound_verify_next_depth(1, 1, 2), 2) << "one draft accepted: the chain comes back";
++    EXPECT_EQ(mtp_bound_verify_next_depth(1, 0, 2), 1) << "floor 1";
++    EXPECT_EQ(mtp_bound_verify_next_depth(1, 1, 1), 1) << "a request that asked for mtp_k=1 stays at 1";
++    EXPECT_EQ(mtp_bound_verify_next_depth(2, 2, 0), 1) << "floor holds against a zero ceiling";
++}
++
+ }  // namespace
+ }  // namespace imp

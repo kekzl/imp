@@ -2,6 +2,7 @@
 #include "sampling_fields.h"
 #include "spec_usage_keys.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <stdexcept>
@@ -51,8 +52,18 @@ json content_to_chat(const json& content) {
     return has_image ? parts : json(text);
 }
 
+// Chat function names of the two client tools with their own item types.
+constexpr const char* kLocalShellTool = "shell";
+constexpr const char* kToolSearchTool = "tool_search";
+
+// Codex 0.166.0 hides MCP and agent tools behind {"type":"tool_search","execution":"client"}.
+bool is_client_tool_search(const json& t) {
+    const auto it = t.find("execution");
+    return t.value("type", "") == "tool_search" && it != t.end() && it->is_string() && *it == "client";
+}
+
 // Server-side tools the server cannot execute: offered, never demanded, so they are dropped
-// (Codex 0.163.0 sends web_search and tool_search with every request).
+// (Codex 0.163.0 sends web_search with every request).
 bool is_hosted_tool(const std::string& type) {
     static const char* const kHosted[] = {"web_search",           "web_search_preview",
                                           "tool_search",          "file_search",
@@ -77,6 +88,55 @@ json custom_tool_parameters(const json& t) {
             {"required", json::array({"input"})}};
 }
 
+json local_shell_tool() {
+    json props = {{"command",
+                   {{"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "The command and its arguments, as for execvp"}}},
+                  {"workdir", {{"type", "string"}, {"description", "Working directory"}}},
+                  {"timeout_ms", {{"type", "integer"}, {"description", "Timeout in milliseconds"}}}};
+    json fn = {
+        {"name", kLocalShellTool},
+        {"description", "Runs a shell command and returns its output."},
+        {"parameters",
+         {{"type", "object"}, {"properties", std::move(props)}, {"required", json::array({"command"})}}}};
+    return {{"type", "function"}, {"function", std::move(fn)}};
+}
+
+// `shell` function arguments -> local_shell_call action. A bare string runs through bash.
+json local_shell_action(const std::string& arguments) {
+    json action = {{"type", "exec"}, {"command", json::array()}, {"env", json::object()}};
+    const json a = json::parse(arguments, nullptr, /*allow_exceptions=*/false);
+    if (!a.is_object())
+        return action;
+    json command = a.value("command", json());
+    // Qwen3.8-Flash-Next's XML call layout hands an array parameter over as its JSON text.
+    if (command.is_string()) {
+        json parsed = json::parse(command.get<std::string>(), nullptr, /*allow_exceptions=*/false);
+        if (parsed.is_array())
+            command = std::move(parsed);
+    }
+    if (command.is_array())
+        action["command"] = command;
+    else if (command.is_string())
+        action["command"] = json::array({"bash", "-lc", command});
+    if (a.contains("workdir") && a["workdir"].is_string())
+        action["working_directory"] = a["workdir"];
+    if (a.contains("timeout_ms") && a["timeout_ms"].is_number())
+        action["timeout_ms"] = a["timeout_ms"];
+    return action;
+}
+
+// Inverse for a replayed local_shell_call.
+std::string local_shell_arguments(const json& action) {
+    json args = {{"command", action.value("command", json::array())}};
+    if (action.contains("working_directory") && action["working_directory"].is_string())
+        args["workdir"] = action["working_directory"];
+    if (action.contains("timeout_ms") && action["timeout_ms"].is_number())
+        args["timeout_ms"] = action["timeout_ms"];
+    return args.dump();
+}
+
 // Responses tools (flat function, custom, namespace) -> chat tools (nested function).
 void append_chat_tools(const json& list, json& tools) {
     for (const auto& t : list) {
@@ -88,11 +148,26 @@ void append_chat_tools(const json& list, json& tools) {
                 append_chat_tools(t["tools"], tools);
             continue;
         }
+        if (ttype == "local_shell") {
+            tools.push_back(local_shell_tool());
+            continue;
+        }
+        if (is_client_tool_search(t)) {
+            json fn = {{"name", kToolSearchTool}};
+            if (t.contains("description"))
+                fn["description"] = t["description"];
+            fn["parameters"] = t.value("parameters", json{{"type", "object"},
+                                                          {"properties", {{"query", {{"type", "string"}}}}},
+                                                          {"required", json::array({"query"})}});
+            tools.push_back({{"type", "function"}, {"function", std::move(fn)}});
+            continue;
+        }
         if (is_hosted_tool(ttype))
             continue;
         if (ttype != "function" && ttype != "custom")
             throw std::invalid_argument("unsupported tool type: " + ttype +
-                                        " (function, custom and namespace; hosted tools are ignored)");
+                                        " (function, custom, namespace, local_shell and client tool_search; "
+                                        "hosted tools are ignored)");
         json fn = {{"name", t.value("name", "")}};
         if (t.contains("description"))
             fn["description"] = t["description"];
@@ -106,16 +181,49 @@ void append_chat_tools(const json& list, json& tools) {
     }
 }
 
-// Replayed tool items -> chat messages: function_call / custom_tool_call become an assistant
-// tool call, *_output a tool message. False for any other item type.
+// A replayed call item's chat function name and arguments. False for any other item type.
+bool replayed_call(const std::string& type, const json& item, std::string& name, std::string& args) {
+    if (type == "function_call") {
+        name = item.value("name", "");
+        args = item.value("arguments", std::string("{}"));
+    } else if (type == "custom_tool_call") {
+        name = item.value("name", "");
+        args = json{{"input", item.value("input", std::string())}}.dump();
+    } else if (type == "local_shell_call") {
+        name = kLocalShellTool;
+        args = local_shell_arguments(item.value("action", json::object()));
+    } else if (type == "tool_search_call") {
+        name = kToolSearchTool;
+        const json a = item.value("arguments", json::object());
+        args = a.is_string() ? a.get<std::string>() : a.dump();
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// What the model reads as the result of tool_search; the tools themselves join the request's list.
+std::string tool_search_result_text(const json& item) {
+    json found = json::array();
+    if (item.contains("tools") && item["tools"].is_array())
+        append_chat_tools(item["tools"], found);
+    if (found.empty())
+        return "No matching tools found.";
+    std::string text = "These tools can be called now:";
+    for (const auto& t : found)
+        text += " " + t["function"].value("name", "");
+    return text;
+}
+
+// Replayed tool items -> chat messages: every call item becomes an assistant tool call, its output
+// a tool message. False for any other item type.
 bool tool_item_to_message(const std::string& type, const json& item, json& messages) {
-    if (type == "function_call" || type == "custom_tool_call") {
-        const std::string args = type == "function_call"
-                                     ? item.value("arguments", std::string("{}"))
-                                     : json{{"input", item.value("input", std::string())}}.dump();
+    std::string name;
+    std::string args;
+    if (replayed_call(type, item, name, args)) {
         json tc = {{"id", item.value("call_id", item.value("id", ""))},
                    {"type", "function"},
-                   {"function", {{"name", item.value("name", "")}, {"arguments", args}}}};
+                   {"function", {{"name", name}, {"arguments", args}}}};
         // One response's preamble and calls are one assistant turn. As separate turns the template
         // closed the preamble with an end marker, and Qwen3.8-Flash-Next then ended 15 of 40 replies
         // after its preamble, without the call (#2807).
@@ -129,14 +237,49 @@ bool tool_item_to_message(const std::string& type, const json& item, json& messa
         messages.push_back({{"role", "assistant"}, {"content", nullptr}, {"tool_calls", json::array({tc})}});
         return true;
     }
-    if (type == "function_call_output" || type == "custom_tool_call_output") {
+    if (type == "function_call_output" || type == "custom_tool_call_output" ||
+        type == "local_shell_call_output") {
         json out = item.value("output", json());
         std::string out_text = out.is_string() ? out.get<std::string>() : out.dump();
-        messages.push_back(
-            {{"role", "tool"}, {"tool_call_id", item.value("call_id", "")}, {"content", out_text}});
+        // local_shell_call_output names its call by `id` in the API reference.
+        messages.push_back({{"role", "tool"},
+                            {"tool_call_id", item.value("call_id", item.value("id", ""))},
+                            {"content", out_text}});
+        return true;
+    }
+    if (type == "tool_search_output") {
+        messages.push_back({{"role", "tool"},
+                            {"tool_call_id", item.value("call_id", "")},
+                            {"content", tool_search_result_text(item)}});
         return true;
     }
     return false;
+}
+
+// Tools a replayed tool_search_output loaded are callable from then on: the client keeps them out
+// of `tools`, so they are added here, once each.
+void append_searched_tools(const json& input, json& tools) {
+    if (!input.is_array())
+        return;
+    std::set<std::string> seen;
+    for (const auto& t : tools)
+        seen.insert(t["function"].value("name", ""));
+    for (const auto& item : input) {
+        if (!item.is_object() || item.value("type", "") != "tool_search_output" || !item.contains("tools") ||
+            !item["tools"].is_array())
+            continue;
+        json found = json::array();
+        append_chat_tools(item["tools"], found);
+        for (auto& t : found)
+            if (seen.insert(t["function"].value("name", "")).second)
+                tools.push_back(std::move(t));
+    }
+}
+
+// '-' as '_': the model spells MCP server names both ways (#3056).
+std::string name_key(std::string name) {
+    std::replace(name.begin(), name.end(), '-', '_');
+    return name;
 }
 
 void collect_tool_kinds(const json& list, const std::string& ns, ToolKinds& kinds) {
@@ -148,11 +291,16 @@ void collect_tool_kinds(const json& list, const std::string& ns, ToolKinds& kind
             collect_tool_kinds(t["tools"], t.value("name", ""), kinds);
             continue;
         }
+        kinds.local_shell = kinds.local_shell || ttype == "local_shell";
+        kinds.tool_search = kinds.tool_search || is_client_tool_search(t);
         const std::string name = t.value("name", "");
         if (ttype == "custom")
             kinds.custom.insert(name);
-        if (!ns.empty() && (ttype == "custom" || ttype == "function"))
+        if (!ns.empty() && (ttype == "custom" || ttype == "function")) {
             kinds.ns[name] = ns;
+            kinds.qualified[name_key(ns + "__" + name)] = name;
+            kinds.qualified[name_key(ns + "_" + name)] = name;
+        }
     }
 }
 
@@ -187,7 +335,26 @@ ToolKinds tool_kinds(const json& rsp) {
     ToolKinds kinds;
     if (rsp.contains("tools") && rsp["tools"].is_array())
         collect_tool_kinds(rsp["tools"], "", kinds);
+    if (rsp.contains("input") && rsp["input"].is_array())
+        for (const auto& item : rsp["input"])
+            if (item.is_object() && item.value("type", "") == "tool_search_output" &&
+                item.contains("tools") && item["tools"].is_array())
+                collect_tool_kinds(item["tools"], "", kinds);
     return kinds;
+}
+
+std::string ToolKinds::resolve(const std::string& name) const {
+    const auto it = qualified.find(name_key(name));
+    return it == qualified.end() ? name : it->second;
+}
+
+CallShape ToolKinds::shape(const std::string& name) const {
+    const std::string n = resolve(name);
+    if (local_shell && n == kLocalShellTool)
+        return CallShape::kLocalShell;
+    if (tool_search && n == kToolSearchTool)
+        return CallShape::kToolSearch;
+    return custom.count(n) != 0 ? CallShape::kCustom : CallShape::kFunction;
 }
 
 std::string custom_tool_input(const std::string& arguments) {
@@ -199,18 +366,33 @@ std::string custom_tool_input(const std::string& arguments) {
 
 json tool_call_item(const ToolKinds& kinds, const std::string& item_id, const std::string& call_id,
                     const std::string& name, const std::string& arguments, const char* status) {
-    json item = kinds.custom.count(name) != 0 ? json{{"type", "custom_tool_call"},
-                                                     {"id", item_id},
-                                                     {"call_id", call_id},
-                                                     {"name", name},
-                                                     {"input", custom_tool_input(arguments)}}
-                                              : json{{"type", "function_call"},
-                                                     {"id", item_id},
-                                                     {"call_id", call_id},
-                                                     {"name", name},
-                                                     {"arguments", arguments}};
-    item["status"] = status;
-    if (const auto it = kinds.ns.find(name); it != kinds.ns.end())
+    // Codex answers "unsupported call" to <ns>__<name> without `namespace` (0.166.0, #3056).
+    const std::string tool = kinds.resolve(name);
+    json item = {{"id", item_id}, {"call_id", call_id}, {"status", status}};
+    switch (kinds.shape(tool)) {
+        case CallShape::kCustom:
+            item["type"] = "custom_tool_call";
+            item["name"] = tool;
+            item["input"] = custom_tool_input(arguments);
+            break;
+        case CallShape::kLocalShell:
+            item["type"] = "local_shell_call";
+            item["action"] = local_shell_action(arguments);
+            break;
+        case CallShape::kToolSearch: {
+            item["type"] = "tool_search_call";
+            item["execution"] = "client";
+            const json a = json::parse(arguments, nullptr, /*allow_exceptions=*/false);
+            item["arguments"] = a.is_object() ? a : json::object();
+            break;
+        }
+        case CallShape::kFunction:
+            item["type"] = "function_call";
+            item["name"] = tool;
+            item["arguments"] = arguments;
+            break;
+    }
+    if (const auto it = kinds.ns.find(tool); it != kinds.ns.end())
         item["namespace"] = it->second;
     return item;
 }
@@ -284,12 +466,12 @@ json responses_to_openai_body(const json& rsp) {
 
     // Tools: Responses uses a FLAT function shape ({type, name, parameters});
     // chat/completions nests it under `function`.
-    if (rsp.contains("tools") && rsp["tools"].is_array()) {
-        json tools = json::array();
+    json tools = json::array();
+    if (rsp.contains("tools") && rsp["tools"].is_array())
         append_chat_tools(rsp["tools"], tools);
-        if (!tools.empty())
-            oai["tools"] = std::move(tools);
-    }
+    append_searched_tools(input, tools);
+    if (!tools.empty())
+        oai["tools"] = std::move(tools);
     if (rsp.contains("tool_choice")) {
         const json& tc = rsp["tool_choice"];
         if (tc.is_string()) {

@@ -7,7 +7,7 @@ set(IMP_PROJECT_LANGUAGES C CXX CUDA)
 if(IMP_FUZZERS_CPU_ONLY)
     set(IMP_PROJECT_LANGUAGES C CXX)
 endif()
-project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.63.0)
+project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.64.0)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1247,6 +1247,7 @@ if(IMP_BUILD_TESTS)
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
             tests/test_anthropic_transform.cpp
+            tests/test_anthropic_usage.cpp
             tests/test_assistant_prefill_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_responses_store.cpp

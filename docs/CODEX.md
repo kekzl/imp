@@ -63,6 +63,20 @@ wire_api = "responses"
 - `base_instructions` is required. Copy Codex's own text (the first `developer` input item of any Codex request, "You are a coding agent running in the Codex CLI ..."), or write your own.
 - `context_window`: Flash-Next serves up to 131072 tokens; its KV pool grows on demand ([`BIG_MODELS.md`](BIG_MODELS.md#after-start)).
 
+## Tools
+
+| Codex sends | imp |
+|---|---|
+| `function`, `custom`, `namespace` | chat functions; a namespaced call returns with `namespace`, also when the model spells `<namespace>__<name>` |
+| `local_shell` | function `shell`, returned as `local_shell_call` |
+| `tool_search` with `execution: client` | function `tool_search`, returned as `tool_search_call`; the tools in `tool_search_output` join the list |
+| `web_search`, other hosted tools | dropped |
+
+`unsupported call: <name>` is Codex's own tool output for a name it has not registered (`codex-cli` 0.166.0, scripted server).
+
+- `exec`, `shell`: the model invented the name; add the catalog entry above.
+- What the model was offered: the request `tools` in `--log-requests`.
+
 ## Measured
 
 `codex exec`, five tasks (script, bug fix + unittest, multi-file package, fix at `model_reasoning_effort=high`, `-i` screenshot), a fresh server per round, verdict from the files Codex leaves:
