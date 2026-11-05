@@ -317,7 +317,7 @@ struct ServerState {
 
     // Server limits
     int max_concurrent = 64;
-    int request_timeout = 300;
+    int request_timeout = 1800;
     int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
     // --max-queued-tokens (#2408): prompt tokens admitted and not yet prefilled (0=off).
     int64_t max_queued_tokens = 0;

@@ -197,7 +197,7 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--responses-store-max-mib <n>` | `256` (`0`=store off) | Responses store byte cap, LRU eviction |
 | `--reasoning-format <f>` | `deepseek` | `deepseek` or `none` - controls `<think>` channel handling |
 | `--think-budget <f>` | `0.5` (`0`=off) | fraction of `max_tokens` a reasoning model may spend thinking; force-closed at `max_tokens - max(reserve, max_tokens/4)`, paired with `runtime.think_answer_reserve` |
-| `--request-timeout <s>` | `300` (`0`=unlimited) | per-request timeout |
+| `--request-timeout <s>` | `1800` (`0`=unlimited) | per-request timeout, queue wait included |
 | `--max-input-tokens <n>` | `0` (unlimited) | reject longer prompts with 400; also gates `/tokenize`, `/detokenize`, `/v1/messages/count_tokens` |
 | `--max-queued-tokens <n>` | `0` (off) | 429 + `Retry-After: 1` when queued prompt tokens (admitted, not yet past prefill) + this prompt exceed `n`; server flag only, no `imp.conf` key, like `--max-concurrent`. See [API_FEATURES.md](API_FEATURES.md#admission-by-queued-prompt-tokens) |
 | `--prefix-cache <path>` | off | persist the prefix cache across restarts |
