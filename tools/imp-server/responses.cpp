@@ -109,7 +109,13 @@ json local_shell_action(const std::string& arguments) {
     const json a = json::parse(arguments, nullptr, /*allow_exceptions=*/false);
     if (!a.is_object())
         return action;
-    const json command = a.value("command", json());
+    json command = a.value("command", json());
+    // Qwen3.8-Flash-Next's XML call layout hands an array parameter over as its JSON text.
+    if (command.is_string()) {
+        json parsed = json::parse(command.get<std::string>(), nullptr, /*allow_exceptions=*/false);
+        if (parsed.is_array())
+            command = std::move(parsed);
+    }
     if (command.is_array())
         action["command"] = command;
     else if (command.is_string())

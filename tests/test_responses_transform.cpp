@@ -447,6 +447,10 @@ TEST(ResponsesTransform, LocalShellIsAShellFunctionAndComesBackAsItsItem) {
     const json bare = tool_call_item(kinds, "fc_2", "call_2", "shell", R"({"command":"ls | wc"})",
                                      "completed");
     EXPECT_EQ(bare["action"]["command"], json::array({"bash", "-lc", "ls | wc"}));
+    // Measured on Qwen3.8-Flash-Next-NVFP4: the XML call layout sends the array as text.
+    const json text = tool_call_item(kinds, "fc_4", "call_4", "shell", R"({"command":"[\"ls\", \"/etc\"]"})",
+                                     "completed");
+    EXPECT_EQ(text["action"]["command"], json::array({"ls", "/etc"}));
     // A plain function named shell stays one when the client did not offer local_shell.
     EXPECT_EQ(tool_call_item({}, "fc_3", "call_3", "shell", "{}", "completed")["type"], "function_call");
 }
