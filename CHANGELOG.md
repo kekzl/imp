@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
 ### Fixed
+- `SM120.md` decode roofline: memory:compute is ~465:1, not ~28,000:1 (8.4 MB K+V, 8.4 MFLOPs; ~140:1 at FP32 accumulate). `wgmma` is `sm_90a` only per the PTX ISA, not `sm_100`.
 - Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).
 
 ## [0.64.0] - 2026-11-05

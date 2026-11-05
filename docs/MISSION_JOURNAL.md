@@ -726,3 +726,7 @@ axis, but it could never have found this one: the missing line had no switch to 
 dense) was dense *and* text-only, leaving "hybrid" confounded with "multimodal SafeTensors +
 M-RoPE". Qwen3-VL-4B — dense, multimodal, GGUF twin staged — separated them and cleared
 M-RoPE before any conclusion was published.
+
+## Correction (2026-11-05)
+
+The log entry "B200-only (NOT sm_120): tcgen05, TMEM, wgmma" is wrong on `wgmma`: the PTX ISA requires `sm_90a` for every `wgmma.*` instruction, so B200 has none either.

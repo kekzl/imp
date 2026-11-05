@@ -1,5 +1,5 @@
 // FA2 prefill on WMMA HMMA fragments (mma.sync.m16n8k16.f16 QK^T/PV; FP8 variant mma.m16n8k32.e4m3).
-// NOT wgmma/tcgen05/TMEM (Hopper+/sm_100+ only, unavailable on sm_120a). 256 threads (8 warps).
+// NOT wgmma/tcgen05/TMEM (sm_90a, sm_100+ only, unavailable on sm_120a). 256 threads (8 warps).
 // Bq/Bkv by head_dim (99KB smem budget): HD64 Bq128/Bkv64 (~89KB); HD96 Bq64/Bkv64 (~65KB);
 // HD128 Bq64/Bkv64 (~81KB); HD256 Bq32/Bkv64 (~88KB).
 // Shared memory: Q_tile half[Bq,HD], KV_tile half[Bkv,HD] (K then reused for V), S_tile

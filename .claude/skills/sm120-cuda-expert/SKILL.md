@@ -21,7 +21,7 @@ Scope: kernels for SafeTensors NVFP4 / FP8 (and BF16/FP16). GGUF-only kernels (d
 | Measured TC rates | FP4 `mma.sync` 2019 TOPS (~1/2 datasheet); f32-accumulate 1/4 rate; GeForce TF32 = 1/2 the FP16-fp32acc rate (253 TFLOPS) |
 | Registers | 255 per thread is the DEVICE attribute; a kernel "at 255" must be read from ptxas (`make kernel-resources`), the dense FA2 instance allocates 144 |
 
-No `tcgen05` / TMEM / `wgmma` / 2-CTA cluster MMA (SM100 only). Peak path = register `mma.sync` with block scaling, FA2-style. Toolkit bumps add nothing: CUDA 13.3 flipped 0 of 247 probed instructions.
+No `tcgen05` / TMEM / 2-CTA cluster MMA (SM100 only), no `wgmma` (`sm_90a` only). Peak path = register `mma.sync` with block scaling, FA2-style. Toolkit bumps add nothing: CUDA 13.3 flipped 0 of 247 probed instructions.
 
 ## The three laws
 
