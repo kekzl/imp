@@ -21,7 +21,7 @@ Run the battery after touching the forward pass, graph capture, MoE routing, KV 
 | Empty `content`, exit 0 | API "empty response", CLI fine | (a) thinking-state != rendered prompt tail (#937, server-api); (b) spec verify argmax emitted a chat delimiter mid-think (banned mask missing, fixed #1796); (c) shared think budget at `max_tokens < ~400` on Qwen3.8 (not a bug) |
 | Cross-sequence contamination | single-stream clean, garbled only under a burst | ragged prefill row/offset, batched GDN slot mixing, shared act-quant scratch; needs the concurrency probe |
 | Greedy output differs between graph replays | `DegenerationTest.GreedyDeterminism` red | PDL registration without `griddepcontrol.wait` (registered = waits, #1833) |
-| Digits inside the retrieved needle corrupted | NIAH `ZEBRA-1550-25` for `ZEBRA-155000-25` | sparse budget too small (floor 8192 on Qwen3.8: 8/10; 4096 = 5/10), an approximation not a defect |
+| Digits inside the retrieved needle corrupted | NIAH `ZEBRA-1550-25` for `ZEBRA-155000-25` | sparse budget too small (old min/max score; Qwen3.8 mean+std reads 10/10 at 4096), an approximation not a defect |
 
 ## Pass criteria
 

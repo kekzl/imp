@@ -173,7 +173,7 @@ TEST_F(SparseMinMaxTest, PrefillSpanThenDecodeMerge) {
     check_block(2, 8, "prefill partial tail");
 
     // Decode continuation: token at pos 40 lands in block 2 slot 8 - the
-    // metadata must MERGE with the existing partial-block state.
+    // metadata must cover the whole partial block, prefill rows included.
     write_row(2, 8, 40);
     dcopy(d_k, k_cache_h);
     std::vector<int> pos2 = {40};
@@ -184,7 +184,7 @@ TEST_F(SparseMinMaxTest, PrefillSpanThenDecodeMerge) {
     check_block(2, 9, "decode merge");
 
     // Block reuse: a fresh sequence writes pos 0 into (reused) block 3 - the
-    // slot-0 write must RE-INITIALIZE, not merge with the poison pattern.
+    // slot-0 write must RE-INITIALIZE, not keep the poison pattern.
     std::vector<int> bt2_h = {3};
     int* d_bt2 = dmalloc<int>(bt2_h.size());
     dcopy(d_bt2, bt2_h);
@@ -213,9 +213,8 @@ TEST_F(SparseMinMaxTest, PrefillSpanThenDecodeMerge) {
 }
 
 TEST_F(SparseMinMaxTest, MeanStdMergesAcrossSpanAndDecodeSteps) {
-    // min/max merges idempotently; mean/std does not - the stored half must be weighted by the
-    // slot count already covered ("slot"). A 24-token prefill span then two single-token decode
-    // merges into the same block exposes a restart or double-weight immediately.
+    // Mean/std weights every row: a 24-token prefill span then two single-token decode steps
+    // into the same block expose a dropped or double-counted row immediately.
     std::vector<int> bt_h = {0, 1, 2};
     int* d_bt = dmalloc<int>(bt_h.size());
     dcopy(d_bt, bt_h);
@@ -248,6 +247,43 @@ TEST_F(SparseMinMaxTest, MeanStdMergesAcrossSpanAndDecodeSteps) {
     }
     cudaFree(d_bt);
     cudaFree(d_pos);
+}
+
+TEST_F(SparseMinMaxTest, RolledBackDraftRowsLeaveNoTrace) {
+    // Spec verify writes rows 4..7, the rollback keeps row 4, and the next step
+    // overwrites slot 5: the pair must cover rows 0..5 as they stand now.
+    std::vector<int> bt_h = {0};
+    int* d_bt = dmalloc<int>(bt_h.size());
+    dcopy(d_bt, bt_h);
+    for (const bool meanstd : {false, true}) {
+        std::vector<int> verify_h(8);
+        for (int i = 0; i < 8; i++) {
+            verify_h[i] = i;
+            write_row(0, i, i < 5 ? i : 1000 + i);  // rows 5..7: drafts far from the kept rows
+        }
+        dcopy(d_k, k_cache_h);
+        int* d_verify = dmalloc<int>(verify_h.size());
+        dcopy(d_verify, verify_h);
+        sparse_update_key_minmax(QType::F16, d_k, d_mm, d_verify, d_bt, nkv, hd, kBS, 8, 0, 1, nullptr,
+                                 nullptr, nullptr, meanstd);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        write_row(0, 5, 5);
+        dcopy(d_k, k_cache_h);
+        std::vector<int> next_h = {5};
+        int* d_next = dmalloc<int>(next_h.size());
+        dcopy(d_next, next_h);
+        sparse_update_key_minmax(QType::F16, d_k, d_mm, d_next, d_bt, nkv, hd, kBS, 1, 0, 1, nullptr, nullptr,
+                                 nullptr, meanstd);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        if (meanstd)
+            check_block_meanstd(0, 6, "after rollback");
+        else
+            check_block(0, 6, "after rollback");
+        cudaFree(d_verify);
+        cudaFree(d_next);
+    }
+    cudaFree(d_bt);
 }
 
 TEST_F(SparseMinMaxTest, MultiSeqDecodeTwoTokens) {
