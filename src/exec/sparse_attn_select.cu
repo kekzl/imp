@@ -57,9 +57,9 @@ struct KeyReaderNvfp4 {
 // token i's physical block differs from token i-1's; the owner covers every same-block
 // token after it (same-block tokens are adjacent in every call shape: prefill
 // contiguous, ragged row-range per sequence, spec verify chunk contiguous, multi-seq
-// decode one token per sequence with exclusive blocks). Slot 0 initializes, otherwise
-// merges with stored metadata; block reuse is covered because a fresh block's first
-// write is always slot 0.
+// decode one token per sequence with exclusive blocks). The owner rebuilds the pair from
+// slots [0, slot + span): a rolled-back draft row leaves no trace, and neither does a
+// reused block's old content.
 // Metadata layout per (layer, block): row_elems half2 per (kv_head, dim) element, index
 // e = kv_head * head_dim + d. The pair carries (min, max), or (mean, std) under
 // attention.sparse_score_meanstd; same layout, same pass, same read by the score kernel.
@@ -114,54 +114,31 @@ __device__ __forceinline__ int sparse_owner_block(const int* block_tables, const
 }
 
 // Mean/std twin (attention.sparse_score_meanstd): same storage, same owner scheme, but
-// the pair holds (mean, std) over the block's written slots instead of (min, max). slot
-// IS the count already merged (slots fill in order), no separate counter needed. One
-// Welford pass per element rather than sum/sumsq: E[x^2]-E[x]^2 cancels most of the
-// mantissa once |mean| is a few multiples of the spread.
+// the pair holds (mean, std) over the block's rows instead of (min, max). One Welford
+// pass per element rather than sum/sumsq: E[x^2]-E[x]^2 cancels most of the mantissa
+// once |mean| is a few multiples of the spread.
 template <typename Reader>
-__device__ __forceinline__ void sparse_merge_block_meanstd(Reader rd, __half2* __restrict__ mm, int slot,
-                                                           int span, int row_elems) {
+__device__ __forceinline__ void sparse_rebuild_block_meanstd(Reader rd, __half2* __restrict__ mm, int rows,
+                                                             int row_elems) {
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
-        float mean_b = 0.0f, m2_b = 0.0f;
-        for (int j = 0; j < span; j++) {
-            const float v = rd.get(slot + j, e);
-            const float d = v - mean_b;
-            mean_b += d / (float)(j + 1);
-            m2_b += d * (v - mean_b);
+        float mean = 0.0f, m2 = 0.0f;
+        for (int j = 0; j < rows; j++) {
+            const float v = rd.get(j, e);
+            const float d = v - mean;
+            mean += d / (float)(j + 1);
+            m2 += d * (v - mean);
         }
-        float mean = mean_b, m2 = m2_b, n = (float)span;
-        if (slot != 0) {
-            // Chan's parallel merge. M2 of the stored half is reconstructed
-            // from std, which keeps the combine exact in fp32 even though the
-            // carrier is fp16.
-            const __half2 cur = mm[e];
-            const float mean_a = __low2float(cur), sd_a = __high2float(cur);
-            const float na = (float)slot, nb = (float)span;
-            const float delta = mean_b - mean_a;
-            n = na + nb;
-            mean = mean_a + (delta * nb / n);
-            m2 = (sd_a * sd_a * na) + m2_b + (delta * delta * na * nb / n);
-        }
-        mm[e] = __floats2half2_rn(mean, sqrtf(fmaxf(m2 / n, 0.0f)));
+        mm[e] = __floats2half2_rn(mean, sqrtf(fmaxf(m2 / (float)rows, 0.0f)));
     }
 }
 
 template <typename Reader>
-__device__ __forceinline__ void sparse_merge_block_minmax(Reader rd, __half2* __restrict__ mm, int slot,
-                                                          int span, int row_elems) {
-    const bool init = (slot == 0);
+__device__ __forceinline__ void sparse_rebuild_block_minmax(Reader rd, __half2* __restrict__ mm, int rows,
+                                                            int row_elems) {
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
-        float mn, mx;
-        if (init) {
-            mn = FLT_MAX;
-            mx = -FLT_MAX;
-        } else {
-            const __half2 cur = mm[e];
-            mn = __low2float(cur);
-            mx = __high2float(cur);
-        }
-        for (int j = 0; j < span; j++) {
-            const float v = rd.get(slot + j, e);
+        float mn = FLT_MAX, mx = -FLT_MAX;
+        for (int j = 0; j < rows; j++) {
+            const float v = rd.get(j, e);
             mn = fminf(mn, v);
             mx = fmaxf(mx, v);
         }
@@ -172,12 +149,12 @@ __device__ __forceinline__ void sparse_merge_block_minmax(Reader rd, __half2* __
 // kMeanStd picks which statistic the pair carries; everything around it (owner
 // resolution, span walk, strides) is shared.
 template <bool kMeanStd, typename Reader>
-__device__ __forceinline__ void sparse_merge_block(Reader rd, __half2* __restrict__ mm, int slot, int span,
-                                                   int row_elems) {
+__device__ __forceinline__ void sparse_rebuild_block(Reader rd, __half2* __restrict__ mm, int rows,
+                                                     int row_elems) {
     if constexpr (kMeanStd)
-        sparse_merge_block_meanstd(rd, mm, slot, span, row_elems);
+        sparse_rebuild_block_meanstd(rd, mm, rows, row_elems);
     else
-        sparse_merge_block_minmax(rd, mm, slot, span, row_elems);
+        sparse_rebuild_block_minmax(rd, mm, rows, row_elems);
 }
 
 template <typename CacheT, bool kMeanStd>
@@ -198,8 +175,8 @@ __global__ void sparse_update_key_minmax_layers_kernel(
         return;
     KeyReaderPlain<CacheT> rd{k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems,
                               row_elems};
-    sparse_merge_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
-                                 slot, span, row_elems);
+    sparse_rebuild_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
+                                   slot + span, row_elems);
 }
 
 // NVFP4 twin: same owner scheme, two base pointers (packed nibbles + UE4M3
@@ -225,8 +202,8 @@ __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
     KeyReaderNvfp4 rd{k_base + (layer * k_layer_stride_bytes) + ((int64_t)block_id * block_size * row_bytes),
                       sc_base + (layer * sc_layer_stride_bytes) + ((int64_t)block_id * block_size * sc_row),
                       row_bytes, sc_row};
-    sparse_merge_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
-                                 slot, span, row_elems);
+    sparse_rebuild_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
+                                   slot + span, row_elems);
 }
 
 // Block scoring: one warp per block, grid-stride over blocks (context-independent grid
