@@ -1104,6 +1104,10 @@ ngram                = true
 # draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
 # and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
 sampled              = true
+# With sampled: sampled rows verify in the batched step too (mtp_batch_verify,
+# a lone bound chat included), each row with its own request's seed. false =
+# the single verify chunk, a batch holding a sampled row decodes plain.
+sampled_batch_verify = true
 # Context cap for DENSE chunk-verify drafting (#964): the captured verify
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past

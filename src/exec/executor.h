@@ -177,6 +177,14 @@ public:
     // set_verify_sampling(s): until reset with nullptr, row r draws from s instead of the argmax.
     void set_verify_sampling(const VerifySampling* s) {
         verify_sampling_ = s ? std::optional(*s) : std::nullopt;
+        verify_rows_.clear();
+    }
+    // set_verify_sampling_rows(rows, n): a mixed-request chunk (batched verify) until reset with
+    // set_verify_sampling(nullptr). Row r draws with rows[r], seed rows[r].seed0 as given; top_k 0 = argmax
+    // row.
+    void set_verify_sampling_rows(const VerifySampling* rows, int n) {
+        verify_sampling_.reset();
+        verify_rows_.assign(rows, rows + n);
     }
     void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                            const int32_t* d_hist = nullptr, int n_hist = 0,
@@ -755,6 +763,9 @@ private:
     // greedy_argmax_all's per-batch pick: argmax, or a draw per row under set_verify_sampling.
     void pick_verify_rows_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
                            cudaStream_t stream);
+    // Under set_verify_sampling_rows: each run of sampled rows in [row0, row0 + csz) overwrites the argmax.
+    void draw_verify_row_runs_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
+                               cudaStream_t stream);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).
@@ -767,6 +778,7 @@ private:
     // Sampled verify: device [rows x TopkRowArgs (256-aligned) | rows x SAMPLE_SCRATCH_BYTES], pinned args
     // twin.
     std::optional<VerifySampling> verify_sampling_;
+    std::vector<VerifySampling> verify_rows_;  // set_verify_sampling_rows, indexed by chunk row
     VramOwned<char> verify_sample_scratch_;
     PinnedBuffer h_verify_sample_args_;
     int verify_sample_rows_cap_ = 0;

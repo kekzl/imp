@@ -150,6 +150,60 @@ TEST(SampleVerifyRows, MinPRemovesTokensBelowTheThreshold) {
     }
 }
 
+TEST(SampleVerifyRows, PerRowParamsDrawWhatEachRequestsOwnChunkDraws) {
+    // Batched verify: two requests x 3 rows in one call, each row with its request's params and seed + j,
+    // must draw what sample_verify_rows draws for that request's chunk alone.
+    const int T = 3, n_rows = 2 * T, vocab = 4096;
+    std::vector<float> h(static_cast<size_t>(n_rows) * vocab);
+    for (int r = 0; r < n_rows; ++r)
+        for (int v = 0; v < vocab; ++v)
+            h[static_cast<size_t>(r) * vocab + v] = std::sin(0.29f * v + 0.71f * r) * 5.0f +
+                                                    ((v * 17 + r) % 89) * 0.01f;
+    VerifySampling a;
+    a.temperature = 1.0f;
+    a.top_p = 0.95f;
+    a.top_k = 20;
+    a.seed0 = 0x7ffffffe;
+    VerifySampling b;
+    b.temperature = 0.6f;
+    b.top_p = 0.8f;
+    b.min_p = 0.05f;
+    b.top_k = 40;
+    b.seed0 = 12345;
+    std::vector<VerifySampling> per_row(n_rows);
+    for (int j = 0; j < T; ++j) {
+        per_row[j] = a;
+        per_row[j].seed0 = static_cast<int>((static_cast<unsigned>(a.seed0) + j) & 0x7fffffffu);
+        per_row[T + j] = b;
+        per_row[T + j].seed0 = b.seed0 + j;
+    }
+    RowsFixture f(n_rows, vocab);
+    f.upload(h);
+    ASSERT_EQ(sample_verify_rows_each(f.d_logits, n_rows, vocab, per_row.data(), f.h_args, f.d_args,
+                                      f.d_slots, f.d_out, nullptr),
+              cudaSuccess);
+    std::vector<int32_t> got(n_rows, -1);
+    ASSERT_EQ(cudaMemcpy(got.data(), f.d_out, sizeof(int32_t) * n_rows, cudaMemcpyDeviceToHost), cudaSuccess);
+
+    for (int g = 0; g < 2; ++g) {
+        RowsFixture one(T, vocab);
+        one.upload(std::vector<float>(h.begin() + static_cast<ptrdiff_t>(g) * T * vocab,
+                                      h.begin() + static_cast<ptrdiff_t>(g + 1) * T * vocab));
+        const std::vector<int32_t> ref = one.run(g == 0 ? a : b, 0);
+        for (int j = 0; j < T; ++j)
+            EXPECT_EQ(got[(g * T) + j], ref[j]) << "request " << g << " row " << j;
+    }
+}
+
+TEST(SampleVerifyRows, PerRowRefusesARowWithoutADraw) {
+    RowsFixture f(2, 512);
+    std::vector<VerifySampling> rows(2);
+    rows[1].top_k = 0;  // an argmax row is the caller's to skip
+    EXPECT_EQ(sample_verify_rows_each(f.d_logits, 2, 512, rows.data(), f.h_args, f.d_args, f.d_slots, f.d_out,
+                                      nullptr),
+              cudaErrorInvalidValue);
+}
+
 TEST(SampleVerifyRows, RefusesTopKPastTheRowSampler) {
     RowsFixture f(2, 512);
     VerifySampling s;

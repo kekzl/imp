@@ -19,6 +19,10 @@ struct Speculative {
     // sampler's seed, a draft token is accepted while the draw equals it (exact, compute/sampling.h).
     // Off = greedy requests only.
     bool sampled = true;
+    // With sampled: a sampled row verifies in the batched step too (speculative.mtp_batch_verify, its solo
+    // group of one included), each row drawing with its own request's seed. false = sampled rows take the
+    // single verify chunk, and a batch holding one decodes plain.
+    bool sampled_batch_verify = true;
     // Context cap for dense chunk-verify drafting (#964): past this context,
     // drafting is gated per step. MoE-NVFP4 and GDN-hybrid requests are exempt
     // (deep drafts pay for themselves). Superseded in practice by the
