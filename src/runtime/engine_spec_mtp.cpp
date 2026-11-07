@@ -114,7 +114,7 @@ int Engine::mtp_acquire_slot_(const Request& req, int offset) {
         cands.push_back({.pos = s == ws->cur_slot ? ws->mtp_pos : ws->slot_pos[static_cast<size_t>(s)],
                          .history = &mtp_pool_.slot_history[static_cast<size_t>(s)],
                          .last_use = mtp_pool_.slot_used[static_cast<size_t>(s)]});
-    const int pick = mtp_pick_slot(cands, req.input_tokens, offset);
+    const int pick = mtp_pick_slot(cands, req.input_tokens, offset, runtime_config_.speculative.mtp_gap_bind);
     if (pick < 0)
         return -1;
     const int slot = mtp_pool_.free_slots[static_cast<size_t>(pick)];
@@ -485,7 +485,8 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
 
 // Bind req's first prefill chunk (at `offset`) to a head KV slot, resuming over the longest common
 // prefix of the slot's fed history and this prompt (multi-turn agent loops re-send the prior turn
-// verbatim, so the cache carries over). false = req drafts nothing; no slot's history is touched.
+// verbatim, so the cache carries over). A resume past every slot's rows starts the head at `offset`
+// (speculative.mtp_gap_bind). false = req drafts nothing; no slot's history is touched.
 bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
@@ -531,6 +532,16 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     mtp_active_.econ_batched = 0;
     mtp_active_.k_live = mtp_spec_k_;
     mtp_active_.carry_n = 0;
+    if (runtime_config_.speculative.mtp_gap_bind && imp::mtp_bind_has_gap(offset, keep_pairs, ring_lost)) {
+        if (!imp::mtp_kv_hi_floor(*ws, slot, offset, decode_stream())) {
+            mtp_unbind_("head KV ring floor failed");
+            return false;
+        }
+        IMP_LOG_INFO("mtp-spec: req %d binds slot %d from %d, no head rows below it", req.id, slot, offset);
+        ws->mtp_pos = offset;
+        mtp_active_.history.assign(in.begin(), in.begin() + std::min<size_t>(in.size(), offset + 1));
+        return true;
+    }
     if (!mtp_active_.history.empty() && ws->mtp_pos > 0)
         return true;
     // Nothing usable carried over, restart the cache. Pair 0 needs

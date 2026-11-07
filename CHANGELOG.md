@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `/v1/messages` reads `output_config.effort` and maps it onto the chat template's `reasoning_effort` list. Qwen3.8-27B-NVFP4: `low`, `medium` as sent; `high`, `xhigh`, `max` render `xhigh`.
 - `diagnostics.tool_fault_raw` (default off): a failed tool call logs the model's raw call text, first 2000 bytes. A call naming a tool the request did not offer now logs a line too, and non-streamed requests log validation failures (#3063).
+- `speculative.mtp_gap_bind` (default on): a prompt whose prefix-cache hit reaches past every MTP head slot's rows binds anyway, the head starting at the hit. Agent chats resend whole transcripts, so one unbound turn kept a chat unbound: familiar, 4 agents on Qwen3.8-27B-NVFP4, 3851 of 4567 requests drafted nothing.
 
 ### Changed
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
@@ -15,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Sparse attention page metadata: a page statistic is rebuilt from its current KV rows, so rejected MTP drafts no longer stay in the mean/std (or min/max) that ranks the page. Prompt pages were not affected.
 - `SM120.md` decode roofline: memory:compute is ~465:1, not ~28,000:1 (8.4 MB K+V, 8.4 MFLOPs; ~140:1 at FP32 accumulate). `wgmma` is `sm_90a` only per the PTX ISA, not `sm_100`.
 - Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).
+- Request log: `temp=` reads `model` when the request sent no temperature; it printed the 0.70 placeholder before the model default (Qwen3.8: 1.0) applied.
 
 ## [0.64.0] - 2026-11-05
 

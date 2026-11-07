@@ -520,6 +520,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_concurrent", cfg.speculative.mtp_concurrent);
     I("speculative.mtp_history_slots", cfg.speculative.mtp_history_slots);
     I("speculative.mtp_kv_window", cfg.speculative.mtp_kv_window);
+    B("speculative.mtp_gap_bind", cfg.speculative.mtp_gap_bind);
     B("speculative.mtp_carry", cfg.speculative.mtp_carry);
     I("speculative.mtp_batch_verify", cfg.speculative.mtp_batch_verify);
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
