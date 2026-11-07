@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -42,6 +43,14 @@ struct SamplingFields {
             top_k = d.top_k;
         if (!rep_pen_explicit)
             repetition_penalty = d.repetition_penalty;
+    }
+
+    // Request-log text before apply_model_defaults: an omitted temperature reads "model", not the 0.7 above.
+    [[nodiscard]] std::string log_temperature() const {
+        char b[16] = "model";
+        if (temperature_explicit)
+            std::snprintf(b, sizeof(b), "%.2f", temperature);
+        return b;
     }
 
     // Everything but seed and stream, which callers set per completion.

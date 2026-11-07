@@ -384,6 +384,8 @@ inline void mtp_kv_reset(MtpDraftWorkspace& ws) {
 }
 // Zero d_slot_hi and slot_hi_bound of `slot` (< 0: every slot) on `stream`: the slot restarts at position 0.
 [[nodiscard]] bool mtp_kv_hi_reset(MtpDraftWorkspace& ws, int slot, cudaStream_t stream);
+// Start `slot` at position `floor` with no row below it: its window begins there (mtp_ring_floor_hi).
+[[nodiscard]] bool mtp_kv_hi_floor(MtpDraftWorkspace& ws, int slot, int floor, cudaStream_t stream);
 // The active slot's d_slot_hi entry (null without a head KV).
 inline int* mtp_active_hi(const MtpDraftWorkspace& ws) {
     return ws.d_slot_hi != nullptr ? ws.d_slot_hi + ws.cur_slot : nullptr;

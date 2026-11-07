@@ -316,6 +316,15 @@ bool mtp_kv_hi_reset(MtpDraftWorkspace& ws, int slot, cudaStream_t stream) {
                            stream) == cudaSuccess;
 }
 
+bool mtp_kv_hi_floor(MtpDraftWorkspace& ws, int slot, int floor, cudaStream_t stream) {
+    if (ws.d_slot_hi == nullptr || slot < 0 || slot >= ws.n_kv_slots)
+        return false;
+    const int hi = mtp_ring_floor_hi(floor, ws.max_seq_len);
+    ws.slot_hi_bound[static_cast<size_t>(slot)] = hi;
+    return cudaMemcpyAsync(ws.d_slot_hi + slot, &hi, sizeof(int), cudaMemcpyHostToDevice, stream) ==
+           cudaSuccess;
+}
+
 // ---------------------------------------------------------------------------
 // Workspace alloc/free
 // ---------------------------------------------------------------------------

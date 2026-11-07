@@ -184,7 +184,9 @@ TEST(BatchVerifyPredicates, PickSlotKeepsAChatsHeadCacheAcrossASideRequest) {
     EXPECT_EQ(mtp_pick_slot(c, a_next, 864), 0);
     EXPECT_EQ(mtp_pick_slot(c, a_next, 0), 0) << "a long resume wins on a fresh prompt too";
     EXPECT_EQ(mtp_pick_slot(c, a_next, 899), 0) << "resume min(pos, L - 1) = 899 covers offset 899";
-    EXPECT_EQ(mtp_pick_slot(c, a_next, 900), -1) << "pair 899 needs h_899, the prefix never forwarded it";
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 900, /*gap_bind=*/false), -1)
+        << "pair 899 needs h_899, the prefix never forwarded it";
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 900), 0) << "gap bind: the chat's own stale slot, not another one";
     // The side request took slot 1; its history is no match for A, the decline keeps slot 0 intact.
     const auto side_hist = side;
     c[1] = {.pos = 502, .history = &side_hist, .last_use = 2};
@@ -195,6 +197,24 @@ TEST(BatchVerifyPredicates, PickSlotKeepsAChatsHeadCacheAcrossASideRequest) {
     EXPECT_EQ(mtp_pick_slot(c, b, 0), 0) << "slot 0 is the LRU one here";
     c[0].last_use = 3;
     EXPECT_EQ(mtp_pick_slot(c, b, 0), 1);
+}
+
+// familiar, 4 agents on Qwen3.8-27B: chats 2-4 hit the shared system prompt past a wrapped ring, then every
+// turn's hit reached past the slot's rows, 3851 of 4567 requests drafted nothing.
+TEST(BatchVerifyPredicates, GapBindPicksTheLruSlotForANewChatOverASharedPrompt) {
+    const auto a_hist = seq(0, 2400), b_hist = seq(0, 3000);
+    std::vector<MtpSlotCand> c = {{.pos = 2399, .history = &a_hist, .last_use = 2},
+                                  {.pos = 2999, .history = &b_hist, .last_use = 1}};
+    auto d = seq(0, 900);  // the shared 900-token system prompt, then its own turn
+    d.insert(d.end(), 300, 77777);
+    EXPECT_EQ(mtp_pick_slot(c, d, 899), 1) << "both resume 899: the older slot";
+    EXPECT_EQ(mtp_pick_slot(c, d, 1000), 1) << "same tie with the hit past both resumes";
+    std::vector<int32_t> nothing;
+    auto x = seq(5000, 40);
+    std::vector<MtpSlotCand> two = {{.pos = 0, .history = &nothing, .last_use = 5},
+                                    {.pos = 0, .history = &nothing, .last_use = 4}};
+    EXPECT_EQ(mtp_pick_slot(two, x, 30), 1) << "no resume at all: LRU";
+    EXPECT_EQ(mtp_pick_slot({}, x, 30), -1) << "no free slot";
 }
 
 // speculative.mtp_batch_verify: two to four chats decoding on a default Qwen3.8-27B server verify their bound

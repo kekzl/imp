@@ -1104,6 +1104,10 @@ ngram                = true
 # draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
 # and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
 sampled              = true
+# With sampled: sampled rows verify in the batched step too (mtp_batch_verify,
+# a lone bound chat included), each row with its own request's seed. false =
+# the single verify chunk, a batch holding a sampled row decodes plain.
+sampled_batch_verify = true
 # Context cap for DENSE chunk-verify drafting (#964): the captured verify
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
@@ -1220,6 +1224,10 @@ mtp_history_slots    = 4
 # Clamped to the model context; with many slots (batched verify) a 1 GiB budget
 # caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
 mtp_kv_window        = 16384
+# A prompt whose prefix-cache hit reaches past every head slot's rows still
+# binds: the head starts at the hit with no rows below it. false = it drafts
+# nothing, and an agent chat that missed one turn stays unbound.
+mtp_gap_bind         = true
 # With mtp_history_slots: up to that many requests bind the head at once, and
 # a bound request's hidden rows from batched decode steps feed its head slot
 # in 256-row passes (2.5 MiB per slot), so two chats decoding together draft

@@ -619,7 +619,7 @@ TEST_F(MtpFeedBatchTest, AttnScanRingWindowMatchesReference) {
     const int nh = 8, nkv = 2, hd = 128, ring = 1024;
     const size_t row = static_cast<size_t>(nkv) * hd;
     for (const int p : {700, 3000, 5000}) {
-        for (const int stale : {0, 5, 300}) {
+        for (const int stale : {0, 5, 300, 900}) {
             const int hi = p + 1 + stale;
             const int lo = imp::mtp_ring_lo(p, hi, ring);
             std::mt19937 rng(static_cast<unsigned>(p + stale));

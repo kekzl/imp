@@ -19,6 +19,10 @@ struct Speculative {
     // sampler's seed, a draft token is accepted while the draw equals it (exact, compute/sampling.h).
     // Off = greedy requests only.
     bool sampled = true;
+    // With sampled: a sampled row verifies in the batched step too (speculative.mtp_batch_verify, its solo
+    // group of one included), each row drawing with its own request's seed. false = sampled rows take the
+    // single verify chunk, and a batch holding one decodes plain.
+    bool sampled_batch_verify = true;
     // Context cap for dense chunk-verify drafting (#964): past this context,
     // drafting is gated per step. MoE-NVFP4 and GDN-hybrid requests are exempt
     // (deep drafts pay for themselves). Superseded in practice by the
@@ -190,6 +194,11 @@ struct Speculative {
     // floor 2048. Qwen3.8-27B: 4 KiB per row per slot; 40k prompt 222 / 276 drafts accepted (full: 222 /
     // 277).
     int mtp_kv_window = 16384;
+    // A prompt whose prefix-cache hit reaches past every head slot's rows still binds: the head starts at
+    // the hit, with no rows below it, and drafts from there. Agent chats resend whole transcripts, so one
+    // unbound turn kept a chat unbound for good (84 % of requests, 0.11 % of tokens through the head).
+    // false = such a prompt drafts nothing.
+    bool mtp_gap_bind = true;
     // With mtp_history_slots: up to that many requests bind at once, and a bound request's hidden rows from
     // batched decode steps feed its head slot in 256-row passes, so it drafts again once it decodes alone
     // and its chat's next turn resumes the head cache. false = one binding, a batched step unbinds it.

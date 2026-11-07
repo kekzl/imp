@@ -92,6 +92,12 @@ struct VerifySampling {
                                              const VerifySampling& s, int row0, TopkRowArgs* h_args,
                                              TopkRowArgs* d_args, void* d_slots, int32_t* d_out,
                                              cudaStream_t stream = nullptr);
+// Mixed-request twin (batched verify): row r draws with per_row[r], seed per_row[r].seed0 as given (the
+// caller adds the row's output index). Every row's top_k in [1, SAMPLE_MAX_TOP_K].
+[[nodiscard]] cudaError_t sample_verify_rows_each(float* d_logits, int n_rows, int vocab_size,
+                                                  const VerifySampling* per_row, TopkRowArgs* h_args,
+                                                  TopkRowArgs* d_args, void* d_slots, int32_t* d_out,
+                                                  cudaStream_t stream = nullptr);
 
 // Row-parallel batched GREEDY argmax (temperature-0 twin of the top-k stash): one partial
 // launch (grid ARGMAX_NBLOCKS x n_rows) + one reduce launch (grid n_rows) replace n
