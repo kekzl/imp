@@ -428,6 +428,13 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
                              request_id);
         return;
     }
+    if (oai_body.contains("reasoning_effort")) {
+        std::vector<std::string> values;
+        if (std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout); lock.owns_lock())
+            values = state.chat_tpl.reasoning_effort_values();
+        oai_body["reasoning_effort"] =
+            anth::nearest_reasoning_effort(oai_body["reasoning_effort"].get<std::string>(), values);
+    }
 
     // stream=true drives the same per-token batching-engine loop as OpenAI streaming, emitting
     // native Anthropic SSE events - TTFT is real first-token latency, not full-generation latency.

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <vector>
 
 namespace imp_server::anthropic {
 
@@ -16,6 +17,11 @@ using json = nlohmann::json;
 // /v1/chat/completions body, feedable back into handle_chat_completions unchanged. Throws
 // nothing; malformed fields default to OpenAI-sensible values.
 json anthropic_to_openai_body(const json& anth);
+
+// output_config.effort levels against the loaded template's reasoning_effort list: the
+// level itself, else the next higher one listed, else the highest listed. An unranked
+// value or an empty list returns `want`.
+std::string nearest_reasoning_effort(const std::string& want, const std::vector<std::string>& values);
 
 // Inverse: translates an OpenAI non-streaming chat.completion response into an Anthropic
 // Messages response. anth_model is used verbatim (the name the client sent, not a resolved

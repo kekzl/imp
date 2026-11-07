@@ -1246,6 +1246,7 @@ if(IMP_BUILD_TESTS)
         # test_sse_stream_utils.cpp covers SSE chunk envelopes + reasoning/channel splits in
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
+            tests/test_anthropic_effort.cpp
             tests/test_anthropic_transform.cpp
             tests/test_anthropic_usage.cpp
             tests/test_assistant_prefill_transform.cpp
