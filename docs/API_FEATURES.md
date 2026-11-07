@@ -103,7 +103,7 @@ Reasoning models separate their chain of thought into `reasoning_content` (Anthr
 **On `/v1/messages`, thinking is opt-in** (#1541).
 
 - Without `thinking` field: no thinking block, `content[0]` is text.
-- With it: thinking block first.
+- With it: thinking block first. `output_config.effort` picks the template's `reasoning_effort`: the same level, else the next higher one listed, else the highest. Qwen3.8 (`xhigh`, `medium`, `low`): `high` and `max` render `xhigh`. It changes the system prompt, so keep it fixed within a session or the prefix cache misses.
 - Measured on `Qwen3.6-27B-Text-NVFP4-MTP`:
 
 | request `thinking` | `content` blocks | `content[0].text` |
