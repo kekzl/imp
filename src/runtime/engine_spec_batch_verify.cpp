@@ -928,7 +928,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         emit_total);
     spec_stats_record_(
         any_mtp, drafted_total, acc_total, emit_total,
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count(),
+        /*sampled=*/!row_draw.empty());
     static bool logged = false;
     if (!logged) {
         logged = true;
