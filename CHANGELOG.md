@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/v1/messages` reads `output_config.effort` and maps it onto the chat template's `reasoning_effort` list. Qwen3.8-27B-NVFP4: `low`, `medium` as sent; `high`, `xhigh`, `max` render `xhigh`.
 - `diagnostics.tool_fault_raw` (default off): a failed tool call logs the model's raw call text, first 2000 bytes. A call naming a tool the request did not offer now logs a line too, and non-streamed requests log validation failures (#3063).
 - `speculative.mtp_gap_bind` (default on): a prompt whose prefix-cache hit reaches past every MTP head slot's rows binds anyway, the head starting at the hit. Agent chats resend whole transcripts, so one unbound turn kept a chat unbound: familiar, 4 agents on Qwen3.8-27B-NVFP4, 3851 of 4567 requests drafted nothing.
+- `speculative.sampled_batch_verify` (default on): sampled requests verify MTP drafts in the batched step, a lone chat included, each row with its own seed; before, the single verify chunk. Qwen3.8-27B-NVFP4 agent replay at temperature 1, 50k context: 1 chat 65.6 -> 141.1 tok/s (MTP off 92.6), 4 chats 156.0 -> 211.1 tok/s total (MTP off 173.7).
 
 ### Changed
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
