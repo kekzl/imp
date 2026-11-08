@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `speculative.sampled_batch_verify` (default on): sampled requests verify MTP drafts in the batched step, a lone chat included, each row with its own seed; before, the single verify chunk. Qwen3.8-27B-NVFP4 agent replay at temperature 1, 50k context: 1 chat 65.6 -> 141.1 tok/s (MTP off 92.6), 4 chats 156.0 -> 211.1 tok/s total (MTP off 173.7).
 
 ### Changed
+- A concurrent GDN-hybrid server with MTP on defaults to `speculative.mtp_nvfp4_head=false` and `mtp_batch_verify_k=1`, keeping 682 MiB plus half the spare recurrent slots for the KV pool. Qwen3.8-27B-NVFP4, SWE-bench dev 50, 4 agents: 33/50 solved, agent time 10.81 h vs 13.43 h MTP off; single-stream unchanged.
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
 ### Fixed

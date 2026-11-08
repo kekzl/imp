@@ -209,7 +209,8 @@ struct Speculative {
     // Qwen3.8-27B-NVFP4, 4 overlapping chats: 83.72 -> 117.45 tok/s per turn, c32 unchanged.
     int mtp_batch_verify = 4;
     // Drafts per bound request in that step: 2 = the last token plus a 2-token MTP chain (3 rows per request,
-    // a second head pass, two spare recurrent slots per row); 1 = one draft (2 rows, one spare).
+    // a second head pass, two spare recurrent slots per row); 1 = one draft (2 rows, one spare). A concurrent
+    // GDN-hybrid server with MTP on defaults to 1 unless set (tools/common/mtp_auto.cpp: KV pool kept).
     int mtp_batch_verify_k = 2;
     // With mtp_batch_verify: a bound request decoding alone verifies in that batched step too (rows on paged
     // decode attention, split-K over the context) instead of the single verify chunk, whose prefill attention
@@ -234,7 +235,8 @@ struct Speculative {
     // Draft-only precision; verification stays lossless. Off = keep the FP16 chain GEMV. A 16-bit head
     // served as FP8 gets an NVFP4 draft copy while MTP is on (+682 MiB on Qwen3.8-27B-NVFP4). The batched
     // draft passes (mtp_batch_verify) read it too, 4 rows per weight pass: head pass 3.74 -> 2.73 ms at 2
-    // requests.
+    // requests. A concurrent GDN-hybrid server with MTP on defaults to false unless set (pool kept: SWE-bench
+    // dev 50, 4 agents on Qwen3.8-27B-NVFP4, agent time 13.43 h MTP off -> 10.81 h with both pool defaults).
     bool mtp_nvfp4_head = true;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw
