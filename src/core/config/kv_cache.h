@@ -76,7 +76,8 @@ struct KVCache {
 
     // Host spill tier (#2203): pinned host RAM (MiB) for prefix-cache blocks reclaimed under pool
     // pressure; a later prefix hit restores them by H2D copy instead of re-prefill. 0 = off.
-    // Needs prefix caching; refused on SWA layers and the sparse key min/max pool.
+    // Needs prefix caching; refused on SWA layers. A spilled block carries its sparse key min/max pages;
+    // a GDN hybrid restores it through recurrent snapshot chains (8 chats x 31k, 8000 blocks: TTFT -90 %).
     int host_spill_mb = 0;
 
     // Pin the KV pool to exactly this many blocks; 0 = size from the VRAM

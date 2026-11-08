@@ -319,7 +319,9 @@ swa_snapshot_mb             = 0
 # Host spill tier for the prefix cache (#2203): pinned host RAM in MiB. Blocks
 # the pool reclaims are copied here and restored by H2D on a later prefix hit
 # instead of re-prefilled. 0 = off. Needs prefix caching; refused with SWA
-# layers or sparse attention key metadata.
+# layers. Carries sparse key min/max pages; GDN hybrids restore through their
+# recurrent snapshot chains (Qwen3.8-27B-NVFP4, 8 chats x ~31k, 8000-block
+# pool, 16384: TTFT sum 213.1 -> 21.3 s).
 host_spill_mb               = 0
 # Pin the KV pool to exactly this many blocks instead of sizing it from the
 # VRAM budget. 0 = auto (the default). Useful when several processes share a
@@ -582,8 +584,8 @@ attn_scores_mib      = 384
 # 0 = off. Contexts at or below the budget are bit-identical to dense.
 # F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA decode,
 # speculative.token_recycling (on by default under --gpu-layers) or the persistent prefix cache
-# (src/runtime/vram_budget.cpp sparse_minmax_refusal); auto also resolves 0 with
-# kv_cache.host_spill_mb > 0 (the spill tier refuses the pool); SWA / StreamingLLM
+# (src/runtime/vram_budget.cpp sparse_minmax_refusal); kv_cache.host_spill_mb carries the
+# pages of a spilled block, so it no longer turns auto off; SWA / StreamingLLM
 # layers and spec verify chunks keep full attention. Costs a metadata pool of
 # ~12.5% (FP8 KV) / ~6.25% (F16 KV) / 22.2% (NVFP4 KV, Qwen3.8-27B) of the K+V
 # pool bytes, planned and grown with a growable KV pool (#2364).

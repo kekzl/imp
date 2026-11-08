@@ -428,15 +428,20 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
-    int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
+    int cached = 0;  // through host-tier blocks too: a snapshot chain may restore them (#2203)
+    const int on_device = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes, 0, &cached);
     // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2560).
-    int max_b = std::min(cached, prompt_reuse_cap_blocks(total, bs));
+    const int cap = prompt_reuse_cap_blocks(total, bs);
+    int max_b = std::min(cached, cap);
     kv_manager_->release_held_block(req.id);
-    // Branch point (#2409): a restore below max_b re-forwards cached blocks; snapshot their end
-    // so the next prompt sharing them restores there. Floored to the prefill chunk grid: an
-    // off-grid split changes greedy output (Qwen3.8-27B-NVFP4, FP16 KV, deterministic: 4/4).
+    // Branch point (#2409): a restore below the device-cached blocks re-forwards them; snapshot
+    // their end so the next prompt sharing them restores there. Device only: host-held blocks
+    // moved it past a shared prefix that then got no snapshot (8 chats x 31k: cached 16384 -> 0).
+    // Floored to the prefill chunk grid: an off-grid split changes greedy output
+    // (Qwen3.8-27B-NVFP4, FP16 KV, deterministic: 4/4).
     const int grid = base_prefill_chunk(resolve_prefill_chunk_size_(), executor_->max_tokens(), bs);
-    req.branch_point_tokens = grid > 0 ? (max_b * bs / grid) * grid : max_b * bs;
+    const int branch_b = std::min(on_device, cap);
+    req.branch_point_tokens = grid > 0 ? (branch_b * bs / grid) * grid : branch_b * bs;
     for (int b = max_b; b >= 1; --b) {
         // Transcript snapshot (unaligned, saved at finish) before the aligned entry: it
         // reaches further into the same block. Its full blocks are the LAST cached ones (the

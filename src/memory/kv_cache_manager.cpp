@@ -476,12 +476,12 @@ bool KVCacheManager::can_allocate(int num_blocks) const {
 // ─── Content-addressed prefix caching ────────────────────────────────
 
 int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens,
-                                                 std::vector<size_t>& chain_hashes,
-                                                 size_t content_salt) const {
+                                                 std::vector<size_t>& chain_hashes, size_t content_salt,
+                                                 int* with_host) const {
     chain_hashes.clear();
     const int num_tokens = static_cast<int>(tokens.size());
     const int full_blocks = num_tokens / cache_->block_size();
-    int cached = 0;
+    int cached = 0, on_device = 0;
     bool chain_intact = true;
     size_t parent_hash = content_salt;
     for (int b = 0; b < full_blocks; ++b) {
@@ -490,7 +490,10 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
             parent_hash);
         chain_hashes.push_back(h);
         parent_hash = h;
-        if (chain_intact && block_hash_to_id_.contains(h)) {
+        const bool dev = block_hash_to_id_.contains(h);
+        if (dev && on_device == b)
+            on_device = b + 1;
+        if (chain_intact && (dev || (host_spill_ && host_spill_->contains(h)))) {
             cached = b + 1;
         } else if (chain_intact) {
             chain_intact = false;
@@ -504,15 +507,16 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
                           chain_hashes.size() >= 2 ? chain_hashes[chain_hashes.size() - 2] : 0, ids);
         }
     }
-    return cached;
+    if (with_host)
+        *with_host = cached;
+    return on_device;
 }
 
 int KVCacheManager::reusable_block_(size_t block_hash, const KvChainLink* link) {
     if (link != nullptr) {
-        const int cb = link->block_id;
+        const int cb = link->hash == block_hash ? device_block_of_(*link) : -1;
         const bool alive = cb >= 0 && (cached_blocks_map_.contains(cb) || cache_->ref_count(cb) > 0);
-        return link->hash == block_hash && alive && chain_intact(std::span<const KvChainLink>(link, 1)) ? cb
-                                                                                                        : -1;
+        return alive ? cb : -1;
     }
     auto hit = block_hash_to_id_.find(block_hash);
     if (hit == block_hash_to_id_.end())
@@ -599,8 +603,10 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 ++reused_blocks;
                 continue;
             }
-            if (link != nullptr)
-                reuse_open = false;  // the chain broke: a hash hit here would pair foreign KV
+            // A chain continues only through the host slot holding its own binding's KV, and only
+            // where no other forward's block holds the hash; anything else would pair foreign KV.
+            if (link != nullptr && !host_holds_(*link))
+                reuse_open = false;
 
             // No device hit (or reuse closed) — allocate a fresh block.
             BlockRef fresh = allocate_block_ref_with_eviction();
@@ -610,8 +616,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 return -1;
             }
             // Host tier hit: restore the spilled KV and publish the block as computed (#2203).
-            if (reuse_open && host_spill_ && restore_spilled_(block_hash, fresh.id())) {
-                bind_(block_hash, fresh.id());
+            if (reuse_open && host_spill_ && restore_spilled_(block_hash, link, fresh.id())) {
                 blocks.push(std::move(fresh));
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
@@ -734,6 +739,12 @@ void KVCacheManager::unbind_block_(int block_id) {
         block_id_to_hash_.erase(it);
     }
     block_bind_serial_.erase(block_id);
+    if (auto o = block_origin_.find(block_id); o != block_origin_.end()) {
+        if (auto r = restored_by_serial_.find(o->second.serial);
+            r != restored_by_serial_.end() && r->second == block_id)
+            restored_by_serial_.erase(r);
+        block_origin_.erase(o);
+    }
 }
 
 // A fresh block carries no binding: its KV is about to be rewritten.
@@ -778,26 +789,11 @@ std::vector<KvChainLink> KVCacheManager::adopt_chain(int seq_id, std::span<const
                 "prefix cache: snapshot chain of seq %d keeps block %d hash %zx as shadow %d (primary %d)",
                 seq_id, b, hash, own, hit->second);
         }
-        chain.push_back({hash, own, block_bind_serial_[own]});
+        chain.push_back(identity_(hash, own));  // a restored block names the binding its KV came from
     }
     return chain;
 }
 
-bool KVCacheManager::chain_intact(std::span<const KvChainLink> chain) const {
-    if (chain.empty())
-        return false;
-    for (const auto& l : chain) {
-        auto hit = block_hash_to_id_.find(l.hash);
-        const bool primary = hit != block_hash_to_id_.end() && hit->second == l.block_id;
-        auto sh = shadow_id_to_hash_.find(l.block_id);
-        if (!primary && (sh == shadow_id_to_hash_.end() || sh->second != l.hash))
-            return false;
-        auto s = block_bind_serial_.find(l.block_id);
-        if (s == block_bind_serial_.end() || s->second != l.serial)
-            return false;
-    }
-    return true;
-}
 
 void KVCacheManager::register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key) {
     if (!prefix_caching_enabled_ || key == 0)
@@ -880,8 +876,11 @@ int KVCacheManager::reclaim_cached_block() {
     cached_block_evictions_.fetch_add(1, std::memory_order_relaxed);
 
     // Remove from hash tables (spilling the KV to the host tier first when it is on).
+    // A shadow goes too: it is the KV a recurrent snapshot chain names (#2409).
     if (auto h = block_id_to_hash_.find(block_id); h != block_id_to_hash_.end() && host_spill_)
         spill_block_(block_id, h->second);
+    else if (auto s = shadow_id_to_hash_.find(block_id); s != shadow_id_to_hash_.end() && host_spill_)
+        spill_block_(block_id, s->second);
     unbind_block_(block_id);  // primary or shadow binding and its serial
 
     // Dropping the cache's reference is what returns the block to the pool —
