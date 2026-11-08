@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `speculative.sampled_batch_verify` (default on): sampled requests verify MTP drafts in the batched step, a lone chat included, each row with its own seed; before, the single verify chunk. Qwen3.8-27B-NVFP4 agent replay at temperature 1, 50k context: 1 chat 65.6 -> 141.1 tok/s (MTP off 92.6), 4 chats 156.0 -> 211.1 tok/s total (MTP off 173.7).
 
 ### Changed
+- `kv_cache.host_spill_mb` serves GDN hybrids and sparse attention: a spilled block carries its key min/max pages, and a recurrent snapshot's KV chain restores from its own host slot, shadows included. Qwen3.8-27B-NVFP4, 8 chats x ~31k tokens, 8000-block pool, 16384 MiB: cached 13 % -> 97 %, TTFT sum 213.1 -> 21.3 s.
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
 ### Fixed

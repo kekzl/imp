@@ -912,9 +912,7 @@ void Engine::init_resolve_sparse_attention_() {
                                                !config_.prefix_cache_path.empty());
     if (!refuse && !mcfg.head_dim_per_layer.empty())
         refuse = "per-layer KV geometry";
-    // The host spill tier refuses a cache with the metadata pool (kv_host_spill_supported).
-    if (!refuse && runtime_config_.kv_cache.host_spill_mb > 0)
-        refuse = "kv_cache.host_spill_mb";
+    // kv_cache.host_spill_mb no longer refuses: a spilled block carries its key min/max pages.
     const auto resolve = [&](const char* key, int& value, int family_tokens) {
         if (value >= 0)
             return;
