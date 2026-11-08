@@ -2,6 +2,8 @@
 
 #include <cuda_runtime.h>
 
+#include "memory/kv_chain_link.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -47,13 +49,29 @@ public:
     // Slot buffer to fill for hash (replaces the LRU entry when full, reuses the hash's own slot).
     // nullptr when disabled. The entry counts only after commit(hash).
     void* reserve(size_t hash);
-    void commit(size_t hash);
+    // origin: the binding (block, serial) whose KV the slot holds, so a recurrent snapshot's
+    // chain (#2174) still pairs with it after the block was reclaimed.
+    void commit(size_t hash, const KvChainLink& origin = {});
     // Undo a reserve() whose copy failed.
     void abandon(size_t hash);
 
     // Slot buffer holding hash, nullptr on a miss. Marks it most recently used.
     const void* find(size_t hash);
-    [[nodiscard]] bool contains(size_t hash) const { return index_.contains(hash); }
+    [[nodiscard]] bool contains(size_t hash) const {
+        auto it = index_.find(hash);
+        return it != index_.end() && it->second.committed;
+    }
+    // The binding a committed slot's KV came from; block_id -1 on a miss.
+    [[nodiscard]] KvChainLink origin(size_t hash) const {
+        auto it = index_.find(hash);
+        return it != index_.end() && it->second.committed ? it->second.origin : KvChainLink{};
+    }
+    // True when a committed slot holds link's hash with the KV of link's binding.
+    [[nodiscard]] bool holds(const KvChainLink& link) const {
+        auto it = index_.find(link.hash);
+        return it != index_.end() && it->second.committed && it->second.origin.block_id == link.block_id &&
+               it->second.origin.serial == link.serial;
+    }
     void erase(size_t hash);
     void clear();
     int size() const { return static_cast<int>(index_.size()); }
@@ -68,6 +86,7 @@ private:
         int slot;
         bool committed;
         std::list<size_t>::iterator lru;
+        KvChainLink origin{};
     };
     char* slot_ptr(int slot) const { return arena_ + (static_cast<size_t>(slot) * slot_bytes_); }
 

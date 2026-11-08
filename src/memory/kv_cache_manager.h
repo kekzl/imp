@@ -500,6 +500,16 @@ private:
     [[nodiscard]] bool has_binding_(int block_id) const {
         return block_id_to_hash_.contains(block_id) || shadow_id_to_hash_.contains(block_id);
     }
+    // A block restored from the host tier keeps the binding its KV was computed under, so a
+    // snapshot chain naming that binding (#2174) still pairs with it. Cleared by unbind_block_.
+    std::unordered_map<int, KvChainLink> block_origin_;
+    // The binding a block's KV belongs to: its origin when restored, else its own (hash, id, serial).
+    [[nodiscard]] KvChainLink identity_(size_t hash, int block_id) const;
+    // The device block bound under link's binding, -1 when none (reclaimed or rebound).
+    [[nodiscard]] int device_block_of_(const KvChainLink& link) const;
+    // The host tier holds link's KV and no other forward's block holds the hash, so a restore
+    // can bind it as the primary.
+    [[nodiscard]] bool host_holds_(const KvChainLink& link) const;
 
     // LRU list of cached (unreferenced) block IDs. When a block's
     // ref_count drops to 0, it goes to the tail. Eviction pops from head.

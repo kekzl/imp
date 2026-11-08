@@ -490,7 +490,7 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
             parent_hash);
         chain_hashes.push_back(h);
         parent_hash = h;
-        if (chain_intact && block_hash_to_id_.contains(h)) {
+        if (chain_intact && (block_hash_to_id_.contains(h) || (host_spill_ && host_spill_->contains(h)))) {
             cached = b + 1;
         } else if (chain_intact) {
             chain_intact = false;
@@ -509,10 +509,9 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
 
 int KVCacheManager::reusable_block_(size_t block_hash, const KvChainLink* link) {
     if (link != nullptr) {
-        const int cb = link->block_id;
+        const int cb = link->hash == block_hash ? device_block_of_(*link) : -1;
         const bool alive = cb >= 0 && (cached_blocks_map_.contains(cb) || cache_->ref_count(cb) > 0);
-        return link->hash == block_hash && alive && chain_intact(std::span<const KvChainLink>(link, 1)) ? cb
-                                                                                                        : -1;
+        return alive ? cb : -1;
     }
     auto hit = block_hash_to_id_.find(block_hash);
     if (hit == block_hash_to_id_.end())
@@ -599,8 +598,10 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 ++reused_blocks;
                 continue;
             }
-            if (link != nullptr)
-                reuse_open = false;  // the chain broke: a hash hit here would pair foreign KV
+            // A chain continues only through the host slot holding its own binding's KV, and only
+            // where no other forward's block holds the hash; anything else would pair foreign KV.
+            if (link != nullptr && !host_holds_(*link))
+                reuse_open = false;
 
             // No device hit (or reuse closed) — allocate a fresh block.
             BlockRef fresh = allocate_block_ref_with_eviction();
@@ -612,6 +613,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
             // Host tier hit: restore the spilled KV and publish the block as computed (#2203).
             if (reuse_open && host_spill_ && restore_spilled_(block_hash, fresh.id())) {
                 bind_(block_hash, fresh.id());
+                if (const KvChainLink o = host_spill_->origin(block_hash); o.block_id >= 0)
+                    block_origin_[fresh.id()] = o;
                 blocks.push(std::move(fresh));
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
@@ -734,6 +737,7 @@ void KVCacheManager::unbind_block_(int block_id) {
         block_id_to_hash_.erase(it);
     }
     block_bind_serial_.erase(block_id);
+    block_origin_.erase(block_id);
 }
 
 // A fresh block carries no binding: its KV is about to be rewritten.
@@ -778,26 +782,11 @@ std::vector<KvChainLink> KVCacheManager::adopt_chain(int seq_id, std::span<const
                 "prefix cache: snapshot chain of seq %d keeps block %d hash %zx as shadow %d (primary %d)",
                 seq_id, b, hash, own, hit->second);
         }
-        chain.push_back({hash, own, block_bind_serial_[own]});
+        chain.push_back(identity_(hash, own));  // a restored block names the binding its KV came from
     }
     return chain;
 }
 
-bool KVCacheManager::chain_intact(std::span<const KvChainLink> chain) const {
-    if (chain.empty())
-        return false;
-    for (const auto& l : chain) {
-        auto hit = block_hash_to_id_.find(l.hash);
-        const bool primary = hit != block_hash_to_id_.end() && hit->second == l.block_id;
-        auto sh = shadow_id_to_hash_.find(l.block_id);
-        if (!primary && (sh == shadow_id_to_hash_.end() || sh->second != l.hash))
-            return false;
-        auto s = block_bind_serial_.find(l.block_id);
-        if (s == block_bind_serial_.end() || s->second != l.serial)
-            return false;
-    }
-    return true;
-}
 
 void KVCacheManager::register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key) {
     if (!prefix_caching_enabled_ || key == 0)

@@ -64,5 +64,23 @@ TEST(KVHostSpillTest, SameHashReusesItsSlotAndEraseFreesIt) {
     EXPECT_EQ(s.find(11), nullptr);
 }
 
+// A slot remembers the binding its KV came from: only that (block, serial) pairs with it (#2174).
+TEST(KVHostSpillTest, SlotHoldsOnlyItsOriginBinding) {
+    auto s = make(2);
+    s.reserve(5);
+    EXPECT_FALSE(s.contains(5)) << "uncommitted";
+    s.commit(5, KvChainLink{5, 3, 42});
+    EXPECT_TRUE(s.contains(5));
+    EXPECT_TRUE(s.holds(KvChainLink{5, 3, 42}));
+    EXPECT_FALSE(s.holds(KvChainLink{5, 3, 43})) << "a later binding of block 3";
+    EXPECT_FALSE(s.holds(KvChainLink{5, 4, 42}));
+    EXPECT_FALSE(s.holds(KvChainLink{6, 3, 42}));
+    EXPECT_EQ(s.origin(5).serial, 42u);
+    EXPECT_EQ(s.origin(6).block_id, -1);
+    s.reserve(5), s.commit(5, KvChainLink{5, 7, 50});  // re-spilled from another binding
+    EXPECT_FALSE(s.holds(KvChainLink{5, 3, 42}));
+    EXPECT_TRUE(s.holds(KvChainLink{5, 7, 50}));
+}
+
 }  // namespace
 }  // namespace imp

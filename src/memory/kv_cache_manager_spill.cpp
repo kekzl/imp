@@ -36,7 +36,7 @@ void KVCacheManager::spill_block_(int block_id, size_t hash) {
         return;
     const bool enqueued = kv_block_to_host(*cache_, block_id, dst, spill_stream_);
     if (cudaStreamSynchronize(spill_stream_) == cudaSuccess && enqueued)
-        host_spill_->commit(hash);
+        host_spill_->commit(hash, identity_(hash, block_id));
     else
         host_spill_->abandon(hash);
 }
@@ -52,6 +52,40 @@ bool KVCacheManager::restore_spilled_(size_t hash, int block_id) {
         return false;
     }
     host_spill_->count_restore();
+    return true;
+}
+
+KvChainLink KVCacheManager::identity_(size_t hash, int block_id) const {
+    if (auto o = block_origin_.find(block_id); o != block_origin_.end())
+        return o->second;
+    auto s = block_bind_serial_.find(block_id);
+    return {hash, block_id, s != block_bind_serial_.end() ? s->second : 0};
+}
+
+int KVCacheManager::device_block_of_(const KvChainLink& l) const {
+    const auto same = [&](int id) {
+        const KvChainLink k = identity_(l.hash, id);
+        return k.block_id == l.block_id && k.serial == l.serial;
+    };
+    if (auto hit = block_hash_to_id_.find(l.hash); hit != block_hash_to_id_.end() && same(hit->second))
+        return hit->second;
+    if (auto sh = shadow_id_to_hash_.find(l.block_id);
+        sh != shadow_id_to_hash_.end() && sh->second == l.hash && same(l.block_id))
+        return l.block_id;
+    return -1;
+}
+
+bool KVCacheManager::host_holds_(const KvChainLink& l) const {
+    return host_spill_ && host_spill_->holds(l) && !block_hash_to_id_.contains(l.hash);
+}
+
+// A link holds while its KV is bound on the device or sits in the host tier.
+bool KVCacheManager::chain_intact(std::span<const KvChainLink> chain) const {
+    if (chain.empty())
+        return false;
+    for (const auto& l : chain)
+        if (device_block_of_(l) < 0 && !host_holds_(l))
+            return false;
     return true;
 }
 

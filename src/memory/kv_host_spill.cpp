@@ -159,14 +159,15 @@ void* KVHostSpill::reserve(size_t hash) {
         ++replacements_;
     }
     lru_.push_back(hash);
-    index_.emplace(hash, Entry{slot, false, std::prev(lru_.end())});
+    index_.emplace(hash, Entry{slot, false, std::prev(lru_.end()), KvChainLink{}});
     return slot_ptr(slot);
 }
 
-void KVHostSpill::commit(size_t hash) {
+void KVHostSpill::commit(size_t hash, const KvChainLink& origin) {
     auto it = index_.find(hash);
     if (it != index_.end() && !it->second.committed) {
         it->second.committed = true;
+        it->second.origin = origin;
         ++saves_;
     }
 }
