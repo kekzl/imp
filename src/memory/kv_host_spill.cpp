@@ -41,7 +41,7 @@ size_t part_bytes(KVCache& c, Part p, int layer) {
     return (p == Part::K || p == Part::V) ? c.block_bytes(layer) : c.scale_block_bytes(layer);
 }
 
-// Host layout: all layers' K, then V, then K scales, then V scales. A part whose layers share one
+// Host layout: all layers' K, then V, K scales, V scales, key min/max pages. A part whose layers share one
 // size and a constant device stride moves as a single 2D copy (2 to 4 copies per block instead of
 // 2-4 per layer); anything else falls back to one copy per layer.
 template <typename F2D, typename F1D>
