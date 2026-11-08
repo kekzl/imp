@@ -15,8 +15,8 @@ namespace imp {
 class KVCache;
 
 // One KV block across every layer as host bytes: per layer K, V, then K/V scales when the dtype
-// has them. False when the cache cannot round-trip a block: an SWA layer (separate id space) or the
-// key min/max pool (not copied, same limit as KVCacheManager::clone_held_block).
+// has them, then the sparse key min/max page metadata when that pool exists. False when the cache
+// cannot round-trip a block: an SWA layer (separate id space).
 [[nodiscard]] bool kv_host_spill_supported(KVCache& cache);
 size_t kv_host_block_bytes(KVCache& cache);
 // Async on stream; the caller synchronizes before the block or the host bytes are reused.

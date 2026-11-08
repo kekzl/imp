@@ -10,7 +10,7 @@ bool KVCacheManager::enable_host_spill(size_t budget_bytes) {
     if (budget_bytes == 0)
         return false;
     const char* why = !prefix_caching_enabled_                       ? "prefix caching is off"
-                      : !cache_ || !kv_host_spill_supported(*cache_) ? "SWA layers or sparse key metadata"
+                      : !cache_ || !kv_host_spill_supported(*cache_) ? "SWA layers"
                                                                      : nullptr;
     std::unique_ptr<KVHostSpill> spill;
     if (!why) {

@@ -8,8 +8,6 @@
 namespace imp {
 
 bool kv_host_spill_supported(KVCache& cache) {
-    if (cache.key_minmax_enabled())
-        return false;
     for (int l = 0; l < cache.n_layers(); ++l)
         if (cache.layer_is_swa(l))
             return false;
@@ -18,7 +16,8 @@ bool kv_host_spill_supported(KVCache& cache) {
 
 namespace {
 
-enum class Part { K, V, KScale, VScale };
+// KeyMinMax: the sparse attention page metadata of the block's keys, a pure function of its rows.
+enum class Part { K, V, KScale, VScale, KeyMinMax };
 
 void* part_ptr(KVCache& c, Part p, int layer, int block_id) {
     switch (p) {
@@ -30,11 +29,15 @@ void* part_ptr(KVCache& c, Part p, int layer, int block_id) {
             return c.k_scale_ptr(layer, block_id);
         case Part::VScale:
             return c.v_scale_ptr(layer, block_id);
+        case Part::KeyMinMax:
+            return c.key_minmax_ptr(layer, block_id);
     }
     return nullptr;
 }
 
 size_t part_bytes(KVCache& c, Part p, int layer) {
+    if (p == Part::KeyMinMax)
+        return KVCache::minmax_block_bytes(c.n_kv_heads(), c.head_dim());
     return (p == Part::K || p == Part::V) ? c.block_bytes(layer) : c.scale_block_bytes(layer);
 }
 
@@ -45,7 +48,7 @@ template <typename F2D, typename F1D>
 size_t for_each_part(KVCache& c, int block_id, F2D&& copy2d, F1D&& copy1d) {
     const int n = c.n_layers();
     size_t host_off = 0;
-    for (Part p : {Part::K, Part::V, Part::KScale, Part::VScale}) {
+    for (Part p : {Part::K, Part::V, Part::KScale, Part::VScale, Part::KeyMinMax}) {
         if (!part_ptr(c, p, 0, block_id))
             continue;  // no scale planes for this dtype
         const size_t bytes = part_bytes(c, p, 0);

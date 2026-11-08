@@ -76,6 +76,47 @@ TEST_P(KVHostSpillGpuTest, ReclaimedPrefixRestoresBitExact) {
     EXPECT_EQ(read_block(*c, back[1]), want1);
 }
 
+std::vector<uint8_t> read_minmax(KVCache& c, int block) {
+    const size_t bytes = KVCache::minmax_block_bytes(c.n_kv_heads(), c.head_dim());
+    std::vector<uint8_t> out(bytes * static_cast<size_t>(c.n_layers()));
+    for (int l = 0; l < c.n_layers(); ++l)
+        EXPECT_EQ(cudaMemcpy(out.data() + (bytes * l), c.key_minmax_ptr(l, block), bytes,
+                             cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+    return out;
+}
+
+// Sparse attention's key min/max pages ride along: a restored block selects pages from the
+// metadata its own rows produced, not from whatever the reclaiming sequence left there.
+TEST_P(KVHostSpillGpuTest, ReclaimedPrefixRestoresItsKeyMinMax) {
+    auto cache = std::make_unique<KVCache>(2, 2, 64, GetParam(), 4);
+    KVCache* c = cache.get();
+    ASSERT_TRUE(c->enable_key_minmax());
+    KVCacheManager mgr(std::move(cache));
+    mgr.set_prefix_caching_enabled(true);
+    ASSERT_TRUE(mgr.enable_host_spill(8 * kv_host_block_bytes(*c)));
+    const int bs = c->block_size();
+
+    const auto a = tokens(2 * bs, 1000);
+    ASSERT_EQ(mgr.allocate_blocks_with_prefix(0, a), 0);
+    const std::vector<int> a_blocks = mgr.block_table(0);
+    fill_block(*c, a_blocks[0], 11);  // the host layout includes the min/max part
+    fill_block(*c, a_blocks[1], 22);
+    const auto want0 = read_minmax(*c, a_blocks[0]), want1 = read_minmax(*c, a_blocks[1]);
+    mgr.register_block_hashes(0, a);
+    mgr.free_sequence(0);
+
+    ASSERT_EQ(mgr.allocate_blocks_with_prefix(1, tokens(4 * bs, 5000)), 0);
+    for (int b : mgr.block_table(1))
+        fill_block(*c, b, 99);
+    mgr.free_sequence(1);
+
+    ASSERT_EQ(mgr.allocate_blocks_with_prefix(2, a), 2);
+    const std::vector<int> back = mgr.block_table(2);
+    EXPECT_EQ(read_minmax(*c, back[0]), want0);
+    EXPECT_EQ(read_minmax(*c, back[1]), want1);
+}
+
 // Without the tier the same sequence re-prefills: the control that the restore is what reuses.
 TEST_P(KVHostSpillGpuTest, WithoutTheTierTheReclaimedPrefixMisses) {
     auto cache = std::make_unique<KVCache>(2, 2, 64, GetParam(), 4);
