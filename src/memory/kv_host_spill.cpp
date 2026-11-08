@@ -78,17 +78,47 @@ size_t kv_host_block_bytes(KVCache& cache) {
     return for_each_part(cache, 0, [](size_t, char*, size_t, size_t, int) {}, [](size_t, void*, size_t) {});
 }
 
+namespace {
+// First failed copy only: the error is consumed so it does not surface at an unrelated check.
+bool copy_ok(cudaError_t e, const char* dir, int block_id, size_t off, size_t pitch, size_t width, int rows) {
+    if (e == cudaSuccess)
+        return true;
+    static std::atomic<bool> logged{false};
+    (void)cudaGetLastError();
+    if (!logged.exchange(true))
+        IMP_LOG_ERROR(
+            "KV host spill: %s copy of block %d failed (%s): host off %zu, pitch %zu, width %zu, rows %d",
+            dir, block_id, cudaGetErrorString(e), off, pitch, width, rows);
+    return false;
+}
+
+// A 2D copy over a 125 MiB layer pitch failed as invalid argument (Qwen3.8-27B, pool at 2000
+// blocks during warmup): one copy per layer then.
+cudaError_t copy_2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, int rows,
+                    cudaMemcpyKind kind, cudaStream_t stream) {
+    if (cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, rows, kind, stream) == cudaSuccess)
+        return cudaSuccess;
+    (void)cudaGetLastError();
+    cudaError_t e = cudaSuccess;
+    for (int r = 0; r < rows && e == cudaSuccess; ++r)
+        e = cudaMemcpyAsync(static_cast<char*>(dst) + (dpitch * r),
+                            static_cast<const char*>(src) + (spitch * r), width, kind, stream);
+    return e;
+}
+}  // namespace
+
 bool kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream) {
     char* out = static_cast<char*>(dst);
     bool ok = true;
     for_each_part(
         cache, block_id,
         [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            ok &= cudaMemcpy2DAsync(out + off, width, dev, pitch, width, rows, cudaMemcpyDeviceToHost, stream) ==
-                  cudaSuccess;
+            ok &= copy_ok(copy_2d(out + off, width, dev, pitch, width, rows, cudaMemcpyDeviceToHost, stream),
+                          "D2H", block_id, off, pitch, width, rows);
         },
         [&](size_t off, void* dev, size_t bytes) {
-            ok &= cudaMemcpyAsync(out + off, dev, bytes, cudaMemcpyDeviceToHost, stream) == cudaSuccess;
+            ok &= copy_ok(cudaMemcpyAsync(out + off, dev, bytes, cudaMemcpyDeviceToHost, stream), "D2H",
+                          block_id, off, 0, bytes, 1);
         });
     return ok;
 }
@@ -99,11 +129,12 @@ bool kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStrea
     for_each_part(
         cache, block_id,
         [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            ok &= cudaMemcpy2DAsync(dev, pitch, in + off, width, width, rows, cudaMemcpyHostToDevice, stream) ==
-                  cudaSuccess;
+            ok &= copy_ok(copy_2d(dev, pitch, in + off, width, width, rows, cudaMemcpyHostToDevice, stream),
+                          "H2D", block_id, off, pitch, width, rows);
         },
         [&](size_t off, void* dev, size_t bytes) {
-            ok &= cudaMemcpyAsync(dev, in + off, bytes, cudaMemcpyHostToDevice, stream) == cudaSuccess;
+            ok &= copy_ok(cudaMemcpyAsync(dev, in + off, bytes, cudaMemcpyHostToDevice, stream), "H2D",
+                          block_id, off, 0, bytes, 1);
         });
     return ok;
 }
@@ -137,12 +168,20 @@ KVHostSpill::~KVHostSpill() {
         free_(arena_);
 }
 
-void* KVHostSpill::reserve(size_t hash) {
+void KVHostSpill::drop_alias_(size_t key, const Entry& e) {
+    if (!e.committed || e.origin.block_id < 0)
+        return;
+    if (auto a = latest_.find(e.origin.hash); a != latest_.end() && a->second == key)
+        latest_.erase(a);
+}
+
+void* KVHostSpill::reserve(size_t key) {
     if (!enabled())
         return nullptr;
-    auto it = index_.find(hash);
-    if (it != index_.end()) {  // same content re-spilled: overwrite in place
+    auto it = index_.find(key);
+    if (it != index_.end()) {  // same binding re-spilled: overwrite in place
         lru_.splice(lru_.end(), lru_, it->second.lru);
+        drop_alias_(key, it->second);
         it->second.committed = false;
         return slot_ptr(it->second.slot);
     }
@@ -155,37 +194,54 @@ void* KVHostSpill::reserve(size_t hash) {
         lru_.pop_front();
         auto v = index_.find(victim);
         slot = v->second.slot;
+        drop_alias_(victim, v->second);
         index_.erase(v);
         ++replacements_;
     }
-    lru_.push_back(hash);
-    index_.emplace(hash, Entry{slot, false, std::prev(lru_.end()), KvChainLink{}});
+    lru_.push_back(key);
+    index_.emplace(key, Entry{slot, false, std::prev(lru_.end()), KvChainLink{}});
     return slot_ptr(slot);
 }
 
-void KVHostSpill::commit(size_t hash, const KvChainLink& origin) {
-    auto it = index_.find(hash);
+void KVHostSpill::commit(size_t key, const KvChainLink& origin) {
+    auto it = index_.find(key);
     if (it != index_.end() && !it->second.committed) {
         it->second.committed = true;
         it->second.origin = origin;
+        if (origin.block_id >= 0)
+            latest_[origin.hash] = key;
         ++saves_;
     }
 }
 
-void KVHostSpill::abandon(size_t hash) { erase(hash); }
+void KVHostSpill::abandon(size_t key) { erase(key); }
 
-const void* KVHostSpill::find(size_t hash) {
-    auto it = index_.find(hash);
+const void* KVHostSpill::find(size_t key) {
+    auto it = index_.find(key);
     if (it == index_.end() || !it->second.committed)
         return nullptr;
     lru_.splice(lru_.end(), lru_, it->second.lru);
     return slot_ptr(it->second.slot);
 }
 
-void KVHostSpill::erase(size_t hash) {
-    auto it = index_.find(hash);
+bool KVHostSpill::latest_key(size_t hash, size_t* key) const {
+    auto a = latest_.find(hash);
+    if (a == latest_.end())
+        return false;
+    *key = a->second;
+    return true;
+}
+
+KvChainLink KVHostSpill::origin(size_t hash) const {
+    size_t key = 0;
+    return latest_key(hash, &key) ? origin_of_key(key) : KvChainLink{};
+}
+
+void KVHostSpill::erase(size_t key) {
+    auto it = index_.find(key);
     if (it == index_.end())
         return;
+    drop_alias_(key, it->second);
     free_slots_.push_back(it->second.slot);
     lru_.erase(it->second.lru);
     index_.erase(it);
@@ -195,6 +251,7 @@ void KVHostSpill::clear() {
     for (auto& [h, e] : index_)
         free_slots_.push_back(e.slot);
     index_.clear();
+    latest_.clear();
     lru_.clear();
 }
 

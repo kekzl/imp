@@ -67,19 +67,24 @@ TEST(KVHostSpillTest, SameHashReusesItsSlotAndEraseFreesIt) {
 // A slot remembers the binding its KV came from: only that (block, serial) pairs with it (#2174).
 TEST(KVHostSpillTest, SlotHoldsOnlyItsOriginBinding) {
     auto s = make(2);
-    s.reserve(5);
+    const KvChainLink a{5, 3, 42}, b{5, 7, 50};  // two forwards of hash 5
+    s.reserve(KVHostSpill::slot_key(a));
     EXPECT_FALSE(s.contains(5)) << "uncommitted";
-    s.commit(5, KvChainLink{5, 3, 42});
+    s.commit(KVHostSpill::slot_key(a), a);
     EXPECT_TRUE(s.contains(5));
-    EXPECT_TRUE(s.holds(KvChainLink{5, 3, 42}));
+    EXPECT_TRUE(s.holds(a));
     EXPECT_FALSE(s.holds(KvChainLink{5, 3, 43})) << "a later binding of block 3";
-    EXPECT_FALSE(s.holds(KvChainLink{5, 4, 42}));
     EXPECT_FALSE(s.holds(KvChainLink{6, 3, 42}));
     EXPECT_EQ(s.origin(5).serial, 42u);
     EXPECT_EQ(s.origin(6).block_id, -1);
-    s.reserve(5), s.commit(5, KvChainLink{5, 7, 50});  // re-spilled from another binding
-    EXPECT_FALSE(s.holds(KvChainLink{5, 3, 42}));
-    EXPECT_TRUE(s.holds(KvChainLink{5, 7, 50}));
+
+    s.reserve(KVHostSpill::slot_key(b)), s.commit(KVHostSpill::slot_key(b), b);
+    EXPECT_TRUE(s.holds(a)) << "each forward keeps its own slot";
+    EXPECT_TRUE(s.holds(b));
+    EXPECT_EQ(s.origin(5).serial, 50u) << "the hash names its newest slot";
+    s.erase(KVHostSpill::slot_key(b));
+    EXPECT_FALSE(s.contains(5)) << "the alias goes with its slot";
+    EXPECT_TRUE(s.holds(a));
 }
 
 }  // namespace

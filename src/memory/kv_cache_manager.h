@@ -112,8 +112,9 @@ public:
     // prefix for `tokens`, without allocating anything. Fills chain_hashes with the chained
     // hash of every FULL block of tokens (independent of cache state); used by the hybrid
     // recurrent-snapshot lookup to pick a restore boundary before allocation.
+    // with_host: the same prefix continued through blocks the host spill tier holds (#2203).
     int longest_cached_prefix_blocks(std::span<const int32_t> tokens, std::vector<size_t>& chain_hashes,
-                                     size_t content_salt = 0) const;
+                                     size_t content_salt = 0, int* with_host = nullptr) const;
 
     // Register the block hashes for a sequence after prefill completes.
     // This must be called so that future sequences can match against
@@ -426,12 +427,14 @@ private:
     void take_block_(SeqBlocks& blocks, int block_id);
 
     // Host spill (kv_cache_manager_spill.cpp): spill_block_ copies a reclaimed block out under its
-    // chain hash and completes before returning (the block is reused next). restore_spilled_
+    // binding (slot_key) and completes before returning (the block is reused next). restore_spilled_
     // enqueues the H2D copy on spill_stream_; flush_spill_restores_ waits for all of them before
     // allocate_blocks_with_prefix returns. Stream order keeps a slot's pending H2D ahead of a later
     // D2H into the same slot.
     void spill_block_(int block_id, size_t hash);
-    [[nodiscard]] bool restore_spilled_(size_t hash, int block_id);
+    // link: the snapshot chain's binding to restore (its own slot), nullptr = the hash's newest slot. Binds
+    // the block (shadow beside another primary) and records its origin.
+    [[nodiscard]] bool restore_spilled_(size_t hash, const KvChainLink* link, int block_id);
     void flush_spill_restores_();
     bool spill_restores_pending_ = false;
 
@@ -503,12 +506,12 @@ private:
     // A block restored from the host tier keeps the binding its KV was computed under, so a
     // snapshot chain naming that binding (#2174) still pairs with it. Cleared by unbind_block_.
     std::unordered_map<int, KvChainLink> block_origin_;
+    std::unordered_map<uint64_t, int> restored_by_serial_;  // origin serial -> restored block
     // The binding a block's KV belongs to: its origin when restored, else its own (hash, id, serial).
     [[nodiscard]] KvChainLink identity_(size_t hash, int block_id) const;
     // The device block bound under link's binding, -1 when none (reclaimed or rebound).
     [[nodiscard]] int device_block_of_(const KvChainLink& link) const;
-    // The host tier holds link's KV and no other forward's block holds the hash, so a restore
-    // can bind it as the primary.
+    // The host tier holds the KV of link's binding (its own slot, #2203).
     [[nodiscard]] bool host_holds_(const KvChainLink& link) const;
 
     // LRU list of cached (unreferenced) block IDs. When a block's
