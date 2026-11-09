@@ -91,6 +91,19 @@ TEST(ToolCallQwen36Xml, BareCloseTagInsideAValueStaysText) {
     EXPECT_EQ(args["path"], "a.py");
 }
 
+// Only the template's own newlines go: a re-render of the parsed call is the model's text again.
+TEST(ToolCallQwen36Xml, ValueKeepsIndentationAndEdgeSpaces) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call(
+        "<function=edit>\n<parameter=old>\n    def foo():\n        pass\n\n</parameter>\n"
+        "<parameter=pattern>\ndef \n</parameter>\n<parameter=n>\n120\n</parameter>\n</function>",
+        tc));
+    const json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["old"], "    def foo():\n        pass\n");
+    EXPECT_EQ(args["pattern"], "def ");
+    EXPECT_EQ(args["n"], 120);
+}
+
 TEST(ToolCallQwen36Xml, ArraySchemaWithUnparsableTextStaysInvalid) {
     const json tools = json::parse(R"([{"type":"function","function":{"name":"multi_edit","parameters":{
         "type":"object","properties":{"edits":{"type":"array"}}}}}])");

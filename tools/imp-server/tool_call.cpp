@@ -238,12 +238,19 @@ bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std:
 
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
                                          const std::string& content, bool xml) {
+    const ToolRenderCallFn render = tool_call_dialect(family).render_call;
     std::string result;
     if (!content.empty() && content != "null") {
         result = content;
+        // Qwen XML templates write content|trim + "\n\n<tool_call>", as the model does: one "\n"
+        // here plus the call's own leading "\n" (a single one broke the next turn's prefix match).
+        if (xml && render == chatml_render_call && tool_calls.is_array() && !tool_calls.empty()) {
+            result.erase(result.find_last_not_of("\n\r\t ") + 1);
+            if (!result.empty())
+                result += '\n';
+        }
     }
 
-    const ToolRenderCallFn render = tool_call_dialect(family).render_call;
     for (const auto& tc : tool_calls) {
         if (!tc.contains("function"))
             continue;

@@ -69,8 +69,17 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         }
         if (pv_end == std::string::npos || pv_end > scan_end)
             break;
+        // The template writes "<parameter=K>\n" + value + "\n</parameter>": only those newlines go
+        // (as vLLM's qwen3_coder parser). "def " and a first line's indentation are the value.
         std::string val = body.substr(val_start, pv_end - val_start);
-        trim(val);
+        if (val.starts_with("\r\n"))
+            val.erase(0, 2);
+        else if (val.starts_with('\n'))
+            val.erase(0, 1);
+        if (pv_adv == 12 && val.ends_with('\n'))  // a bare close tag: its newline is still in `val`
+            val.pop_back();
+        if (val.ends_with('\r'))
+            val.pop_back();
         // Only a whole JSON scalar literal coerces; "600acab9" stays a string (#2103).
         // validate_tool_call restores `val` for string-typed params.
         json jv = json::parse(val, nullptr, false);
