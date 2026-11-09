@@ -12,67 +12,66 @@
 #
 # kernel<tab>arch<tab>reg<tab>stack<tab>local
 void apa::apa_kernel<256, true, false, true, __half, apa::PagedF16KV>	sm_120a	255	128	0
+void apa::apa_kernel<256, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	255	128	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 64, true, false, false>	sm_120a	255	112	0
-void apa::apa_kernel<256, true, true, true, __half, apa::PagedF16KV>	sm_120a	255	104	0
-void apa::apa_kernel<256, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	255	96	0
-void apa::apa_kernel<256, false, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	80	0
-void apa::apa_kernel<256, false, false, true, __half, apa::PagedF16KV>	sm_120a	255	80	0
-void apa::apa_kernel<256, true, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	80	0
-void apa::apa_kernel<256, true, true, false, __half, apa::PagedF16KV>	sm_120a	255	80	0
-void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	80	0
-void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	80	0
-void apa::apa_kernel<256, false, false, false, __half, apa::FlatKV<__half> >	sm_120a	255	72	0
-void apa::apa_kernel<256, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	255	64	0
+void apa::apa_kernel<256, true, true, true, __half, apa::PagedF16KV>	sm_120a	255	96	0
+void apa::apa_kernel<256, false, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	88	0
+void apa::apa_kernel<256, false, false, true, __half, apa::PagedF16KV>	sm_120a	255	88	0
+void apa::apa_kernel<256, true, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	88	0
+void apa::apa_kernel<256, true, true, false, __half, apa::PagedF16KV>	sm_120a	255	88	0
+void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	88	0
+void apa::apa_kernel<256, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	255	72	0
+void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	255	64	0
 void imp::(anonymous namespace)::kda_chunk_kernel<__nv_bfloat16>	sm_120a	255	64	0
 void imp::(anonymous namespace)::kda_chunk_kernel<float>	sm_120a	255	64	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	64	0
+void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	64	0
+void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	64	0
+void apa::apa_kernel<256, false, false, false, __half, apa::FlatKV<__half> >	sm_120a	255	56	0
 void apa::apa_kernel<256, true, false, false, __half, apa::FlatKV<__half> >	sm_120a	255	56	0
 void apa::apa_kernel<256, true, false, false, __half, apa::PagedF16KV>	sm_120a	255	56	0
 void ra2::attn_kernel<256, 8, 2, false, __half, 1>	sm_120a	255	8	0
+void imp::(anonymous namespace)::nvfp4_smallm_ws_kernel<2, 4, 2>	sm_120a	255	0	0
 void imp::(anonymous namespace)::nvfp4_smallm_ws_multi_kernel<2, 4, 2>	sm_120a	255	0	0
-void imp::(anonymous namespace)::nvfp4_smallm_ws_kernel<2, 4, 2>	sm_120a	254	0	0
 void imp::(anonymous namespace)::paged_attention_decode_f16_multitok_kernel<512, 4, 2>	sm_120a	254	0	0
-imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	252	0	0
-void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, false, false>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, true, false>	sm_120a	252	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 64, 3, true, false, false, (imp::nvfp4_tile::Fmt)3, false> >	sm_120a	249	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
 void imp::(anonymous namespace)::paged_attention_splitk_f16_multitok_kernel<512, 4, 2>	sm_120a	245	0	0
-void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
+void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	242	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
+void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	242	0	0
+imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	241	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, false> >	sm_120a	240	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, true> >	sm_120a	240	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigIQ3S<2>, false, true>	sm_120a	240	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ8_0<2>, false, true>	sm_120a	240	0	0
-void apa::apa_kernel<128, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	168	88	0
-void apa::apa_kernel<128, false, false, true, __half, apa::PagedF16KV>	sm_120a	168	80	0
-void apa::apa_kernel<128, true, true, true, __half, apa::PagedF16KV>	sm_120a	168	80	0
+void apa::apa_kernel<128, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	168	112	0
+void apa::apa_kernel<128, false, false, true, __half, apa::FlatKV<__half> >	sm_120a	168	96	0
+void apa::apa_kernel<128, false, false, true, __half, apa::PagedF16KV>	sm_120a	168	96	0
+void apa::apa_kernel<128, true, false, true, __half, apa::FlatKV<__half> >	sm_120a	168	96	0
+void apa::apa_kernel<128, true, false, false, __half, apa::FlatKV<__half> >	sm_120a	168	88	0
+void apa::apa_kernel<128, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	168	80	0
 void apa::apa_kernel<128, false, false, false, __half, apa::FlatKV<__half> >	sm_120a	168	72	0
-void apa::apa_kernel<128, false, false, true, __half, apa::FlatKV<__half> >	sm_120a	168	72	0
-void apa::apa_kernel<128, true, false, false, __half, apa::PagedF16KV>	sm_120a	168	64	0
-void apa::apa_kernel<128, true, false, true, __half, apa::FlatKV<__half> >	sm_120a	168	64	0
-void apa::apa_kernel<128, true, false, true, __half, apa::PagedF16KV>	sm_120a	168	64	0
-void apa::apa_kernel<128, false, false, false, __half, apa::PagedF16KV>	sm_120a	168	56	0
-void apa::apa_kernel<128, true, false, false, __half, apa::FlatKV<__half> >	sm_120a	168	56	0
-void apa::apa_kernel<128, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	168	56	0
-void apa::apa_kernel<128, true, true, false, __half, apa::PagedF16KV>	sm_120a	168	48	0
-void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	158	32	0
+void apa::apa_kernel<128, false, false, false, __half, apa::PagedF16KV>	sm_120a	168	72	0
+void apa::apa_kernel<128, true, false, false, __half, apa::PagedF16KV>	sm_120a	168	72	0
+void apa::apa_kernel<128, true, false, true, __half, apa::PagedF16KV>	sm_120a	168	72	0
+void apa::apa_kernel<128, true, true, false, __half, apa::PagedF16KV>	sm_120a	168	72	0
+void apa::apa_kernel<128, true, true, true, __half, apa::PagedF16KV>	sm_120a	168	48	0
+void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
+imp::gemm_q6k_fused_moe_prefill_tc_kernel	sm_120a	128	40	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	40	0
-void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	24	0
-void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 2, true, 16, 256>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	16	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	40	0
 void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::KqDec<false> >	sm_120a	128	16	0
 void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::KqDec<true> >	sm_120a	128	16	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 64, true, false, 64, false, false, false>	sm_120a	128	8	0
-void imp::fmha_sm120_kernel<64, 256, false>	sm_120a	128	8	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	104	144	0
-void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, false, 4>	sm_120a	96	16	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, true, 4>	sm_120a	96	16	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
+void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	80	32	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
 void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	79	16	0
 void apa::quant_kv_kernel<256, apa::PagedNvfp4KV>	sm_120a	72	32	0
@@ -82,31 +81,30 @@ void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)5>, true, 4>	sm_120a	72	8	0
 void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 128, 3>	sm_120a	66	528	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 128, 3>	sm_120a	64	144	0
-void imp::flash_attention_blackwell_kernel<128, 96>	sm_120a	64	16	0
+void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	64	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::paged_attention_splitk_pipeline_kernel<256>	sm_120a	64	16	0
+imp::paged_attention_gqa_kernel	sm_120a	63	128	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<256>	sm_120a	63	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 128, 3>	sm_120a	62	272	0
-imp::paged_attention_gqa_kernel	sm_120a	61	128	0
 void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 256, 2>	sm_120a	60	8	0
+void imp::flash_attention_blackwell_kernel<64, 256>	sm_120a	59	16	0
+void imp::flash_attention_blackwell_kernel<64, 64>	sm_120a	57	16	0
+void imp::flash_attention_blackwell_kernel<128, 96>	sm_120a	56	16	0
 void imp::flash_attention_blackwell_kernel<64, 96>	sm_120a	56	16	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	56	16	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56	16	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	56	16	0
 void imp::gemv_dp4a_moe_decode_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56	16	0
 void imp::gemv_dp4a_moe_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6> >	sm_120a	56	16	0
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<192>	sm_120a	56	16	0
-void imp::flash_attention_blackwell_kernel<64, 256>	sm_120a	55	16	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	55	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 256, 2>	sm_120a	54	528	0
 void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 256, 2>	sm_120a	54	272	0
-void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	54	16	0
-void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	53	16	0
+void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 128, 3>	sm_120a	54	16	0
 void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	53	16	0
-void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 128, 3>	sm_120a	50	16	0
 void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	48	16	0
-void imp::flash_attention_blackwell_kernel<64, 64>	sm_120a	48	16	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	48	16	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	48	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	48	16	0
 void imp::gemv_dp4a_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	48	16	0
 void imp::gemv_dp4a_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2, false>	sm_120a	48	16	0
@@ -114,16 +112,17 @@ void imp::gemv_dp4a_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2, true>	sm_120a	
 void imp::paged_attention_splitk_fp8_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<128>	sm_120a	48	16	0
+void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
 imp::topk_gating_kernel	sm_120a	46	256	0
-imp::topk_partial_rows_kernel	sm_120a	42	1056	0
+imp::paged_attention_decode_kernel_generic	sm_120a	43	128	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
 imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
+imp::topk_partial_kernel	sm_120a	40	1056	0
+imp::topk_partial_rows_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
-imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
-imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
 imp::(anonymous namespace)::kv_evict_qstats_kernel	sm_120a	40	40	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
@@ -138,9 +137,9 @@ void imp::gemv_dp4a_kpar_kernel<imp::DequantTraits<(imp::DPQTag)6>, true>	sm_120
 void imp::gemv_dp4a_kpar_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6> >	sm_120a	40	16	0
 void imp::gemv_dp4a_moe_decode_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
-imp::topk_partial_kernel	sm_120a	39	1056	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
 imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	38	128	0
+imp::rowwise_topm_reduce_kernel	sm_120a	37	64	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::bench_separate	sm_120a	29	8	0
 imp::bench_tma_v_load	sm_120a	26	8	0
