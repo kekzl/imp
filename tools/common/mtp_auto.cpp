@@ -58,6 +58,12 @@ void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
             "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_batch_verify_k=%d (KV pool kept "
             "for concurrent chats; set either key to override)",
             cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_batch_verify_k);
+    // Drafts then read the FP8 head: its first 98304 rows hold 99.94 % of Qwen3.8 agent output tokens.
+    // 1 chat x 50k replay 122.0-123.4 -> 125.4-130.5 tok/s, 4 chats 91.3-91.4 -> 94.6 per request.
+    if (!cfg.speculative.mtp_nvfp4_head && !cfg.was_set("speculative.mtp_draft_vocab")) {
+        cfg.speculative.mtp_draft_vocab = 98304;
+        IMP_LOG_INFO("speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)");
+    }
 }
 }  // namespace
 

@@ -529,6 +529,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_head_graph", cfg.speculative.mtp_head_graph);
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
+    I("speculative.mtp_draft_vocab", cfg.speculative.mtp_draft_vocab);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);
     // #1638: also read at engine_scheduler.cpp:1363 and :2882 ("kill switch for A/B").
     B("speculative.batch_rr", cfg.speculative.batch_rr);

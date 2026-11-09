@@ -561,7 +561,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
 }
 
 bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream,
-                                        const NvFP4QuantResult* draft_nvfp4) {
+                                        const NvFP4QuantResult* draft_nvfp4, int draft_vocab) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
     // Draft copy first: 682 MiB read once per 4 rows. An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4
@@ -575,7 +575,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
          qscratch_.cutlass_act_sf == nullptr))
         return false;
     const auto& cfg = model_->config();
-    const int V = cfg.vocab_size;
+    // Rows of the FP8 head scored: a prefix of the vocabulary, the logits packed V to a row.
+    const int V = fp8 && draft_vocab > 0 ? std::min(draft_vocab, cfg.vocab_size) : cfg.vocab_size;
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     if (!ensure_verify_scratch(/*with_penalties=*/false))
         return false;

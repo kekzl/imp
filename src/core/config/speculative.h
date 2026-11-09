@@ -238,6 +238,9 @@ struct Speculative {
     // requests. A concurrent GDN-hybrid server with MTP on defaults to false unless set (pool kept: SWE-bench
     // dev 50, 4 agents on Qwen3.8-27B-NVFP4, agent time 13.43 h MTP off -> 10.81 h with both pool defaults).
     bool mtp_nvfp4_head = true;
+    // Batched MTP drafts score only LM-head rows [0, mtp_draft_vocab) on the FP8 head (0 = all). BPE ids
+    // follow merge order: familiar dev50h output, 1.54M tokens, 99.94 % below 98304. Verify stays full vocab.
+    int mtp_draft_vocab = 0;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw
     // measurement). Negative (default) = k-aware threshold 1 + f*k with f=0.40,

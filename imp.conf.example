@@ -1278,6 +1278,11 @@ mtp_adaptive_k       = true
 # Unset, a concurrent GDN-hybrid server with MTP on takes false (KV pool kept for
 # concurrent chats); this line sets it, so drop it there.
 mtp_nvfp4_head       = true
+# Batched MTP drafts on the FP8 head score only its first N rows (0 = all);
+# verification stays full vocab. BPE ids follow merge order: 99.94 % of
+# Qwen3.8 agent output tokens sit below 98304. Unset, a concurrent GDN-hybrid
+# server that drafts on the FP8 head takes 98304.
+mtp_draft_vocab      = 0
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.
