@@ -47,6 +47,10 @@ namespace {
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
+    // KV host spill brings an evicted prefix back by H2D, the re-prefill the lean pair avoided:
+    // 4 chats x 27k/50k replay 97.9/89.7 -> 102.3/99.1 tok/s per request, 4 x 110k queue time equal.
+    if (cfg.kv_cache.host_spill_mb > 0)
+        return;
     const bool head = !cfg.was_set("speculative.mtp_nvfp4_head");
     const bool k = !cfg.was_set("speculative.mtp_batch_verify_k");
     if (head)
