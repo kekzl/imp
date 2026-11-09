@@ -1026,7 +1026,9 @@ recurrent_snapshot_mb = 256
 # Host tier for those snapshots: entries evicted from the device slots are
 # copied to pinned host memory instead of dropped and restored from there
 # (one H2D of one slab). Sessions beyond the device slot count keep their
-# tail-only prefill. 0 = off.
+# tail-only prefill. 0 = off. Left unset with kv_cache.host_spill_mb > 0, it
+# rises to host_spill_mb / 2: a spilled hybrid prefix restores only with its
+# snapshot.
 recurrent_snapshot_host_mb = 2048
 # Prompts whose block-aligned prefix is shorter than this take no snapshot
 # and no prefill split at the boundary (the split is two eager chunks plus a

@@ -1050,6 +1050,7 @@ if(IMP_BUILD_TESTS)
         # name would silently print "?".
         tests/test_graph_eligibility.cpp
         tests/test_offload_spec_defaults.cpp
+        tests/test_snapshot_host_default.cpp
         # Prefill pacing under decode (runtime.prefill_cap_fairness). CPU-only:
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
