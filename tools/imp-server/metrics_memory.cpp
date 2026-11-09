@@ -9,6 +9,7 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/mem_account.h"
+#include "memory/recurrent_snapshot_store.h"
 #include "memory/vram_allocator.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"
@@ -84,6 +85,39 @@ if (state.ctx && state.ctx->engine) {
         out += "# HELP imp_kv_host_spill_replacements_total Host-tier entries dropped to make room\n";
         out += "# TYPE imp_kv_host_spill_replacements_total counter\n";
         out += "imp_kv_host_spill_replacements_total " + std::to_string(spill->replacements()) + "\n";
+    }
+    // Hybrid prefix reuse: a cached KV prefix restores only with the recurrent state at its end.
+    if (const imp::RecurrentSnapshotStore* snaps = state.ctx->engine->recurrent_snapshots()) {
+        const auto counter = [&out](const char* name, const char* help, uint64_t v) {
+            out += std::string("# HELP ") + name + " " + help + "\n# TYPE " + name + " counter\n" + name +
+                   " " + std::to_string(v) + "\n";
+        };
+        counter("imp_recurrent_snapshot_saves_total", "Recurrent-state snapshots stored (either tier)",
+                snaps->saves());
+        counter("imp_recurrent_snapshot_demotions_total", "Snapshots moved from the device to the host tier",
+                snaps->demotions());
+        counter("imp_recurrent_snapshot_evictions_total", "Snapshots dropped from both tiers",
+                snaps->evictions());
+        const auto& h = snaps->reuse();
+        out +=
+            "# HELP imp_prefix_snapshot_restores_total Requests that restored a recurrent snapshot, by "
+            "tier\n";
+        out += "# TYPE imp_prefix_snapshot_restores_total counter\n";
+        out += "imp_prefix_snapshot_restores_total{tier=\"device\"} " +
+               std::to_string(h.restores_device.load()) + "\n";
+        out += "imp_prefix_snapshot_restores_total{tier=\"host\"} " + std::to_string(h.restores_host.load()) +
+               "\n";
+        out +=
+            "# HELP imp_prefix_snapshot_misses_total Requests with a cached KV prefix and no restorable "
+            "snapshot: none stored (absent) or stored but unpaired (stale)\n";
+        out += "# TYPE imp_prefix_snapshot_misses_total counter\n";
+        out += "imp_prefix_snapshot_misses_total{reason=\"absent\"} " +
+               std::to_string(h.misses_absent.load()) + "\n";
+        out += "imp_prefix_snapshot_misses_total{reason=\"stale\"} " + std::to_string(h.misses_stale.load()) +
+               "\n";
+        counter("imp_prefix_snapshot_unused_tokens_total",
+                "Cached prefix tokens prefilled again for want of a snapshot at their end",
+                h.unused_tokens.load());
     }
     if (const auto* kv = state.ctx->engine->kv_cache()) {
         const int total_blocks = kv->total_blocks();

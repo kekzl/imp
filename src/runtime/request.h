@@ -215,6 +215,7 @@ struct Request {
     // Hybrid branch point (#2409): cached prefix tokens with no restorable snapshot at their end.
     // Set at admission; used when snapshot_hint_tokens is 0. 0 = none.
     int branch_point_tokens = 0;
+    bool reuse_probed = false;  // hybrid reuse outcome counted (first admission probe only)
     // When the scheduler moved this request into its first prefill batch
     // (epoch = never). The server's queue histogram measures up to here:
     // the wait behind max_batch_size and KV admission, not the batching

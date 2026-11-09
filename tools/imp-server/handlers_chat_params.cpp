@@ -597,9 +597,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     res.set_header("X-Request-Id", ctx.log_client_request_id.empty()
                                        ? ctx.req_id
                                        : ctx.log_client_request_id);
-    IMP_LOG_INFO("[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%s", ctx.req_id.c_str(),
-                 messages.size(), ctx.params.stream ? "true" : "false", ctx.params.max_tokens,
-                 ctx.params.log_temperature().c_str());
+    // client_id: the caller's X-Request-Id, so a client log joins this line (and engine req N) by id.
+    IMP_LOG_INFO("[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%s%s%s",
+                 ctx.req_id.c_str(), messages.size(), ctx.params.stream ? "true" : "false",
+                 ctx.params.max_tokens, ctx.params.log_temperature().c_str(),
+                 ctx.log_client_request_id.empty() ? "" : " client_id=", ctx.log_client_request_id.c_str());
 
     // Validate model field (required per OpenAI spec)
     ctx.params.requested_model = body.value("model", "");

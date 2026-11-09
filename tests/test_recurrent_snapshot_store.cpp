@@ -290,5 +290,31 @@ TEST(RecurrentSnapshotStoreTest, KvChainSurvivesHostEvictionAndEraseReplaces) {
     EXPECT_EQ(ReadEntry(*e1b), std::vector<uint8_t>(kEntryBytes, 0x33));
 }
 
+// /metrics counters: a device eviction with a host slot is a demotion, a host LRU drop or a
+// device drop without a host tier is an eviction (gone from both tiers); a duplicate save is not a save.
+TEST(RecurrentSnapshotStoreTest, CountersSplitDemotionsFromEvictions) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore tiered;
+    tiered.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/1 * kEntryBytes);
+    DeviceSrc a(0x11), b(0x22), c(0x33);
+    ASSERT_TRUE(tiered.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(tiered.save(1, 32, a.d, nullptr));  // duplicate
+    ASSERT_TRUE(tiered.save(2, 64, b.d, nullptr));  // 1 -> host
+    ASSERT_TRUE(tiered.save(3, 96, c.d, nullptr));  // host drops 1, 2 -> host
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(tiered.saves(), 3u);
+    EXPECT_EQ(tiered.demotions(), 2u);
+    EXPECT_EQ(tiered.evictions(), 1u);
+
+    RecurrentSnapshotStore device_only;
+    device_only.init(kEntryBytes, 1 * kEntryBytes);
+    ASSERT_TRUE(device_only.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(device_only.save(2, 64, b.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(device_only.saves(), 2u);
+    EXPECT_EQ(device_only.demotions(), 0u);
+    EXPECT_EQ(device_only.evictions(), 1u);
+}
+
 }  // namespace
 }  // namespace imp

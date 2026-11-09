@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- GDN-hybrid prefix reuse is visible: `/metrics` counts snapshot restores per tier, misses with a cached KV prefix (`absent`, `stale`), the cached tokens prefilled again, and snapshot saves, demotions and evictions. A request leaving >= 4096 cached tokens unused logs one line; the request line logs the client's `X-Request-Id`.
 - `/v1/messages` reads `output_config.effort` and maps it onto the chat template's `reasoning_effort` list. Qwen3.8-27B-NVFP4: `low`, `medium` as sent; `high`, `xhigh`, `max` render `xhigh`.
 - `diagnostics.tool_fault_raw` (default off): a failed tool call logs the model's raw call text, first 2000 bytes. A call naming a tool the request did not offer now logs a line too, and non-streamed requests log validation failures (#3063).
 - `speculative.mtp_gap_bind` (default on): a prompt whose prefix-cache hit reaches past every MTP head slot's rows binds anyway, the head starting at the hit. Agent chats resend whole transcripts, so one unbound turn kept a chat unbound: familiar, 4 agents on Qwen3.8-27B-NVFP4, 3851 of 4567 requests drafted nothing.
