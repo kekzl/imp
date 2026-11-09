@@ -91,7 +91,7 @@ Two of these do not switch off the way the field name suggests:
 
 ### Metrics for what the server decided
 
-`/metrics` carries counters (#1640, #1641):
+`/metrics` carries counters (#1640, #1641; `imp_requests_cancelled_total` stays client-disconnect only):
 
 | counter | what moves it |
 |---|---|
@@ -100,8 +100,7 @@ Two of these do not switch off the way the field name suggests:
 | `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
 | `imp_streaming_kv_auto_enables_total` | the KV pool ran nearly full and StreamingLLM eviction switched itself on (every KV dtype; F16 only before v0.43). The same event demotes CUDA graphs; both are lifted again once a fifth of the pool is free, unless a sequence was actually evicted, which pins them for the rest of the process. `usage.prompt_tokens_details.evicted_tokens` is the per-request size, this is the rate |
 | `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
-
-`imp_requests_cancelled_total` remains client-disconnect only.
+| `imp_prefix_snapshot_misses_total{reason}` | GDN hybrids: a request had a cached KV prefix but no recurrent snapshot to restore it with, none stored (`absent`) or stored but no longer paired with its KV (`stale`). `imp_prefix_snapshot_unused_tokens_total` counts the cached tokens prefilled again; `imp_recurrent_snapshot_evictions_total` rising beside it means `server.recurrent_snapshot_host_mb` is short |
 
 Speculative decoding is counted twice: once in aggregate, once per draft source.
 

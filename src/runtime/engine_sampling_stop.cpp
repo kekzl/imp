@@ -412,6 +412,29 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
 // One snapshot is saved per prefill at the largest block-aligned position
 // (step_prefill_one), keyed by the chained KV block hash; the scheduler caps KV block reuse to the longest restorable prefix so continuation prefill never rewrites blocks shared with other sequences.
 
+// First admission probe only (KV-full retries probe again). Logs when >= 4096 reusable prefix
+// tokens (cached, under the chunk cap) prefill again: the KV survived, the state did not.
+static void note_reuse(RecurrentSnapshotStore& store, Request& req, int bs, int restored_tokens, bool on_host,
+                       int stale, int cached_blocks, int on_device_blocks) {
+    if (req.reuse_probed)
+        return;
+    req.reuse_probed = true;
+    const int unused = std::max(cached_blocks * bs - restored_tokens, 0);
+    auto& c = store.reuse();
+    if (restored_tokens > 0)
+        (on_host ? c.restores_host : c.restores_device).fetch_add(1, std::memory_order_relaxed);
+    else if (cached_blocks > 0)
+        (stale > 0 ? c.misses_stale : c.misses_absent).fetch_add(1, std::memory_order_relaxed);
+    c.unused_tokens.fetch_add(static_cast<uint64_t>(unused), std::memory_order_relaxed);
+    if (unused < 4096)
+        return;
+    IMP_LOG_INFO(
+        "RecurrentSnapshot: req %d restores %d of %d cached prefix tokens (%d on device), %d stale "
+        "snapshot(s) passed, store %d/%d device + %d/%d host",
+        req.id, restored_tokens, cached_blocks * bs, on_device_blocks * bs, stale, store.size(),
+        store.capacity(), store.host_size(), store.host_capacity());
+}
+
 int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     req.recurrent_restore.reset();
     if (req.bypass_prefix_cache)  // #2198 direct: no snapshot restore, no cached-block hold
@@ -442,6 +465,7 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     const int grid = base_prefill_chunk(resolve_prefill_chunk_size_(), executor_->max_tokens(), bs);
     const int branch_b = std::min(on_device, cap);
     req.branch_point_tokens = grid > 0 ? (branch_b * bs / grid) * grid : branch_b * bs;
+    int stale = 0;  // snapshots found whose length or KV chain no longer pairs
     for (int b = max_b; b >= 1; --b) {
         // Transcript snapshot (unaligned, saved at finish) before the aligned entry: it
         // reaches further into the same block. Its full blocks are the LAST cached ones (the
@@ -453,10 +477,15 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
             for (int m = std::min(bs - 1, total - kMinPromptChunkRows - base); m >= 1; --m) {
                 const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
                 auto entry = recurrent_snapshots_->find(key);
-                if (!entry || entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain))
+                if (!entry)
                     continue;
-                if (kv_manager_->hold_cached_block(key, req.id) < 0)
-                    continue;  // the tail block was reclaimed; the state alone cannot restore
+                // Unpaired, or its tail block was reclaimed (the state alone cannot restore).
+                if (entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain) ||
+                    kv_manager_->hold_cached_block(key, req.id) < 0) {
+                    ++stale;
+                    continue;
+                }
+                note_reuse(*recurrent_snapshots_, req, bs, base + m, entry->on_host, stale, max_b, on_device);
                 req.recurrent_restore = std::move(entry);
                 return b;
             }
@@ -465,10 +494,13 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
         // The state pairs only with the KV its forward attended to; a chain rebound by another
         // forward would mix two forwards (#2174): prefill from further back instead.
         if (entry && entry->n_tokens == b * bs && kv_manager_->chain_intact(entry->kv_chain)) {
+            note_reuse(*recurrent_snapshots_, req, bs, b * bs, entry->on_host, stale, max_b, on_device);
             req.recurrent_restore = std::move(entry);
             return b;
         }
+        stale += entry ? 1 : 0;
     }
+    note_reuse(*recurrent_snapshots_, req, bs, 0, false, stale, max_b, on_device);
     IMP_LOG_DEBUG("RecurrentSnapshot: no restorable prefix for req %d (%d/%d blocks cached, %d tokens)", req.id,
                   cached, total / bs, total);
     return 0;
