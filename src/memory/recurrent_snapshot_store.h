@@ -111,6 +111,13 @@ public:
     // stay valid until released.
     void clear();
 
+    // A running request's prompt-boundary snapshot: host eviction skips it until unprotect(owner),
+    // which marks it most-recently-used. dev50h (4 agents, 28 slots): 39.5 % of turns after a
+    // >= 60 s turn found no snapshot, their finish-time transcript snapshot unpaired or skipped.
+    void protect(int owner, size_t key) { protected_[owner] = key; }
+    void unprotect(int owner);
+    [[nodiscard]] bool is_protected(size_t key) const;
+
 private:
     // Shared with entry deleters so buffers outlive the store if needed.
         struct BufferPool {
@@ -135,6 +142,7 @@ private:
                                                         std::vector<KvChainLink> kv_chain);
 
     std::shared_ptr<BufferPool> pool_;
+    std::unordered_map<int, size_t> protected_;  // owner (request id) -> key, <= max_batch entries
     size_t entry_bytes_ = 0;
     size_t sidecar_bytes_ = 0;
     size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_

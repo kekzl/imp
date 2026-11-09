@@ -17,6 +17,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
 ### Fixed
+- GDN hybrids: a running request's prompt-boundary snapshot is no longer evicted from the host tier while it decodes. familiar dev50h (Qwen3.8-27B-NVFP4, 4 agents): 39.5 % of turns after a >= 60 s turn prefilled their whole transcript (cached=0), 0.8 % after a < 20 s turn.
 - Sparse attention page metadata: a page statistic is rebuilt from its current KV rows, so rejected MTP drafts no longer stay in the mean/std (or min/max) that ranks the page. Prompt pages were not affected.
 - `SM120.md` decode roofline: memory:compute is ~465:1, not ~28,000:1 (8.4 MB K+V, 8.4 MFLOPs; ~140:1 at FP32 accumulate). `wgmma` is `sm_90a` only per the PTX ISA, not `sm_100`.
 - Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).

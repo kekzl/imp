@@ -156,8 +156,13 @@ void* RecurrentSnapshotStore::acquire_host_buffer_() {
             return p;
         }
     }
-    while (!host_lru_.empty()) {
+    // Protected keys rotate to the tail; one pass over the list bounds the walk.
+    for (size_t n = host_lru_.size(); n > 0 && !host_lru_.empty(); --n) {
         size_t victim = host_lru_.front();
+        if (is_protected(victim)) {
+            host_lru_.splice(host_lru_.end(), host_lru_, host_lru_.begin());
+            continue;
+        }
         host_lru_.pop_front();
         host_lru_map_.erase(victim);
         host_entries_.erase(victim);  // may run the deleter right here
@@ -300,6 +305,22 @@ void RecurrentSnapshotStore::erase(size_t key) {
         host_lru_map_.erase(lit);
     }
     host_entries_.erase(key);
+}
+
+void RecurrentSnapshotStore::unprotect(int owner) {
+    auto it = protected_.find(owner);
+    if (it == protected_.end())
+        return;
+    const size_t key = it->second;
+    protected_.erase(it);
+    (void)find(key);  // MRU: the owner's next turn is the likeliest next restore
+}
+
+bool RecurrentSnapshotStore::is_protected(size_t key) const {
+    for (const auto& [owner, k] : protected_)
+        if (k == key)
+            return true;
+    return false;
 }
 
 void RecurrentSnapshotStore::clear() {
