@@ -5,6 +5,8 @@
 
 #include <cuda_runtime.h>
 
+#include <vector>
+
 namespace imp {
 
 bool kv_host_spill_supported(KVCache& cache) {
@@ -41,9 +43,9 @@ size_t part_bytes(KVCache& c, Part p, int layer) {
     return (p == Part::K || p == Part::V) ? c.block_bytes(layer) : c.scale_block_bytes(layer);
 }
 
-// Host layout: all layers' K, then V, K scales, V scales, key min/max pages. A part whose layers share one
-// size and a constant device stride moves as a single 2D copy (2 to 4 copies per block instead of
-// 2-4 per layer); anything else falls back to one copy per layer.
+// Host layout: all layers' K, then V, K scales, V scales, key min/max pages. copy2d gets a part whose
+// layers share one size and a constant device stride (rows = layers); anything else goes to copy1d
+// one layer at a time.
 template <typename F2D, typename F1D>
 size_t for_each_part(KVCache& c, int block_id, F2D&& copy2d, F1D&& copy1d) {
     const int n = c.n_layers();
@@ -92,51 +94,59 @@ bool copy_ok(cudaError_t e, const char* dir, int block_id, size_t off, size_t pi
     return false;
 }
 
-// A 2D copy over a 125 MiB layer pitch failed as invalid argument (Qwen3.8-27B, pool at 2000
-// blocks during warmup): one copy per layer then.
-cudaError_t copy_2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, int rows,
-                    cudaMemcpyKind kind, cudaStream_t stream) {
-    if (cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, rows, kind, stream) == cudaSuccess)
-        return cudaSuccess;
-    (void)cudaGetLastError();
-    cudaError_t e = cudaSuccess;
-    for (int r = 0; r < rows && e == cudaSuccess; ++r)
-        e = cudaMemcpyAsync(static_cast<char*>(dst) + (dpitch * r),
-                            static_cast<const char*>(src) + (spitch * r), width, kind, stream);
-    return e;
+std::atomic<bool> g_batch_copy_ok{true};
+
+// One cudaMemcpyBatchAsync per block, every layer row a segment. A growable pool's layer pitch
+// (Qwen3.8-27B: 17223-block ceiling) refuses cudaMemcpy2DAsync, and 80 single copies cost 668 us
+// per block vs 75 us on a fixed pool (16 layers, 4 kv heads, hd 256, NVFP4; batched: 55 us).
+bool copy_block(KVCache& c, int block_id, char* host, bool to_host, cudaStream_t stream) {
+    std::vector<void*> dsts;
+    std::vector<const void*> srcs;
+    std::vector<size_t> sizes;
+    const auto add = [&](size_t off, char* dev, size_t bytes) {
+        dsts.push_back(to_host ? host + off : dev);
+        srcs.push_back(to_host ? dev : host + off);
+        sizes.push_back(bytes);
+    };
+    for_each_part(
+        c, block_id,
+        [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
+            for (int r = 0; r < rows; ++r)
+                add(off + (width * r), dev + (pitch * r), width);
+        },
+        [&](size_t off, void* dev, size_t bytes) { add(off, static_cast<char*>(dev), bytes); });
+    const char* dir = to_host ? "D2H" : "H2D";
+    // The legacy NULL stream takes no batch copy (tests pass nullptr).
+    if (stream != nullptr && g_batch_copy_ok.load(std::memory_order_relaxed)) {
+        cudaMemcpyAttributes attr{};
+        attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+        size_t attr_idx = 0;
+        const cudaError_t e = cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr,
+                                                   &attr_idx, 1, stream);
+        if (e == cudaSuccess)
+            return true;
+        (void)cudaGetLastError();
+        if (g_batch_copy_ok.exchange(false))
+            IMP_LOG_WARN("KV host spill: cudaMemcpyBatchAsync refused (%s), one copy per segment from now on",
+                         cudaGetErrorString(e));
+    }
+    const cudaMemcpyKind kind = to_host ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+    bool ok = true;
+    for (size_t i = 0; i < dsts.size(); ++i) {
+        const auto off = static_cast<size_t>(static_cast<const char*>(to_host ? dsts[i] : srcs[i]) - host);
+        ok &= copy_ok(cudaMemcpyAsync(dsts[i], srcs[i], sizes[i], kind, stream), dir, block_id, off, 0,
+                      sizes[i], 1);
+    }
+    return ok;
 }
 }  // namespace
 
 bool kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream) {
-    char* out = static_cast<char*>(dst);
-    bool ok = true;
-    for_each_part(
-        cache, block_id,
-        [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            ok &= copy_ok(copy_2d(out + off, width, dev, pitch, width, rows, cudaMemcpyDeviceToHost, stream),
-                          "D2H", block_id, off, pitch, width, rows);
-        },
-        [&](size_t off, void* dev, size_t bytes) {
-            ok &= copy_ok(cudaMemcpyAsync(out + off, dev, bytes, cudaMemcpyDeviceToHost, stream), "D2H",
-                          block_id, off, 0, bytes, 1);
-        });
-    return ok;
+    return copy_block(cache, block_id, static_cast<char*>(dst), true, stream);
 }
 
 bool kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStream_t stream) {
-    const char* in = static_cast<const char*>(src);
-    bool ok = true;
-    for_each_part(
-        cache, block_id,
-        [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            ok &= copy_ok(copy_2d(dev, pitch, in + off, width, width, rows, cudaMemcpyHostToDevice, stream),
-                          "H2D", block_id, off, pitch, width, rows);
-        },
-        [&](size_t off, void* dev, size_t bytes) {
-            ok &= copy_ok(cudaMemcpyAsync(dev, in + off, bytes, cudaMemcpyHostToDevice, stream), "H2D",
-                          block_id, off, 0, bytes, 1);
-        });
-    return ok;
+    return copy_block(cache, block_id, const_cast<char*>(static_cast<const char*>(src)), false, stream);
 }
 
 KVHostSpill::KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc, Free free)

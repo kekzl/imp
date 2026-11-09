@@ -322,6 +322,31 @@ TEST_P(KVHostSpillGpuTest, WithoutTheTierTheReclaimedPrefixMisses) {
     EXPECT_EQ(mgr.allocate_blocks_with_prefix(2, a), 0);
 }
 
+// A growable pool (layer pitch = the ceiling) moves a block as one cudaMemcpyBatchAsync on a real
+// stream; the NULL-stream path (one copy per segment) reads back the same bytes, both directions.
+TEST_P(KVHostSpillGpuTest, GrowablePoolBlockRoundTripsThroughTheBatchCopy) {
+    KVCache c(4, 2, 64, GetParam(), 8, 16, nullptr, 4096);
+    ASSERT_TRUE(c.growable());
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    const size_t bytes = kv_host_block_bytes(c);
+    uint8_t* pinned = nullptr;
+    ASSERT_EQ(cudaHostAlloc(reinterpret_cast<void**>(&pinned), 2 * bytes, cudaHostAllocDefault), cudaSuccess);
+    for (size_t i = 0; i < bytes; ++i)
+        pinned[i] = static_cast<uint8_t>(31 + i * 13);
+    const std::vector<uint8_t> want(pinned, pinned + bytes);
+    EXPECT_TRUE(kv_block_from_host(c, pinned, 5, s));
+    EXPECT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    EXPECT_EQ(read_block(c, 5), want);
+
+    fill_block(c, 6, 77);
+    EXPECT_TRUE(kv_block_to_host(c, 6, pinned + bytes, s));
+    EXPECT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    EXPECT_EQ(std::vector<uint8_t>(pinned + bytes, pinned + (2 * bytes)), read_block(c, 6));
+    cudaFreeHost(pinned);
+    cudaStreamDestroy(s);
+}
+
 INSTANTIATE_TEST_SUITE_P(Dtypes, KVHostSpillGpuTest, ::testing::Values(QType::F16, QType::INT8, QType::NVFP4),
                          [](const auto& info) { return std::string(qtype_name(info.param)); });
 
