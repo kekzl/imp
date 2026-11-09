@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - A concurrent GDN-hybrid server with MTP on defaults to `speculative.mtp_nvfp4_head=false` and `mtp_batch_verify_k=1`, keeping 682 MiB plus half the spare recurrent slots for the KV pool. Qwen3.8-27B-NVFP4, SWE-bench dev 50, 4 agents: 33/50 solved, agent time 10.81 h vs 13.43 h MTP off; single-stream unchanged.
+- A concurrent GDN-hybrid server drafting MTP on the FP8 head scores only its first 98304 rows (`speculative.mtp_draft_vocab`, 0 = all): 99.94 % of Qwen3.8 agent output tokens sit below. Qwen3.8-27B-NVFP4, 1 chat x 50k replay: 121.6-124.8 -> 125.4-130.5 tok/s (8/8 above); verification stays full vocab.
 - `kv_cache.host_spill_mb` serves GDN hybrids and sparse attention: a spilled block carries its key min/max pages, and a recurrent snapshot's KV chain restores from its own host slot, shadows included. Qwen3.8-27B-NVFP4, 8 chats x ~31k tokens, 8000-block pool, 16384 MiB: cached 13 % -> 97 %, TTFT sum 213.1 -> 21.3 s (#3068).
 - KV host spill moves a block as one `cudaMemcpyBatchAsync`: a growable pool's layer pitch refused the 2D copy, and 80 single copies cost 668 us per block (now 55 us, Qwen3.8-27B geometry). Qwen3.8-27B-NVFP4, 14 chats x ~33k tokens, 16384 MiB: later-turn TTFT median 1725/3564 -> 1012/1073 ms, queue time 17.5/17.7 -> 10.1/11.8 s.
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).

@@ -129,6 +129,7 @@ struct HeadPassInputs {
     const void* hidden;            // the verify chunk's hidden rows (tab.src indexes them)
     const NvFP4QuantResult* head;  // NVFP4 draft LM head, or null
     const Tensor* post_norm;       // the target's final norm on the gathered rows, or null
+    int draft_vocab;               // speculative.mtp_draft_vocab: FP8 head rows scored, 0 = all
 };
 
 // The pass after the table upload: feed, draft LM head, the chain when asked; drafts in ws.d_chain_tokens.
@@ -145,7 +146,8 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain
         return -1;
     // The next draft per request: LM head over the last fed row of each.
     mtp_gather_rows(ws.d_b_h_final, tab.last, ws.d_b_gather, hidden_dim, m, stream);
-    if (!in.executor.lm_head_rows_argmax(ws.d_b_gather, m, ws.d_chain_tokens, stream, in.head))
+    if (!in.executor.lm_head_rows_argmax(ws.d_b_gather, m, ws.d_chain_tokens, stream, in.head,
+                                         in.draft_vocab))
         return -2;
     if (!chain)
         return m;
@@ -156,7 +158,7 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain
                                                  tab.chain_slots, tab.chain_pos, chain_max, *model.mtp_,
                                                  model.tok_emb_, ws, hidden_dim, stream) &&
                      in.executor.lm_head_rows_argmax(ws.d_b_h_final, m, ws.d_chain_tokens + m, stream,
-                                                     in.head);
+                                                     in.head, in.draft_vocab);
     return two ? 2 * m : m;
 }
 
@@ -173,9 +175,13 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
     const bool chain = bv_.depth > 1;
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
-    const HeadPassInputs in{
-        *model_, *executor_, *mtp_ws_storage_,
-        hidden,  head,       runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr};
+    const HeadPassInputs in{*model_,
+                            *executor_,
+                            *mtp_ws_storage_,
+                            hidden,
+                            head,
+                            runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr,
+                            runtime_config_.speculative.mtp_draft_vocab};
     auto run = [&](int feed_max, int chain_max) {
         return run_head_pass(in, tab, chain, feed_max, chain_max, stream);
     };
