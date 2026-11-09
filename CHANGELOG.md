@@ -30,7 +30,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Sparse attention page metadata: a page statistic is rebuilt from its current KV rows, so rejected MTP drafts no longer stay in the mean/std (or min/max) that ranks the page. Prompt pages were not affected (#3065).
 - `SM120.md` decode roofline: memory:compute is ~465:1, not ~28,000:1 (8.4 MB K+V, 8.4 MFLOPs; ~140:1 at FP32 accumulate). `wgmma` is `sm_90a` only per the PTX ISA, not `sm_100` (#3064).
 - Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).
-- Request log: `temp=` reads `model` when the request sent no temperature; it printed the 0.70 placeholder before the model default (Qwen3.8: 1.0) applied (#`=3067).
+- Request log: `temp=` reads `model` when the request sent no temperature; it printed the 0.70 placeholder before the model default (Qwen3.8: 1.0) applied (#3067).
 
 ## [0.64.0] - 2026-11-05
 
