@@ -344,6 +344,8 @@ void Engine::release_recurrent_slot_(int req_id) {
         bv_.spare2_of.erase(sp);
     }
     phrase_release_(req_id);  // banned-phrase recurrent slabs
+    if (recurrent_snapshots_)
+        recurrent_snapshots_->unprotect(req_id);
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
@@ -574,8 +576,10 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
         key = KVCacheManager::compute_block_hash(
             std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
     }
-    if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end))
+    if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end)) {
+        recurrent_snapshots_->protect(req.id, key);
         return;  // identical prefix already snapshotted (e.g. it was just restored)
+    }
     auto it = recurrent_slot_of_.find(req.id);
     if (it == recurrent_slot_of_.end())
         return;
@@ -588,6 +592,7 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream,
                                    nullptr, std::move(chain))) {
+        recurrent_snapshots_->protect(req.id, key);
         // The copy must complete before anything else mutates the slot: later
         // prefill chunks are ordered on this stream, but the first DECODE step
         // may run on a different stream (green contexts). One sync per prefill.
