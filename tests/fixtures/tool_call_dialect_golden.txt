@@ -633,25 +633,25 @@ reconstruct|raw|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=ci
 reconstruct|raw|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|raw|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|raw|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|raw|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|raw|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|raw|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|raw|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|raw|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|raw|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|raw|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|raw|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|raw|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|raw|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|raw|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|raw|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|raw|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|raw|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|raw|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|raw|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|raw|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|raw|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|raw|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|raw|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|raw|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|raw|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|raw|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|raw|m0|22C
 response|raw|m1|sunny "hot"
 response|raw|m2|{"ok":true,"temp":22}
@@ -1293,25 +1293,25 @@ reconstruct|chatml|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter
 reconstruct|chatml|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|chatml|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|chatml|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|chatml|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|chatml|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|chatml|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|chatml|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|chatml|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|chatml|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|chatml|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|chatml|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|chatml|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|chatml|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|chatml|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|chatml|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|chatml|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|chatml|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|chatml|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|chatml|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|chatml|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|chatml|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|chatml|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|chatml|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|chatml|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|chatml|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|chatml|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|chatml|m0|22C
 response|chatml|m1|sunny "hot"
 response|chatml|m2|{"ok":true,"temp":22}
@@ -1953,25 +1953,25 @@ reconstruct|llama2|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter
 reconstruct|llama2|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|llama2|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|llama2|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|llama2|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|llama2|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|llama2|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|llama2|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|llama2|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|llama2|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|llama2|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|llama2|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|llama2|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|llama2|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|llama2|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|llama2|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|llama2|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|llama2|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|llama2|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|llama2|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|llama2|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|llama2|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|llama2|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|llama2|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|llama2|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|llama2|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|llama2|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|llama2|m0|22C
 response|llama2|m1|sunny "hot"
 response|llama2|m2|{"ok":true,"temp":22}
@@ -2613,25 +2613,25 @@ reconstruct|mistral_v3|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<param
 reconstruct|mistral_v3|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|mistral_v3|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|mistral_v3|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|mistral_v3|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|mistral_v3|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|mistral_v3|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|mistral_v3|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|mistral_v3|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|mistral_v3|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|mistral_v3|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|mistral_v3|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|mistral_v3|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|mistral_v3|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|mistral_v3|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|mistral_v3|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|mistral_v3|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|mistral_v3|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|mistral_v3|m0|22C
 response|mistral_v3|m1|sunny "hot"
 response|mistral_v3|m2|{"ok":true,"temp":22}
@@ -3933,25 +3933,25 @@ reconstruct|nemotron|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<paramet
 reconstruct|nemotron|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|nemotron|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|nemotron|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|nemotron|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|nemotron|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|nemotron|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|nemotron|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|nemotron|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|nemotron|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|nemotron|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|nemotron|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|nemotron|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|nemotron|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|nemotron|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|nemotron|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|nemotron|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|nemotron|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|nemotron|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|nemotron|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|nemotron|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|nemotron|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|nemotron|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|nemotron|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|nemotron|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|nemotron|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|nemotron|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|nemotron|m0|22C
 response|nemotron|m1|sunny "hot"
 response|nemotron|m2|{"ok":true,"temp":22}
@@ -5253,25 +5253,25 @@ reconstruct|deepseek_r1|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<para
 reconstruct|deepseek_r1|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|deepseek_r1|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|deepseek_r1|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|deepseek_r1|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|deepseek_r1|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|deepseek_r1|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|deepseek_r1|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|deepseek_r1|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|deepseek_r1|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|deepseek_r1|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|deepseek_r1|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|deepseek_r1|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|deepseek_r1|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|deepseek_r1|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|deepseek_r1|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|deepseek_r1|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|deepseek_r1|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|deepseek_r1|m0|22C
 response|deepseek_r1|m1|sunny "hot"
 response|deepseek_r1|m2|{"ok":true,"temp":22}
@@ -5913,25 +5913,25 @@ reconstruct|phi|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=ci
 reconstruct|phi|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|phi|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|phi|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|phi|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|phi|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|phi|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|phi|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|phi|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|phi|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|phi|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|phi|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|phi|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|phi|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|phi|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|phi|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|phi|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|phi|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|phi|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|phi|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|phi|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|phi|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|phi|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|phi|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|phi|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|phi|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|phi|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|phi|m0|22C
 response|phi|m1|sunny "hot"
 response|phi|m2|{"ok":true,"temp":22}
@@ -6573,25 +6573,25 @@ reconstruct|harmony|k1|t0|xml=1|\n<tool_call>\n<function=get_weather>\n<paramete
 reconstruct|harmony|k1|t1|xml=0|\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
 reconstruct|harmony|k1|t1|xml=1|\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|harmony|k1|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"city":"Berlin","n":3},"name":"get_weather"}\n</tool_call>
-reconstruct|harmony|k1|t2|xml=1|Some text before.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
+reconstruct|harmony|k1|t2|xml=1|Some text before.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nBerlin\n</parameter>\n<parameter=n>\n3\n</parameter>\n</function>\n</tool_call>
 reconstruct|harmony|k2|t0|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|harmony|k2|t0|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|harmony|k2|t1|xml=0|\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
 reconstruct|harmony|k2|t1|xml=1|\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|harmony|k2|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"b":true,"l":[1,"two",{"k":2.5}],"o":{"in":"v"},"s":"x y","z":null},"name":"f"}\n</tool_call>
-reconstruct|harmony|k2|t2|xml=1|Some text before.\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
+reconstruct|harmony|k2|t2|xml=1|Some text before.\n\n<tool_call>\n<function=f>\n<parameter=b>\ntrue\n</parameter>\n<parameter=l>\n[1,"two",{"k":2.5}]\n</parameter>\n<parameter=o>\n{"in":"v"}\n</parameter>\n<parameter=s>\nx y\n</parameter>\n<parameter=z>\nnull\n</parameter>\n</function>\n</tool_call>
 reconstruct|harmony|k3|t0|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|harmony|k3|t0|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|harmony|k3|t1|xml=0|\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
 reconstruct|harmony|k3|t1|xml=1|\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|harmony|k3|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":"not json","name":"g"}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":""}\n</tool_call>\n<tool_call>\n{"arguments":{},"name":"h"}\n</tool_call>
-reconstruct|harmony|k3|t2|xml=1|Some text before.\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
+reconstruct|harmony|k3|t2|xml=1|Some text before.\n\n<tool_call>\n<function=g>\n</function>\n</tool_call>\n<tool_call>\n<function=>\n</function>\n</tool_call>\n<tool_call>\n<function=h>\n</function>\n</tool_call>
 reconstruct|harmony|k4|t0|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|harmony|k4|t0|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|harmony|k4|t1|xml=0|\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
 reconstruct|harmony|k4|t1|xml=1|\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 reconstruct|harmony|k4|t2|xml=0|Some text before.\n<tool_call>\n{"arguments":{"x":1},"name":"a"}\n</tool_call>\n<tool_call>\n{"arguments":[1,2],"name":"b"}\n</tool_call>
-reconstruct|harmony|k4|t2|xml=1|Some text before.\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
+reconstruct|harmony|k4|t2|xml=1|Some text before.\n\n<tool_call>\n<function=a>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>
 response|harmony|m0|22C
 response|harmony|m1|sunny "hot"
 response|harmony|m2|{"ok":true,"temp":22}
