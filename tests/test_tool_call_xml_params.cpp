@@ -126,3 +126,38 @@ TEST(ToolCallQwen36Xml, ArraySchemaRejectsAnObject) {
     EXPECT_FALSE(tc.valid);
     EXPECT_EQ(json::parse(tc.arguments)["edits"], "{\"a\": 1}") << "a value of the wrong kind stays the text";
 }
+
+// An emitted call replays as the model wrote it (parameter order), under either id form, while its
+// arguments still parse equal; an edited or unknown call renders canonically (keys sorted).
+TEST(ToolCallQwen36Xml, ReplayedCallKeepsTheEmittedParameterOrder) {
+    const json tools = json::parse(R"([{"type":"function","function":{"name":"read_file","parameters":{
+        "type":"object","required":["path"],"properties":{"path":{"type":"string"},
+        "offset":{"type":"integer"},"limit":{"type":"integer"}}}}}])");
+    ParsedToolCall tc;
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=read_file>\n<parameter=path>\na.py\n</parameter>\n"
+                              "<parameter=offset>\n200\n</parameter>\n<parameter=limit>\n120\n"
+                              "</parameter>\n</function>",
+                              tc));
+    tc.id = "call_imp_987654";
+    validate_tool_call(tc, tools);
+    const std::string emitted =
+        "<parameter=path>\na.py\n</parameter>\n<parameter=offset>\n200\n</parameter>\n"
+        "<parameter=limit>\n120\n</parameter>\n";
+    const std::string sorted =
+        "<parameter=limit>\n120\n</parameter>\n<parameter=offset>\n200\n</parameter>\n"
+        "<parameter=path>\na.py\n</parameter>\n";
+    auto replay = [](const char* id, const char* args) {
+        const json calls = json::array(
+            {{{"id", id}, {"type", "function"}, {"function", {{"name", "read_file"}, {"arguments", args}}}}});
+        return reconstruct_tool_call_output(imp::ChatTemplateFamily::CHATML, calls, "", true);
+    };
+    const char* same = R"({"limit":120,"offset":200,"path":"a.py"})";
+    EXPECT_NE(replay("toolu_987654", same).find(emitted), std::string::npos);
+    EXPECT_NE(replay("call_imp_987654", same).find(emitted), std::string::npos);
+    EXPECT_NE(replay("toolu_987654", R"({"limit":10,"offset":200,"path":"a.py"})")
+                  .find("<parameter=limit>\n10\n</parameter>\n<parameter=offset>"),
+              std::string::npos)
+        << "edited arguments render canonically";
+    EXPECT_NE(replay("toolu_123", same).find(sorted), std::string::npos) << "unknown id renders canonically";
+}

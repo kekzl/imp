@@ -20,6 +20,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
 
 ### Fixed
+- A Qwen XML tool call replayed in the next turn renders as the model wrote it (by id, while its arguments still parse equal), not re-sorted by key. Qwen3.8-27B-NVFP4 agent probe: turn 1 cached 832 -> 1208 of 1208 (the call was path, offset, limit).
 - Qwen XML tool calls keep a parameter value's edge whitespace (only the template newline goes, as in vLLM): `"def "` stayed `"def"` and a code value lost its first line's indentation. A replayed call after text renders `"\n\n<tool_call>"` like the template. Qwen3.8-27B-NVFP4, 4-turn agent probe: turn 2/3 cached 10672/17808 -> 11521/18389 (full transcript).
 - GDN hybrids: a running request's prompt-boundary snapshot is no longer evicted from the host tier while it decodes. Qwen3.8-27B-NVFP4, 21k-token chat resent after a 3000-token turn beside 3 agents: 20080-21584 tokens cached instead of 0, TTFT 131-186 ms instead of 2384-2520 ms (3/3 trials).
 - Sparse attention page metadata: a page statistic is rebuilt from its current KV rows, so rejected MTP drafts no longer stay in the mean/std (or min/max) that ranks the page. Prompt pages were not affected.

@@ -5,6 +5,75 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
+
+namespace {
+
+// "call_imp_7" and its Anthropic form "toolu_7" name the same emitted call.
+std::string call_id_key(const std::string& id) {
+    for (const char* p : {"call_imp_", "toolu_"})
+        if (id.starts_with(p))
+            return id.substr(std::strlen(p));
+    return id;
+}
+
+// Qwen XML calls as the model wrote them, by id. A replayed call whose arguments still parse equal
+// renders that text again: a re-render orders parameters by key and broke the next turn's prefix
+// match (path, offset, limit came back as limit, offset, path). Last 2048 calls.
+class XmlCallMemory {
+public:
+    void remember(const ParsedToolCall& tc) {
+        if (tc.id.empty() || tc.raw_params.empty() || !tc.raw_body.contains("<parameter="))
+            return;
+        json args = json::parse(tc.arguments, nullptr, false);
+        if (!args.is_object() || args.size() != tc.raw_params.size())
+            return;
+        std::string text = "\n<tool_call>\n<function=" + tc.name + ">\n";
+        for (const auto& [key, raw] : tc.raw_params) {
+            if (!args.contains(key))
+                return;
+            text += "<parameter=" + key + ">\n" + raw + "\n</parameter>\n";
+        }
+        text += "</function>\n</tool_call>";
+        std::lock_guard<std::mutex> lock(mu_);
+        const std::string key = call_id_key(tc.id);
+        if (!calls_.contains(key))
+            order_.push_back(key);
+        calls_[key] = {tc.name, std::move(args), std::move(text)};
+        while (order_.size() > kMaxCalls) {
+            calls_.erase(order_.front());
+            order_.pop_front();
+        }
+    }
+    bool recall(const std::string& id, const std::string& name, const json& args, std::string& out) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = calls_.find(call_id_key(id));
+        if (it == calls_.end() || it->second.name != name || it->second.args != args)
+            return false;
+        out += it->second.text;
+        return true;
+    }
+
+private:
+    static constexpr size_t kMaxCalls = 2048;
+    struct Call {
+        std::string name;
+        json args;
+        std::string text;
+    };
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, Call> calls_;
+    std::deque<std::string> order_;
+};
+
+XmlCallMemory& xml_call_memory() {
+    static XmlCallMemory memory;
+    return memory;
+}
+
+}  // namespace
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
     if (tools.empty())
@@ -264,6 +333,10 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
         else if (fn.contains("arguments") && !fn["arguments"].is_null())
             args = dump_safe(fn["arguments"]);
 
+        if (xml && render == chatml_render_call && tc.contains("id") && tc["id"].is_string() &&
+            xml_call_memory().recall(tc["id"].get<std::string>(), name, json::parse(args, nullptr, false),
+                                     result))
+            continue;
         render(result, name, args, xml);
     }
 
@@ -315,7 +388,7 @@ static json find_tool_schema(const json& tools, const std::string& name) {
     return json::object();
 }
 
-void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
+static void restore_string_params(ParsedToolCall& tc, const json& tools) {
     if (tc.raw_params.empty())
         return;
     const json schema = find_tool_schema(tools, tc.name);
@@ -356,6 +429,11 @@ void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
     }
     if (changed)
         tc.arguments = dump_safe(args);
+}
+
+void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
+    restore_string_params(tc, tools);
+    xml_call_memory().remember(tc);  // every emitted call passes here (validate_tool_call, stream driver)
 }
 
 void validate_tool_call(ParsedToolCall& tc, const json& tools) {

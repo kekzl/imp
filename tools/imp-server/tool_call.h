@@ -35,6 +35,7 @@ std::string tool_call_fault(const ParsedToolCall& tc, const json& tools, bool wi
 // A raw_params value coerced to a type its schema does not allow, where the schema allows
 // "string", goes back to the emitted text: "0600" for {"type":"string"}, not 600 (#2103). A value
 // left as text where the schema allows array or object, not "string", parses as JSON.
+// A Qwen XML call with an id is remembered as emitted: reconstruct_tool_call_output replays it.
 void restore_raw_string_params(ParsedToolCall& tc, const json& tools);
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);
