@@ -3,8 +3,8 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
-# Native CUDA 13.4.3 devel image: nvcc 13.4 (V13.4.92) is on PATH at
-# /usr/local/cuda (-> /usr/local/cuda-13.4) out of the box, no apt toolkit
+# Native CUDA 13.5.0 devel image: nvcc 13.5 (V13.5.37) is on PATH at
+# /usr/local/cuda (-> /usr/local/cuda-13.5) out of the box, no apt toolkit
 # install needed. sm_120: no new tensor-core HW (still mma.sync, no tcgen05/wgmma).
 # Ubuntu 26.04 LTS host userland → GCC 15.2 / libstdc++ 15. GCC 15 no longer
 # pulls <algorithm>/<numeric> in transitively through other headers, so it
@@ -20,7 +20,7 @@
 # Dockerfile built two different base layers on two different days. Refresh
 # with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
 # not a per-platform one) and keep the five ci.yml `image:` lines in step.
-FROM nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b AS toolchain
+FROM nvidia/cuda:13.5.0-devel-ubuntu26.04@sha256:cafb2ca8fcffb6669cd80b929830de884bd12bb6eb364b474e8fe99108249d1e AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -148,7 +148,7 @@ COPY --from=bundle-build /dist/*.tar.gz* /
 # CUDA `base` (cudart only) + cuBLASLt from the toolchain stage: every binary links
 # exactly libcudart.so.13 + libcublasLt.so.13 (ldd); `runtime` carried 2.1 GB of
 # CUDA libs, 1.6 GB unused (cuFFT, cuSPARSE, cuSOLVER, NPP, nvrtc, ...).
-FROM nvidia/cuda:13.4.3-base-ubuntu26.04@sha256:e2eb43e25d404e2c48716f80afdb8989a84c4da588f5509330322842084d97b0
+FROM nvidia/cuda:13.5.0-base-ubuntu26.04@sha256:2b8fc7b402eb045b809c3bb6296853e7d6e99a5acaded62b28f9494b357fbb4f
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here

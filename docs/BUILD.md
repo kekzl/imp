@@ -11,7 +11,7 @@ The published image `ghcr.io/kekzl/imp:latest` is the supported way to run imp (
 
 ## Docker image (recommended)
 
-Needs Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), no CUDA toolkit on the host: the compile runs in a CUDA 13.4.3 container.
+Needs Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), no CUDA toolkit on the host: the compile runs in a CUDA 13.5.0 container.
 
 ```bash
 git clone https://github.com/kekzl/imp && cd imp
@@ -36,7 +36,7 @@ For a machine with the CUDA toolkit installed natively.
 
 | Needs | Version |
 |---|---|
-| CUDA toolkit | 13.2 or newer (CMake refuses older); tested: 13.4.3 |
+| CUDA toolkit | 13.2 or newer (CMake refuses older); tested: 13.5.0 |
 | CMake | 3.25 or newer |
 | host compiler | C++23: GCC 13+ or Clang 16+ |
 | CUDA libraries linked | `cudart`, `cuda_driver`, `cublasLt` |

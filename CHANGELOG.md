@@ -19,6 +19,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - With `kv_cache.host_spill_mb` set, `server.recurrent_snapshot_host_mb` left unset rises to half of it: a spilled GDN-hybrid prefix restores only with its snapshot. Qwen3.8-27B-NVFP4, 24 chats x ~12k tokens, 16384 MiB: later-turn cached 96k/98k -> 698k/878k of 899k tokens, TTFT median 4817/4645 -> 503/665 ms.
 - KV host spill moves a block as one `cudaMemcpyBatchAsync`: a growable pool's layer pitch refused the 2D copy, and 80 single copies cost 668 us per block (now 55 us, Qwen3.8-27B geometry). Qwen3.8-27B-NVFP4, 14 chats x ~33k tokens, 16384 MiB: later-turn TTFT median 1725/3564 -> 1012/1073 ms, queue time 17.5/17.7 -> 10.1/11.8 s.
 - `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
+- CUDA 13.4.3 -> 13.5.0: build, runtime, CI and ncu images by digest. nvcc V13.4.92 -> V13.5.37, cudart 13.4.92 -> 13.5.37, cuBLASLt 13.8.0.4 -> 13.10.0.20.
 
 ### Fixed
 - A Qwen XML tool call replayed in the next turn renders as the model wrote it (by id, while its arguments still parse equal), not re-sorted by key. Qwen3.8-27B-NVFP4 agent probe: turn 1 cached 832 -> 1208 of 1208 (the call was path, offset, limit).

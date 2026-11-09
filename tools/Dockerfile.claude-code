@@ -5,7 +5,7 @@
 #
 # Build:  docker build -f tools/Dockerfile.claude-code -t imp:claude-code tools/
 # Usage:  see tools/analysis/agent_external_smoke.sh
-FROM node:26-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
+FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
