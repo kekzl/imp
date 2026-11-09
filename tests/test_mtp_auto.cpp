@@ -86,6 +86,17 @@ TEST(MtpAuto, ExplicitDraftVocabSurvivesTheConcurrentDefaults) {
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
 }
 
+TEST(MtpAuto, HostSpillKeepsTheFullDraftOnAConcurrentHybrid) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"kv_cache.host_spill_mb=16384"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_GT(cfg.speculative.mtp_k, 0);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
+}
+
 TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=2"}).empty());
