@@ -12,6 +12,7 @@
 #include "exec/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/prompt_tail.h"  // base_prefill_chunk
+#include "runtime/snapshot_host_default.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
 #include "core/logging.h"
@@ -840,10 +841,8 @@ bool Engine::init_kv_cache() {
             int budget_mb = runtime_config_.server.recurrent_snapshot_mb;
             if (ssm_state_ && budget_mb > 0) {
                 recurrent_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
-                recurrent_snapshots_->init(
-                    ssm_state_->per_seq_bytes(), static_cast<size_t>(budget_mb) << 20,
-                    static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0))
-                        << 20);
+                recurrent_snapshots_->init(ssm_state_->per_seq_bytes(), static_cast<size_t>(budget_mb) << 20,
+                                           snapshot_host_budget_bytes(runtime_config_));
                 if (recurrent_snapshots_->enabled()) {
                     scheduler_->set_prefix_reuse_limit(
                         [this](Request& r) { return hybrid_prefix_reuse_limit_(r); });
