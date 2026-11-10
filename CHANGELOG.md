@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- With `kv_cache.host_spill_mb` set, a concurrent GDN-hybrid server drafts MTP on the FP8 head (`mtp_draft_vocab=98304`) and keeps `mtp_batch_verify_k=2`; the 682 MiB NVFP4 head copy goes to the KV pool. Qwen3.8-27B-NVFP4 replay, 8 chats x 27k: 296.5 -> 316.3 tok/s; 8 agents x ~97k: KV ceiling 18503 -> 20492 blocks.
+
 ## [0.65.0] - 2026-11-09
 
 ### Added
