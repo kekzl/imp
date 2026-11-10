@@ -105,7 +105,7 @@ struct MtpDraftWorkspace {
     void* d_attn_out      = nullptr;  // [num_heads * head_dim] FP16
     void* d_attn_residual = nullptr;  // [hidden_dim] FP16 — o_proj output (added to fc_out)
     int*  d_mtp_position  = nullptr;  // [1] int — current MTP cache position (for RoPE)
-    float* d_scan_part = nullptr;     // [num_heads, 32, head_dim + 2] split-K partials, inside d_mtp_position
+    float* d_scan_part = nullptr;     // split-K partials (mtp_scan_part_bytes), inside d_mtp_position
 
     // MTP-side KV cache, a ring of max_seq_len rows per slot: position p lives in row p % max_seq_len
     // and a query at p attends mtp_ring_window (the last max_seq_len positions, minus rows a later
@@ -332,7 +332,8 @@ struct MtpScanNodes {
 };
 // Every scan kernel node of `graph` into out; false = a graph API call failed.
 [[nodiscard]] bool mtp_scan_nodes_find(cudaGraph_t graph, MtpScanNodes& out);
-// Sets every scan node of `exec` to `rows` scores of dynamic smem (mtp_scan_smem_rows); no-op when unchanged.
+// Sets every scan node of `exec` to `rows` scores of dynamic smem (mtp_scan_smem_rows; a split node
+// mtp_scan_split_chunk(rows)); no-op when unchanged.
 [[nodiscard]] bool mtp_scan_nodes_set_rows(cudaGraphExec_t exec, MtpScanNodes& scan, int rows);
 // Make `slot` the active KV slot: saves the current slot's position, loads
 // the new one, re-points d_k_cache / d_v_cache. No-op for the active slot.

@@ -28,12 +28,19 @@ constexpr int kMtpFeedRows = 256;
 // 4 x kMtpFeedRows host-table feed tables in the same allocation.
 constexpr int kMtpPassTableInts = 8 * kMtpFeedRows;
 
-// ws.d_scan_part: [num_heads, kMtpScanMaxSplits, head_dim + 2] FP32, kMtpScanPartOffset bytes into
-// the d_mtp_position allocation.
+// ws.d_scan_part: split-K partials, kMtpScanPartOffset bytes into the d_mtp_position allocation. One row:
+// [num_heads, kMtpScanMaxSplits, head_dim + 2] FP32; multi-slot rows (mtp_attn_scan_slots, n_rows <=
+// kMtpScanSlotSplitRows): [n_rows, num_heads, kMtpScanSlotSplits, head_dim + 2].
 constexpr int kMtpScanMaxSplits = 32;
+constexpr int kMtpScanSlotSplits = 16;
+constexpr int kMtpScanSlotSplitRows = 16;
+// Scores per CTA of the multi-slot split scan for a window of `rows` (its dynamic smem / sizeof(float)).
+constexpr int mtp_scan_split_chunk(int rows) { return (rows + kMtpScanSlotSplits - 1) / kMtpScanSlotSplits; }
 constexpr size_t kMtpScanPartOffset = 256;
 inline size_t mtp_scan_part_bytes(int num_heads, int head_dim) {
-    return sizeof(float) * num_heads * kMtpScanMaxSplits * (static_cast<size_t>(head_dim) + 2);
+    return sizeof(float) * num_heads *
+           std::max(kMtpScanMaxSplits, kMtpScanSlotSplits * kMtpScanSlotSplitRows) *
+           (static_cast<size_t>(head_dim) + 2);
 }
 // ws.d_slot_hi [n_kv_slots] int follows the scan partials in the same allocation.
 inline size_t mtp_slot_hi_offset(int num_heads, int head_dim) {
@@ -88,7 +95,8 @@ struct MtpWorkspaceShape {
 };
 
 // Device footprint of one cudaMalloc: above 1 MiB it takes whole 2 MiB pages. Qwen3.8-27B head: 344.5 MiB
-// requested, 360 MiB measured (imp_vram_own_bytes boot - init_complete); with this rounding 359.5 MiB.
+// requested, 360 MiB measured (imp_vram_own_bytes boot - init_complete); with this rounding 359.5 MiB
+// (367 MiB with the 8 MiB multi-slot scan partials).
 constexpr size_t kMtpAllocGranule = size_t{2} << 20;
 inline size_t mtp_alloc_footprint(size_t bytes) {
     return bytes > (size_t{1} << 20) ? (bytes + kMtpAllocGranule - 1) / kMtpAllocGranule * kMtpAllocGranule

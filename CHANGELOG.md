@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - With `kv_cache.host_spill_mb` set, a concurrent GDN-hybrid server drafts MTP on the FP8 head (`mtp_draft_vocab=98304`) and keeps `mtp_batch_verify_k=2`; the 682 MiB NVFP4 head copy goes to the KV pool. Qwen3.8-27B-NVFP4 replay, 8 chats x 27k: 296.5 -> 316.3 tok/s; 8 agents x ~97k: KV ceiling 18503 -> 20492 blocks (#3084).
 - MoE decode with host-resident experts prefetches 6 predicted expert keys per layer instead of 2, one copy block per key (`moe.expert_prefetch`, new `moe.expert_prefetch_blocks`). Qwen3.8-Flash-Next-NVFP4 server, 6 prompts x 400 tokens: 95.84 -> 102.84 tok/s, answers byte-identical; Kimi-Linear-48B and Qwen3-30B-A3B unchanged (#3085).
+- The MTP draft attention of a multi-slot server scans each head KV ring with 16 CTAs per head and row instead of 1: 886 -> 140 us per pass at 16384 rows. Qwen3.8-27B-NVFP4 server, one 80k-token chat: 121.6 -> 128.2 tok/s, with `kv_cache.host_spill_mb` 135.9 -> 148.2; two chats 116.5 -> 121.0 and 129.7 -> 139.2 per stream. MTP workspace +8 MiB (#3087).
 
 ## [0.65.0] - 2026-11-09
 
