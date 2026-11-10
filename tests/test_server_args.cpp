@@ -32,7 +32,7 @@ TEST(ServerArgs, DefaultsWhenNoFlags) {
     ServerArgs a = parse({});
     EXPECT_EQ(a.vram_budget_mb, 0);   // 0 = uncapped
     EXPECT_EQ(a.max_concurrent, 64);  // guard active out of the box
-    EXPECT_EQ(a.request_timeout, 300);
+    EXPECT_EQ(a.request_timeout, 1800);
     EXPECT_EQ(a.rate_limit, 0);        // 0 = unlimited
     EXPECT_EQ(a.max_input_tokens, 0);  // 0 = unlimited
     EXPECT_EQ(a.max_queued_tokens, 0);  // 0 = off (#2408)

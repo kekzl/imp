@@ -5,6 +5,75 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
+
+namespace {
+
+// "call_imp_7" and its Anthropic form "toolu_7" name the same emitted call.
+std::string call_id_key(const std::string& id) {
+    for (const char* p : {"call_imp_", "toolu_"})
+        if (id.starts_with(p))
+            return id.substr(std::strlen(p));
+    return id;
+}
+
+// Qwen XML calls as the model wrote them, by id. A replayed call whose arguments still parse equal
+// renders that text again: a re-render orders parameters by key and broke the next turn's prefix
+// match (path, offset, limit came back as limit, offset, path). Last 2048 calls.
+class XmlCallMemory {
+public:
+    void remember(const ParsedToolCall& tc) {
+        if (tc.id.empty() || tc.raw_params.empty() || !tc.raw_body.contains("<parameter="))
+            return;
+        json args = json::parse(tc.arguments, nullptr, false);
+        if (!args.is_object() || args.size() != tc.raw_params.size())
+            return;
+        std::string text = "\n<tool_call>\n<function=" + tc.name + ">\n";
+        for (const auto& [key, raw] : tc.raw_params) {
+            if (!args.contains(key))
+                return;
+            text += "<parameter=" + key + ">\n" + raw + "\n</parameter>\n";
+        }
+        text += "</function>\n</tool_call>";
+        std::lock_guard<std::mutex> lock(mu_);
+        const std::string key = call_id_key(tc.id);
+        if (!calls_.contains(key))
+            order_.push_back(key);
+        calls_[key] = {tc.name, std::move(args), std::move(text)};
+        while (order_.size() > kMaxCalls) {
+            calls_.erase(order_.front());
+            order_.pop_front();
+        }
+    }
+    bool recall(const std::string& id, const std::string& name, const json& args, std::string& out) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = calls_.find(call_id_key(id));
+        if (it == calls_.end() || it->second.name != name || it->second.args != args)
+            return false;
+        out += it->second.text;
+        return true;
+    }
+
+private:
+    static constexpr size_t kMaxCalls = 2048;
+    struct Call {
+        std::string name;
+        json args;
+        std::string text;
+    };
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, Call> calls_;
+    std::deque<std::string> order_;
+};
+
+XmlCallMemory& xml_call_memory() {
+    static XmlCallMemory memory;
+    return memory;
+}
+
+}  // namespace
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
     if (tools.empty())
@@ -238,12 +307,19 @@ bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std:
 
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
                                          const std::string& content, bool xml) {
+    const ToolRenderCallFn render = tool_call_dialect(family).render_call;
     std::string result;
     if (!content.empty() && content != "null") {
         result = content;
+        // Qwen XML templates write content|trim + "\n\n<tool_call>", as the model does: one "\n"
+        // here plus the call's own leading "\n" (a single one broke the next turn's prefix match).
+        if (xml && render == chatml_render_call && tool_calls.is_array() && !tool_calls.empty()) {
+            result.erase(result.find_last_not_of("\n\r\t ") + 1);
+            if (!result.empty())
+                result += '\n';
+        }
     }
 
-    const ToolRenderCallFn render = tool_call_dialect(family).render_call;
     for (const auto& tc : tool_calls) {
         if (!tc.contains("function"))
             continue;
@@ -257,6 +333,10 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const j
         else if (fn.contains("arguments") && !fn["arguments"].is_null())
             args = dump_safe(fn["arguments"]);
 
+        if (xml && render == chatml_render_call && tc.contains("id") && tc["id"].is_string() &&
+            xml_call_memory().recall(tc["id"].get<std::string>(), name, json::parse(args, nullptr, false),
+                                     result))
+            continue;
         render(result, name, args, xml);
     }
 
@@ -308,7 +388,7 @@ static json find_tool_schema(const json& tools, const std::string& name) {
     return json::object();
 }
 
-void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
+static void restore_string_params(ParsedToolCall& tc, const json& tools) {
     if (tc.raw_params.empty())
         return;
     const json schema = find_tool_schema(tools, tc.name);
@@ -320,13 +400,23 @@ void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
     bool changed = false;
     for (const auto& [key, raw] : tc.raw_params) {
         const json& p = schema["properties"].value(key, json::object());
-        if (!p.is_object() || !args.contains(key) || args[key].is_string())
+        if (!p.is_object() || !args.contains(key))
             continue;
         const json types = p.contains("type") ? p["type"] : json();
         const auto allows = [&](const char* t) {
             return types == t ||
                    (types.is_array() && std::find(types.begin(), types.end(), t) != types.end());
         };
+        if (args[key].is_string()) {
+            if (allows("string"))
+                continue;
+            json parsed = json::parse(raw, nullptr, false);
+            if ((parsed.is_array() && allows("array")) || (parsed.is_object() && allows("object"))) {
+                args[key] = std::move(parsed);
+                changed = true;
+            }
+            continue;
+        }
         if (!allows("string"))
             continue;
         bool other_ok = false;
@@ -339,6 +429,11 @@ void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
     }
     if (changed)
         tc.arguments = dump_safe(args);
+}
+
+void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
+    restore_string_params(tc, tools);
+    xml_call_memory().remember(tc);  // every emitted call passes here (validate_tool_call, stream driver)
 }
 
 void validate_tool_call(ParsedToolCall& tc, const json& tools) {
@@ -385,6 +480,19 @@ void validate_tool_call(ParsedToolCall& tc, const json& tools) {
             }
         }
     }
+}
+
+std::string tool_call_fault(const ParsedToolCall& tc, const json& tools, bool with_raw) {
+    constexpr size_t kMaxRawBytes = 2000;
+    const std::vector<std::string> offered = tool_names_from_request(tools);
+    std::string line;
+    if (!tc.valid)
+        line = tc.name + ": " + tc.error;
+    else if (!offered.empty() && std::find(offered.begin(), offered.end(), tc.name) == offered.end())
+        line = dump_safe(json(tc.name)) + ": tool not offered";
+    if (!line.empty() && with_raw && !tc.raw_body.empty())
+        line += " raw=" + dump_safe(json(tc.raw_body.substr(0, kMaxRawBytes)));
+    return line;
 }
 
 std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {

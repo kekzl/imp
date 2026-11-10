@@ -156,11 +156,17 @@ void* RecurrentSnapshotStore::acquire_host_buffer_() {
             return p;
         }
     }
-    while (!host_lru_.empty()) {
+    // Protected keys rotate to the tail; one pass over the list bounds the walk.
+    for (size_t n = host_lru_.size(); n > 0 && !host_lru_.empty(); --n) {
         size_t victim = host_lru_.front();
+        if (is_protected(victim)) {
+            host_lru_.splice(host_lru_.end(), host_lru_, host_lru_.begin());
+            continue;
+        }
         host_lru_.pop_front();
         host_lru_map_.erase(victim);
         host_entries_.erase(victim);  // may run the deleter right here
+        ++evictions_;
         std::lock_guard<std::mutex> lk(pool_->mu);
         if (!pool_->free_host_bufs.empty()) {
             void* p = pool_->free_host_bufs.back();
@@ -190,11 +196,16 @@ void RecurrentSnapshotStore::evict_device_lru_(cudaStream_t stream) {
             host_entries_[victim] = make_entry_(victim, dev->n_tokens, hbuf, /*on_host=*/true, dev->kv_chain);
             host_lru_.push_back(victim);
             host_lru_map_[victim] = std::prev(host_lru_.end());
-        } else if (hbuf) {
+            ++demotions_;
+            return;
+        }
+        if (hbuf) {
             std::lock_guard<std::mutex> lk(pool_->mu);
             pool_->free_host_bufs.push_back(hbuf);
         }
     }
+    if (!host_entries_.contains(victim))
+        ++evictions_;
     // `dev` goes out of scope here: its buffer recycles now, or when the last
     // in-flight holder releases it.
 }
@@ -248,6 +259,7 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
     entries_[key] = make_entry_(key, n_tokens, buf, /*on_host=*/false, std::move(kv_chain));
     lru_.push_back(key);
     lru_map_[key] = std::prev(lru_.end());
+    ++saves_;
     return true;
 }
 
@@ -278,6 +290,7 @@ bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void*
     host_lru_.push_back(key);
     host_lru_map_[key] = std::prev(host_lru_.end());
     ++host_direct_saves_;
+    ++saves_;
     return true;
 }
 
@@ -292,6 +305,22 @@ void RecurrentSnapshotStore::erase(size_t key) {
         host_lru_map_.erase(lit);
     }
     host_entries_.erase(key);
+}
+
+void RecurrentSnapshotStore::unprotect(int owner) {
+    auto it = protected_.find(owner);
+    if (it == protected_.end())
+        return;
+    const size_t key = it->second;
+    protected_.erase(it);
+    (void)find(key);  // MRU: the owner's next turn is the likeliest next restore
+}
+
+bool RecurrentSnapshotStore::is_protected(size_t key) const {
+    for (const auto& [owner, k] : protected_)
+        if (k == key)
+            return true;
+    return false;
 }
 
 void RecurrentSnapshotStore::clear() {

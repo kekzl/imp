@@ -287,6 +287,7 @@ struct ServerState {
     int32_t channel_close_id = -1;      // <channel|>
     int32_t channel_newline_id = -1;    // '\n' used to terminate a channel header
     float default_think_budget = 0.5f;  // fraction of max_tokens for reasoning (0=disabled, 0.5=50%)
+    bool tool_fault_raw = false;        // diagnostics.tool_fault_raw
     imp::SamplingDefaults sampling_defaults;  // loaded model (#2462): imp::resolve_sampling_defaults
     ServerMetrics metrics;
 
@@ -317,7 +318,7 @@ struct ServerState {
 
     // Server limits
     int max_concurrent = 64;
-    int request_timeout = 300;
+    int request_timeout = 1800;
     int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
     // --max-queued-tokens (#2408): prompt tokens admitted and not yet prefilled (0=off).
     int64_t max_queued_tokens = 0;

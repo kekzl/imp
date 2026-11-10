@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cuda_runtime_api.h>
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <span>
@@ -90,10 +92,31 @@ public:
     // saves dropped because no slab of either tier was.
     int host_direct_saves() const { return host_direct_saves_; }
     int dropped_saves() const { return dropped_saves_; }
+    // Lifetime counters for /metrics: every stored snapshot, device LRU heads copied to the host
+    // tier, and entries gone from both tiers (host LRU drop, or device drop with no host slot).
+    uint64_t saves() const { return saves_.load(std::memory_order_relaxed); }
+    uint64_t demotions() const { return demotions_.load(std::memory_order_relaxed); }
+    uint64_t evictions() const { return evictions_.load(std::memory_order_relaxed); }
+    // Admission outcomes, counted by the engine at a request's first reuse probe: restores per
+    // tier, requests with a cached KV prefix but no snapshot (none stored / stored but unpaired),
+    // and the cached prefix tokens prefilled again.
+    struct ReuseCounters {
+        std::atomic<uint64_t> restores_device{0}, restores_host{0}, misses_absent{0}, misses_stale{0},
+            unused_tokens{0};
+    };
+    ReuseCounters& reuse() { return reuse_; }
+    const ReuseCounters& reuse() const { return reuse_; }
 
     // Drop all entries (context reset). Outstanding request-held entries
     // stay valid until released.
     void clear();
+
+    // A running request's prompt-boundary snapshot: host eviction skips it until unprotect(owner),
+    // which marks it most-recently-used. dev50h (4 agents, 28 slots): 39.5 % of turns after a
+    // >= 60 s turn found no snapshot, their finish-time transcript snapshot unpaired or skipped.
+    void protect(int owner, size_t key) { protected_[owner] = key; }
+    void unprotect(int owner);
+    [[nodiscard]] bool is_protected(size_t key) const;
 
 private:
     // Shared with entry deleters so buffers outlive the store if needed.
@@ -113,10 +136,13 @@ private:
                   cudaStream_t stream) const;
     int host_direct_saves_ = 0;
     int dropped_saves_ = 0;
+    std::atomic<uint64_t> saves_{0}, demotions_{0}, evictions_{0};  // read by /metrics
+    ReuseCounters reuse_;
     std::shared_ptr<RecurrentSnapshotEntry> make_entry_(size_t key, int n_tokens, void* buf, bool on_host,
                                                         std::vector<KvChainLink> kv_chain);
 
     std::shared_ptr<BufferPool> pool_;
+    std::unordered_map<int, size_t> protected_;  // owner (request id) -> key, <= max_batch entries
     size_t entry_bytes_ = 0;
     size_t sidecar_bytes_ = 0;
     size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_

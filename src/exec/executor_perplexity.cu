@@ -462,6 +462,36 @@ void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n
     IMP_CUDA_CHECK_LAUNCH();
     rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
     IMP_CUDA_CHECK_LAUNCH();
+    if (!verify_rows_.empty())
+        draw_verify_row_runs_(lg, row0, csz, n_rows, d_out, stream);
+}
+
+void GraphExecutor::draw_verify_row_runs_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
+                                          cudaStream_t stream) {
+    const int V = model_->config().vocab_size;
+    const int end = std::min(row0 + csz, static_cast<int>(verify_rows_.size()));
+    if (end <= row0 || !ensure_verify_sample_scratch(n_rows))
+        return;
+    auto* d_args = reinterpret_cast<TopkRowArgs*>(verify_sample_scratch_.get());
+    char* slots = verify_sample_scratch_.get() + verify_sample_args_bytes(verify_sample_rows_cap_);
+    for (int a = row0; a < end;) {
+        if (verify_rows_[a].top_k == 0) {
+            ++a;
+            continue;
+        }
+        int b = a + 1;
+        while (b < end && verify_rows_[b].top_k != 0)
+            ++b;
+        const cudaError_t e = sample_verify_rows_each(static_cast<float*>(lg.data) +
+                                                          (static_cast<size_t>(a - row0) * V),
+                                                      b - a, V, verify_rows_.data() + a,
+                                                      h_verify_sample_args_.as<TopkRowArgs>() + a, d_args + a,
+                                                      slots + (static_cast<size_t>(a) * SAMPLE_SCRATCH_BYTES),
+                                                      d_out + a, stream);
+        if (e != cudaSuccess)
+            IMP_LOG_ERROR("sampled verify rows %d..%d: %s, argmax instead", a, b, cudaGetErrorString(e));
+        a = b;
+    }
 }
 
 void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
@@ -531,7 +561,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
 }
 
 bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream,
-                                        const NvFP4QuantResult* draft_nvfp4) {
+                                        const NvFP4QuantResult* draft_nvfp4, int draft_vocab) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
     // Draft copy first: 682 MiB read once per 4 rows. An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4
@@ -545,7 +575,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
          qscratch_.cutlass_act_sf == nullptr))
         return false;
     const auto& cfg = model_->config();
-    const int V = cfg.vocab_size;
+    // Rows of the FP8 head scored: a prefix of the vocabulary, the logits packed V to a row.
+    const int V = fp8 && draft_vocab > 0 ? std::min(draft_vocab, cfg.vocab_size) : cfg.vocab_size;
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     if (!ensure_verify_scratch(/*with_penalties=*/false))
         return false;

@@ -114,8 +114,9 @@ bool parse_completions_request_params(const httplib::Request& req, httplib::Resp
         const std::string cid = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
         res.set_header("X-Request-Id", cid.empty() ? out.req_id : cid);
     }
-    IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", out.req_id.c_str(),
-                 out.prompt.size(), out.stream ? "true" : "false", out.max_tokens, out.temperature);
+    IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%s", out.req_id.c_str(),
+                 out.prompt.size(), out.stream ? "true" : "false", out.max_tokens,
+                 out.log_temperature().c_str());
 
     // Validate model field (required per OpenAI spec)
     out.requested_model = body.value("model", "");

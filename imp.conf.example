@@ -319,7 +319,9 @@ swa_snapshot_mb             = 0
 # Host spill tier for the prefix cache (#2203): pinned host RAM in MiB. Blocks
 # the pool reclaims are copied here and restored by H2D on a later prefix hit
 # instead of re-prefilled. 0 = off. Needs prefix caching; refused with SWA
-# layers or sparse attention key metadata.
+# layers. Carries sparse key min/max pages; GDN hybrids restore through their
+# recurrent snapshot chains (Qwen3.8-27B-NVFP4, 8 chats x ~31k, 8000-block
+# pool, 16384: TTFT sum 213.1 -> 21.3 s).
 host_spill_mb               = 0
 # Pin the KV pool to exactly this many blocks instead of sizing it from the
 # VRAM budget. 0 = auto (the default). Useful when several processes share a
@@ -582,8 +584,8 @@ attn_scores_mib      = 384
 # 0 = off. Contexts at or below the budget are bit-identical to dense.
 # F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA decode,
 # speculative.token_recycling (on by default under --gpu-layers) or the persistent prefix cache
-# (src/runtime/vram_budget.cpp sparse_minmax_refusal); auto also resolves 0 with
-# kv_cache.host_spill_mb > 0 (the spill tier refuses the pool); SWA / StreamingLLM
+# (src/runtime/vram_budget.cpp sparse_minmax_refusal); kv_cache.host_spill_mb carries the
+# pages of a spilled block, so it no longer turns auto off; SWA / StreamingLLM
 # layers and spec verify chunks keep full attention. Costs a metadata pool of
 # ~12.5% (FP8 KV) / ~6.25% (F16 KV) / 22.2% (NVFP4 KV, Qwen3.8-27B) of the K+V
 # pool bytes, planned and grown with a growable KV pool (#2364).
@@ -1027,7 +1029,9 @@ recurrent_snapshot_mb = 256
 # Host tier for those snapshots: entries evicted from the device slots are
 # copied to pinned host memory instead of dropped and restored from there
 # (one H2D of one slab). Sessions beyond the device slot count keep their
-# tail-only prefill. 0 = off.
+# tail-only prefill. 0 = off. Left unset with kv_cache.host_spill_mb > 0, it
+# rises to host_spill_mb / 2: a spilled hybrid prefix restores only with its
+# snapshot.
 recurrent_snapshot_host_mb = 2048
 # Prompts whose block-aligned prefix is shorter than this take no snapshot
 # and no prefill split at the boundary (the split is two eager chunks plus a
@@ -1107,6 +1111,10 @@ ngram                = true
 # draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
 # and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
 sampled              = true
+# With sampled: sampled rows verify in the batched step too (mtp_batch_verify,
+# a lone bound chat included), each row with its own request's seed. false =
+# the single verify chunk, a batch holding a sampled row decodes plain.
+sampled_batch_verify = true
 # Context cap for DENSE chunk-verify drafting (#964): the captured verify
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
@@ -1223,6 +1231,10 @@ mtp_history_slots    = 4
 # Clamped to the model context; with many slots (batched verify) a 1 GiB budget
 # caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
 mtp_kv_window        = 16384
+# A prompt whose prefix-cache hit reaches past every head slot's rows still
+# binds: the head starts at the hit with no rows below it. false = it drafts
+# nothing, and an agent chat that missed one turn stays unbound.
+mtp_gap_bind         = true
 # With mtp_history_slots: up to that many requests bind the head at once, and
 # a bound request's hidden rows from batched decode steps feed its head slot
 # in 256-row passes (2.5 MiB per slot), so two chats decoding together draft
@@ -1239,7 +1251,9 @@ mtp_carry            = true
 mtp_batch_verify     = 4
 # Drafts per bound request in that step: 2 = last token plus a 2-token MTP
 # chain (3 rows per request, a second head pass, two spare recurrent slots per
-# row); 1 = one draft (2 rows, one spare slot per row).
+# row); 1 = one draft (2 rows, one spare slot per row). Unset, a concurrent
+# GDN-hybrid server with MTP on takes 1 (2 with kv_cache.host_spill_mb set);
+# this line sets it, so drop it there.
 mtp_batch_verify_k   = 2
 # A bound request decoding alone verifies in that batched step too (rows on
 # paged decode attention, split-K over the context) instead of the single
@@ -1267,7 +1281,14 @@ mtp_adaptive_k       = true
 # stays lossless. false = keep the FP16 chain GEMV. A 16-bit head served as FP8
 # gets an NVFP4 draft copy while MTP is on (+682 MiB on Qwen3.8-27B-NVFP4).
 # The batched draft passes (mtp_batch_verify) read it too, 4 rows per weight pass.
+# Unset, a concurrent GDN-hybrid server with MTP on takes false (KV pool kept for
+# concurrent chats); this line sets it, so drop it there.
 mtp_nvfp4_head       = true
+# Batched MTP drafts on the FP8 head score only its first N rows (0 = all);
+# verification stays full vocab. BPE ids follow merge order: 99.94 % of
+# Qwen3.8 agent output tokens sit below 98304. Unset, a concurrent GDN-hybrid
+# server that drafts on the FP8 head takes 98304.
+mtp_draft_vocab      = 0
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.
@@ -1439,6 +1460,9 @@ step_timing          = false
 # imp-server worker-loop phase attribution (admission / step / delivery
 # staging), logged every 256 loops. Legacy env: IMP_WORKER_TIMING=1.
 worker_timing        = false
+# imp-server: a failed tool call logs the model's raw call text, first 2000 bytes.
+# Off by default, the text can hold request content.
+tool_fault_raw       = false
 # Attempt prefill graph capture even when the dequant scratch exceeds the cap
 # (the fail-loud in gemm_nvfp4 then answers whether the M>1 fallback fires).
 prefill_graph_ignore_dequant_cap = false

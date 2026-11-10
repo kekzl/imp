@@ -448,6 +448,7 @@ public:
     const KVHostSpill* kv_host_spill() const noexcept {
         return kv_manager_ ? kv_manager_->host_spill() : nullptr;
     }
+    const RecurrentSnapshotStore* recurrent_snapshots() const noexcept { return recurrent_snapshots_.get(); }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window allocated by the engine (VRAM-aware auto-sizing
     // in init_compute_max_seq_len_), may be < the model's declared max context.

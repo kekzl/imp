@@ -48,6 +48,72 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     EXPECT_FALSE(cfg.speculative.ngram);
 }
 
+// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy, one draft per bound row.
+TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "FP8 draft head scores the first 98304 rows";
+}
+
+TEST(MtpAuto, SingleStreamKeepsTheFullDraft) {
+    RuntimeConfig cfg;
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kSingleStream), /*head_loaded=*/true);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head) << "1 chat at 50k: 138 vs 123 tok/s";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
+}
+
+TEST(MtpAuto, ConcurrentPoolDefaultsYieldToTheOperator) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(
+        cfg.apply_overrides({"speculative.mtp_nvfp4_head=true", "speculative.mtp_batch_verify_k=2"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0) << "the NVFP4 draft head scores every row";
+}
+
+TEST(MtpAuto, ExplicitDraftVocabSurvivesTheConcurrentDefaults) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_draft_vocab=0"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
+}
+
+TEST(MtpAuto, HostSpillKeepsBothDraftsButNotTheHeadCopy) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"kv_cache.host_spill_mb=16384"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_GT(cfg.speculative.mtp_k, 0);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head) << "the 682 MiB head copy is KV pool";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2) << "spill restores evicted prefixes";
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
+}
+
+TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=2"}).empty());
+    tools::mtp_auto_finalize(cfg, 2, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
+}
+
+TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=0"}).empty());
+    tools::mtp_auto_finalize(cfg, 0, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
+}
+
 // Off a GDN hybrid, batch > 1 round-robin verifies with the matcher: the pair would turn it off.
 TEST(MtpAuto, ConcurrentNonHybridDeclines) {
     RuntimeConfig cfg;

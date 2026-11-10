@@ -7,7 +7,7 @@ set(IMP_PROJECT_LANGUAGES C CXX CUDA)
 if(IMP_FUZZERS_CPU_ONLY)
     set(IMP_PROJECT_LANGUAGES C CXX)
 endif()
-project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.64.0)
+project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.65.0)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1050,6 +1050,7 @@ if(IMP_BUILD_TESTS)
         # name would silently print "?".
         tests/test_graph_eligibility.cpp
         tests/test_offload_spec_defaults.cpp
+        tests/test_snapshot_host_default.cpp
         # Prefill pacing under decode (runtime.prefill_cap_fairness). CPU-only:
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
@@ -1246,6 +1247,7 @@ if(IMP_BUILD_TESTS)
         # test_sse_stream_utils.cpp covers SSE chunk envelopes + reasoning/channel splits in
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
+            tests/test_anthropic_effort.cpp
             tests/test_anthropic_transform.cpp
             tests/test_anthropic_usage.cpp
             tests/test_assistant_prefill_transform.cpp
@@ -1262,6 +1264,7 @@ if(IMP_BUILD_TESTS)
             tests/test_tool_stream_filter.cpp
             tests/test_tool_call_dialect_golden.cpp
             tests/test_tool_call_dialect_registry.cpp
+            tests/test_tool_call_xml_params.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp

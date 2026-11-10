@@ -150,17 +150,17 @@ inline void mtp_econ_count(MtpBind& b, int emitted, int rows, bool batched) {
 inline constexpr int kMtpResumeMinPairs = 64;
 
 // Head KV slot for a prompt whose prefill starts at `offset` (prefix-cache hit), or -1. A slot resumes
-// at min(pos, L - 1) pairs, L = common prefix of its history and the prompt; pairs below `offset` need
-// hidden rows the cached prefix never forwarded, so offset > 0 takes only a slot that covers it (-1 =
-// draft nothing and leave every history intact). Longest resume wins; a fresh prompt without a
-// kMtpResumeMinPairs resume takes the least recently used slot.
+// at min(pos, L - 1) pairs, L = common prefix of its history and the prompt. Longest resume wins; without
+// a kMtpResumeMinPairs resume the least recently used slot. Pairs below `offset` need hidden rows the
+// cached prefix never forwarded: with no slot covering it, gap_bind picks as above (the head starts at
+// `offset`, mtp_bind_has_gap), else -1 = draft nothing and leave every history intact.
 struct MtpSlotCand {
     int pos = 0;                                    // pairs its head KV holds
     const std::vector<int32_t>* history = nullptr;  // tokens t_0..t_pos
     uint64_t last_use = 0;
 };
 [[nodiscard]] inline int mtp_pick_slot(const std::vector<MtpSlotCand>& cands, const std::vector<int32_t>& in,
-                                       int offset) {
+                                       int offset, bool gap_bind = true) {
     int best = -1, best_r = -1, lru = -1;
     for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
         const auto& h = *cands[i].history;
@@ -175,8 +175,10 @@ struct MtpSlotCand {
         if (lru < 0 || cands[i].last_use < cands[lru].last_use)
             lru = i;
     }
-    if (offset > 0)
-        return best_r >= offset ? best : -1;
+    if (offset > 0 && best_r >= offset)
+        return best;
+    if (offset > 0 && !gap_bind)
+        return -1;
     return best_r >= kMtpResumeMinPairs ? best : lru;
 }
 

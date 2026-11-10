@@ -66,5 +66,25 @@ TEST(MtpHeadGraph, RingResumeLostOnlyBehindTheRing) {
     EXPECT_EQ(mtp_slot_hi_bound(100, 40), 142);
 }
 
+// speculative.mtp_gap_bind: a slot started at `floor` attends from there on, until the ring moves past it.
+TEST(MtpHeadGraph, RingFloorHidesEveryRowBelowIt) {
+    const int ring = 16384, floor = 52392;
+    const int hi = mtp_ring_floor_hi(floor, ring);
+    EXPECT_EQ(mtp_ring_lo(floor, hi, ring), floor);
+    EXPECT_EQ(mtp_ring_lo(floor + 700, hi, ring), floor);
+    EXPECT_EQ(mtp_ring_lo(hi - 1, hi, ring), floor);
+    EXPECT_EQ(mtp_ring_lo(hi, hi + 1, ring), floor + 1) << "past the floor the ring takes over";
+    EXPECT_TRUE(mtp_ring_resume_lost(hi, floor - 1, ring)) << "a resume below the floor finds no row";
+    EXPECT_FALSE(mtp_ring_resume_lost(hi, floor, ring));
+}
+
+TEST(MtpHeadGraph, BindHasAGapOnlyPastTheSlotsRows) {
+    EXPECT_FALSE(mtp_bind_has_gap(0, 0, false)) << "cold prompt: pair 0 is forwarded";
+    EXPECT_FALSE(mtp_bind_has_gap(0, 900, true)) << "ring lost on a cold prompt: plain restart";
+    EXPECT_FALSE(mtp_bind_has_gap(864, 899, false));
+    EXPECT_TRUE(mtp_bind_has_gap(900, 899, false));
+    EXPECT_TRUE(mtp_bind_has_gap(4224, 4300, true)) << "first seen on the shared system prompt";
+}
+
 }  // namespace
 }  // namespace imp

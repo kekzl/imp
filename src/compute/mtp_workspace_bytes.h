@@ -56,6 +56,15 @@ constexpr bool mtp_ring_resume_lost(int hi_bound, int keep, int ring) {
     return ring > 0 && hi_bound - ring > keep;
 }
 
+// hi that makes mtp_ring_lo >= floor until the positions pass it: a slot bound over a prefix the head
+// never saw (mtp_kv_hi_floor) attends only the rows written from `floor` on.
+constexpr int mtp_ring_floor_hi(int floor, int ring) { return floor + ring; }
+// A prompt resuming at `offset` that no slot row reaches: pairs below it need hidden rows the cached
+// prefix never forwarded, so the head starts at `offset` with nothing below it.
+constexpr bool mtp_bind_has_gap(int offset, int keep_pairs, bool ring_lost) {
+    return offset > 0 && (ring_lost || keep_pairs < offset);
+}
+
 // sizeof(block_q8_1) (compute/gemm.h, static_assert in mtp_forward.cu).
 constexpr size_t kMtpQ8_1BlockBytes = 48;
 

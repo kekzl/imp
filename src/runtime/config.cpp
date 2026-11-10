@@ -455,6 +455,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
     B("diagnostics.step_timing", cfg.diagnostics.step_timing);
     B("diagnostics.worker_timing", cfg.diagnostics.worker_timing);
+    B("diagnostics.tool_fault_raw", cfg.diagnostics.tool_fault_raw);
     B("diagnostics.mtp_tree_probe", cfg.diagnostics.mtp_tree_probe);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
@@ -483,6 +484,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [speculative]
     B("speculative.ngram", cfg.speculative.ngram);
     B("speculative.sampled", cfg.speculative.sampled);
+    B("speculative.sampled_batch_verify", cfg.speculative.sampled_batch_verify);
     I("speculative.draft_ctx_cap", cfg.speculative.draft_ctx_cap);
     I("speculative.shallow_draft_ctx", cfg.speculative.shallow_draft_ctx);
     B("speculative.verify_decode_attn", cfg.speculative.verify_decode_attn);
@@ -520,6 +522,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_concurrent", cfg.speculative.mtp_concurrent);
     I("speculative.mtp_history_slots", cfg.speculative.mtp_history_slots);
     I("speculative.mtp_kv_window", cfg.speculative.mtp_kv_window);
+    B("speculative.mtp_gap_bind", cfg.speculative.mtp_gap_bind);
     B("speculative.mtp_carry", cfg.speculative.mtp_carry);
     I("speculative.mtp_batch_verify", cfg.speculative.mtp_batch_verify);
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
@@ -527,6 +530,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_head_graph", cfg.speculative.mtp_head_graph);
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
+    I("speculative.mtp_draft_vocab", cfg.speculative.mtp_draft_vocab);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);
     // #1638: also read at engine_scheduler.cpp:1363 and :2882 ("kill switch for A/B").
     B("speculative.batch_rr", cfg.speculative.batch_rr);

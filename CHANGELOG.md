@@ -4,6 +4,37 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- With `kv_cache.host_spill_mb` set, a concurrent GDN-hybrid server drafts MTP on the FP8 head (`mtp_draft_vocab=98304`) and keeps `mtp_batch_verify_k=2`; the 682 MiB NVFP4 head copy goes to the KV pool. Qwen3.8-27B-NVFP4 replay, 8 chats x 27k: 296.5 -> 316.3 tok/s; 8 agents x ~97k: KV ceiling 18503 -> 20492 blocks (#3084).
+
+## [0.65.0] - 2026-11-09
+
+### Added
+- GDN-hybrid prefix reuse is visible: `/metrics` counts snapshot restores per tier, misses with a cached KV prefix (`absent`, `stale`), the cached tokens prefilled again, and snapshot saves, demotions and evictions. A request leaving >= 4096 cached tokens unused logs one line; the request line logs the client's `X-Request-Id` (#3073).
+- `/v1/messages` reads `output_config.effort` and maps it onto the chat template's `reasoning_effort` list. Qwen3.8-27B-NVFP4: `low`, `medium` as sent; `high`, `xhigh`, `max` render `xhigh` (#3066).
+- `diagnostics.tool_fault_raw` (default off): a failed tool call logs the model's raw call text, first 2000 bytes. A call naming a tool the request did not offer now logs a line too, and non-streamed requests log validation failures (#3063).
+- `speculative.mtp_gap_bind` (default on): a prompt whose prefix-cache hit reaches past every MTP head slot's rows binds anyway, the head starting at the hit. Agent chats resend whole transcripts, so one unbound turn kept a chat unbound: familiar, 4 agents on Qwen3.8-27B-NVFP4, 3851 of 4567 requests drafted nothing (#3067).
+- `speculative.sampled_batch_verify` (default on): sampled requests verify MTP drafts in the batched step, a lone chat included, each row with its own seed; before, the single verify chunk. Qwen3.8-27B-NVFP4 agent replay at temperature 1, 50k context: 1 chat 65.6 -> 141.1 tok/s (MTP off 92.6), 4 chats 156.0 -> 211.1 tok/s total (MTP off 173.7) (#3067).
+
+### Changed
+- With `kv_cache.host_spill_mb` set, a concurrent GDN-hybrid server keeps the full MTP draft (NVFP4 head, `mtp_batch_verify_k=2`): the spill tier restores an evicted prefix, the re-prefill the lean pair avoided. Qwen3.8-27B-NVFP4 replay, 4 chats x 27k/50k: 97.9/89.7 -> 102.3/99.1 tok/s per request; 4 x 110k queue time equal (#3080).
+- A concurrent GDN-hybrid server with MTP on defaults to `speculative.mtp_nvfp4_head=false` and `mtp_batch_verify_k=1`, keeping 682 MiB plus half the spare recurrent slots for the KV pool. Qwen3.8-27B-NVFP4, SWE-bench dev 50, 4 agents: 33/50 solved, agent time 10.81 h vs 13.43 h MTP off; single-stream unchanged (#3069).
+- A concurrent GDN-hybrid server drafting MTP on the FP8 head scores only its first 98304 rows (`speculative.mtp_draft_vocab`, 0 = all): 99.94 % of Qwen3.8 agent output tokens sit below. Qwen3.8-27B-NVFP4, 1 chat x 50k replay: 121.6-124.8 -> 125.4-130.5 tok/s (8/8 above); verification stays full vocab (#3076).
+- `kv_cache.host_spill_mb` serves GDN hybrids and sparse attention: a spilled block carries its key min/max pages, and a recurrent snapshot's KV chain restores from its own host slot, shadows included. Qwen3.8-27B-NVFP4, 8 chats x ~31k tokens, 8000-block pool, 16384 MiB: cached 13 % -> 97 %, TTFT sum 213.1 -> 21.3 s (#3068).
+- With `kv_cache.host_spill_mb` set, `server.recurrent_snapshot_host_mb` left unset rises to half of it: a spilled GDN-hybrid prefix restores only with its snapshot. Qwen3.8-27B-NVFP4, 24 chats x ~12k tokens, 16384 MiB: later-turn cached 96k/98k -> 698k/878k of 899k tokens, TTFT median 4817/4645 -> 503/665 ms (#3077).
+- KV host spill moves a block as one `cudaMemcpyBatchAsync`: a growable pool's layer pitch refused the 2D copy, and 80 single copies cost 668 us per block (now 55 us, Qwen3.8-27B geometry). Qwen3.8-27B-NVFP4, 14 chats x ~33k tokens, 16384 MiB: later-turn TTFT median 1725/3564 -> 1012/1073 ms, queue time 17.5/17.7 -> 10.1/11.8 s (#3075).
+- `--request-timeout` defaults to 1800 s (was 300 s, which ended long answers with `finish_reason: "length"`: 16384 tokens need 55 tok/s at 300 s, 9.1 tok/s at 1800 s) (#3061).
+- CUDA 13.4.3 -> 13.5.0: build, runtime, CI and ncu images by digest. nvcc V13.4.92 -> V13.5.37, cudart 13.4.92 -> 13.5.37, cuBLASLt 13.8.0.4 -> 13.10.0.20 (#3081).
+
+### Fixed
+- A Qwen XML tool call replayed in the next turn renders as the model wrote it (by id, while its arguments still parse equal), not re-sorted by key. Qwen3.8-27B-NVFP4 agent probe: turn 1 cached 832 -> 1208 of 1208 (the call was path, offset, limit) (#3079).
+- Qwen XML tool calls keep a parameter value's edge whitespace (only the template newline goes, as in vLLM): `"def "` stayed `"def"` and a code value lost its first line's indentation. A replayed call after text renders `"\n\n<tool_call>"` like the template. Qwen3.8-27B-NVFP4, 4-turn agent probe: turn 2/3 cached 10672/17808 -> 11521/18389 (#3078).
+- GDN hybrids: a running request's prompt-boundary snapshot is no longer evicted from the host tier while it decodes. Qwen3.8-27B-NVFP4, 21k-token chat resent after a 3000-token turn beside 3 agents: 20080-21584 tokens cached instead of 0, TTFT 131-186 ms instead of 2384-2520 ms (3/3 trials) (#3074).
+- Sparse attention page metadata: a page statistic is rebuilt from its current KV rows, so rejected MTP drafts no longer stay in the mean/std (or min/max) that ranks the page. Prompt pages were not affected (#3065).
+- `SM120.md` decode roofline: memory:compute is ~465:1, not ~28,000:1 (8.4 MB K+V, 8.4 MFLOPs; ~140:1 at FP32 accumulate). `wgmma` is `sm_90a` only per the PTX ISA, not `sm_100` (#3064).
+- Qwen XML tool calls: an `array` or `object` argument reaches the client as JSON, not as a string, on all dialects (Qwen3.8-27B NVFP4, `multi_edit` `edits`: string -> array, 3 of 3 runs). A value closed by a bare `</parameter>` no longer swallows the next parameter (#3062).
+- Request log: `temp=` reads `model` when the request sent no temperature; it printed the 0.70 placeholder before the model default (Qwen3.8: 1.0) applied (#3067).
+
 ## [0.64.0] - 2026-11-05
 
 ### Changed

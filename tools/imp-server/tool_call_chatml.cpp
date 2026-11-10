@@ -15,6 +15,7 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     size_t fn_end = body.find('>', fn);
     if (fn_end == std::string::npos)
         return false;
+    tc.raw_body = body;
     tc.name = body.substr(fn, fn_end - fn);
     auto trim = [](std::string& s) {
         auto a = s.find_first_not_of("\n\r\t ");
@@ -52,14 +53,33 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         size_t val_start = pk_end + 1;
         size_t pv_end = body.find("\n</parameter>", val_start);
         size_t pv_adv = 13;
+        // A bare close tag right before the next <parameter= ends this value: the anchored find
+        // would swallow that parameter ("offset" eating "path" = missing required argument).
+        const size_t bare = body.find("</parameter>", val_start);
+        const size_t after_bare = bare == std::string::npos ? bare
+                                                            : body.find_first_not_of("\n\r\t ", bare + 12);
+        if (bare < pv_end && after_bare != std::string::npos &&
+            body.compare(after_bare, 11, "<parameter=") == 0) {
+            pv_end = bare;
+            pv_adv = 12;
+        }
         if (pv_end == std::string::npos || pv_end > scan_end) {
             pv_end = body.find("</parameter>", val_start);
             pv_adv = 12;
         }
         if (pv_end == std::string::npos || pv_end > scan_end)
             break;
+        // The template writes "<parameter=K>\n" + value + "\n</parameter>": only those newlines go
+        // (as vLLM's qwen3_coder parser). "def " and a first line's indentation are the value.
         std::string val = body.substr(val_start, pv_end - val_start);
-        trim(val);
+        if (val.starts_with("\r\n"))
+            val.erase(0, 2);
+        else if (val.starts_with('\n'))
+            val.erase(0, 1);
+        if (pv_adv == 12 && val.ends_with('\n'))  // a bare close tag: its newline is still in `val`
+            val.pop_back();
+        if (val.ends_with('\r'))
+            val.pop_back();
         // Only a whole JSON scalar literal coerces; "600acab9" stays a string (#2103).
         // validate_tool_call restores `val` for string-typed params.
         json jv = json::parse(val, nullptr, false);

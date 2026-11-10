@@ -290,5 +290,58 @@ TEST(RecurrentSnapshotStoreTest, KvChainSurvivesHostEvictionAndEraseReplaces) {
     EXPECT_EQ(ReadEntry(*e1b), std::vector<uint8_t>(kEntryBytes, 0x33));
 }
 
+// /metrics counters: a device eviction with a host slot is a demotion, a host LRU drop or a
+// device drop without a host tier is an eviction (gone from both tiers); a duplicate save is not a save.
+TEST(RecurrentSnapshotStoreTest, CountersSplitDemotionsFromEvictions) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore tiered;
+    tiered.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/1 * kEntryBytes);
+    DeviceSrc a(0x11), b(0x22), c(0x33);
+    ASSERT_TRUE(tiered.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(tiered.save(1, 32, a.d, nullptr));  // duplicate
+    ASSERT_TRUE(tiered.save(2, 64, b.d, nullptr));  // 1 -> host
+    ASSERT_TRUE(tiered.save(3, 96, c.d, nullptr));  // host drops 1, 2 -> host
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(tiered.saves(), 3u);
+    EXPECT_EQ(tiered.demotions(), 2u);
+    EXPECT_EQ(tiered.evictions(), 1u);
+
+    RecurrentSnapshotStore device_only;
+    device_only.init(kEntryBytes, 1 * kEntryBytes);
+    ASSERT_TRUE(device_only.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(device_only.save(2, 64, b.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(device_only.saves(), 2u);
+    EXPECT_EQ(device_only.demotions(), 0u);
+    EXPECT_EQ(device_only.evictions(), 1u);
+}
+
+// A running request's snapshot survives host-tier pressure; unprotect makes it MRU, so the next
+// victim is the entry saved after it.
+TEST(RecurrentSnapshotStoreTest, ProtectedEntrySkipsHostEvictionUntilUnprotect) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/2 * kEntryBytes);
+    DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44), e(0x55);
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
+    store.protect(/*owner=*/7, 1);
+    EXPECT_TRUE(store.is_protected(1));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));   // 1 -> host
+    ASSERT_TRUE(store.save(3, 96, c.d, nullptr));   // 2 -> host; host [1, 2]
+    ASSERT_TRUE(store.save(4, 128, d.d, nullptr));  // 3 -> host: LRU 1 is protected, 2 goes
+    cudaStreamSynchronize(nullptr);
+    EXPECT_TRUE(store.contains(1));
+    EXPECT_FALSE(store.contains(2));
+    store.unprotect(7);
+    EXPECT_FALSE(store.is_protected(1));
+    ASSERT_TRUE(store.save(5, 160, e.d, nullptr));  // 4 -> host: host LRU [3, 1], 3 goes
+    cudaStreamSynchronize(nullptr);
+    EXPECT_FALSE(store.contains(3));
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
+    store.unprotect(7);  // unknown owner: no-op
+}
+
 }  // namespace
 }  // namespace imp

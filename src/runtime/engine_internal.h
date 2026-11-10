@@ -49,6 +49,35 @@ inline int compute_step_seed(const Request& req) {
     return static_cast<int>((base + static_cast<unsigned>(req.output_tokens.size())) & 0x7fffffffu);
 }
 
+[[nodiscard]] inline bool greedy_request(const Request& req) {
+    return req.temperature <= 0.0f || req.top_k == 1;
+}
+
+// req's speculative-verify draw at its next output index (seed0 = compute_step_seed); greedy -> top_k 0.
+inline VerifySampling verify_sampling_for(const Request& req, int vocab_size) {
+    VerifySampling s;
+    if (greedy_request(req)) {
+        s.top_k = 0;
+        return s;
+    }
+    s.temperature = req.temperature;
+    s.top_p = req.top_p;
+    s.min_p = req.min_p;
+    s.typical_p = req.typical_p;
+    s.top_k = sample_effective_top_k(req.top_k, vocab_size);
+    s.seed0 = compute_step_seed(req);
+    return s;
+}
+
+// Batched verify draws, T rows per request (engine_spec_sampled.cpp): a sampled request's row j draws with
+// its params and the seed of output index size() + j, a greedy one's rows argmax (top_k 0). Empty: all
+// greedy.
+std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<Request>>& reqs, int T,
+                                             int vocab_size);
+// A batched-verify row: the engine's sampled-verify refusal, then speculative.sampled_batch_verify
+// (batch_on).
+const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on);
+
 // Build a TokenLogprobInfo on the host from the PROCESSED logits: the row the
 // sampler drew from, after penalties, logit_bias, bans, the constraint mask,
 // min_p and typical_p (executor_sampling.cu applies them in place). vLLM

@@ -40,10 +40,43 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
     return cfg.speculative.mtp_k;
 }
 
+namespace {
+// A concurrent GDN-hybrid server keeps the KV pool: no NVFP4 draft head copy (682 MiB on Qwen3.8-27B)
+// and one draft per bound request (half the spare recurrent slots). Qwen3.8-27B-NVFP4, SWE-bench dev
+// 50, 4 agents: agent time 13.43 -> 10.81 h vs MTP off; full config re-prefilled 3x the tokens.
+void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
+    if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
+        return;
+    // KV host spill restores an evicted prefix by H2D, so the second draft per row stays; the NVFP4 head
+    // copy still costs pool: 8 agents x ~97k, spill 16384: ceiling 18503 -> 20492 blocks, wall
+    // 703.9/763.7 -> 672.3/597.4 s.
+    const bool spill = cfg.kv_cache.host_spill_mb > 0;
+    const bool head = !cfg.was_set("speculative.mtp_nvfp4_head");
+    const bool k = !spill && !cfg.was_set("speculative.mtp_batch_verify_k");
+    if (head)
+        cfg.speculative.mtp_nvfp4_head = false;
+    if (k)
+        cfg.speculative.mtp_batch_verify_k = 1;
+    if (head || k)
+        IMP_LOG_INFO(
+            "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_batch_verify_k=%d (KV pool kept "
+            "for concurrent chats; set either key to override)",
+            cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_batch_verify_k);
+    // Drafts then read the FP8 head: its first 98304 rows hold 99.94 % of Qwen3.8 agent output tokens.
+    // 1 chat x 50k replay 122.0-123.4 -> 125.4-130.5 tok/s, 4 chats 91.3-91.4 -> 94.6 per request.
+    if (!cfg.speculative.mtp_nvfp4_head && !cfg.was_set("speculative.mtp_draft_vocab")) {
+        cfg.speculative.mtp_draft_vocab = 98304;
+        IMP_LOG_INFO("speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)");
+    }
+}
+}  // namespace
+
 void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, int head_auto_k_cap,
                        MtpAutoServing serving) {
-    if (cfg.speculative.mtp_k >= 0)
-        return;  // explicit configuration, nothing to resolve
+    if (cfg.speculative.mtp_k >= 0) {
+        mtp_concurrent_pool_defaults(cfg, serving);
+        return;  // explicit depth, nothing else to resolve
+    }
 
     if (requested_k > 0 && head_loaded && serving == MtpAutoServing::ConcurrentOther) {
         // Not a GDN hybrid: batch > 1 round-robin verifies with the n-gram matcher, which the pair
@@ -79,6 +112,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
             serving == MtpAutoServing::ConcurrentHybrid
                 ? "concurrent server: drafts while one request decodes, speculative.mtp_concurrent"
                 : "single-stream run");
+        mtp_concurrent_pool_defaults(cfg, serving);
         return;
     }
 

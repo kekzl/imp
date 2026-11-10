@@ -7,8 +7,10 @@
 #include "utils.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
+#include <string_view>
 
 namespace imp_server::anthropic {
 
@@ -335,6 +337,23 @@ static bool has_cache_control(const json& anth) {
     return false;
 }
 
+std::string nearest_reasoning_effort(const std::string& want, const std::vector<std::string>& values) {
+    static constexpr std::array<std::string_view, 5> kRank = {"low", "medium", "high", "xhigh", "max"};
+    const auto* at = std::find(kRank.begin(), kRank.end(), want);
+    if (at == kRank.end() || values.empty())
+        return want;
+    const auto listed = [&](std::string_view level) {
+        return std::find(values.begin(), values.end(), level) != values.end();
+    };
+    for (const auto* up = at; up != kRank.end(); ++up)
+        if (listed(*up))
+            return std::string(*up);
+    for (const auto* down = at; down != kRank.begin();)
+        if (listed(*--down))
+            return std::string(*down);
+    return want;
+}
+
 json anthropic_to_openai_body(const json& anth) {
     json oai = json::object();
 
@@ -360,6 +379,11 @@ json anthropic_to_openai_body(const json& anth) {
     for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format"})
         if (anth.contains(key))
             oai[key] = anth[key];
+
+    // output_config.effort: verbatim here, the handler maps it onto the loaded template's list.
+    if (anth.contains("output_config") && anth["output_config"].is_object() &&
+        anth["output_config"].contains("effort") && anth["output_config"]["effort"].is_string())
+        oai["reasoning_effort"] = anth["output_config"]["effort"];
 
     // Extended-thinking control: Anthropic's `thinking` object ({"type":"enabled",
     // "budget_tokens":N} | {"type":"disabled"}) maps to imp's enable_thinking (bool) and

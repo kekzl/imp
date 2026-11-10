@@ -16,6 +16,7 @@
 #include "memory/kv_cache_manager.h"
 #include "model/mtp_head.h"
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "compute/gdn_factor.cuh"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
@@ -31,13 +32,10 @@
 namespace imp {
 
 namespace {
-// Per-row conditions the batched verify replicates: greedy argmax, rep /
-// freq / presence penalties over the unbounded window (per-row device
-// histories), no logit shaping, no constraint FSM, no logprobs.
+// Per-row conditions the batched verify replicates: rep / freq / presence
+// penalties over the unbounded window (per-row device histories), no logit
+// shaping, no constraint FSM, no logprobs. Sampling: spec_sampling_refusal_.
 bool batch_verify_row_ok(const Request& r) {
-    const bool greedy = r.temperature <= 0.0f || r.top_k == 1;
-    if (!greedy)
-        return false;
     const bool penalties = r.repetition_penalty != 1.0f || r.frequency_penalty != 0.0f ||
                            r.presence_penalty != 0.0f;
     if (penalties && r.repeat_last_n != 0)
@@ -474,7 +472,10 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             if (r->status != RequestStatus::DECODING)
                 continue;
             if (!batch_verify_row_ok(*r))
-                return "row_not_greedy_or_shaped";
+                return "row_shaped";
+            if (const char* sampled = engine_internal::sampled_row_refusal(
+                    *r, spec_sampling_refusal_(*r), runtime_config_.speculative.sampled_batch_verify))
+                return sampled;
             if (think_closer_pending_(*r))
                 return "think_forcing_due";
             if (r->think_budget > 0.0f && r->in_think_block &&
@@ -810,10 +811,14 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const int n_ban = d_ban ? static_cast<int>(banned_token_ids_.size()) : 0;
     const int32_t* d_alt = (any_alt && stop_mask_.n() > 0) ? stop_mask_.device(vram_alloc_, stream) : nullptr;
     const int n_alt = d_alt ? stop_mask_.n() : 0;
+    const std::vector<VerifySampling> row_draw =
+        engine_internal::verify_row_draws(reqs, T, model_->config().vocab_size);
+    executor_->set_verify_sampling_rows(row_draw.data(), static_cast<int>(row_draw.size()));
     executor_->greedy_argmax_all(n_rows, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr,
                                  0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
                                  any_alt ? row_alt.data() : nullptr, any_pen ? pen_hist.data() : nullptr,
                                  any_pen ? pen_n.data() : nullptr, any_pen ? pen_v.data() : nullptr);
+    executor_->set_verify_sampling(nullptr);
     int32_t* h_am = bv_.h_argmax.as<int32_t>();
     if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax, static_cast<size_t>(n_rows) * sizeof(int32_t),
                                cudaMemcpyDeviceToHost, stream),
@@ -923,7 +928,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         emit_total);
     spec_stats_record_(
         any_mtp, drafted_total, acc_total, emit_total,
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count());
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count(),
+        /*sampled=*/!row_draw.empty());
     static bool logged = false;
     if (!logged) {
         logged = true;

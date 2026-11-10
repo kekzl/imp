@@ -344,6 +344,8 @@ void Engine::release_recurrent_slot_(int req_id) {
         bv_.spare2_of.erase(sp);
     }
     phrase_release_(req_id);  // banned-phrase recurrent slabs
+    if (recurrent_snapshots_)
+        recurrent_snapshots_->unprotect(req_id);
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
@@ -412,6 +414,29 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
 // One snapshot is saved per prefill at the largest block-aligned position
 // (step_prefill_one), keyed by the chained KV block hash; the scheduler caps KV block reuse to the longest restorable prefix so continuation prefill never rewrites blocks shared with other sequences.
 
+// First admission probe only (KV-full retries probe again). Logs when >= 4096 reusable prefix
+// tokens (cached, under the chunk cap) prefill again: the KV survived, the state did not.
+static void note_reuse(RecurrentSnapshotStore& store, Request& req, int bs, int restored_tokens, bool on_host,
+                       int stale, int cached_blocks, int on_device_blocks) {
+    if (req.reuse_probed)
+        return;
+    req.reuse_probed = true;
+    const int unused = std::max(cached_blocks * bs - restored_tokens, 0);
+    auto& c = store.reuse();
+    if (restored_tokens > 0)
+        (on_host ? c.restores_host : c.restores_device).fetch_add(1, std::memory_order_relaxed);
+    else if (cached_blocks > 0)
+        (stale > 0 ? c.misses_stale : c.misses_absent).fetch_add(1, std::memory_order_relaxed);
+    c.unused_tokens.fetch_add(static_cast<uint64_t>(unused), std::memory_order_relaxed);
+    if (unused < 4096)
+        return;
+    IMP_LOG_INFO(
+        "RecurrentSnapshot: req %d restores %d of %d cached prefix tokens (%d on device), %d stale "
+        "snapshot(s) passed, store %d/%d device + %d/%d host",
+        req.id, restored_tokens, cached_blocks * bs, on_device_blocks * bs, stale, store.size(),
+        store.capacity(), store.host_size(), store.host_capacity());
+}
+
 int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     req.recurrent_restore.reset();
     if (req.bypass_prefix_cache)  // #2198 direct: no snapshot restore, no cached-block hold
@@ -428,15 +453,21 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
-    int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
+    int cached = 0;  // through host-tier blocks too: a snapshot chain may restore them (#2203)
+    const int on_device = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes, 0, &cached);
     // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2560).
-    int max_b = std::min(cached, prompt_reuse_cap_blocks(total, bs));
+    const int cap = prompt_reuse_cap_blocks(total, bs);
+    int max_b = std::min(cached, cap);
     kv_manager_->release_held_block(req.id);
-    // Branch point (#2409): a restore below max_b re-forwards cached blocks; snapshot their end
-    // so the next prompt sharing them restores there. Floored to the prefill chunk grid: an
-    // off-grid split changes greedy output (Qwen3.8-27B-NVFP4, FP16 KV, deterministic: 4/4).
+    // Branch point (#2409): a restore below the device-cached blocks re-forwards them; snapshot
+    // their end so the next prompt sharing them restores there. Device only: host-held blocks
+    // moved it past a shared prefix that then got no snapshot (8 chats x 31k: cached 16384 -> 0).
+    // Floored to the prefill chunk grid: an off-grid split changes greedy output
+    // (Qwen3.8-27B-NVFP4, FP16 KV, deterministic: 4/4).
     const int grid = base_prefill_chunk(resolve_prefill_chunk_size_(), executor_->max_tokens(), bs);
-    req.branch_point_tokens = grid > 0 ? (max_b * bs / grid) * grid : max_b * bs;
+    const int branch_b = std::min(on_device, cap);
+    req.branch_point_tokens = grid > 0 ? (branch_b * bs / grid) * grid : branch_b * bs;
+    int stale = 0;  // snapshots found whose length or KV chain no longer pairs
     for (int b = max_b; b >= 1; --b) {
         // Transcript snapshot (unaligned, saved at finish) before the aligned entry: it
         // reaches further into the same block. Its full blocks are the LAST cached ones (the
@@ -448,10 +479,15 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
             for (int m = std::min(bs - 1, total - kMinPromptChunkRows - base); m >= 1; --m) {
                 const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
                 auto entry = recurrent_snapshots_->find(key);
-                if (!entry || entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain))
+                if (!entry)
                     continue;
-                if (kv_manager_->hold_cached_block(key, req.id) < 0)
-                    continue;  // the tail block was reclaimed; the state alone cannot restore
+                // Unpaired, or its tail block was reclaimed (the state alone cannot restore).
+                if (entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain) ||
+                    kv_manager_->hold_cached_block(key, req.id) < 0) {
+                    ++stale;
+                    continue;
+                }
+                note_reuse(*recurrent_snapshots_, req, bs, base + m, entry->on_host, stale, max_b, on_device);
                 req.recurrent_restore = std::move(entry);
                 return b;
             }
@@ -460,10 +496,13 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
         // The state pairs only with the KV its forward attended to; a chain rebound by another
         // forward would mix two forwards (#2174): prefill from further back instead.
         if (entry && entry->n_tokens == b * bs && kv_manager_->chain_intact(entry->kv_chain)) {
+            note_reuse(*recurrent_snapshots_, req, bs, b * bs, entry->on_host, stale, max_b, on_device);
             req.recurrent_restore = std::move(entry);
             return b;
         }
+        stale += entry ? 1 : 0;
     }
+    note_reuse(*recurrent_snapshots_, req, bs, 0, false, stale, max_b, on_device);
     IMP_LOG_DEBUG("RecurrentSnapshot: no restorable prefix for req %d (%d/%d blocks cached, %d tokens)", req.id,
                   cached, total / bs, total);
     return 0;
@@ -537,8 +576,10 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
         key = KVCacheManager::compute_block_hash(
             std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
     }
-    if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end))
+    if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end)) {
+        recurrent_snapshots_->protect(req.id, key);
         return;  // identical prefix already snapshotted (e.g. it was just restored)
+    }
     auto it = recurrent_slot_of_.find(req.id);
     if (it == recurrent_slot_of_.end())
         return;
@@ -551,6 +592,7 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream,
                                    nullptr, std::move(chain))) {
+        recurrent_snapshots_->protect(req.id, key);
         // The copy must complete before anything else mutates the slot: later
         // prefill chunks are ordered on this stream, but the first DECODE step
         // may run on a different stream (green contexts). One sync per prefill.

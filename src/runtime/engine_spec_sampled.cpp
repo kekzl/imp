@@ -11,9 +11,7 @@
 
 namespace imp {
 
-namespace {
-bool greedy_request(const Request& req) { return req.temperature <= 0.0f || req.top_k == 1; }
-}  // namespace
+using engine_internal::greedy_request;
 
 const char* Engine::spec_sampling_refusal_(const Request& req) const {
     if (greedy_request(req))
@@ -41,15 +39,43 @@ bool Engine::spec_arm_verify_sampling_(const Request& req) {
         executor_->set_verify_sampling(nullptr);
         return false;
     }
-    VerifySampling s;
-    s.temperature = req.temperature;
-    s.top_p = req.top_p;
-    s.min_p = req.min_p;
-    s.typical_p = req.typical_p;
-    s.top_k = sample_effective_top_k(req.top_k, model_->config().vocab_size);
-    s.seed0 = engine_internal::compute_step_seed(req);
+    const VerifySampling s = engine_internal::verify_sampling_for(req, model_->config().vocab_size);
     executor_->set_verify_sampling(&s);
     return true;
 }
+
+namespace engine_internal {
+
+const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on) {
+    if (sampling_refusal != nullptr)
+        return sampling_refusal;
+    return !batch_on && !greedy_request(r) ? "sampled_batch_verify_off" : nullptr;
+}
+
+std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<Request>>& reqs, int T,
+                                             int vocab_size) {
+    std::vector<VerifySampling> rows;
+    for (size_t g = 0; g < reqs.size(); ++g) {
+        const VerifySampling s = verify_sampling_for(*reqs[g], vocab_size);
+        if (s.top_k == 0)
+            continue;
+        if (rows.empty())
+            rows.assign(reqs.size() * static_cast<size_t>(T), VerifySampling{.top_k = 0});
+        for (int j = 0; j < T; ++j) {
+            VerifySampling& r = rows[(g * static_cast<size_t>(T)) + j];
+            r = s;
+            r.seed0 = static_cast<int>((static_cast<unsigned>(s.seed0) + static_cast<unsigned>(j)) &
+                                       0x7fffffffu);
+        }
+    }
+    static bool logged = false;
+    if (!rows.empty() && !logged) {
+        logged = true;
+        IMP_LOG_INFO("spec-batch: first sampled batched verify n=%zu rows=%zu", reqs.size(), rows.size());
+    }
+    return rows;
+}
+
+}  // namespace engine_internal
 
 }  // namespace imp
