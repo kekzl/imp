@@ -47,12 +47,12 @@ namespace {
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
-    // KV host spill brings an evicted prefix back by H2D, the re-prefill the lean pair avoided:
-    // 4 chats x 27k/50k replay 97.9/89.7 -> 102.3/99.1 tok/s per request, 4 x 110k queue time equal.
-    if (cfg.kv_cache.host_spill_mb > 0)
-        return;
+    // KV host spill restores an evicted prefix by H2D, so the second draft per row stays; the NVFP4 head
+    // copy still costs pool: 8 agents x ~97k, spill 16384: ceiling 18503 -> 20492 blocks, wall
+    // 703.9/763.7 -> 672.3/597.4 s.
+    const bool spill = cfg.kv_cache.host_spill_mb > 0;
     const bool head = !cfg.was_set("speculative.mtp_nvfp4_head");
-    const bool k = !cfg.was_set("speculative.mtp_batch_verify_k");
+    const bool k = !spill && !cfg.was_set("speculative.mtp_batch_verify_k");
     if (head)
         cfg.speculative.mtp_nvfp4_head = false;
     if (k)

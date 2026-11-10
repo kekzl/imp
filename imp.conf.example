@@ -1249,7 +1249,8 @@ mtp_batch_verify     = 4
 # Drafts per bound request in that step: 2 = last token plus a 2-token MTP
 # chain (3 rows per request, a second head pass, two spare recurrent slots per
 # row); 1 = one draft (2 rows, one spare slot per row). Unset, a concurrent
-# GDN-hybrid server with MTP on takes 1; this line sets it, so drop it there.
+# GDN-hybrid server with MTP on takes 1 (2 with kv_cache.host_spill_mb set);
+# this line sets it, so drop it there.
 mtp_batch_verify_k   = 2
 # A bound request decoding alone verifies in that batched step too (rows on
 # paged decode attention, split-K over the context) instead of the single
