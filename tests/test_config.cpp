@@ -54,6 +54,15 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
 }
 
+// moe.expert_prefetch_blocks: copy blocks per prefetched key, default 1 beside 6 prefetched keys.
+TEST(RuntimeConfigTest, ExpertPrefetchBlocksBinds) {
+    RuntimeConfig cfg;
+    EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 1);
+    EXPECT_EQ(cfg.moe.expert_prefetch, 6);
+    set_(cfg, {"moe.expert_prefetch_blocks=4"});
+    EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 4);
+}
+
 // AUDIT_ARCH_2026 E-4: the agent-path SCAN hold was a constant in stream_driver.cpp; it is
 // the whole TTFT of a prose reply on tool requests.
 // AUDIT_ARCH_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old

@@ -78,21 +78,24 @@ struct DevExpertLayer {
     int32_t* key_of_slot;        // [slots], -1 = empty
     uint32_t* stamp;             // [slots], LRU stamp (step clock at last use)
     uint32_t* clock;             // [1]
-    unsigned long long* stats;   // [4]: hits, misses, prefetched keys, prefetched keys the routing used
+    unsigned long long* stats;   // [5]: hits, misses, prefetched keys, of them routed, of those still copying
     char* pool;                  // layer pool base
     float* slot_scales;          // [slots]; null for GGUF slots (no per-slot scale)
     size_t slot_bytes;
     int n_experts;
     int slots;
-    // moe.expert_prefetch: slots the next-layer prefetch is still filling; resolve treats a hit on
-    // one as waiting for the gather and clears the list. Null when prefetch is off.
+    // moe.expert_prefetch: slots the next-layer prefetch fills; resolve treats a hit on one as waiting
+    // for the gather unless pf_done shows every copy block finished, and clears the list. Null when off.
     int32_t* pf_slots;  // [kDevExpertPrefetchMax]
     int32_t* pf_count;  // [1]
+    uint32_t* pf_done;  // [1] prefetch gather blocks finished, reset by the prefetch resolve
+    int pf_blocks;      // prefetch gather blocks per key
 };
 
 inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per row
 inline constexpr int kDevExpertMaxRows = 8;   // decode rows one resolve serves (non-tiered layers)
 inline constexpr int kDevExpertPrefetchMax = 32;  // moe.expert_prefetch ceiling, keys per layer
+inline constexpr int kDevExpertGatherBlocks = 16;  // gather copy blocks per key (grid.x)
 
 // GPU <-> host handshake for tiered decode layers, in mapped pinned memory. The resolve kernel
 // posts req_seq; the tier thread fills the misses' sources and acks; a one-thread kernel spins
@@ -159,8 +162,9 @@ public:
     // pending lists and the predict scratch; false = off. predict_topk: top_k ids of logits[ne] into
     // pred_out, plus a trace record [1000 + layer, ids] when trace is set. prefetch_resolve stamps the
     // predicted keys of `layer`, assigns LRU victims to up to `budget` absent ones and lists them as
-    // pending; prefetch_gather copies them (gather stream, before that layer's own gather).
-    [[nodiscard]] bool enable_prefetch(int budget);
+    // pending; prefetch_gather copies them (gather stream, before that layer's own gather) and counts its
+    // finished blocks in pf_done, so that layer's resolve runs a landed key with the hits.
+    [[nodiscard]] bool enable_prefetch(int budget, int blocks_per_key = kDevExpertGatherBlocks);
     [[nodiscard]] bool prefetch_on() const { return pf_budget_ > 0; }
     [[nodiscard]] float* pf_logits() const { return pf_logits_; }
     struct PredTrace {
