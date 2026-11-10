@@ -89,14 +89,16 @@ struct MoE {
     // Decode (n = 1) on the device expert cache with expert_gather_overlap: layer L's MoE input through
     // layer L+1's router predicts L+1's top-k, and up to this many predicted keys that are not resident are
     // gathered behind L's misses. 0 = off; at most 32. Output bits unchanged (a key still copying waits on
-    // the gather). Flash-Next server, 6 prompts: 0 / 1 / 2 / 3 / 4 = 91.5 / 92.3 / 93.7 / 91.9 / 90.3 tok/s.
+    // the gather). Flash-Next server, 6 prompts, 1 block per key, 2 pairs: 0 / 2 / 4 / 6 / 7 =
+    // 91.9-92.2 / 96.4-96.8 / 99.8-100.2 / 102.6-102.8 / 101.8-103.0 tok/s.
     int expert_prefetch = 6;
     // Qwen4Exp (gated residual): that router reads the hc streams normed with layer L+1's mlp norm and
     // summed, not L's MoE input. Predictor recall 66.0 -> 71.4 % of top-10; server 6 prompts at N=2
     // 94.42-94.88 -> 95.84-96.11 tok/s. Output bits unchanged.
     bool expert_prefetch_hc_norm = true;
-    // Copy blocks per prefetched key (1-64). The zero-copy blocks run beside the next layer's attention
-    // and slow its kernels; fewer blocks with 4 loads in flight per thread hold fewer SMs.
+    // Copy blocks per prefetched key (1-64), 4 loads in flight per thread. The zero-copy blocks run beside
+    // the next layer's attention and slow its kernels with the PCIe loads in flight. Flash-Next server at
+    // 6 keys, 3 pairs: 1 / 2 blocks = 102.6-103.0 / 99.8-100.3 tok/s.
     int expert_prefetch_blocks = 1;
     // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
     // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +

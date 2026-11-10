@@ -54,7 +54,7 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
 }
 
-// moe.expert_prefetch_blocks: copy blocks per prefetched key, 16 = the miss gather's grid.x.
+// moe.expert_prefetch_blocks: copy blocks per prefetched key, default 1 beside 6 prefetched keys.
 TEST(RuntimeConfigTest, ExpertPrefetchBlocksBinds) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 1);

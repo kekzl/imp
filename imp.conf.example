@@ -700,13 +700,13 @@ shared_expert_overlap = true
 expert_gather_overlap = true
 # Decode on the device expert cache: layer L's MoE input through layer L+1's router predicts L+1's
 # experts; up to this many absent predicted keys cross PCIe behind L's misses. 0 = off, max 32.
-# Past 2 decode drops although every prefetch has landed when the next layer resolves.
+# Qwen3.8-Flash-Next server: 0 / 2 / 6 keys = 92 / 96.6 / 102.7 tok/s; flat from 6 to 8.
 expert_prefetch = 6
 # Qwen4Exp: the prediction reads the hc streams normed with layer L+1's mlp norm and summed instead
 # of L's MoE input (recall 66.0 -> 71.4 % of top-10); output bits unchanged.
 expert_prefetch_hc_norm = true
 # Copy blocks per prefetched key (1-64): the zero-copy blocks run beside the next layer's
-# attention and slow its kernels.
+# attention and slow its kernels (6 keys: 1 / 2 blocks = 102.7 / 100.0 tok/s).
 expert_prefetch_blocks = 1
 # Router of n >= 2 rows as one launch (GEMM + softmax / sigmoid + top-k + renorm), F16 router,
 # <= 128 experts, no group limit; off under runtime.deterministic.
