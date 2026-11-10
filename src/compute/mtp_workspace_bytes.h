@@ -95,7 +95,8 @@ struct MtpWorkspaceShape {
 };
 
 // Device footprint of one cudaMalloc: above 1 MiB it takes whole 2 MiB pages. Qwen3.8-27B head: 344.5 MiB
-// requested, 360 MiB measured (imp_vram_own_bytes boot - init_complete); with this rounding 359.5 MiB.
+// requested, 360 MiB measured (imp_vram_own_bytes boot - init_complete); with this rounding 359.5 MiB
+// (367 MiB with the 8 MiB multi-slot scan partials).
 constexpr size_t kMtpAllocGranule = size_t{2} << 20;
 inline size_t mtp_alloc_footprint(size_t bytes) {
     return bytes > (size_t{1} << 20) ? (bytes + kMtpAllocGranule - 1) / kMtpAllocGranule * kMtpAllocGranule

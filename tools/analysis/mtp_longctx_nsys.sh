@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Per-step kernel time of a DEFAULT imp-server with MTP at long context: a fresh server under nsys (graph-node
 # trace; fresh because a prefix-cache hit would skip a prefill), mtp_longctx_client.py with CONC streams over
-# CTX, then mtp_step_profile.py per client window (decode phase only).
-# Usage: IMAGE=imp:x OUT=/mnt/data/scratch/dir [CONC=1] [CTX="20000 80000"] [GEN=384]
+# CTX, then mtp_step_profile.py per client window (decode phase only). One CTX per run: two contexts closer
+# than --gap-s merge into one window and only the last decode is profiled.
+# Usage: IMAGE=imp:x OUT=/mnt/data/scratch/dir [CONC=1] [CTX="80000"] [GEN=384]
 #        [CORPUS=dir holding docs/internals + src/] [SETS="k=v,k=v"] [PROFILE_ARGS=...] mtp_longctx_nsys.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -34,9 +35,9 @@ for _ in $(seq 1 600); do
     [ -z "$(docker ps -q -f name="$NAME")" ] && { echo "server died"; docker logs "$NAME" 2>&1 | tail -20; exit 3; }
 done
 mkdir -p "$OUT/client"
-docker run --rm --network host -e CTX="${CTX:-20000 80000}" -e GEN="${GEN:-384}" -e CONC="$CONC" \
+docker run --rm --network host -e CTX="${CTX:-80000}" -e GEN="${GEN:-384}" -e CONC="$CONC" \
     -e OUT_DIR=/o -v "$OUT/client":/o -e REPO_DIR=/corpus -v "${CORPUS:-$REPO}":/corpus:ro \
-    -v "$HERE":/h:ro python:3.13-slim python -I /h/mtp_longctx_client.py "$PORT" "c$CONC" 2>&1 |
+    -v "$HERE":/h:ro imp:toolchain python3 -I /h/mtp_longctx_client.py "$PORT" "c$CONC" 2>&1 |
     tee "$OUT/client.txt"
 grep -E '^(REQ|AGG)' "$OUT/client.txt" >> "$OUT/summary.txt"
 docker kill --signal=SIGINT "$NAME" >/dev/null 2>&1
@@ -49,5 +50,5 @@ docker rm -f "$NAME" >/dev/null 2>&1
 grep -E 'spec-batch price|mtp-batched-feed' "$OUT/server.log" | tail -12 | tee -a "$OUT/summary.txt"
 nsys export --type sqlite --force-overwrite=true -o "$OUT/serving.sqlite" "$OUT/serving.nsys-rep" >/dev/null 2>&1
 # shellcheck disable=SC2086
-docker run --rm -v "$OUT":/d:ro -v "$HERE":/h:ro python:3.13-slim \
-    python -I /h/mtp_step_profile.py /d/serving.sqlite ${PROFILE_ARGS:-} | tee -a "$OUT/summary.txt"
+docker run --rm -v "$OUT":/d:ro -v "$HERE":/h:ro imp:toolchain \
+    python3 -I /h/mtp_step_profile.py /d/serving.sqlite ${PROFILE_ARGS:-} | tee -a "$OUT/summary.txt"

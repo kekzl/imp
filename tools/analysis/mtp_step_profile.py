@@ -6,7 +6,8 @@ Splits an nsys SQLite export (imp-server under `--cuda-graph-trace=node`) into w
 the last --prefill-pat kernel), then prints per window: decode wall, steps (launches of --anchor divided by
 --per-step), wall / busy union / kernel sum per step, and the top kernels in ms per step.
 
-Usage: mtp_step_profile.py profile.sqlite [--gap-s 1.5] [--anchor NAME] [--per-step 1] [--top 25]
+Usage: mtp_step_profile.py profile.sqlite [--gap-s 1.5] [--anchor REGEX] [--per-step 1] [--top 25]
+--anchor default: the bound head scan (one launch per draft pass: 1 per step at mtp_batch_verify_k=1, 2 at 2).
 """
 import argparse
 import re
@@ -51,7 +52,7 @@ def main():
     ap.add_argument("--gap-s", type=float, default=1.5)
     ap.add_argument("--min-window-ms", type=float, default=500.0)
     ap.add_argument("--prefill-pat", default="fmha_sm120")
-    ap.add_argument("--anchor", default="")
+    ap.add_argument("--anchor", default=r"^mtp_attn_kv_scan_rows(_split)?_kernel$")
     ap.add_argument("--per-step", type=float, default=1.0)
     ap.add_argument("--top", type=int, default=25)
     a = ap.parse_args()
@@ -85,10 +86,10 @@ def main():
         for s, e, n in dec:
             cnt[n] = cnt.get(n, 0) + 1
             dur[n] = dur.get(n, 0) + (e - s)
-        anchor = a.anchor or min((n for n in cnt if cnt[n] >= 50), key=lambda n: cnt[n], default="")
-        steps = cnt.get(anchor, 0) / a.per_step if anchor else 0
+        n_anchor = sum(c for n, c in cnt.items() if re.search(a.anchor, n))
+        steps = n_anchor / a.per_step
         print(f"window {i}: t={(w[0][0] - t0) / 1e9:.1f}s prefill kernels {len(pf)}, decode wall "
-              f"{wall / 1e6:.1f} ms, {len(dec)} kernels, anchor {anchor} x{cnt.get(anchor, 0)} / {a.per_step} "
+              f"{wall / 1e6:.1f} ms, {len(dec)} kernels, anchor {a.anchor} x{n_anchor} / {a.per_step} "
               f"= {steps:.0f} steps")
         if steps <= 0:
             continue
