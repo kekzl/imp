@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - A speculative draft that matched `</think>` under a think budget was kept and then forwarded a second time at the same position, advancing the GDN recurrent state twice. The token now stays the chunk's bonus. Qwen3.8-27B-NVFP4, 12 thinking chats x 2, `--max-batch 1`: double forwards 8 of 24 requests -> 0 (#3090).
+- With MTP drafts on, a thinking chat ran up to `mtp_k` tokens past its think budget before `</think>` was forced. A verify chunk now ends at the budget. Qwen3.8-27B-NVFP4 server, 1 chat x 20k, `max_tokens` 384, reasoning tokens at `mtp_k` 1 / 2 / 3 / 4: 193 / 194 / 195 / 196 -> 193 each, as with MTP off (#3092).
 
 ## [0.65.0] - 2026-11-09
 

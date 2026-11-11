@@ -1,0 +1,39 @@
+# tools/analysis/mtp_factor_row_equiv.sh, default think budget, 1 chat x 20k (depth) and 2 chats x 20k (pair),
+# 384 tokens, Qwen3.8-27B-NVFP4-vllm, RTX 5090. Fix: image imp:tb created 2026-11-11T10:40:07.294333739+01:00
+
+## Fix image imp:tb (rc 0)
+pair spare: drafted 604
+pair ctx/stream 20000 s0: spare e260f84e6e5c spare e260f84e6e5c equal
+pair ctx/stream 20000 s1: spare a43ddb8f444b spare a43ddb8f444b equal
+pair row: drafted 604
+pair ctx/stream 20000 s0: spare e260f84e6e5c row e260f84e6e5c equal
+pair ctx/stream 20000 s1: spare a43ddb8f444b row a43ddb8f444b equal
+depth k1: drafted 207
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k1 91e7ba2d359b equal
+depth k2: drafted 308
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k2 91e7ba2d359b equal
+depth k3: drafted 393
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k3 91e7ba2d359b equal
+depth k4: drafted 468
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k4 91e7ba2d359b equal
+
+## Control: main e2906af1 (imp:m3091), CHECKS=depth (rc 1)
+depth k1: drafted 207
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k1 91e7ba2d359b equal
+depth k2: drafted 302
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k2 852d98dd2303 DIFFER
+depth k3: drafted 393
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k3 85fd5eb03356 DIFFER
+depth k4: drafted 492
+depth ctx/stream 20000 s0: k1 91e7ba2d359b k4 d9d799e4e6fa DIFFER
+
+## MTP off (k0) against 4 drafts (k4): <image>_default = default budget, <image>_1 = think_budget 1
+## The eager text differs from the MTP text without a budget too: its md5 is no detector.
+eager tb_default p1_k0 comp 384 tps 93.51 drafted 0 acc 0 0df24174c026
+eager tb_default p1_k4 comp 384 tps 183.73 drafted 468 acc 264 91e7ba2d359b
+eager tb_1 p1_k0 comp 384 tps 93.52 drafted 0 acc 0 350e66ac9bb9
+eager tb_1 p1_k4 comp 384 tps 172.11 drafted 504 acc 257 6c3481086686
+eager m3091_default p1_k0 comp 384 tps 93.20 drafted 0 acc 0 0df24174c026
+eager m3091_default p1_k4 comp 384 tps 175.03 drafted 492 acc 258 d9d799e4e6fa
+eager m3091_1 p1_k0 comp 384 tps 93.24 drafted 0 acc 0 350e66ac9bb9
+eager m3091_1 p1_k4 comp 384 tps 174.87 drafted 504 acc 257 6c3481086686

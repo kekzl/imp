@@ -811,7 +811,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             return hard_stop;
         };
         const auto [matched, emitted] = spec_accept_rows(h_am + (static_cast<size_t>(T) * g), dr, nd, nd + 1,
-                                                         req->think_budget > 0.0f, req->in_think_block, emit,
+                                                         req->think_budget > 0.0f, req->in_think_block,
+                                                         think_tokens_left_(*req), emit,
                                                          [](int) { return true; });
         row0[g] = T * g;
         emitted_of[g] = emitted;

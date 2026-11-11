@@ -7,7 +7,7 @@
 #          1 run differed.
 #   depth: 4 drafts verified, 1 chat, speculative.mtp_k = 4 / 3 / 2 / 1 (spare adopted, 3 / 2 / 1 rows
 #          folded). 1 chat only: the rows per step change the text, so a second stream's timing would too.
-#          THINK_BUDGET=1: a forced closer lands up to mtp_k tokens past the budget (engine_spec_ngram.cpp).
+#          Default think budget: the closer is forced inside the run, a chunk must end at the budget (B-69.1).
 # Usage: OUT=/mnt/data/scratch/dir [IMAGE=imp:test | dev] [CTX=20000] [CONC=2] [CORPUS=dir] [STAGGER_MS=300]
 #        [CHECKS="pair depth"] tools/analysis/mtp_factor_row_equiv.sh
 set -uo pipefail
@@ -53,7 +53,7 @@ for c in ${CHECKS:-pair depth}; do
         ;;
     depth)
         B="speculative.ngram=false,speculative.mtp_batch_verify_k=4,gdn.state_bf16=false"
-        THINK_BUDGET=1 check depth k1 1 0 \
+        check depth k1 1 0 \
             "k1|$I|$B,speculative.mtp_k=1 k2|$I|$B,speculative.mtp_k=2 k3|$I|$B,speculative.mtp_k=3 k4|$I|$B,speculative.mtp_k=4"
         ;;
     *)

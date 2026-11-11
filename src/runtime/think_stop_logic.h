@@ -5,6 +5,7 @@
 // Engine methods are thin wrappers; behaviour must stay byte-identical to them.
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -91,6 +92,24 @@ constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve
     return think_cap > 0 && limit > think_cap ? think_cap : limit;
 }
 
+// Reasoning tokens an open, budgeted think block may still emit before the closer is forced
+// (think_limit minus the count, floored at 0). kThinkUnbounded: no budget, no </think> id, not thinking.
+inline constexpr int kThinkUnbounded = std::numeric_limits<int>::max();
+inline int think_tokens_left(float think_budget, int32_t think_end_id, int max_tokens,
+                             const std::vector<int32_t>& output_tokens, int32_t think_start_id,
+                             bool started_in_think, int answer_reserve = kMaxAnswerReserve,
+                             int think_cap = 0) {
+    if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
+        return kThinkUnbounded;
+    const int limit = think_limit(max_tokens, think_budget, answer_reserve, think_cap);
+    bool currently_thinking = false;
+    int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
+                                             currently_thinking);
+    if (!currently_thinking)
+        return kThinkUnbounded;
+    return n_reasoning >= limit ? 0 : limit - n_reasoning;
+}
+
 // True when budgeting is active, a </think> id exists, still thinking, and the
 // reasoning count reached think_limit (LATER of fraction / reserve-based cap),
 // so a larger max_tokens only ever grants more thinking room, never less.
@@ -98,13 +117,8 @@ inline bool should_force_think_end(float think_budget, int32_t think_end_id, int
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
                                    bool started_in_think, int answer_reserve = kMaxAnswerReserve,
                                    int think_cap = 0) {
-    if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
-        return false;
-    const int limit = think_limit(max_tokens, think_budget, answer_reserve, think_cap);
-    bool currently_thinking = false;
-    int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
-                                             currently_thinking);
-    return currently_thinking && n_reasoning >= limit;
+    return think_tokens_left(think_budget, think_end_id, max_tokens, output_tokens, think_start_id,
+                             started_in_think, answer_reserve, think_cap) == 0;
 }
 
 // Client end-of-think (#2420, POST /v1/requests/{id}/end_thinking): forces the closer while the

@@ -5,6 +5,7 @@
 
 #include "runtime/spec_accept.h"
 #include "runtime/spec_gates.h"
+#include "runtime/think_stop_logic.h"
 
 #include <gtest/gtest.h>
 
@@ -158,7 +159,7 @@ struct AcceptRun {
 };
 
 AcceptRun accept(const std::vector<int32_t>& argmax, const std::vector<int32_t>& draft, bool in_think,
-                 bool budgeted, int masked_row = -1) {
+                 bool budgeted, int masked_row = -1, int think_left = imp::think_logic::kThinkUnbounded) {
     AcceptRun a;
     a.in_think = in_think;
     const auto emit = [&](int, int32_t tok) {
@@ -171,8 +172,8 @@ AcceptRun accept(const std::vector<int32_t>& argmax, const std::vector<int32_t>&
         return a.finished;
     };
     const int nd = static_cast<int>(draft.size());
-    a.r = imp::spec_accept_rows(argmax.data(), draft.data(), nd, nd + 1, budgeted, a.in_think, emit,
-                                [&](int j) { return j + 1 != masked_row; });
+    a.r = imp::spec_accept_rows(argmax.data(), draft.data(), nd, nd + 1, budgeted, a.in_think, think_left,
+                                emit, [&](int j) { return j + 1 != masked_row; });
     return a;
 }
 
@@ -254,6 +255,39 @@ TEST(SpecAcceptRows, MaskedNextRowAndStopEndTheChunk) {
     run = accept({7, 8, 7}, {7, 7}, false, false);
     EXPECT_EQ(run.r.matched, 1) << "the diverging token is emitted as the bonus";
     EXPECT_EQ(run.r.emitted, 2);
+}
+
+// B-69.1: a fully accepted chunk of 1 .. 4 drafts that starts gap tokens short of the think budget
+// emits min(gap, drafts + 1) tokens, so the closer is due at the eager step's count (was: up to
+// drafts tokens past it).
+TEST(SpecAcceptRows, ChunkEndsAtTheThinkBudget) {
+    namespace tl = imp::think_logic;
+    const int max_tokens = 1024;
+    const int limit = tl::think_limit(max_tokens, 0.5f);
+    ASSERT_GT(limit, 16);
+    for (int nd = 1; nd <= 4; ++nd) {
+        for (int gap = 1; gap <= nd + 3; ++gap) {
+            std::vector<int32_t> out(static_cast<size_t>(limit - gap), 7);  // started in think: all reasoning
+            const int left = tl::think_tokens_left(0.5f, kClose, max_tokens, out, kOpen,
+                                                   /*started_in_think=*/true);
+            ASSERT_EQ(left, gap);
+            const std::vector<int32_t> am(static_cast<size_t>(nd) + 1, 7), dr(static_cast<size_t>(nd), 7);
+            const AcceptRun run = accept(am, dr, /*in_think=*/true, /*budgeted=*/true, -1, left);
+            const int want = gap < nd + 1 ? gap : nd + 1;
+            EXPECT_EQ(run.r.emitted, want) << "nd " << nd << " gap " << gap;
+            EXPECT_EQ(run.r.matched, want - 1) << "the last token is the bonus";
+            out.insert(out.end(), run.out.begin(), run.out.end());
+            EXPECT_LE(static_cast<int>(out.size()), limit) << "nd " << nd << " gap " << gap;
+            EXPECT_EQ(tl::should_force_think_end(0.5f, kClose, max_tokens, out, kOpen, true), gap <= nd + 1);
+        }
+    }
+    // No budget, no closer id, or outside the block: unbounded.
+    const std::vector<int32_t> out(8, 7);
+    EXPECT_EQ(tl::think_tokens_left(0.0f, kClose, max_tokens, out, kOpen, true), tl::kThinkUnbounded);
+    EXPECT_EQ(tl::think_tokens_left(0.5f, -1, max_tokens, out, kOpen, true), tl::kThinkUnbounded);
+    EXPECT_EQ(tl::think_tokens_left(0.5f, kClose, max_tokens, out, kOpen, false), tl::kThinkUnbounded);
+    const AcceptRun free_run = accept({7, 7, 7}, {7, 7}, true, true);
+    EXPECT_EQ(free_run.r.emitted, 3);
 }
 
 }  // namespace
