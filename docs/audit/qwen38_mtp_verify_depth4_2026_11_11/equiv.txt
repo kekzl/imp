@@ -1,0 +1,33 @@
+# Qwen3.8-27B-NVFP4-vllm, RTX 5090, imp-server defaults, tools/analysis/mtp_longctx_ab.sh, 2026-11-11
+# tools/analysis/mtp_factor_row_equiv.sh on the image (rc 0): pair = 2 chats, 2 drafts, factor row vs a
+# second spare; depth = 1 chat, 4 drafts verified, speculative.mtp_k 1..4, THINK_BUDGET=1.
+pair spare: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 spare 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b spare 805077946d6b equal
+pair row: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 row 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b row 805077946d6b equal
+depth k1: drafted 207
+depth ctx/stream 20000 s0: k1 6c3481086686 k1 6c3481086686 equal
+depth k2: drafted 316
+depth ctx/stream 20000 s0: k1 6c3481086686 k2 6c3481086686 equal
+depth k3: drafted 402
+depth ctx/stream 20000 s0: k1 6c3481086686 k3 6c3481086686 equal
+depth k4: drafted 504
+depth ctx/stream 20000 s0: k1 6c3481086686 k4 6c3481086686 equal
+
+## Think budget control: with the default budget (max_tokens 384, closer forced at 192 reasoning tokens)
+## the forced closer lands up to mtp_k tokens late, so the text follows mtp_k. Not new at 4 drafts:
+# main imp:m3090, 3 drafts verified, default budget
+REQ p1_k1 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.81 decode_tps 113.67 drafted 206 accepted 175 md5 18844088bac2
+REQ p1_k2 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.79 decode_tps 150.62 drafted 312 accepted 225 md5 81466897ba0b
+REQ p1_k3 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.78 decode_tps 178.39 drafted 390 accepted 251 md5 bb3c0b591cc5
+# main imp:m3090, 3 drafts verified, THINK_BUDGET=1
+REQ p1_k1 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.78 decode_tps 114.93 drafted 208 accepted 175 md5 5ac4d15b4170
+REQ p1_k2 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.79 decode_tps 144.90 drafted 328 accepted 219 md5 5ac4d15b4170
+REQ p1_k3 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.78 decode_tps 168.72 drafted 420 accepted 243 md5 5ac4d15b4170
+# this branch (dev build), 4 drafts verified, default budget
+REQ p1_k1 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.78 decode_tps 110.28 drafted 201 accepted 180 md5 b52e77f78dba
+REQ p1_k2 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.79 decode_tps 155.81 drafted 280 accepted 241 md5 61a1e2b366aa
+REQ p1_k3 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.79 decode_tps 173.04 drafted 375 accepted 256 md5 3a2ea49ec9eb
+REQ p1_k4 ctx 20000 rep 0 s0 prompt 19966 comp 384 ttft_s 1.78 decode_tps 196.76 drafted 440 accepted 271 md5 ab4082a562c4

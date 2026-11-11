@@ -20,6 +20,9 @@ Status (2026-11-11, later): the factor rows are indexed by verify group and carr
 request verifies 3 drafts by default (`speculative.mtp_batch_verify_k` 3, section "Up to 3 drafts per bound
 request" at the end).
 
+Status (2026-11-11, depth 4): the depth is per step, 4 drafts below 4 requests, 3 from 4 up
+(`speculative.mtp_batch_verify_k` 4, `speculative.mtp_batch_verify_k_wide` 3, last section).
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -468,3 +471,79 @@ is no detector.
 
 Next: verify depth per request by its acceptance (the worst session above); adopting the spare when the
 request's own chain is shorter than D.
+
+## 4 drafts per bound request, 3 from 4 requests up (2026-11-11, `speculative.mtp_batch_verify_k` 4, `_k_wide` 3)
+
+The verify depth is a property of the step: 1 to 3 requests stage 4 drafts each (T = 5 rows), 4 requests stage
+3 (T = 4). Evidence: `docs/audit/qwen38_mtp_verify_depth4_2026_11_11/`.
+
+| Piece | Rule |
+|---|---|
+| Step depth | `mtp_bound_verify_step_depth(depth, wide_depth, n)`: `speculative.mtp_batch_verify_k` (default 4, `kMtpBoundVerifyMaxDepth` 4) below `kMtpBoundVerifyWideRows` (4) requests, `speculative.mtp_batch_verify_k_wide` (default 3, clamped to 2..depth) from there up; staged rows, head chain levels and the factor row stride follow the step |
+| Factor rows, conv taps | allocated for the deeper setting, 48 layers x 4 groups x 3 drafts = 27.4 MiB + 11.2 MiB (18.3 + 7.5 at D 3); a step at depth D writes row `g * (D - 1) + lv` (`bound_verify_fold_lists(levels, ...)`) |
+| Accept | 1..D-1 matched = fold that many rows + taps, `kGdnFactorFoldMaxRows` 3 |
+| Head | a fourth chain level reads `chain_pos3` (`src/compute/mtp_pass_tables.cpp`); the chain depth of a pass is the step's |
+| KV plan | 11164 blocks at D 3 -> 11126 at D 4 (Qwen3.8-27B-NVFP4-vllm, 32 GB); own peak 1 x 20k 22208 -> 22202 MiB, 2 x 80k 24935 -> 24937 |
+| Trace | `diagnostics.spec_trace` prints `spec-batch-trace n= T= fwd= head= \| id:nd:m:e` per step (`src/runtime/spec_trace.cpp`), `tools/analysis/mtp_trace_hist.py` groups it by (n, T) |
+
+Qwen3.8-27B-NVFP4-vllm server defaults, RTX 5090, `tools/analysis/mtp_longctx_ab.sh`, one image, arms default
+(new) against `speculative.mtp_batch_verify_k=3` (d3), 2 pairs x 2 sessions x 768 greedy tokens per load, streams
+started together (`ab_table.txt`, `ab_digest.txt`):
+
+| load | new, tok/s per stream (min-max) | d3 | new, all streams (min-max) | d3, all streams (min-max) | accepted / drafted new | d3 |
+|---|---|---|---|---|---|---|
+| 1 x 20k | 211.32 (209.64-212.82) | 194.25 (193.21-195.18) | | | 2218 / 3368 | 2082 / 2934 |
+| 1 x 80k | 188.66 (170.44-199.89) | 176.56 (176.01-177.08) | | | 2126 / 3736 | 2018 / 3126 |
+| 2 x 20k | 172.78 (156.53-190.00) | 164.74 (155.65-178.20) | 324.78 (313.48-334.59) | 315.45 (307.78-333.88) | 4191 / 7588 | 3939 / 6459 |
+| 2 x 80k | 165.97 (154.29-177.87) | 162.12 (143.50-173.87) | 320.01 (304.66-336.94) | 311.60 (287.36-326.30) | 4242 / 7384 | 4031 / 6153 |
+| 3 x 8k | 178.99 (166.49-201.26) | 173.98 (155.36-191.91) | 500.39 (491.65-517.76) | 493.42 (466.70-507.55) | 6408 / 10752 | 6069 / 9108 |
+| 3 x 20k | 161.58 (147.29-185.76) | 154.48 (141.30-170.00) | 444.28 (433.91-459.37) | 427.93 (416.31-443.20) | 6270 / 11340 | 5867 / 9687 |
+| 4 x 8k | 159.64 (148.83-173.79) | 161.89 (147.98-177.47) | 589.75 (582.87-596.41) | 594.82 (578.27-605.79) | 8012 / 12520 | 8046 / 12138 |
+| 4 x 20k | 143.83 (132.51-160.58) | 144.32 (130.07-159.79) | 530.61 (518.46-550.50) | 530.84 (509.48-538.64) | 7866 / 13064 | 7819 / 12855 |
+
+The wide key confirmed by its opposite (`speculative.mtp_batch_verify_k_wide=4`, same runs): 4 x 20k 517.18 tok/s
+all streams (504.29-535.30) against 530.61, 4 x 8k 588.57 (558.74-618.82) against 589.75.
+
+Step medians (dev build, `step_trace.txt`), forward + argmax, head, tokens per step:
+
+| requests in the step | 3 drafts | 4 drafts |
+|---|---|---|
+| 1 (20k + 80k) | 12.871 ms, 3.204 ms, 2.83 | 13.078 ms, 4.227 ms, 3.09 |
+| 3 (8k + 20k) | 13.772 ms, 3.670 ms, 8.54 | 14.192 ms, 4.887 ms, 9.59 |
+| 4 (8k + 20k) | 14.709 ms, 4.010 ms, 11.52 | 15.506 ms, 5.333 ms, 12.77 |
+
+- The fourth draft is one more head pass over every request: +1.02 ms at 1 request, +1.32 ms at 4. At 4
+  requests the step carries 12.77 tokens in 20.84 ms against 11.52 in 18.72 ms: no gain, hence the wide key.
+- 1 x 80k, session 0 of the default in pair 1 and pair 2 (same text, 515 of 1000 drafts accepted both times):
+  170.44 and 186.15 tok/s; at 3 drafts 176.88 and 176.01. One session of a load is no verdict; the table
+  carries min-max.
+- The worst session of the 3-draft section (1 x 20k, third session, `gates.txt`): 158.72 tok/s at 3 drafts
+  (464 of 903 drafts accepted) -> 169.60 on the default (501 of 1056).
+- d3 on this tree against main 2b6a1d37 (`main_control.txt`): 14 of 14 streams equal in md5, drafted and
+  accepted counts; 194.67 against 193.97, 166.47 against 166.74, 150.53 against 150.51 tok/s per stream.
+- Acceptance along the chain does not decay (`depth_replay.txt`, 6 drafts single-stream, 530 steps):
+  P(level k matches, given k - 1 matched) = 0.800, 0.705, 0.732, 0.799, 0.743, 0.838.
+
+Depth per request by its own acceptance is not built (ledger B-67.1). Replay of traced depth-2 and depth-3 steps
+through 50 policies (`tools/analysis/mtp_depth_replay.py`, `depth_replay.txt`, a calculation, no A/B): the best
+policy without the outcome reaches +0.01 %, -0.02 %, -1.62 % against fixed depth 3 at 1, 2, 4 chats; knowing each
+step's outcome is worth +3.95 %, +2.50 %, +1.34 %. A full accept repeats with P = 0.645, 0.648, 0.665: the last
+steps do not predict the next one.
+
+The think budget moves the greedy text with `mtp_k`: an MTP chunk lands up to `mtp_k` tokens past the budget
+before the closer is forced (`src/runtime/engine_spec_ngram.cpp`). 1 chat x 20k, 384 tokens, default budget, main
+imp:m3090 at 3 drafts: `mtp_k` 1, 2, 3 give 3 texts (18844088bac2, 81466897ba0b, bb3c0b591cc5); with
+`think_budget: 1` 3 of 3 equal (5ac4d15b4170). `mtp_factor_row_equiv.sh` therefore runs its depth check with
+`THINK_BUDGET=1` (`equiv.txt`); the check of the section above ran with the default budget, main at 3 drafts
+fails it on the corpus used here.
+
+Gates. Kernel: `GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToThreeDraftsOfFour` (+ `Bf16`) and
+`ConvFactorRowsFoldOneToThreeDraftsOfFour`; a fold of 2 rows at most fails 2 of 11, of 2 taps at most 1 of 11,
+and both change the `mtp_k` 3 and 4 texts of the depth check. Step depth:
+`BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep` and `FoldListsUseTheStepsRowStride`, each red under
+its mutant (`mutants.txt`). Engine level: `mtp_factor_row_equiv.sh` on the image, pair 2 of 2 and depth 4 of 4
+arms md5-equal (`equiv.txt`). Final image: `degen_suite.py` 52 checks 0 FAIL at defaults and at
+`--max-batch 1`, `make test-spec-fidelity` passed, `make verify-fast` OK (`gates.txt`).
+
+Next: an exact think budget under MTP (the overshoot above); the head chain level at 4 requests (1.32 ms);
+adopting the spare when the request's own chain is shorter than D.

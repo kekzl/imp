@@ -28,4 +28,11 @@ void spec_trace_emit_verify(int p0, int t0, const std::vector<int32_t>* draft, i
                             const int32_t* argmax, int chunk_len, GraphExecutor* exec, float* d_logits,
                             std::vector<float>& h_logits, int vocab, cudaStream_t stream);
 
+// Bound batched verify, one line per step when `on`:
+// "spec-batch-trace n=N T=T fwd=MS head=MS | id:nd:m:e ..." (request id, drafts verified, drafts matched,
+// tokens emitted). Read by tools/analysis/mtp_trace_hist.py.
+void spec_trace_emit_batch_step(bool on, int rows_per_req, double fwd_ms, double head_ms,
+                                const std::vector<int>& ids, const std::vector<int>& n_draft,
+                                const std::vector<int>& matched, const std::vector<int>& emitted);
+
 }  // namespace imp

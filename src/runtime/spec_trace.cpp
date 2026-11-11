@@ -72,4 +72,19 @@ void spec_trace_emit_verify(int p0, int t0, const std::vector<int32_t>* draft, i
     IMP_LOG_INFO("%s", s.c_str());
 }
 
+void spec_trace_emit_batch_step(bool on, int rows_per_req, double fwd_ms, double head_ms,
+                                const std::vector<int>& ids, const std::vector<int>& n_draft,
+                                const std::vector<int>& matched, const std::vector<int>& emitted) {
+    if (!on)
+        return;
+    char head[96];
+    std::snprintf(head, sizeof(head), "spec-batch-trace n=%zu T=%d fwd=%.3f head=%.3f |", ids.size(),
+                  rows_per_req, fwd_ms, head_ms);
+    std::string s = head;
+    for (size_t g = 0; g < ids.size(); ++g)
+        s += " " + std::to_string(ids[g]) + ":" + std::to_string(n_draft[g]) + ":" +
+             std::to_string(matched[g]) + ":" + std::to_string(emitted[g]);
+    IMP_LOG_INFO("%s", s.c_str());
+}
+
 }  // namespace imp

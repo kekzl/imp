@@ -18,12 +18,12 @@ namespace imp {
 struct MtpHeadGraphKey {
     int n = 0;  // fed rows
     int m = 0;  // bound requests (draft rows)
-    int chain = 0;  // chain levels after the first draft: 0..2
+    int chain = 0;  // chain levels after the first draft: 0..3
     auto operator<=>(const MtpHeadGraphKey&) const = default;
 };
 
-// Bound: mtp_batch_verify <= 4 requests x 1..4 fed rows each = 34 (n, m) pairs at the one chain depth a
-// process runs.
+// Bound: 1..3 requests x 1..5 fed rows each (27 (n, m) pairs, chain 3) + 4 requests x 1..4 rows (13 pairs,
+// chain 2, mtp_bound_verify_step_depth) = 40.
 inline constexpr size_t kMtpHeadGraphMax = 48;
 // Consecutive capture / instantiate / launch failures before the cache turns itself off.
 inline constexpr int kMtpHeadGraphMaxFailures = 2;

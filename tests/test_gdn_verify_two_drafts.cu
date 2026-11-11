@@ -3,7 +3,7 @@
 // 2 rows into spare2 Q_z, 3 rows into spare P_z; the scan writes the 2-row state in a commit-only pass
 // before the main pass (run_gdn, ssm_snap_rows 2), the conv takes a third commit launch (snap_rows 2).
 // Reference: the single-sequence launchers per group and row count. Factor rows (mtp_batch_verify_factor_row,
-// D = 2 or 3): no spare2, drafts 1 .. D - 1 as factor rows / conv taps by group, folded into the live slot
+// D = 2 .. 4): no spare2, drafts 1 .. D - 1 as factor rows / conv taps by group, folded into the live slot
 // on a partial accept.
 
 #include <gtest/gtest.h>
@@ -643,6 +643,21 @@ TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16) {
     }
 }
 
+// 4 drafts: 3 factor rows per group, the groups fold 1, 2 or 3 of them in turn.
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneToThreeDraftsOfFour) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "f32 n_seq " << n_seq);
+        run_scan_factor_row<float>(n_seq, /*drafts=*/4);
+    }
+}
+
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneToThreeDraftsOfFourBf16) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "bf16 n_seq " << n_seq);
+        run_scan_factor_row<__nv_bfloat16>(n_seq, /*drafts=*/4);
+    }
+}
+
 // The conv half at D drafts: D + 1 rows -> spare, 1 row in place, rows 2 .. D as taps [z * (D - 1) + level],
 // then ssm_conv_tap_fold(window live, taps from z * (D - 1), count c_z) gives the (1 + c_z)-row window in
 // the live slot, bit-exact. c_z cycles 1 .. D - 1 over the groups.
@@ -808,6 +823,11 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
 
 // 3 drafts: 2 taps per group, the groups fold 1 or 2 of them in turn.
 TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldOneOrTwoDraftsOfThree) { run_conv_factor_row(/*drafts=*/3); }
+
+// 4 drafts: 3 taps per group, the groups fold 1, 2 or 3 of them in turn.
+TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldOneToThreeDraftsOfFour) {
+    run_conv_factor_row(/*drafts=*/4);
+}
 
 }  // namespace
 }  // namespace imp

@@ -26,9 +26,9 @@ void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
                                                  BatchVerifyState& bv, int groups, int levels,
                                                  cudaStream_t stream);
 
-// Group g folds its first fold[g] rows and taps (the matched drafts, 0 = none) into live[g], which holds the
-// 1-row state. Queued on `stream` behind the forward that wrote them; live[g] then holds 1 + fold[g] rows.
-void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, const int* live,
-                                  const int* fold, int n_groups, cudaStream_t stream);
+// Group g folds its first fold[g] of the step's `levels` rows and taps (the matched drafts, 0 = none) into
+// live[g], which holds the 1-row state. Queued on `stream` behind the forward that wrote them.
+void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, int levels,
+                                  const int* live, const int* fold, int n_groups, cudaStream_t stream);
 
 }  // namespace imp

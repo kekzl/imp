@@ -1,0 +1,39 @@
+# Per-step trace of the bound verify (dev build, diagnostics.spec_trace=true, tools/analysis/mtp_trace_hist.py)
+# Qwen3.8-27B-NVFP4-vllm, RTX 5090, 2 sessions x 768 tokens, 4 / 3 chats at 8k + 20k 300 ms apart, 1 chat at
+# 20k + 80k. def = defaults, k3 = speculative.mtp_batch_verify_k=3, w4 = speculative.mtp_batch_verify_k_wide=4.
+# n = requests in the step, T = rows per request, m<j> = share of rows with j drafts matched,
+# tok_per_s = emitted / (fwd + head) of those steps.
+c4/p1_def.server.log
+  n=1 T=5 steps=70 fwd_med=12.793 head_med=4.069 emitted=244 tok_per_s=76.99 rows=70 short=0 m0=0.157 m1=0.171 m2=0.143 m3=0.086 m4=0.443
+  n=2 T=5 steps=33 fwd_med=13.550 head_med=4.876 emitted=220 tok_per_s=254.63 rows=66 short=0 m0=0.182 m1=0.182 m2=0.152 m3=0.091 m4=0.394
+  n=3 T=5 steps=23 fwd_med=14.343 head_med=5.175 emitted=240 tok_per_s=466.02 rows=69 short=0 m0=0.203 m1=0.130 m2=0.116 m3=0.087 m4=0.464
+  n=4 T=4 steps=989 fwd_med=14.709 head_med=4.010 emitted=11392 tok_per_s=611.12 rows=3956 short=0 m0=0.206 m1=0.183 m2=0.138 m3=0.474
+  all: emitted=12096 step_ms=23189 tok_per_s=521.62
+c4/p1_k3.server.log
+  n=1 T=4 steps=54 fwd_med=13.963 head_med=3.030 emitted=171 tok_per_s=59.53 rows=54 short=0 m0=0.130 m1=0.167 m2=0.111 m3=0.593
+  n=2 T=4 steps=23 fwd_med=13.379 head_med=3.642 emitted=158 tok_per_s=258.55 rows=46 short=0 m0=0.087 m1=0.087 m2=0.130 m3=0.696
+  n=3 T=4 steps=54 fwd_med=13.831 head_med=3.897 emitted=523 tok_per_s=516.19 rows=162 short=0 m0=0.136 m1=0.142 m2=0.080 m3=0.642
+  n=4 T=4 steps=980 fwd_med=14.704 head_med=3.981 emitted=11228 tok_per_s=608.55 rows=3920 short=0 m0=0.212 m1=0.183 m2=0.133 m3=0.471
+  all: emitted=12080 step_ms=22947 tok_per_s=526.43
+c4/p1_w4.server.log
+  n=1 T=5 steps=56 fwd_med=13.410 head_med=4.194 emitted=197 tok_per_s=66.63 rows=56 short=0 m0=0.125 m1=0.214 m2=0.125 m3=0.089 m4=0.446
+  n=2 T=5 steps=36 fwd_med=13.535 head_med=4.779 emitted=257 tok_per_s=288.88 rows=72 short=0 m0=0.153 m1=0.208 m2=0.083 m3=0.028 m4=0.528
+  n=3 T=5 steps=45 fwd_med=14.218 head_med=5.093 emitted=441 tok_per_s=488.57 rows=135 short=0 m0=0.185 m1=0.215 m2=0.126 m3=0.096 m4=0.378
+  n=4 T=5 steps=877 fwd_med=15.506 head_med=5.333 emitted=11197 tok_per_s=604.01 rows=3508 short=0 m0=0.218 m1=0.189 m2=0.141 m3=0.088 m4=0.364
+  all: emitted=12092 step_ms=23287 tok_per_s=519.27
+c3/p1_def.server.log
+  n=1 T=5 steps=95 fwd_med=12.794 head_med=4.211 emitted=303 tok_per_s=111.88 rows=95 short=0 m0=0.179 m1=0.168 m2=0.253 m3=0.084 m4=0.316
+  n=2 T=5 steps=30 fwd_med=13.479 head_med=4.734 emitted=228 tok_per_s=380.65 rows=60 short=0 m0=0.167 m1=0.117 m2=0.083 m3=0.017 m4=0.617
+  n=3 T=5 steps=893 fwd_med=14.192 head_med=4.887 emitted=8565 tok_per_s=500.52 rows=2679 short=0 m0=0.212 m1=0.189 m2=0.146 m3=0.095 m4=0.358
+  all: emitted=9096 step_ms=20419 tok_per_s=445.46
+c3/p1_k3.server.log
+  n=1 T=4 steps=63 fwd_med=12.679 head_med=3.088 emitted=180 tok_per_s=85.89 rows=63 short=0 m0=0.159 m1=0.254 m2=0.159 m3=0.429
+  n=2 T=4 steps=65 fwd_med=13.271 head_med=3.589 emitted=385 tok_per_s=336.79 rows=130 short=0 m0=0.192 m1=0.200 m2=0.062 m3=0.546
+  n=3 T=4 steps=999 fwd_med=13.772 head_med=3.670 emitted=8531 tok_per_s=486.59 rows=2997 short=0 m0=0.214 m1=0.179 m2=0.153 m3=0.453
+  all: emitted=9096 step_ms=20771 tok_per_s=437.92
+c1/p1_def.server.log
+  n=1 T=5 steps=989 fwd_med=13.078 head_med=4.227 emitted=3060 tok_per_s=178.04 rows=989 short=0 m0=0.217 m1=0.208 m2=0.160 m3=0.092 m4=0.323
+  all: emitted=3060 step_ms=17187 tok_per_s=178.04
+c1/p1_k3.server.log
+  n=1 T=4 steps=1081 fwd_med=12.871 head_med=3.204 emitted=3060 tok_per_s=174.61 rows=1081 short=0 m0=0.213 m1=0.200 m2=0.131 m3=0.456
+  all: emitted=3060 step_ms=17525 tok_per_s=174.61

@@ -1,0 +1,44 @@
+# Mutants of the depth-4 bound verify (dev build, Qwen3.8-27B-NVFP4-vllm, RTX 5090)
+
+## Kernel mutants: test-moe-gdn --gtest_filter='GdnVerifyTwoDraftsTest.*' (11 tests) and the depth check
+## of tools/analysis/mtp_factor_row_equiv.sh (clean build: 4 of 4 arms 6c3481086686 / b374b7393061)
+# K1 gdn_factor_fold applies 2 rows at most   K2 ssm_conv_tap_fold applies 2 taps at most
+== K1
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToThreeDraftsOfFour
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToThreeDraftsOfFourBf16
+[  PASSED  ] 9 tests.
+depth k1: drafted 205
+depth ctx/stream 20000 s0: k1 b374b7393061 k1 b374b7393061 equal
+depth k2: drafted 316
+depth ctx/stream 20000 s0: k1 b374b7393061 k2 b374b7393061 equal
+depth k3: drafted 453
+depth ctx/stream 20000 s0: k1 b374b7393061 k3 468e120ce1f6 DIFFER
+depth k4: drafted 544
+depth ctx/stream 20000 s0: k1 b374b7393061 k4 0c200b954e7d DIFFER
+== K2
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowsFoldOneToThreeDraftsOfFour
+[  PASSED  ] 10 tests.
+depth k1: drafted 205
+depth ctx/stream 20000 s0: k1 b374b7393061 k1 b374b7393061 equal
+depth k2: drafted 316
+depth ctx/stream 20000 s0: k1 b374b7393061 k2 b374b7393061 equal
+depth k3: drafted 474
+depth ctx/stream 20000 s0: k1 b374b7393061 k3 81bf272dc885 DIFFER
+depth k4: drafted 584
+depth ctx/stream 20000 s0: k1 b374b7393061 k4 6fef5d92d1e7 DIFFER
+
+## Unit mutants, make dev-test (ctest -L unit, 13 lanes)
+# U1 mtp_bound_verify_step_depth ignores the request count   U2 bound_verify_fold_lists strides by the
+# allocation's levels instead of the step's
+== U1
+92% tests passed, 1 tests failed out of 13
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+[  PASSED  ] 2243 tests.
+== U2
+92% tests passed, 1 tests failed out of 13
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] BatchVerifyPredicates.FoldListsUseTheStepsRowStride
+[  PASSED  ] 2244 tests.

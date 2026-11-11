@@ -152,13 +152,13 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
         return -2;
     // Draft lv + 1 per bound request: (draft lv, the head's own final-norm row) at the request's next
     // position in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (drafts
-    // never leave the device). Level 1 reads the last fed row, level 2 the chain's own rows 0..m-1.
+    // never leave the device). Level 1 reads the last fed row, levels 2+ the chain's own rows 0..m-1.
+    const int* const level_pos[] = {tab.chain_pos, tab.chain_pos2, tab.chain_pos3};
     for (int lv = 1; lv <= chain; ++lv) {
         const bool ok = mtp_feed_rows_multislot_dev(ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv - 1) * m),
                                                     ws.d_b_h_final, lv == 1 ? tab.last : tab.chain_rows, m,
-                                                    tab.chain_slots, lv == 1 ? tab.chain_pos : tab.chain_pos2,
-                                                    chain_max + lv - 1, *model.mtp_, model.tok_emb_, ws,
-                                                    hidden_dim, stream) &&
+                                                    tab.chain_slots, level_pos[lv - 1], chain_max + lv - 1,
+                                                    *model.mtp_, model.tok_emb_, ws, hidden_dim, stream) &&
                         in.executor.lm_head_rows_argmax(ws.d_b_h_final, m,
                                                         ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv) * m),
                                                         stream, in.head, in.draft_vocab);
@@ -179,7 +179,8 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     MtpHeadGraphs& G = *mtp_head_graphs_;
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
-    const int chain = std::clamp(bv_.depth - 1, 0, 2);  // chain levels: one per verify depth past the first
+    // Chain levels: one per draft past the first that a step of these m requests verifies.
+    const int chain = std::clamp(mtp_bound_verify_step_depth(bv_.depth, bv_.wide_depth, tab.m) - 1, 0, 3);
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
     const HeadPassInputs in{*model_,
                             *executor_,

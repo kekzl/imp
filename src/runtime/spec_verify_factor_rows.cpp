@@ -158,26 +158,16 @@ bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAll
     return true;
 }
 
-void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, const int* live,
-                                  const int* fold, int n_groups, cudaStream_t stream) {
-    if (!bv.factor_row || bv.d_fac == nullptr || bv.fac_levels <= 0)
+void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, int levels,
+                                  const int* live, const int* fold, int n_groups, cudaStream_t stream) {
+    if (!bv.factor_row || bv.d_fac == nullptr || levels <= 0 || levels > bv.fac_levels)
         return;
-    // Three lists of n: live slot, first row (group * levels), rows to fold. Pinned twin: untouched until
-    // the next verify, which syncs this stream first.
-    int n = 0;
-    for (int g = 0; g < n_groups; g++)
-        n += fold[g] > 0 ? 1 : 0;
+    // Three lists of n (bound_verify_fold_lists). Pinned twin: untouched until the next verify, which syncs
+    // this stream first.
+    auto* h_list = static_cast<int32_t*>(bv.h_clear.data());
+    const int n = bound_verify_fold_lists(levels, live, fold, n_groups, h_list);
     if (n == 0)
         return;
-    auto* h_list = static_cast<int32_t*>(bv.h_clear.data());
-    for (int g = 0, i = 0; g < n_groups; g++) {
-        if (fold[g] <= 0)
-            continue;
-        h_list[i] = live[g];
-        h_list[n + i] = g * bv.fac_levels;
-        h_list[(2 * n) + i] = std::min(fold[g], bv.fac_levels);
-        i++;
-    }
     IMP_CUDA_CHECK_LOG(
         cudaMemcpyAsync(bv.d_clear, h_list, 3ull * n * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     const int* d_live = bv.d_clear;

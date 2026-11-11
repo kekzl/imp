@@ -2,7 +2,7 @@
 //
 // One forward per decode step for N requests, D + 1 rows each: the request's
 // last emitted token and up to D drafts (D = 1; the bound verify takes
-// speculative.mtp_batch_verify_k, up to 3). Group g runs the GDN layers on its
+// speculative.mtp_batch_verify_k, up to 4). Group g runs the GDN layers on its
 // live slot L_g, commits the (D + 1)-row state into the spare P_g, the 1-row
 // state in place into L_g and the states between as factor rows (or, D = 2 without
 // them, the 2-row state into a second spare Q_g; compute/gdn.h out_slots /
@@ -22,6 +22,7 @@
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
 #include "runtime/spec_accept.h"
+#include "runtime/spec_trace.h"
 #include "runtime/spec_verify_factor_rows.h"
 #include "runtime/stop_mask.h"
 #include "runtime/suffix_draft.h"
@@ -268,12 +269,16 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     bv_.cap_rows = cap_rows;
     bv_.table_cap = table_cap;
     bv_.depth = depth;
+    bv_.wide_depth = mtp_bound_verify_wide_depth(runtime_config_.speculative.mtp_batch_verify_k_wide, depth,
+                                                 bv_.factor_row);
     bv_.bound_only = !full;
     if (!full) {
         IMP_LOG_INFO(
             "speculative.mtp_batch_verify: bound requests verify together while <= %d decode, %d draft(s) "
-            "each (%d spare recurrent slots%s)",
-            cap_seq, depth, batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
+            "each, %d from %d requests up "
+            "(%d spare recurrent slots%s)",
+            cap_seq, depth, bv_.wide_depth, kMtpBoundVerifyWideRows,
+            batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
             bv_.factor_row ? ", the drafts before the last also as factor rows" : "");
         return true;  // slot-swapping spares: a factored row would need every following step to apply it
     }
@@ -299,7 +304,7 @@ void Engine::free_batch_verify_bufs_() {
     bv_.h_row_tables = PinnedBuffer{};
     bv_.h_argmax = PinnedBuffer{};
     bv_.cap_seq = bv_.cap_rows = bv_.table_cap = 0;
-    bv_.depth = 1;
+    bv_.depth = bv_.wide_depth = 1;
     bv_.factor_row = false;
     bv_.fac_levels = 0;
 }
@@ -344,12 +349,11 @@ void Engine::bound_verify_adopt_slot_(int req_id, int role, int live, int slot) 
     }
 }
 
-// Up to bv_.depth draft tokens for the request's next positions: the pending
+// Up to depth draft tokens for the request's next positions: the pending
 // MTP chain (bound request), else the suffix / n-gram draft. 0 = no draft
 // (the request's draft rows are pads that are never accepted).
-int Engine::batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp) {
+int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& from_mtp) {
     from_mtp = false;
-    const int depth = bv_.depth;
     auto take = [&](const std::vector<int32_t>& d) {
         const int n = std::min(depth, static_cast<int>(d.size()));
         std::copy_n(d.begin(), n, out);
@@ -495,7 +499,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Slots: the live one must exist (acquired at prefill), the spare is
     // taken now and kept for the request's lifetime.
     // Rows per request: the last token plus up to D drafts (D >= 2 only on the bound verify).
-    const int D = bv_.depth;
+    const int D = mtp_bound_verify_step_depth(bv_.depth, bv_.wide_depth, N);
     const int T = D + 1;
     std::vector<int> live(N), spare(N), spare2(N, -1);
     const bool second_spare = bound_verify_spares_per_row(D, bv_.factor_row) > 1;
@@ -520,7 +524,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int n_drafted = 0;
     for (int g = 0; g < N; ++g) {
         bool mtp = false;
-        n_draft[g] = batch_verify_draft_(*reqs[g], draft.data() + (static_cast<size_t>(g) * D), mtp);
+        n_draft[g] = batch_verify_draft_(*reqs[g], D, draft.data() + (static_cast<size_t>(g) * D), mtp);
         from_mtp[g] = mtp ? 1 : 0;
         n_drafted += static_cast<int>(n_draft[g] > 0);
     }
@@ -790,7 +794,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
 
     long long acc_total = 0, emit_total = 0, drafted_total = 0;
     bool any_mtp = false;
-    std::vector<int> row0(N), emitted_of(N, 0), fold_of(N, 0);
+    std::vector<int> row0(N), emitted_of(N, 0), fold_of(N, 0), matched_of(N, 0), id_of(N, 0);
     for (int g = 0; g < N; ++g) {
         auto& req = reqs[g];
         const int nd = n_draft[g];
@@ -811,6 +815,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
                                                          [](int) { return true; });
         row0[g] = T * g;
         emitted_of[g] = emitted;
+        matched_of[g] = matched;
+        id_of[g] = req->id;
         // The binding's economics tally (judged at its lone verifies); a finished request has none.
         if (from_mtp[g] && nd > 0)
             if (MtpBind* b = mtp_find_bind(mtp_active_, mtp_pool_, req->id))
@@ -868,17 +874,20 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
                          heads, bv_.fac_stride, stream);
         bv_.clear_slots.clear();
     }
-    bound_verify_factor_row_fold(model_->config(), *ssm_state_, bv_, live.data(), fold_of.data(), N, stream);
+    bound_verify_factor_row_fold(model_->config(), *ssm_state_, bv_, D - 1, live.data(), fold_of.data(), N,
+                                 stream);
 
     // MTP: feed every bound request's emitted pairs and draft its next token
     // in one head pass (the chunk's hidden rows are still in place).
     const auto feed_t0 = std::chrono::steady_clock::now();
     if (mtp_spec_decode_enabled())
         mtp_batched_feed_(reqs, row0, emitted_of, stream);
-    log_step_price(
-        N, T, std::chrono::duration<double, std::milli>(feed_t0 - verify_t0).count(),
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_t0).count(),
-        emit_total);
+    const double fwd_ms = std::chrono::duration<double, std::milli>(feed_t0 - verify_t0).count();
+    const double head_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feed_t0).count();
+    log_step_price(N, T, fwd_ms, head_ms, emit_total);
+    spec_trace_emit_batch_step(runtime_config_.diagnostics.spec_trace, T, fwd_ms, head_ms, id_of, n_draft,
+                               matched_of, emitted_of);
     spec_stats_record_(
         any_mtp, drafted_total, acc_total, emit_total,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count(),

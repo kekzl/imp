@@ -1,0 +1,77 @@
+# Final GPU gates, image built from the shipped tree minus gates.txt and the gate lines of the docs
+# (image imp:d4 created 2026-11-11T10:02:01.853814413+01:00). RTX 5090, Qwen3.8-27B-NVFP4-vllm. Raw logs: scratch, not in the repo.
+
+## tools/analysis/mtp_factor_row_equiv.sh (rc 0)
+pair spare: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 spare 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b spare 805077946d6b equal
+pair row: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 row 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b row 805077946d6b equal
+depth k1: drafted 207
+depth ctx/stream 20000 s0: k1 6c3481086686 k1 6c3481086686 equal
+depth k2: drafted 316
+depth ctx/stream 20000 s0: k1 6c3481086686 k2 6c3481086686 equal
+depth k3: drafted 402
+depth ctx/stream 20000 s0: k1 6c3481086686 k3 6c3481086686 equal
+depth k4: drafted 504
+depth ctx/stream 20000 s0: k1 6c3481086686 k4 6c3481086686 equal
+
+## degen_suite.py against imp-server (defaults)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (37s)
+[09:05:47.279][INFO] engine_spec_batch_verify.cpp:276: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 3 from 4 requests 
+stderr hits 0
+
+## degen_suite.py against imp-server --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (57s)
+stderr hits 0
+
+## make test-spec-fidelity
+[==========] Running 1 test from 1 test suite.
+[==========] 1 test from 1 test suite ran. (45147 ms total)
+[  PASSED  ] 1 test.
+
+## make verify-fast
+  perf gate: median of 3 independent runs (spread 0.15%)
+  decode  tg128 =  292.84 tok/s  (baseline  282.84, delta 3.54%)
+  prefill pp512 = 50437.23 tok/s  (baseline 50374.39, delta 0.12%)
+  GPU during bench: sm=2895MHz(med) mem=13801MHz(med) power=526W(max) n=13
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50363.76 tok/s  (baseline 50318.99, delta 0.09%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+
+== peak VRAM vs baseline ==
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+
+== graphs ON vs OFF decode gate ==
+  graphs OFF tg256 =  185.71 tok/s
+  graphs ON  tg256 =  296.23 tok/s   (1.60x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+
+== server throughput vs baseline ==
+  server c8 = 1961.69 tok/s, slowest request 513 ms  (baseline 1899.81, delta 3.26%)
+PASS server throughput within 8% of baseline
+
+== smoke prompts (degeneration check) ==
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+
+=== verify fast: OK === (started 09:08:33Z, ended 09:10:10Z)
+
+## 1 chat x 20k, 3 sessions x 768 tokens, default (new) against speculative.mtp_batch_verify_k=3 (d3)
+=== conc 1 ctx 20000
+p1_new own_peak_mib 22202 kv_blocks 6347
+p1_new rep 0 s0 tps 210.04 drafted 844 acc 554 047d15ec2954
+p1_new rep 1 s0 tps 211.78 drafted 840 acc 555 b3fd9f61518d
+p1_new rep 2 s0 tps 169.60 drafted 1056 acc 501 35713a742e15
+p1_d3 own_peak_mib 22208 kv_blocks 6347
+p1_d3 rep 0 s0 tps 195.69 drafted 726 acc 523 7602e5ba2a50
+p1_d3 rep 1 s0 tps 193.51 drafted 741 acc 518 26ca9150f8cd
+p1_d3 rep 2 s0 tps 158.72 drafted 903 acc 464 d39c522b5f2b

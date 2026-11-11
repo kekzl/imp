@@ -101,7 +101,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
         return;
     }
     if (requested_k > 0 && head_loaded) {
-        // A concurrent GDN hybrid drafts what its bound verify stages per request (3 with factor rows).
+        // A concurrent GDN hybrid drafts what its bound verify stages per request (4 with factor rows).
         if (serving == MtpAutoServing::ConcurrentHybrid && mtp_bound_verify_config_rows(cfg) > 0)
             requested_k = std::max(requested_k,
                                    mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k,

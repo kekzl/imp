@@ -228,7 +228,9 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     EXPECT_EQ(cfg.speculative.mtp_batch_verify, 4) << "default on: 2-4 chats verify together";
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 3) << "default: 3 drafts, 4 rows per request";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 4) << "default: 4 drafts, 5 rows per request";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k_wide, 3)
+        << "default: 3 drafts once 4 requests share the step";
     EXPECT_TRUE(cfg.speculative.mtp_batch_verify_factor_row);
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "factor row: one spare per row";
     cfg.speculative.mtp_batch_verify_factor_row = false;
@@ -284,11 +286,12 @@ TEST(BatchVerifyPredicates, UnsetVerifyDepthFollowsASmallerDraftDepth) {
         mtp_verify_depth_follows_k(cfg);
         return cfg.speculative.mtp_batch_verify_k;
     };
-    EXPECT_EQ(depth({}), 3) << "mtp_k=auto is not a depth";
-    EXPECT_EQ(depth({"speculative.mtp_k=0"}), 3);
+    EXPECT_EQ(depth({}), 4) << "mtp_k=auto is not a depth";
+    EXPECT_EQ(depth({"speculative.mtp_k=0"}), 4);
     EXPECT_EQ(depth({"speculative.mtp_k=2"}), 2);
     EXPECT_EQ(depth({"speculative.mtp_k=1"}), 1);
-    EXPECT_EQ(depth({"speculative.mtp_k=4"}), 3);
+    EXPECT_EQ(depth({"speculative.mtp_k=3"}), 3);
+    EXPECT_EQ(depth({"speculative.mtp_k=6"}), 4);
     EXPECT_EQ(depth({"speculative.mtp_k=1", "speculative.mtp_batch_verify_k=3"}), 3) << "the operator set it";
     EXPECT_EQ(depth({"speculative.mtp_k=2", "speculative.mtp_batch_verify_k=1"}), 1);
 }
@@ -325,7 +328,8 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(mtp_bound_verify_depth(2, false), 2);
     EXPECT_EQ(mtp_bound_verify_depth(5, false), 2) << "the step stages two snapshots at most";
     EXPECT_EQ(mtp_bound_verify_depth(3, true), 3);
-    EXPECT_EQ(mtp_bound_verify_depth(5, true), 3) << "one fold applies kGdnFactorFoldMaxRows = 2 rows";
+    EXPECT_EQ(mtp_bound_verify_depth(4, true), 4);
+    EXPECT_EQ(mtp_bound_verify_depth(5, true), 4) << "one fold applies kGdnFactorFoldMaxRows = 3 rows";
     // One draft: reject keeps the live slot (row-1 snapshot), accept takes the spare (both rows).
     EXPECT_EQ(bound_verify_state_slot(0, 1), 0);
     EXPECT_EQ(bound_verify_state_slot(1, 1), 1);
@@ -351,6 +355,12 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(bound_verify_factor_row_folds(true, false, 3, 3), 0);
     EXPECT_EQ(bound_verify_kept_slot(2, 3, true), 0);
     EXPECT_EQ(bound_verify_kept_slot(3, 3, true), 1);
+    // Four drafts: 1..3 accepted fold that many rows, 4 take the spare (all 5 rows).
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 3, 4), 3);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 4, 4), 0);
+    EXPECT_EQ(bound_verify_kept_slot(3, 4, true), 0);
+    EXPECT_EQ(bound_verify_kept_slot(4, 4, true), 1);
+    EXPECT_EQ(bound_verify_spares_per_row(4, true), 1);
     EXPECT_EQ(bound_verify_spares_per_row(3, true), 1);
     EXPECT_EQ(bound_verify_factor_row_folds(true, true, 1, 2), 0)
         << "a finished request keeps its slot as is";
@@ -372,6 +382,43 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_FALSE(mtp_bound_verify_factor_row(cfg));
     // Stage: 3 ints per row, 4 per request (seq, out, 2 snapshots), 3 row counts.
     EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
+}
+
+// speculative.mtp_batch_verify_k_wide: a step of kMtpBoundVerifyWideRows requests or more verifies the wide
+// depth.
+TEST(BatchVerifyPredicates, StepDepthFollowsTheRequestsInTheStep) {
+    EXPECT_EQ(kMtpBoundVerifyWideRows, 4);
+    for (int n = 1; n < kMtpBoundVerifyWideRows; ++n) {
+        EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, n), 4) << n;
+    }
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 4), 3);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 8), 3);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 4, 4), 4) << "wide key = depth: one depth for every step";
+    // The wide depth stays in 2..depth and needs the factor rows.
+    EXPECT_EQ(mtp_bound_verify_wide_depth(3, 4, true), 3);
+    EXPECT_EQ(mtp_bound_verify_wide_depth(9, 4, true), 4);
+    EXPECT_EQ(mtp_bound_verify_wide_depth(0, 4, true), 2);
+    EXPECT_EQ(mtp_bound_verify_wide_depth(3, 2, true), 2) << "never above the depth";
+    EXPECT_EQ(mtp_bound_verify_wide_depth(3, 1, true), 1) << "one draft: nothing to narrow";
+    EXPECT_EQ(mtp_bound_verify_wide_depth(1, 2, false), 2) << "no factor rows: the depth";
+}
+
+// A wide step (3 drafts) of 4 groups in buffers allocated for 4 drafts: the scan wrote 2 rows per group, so
+// group g folds from row 2 * g.
+TEST(BatchVerifyPredicates, FoldListsUseTheStepsRowStride) {
+    const int live[] = {7, 5, 3, 1};
+    const int fold[] = {1, 0, 2, 5};
+    int32_t out[12] = {};
+    ASSERT_EQ(bound_verify_fold_lists(/*levels=*/2, live, fold, 4, out), 3);
+    const int32_t want[] = {7, 3, 1, /*first row*/ 0, 4, 6, /*rows*/ 1, 2, 2};
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_EQ(out[i], want[i]) << i;
+    }
+    ASSERT_EQ(bound_verify_fold_lists(/*levels=*/3, live, fold, 4, out), 3);
+    EXPECT_EQ(out[3 + 2], 9) << "4 drafts: 3 rows per group";
+    EXPECT_EQ(out[6 + 2], 3);
+    const int none[] = {0, 0, 0, 0};
+    EXPECT_EQ(bound_verify_fold_lists(2, live, none, 4, out), 0);
 }
 
 }  // namespace

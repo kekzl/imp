@@ -5,8 +5,9 @@
 #   pair:  2 drafts, factor row vs a second spare per row, CONC chats STAGGER_MS apart (the texts follow the
 #          arrival order of the streams, 2 outcomes at STAGGER_MS=0). Quiet host only: beside `make preflight`
 #          1 run differed.
-#   depth: 3 drafts verified, 1 chat, speculative.mtp_k = 3 / 2 / 1 (spare adopted, 2 rows folded, 1 row
+#   depth: 4 drafts verified, 1 chat, speculative.mtp_k = 4 / 3 / 2 / 1 (spare adopted, 3 / 2 / 1 rows
 #          folded). 1 chat only: the rows per step change the text, so a second stream's timing would too.
+#          THINK_BUDGET=1: a forced closer lands up to mtp_k tokens past the budget (engine_spec_ngram.cpp).
 # Usage: OUT=/mnt/data/scratch/dir [IMAGE=imp:test | dev] [CTX=20000] [CONC=2] [CORPUS=dir] [STAGGER_MS=300]
 #        [CHECKS="pair depth"] tools/analysis/mtp_factor_row_equiv.sh
 set -uo pipefail
@@ -51,9 +52,9 @@ for c in ${CHECKS:-pair depth}; do
             "spare|$I|$B,speculative.mtp_batch_verify_factor_row=false row|$I|$B,speculative.mtp_batch_verify_factor_row=true"
         ;;
     depth)
-        B="speculative.ngram=false,speculative.mtp_batch_verify_k=3,gdn.state_bf16=false"
-        check depth k1 1 0 \
-            "k1|$I|$B,speculative.mtp_k=1 k2|$I|$B,speculative.mtp_k=2 k3|$I|$B,speculative.mtp_k=3"
+        B="speculative.ngram=false,speculative.mtp_batch_verify_k=4,gdn.state_bf16=false"
+        THINK_BUDGET=1 check depth k1 1 0 \
+            "k1|$I|$B,speculative.mtp_k=1 k2|$I|$B,speculative.mtp_k=2 k3|$I|$B,speculative.mtp_k=3 k4|$I|$B,speculative.mtp_k=4"
         ;;
     *)
         echo "unknown check '$c'"

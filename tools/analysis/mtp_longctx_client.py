@@ -5,6 +5,7 @@
 # CONC=2 sends two prompts per length at once (different head line). Texts land in OUT_DIR/<tag>.<ctx>.<i>.txt.
 # Usage: mtp_longctx_client.py PORT TAG; env CTX ("8000 20000 40000 80000"), GEN (384), CONC (1), REPS (1),
 #        REPO_DIR (/repo), OUT_DIR (.), IGNORE_EOS (1), MTP_K (unset = server default; 0 = speculation off),
+#        THINK_BUDGET (fraction of max_tokens; unset = server default, 1 = never forced, 0 = thinking off),
 #        STAGGER_MS (0; > 0 starts stream i that long after stream i - 1: a fixed arrival order).
 import hashlib
 import json
@@ -25,6 +26,7 @@ REPO = Path(os.environ.get("REPO_DIR", "/repo"))
 OUT_DIR = Path(os.environ.get("OUT_DIR", "."))
 IGNORE_EOS = os.environ.get("IGNORE_EOS", "1") == "1"
 MTP_K = os.environ.get("MTP_K", "")
+THINK_BUDGET = os.environ.get("THINK_BUDGET", "")
 STAGGER_S = int(os.environ.get("STAGGER_MS", "0")) / 1000.0
 BASE = f"http://127.0.0.1:{PORT}"
 
@@ -71,6 +73,8 @@ def one(ctx, i, rep, prompt, res):
         body["ignore_eos"] = True
     if MTP_K != "":
         body["speculative"] = {"mtp_k": int(MTP_K)}
+    if THINK_BUDGET != "":
+        body["think_budget"] = float(THINK_BUDGET)
     t0 = time.time()
     first = last = None
     text, usage = [], {}

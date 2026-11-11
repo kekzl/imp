@@ -31,16 +31,17 @@ struct BatchVerifyState {
     int32_t* d_argmax = nullptr;
     PinnedBuffer h_stage, h_row_tables, h_argmax;
     // Drafts per request (rows per request = depth + 1): 1, or speculative.mtp_batch_verify_k on the bound
-    // verify.
+    // verify; wide_depth from kMtpBoundVerifyWideRows requests up (mtp_bound_verify_step_depth).
     int depth = 1;
+    int wide_depth = 1;
     std::unordered_map<int, int> spare_of;   // req.id -> spare slot (state after all depth + 1 rows)
     std::unordered_map<int, int>
         spare2_of;  // req.id -> second spare (state after 2 rows), depth 2, no factor row
-    // Depth 2..3 with speculative.mtp_batch_verify_factor_row: no second spare, drafts 1..depth - 1 are also
-    // rows of d_fac + d_tap at [group * fac_levels + level], folded into the live slot on a partial accept
-    // (bound_verify_factor_row_fold).
+    // Depth 2..4 with speculative.mtp_batch_verify_factor_row: no second spare, drafts 1..depth - 1 are also
+    // rows of d_fac + d_tap at [group * (step depth - 1) + level], folded into the live slot on a partial
+    // accept (bound_verify_factor_row_fold).
     bool factor_row = false;
-    int fac_levels = 0;  // depth - 1 with factor_row
+    int fac_levels = 0;  // depth - 1 with factor_row: the levels allocated per group
     std::vector<int> free;
     // Factored spare (speculative.factored_spare,
     // docs/plans/2026-09-12-factored-verify-spare.md): drafted row as (g, k,
@@ -252,9 +253,18 @@ void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 2 drafts per request on spares alone (two
 // snapshots), kMtpBoundVerifyMaxDepth with factor rows (a fold applies kGdnFactorFoldMaxRows of them).
-inline constexpr int kMtpBoundVerifyMaxDepth = 3;
+inline constexpr int kMtpBoundVerifyMaxDepth = 4;
 [[nodiscard]] constexpr int mtp_bound_verify_depth(int key, bool factor_row) {
     return std::clamp(key, 1, factor_row ? kMtpBoundVerifyMaxDepth : 2);
+}
+// speculative.mtp_batch_verify_k_wide: a step of kMtpBoundVerifyWideRows+ requests verifies that many drafts
+// (2..depth, factor rows only: each chain level is one more head pass over every request).
+inline constexpr int kMtpBoundVerifyWideRows = 4;
+[[nodiscard]] constexpr int mtp_bound_verify_wide_depth(int key_wide, int depth, bool factor_row) {
+    return factor_row ? std::clamp(key_wide, std::min(2, depth), depth) : depth;
+}
+[[nodiscard]] constexpr int mtp_bound_verify_step_depth(int depth, int wide_depth, int n) {
+    return n >= kMtpBoundVerifyWideRows ? wide_depth : depth;
 }
 // Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
 // snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).
@@ -276,6 +286,23 @@ inline constexpr int kMtpBoundVerifyMaxDepth = 3;
 [[nodiscard]] constexpr int bound_verify_factor_row_folds(bool factor_row, bool done, int matched,
                                                           int depth) {
     return factor_row && !done && matched >= 1 && matched < depth ? matched : 0;
+}
+// The fold's three lists of n ints for the groups with fold[g] > 0: live slot, first factor row (group *
+// levels: the stride of the STEP's scan, not of the allocation), rows to fold. Returns n.
+[[nodiscard]] constexpr int bound_verify_fold_lists(int levels, const int* live, const int* fold,
+                                                    int n_groups, int32_t* out) {
+    int n = 0;
+    for (int g = 0; g < n_groups; g++)
+        n += fold[g] > 0 ? 1 : 0;
+    for (int g = 0, i = 0; g < n_groups; g++) {
+        if (fold[g] <= 0)
+            continue;
+        out[i] = live[g];
+        out[n + i] = g * levels;
+        out[(2 * n) + i] = std::min(fold[g], levels);
+        i++;
+    }
+    return n;
 }
 // Spare recurrent slots per bound row.
 [[nodiscard]] constexpr int bound_verify_spares_per_row(int depth, bool factor_row) {
