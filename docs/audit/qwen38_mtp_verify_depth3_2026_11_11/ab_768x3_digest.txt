@@ -1,0 +1,128 @@
+=== conc 1 ctx 20000
+p1_new own_peak_mib 22208 kv_blocks 6347
+p1_new rep 0 s0 tps 194.78 drafted 726 acc 523 7602e5ba2a50
+p1_new rep 1 s0 tps 192.55 drafted 741 acc 518 26ca9150f8cd
+p1_new rep 2 s0 tps 158.17 drafted 903 acc 464 d39c522b5f2b
+p1_d2 own_peak_mib 22166 kv_blocks 6347
+p1_d2 rep 0 s0 tps 180.26 drafted 568 acc 481 b565963fc4f3
+p1_d2 rep 1 s0 tps 177.66 drafted 580 acc 475 26b3ba868ecd
+p1_d2 rep 2 s0 tps 165.64 drafted 624 acc 453 456eed383761
+=== conc 1 ctx 80000
+p1_new own_peak_mib 24491 kv_blocks 15350
+p1_new rep 0 s0 tps 174.52 drafted 780 acc 505 029b38a7132c
+p1_new rep 1 s0 tps 176.14 drafted 783 acc 504 2d0c4d154bf5
+p1_new rep 2 s0 tps 192.89 drafted 714 acc 527 c6c4b553ec94
+p1_d2 own_peak_mib 24474 kv_blocks 15390
+p1_d2 rep 0 s0 tps 158.74 drafted 624 acc 454 faf5088fbf7d
+p1_d2 rep 1 s0 tps 162.05 drafted 614 acc 458 ecfac25836ca
+p1_d2 rep 2 s0 tps 173.89 drafted 574 acc 478 e1a9b1faa940
+=== conc 2 ctx 20000
+p1_new own_peak_mib 22824 kv_blocks 12395
+p1_new rep 0 s0 tps 163.86 drafted 798 acc 496 f246d86923ef
+p1_new rep 0 s1 tps 155.56 drafted 855 acc 477 0d330aaa7c85
+AGG p1_new ctx 20000 rep 0 conc 2 tok_s 306.59
+p1_new rep 1 s0 tps 174.84 drafted 756 acc 509 2f0d57cb15a7
+p1_new rep 1 s1 tps 168.84 drafted 792 acc 497 53086a1b9fdd
+AGG p1_new ctx 20000 rep 1 conc 2 tok_s 334.47
+p1_new rep 2 s0 tps 164.58 drafted 810 acc 494 94fdf03406dc
+p1_new rep 2 s1 tps 158.73 drafted 849 acc 481 8ae6e85d5f13
+AGG p1_new ctx 20000 rep 2 conc 2 tok_s 314.55
+p1_d2 own_peak_mib 22778 kv_blocks 12395
+p1_d2 rep 0 s0 tps 163.43 drafted 584 acc 469 a883008eb83d
+p1_d2 rep 0 s1 tps 148.65 drafted 652 acc 435 81da3ffcf0e5
+AGG p1_d2 ctx 20000 rep 0 conc 2 tok_s 294.40
+p1_d2 rep 1 s0 tps 168.39 drafted 576 acc 473 dbc4e7206121
+p1_d2 rep 1 s1 tps 150.97 drafted 652 acc 435 0b7515d138bb
+AGG p1_d2 ctx 20000 rep 1 conc 2 tok_s 299.53
+p1_d2 rep 2 s0 tps 159.40 drafted 608 acc 457 f57386267d32
+p1_d2 rep 2 s1 tps 147.33 drafted 666 acc 428 dba406262fcd
+AGG p1_d2 ctx 20000 rep 2 conc 2 tok_s 292.43
+=== conc 2 ctx 80000
+p1_new own_peak_mib 24935 kv_blocks 15350
+p1_new rep 0 s0 tps 165.91 drafted 741 acc 511 5512bec0c0d4
+p1_new rep 0 s1 tps 143.27 drafted 864 acc 470 d42e8f0923b8
+AGG p1_new ctx 80000 rep 0 conc 2 tok_s 286.91
+p1_new rep 1 s0 tps 161.01 drafted 774 acc 503 4d499f824d2f
+p1_new rep 1 s1 tps 166.27 drafted 753 acc 510 f4f2ef7efcb4
+AGG p1_new ctx 80000 rep 1 conc 2 tok_s 322.44
+p1_new rep 2 s0 tps 160.91 drafted 774 acc 503 b82b920c944d
+p1_new rep 2 s1 tps 168.38 drafted 744 acc 513 7bcf688b0a46
+AGG p1_new ctx 80000 rep 2 conc 2 tok_s 322.25
+p1_d2 own_peak_mib 24950 kv_blocks 15390
+p1_d2 rep 0 s0 tps 150.84 drafted 602 acc 460 e121f08a75de
+p1_d2 rep 0 s1 tps 154.00 drafted 596 acc 463 08883e2d381a
+AGG p1_d2 ctx 80000 rep 0 conc 2 tok_s 302.08
+p1_d2 rep 1 s0 tps 153.47 drafted 598 acc 462 4da961ebbd7a
+p1_d2 rep 1 s1 tps 155.53 drafted 594 acc 464 da589a80e857
+AGG p1_d2 ctx 80000 rep 1 conc 2 tok_s 307.35
+p1_d2 rep 2 s0 tps 142.87 drafted 648 acc 437 b651cda4f25d
+p1_d2 rep 2 s1 tps 148.70 drafted 616 acc 453 a60bb6c38951
+AGG p1_d2 ctx 80000 rep 2 conc 2 tok_s 283.43
+=== conc 4 ctx 8000
+p1_new own_peak_mib 22340 kv_blocks 9337
+p1_new rep 0 s0 tps 165.91 drafted 723 acc 517 6434287f0f84
+p1_new rep 0 s1 tps 175.85 drafted 699 acc 525 5a0f489cc626
+p1_new rep 0 s2 tps 148.71 drafted 843 acc 477 100a1edf6096
+p1_new rep 0 s3 tps 163.04 drafted 756 acc 506 ec6285f39ae2
+AGG p1_new ctx 8000 rep 0 conc 4 tok_s 580.98
+p1_new rep 1 s0 tps 161.37 drafted 768 acc 499 2bc42f71b58e
+p1_new rep 1 s1 tps 177.00 drafted 675 acc 530 53daf5d3fd53
+p1_new rep 1 s2 tps 154.71 drafted 807 acc 486 c3fa48bb38d9
+p1_new rep 1 s3 tps 157.06 drafted 792 acc 491 4e1ef890ed81
+AGG p1_new ctx 8000 rep 1 conc 4 tok_s 604.65
+p1_new rep 2 s0 tps 155.48 drafted 786 acc 493 c46306a66feb
+p1_new rep 2 s1 tps 175.41 drafted 702 acc 521 482f41c88bf5
+p1_new rep 2 s2 tps 161.71 drafted 768 acc 499 f2f26d6e4ef2
+p1_new rep 2 s3 tps 160.04 drafted 777 acc 496 a4598ae95b26
+AGG p1_new ctx 8000 rep 2 conc 4 tok_s 622.74
+p1_d2 own_peak_mib 22274 kv_blocks 9337
+p1_d2 rep 0 s0 tps 154.52 drafted 582 acc 467 afa96de0c390
+p1_d2 rep 0 s1 tps 149.63 drafted 610 acc 453 19d85db3c74d
+p1_d2 rep 0 s2 tps 151.88 drafted 604 acc 456 251ac417af42
+p1_d2 rep 0 s3 tps 149.12 drafted 612 acc 452 aa856872071e
+AGG p1_d2 ctx 8000 rep 0 conc 4 tok_s 584.12
+p1_d2 rep 1 s0 tps 149.23 drafted 602 acc 454 dbc2e116109f
+p1_d2 rep 1 s1 tps 158.96 drafted 574 acc 468 1cd150e756f2
+p1_d2 rep 1 s2 tps 148.09 drafted 620 acc 445 3f4cd2ab185f
+p1_d2 rep 1 s3 tps 153.54 drafted 596 acc 457 dc43f9dec171
+AGG p1_d2 ctx 8000 rep 1 conc 4 tok_s 580.60
+p1_d2 rep 2 s0 tps 148.82 drafted 616 acc 447 0a5b47603050
+p1_d2 rep 2 s1 tps 150.83 drafted 596 acc 457 bc48ad7aca08
+p1_d2 rep 2 s2 tps 147.60 drafted 622 acc 444 170b9c0010c9
+p1_d2 rep 2 s3 tps 150.17 drafted 610 acc 450 3273af154a2d
+AGG p1_d2 ctx 8000 rep 2 conc 4 tok_s 579.48
+=== conc 4 ctx 20000
+p1_new own_peak_mib 24531 kv_blocks 15350
+p1_new rep 0 s0 tps 159.36 drafted 693 acc 524 5ac833e507da
+p1_new rep 0 s1 tps 143.56 drafted 798 acc 489 954a4cfbd251
+p1_new rep 0 s2 tps 137.13 drafted 837 acc 476 2a9d6af55119
+p1_new rep 0 s3 tps 138.47 drafted 828 acc 479 94608da5bf61
+AGG p1_new ctx 20000 rep 0 conc 4 tok_s 536.57
+p1_new rep 1 s0 tps 155.25 drafted 735 acc 510 cbb1dcecd173
+p1_new rep 1 s1 tps 146.07 drafted 789 acc 492 556d0f37235c
+p1_new rep 1 s2 tps 150.03 drafted 747 acc 506 e381e6e14299
+p1_new rep 1 s3 tps 141.38 drafted 822 acc 481 034212026c21
+AGG p1_new ctx 20000 rep 1 conc 4 tok_s 554.28
+p1_new rep 2 s0 tps 141.03 drafted 819 acc 482 1341abf314a6
+p1_new rep 2 s1 tps 137.46 drafted 825 acc 480 d1a023c2ab6a
+p1_new rep 2 s2 tps 147.85 drafted 777 acc 496 2610277facab
+p1_new rep 2 s3 tps 138.13 drafted 840 acc 475 46f8ad8ddf4a
+AGG p1_new ctx 20000 rep 2 conc 4 tok_s 541.31
+p1_d2 own_peak_mib 24473 kv_blocks 15390
+p1_d2 rep 0 s0 tps 142.76 drafted 600 acc 455 fcf9f1661365
+p1_d2 rep 0 s1 tps 133.42 drafted 642 acc 434 94bf6ae83f76
+p1_d2 rep 0 s2 tps 133.42 drafted 642 acc 434 1f9d70519d51
+p1_d2 rep 0 s3 tps 134.64 drafted 622 acc 444 c33eec505994
+AGG p1_d2 ctx 20000 rep 0 conc 4 tok_s 522.41
+p1_d2 rep 1 s0 tps 147.52 drafted 582 acc 464 25d00e6f14ca
+p1_d2 rep 1 s1 tps 137.18 drafted 630 acc 440 2f4b10d7faee
+p1_d2 rep 1 s2 tps 133.93 drafted 634 acc 438 4d9b281f257f
+p1_d2 rep 1 s3 tps 137.61 drafted 628 acc 441 fc20ac537642
+AGG p1_d2 ctx 20000 rep 1 conc 4 tok_s 536.42
+p1_d2 rep 2 s0 tps 134.61 drafted 642 acc 434 c34315bc0a99
+p1_d2 rep 2 s1 tps 135.26 drafted 626 acc 442 08f879d13a80
+p1_d2 rep 2 s2 tps 129.58 drafted 672 acc 419 db04593b6cb2
+p1_d2 rep 2 s3 tps 141.43 drafted 608 acc 451 7ad7e0601df8
+AGG p1_d2 ctx 20000 rep 2 conc 4 tok_s 508.96
+DONE
+Wed Nov 11 04:46:08 AM CET 2026

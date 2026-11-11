@@ -25,7 +25,7 @@ namespace {
 constexpr int kMtpHeadOutInts = kMtpMaxTopW * kMtpMaxChainK;
 
 void note_failure(MtpHeadGraphs& G, const MtpHeadGraphKey& key, const char* what, cudaError_t err) {
-    IMP_LOG_WARN("[mtp-head-graph] %s failed (n=%d m=%d chain=%d): %s", what, key.n, key.m, key.chain ? 1 : 0,
+    IMP_LOG_WARN("[mtp-head-graph] %s failed (n=%d m=%d chain=%d): %s", what, key.n, key.m, key.chain,
                  cudaGetErrorString(err));
     (void)cudaGetLastError();
     if (++G.failures >= kMtpHeadGraphMaxFailures && !G.doomed) {
@@ -92,7 +92,7 @@ int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* 
         return -1;
     }
     MtpScanNodes scan;
-    if (!mtp_scan_nodes_find(graph, scan) || scan.nodes.size() != (n_out == 2 * key.m ? 2u : 1u)) {
+    if (!mtp_scan_nodes_find(graph, scan) || scan.nodes.size() != static_cast<size_t>(n_out / key.m)) {
         note_failure(G, key, "scan node lookup", cudaErrorInvalidValue);
         return -1;
     }
@@ -116,7 +116,7 @@ int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* 
     ++G.n_graphs;
     G.failures = 0;
     IMP_LOG_INFO("[mtp-head-graph] captured n=%d m=%d chain=%d (%zu scan nodes, %zu graphs): %.1f ms", key.n,
-                 key.m, key.chain ? 1 : 0, g.scan.nodes.size(), G.n_graphs,
+                 key.m, key.chain, g.scan.nodes.size(), G.n_graphs,
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return n_out;
 }
@@ -133,8 +133,9 @@ struct HeadPassInputs {
 };
 
 // The pass after the table upload: feed, draft LM head, the chain when asked; drafts in ws.d_chain_tokens.
-// Scans size their scores for feed_max / chain_max. Returns m or 2m, -1 = feed failed, -2 = LM head failed.
-int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain, int feed_max, int chain_max,
+// Scans size their scores for feed_max / chain_max (+1 per further chain level). Returns m per finished draft
+// level (m .. (1 + chain) * m), -1 = feed failed, -2 = LM head failed.
+int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain, int feed_max, int chain_max,
                   cudaStream_t stream) {
     const Model& model = in.model;
     MtpDraftWorkspace& ws = in.ws;
@@ -149,17 +150,22 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, bool chain
     if (!in.executor.lm_head_rows_argmax(ws.d_b_gather, m, ws.d_chain_tokens, stream, in.head,
                                          in.draft_vocab))
         return -2;
-    if (!chain)
-        return m;
-    // Second draft per bound request: (draft 1, the head's own final-norm row) at the request's next position
-    // in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (draft 1 never
-    // leaves the device).
-    const bool two = mtp_feed_rows_multislot_dev(ws.d_chain_tokens, ws.d_b_h_final, tab.last, m,
-                                                 tab.chain_slots, tab.chain_pos, chain_max, *model.mtp_,
-                                                 model.tok_emb_, ws, hidden_dim, stream) &&
-                     in.executor.lm_head_rows_argmax(ws.d_b_h_final, m, ws.d_chain_tokens + m, stream,
-                                                     in.head, in.draft_vocab);
-    return two ? 2 * m : m;
+    // Draft lv + 1 per bound request: (draft lv, the head's own final-norm row) at the request's next
+    // position in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (drafts
+    // never leave the device). Level 1 reads the last fed row, level 2 the chain's own rows 0..m-1.
+    for (int lv = 1; lv <= chain; ++lv) {
+        const bool ok = mtp_feed_rows_multislot_dev(ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv - 1) * m),
+                                                    ws.d_b_h_final, lv == 1 ? tab.last : tab.chain_rows, m,
+                                                    tab.chain_slots, lv == 1 ? tab.chain_pos : tab.chain_pos2,
+                                                    chain_max + lv - 1, *model.mtp_, model.tok_emb_, ws,
+                                                    hidden_dim, stream) &&
+                        in.executor.lm_head_rows_argmax(ws.d_b_h_final, m,
+                                                        ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv) * m),
+                                                        stream, in.head, in.draft_vocab);
+        if (!ok)
+            return lv * m;
+    }
+    return (1 + chain) * m;
 }
 
 }  // namespace
@@ -173,7 +179,7 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     MtpHeadGraphs& G = *mtp_head_graphs_;
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
-    const bool chain = bv_.depth > 1;
+    const int chain = std::clamp(bv_.depth - 1, 0, 2);  // chain levels: one per verify depth past the first
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
     const HeadPassInputs in{*model_,
                             *executor_,
@@ -194,7 +200,8 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     const MtpHeadGraphStep step = runtime_config_.speculative.mtp_head_graph
                                       ? mtp_head_graph_step(g != nullptr, uses, G.n_graphs, G.doomed)
                                       : MtpHeadGraphStep::Eager;
-    const int rows = mtp_scan_smem_rows(std::max(tab.max_pos, chain ? tab.chain_max_pos : 0), max_seq);
+    const int rows = mtp_scan_smem_rows(std::max(tab.max_pos, chain > 0 ? tab.chain_max_pos + chain - 1 : 0),
+                                        max_seq);
     int n_out = -1;
     if (step == MtpHeadGraphStep::Replay)
         n_out = replay(G, key, *g, rows, stream);

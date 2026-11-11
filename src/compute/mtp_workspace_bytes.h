@@ -24,9 +24,9 @@ constexpr int kMtpTopWBlocks = 64;
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
 // scratch: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
 constexpr int kMtpFeedRows = 256;
-// Ints of the batched head pass's packed tables (4n + 3m, m <= n <= kMtpFeedRows), after the
+// Ints of the batched head pass's packed tables (4n + 5m, m <= n <= kMtpFeedRows), after the
 // 4 x kMtpFeedRows host-table feed tables in the same allocation.
-constexpr int kMtpPassTableInts = 8 * kMtpFeedRows;
+constexpr int kMtpPassTableInts = 9 * kMtpFeedRows;
 
 // ws.d_scan_part: split-K partials, kMtpScanPartOffset bytes into the d_mtp_position allocation. One row:
 // [num_heads, kMtpScanMaxSplits, head_dim + 2] FP32; multi-slot rows (mtp_attn_scan_slots, n_rows <=

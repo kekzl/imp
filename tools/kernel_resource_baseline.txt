@@ -35,6 +35,7 @@ void imp::(anonymous namespace)::nvfp4_smallm_ws_multi_kernel<2, 4, 2>	sm_120a	2
 void imp::(anonymous namespace)::paged_attention_decode_f16_multitok_kernel<512, 4, 2>	sm_120a	254	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, false, false>	sm_120a	252	0	0
 void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K<4>, true, false>	sm_120a	252	0	0
+void imp::gdn_scan_fused_kernel<64, 64, __half, 1, float, 1>	sm_120a	252	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 64, 3, true, false, false, (imp::nvfp4_tile::Fmt)3, false> >	sm_120a	249	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0

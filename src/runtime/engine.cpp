@@ -607,6 +607,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // if none was set (library/test embeddings). Every Engine::* method reads
     // runtime_config_ from here on; engine_init_resolver_ helpers mutate it in place.
     runtime_config_ = take_pending_runtime_config();
+    mtp_verify_depth_follows_k(runtime_config_);  // embedders that skip tools/common/mtp_auto.cpp
 
     // Bridges the documented imp.conf [server]/[paths] keys into EngineConfig
     // (previously parsed into RuntimeConfig but never read, #541). A CLI flag /
@@ -662,26 +663,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_->build_profile();
     {
         const auto& mp = model_->profile();
-        const char* av = nullptr;
-        switch (mp.attn_variant) {
-            case ModelProfile::AttnVariant::GEMMA4_SWA:
-                av = "gemma4_swa";
-                break;
-            case ModelProfile::AttnVariant::GPTOSS_SWA:
-                av = "gptoss_swa";
-                break;
-            case ModelProfile::AttnVariant::NOPE:
-                av = "nope";
-                break;
-            case ModelProfile::AttnVariant::MLA:
-                av = "mla";
-                break;
-            case ModelProfile::AttnVariant::STANDARD:
-                av = "standard";
-                break;
-        }
         IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s", mp.is_moe, mp.is_gdn,
-                     mp.is_ssm, mp.is_hybrid, mp.is_dense, av);
+                     mp.is_ssm, mp.is_hybrid, mp.is_dense, attn_variant_name(mp.attn_variant));
     }
 
     init_apply_debug_raw_overrides_();

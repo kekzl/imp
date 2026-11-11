@@ -18,11 +18,12 @@ namespace imp {
 struct MtpHeadGraphKey {
     int n = 0;  // fed rows
     int m = 0;  // bound requests (draft rows)
-    bool chain = false;
+    int chain = 0;  // chain levels after the first draft: 0..2
     auto operator<=>(const MtpHeadGraphKey&) const = default;
 };
 
-// Bound: mtp_batch_verify <= 4 requests x 1..3 fed rows each = 24 (n, m) pairs, x chain on/off = 48.
+// Bound: mtp_batch_verify <= 4 requests x 1..4 fed rows each = 34 (n, m) pairs at the one chain depth a
+// process runs.
 inline constexpr size_t kMtpHeadGraphMax = 48;
 // Consecutive capture / instantiate / launch failures before the cache turns itself off.
 inline constexpr int kMtpHeadGraphMaxFailures = 2;
@@ -45,7 +46,7 @@ struct MtpHeadGraph {
     CudaGraphExec exec;
     MtpScanNodes scan;
     int eager_uses = 0;
-    int n_out = 0;  // draft tokens the pass writes (m, or 2m with the chain)
+    int n_out = 0;  // draft tokens the pass writes: m per draft level
     // Captured device pointers that are not fixed by the workspace: a change drops the graph.
     const void* hidden = nullptr;
     const void* head = nullptr;

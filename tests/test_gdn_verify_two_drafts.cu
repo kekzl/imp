@@ -1,10 +1,10 @@
-// Bound verify at 2 drafts (speculative.mtp_batch_verify_k 2, docs/plans/2026-09-11-batched-mtp-verify.md):
-// groups of 3 rows (last token + 2 drafts). Three states per group: 1 row in place into the live slot L_z,
-// 2 rows into spare2 Q_z, 3 rows into spare P_z. The scan writes the 2-row state in a commit-only pass
-// before the main pass (run_gdn, ssm_snap_rows 2); the conv takes a third commit launch (snap_rows 2).
-// Reference: the single-sequence launchers per group and row count. Factor row (mtp_batch_verify_factor_row):
-// no spare2, draft 1 as a factor row / conv tap at the live slot, folded into the live slot on a 1-draft
-// accept.
+// Bound verify at 2+ drafts (speculative.mtp_batch_verify_k, docs/plans/2026-09-11-batched-mtp-verify.md):
+// groups of D + 1 rows (last token + D drafts). Second spare (D = 2): 1 row in place into the live slot L_z,
+// 2 rows into spare2 Q_z, 3 rows into spare P_z; the scan writes the 2-row state in a commit-only pass
+// before the main pass (run_gdn, ssm_snap_rows 2), the conv takes a third commit launch (snap_rows 2).
+// Reference: the single-sequence launchers per group and row count. Factor rows (mtp_batch_verify_factor_row,
+// D = 2 or 3): no spare2, drafts 1 .. D - 1 as factor rows / conv taps by group, folded into the live slot
+// on a partial accept.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -362,13 +362,15 @@ void scan_batched(const float* conv, int conv_channels, const half* alpha, const
                                     fac_out, /*fac_in=*/nullptr, fac_stride);
 }
 
-// As run_gdn stages the factor row: ONE pass (1 row in place into L_z, 3 rows into the spare P_z, row 2 as
-// a factor row at L_z's index), then gdn_factor_fold(dst L_z, row L_z) = the 2-row state in the live slot.
-// n_seq 4 = 32 CTAs (column split), n_seq 13 = 104 CTAs (no column split, limit 96).
+// As run_gdn stages the factor rows at D drafts: ONE pass (1 row in place into L_z, D + 1 rows into the spare
+// P_z, rows 2 .. D as factor rows [z * (D - 1) + level]), then gdn_factor_fold(dst L_z, rows from z * (D -
+// 1), count c_z) = the (1 + c_z)-row state in the live slot. c_z cycles 1 .. D - 1 over the groups. n_seq 4 =
+// 32 CTAs (column split), n_seq 13 = 104 CTAs (no column split, limit 96).
 template <typename StateT>
-void run_scan_factor_row(int n_seq) {
+void run_scan_factor_row(int n_seq, int drafts) {
     const bool bf16 = !std::is_same_v<StateT, float>;
-    const ScanShape s{n_seq, /*n_tokens=*/3};
+    const int T = drafts + 1, L = drafts - 1;
+    const ScanShape s{n_seq, /*n_tokens=*/T};
     const int n_slots = (2 * n_seq) + 4;  // 4 slots in no table: must stay untouched
     std::vector<int> perm(n_slots);
     std::iota(perm.begin(), perm.end(), 0);
@@ -382,8 +384,14 @@ void run_scan_factor_row(int n_seq) {
     const size_t pool_elems = static_cast<size_t>(n_slots) * state_elems;
     const size_t pool_bytes = pool_elems * sizeof(StateT);
     const int fac_stride = gdn_factor_floats_per_head(s.state_size, s.head_dim);
-    // Rows are indexed by SLOT, like the state pool, so the buffer spans slots.
-    const size_t fac_elems = static_cast<size_t>(n_slots) * s.n_heads * fac_stride;
+    // Rows are indexed by group and level; one more row than the scan may write, which must stay zero.
+    const size_t fac_row = static_cast<size_t>(s.n_heads) * fac_stride;
+    const size_t fac_elems = ((static_cast<size_t>(n_seq) * L) + 1) * fac_row;
+    std::vector<int> count(n_seq), row0(n_seq);
+    for (int i = 0; i < n_seq; i++) {
+        count[i] = 1 + (i % L);
+        row0[i] = i * L;
+    }
 
     std::vector<float> h_conv(rows * conv_channels), h_alpha_f(rows * s.n_heads), h_beta_f(rows * s.n_heads);
     std::vector<float> h_Alog(s.n_heads), h_dtb(s.n_heads), h_init_f(pool_elems);
@@ -405,7 +413,7 @@ void run_scan_factor_row(int n_seq) {
     float *d_conv = nullptr, *d_Alog = nullptr, *d_dtb = nullptr, *d_fac = nullptr;
     StateT* d_pool = nullptr;
     half *d_alpha = nullptr, *d_beta = nullptr, *d_y = nullptr;
-    int *d_live = nullptr, *d_spare = nullptr, *d_lens = nullptr;
+    int *d_live = nullptr, *d_spare = nullptr, *d_lens = nullptr, *d_fold = nullptr;
     ASSERT_EQ(cudaMalloc(&d_conv, h_conv.size() * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_alpha, h_alpha.size() * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_beta, h_beta.size() * sizeof(half)), cudaSuccess);
@@ -416,7 +424,10 @@ void run_scan_factor_row(int n_seq) {
     ASSERT_EQ(cudaMalloc(&d_y, rows * inner * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_live, live.size() * sizeof(int)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_spare, spare.size() * sizeof(int)), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_lens, 3 * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_lens, T * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_fold, 2 * n_seq * sizeof(int)), cudaSuccess);
+    cudaMemcpy(d_fold, row0.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_fold + n_seq, count.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_conv, h_conv.data(), h_conv.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_alpha, h_alpha.data(), h_alpha.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_beta, h_beta.data(), h_beta.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -424,9 +435,10 @@ void run_scan_factor_row(int n_seq) {
     cudaMemcpy(d_dtb, h_dtb.data(), h_dtb.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_live, live.data(), live.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_spare, spare.data(), spare.size() * sizeof(int), cudaMemcpyHostToDevice);
-    const int lens[3] = {1, 2, 3};
-    cudaMemcpy(d_lens, lens, sizeof(lens), cudaMemcpyHostToDevice);
-    const int *d_one = d_lens, *d_two = d_lens + 1, *d_three = d_lens + 2;
+    std::vector<int> lens(T);
+    std::iota(lens.begin(), lens.end(), 1);
+    cudaMemcpy(d_lens, lens.data(), T * sizeof(int), cudaMemcpyHostToDevice);
+    const int *d_one = d_lens, *d_all = d_lens + (T - 1);
 
     auto seq_ptr = [&](int i, size_t per_row) { return static_cast<size_t>(i) * s.n_tokens * per_row; };
     auto reset_pool = [&] { cudaMemcpy(d_pool, h_init.data(), pool_bytes, cudaMemcpyHostToDevice); };
@@ -441,65 +453,75 @@ void run_scan_factor_row(int n_seq) {
     reset_pool();
     read_pool(init);
 
-    // ---- reference A (single-sequence launcher): n rows from L_z. want_pre: 1 row at L_z, 3 rows at P_z;
-    // want_post: 2 rows at L_z, 3 rows at P_z.
+    // ---- reference A (single-sequence launcher): n rows from L_z. want_pre: 1 row at L_z, T rows at P_z;
+    // want_post: 1 + c_z rows at L_z, T rows at P_z.
     std::vector<float> want_pre(init), want_post(init);
     std::vector<StateT> one(state_elems);
     for (int i = 0; i < s.n_seq; i++) {
         StateT* h_live = d_pool + static_cast<size_t>(live[i]) * state_elems;
         const StateT* h_live_init = h_init.data() + static_cast<size_t>(live[i]) * state_elems;
-        for (int n = 1; n <= 3; n++) {
+        for (int n = 1; n <= T; n++) {
             cudaMemcpy(h_live, h_live_init, state_elems * sizeof(StateT), cudaMemcpyHostToDevice);
             scan_single<StateT>(d_conv + seq_ptr(i, conv_channels), conv_channels,
                                 d_alpha + seq_ptr(i, s.n_heads), d_beta + seq_ptr(i, s.n_heads), d_Alog,
                                 d_dtb, h_live, d_y + seq_ptr(i, inner), n, s);
             ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
             cudaMemcpy(one.data(), h_live, state_elems * sizeof(StateT), cudaMemcpyDeviceToHost);
-            const size_t dst = static_cast<size_t>(n == 3 ? spare[i] : live[i]) * state_elems;
+            const size_t dst = static_cast<size_t>(n == T ? spare[i] : live[i]) * state_elems;
             for (size_t k = 0; k < state_elems; k++) {
                 const float v = state_to_float(one[k]);
-                if (n == 3)
+                if (n == T)
                     want_pre[dst + k] = want_post[dst + k] = v;
-                else
-                    (n == 1 ? want_pre : want_post)[dst + k] = v;
+                if (n == 1)
+                    want_pre[dst + k] = v;
+                if (n == 1 + count[i])
+                    want_post[dst + k] = v;
             }
         }
     }
 
-    // ---- reference B (same batched kernel, no factor row): 3 rows -> P_z, 1 row in place. The factor-row
+    // ---- reference B (same batched kernel, no factor row): T rows -> P_z, 1 row in place. The factor-row
     // launch must reproduce its pool and y rows bit for bit.
-    std::vector<float> full, two;
+    std::vector<float> full, two(pool_elems), part;
     std::vector<half> y_full(rows * inner), y_row(rows * inner);
     reset_pool();
     scan_batched<StateT>(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
-                         static_cast<int64_t>(state_elems), d_y, s, d_three, d_one, d_spare, d_live, nullptr,
+                         static_cast<int64_t>(state_elems), d_y, s, d_all, d_one, d_spare, d_live, nullptr,
                          0);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     read_pool(full);
     cudaMemcpy(y_full.data(), d_y, y_full.size() * sizeof(half), cudaMemcpyDeviceToHost);
-    // ---- reference C (same batched kernel): 2 rows in place, the state the fold must land on.
-    reset_pool();
-    scan_batched<StateT>(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
-                         static_cast<int64_t>(state_elems), d_y, s, d_two, /*snap_n=*/nullptr,
-                         /*outs=*/nullptr, /*snaps=*/nullptr, /*fac_out=*/nullptr, 0);
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    read_pool(two);
+    // ---- reference C (same batched kernel): 1 + c rows in place, the state a fold of c rows must land on.
+    for (int c = 1; c <= L; c++) {
+        reset_pool();
+        scan_batched<StateT>(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
+                             static_cast<int64_t>(state_elems), d_y, s, d_lens + c, /*snap_n=*/nullptr,
+                             /*outs=*/nullptr, /*snaps=*/nullptr, /*fac_out=*/nullptr, 0);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        read_pool(part);
+        for (int i = 0; i < s.n_seq; i++)
+            if (count[i] == c)
+                std::copy_n(part.begin() + static_cast<size_t>(live[i]) * state_elems, state_elems,
+                            two.begin() + static_cast<size_t>(live[i]) * state_elems);
+    }
 
-    // ---- the factor row
+    // ---- the factor rows
     reset_pool();
     cudaMemset(d_y, 0, rows * inner * sizeof(half));
     cudaMemset(d_fac, 0, fac_elems * sizeof(float));
     scan_batched<StateT>(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
-                         static_cast<int64_t>(state_elems), d_y, s, d_three, d_one, d_spare, d_live, d_fac,
+                         static_cast<int64_t>(state_elems), d_y, s, d_all, d_one, d_spare, d_live, d_fac,
                          fac_stride);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pre, post, h_fac(fac_elems);
     read_pool(pre);
     cudaMemcpy(y_row.data(), d_y, y_row.size() * sizeof(half), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_fac.data(), d_fac, fac_elems * sizeof(float), cudaMemcpyDeviceToHost);
+    // 2 drafts: the default count (nullptr = 1 row per entry).
     gdn_factor_fold(d_pool, bf16, static_cast<int64_t>(state_elems * sizeof(StateT)),
-                    /*layer_stride_bytes=*/0, d_fac, /*fac_layer_stride=*/0, /*n_layers=*/1, d_live, d_live,
-                    s.n_seq, s.n_heads, s.state_size, s.head_dim, fac_stride, nullptr);
+                    /*layer_stride_bytes=*/0, d_fac, /*fac_layer_stride=*/0, /*n_layers=*/1, d_live, d_fold,
+                    s.n_seq, s.n_heads, s.state_size, s.head_dim, fac_stride, nullptr,
+                    L == 1 ? nullptr : d_fold + n_seq);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     read_pool(post);
 
@@ -509,7 +531,7 @@ void run_scan_factor_row(int n_seq) {
     for (size_t k = 0; k < pool_elems; k++)
         sd += pre[k] != full[k] ? 1 : 0;
     EXPECT_EQ(yd, 0u) << "the factor row changed the y rows";
-    EXPECT_EQ(sd, 0u) << "the factor row changed the 1-row or 3-row states";
+    EXPECT_EQ(sd, 0u) << "the factor rows changed the 1-row or all-rows states";
 
     double ss = 0.0;
     for (float x : want_post)
@@ -532,7 +554,7 @@ void run_scan_factor_row(int n_seq) {
             EXPECT_EQ(touched, 0u) << "slot " << sl << " is in no table";
             continue;
         }
-        // Before the fold: L_z = 1 row, P_z = 3 rows (the existing test's 1e-3 of the state rms, plus
+        // Before the fold: L_z = 1 row, P_z = T rows (the existing test's 1e-3 of the state rms, plus
         // one flipped bf16 rounding between the two launchers).
         size_t bad_pre = 0, bad_ref = 0, bad_two = 0, spare_moved = 0, folded = 0;
         for (size_t k = off; k < off + state_elems; k++) {
@@ -545,9 +567,9 @@ void run_scan_factor_row(int n_seq) {
                 spare_moved += post[k] != pre[k] ? 1 : 0;
                 continue;
             }
-            // After the fold, against the same kernel's 2 rows in place. f32: same expression, 1e-5 of the
-            // rms covers FMA contraction. bf16: the 1-row state was rounded once before the fold (<= g *
-            // 2^-8 |S1|, g <= 1) and the result once more (<= 1 ulp of S2 apart).
+            // After the fold, against the same kernel's 1 + c rows in place. f32: same expression, 1e-5 of
+            // the rms covers FMA contraction. bf16: the 1-row state was rounded once before the fold (<= g *
+            // 2^-8 |S1|, g <= 1) and the result once more (<= 1 ulp of the reference apart).
             const double fold_tol = (1e-5 * scale) + (half_ulp * std::abs(double(pre[k]))) +
                                     (ulp * std::abs(double(two[k])));
             const double err = std::abs(double(post[k]) - double(two[k]));
@@ -564,19 +586,19 @@ void run_scan_factor_row(int n_seq) {
             EXPECT_EQ(spare_moved, 0u) << "the fold wrote spare slot " << sl;
             continue;
         }
-        EXPECT_EQ(bad_two, 0u) << "live " << sl << " vs the same kernel's 2-row state";
-        EXPECT_EQ(bad_ref, 0u) << "live " << sl << " vs the single-sequence 2-row state";
+        EXPECT_EQ(bad_two, 0u) << "live " << sl << " vs the same kernel's state after the folded rows";
+        EXPECT_EQ(bad_ref, 0u) << "live " << sl << " vs the single-sequence state after the folded rows";
         EXPECT_GT(folded, state_elems / 100) << "live " << sl << ": the fold moved (almost) nothing";
     }
-    // The pass must leave a row (g != 0) for every head of a live slot and nothing elsewhere.
-    for (int sl = 0; sl < n_slots; sl++)
-        for (int h = 0; h < s.n_heads; h++) {
-            const float g = h_fac[((static_cast<size_t>(sl) * s.n_heads) + h) * fac_stride];
-            if (is_live[sl])
-                EXPECT_NE(g, 0.0f) << "no factor row at live slot " << sl << " head " << h;
-            else
-                EXPECT_EQ(g, 0.0f) << "factor row at slot " << sl << " head " << h;
-        }
+    // The pass must leave a row (g != 0) for every group, level and head, and nothing past them.
+    for (int r = 0; r < n_seq * L; r++)
+        for (int h = 0; h < s.n_heads; h++)
+            EXPECT_NE(h_fac[(static_cast<size_t>(r) * fac_row) + (static_cast<size_t>(h) * fac_stride)], 0.0f)
+                << "no factor row at group " << (r / L) << " level " << (r % L) << " head " << h;
+    size_t past = 0;
+    for (size_t k = static_cast<size_t>(n_seq) * L * fac_row; k < fac_elems; k++)
+        past += h_fac[k] != 0.0f ? 1 : 0;
+    EXPECT_EQ(past, 0u) << "the scan wrote past the last group's rows";
 
     cudaFree(d_conv);
     cudaFree(d_alpha);
@@ -589,32 +611,56 @@ void run_scan_factor_row(int n_seq) {
     cudaFree(d_live);
     cudaFree(d_spare);
     cudaFree(d_lens);
+    cudaFree(d_fold);
 }
 
 TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowFoldsTheLiveSlotToTheTwoRowState) {
     for (int n_seq : {4, 13}) {
         SCOPED_TRACE(testing::Message() << "f32 n_seq " << n_seq);
-        run_scan_factor_row<float>(n_seq);
+        run_scan_factor_row<float>(n_seq, /*drafts=*/2);
     }
 }
 
 TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16) {
     for (int n_seq : {4, 13}) {
         SCOPED_TRACE(testing::Message() << "bf16 n_seq " << n_seq);
-        run_scan_factor_row<__nv_bfloat16>(n_seq);
+        run_scan_factor_row<__nv_bfloat16>(n_seq, /*drafts=*/2);
     }
 }
 
-// The conv half: 3 rows -> spare, 1 row in place, row 2 as a tap at the live slot, then
-// ssm_conv_tap_fold(window live, tap live) gives the 2-row window in the live slot, bit-exact.
-TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
-    const int n_seq = 4, n_tokens = 3, channels = 2048, ksize = 4, n_slots = 12;
+// 3 drafts: 2 factor rows per group, the groups fold 1 or 2 of them in turn.
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneOrTwoDraftsOfThree) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "f32 n_seq " << n_seq);
+        run_scan_factor_row<float>(n_seq, /*drafts=*/3);
+    }
+}
+
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "bf16 n_seq " << n_seq);
+        run_scan_factor_row<__nv_bfloat16>(n_seq, /*drafts=*/3);
+    }
+}
+
+// The conv half at D drafts: D + 1 rows -> spare, 1 row in place, rows 2 .. D as taps [z * (D - 1) + level],
+// then ssm_conv_tap_fold(window live, taps from z * (D - 1), count c_z) gives the (1 + c_z)-row window in
+// the live slot, bit-exact. c_z cycles 1 .. D - 1 over the groups.
+void run_conv_factor_row(int drafts) {
+    const int n_seq = 4, n_tokens = drafts + 1, L = drafts - 1, channels = 2048, ksize = 4, n_slots = 12;
     const std::vector<int> live{5, 1, 3, 0};
     const std::vector<int> spare{2, 7, 4, 6};
     const size_t win = static_cast<size_t>(channels) * ksize;
     const size_t pool_elems = static_cast<size_t>(n_slots) * win;
     const size_t rows = static_cast<size_t>(n_seq) * n_tokens;
-    const size_t tap_elems = static_cast<size_t>(n_slots) * channels;
+    // One more tap row than the stash may write, which must stay zero.
+    const size_t tap_elems = ((static_cast<size_t>(n_seq) * L) + 1) * channels;
+    std::vector<int> fold(2 * n_seq);  // [first tap row x n_seq][count x n_seq]
+    for (int i = 0; i < n_seq; i++) {
+        fold[i] = i * L;
+        fold[n_seq + i] = 1 + (i % L);
+    }
+    const int* count = fold.data() + n_seq;
 
     std::vector<float> h_pool_init(pool_elems), h_w(win), h_b(channels), h_xf(rows * channels);
     fill(h_pool_init, 557, -1.0f, 1.0f);
@@ -631,7 +677,7 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
 
     float *d_pool = nullptr, *d_out = nullptr;
     half *d_w = nullptr, *d_b = nullptr, *d_x = nullptr, *d_tap = nullptr;
-    int *d_live = nullptr, *d_spare = nullptr, *d_lens = nullptr;
+    int *d_live = nullptr, *d_spare = nullptr, *d_lens = nullptr, *d_fold = nullptr;
     ASSERT_EQ(cudaMalloc(&d_pool, pool_elems * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_out, rows * channels * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_w, win * sizeof(half)), cudaSuccess);
@@ -640,15 +686,18 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     ASSERT_EQ(cudaMalloc(&d_tap, tap_elems * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_live, n_seq * sizeof(int)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_spare, n_seq * sizeof(int)), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_lens, 3 * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_lens, n_tokens * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_fold, fold.size() * sizeof(int)), cudaSuccess);
     cudaMemcpy(d_w, h_wh.data(), win * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, h_bh.data(), channels * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_live, live.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_spare, spare.data(), n_seq * sizeof(int), cudaMemcpyHostToDevice);
-    const int lens[3] = {1, 2, 3};
-    cudaMemcpy(d_lens, lens, sizeof(lens), cudaMemcpyHostToDevice);
-    const int *d_one = d_lens, *d_two = d_lens + 1, *d_three = d_lens + 2;
+    cudaMemcpy(d_fold, fold.data(), fold.size() * sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<int> lens(n_tokens);
+    std::iota(lens.begin(), lens.end(), 1);
+    cudaMemcpy(d_lens, lens.data(), n_tokens * sizeof(int), cudaMemcpyHostToDevice);
+    const int *d_one = d_lens, *d_all = d_lens + (n_tokens - 1);
 
     Tensor w{};
     w.data = d_w;
@@ -662,10 +711,10 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     b.shape[0] = channels;
     b.qtype = QType::F16;
 
-    // Reference: n rows from L_z. want_pre: 1 row at L_z, 3 rows at P_z; want_post: 2 rows at L_z.
+    // Reference: n rows from L_z. want_pre: 1 row at L_z, all rows at P_z; want_post: 1 + c_z rows at L_z.
     std::vector<float> want_pre(h_pool_init), want_post(h_pool_init), out_a(rows * channels);
     for (int i = 0; i < n_seq; i++) {
-        for (int n = 1; n <= 3; n++) {
+        for (int n = 1; n <= n_tokens; n++) {
             cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
             Tensor xs{};
             xs.data = d_x + static_cast<size_t>(i) * n_tokens * channels;
@@ -677,16 +726,16 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
                                         d_out + static_cast<size_t>(i) * n_tokens * channels, ksize, nullptr);
             ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
             const float* src = d_pool + static_cast<size_t>(live[i]) * win;
-            const size_t dst = static_cast<size_t>(n == 3 ? spare[i] : live[i]) * win;
-            if (n != 2)
+            const size_t dst = static_cast<size_t>(n == n_tokens ? spare[i] : live[i]) * win;
+            if (n == 1 || n == n_tokens)
                 cudaMemcpy(want_pre.data() + dst, src, win * sizeof(float), cudaMemcpyDeviceToHost);
-            if (n != 1)
+            if (n == 1 + count[i] || n == n_tokens)
                 cudaMemcpy(want_post.data() + dst, src, win * sizeof(float), cudaMemcpyDeviceToHost);
         }
     }
     cudaMemcpy(out_a.data(), d_out, out_a.size() * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // As run_gdn stages it: commit at 3 rows into the spare, at 1 row in place, tap = row 2.
+    // As run_gdn stages it: commit at all rows into the spare, at 1 row in place, taps = rows 2 .. D.
     cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemset(d_out, 0, rows * channels * sizeof(float));
     cudaMemset(d_tap, 0, tap_elems * sizeof(half));
@@ -697,10 +746,10 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     xg.shape[1] = channels;
     xg.qtype = QType::F16;
     ssm_conv1d_prefill_f32_silu_grouped(d_pool, d_live, static_cast<int64_t>(win), n_seq, xg, w, b, d_out,
-                                        ksize, nullptr, d_three, /*conv_snap=*/nullptr, d_one,
+                                        ksize, nullptr, d_all, /*conv_snap=*/nullptr, d_one,
                                         /*conv_prev=*/nullptr,
                                         /*out_slots=*/d_spare, /*snap_slots=*/d_live, /*snap_rows=*/1);
-    ssm_conv_tap_stash(d_tap, xg.data, n_tokens, channels, d_two, d_live, n_seq, nullptr);
+    ssm_conv_tap_stash_mid(d_tap, xg.data, n_tokens, channels, d_one, L, n_seq, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pre(pool_elems), post(pool_elems), out_b(rows * channels);
     std::vector<half> h_tap(tap_elems);
@@ -708,8 +757,8 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     cudaMemcpy(out_b.data(), d_out, out_b.size() * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_tap.data(), d_tap, tap_elems * sizeof(half), cudaMemcpyDeviceToHost);
     ssm_conv_tap_fold(d_pool, static_cast<int64_t>(win * sizeof(float)), /*layer_stride_bytes=*/0, d_tap,
-                      /*tap_layer_stride=*/0, /*n_layers=*/1, channels, ksize, d_live, d_live, n_seq,
-                      nullptr);
+                      /*tap_layer_stride=*/0, /*n_layers=*/1, channels, ksize, d_live, d_fold, n_seq, nullptr,
+                      L == 1 ? nullptr : d_fold + n_seq);  // 2 drafts: the default count of 1
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     cudaMemcpy(post.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -720,13 +769,12 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     }
     for (size_t i = 0; i < out_a.size(); i++)
         od += out_a[i] != out_b[i] ? 1 : 0;
-    // The tap row of L_z is group z's second input row; every other slot's row stays zero.
+    // Tap [z * L + level] is group z's input row 1 + level; the row past the last group stays zero.
     std::vector<half> want_tap(tap_elems, __float2half(0.0f));
-    for (int i = 0; i < n_seq; i++) {
-        const size_t row2 = ((static_cast<size_t>(i) * n_tokens) + 1) * channels;
-        const size_t tap_row = static_cast<size_t>(live[i]) * channels;
+    for (int i = 0; i < n_seq * L; i++) {
+        const size_t src_row = ((static_cast<size_t>(i / L) * n_tokens) + 1 + (i % L)) * channels;
         for (int c = 0; c < channels; c++)
-            want_tap[tap_row + c] = h_x[row2 + c];
+            want_tap[(static_cast<size_t>(i) * channels) + c] = h_x[src_row + c];
     }
     for (size_t i = 0; i < tap_elems; i++)
         td += __half_as_ushort(h_tap[i]) != __half_as_ushort(want_tap[i]) ? 1 : 0;
@@ -751,7 +799,15 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
     cudaFree(d_live);
     cudaFree(d_spare);
     cudaFree(d_lens);
+    cudaFree(d_fold);
 }
+
+TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowFoldsTheLiveWindowToTwoRows) {
+    run_conv_factor_row(/*drafts=*/2);
+}
+
+// 3 drafts: 2 taps per group, the groups fold 1 or 2 of them in turn.
+TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldOneOrTwoDraftsOfThree) { run_conv_factor_row(/*drafts=*/3); }
 
 }  // namespace
 }  // namespace imp

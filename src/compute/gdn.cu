@@ -298,8 +298,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
                     H_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
             }
         }
-        if (t == fac_mid_t)
-            gdn_factor_store<SS_PER>(fac_out + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
+        float* const fac_mid = gdn_factor_mid(fac_out, fac_mid_t, t, real_n, seq, n_heads, h, fac_stride);
+        gdn_factor_store<SS_PER>(fac_mid, s_k, SS, s_base, d, part, g_t, delta_d);
         if (t + 1 == snap_n) {
             StateT* S_col = h_snap_dst + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll

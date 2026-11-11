@@ -3,6 +3,9 @@
 #include "core/logging.h"
 #include "model/mtp_head.h"
 #include "model/safetensors_loader.h"
+#include "runtime/spec_batch_verify_state.h"
+
+#include <algorithm>
 
 namespace imp::tools {
 
@@ -42,8 +45,9 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
 
 namespace {
 // A concurrent GDN-hybrid server keeps the KV pool: no NVFP4 draft head copy (682 MiB on Qwen3.8-27B).
-// The second draft per bound request stays while a factor row replaces its second spare slot
-// (speculative.mtp_batch_verify_factor_row, 3.22 MiB per recurrent slot vs 79.5 MiB per row); else it goes.
+// Drafts past the first per bound request stay while factor rows replace their spare slots
+// (speculative.mtp_batch_verify_factor_row, 3.22 MiB per request and draft vs 79.5 MiB per row); else they
+// go.
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
@@ -76,6 +80,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
                        MtpAutoServing serving) {
     if (cfg.speculative.mtp_k >= 0) {
         mtp_concurrent_pool_defaults(cfg, serving);
+        mtp_verify_depth_follows_k(cfg);
         return;  // explicit depth, nothing else to resolve
     }
 
@@ -96,6 +101,11 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
         return;
     }
     if (requested_k > 0 && head_loaded) {
+        // A concurrent GDN hybrid drafts what its bound verify stages per request (3 with factor rows).
+        if (serving == MtpAutoServing::ConcurrentHybrid && mtp_bound_verify_config_rows(cfg) > 0)
+            requested_k = std::max(requested_k,
+                                   mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k,
+                                                          cfg.speculative.mtp_batch_verify_factor_row));
         if (head_auto_k_cap > 0 && requested_k > head_auto_k_cap)
             requested_k = head_auto_k_cap;  // the head's own auto depth (mtp_auto_k_cap)
         cfg.speculative.mtp_k = requested_k;
@@ -114,6 +124,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
                 ? "concurrent server: drafts while one request decodes, speculative.mtp_concurrent"
                 : "single-stream run");
         mtp_concurrent_pool_defaults(cfg, serving);
+        mtp_verify_depth_follows_k(cfg);
         return;
     }
 

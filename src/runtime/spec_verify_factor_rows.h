@@ -1,7 +1,7 @@
 #pragma once
 
 // Factored rows of the batched verify (docs/plans/2026-09-12-factored-verify-spare.md): the full verify's
-// spare (speculative.factored_spare) and the bound verify's draft 1 at 2 drafts
+// spare (speculative.factored_spare) and the bound verify's drafts before the last at 2+ drafts
 // (speculative.mtp_batch_verify_factor_row), buffers and the accept-time fold.
 
 #include <cuda_runtime.h>
@@ -20,13 +20,14 @@ class VRAMAllocator;
                                         VRAMAllocator& alloc, BatchVerifyState& bv, cudaStream_t stream);
 void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
 
-// Factor rows, conv taps and the fold list over every recurrent slot (bv.d_fac, d_tap, d_clear).
-// false = nothing allocated (geometry, state dtype or VRAM): the caller verifies 1 draft.
+// Factor rows and conv taps per (verify group, level) and the fold lists (bv.d_fac, d_tap, d_clear), levels =
+// drafts - 1. false = nothing allocated (geometry, state dtype or VRAM): the caller verifies 1 draft.
 [[nodiscard]] bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
-                                                 BatchVerifyState& bv, cudaStream_t stream);
+                                                 BatchVerifyState& bv, int groups, int levels,
+                                                 cudaStream_t stream);
 
-// Draft 1 of the groups with fold[g] != 0: live[g] holds the 1-row state and names the row and tap the
-// forward just wrote. Queued on `stream` behind that forward; the live slot then holds the 2-row state.
+// Group g folds its first fold[g] rows and taps (the matched drafts, 0 = none) into live[g], which holds the
+// 1-row state. Queued on `stream` behind the forward that wrote them; live[g] then holds 1 + fold[g] rows.
 void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, const int* live,
                                   const int* fold, int n_groups, cudaStream_t stream);
 
