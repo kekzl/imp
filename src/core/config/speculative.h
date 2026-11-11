@@ -208,14 +208,13 @@ struct Speculative {
     // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
     // Qwen3.8-27B-NVFP4, 4 overlapping chats: 83.72 -> 117.45 tok/s per turn, c32 unchanged.
     int mtp_batch_verify = 4;
-    // Drafts per bound request in that step: 2 = the last token plus a 2-token MTP chain (3 rows per request,
-    // a second head pass); 1 = one draft (2 rows). A concurrent GDN-hybrid server with MTP on takes 1 when
-    // mtp_batch_verify_factor_row is false and nothing set this key (tools/common/mtp_auto.cpp: KV pool
-    // kept).
-    int mtp_batch_verify_k = 2;
-    // At 2 drafts: one spare per row holds the full accept, draft 1 also leaves as a factor row + conv tap
-    // (3.22 MiB per recurrent slot on Qwen3.8-27B) folded into the live slot when only it is accepted.
-    // false = a second spare per row (79.5 MiB each).
+    // Drafts per bound request in that step (N + 1 rows, N head passes): 3 at most, 2 without
+    // mtp_batch_verify_factor_row. Unset, it follows mtp_k down (a row past the drafted depth is a pad);
+    // mtp_k=auto on a concurrent GDN-hybrid server follows it up (tools/common/mtp_auto.cpp).
+    int mtp_batch_verify_k = 3;
+    // At 2+ drafts: one spare per row holds the full accept, every draft before the last also leaves as a
+    // factor row + conv tap (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
+    // a partial accept. false = a second spare per row (79.5 MiB each), 2 drafts at most.
     bool mtp_batch_verify_factor_row = true;
     // With mtp_batch_verify: a bound request decoding alone verifies in that batched step too (rows on paged
     // decode attention, split-K over the context) instead of the single verify chunk, whose prefill attention

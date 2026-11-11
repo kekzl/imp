@@ -3,6 +3,11 @@
 // must be kept. CPU-only, plain config in/out.
 
 #include <gtest/gtest.h>
+
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "common/mtp_auto.h"
 #include "runtime/config.h"
 #include "../tools/imp-cli/args.h"
@@ -44,17 +49,18 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
-    EXPECT_EQ(cfg.speculative.mtp_k, tools::kMtpAutoK);
+    EXPECT_EQ(cfg.speculative.mtp_k, 3) << "the bound verify stages 3 drafts per request";
     EXPECT_FALSE(cfg.speculative.ngram);
 }
 
-// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy; draft 2 stays as a factor row.
+// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy; drafts 1 and 2 leave as factor
+// rows.
 TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 3);
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "FP8 draft head scores the first 98304 rows";
 }
 
@@ -93,7 +99,7 @@ TEST(MtpAuto, HostSpillKeepsBothDraftsButNotTheHeadCopy) {
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_GT(cfg.speculative.mtp_k, 0);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head) << "the 682 MiB head copy is KV pool";
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2) << "spill restores evicted prefixes";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 3) << "spill restores evicted prefixes";
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
 }
 
@@ -119,6 +125,39 @@ TEST(MtpAuto, ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft) {
     tools::mtp_auto_finalize(set, tools::mtp_auto_request_k(set, kServingAutoBatch), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(set.speculative.mtp_batch_verify_k, 2) << "the operator set it";
+    EXPECT_EQ(cfg.speculative.mtp_k, 2) << "no factor rows: the step stages 2 drafts at most";
+}
+
+// mtp_k=auto on a concurrent hybrid drafts what the bound verify stages; unset, the verify depth follows a
+// smaller mtp_k (a row past the drafted depth is a pad).
+TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
+    const auto resolve = [](std::vector<std::string> sets) {
+        RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides(sets).empty());
+        tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true,
+                                 0, tools::MtpAutoServing::ConcurrentHybrid);
+        return std::pair{cfg.speculative.mtp_k, cfg.speculative.mtp_batch_verify_k};
+    };
+    EXPECT_EQ(resolve({}), (std::pair{3, 3}));
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=2"}), (std::pair{2, 2})) << "auto follows the key";
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=1"}), (std::pair{2, 1})) << "auto keeps kMtpAutoK";
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify=0"}), (std::pair{2, 2})) << "no bound verify";
+    EXPECT_EQ(resolve({"speculative.mtp_carry=false"}), (std::pair{2, 2}));
+    EXPECT_EQ(resolve({"speculative.mtp_history_slots=1"}), (std::pair{2, 2})) << "one binding";
+    EXPECT_EQ(resolve({"speculative.hybrid=false"}), (std::pair{2, 2})) << "no grouped verify scan";
+    EXPECT_EQ(resolve({"speculative.mtp_k=1"}), (std::pair{1, 1})) << "2 rows per request, no pad";
+    EXPECT_EQ(resolve({"speculative.mtp_k=2"}), (std::pair{2, 2}));
+    EXPECT_EQ(resolve({"speculative.mtp_k=4"}), (std::pair{4, 3}));
+    EXPECT_EQ(resolve({"speculative.mtp_k=1", "speculative.mtp_batch_verify_k=3"}), (std::pair{1, 3}))
+        << "the operator set it";
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_factor_row=false", "kv_cache.host_spill_mb=16384"}),
+              (std::pair{2, 2}))
+        << "a second spare per row holds 2 drafts";
+    RuntimeConfig cap;
+    tools::mtp_auto_finalize(cap, tools::mtp_auto_request_k(cap, kServingAutoBatch), /*head_loaded=*/true,
+                             /*head_auto_k_cap=*/1, tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_EQ(cap.speculative.mtp_k, 1) << "the head's own cap outranks the verify depth";
+    EXPECT_EQ(cap.speculative.mtp_batch_verify_k, 1);
 }
 
 TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {
@@ -126,7 +165,7 @@ TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=0"}).empty());
     tools::mtp_auto_finalize(cfg, 0, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 3);
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
 }
 

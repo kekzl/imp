@@ -68,6 +68,23 @@ struct ModelProfile {
     AttnVariant attn_variant = AttnVariant::STANDARD;
 };
 
+// Log name of an attention variant.
+constexpr const char* attn_variant_name(ModelProfile::AttnVariant v) {
+    switch (v) {
+        case ModelProfile::AttnVariant::GEMMA4_SWA:
+            return "gemma4_swa";
+        case ModelProfile::AttnVariant::GPTOSS_SWA:
+            return "gptoss_swa";
+        case ModelProfile::AttnVariant::NOPE:
+            return "nope";
+        case ModelProfile::AttnVariant::MLA:
+            return "mla";
+        case ModelProfile::AttnVariant::STANDARD:
+            break;
+    }
+    return "standard";
+}
+
 // Pure: no side effects, no allocation. Reads the model's layers + config once.
 ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg);
 

@@ -1088,15 +1088,15 @@ private:
                            const std::vector<int>& emitted, cudaStream_t stream);
     // The NVFP4 draft LM head (speculative.mtp_nvfp4_head) the lone and batched chains read, or nullptr.
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
-    // The batched head pass over tables already on the device: feed, draft LM head and, when bv_.depth > 1
-    // and the KV has room, one more feed + LM head per request's second draft (a graph replay with
-    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m, 2m);
-    // -1 = feed, -2 = LM head, -3 = D2H failed.
+    // The batched head pass over tables already on the device: feed, draft LM head and, per verify depth past
+    // 1 and the KV has room, one more feed + LM head for the next draft per request (a graph replay with
+    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
+    // level); -1 = feed, -2 = LM head, -3 = D2H failed.
     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
                                      const NvFP4QuantResult* head, cudaStream_t stream,
                                      const int32_t** drafts);
     std::unique_ptr<MtpHeadGraphs, MtpHeadGraphsDeleter> mtp_head_graphs_;
-    void mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2);
+    void mtp_batched_set_draft_(const Request& req, int emitted, std::span<const int32_t> drafts);
     // True when the request's context advanced without MTP pairs (async-loop
     // burst, chunked-prefill gap): drafting stays off for the request.
     // Economics guard: an MTP-filled verify step costs ~2x a loop step plus K

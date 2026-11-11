@@ -1,5 +1,6 @@
 // Factored rows of the batched verify: the full verify's spare (speculative.factored_spare) and the bound
-// verify's draft 1 at 2 drafts (speculative.mtp_batch_verify_factor_row). See spec_verify_factor_rows.h.
+// verify's drafts before the last at 2+ drafts (speculative.mtp_batch_verify_factor_row). See
+// spec_verify_factor_rows.h.
 
 #include "runtime/spec_verify_factor_rows.h"
 
@@ -16,19 +17,20 @@
 
 namespace imp {
 
-static_assert(bound_verify_factor_row_bytes(1, 1, 1, 128, 128, 0) ==
-                  (gdn_factor_floats_per_head(128, 128) * sizeof(float)) + sizeof(int32_t),
+static_assert(bound_verify_factor_row_bytes(1, 1, 1, 1, 128, 128, 0) ==
+                  (gdn_factor_floats_per_head(128, 128) * sizeof(float)) + (3 * sizeof(int32_t)),
               "bound_verify_factor_row_bytes prices the factor row layout of gdn_factor.cuh");
+static_assert(kMtpBoundVerifyMaxDepth - 1 <= kGdnFactorFoldMaxRows,
+              "a partial accept folds up to depth - 1 rows in one gdn_factor_fold");
 
 bool mtp_bound_verify_factor_row(const RuntimeConfig& cfg) {
-    return cfg.speculative.mtp_batch_verify_factor_row &&
-           mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k) == 2;
+    return cfg.speculative.mtp_batch_verify_factor_row && cfg.speculative.mtp_batch_verify_k >= 2;
 }
 
 size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Model* model,
-                                              int max_batch_size, int slots) {
-    if (!mtp_bound_verify_factor_row(cfg) || mtp_bound_verify_rows(cfg, model, max_batch_size) == 0 ||
-        slots <= 0)
+                                              int max_batch_size) {
+    const int groups = mtp_bound_verify_rows(cfg, model, max_batch_size);
+    if (!mtp_bound_verify_factor_row(cfg) || groups <= 0)
         return 0;
     const auto& mc = model->config();
     const int heads = mc.ssm_dt_rank;
@@ -37,8 +39,9 @@ size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Mo
     int layers = 0;
     for (int i = 0; i < mc.n_layers; i++)
         layers += model->layer(i).ssm_in.data != nullptr ? 1 : 0;
-    return bound_verify_factor_row_bytes(layers, slots, heads, mc.ssm_state_size, mc.ssm_inner_size / heads,
-                                         mc.ssm_conv_channels());
+    const int levels = mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k, true) - 1;
+    return bound_verify_factor_row_bytes(layers, groups, levels, heads, mc.ssm_state_size,
+                                         mc.ssm_inner_size / heads, mc.ssm_conv_channels());
 }
 
 bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
@@ -112,26 +115,27 @@ void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv) {
 }
 
 bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
-                                   BatchVerifyState& bv, cudaStream_t stream) {
+                                   BatchVerifyState& bv, int groups, int levels, cudaStream_t stream) {
     if (bv.d_fac != nullptr)
         return true;
     const int layers = ssm ? ssm->n_ssm_layers() : 0;
-    const int slots = ssm ? ssm->max_sequences() + ssm->n_reserved() : 0;
+    const int rows = groups * levels;
     const int heads = mc.ssm_dt_rank;
     const int hd = heads > 0 ? mc.ssm_inner_size / heads : 0;
     const int ss = mc.ssm_state_size;
     const int ch = mc.ssm_conv_channels();
     const bool dtype_ok = ssm && (ssm->h_dtype() == QType::F32 || ssm->h_dtype() == QType::BF16);
-    if (layers <= 0 || slots <= 0 || heads <= 0 || hd <= 0 || ss <= 0 || ch <= 0 || !dtype_ok) {
+    if (layers <= 0 || groups <= 0 || levels <= 0 || levels > kGdnFactorFoldMaxRows || heads <= 0 ||
+        hd <= 0 || ss <= 0 || ch <= 0 || !dtype_ok) {
         IMP_LOG_WARN("speculative.mtp_batch_verify_factor_row: no GDN state geometry for factor rows");
         return false;
     }
     bv.fac_stride = gdn_factor_floats_per_head(ss, hd);
-    bv.fac_layer_stride = static_cast<int64_t>(slots) * heads * bv.fac_stride;
-    bv.tap_layer_stride = static_cast<int64_t>(slots) * ch;
+    bv.fac_layer_stride = static_cast<int64_t>(rows) * heads * bv.fac_stride;
+    bv.tap_layer_stride = static_cast<int64_t>(rows) * ch;
     const size_t fac_bytes = static_cast<size_t>(layers) * bv.fac_layer_stride * sizeof(float);
     const size_t tap_bytes = static_cast<size_t>(layers) * bv.tap_layer_stride * sizeof(uint16_t);
-    const size_t list_bytes = static_cast<size_t>(slots) * sizeof(int32_t);
+    const size_t list_bytes = 3 * static_cast<size_t>(groups) * sizeof(int32_t);
     bv.d_fac = static_cast<float*>(alloc.allocate(fac_bytes, "spec_bound_fac_rows"));
     bv.d_tap = alloc.allocate(tap_bytes, "spec_bound_fac_taps");
     bv.d_clear = static_cast<int*>(alloc.allocate(list_bytes, "spec_bound_fac_folds"));
@@ -145,28 +149,40 @@ bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAll
     }
     // On the verify stream: a legacy-stream memset is not ordered before its kernels (#2275).
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(bv.d_fac, 0, fac_bytes, stream));
+    bv.fac_levels = levels;
     IMP_LOG_INFO(
-        "speculative.mtp_batch_verify_factor_row: %d layers x %d slots, %.1f MiB of factor rows + %.1f "
-        "MiB of conv taps (a second spare per row is %.1f MiB each)",
-        layers, slots, fac_bytes / (1024.0 * 1024.0), tap_bytes / (1024.0 * 1024.0),
+        "speculative.mtp_batch_verify_factor_row: %d layers x %d groups x %d draft(s), %.1f MiB of factor "
+        "rows + %.1f MiB of conv taps (a second spare per row is %.1f MiB each)",
+        layers, groups, levels, fac_bytes / (1024.0 * 1024.0), tap_bytes / (1024.0 * 1024.0),
         static_cast<double>(ssm->slot_stride_bytes()) / (1024.0 * 1024.0));
     return true;
 }
 
 void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, const int* live,
                                   const int* fold, int n_groups, cudaStream_t stream) {
-    if (!bv.factor_row || bv.d_fac == nullptr)
+    if (!bv.factor_row || bv.d_fac == nullptr || bv.fac_levels <= 0)
         return;
-    // Pinned twin: the list stays untouched until the next verify, which syncs this stream first.
-    auto* h_live = static_cast<int32_t*>(bv.h_clear.data());
+    // Three lists of n: live slot, first row (group * levels), rows to fold. Pinned twin: untouched until
+    // the next verify, which syncs this stream first.
     int n = 0;
     for (int g = 0; g < n_groups; g++)
-        if (fold[g] != 0)
-            h_live[n++] = live[g];
+        n += fold[g] > 0 ? 1 : 0;
     if (n == 0)
         return;
+    auto* h_list = static_cast<int32_t*>(bv.h_clear.data());
+    for (int g = 0, i = 0; g < n_groups; g++) {
+        if (fold[g] <= 0)
+            continue;
+        h_list[i] = live[g];
+        h_list[n + i] = g * bv.fac_levels;
+        h_list[(2 * n) + i] = std::min(fold[g], bv.fac_levels);
+        i++;
+    }
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(bv.d_clear, h_live, n * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(bv.d_clear, h_list, 3ull * n * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
+    const int* d_live = bv.d_clear;
+    const int* d_row = bv.d_clear + n;
+    const int* d_count = bv.d_clear + (static_cast<ptrdiff_t>(n) * 2);
     const int layers = ssm.n_ssm_layers();
     const int heads = mc.ssm_dt_rank;
     const auto slot_stride = static_cast<int64_t>(ssm.slot_stride_bytes());
@@ -174,10 +190,10 @@ void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVer
                                                   static_cast<char*>(ssm.h_state(0, 0))
                                             : 0;
     ssm_conv_tap_fold(ssm.conv_state(0, 0), slot_stride, layer_stride, bv.d_tap, bv.tap_layer_stride, layers,
-                      mc.ssm_conv_channels(), mc.ssm_conv_kernel, bv.d_clear, bv.d_clear, n, stream);
+                      mc.ssm_conv_channels(), mc.ssm_conv_kernel, d_live, d_row, n, stream, d_count);
     gdn_factor_fold(ssm.h_state(0, 0), ssm.h_dtype() == QType::BF16, slot_stride, layer_stride, bv.d_fac,
-                    bv.fac_layer_stride, layers, bv.d_clear, bv.d_clear, n, heads, mc.ssm_state_size,
-                    mc.ssm_inner_size / heads, bv.fac_stride, stream);
+                    bv.fac_layer_stride, layers, d_live, d_row, n, heads, mc.ssm_state_size,
+                    mc.ssm_inner_size / heads, bv.fac_stride, stream, d_count);
 }
 
 }  // namespace imp

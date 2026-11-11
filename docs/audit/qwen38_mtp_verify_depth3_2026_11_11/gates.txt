@@ -1,0 +1,74 @@
+# Final GPU gates, image built from the shipped tree (2026-11-11T05:18:11.263060378+01:00)
+# RTX 5090, Qwen3.8-27B-NVFP4-vllm. Raw logs: scratch, not in the repo.
+
+## degen_suite.py against imp-server (defaults)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (40s)
+[04:21:14.740][INFO] engine_spec_batch_verify.cpp:272: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 3 draft(s) each (4 spare recurrent slots, the drafts before the last also as factor rows)
+stderr hits 0
+
+## make test-spec-fidelity
+[==========] Running 1 test from 1 test suite.
+[==========] 1 test from 1 test suite ran. (45265 ms total)
+[  PASSED  ] 1 test.
+
+## make verify-fast
+  prefill pp512 = 49958.57 tok/s  (baseline 50374.39, delta -0.83%)
+  GPU during bench: sm=2887MHz(med) mem=13801MHz(med) power=526W(max) n=13
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50328.94 tok/s  (baseline 50318.99, delta 0.02%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+
+== peak VRAM vs baseline ==
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+
+== graphs ON vs OFF decode gate ==
+  graphs OFF tg256 =  182.91 tok/s
+  graphs ON  tg256 =  296.57 tok/s   (1.62x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+
+== server throughput vs baseline ==
+  server c8 = 1950.48 tok/s, slowest request 515 ms  (baseline 1899.81, delta 2.67%)
+PASS server throughput within 8% of baseline
+
+== smoke prompts (degeneration check) ==
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+
+=== verify fast: OK === (started 04:22:49Z, ended 04:24:26Z)
+
+## Unset speculative.mtp_batch_verify_k follows speculative.mtp_k=1 down (1 chat x 20k, new vs main)
+REQ p1_new ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.80 decode_tps 137.12 drafted 204 accepted 177 md5 ebd044720a11
+REQ p1_main ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.77 decode_tps 121.42 drafted 211 accepted 170 md5 f8bdc9d91152
+[04:25:12.180][INFO] engine_spec_batch_verify.cpp:254: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (4 spare recurrent slots, draft 1 also as a factor row)
+[04:24:43.643][INFO] engine_spec_batch_verify.cpp:272: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 1 draft(s) each (4 spare recurrent slots)
+
+## A/B on the final image, 2 reps (new = default 3 drafts, d2 = speculative.mtp_batch_verify_k=2)
+=== conc 2 ctx 80000
+p1_new own_peak_mib 24935 kv_blocks 15350
+p1_new rep 0 s0 tps 155.91 drafted 795 acc 496 214e8d998b39
+p1_new rep 0 s1 tps 167.01 drafted 747 acc 512 c3e0c0116ff8
+AGG p1_new ctx 80000 rep 0 conc 2 tok_s 312.23
+p1_new rep 1 s0 tps 165.02 drafted 765 acc 506 a5e64e6cd255
+p1_new rep 1 s1 tps 174.16 drafted 714 acc 523 fdf641c0e39e
+AGG p1_new ctx 80000 rep 1 conc 2 tok_s 326.78
+p1_d2 own_peak_mib 24935 kv_blocks 15390
+p1_d2 rep 0 s0 tps 155.14 drafted 594 acc 465 ca9ed111b922
+p1_d2 rep 0 s1 tps 151.04 drafted 604 acc 460 1744fea60f17
+AGG p1_d2 ctx 80000 rep 0 conc 2 tok_s 302.47
+p1_d2 rep 1 s0 tps 153.47 drafted 598 acc 462 4da961ebbd7a
+p1_d2 rep 1 s1 tps 155.51 drafted 594 acc 464 da589a80e857
+AGG p1_d2 ctx 80000 rep 1 conc 2 tok_s 307.34
+=== conc 1 ctx 20000
+p1_new own_peak_mib 22208 kv_blocks 3825
+p1_new rep 0 s0 tps 195.14 drafted 726 acc 523 7602e5ba2a50
+p1_new rep 1 s0 tps 192.95 drafted 741 acc 518 26ca9150f8cd
+p1_d2 own_peak_mib 22166 kv_blocks 3825
+p1_d2 rep 0 s0 tps 181.02 drafted 568 acc 481 b565963fc4f3
+p1_d2 rep 1 s0 tps 178.29 drafted 580 acc 475 26b3ba868ecd

@@ -306,12 +306,14 @@ struct MtpPassTables {
     const int* last = nullptr;
     const int* chain_slots = nullptr;
     const int* chain_pos = nullptr;
+    const int* chain_rows = nullptr;  // 0..m-1: the chain row of each request, hidden source of chain level 2
+    const int* chain_pos2 = nullptr;  // chain_pos + 1: chain level 2
     int n = 0, m = 0;
     int max_pos = 0;        // largest feed position (validated by the upload)
     int chain_max_pos = 0;  // largest chain position (not validated: the chain checks it)
 };
-// Validates the feed rows (mtp_feed_tables_valid), packs the 7 tables into ws.h_pass_tables and uploads
-// them with one async H2D on `stream` (4n + 3m ints, m <= n <= feed_rows_cap). Waits for the previous pass's
+// Validates the feed rows (mtp_feed_tables_valid), packs the 9 tables into ws.h_pass_tables and uploads
+// them with one async H2D on `stream` (4n + 5m ints, m <= n <= feed_rows_cap). Waits for the previous pass's
 // copy before reusing the staging.
 [[nodiscard]] bool mtp_head_pass_upload(MtpDraftWorkspace& ws, const int32_t* toks, const int* src,
                                         const int* slots, const int* pos, int n, const int* last,

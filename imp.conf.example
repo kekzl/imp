@@ -1249,15 +1249,18 @@ mtp_carry            = true
 # tok/s per turn, c4 337.4 -> 460.3, c32 unchanged, KV plan 4812 -> 4531 blocks.
 # 0 = plain batched decode at any batch > 1.
 mtp_batch_verify     = 4
-# Drafts per bound request in that step: 2 = last token plus a 2-token MTP
-# chain (3 rows per request, a second head pass); 1 = one draft (2 rows). Unset,
-# a concurrent GDN-hybrid server with MTP on takes 1 only when
-# mtp_batch_verify_factor_row is false and kv_cache.host_spill_mb is 0.
-mtp_batch_verify_k   = 2
-# At 2 drafts: one spare slot per row holds the state for a full accept, draft 1
-# also leaves the forward as a factor row plus a conv tap (3.22 MiB per recurrent
-# slot on Qwen3.8-27B), folded into the live slot when only draft 1 is accepted.
-# false = a second spare slot per row (79.5 MiB each).
+# Drafts per bound request in that step: N = last token plus an N-token MTP
+# chain (N + 1 rows per request, N head passes), 3 at most, 2 without
+# mtp_batch_verify_factor_row. Unset, it follows mtp_k down (a row past the
+# drafted depth is a pad), mtp_k=auto on a concurrent GDN-hybrid server follows
+# it up, and that server takes 1 when mtp_batch_verify_factor_row is false and
+# kv_cache.host_spill_mb is 0.
+mtp_batch_verify_k   = 3
+# At 2+ drafts: one spare slot per row holds the state for a full accept, every
+# draft before the last also leaves the forward as a factor row plus a conv tap
+# (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
+# a partial accept. false = a second spare slot per row (79.5 MiB each), 2
+# drafts at most.
 mtp_batch_verify_factor_row = true
 # A bound request decoding alone verifies in that batched step too (rows on
 # paged decode attention, split-K over the context) instead of the single

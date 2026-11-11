@@ -27,18 +27,31 @@ inline constexpr int gdn_factor_floats_per_head(int state_size, int head_dim) {
 void gdn_factor_clear(float* fac, int64_t layer_stride, int n_layers, const int* slots, int n_slots,
                       int n_heads, int fac_stride, cudaStream_t stream);
 
-// Fold a row into a full state slot: H[s][d] = g*H[s][d] + k[s]*delta[d] over every (layer, head) of
-// dst_slots[i], row read at fac_slots[i]; a g = 0 row leaves the slot as is. h_pool = slot 0, layer 0
-// (float or bf16), strides in bytes. Bound verify at 2 drafts: dst = fac = the live slot (1-row state),
-// the row is draft 1.
+// Rows one fold applies in order: the bound verify at 3 drafts folds up to 2 matched drafts.
+inline constexpr int kGdnFactorFoldMaxRows = 2;
+
+// Fold rows into a full state slot: H[s][d] = g*H[s][d] + k[s]*delta[d] over every (layer, head) of
+// dst_slots[i], the n_rows[i] (nullptr = 1, max kGdnFactorFoldMaxRows) rows from fac_slots[i] on, one store
+// per element; a g = 0 row is skipped. h_pool = slot 0, layer 0 (float or bf16), strides in bytes.
 void gdn_factor_fold(void* h_pool, bool bf16, int64_t slot_stride_bytes, int64_t layer_stride_bytes,
                      const float* fac, int64_t fac_layer_stride, int n_layers, const int* dst_slots,
                      const int* fac_slots, int n, int n_heads, int state_size, int head_dim, int fac_stride,
-                     cudaStream_t stream);
+                     cudaStream_t stream, const int* n_rows = nullptr);
 
 #ifdef __CUDACC__
 
-// Token index whose row a scan with fac_out AND out_slots stores (the one after the snapshot), -1 = none.
+// Mid rows by batch group and level, [seq][real_n - 1 - mid_t levels][head]: tokens mid_t .. real_n - 2 (the
+// last token is the commit). Token t's row, null = none.
+__device__ __forceinline__ float* gdn_factor_mid(float* fac_out, int mid_t, int t, int real_n, int seq,
+                                                 int n_heads, int h, int fac_stride) {
+    if (mid_t < 0 || t < mid_t || t + 1 >= real_n)
+        return nullptr;
+    return fac_out +
+           ((static_cast<ptrdiff_t>(seq) * (real_n - 1 - mid_t) + (t - mid_t)) * n_heads + h) * fac_stride;
+}
+
+// First token index whose row a scan with fac_out AND out_slots stores (the one after the snapshot; rows up
+// to real_n - 2 follow, gdn_factor_mid), -1 = none.
 __device__ __forceinline__ int gdn_factor_mid_row(const int* out_slots, const float* fac_out, int snap_n,
                                                   int real_n) {
     return out_slots && fac_out && snap_n >= 1 && snap_n < real_n ? snap_n : -1;

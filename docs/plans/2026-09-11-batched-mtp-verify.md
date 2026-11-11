@@ -16,6 +16,10 @@ Status (2026-11-11): at 2 drafts the second spare slot per row is replaced by a 
 (`speculative.mtp_batch_verify_factor_row`, section "Draft 1 as a factor row" at the end); a concurrent
 GDN-hybrid server keeps 2 drafts by default.
 
+Status (2026-11-11, later): the factor rows are indexed by verify group and carry up to 2 drafts, a bound
+request verifies 3 drafts by default (`speculative.mtp_batch_verify_k` 3, section "Up to 3 drafts per bound
+request" at the end).
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -403,4 +407,64 @@ Refuted first variant (`spare_fold_variant_ab_table.txt`): the live slot keeps r
 1-of-2 groups and reads 509.62-509.81 there.
 
 Next: factor rows indexed by verify group instead of by recurrent slot (4 groups instead of 36 slots of
-3.22 MiB); adopting the spare when the request's own chain is 1 draft long.
+3.22 MiB), done in the next section; adopting the spare when the request's own chain is 1 draft long.
+
+## Up to 3 drafts per bound request (2026-11-11, `speculative.mtp_batch_verify_k`, default 3)
+
+A bound request stages D drafts + its last token = T = D + 1 rows; one spare slot per row keeps the state
+after all T rows, every shorter accept is rebuilt from factor rows. Evidence:
+`docs/audit/qwen38_mtp_verify_depth3_2026_11_11/`.
+
+| Piece | Rule |
+|---|---|
+| Factor rows, conv taps | indexed `[verify group g][level lv]`, row `g * L + lv`, L = D - 1 levels (`ssm_tap_levels`); drafts 1..D-1 leave the scan mid-pass next to the commit |
+| Memory | 48 layers x 4 groups x 2 drafts = 18.3 MiB of factor rows + 7.5 MiB of conv taps at D 3, 9.1 + 3.8 MiB at D 2; by recurrent slot (36 slots, #3088) it was 82.3 + 33.8 MiB at D 2 |
+| Accept | 0 matched = the live slot; D matched = the spare; 1..D-1 matched = fold that many rows + taps into the live slot (`bound_verify_factor_row_folds`, fold list `[live slot][row base g * L][count]`, `kGdnFactorFoldMaxRows` 2) |
+| Depth | `mtp_bound_verify_depth` = clamp(key, 1, 3 with factor rows, else 2); `mtp_k=auto` on a concurrent GDN hybrid follows it up; an unset key follows a smaller `mtp_k` down (`mtp_verify_depth_follows_k`, in `tools/common/mtp_auto.cpp` and `Engine::init`) |
+| KV plan | 10901 blocks on main (#3088) -> 11201 at D 2 -> 11164 at D 3 (Qwen3.8-27B-NVFP4-vllm, 32 GB) |
+
+Qwen3.8-27B-NVFP4-vllm server defaults, RTX 5090, `tools/analysis/mtp_longctx_ab.sh`, one image, arms default
+(D 3) against `speculative.mtp_batch_verify_k=2`, 3 sessions x 768 greedy tokens per load, streams started
+together (`ab_768x3_table.txt`, `ab_768x3_digest.txt`):
+
+| load | D 3, tok/s per stream | D 2 | D 3, all streams (min-max) | D 2, all streams (min-max) | accepted / drafted D 3 | D 2 |
+|---|---|---|---|---|---|---|
+| 1 x 20k | 181.83 | 174.52 | | | 1505 / 2370 | 1409 / 1772 |
+| 1 x 80k | 181.18 | 164.89 | | | 1536 / 2277 | 1390 / 1812 |
+| 2 x 20k | 164.40 | 156.36 | 318.54 (306.59-334.47) | 295.45 (292.43-299.53) | 2954 / 4860 | 2697 / 3738 |
+| 2 x 80k | 160.96 | 150.90 | 310.53 (286.91-322.44) | 297.62 (283.43-307.35) | 3010 / 4650 | 2739 / 3654 |
+| 4 x 8k | 163.02 | 151.03 | 602.79 (580.98-622.74) | 581.40 (579.48-584.12) | 6040 / 9096 | 5450 / 7244 |
+| 4 x 20k | 144.64 | 136.78 | 544.05 (536.57-554.28) | 522.60 (508.96-536.42) | 5890 / 9510 | 5296 / 7528 |
+
+| | D 2 (3 rows) | D 3 (4 rows) |
+|---|---|---|
+| step at 2 requests, 80k: forward + argmax, head, tokens/step | 13.90 ms, 2.48 ms, 5.01 | 14.48 ms, 3.63 ms, 5.95 |
+| step at 4 requests, 20k | 14.44 ms, 2.91 ms, 9.56 | 15.23 ms, 4.31 ms, 11.27 |
+| own peak, 1 x 20k / 4 x 20k / 2 x 80k | 22166 / 24473 / 24950 MiB | 22208 / 24531 / 24935 MiB |
+
+- The third draft is accepted less often (1 x 20k 63.5 % of the drafts against 79.5 %) and still pays: the
+  step at 4 requests carries 11.27 tokens in 19.54 ms against 9.56 in 17.35 ms.
+- The gain is text dependent: worst session 1 x 20k, 158.17 tok/s at D 3 against 165.64 at D 2 (464 of 903
+  against 453 of 624 drafts accepted).
+- D 2 on this tree against main d1f91bd6 (`ab_main_control_digest.txt`): 16 of 16 streams equal in md5,
+  drafted and accepted counts.
+- A staged row that carries no draft costs: main, 1 chat x 20k, 1 draft, 124.11 tok/s at 3 rows against
+  137.69 at 2 rows. Hence the verify depth follows a smaller `mtp_k`.
+
+Gates. Kernel: `GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThree` (+ `Bf16`) and
+`ConvFactorRowsFoldOneOrTwoDraftsOfThree`; 4 kernel mutants fail 2-6 of the 9 tests. Depth resolution:
+`MtpAuto.*` and `BatchVerifyPredicates.*` (42 tests), 5 mutants fail 2-4 each; `Engine::init` without its
+follow-down call serves 3 drafts at `speculative.mtp_k=2` (all in `mutants.txt`). Engine level:
+`tools/analysis/mtp_factor_row_equiv.sh` (GPU, manual, `equiv.txt`: 5 of 5 arms md5-equal on a quiet host,
+its 2-chat pair check differed once beside `make preflight`). Final image: `degen_suite.py` 52 checks 0 FAIL,
+`make test-spec-fidelity` passed, `make verify-fast` OK (`gates.txt`).
+
+The engine detector is 1 chat at a fixed depth with `gdn.state_bf16=false` and `speculative.ngram=false`,
+`speculative.mtp_k` varied: at D 3 the texts at `mtp_k` 3, 2, 1 are md5-equal (531fa8137d6b); an engine
+that never folds or folds 1 row at most changes the `mtp_k=3` text (a0e675b52ef9, afc4f7b6b391). The
+greedy text is NOT equal across depths: 5e231af2f6e6 at D 2 on this tree and on main, 62b9754c388b at D 1
+on main (rows per step 4, 3, 2). At 2 chats the text also follows which stream joins first, so a 2-chat md5
+is no detector.
+
+Next: verify depth per request by its acceptance (the worst session above); adopting the spare when the
+request's own chain is shorter than D.

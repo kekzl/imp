@@ -9,6 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - MoE decode with host-resident experts prefetches 6 predicted expert keys per layer instead of 2, one copy block per key (`moe.expert_prefetch`, new `moe.expert_prefetch_blocks`). Qwen3.8-Flash-Next-NVFP4 server, 6 prompts x 400 tokens: 95.84 -> 102.84 tok/s, answers byte-identical; Kimi-Linear-48B and Qwen3-30B-A3B unchanged (#3085).
 - The MTP draft attention of a multi-slot server scans each head KV ring with 16 CTAs per head and row instead of 1: 886 -> 140 us per pass at 16384 rows. Qwen3.8-27B-NVFP4 server, one 80k-token chat: 121.6 -> 128.2 tok/s, with `kv_cache.host_spill_mb` 135.9 -> 148.2; two chats 116.5 -> 121.0 and 129.7 -> 139.2 per stream. MTP workspace +8 MiB (#3087).
 - At 2 MTP drafts the bound batched verify keeps draft 1 as a factor row instead of a second spare recurrent slot (`speculative.mtp_batch_verify_factor_row`), so a concurrent GDN-hybrid server keeps `mtp_batch_verify_k=2`. Qwen3.8-27B-NVFP4 server, 2 chats x 80k: 240.2 -> 285.0 tok/s, 1 chat 128.4 -> 154.3; KV plan 11239 -> 10901 blocks (#3088).
+- A concurrent GDN-hybrid server verifies 3 MTP drafts per request instead of 2 (`speculative.mtp_batch_verify_k` default 3, `mtp_k=auto` follows). Qwen3.8-27B-NVFP4 server, tok/s per stream, 2 -> 3 drafts: 1 chat x 80k 164.9 -> 181.2, 2 chats x 80k 150.9 -> 161.0, 4 chats x 20k 136.8 -> 144.6; KV plan 10901 -> 11164 blocks (#3089).
 
 ## [0.65.0] - 2026-11-09
 

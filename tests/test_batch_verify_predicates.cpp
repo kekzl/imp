@@ -228,7 +228,7 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     EXPECT_EQ(cfg.speculative.mtp_batch_verify, 4) << "default on: 2-4 chats verify together";
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2) << "default: 2 drafts, 3 rows per request";
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 3) << "default: 3 drafts, 4 rows per request";
     EXPECT_TRUE(cfg.speculative.mtp_batch_verify_factor_row);
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "factor row: one spare per row";
     cfg.speculative.mtp_batch_verify_factor_row = false;
@@ -270,6 +270,27 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     dense.mtp_ = std::make_unique<MtpHead>();
     dense.mtp_->loaded = true;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &dense, 32), 0) << "no grouped verify scan to batch";
+    EXPECT_EQ(mtp_bound_verify_config_rows(cfg), 4) << "the config half does not see the model";
+    cfg.speculative.hybrid = false;
+    EXPECT_EQ(mtp_bound_verify_config_rows(cfg), 0);
+    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0);
+}
+
+// Engine::init applies it too: an embedder's mtp_k=2 does not forward a pad row per request.
+TEST(BatchVerifyPredicates, UnsetVerifyDepthFollowsASmallerDraftDepth) {
+    const auto depth = [](std::vector<std::string> sets) {
+        RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides(sets).empty());
+        mtp_verify_depth_follows_k(cfg);
+        return cfg.speculative.mtp_batch_verify_k;
+    };
+    EXPECT_EQ(depth({}), 3) << "mtp_k=auto is not a depth";
+    EXPECT_EQ(depth({"speculative.mtp_k=0"}), 3);
+    EXPECT_EQ(depth({"speculative.mtp_k=2"}), 2);
+    EXPECT_EQ(depth({"speculative.mtp_k=1"}), 1);
+    EXPECT_EQ(depth({"speculative.mtp_k=4"}), 3);
+    EXPECT_EQ(depth({"speculative.mtp_k=1", "speculative.mtp_batch_verify_k=3"}), 3) << "the operator set it";
+    EXPECT_EQ(depth({"speculative.mtp_k=2", "speculative.mtp_batch_verify_k=1"}), 1);
 }
 
 // An undrafted row forwards a pad that is never accepted: half the rows must draft.
@@ -300,9 +321,11 @@ TEST(BatchVerifyPredicates, LoneBoundRequestVerifiesAsAGroupOfOne) {
 
 // speculative.mtp_batch_verify_k: 1 + k accepted rows name the slot that holds the state after them.
 TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
-    EXPECT_EQ(mtp_bound_verify_depth(0), 1);
-    EXPECT_EQ(mtp_bound_verify_depth(2), 2);
-    EXPECT_EQ(mtp_bound_verify_depth(5), 2) << "the step stages two snapshots at most";
+    EXPECT_EQ(mtp_bound_verify_depth(0, true), 1);
+    EXPECT_EQ(mtp_bound_verify_depth(2, false), 2);
+    EXPECT_EQ(mtp_bound_verify_depth(5, false), 2) << "the step stages two snapshots at most";
+    EXPECT_EQ(mtp_bound_verify_depth(3, true), 3);
+    EXPECT_EQ(mtp_bound_verify_depth(5, true), 3) << "one fold applies kGdnFactorFoldMaxRows = 2 rows";
     // One draft: reject keeps the live slot (row-1 snapshot), accept takes the spare (both rows).
     EXPECT_EQ(bound_verify_state_slot(0, 1), 0);
     EXPECT_EQ(bound_verify_state_slot(1, 1), 1);
@@ -319,18 +342,27 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(bound_verify_kept_slot(2, 2, true), 1);
     EXPECT_EQ(bound_verify_kept_slot(1, 2, false), 2);
     EXPECT_EQ(bound_verify_kept_slot(2, 2, false), 1);
-    EXPECT_TRUE(bound_verify_factor_row_folds(true, false, 1, 2));
-    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 0, 2));
-    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 2, 2)) << "the spare already holds all 3 rows";
-    EXPECT_FALSE(bound_verify_factor_row_folds(true, true, 1, 2))
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 1, 2), 1);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 0, 2), 0);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 2, 2), 0) << "the spare already holds all 3 rows";
+    // Three drafts: 1 or 2 accepted fold that many rows, 3 take the spare (all 4 rows).
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 1, 3), 1);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 2, 3), 2);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 3, 3), 0);
+    EXPECT_EQ(bound_verify_kept_slot(2, 3, true), 0);
+    EXPECT_EQ(bound_verify_kept_slot(3, 3, true), 1);
+    EXPECT_EQ(bound_verify_spares_per_row(3, true), 1);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, true, 1, 2), 0)
         << "a finished request keeps its slot as is";
-    EXPECT_FALSE(bound_verify_factor_row_folds(false, false, 1, 2));
-    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 1, 1)) << "one draft: accept takes the spare";
+    EXPECT_EQ(bound_verify_factor_row_folds(false, false, 1, 2), 0);
+    EXPECT_EQ(bound_verify_factor_row_folds(true, false, 1, 1), 0) << "one draft: accept takes the spare";
     EXPECT_EQ(bound_verify_spares_per_row(2, true), 1);
     EXPECT_EQ(bound_verify_spares_per_row(2, false), 2);
     EXPECT_EQ(bound_verify_spares_per_row(1, false), 1);
-    // Qwen3.8-27B: 48 layers x (48 heads x 260 floats + 10240 halfs) + 1 list int per slot.
-    EXPECT_EQ(bound_verify_factor_row_bytes(48, 1, 48, 128, 128, 10240), 3379204u);
+    // Qwen3.8-27B: 48 layers x (48 heads x 260 floats + 10240 halfs) per draft before the last + 3 list
+    // ints per group.
+    EXPECT_EQ(bound_verify_factor_row_bytes(48, 1, 1, 48, 128, 128, 10240), 3379212u);
+    EXPECT_EQ(bound_verify_factor_row_bytes(48, 4, 2, 48, 128, 128, 10240), (8u * 3379200u) + 48u);
     RuntimeConfig cfg;
     EXPECT_TRUE(mtp_bound_verify_factor_row(cfg));
     cfg.speculative.mtp_batch_verify_k = 1;

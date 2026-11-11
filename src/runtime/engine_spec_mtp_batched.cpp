@@ -55,7 +55,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
         return;
     std::vector<int32_t> toks;
     std::vector<int> src, slots, pos, last_row, bound_g;
-    // Second draft (bv_.depth 2): one chained head row per bound request at its next position.
+    // Drafts past the first (bv_.depth >= 2): chained head rows per bound request at its next position.
     std::vector<int> chain_slot, chain_pos;
     for (int g = 0; g < N; ++g) {
         Request& req = *reqs[g];
@@ -102,8 +102,8 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     static double t_head_ms = 0.0;
     static long long t_calls = 0, t_rows = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    // The next draft per request lands in ws->d_chain_tokens: m rows, m more with the chain.
-    if (2 * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
+    // The next drafts per request land in ws->d_chain_tokens: m rows per draft level (bv_.depth levels).
+    if (std::max(bv_.depth, 1) * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
         fail_all("batched draft: too many rows");
         return;
     }
@@ -129,17 +129,19 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
             IMP_LOG_INFO("mtp-batched-feed: %lld calls, %.2f rows/call, %.2f ms/call (feed + LM head + sync)",
                          t_calls, static_cast<double>(t_rows) / t_calls, t_head_ms / t_calls);
     }
-    const bool two = n_out == 2 * m;
+    const int levels = std::min(n_out / m, kMtpBoundVerifyMaxDepth);
     for (int i = 0; i < m; ++i) {
         const int g = bound_g[i];
-        const int32_t tok2 = two ? h_out[static_cast<size_t>(m) + i] : -1;
-        mtp_batched_set_draft_(*reqs[g], emitted[g], h_out[static_cast<size_t>(i)], tok2);
+        int32_t drafts[kMtpBoundVerifyMaxDepth];
+        for (int lv = 0; lv < levels; ++lv)
+            drafts[lv] = h_out[(static_cast<size_t>(lv) * m) + i];
+        mtp_batched_set_draft_(*reqs[g], emitted[g], {drafts, static_cast<size_t>(levels)});
     }
 }
 
-// A bound request after the batched feed: its emitted tokens join the head history, the drafts (tok2 < 0 =
-// one draft; the request's own mtp_k bounds the chain) become its pending chain for the next verify.
-void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok, int32_t tok2) {
+// A bound request after the batched feed: its emitted tokens join the head history, the drafts (cut at the
+// first invalid token and at the request's own mtp_k) become its pending chain for the next verify.
+void Engine::mtp_batched_set_draft_(const Request& req, int emitted, std::span<const int32_t> drafts) {
     auto* ws = mtp_ws_storage_.get();
     const int vocab_size = model_->config_.vocab_size;
     mtp_activate_(req.id);
@@ -147,17 +149,17 @@ void Engine::mtp_batched_set_draft_(const Request& req, int emitted, int32_t tok
     mtp_active_.history.insert(mtp_active_.history.end(), t, t + emitted);
     ws->mtp_pos += emitted;
     mtp_active_.chains.clear();
-    if (tok < 0 || tok >= vocab_size) {
-        mtp_active_.pending.clear();
+    mtp_active_.pending.clear();
+    const size_t cap = std::min(drafts.size(), static_cast<size_t>(std::max(mtp_request_k_(req), 1)));
+    for (size_t i = 0; i < cap && drafts[i] >= 0 && drafts[i] < vocab_size; ++i)
+        mtp_active_.pending.push_back(drafts[i]);
+    if (mtp_active_.pending.empty()) {
         mtp_active_.draft_ctx = -1;
         mtp_pool_.pending_prediction = -1;
         return;
     }
-    mtp_active_.pending.assign(1, tok);
-    if (tok2 >= 0 && tok2 < vocab_size && mtp_request_k_(req) >= 2)
-        mtp_active_.pending.push_back(tok2);
     mtp_active_.draft_ctx = static_cast<int>(mtp_active_.history.size());
-    mtp_pool_.pending_prediction = tok;
+    mtp_pool_.pending_prediction = mtp_active_.pending.front();
 }
 
 void Engine::mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,

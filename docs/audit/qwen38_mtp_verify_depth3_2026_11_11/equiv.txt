@@ -1,0 +1,14 @@
+pair spare: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 spare 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b spare 805077946d6b equal
+pair row: drafted 606
+pair ctx/stream 20000 s0: spare 203b411ea078 row 203b411ea078 equal
+pair ctx/stream 20000 s1: spare 805077946d6b row 805077946d6b equal
+depth k1: drafted 203
+depth ctx/stream 20000 s0: k1 531fa8137d6b k1 531fa8137d6b equal
+depth k2: drafted 298
+depth ctx/stream 20000 s0: k1 531fa8137d6b k2 531fa8137d6b equal
+depth k3: drafted 372
+depth ctx/stream 20000 s0: k1 531fa8137d6b k3 531fa8137d6b equal
+# Run 1 of the pair check ran beside `make preflight` (CPU load): s0 ttft 3.11 s (spare) vs 3.29 s (row), texts
+# 406f9c54e6d1 / 1167a6e06dfc in the row arm, rc=1. Run 2 above: quiet host, image rebuilt after the tidy casts and clang-format, 2 of 2 equal.

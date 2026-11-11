@@ -1,0 +1,107 @@
+# Mutants of the depth-3 bound verify (dev build, Qwen3.8-27B-NVFP4-vllm, RTX 5090)
+
+## Kernel mutants, imp-tests --gtest_filter='GdnVerifyTwoDraftsTest.*' (9 tests)
+# M1 the fold ignores the row count   M2 state fold applies the rows in reverse order
+# M3 mid-scan rows + taps always land on level 0   M4 the fold always takes 2 rows
+== M1
+[  FAILED  ] 3 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16
+[  PASSED  ] 6 tests.
+== M2
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16
+[  PASSED  ] 7 tests.
+== M3
+[  FAILED  ] 3 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16
+[  PASSED  ] 6 tests.
+== M4
+[  FAILED  ] 6 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowFoldsTheLiveWindowToTwoRows
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThree
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneOrTwoDraftsOfThreeBf16
+[  PASSED  ] 3 tests.
+
+## Engine mutants, 1 chat x 20k, gdn.state_bf16=false, speculative.ngram=false, depth 3,
+## speculative.mtp_k 3 vs 1 (clean build: equal md5)
+# E1 the engine never folds   E3 the engine folds 1 row at most
+== clean
+REQ p1_d3k3 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.80 decode_tps 185.35 drafted 372 accepted 257 md5 531fa8137d6b
+REQ p1_d3k2 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.80 decode_tps 156.38 drafted 298 accepted 232 md5 531fa8137d6b
+REQ p1_d3k1 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.77 decode_tps 117.02 drafted 203 accepted 178 md5 531fa8137d6b
+REQ p1_d3k3b ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.77 decode_tps 186.23 drafted 372 accepted 257 md5 531fa8137d6b
+== E1
+REQ p1_d3k3 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.77 decode_tps 148.73 drafted 474 accepted 223 md5 a0e675b52ef9
+REQ p1_d3k1 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.77 decode_tps 110.92 drafted 217 accepted 164 md5 6f9868c24416
+== E3
+REQ p1_d3k3 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.78 decode_tps 173.43 drafted 396 accepted 249 md5 afc4f7b6b391
+REQ p1_d3k1 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 1.78 decode_tps 116.14 drafted 203 accepted 178 md5 531fa8137d6b
+
+## Depth resolution mutants, test-core --gtest_filter='MtpAuto.*:BatchVerifyPredicates.*' (42 tests)
+# A1 mtp_k=auto does not follow the verify depth   B1 config rows ignore speculative.hybrid
+# B2 config rows ignore mtp_history_slots   B3 the verify depth never follows mtp_k
+# B4 it follows over an operator-set key
+=== A1: 1 mutated line(s)
+dev rc=0
+test rc=1
+[  FAILED  ] 4 tests, listed below:
+[  FAILED  ] MtpAuto.AutoDepthAndVerifyDepthFollowEachOther
+[  FAILED  ] MtpAuto.ConcurrentHybridKeepsThePool
+[  FAILED  ] MtpAuto.ConcurrentHybridTakesThePair
+[  FAILED  ] MtpAuto.HostSpillKeepsBothDraftsButNotTheHeadCopy
+[  PASSED  ] 38 tests.
+=== B1: 1 mutated line(s)
+dev rc=0
+test rc=1
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] BatchVerifyPredicates.BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow
+[  FAILED  ] MtpAuto.AutoDepthAndVerifyDepthFollowEachOther
+[  PASSED  ] 40 tests.
+=== B2: 1 mutated line(s)
+dev rc=0
+test rc=1
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] BatchVerifyPredicates.BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow
+[  FAILED  ] MtpAuto.AutoDepthAndVerifyDepthFollowEachOther
+[  PASSED  ] 40 tests.
+=== B3: 1 mutated line(s)
+dev rc=0
+test rc=1
+[  FAILED  ] 4 tests, listed below:
+[  FAILED  ] BatchVerifyPredicates.UnsetVerifyDepthFollowsASmallerDraftDepth
+[  FAILED  ] MtpAuto.AutoDepthAndVerifyDepthFollowEachOther
+[  FAILED  ] MtpAuto.ExplicitDepthOnAConcurrentHybridKeepsThePoolToo
+[  FAILED  ] MtpAuto.SingleStreamKeepsTheFullDraft
+[  PASSED  ] 38 tests.
+=== B4: 1 mutated line(s)
+dev rc=0
+test rc=1
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] BatchVerifyPredicates.UnsetVerifyDepthFollowsASmallerDraftDepth
+[  FAILED  ] MtpAuto.AutoDepthAndVerifyDepthFollowEachOther
+[  PASSED  ] 40 tests.
+=== restore: 0 mutated line(s)
+dev rc=0
+test rc=0
+[  PASSED  ] 42 tests.
+
+## Engine::init follow-down, dev server at --set speculative.mtp_k=2
+# T the 2 calls in tools/common/mtp_auto.cpp removed   TE the call in Engine::init removed too
+=== T: tools 2 engine 0 line(s) removed
+dev rc=0
+speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each
+mtp_batch_verify_factor_row: 48 layers x 4 groups x 1 draft(s)
+=== TE: tools 2 engine 1 line(s) removed
+dev rc=0
+speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 3 draft(s) each
+mtp_batch_verify_factor_row: 48 layers x 4 groups x 2 draft(s)
+=== restore: tools 0 engine 0 line(s) removed
+dev rc=0
