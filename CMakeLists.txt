@@ -478,6 +478,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/stop_mask.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
+    src/runtime/suffix_shadow.cpp
     src/runtime/spec_corpus.cpp
     src/runtime/token_recycle_draft.cpp
     src/vision/vision_pipeline.cpp
@@ -1151,6 +1152,7 @@ if(IMP_BUILD_TESTS)
         # three decide something on a GPU path from pure inputs; CI has no GPU.
         tests/test_spec_request.cpp
         tests/test_suffix_draft.cpp
+        tests/test_suffix_shadow.cpp
         tests/test_token_recycle_draft.cpp
         tests/test_routing_decision.cpp
         tests/test_think_stop_logic.cpp

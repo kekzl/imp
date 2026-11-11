@@ -1459,7 +1459,8 @@ moe_expert_hist      = ""
 # Per-token MoE expert trace (JSON, decode only) written at teardown; the
 # temporal-locality dataset the expert-cache question needs. "" = off.
 moe_expert_trace     = ""
-# Per-step speculative draft/verify trace on the log. Legacy env: IMP_SPEC_TRACE.
+# Per-step speculative draft/verify trace on the log (bound verify: spec-batch-trace,
+# spec-sfx-shadow). Legacy env: IMP_SPEC_TRACE.
 spec_trace           = false
 # Conditional-graph jump trace on the log. Legacy env: IMP_JUMP_TRACE.
 jump_trace           = false

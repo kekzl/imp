@@ -580,3 +580,70 @@ Gates. CPU: `SpecAcceptRows.ChunkEndsAtTheThinkBudget` (`tests/test_spec_gates.c
 removed (`mutants.txt`). Image: `degen_suite.py` 52 checks 0 FAIL at defaults and at `--max-batch 1`,
 `make test-spec-fidelity` passed, `make verify-fast` OK (`gates.txt`). Speed at server defaults is not compared:
 the texts of the two images differ from the budget cut on (`gates.txt`, last block).
+
+## Suffix drafts for bound requests: shadow trace, not built (2026-11-11, B-70)
+
+Question: `Engine::batch_verify_draft_` takes the MTP draft first and asks the suffix index only when MTP has
+none, so a bound agent chat never drafts a copy span (file contents, earlier tool arguments). Would suffix
+precedence at a long match pay?
+
+Instrument. Under `diagnostics.spec_trace` every bound request step also asks the suffix index for a 32-token
+draft (`kSuffixShadowDrafts`, `src/runtime/suffix_shadow.h`) and logs, once the tokens are known,
+`spec-sfx-shadow id=I pos=P n=N T=T mtp=nd:m:e sfx=len:match:agree`: `match` is the backward match behind the
+draft (`SuffixDraftIndex::draft` reports it, capped at `speculative.max_match`), `agree` the leading draft
+tokens equal to what the request emitted from `pos` on. The step itself is unchanged.
+
+Workload. `tools/analysis/agent_turn_replay.py` replays recorded agent sessions (Anthropic block format) against
+`/v1/messages`: request t sends the recorded messages before assistant turn t and reads the model's own turn,
+the next request continues from the recorded turn, so the prefix cache hits like in an agent loop (cached
+95.5-97.3 % of the prompt tokens) and no tool runs. Recorded familiar SWE-bench sessions (55 sessions, 4427
+turns: thinking 75.2 %, tool calls 20.9 %, text 4.0 % of the assistant characters, `recorded_mix.txt`),
+Qwen3.8-27B-NVFP4-vllm server at defaults + `kv_cache.host_spill_mb=16384`, `speculative.max_match=32`,
+`max_tokens` 4096, think budget 2048, tools rebuilt from the recorded calls, no system prompt.
+
+Serial run (6 sessions x 60 turns, every request decodes alone; `client_serial.txt`, `shadow_serial.txt`):
+360 requests, 166353 output tokens, reasoning 75.2 %, 165.47 tok/s decode, 60599 steps at 16.324 ms.
+
+| match | steps | share % | MTP tok/step | suffix agree | agree >= 8 % | agree >= 16 % | suffix tok/step at MTP depth |
+|---|---|---|---|---|---|---|---|
+| none | 52091 | 86.0 | 2.52 | 0.00 | 0.0 | 0.0 | 1.00 |
+| below 8 | 1930 | 3.2 | 3.73 | 4.08 | 15.9 | 6.4 | 2.85 |
+| 8-11 | 2029 | 3.3 | 3.78 | 5.83 | 28.0 | 10.4 | 3.29 |
+| 12-15 | 1055 | 1.7 | 4.28 | 8.06 | 39.0 | 14.5 | 3.94 |
+| 16-23 | 1186 | 2.0 | 4.44 | 9.75 | 42.5 | 22.6 | 4.00 |
+| 24-31 | 655 | 1.1 | 3.98 | 10.76 | 42.0 | 29.3 | 3.93 |
+| 32+ | 1653 | 2.7 | 4.69 | 19.45 | 71.9 | 57.8 | 4.58 |
+
+Where the suffix index matches, MTP already fills its 4 drafts (3.73-4.69 of 5 tokens per step): a suffix draft
+at MTP depth emits less in every bucket. Only rows past the MTP depth can pay.
+
+Policy replay (`tools/analysis/sfx_shadow.py`, a calculation, no A/B): a step with match >= M runs the suffix
+draft at K rows and emits min(agree, K) + 1 tokens, every other step is the recorded MTP step; a row past the
+measured row count costs 0.27 ms per request in the step (one row count per step: the other requests pad).
+Gain against the recorded run, 1 request (168.16 tok/s):
+
+| M | K 4 | K 8 | K 16 | K 32 |
+|---|---|---|---|---|
+| 6 | -1.04 % | +1.80 % | +2.87 % | +2.23 % |
+| 8 | -0.55 % | +1.95 % | +3.08 % | +2.96 % |
+| 12 | -0.26 % | +1.76 % | +2.75 % | +2.90 % |
+| 16 | -0.15 % | +1.45 % | +2.21 % | +2.51 % |
+| 24 | -0.02 % | +1.13 % | +1.68 % | +2.02 % |
+| 32 | -0.05 % | +0.85 % | +1.34 % | +1.64 % |
+
+Mixed run (1 chat x 60 turns, then 4 chats x 60 turns, 190118 tokens, row cost 0.284 ms fitted over 4 step
+shapes; `client_mixed.txt`, `shadow_mixed.txt`): 1 request best +1.31 % (M 8, K 16); 4 requests lose at 23 of
+24 points (M 12: K 8 -1.77 %, K 16 -5.00 %, K 32 -11.96 %), the pad rows of the 3 other requests cost more than
+the copy returns.
+
+Decision: not built. A deep suffix step needs factor-row folds past 3 rows (`kGdnFactorFoldMaxRows`), cap rows
+and graph shapes up to 17 rows and a ragged row count per request to stop losing at 4 chats, for a replayed
++3.08 % at 1 request. The trace and both tools stay as the instrument. Gates: `SuffixShadow.*`
+(`tests/test_suffix_shadow.cpp`, 5 tests), 6 of 6 mutants red (`mutants.txt`); 1 greedy chat x 20k, main, branch and
+branch + trace md5-equal with 460 drafted, 266 accepted each, 115 shadow lines in the trace arm; `make verify-fast`
+OK (`gates.txt`). Evidence
+`docs/audit/qwen38_suffix_shadow_2026_11_11/`.
+
+The same directory holds the profile behind ledger row B-69.2 (`head_level_*.txt`): the fourth head chain
+level costs 1.32 ms at 4 requests; 3 matrix kernels hold 12.376 of 17.043 ms exclusive per step at 1 chat, every
+other kernel stays below 0.7 ms. No lever identified, no arm built.

@@ -1,0 +1,66 @@
+tables: CUPTI_ACTIVITY_KIND_CUDA_EVENT CUPTI_ACTIVITY_KIND_OVERHEAD CUPTI_ACTIVITY_KIND_SYNCHRONIZATION CUPTI_ACTIVITY_KIND_MEMCPY CUPTI_ACTIVITY_KIND_MEMSET CUPTI_ACTIVITY_KIND_KERNEL CUPTI_ACTIVITY_KIND_RUNTIME ENUM_CUPTI_STREAM_TYPE ENUM_CUPTI_SYNC_TYPE ENUM_CUPTI_OVERHEAD_TYPE
+gaps ^rowwise_argmax_reduce_kernel$ -> ^embedding_lookup_vec_kernel$: 263, mean 994.0 us
+API time inside the gap, per gap (sum over threads 932.9 us):
+     534.9 us    0.02 calls  cudaGraphInstantiate
+     181.6 us    0.98 calls  cudaGraphLaunch
+      67.8 us   26.87 calls  cudaLaunchKernelExC
+      53.5 us    2.92 calls  cudaMemcpyAsync
+      52.8 us   12.33 calls  cudaLaunchKernel
+       9.2 us    0.00 calls  cudaGraphExecUpdate
+       8.9 us    0.03 calls  cuMemCreate
+       7.2 us    1.05 calls  cudaStreamSynchronize
+       5.5 us    0.02 calls  cudaGraphDestroy
+       5.3 us    0.03 calls  cuMemSetAccess
+       1.9 us   12.35 calls  cuKernelGetName
+       1.0 us    3.31 calls  cudaStreamSetAttribute
+most common call sequences:
+  103 x: cudaMemcpyAsync cudaStreamSynchronize cudaMemcpyAsync cudaMemcpyAsync cudaGraphLaunch cudaLaunchKernelExC cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel
+  59 x: cudaStreamSynchronize cudaMemcpyAsync cudaMemcpyAsync cudaGraphLaunch cudaLaunchKernelExC cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName
+  24 x: cudaMemcpyAsync cudaStreamSynchronize cudaMemcpyAsync cudaMemcpyAsync cudaGraphLaunch cudaLaunchKernelExC cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel cuKernelGetName cudaLaunchKernel
+median gap timeline (325.7 us), offsets from the gap start in us:
+    -3801.6 ..       0.5  tid      174  cudaMemcpyAsync_v3020
+        1.7 ..       5.8  tid      174  cudaStreamSynchronize_v3020
+       39.6 ..      66.5  tid      174  cudaMemcpyAsync_v3020
+       67.0 ..      75.3  tid      174  cudaMemcpyAsync_v3020
+       76.9 ..     239.7  tid      174  cudaGraphLaunch_v10000
+      243.6 ..     303.4  tid      174  cudaLaunchKernelExC_v11060
+      306.8 ..     307.5  tid      174  cuKernelGetName
+      308.1 ..     332.2  tid      174  cudaLaunchKernel_v7000
+      333.9 ..     334.1  tid      174  cuKernelGetName
+      334.2 ..     341.5  tid      174  cudaLaunchKernel_v7000
+      342.0 ..     342.2  tid      174  cuKernelGetName
+      342.3 ..     347.9  tid      174  cudaLaunchKernel_v7000
+      348.3 ..     348.4  tid      174  cuKernelGetName
+      348.5 ..     353.7  tid      174  cudaLaunchKernel_v7000
+      354.2 ..     354.4  tid      174  cuKernelGetName
+      354.5 ..     360.9  tid      174  cudaLaunchKernel_v7000
+      361.3 ..     361.4  tid      174  cuKernelGetName
+      361.5 ..     367.2  tid      174  cudaLaunchKernel_v7000
+      367.7 ..     367.8  tid      174  cuKernelGetName
+      367.9 ..     372.9  tid      174  cudaLaunchKernel_v7000
+      373.5 ..     373.6  tid      174  cuKernelGetName
+      373.8 ..     379.6  tid      174  cudaLaunchKernel_v7000
+      380.0 ..     380.1  tid      174  cuKernelGetName
+      380.2 ..     385.9  tid      174  cudaLaunchKernel_v7000
+      386.4 ..     386.5  tid      174  cuKernelGetName
+      386.6 ..     391.6  tid      174  cudaLaunchKernel_v7000
+      392.0 ..     392.1  tid      174  cuKernelGetName
+      392.2 ..     397.9  tid      174  cudaLaunchKernel_v7000
+      398.3 ..     398.4  tid      174  cuKernelGetName
+      398.5 ..     402.5  tid      174  cudaLaunchKernel_v7000
+      402.8 ..     402.9  tid      174  cuKernelGetName
+      403.1 ..     407.3  tid      174  cudaLaunchKernel_v7000
+      407.6 ..     407.7  tid      174  cuKernelGetName
+      407.8 ..     412.1  tid      174  cudaLaunchKernel_v7000
+      412.4 ..     412.5  tid      174  cuKernelGetName
+      412.6 ..     415.9  tid      174  cudaLaunchKernel_v7000
+      416.2 ..     416.3  tid      174  cuKernelGetName
+      416.3 ..     421.0  tid      174  cudaLaunchKernel_v7000
+      421.3 ..     421.4  tid      174  cuKernelGetName
+      421.5 ..     425.6  tid      174  cudaLaunchKernel_v7000
+      426.2 ..     426.4  tid      174  cuKernelGetName
+      426.4 ..     430.9  tid      174  cudaLaunchKernel_v7000
+      431.4 ..     431.5  tid      174  cuKernelGetName
+      431.6 ..     435.1  tid      174  cudaLaunchKernel_v7000
+      436.1 ..     448.1  tid      174  cudaMemcpyAsync_v3020
+      448.4 ..   14541.3  tid      174  cudaStreamSynchronize_v3020

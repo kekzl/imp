@@ -50,8 +50,8 @@ void SuffixDraftIndex::append(std::span<const int32_t> toks) {
     }
 }
 
-NgramDraft SuffixDraftIndex::draft(int k, int k_max) const {
-    return draft_impl_(hist_.data(), static_cast<int>(hist_.size()), k, k_max, /*self=*/true);
+NgramDraft SuffixDraftIndex::draft(int k, int k_max, int* match) const {
+    return draft_impl_(hist_.data(), static_cast<int>(hist_.size()), k, k_max, /*self=*/true, match);
 }
 
 NgramDraft SuffixDraftIndex::draft_from(std::span<const int32_t> query, int k, int k_max) const {
@@ -124,7 +124,10 @@ Vote vote_at(const std::vector<int32_t>& hist, const std::vector<Candidate>& can
 
 // q / qn: the history whose suffix is continued (hist_ itself when self). An occurrence's
 // continuation ends at the history end or at a negative separator token.
-NgramDraft SuffixDraftIndex::draft_impl_(const int32_t* q, int qn, int k, int k_max, bool self) const {
+NgramDraft SuffixDraftIndex::draft_impl_(const int32_t* q, int qn, int k, int k_max, bool self,
+                                         int* match) const {
+    if (match != nullptr)
+        *match = 0;
     const int n = static_cast<int>(hist_.size());
     if (k <= 0 || qn < min_match_ + (self ? 1 : 0) || n == 0)
         return {};
@@ -151,8 +154,11 @@ NgramDraft SuffixDraftIndex::draft_impl_(const int32_t* q, int qn, int k, int k_
         if (i >= k && !(unanimous && (v.votes >= 2 || v.len >= max_match_)))
             break;
         out.push_back(v.tok);
-        if (i == 0)
+        if (i == 0) {
             rep_end = v.end;  // source region of the draft's first token
+            if (match != nullptr)
+                *match = v.len;
+        }
         // Drop disagreeing/exhausted occurrences.
         std::erase_if(cands,
                       [&](const Candidate& c) { return !live(c.end + i) || hist_[c.end + i] != v.tok; });

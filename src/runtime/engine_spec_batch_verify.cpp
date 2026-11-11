@@ -359,6 +359,20 @@ int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& fro
         std::copy_n(d.begin(), n, out);
         return n;
     };
+    // The request's suffix index with every output token appended.
+    auto synced_index = [&]() -> SuffixDraftIndex& {
+        const int pred_end = static_cast<int>(req.input_tokens.size() + req.prediction_tokens.size());
+        SuffixDraftIndex& idx = spec_suffix_index_(req);
+        const int out_indexed = std::clamp(idx.size() - pred_end, 0,
+                                           static_cast<int>(req.output_tokens.size()));
+        idx.append(std::span(req.output_tokens).subspan(static_cast<size_t>(out_indexed)));
+        return idx;
+    };
+    if (runtime_config_.diagnostics.spec_trace && runtime_config_.speculative.suffix) {
+        int match = 0;
+        NgramDraft sd = synced_index().draft(kSuffixShadowDrafts, kSuffixShadowDrafts, &match);
+        bv_.sfx_shadow.trace_draft(req.id, req.output_tokens, std::move(sd.tokens), match);
+    }
     if (mtp_spec_decode_enabled()) {
         auto d = mtp_take_draft_(req);
         // Plain batched steps since its last draft (speculative.mtp_batch_verify): the carried rows catch
@@ -379,12 +393,7 @@ int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& fro
     const auto& scfg = runtime_config_.speculative;
     NgramDraft nd;
     if (scfg.suffix) {
-        const int pred_end = static_cast<int>(req.input_tokens.size() + req.prediction_tokens.size());
-        SuffixDraftIndex& idx = spec_suffix_index_(req);
-        const int out_indexed = std::clamp(idx.size() - pred_end, 0,
-                                           static_cast<int>(req.output_tokens.size()));
-        idx.append(std::span(req.output_tokens).subspan(static_cast<size_t>(out_indexed)));
-        nd = idx.draft(depth, std::max(depth, scfg.suffix_k_max));
+        nd = synced_index().draft(depth, std::max(depth, scfg.suffix_k_max));
     } else {
         std::vector<int32_t> history;
         history.reserve(req.input_tokens.size() + req.prediction_tokens.size() + req.output_tokens.size());
@@ -844,6 +853,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         const bool done = req->status == RequestStatus::FINISHED;
         const int role = done ? 0 : bound_verify_kept_slot(matched, D, bv_.factor_row);
         fold_of[g] = bound_verify_factor_row_folds(bv_.factor_row, done, matched, D);
+        if (runtime_config_.diagnostics.spec_trace)
+            bv_.sfx_shadow.trace_step(req->id, N, T, nd, matched, emitted, req->output_tokens, done);
         if (factored)
             (role != 0 ? bv_.pending : bv_.clear_slots).push_back(live[g]);
         else

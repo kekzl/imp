@@ -1,0 +1,26 @@
+window 2: 387411 kernels, 237 steps
+  gap     0..    5 us:   548.68 n/step   0.236 ms/step
+  gap     5..   20 us:     3.86 n/step   0.038 ms/step
+  gap    20..   50 us:     2.39 n/step   0.078 ms/step
+  gap    50..  100 us:     2.01 n/step   0.137 ms/step
+  gap   100..  200 us:     0.70 n/step   0.090 ms/step
+  gap   200..  500 us:     1.03 n/step   0.315 ms/step
+  gap   500.. 1000 us:     0.06 n/step   0.036 ms/step
+  gap  1000..  inf us:     0.14 n/step   1.007 ms/step
+  pairs with gap >= 50 us (ms/step, n/step, us/gap, last-ending kernel -> next kernel):
+     0.829   1.00    829.3  rowwise_argmax_reduce_kernel -> embedding_lookup_vec_kernel
+     0.310   0.08   4081.4  gdn_factor_fold_kernel -> mtp_gather_rows_kernel
+     0.141   0.81    173.7  rowwise_argmax_reduce_kernel -> ssm_conv_tap_fold_kernel
+     0.094   0.19    505.9  rowwise_argmax_reduce_kernel -> mtp_gather_rows_kernel
+     0.027   0.07    402.2  quantize_nvfp4_kernel -> gemm_nvfp4_smallm_v2_kernel
+     0.026   0.04    624.8  gemm_nvfp4_smallm_v2_kernel -> gemm_nvfp4_smallm_v2_kernel
+     0.014   0.02    669.0  mtp_argmax_kernel -> embedding_lookup_vec_kernel
+     0.011   0.16     65.6  rmsnorm_fp16_rowblock_nvfp4_kernel -> gemm_nvfp4_smallm_v2_kernel
+     0.007   0.11     66.7  device_copy_v4_kernel -> rmsnorm_fp16_rowblock_nvfp4_kernel
+     0.006   0.10     60.4  ban_logits_kernel -> ban_logits_kernel
+     0.006   0.09     62.7  device_copy_v4_kernel -> device_copy_v4_kernel
+     0.005   0.08     68.5  ssm_conv1d_commit_kernel -> ssm_conv_tap_stash_mid_kernel
+     0.005   0.01    557.6  rmsnorm_fp16_rowblock_kernel -> nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_al
+     0.004   0.06     75.3  ssm_conv1d_prefill_f32_silu_kernel -> ssm_conv1d_commit_kernel
+     0.004   0.01    524.9  rmsnorm_fp16_rowblock_kernel -> nvjet_sm120_hhh_mma_128x96x64_3_64x24x64_tmaAB_a
+     0.004   0.00   1001.1  rmsnorm_fp16_rowblock_kernel -> nvjet_sm120_hhh_mma_256x16x64_2_64x8x64_tmaAB_al

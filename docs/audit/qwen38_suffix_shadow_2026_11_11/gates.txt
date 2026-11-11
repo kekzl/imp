@@ -1,0 +1,40 @@
+# text equality, 1 greedy chat x 20k, 384 tokens: main imp:m3092 | branch | branch + diagnostics.spec_trace
+REQ p1_main ctx 20000 rep 0 s0 prompt 19985 comp 384 ttft_s 1.81 decode_tps 190.62 drafted 460 accepted 266 think 193 md5 9268933ca090
+REQ p1_sfx ctx 20000 rep 0 s0 prompt 19985 comp 384 ttft_s 1.78 decode_tps 188.07 drafted 460 accepted 266 think 193 md5 9268933ca090
+REQ p1_trace ctx 20000 rep 0 s0 prompt 19985 comp 384 ttft_s 1.78 decode_tps 188.84 drafted 460 accepted 266 think 193 md5 9268933ca090
+spec-sfx-shadow lines in the trace arm: 115
+
+# make dev-test
+100% tests passed, 0 tests failed out of 13
+Total Test time (real) =  21.36 sec
+
+# make preflight
+preflight: base c43edb0c, 27 changed file(s)
+static gates                                               ok       19  259 ok
+clang-tidy                                                 ok        6  3 changed file(s)
+clang-format                                               ok        0  changed lines clean
+actionlint                                                 skip      0  no .github change
+preflight: 0 failure(s), 25 s wall
+
+# make verify-fast DOCKER_IMG=imp:sfx
+PASS fast gtest filter
+  decode  tg128 =  293.04 tok/s  (baseline  282.84, delta 3.61%)
+  prefill pp512 = 50232.39 tok/s  (baseline 50374.39, delta -0.28%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50444.42 tok/s  (baseline 50318.99, delta 0.25%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  186.96 tok/s
+  graphs ON  tg256 =  296.48 tok/s   (1.59x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1861.82 tok/s, slowest request 541 ms  (baseline 1899.81, delta -2.00%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 11:40:05Z, ended 11:41:43Z)
