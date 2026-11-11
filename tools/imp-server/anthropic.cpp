@@ -363,7 +363,7 @@ json anthropic_to_openai_body(const json& anth) {
     // prefer to pass the user's intent through.
     if (anth.contains("max_tokens"))
         oai["max_tokens"] = anth["max_tokens"];
-    // temperature, top_p, top_k, priority, stream, speculative: kSamplingKeys rows with kViaMessages.
+    // temperature, top_p, top_k, seed, priority, stream, speculative: kSamplingKeys rows with kViaMessages.
     pass_sampling_keys(anth, kViaMessages, oai);
     if (anth.contains("metadata") && anth["metadata"].is_object() && anth["metadata"].contains("user_id")) {
         oai["user"] = anth["metadata"]["user_id"];
