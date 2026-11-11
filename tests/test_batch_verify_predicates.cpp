@@ -329,7 +329,8 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(mtp_bound_verify_depth(5, false), 2) << "the step stages two snapshots at most";
     EXPECT_EQ(mtp_bound_verify_depth(3, true), 3);
     EXPECT_EQ(mtp_bound_verify_depth(4, true), 4);
-    EXPECT_EQ(mtp_bound_verify_depth(5, true), 4) << "one fold applies kGdnFactorFoldMaxRows = 3 rows";
+    EXPECT_EQ(mtp_bound_verify_depth(8, true), 8);
+    EXPECT_EQ(mtp_bound_verify_depth(9, true), 8) << "one fold applies kGdnFactorFoldMaxRows = 7 rows";
     // One draft: reject keeps the live slot (row-1 snapshot), accept takes the spare (both rows).
     EXPECT_EQ(bound_verify_state_slot(0, 1), 0);
     EXPECT_EQ(bound_verify_state_slot(1, 1), 1);
@@ -394,6 +395,78 @@ TEST(BatchVerifyPredicates, StepDepthFollowsTheRequestsInTheStep) {
     EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 4), 3);
     EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 8), 3);
     EXPECT_EQ(mtp_bound_verify_step_depth(4, 4, 4), 4) << "wide key = depth: one depth for every step";
+    // speculative.mtp_batch_verify_k_streak: the step after a full accept, below the wide tier only.
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 1, 6), 6);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 2, 6), 6);
+    // The 8-row GEMM tile: 1 or 2 requests reach 7 drafts (8, 16 rows), 3 stay at 4 (15 rows, 6 = 21).
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 1, 8), 7);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 2, 8), 7);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 3, 6), 4);
+    EXPECT_EQ(mtp_bound_verify_tile_depth(5, 3, 8), 7) << "18 rows sit in the 24-row tile";
+    EXPECT_EQ(mtp_bound_verify_tile_depth(7, 1, 8), 7) << "a 9th row opens the second tile";
+    EXPECT_EQ(mtp_bound_verify_tile_depth(8, 1, 6), 8) << "the depth itself is never cut";
+    EXPECT_EQ(mtp_bound_verify_tile_depth(4, 0, 6), 6);
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 4, 6), 3) << "4 requests keep the wide depth";
+    EXPECT_EQ(mtp_bound_verify_step_depth(4, 3, 1, 0), 4) << "no full accept before it";
+    EXPECT_EQ(mtp_bound_verify_streak_depth(6, 4, true), 6);
+    EXPECT_EQ(mtp_bound_verify_streak_depth(9, 4, true), kMtpBoundVerifyMaxDepth);
+    EXPECT_EQ(mtp_bound_verify_streak_depth(0, 4, true), 4) << "0 = mtp_batch_verify_k";
+    EXPECT_EQ(mtp_bound_verify_streak_depth(3, 4, true), 4) << "never below the depth";
+    EXPECT_EQ(mtp_bound_verify_streak_depth(6, 2, false), 2) << "spares alone stage 2 drafts";
+    EXPECT_TRUE(mtp_bound_verify_full_accept(4, 4, false));
+    EXPECT_FALSE(mtp_bound_verify_full_accept(4, 3, false));
+    EXPECT_FALSE(mtp_bound_verify_full_accept(0, 0, false)) << "an undrafted row accepts nothing";
+    EXPECT_FALSE(mtp_bound_verify_full_accept(4, 4, true)) << "a finished request drafts no next step";
+    // The ladder: a full accept of N drafts earns N + kMtpBoundVerifyStreakStep, up to the streak depth.
+    EXPECT_EQ(mtp_bound_verify_streak_next(4, 8), 6);
+    EXPECT_EQ(mtp_bound_verify_streak_next(6, 8), 8);
+    EXPECT_EQ(mtp_bound_verify_streak_next(8, 8), 8);
+    EXPECT_EQ(mtp_bound_verify_streak_next(4, 6), 6);
+    EXPECT_EQ(mtp_bound_verify_streak_next(6, 6), 6);
+    EXPECT_EQ(mtp_bound_verify_streak_next(0, 8), 0) << "no full accept: back to the depth";
+    EXPECT_EQ(mtp_bound_verify_streak_next(4, 4), 4) << "key off: the streak depth is the depth";
+    EXPECT_EQ(mtp_bound_verify_pin_depth(8, 4, true), 8);
+    EXPECT_EQ(mtp_bound_verify_pin_depth(0, 4, true), 0);
+    EXPECT_EQ(mtp_bound_verify_pin_depth(2, 4, true), 4);
+    EXPECT_EQ(mtp_bound_verify_pin_depth(11, 4, true), kMtpBoundVerifyMaxDepth);
+    EXPECT_EQ(mtp_bound_verify_pin_depth(8, 2, false), 0) << "spares alone stage 2 drafts";
+    {
+        BatchVerifyState bv;
+        bv.depth = 4, bv.wide_depth = 3, bv.streak_depth = 8;
+        EXPECT_EQ(bound_verify_step_depth(bv, 2), 4);
+        bv.streak = 6;
+        EXPECT_EQ(bound_verify_step_depth(bv, 2), 6);
+        EXPECT_EQ(bound_verify_step_depth(bv, 4), 3);
+        EXPECT_EQ(bound_verify_stage_depth(bv, 2), 6);
+        // diagnostics.mtp_verify_pin: every step stages the pinned rows, the head still drafts the step
+        // depth.
+        bv.streak = 0, bv.pin = 8;
+        EXPECT_EQ(bound_verify_stage_depth(bv, 2), 8);
+        EXPECT_EQ(bound_verify_stage_depth(bv, 4), 3);
+        EXPECT_EQ(bound_verify_step_depth(bv, 2), 4);
+        bv.streak = 6;
+        EXPECT_EQ(bound_verify_stage_depth(bv, 2), 8);
+        EXPECT_EQ(bound_verify_step_depth(bv, 2), 6);
+    }
+    const auto top = [](std::vector<std::string> sets) {
+        RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides(sets).empty());
+        mtp_verify_depth_follows_k(cfg);
+        return mtp_bound_verify_top_depth(cfg);
+    };
+    EXPECT_EQ(top({}), 7) << "the default ladder: 4 -> 6 -> 7";
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=0"}), 4);
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=6"}), 6);
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=6", "speculative.mtp_k=5"}), 5)
+        << "mtp_k caps a pass";
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=6", "speculative.mtp_k=2"}), 2);
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=8"}), 8);
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=12"}), kMtpBoundVerifyMaxDepth);
+    EXPECT_EQ(top({"diagnostics.mtp_verify_pin=8"}), 8) << "the pin sizes the stage like a streak";
+    EXPECT_EQ(top({"diagnostics.mtp_verify_pin=6", "speculative.mtp_batch_verify_k_streak=8"}), 8);
+    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=6",
+                   "speculative.mtp_batch_verify_factor_row=false"}),
+              2);
     // The wide depth stays in 2..depth and needs the factor rows.
     EXPECT_EQ(mtp_bound_verify_wide_depth(3, 4, true), 3);
     EXPECT_EQ(mtp_bound_verify_wide_depth(9, 4, true), 4);

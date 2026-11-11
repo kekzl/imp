@@ -49,7 +49,7 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
-    EXPECT_EQ(cfg.speculative.mtp_k, 4) << "the bound verify stages 4 drafts per request";
+    EXPECT_EQ(cfg.speculative.mtp_k, 7) << "the bound verify stages up to 7 drafts per request (streak)";
     EXPECT_FALSE(cfg.speculative.ngram);
 }
 
@@ -138,8 +138,13 @@ TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
                                  0, tools::MtpAutoServing::ConcurrentHybrid);
         return std::pair{cfg.speculative.mtp_k, cfg.speculative.mtp_batch_verify_k};
     };
-    EXPECT_EQ(resolve({}), (std::pair{4, 4}));
-    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=2"}), (std::pair{2, 2})) << "auto follows the key";
+    EXPECT_EQ(resolve({}), (std::pair{7, 4})) << "the streak key reaches 7 drafts";
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k_streak=0"}), (std::pair{4, 4}));
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=2"}), (std::pair{7, 2}))
+        << "the streak starts at the key";
+    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=2", "speculative.mtp_batch_verify_k_streak=0"}),
+              (std::pair{2, 2}))
+        << "auto follows the key";
     EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=1"}), (std::pair{2, 1})) << "auto keeps kMtpAutoK";
     EXPECT_EQ(resolve({"speculative.mtp_batch_verify=0"}), (std::pair{2, 2})) << "no bound verify";
     EXPECT_EQ(resolve({"speculative.mtp_carry=false"}), (std::pair{2, 2}));

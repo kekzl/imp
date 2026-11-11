@@ -1,0 +1,62 @@
+# cost /s/crn_ld2_r4/server.log
+# counts /s/crn_ld1_p4/server.log
+  real   steps  13917 tok  48170 tok/step 3.4612 own ms/step 16.926
+    nd=4 full=0 steps   7833 share  56.3 % fwd 12.858 head 4.058 tok/step 2.266
+    nd=4 full=1 steps   6084 share  43.7 % fwd 12.810 head 4.128 tok/step 5.000
+  pinned steps  11974 tok  40257 tok/step 3.3620 own ms/step 18.290
+    nd=4 full=0 steps   7102 share  59.3 % fwd 14.118 head 4.051 tok/step 2.268
+    nd=4 full=1 steps   4781 share  39.9 % fwd 14.170 head 4.278 tok/step 5.000
+    nd=8 full=0 steps     85 share   0.7 % fwd 15.274 head 4.108 tok/step 2.282
+    nd=8 full=1 steps      6 share   0.1 % fwd 15.472 head 4.987 tok/step 9.000
+  pinned counts x real class cost: steps 11883 tok 40009 ms/step 16.925 tok/ms 0.19893 (classes without a real cost: [(8, False), (8, True)], 91 steps)
+# cost /s/crn_ld2_r6/server.log
+# counts /s/crn_ld1_p6/server.log
+  real   steps  12527 tok  46220 tok/step 3.6896 own ms/step 17.734
+    nd=4 full=0 steps   5664 share  45.2 % fwd 12.874 head 4.031 tok/step 2.214
+    nd=4 full=1 steps   2463 share  19.7 % fwd 12.803 head 6.008 tok/step 5.000
+    nd=6 full=0 steps   2463 share  19.7 % fwd 13.215 head 4.141 tok/step 3.169
+    nd=6 full=1 steps   1937 share  15.5 % fwd 13.150 head 6.119 tok/step 7.000
+  pinned steps  11234 tok  40257 tok/step 3.5835 own ms/step 18.962
+    nd=4 full=0 steps   5211 share  46.4 % fwd 14.118 head 4.016 tok/step 2.182
+    nd=4 full=1 steps   2187 share  19.5 % fwd 14.181 head 6.172 tok/step 5.000
+    nd=6 full=0 steps   2193 share  19.5 % fwd 14.250 head 4.148 tok/step 3.120
+    nd=6 full=1 steps   1552 share  13.8 % fwd 14.252 head 6.272 tok/step 7.000
+    nd=8 full=0 steps     85 share   0.8 % fwd 15.513 head 4.085 tok/step 2.282
+    nd=8 full=1 steps      6 share   0.1 % fwd 15.456 head 8.142 tok/step 9.000
+  pinned counts x real class cost: steps 11143 tok 40009 ms/step 17.697 tok/ms 0.20288 (classes without a real cost: [(8, False), (8, True)], 91 steps)
+# cost /s/crn_ld2_r8/server.log
+# counts /s/crn_ld1_p8/server.log
+  real   steps  13591 tok  50445 tok/step 3.7116 own ms/step 18.000
+    nd=4 full=0 steps   6471 share  47.6 % fwd 12.815 head 4.020 tok/step 2.189
+    nd=4 full=1 steps   2725 share  20.1 % fwd 12.775 head 5.992 tok/step 5.000
+    nd=6 full=0 steps   1924 share  14.2 % fwd 13.196 head 4.145 tok/step 3.091
+    nd=6 full=1 steps    801 share   5.9 % fwd 13.137 head 7.993 tok/step 7.000
+    nd=8 full=0 steps    801 share   5.9 % fwd 14.400 head 4.138 tok/step 4.097
+    nd=8 full=1 steps    869 share   6.4 % fwd 14.268 head 8.077 tok/step 9.000
+  pinned steps  11034 tok  40257 tok/step 3.6485 own ms/step 19.137
+    nd=4 full=0 steps   5242 share  47.5 % fwd 14.108 head 4.016 tok/step 2.179
+    nd=4 full=1 steps   2230 share  20.2 % fwd 14.186 head 6.180 tok/step 5.000
+    nd=6 full=0 steps   1577 share  14.3 % fwd 14.214 head 4.169 tok/step 3.073
+    nd=6 full=1 steps    653 share   5.9 % fwd 14.286 head 8.198 tok/step 7.000
+    nd=8 full=0 steps    744 share   6.7 % fwd 14.492 head 4.190 tok/step 4.003
+    nd=8 full=1 steps    588 share   5.3 % fwd 14.253 head 8.147 tok/step 9.000
+  pinned counts x real class cost: steps 11034 tok 40257 ms/step 17.960 tok/ms 0.20314 (classes without a real cost: [], 0 steps)
+# cost /s/crn_l7_r7/server.log
+# counts /s/crn_l7_p7/server.log
+  real   steps  12752 tok  47142 tok/step 3.6968 own ms/step 17.799
+    nd=4 full=0 steps   5967 share  46.8 % fwd 12.794 head 4.009 tok/step 2.188
+    nd=4 full=1 steps   2523 share  19.8 % fwd 12.767 head 6.005 tok/step 5.000
+    nd=6 full=0 steps   1782 share  14.0 % fwd 13.182 head 4.147 tok/step 3.082
+    nd=6 full=1 steps    741 share   5.8 % fwd 13.133 head 7.082 tok/step 7.000
+    nd=7 full=0 steps    741 share   5.8 % fwd 13.488 head 4.147 tok/step 3.787
+    nd=7 full=1 steps    998 share   7.8 % fwd 13.359 head 7.110 tok/step 8.000
+  pinned steps  11096 tok  40257 tok/step 3.6281 own ms/step 19.073
+    nd=4 full=0 steps   5196 share  46.8 % fwd 14.116 head 4.021 tok/step 2.182
+    nd=4 full=1 steps   2201 share  19.8 % fwd 14.194 head 6.169 tok/step 5.000
+    nd=6 full=0 steps   1560 share  14.1 % fwd 14.230 head 4.157 tok/step 3.066
+    nd=6 full=1 steps    641 share   5.8 % fwd 14.283 head 7.244 tok/step 7.000
+    nd=7 full=0 steps    647 share   5.8 % fwd 14.335 head 4.108 tok/step 3.583
+    nd=7 full=1 steps    760 share   6.8 % fwd 14.252 head 7.280 tok/step 8.000
+    nd=8 full=0 steps     85 share   0.8 % fwd 15.378 head 4.095 tok/step 2.282
+    nd=8 full=1 steps      6 share   0.1 % fwd 15.536 head 8.037 tok/step 9.000
+  pinned counts x real class cost: steps 11005 tok 40009 ms/step 17.772 tok/ms 0.20457 (classes without a real cost: [(8, False), (8, True)], 91 steps)

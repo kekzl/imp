@@ -30,6 +30,10 @@ same reasoning token for every `mtp_k` (last section).
 Status (2026-11-11, coupled drafts): a sampled bound request's drafts are draws with the seeds of the verify
 rows that check them (`speculative.mtp_draft_coupled`, default on, section "Coupled MTP drafts" at the end).
 
+Status (2026-11-11, ladder): below 4 requests a step that accepted all of its drafts is followed by a deeper one,
+4 -> 6 -> 7 drafts inside the 8-row GEMM tile (`speculative.mtp_batch_verify_k_streak`, default 7, section "Verify
+depth ladder after a full accept" at the end).
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -711,4 +715,84 @@ Gates: `SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank` (503 of 512 rows
 and the degeneration suite on the shipped tree in `gates.txt`. Evidence
 `docs/audit/qwen38_coupled_draft_2026_11_11/`.
 
-Open (B-72): verify depth above 4 below 4 requests, 43.7 % of the steps accept all 4 drafts.
+## Verify depth ladder after a full accept (2026-11-11, B-72, `speculative.mtp_batch_verify_k_streak`, default 7)
+
+A step in which a request accepts all N drafts is followed by a step at N + 2 drafts, up to the key: 4 -> 6 -> 7.
+A step without a full accept returns to `speculative.mtp_batch_verify_k`. Evidence:
+`docs/audit/qwen38_verify_ladder_2026_11_11/`.
+
+Why a ladder and not a deeper default: the deeper drafts hold only after a full accept. Qwen3.8-27B-NVFP4-vllm,
+recorded familiar SWE-bench sessions (`tools/analysis/agent_turn_replay.py --serial --seed 1000`, 3 chats x 30
+turns in turn, `runtime.deterministic=true`, `speculative.ngram=false`), share of steps whose draft l is accepted
+(`survival.txt`):
+
+| Step before | draft 4 | draft 5 | draft 6 | draft 7 | draft 8 |
+|---|---|---|---|---|---|
+| accepted fewer than its 4 drafts (5154 steps) | 28.4 % | | | | |
+| accepted 4 of 4 (2223 steps) | 44.2 % | 35.2 % | 29.1 % | | |
+| accepted 6 of 6 (645 steps) | 58.9 % | 52.2 % | 46.0 % | 40.5 % | 34.1 % |
+| accepted 8 of 8 (551 steps) | 80.6 % | 76.2 % | 71.1 % | 63.0 % | 58.8 % |
+
+| Piece | Rule |
+|---|---|
+| Next depth | `mtp_bound_verify_streak_next(full_drafts, streak_depth)`: the most drafts a request of the step accepted in full, plus `kMtpBoundVerifyStreakStep` (2), capped at the key; 0 = no full accept (`src/runtime/spec_batch_verify_state.h`) |
+| Row tile | `mtp_bound_verify_tile_depth(depth, n, streak)`: a streak never moves the n x (depth + 1) rows of a step into the next 8-row tile of the small-M GEMM (`kMtpBoundVerifyRowTile`, `src/quant/nvfp4_gemm_smallm_ws.cu`): 1 or 2 requests reach 7 drafts (8, 16 rows), 3 requests stay at 4 (15 rows) |
+| Wide tier | 4 requests keep `speculative.mtp_batch_verify_k_wide` |
+| Depth cap | `kMtpBoundVerifyMaxDepth` 4 -> 8, `kGdnFactorFoldMaxRows` 3 -> 7, head chain levels `kMtpPassChainLevels` 7 (`MtpPassTables::chain_pos[l]`), `kMtpHeadGraphMax` 96 -> 384 |
+| `mtp_k` | `speculative.mtp_k=auto` on a concurrent GDN-hybrid server resolves to the deepest step (7); an explicit `mtp_k` below the key caps the ladder (`mtp_verify_depth_follows_k`) |
+| Factor rows, conv taps | 48 layers x 4 groups x 6 drafts = 54.8 MiB + 22.5 MiB (27.4 + 11.2 at 4 drafts); KV plan 17089 -> 16977 blocks (4806 -> 4775 MiB), server defaults with `kv_cache.host_spill_mb=16384`, 32 GB |
+| `diagnostics.mtp_verify_pin=N` | every step below 4 requests stages N draft rows per request (pad rows past the drafts): the instrument of the paired comparison below, 0 = off |
+
+Row tile, forward + argmax per step in ms by rows of the step (pin arms, drafts held at 4, `row_sweep.txt`):
+
+| Requests | rows: ms |
+|---|---|
+| 1 | 5: 13.072, 6: 12.957, 7: 13.350, 8: 13.461, 9: 14.501 |
+| 2 | 10: 14.687, 14: 15.057, 16: 15.180, 18: 16.195 |
+| 3 | 15: 15.254, 21: 16.566, 24: 16.726, 27: 17.902 |
+
+Paired comparison at 1 chat. The text of a chat depends on the rows of its steps, so two depth policies emit
+different texts and a tok/s difference below 4 % is not readable from them. With the pin at 8 every policy stages
+9 rows per step and the texts are md5-equal (4 policies, 3 of 3 chats, 40259 output tokens,
+`pinned_clients.txt`). The pinned run gives the step count per class (drafts of the step, full accept or not), the
+unpinned run of the same policy gives forward and head ms per class (`paired_cost.txt`):
+
+| Policy | steps | tokens per step | tokens per ms | against 4 drafts |
+|---|---|---|---|---|
+| 4 drafts every step (`mtp_batch_verify_k_streak=0`) | 11974 | 3.3620 | 0.19893 | |
+| ladder to 6 | 11234 | 3.5835 | 0.20288 | +1.99 % |
+| ladder to 7 (default) | 11096 | 3.6281 | 0.20457 | +2.84 % |
+| ladder to 8 (9 rows) | 11034 | 3.6485 | 0.20314 | +2.12 % |
+
+Head pass per step class, ladder to 7: 4.009 ms after a partial step at 4 drafts, 6.005 ms after 4 of 4 (6 drafts
+next), 7.082 ms after 6 of 6, 7.110 ms after 7 of 7.
+
+Unpaired runs (the texts differ between the arms):
+
+| Load | 4 drafts | ladder to 7 |
+|---|---|---|
+| 1 chat at a time, default mode (`mtp_k=auto` 4 / 7), tok/s decode per chat; tokens per ms | 193.79; 0.1944 | 200.95; 0.2017 |
+| 1 chat at a time, deterministic, tok/s decode per chat | 203.79 | 206.92, 207.02 |
+| 2 chats x 30 turns overlapping, deterministic: tok/s decode per chat; tok/s wall; tokens per ms of the steps at 2 requests | 179.05; 253.68; 0.3718 | 180.71, 184.10; 265.15, 263.81; 0.3807, 0.3892 |
+| 3 chats x 30 turns overlapping, deterministic, tile rule (3958 of 3958 steps at 3 requests stage 4 drafts): tok/s decode per chat; tok/s wall; tokens per ms of the steps at 3 requests | 159.18; 356.39; 0.5096 | 157.66; 352.38; 0.5007 |
+| the same without the tile rule (steps at 3 requests on 15 / 21 / 24 rows: 15.366 / 16.862 / 17.220 ms forward) | 158.26; 374.66; 0.5055 | 156.61; 362.38; 0.5035 |
+
+At 3 requests a ladder step costs up to 1.85 ms more forward and gained nothing in tokens per ms (0.5035 against
+0.5055), so the tile rule holds those steps at 4 drafts; the 0.5007 to 0.5096 spread is 3 runs of the same policy at
+3 requests. Files: `overlap_shipped_steps.txt`, `overlap_shipped_clients.txt`, `overlap_per_requests.txt`,
+`overlap_no_tile_clamp.txt`, `real_clients_pre_clamp.txt`.
+
+Gates (`mutants.txt`, `gates.txt`): `BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep` and `MtpAuto.*`
+turn red on 13 of 13 mutants of the depth rules (tile clamp, tile rounding, step 2, pin, full accept at a finished
+request, wide tier, factor-row condition, reset, default, `mtp_k` cap, auto `mtp_k`);
+`GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToSevenDraftsOfEight` (f32, BF16) and
+`ConvFactorRowsFoldFourToSevenDraftsOfEight` cover the fold at 7 rows (`gdn_factor_fold`, `ssm_conv_tap_fold`),
+red on 2 of 2 kernel mutants (fold capped at 3 rows, first tap skipped at 4 or more taps).
+
+Not built: a second tile on a long streak. After 8 of 8 the next step accepts 8 of 8 again in 58.8 % of 551 steps,
+and a 9th row costs 1.04 ms forward plus about 1.0 ms head per chain level.
+
+Draft head format (B-73 lead, `draft_head_fp8_vs_nvfp4.txt`, pin 4, texts md5-equal, 48176 output tokens): FP8
+draft head over rows [0, 98304) (server default) 4.084 ms head per step, 203.59 tok/s decode per chat; the full
+NVFP4 copy (`speculative.mtp_nvfp4_head=true`, 682 MiB) 4.553 ms, 199.31 tok/s. The full copy stays off. Open: an
+NVFP4 copy over the first `speculative.mtp_draft_vocab` rows only.

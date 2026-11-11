@@ -39,7 +39,7 @@ size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Mo
     int layers = 0;
     for (int i = 0; i < mc.n_layers; i++)
         layers += model->layer(i).ssm_in.data != nullptr ? 1 : 0;
-    const int levels = mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k, true) - 1;
+    const int levels = mtp_bound_verify_top_depth(cfg) - 1;
     return bound_verify_factor_row_bytes(layers, groups, levels, heads, mc.ssm_state_size,
                                          mc.ssm_inner_size / heads, mc.ssm_conv_channels());
 }

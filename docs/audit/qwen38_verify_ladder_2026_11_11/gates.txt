@@ -1,0 +1,58 @@
+# final tree (imp:streak, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm
+# pair: 2 chats x 30 turns overlapping, seed 1000, runtime.deterministic=true, speculative.ngram=false;
+# o2r4 = speculative.mtp_k=4 (ladder capped at 4 drafts), o2r7 = speculative.mtp_k=7 (ladder to 7)
+arm o2r4 rc=0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22612 |  81.4 |   125.76 |  179.81 | 30/0/0 | 8dd77fa61bd3
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11327 |  64.4 |    64.29 |  176.19 | 30/0/0 | d2ab72dcd0e2
+total | requests 60 | output tok 33939 | reasoning 75.7 % | wall 134.10 s | 253.09 tok/s wall | 178.59 tok/s decode per chat
+head graphs 14 stderr hits 0
+arm o2r7 rc=0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   21076 |  81.0 |   112.36 |  187.57 | 30/0/0 | ecfacad47e50
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10826 |  68.9 |    60.76 |  178.19 | 30/0/0 | cde149bfb8b1
+total | requests 60 | output tok 31902 | reasoning 76.9 % | wall 120.78 s | 264.13 tok/s wall | 184.28 tok/s decode per chat
+head graphs 37 stderr hits 0
+
+# test-moe-gdn --gtest_filter='GdnVerifyTwoDraftsTest.*:MtpFeedBatchTest.*:GdnBatchedScanTest.*' (image)
+[  PASSED  ] 37 tests.
+
+# make dev-test
+100% tests passed, 0 tests failed out of 13
+Total Test time (real) =  22.04 sec
+
+# make preflight
+preflight: base ffb965c2, 35 changed file(s)
+static gates                                               ok       19  259 ok
+clang-tidy                                                 ok        9  7 changed file(s)
+clang-format                                               ok        0  changed lines clean
+actionlint                                                 skip      0  no .github change
+preflight: 0 failure(s), 30 s wall
+
+# tools/analysis/degen_suite.py, server defaults / --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (42s)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (56s)
+head graphs with chain >= 5: 12 / 0
+
+# make test-spec-fidelity DOCKER_IMG=imp:streak
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:streak
+PASS fast gtest filter
+  decode  tg128 =  293.14 tok/s  (baseline  282.84, delta 3.64%)
+  prefill pp512 = 49920.64 tok/s  (baseline 50374.39, delta -0.90%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50441.39 tok/s  (baseline 50318.99, delta 0.24%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  195.63 tok/s
+  graphs ON  tg256 =  296.34 tok/s   (1.51x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1892.79 tok/s, slowest request 530 ms  (baseline 1899.81, delta -0.37%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 21:39:15Z, ended 21:40:52Z)

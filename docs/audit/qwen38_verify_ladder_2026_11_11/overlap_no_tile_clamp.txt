@@ -1,0 +1,28 @@
+# /s/crn_l7_o2r4/server.log
+  all       steps   6638 tok  33935 tok/step 5.112 fwd 14.023 head 4.445 sum 18.468 ms tok/ms 0.2768
+  n=1 T=5  steps   3631 share  54.7 % tok/step 3.419 fwd 13.553 head 4.268 drafted/step 4.00 matched/step 2.42
+  n=2 T=5  steps   3007 share  45.3 % tok/step 7.156 fwd 14.591 head 4.658 drafted/step 8.00 matched/step 5.16
+# /s/crn_l7_o2r7/server.log
+  all       steps   5458 tok  31902 tok/step 5.845 fwd 14.429 head 5.638 sum 20.067 ms tok/ms 0.2913
+  n=1 T=5  steps   1934 share  35.4 % tok/step 3.087 fwd 13.554 head 4.845 drafted/step 4.00 matched/step 2.09
+  n=1 T=7  steps    612 share  11.2 % tok/step 4.306 fwd 14.423 head 5.247 drafted/step 6.00 matched/step 3.31
+  n=1 T=8  steps    318 share   5.8 % tok/step 5.415 fwd 14.744 head 5.580 drafted/step 7.00 matched/step 4.42
+  n=2 T=5  steps   1081 share  19.8 % tok/step 6.352 fwd 14.643 head 5.772 drafted/step 8.00 matched/step 4.35
+  n=2 T=7  steps    588 share  10.8 % tok/step 8.279 fwd 15.215 head 6.325 drafted/step 12.00 matched/step 6.28
+  n=2 T=8  steps    925 share  16.9 % tok/step 10.638 fwd 15.403 head 6.981 drafted/step 14.00 matched/step 8.64
+# /s/crn_l7_o3r4/server.log
+  all       steps   6145 tok  50222 tok/step 8.173 fwd 14.945 head 4.697 sum 19.642 ms tok/ms 0.4161
+  n=1 T=5  steps   1453 share  23.6 % tok/step 3.479 fwd 13.394 head 4.246 drafted/step 4.00 matched/step 2.48
+  n=2 T=5  steps    781 share  12.7 % tok/step 6.789 fwd 16.204 head 4.546 drafted/step 8.00 matched/step 4.79
+  n=3 T=5  steps   3911 share  63.6 % tok/step 10.193 fwd 15.269 head 4.895 drafted/step 12.00 matched/step 7.19
+# /s/crn_l7_o3r7/server.log
+  all       steps   5458 tok  48654 tok/step 8.914 fwd 15.792 head 6.306 sum 22.099 ms tok/ms 0.4034
+  n=1 T=5  steps    524 share   9.6 % tok/step 3.113 fwd 13.658 head 4.875 drafted/step 4.00 matched/step 2.11
+  n=1 T=7  steps    167 share   3.1 % tok/step 4.347 fwd 14.051 head 5.292 drafted/step 6.00 matched/step 3.35
+  n=1 T=8  steps     83 share   1.5 % tok/step 4.976 fwd 14.305 head 5.306 drafted/step 7.00 matched/step 3.98
+  n=2 T=5  steps   1078 share  19.8 % tok/step 5.976 fwd 15.232 head 5.497 drafted/step 8.00 matched/step 3.98
+  n=2 T=7  steps    534 share   9.8 % tok/step 7.543 fwd 16.044 head 5.844 drafted/step 12.00 matched/step 5.54
+  n=2 T=8  steps    454 share   8.3 % tok/step 9.388 fwd 16.023 head 6.310 drafted/step 14.00 matched/step 7.39
+  n=3 T=5  steps    882 share  16.2 % tok/step 9.110 fwd 15.366 head 6.322 drafted/step 12.00 matched/step 6.11
+  n=3 T=7  steps    575 share  10.5 % tok/step 11.503 fwd 16.862 head 6.918 drafted/step 18.00 matched/step 8.50
+  n=3 T=8  steps   1161 share  21.3 % tok/step 14.214 fwd 17.220 head 7.818 drafted/step 21.00 matched/step 11.21

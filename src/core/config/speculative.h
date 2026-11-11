@@ -216,6 +216,10 @@ struct Speculative {
     // draft is one more head pass over every request. Qwen3.8-27B-NVFP4 server, 4 chats x 20k, all
     // streams: 530.61 tok/s at 3 drafts, 517.18 at 4; 1 chat x 20k: 194.25 at 3, 211.32 at 4.
     int mtp_batch_verify_k_wide = 3;
+    // Deepest step a run of full accepts reaches (mtp_batch_verify_k..8, factor rows only, below 4 requests,
+    // inside the 8-row GEMM tile): all N drafts accepted -> N + 2 next. 0 = off. Qwen3.8-27B-NVFP4 agent
+    // replay, 1 chat, same text: +1.99 % tok/ms at 6, +2.84 % at 7, +2.12 % at 8 (9 rows).
+    int mtp_batch_verify_k_streak = 7;
     // At 2+ drafts: one spare per row holds the full accept, every draft before the last also leaves as a
     // factor row + conv tap (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
     // a partial accept. false = a second spare per row (79.5 MiB each), 2 drafts at most.

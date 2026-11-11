@@ -18,14 +18,15 @@ namespace imp {
 struct MtpHeadGraphKey {
     int n = 0;  // fed rows
     int m = 0;  // bound requests (draft rows)
-    int chain = 0;  // chain levels after the first draft: 0..3
+    int chain = 0;  // chain levels after the first draft: 0..kMtpPassChainLevels
     int draw = 0;   // coupled draft draws: the rows' largest top_k, 0 = argmax drafts
     auto operator<=>(const MtpHeadGraphKey&) const = default;
 };
 
-// Bound: 1..3 requests x 1..5 fed rows each (27 (n, m) pairs, chain 3) + 4 requests x 1..4 rows (13 pairs,
-// chain 2, mtp_bound_verify_step_depth) = 40, once more with speculative.mtp_draft_coupled (draw > 0) = 80.
-inline constexpr size_t kMtpHeadGraphMax = 96;
+// Bound: 1..3 requests x 1..9 fed rows each (51 (n, m) pairs, chain 3, 5 or 6 on the default ladder, 7 at
+// mtp_batch_verify_k_streak 8) + 4 requests x 1..4 rows (13 pairs, chain 2, mtp_bound_verify_step_depth),
+// once more with speculative.mtp_draft_coupled (draw > 0).
+inline constexpr size_t kMtpHeadGraphMax = 384;
 // Consecutive capture / instantiate / launch failures before the cache turns itself off.
 inline constexpr int kMtpHeadGraphMaxFailures = 2;
 

@@ -1,0 +1,94 @@
+arm o3r7 rc=0
+arm o3r4 rc=0
+arm o2r7 rc=0
+arm s1r7 rc=0
+arm def rc=0
+arm def0 rc=0
+== o3r7
+n=1 T=5 steps 1515 share 10.2 % tok/step 3.049
+   nd=4 steps 1515 share 100.0 % full-accept 30.2 % | m0:22.3 m1:22.0 m2:14.5 m3:11.0 m4:30.2
+n=1 T=7 steps 456 share 3.1 % tok/step 4.285
+   nd=6 steps 456 share 100.0 % full-accept 30.5 % | m0:14.0 m1:13.6 m2:15.4 m3:10.7 m4:9.9 m5:5.9 m6:30.5
+n=1 T=8 steps 228 share 1.5 % tok/step 5.167
+   nd=7 steps 228 share 100.0 % full-accept 38.6 % | m0:13.6 m1:11.0 m2:9.6 m3:8.3 m4:8.8 m5:4.4 m6:5.7 m7:38.6
+n=2 T=5 steps 324 share 2.2 % tok/step 2.981
+   nd=4 steps 324 share 100.0 % full-accept 29.6 % | m0:22.8 m1:24.1 m2:14.8 m3:8.6 m4:29.6
+n=2 T=7 steps 222 share 1.5 % tok/step 4.077
+   nd=6 steps 222 share 100.0 % full-accept 32.0 % | m0:18.9 m1:18.0 m2:11.7 m3:8.1 m4:6.3 m5:5.0 m6:32.0
+n=2 T=8 steps 206 share 1.4 % tok/step 4.845
+   nd=7 steps 206 share 100.0 % full-accept 36.4 % | m0:17.5 m1:16.0 m2:9.2 m3:4.4 m4:4.9 m5:7.3 m6:4.4 m7:36.4
+n=3 T=5 steps 11874 share 80.1 % tok/step 3.368
+   nd=4 steps 11874 share 100.0 % full-accept 40.8 % | m0:19.0 m1:16.8 m2:13.3 m3:10.1 m4:40.8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23033 |  81.0 |   133.45 |  172.60 | 30/0/0 | ba49afedcab2
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   14941 |  71.4 |    90.41 |  165.26 | 30/0/0 | e9ca6ab9673b
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   12643 |  81.3 |    97.20 |  130.07 | 30/0/0 | b1df6683d68f
+total | requests 90 | output tok 50617 | reasoning 78.2 % | wall 143.64 s | 352.38 tok/s wall | 157.66 tok/s decode per chat
+46
+0
+== o3r4
+n=1 T=5 steps 2163 share 15.5 % tok/step 3.364
+   nd=4 steps 2163 share 100.0 % full-accept 40.3 % | m0:18.8 m1:17.1 m2:13.5 m3:10.4 m4:40.3
+n=2 T=5 steps 662 share 4.8 % tok/step 3.505
+   nd=4 steps 662 share 100.0 % full-accept 44.4 % | m0:16.9 m1:15.9 m2:11.5 m3:11.3 m4:44.4
+n=3 T=5 steps 11100 share 79.7 % tok/step 3.422
+   nd=4 steps 11100 share 100.0 % full-accept 42.3 % | m0:17.8 m1:17.1 m2:12.5 m3:10.3 m4:42.3
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   21414 |  79.8 |   124.46 |  172.06 | 30/0/0 | 3e6ab748ee9f
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   14218 |  64.8 |    86.41 |  164.54 | 30/0/0 | fe0cd49005db
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   11950 |  80.0 |    88.06 |  135.70 | 30/0/0 | 38107cc9e18b
+total | requests 90 | output tok 47582 | reasoning 75.4 % | wall 133.51 s | 356.39 tok/s wall | 159.18 tok/s decode per chat
+27
+0
+== o2r7
+n=1 T=5 steps 1665 share 21.5 % tok/step 3.132
+   nd=4 steps 1665 share 100.0 % full-accept 32.9 % | m0:21.5 m1:20.8 m2:13.6 m3:11.2 m4:32.9
+n=1 T=7 steps 548 share 7.1 % tok/step 4.345
+   nd=6 steps 548 share 100.0 % full-accept 30.8 % | m0:15.1 m1:11.1 m2:14.1 m3:11.9 m4:10.2 m5:6.8 m6:30.8
+n=1 T=8 steps 288 share 3.7 % tok/step 5.392
+   nd=7 steps 288 share 100.0 % full-accept 41.0 % | m0:10.8 m1:8.7 m2:11.8 m3:6.6 m4:9.7 m5:7.3 m6:4.2 m7:41.0
+n=2 T=5 steps 2244 share 29.0 % tok/step 3.133
+   nd=4 steps 2244 share 100.0 % full-accept 32.3 % | m0:20.8 m1:21.1 m2:14.5 m3:11.3 m4:32.3
+n=2 T=7 steps 1208 share 15.6 % tok/step 4.109
+   nd=6 steps 1208 share 100.0 % full-accept 28.6 % | m0:16.7 m1:16.0 m2:13.2 m3:11.6 m4:7.2 m5:6.7 m6:28.6
+n=2 T=8 steps 1788 share 23.1 % tok/step 5.179
+   nd=7 steps 1788 share 100.0 % full-accept 39.4 % | m0:12.1 m1:12.8 m2:10.3 m3:8.4 m4:6.1 m5:6.2 m6:4.8 m7:39.4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19282 |  80.8 |   105.98 |  181.94 | 30/0/0 | d5010f5738ac
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11121 |  70.8 |    62.26 |  178.62 | 30/0/0 | 28fa2a5b005f
+total | requests 60 | output tok 30403 | reasoning 77.1 % | wall 114.67 s | 265.15 tok/s wall | 180.71 tok/s decode per chat
+37
+0
+== s1r7
+n=1 T=5 steps 8490 share 66.6 % tok/step 3.024
+   nd=4 steps 8490 share 100.0 % full-accept 29.7 % | m0:23.5 m1:21.2 m2:14.5 m3:11.1 m4:29.7
+n=1 T=7 steps 2523 share 19.8 % tok/step 4.233
+   nd=6 steps 2523 share 100.0 % full-accept 29.4 % | m0:14.0 m1:15.2 m2:14.7 m3:11.1 m4:9.0 m5:6.7 m6:29.4
+n=1 T=8 steps 1739 share 13.6 % tok/step 6.205
+   nd=7 steps 1739 share 100.0 % full-accept 57.4 % | m0:6.4 m1:6.6 m2:7.0 m3:6.3 m4:7.1 m5:4.7 m6:4.5 m7:57.4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   18869 |  82.0 |    91.13 |  207.05 | 30/0/0 | 594bded5b7e1
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   13420 |  64.6 |    60.79 |  220.78 | 30/0/0 | 767ad807b7e9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   14857 |  84.5 |    75.93 |  195.67 | 30/0/0 | 111beb0dd41f
+total | requests 90 | output tok 47146 | reasoning 77.8 % | wall 243.31 s | 193.77 tok/s wall | 206.92 tok/s decode per chat
+10
+0
+== def
+n=1 T=5 steps 13151 share 69.4 % tok/step 2.951
+   nd=4 steps 13151 share 100.0 % full-accept 27.9 % | m0:24.5 m1:22.2 m2:15.1 m3:10.3 m4:27.9
+n=1 T=7 steps 3673 share 19.4 % tok/step 4.087
+   nd=6 steps 3673 share 100.0 % full-accept 27.3 % | m0:16.3 m1:16.2 m2:13.4 m3:11.7 m4:8.3 m5:6.8 m6:27.3
+n=1 T=8 steps 2139 share 11.3 % tok/step 5.941
+   nd=7 steps 2139 share 100.0 % full-accept 53.2 % | m0:7.2 m1:9.9 m2:7.9 m3:6.3 m4:5.2 m5:5.1 m6:5.1 m7:53.2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20178 |  80.5 |    98.34 |  205.19 | 30/0/0 | 8cc60ed91105
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10882 |  59.9 |    50.61 |  215.03 | 30/0/0 | 680deb702202
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   35476 |  93.4 |   182.16 |  194.75 | 30/0/0 | 3eb5e101b93a
+total | requests 90 | output tok 66536 | reasoning 84.0 % | wall 342.82 s | 194.09 tok/s wall | 200.95 tok/s decode per chat
+10
+0
+== def0
+n=1 T=5 steps 15880 share 100.0 % tok/step 3.223
+   nd=4 steps 15880 share 100.0 % full-accept 35.4 % | m0:20.4 m1:18.5 m2:14.8 m3:10.9 m4:35.4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   15869 |  75.8 |    80.56 |  196.98 | 30/0/0 | 129613ac9144
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12190 |  69.4 |    57.90 |  210.53 | 30/0/0 | 7c5008250d2c
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   23129 |  90.1 |   125.67 |  184.04 | 30/0/0 | 6f177a183161
+total | requests 90 | output tok 51188 | reasoning 80.7 % | wall 275.36 s | 185.89 tok/s wall | 193.79 tok/s decode per chat
+5
+0
+X_DONE

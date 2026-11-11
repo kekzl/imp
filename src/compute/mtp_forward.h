@@ -305,10 +305,8 @@ struct MtpPassTables {
     const int* pos = nullptr;
     const int* last = nullptr;
     const int* chain_slots = nullptr;
-    const int* chain_pos = nullptr;
     const int* chain_rows = nullptr;  // 0..m-1: each request's chain row, hidden source of chain level 2+
-    const int* chain_pos2 = nullptr;  // chain_pos + 1: chain level 2
-    const int* chain_pos3 = nullptr;  // chain_pos + 2: chain level 3
+    const int* chain_pos[kMtpPassChainLevels] = {};  // [l]: the chain positions + l, chain level l + 1
     int n = 0, m = 0;
     int max_pos = 0;        // largest feed position (validated by the upload)
     int chain_max_pos = 0;  // largest chain position (not validated: the chain checks it)
