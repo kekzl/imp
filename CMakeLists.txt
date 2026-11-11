@@ -472,6 +472,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_mtp_batched.cpp
     src/runtime/engine_spec_mtp_head_graph.cpp
     src/runtime/engine_spec_batch_verify.cpp
+    src/runtime/spec_verify_factor_rows.cpp
     src/runtime/engine_sampling_stop.cpp
     src/runtime/engine_kv_swap.cpp
     src/runtime/stop_mask.cpp

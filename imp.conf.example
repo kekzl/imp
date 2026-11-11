@@ -1250,11 +1250,15 @@ mtp_carry            = true
 # 0 = plain batched decode at any batch > 1.
 mtp_batch_verify     = 4
 # Drafts per bound request in that step: 2 = last token plus a 2-token MTP
-# chain (3 rows per request, a second head pass, two spare recurrent slots per
-# row); 1 = one draft (2 rows, one spare slot per row). Unset, a concurrent
-# GDN-hybrid server with MTP on takes 1 (2 with kv_cache.host_spill_mb set);
-# this line sets it, so drop it there.
+# chain (3 rows per request, a second head pass); 1 = one draft (2 rows). Unset,
+# a concurrent GDN-hybrid server with MTP on takes 1 only when
+# mtp_batch_verify_factor_row is false and kv_cache.host_spill_mb is 0.
 mtp_batch_verify_k   = 2
+# At 2 drafts: one spare slot per row holds the state for a full accept, draft 1
+# also leaves the forward as a factor row plus a conv tap (3.22 MiB per recurrent
+# slot on Qwen3.8-27B), folded into the live slot when only draft 1 is accepted.
+# false = a second spare slot per row (79.5 MiB each).
+mtp_batch_verify_factor_row = true
 # A bound request decoding alone verifies in that batched step too (rows on
 # paged decode attention, split-K over the context) instead of the single
 # verify chunk, whose prefill attention walks the whole context per CTA.

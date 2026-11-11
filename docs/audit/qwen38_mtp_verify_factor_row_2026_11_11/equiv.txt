@@ -1,0 +1,44 @@
+# tools/analysis/mtp_factor_row_equiv.sh, Qwen3.8-27B-NVFP4-vllm, 2 chats x 20k, 384 tokens, gdn.state_bf16=false
+## STAGGER_MS=300, imp:mid (full image of this tree), 2 runs
+ctx/stream 20000 s0: spare 203b411ea078 row 203b411ea078 equal
+ctx/stream 20000 s1: spare 805077946d6b row 805077946d6b equal
+drafted: spare 606 row 606
+equiv rc=0
+REQ p1_spare ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.10 decode_tps 128.37 drafted 298 accepted 228 md5 203b411ea078
+REQ p1_spare ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.31 decode_tps 147.44 drafted 308 accepted 223 md5 805077946d6b
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.07 decode_tps 130.59 drafted 298 accepted 228 md5 203b411ea078
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.27 decode_tps 150.26 drafted 308 accepted 223 md5 805077946d6b
+ctx/stream 20000 s0: spare 203b411ea078 row 203b411ea078 equal
+ctx/stream 20000 s1: spare 805077946d6b row 805077946d6b equal
+drafted: spare 606 row 606
+equiv rc=0
+REQ p1_spare ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.07 decode_tps 126.76 drafted 298 accepted 228 md5 203b411ea078
+REQ p1_spare ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.28 decode_tps 145.14 drafted 308 accepted 223 md5 805077946d6b
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.10 decode_tps 131.19 drafted 298 accepted 228 md5 203b411ea078
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.31 decode_tps 151.08 drafted 308 accepted 223 md5 805077946d6b
+## STAGGER_MS=0: the texts follow which stream's first token came first (ttft_s), not the arm
+-- f32clean
+REQ p1_slot ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.58 decode_tps 150.33 drafted 302 accepted 227 md5 7c1e15529969
+REQ p1_slot ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.52 decode_tps 143.69 drafted 310 accepted 223 md5 966ee9efd30d
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.56 decode_tps 154.18 drafted 302 accepted 227 md5 7c1e15529969
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.50 decode_tps 147.48 drafted 310 accepted 223 md5 966ee9efd30d
+-- equiv_dev
+REQ p1_spare ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.53 decode_tps 147.99 drafted 300 accepted 227 md5 9b50c19406f4
+REQ p1_spare ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.59 decode_tps 148.21 drafted 304 accepted 225 md5 7d25473fb0b8
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.48 decode_tps 151.20 drafted 300 accepted 227 md5 9b50c19406f4
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.54 decode_tps 151.46 drafted 304 accepted 225 md5 7d25473fb0b8
+-- equiv_dev2
+REQ p1_spare ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.84 decode_tps 129.43 drafted 300 accepted 227 md5 9b50c19406f4
+REQ p1_spare ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 4.20 decode_tps 144.08 drafted 304 accepted 225 md5 7d25473fb0b8
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.95 decode_tps 139.08 drafted 300 accepted 227 md5 9b50c19406f4
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 4.18 decode_tps 148.11 drafted 304 accepted 225 md5 7d25473fb0b8
+-- equiv_mid
+REQ p1_spare ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.58 decode_tps 150.74 drafted 302 accepted 227 md5 7c1e15529969
+REQ p1_spare ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.48 decode_tps 142.31 drafted 310 accepted 223 md5 966ee9efd30d
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.51 decode_tps 150.23 drafted 300 accepted 227 md5 9b50c19406f4
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.57 decode_tps 150.51 drafted 304 accepted 225 md5 7d25473fb0b8
+## STAGGER_MS=300, dev build with the engine mutant E1 (never folds) in the row arm
+ctx/stream 20000 s0: spare 203b411ea078 row ad7948967aa4 DIFFER
+ctx/stream 20000 s1: spare 805077946d6b row 2a2b8a289bd1 DIFFER
+drafted: spare 606 row 590
+equiv rc=1

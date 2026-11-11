@@ -4,7 +4,8 @@
 # tok/s ((completion - 1) / (last delta - first delta)), MTP drafted/accepted (usage), md5 of the text.
 # CONC=2 sends two prompts per length at once (different head line). Texts land in OUT_DIR/<tag>.<ctx>.<i>.txt.
 # Usage: mtp_longctx_client.py PORT TAG; env CTX ("8000 20000 40000 80000"), GEN (384), CONC (1), REPS (1),
-#        REPO_DIR (/repo), OUT_DIR (.), IGNORE_EOS (1), MTP_K (unset = server default; 0 = speculation off).
+#        REPO_DIR (/repo), OUT_DIR (.), IGNORE_EOS (1), MTP_K (unset = server default; 0 = speculation off),
+#        STAGGER_MS (0; > 0 starts stream i that long after stream i - 1: a fixed arrival order).
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ REPO = Path(os.environ.get("REPO_DIR", "/repo"))
 OUT_DIR = Path(os.environ.get("OUT_DIR", "."))
 IGNORE_EOS = os.environ.get("IGNORE_EOS", "1") == "1"
 MTP_K = os.environ.get("MTP_K", "")
+STAGGER_S = int(os.environ.get("STAGGER_MS", "0")) / 1000.0
 BASE = f"http://127.0.0.1:{PORT}"
 
 
@@ -104,7 +106,9 @@ for rep in range(REPS):
         prompts = [build(ctx, f"[session {ctx}-{rep}-{i}] ") for i in range(CONC)]
         res = [None] * CONC
         th = [threading.Thread(target=one, args=(ctx, i, rep, prompts[i], res)) for i in range(CONC)]
-        for t in th:
+        for n, t in enumerate(th):
+            if n and STAGGER_S:
+                time.sleep(STAGGER_S)
             t.start()
         for t in th:
             t.join()

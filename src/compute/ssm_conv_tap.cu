@@ -49,9 +49,45 @@ __global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t
     w[kernel_size - 1] = __half2float(tap_pool[(static_cast<size_t>(slot) * channels) + ch]);
 }
 
+// The apply over every layer in one launch, window slot and tap slot named separately. The bound verify
+// passes the live slot for both: its 1-row window advances by draft 1's tap.
+__global__ void ssm_conv_tap_fold_kernel(char* __restrict__ conv_pool, int64_t slot_stride,
+                                         int64_t layer_stride, const half* __restrict__ tap_pool,
+                                         int64_t tap_layer_stride, int channels, int kernel_size,
+                                         const int* __restrict__ win_slots,
+                                         const int* __restrict__ tap_slots) {
+    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (ch >= channels)
+        return;
+    const int layer = blockIdx.y;
+    float* w = reinterpret_cast<float*>(conv_pool + (win_slots[blockIdx.z] * slot_stride) +
+                                        (layer * layer_stride)) +
+               (static_cast<int64_t>(ch) * kernel_size);
+    for (int k = 0; k + 1 < kernel_size; k++)
+        w[k] = w[k + 1];
+    w[kernel_size - 1] = __half2float(
+        tap_pool[(layer * tap_layer_stride) + (static_cast<int64_t>(tap_slots[blockIdx.z]) * channels) + ch]);
+}
+
 constexpr int kTapThreads = 256;
 
 }  // namespace
+
+void ssm_conv_tap_fold(void* conv_pool, int64_t slot_stride_bytes, int64_t layer_stride_bytes,
+                       const void* tap_pool, int64_t tap_layer_stride, int n_layers, int channels,
+                       int kernel_size, const int* win_slots, const int* tap_slots, int n,
+                       cudaStream_t stream) {
+    if (!conv_pool || !tap_pool || !win_slots || !tap_slots || n <= 0 || n_layers <= 0 || channels <= 0 ||
+        kernel_size <= 0)
+        return;
+    dim3 grid((channels + kTapThreads - 1) / kTapThreads, n_layers, n);
+    ssm_conv_tap_fold_kernel<<<grid, kTapThreads, 0, stream>>>(static_cast<char*>(conv_pool),
+                                                               slot_stride_bytes, layer_stride_bytes,
+                                                               static_cast<const half*>(tap_pool),
+                                                               tap_layer_stride, channels, kernel_size,
+                                                               win_slots, tap_slots);
+    IMP_CUDA_CHECK_LAUNCH();
+}
 
 void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_real_n,
                         const int* slots, int n_seq, cudaStream_t stream) {

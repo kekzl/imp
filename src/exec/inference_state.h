@@ -77,6 +77,7 @@ struct InferenceState {
     const int* ssm_out_slots = nullptr;
     const int* ssm_snap_slots = nullptr;
     // 2 = second per-group snapshot: d_snap_n[1] rows into ssm_snap_slots[ssm_n_seq + g] (3-row groups).
+    // ssm_fac_out + ssm_tap_out WITH ssm_out_slots: row d_snap_n[1] also leaves as a factor row + tap.
     int ssm_snap_rows = 1;
     // Factored spare (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md):
     // ssm_fac_out replaces ssm_out_slots, carrying the drafted row as (g,k,delta) per head

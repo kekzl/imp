@@ -229,7 +229,11 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 4);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2) << "default: 2 drafts, 3 rows per request";
+    EXPECT_TRUE(cfg.speculative.mtp_batch_verify_factor_row);
+    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "factor row: one spare per row";
+    cfg.speculative.mtp_batch_verify_factor_row = false;
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 8) << "slot-swapping spares, two per row at 2 drafts";
+    cfg.speculative.mtp_batch_verify_factor_row = true;
     cfg.speculative.mtp_batch_verify_k = 1;
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "one draft: one spare per row";
     EXPECT_TRUE(batch_verify_wants_bufs(cfg, &m, 32));
@@ -306,6 +310,34 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     EXPECT_EQ(bound_verify_state_slot(0, 2), 0);
     EXPECT_EQ(bound_verify_state_slot(1, 2), 2);
     EXPECT_EQ(bound_verify_state_slot(2, 2), 1);
+    // Factor row at two drafts: 2 accepted take the one spare (all 3 rows), 1 accepted keeps the live slot
+    // and folds draft 1 into it, 0 keeps the live slot as is.
+    EXPECT_EQ(bound_verify_factor_row_slot(0, 2), 0);
+    EXPECT_EQ(bound_verify_factor_row_slot(1, 2), 0);
+    EXPECT_EQ(bound_verify_factor_row_slot(2, 2), 1);
+    EXPECT_EQ(bound_verify_kept_slot(1, 2, true), 0);
+    EXPECT_EQ(bound_verify_kept_slot(2, 2, true), 1);
+    EXPECT_EQ(bound_verify_kept_slot(1, 2, false), 2);
+    EXPECT_EQ(bound_verify_kept_slot(2, 2, false), 1);
+    EXPECT_TRUE(bound_verify_factor_row_folds(true, false, 1, 2));
+    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 0, 2));
+    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 2, 2)) << "the spare already holds all 3 rows";
+    EXPECT_FALSE(bound_verify_factor_row_folds(true, true, 1, 2))
+        << "a finished request keeps its slot as is";
+    EXPECT_FALSE(bound_verify_factor_row_folds(false, false, 1, 2));
+    EXPECT_FALSE(bound_verify_factor_row_folds(true, false, 1, 1)) << "one draft: accept takes the spare";
+    EXPECT_EQ(bound_verify_spares_per_row(2, true), 1);
+    EXPECT_EQ(bound_verify_spares_per_row(2, false), 2);
+    EXPECT_EQ(bound_verify_spares_per_row(1, false), 1);
+    // Qwen3.8-27B: 48 layers x (48 heads x 260 floats + 10240 halfs) + 1 list int per slot.
+    EXPECT_EQ(bound_verify_factor_row_bytes(48, 1, 48, 128, 128, 10240), 3379204u);
+    RuntimeConfig cfg;
+    EXPECT_TRUE(mtp_bound_verify_factor_row(cfg));
+    cfg.speculative.mtp_batch_verify_k = 1;
+    EXPECT_FALSE(mtp_bound_verify_factor_row(cfg)) << "one draft: nothing to factor";
+    cfg.speculative.mtp_batch_verify_k = 2;
+    cfg.speculative.mtp_batch_verify_factor_row = false;
+    EXPECT_FALSE(mtp_bound_verify_factor_row(cfg));
     // Stage: 3 ints per row, 4 per request (seq, out, 2 snapshots), 3 row counts.
     EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
 }

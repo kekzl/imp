@@ -41,9 +41,9 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
 }
 
 namespace {
-// A concurrent GDN-hybrid server keeps the KV pool: no NVFP4 draft head copy (682 MiB on Qwen3.8-27B)
-// and one draft per bound request (half the spare recurrent slots). Qwen3.8-27B-NVFP4, SWE-bench dev
-// 50, 4 agents: agent time 13.43 -> 10.81 h vs MTP off; full config re-prefilled 3x the tokens.
+// A concurrent GDN-hybrid server keeps the KV pool: no NVFP4 draft head copy (682 MiB on Qwen3.8-27B).
+// The second draft per bound request stays while a factor row replaces its second spare slot
+// (speculative.mtp_batch_verify_factor_row, 3.22 MiB per recurrent slot vs 79.5 MiB per row); else it goes.
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
@@ -52,7 +52,8 @@ void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     // 703.9/763.7 -> 672.3/597.4 s.
     const bool spill = cfg.kv_cache.host_spill_mb > 0;
     const bool head = !cfg.was_set("speculative.mtp_nvfp4_head");
-    const bool k = !spill && !cfg.was_set("speculative.mtp_batch_verify_k");
+    const bool k = !spill && !cfg.speculative.mtp_batch_verify_factor_row &&
+                   !cfg.was_set("speculative.mtp_batch_verify_k");
     if (head)
         cfg.speculative.mtp_nvfp4_head = false;
     if (k)
