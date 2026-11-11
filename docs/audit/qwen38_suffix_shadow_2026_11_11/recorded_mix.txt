@@ -1,0 +1,4 @@
+turns 4427 chars 5320431
+thinking blocks 2192 chars 3999606 share 75.2 % chars/turn 903
+tool_use blocks 4729 chars 1109312 share 20.9 % chars/turn 251
+text blocks 995 chars 211513 share 4.0 % chars/turn 48

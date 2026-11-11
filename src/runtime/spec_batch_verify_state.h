@@ -5,6 +5,7 @@
 // engine.h: docs/plans/2026-09-11-batched-mtp-verify.md.
 
 #include "memory/host_pinned.h"
+#include "runtime/suffix_shadow.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -26,6 +27,7 @@ struct BatchVerifyState {
     // Pipelined plain steps between two bound-verify attempts: 1 after a verify, doubling to 64 per decline.
     int yield_every = 1;
     int since_yield = 0;
+    SuffixShadow sfx_shadow;  // diagnostics.spec_trace only
     int32_t* d_stage = nullptr;
     int32_t* d_row_tables = nullptr;
     int32_t* d_argmax = nullptr;

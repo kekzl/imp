@@ -1,0 +1,11 @@
+chats 1 turns 60 tools 15 max_tokens 4096 think_budget 2048
+chat | requests | prompt tok (last) | cached % | output tok | decode s | tok/s decode | stops tool_use/end_turn/max_tokens
+   0 |  60 |   10284 |  96.7 |   64859 |   425.06 |  152.59 | 60/0/0
+total | requests 60 | output tok 64859 | wall 429.74 s | 150.92 tok/s wall | 152.59 tok/s decode per chat
+chats 4 turns 60 tools 15 max_tokens 4096 think_budget 2048
+chat | requests | prompt tok (last) | cached % | output tok | decode s | tok/s decode | stops tool_use/end_turn/max_tokens
+   0 |  60 |   10284 |  96.7 |   61934 |   453.21 |  136.66 | 60/0/0
+   1 |  60 |   10772 |  96.4 |   23315 |   185.78 |  125.50 | 58/2/0
+   2 |  60 |   48369 |  96.6 |   19624 |   154.05 |  127.39 | 60/0/0
+   3 |  60 |   46172 |  97.3 |   20430 |   156.49 |  130.55 | 60/0/0
+total | requests 240 | output tok 125303 | wall 460.34 s | 272.20 tok/s wall | 131.96 tok/s decode per chat

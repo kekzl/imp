@@ -1,0 +1,33 @@
+MUTANT M1_decided:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft
+MUTANT M2_replace:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft
+MUTANT M3_match0:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.FullAgreementAndNoDraft
+MUTANT M4_len:
+[  FAILED  ] SuffixShadow.IndexReportsTheMatchLength (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.IndexReportsTheMatchLength
+MUTANT M5_unstepped:
+[  FAILED  ] SuffixShadow.DeclinedStepIsReplaced (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.DeclinedStepIsReplaced
+MUTANT M6_last:
+[  FAILED  ] SuffixShadow.LastStepSettlesAnOpenDraft (0 ms)
+[  PASSED  ] 4 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SuffixShadow.LastStepSettlesAnOpenDraft
+BASELINE:
+[  PASSED  ] 5 tests.
+RESTORED

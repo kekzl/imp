@@ -1,0 +1,40 @@
+window 2: 257 steps, wall 18.008 ms/step, exclusive sum 17.043 ms/step
+  stream 183:  1410.00 kernels/step  11.921 ms/step exclusive
+  stream 185:    37.35 kernels/step   1.199 ms/step exclusive
+  stream 13:    19.54 kernels/step   1.118 ms/step exclusive
+  stream 184:    30.38 kernels/step   0.937 ms/step exclusive
+  exclusive ms/step, n/step, exclusive us/call, raw us/call, kernel
+      8.609  369.43    23.30    28.27  gemm_nvfp4_smallm_v2_kernel
+      2.062    5.06   407.42   407.42  fp8_head_cpasync_kernel
+      1.705   26.29    64.85    65.09  gemv_fp16_kernel
+      0.660  128.50     5.13    11.27  rmsnorm_fp16_rowblock_nvfp4_kernel
+      0.532    4.00   132.99   132.99  mtp_attn_kv_scan_rows_split_kernel
+      0.513   48.56    10.56    11.71  gdn_scan_fused_kernel
+      0.362   16.19    22.34    22.34  sparse_score_blocks_kernel
+      0.284   16.19    17.52    17.52  sparse_select_topk_kernel
+      0.234   16.19    14.44    14.44  paged_attention_splitk_nvfp4_mma_kernel
+      0.195   48.19     4.04    17.23  gemm_f16_narrow_smallm_kernel
+      0.186   64.25     2.89    15.60  gated_fp16_nvfp4_kernel
+      0.170    1.53   110.71   111.24  nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_alignCD4_bz_TNNN
+      0.142   96.37     1.47     1.47  ssm_conv1d_commit_kernel
+      0.138   32.12     4.28    10.20  nvfp4_smallm_ws_kernel
+      0.121  192.75     0.63     6.08  device_copy_v4_kernel
+      0.113   48.19     2.35     2.35  ssm_conv1d_prefill_f32_silu_kernel
+      0.113   64.25     1.76     1.76  quantize_nvfp4_kernel
+      0.101    0.47   215.55   215.55  gdn_factor_fold_kernel
+      0.083    0.77   107.95   107.95  nvjet_sm120_hhh_mma_128x8x64_5_32x8x64_tmaAB_alignCD4_splitK_TNNN
+      0.069   48.56     1.43     1.51  gdn_rmsnorm_gated_silu_kernel
+      0.064    5.00    12.78    12.78  rowwise_argmax_partial_kernel
+      0.062    0.77    79.95    80.89  nvjet_sm120_hhh_mma_256x16x64_2_64x8x64_tmaAB_alignCD4_splitK_TNNN
+      0.051    0.76    67.17    67.17  nvjet_sm120_hhh_mma_320x16x64_2_160x8x64_tmaAB_alignCD4_splitK_TNNN
+      0.049   16.19     3.05     4.30  paged_attention_reduce_kernel
+      0.039   16.19     2.38     2.88  write_kv_cache_nvfp4_kernel
+      0.033   16.19     2.07     2.07  qknorm_rope_warp_fp16_kernel
+      0.033   48.19     0.69     0.69  ssm_conv_tap_stash_mid_kernel
+      0.032   22.29     1.44     2.06  rmsnorm_fp16_rowblock_kernel
+      0.031    0.77    40.38    40.38  nvjet_sm120_hhh_mma_256x8x64_2_64x8x64_tmaAB_alignCD4_splitK_TNNN
+      0.030    0.50    60.67    61.20  gemv_nvfp4_gate_up_fused_mr_kernel
+      0.023   48.19     0.48    13.45  elementwise_add_fp16_kernel
+      0.023    1.00    22.93    22.93  gemv_nvfp4_residual_kernel
+      0.023   48.19     0.47    34.94  elementwise_add_store_fp16_kernel
+      0.016    1.02    16.02    16.02  sparse_update_key_minmax_layers_nvfp4_kernel

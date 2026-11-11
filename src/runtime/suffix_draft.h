@@ -29,14 +29,16 @@ public:
     // gram recurs. `start` is the history index the winning continuation was
     // copied from, one past the matched occurrence, for source-region
     // classification (prompt / prediction / prior output).
-    [[nodiscard]] NgramDraft draft(int k, int k_max) const;
+    // `match`: the backward match length of the first drafted token (0 without a draft).
+    [[nodiscard]] NgramDraft draft(int k, int k_max, int* match = nullptr) const;
     // Same, continuing the suffix of `query` from this index (a corpus, #2421). `start` = -1;
     // negative history tokens separate documents and end a continuation.
     [[nodiscard]] NgramDraft draft_from(std::span<const int32_t> query, int k, int k_max) const;
     [[nodiscard]] std::span<const int32_t> tokens() const { return hist_; }
 
 private:
-    [[nodiscard]] NgramDraft draft_impl_(const int32_t* q, int qn, int k, int k_max, bool self) const;
+    [[nodiscard]] NgramDraft draft_impl_(const int32_t* q, int qn, int k, int k_max, bool self,
+                                         int* match = nullptr) const;
     uint64_t gram_hash_at_(int end) const;  // hash of hist_[end - min_match_, end)
 
     int min_match_;

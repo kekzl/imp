@@ -1,0 +1,26 @@
+window 2: 400484 kernels, 257 steps
+  gap     0..    5 us:   522.09 n/step   0.113 ms/step
+  gap     5..   20 us:     0.86 n/step   0.008 ms/step
+  gap    20..   50 us:     0.23 n/step   0.007 ms/step
+  gap    50..  100 us:     0.19 n/step   0.015 ms/step
+  gap   100..  200 us:     0.82 n/step   0.105 ms/step
+  gap   200..  500 us:     1.10 n/step   0.328 ms/step
+  gap   500.. 1000 us:     0.02 n/step   0.010 ms/step
+  gap  1000..  inf us:     0.05 n/step   0.378 ms/step
+  pairs with gap >= 50 us (ms/step, n/step, us/gap, last-ending kernel -> next kernel):
+     0.505   1.00    506.7  rowwise_argmax_reduce_kernel -> embedding_lookup_vec_kernel
+     0.116   0.53    217.8  rowwise_argmax_reduce_kernel -> mtp_gather_rows_kernel
+     0.093   0.00  23933.0  rowwise_argmax_reduce_kernel -> norm_fold_zero_kernel
+     0.056   0.47    119.9  rowwise_argmax_reduce_kernel -> ssm_conv_tap_fold_kernel
+     0.020   0.01   1676.4  gdn_factor_fold_kernel -> mtp_gather_rows_kernel
+     0.010   0.01   1264.6  mtp_argmax_kernel -> embedding_lookup_vec_kernel
+     0.005   0.00   1364.4  mtp_concat_kernel -> nvjet_sm120_hhh_mma_128x112x64_3_32x56x64_tmaAB_
+     0.005   0.00   1279.5  rmsnorm_fp16_rowblock_kernel -> nvjet_sm120_hhh_mma_256x16x64_2_64x8x64_tmaAB_al
+     0.004   0.05     78.5  ssm_conv_tap_fold_kernel -> gdn_factor_fold_kernel
+     0.004   0.00   1076.5  rmsnorm_fp16_rowblock_kernel -> nvjet_sm120_hhh_mma_128x16x64_5_64x8x64_tmaAB_al
+     0.003   0.00    808.5  gemm_nvfp4_smallm_v2_kernel -> nvfp4_smallm_ws_kernel
+     0.003   0.00    710.5  gemv_fp16_kernel -> nvjet_sm120_hhh_mma_64x48x64_7_32x24x64_tmaAB_al
+     0.002   0.00    581.2  swiglu_fp16_kernel -> nvjet_sm120_hhh_mma_128x8x64_5_32x8x64_tmaAB_ali
+     0.002   0.00    397.6  mtp_gate_attn_out_kernel -> nvjet_sm120_hhh_mma_256x8x64_2_64x8x64_tmaAB_ali
+     0.001   0.00    309.2  mtp_argmax_kernel -> norm_fold_zero_kernel
+     0.001   0.00    200.2  write_kv_cache_nvfp4_kernel -> sparse_score_blocks_kernel

@@ -1,0 +1,9 @@
+chats 6 turns 60 tools 15 max_tokens 4096 think_budget 2048 serial 1 system 0 chars
+chat | session | requests | prompt tok (last) | cached % | output tok | reasoning % | decode s | tok/s decode | stops tool_use/end_turn/max_tokens
+   0 | 20261109-230053-bdc4e3 |  60 |   10772 |  96.4 |   24718 |  78.6 |   144.22 |  171.39 | 59/1/0
+   1 | 20261109-230259-ccb543 |  60 |   48369 |  96.6 |   20911 |  66.3 |   121.00 |  172.82 | 60/0/0
+   2 | 20261109-230923-351793 |  60 |   46172 |  97.3 |   19294 |  65.3 |   112.23 |  171.91 | 60/0/0
+   3 | 20261109-231028-1c9d2a |  60 |   10919 |  96.8 |   37424 |  71.4 |   226.48 |  165.24 | 60/0/0
+   4 | 20261109-231350-06b391 |  60 |   60533 |  95.5 |   45070 |  84.9 |   278.58 |  161.78 | 60/0/0
+   5 | 20261109-232910-5e13d2 |  60 |   18545 |  95.6 |   18936 |  74.9 |   122.84 |  154.15 | 60/0/0
+total | requests 360 | output tok 166353 | reasoning 75.2 % | wall 1045.94 s | 159.05 tok/s wall | 165.47 tok/s decode per chat

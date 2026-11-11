@@ -1,0 +1,4 @@
+c1_d3  per step: wall 16.828 ms, busy union 15.922 ms, idle 0.906 ms, kernel sum 23.571 ms
+c1_d4  per step: wall 18.008 ms, busy union 17.043 ms, idle 0.965 ms, kernel sum 24.759 ms
+c4_d3  per step: wall 20.458 ms, busy union 18.308 ms, idle 2.150 ms, kernel sum 26.166 ms
+c4_d4  per step: wall 22.644 ms, busy union 20.706 ms, idle 1.937 ms, kernel sum 28.817 ms
