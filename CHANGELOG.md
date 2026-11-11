@@ -16,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Up to 3 chats on a concurrent GDN-hybrid server verify 4 MTP drafts each, 4 chats keep 3 (`speculative.mtp_batch_verify_k` default 4, new `speculative.mtp_batch_verify_k_wide` 3). Qwen3.8-27B-NVFP4 server, 3 -> 4 drafts: 1 chat x 20k 194.3 -> 211.3 tok/s, x 80k 176.6 -> 188.7; 3 chats x 20k 427.9 -> 444.3 over all streams (#3091).
 
 ### Fixed
+- `/v1/messages` dropped `seed`: a seeded request drew a fresh sampler base per call (3 identical requests, 3 texts; `/v1/chat/completions` 3 of 3 equal). The field now reaches the sampler. Qwen3.8-27B-NVFP4, `runtime.deterministic=true`: a repeated seeded 15-turn agent replay gives 15 of 15 identical turns. (#3094)
 - A speculative draft that matched `</think>` under a think budget was kept and then forwarded a second time at the same position, advancing the GDN recurrent state twice. The token now stays the chunk's bonus. Qwen3.8-27B-NVFP4, 12 thinking chats x 2, `--max-batch 1`: double forwards 8 of 24 requests -> 0 (#3090).
 - With MTP drafts on, a thinking chat ran up to `mtp_k` tokens past its think budget before `</think>` was forced. A verify chunk now ends at the budget. Qwen3.8-27B-NVFP4 server, 1 chat x 20k, `max_tokens` 384, reasoning tokens at `mtp_k` 1 / 2 / 3 / 4: 193 / 194 / 195 / 196 -> 193 each, as with MTP off (#3092).
 

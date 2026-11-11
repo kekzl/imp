@@ -4058,40 +4058,61 @@
    "params": {}
   },
   "seed=\"x\"": {
-   "params": {}
+   "error": "\"seed\" must be a number, got string",
+   "status": 400
   },
   "seed=-1": {
    "params": {}
   },
   "seed=-2147483648": {
-   "params": {}
+   "params": {
+    "seed": -2147483648
+   }
   },
   "seed=0": {
-   "params": {}
+   "params": {
+    "seed": 0
+   }
   },
   "seed=1": {
-   "params": {}
+   "params": {
+    "seed": 1
+   }
   },
   "seed=2.7": {
-   "params": {}
+   "params": {
+    "seed": 2
+   }
   },
   "seed=2147483647": {
-   "params": {}
+   "params": {
+    "seed": 2147483647
+   }
   },
   "seed=3": {
-   "params": {}
+   "params": {
+    "seed": 3
+   }
   },
   "seed=4294967297": {
-   "params": {}
+   "params": {
+    "seed": 1
+   }
   },
   "seed=65": {
-   "params": {}
+   "params": {
+    "seed": 65
+   }
   },
   "seed=7": {
-   "params": {}
+   "params": {
+    "seed": 7
+   }
   },
   "seed=false": {
-   "params": {}
+   "params": {
+    "seed": 0
+   }
   },
   "stream=\"x\"": {
    "error": "\"stream\" must be a boolean, got string",
@@ -4402,6 +4423,7 @@
   "{\"cache_prompt\":true,\"dry_allowed_length\":3,\"dry_base\":2.0,\"dry_multiplier\":0.8,\"dry_penalty_last_n\":128,\"frequency_penalty\":0.3,\"ignore_eos\":true,\"min_p\":0.1,\"mirostat\":2,\"mirostat_eta\":0.2,\"mirostat_tau\":4.0,\"presence_penalty\":-0.3,\"priority\":-2,\"repeat_last_n\":64,\"repetition_penalty\":1.2,\"seed\":4,\"temperature\":0.2,\"think_budget\":0.25,\"top_k\":9,\"top_p\":0.5,\"typical_p\":0.9}": {
    "params": {
     "priority": -2,
+    "seed": 4,
     "temperature": 0.20000000298023224,
     "top_k": 9,
     "top_k_explicit": true,

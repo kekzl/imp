@@ -96,7 +96,7 @@ inline constexpr SamplingKey kSamplingKeys[] = {
     {"temperature", &SamplingFields::temperature, kViaMessages | kViaResponses},
     {"top_p", &SamplingFields::top_p, kViaMessages | kViaResponses},
     {"top_k", &SamplingFields::top_k, kViaMessages},
-    {"seed", &SamplingFields::seed, 0},
+    {"seed", &SamplingFields::seed, kViaMessages},
     {"priority", &SamplingFields::priority, kViaMessages | kViaResponses},
     {"stream", &SamplingFields::stream, kViaMessages | kViaResponses},
     {"min_p", &SamplingFields::min_p, 0},

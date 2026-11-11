@@ -1,4 +1,4 @@
-// /v1/messages output_config.effort: the body field, and the level the loaded template gets.
+// /v1/messages body fields: output_config.effort and the level the loaded template gets, sampling keys.
 #include "anthropic.h"
 
 #include <string>
@@ -43,4 +43,18 @@ TEST(AnthropicEffort, NearestLevelInTheTemplateList) {
     EXPECT_EQ(nearest_reasoning_effort("high", {}), "high");
     EXPECT_EQ(nearest_reasoning_effort("weird", qwen), "weird");
     EXPECT_EQ(nearest_reasoning_effort("high", {"custom"}), "high");
+}
+
+// /v1/messages carries the sampling keys the chat endpoint takes: a dropped seed made a seeded request
+// draw a fresh base per call (3 identical requests, 3 texts).
+TEST(AnthropicSampling, SeedTopKTemperatureReachTheChatBody) {
+    json req = base_request();
+    req["seed"] = 4242;
+    req["top_k"] = 7;
+    req["temperature"] = 0.5;
+    const json oai = anthropic_to_openai_body(req);
+    EXPECT_EQ(oai.value("seed", -1), 4242);
+    EXPECT_EQ(oai.value("top_k", -1), 7);
+    EXPECT_DOUBLE_EQ(oai.value("temperature", -1.0), 0.5);
+    EXPECT_FALSE(anthropic_to_openai_body(base_request()).contains("seed"));
 }

@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-11-01
-commit: 216a779c
+verified: 2026-11-11
+commit: 21fc346c
 -->
 
 # API
@@ -49,7 +49,7 @@ so a streaming fix lands in all of them at once.
 | `max_tokens` | ✅ | default: the remaining context (`--max-tokens N` sets a fixed default); on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
 | `temperature`, `top_p`, `top_k`, `min_p` | ✅ | **imp's defaults are not OpenAI's** - see the table below |
 | `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | `repetition_penalty` has no OpenAI field; imp takes the model default (`generation_config.json`, else 1.0). Ranges: `repetition_penalty` > 0, `min_p` 0..1, `typical_p` in (0, 1], presence/frequency -2..2; outside is a 400 |
-| `seed` | ✅ | greedy is reproducible; see [`DETERMINISM.md`](DETERMINISM.md) for the exact guarantee, which is narrower than "same seed, same bytes" |
+| `seed` | ✅ | greedy is reproducible; see [`DETERMINISM.md`](DETERMINISM.md) for the exact guarantee, which is narrower than "same seed, same bytes". `/v1/messages` reads it too |
 | `stop` | ✅ | |
 | `stream` | ✅ | per token, all three dialects |
 | `n` | ✅ | documented and tested as `[1,4]` |
