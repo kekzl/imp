@@ -3,9 +3,13 @@
 // nothing logged it (found via nsys kernel-instance-count comparison). CPU tests on purpose:
 // the rule was an inline Engine method unreachable from any CI lane.
 
+#include "runtime/spec_accept.h"
 #include "runtime/spec_gates.h"
 
 #include <gtest/gtest.h>
+
+#include <cstdint>
+#include <vector>
 
 using imp::spec_any_drafter;
 using imp::spec_ngram_source;
@@ -140,6 +144,116 @@ TEST(SpecGates, BlockDrafterIsPricedPerVerify) {
     EXPECT_FALSE(imp::spec_economics(low).final) << "a block drafter re-arms after the next burst";
     const imp::SpecEconState early{7, 49, 0, 7, true, 1.8f};
     EXPECT_FALSE(imp::spec_economics(early).stop) << "no verdict before 8 verifies";
+}
+
+// A model of the engine side of spec_accept_rows: think state as track_think_state keeps it,
+// the KV rows the rollback keeps, and what the next step forwards.
+constexpr int32_t kOpen = 900, kClose = 901, kEos = 902;
+
+struct AcceptRun {
+    imp::SpecAccept r;
+    bool finished = false;
+    bool in_think = false;
+    std::vector<int32_t> out;
+};
+
+AcceptRun accept(const std::vector<int32_t>& argmax, const std::vector<int32_t>& draft, bool in_think,
+                 bool budgeted, int masked_row = -1) {
+    AcceptRun a;
+    a.in_think = in_think;
+    const auto emit = [&](int, int32_t tok) {
+        a.out.push_back(tok);
+        if (tok == kOpen)
+            a.in_think = true;
+        if (tok == kClose)
+            a.in_think = false;
+        a.finished = tok == kEos;
+        return a.finished;
+    };
+    const int nd = static_cast<int>(draft.size());
+    a.r = imp::spec_accept_rows(argmax.data(), draft.data(), nd, nd + 1, budgeted, a.in_think, emit,
+                                [&](int j) { return j + 1 != masked_row; });
+    return a;
+}
+
+// Every argmax/draft pattern over {plain, <think>, </think>, eos} at 1 .. 3 drafts: the kept KV rows are
+// t0 + matched drafts, so an unfinished request must hold emitted == matched + 1 (B-68: the think break
+// sat behind matched++, kept </think> in KV and forwarded it again as the next t0).
+TEST(SpecAcceptRows, UnfinishedChunkLeavesExactlyTheBonusOutsideTheKeptRows) {
+    const int32_t alphabet[] = {7, kOpen, kClose, kEos};
+    int crossings = 0;
+    for (int nd = 1; nd <= 3; ++nd) {
+        const int rows = nd + 1;
+        int n_am = 1, n_dr = 1;
+        for (int i = 0; i < rows; ++i)
+            n_am *= 4;
+        for (int i = 0; i < nd; ++i)
+            n_dr *= 5;
+        for (int a = 0; a < n_am; ++a) {
+            std::vector<int32_t> am(rows);
+            for (int i = 0, v = a; i < rows; ++i, v /= 4)
+                am[i] = alphabet[v % 4];
+            for (int d = 0; d < n_dr; ++d) {
+                std::vector<int32_t> dr(nd);
+                for (int i = 0, v = d; i < nd; ++i, v /= 5)
+                    dr[i] = (v % 5 == 4) ? 8 : alphabet[v % 5];  // 8 never matches
+                for (int flags = 0; flags < 4; ++flags) {
+                    const bool in_think = (flags & 1) != 0, budgeted = (flags & 2) != 0;
+                    const AcceptRun run = accept(am, dr, in_think, budgeted);
+                    const auto& r = run.r;
+                    ASSERT_EQ(static_cast<int>(run.out.size()), r.emitted);
+                    ASSERT_LE(r.matched, nd);
+                    for (int i = 0; i < r.matched; ++i)
+                        ASSERT_EQ(am[i], dr[i]) << "an accepted row holds its draft token";
+                    if (run.finished) {
+                        ASSERT_EQ(run.out.back(), kEos);
+                        continue;
+                    }
+                    ASSERT_EQ(r.emitted, r.matched + 1) << "nd " << nd << " am " << a << " dr " << d;
+                    if (budgeted && run.in_think != in_think) {
+                        ++crossings;
+                        const int32_t edge = in_think ? kClose : kOpen;
+                        ASSERT_EQ(run.out.back(), edge) << "the crossing token is the bonus";
+                        for (int i = 0; i < r.matched; ++i)
+                            ASSERT_NE(am[i], edge) << "no kept KV row holds the crossing token";
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(crossings, 10000) << "the sweep must reach the think edge";
+}
+
+TEST(SpecAcceptRows, ThinkEdgeAcceptedDraftStaysTheBonus) {
+    // The head drafted </think> and the model agreed: 1 token, 0 kept draft rows.
+    AcceptRun run = accept({kClose, 7, 7}, {kClose, 7}, /*in_think=*/true, /*budgeted=*/true);
+    EXPECT_EQ(run.r.matched, 0);
+    EXPECT_EQ(run.r.emitted, 1);
+    // One draft in, </think> second: the draft before it is kept.
+    run = accept({7, kClose, 7}, {7, kClose}, true, true);
+    EXPECT_EQ(run.r.matched, 1);
+    EXPECT_EQ(run.r.emitted, 2);
+    // No budget: the edge does not end the chunk.
+    run = accept({kClose, 7, 7}, {kClose, 7}, true, /*budgeted=*/false);
+    EXPECT_EQ(run.r.matched, 2);
+    EXPECT_EQ(run.r.emitted, 3);
+    // Started outside, stays outside: full accept plus the bonus.
+    run = accept({7, 7, 7}, {7, 7}, false, true);
+    EXPECT_EQ(run.r.matched, 2);
+    EXPECT_EQ(run.r.emitted, 3);
+}
+
+TEST(SpecAcceptRows, MaskedNextRowAndStopEndTheChunk) {
+    AcceptRun run = accept({7, 7, 7}, {7, 7}, false, false, /*masked_row=*/2);
+    EXPECT_EQ(run.r.matched, 1) << "row 2's token is masked out: row 1's token is the bonus";
+    EXPECT_EQ(run.r.emitted, 2);
+    run = accept({7, kEos, 7}, {7, kEos}, false, false);
+    EXPECT_TRUE(run.finished);
+    EXPECT_EQ(run.r.matched, 1);
+    EXPECT_EQ(run.r.emitted, 2);
+    run = accept({7, 8, 7}, {7, 7}, false, false);
+    EXPECT_EQ(run.r.matched, 1) << "the diverging token is emitted as the bonus";
+    EXPECT_EQ(run.r.emitted, 2);
 }
 
 }  // namespace

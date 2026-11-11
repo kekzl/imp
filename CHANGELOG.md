@@ -11,6 +11,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - At 2 MTP drafts the bound batched verify keeps draft 1 as a factor row instead of a second spare recurrent slot (`speculative.mtp_batch_verify_factor_row`), so a concurrent GDN-hybrid server keeps `mtp_batch_verify_k=2`. Qwen3.8-27B-NVFP4 server, 2 chats x 80k: 240.2 -> 285.0 tok/s, 1 chat 128.4 -> 154.3; KV plan 11239 -> 10901 blocks (#3088).
 - A concurrent GDN-hybrid server verifies 3 MTP drafts per request instead of 2 (`speculative.mtp_batch_verify_k` default 3, `mtp_k=auto` follows). Qwen3.8-27B-NVFP4 server, tok/s per stream, 2 -> 3 drafts: 1 chat x 80k 164.9 -> 181.2, 2 chats x 80k 150.9 -> 161.0, 4 chats x 20k 136.8 -> 144.6; KV plan 10901 -> 11164 blocks (#3089).
 
+### Fixed
+- A speculative draft that matched `</think>` under a think budget was kept and then forwarded a second time at the same position, advancing the GDN recurrent state twice. The token now stays the chunk's bonus. Qwen3.8-27B-NVFP4, 12 thinking chats x 2, `--max-batch 1`: double forwards 8 of 24 requests -> 0 (#3090).
+
 ## [0.65.0] - 2026-11-09
 
 ### Added

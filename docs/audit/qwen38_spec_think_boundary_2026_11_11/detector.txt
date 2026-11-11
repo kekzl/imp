@@ -1,0 +1,100 @@
+# Think-boundary accept in the speculative verify paths (dev build, RTX 5090, Qwen3.8-27B-NVFP4-vllm)
+# 12 short thinking chats x 2 reps, greedy, max_tokens 1024, gdn.state_bf16=false, speculative.ngram=false
+# U = think break behind matched++ (main 3b273839), F = the fix (src/runtime/spec_accept.h)
+# edge = the verify chunk that emitted </think> (id 248069), fwd = the next step forwarding it as row 0
+# kept = p0 + matched, the last KV row / recurrent-state token the chunk keeps
+
+## single-stream verify (--max-batch 1, mtp_k auto 2) and bound batched verify at server defaults
+U_conc edges 24 drafted_think_end 0 matched_eq_emitted 0 fwd 24 fwd_p0_eq_kept 0 fwd_p0_eq_kept_plus1 24
+U_single edges 24 drafted_think_end 8 matched_eq_emitted 8 fwd 24 fwd_p0_eq_kept 8 fwd_p0_eq_kept_plus1 16
+F_conc edges 24 drafted_think_end 0 matched_eq_emitted 0 fwd 24 fwd_p0_eq_kept 0 fwd_p0_eq_kept_plus1 24
+F_single edges 24 drafted_think_end 8 matched_eq_emitted 0 fwd 24 fwd_p0_eq_kept 0 fwd_p0_eq_kept_plus1 24
+# U_conc / F_conc: mtp_draft_vocab=98304 (FP8 draft head rows): id 248069 is never drafted
+
+=== single: F against U
+U_single: 12 of 12 prompts identical across reps
+F_single: 12 of 12 prompts identical across reps
+i ref_rlen ref_len F_single
+0 94 98 eq
+1 163 188 eq
+2 216 258 eq
+3 217 370 eq
+4 221 318 11
+5 224 298 eq
+6 416 591 eq
+7 144 380 158
+8 156 201 eq
+9 556 629 eq
+10 137 242 eq
+11 395 466 eq
+F_single: identical 10, diverged in think 0, diverged in answer 2
+
+=== conc: F against U
+U_conc: 12 of 12 prompts identical across reps
+F_conc: 12 of 12 prompts identical across reps
+i ref_rlen ref_len F_conc
+0 116 120 eq
+1 148 173 eq
+2 387 429 eq
+3 205 347 eq
+4 233 330 eq
+5 310 386 eq
+6 352 530 eq
+7 129 367 eq
+8 135 180 eq
+9 1169 1230 eq
+10 89 194 eq
+11 1526 1603 eq
+F_conc: identical 12, diverged in think 0, diverged in answer 0
+
+## bound batched verify with --set speculative.mtp_draft_vocab=0 (3 drafts per request)
+U_conc edges 24 drafted_think_end 16 matched_eq_emitted 16 fwd 24 fwd_p0_eq_kept 16 fwd_p0_eq_kept_plus1 8
+F_conc edges 24 drafted_think_end 16 matched_eq_emitted 0 fwd 24 fwd_p0_eq_kept 0 fwd_p0_eq_kept_plus1 24
+
+=== conc: F against U
+U_conc: 12 of 12 prompts identical across reps
+F_conc: 12 of 12 prompts identical across reps
+i ref_rlen ref_len F_conc
+0 116 120 eq
+1 148 173 eq
+2 387 429 eq
+3 205 347 eq
+4 233 323 38
+5 310 386 eq
+6 352 530 eq
+7 129 376 8
+8 135 180 eq
+9 1169 1230 eq
+10 89 194 eq
+11 1526 1603 eq
+F_conc: identical 10, diverged in think 0, diverged in answer 2
+
+## edge + fwd lines of the first 3 requests that drafted </think>, U then F
+# U_single
+THINKDBG edge path=ng req=6 p0=141 j=0 nd=2 draft=248069 matched=1 emitted=1 kept_through=142 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=6 p0=142 t0=248069
+THINKDBG edge path=ng req=9 p0=92 j=1 nd=2 draft=248069 matched=2 emitted=2 kept_through=94 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=9 p0=94 t0=248069
+THINKDBG edge path=ng req=12 p0=97 j=0 nd=2 draft=248069 matched=1 emitted=1 kept_through=98 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=12 p0=98 t0=248069
+# F_single
+THINKDBG edge path=ng req=6 p0=141 j=0 nd=2 draft=248069 matched=0 emitted=1 kept_through=141 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=6 p0=142 t0=248069
+THINKDBG edge path=ng req=9 p0=92 j=1 nd=2 draft=248069 matched=1 emitted=2 kept_through=93 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=9 p0=94 t0=248069
+THINKDBG edge path=ng req=12 p0=97 j=0 nd=2 draft=248069 matched=0 emitted=1 kept_through=97 budget=0.50 think0=1 N=1
+THINKDBG fwd path=ng req=12 p0=98 t0=248069
+# U_conc
+THINKDBG edge path=bv req=34 p0=121 j=2 nd=3 draft=248069 matched=3 emitted=3 kept_through=124 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=34 p0=124 t0=248069
+THINKDBG edge path=bv req=37 p0=105 j=2 nd=3 draft=248069 matched=3 emitted=3 kept_through=108 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=37 p0=108 t0=248069
+THINKDBG edge path=bv req=38 p0=156 j=0 nd=3 draft=248069 matched=1 emitted=1 kept_through=157 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=38 p0=157 t0=248069
+# F_conc
+THINKDBG edge path=bv req=34 p0=121 j=2 nd=3 draft=248069 matched=2 emitted=3 kept_through=123 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=34 p0=124 t0=248069
+THINKDBG edge path=bv req=37 p0=105 j=2 nd=3 draft=248069 matched=2 emitted=3 kept_through=107 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=37 p0=108 t0=248069
+THINKDBG edge path=bv req=38 p0=156 j=0 nd=3 draft=248069 matched=0 emitted=1 kept_through=156 budget=0.50 think0=1 N=1
+THINKDBG fwd path=bv req=38 p0=157 t0=248069

@@ -42,6 +42,7 @@
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
+#include "runtime/spec_accept.h"
 #include "runtime/spec_gates.h"
 #include "runtime/suffix_draft.h"
 #include "runtime/think_stop_logic.h"
@@ -942,20 +943,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // Linear: K (attn-scores clamp may have trimmed the staged chunk below
     // draft.size()). mc: the winning candidate's full length.
     const int acc_len = mc_on ? static_cast<int>(acc->size()) : K;
-    int matched = 0;  // accepted draft tokens (their KV entries are valid)
-    int emitted = 0;
-    // Whether this chunk STARTED inside a budgeted think block. Verifies run
-    // inside think for MTP-bound requests (gate exception above); the break
-    // below must fire only on ENTERING the block mid-chunk, or every in-think
-    // verify emits 1 token, reads as avg 1.0 emitted/verify and trips the
-    // economics guard on a head that is accepting fine.
-    const bool think_at_chunk_start = req->in_think_block;
-    for (int j = 0; j + mc_row0 < chunk_len; ++j) {
-        if (mc_on && j > acc_len) break;  // stay inside the winning group
-        const int32_t tokj = h_spec_argmax_.as<int32_t>()[mc_row0 + j];
+    const int32_t* am = h_spec_argmax_.as<int32_t>() + mc_row0;
+    const auto emit = [&](int j, int32_t tokj) {
         req->output_tokens.push_back(tokj);
         track_think_state(*req, tokj);
-        emitted++;
         const bool hard_stop = should_stop(*req, tokj) ||
                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
         // Per-request FSM; must advance before finish_request returns the
@@ -965,20 +956,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (hard_stop) {
             mark_slab_ahead(*req, hybrid, hybrid_mc, mc_row0, j, K, mc_rows_per_cand);
             finish_request(req);
-            break;
         }
-        if (j >= acc_len || tokj != (*acc)[j]) break;  // bonus reached or draft diverged
-        if (!spec_constraint_allows_(*req, h_spec_argmax_.as<int32_t>()[mc_row0 + j + 1], stream))
-            break;  // the next row's token is masked out: tokj is the bonus
-        matched++;
-        // Crossing a think boundary mid-chunk (either direction): stop
-        // extending; the accepted prefix stays. Entering: budget forcing
-        // lives in the loop/eager path. Leaving: the post-</think>
-        // stop/grace window is where chunk-argmax noise diverges from the
-        // eager path, so hand it to the eager step, which is byte-identical
-        // to the pre-MTP behavior.
-        if (req->think_budget > 0.0f && req->in_think_block != think_at_chunk_start) break;
-    }
+        return hard_stop;
+    };
+    // The next row's token masked out: row j's token is the bonus.
+    const auto extends = [&](int j) { return spec_constraint_allows_(*req, am[j + 1], stream); };
+    // A token crossing a budgeted think boundary ends the chunk as its bonus (either direction):
+    // budget forcing and the post-</think> stop/grace window belong to the eager step.
+    // matched = accepted draft tokens (their KV entries are valid).
+    const auto [matched, emitted] = spec_accept_rows(am, acc->data(), acc_len, chunk_len - mc_row0,
+                                                     req->think_budget > 0.0f, req->in_think_block, emit,
+                                                     extends);
     touch_if_live(*kv_manager_, *req);
 
     // mc: materialize the winner's KV, copying its private block(s) covering
