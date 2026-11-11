@@ -39,13 +39,15 @@ inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_
     IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
 }
 
-// Per-step sampler seed: request seed (or hash(id) ^ clock) + output token count.
-// Masked to 31 bits: samplers read a negative seed as unset and draw with the fixed 42u.
+// Per-step sampler seed: request seed (or hash(id) ^ clock, fixed at the request's first draw) + output
+// token count. Masked to 31 bits: samplers read a negative seed as unset and draw with the fixed 42u.
 inline int compute_step_seed(const Request& req) {
-    const unsigned base = req.seed >= 0 ? static_cast<unsigned>(req.seed)
-                                        : static_cast<unsigned>(
-                                              std::hash<int>{}(req.id) ^
+    if (req.seed < 0 && !req.draw_base_set) {
+        req.draw_base = static_cast<unsigned>(std::hash<int>{}(req.id) ^
                                               std::chrono::steady_clock::now().time_since_epoch().count());
+        req.draw_base_set = true;
+    }
+    const unsigned base = req.seed >= 0 ? static_cast<unsigned>(req.seed) : req.draw_base;
     return static_cast<int>((base + static_cast<unsigned>(req.output_tokens.size())) & 0x7fffffffu);
 }
 
@@ -74,6 +76,29 @@ inline VerifySampling verify_sampling_for(const Request& req, int vocab_size) {
 // greedy.
 std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<Request>>& reqs, int T,
                                              int vocab_size);
+// MTP draft draws (speculative.mtp_draft_coupled), row lv * m + i: request reqs[bound[i]]'s draft level lv
+// draws with its params and the seed of output index size() + lv, the seed of the verify row that checks
+// it. A greedy request's rows take top_k 1. Empty: no bound request samples.
+inline std::vector<VerifySampling> draft_row_draws(const std::vector<std::shared_ptr<Request>>& reqs,
+                                                   const std::vector<int>& bound, int levels,
+                                                   int vocab_size) {
+    std::vector<VerifySampling> rows;
+    const size_t m = bound.size();
+    for (size_t i = 0; i < m; ++i) {
+        const VerifySampling s = verify_sampling_for(*reqs[static_cast<size_t>(bound[i])], vocab_size);
+        if (s.top_k < 1 || s.top_k > SAMPLE_MAX_TOP_K)
+            continue;
+        if (rows.empty())
+            rows.assign(m * static_cast<size_t>(levels), VerifySampling{.top_k = 1});
+        for (int lv = 0; lv < levels; ++lv) {
+            VerifySampling& r = rows[(static_cast<size_t>(lv) * m) + i];
+            r = s;
+            r.seed0 = static_cast<int>((static_cast<unsigned>(s.seed0) + static_cast<unsigned>(lv)) &
+                                       0x7fffffffu);
+        }
+    }
+    return rows;
+}
 // A batched-verify row: the engine's sampled-verify refusal, then speculative.sampled_batch_verify
 // (batch_on).
 const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on);

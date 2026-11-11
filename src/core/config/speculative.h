@@ -225,9 +225,13 @@ struct Speculative {
     // walks the whole context per CTA (Qwen3.8-27B-NVFP4 at 20k: 1 ms per layer). false = the single chunk.
     bool mtp_batch_verify_solo = true;
     // That step's head pass (feed, draft LM head, chain) replays a CUDA graph per (fed rows, requests,
-    // chain), at most 48: the second use of a shape captures it. Off = eager launches. Qwen3.8-27B-NVFP4:
+    // chain), at most 96: the second use of a shape captures it. Off = eager launches. Qwen3.8-27B-NVFP4:
     // head pass at 2 requests 2.66-2.77 -> 2.33-2.46 ms, 4 overlapping chats 140.40 -> 143.47 tok/s.
     bool mtp_head_graph = true;
+    // Sampled bound requests: an MTP draft draws from the head's logits with the request's params and the
+    // seed of its verify row (sampler noise is keyed on (seed, token id)); emitted tokens stay the verify
+    // rows' draws. Off = argmax drafts. Qwen3.8-27B-NVFP4 agent replay: 2.981 -> 3.461 tokens per step.
+    bool mtp_draft_coupled = true;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

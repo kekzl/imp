@@ -254,21 +254,7 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
             break;
         }
     }
-    const float norm = cumsum;  // the prefix sum up to cutoff, same summation order
-    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-
-    unsigned int rng_state = sampler_seed_scramble(seed);
-    float r = lcg_rand_float(rng_state);
-    float acc = 0.0f;
-    int chosen = s_idx[0];
-    for (int i = 0; i < cutoff; ++i) {
-        acc += s_val[i] * inv_norm;
-        if (r < acc) {
-            chosen = s_idx[i];
-            break;
-        }
-    }
-    d_result[0] = static_cast<int32_t>(chosen);
+    d_result[0] = static_cast<int32_t>(sampler_race_pick(seed, s_val, s_idx, cutoff));
 }
 
 __global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
@@ -466,23 +452,7 @@ __global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_
             break;
         }
     }
-
-    const float norm = cumsum;  // the prefix sum up to cutoff, same summation order
-    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-
-    unsigned int rng_state = sampler_seed_scramble(seed);
-    float r = lcg_rand_float(rng_state);
-
-    float acc = 0.0f;
-    int32_t chosen = sorted_indices[0];
-    for (int i = 0; i < cutoff; i++) {
-        acc += sorted_probs[i] * inv_norm;
-        if (r < acc) {
-            chosen = sorted_indices[i];
-            break;
-        }
-    }
-    d_result[0] = chosen;
+    d_result[0] = sampler_race_pick(seed, sorted_probs, sorted_indices, cutoff);
 }
 
 // Persistent scratch for CUB sort (lazily allocated, grows only)

@@ -1,0 +1,36 @@
+# build-dev, one mutant at a time, restored by copy; GPU filter SamplingTest.*:SampleVerifyRows.*,
+# CPU filter StepSeed.*:DraftRowDraws.*
+MUTANT M1_no_token_in_hash:
+[  PASSED  ] 30 tests.
+[  FAILED  ] 9 tests, listed below:
+[  FAILED  ] SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank
+[  FAILED  ] SampleVerifyRows.CoupledDraftMatchesTheVerifyDrawMoreOftenThanTheArgmax
+[  FAILED  ] SampleVerifyRows.DraftAcceptanceMatchesTargetDistribution
+[  FAILED  ] SampleVerifyRows.DraftRowDrawsWhatTheVerifyRowDrawsOnTheSameLogits
+[  FAILED  ] SamplingTest.SamplingDistribution
+[  FAILED  ] SamplingTest.TopPTruncatesCubPath
+[  FAILED  ] SamplingTest.TopPTruncatesCubPathShifted
+[  FAILED  ] SamplingTest.TopPTruncatesMultiblockPath
+[  FAILED  ] SamplingTest.TopPTruncatesMultiblockPathShifted
+MUTANT M2_rank_keyed:
+[  PASSED  ] 38 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank
+MUTANT M3_draft_seed_plus_1:
+[  PASSED  ] 38 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] SampleVerifyRows.RowDrawsWhatTheEagerSamplerDrawsForItsStepSeed
+MUTANT M4_no_level_offset:
+[  PASSED  ] 2 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] DraftRowDraws.EmptyWithoutASampledRowTheSamplerHolds
+[  FAILED  ] DraftRowDraws.LevelRowsTakeTheVerifyRowsSeedAndGreedyRowsTopK1
+MUTANT M5_base_redrawn:
+[  PASSED  ] 3 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] StepSeed.UnseededRequestKeepsOneBase
+CONTROL (restored tree):
+gpu.log:[  PASSED  ] 39 tests.
+cpu.log:[  PASSED  ] 4 tests.
+coupled 511 / 512, argmax 259 / 512
+coupled 503 / 512, target draws its top token on 231

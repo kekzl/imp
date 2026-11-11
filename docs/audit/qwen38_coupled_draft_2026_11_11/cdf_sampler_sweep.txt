@@ -1,0 +1,57 @@
+# CDF sampler (one uniform through the sorted candidates), experiment build, deterministic:
+# off = argmax drafts, tNN = coupled with draft temperature x N.N
+arm off rc=0
+arm t13 rc=0
+arm t10 rc=0
+arm t07 rc=0
+arm t05 rc=0
+arm t03 rc=0
+== off
+n=1 T=5 steps 18051 share 100.0 % tok/step 2.787
+   nd=4 steps 18051 share 100.0 % full-accept 27.5 % | m0:32.2 m1:20.1 m2:12.0 m3:8.2 m4:27.5
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   120.78 |  165.22 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    64.32 |  185.37 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   118.54 |  155.55 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 318.72 s | 157.88 tok/s wall | 165.71 tok/s decode per chat
+0
+== t13
+n=1 T=5 steps 18822 share 100.0 % tok/step 2.673
+   nd=4 steps 18822 share 100.0 % full-accept 24.8 % | m0:34.7 m1:20.8 m2:11.8 m3:8.0 m4:24.8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   127.41 |  156.62 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    66.94 |  178.13 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   122.54 |  150.47 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 331.90 s | 151.61 tok/s wall | 158.79 tok/s decode per chat
+5
+== t10
+n=1 T=5 steps 17857 share 100.0 % tok/step 2.818
+   nd=4 steps 17857 share 100.0 % full-accept 27.4 % | m0:30.7 m1:20.4 m2:12.7 m3:8.7 m4:27.4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   120.63 |  165.42 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    63.74 |  187.07 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   116.33 |  158.50 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 315.78 s | 159.35 tok/s wall | 167.34 tok/s decode per chat
+5
+== t07
+n=1 T=5 steps 17762 share 100.0 % tok/step 2.833
+   nd=4 steps 17762 share 100.0 % full-accept 28.1 % | m0:30.9 m1:19.9 m2:12.4 m3:8.8 m4:28.1
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   119.44 |  167.07 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    63.76 |  187.01 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   115.85 |  159.16 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 314.00 s | 160.25 tok/s wall | 168.26 tok/s decode per chat
+5
+== t05
+n=1 T=5 steps 17880 share 100.0 % tok/step 2.814
+   nd=4 steps 17880 share 100.0 % full-accept 27.8 % | m0:31.3 m1:20.1 m2:12.3 m3:8.5 m4:27.8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   119.89 |  166.45 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    64.17 |  185.83 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   117.17 |  157.37 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 316.32 s | 159.07 tok/s wall | 167.05 tok/s decode per chat
+5
+== t03
+n=1 T=5 steps 17935 share 100.0 % tok/step 2.805
+   nd=4 steps 17935 share 100.0 % full-accept 27.8 % | m0:31.7 m1:20.1 m2:12.1 m3:8.4 m4:27.8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19956 |  81.0 |   120.09 |  166.17 | 30/0/0 | 40d52ed847d0
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11924 |  65.3 |    64.21 |  185.69 | 30/0/0 | 26a30cc1cbee
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18439 |  85.2 |   117.85 |  156.47 | 30/0/0 | a5310d9a5f49
+total | requests 90 | output tok 50319 | reasoning 78.8 % | wall 317.23 s | 158.62 tok/s wall | 166.53 tok/s decode per chat
+5
+SWEEP_DONE

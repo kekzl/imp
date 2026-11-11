@@ -1,0 +1,21 @@
+# shipped tree (imp:crn), runtime.deterministic=true, coupled, 2 more server starts
+arm don1 rc=0
+arm don2 rc=0
+== don1
+n=1 T=5 steps 13917 share 100.0 % tok/step 3.461
+   nd=4 steps 13917 share 100.0 % full-accept 43.7 % | m0:17.1 m1:17.1 m2:12.2 m3:9.9 m4:43.7
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   112.37 |  202.82 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    58.06 |  212.99 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    66.01 |  197.24 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 251.49 s | 191.56 tok/s wall | 203.76 tok/s decode per chat
+5
+0
+== don2
+n=1 T=5 steps 13917 share 100.0 % tok/step 3.461
+   nd=4 steps 13917 share 100.0 % full-accept 43.7 % | m0:17.1 m1:17.1 m2:12.2 m3:9.9 m4:43.7
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   112.35 |  202.87 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    58.11 |  212.81 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    66.04 |  197.13 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 251.55 s | 191.51 tok/s wall | 203.71 tok/s decode per chat
+5
+0

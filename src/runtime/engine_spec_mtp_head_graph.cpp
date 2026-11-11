@@ -115,8 +115,8 @@ int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* 
     g.head = head;
     ++G.n_graphs;
     G.failures = 0;
-    IMP_LOG_INFO("[mtp-head-graph] captured n=%d m=%d chain=%d (%zu scan nodes, %zu graphs): %.1f ms", key.n,
-                 key.m, key.chain, g.scan.nodes.size(), G.n_graphs,
+    IMP_LOG_INFO("[mtp-head-graph] captured n=%d m=%d chain=%d draw=%d (%zu scan nodes, %zu graphs): %.1f ms",
+                 key.n, key.m, key.chain, key.draw, g.scan.nodes.size(), G.n_graphs,
                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     return n_out;
 }
@@ -130,6 +130,7 @@ struct HeadPassInputs {
     const NvFP4QuantResult* head;  // NVFP4 draft LM head, or null
     const Tensor* post_norm;       // the target's final norm on the gathered rows, or null
     int draft_vocab;               // speculative.mtp_draft_vocab: FP8 head rows scored, 0 = all
+    int draw_top_k;                // staged draft draws (stage_draft_draws), 0 = argmax drafts
 };
 
 // The pass after the table upload: feed, draft LM head, the chain when asked; drafts in ws.d_chain_tokens.
@@ -147,8 +148,8 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
         return -1;
     // The next draft per request: LM head over the last fed row of each.
     mtp_gather_rows(ws.d_b_h_final, tab.last, ws.d_b_gather, hidden_dim, m, stream);
-    if (!in.executor.lm_head_rows_argmax(ws.d_b_gather, m, ws.d_chain_tokens, stream, in.head,
-                                         in.draft_vocab))
+    if (!in.executor.lm_head_rows_argmax(ws.d_b_gather, m, ws.d_chain_tokens, stream, in.head, in.draft_vocab,
+                                         0, in.draw_top_k))
         return -2;
     // Draft lv + 1 per bound request: (draft lv, the head's own final-norm row) at the request's next
     // position in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (drafts
@@ -161,7 +162,8 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
                                                     *model.mtp_, model.tok_emb_, ws, hidden_dim, stream) &&
                         in.executor.lm_head_rows_argmax(ws.d_b_h_final, m,
                                                         ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv) * m),
-                                                        stream, in.head, in.draft_vocab);
+                                                        stream, in.head, in.draft_vocab, lv * m,
+                                                        in.draw_top_k);
         if (!ok)
             return lv * m;
     }
@@ -171,7 +173,8 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
 }  // namespace
 
 int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const NvFP4QuantResult* head,
-                           cudaStream_t stream, const int32_t** drafts) {
+                           cudaStream_t stream, const int32_t** drafts, const VerifySampling* draws,
+                           int n_draws) {
     if (mtp_head_graphs_ == nullptr) {
         mtp_head_graphs_.reset(new MtpHeadGraphs{});
         mtp_head_graphs_->h_out.resize(kMtpHeadOutInts);
@@ -181,18 +184,22 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
     // Chain levels: one per draft past the first that a step of these m requests verifies.
     const int chain = std::clamp(mtp_bound_verify_step_depth(bv_.depth, bv_.wide_depth, tab.m) - 1, 0, 3);
+    const int draft_vocab = runtime_config_.speculative.mtp_draft_vocab;
+    // Coupled drafts: every level's draw args go up before the pass (a replayed graph reads them too).
+    const int draw_rows = (1 + chain) * tab.m;
+    const int draw_top_k = draws != nullptr && n_draws >= draw_rows
+                               ? executor_->stage_draft_draws(draws, draw_rows, tab.m, head, draft_vocab,
+                                                              stream)
+                               : 0;
     // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
-    const HeadPassInputs in{*model_,
-                            *executor_,
-                            *mtp_ws_storage_,
-                            hidden,
-                            head,
-                            runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr,
-                            runtime_config_.speculative.mtp_draft_vocab};
+    const HeadPassInputs in{
+        *model_,     *executor_, *mtp_ws_storage_,
+        hidden,      head,       runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr,
+        draft_vocab, draw_top_k};
     auto run = [&](int feed_max, int chain_max) {
         return run_head_pass(in, tab, chain, feed_max, chain_max, stream);
     };
-    const MtpHeadGraphKey key{tab.n, tab.m, chain};
+    const MtpHeadGraphKey key{tab.n, tab.m, chain, draw_top_k};
     const void* head_data = head != nullptr ? head->packed_data : nullptr;
     MtpHeadGraph* g = runtime_config_.speculative.mtp_head_graph && !G.doomed
                           ? cached_graph(G, key, hidden, head_data)

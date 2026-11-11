@@ -1,0 +1,41 @@
+# shipped tree (imp:crn), default mode, 3 chats x 30 turns in turn, off / on / off / on
+arm poff1 rc=0
+arm pon1 rc=0
+arm poff2 rc=0
+arm pon2 rc=0
+== poff1
+n=1 T=5 steps 17921 share 100.0 % tok/step 2.813
+   nd=4 steps 17921 share 100.0 % full-accept 28.2 % | m0:31.6 m1:20.1 m2:11.8 m3:8.3 m4:28.2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   21162 |  79.0 |   121.11 |  174.74 | 30/0/0 | 5d36ee089579
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10522 |  52.1 |    56.96 |  184.74 | 30/0/0 | b4d6357c4dae
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18738 |  87.9 |   121.30 |  154.47 | 30/0/0 | b7d8ebe1cde1
+total | requests 90 | output tok 50422 | reasoning 76.7 % | wall 310.67 s | 162.30 tok/s wall | 168.43 tok/s decode per chat
+0
+0
+== pon1
+n=1 T=5 steps 15858 share 100.0 % tok/step 3.234
+   nd=4 steps 15858 share 100.0 % full-accept 35.7 % | m0:20.3 m1:18.4 m2:14.5 m3:11.0 m4:35.7
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   15869 |  75.8 |    80.51 |  197.10 | 30/0/0 | 129613ac9144
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12288 |  74.2 |    57.28 |  214.51 | 30/0/0 | be65b023ea2e
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   23129 |  90.1 |   125.49 |  184.31 | 30/0/0 | 6f177a183161
+total | requests 90 | output tok 51286 | reasoning 81.9 % | wall 274.55 s | 186.80 tok/s wall | 194.79 tok/s decode per chat
+5
+0
+== poff2
+n=1 T=5 steps 17921 share 100.0 % tok/step 2.813
+   nd=4 steps 17921 share 100.0 % full-accept 28.2 % | m0:31.6 m1:20.1 m2:11.8 m3:8.3 m4:28.2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   21162 |  79.0 |   120.65 |  175.40 | 30/0/0 | 5d36ee089579
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10522 |  52.1 |    56.91 |  184.88 | 30/0/0 | b4d6357c4dae
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   18738 |  87.9 |   121.31 |  154.47 | 30/0/0 | b7d8ebe1cde1
+total | requests 90 | output tok 50422 | reasoning 76.7 % | wall 310.06 s | 162.62 tok/s wall | 168.71 tok/s decode per chat
+0
+0
+== pon2
+n=1 T=5 steps 15880 share 100.0 % tok/step 3.223
+   nd=4 steps 15880 share 100.0 % full-accept 35.4 % | m0:20.4 m1:18.5 m2:14.8 m3:10.9 m4:35.4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   15869 |  75.8 |    80.70 |  196.65 | 30/0/0 | 129613ac9144
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12190 |  69.4 |    57.89 |  210.57 | 30/0/0 | 7c5008250d2c
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   23129 |  90.1 |   125.67 |  184.04 | 30/0/0 | 6f177a183161
+total | requests 90 | output tok 51188 | reasoning 80.7 % | wall 275.42 s | 185.85 tok/s wall | 193.70 tok/s decode per chat
+5
+0

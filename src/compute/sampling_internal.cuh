@@ -110,6 +110,28 @@ __device__ __forceinline__ unsigned int sampler_seed_scramble(unsigned int seed)
     return s ^ (s >> 15);
 }
 
+// Exponential race (Gumbel-max): candidate i wins with probability p[i] / sum(p), p unnormalized.
+// The noise is keyed on (seed, token id), so two rows drawing with one seed pick the same token
+// wherever their p agree (an MTP draft row and the verify row that checks it). u has 23 bits, in (0, 1).
+__device__ __forceinline__ int sampler_race_pick(unsigned int seed, const float* p, const int* ids, int n) {
+    const unsigned int base = sampler_seed_scramble(seed);
+    float best = FLT_MAX;
+    int win = ids[0];
+    for (int i = 0; i < n; ++i) {
+        if (!(p[i] > 0.0f) || ids[i] < 0)
+            continue;
+        const unsigned int h = sampler_seed_scramble(base ^
+                                                     (static_cast<unsigned int>(ids[i]) * 0x85EBCA6Bu));
+        const float u = (static_cast<float>(h >> 9) + 0.5f) * (1.0f / 8388608.0f);
+        const float t = -logf(u) / p[i];
+        if (t < best) {
+            best = t;
+            win = ids[i];
+        }
+    }
+    return win;
+}
+
 // Block-cooperative top-k: each thread passes its own unsorted local candidates; produces
 // the block's global top_k (sorted desc, ties -> smaller index) in out_val/out_idx.
 // s_warp_vals/idxs: smem scratch of NUM_WARPS*top_k each. All threads must reach this with

@@ -54,6 +54,7 @@ namespace imp {
 struct ImageData;  // src/vision/image_processor.h (per-request vision)
 struct QwenPatches;      // src/vision/image_processor.h
 struct Request;          // runtime/request.h: complete only in the TUs that read it
+struct VerifySampling;   // compute/sampling.h
 struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
 struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
@@ -1092,9 +1093,12 @@ private:
     // 1 and the KV has room, one more feed + LM head for the next draft per request (a graph replay with
     // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
     // level); -1 = feed, -2 = LM head, -3 = D2H failed.
+    // draws: n_draws draft_row_draws() rows of the bound requests (speculative.mtp_draft_coupled), 0 =
+    // argmax.
     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
                                      const NvFP4QuantResult* head, cudaStream_t stream,
-                                     const int32_t** drafts);
+                                     const int32_t** drafts, const VerifySampling* draws = nullptr,
+                                     int n_draws = 0);
     std::unique_ptr<MtpHeadGraphs, MtpHeadGraphsDeleter> mtp_head_graphs_;
     void mtp_batched_set_draft_(const Request& req, int emitted, std::span<const int32_t> drafts);
     // True when the request's context advanced without MTP pairs (async-loop

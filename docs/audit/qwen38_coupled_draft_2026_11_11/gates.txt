@@ -1,0 +1,66 @@
+# final tree (imp:crn, image tree label = working tree), Qwen3.8-27B-NVFP4-vllm
+# pair: 3 chats x 10 turns in turn, seed 1000, runtime.deterministic=true, speculative.mtp_k=4,
+# speculative.ngram=false; zoff = speculative.mtp_draft_coupled=false, zon = default
+arm zoff rc=0
+n=1 T=5 steps 5799 share 100.0 % tok/step 3.129
+   nd=4 steps 5799 share 100.0 % full-accept 37.8 % | m0:26.6 m1:17.1 m2:11.0 m3:7.5 m4:37.8
+   0 | 20261109-225000-ba61bb |  10 |   36912 |  84.7 |    5714 |  81.0 |    32.17 |  177.63 | 10/0/0 | 9be693391140
+   1 | 20261109-225000-effbb6 |  10 |   21035 |  85.2 |    7693 |  82.0 |    41.98 |  183.25 | 10/0/0 | cd2867013d8b
+   2 | 20261109-225000-4c9280 |  10 |    3352 |  85.0 |    4739 |  80.7 |    24.04 |  197.12 | 10/0/0 | 58dcd00c430e
+total | requests 30 | output tok 18146 | reasoning 81.4 % | wall 108.82 s | 166.76 tok/s wall | 184.80 tok/s decode per chat
+draw graphs 0 stderr hits 0
+arm zon rc=0
+n=1 T=5 steps 4982 share 100.0 % tok/step 3.642
+   nd=4 steps 4982 share 100.0 % full-accept 49.7 % | m0:14.9 m1:15.1 m2:10.9 m3:9.5 m4:49.7
+   0 | 20261109-225000-ba61bb |  10 |   36912 |  84.7 |    5714 |  81.0 |    27.12 |  210.72 | 10/0/0 | 9be693391140
+   1 | 20261109-225000-effbb6 |  10 |   21035 |  85.2 |    7693 |  82.0 |    35.95 |  213.99 | 10/0/0 | cd2867013d8b
+   2 | 20261109-225000-4c9280 |  10 |    3352 |  85.0 |    4739 |  80.7 |    21.51 |  220.34 | 10/0/0 | 58dcd00c430e
+total | requests 30 | output tok 18146 | reasoning 81.4 % | wall 95.19 s | 190.64 tok/s wall | 214.56 tok/s decode per chat
+draw graphs 5 stderr hits 0
+
+# test-compute --gtest_filter='*Sampl*:TopkRadix*' (image)
+coupled 511 / 512, argmax 259 / 512
+coupled 503 / 512, target draws its top token on 231
+[  PASSED  ] 52 tests.
+
+# make dev-test
+100% tests passed, 0 tests failed out of 13
+Total Test time (real) =  21.27 sec
+
+# make preflight
+preflight: base 7f3d3adb, 37 changed file(s)
+static gates                                               ok       22  259 ok
+clang-tidy                                                 ok        9  9 changed file(s)
+clang-format                                               ok        0  changed lines clean
+actionlint                                                 skip      0  no .github change
+preflight: 0 failure(s), 32 s wall
+
+# tools/analysis/degen_suite.py, server defaults / --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (38s)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (56s)
+draw graphs 5 / 0
+
+# make test-spec-fidelity DOCKER_IMG=imp:crn
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:crn
+PASS fast gtest filter
+  decode  tg128 =  292.91 tok/s  (baseline  282.84, delta 3.56%)
+  prefill pp512 = 50077.61 tok/s  (baseline 50374.39, delta -0.59%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50446.59 tok/s  (baseline 50318.99, delta 0.25%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  168.67 tok/s
+  graphs ON  tg256 =  296.58 tok/s   (1.76x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1954.20 tok/s, slowest request 514 ms  (baseline 1899.81, delta 2.86%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 17:00:06Z, ended 17:01:44Z)

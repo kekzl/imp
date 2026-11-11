@@ -18,20 +18,28 @@ void stage_verify_row(float* lp, int vocab_size, const VerifySampling& s, unsign
                       TopkRowArgs& a, cudaStream_t stream) {
     apply_min_p(lp, vocab_size, s.min_p, stream);          // no-op at 0
     apply_typical_p(lp, vocab_size, s.typical_p, stream);  // no-op outside (0, 1)
+    VerifySampling d = s;
+    d.seed0 = static_cast<int>(seed & 0x7fffffffu);
+    stage_draft_row(lp, d, slot, a);
+}
+
+void* row_slot(void* d_slots, int r) {
+    return static_cast<char*>(d_slots) + (static_cast<size_t>(r) * SAMPLE_SCRATCH_BYTES);
+}
+
+}  // namespace
+
+void stage_draft_row(const float* lp, const VerifySampling& s, void* slot, TopkRowArgs& a) {
     a.logits = lp;
     a.d_result = static_cast<int32_t*>(slot);
     a.inv_temperature = 1.0f / (s.temperature > 0.0f ? s.temperature : 1.0f);
     a.top_p = s.top_p > 0.0f ? s.top_p : 1.0f;
-    a.seed = seed & 0x7fffffffu;
+    a.seed = static_cast<unsigned>(s.seed0) & 0x7fffffffu;
     a.top_k = s.top_k;
 }
 
-cudaError_t draw_staged_rows(int n_rows, int max_top_k, int vocab_size, TopkRowArgs* h_args,
-                             TopkRowArgs* d_args, void* d_slots, int32_t* d_out, cudaStream_t stream) {
-    if (const cudaError_t e = cudaMemcpyAsync(d_args, h_args, sizeof(TopkRowArgs) * n_rows,
-                                              cudaMemcpyHostToDevice, stream);
-        e != cudaSuccess)
-        return e;
+cudaError_t draw_uploaded_rows(const TopkRowArgs* d_args, int n_rows, int max_top_k, int vocab_size,
+                               const void* d_slots, int32_t* d_out, cudaStream_t stream) {
     if (const cudaError_t e = launch_topk_topp_rows(d_args, n_rows, max_top_k, vocab_size, stream);
         e != cudaSuccess)
         return e;
@@ -40,8 +48,16 @@ cudaError_t draw_staged_rows(int n_rows, int max_top_k, int vocab_size, TopkRowA
                              static_cast<size_t>(n_rows), cudaMemcpyDeviceToDevice, stream);
 }
 
-void* row_slot(void* d_slots, int r) {
-    return static_cast<char*>(d_slots) + (static_cast<size_t>(r) * SAMPLE_SCRATCH_BYTES);
+namespace {
+
+// Uploads n_rows staged rows (h_args) and draws them into d_out[n_rows].
+cudaError_t draw_staged_rows(int n_rows, int max_top_k, int vocab_size, const TopkRowArgs* h_args,
+                             TopkRowArgs* d_args, void* d_slots, int32_t* d_out, cudaStream_t stream) {
+    if (const cudaError_t e = cudaMemcpyAsync(d_args, h_args, sizeof(TopkRowArgs) * n_rows,
+                                              cudaMemcpyHostToDevice, stream);
+        e != cudaSuccess)
+        return e;
+    return draw_uploaded_rows(d_args, n_rows, max_top_k, vocab_size, d_slots, d_out, stream);
 }
 
 }  // namespace
