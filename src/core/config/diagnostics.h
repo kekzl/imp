@@ -49,6 +49,9 @@ struct Diagnostics {
     // IMP_JUMP_TRACE / IMP_PPL_DUMP still work as env names but are seeded into
     // these keys at load, so --set and imp.conf reach them too.
     bool spec_trace = false;  // per-step speculative draft/verify trace
+    // Paired depth A/Bs: N draft rows staged per request at every bound verify step below 4 requests (pad
+    // rows past the drafts, mtp_batch_verify_k..8): texts then match across depth policies. 0 = off.
+    int mtp_verify_pin = 0;
     bool jump_trace = false;  // conditional-graph jump trace
     // Per-row NLL from --perplexity: "1" sparse / "full" to the debug log, a path ('/') to a file.
     std::string ppl_dump;

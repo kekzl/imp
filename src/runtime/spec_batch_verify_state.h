@@ -36,6 +36,11 @@ struct BatchVerifyState {
     // verify; wide_depth from kMtpBoundVerifyWideRows requests up (mtp_bound_verify_step_depth).
     int depth = 1;
     int wide_depth = 1;
+    // speculative.mtp_batch_verify_k_streak (>= depth) and the depth the last verify step earned (0 = none,
+    // mtp_bound_verify_streak_next): the head pass after it drafts that many, the next step verifies them.
+    int streak_depth = 1;
+    int streak = 0;
+    int pin = 0;  // diagnostics.mtp_verify_pin, 0 or depth..kMtpBoundVerifyMaxDepth
     std::unordered_map<int, int> spare_of;   // req.id -> spare slot (state after all depth + 1 rows)
     std::unordered_map<int, int>
         spare2_of;  // req.id -> second spare (state after 2 rows), depth 2, no factor row
@@ -242,6 +247,8 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 // An unset speculative.mtp_batch_verify_k follows a smaller mtp_k down: a row past the drafted depth is a pad
 // (Qwen3.8-27B-NVFP4, 1 chat x 20k, 1 draft: 124.11 tok/s at 3 rows, 137.69 at 2).
 void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
+// The deepest step the config stages (speculative.mtp_batch_verify_k_streak over mtp_batch_verify_k).
+[[nodiscard]] int mtp_bound_verify_top_depth(const RuntimeConfig& cfg);
 // Every decoding row is no wider than the bound verify takes, and the verify pays: at least one row drafts
 // and drafted rows are at least half the batch (an undrafted row forwards a pad that is never accepted).
 [[nodiscard]] constexpr bool mtp_bound_verify_fits(int rows_cap, int decoding, int drafted,
@@ -255,7 +262,7 @@ void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 2 drafts per request on spares alone (two
 // snapshots), kMtpBoundVerifyMaxDepth with factor rows (a fold applies kGdnFactorFoldMaxRows of them).
-inline constexpr int kMtpBoundVerifyMaxDepth = 4;
+inline constexpr int kMtpBoundVerifyMaxDepth = 8;
 [[nodiscard]] constexpr int mtp_bound_verify_depth(int key, bool factor_row) {
     return std::clamp(key, 1, factor_row ? kMtpBoundVerifyMaxDepth : 2);
 }
@@ -265,8 +272,48 @@ inline constexpr int kMtpBoundVerifyWideRows = 4;
 [[nodiscard]] constexpr int mtp_bound_verify_wide_depth(int key_wide, int depth, bool factor_row) {
     return factor_row ? std::clamp(key_wide, std::min(2, depth), depth) : depth;
 }
-[[nodiscard]] constexpr int mtp_bound_verify_step_depth(int depth, int wide_depth, int n) {
-    return n >= kMtpBoundVerifyWideRows ? wide_depth : depth;
+// speculative.mtp_batch_verify_k_streak: the deepest step a run of full accepts reaches
+// (depth..kMtpBoundVerifyMaxDepth, factor rows only, below kMtpBoundVerifyWideRows requests).
+[[nodiscard]] constexpr int mtp_bound_verify_streak_depth(int key_streak, int depth, bool factor_row) {
+    return factor_row ? std::clamp(key_streak, depth, std::max(depth, kMtpBoundVerifyMaxDepth)) : depth;
+}
+// diagnostics.mtp_verify_pin: draft rows every step below the wide tier stages (0 = off, factor rows only).
+[[nodiscard]] constexpr int mtp_bound_verify_pin_depth(int key_pin, int depth, bool factor_row) {
+    return factor_row && key_pin > 0 ? std::clamp(key_pin, depth, std::max(depth, kMtpBoundVerifyMaxDepth))
+                                     : 0;
+}
+// A request accepted every draft of its step.
+[[nodiscard]] constexpr bool mtp_bound_verify_full_accept(int drafted, int matched, bool finished) {
+    return drafted > 0 && matched == drafted && !finished;
+}
+// Depth the next step earns from the most drafts a request of this one accepted in full (0 = none did):
+// kMtpBoundVerifyStreakStep more, up to the streak depth. Qwen3.8-27B: drafts 5 / 6 hold 35.2 % / 29.1 %
+// after 4 of 4.
+inline constexpr int kMtpBoundVerifyStreakStep = 2;
+[[nodiscard]] constexpr int mtp_bound_verify_streak_next(int full_drafts, int streak_depth) {
+    return full_drafts > 0 ? std::min(full_drafts + kMtpBoundVerifyStreakStep, streak_depth) : 0;
+}
+// A streak keeps n requests in the row tile of their depth-deep step: the small-M GEMM runs
+// kMtpBoundVerifyRowTile rows a tile (nvfp4_gemm_smallm_ws.cu), Qwen3.8-27B 8 -> 9 rows 13.46 -> 14.50 ms.
+inline constexpr int kMtpBoundVerifyRowTile = 8;
+[[nodiscard]] constexpr int mtp_bound_verify_tile_depth(int depth, int n, int streak) {
+    if (n <= 0)
+        return std::max(depth, streak);
+    const int tiles = (n * (depth + 1) + kMtpBoundVerifyRowTile - 1) / kMtpBoundVerifyRowTile;
+    return std::max(depth, std::min(streak, tiles * kMtpBoundVerifyRowTile / n - 1));
+}
+// Drafts per request of one step; streak = what the step before it earned (0 = no full accept).
+[[nodiscard]] constexpr int mtp_bound_verify_step_depth(int depth, int wide_depth, int n, int streak = 0) {
+    return n >= kMtpBoundVerifyWideRows ? wide_depth : mtp_bound_verify_tile_depth(depth, n, streak);
+}
+[[nodiscard]] inline int bound_verify_step_depth(const BatchVerifyState& bv, int n) {
+    return mtp_bound_verify_step_depth(bv.depth, bv.wide_depth, n, bv.streak);
+}
+// Rows a verify step stages per request, less one: the step depth, at least diagnostics.mtp_verify_pin (pad
+// rows past the drafts) below the wide tier.
+[[nodiscard]] inline int bound_verify_stage_depth(const BatchVerifyState& bv, int n) {
+    const int step = bound_verify_step_depth(bv, n);
+    return n >= kMtpBoundVerifyWideRows ? step : std::max(step, bv.pin);
 }
 // Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
 // snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).

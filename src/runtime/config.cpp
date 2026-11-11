@@ -259,6 +259,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("attention.mla_absorb", cfg.attention.mla_absorb);
     B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
     B("diagnostics.spec_trace", cfg.diagnostics.spec_trace);
+    I("diagnostics.mtp_verify_pin", cfg.diagnostics.mtp_verify_pin);
     B("diagnostics.spec_capture_fidelity", cfg.diagnostics.spec_capture_fidelity);
     B("diagnostics.jump_trace", cfg.diagnostics.jump_trace);
     S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
@@ -527,6 +528,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.mtp_batch_verify", cfg.speculative.mtp_batch_verify);
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
     I("speculative.mtp_batch_verify_k_wide", cfg.speculative.mtp_batch_verify_k_wide);
+    I("speculative.mtp_batch_verify_k_streak", cfg.speculative.mtp_batch_verify_k_streak);
     B("speculative.mtp_batch_verify_factor_row", cfg.speculative.mtp_batch_verify_factor_row);
     B("speculative.mtp_batch_verify_solo", cfg.speculative.mtp_batch_verify_solo);
     B("speculative.mtp_head_graph", cfg.speculative.mtp_head_graph);

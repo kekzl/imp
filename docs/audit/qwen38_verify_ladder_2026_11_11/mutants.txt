@@ -1,0 +1,22 @@
+# B-72 mutation validation, build-dev test-core --gtest_filter='BatchVerifyPredicates.*:MtpAuto.*' (44 tests)
+# mutant | changed lines | build rc | test rc | failed tests
+M1_no_tile_clamp | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M2_tile_floor | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M3_streak_step_1 | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M4_stage_drops_pin | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M5_pin_always_0 | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M6_full_accept_ignores_finished | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M7_wide_takes_streak | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M8_streak_without_factor_row | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep MtpAuto.AutoDepthAndVerifyDepthFollowEachOther MtpAuto.ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft
+M9_streak_never_resets | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M10_default_0 | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep MtpAuto.AutoDepthAndVerifyDepthFollowEachOther MtpAuto.ConcurrentHybridTakesThePair
+M11_top_ignores_pin | diff lines 2 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M12_streak_above_mtp_k | diff lines 3 | build rc=0 | test rc=1 | BatchVerifyPredicates.StepDepthFollowsTheRequestsInTheStep
+M13_auto_k_ignores_top | diff lines 2 | build rc=0 | test rc=1 | MtpAuto.AutoDepthAndVerifyDepthFollowEachOther MtpAuto.ConcurrentHybridTakesThePair MtpAuto.ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft
+control | build rc=0 | test rc=0 | [  PASSED  ] 44 tests.
+
+# 8-draft fold tests, build-dev test-moe-gdn --gtest_filter='GdnVerifyTwoDraftsTest.*' (14 tests, GPU)
+# G1: gdn_factor_fold caps at 3 rows (src/compute/gdn_factor.cu); G2: ssm_conv_tap_fold skips its first tap at n >= kernel_size (src/compute/ssm_conv_tap.cu)
+G1_fold_cap_3 | diff lines 2 | build rc=0 | test rc=1 | 12 ok | failed: GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToSevenDraftsOfEight GdnVerifyTwoDraftsTest.ScanFactorRowsFoldOneToSevenDraftsOfEightBf16
+G2_tap_fold_skips_first | diff lines 2 | build rc=0 | test rc=1 | 13 ok | failed: GdnVerifyTwoDraftsTest.ConvFactorRowsFoldFourToSevenDraftsOfEight
+control | build rc=0 | test rc=0 | [  PASSED  ] 14 tests.

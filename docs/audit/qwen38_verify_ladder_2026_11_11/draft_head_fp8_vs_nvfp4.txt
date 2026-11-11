@@ -1,0 +1,16 @@
+== fp8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   112.63 |  202.35 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    58.02 |  213.13 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    65.98 |  197.33 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 251.66 s | 191.43 tok/s wall | 203.59 tok/s decode per chat
+== nv
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   114.67 |  198.76 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    59.36 |  208.32 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    67.69 |  192.35 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 256.67 s | 187.70 tok/s wall | 199.31 tok/s decode per chat
+# /s/crn_hd1_fp8/server.log
+  all       steps  13917 tok  48170 tok/step 3.461 fwd 12.857 head 4.084 sum 16.941 ms tok/ms 0.2043
+  n=1 T=5  steps  13917 share 100.0 % tok/step 3.461 fwd 12.857 head 4.084 drafted/step 4.00 matched/step 2.46
+# /s/crn_hd1_nv/server.log
+  all       steps  13850 tok  48170 tok/step 3.478 fwd 12.837 head 4.553 sum 17.390 ms tok/ms 0.2000
+  n=1 T=5  steps  13850 share 100.0 % tok/step 3.478 fwd 12.837 head 4.553 drafted/step 4.00 matched/step 2.48

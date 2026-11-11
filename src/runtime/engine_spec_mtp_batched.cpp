@@ -103,8 +103,9 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     static double t_head_ms = 0.0;
     static long long t_calls = 0, t_rows = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    // The next drafts per request land in ws->d_chain_tokens: m rows per draft level (bv_.depth levels).
-    if (std::max(bv_.depth, 1) * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK || ws->d_chain_tokens == nullptr) {
+    // The next drafts per request land in ws->d_chain_tokens: m rows per draft level (the step depth of m).
+    if (std::max(bv_.depth, bound_verify_step_depth(bv_, m)) * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK ||
+        ws->d_chain_tokens == nullptr) {
         fail_all("batched draft: too many rows");
         return;
     }

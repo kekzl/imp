@@ -922,13 +922,13 @@ static MtpWorkspaceShape qwen38_27b_head() {
 
 TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     const auto s = qwen38_27b_head();
-    EXPECT_EQ(mtp_workspace_bytes(s), 363555528u);  // 2 MiB page rounding included; scan partials 8 MiB
+    EXPECT_EQ(mtp_workspace_bytes(s), 363557576u);  // 2 MiB page rounding included; scan partials 8 MiB
     EXPECT_EQ(mtp_alloc_footprint(size_t{1} << 20), size_t{1} << 20);
     EXPECT_EQ(mtp_alloc_footprint(2621440), size_t{4} << 20);
     auto no_kv = s;
     no_kv.max_seq_len = 0;  // also drops the batched feed and the carry that needs it
     EXPECT_EQ(mtp_workspace_bytes(s) - mtp_workspace_bytes(no_kv),
-              268435456u + 74448896u + 13312u + 10485760u);
+              268435456u + 74448896u + 15360u + 10485760u);
     auto prenorm = s;
     prenorm.prenorm_rows = 4096;
     EXPECT_EQ(mtp_workspace_bytes(prenorm) - mtp_workspace_bytes(s), 4096u * 5120 * 2);

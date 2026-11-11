@@ -303,11 +303,11 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
         ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
                                                      tab.max_pos, s.head, s.tok_emb, ws_pass, kH, stream));
         ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(d_ctok, ws_pass.d_b_h_final, tab.last, m,
-                                                     tab.chain_slots, tab.chain_pos, tab.chain_max_pos,
+                                                     tab.chain_slots, tab.chain_pos[0], tab.chain_max_pos,
                                                      s.head, s.tok_emb, ws_pass, kH, stream));
         ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
         int back[m];
-        ASSERT_EQ(cudaMemcpy(back, tab.chain_pos, sizeof(back), cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(back, tab.chain_pos[0], sizeof(back), cudaMemcpyDeviceToHost), cudaSuccess);
         EXPECT_TRUE(std::equal(back, back + m, cpos));
         cudaFree(d_ctok);
     }
@@ -382,7 +382,8 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
         return imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
                                                 feed_max, s.head, s.tok_emb, ws, kH, stream) &&
                imp::mtp_feed_rows_multislot_dev(d_ctok, ws.d_b_h_final, tab.last, m, tab.chain_slots,
-                                                tab.chain_pos, chain_max, s.head, s.tok_emb, ws, kH, stream);
+                                                tab.chain_pos[0], chain_max, s.head, s.tok_emb, ws, kH,
+                                                stream);
     };
     imp::MtpPassTables tab_e, tab_g;
     ASSERT_TRUE(imp::mtp_head_pass_upload(ws_e, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab_e));

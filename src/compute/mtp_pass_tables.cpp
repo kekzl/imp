@@ -31,53 +31,42 @@ bool mtp_head_pass_upload(MtpDraftWorkspace& ws, const int32_t* toks, const int*
                           const int* pos, int n, const int* last, const int* chain_slots,
                           const int* chain_pos, int m, cudaStream_t stream, MtpPassTables& out) {
     if (ws.d_pass_tables == nullptr || ws.h_pass_tables.empty() || ws.pass_tables_copied.get() == nullptr ||
-        n <= 0 || m <= 0 || m > n || n > ws.feed_rows_cap || (4 * n) + (6 * m) > kMtpPassTableInts)
+        n <= 0 || m <= 0 || m > n || n > ws.feed_rows_cap ||
+        (4 * n) + ((3 + kMtpPassChainLevels) * m) > kMtpPassTableInts)
         return false;
-    std::vector<int> chain_rows(m), chain_pos2(m), chain_pos3(m);
-    for (int i = 0; i < m; ++i) {
-        chain_rows[i] = i;
-        chain_pos2[i] = chain_pos[i] + 1;
-        chain_pos3[i] = chain_pos[i] + 2;
-    }
     int max_pos = 0;
     // The previous pass's copy must have left the staging before it is rewritten.
     if (!mtp_feed_tables_valid(ws, slots, pos, n, &max_pos) ||
         cudaEventSynchronize(ws.pass_tables_copied) != cudaSuccess)
         return false;
     int* h = ws.h_pass_tables.as<int>();
-    const int* parts[] = {toks,
-                          src,
-                          slots,
-                          pos,
-                          last,
-                          chain_slots,
-                          chain_pos,
-                          chain_rows.data(),
-                          chain_pos2.data(),
-                          chain_pos3.data()};
-    const int lens[] = {n, n, n, n, m, m, m, m, m, m};
-    const int* dev[10] = {};
     int off = 0;
-    for (int i = 0; i < 10; ++i) {
-        std::copy_n(parts[i], lens[i], h + off);
-        dev[i] = ws.d_pass_tables + off;
-        off += lens[i];
+    auto put = [&](const int* part, int len) {
+        std::copy_n(part, len, h + off);
+        off += len;
+        return static_cast<const int*>(ws.d_pass_tables + off - len);
+    };
+    out = MtpPassTables{};
+    out.tokens = put(toks, n);
+    out.src = put(src, n);
+    out.slots = put(slots, n);
+    out.pos = put(pos, n);
+    out.last = put(last, m);
+    out.chain_slots = put(chain_slots, m);
+    out.chain_rows = ws.d_pass_tables + off;
+    for (int i = 0; i < m; ++i)
+        h[off++] = i;
+    for (int l = 0; l < kMtpPassChainLevels; ++l) {
+        out.chain_pos[l] = ws.d_pass_tables + off;
+        for (int i = 0; i < m; ++i)
+            h[off++] = chain_pos[i] + l;
     }
     if (cudaMemcpyAsync(ws.d_pass_tables, h, static_cast<size_t>(off) * sizeof(int), cudaMemcpyHostToDevice,
                         stream) != cudaSuccess ||
-        !ws.pass_tables_copied.record(stream))
+        !ws.pass_tables_copied.record(stream)) {
+        out = MtpPassTables{};
         return false;
-    out = MtpPassTables{};
-    out.tokens = dev[0];
-    out.src = dev[1];
-    out.slots = dev[2];
-    out.pos = dev[3];
-    out.last = dev[4];
-    out.chain_slots = dev[5];
-    out.chain_pos = dev[6];
-    out.chain_rows = dev[7];
-    out.chain_pos2 = dev[8];
-    out.chain_pos3 = dev[9];
+    }
     out.n = n;
     out.m = m;
     out.max_pos = max_pos;

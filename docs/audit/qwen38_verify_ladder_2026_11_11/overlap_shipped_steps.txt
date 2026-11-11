@@ -1,0 +1,30 @@
+# /s/crn_tc_o3r7/server.log
+  all       steps   6533 tok  50617 tok/step 7.748 fwd 14.883 head 5.007 sum 19.890 ms tok/ms 0.3895
+  n=1 T=5  steps   1515 share  23.2 % tok/step 3.049 fwd 13.568 head 4.826 drafted/step 4.00 matched/step 2.05
+  n=1 T=7  steps    456 share   7.0 % tok/step 4.285 fwd 14.011 head 5.242 drafted/step 6.00 matched/step 3.29
+  n=1 T=8  steps    228 share   3.5 % tok/step 5.167 fwd 14.063 head 5.477 drafted/step 7.00 matched/step 4.17
+  n=2 T=5  steps    162 share   2.5 % tok/step 5.963 fwd 16.384 head 5.587 drafted/step 8.00 matched/step 3.96
+  n=2 T=7  steps    111 share   1.7 % tok/step 8.153 fwd 17.489 head 6.403 drafted/step 12.00 matched/step 6.15
+  n=2 T=8  steps    103 share   1.6 % tok/step 9.689 fwd 19.882 head 6.771 drafted/step 14.00 matched/step 7.69
+  n=3 T=5  steps   3958 share  60.6 % tok/step 10.105 fwd 15.270 head 4.913 drafted/step 12.00 matched/step 7.11
+# /s/crn_tc_o3r4/server.log
+  all       steps   6194 tok  47580 tok/step 7.682 fwd 14.744 head 4.656 sum 19.400 ms tok/ms 0.3960
+  n=1 T=5  steps   2163 share  34.9 % tok/step 3.364 fwd 13.319 head 4.260 drafted/step 4.00 matched/step 2.36
+  n=2 T=5  steps    331 share   5.3 % tok/step 7.009 fwd 18.314 head 4.673 drafted/step 8.00 matched/step 5.01
+  n=3 T=5  steps   3700 share  59.7 % tok/step 10.266 fwd 15.258 head 4.886 drafted/step 12.00 matched/step 7.27
+# /s/crn_tc_o2r7/server.log
+  all       steps   5121 tok  30403 tok/step 5.937 fwd 14.501 head 5.674 sum 20.175 ms tok/ms 0.2943
+  n=1 T=5  steps   1665 share  32.5 % tok/step 3.132 fwd 13.510 head 4.877 drafted/step 4.00 matched/step 2.13
+  n=1 T=7  steps    548 share  10.7 % tok/step 4.345 fwd 14.451 head 5.258 drafted/step 6.00 matched/step 3.34
+  n=1 T=8  steps    288 share   5.6 % tok/step 5.392 fwd 15.495 head 5.570 drafted/step 7.00 matched/step 4.39
+  n=2 T=5  steps   1122 share  21.9 % tok/step 6.266 fwd 14.641 head 5.763 drafted/step 8.00 matched/step 4.27
+  n=2 T=7  steps    604 share  11.8 % tok/step 8.219 fwd 15.216 head 6.292 drafted/step 12.00 matched/step 6.22
+  n=2 T=8  steps    894 share  17.5 % tok/step 10.358 fwd 15.396 head 6.920 drafted/step 14.00 matched/step 8.36
+# /s/crn_tc_def/server.log
+  all       steps  18963 tok  66524 tok/step 3.508 fwd 12.708 head 4.686 sum 17.395 ms tok/ms 0.2017
+  n=1 T=5  steps  13151 share  69.4 % tok/step 2.951 fwd 12.564 head 4.490 drafted/step 4.00 matched/step 1.95
+  n=1 T=7  steps   3673 share  19.4 % tok/step 4.087 fwd 12.948 head 4.845 drafted/step 6.00 matched/step 3.09
+  n=1 T=8  steps   2139 share  11.3 % tok/step 5.941 fwd 13.184 head 5.620 drafted/step 7.00 matched/step 4.94
+# /s/crn_tc_def0/server.log
+  all       steps  15880 tok  51184 tok/step 3.223 fwd 12.581 head 3.994 sum 16.575 ms tok/ms 0.1945
+  n=1 T=5  steps  15880 share 100.0 % tok/step 3.223 fwd 12.581 head 3.994 drafted/step 4.00 matched/step 2.22

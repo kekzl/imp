@@ -1,0 +1,29 @@
+# /s/crn_l7_o2r4/server.log
+  n=1 steps   3631 tok     12414 ms/step  17.821 tok/ms 0.1919
+  n=2 steps   3007 tok     21518 ms/step  19.249 tok/ms 0.3718
+# /s/crn_l7_o2r7/server.log
+  n=1 steps   2864 tok     10328 ms/step  18.884 tok/ms 0.1910
+  n=2 steps   2594 tok     21575 ms/step  21.372 tok/ms 0.3892
+# /s/crn_l7_o3r4/server.log
+  n=1 steps   1453 tok      5055 ms/step  17.640 tok/ms 0.1972
+  n=2 steps    781 tok      5302 ms/step  20.750 tok/ms 0.3272
+  n=3 steps   3911 tok     39865 ms/step  20.164 tok/ms 0.5055
+# /s/crn_l7_o3r7/server.log
+  n=1 steps    774 tok      2770 ms/step  18.823 tok/ms 0.1901
+  n=2 steps   2066 tok     14732 ms/step  21.381 tok/ms 0.3335
+  n=3 steps   2618 tok     31152 ms/step  23.633 tok/ms 0.5035
+# /s/crn_tc_o3r7/server.log
+  n=1 steps   2199 tok      7751 ms/step  18.691 tok/ms 0.1886
+  n=2 steps    376 tok      2869 ms/step  23.821 tok/ms 0.3203
+  n=3 steps   3958 tok     39996 ms/step  20.183 tok/ms 0.5007
+# /s/crn_tc_o3r4/server.log
+  n=1 steps   2163 tok      7276 ms/step  17.579 tok/ms 0.1914
+  n=2 steps    331 tok      2320 ms/step  22.987 tok/ms 0.3049
+  n=3 steps   3700 tok     37984 ms/step  20.144 tok/ms 0.5096
+# /s/crn_tc_o2r7/server.log
+  n=1 steps   2501 tok      9149 ms/step  18.985 tok/ms 0.1927
+  n=2 steps   2620 tok     21255 ms/step  21.311 tok/ms 0.3807
+# /s/crn_tc_def/server.log
+  n=1 steps  18963 tok     66528 ms/step  17.395 tok/ms 0.2017
+# /s/crn_tc_def0/server.log
+  n=1 steps  15880 tok     51181 ms/step  16.575 tok/ms 0.1944

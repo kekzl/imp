@@ -658,9 +658,24 @@ TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneToThreeDraftsOfFourBf16) {
     }
 }
 
+// 8 drafts (kMtpBoundVerifyMaxDepth): 7 factor rows per group = kGdnFactorFoldMaxRows, 13 groups fold 1 to 7.
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneToSevenDraftsOfEight) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "f32 n_seq " << n_seq);
+        run_scan_factor_row<float>(n_seq, /*drafts=*/8);
+    }
+}
+
+TEST_F(GdnVerifyTwoDraftsTest, ScanFactorRowsFoldOneToSevenDraftsOfEightBf16) {
+    for (int n_seq : {4, 13}) {
+        SCOPED_TRACE(testing::Message() << "bf16 n_seq " << n_seq);
+        run_scan_factor_row<__nv_bfloat16>(n_seq, /*drafts=*/8);
+    }
+}
+
 // The conv half at D drafts: D + 1 rows -> spare, 1 row in place, rows 2 .. D as taps [z * (D - 1) + level],
 // then ssm_conv_tap_fold(window live, taps from z * (D - 1), count c_z) gives the (1 + c_z)-row window in
-// the live slot, bit-exact. c_z cycles 1 .. D - 1 over the groups.
+// the live slot, bit-exact. c_z cycles D - 1 .. 1 over the groups.
 void run_conv_factor_row(int drafts) {
     const int n_seq = 4, n_tokens = drafts + 1, L = drafts - 1, channels = 2048, ksize = 4, n_slots = 12;
     const std::vector<int> live{5, 1, 3, 0};
@@ -673,7 +688,7 @@ void run_conv_factor_row(int drafts) {
     std::vector<int> fold(2 * n_seq);  // [first tap row x n_seq][count x n_seq]
     for (int i = 0; i < n_seq; i++) {
         fold[i] = i * L;
-        fold[n_seq + i] = 1 + (i % L);
+        fold[n_seq + i] = L - (i % L);
     }
     const int* count = fold.data() + n_seq;
 
@@ -827,6 +842,11 @@ TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldOneOrTwoDraftsOfThree) { run_co
 // 4 drafts: 3 taps per group, the groups fold 1, 2 or 3 of them in turn.
 TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldOneToThreeDraftsOfFour) {
     run_conv_factor_row(/*drafts=*/4);
+}
+
+// 8 drafts: 7 taps per group, the groups fold 7, 6, 5 and 4 of them (more taps than the 4-row window holds).
+TEST_F(GdnVerifyTwoDraftsTest, ConvFactorRowsFoldFourToSevenDraftsOfEight) {
+    run_conv_factor_row(/*drafts=*/8);
 }
 
 }  // namespace

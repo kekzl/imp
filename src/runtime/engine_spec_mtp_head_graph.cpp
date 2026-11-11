@@ -23,6 +23,7 @@ void MtpHeadGraphsDeleter::operator()(MtpHeadGraphs* g) const noexcept { delete 
 namespace {
 
 constexpr int kMtpHeadOutInts = kMtpMaxTopW * kMtpMaxChainK;
+static_assert(kMtpBoundVerifyMaxDepth - 1 <= kMtpPassChainLevels, "one position table per chain level");
 
 void note_failure(MtpHeadGraphs& G, const MtpHeadGraphKey& key, const char* what, cudaError_t err) {
     IMP_LOG_WARN("[mtp-head-graph] %s failed (n=%d m=%d chain=%d): %s", what, key.n, key.m, key.chain,
@@ -154,12 +155,12 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
     // Draft lv + 1 per bound request: (draft lv, the head's own final-norm row) at the request's next
     // position in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (drafts
     // never leave the device). Level 1 reads the last fed row, levels 2+ the chain's own rows 0..m-1.
-    const int* const level_pos[] = {tab.chain_pos, tab.chain_pos2, tab.chain_pos3};
     for (int lv = 1; lv <= chain; ++lv) {
         const bool ok = mtp_feed_rows_multislot_dev(ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv - 1) * m),
                                                     ws.d_b_h_final, lv == 1 ? tab.last : tab.chain_rows, m,
-                                                    tab.chain_slots, level_pos[lv - 1], chain_max + lv - 1,
-                                                    *model.mtp_, model.tok_emb_, ws, hidden_dim, stream) &&
+                                                    tab.chain_slots, tab.chain_pos[lv - 1],
+                                                    chain_max + lv - 1, *model.mtp_, model.tok_emb_, ws,
+                                                    hidden_dim, stream) &&
                         in.executor.lm_head_rows_argmax(ws.d_b_h_final, m,
                                                         ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv) * m),
                                                         stream, in.head, in.draft_vocab, lv * m,
@@ -183,7 +184,7 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     // The chained KV row is speculative: the next feed starts at that position and overwrites it.
     const int max_seq = mtp_ws_storage_->max_seq_len;  // head KV ring rows: bounds the scan smem only
     // Chain levels: one per draft past the first that a step of these m requests verifies.
-    const int chain = std::clamp(mtp_bound_verify_step_depth(bv_.depth, bv_.wide_depth, tab.m) - 1, 0, 3);
+    const int chain = std::clamp(bound_verify_step_depth(bv_, tab.m) - 1, 0, kMtpPassChainLevels);
     const int draft_vocab = runtime_config_.speculative.mtp_draft_vocab;
     // Coupled drafts: every level's draw args go up before the pass (a replayed graph reads them too).
     const int draw_rows = (1 + chain) * tab.m;
