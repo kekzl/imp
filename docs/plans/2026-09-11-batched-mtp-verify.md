@@ -21,7 +21,11 @@ request verifies 3 drafts by default (`speculative.mtp_batch_verify_k` 3, sectio
 request" at the end).
 
 Status (2026-11-11, depth 4): the depth is per step, 4 drafts below 4 requests, 3 from 4 up
-(`speculative.mtp_batch_verify_k` 4, `speculative.mtp_batch_verify_k_wide` 3, last section).
+(`speculative.mtp_batch_verify_k` 4, `speculative.mtp_batch_verify_k_wide` 3, section "4 drafts per bound
+request, 3 from 4 requests up").
+
+Status (2026-11-11, think budget): a verify chunk ends at the think budget, the forced closer lands at the
+same reasoning token for every `mtp_k` (last section).
 
 ## Why
 
@@ -530,10 +534,10 @@ policy without the outcome reaches +0.01 %, -0.02 %, -1.62 % against fixed depth
 step's outcome is worth +3.95 %, +2.50 %, +1.34 %. A full accept repeats with P = 0.645, 0.648, 0.665: the last
 steps do not predict the next one.
 
-The think budget moves the greedy text with `mtp_k`: an MTP chunk lands up to `mtp_k` tokens past the budget
-before the closer is forced (`src/runtime/engine_spec_ngram.cpp`). 1 chat x 20k, 384 tokens, default budget, main
-imp:m3090 at 3 drafts: `mtp_k` 1, 2, 3 give 3 texts (18844088bac2, 81466897ba0b, bb3c0b591cc5); with
-`think_budget: 1` 3 of 3 equal (5ac4d15b4170). `mtp_factor_row_equiv.sh` therefore runs its depth check with
+Until B-69.1 (next section) the think budget moved the greedy text with `mtp_k`: an MTP chunk landed up to
+`mtp_k` tokens past the budget before the closer was forced (`src/runtime/engine_spec_ngram.cpp`). 1 chat x 20k,
+384 tokens, default budget, main imp:m3090 at 3 drafts: `mtp_k` 1, 2, 3 give 3 texts (18844088bac2, 81466897ba0b,
+bb3c0b591cc5); with `think_budget: 1` 3 of 3 equal (5ac4d15b4170). The depth check of this section ran with
 `THINK_BUDGET=1` (`equiv.txt`); the check of the section above ran with the default budget, main at 3 drafts
 fails it on the corpus used here.
 
@@ -545,5 +549,34 @@ its mutant (`mutants.txt`). Engine level: `mtp_factor_row_equiv.sh` on the image
 arms md5-equal (`equiv.txt`). Final image: `degen_suite.py` 52 checks 0 FAIL at defaults and at
 `--max-batch 1`, `make test-spec-fidelity` passed, `make verify-fast` OK (`gates.txt`).
 
-Next: an exact think budget under MTP (the overshoot above); the head chain level at 4 requests (1.32 ms);
-adopting the spare when the request's own chain is shorter than D.
+Next: the head chain level at 4 requests (1.32 ms); adopting the spare when the request's own chain is shorter
+than D.
+
+## A verify chunk ends at the think budget (2026-11-11, B-69.1)
+
+Rule: inside an open, budgeted think block a verify chunk emits at most the reasoning tokens the budget has
+left (`think_logic::think_tokens_left`, `src/runtime/think_stop_logic.h`; `Engine::think_tokens_left_`); the
+accept loop breaks at `emitted >= think_left` (`spec_accept_rows`, `src/runtime/spec_accept.h`), the last token
+is the chunk's bonus and the next step is the eager step that forces the closer. Both callers pass it: the bound
+batched verify (`engine_spec_batch_verify.cpp`) and the single-stream verify (`engine_spec_ngram.cpp`).
+
+Qwen3.8-27B-NVFP4-vllm server, 1 greedy chat x 20k, 384 tokens, default think budget, reasoning tokens before
+the closer (`reasoning_content` through `/tokenize`, the `think` field of `mtp_longctx_client.py`), main
+e2906af1 -> fix, evidence `docs/audit/qwen38_think_budget_exact_2026_11_11/think.txt`:
+
+| Path | `mtp_k` | main | fix |
+|---|---|---|---|
+| bound batched verify (server defaults) | 0 / 1 / 2 / 3 / 4 | 193 / 193 / 194 / 195 / 196 | 193 / 193 / 193 / 193 / 193 |
+| single-stream verify (`runtime.max_batch_size=1`) | 0 / 1 / 2 / 3 | 193 / 193 / 193 / 194 | 193 / 193 / 193 / 193 |
+
+Texts. Bound verify: `mtp_k` 1 to 4 give 4 texts on main and 1 on the fix (91e7ba2d359b);
+`mtp_factor_row_equiv.sh` runs its depth check with the default budget again, 4 of 4 arms md5-equal on the
+fix, 1 of 4 on main (`equiv.txt`). Single-stream verify: 3 texts for `mtp_k` 1 to 3 on both images, `mtp_k` 1
+and 2 md5-equal between the images, 3 differs (main overshoots there); why the single-stream text follows
+`mtp_k` is not measured. MTP off against MTP on differs with `think_budget: 1` too (350e66ac9bb9 against
+6c3481086686 on both images): the eager md5 is no detector for the budget, the reasoning token count is.
+
+Gates. CPU: `SpecAcceptRows.ChunkEndsAtTheThinkBudget` (`tests/test_spec_gates.cpp`), red with the budget break
+removed (`mutants.txt`). Image: `degen_suite.py` 52 checks 0 FAIL at defaults and at `--max-batch 1`,
+`make test-spec-fidelity` passed, `make verify-fast` OK (`gates.txt`). Speed at server defaults is not compared:
+the texts of the two images differ from the budget cut on (`gates.txt`, last block).

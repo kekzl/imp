@@ -1,0 +1,26 @@
+# Reasoning tokens (reasoning_content through /tokenize) of one greedy chat, 20k-token prompt, 384 tokens,
+# default think budget (think_budget 0.5), Qwen3.8-27B-NVFP4-vllm, RTX 5090, mtp_longctx_ab.sh.
+# tb = fix (image imp:tb created 2026-11-11T10:40:07.294333739+01:00), m3091 = main e2906af1. k<N> = speculative.mtp_k=N, k0 = MTP off.
+# Fields: image arm comp drafted accepted think md5.
+
+## Bound batched verify (server defaults, speculative.mtp_batch_verify_k=4)
+tb p1_k0 comp 384 drafted 0 accepted 0 think 193 md5 0df24174c026
+tb p1_k1 comp 384 drafted 207 accepted 174 think 193 md5 91e7ba2d359b
+tb p1_k2 comp 384 drafted 308 accepted 227 think 193 md5 91e7ba2d359b
+tb p1_k3 comp 384 drafted 393 accepted 250 think 193 md5 91e7ba2d359b
+tb p1_k4 comp 384 drafted 468 accepted 264 think 193 md5 91e7ba2d359b
+m3091 p1_k0 comp 384 drafted 0 accepted 0 think 193 md5 0df24174c026
+m3091 p1_k1 comp 384 drafted 207 accepted 174 think 193 md5 91e7ba2d359b
+m3091 p1_k2 comp 384 drafted 302 accepted 230 think 194 md5 852d98dd2303
+m3091 p1_k3 comp 384 drafted 393 accepted 250 think 195 md5 85fd5eb03356
+m3091 p1_k4 comp 384 drafted 492 accepted 258 think 196 md5 d9d799e4e6fa
+
+## Single-stream verify (runtime.max_batch_size=1): the text follows mtp_k on both images, the count only on main
+tb p1_k0 comp 384 drafted 0 accepted 0 think 193 md5 0df24174c026
+tb p1_k1 comp 384 drafted 209 accepted 172 think 193 md5 127f1154849e
+tb p1_k2 comp 384 drafted 282 accepted 218 think 193 md5 aa1926343191
+tb p1_k3 comp 384 drafted 329 accepted 238 think 193 md5 69aeffbf8b81
+m3091 p1_k0 comp 384 drafted 0 accepted 0 think 193 md5 0df24174c026
+m3091 p1_k1 comp 384 drafted 209 accepted 172 think 193 md5 127f1154849e
+m3091 p1_k2 comp 384 drafted 282 accepted 218 think 193 md5 aa1926343191
+m3091 p1_k3 comp 384 drafted 322 accepted 239 think 194 md5 93903b85603d

@@ -189,16 +189,13 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // the budget device-side. Exception: an MTP-bound request runs the
     // interior eager already (a loop burst would desync the MTP cache for
     // the rest of the generation, #847), so verifies between forcing points
-    // are legal there and overshoot the budget by at most k tokens/chunk.
+    // are legal there; the accept loop ends a chunk at the budget (spec_accept_rows think_left).
     if (!ignore_think && req.think_budget > 0.0f && req.in_think_block) {
         if (!(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id)))
             return "think_budget_in_block";
         // Forcing due: the eager step must run NOW to force </think>; a
         // verify would emit past the exhausted budget instead.
-        if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
-                                                req.output_tokens, think_start_id_, req.started_in_think,
-                                                runtime_config_.runtime.think_answer_reserve,
-                                                runtime_config_.runtime.think_max_tokens))
+        if (think_tokens_left_(req) == 0)
             return "think_budget_in_block";
     }
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";
@@ -965,8 +962,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // budget forcing and the post-</think> stop/grace window belong to the eager step.
     // matched = accepted draft tokens (their KV entries are valid).
     const auto [matched, emitted] = spec_accept_rows(am, acc->data(), acc_len, chunk_len - mc_row0,
-                                                     req->think_budget > 0.0f, req->in_think_block, emit,
-                                                     extends);
+                                                     req->think_budget > 0.0f, req->in_think_block,
+                                                     think_tokens_left_(*req), emit, extends);
     touch_if_live(*kv_manager_, *req);
 
     // mc: materialize the winner's KV, copying its private block(s) covering

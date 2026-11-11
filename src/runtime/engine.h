@@ -1520,6 +1520,8 @@ private:
     bool should_stop(Request& req, int32_t token) const;
     // A forced think end is due this step: budget exhausted or the client ended the block (#2420).
     [[nodiscard]] bool think_end_due_(const Request& req) const;
+    // Reasoning tokens left before the budget forces the closer (think_logic::think_tokens_left).
+    [[nodiscard]] int think_tokens_left_(const Request& req) const;
     // think_end_due_ or a forced Harmony opener mid-way: only the eager step may run (#2420).
     [[nodiscard]] bool think_closer_pending_(const Request& req) const;
 

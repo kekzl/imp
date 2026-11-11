@@ -88,6 +88,13 @@ bool Engine::think_end_due_(const Request& req) const {
                                                runtime_config_.runtime.think_max_tokens);
 }
 
+int Engine::think_tokens_left_(const Request& req) const {
+    return think_logic::think_tokens_left(req.think_budget, think_end_id_, req.max_tokens, req.output_tokens,
+                                          think_start_id_, req.started_in_think,
+                                          runtime_config_.runtime.think_answer_reserve,
+                                          runtime_config_.runtime.think_max_tokens);
+}
+
 bool Engine::think_closer_pending_(const Request& req) const {
     return req.harmony_force_idx >= 0 || think_end_due_(req);
 }

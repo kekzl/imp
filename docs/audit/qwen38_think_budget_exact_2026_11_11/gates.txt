@@ -1,0 +1,67 @@
+# GPU gates on image imp:tb created 2026-11-11T10:40:07.294333739+01:00, RTX 5090, Qwen3.8-27B-NVFP4-vllm.
+# Built before the client's think field and the docs of this PR (src/ and tests/ as shipped).
+# Raw logs: scratch, not in the repo.
+
+## degen_suite.py against imp-server (defaults, bound batched verify)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (37s)
+[09:54:22.620][INFO] mtp_auto.cpp:118: speculative.mtp_k: auto -> 4 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; mea
+[09:54:22.620][INFO] mtp_auto.cpp:66: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set either key to override)
+[09:54:22.620][INFO] mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+[09:54:31.337][INFO] engine_spec_batch_verify.cpp:276: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 3 from 4 requests up (4 spare recurrent slots, t
+stderr hits 0
+
+## degen_suite.py against imp-server --max-batch 1 (single-stream verify)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (57s)
+[09:55:17.908][INFO] mtp_auto.cpp:118: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen3
+stderr hits 0
+
+## make test-spec-fidelity
+[==========] Running 1 test from 1 test suite.
+[==========] 1 test from 1 test suite ran. (44894 ms total)
+[  PASSED  ] 1 test.
+
+## make verify-fast
+  decode  tg128 =  292.69 tok/s  (baseline  282.84, delta 3.48%)
+  prefill pp512 = 50236.40 tok/s  (baseline 50374.39, delta -0.27%)
+  GPU during bench: sm=2895MHz(med) mem=13801MHz(med) power=526W(max) n=12
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50207.53 tok/s  (baseline 50318.99, delta -0.22%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+== peak VRAM vs baseline ==
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+== graphs ON vs OFF decode gate ==
+  graphs OFF tg256 =  184.11 tok/s
+  graphs ON  tg256 =  296.27 tok/s   (1.61x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+== server throughput vs baseline ==
+  server c8 = 1885.82 tok/s, slowest request 533 ms  (baseline 1899.81, delta -0.74%)
+PASS server throughput within 8% of baseline
+== smoke prompts (degeneration check) ==
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 09:57:17Z, ended 09:58:52Z)
+
+## Server defaults, new = imp:tb, old = imp:m3091, 2 pairs x 2 sessions x 768 tokens (texts differ at the
+## budget cut, no speed claim): tok/s per stream at 1 x 20k, all streams at 4 x 8k
+p1_new rep 0 s0 tps 197.07 drafted 896 acc 541 cccb6ff473dd
+p1_new rep 1 s0 tps 214.80 drafted 824 acc 559 b9547b25b8ee
+p1_old rep 0 s0 tps 207.80 drafted 844 acc 554 047d15ec2954
+p1_old rep 1 s0 tps 211.51 drafted 840 acc 555 b3fd9f61518d
+p2_new rep 0 s0 tps 197.78 drafted 896 acc 541 cccb6ff473dd
+p2_new rep 1 s0 tps 216.14 drafted 824 acc 559 b9547b25b8ee
+p2_old rep 0 s0 tps 209.78 drafted 844 acc 554 047d15ec2954
+p2_old rep 1 s0 tps 211.72 drafted 840 acc 555 b3fd9f61518d
+AGG p1_new ctx 8000 rep 0 conc 4 tok_s 607.72
+AGG p1_new ctx 8000 rep 1 conc 4 tok_s 584.18
+AGG p1_old ctx 8000 rep 0 conc 4 tok_s 594.88
+AGG p1_old ctx 8000 rep 1 conc 4 tok_s 582.78
+AGG p2_new ctx 8000 rep 0 conc 4 tok_s 588.94
+AGG p2_new ctx 8000 rep 1 conc 4 tok_s 585.39
+AGG p2_old ctx 8000 rep 0 conc 4 tok_s 595.73
+AGG p2_old ctx 8000 rep 1 conc 4 tok_s 584.13

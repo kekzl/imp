@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Long-context agent prompts against imp-server: repo docs + source (REPO_DIR) sized by /tokenize to each
 # CTX target, a coding question at the end, greedy streaming chat. Per request: prompt tokens, TTFT, decode
-# tok/s ((completion - 1) / (last delta - first delta)), MTP drafted/accepted (usage), md5 of the text.
+# tok/s ((completion - 1) / (last delta - first delta)), MTP drafted/accepted (usage), think (reasoning text
+# through /tokenize once every stream of the round is done), md5 of the text.
 # CONC=2 sends two prompts per length at once (different head line). Texts land in OUT_DIR/<tag>.<ctx>.<i>.txt.
 # Usage: mtp_longctx_client.py PORT TAG; env CTX ("8000 20000 40000 80000"), GEN (384), CONC (1), REPS (1),
 #        REPO_DIR (/repo), OUT_DIR (.), IGNORE_EOS (1), MTP_K (unset = server default; 0 = speculation off),
@@ -77,7 +78,7 @@ def one(ctx, i, rep, prompt, res):
         body["think_budget"] = float(THINK_BUDGET)
     t0 = time.time()
     first = last = None
-    text, usage = [], {}
+    text, think, usage = [], [], {}
     with post("/v1/chat/completions", body) as r:
         for raw in r:
             line = raw.decode("utf-8", errors="replace").strip()
@@ -94,15 +95,16 @@ def one(ctx, i, rep, prompt, res):
                     first = first or now
                     last = now
                     text.append(piece)
+                    think.append(d.get("reasoning_content") or "")
     out = "".join(text)
     comp = usage.get("completion_tokens", 0)
     det = usage.get("completion_tokens_details") or {}
     dec = (comp - 1) / (last - first) if first and last and last > first else 0.0
     (OUT_DIR / f"{TAG}.{ctx}.{rep}.{i}.txt").write_text(out, encoding="utf-8")
-    res[i] = (f"REQ {TAG} ctx {ctx} rep {rep} s{i} prompt {usage.get('prompt_tokens', 0)} comp {comp} "
-              f"ttft_s {first - t0 if first else -1:.2f} decode_tps {dec:.2f} "
-              f"drafted {det.get('imp_spec_drafted', 0)} accepted {det.get('imp_spec_accepted', 0)} "
-              f"md5 {hashlib.md5(out.encode()).hexdigest()[:12]}"), comp, (first or t0), (last or t0)
+    line = (f"REQ {TAG} ctx {ctx} rep {rep} s{i} prompt {usage.get('prompt_tokens', 0)} comp {comp} "
+            f"ttft_s {first - t0 if first else -1:.2f} decode_tps {dec:.2f} "
+            f"drafted {det.get('imp_spec_drafted', 0)} accepted {det.get('imp_spec_accepted', 0)}")
+    res[i] = (line, comp, (first or t0), (last or t0), "".join(think), hashlib.md5(out.encode()).hexdigest()[:12])
 
 
 for rep in range(REPS):
@@ -116,8 +118,8 @@ for rep in range(REPS):
             t.start()
         for t in th:
             t.join()
-        for line, *_ in res:
-            print(line, flush=True)
+        for line, _, _, _, think, md5 in res:
+            print(f"{line} think {n_tokens(think) if think else 0} md5 {md5}", flush=True)
         if CONC > 1:  # aggregate decode: tokens of all streams over the span of their deltas
             span = max(r[3] for r in res) - min(r[2] for r in res)
             print(f"AGG {TAG} ctx {ctx} rep {rep} conc {CONC} tok_s {sum(r[1] for r in res) / span:.2f}",

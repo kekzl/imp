@@ -1,0 +1,5 @@
+# Mutant of src/runtime/spec_accept.h against the unit lane (make dev-test, 13 ctest entries)
+clean: 100% tests passed, 0 tests failed out of 13
+M1 budget break removed (if (r.emitted >= think_left) break;): 92% tests passed, 1 tests failed out of 13
+[  FAILED  ] SpecAcceptRows.ChunkEndsAtTheThinkBudget (0 ms)
+restored: 100% tests passed, 0 tests failed out of 13
