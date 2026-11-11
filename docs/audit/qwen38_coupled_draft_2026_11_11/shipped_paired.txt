@@ -1,0 +1,78 @@
+# shipped tree (imp:crn), deterministic: soff / son = 3 chats x 30 turns in turn,
+# c2 = 2 chats overlapping, c4 = 4 chats overlapping; off = speculative.mtp_draft_coupled=false
+arm soff rc=0
+arm son rc=0
+arm c2off rc=0
+arm c2on rc=0
+arm c4off rc=0
+arm c4on rc=0
+== soff
+n=1 T=5 steps 16158 share 100.0 % tok/step 2.981
+   nd=4 steps 16158 share 100.0 % full-accept 33.1 % | m0:29.2 m1:17.8 m2:11.6 m3:8.1 m4:33.1
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   129.59 |  175.88 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    66.17 |  186.87 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    77.76 |  167.42 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 288.50 s | 166.99 tok/s wall | 176.13 tok/s decode per chat
+0
+0
+== son
+n=1 T=5 steps 13917 share 100.0 % tok/step 3.461
+   nd=4 steps 13917 share 100.0 % full-accept 43.7 % | m0:17.1 m1:17.1 m2:12.2 m3:9.9 m4:43.7
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22791 |  82.7 |   112.28 |  202.97 | 30/0/0 | fc9ae5ff3076
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12366 |  60.8 |    58.06 |  212.97 | 30/0/0 | 3c03a3a642a9
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   13019 |  82.7 |    66.02 |  197.19 | 30/0/0 | da3a281a11b1
+total | requests 90 | output tok 48176 | reasoning 77.1 % | wall 251.42 s | 191.62 tok/s wall | 203.81 tok/s decode per chat
+5
+0
+== c2off
+n=1 T=5 steps 4584 share 41.6 % tok/step 2.950
+   nd=4 steps 4584 share 100.0 % full-accept 31.3 % | m0:28.9 m1:18.4 m2:12.7 m3:8.6 m4:31.3
+n=2 T=5 steps 6426 share 58.4 % tok/step 3.102
+   nd=4 steps 6426 share 100.0 % full-accept 36.0 % | m0:26.3 m1:17.8 m2:11.5 m3:8.5 m4:36.0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22973 |  82.2 |   145.88 |  157.48 | 30/0/0 | 5c05f377837c
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10489 |  63.3 |    66.95 |  156.67 | 30/0/0 | a4cb7fc189e9
+total | requests 60 | output tok 33462 | reasoning 76.3 % | wall 154.11 s | 217.13 tok/s wall | 157.23 tok/s decode per chat
+0
+0
+== c2on
+n=1 T=5 steps 3631 share 37.6 % tok/step 3.419
+   nd=4 steps 3631 share 100.0 % full-accept 41.8 % | m0:16.7 m1:18.2 m2:13.2 m3:10.1 m4:41.8
+n=2 T=5 steps 6014 share 62.4 % tok/step 3.578
+   nd=4 steps 6014 share 100.0 % full-accept 47.2 % | m0:15.0 m1:16.5 m2:11.5 m3:9.8 m4:47.2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22612 |  81.4 |   125.41 |  180.31 | 30/0/0 | 8dd77fa61bd3
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11327 |  64.4 |    64.11 |  176.69 | 30/0/0 | d2ab72dcd0e2
+total | requests 60 | output tok 33939 | reasoning 75.7 % | wall 133.75 s | 253.76 tok/s wall | 179.08 tok/s decode per chat
+14
+0
+== c4off
+n=1 T=5 steps 454 share 3.1 % tok/step 3.593
+   nd=4 steps 454 share 100.0 % full-accept 51.3 % | m0:19.4 m1:12.3 m2:9.3 m3:7.7 m4:51.3
+n=2 T=5 steps 874 share 6.0 % tok/step 3.294
+   nd=4 steps 874 share 100.0 % full-accept 39.9 % | m0:21.6 m1:17.0 m2:11.6 m3:9.8 m4:39.9
+n=3 T=5 steps 2544 share 17.4 % tok/step 2.952
+   nd=4 steps 2544 share 100.0 % full-accept 31.4 % | m0:28.4 m1:19.5 m2:11.9 m3:8.8 m4:31.4
+n=4 T=4 steps 10752 share 73.5 % tok/step 2.761
+   nd=3 steps 10752 share 100.0 % full-accept 45.3 % | m0:25.6 m1:18.1 m2:11.0 m3:45.3
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    7959 |  68.0 |    61.31 |  129.81 | 20/0/0 | 73817774e5ce
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    9814 |  75.2 |    82.35 |  119.18 | 20/0/0 | 8088c2d30714
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   11044 |  76.2 |    94.32 |  117.09 | 19/1/0 | 04810a290703
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   12887 |  77.1 |    98.58 |  130.72 | 20/0/0 | 3dec730870c5
+total | requests 80 | output tok 41704 | reasoning 74.7 % | wall 106.06 s | 393.20 tok/s wall | 123.91 tok/s decode per chat
+0
+0
+== c4on
+n=1 T=5 steps 715 share 5.5 % tok/step 3.408
+   nd=4 steps 715 share 100.0 % full-accept 40.4 % | m0:17.1 m1:17.1 m2:14.3 m3:11.2 m4:40.4
+n=2 T=5 steps 1134 share 8.6 % tok/step 3.303
+   nd=4 steps 1134 share 100.0 % full-accept 38.1 % | m0:20.0 m1:17.0 m2:13.7 m3:11.2 m4:38.1
+n=3 T=5 steps 1542 share 11.8 % tok/step 3.854
+   nd=4 steps 1542 share 100.0 % full-accept 57.1 % | m0:13.4 m1:10.6 m2:10.2 m3:8.6 m4:57.1
+n=4 T=4 steps 9728 share 74.2 % tok/step 3.124
+   nd=3 steps 9728 share 100.0 % full-accept 57.8 % | m0:15.2 m1:15.0 m2:12.0 m3:57.8
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    8115 |  70.6 |    58.44 |  138.85 | 20/0/0 | 69a2981bf1a9
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |   11344 |  76.0 |    81.52 |  139.15 | 20/0/0 | 84a8cd6c1bb3
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   13617 |  81.0 |    96.96 |  140.44 | 19/1/0 | bbc7b7de979e
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |    9465 |  61.4 |    69.76 |  135.69 | 20/0/0 | b975bec25826
+total | requests 80 | output tok 42541 | reasoning 73.3 % | wall 100.94 s | 421.46 tok/s wall | 138.71 tok/s decode per chat
+38
+0

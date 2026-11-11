@@ -104,6 +104,10 @@ struct Request {
     float top_p = 1.0f;
     int top_k = 0;
     int seed = -1;
+    // Unseeded sampler base, fixed at the first draw: output index i draws with draw_base + i (a draft drawn
+    // with that seed guesses the verify row, speculative.mtp_draft_coupled).
+    mutable unsigned draw_base = 0;
+    mutable bool draw_base_set = false;
     float min_p = 0.0f;               // Min probability threshold (0 = disabled)
     float typical_p = 1.0f;           // Locally typical sampling (1.0 = disabled)
     float repetition_penalty = 1.0f;  // >1 penalizes repeats (multiplicative)

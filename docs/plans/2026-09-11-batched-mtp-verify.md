@@ -27,6 +27,9 @@ request, 3 from 4 requests up").
 Status (2026-11-11, think budget): a verify chunk ends at the think budget, the forced closer lands at the
 same reasoning token for every `mtp_k` (last section).
 
+Status (2026-11-11, coupled drafts): a sampled bound request's drafts are draws with the seeds of the verify
+rows that check them (`speculative.mtp_draft_coupled`, default on, section "Coupled MTP drafts" at the end).
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -647,3 +650,65 @@ OK (`gates.txt`). Evidence
 The same directory holds the profile behind ledger row B-69.2 (`head_level_*.txt`): the fourth head chain
 level costs 1.32 ms at 4 requests; 3 matrix kernels hold 12.376 of 17.043 ms exclusive per step at 1 chat, every
 other kernel stays below 0.7 ms. No lever identified, no arm built.
+
+## Coupled MTP drafts: the draft draws what its verify row draws (2026-11-11, B-71)
+
+A sampled bound request draws verify row j with the seed of its output index (`compute_step_seed`,
+`src/runtime/engine_internal.h`). An argmax draft is accepted only where that draw lands on the head's top
+token: in the off arm of the paired run below 29.2 % of the steps reject draft 1 and 33.1 % accept all 4.
+
+| Piece | Where |
+|---|---|
+| Draft row per request and level: the request's `top_k` / `top_p` / temperature, the seed of output index `size() + level`; a greedy request's rows take `top_k` 1 | `engine_internal::draft_row_draws` |
+| Rows staged and uploaded before the head pass, drawn inside it (graph key carries `draw`, graph cap 48 -> 96) | `GraphExecutor::stage_draft_draws`, `draw_uploaded_rows` (`src/compute/sampling_verify_rows.cpp`), `MtpHeadGraphKey` |
+| Scratch for 32 rows, 2.02 MiB, allocated once at prewarm | `GraphExecutor::kDraftDrawRows` |
+| Unseeded request: one sampler base per request, fixed at its first draw (was `hash(id) ^ clock` per step) | `Request::draw_base` |
+| Sampler: exponential race `argmin(-log u / p)` with `u` hashed from (seed, token id), in the 3 top-k / top-p tails | `sampler_race_pick` (`src/compute/sampling_internal.cuh`) |
+
+The emitted token stays the verify row's draw: with `runtime.deterministic=true` the text md5 of the on and
+the off arm are equal (3 of 3 chats, 48176 tokens).
+
+Sampler choice, measured on experiment builds of the branch (Qwen3.8-27B-NVFP4-vllm, recorded familiar
+SWE-bench sessions via `tools/analysis/agent_turn_replay.py --serial --seed 1000`, 3 chats x 30 turns in turn,
+`runtime.deterministic=true`, `speculative.mtp_k=4`, `speculative.ngram=false`; texts md5-equal within a
+row; tokens per step / tok/s decode per chat):
+
+| Sampler | drafts argmax | coupled, draft temperature x 0.7 | x 1.0 | x 1.3 |
+|---|---|---|---|---|
+| inverse CDF over the sorted candidates, one uniform per seed (the sampler before this change) | 2.787 / 165.71 | 2.833 / 168.26 | 2.818 / 167.34 | 2.673 / 158.79 |
+| race keyed on (seed, token id) | 2.847 / 168.54 | 3.276 / 193.42 | 3.340 / 197.15 | 3.253 / 191.94 |
+
+One uniform through a sorted CDF couples ranks, and head and target order their candidates differently: +1.5 % tok/s
+at best. Keyed on the token, the two rows pick the same token wherever their probabilities agree. The draft
+temperature scale and the switch between the samplers were arms only; neither ships.
+
+Shipped tree (`imp:crn`), on = default, off = `speculative.mtp_draft_coupled=false`:
+
+| Load | tokens per step | steps accepting all drafts | tok/s decode per chat | tok/s wall |
+|---|---|---|---|---|
+| 3 chats x 30 turns in turn, deterministic, texts md5-equal (16158 -> 13917 steps) | 2.981 -> 3.461 | 33.1 % -> 43.7 % | 176.13 -> 203.81 | 166.99 -> 191.62 |
+| the same, default mode, off / on / off / on | 2.813 / 3.234 / 2.813 / 3.223 | 28.2 % / 35.7 % / 28.2 % / 35.4 % | 168.43 / 194.79 / 168.71 / 193.70 | 162.30 / 186.80 / 162.62 / 185.85 |
+| 2 chats x 30 turns overlapping, deterministic (steps at 2 requests) | 3.102 -> 3.578 | 36.0 % -> 47.2 % | 157.23 -> 179.08 | 217.13 -> 253.76 |
+| 4 chats x 20 turns overlapping, deterministic (steps at 4 requests, 3 drafts) | 2.761 -> 3.124 | 45.3 % -> 57.8 % | 123.91 -> 138.71 | 393.20 -> 421.46 |
+
+Activity: `[mtp-head-graph] captured ... draw=<top_k>` lines, off arms 0, on arms 5 / 14 / 38 (1 / 2 / 4
+chats). The overlapping rows are not paired (the texts differ between the arms).
+
+Repeat across server starts, seed 1000, 3 chats x 30 turns in turn:
+
+| Mode | drafts argmax | coupled |
+|---|---|---|
+| default | 2 starts: 3 of 3 texts md5-equal, 17921 of 17921 trace steps equal | 2 starts: 2 of 3 texts md5-equal, first differing step 5627 of 15858 (4 against 0 drafts accepted at one position) |
+| `runtime.deterministic=true` | | 3 starts: 13917 of 13917 trace steps equal |
+
+In default mode a token's logits depend on its row in the verify chunk (on and off arm give different texts there), so a draft that differs between two starts moves
+the text; [`DETERMINISM.md`](../DETERMINISM.md) carries the row.
+
+Gates: `SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank` (503 of 512 rows),
+`SampleVerifyRows.CoupledDraftMatchesTheVerifyDrawMoreOftenThanTheArgmax` (511 against 259 of 512 rows),
+`SampleVerifyRows.DraftRowDrawsWhatTheVerifyRowDrawsOnTheSameLogits`, `DraftRowDraws.*`,
+`StepSeed.UnseededRequestKeepsOneBase`; 5 of 5 mutants red, control 39 + 4 tests green (`mutants.txt`); `make verify-fast`
+and the degeneration suite on the shipped tree in `gates.txt`. Evidence
+`docs/audit/qwen38_coupled_draft_2026_11_11/`.
+
+Open (B-72): verify depth above 4 below 4 requests, 43.7 % of the steps accept all 4 drafts.

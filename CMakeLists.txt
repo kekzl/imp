@@ -544,6 +544,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention_helpers.cpp
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_draft_draws.cpp
     src/exec/executor_prompt_logprobs.cu
     src/exec/executor_lm_head_fp8.cpp
     src/exec/executor_lora.cu

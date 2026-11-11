@@ -202,9 +202,17 @@ public:
     // batched-decode W4A4 LM head, else the FP8 head, no output norm applied. False (nothing written) when
     // none is built or on a GEMM failure.
     // draft_vocab > 0: the FP8 head scores only rows [0, draft_vocab) (speculative.mtp_draft_vocab).
+    // draw_top_k > 0: rows draw_row0.. of stage_draft_draws are drawn instead of the argmax.
     [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out,
                                            cudaStream_t stream, const NvFP4QuantResult* draft_nvfp4 = nullptr,
-                                           int draft_vocab = 0);
+                                           int draft_vocab = 0, int draw_row0 = 0, int draw_top_k = 0);
+    // Coupled MTP drafts (speculative.mtp_draft_coupled): stages draws[n] (row lv * m + i = the i-th row of
+    // the lv-th lm_head_rows_argmax call of one head pass, top_k in [1, SAMPLE_MAX_TOP_K]) and uploads the
+    // args. Returns the largest top_k, 0 = nothing staged (the pass takes the argmax).
+    static constexpr int kDraftDrawRows = 32;  // 4 draft levels x 8 requests, 2.02 MiB
+    [[nodiscard]] int stage_draft_draws(const VerifySampling* draws, int n, int m,
+                                        const NvFP4QuantResult* draft_nvfp4, int draft_vocab,
+                                        cudaStream_t stream);
 
     // Materializes the LM-head projection of hidden_[0..n_rows) into
     // d_out[n_rows,vocab_size] fp32 (same re-projection as greedy_argmax_all,
@@ -618,7 +626,7 @@ public:
     [[nodiscard]] bool ensure_verify_scratch(bool with_penalties);
     // Sampled-verify rows: TopkRowArgs + SAMPLE_SCRATCH_BYTES per row (~64.5 KiB).
     [[nodiscard]] bool ensure_verify_sample_scratch(int rows);
-    void prewarm_verify_scratch(int sample_rows = 0);
+    void prewarm_verify_scratch(int sample_rows = 0, bool draft_draws = false);
     // Bumped whenever the shared forward workspace is reallocated. A captured
     // verify graph holds raw pointers into it — the engine invalidates its
     // graphs when this changes.
@@ -783,6 +791,13 @@ private:
     VramOwned<char> verify_sample_scratch_;
     PinnedBuffer h_verify_sample_args_;
     int verify_sample_rows_cap_ = 0;
+    // Coupled MTP draft draws, same layout for kDraftDrawRows rows. Allocated once, never regrown: a
+    // head-pass graph bakes the pointers.
+    VramOwned<char> draft_draw_scratch_;
+    PinnedBuffer h_draft_draw_args_;
+    [[nodiscard]] bool ensure_draft_draw_scratch_();
+    // Logit columns lm_head_rows_argmax scores per row (the FP8 head's draft_vocab prefix, else the vocab).
+    [[nodiscard]] int draft_rows_vocab_(const NvFP4QuantResult* draft_nvfp4, int draft_vocab) const;
 
     // Activation calibration collector — null unless [calibration] enabled.
     std::unique_ptr<ActivationCalibrator> calib_;

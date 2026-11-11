@@ -1,0 +1,24 @@
+# first differing spec-sfx-shadow trace line between two server starts (first_diff.sh)
+## default mode, argmax drafts (poff1 vs poff2)
+lines a 17921 b 17921 first differing line none
+## default mode, coupled (pon1 vs pon2)
+lines a 15858 b 15880 first differing line 5627
+-- a
+spec-sfx-shadow id=43 pos=7 n=1 T=5 mtp=4:4:5 sfx=32:6:1
+spec-sfx-shadow id=43 pos=12 n=1 T=5 mtp=4:4:5 sfx=0:0:0
+spec-sfx-shadow id=43 pos=17 n=1 T=5 mtp=4:2:3 sfx=0:0:0
+spec-sfx-shadow id=43 pos=20 n=1 T=5 mtp=4:4:5 sfx=0:0:0
+spec-sfx-shadow id=43 pos=25 n=1 T=5 mtp=4:0:1 sfx=0:0:0
+spec-sfx-shadow id=43 pos=26 n=1 T=5 mtp=4:0:1 sfx=0:0:0
+-- b
+spec-sfx-shadow id=43 pos=7 n=1 T=5 mtp=4:4:5 sfx=32:6:1
+spec-sfx-shadow id=43 pos=12 n=1 T=5 mtp=4:4:5 sfx=0:0:0
+spec-sfx-shadow id=43 pos=17 n=1 T=5 mtp=4:2:3 sfx=0:0:0
+spec-sfx-shadow id=43 pos=20 n=1 T=5 mtp=4:0:1 sfx=0:0:0
+spec-sfx-shadow id=43 pos=21 n=1 T=5 mtp=4:1:2 sfx=0:0:0
+spec-sfx-shadow id=43 pos=23 n=1 T=5 mtp=4:1:2 sfx=0:0:0
+ids before the split: 34
+## deterministic, coupled (don1 vs don2)
+lines a 13917 b 13917 first differing line none
+## deterministic, coupled (f1 son vs don1)
+lines a 13917 b 13917 first differing line none

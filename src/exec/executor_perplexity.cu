@@ -402,12 +402,6 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     return true;
 }
 
-namespace {
-size_t verify_sample_args_bytes(int rows) {
-    return ((static_cast<size_t>(rows) * sizeof(TopkRowArgs)) + 255) & ~size_t{255};
-}
-}  // namespace
-
 // Grows before any row of a call uses it (pick_verify_rows_ asks for the call's n_rows), and the
 // verify step syncs its stream per call, so the released buffer has no kernel in flight.
 bool GraphExecutor::ensure_verify_sample_scratch(int rows) {
@@ -428,13 +422,15 @@ bool GraphExecutor::ensure_verify_sample_scratch(int rows) {
     return true;
 }
 
-void GraphExecutor::prewarm_verify_scratch(int sample_rows) {
+void GraphExecutor::prewarm_verify_scratch(int sample_rows, bool draft_draws) {
     if (!initialized_)
         return;
     // Penalties included unconditionally: the buffer is one int per vocab entry
     // (~0.6 MiB) and whether a request sets a penalty is not knowable at init.
     (void)ensure_verify_scratch(/*with_penalties=*/true);
     (void)ensure_verify_sample_scratch(sample_rows);
+    if (draft_draws)
+        (void)ensure_draft_draw_scratch_();
 }
 
 void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
@@ -560,8 +556,29 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
     });
 }
 
+namespace {
+// One head chunk's tokens: top_k > 0 draws the rows from the draft-draw scratch's rows row0.. (args, then
+// one slot per row), else the row argmax.
+bool pick_head_rows(const float* lg, int csz, int V, const char* draw_scratch, int row0, int top_k,
+                    float* pvals, int* pidxs, int32_t* d_out, cudaStream_t stream) {
+    if (top_k > 0) {
+        const char* slots = draw_scratch + verify_sample_args_bytes(GraphExecutor::kDraftDrawRows);
+        return draw_uploaded_rows(reinterpret_cast<const TopkRowArgs*>(draw_scratch) + row0, csz, top_k, V,
+                                  slots + (static_cast<size_t>(row0) * SAMPLE_SCRATCH_BYTES), d_out,
+                                  stream) == cudaSuccess;
+    }
+    dim3 grid(csz, kArgmaxSplits);
+    rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(lg, V, pvals, pidxs);
+    IMP_CUDA_CHECK_LAUNCH();
+    rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+}  // namespace
+
 bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream,
-                                        const NvFP4QuantResult* draft_nvfp4, int draft_vocab) {
+                                        const NvFP4QuantResult* draft_nvfp4, int draft_vocab, int draw_row0,
+                                        int draw_top_k) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
     // Draft copy first: 682 MiB read once per 4 rows. An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4
@@ -576,9 +593,11 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         return false;
     const auto& cfg = model_->config();
     // Rows of the FP8 head scored: a prefix of the vocabulary, the logits packed V to a row.
-    const int V = fp8 && draft_vocab > 0 ? std::min(draft_vocab, cfg.vocab_size) : cfg.vocab_size;
+    const int V = draft_rows_vocab_(draft_nvfp4, draft_vocab);
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     if (!ensure_verify_scratch(/*with_penalties=*/false))
+        return false;
+    if (draw_top_k > 0 && (draw_row0 < 0 || draw_row0 + n_rows > kDraftDrawRows || !draft_draw_scratch_))
         return false;
     float* pvals = static_cast<float*>(verify_argmax_scratch_);
     int* pidxs = reinterpret_cast<int*>(pvals + (static_cast<size_t>(mb) * kArgmaxSplits));
@@ -600,11 +619,9 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
             if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
                 return false;
         }
-        dim3 grid(csz, kArgmaxSplits);
-        rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals, pidxs);
-        IMP_CUDA_CHECK_LAUNCH();
-        rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + c);
-        IMP_CUDA_CHECK_LAUNCH();
+        if (!pick_head_rows(static_cast<const float*>(lg.data), csz, V, draft_draw_scratch_.get(),
+                            draw_row0 + c, draw_top_k, pvals, pidxs, d_out + c, stream))
+            return false;
     }
     return true;
 }

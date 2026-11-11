@@ -336,10 +336,11 @@ TEST(SamplingTest, SamplingDistribution) {
         counts[token]++;
     }
 
-    // Token 0 should be most frequent (>40% of samples)
-    EXPECT_GT(counts[0], N * 4 / 10) << "Token 0 (highest logit) should appear >40% of the time";
-    // Token 2 should be least frequent (<30% of samples)
-    EXPECT_LT(counts[2], N * 3 / 10) << "Token 2 (lowest logit) should appear <30% of the time";
+    // 4 sigma of the binomial around 665 / 245 / 90: an argmax or a one-noise-for-all sampler fails all
+    // three.
+    EXPECT_NEAR(counts[0], 665, 60);
+    EXPECT_NEAR(counts[1], 245, 55);
+    EXPECT_NEAR(counts[2], 90, 36);
 
     free_gpu_tensor(d_logits);
 }

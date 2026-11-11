@@ -10,6 +10,7 @@
 #include "scoped_engine_arena.h"
 
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace imp {
@@ -193,6 +194,150 @@ TEST(SampleVerifyRows, PerRowParamsDrawWhatEachRequestsOwnChunkDraws) {
         for (int j = 0; j < T; ++j)
             EXPECT_EQ(got[(g * T) + j], ref[j]) << "request " << g << " row " << j;
     }
+}
+
+namespace {
+
+// Tokens of n_rows draft rows staged with stage_draft_row (logits packed stride floats to a row).
+std::vector<int32_t> draft_draws(RowsFixture& f, const std::vector<VerifySampling>& rows, int stride,
+                                 int max_top_k) {
+    const int n = static_cast<int>(rows.size());
+    for (int r = 0; r < n; ++r)
+        stage_draft_row(f.d_logits + (static_cast<size_t>(r) * stride), rows[r],
+                        static_cast<char*>(f.d_slots) + (static_cast<size_t>(r) * SAMPLE_SCRATCH_BYTES),
+                        f.h_args[r]);
+    EXPECT_EQ(cudaMemcpy(f.d_args, f.h_args, sizeof(TopkRowArgs) * n, cudaMemcpyHostToDevice), cudaSuccess);
+    EXPECT_EQ(draw_uploaded_rows(f.d_args, n, max_top_k, stride, f.d_slots, f.d_out, nullptr), cudaSuccess);
+    std::vector<int32_t> out(n, -1);
+    EXPECT_EQ(cudaMemcpy(out.data(), f.d_out, sizeof(int32_t) * n, cudaMemcpyDeviceToHost), cudaSuccess);
+    return out;
+}
+
+// Row r: a peaked target distribution; noise > 0 perturbs it the way a draft head's logits differ.
+std::vector<float> peaked_rows(int n_rows, int vocab, float noise) {
+    std::vector<float> h(static_cast<size_t>(n_rows) * vocab);
+    for (int r = 0; r < n_rows; ++r)
+        for (int v = 0; v < vocab; ++v)
+            h[static_cast<size_t>(r) * vocab + v] = std::sin(0.29f * v + 0.71f * r) * 5.0f +
+                                                    ((v * 17 + r) % 89) * 0.01f +
+                                                    noise * std::sin(1.93f * v + 0.37f * r);
+    return h;
+}
+
+// Row r: 6 tokens on a ladder 0.7 logits apart (p = 0.51, 0.25, 0.13, ...), the rest 30 below. noise moves
+// every logit by up to that much: below 0.35 the ladder keeps its order.
+std::vector<float> ladder_rows(int n_rows, int vocab, float noise) {
+    std::vector<float> h(static_cast<size_t>(n_rows) * vocab);
+    for (int r = 0; r < n_rows; ++r) {
+        float* row = h.data() + (static_cast<size_t>(r) * vocab);
+        for (int v = 0; v < vocab; ++v)
+            row[v] = -24.0f + (noise * std::sin((1.93f * v) + (0.37f * r)));
+        for (int j = 0; j < 6; ++j) {
+            const int v = ((r * 37) + (j * 101)) % vocab;
+            row[v] = 6.0f - (0.7f * j) + (noise * std::sin((1.93f * v) + (0.37f * r)));
+        }
+    }
+    return h;
+}
+
+std::vector<VerifySampling> seeded_rows(int n_rows, int seed0) {
+    std::vector<VerifySampling> rows(n_rows);
+    for (int r = 0; r < n_rows; ++r) {
+        rows[r].temperature = 1.0f;
+        rows[r].top_p = 0.95f;
+        rows[r].top_k = 20;
+        rows[r].seed0 = seed0 + r;
+    }
+    return rows;
+}
+
+}  // namespace
+
+TEST(SampleVerifyRows, DraftRowDrawsWhatTheVerifyRowDrawsOnTheSameLogits) {
+    // speculative.mtp_draft_coupled: a draft row with the verify row's seed and params is that row's draw.
+    const int n_rows = 64, vocab = 4096;
+    const std::vector<float> h = peaked_rows(n_rows, vocab, 0.0f);
+    const std::vector<VerifySampling> rows = seeded_rows(n_rows, 1000);
+    RowsFixture v(n_rows, vocab);
+    v.upload(h);
+    ASSERT_EQ(sample_verify_rows_each(v.d_logits, n_rows, vocab, rows.data(), v.h_args, v.d_args, v.d_slots,
+                                      v.d_out, nullptr),
+              cudaSuccess);
+    std::vector<int32_t> want(n_rows, -1);
+    ASSERT_EQ(cudaMemcpy(want.data(), v.d_out, sizeof(int32_t) * n_rows, cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    RowsFixture d(n_rows, vocab);
+    d.upload(h);
+    EXPECT_EQ(draft_draws(d, rows, vocab, 20), want);
+    // The seed decides: the same rows one output index later draw other tokens.
+    int moved = 0;
+    const std::vector<int32_t> shifted = draft_draws(d, seeded_rows(n_rows, 1001), vocab, 20);
+    for (int r = 0; r < n_rows; ++r)
+        moved += shifted[r] != want[r] ? 1 : 0;
+    EXPECT_GT(moved, n_rows / 4);
+}
+
+TEST(SampleVerifyRows, CoupledDraftMatchesTheVerifyDrawMoreOftenThanTheArgmax) {
+    // Draft logits = target logits + noise, same order. The draft's draw with the verify row's seed matches
+    // the verify row's draw on 511 rows of 512, the draft's argmax (top_k 1) on the top token's 0.51.
+    const int n_rows = 512, vocab = 4096;
+    std::vector<VerifySampling> rows = seeded_rows(n_rows, 77);
+    for (auto& r : rows)
+        r.top_p = 1.0f;  // no cut at a ladder step: the noise would move it by one token
+    RowsFixture t(n_rows, vocab);
+    t.upload(ladder_rows(n_rows, vocab, 0.0f));
+    const std::vector<int32_t> target = draft_draws(t, rows, vocab, 20);
+    RowsFixture d(n_rows, vocab);
+    d.upload(ladder_rows(n_rows, vocab, 0.1f));
+    const std::vector<int32_t> coupled = draft_draws(d, rows, vocab, 20);
+    std::vector<VerifySampling> greedy = rows;
+    for (auto& g : greedy)
+        g.top_k = 1;
+    const std::vector<int32_t> argmax = draft_draws(d, greedy, vocab, 1);
+    int hit_coupled = 0, hit_argmax = 0;
+    for (int r = 0; r < n_rows; ++r) {
+        hit_coupled += coupled[r] == target[r] ? 1 : 0;
+        hit_argmax += argmax[r] == target[r] ? 1 : 0;
+    }
+    std::printf("coupled %d / %d, argmax %d / %d\n", hit_coupled, n_rows, hit_argmax, n_rows);
+    EXPECT_GT(hit_argmax, n_rows * 2 / 5);
+    EXPECT_LT(hit_argmax, n_rows * 3 / 5);
+    EXPECT_GT(hit_coupled, n_rows * 19 / 20);
+}
+
+TEST(SampleVerifyRows, CoupledDraftFollowsTheTokenNotTheRank) {
+    // Target and draft swap their two top tokens (logits 0.02 apart, p 0.42 each; third token 0.16). Noise
+    // keyed on the rank draws the other token on 84 rows of 100, the token-keyed race the same token.
+    const int n_rows = 512, vocab = 4096;
+    auto top_swapped = [&](bool swapped) {
+        std::vector<float> h(static_cast<size_t>(n_rows) * vocab, -24.0f);
+        for (int r = 0; r < n_rows; ++r) {
+            float* row = h.data() + (static_cast<size_t>(r) * vocab);
+            row[(r * 37) % vocab] = swapped ? 5.98f : 6.0f;
+            row[((r * 37) + 101) % vocab] = swapped ? 6.0f : 5.98f;
+            row[((r * 37) + 202) % vocab] = 5.0f;
+        }
+        return h;
+    };
+    std::vector<VerifySampling> rows = seeded_rows(n_rows, 4100);
+    for (auto& r : rows)
+        r.top_p = 1.0f;
+    RowsFixture t(n_rows, vocab);
+    t.upload(top_swapped(false));
+    const std::vector<int32_t> target = draft_draws(t, rows, vocab, 20);
+    RowsFixture d(n_rows, vocab);
+    d.upload(top_swapped(true));
+    const std::vector<int32_t> coupled = draft_draws(d, rows, vocab, 20);
+    int hit = 0, top = 0;
+    for (int r = 0; r < n_rows; ++r) {
+        hit += coupled[r] == target[r] ? 1 : 0;
+        top += target[r] == (r * 37) % vocab ? 1 : 0;
+    }
+    std::printf("coupled %d / %d, target draws its top token on %d\n", hit, n_rows, top);
+    EXPECT_GT(hit, n_rows * 19 / 20);
+    // The target rows are a sample, not the argmax: the top token on 0.42 of them.
+    EXPECT_GT(top, n_rows * 3 / 10);
+    EXPECT_LT(top, n_rows * 11 / 20);
 }
 
 TEST(SampleVerifyRows, PerRowRefusesARowWithoutADraw) {

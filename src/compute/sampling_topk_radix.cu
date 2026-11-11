@@ -369,23 +369,7 @@ __device__ __forceinline__ int topk_softmax_topp_sample(int top_k, float top_p, 
             break;
         }
     }
-    float norm = 0.0f;
-    for (int i = 0; i < cutoff; ++i)
-        norm += s_val[i];
-    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-
-    unsigned int rng_state = sampler_seed_scramble(seed);
-    float r = lcg_rand_float(rng_state);
-    float acc = 0.0f;
-    int chosen = s_idx[0];
-    for (int i = 0; i < cutoff; ++i) {
-        acc += s_val[i] * inv_norm;
-        if (r < acc) {
-            chosen = s_idx[i];
-            break;
-        }
-    }
-    return chosen;
+    return sampler_race_pick(seed, s_val, s_idx, cutoff);
 }
 
 // Phase 2: radix select over the n_blocks * top_k candidate pool, then the legacy tail.

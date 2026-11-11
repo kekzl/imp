@@ -1272,10 +1272,16 @@ mtp_batch_verify_factor_row = true
 # false = the single chunk.
 mtp_batch_verify_solo = true
 # That step's head pass (feed, draft LM head, chain) replays a CUDA graph per
-# (fed rows, requests, chain), at most 48; the second use of a shape captures
+# (fed rows, requests, chain), at most 96; the second use of a shape captures
 # it. false = eager launches. Qwen3.8-27B-NVFP4: head pass at 2 requests
 # 2.66-2.77 -> 2.33-2.46 ms, 4 overlapping chats 140.40 -> 143.47 tok/s.
 mtp_head_graph       = true
+# Sampled bound requests: an MTP draft draws from the head's logits with the
+# request's top_k / top_p / temperature and the seed of the verify row that
+# checks it (the sampler's noise is keyed on (seed, token id)). The emitted
+# tokens stay the verify rows' draws. false = argmax drafts. Qwen3.8-27B-NVFP4
+# agent replay: 2.981 -> 3.461 tokens per step.
+mtp_draft_coupled    = true
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.

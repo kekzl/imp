@@ -1,0 +1,42 @@
+# race sampler keyed on (seed, token id), experiment build, deterministic:
+# goff = argmax drafts, gcNN = coupled with draft temperature x N.N
+arm goff rc=0
+arm gc10 rc=0
+arm gc07 rc=0
+arm gc13 rc=0
+== goff
+n=1 T=5 steps 17757 share 100.0 % tok/step 2.847
+   nd=4 steps 17757 share 100.0 % full-accept 29.0 % | m0:31.4 m1:19.1 m2:12.1 m3:8.4 m4:29.0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23881 |  82.9 |   138.14 |  172.88 | 30/0/0 | 8905c4dd6477
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11014 |  59.1 |    58.55 |  188.12 | 30/0/0 | 8dafbc899497
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   15662 |  84.9 |   103.28 |  151.65 | 30/0/0 | 91b164c83792
+total | requests 90 | output tok 50557 | reasoning 78.3 % | wall 314.97 s | 160.51 tok/s wall | 168.54 tok/s decode per chat
+0
+0
+== gc10
+n=1 T=5 steps 15134 share 100.0 % tok/step 3.340
+   nd=4 steps 15134 share 100.0 % full-accept 39.8 % | m0:18.9 m1:17.7 m2:13.6 m3:9.9 m4:39.8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23881 |  82.9 |   120.59 |  198.03 | 30/0/0 | 8905c4dd6477
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11014 |  59.1 |    51.09 |  215.59 | 30/0/0 | 8dafbc899497
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   15662 |  84.9 |    84.76 |  184.78 | 30/0/0 | 91b164c83792
+total | requests 90 | output tok 50557 | reasoning 78.3 % | wall 271.46 s | 186.24 tok/s wall | 197.15 tok/s decode per chat
+5
+0
+== gc07
+n=1 T=5 steps 15431 share 100.0 % tok/step 3.276
+   nd=4 steps 15431 share 100.0 % full-accept 38.3 % | m0:20.4 m1:18.1 m2:13.4 m3:9.9 m4:38.3
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23881 |  82.9 |   122.33 |  195.22 | 30/0/0 | 8905c4dd6477
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11014 |  59.1 |    51.68 |  213.11 | 30/0/0 | 8dafbc899497
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   15662 |  84.9 |    87.37 |  179.26 | 30/0/0 | 91b164c83792
+total | requests 90 | output tok 50557 | reasoning 78.3 % | wall 276.44 s | 182.89 tok/s wall | 193.42 tok/s decode per chat
+5
+0
+== gc13
+n=1 T=5 steps 15539 share 100.0 % tok/step 3.253
+   nd=4 steps 15539 share 100.0 % full-accept 37.3 % | m0:20.9 m1:17.8 m2:13.7 m3:10.3 m4:37.3
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23881 |  82.9 |   123.69 |  193.07 | 30/0/0 | 8905c4dd6477
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11014 |  59.1 |    52.42 |  210.11 | 30/0/0 | 8dafbc899497
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   15662 |  84.9 |    87.29 |  179.42 | 30/0/0 | 91b164c83792
+total | requests 90 | output tok 50557 | reasoning 78.3 % | wall 278.41 s | 181.59 tok/s wall | 191.94 tok/s decode per chat
+5
+0

@@ -21,6 +21,11 @@ void launch_ban_logits(float* logits, const int32_t* banned_ids, int n_banned, i
 void launch_ban_logits_if(float* logits, const int32_t* banned_ids, int n_banned, int vocab_size,
                           const int* d_active, cudaStream_t stream);
 
+// Row-sampler scratch layout: rows x TopkRowArgs padded to 256 bytes, then rows x SAMPLE_SCRATCH_BYTES slots.
+inline size_t verify_sample_args_bytes(int rows) {
+    return ((static_cast<size_t>(rows) * sizeof(TopkRowArgs)) + 255) & ~size_t{255};
+}
+
 // The one place that decides which constrainer masks a step. Four
 // sampling paths across two TUs used to carry four copies of this chain,
 // so a new constrainer had to be added to all four and an easy-to-miss one
