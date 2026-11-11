@@ -48,13 +48,13 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     EXPECT_FALSE(cfg.speculative.ngram);
 }
 
-// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy, one draft per bound row.
+// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy; draft 2 stays as a factor row.
 TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "FP8 draft head scores the first 98304 rows";
 }
 
@@ -102,7 +102,23 @@ TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=2"}).empty());
     tools::mtp_auto_finalize(cfg, 2, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
+}
+
+// Without the factor row a second draft is a second spare slot per row (79.5 MiB each on Qwen3.8-27B).
+TEST(MtpAuto, ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_batch_verify_factor_row=false"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
+    RuntimeConfig set;
+    ASSERT_TRUE(set.apply_overrides(
+                       {"speculative.mtp_batch_verify_factor_row=false", "speculative.mtp_batch_verify_k=2"})
+                    .empty());
+    tools::mtp_auto_finalize(set, tools::mtp_auto_request_k(set, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_EQ(set.speculative.mtp_batch_verify_k, 2) << "the operator set it";
 }
 
 TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {

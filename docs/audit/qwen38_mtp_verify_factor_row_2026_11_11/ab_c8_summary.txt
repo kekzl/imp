@@ -1,0 +1,109 @@
+harness: md5=1fb90481a6c3 client_md5=e207c7b27faf
+p1_k1 own_peak_mib 22164 kv_blocks 6015 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_k1 ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.86 drafted 0 accepted 0 md5 83c5b933f78c
+REQ p1_k1 ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 4.87 decode_tps 72.42 drafted 1 accepted 1 md5 2d1765e4958a
+REQ p1_k1 ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.87 drafted 0 accepted 0 md5 1df9b80d8a63
+REQ p1_k1 ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.24 decode_tps 76.95 drafted 1 accepted 0 md5 c88f13e52471
+REQ p1_k1 ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.85 drafted 0 accepted 0 md5 8203b00c121b
+REQ p1_k1 ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.30 decode_tps 77.49 drafted 2 accepted 1 md5 feb5b2dcc217
+REQ p1_k1 ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.24 decode_tps 76.95 drafted 0 accepted 0 md5 c701b8295bbf
+REQ p1_k1 ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.86 drafted 0 accepted 0 md5 3cd2f7593f30
+AGG p1_k1 ctx 8000 rep 0 conc 8 tok_s 571.44
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:47:24.023][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:47:24.023][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:47:23.936][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:47:23.936][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7698)
+      1 [01:47:22.749][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:47:22.749][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:47:22.278][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it
+p1_row own_peak_mib 22242 kv_blocks 5858 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_row ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 4.87 decode_tps 72.32 drafted 2 accepted 2 md5 2fb753e85277
+REQ p1_row ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.84 drafted 0 accepted 0 md5 eedbdccb1ec2
+REQ p1_row ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.26 decode_tps 76.79 drafted 2 accepted 0 md5 c1fc298a9d12
+REQ p1_row ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.84 drafted 0 accepted 0 md5 8602f35b0f38
+REQ p1_row ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.26 decode_tps 76.80 drafted 0 accepted 0 md5 89512ae853d5
+REQ p1_row ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.83 drafted 0 accepted 0 md5 d991ef91d283
+REQ p1_row ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.84 drafted 0 accepted 0 md5 c5a6af4c8885
+REQ p1_row ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.32 decode_tps 77.67 drafted 2 accepted 2 md5 2cd833e6b215
+AGG p1_row ctx 8000 rep 0 conc 8 tok_s 570.43
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:47:59.417][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:47:59.417][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:47:59.329][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:47:59.329][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7699)
+      1 [01:47:58.125][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:47:58.125][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:47:57.655][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it
+p1_slot own_peak_mib 22102 kv_blocks 5663 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_slot ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 5.12 decode_tps 74.89 drafted 0 accepted 0 md5 1208c7979934
+REQ p1_slot ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 4.91 decode_tps 72.58 drafted 2 accepted 2 md5 a5d105d2ab3b
+REQ p1_slot ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.29 decode_tps 76.88 drafted 2 accepted 0 md5 c1fc298a9d12
+REQ p1_slot ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.12 decode_tps 74.88 drafted 0 accepted 0 md5 8602f35b0f38
+REQ p1_slot ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.12 decode_tps 74.89 drafted 0 accepted 0 md5 4ee03f168696
+REQ p1_slot ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.12 decode_tps 74.88 drafted 0 accepted 0 md5 2e3eec755dd1
+REQ p1_slot ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.34 decode_tps 77.76 drafted 2 accepted 2 md5 e4c8a66d1863
+REQ p1_slot ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.29 decode_tps 76.89 drafted 0 accepted 0 md5 28da4ab8e114
+AGG p1_slot ctx 8000 rep 0 conc 8 tok_s 572.97
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:48:34.704][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:48:34.704][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:48:34.618][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:48:34.617][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7699)
+      1 [01:48:33.435][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:48:33.434][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:48:32.966][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it
+p2_k1 own_peak_mib 22164 kv_blocks 6015 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p2_k1 ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 4.87 decode_tps 72.26 drafted 1 accepted 1 md5 0985eec4afb1
+REQ p2_k1 ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.89 drafted 0 accepted 0 md5 eedbdccb1ec2
+REQ p2_k1 ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.87 drafted 0 accepted 0 md5 1df9b80d8a63
+REQ p2_k1 ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.26 decode_tps 76.95 drafted 1 accepted 0 md5 c88f13e52471
+REQ p2_k1 ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.88 drafted 0 accepted 0 md5 8203b00c121b
+REQ p2_k1 ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.26 decode_tps 76.96 drafted 0 accepted 0 md5 2e3eec755dd1
+REQ p2_k1 ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.09 decode_tps 74.88 drafted 0 accepted 0 md5 c5a6af4c8885
+REQ p2_k1 ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.31 decode_tps 77.50 drafted 2 accepted 1 md5 2cd833e6b215
+AGG p2_k1 ctx 8000 rep 0 conc 8 tok_s 569.98
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:49:10.256][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:49:10.256][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:49:10.169][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:49:10.169][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7698)
+      1 [01:49:08.967][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:49:08.967][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:49:08.498][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it
+p2_row own_peak_mib 22242 kv_blocks 5858 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p2_row ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 4.87 decode_tps 72.59 drafted 2 accepted 2 md5 2fb753e85277
+REQ p2_row ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 5.08 decode_tps 74.90 drafted 0 accepted 0 md5 eedbdccb1ec2
+REQ p2_row ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.25 decode_tps 77.00 drafted 0 accepted 0 md5 d2efecbfc403
+REQ p2_row ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.25 decode_tps 77.00 drafted 2 accepted 0 md5 c88f13e52471
+REQ p2_row ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.90 drafted 0 accepted 0 md5 8203b00c121b
+REQ p2_row ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.91 drafted 0 accepted 0 md5 d991ef91d283
+REQ p2_row ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.07 decode_tps 74.90 drafted 0 accepted 0 md5 c5a6af4c8885
+REQ p2_row ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.30 decode_tps 77.88 drafted 2 accepted 2 md5 2cd833e6b215
+AGG p2_row ctx 8000 rep 0 conc 8 tok_s 573.75
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:49:45.581][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:49:45.581][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:49:45.495][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:49:45.495][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7699)
+      1 [01:49:44.309][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:49:44.309][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:49:43.840][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it
+p2_slot own_peak_mib 22102 kv_blocks 5663 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p2_slot ctx 8000 rep 0 s0 prompt 7696 comp 384 ttft_s 4.85 decode_tps 72.55 drafted 2 accepted 2 md5 2fb753e85277
+REQ p2_slot ctx 8000 rep 0 s1 prompt 7696 comp 384 ttft_s 5.23 decode_tps 76.89 drafted 2 accepted 0 md5 65938c6c6e1b
+REQ p2_slot ctx 8000 rep 0 s2 prompt 7696 comp 384 ttft_s 5.06 decode_tps 74.82 drafted 0 accepted 0 md5 f81a3de8505f
+REQ p2_slot ctx 8000 rep 0 s3 prompt 7696 comp 384 ttft_s 5.29 decode_tps 77.44 drafted 4 accepted 1 md5 fce381d170b6
+REQ p2_slot ctx 8000 rep 0 s4 prompt 7696 comp 384 ttft_s 5.06 decode_tps 74.81 drafted 0 accepted 0 md5 4ee03f168696
+REQ p2_slot ctx 8000 rep 0 s5 prompt 7696 comp 384 ttft_s 5.23 decode_tps 76.89 drafted 0 accepted 0 md5 2e3eec755dd1
+REQ p2_slot ctx 8000 rep 0 s6 prompt 7696 comp 384 ttft_s 5.06 decode_tps 74.82 drafted 0 accepted 0 md5 c5a6af4c8885
+REQ p2_slot ctx 8000 rep 0 s7 prompt 7696 comp 384 ttft_s 5.06 decode_tps 74.81 drafted 0 accepted 0 md5 3cd2f7593f30
+AGG p2_slot ctx 8000 rep 0 conc 8 tok_s 570.40
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+      1 [01:50:20.887][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 36 binds slot 1 from 7648, no head rows below it
+      1 [01:50:20.887][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 36 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 7696)
+      1 [01:50:20.799][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 41 binds slot 0 from 6688, no head rows below it
+      1 [01:50:20.799][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 41 resumes slot 0 at 54, behind its head KV ring (16384 rows, written to 7699)
+      1 [01:50:19.613][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 40 binds slot 1 from 4096, no head rows below it
+      1 [01:50:19.613][INFO] engine_spec_mtp.cpp:518: mtp-spec: req 40 resumes slot 1 at 54, behind its head KV ring (16384 rows, written to 6144)
+      1 [01:50:19.144][INFO] engine_spec_mtp.cpp:540: mtp-spec: req 39 binds slot 2 from 4096, no head rows below it

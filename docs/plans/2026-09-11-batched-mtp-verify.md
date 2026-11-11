@@ -9,8 +9,12 @@ Status (2026-11-04): the same step runs by default for the BOUND requests while 
 (`speculative.mtp_batch_verify`, section "Bound verify at 2-4 rows"), with 2 drafts per request
 (`speculative.mtp_batch_verify_k`, section "Two drafts per bound request"), both draft passes on the
 NVFP4 draft head (section "NVFP4 draft head in the batched passes"), their tables in one H2D (section "One
-table upload per head pass"), the pass replayed as a CUDA graph (section at the end); the full
-`batch_verify` stays opt-in.
+table upload per head pass"), the pass replayed as a CUDA graph (section "The head pass as a CUDA graph");
+the full `batch_verify` stays opt-in.
+
+Status (2026-11-11): at 2 drafts the second spare slot per row is replaced by a factor row of draft 1
+(`speculative.mtp_batch_verify_factor_row`, section "Draft 1 as a factor row" at the end); a concurrent
+GDN-hybrid server keeps 2 drafts by default.
 
 ## Why
 
@@ -201,7 +205,7 @@ docs/audit/qwen38_mtp_batch_verify_k2_2026_11_04/):
 
 | piece | rule |
 |---|---|
-| state | three recurrent states per request: row 1 in place in the live slot, rows 1-2 in a second spare (a commit-only scan pass before the main one, a third conv commit, `InferenceState::ssm_snap_rows`), all 3 rows in the spare; k accepted drafts swap the slot holding 1 + k rows in (`bound_verify_state_slot`). 2 spares per row: 8 x 79.5 MiB charged, KV plan 12305 -> 11380 blocks |
+| state | three recurrent states per request: row 1 in place in the live slot, rows 1-2 in a second spare (a commit-only scan pass before the main one, a third conv commit, `InferenceState::ssm_snap_rows`), all 3 rows in the spare; k accepted drafts swap the slot holding 1 + k rows in (`bound_verify_state_slot`). 2 spares per row: 8 x 79.5 MiB charged, KV plan 12305 -> 11380 blocks. Since 2026-11-11 the default replaces the second spare by a factor row (section "Draft 1 as a factor row"); this row describes `speculative.mtp_batch_verify_factor_row=false` |
 | drafts | the batched head pass drafts token 1 per request, a second ragged pass (draft 1 on device, the head's own final-norm row) drafts token 2 at the next head position, overwritten by the next feed; a request whose own `mtp_k` is 1 keeps one draft |
 | kernels | no scan kernel change: the 2-row state is a second launch of `gdn_scan_fused_*_batched` with `out_slots` = the second spares, its y rows equal to the main pass's (`GdnVerifyTwoDraftsTest`) |
 
@@ -347,3 +351,56 @@ batched decode LM head and `gemm_nvfp4` at M <= 16, not the draft head (<= 4 row
 `gemv_nvfp4_kpar_mb_fp16_kernel` is refuted as a lever: 0 launches on Qwen3.8-27B-NVFP4 at c1 / c4 / c32
 and a 33612-token prompt (captured verify chunks take the small-M kernel, MTP stops past its 16384-row
 head KV); `docs/audit/qwen38_kpar_fp16_verify_share_2026_11_04/`, SETTLED.md section H.
+
+## Draft 1 as a factor row (2026-11-11, `speculative.mtp_batch_verify_factor_row`, default true)
+
+At 2 drafts the second spare slot per row (the 1 + 1 row state) is gone: draft 1 leaves the main scan pass
+as a GDN factor row plus a conv tap, folded into the live slot when exactly 1 of 2 drafts is accepted. A
+concurrent GDN-hybrid server keeps 2 drafts by default again (`tools/common/mtp_auto.cpp`; the NVFP4 draft
+head stays off there). Evidence: docs/audit/qwen38_mtp_verify_factor_row_2026_11_11/.
+
+| piece | rule |
+|---|---|
+| scan | one pass, 3 rows: the spare (`ssm_out_slots`) commits all 3, the live slot takes row 1 in place (`ssm_snap_slots`, `ssm_snap_rows` 1), row 2 goes to `ssm_fac_out` at the live slot (`gdn_factor_mid_row`: `fac_out` WITH `out_slots` stores the row after the snapshot, the commit stays); the commit-only pass and the third conv commit are gone |
+| conv | `ssm_conv_tap_stash` keeps draft 1's input column per live slot (`ssm_tap_out`), `ssm_conv_tap_fold` shifts it into the live window |
+| accept | `bound_verify_kept_slot`: 0 matched = live slot, 2 matched = spare (the same bytes as with a second spare), 1 matched = `gdn_factor_fold` + `ssm_conv_tap_fold` on the live slot (`bound_verify_factor_row_folds`, `src/runtime/spec_verify_factor_rows.cpp`) |
+| numerics | the fold is the scan's own update H = g * H + k * delta on the stored 1-row state: bit-equal to the 2-row scan with an f32 state, the rounding of a token-by-token decode with BF16 |
+| VRAM | Qwen3.8-27B, `--max-batch 32`: 48 layers x 36 slots, 82.3 MiB of factor rows + 33.8 MiB of conv taps (3.22 MiB per recurrent slot) instead of 4 x 80.0 MiB; spare recurrent slots 8 -> 4 |
+
+Measured (`ab_table.txt`: `tools/analysis/mtp_longctx_ab.sh`, Qwen3.8-27B-NVFP4-vllm server defaults, 384
+greedy tokens per chat, 2 alternating pairs, tok/s over all streams, min-max; k 1 = main's concurrent default):
+
+| chats x prompt | k 1 | factor row | second spare |
+|---|---|---|---|
+| 1 x 20k | 137.08-137.79 | 165.83-166.20 | 149.76-151.26 |
+| 1 x 40k | 133.81-133.86 | 156.86-156.98 | 155.09-155.70 |
+| 1 x 80k | 128.41-128.80 | 154.30-154.34 | 149.54-149.57 |
+| 2 x 20k | 248.94-249.24 | 287.77-288.06 | 289.06-297.90 |
+| 2 x 40k | 243.31-244.16 | 288.09-292.06 | 266.97-272.43 |
+| 2 x 80k | 240.15-240.44 | 284.98-286.72 | 270.32-271.41 |
+| 4 x 8k | 476.19-482.75 | 575.17-583.27 | 531.67-569.19 |
+| 4 x 20k | 450.19-451.67 | 509.62-509.81 | 501.18-508.91 |
+| 8 x 8k (no bound verify) | 569.98-571.44 | 570.43-573.75 | 570.40-572.97 |
+
+| | k 1 | factor row | second spare |
+|---|---|---|---|
+| KV plan, blocks | 11239 | 10901 | 10313 |
+| step at 2 requests: forward + argmax, head, tokens/step | 13.13 ms, 1.27 ms, 3.66 | 13.52 ms, 2.43 ms, 4.90 | 13.91 ms, 2.43 ms, 4.83 |
+| step at 4 requests | 13.56 ms, 1.38 ms, 7.45 | 14.28 ms, 2.73 ms, 10.42 | 15.02 ms, 2.70 ms, 10.12 |
+
+Gates: `GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState` (+ `Bf16`) and
+`ConvFactorRowFoldsTheLiveWindowToTwoRows`; mutant sets A and B (2 kernel mutants each) fail 3 and 2 tests
+(`mutants.txt`). Engine level: `tools/analysis/mtp_factor_row_equiv.sh` (GPU, manual): with
+`gdn.state_bf16=false`, 2 chats x 20k come out md5-equal with the factor row and with the second spare, 2
+runs, 606 = 606 drafts (`equiv.txt`); an engine that never folds (exit 1 in that script) or stashes the wrong tap row changes both
+texts. Tok/s and acceptance do not see those two mutants (dev build, 303.14 and 318.42 tok/s against 287.41 clean, the
+text corrupted), so the md5 check is the gate. The streams start 300 ms apart (`STAGGER_MS`): started
+together, the texts follow which stream arrives first (8 of 8 servers), not the arm.
+
+Refuted first variant (`spare_fold_variant_ab_table.txt`): the live slot keeps row 1, the spare takes rows
+1-2 plus a factor row of draft 2, folded on every full accept. 4 chats x
+20k 487.96-491.16 tok/s against 503.68-510.05 with the second spare; the variant above folds only the
+1-of-2 groups and reads 509.62-509.81 there.
+
+Next: factor rows indexed by verify group instead of by recurrent slot (4 groups instead of 36 slots of
+3.22 MiB); adopting the spare when the request's own chain is 1 draft long.

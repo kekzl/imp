@@ -27,8 +27,9 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // All arithmetic stays FP32 in registers; only loads/stores convert. FP16 state was refuted for
 // GDN (subnormal truncation at ~6e-5 breaks near-zero heads); bf16 keeps FP32's range.
 // CSPLIT: CTAs per head along HD (blockIdx.z), each owning HD/CSPLIT state columns. The delta rule
-// is column-independent; K/Q normalisation is recomputed per CTA. Not with fac_in/fac_out (one
-// per-head buffer, read at start and written at end by different CTAs).
+// is column-independent; K/Q normalisation is recomputed per CTA. Not with fac_in (the row is one
+// per-head buffer, read at start and, with fac_out, written at end by different CTAs); fac_out alone
+// has one writer per element (delta[d] its column, k and g the d == 0 lanes).
 template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float, int CSPLIT = 1>
 __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -151,6 +152,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const size_t fac_row = ((static_cast<size_t>(seq_slots ? seq_slots[seq] : seq) * n_heads) + h) *
                            static_cast<size_t>(fac_stride);
     gdn_factor_apply<SS_PER>(H_reg, fac_in ? fac_in + fac_row : nullptr, SS, s_base, d);
+    float* const fac_last = out_slots ? nullptr : fac_out;  // the row replaces the commit
+    const int fac_mid_t = gdn_factor_mid_row(out_slots, fac_out, snap_n, real_n);  // commit stays
 
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce_buf[HD]
     extern __shared__ float smem[];
@@ -284,17 +287,19 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
             // Factored only when a drafted row exists past the snapshot: otherwise the row would re-describe
             // a transition the snapshot already holds and the next step would apply it twice; the 0 sentinel
             // keeps the buffer defined against a stale row from an earlier step.
-            if (fac_out && snap_n >= 1 && real_n > snap_n) {
-                gdn_factor_store<SS_PER>(fac_out + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
+            if (fac_last && snap_n >= 1 && real_n > snap_n) {
+                gdn_factor_store<SS_PER>(fac_last + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
             } else {
-                if (fac_out && d == 0 && part == 0)
-                    fac_out[fac_row] = 0.0f;
+                if (fac_last && d == 0 && part == 0)
+                    fac_last[fac_row] = 0.0f;
                 StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
                 for (int s = 0; s < SS_PER; s++)
                     H_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
             }
         }
+        if (t == fac_mid_t)
+            gdn_factor_store<SS_PER>(fac_out + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
         if (t + 1 == snap_n) {
             StateT* S_col = h_snap_dst + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
@@ -353,7 +358,7 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int 
 // ---------------------------------------------------------------------------
 
 // HD=SS=128, SPLIT=2 launch. Column split (CSPLIT=4) when the head x sequence grid covers at
-// most kScanColSplitMaxCtas CTAs (single-stream decode: 48 CTAs on 170 SMs) and no factored spare.
+// most kScanColSplitMaxCtas CTAs (single-stream decode: 48 CTAs on 170 SMs) and no fac_in row.
 constexpr int kScanColSplit = 4;
 constexpr int kScanColSplitMaxCtas = 96;
 
@@ -405,10 +410,10 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
         // threads share one column, so a warp touches 32/SPLIT distinct columns at 128/SPLIT
         // bytes/access. SPLIT=2 is where the register spill is gone and access is still half a cache
         // line. Do not raise it without re-measuring.
-        launch_scan128<half, float>(n_heads, n_seq, fac_out != nullptr || fac_in != nullptr, stream, conv_f32,
-            alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
-            conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
-            seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
+        launch_scan128<half, float>(n_heads, n_seq, fac_in != nullptr, stream, conv_f32, alpha, beta, A_log,
+                                    dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
+                                    grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
+                                    seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
     } else if (head_dim_ssm == 64 && state_size == 64) {
         const size_t smem = ((2 * 64) + 64) * sizeof(float);
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
@@ -446,10 +451,11 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16_batched: no kernel for HD=" +
                                  std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
-    launch_scan128<half, __nv_bfloat16>(n_heads, n_seq, fac_out != nullptr || fac_in != nullptr, stream,
-        conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups, conv_channels,
-        grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride, seq_row_offsets, out_slots,
-        snap_slots, fac_out, fac_in, fac_stride);
+    launch_scan128<half, __nv_bfloat16>(n_heads, n_seq, fac_in != nullptr, stream, conv_f32, alpha, beta,
+                                        A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
+                                        conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots,
+                                        h_state_seq_stride, seq_row_offsets, out_slots, snap_slots, fac_out,
+                                        fac_in, fac_stride);
 }
 
 // Fused scan: all tokens in one launch. conv_f32: [n_tokens,conv_channels] FP32 (Q|K|V

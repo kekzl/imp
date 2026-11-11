@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-12
-commit: d28a5d48
+verified: 2026-11-11
+commit: e713db1a
 -->
 
 # Factored spare state for the batched speculative verify
@@ -72,6 +72,7 @@ row from an earlier step cannot survive to be applied twice.
 | drop the spare slots from `batch_verify_spare_slots` and the planner | built, follows the flag |
 | conv window: `ssm_conv_tap.cu`, stash + apply, `SsmConvTapTest` | built |
 | quality gate on the factored path (`degen_suite.py`, 50 checks) | GREEN |
+| bound verify at 2 drafts: the same row and tap for draft 1, stored mid-scan next to the commit, folded into the live slot (`gdn_factor_fold`, `ssm_conv_tap_fold`, `speculative.mtp_batch_verify_factor_row`) | built, default on (2026-11-11): [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md), section "Draft 1 as a factor row" |
 
 The test is the gate on the algebra: it runs the real accept sequence both ways (full spare,
 then factored) and compares the state **after the following token**, which is what the engine

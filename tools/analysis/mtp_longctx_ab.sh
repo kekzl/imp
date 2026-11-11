@@ -4,7 +4,8 @@
 # lines, the server's MTP enable line (kv_cap x slots) and why drafting stopped, own peak VRAM, KV blocks.
 # Usage: ARMS="label|image|k=v,k=v ..." OUT=/mnt/data/scratch/dir [PAIRS=1] [CTX="8000 20000 40000 80000"]
 #        [CORPUS=dir holding docs/internals + src/ (default this tree; pin it: an edited tree changes the prompts)]
-#        [CONC=1] [REPS=1 session headers per context] [GEN=384] [MTP_K=] tools/analysis/mtp_longctx_ab.sh
+#        [CONC=1] [REPS=1 session headers per context] [GEN=384] [MTP_K=]
+#        [STAGGER_MS=0 (> 0: stream i starts that long after i - 1)] tools/analysis/mtp_longctx_ab.sh
 set -uo pipefail
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -34,7 +35,8 @@ for pair in $(seq 1 "$PAIRS"); do
             [ -n "$(docker ps -q -f name="$CTR")" ] || { echo "$tag: server died"; docker logs "$CTR" 2>&1 | tail -5; exit 3; }; done
         mkdir -p "$OUT/$tag"
         docker run --rm --network host -e CTX="${CTX:-8000 20000 40000 80000}" -e GEN="${GEN:-384}" \
-            -e CONC="${CONC:-1}" -e REPS="${REPS:-1}" -e MTP_K="${MTP_K:-}" -e OUT_DIR=/out -v "$OUT/$tag":/out \
+            -e CONC="${CONC:-1}" -e REPS="${REPS:-1}" -e MTP_K="${MTP_K:-}" -e STAGGER_MS="${STAGGER_MS:-0}" \
+            -e OUT_DIR=/out -v "$OUT/$tag":/out \
             -e REPO_DIR=/corpus -v "${CORPUS:-$REPO}":/corpus:ro \
             -v "$REPO":/repo:ro imp:toolchain python3 /repo/tools/analysis/mtp_longctx_client.py "$PORT" "$tag" \
             2>&1 | tee "$OUT/$tag.client.txt"

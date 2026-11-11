@@ -461,7 +461,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // snapshot (ssm_out_slots/ssm_snap_slots). Factored spare: commits the
             // window at the SNAPSHOT length into the live slot and stashes the
             // drafted row's tap, equivalent to committing at both lengths into two slots.
-            const bool factored = state.ssm_tap_out != nullptr;
+            // A tap WITH ssm_out_slots (bound verify, 2 drafts): the commits stay, the tap is row
+            // d_snap_n[1], the one a partial accept folds into the live window (ssm_conv_tap_fold).
+            const bool factored = state.ssm_tap_out != nullptr && state.ssm_out_slots == nullptr;
             const bool per_group =
                 !factored && state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
             ssm_conv1d_prefill_f32_silu_grouped(
@@ -473,10 +475,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 (!factored && (conv_prev || per_group)) ? state.d_snap_n : nullptr,
                 per_group ? nullptr : conv_prev, factored ? nullptr : state.ssm_out_slots,
                 per_group ? state.ssm_snap_slots : nullptr, per_group ? state.ssm_snap_rows : 1);
-            if (factored)
+            if (state.ssm_tap_out != nullptr)
                 ssm_conv_tap_stash(static_cast<char*>(state.ssm_tap_out) +
                                        (state.ssm_tap_layer_stride * ssm_idx * 2),
-                                   xBC_g.data, T, conv_channels, state.d_chunk_len, state.ssm_seq_slots,
+                                   xBC_g.data, T, conv_channels,
+                                   factored ? state.d_chunk_len : state.d_snap_n + 1, state.ssm_seq_slots,
                                    state.ssm_n_seq, stream);
             // Bucket pad rows past the last group belong to no sequence: no conv ran
             // for them and the scan writes no y for them. Both are zeroed so the

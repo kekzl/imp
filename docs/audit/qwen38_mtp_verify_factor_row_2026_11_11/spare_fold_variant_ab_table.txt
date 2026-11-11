@@ -1,0 +1,42 @@
+== c1
+p1_k1: KV blocks: plan 11239 | mtp_batch_verify: bound requests verify together while <= 4 decode, 1 draft(s) each (4 spare recurrent slots)
+p1_slot: KV blocks: plan 10313 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (8 spare recurrent slots)
+p1_tail: KV blocks: plan 10901 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (4 spare recurrent slots, draft 2 as a factor row)
+speculative.mtp_batch_verify_tail: 48 layers x 36 slots, 82.3 MiB of factor rows + 33.8 MiB of conv taps (a second spare per row is 80.0 MiB each)
+stderr matches: 0
+== c2
+k1 ctx 20000       tok_s 247.94-249.18 (n=2) accepted 690/818 = 84.4 %
+slot ctx 20000     tok_s 294.29-294.58 (n=2) accepted 906/1204 = 75.2 %
+tail ctx 20000     tok_s 299.64-299.74 (n=2) accepted 918/1180 = 77.8 %
+k1 ctx 40000       tok_s 241.63-242.66 (n=2) accepted 678/834 = 81.3 %
+slot ctx 40000     tok_s 269.68-276.45 (n=2) accepted 864/1292 = 66.9 %
+tail ctx 40000     tok_s 272.75-275.00 (n=2) accepted 874/1268 = 68.9 %
+k1 ctx 80000       tok_s 238.75-240.73 (n=2) accepted 676/836 = 80.9 %
+slot ctx 80000     tok_s 266.11-267.48 (n=2) accepted 878/1260 = 69.7 %
+tail ctx 80000     tok_s 274.93-276.93 (n=2) accepted 908/1212 = 74.9 %
+p1_k1: KV blocks: plan 11239 | mtp_batch_verify: bound requests verify together while <= 4 decode, 1 draft(s) each (4 spare recurrent slots)
+p1_slot: KV blocks: plan 10313 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (8 spare recurrent slots)
+p1_tail: KV blocks: plan 10901 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (4 spare recurrent slots, draft 2 as a factor row)
+speculative.mtp_batch_verify_tail: 48 layers x 36 slots, 82.3 MiB of factor rows + 33.8 MiB of conv taps (a second spare per row is 80.0 MiB each)
+stderr matches: 0
+== c4
+k1 ctx 8000        tok_s 480.41-484.30 (n=2) accepted 1413/1575 = 89.7 %
+slot ctx 8000      tok_s 534.29-551.92 (n=2) accepted 1839/2314 = 79.5 %
+tail ctx 8000      tok_s 533.88-537.60 (n=2) accepted 1836/2264 = 81.1 %
+k1 ctx 20000       tok_s 451.97-454.89 (n=2) accepted 1385/1619 = 85.5 %
+slot ctx 20000     tok_s 503.68-510.05 (n=2) accepted 1795/2394 = 75.0 %
+tail ctx 20000     tok_s 487.96-491.16 (n=2) accepted 1782/2372 = 75.1 %
+p1_k1: KV blocks: plan 11239 | mtp_batch_verify: bound requests verify together while <= 4 decode, 1 draft(s) each (4 spare recurrent slots)
+p1_slot: KV blocks: plan 10313 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (8 spare recurrent slots)
+p1_tail: KV blocks: plan 10901 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (4 spare recurrent slots, draft 2 as a factor row)
+speculative.mtp_batch_verify_tail: 48 layers x 36 slots, 82.3 MiB of factor rows + 33.8 MiB of conv taps (a second spare per row is 80.0 MiB each)
+stderr matches: 0
+== c8
+k1 ctx 8000        tok_s 566.99-568.47 (n=2) accepted 4/8 = 50.0 %
+slot ctx 8000      tok_s 569.14-570.35 (n=2) accepted 8/12 = 66.7 %
+tail ctx 8000      tok_s 565.78-572.02 (n=2) accepted 8/12 = 66.7 %
+p1_k1: KV blocks: plan 11239 | mtp_batch_verify: bound requests verify together while <= 4 decode, 1 draft(s) each (4 spare recurrent slots)
+p1_slot: KV blocks: plan 10313 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (8 spare recurrent slots)
+p1_tail: KV blocks: plan 10901 | mtp_batch_verify: bound requests verify together while <= 4 decode, 2 draft(s) each (4 spare recurrent slots, draft 2 as a factor row)
+speculative.mtp_batch_verify_tail: 48 layers x 36 slots, 82.3 MiB of factor rows + 33.8 MiB of conv taps (a second spare per row is 80.0 MiB each)
+stderr matches: 0

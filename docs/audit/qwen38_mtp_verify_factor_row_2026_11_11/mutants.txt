@@ -1,0 +1,49 @@
+# Mutants, each built, run, restored. Kernel mutants: build-dev/test-moe-gdn; engine mutants: 2 chats x 20k.
+## A: scan stores the row before the snapshot's successor (t + 1 == fac_mid_t) + conv tap fold shifts one short
+[  FAILED  ] 3 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowFoldsTheLiveWindowToTwoRows
+[  FAILED  ] GdnVerifyTwoDraftsTest.ConvFactorRowFoldsTheLiveWindowToTwoRows (4 ms)
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState (143 ms)
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16 (102 ms)
+[  PASSED  ] 3 tests.
+## B: the factor row replaces the commit (fac_last = fac_out) + state fold drops the decay g
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowState (150 ms)
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16
+[  FAILED  ] GdnVerifyTwoDraftsTest.ScanFactorRowFoldsTheLiveSlotToTheTwoRowStateBf16 (100 ms)
+[  PASSED  ] 4 tests.
+## clean tree
+[==========] Running 44 tests from 6 test suites.
+[==========] 44 tests from 6 test suites ran. (6200 ms total)
+[  PASSED  ] 44 tests.
+## E1: engine never folds (fold_of[g] = 0); E2: executor stashes the last row as the tap; f32 state, md5 per stream
+-- f32clean
+REQ p1_slot ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.58 decode_tps 150.33 drafted 302 accepted 227 md5 7c1e15529969
+REQ p1_slot ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.52 decode_tps 143.69 drafted 310 accepted 223 md5 966ee9efd30d
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.56 decode_tps 154.18 drafted 302 accepted 227 md5 7c1e15529969
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.50 decode_tps 147.48 drafted 310 accepted 223 md5 966ee9efd30d
+-- f32mutE1
+REQ p1_rowE1 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.54 decode_tps 139.51 drafted 332 accepted 211 md5 8ec136e19fae
+REQ p1_rowE1 ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.47 decode_tps 141.17 drafted 322 accepted 216 md5 7f83272ba3b1
+-- f32mutE2
+REQ p1_rowE2 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.50 decode_tps 143.24 drafted 316 accepted 219 md5 b19b99719f30
+REQ p1_rowE2 ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.56 decode_tps 148.15 drafted 312 accepted 221 md5 32c4dd3206ae
+## E1, E2 with the BF16 state (default): tok/s and acceptance do not show the corruption
+-- clean20
+REQ p1_slot ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.48 decode_tps 148.16 drafted 306 accepted 224 md5 e86c289839c3
+REQ p1_slot ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.53 decode_tps 155.96 drafted 296 accepted 229 md5 b8094edf96e8
+AGG p1_slot ctx 20000 rep 0 conc 2 tok_s 297.09
+REQ p1_row ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.47 decode_tps 143.33 drafted 324 accepted 215 md5 241137ea62e8
+REQ p1_row ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.53 decode_tps 153.23 drafted 308 accepted 223 md5 e766380b7dff
+AGG p1_row ctx 20000 rep 0 conc 2 tok_s 287.41
+-- mutE1
+REQ p1_rowE1 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.47 decode_tps 162.08 drafted 284 accepted 235 md5 57830e18f8c4
+REQ p1_rowE1 ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.53 decode_tps 154.63 drafted 304 accepted 225 md5 a58775315d17
+AGG p1_rowE1 ctx 20000 rep 0 conc 2 tok_s 303.14
+-- mutE2
+REQ p1_rowE2 ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.50 decode_tps 158.79 drafted 286 accepted 234 md5 50bfae5e5056
+REQ p1_rowE2 ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.55 decode_tps 165.45 drafted 280 accepted 237 md5 0c20daa4e658
+AGG p1_rowE2 ctx 20000 rep 0 conc 2 tok_s 318.42

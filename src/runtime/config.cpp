@@ -526,6 +526,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.mtp_carry", cfg.speculative.mtp_carry);
     I("speculative.mtp_batch_verify", cfg.speculative.mtp_batch_verify);
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
+    B("speculative.mtp_batch_verify_factor_row", cfg.speculative.mtp_batch_verify_factor_row);
     B("speculative.mtp_batch_verify_solo", cfg.speculative.mtp_batch_verify_solo);
     B("speculative.mtp_head_graph", cfg.speculative.mtp_head_graph);
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);

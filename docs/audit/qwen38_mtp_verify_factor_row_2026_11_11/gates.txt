@@ -1,0 +1,39 @@
+# Gates on the full image of this tree (imp:test = imp:mid a9425e63fdfd), RTX 5090
+## test-moe-gdn, 6 suites (GdnVerifyTwoDrafts, GdnBatchedScan, MtpFeedBatch, SsmConvTap, SSMConv1d, SSMScan)
+[==========] Running 44 tests from 6 test suites.
+[==========] 44 tests from 6 test suites ran. (6200 ms total)
+[  PASSED  ] 44 tests.
+## degeneration battery, Qwen3.8-27B-NVFP4-vllm server defaults, --max-batch 8
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (38s)
+degen_suite rc=0
+conc8 rc=0
+conc4_long rc=0
+imp_spec_drafted_total 4765
+imp_spec_accepted_total 3541
+stderr matches: 0
+conc8 conc4_long: MEDIAN 653.0 MEDIAN 283.5
+## make test-spec-fidelity
+[==========] 1 test from 1 test suite ran. (45451 ms total)
+[  PASSED  ] 1 test.
+## make verify-fast
+PASS fast gtest filter
+  decode  tg128 =  293.07 tok/s  (baseline  282.84, delta 3.62%)
+  prefill pp512 = 49642.23 tok/s  (baseline 50374.39, delta -1.45%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50451.56 tok/s  (baseline 50318.99, delta 0.26%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  180.00 tok/s
+  graphs ON  tg256 =  296.53 tok/s   (1.65x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1896.30 tok/s, slowest request 530 ms  (baseline 1899.81, delta -0.18%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 02:04:17Z, ended 02:05:53Z)

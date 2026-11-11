@@ -10,6 +10,7 @@
 //   [kGdnFactorPad+SS+d] delta[d] (head_dim entries)
 
 #include <cuda_runtime.h>
+#include <cstdint>
 
 namespace imp {
 
@@ -26,7 +27,22 @@ inline constexpr int gdn_factor_floats_per_head(int state_size, int head_dim) {
 void gdn_factor_clear(float* fac, int64_t layer_stride, int n_layers, const int* slots, int n_slots,
                       int n_heads, int fac_stride, cudaStream_t stream);
 
+// Fold a row into a full state slot: H[s][d] = g*H[s][d] + k[s]*delta[d] over every (layer, head) of
+// dst_slots[i], row read at fac_slots[i]; a g = 0 row leaves the slot as is. h_pool = slot 0, layer 0
+// (float or bf16), strides in bytes. Bound verify at 2 drafts: dst = fac = the live slot (1-row state),
+// the row is draft 1.
+void gdn_factor_fold(void* h_pool, bool bf16, int64_t slot_stride_bytes, int64_t layer_stride_bytes,
+                     const float* fac, int64_t fac_layer_stride, int n_layers, const int* dst_slots,
+                     const int* fac_slots, int n, int n_heads, int state_size, int head_dim, int fac_stride,
+                     cudaStream_t stream);
+
 #ifdef __CUDACC__
+
+// Token index whose row a scan with fac_out AND out_slots stores (the one after the snapshot), -1 = none.
+__device__ __forceinline__ int gdn_factor_mid_row(const int* out_slots, const float* fac_out, int snap_n,
+                                                  int real_n) {
+    return out_slots && fac_out && snap_n >= 1 && snap_n < real_n ? snap_n : -1;
+}
 
 // Applies a pending factored row to the state column this thread owns, in registers, right
 // after the state load and before any token. No-op when fac is null or the 0 sentinel.

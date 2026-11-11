@@ -148,5 +148,11 @@ void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int chan
                         const int* slots, int n_seq, cudaStream_t stream);
 void ssm_conv_tap_apply(void* conv_pool, int64_t slot_stride_floats, const void* tap_pool, int channels,
                         int kernel_size, const int* slots, int n_seq, cudaStream_t stream);
+// apply over n_layers in one launch: window of win_slots[i] advanced by the tap row of tap_slots[i].
+// conv_pool = slot 0, layer 0; strides in bytes, tap_layer_stride in halfs.
+void ssm_conv_tap_fold(void* conv_pool, int64_t slot_stride_bytes, int64_t layer_stride_bytes,
+                       const void* tap_pool, int64_t tap_layer_stride, int n_layers, int channels,
+                       int kernel_size, const int* win_slots, const int* tap_slots, int n,
+                       cudaStream_t stream);
 
 }  // namespace imp

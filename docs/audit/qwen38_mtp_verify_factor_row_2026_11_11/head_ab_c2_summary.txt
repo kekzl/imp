@@ -1,0 +1,33 @@
+harness: md5=1fb90481a6c3 client_md5=e207c7b27faf
+p1_def own_peak_mib 24403 kv_blocks 15087 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_def ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.49 decode_tps 143.47 drafted 324 accepted 215 md5 241137ea62e8
+REQ p1_def ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.55 decode_tps 153.60 drafted 308 accepted 223 md5 e766380b7dff
+AGG p1_def ctx 20000 rep 0 conc 2 tok_s 287.68
+REQ p1_def ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 14.43 decode_tps 144.99 drafted 312 accepted 221 md5 d49982cb377f
+REQ p1_def ctx 80000 rep 0 s1 prompt 80043 comp 384 ttft_s 14.37 decode_tps 146.82 drafted 304 accepted 225 md5 6f6070a97c1e
+AGG p1_def ctx 80000 rep 0 conc 2 tok_s 285.02
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+p1_nvhead own_peak_mib 23964 kv_blocks 13097 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_nvhead ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.47 decode_tps 160.61 drafted 284 accepted 235 md5 130a3c0c2c53
+REQ p1_nvhead ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.53 decode_tps 154.36 drafted 302 accepted 226 md5 4d4e1357afe5
+AGG p1_nvhead ctx 20000 rep 0 conc 2 tok_s 301.96
+REQ p1_nvhead ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 14.39 decode_tps 140.01 drafted 318 accepted 218 md5 9401facb24a4
+REQ p1_nvhead ctx 80000 rep 0 s1 prompt 80043 comp 384 ttft_s 14.33 decode_tps 138.82 drafted 316 accepted 219 md5 4b602bd58ca7
+AGG p1_nvhead ctx 80000 rep 0 conc 2 tok_s 274.48
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+p2_def own_peak_mib 24418 kv_blocks 15087 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p2_def ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.52 decode_tps 149.47 drafted 316 accepted 219 md5 505938de3058
+REQ p2_def ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.47 decode_tps 151.85 drafted 306 accepted 224 md5 0c92f31befe8
+AGG p2_def ctx 20000 rep 0 conc 2 tok_s 293.26
+REQ p2_def ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 14.41 decode_tps 144.41 drafted 312 accepted 221 md5 d49982cb377f
+REQ p2_def ctx 80000 rep 0 s1 prompt 80043 comp 384 ttft_s 14.36 decode_tps 146.13 drafted 304 accepted 225 md5 6f6070a97c1e
+AGG p2_def ctx 80000 rep 0 conc 2 tok_s 283.81
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
+p2_nvhead own_peak_mib 23964 kv_blocks 13097 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p2_nvhead ctx 20000 rep 0 s0 prompt 19773 comp 384 ttft_s 3.49 decode_tps 158.64 drafted 284 accepted 235 md5 130a3c0c2c53
+REQ p2_nvhead ctx 20000 rep 0 s1 prompt 19773 comp 384 ttft_s 3.57 decode_tps 153.94 drafted 302 accepted 226 md5 4d4e1357afe5
+AGG p2_nvhead ctx 20000 rep 0 conc 2 tok_s 298.29
+REQ p2_nvhead ctx 80000 rep 0 s0 prompt 80043 comp 384 ttft_s 14.43 decode_tps 140.39 drafted 318 accepted 218 md5 9401facb24a4
+REQ p2_nvhead ctx 80000 rep 0 s1 prompt 80043 comp 384 ttft_s 14.35 decode_tps 138.41 drafted 316 accepted 219 md5 4b602bd58ca7
+AGG p2_nvhead ctx 80000 rep 0 conc 2 tok_s 273.70
+      1   MTP draft workspace           367 MiB  (head KV slots + feed scratch, taken before serving)
