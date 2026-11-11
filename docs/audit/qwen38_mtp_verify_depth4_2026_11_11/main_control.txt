@@ -1,0 +1,27 @@
+# Qwen3.8-27B-NVFP4-vllm, RTX 5090, imp-server defaults, tools/analysis/mtp_longctx_ab.sh, 2026-11-11
+# d3 = this branch at speculative.mtp_batch_verify_k=3, main = imp:m3090 (2b6a1d37) at defaults.
+# 2 sessions x 768 tokens, streams 300 ms apart. Text md5 and drafted/accepted per stream.
+== c1_20000
+rep/stream 0 s0 d3 7602e5ba2a50 726/523 main 7602e5ba2a50 726/523 equal
+rep/stream 1 s0 d3 26ca9150f8cd 741/518 main 26ca9150f8cd 741/518 equal
+== c2_20000
+rep/stream 0 s0 d3 c74da5b1b089 711/524 main c74da5b1b089 711/524 equal
+rep/stream 0 s1 d3 bbfad67d01f9 819/488 main bbfad67d01f9 819/488 equal
+rep/stream 1 s0 d3 17ebf3553601 732/517 main 17ebf3553601 732/517 equal
+rep/stream 1 s1 d3 182ff58d4f6c 771/504 main 182ff58d4f6c 771/504 equal
+== c4_8000
+rep/stream 0 s0 d3 f5969feefa8f 735/510 main f5969feefa8f 735/510 equal
+rep/stream 0 s1 d3 77f074c00c6f 786/493 main 77f074c00c6f 786/493 equal
+rep/stream 0 s2 d3 edec906c5c9a 771/498 main edec906c5c9a 771/498 equal
+rep/stream 0 s3 d3 20b1dec4b308 747/506 main 20b1dec4b308 747/506 equal
+rep/stream 1 s0 d3 9e389ece110c 762/502 main 9e389ece110c 762/502 equal
+rep/stream 1 s1 d3 5bbb9b0c8bc0 693/525 main 5bbb9b0c8bc0 693/525 equal
+rep/stream 1 s2 d3 f28da7f454b4 774/498 main f28da7f454b4 774/498 equal
+rep/stream 1 s3 d3 d1623f7ae698 774/498 main d1623f7ae698 774/498 equal
+load     arm   streams  mean_stream_tok_s  min_stream  max_stream  drafted  accepted  accept_rate  all_streams_tok_s_mean  min     max     own_peak_mib  kv_blocks
+1x20000  d3    2        194.67             193.40      195.94      1467     1041      0.710        -                       -       -       22208         3825
+1x20000  main  2        193.97             193.42      194.52      1467     1041      0.710        -                       -       -       22208         3825
+2x20000  d3    4        166.47             162.51      172.98      3033     2033      0.670        302.61                  293.21  312.00  22208         7933
+2x20000  main  4        166.74             163.10      172.78      3033     2033      0.670        303.09                  294.45  311.72  22208         7933
+4x8000   d3    8        150.53             122.61      170.05      6042     4030      0.667        466.50                  459.05  473.95  22208         5976
+4x8000   main  8        150.51             122.39      169.38      6042     4030      0.667        467.21                  461.29  473.12  22208         5976

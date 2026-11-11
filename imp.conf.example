@@ -1250,12 +1250,16 @@ mtp_carry            = true
 # 0 = plain batched decode at any batch > 1.
 mtp_batch_verify     = 4
 # Drafts per bound request in that step: N = last token plus an N-token MTP
-# chain (N + 1 rows per request, N head passes), 3 at most, 2 without
+# chain (N + 1 rows per request, N head passes), 4 at most, 2 without
 # mtp_batch_verify_factor_row. Unset, it follows mtp_k down (a row past the
 # drafted depth is a pad), mtp_k=auto on a concurrent GDN-hybrid server follows
 # it up, and that server takes 1 when mtp_batch_verify_factor_row is false and
 # kv_cache.host_spill_mb is 0.
-mtp_batch_verify_k   = 3
+mtp_batch_verify_k   = 4
+# Drafts per request once 4 requests share the step (2..mtp_batch_verify_k,
+# factor rows only): each draft is one more head pass over every request.
+# Qwen3.8-27B-NVFP4, 4 chats x 20k, all streams: 530.61 tok/s at 3 drafts, 517.18 at 4.
+mtp_batch_verify_k_wide = 3
 # At 2+ drafts: one spare slot per row holds the state for a full accept, every
 # draft before the last also leaves the forward as a factor row plus a conv tap
 # (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on

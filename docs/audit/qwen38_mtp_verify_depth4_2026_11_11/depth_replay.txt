@@ -1,0 +1,60 @@
+# B-67.1 replay (a calculation on traced steps, no A/B): tools/analysis/mtp_depth_replay.py over
+# diagnostics.spec_trace logs of the depth-2 and depth-3 arms, main 2b6a1d37 dev build, 1 / 2 / 4 chats.
+# Each policy picks depth 2 or 3 per request from its own accept history; step cost = traced medians.
+== c1: 50 rows, of them fixed2 and the oracle
+cost n=1 D=2 15.013 ms steps=1874
+cost n=1 D=3 16.212 ms steps=1564
+# depth-3 steps replayed: 1564
+matched n=1 rows=1564 m0=0.188 m1=0.175 m2=0.151 m3=0.486
+# full-accept persistence: same 1005 flips 553 P(same)=0.645
+fixed3                             tok/s   181.03  steps_at_3   1564  n1=181.0
+fixed2                             tok/s   163.12 vs_fixed3 -9.90%  steps_at_3      0  n1=163.1
+oracle (outcome known)             tok/s   188.18 vs_fixed3 +3.95%  steps_at_3    760
+# best 3 policies without the outcome
+streak drop6 climb1                tok/s   181.06 vs_fixed3 +0.01%  steps_at_3   1478  n1=181.1
+streak drop8 climb1                tok/s   180.95 vs_fixed3 -0.05%  steps_at_3   1514  n1=180.9
+streak drop8 climb2                tok/s   180.79 vs_fixed3 -0.13%  steps_at_3   1431  n1=180.8
+== c2: 50 rows, of them fixed2 and the oracle
+cost n=1 D=2 15.146 ms steps=155
+cost n=1 D=3 16.254 ms steps=145
+cost n=2 D=2 16.062 ms steps=1795
+cost n=2 D=3 17.680 ms steps=1499
+# depth-3 steps replayed: 1644
+matched n=1 rows=145 m0=0.172 m1=0.145 m2=0.103 m3=0.579
+matched n=2 rows=2998 m0=0.200 m1=0.178 m2=0.145 m3=0.476
+# full-accept persistence: same 2030 flips 1101 P(same)=0.648
+fixed3                             tok/s   316.50  steps_at_3   1644  n1=190.1 n2=327.7
+fixed2                             tok/s   290.14 vs_fixed3 -8.33%  steps_at_3      0  n1=165.7 n2=301.5
+oracle (outcome known)             tok/s   324.43 vs_fixed3 +2.50%  steps_at_3   1189
+# best 3 policies without the outcome
+ema a0.05 lo0.3 hi0.6              tok/s   316.45 vs_fixed3 -0.02%  steps_at_3   1581  n1=188.5 n2=327.8
+ema a0.05 lo0.2 hi0.6              tok/s   316.40 vs_fixed3 -0.03%  steps_at_3   1621  n1=188.5 n2=327.7
+streak drop6 climb1                tok/s   316.31 vs_fixed3 -0.06%  steps_at_3   1597  n1=189.1 n2=327.6
+== c4: 50 rows, of them fixed2 and the oracle
+cost n=1 D=2 99.440 ms steps=62
+cost n=1 D=3 15.934 ms steps=114
+cost n=2 D=2 15.445 ms steps=86
+cost n=2 D=3 16.921 ms steps=50
+cost n=3 D=2 16.157 ms steps=60
+cost n=3 D=3 17.254 ms steps=65
+cost n=4 D=2 16.803 ms steps=1726
+cost n=4 D=3 18.723 ms steps=1462
+# depth-3 steps replayed: 1691
+matched n=1 rows=114 m0=0.237 m1=0.202 m2=0.114 m3=0.447
+matched n=2 rows=100 m0=0.170 m1=0.190 m2=0.030 m3=0.610
+matched n=3 rows=195 m0=0.138 m1=0.174 m2=0.087 m3=0.600
+matched n=4 rows=5848 m0=0.206 m1=0.181 m2=0.134 m3=0.479
+# full-accept persistence: same 4143 flips 2090 P(same)=0.665
+fixed3                             tok/s   581.58  steps_at_3   1691  n1=174.0 n2=364.0 n3=547.5 n4=616.8
+fixed2                             tok/s   400.00 vs_fixed3 -31.22%  steps_at_3      0  n1=23.4 n2=319.9 n3=473.3 n4=573.2
+oracle (outcome known)             tok/s   589.40 vs_fixed3 +1.34%  steps_at_3   1137
+# best 3 policies without the outcome
+streak drop6 climb1                tok/s   572.16 vs_fixed3 -1.62%  steps_at_3   1662  n1=135.9 n2=363.5 n3=543.4 n4=616.8
+streak drop8 climb1                tok/s   572.13 vs_fixed3 -1.63%  steps_at_3   1674  n1=135.9 n2=364.0 n3=547.5 n4=616.5
+ema a0.05 lo0.3 hi0.6              tok/s   571.72 vs_fixed3 -1.70%  steps_at_3   1607  n1=135.5 n2=364.0 n3=544.6 n4=616.4
+
+## Acceptance per chain level: single-stream verify, 6 MTP drafts, 1 chat at 20k + 80k, 3 sessions x 768
+## tokens (runtime.max_batch_size=1, speculative.mtp_k=6, mtp_adaptive_k=false, ngram=false)
+drafts=6 steps=530 m0=0.200 m1=0.236 m2=0.151 m3=0.083 m4=0.085 m5=0.040 m6=0.206
+drafts=6 P(m>=1|m>=0)=0.800 P(m>=2|m>=1)=0.705 P(m>=3|m>=2)=0.732 P(m>=4|m>=3)=0.799 P(m>=5|m>=4)=0.743 P(m>=6|m>=5)=0.838
+drafts=6 P(m>=1)=0.800 P(m>=2)=0.564 P(m>=3)=0.413 P(m>=4)=0.330 P(m>=5)=0.245 P(m>=6)=0.206

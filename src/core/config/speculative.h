@@ -208,10 +208,14 @@ struct Speculative {
     // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
     // Qwen3.8-27B-NVFP4, 4 overlapping chats: 83.72 -> 117.45 tok/s per turn, c32 unchanged.
     int mtp_batch_verify = 4;
-    // Drafts per bound request in that step (N + 1 rows, N head passes): 3 at most, 2 without
+    // Drafts per bound request in that step (N + 1 rows, N head passes): 4 at most, 2 without
     // mtp_batch_verify_factor_row. Unset, it follows mtp_k down (a row past the drafted depth is a pad);
     // mtp_k=auto on a concurrent GDN-hybrid server follows it up (tools/common/mtp_auto.cpp).
-    int mtp_batch_verify_k = 3;
+    int mtp_batch_verify_k = 4;
+    // Drafts per request once 4 requests share the step (2..mtp_batch_verify_k, factor rows only): each
+    // draft is one more head pass over every request. Qwen3.8-27B-NVFP4 server, 4 chats x 20k, all
+    // streams: 530.61 tok/s at 3 drafts, 517.18 at 4; 1 chat x 20k: 194.25 at 3, 211.32 at 4.
+    int mtp_batch_verify_k_wide = 3;
     // At 2+ drafts: one spare per row holds the full accept, every draft before the last also leaves as a
     // factor row + conv tap (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
     // a partial accept. false = a second spare per row (79.5 MiB each), 2 drafts at most.

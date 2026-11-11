@@ -2,7 +2,7 @@
 layer: L2
 audience: kernel-devs
 verified: 2026-11-11
-commit: d1f91bd6
+commit: 2b6a1d37
 -->
 
 # Factored spare state for the batched speculative verify
@@ -74,6 +74,7 @@ row from an earlier step cannot survive to be applied twice.
 | quality gate on the factored path (`degen_suite.py`, 50 checks) | GREEN |
 | bound verify at 2 drafts: the same row and tap for draft 1, stored mid-scan next to the commit, folded into the live slot (`gdn_factor_fold`, `ssm_conv_tap_fold`, `speculative.mtp_batch_verify_factor_row`) | built, default on (2026-11-11): [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md), section "Draft 1 as a factor row" |
 | bound verify at 3 drafts: rows and taps indexed by verify group x level (4 groups x 2 levels, 18.3 + 7.5 MiB), the fold applies 1 or 2 rows in order (`kGdnFactorFoldMaxRows`) | built, default on (2026-11-11): same doc, section "Up to 3 drafts per bound request" |
+| bound verify at 4 drafts below 4 requests: 4 groups x 3 levels (27.4 + 11.2 MiB), the fold applies 1 to 3 rows, the row stride is the step's depth | built, default on (2026-11-11): same doc, section "4 drafts per bound request, 3 from 4 requests up" |
 
 The test is the gate on the algebra: it runs the real accept sequence both ways (full spare,
 then factored) and compares the state **after the following token**, which is what the engine

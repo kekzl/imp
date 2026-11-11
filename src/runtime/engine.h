@@ -1393,8 +1393,8 @@ private:
     void free_batch_verify_bufs_();
     int acquire_spare_slot_(int req_id, bool second = false);
     void bound_verify_adopt_slot_(int req_id, int role, int live, int slot);
-    // Up to bv_.depth draft tokens for the request's next positions, written to out; returns the count.
-    int batch_verify_draft_(Request& req, int32_t* out, bool& from_mtp);
+    // Up to depth draft tokens for the request's next positions, written to out; returns the count.
+    int batch_verify_draft_(Request& req, int depth, int32_t* out, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
     [[nodiscard]] bool pipeline_yields_(const std::vector<std::shared_ptr<Request>>& rows);  // ends a chain
     // Returns true when it handled the step (tokens emitted for every row).

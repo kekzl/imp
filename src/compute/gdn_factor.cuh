@@ -27,8 +27,8 @@ inline constexpr int gdn_factor_floats_per_head(int state_size, int head_dim) {
 void gdn_factor_clear(float* fac, int64_t layer_stride, int n_layers, const int* slots, int n_slots,
                       int n_heads, int fac_stride, cudaStream_t stream);
 
-// Rows one fold applies in order: the bound verify at 3 drafts folds up to 2 matched drafts.
-inline constexpr int kGdnFactorFoldMaxRows = 2;
+// Rows one fold applies in order: the bound verify at 4 drafts folds up to 3 matched drafts.
+inline constexpr int kGdnFactorFoldMaxRows = 3;
 
 // Fold rows into a full state slot: H[s][d] = g*H[s][d] + k[s]*delta[d] over every (layer, head) of
 // dst_slots[i], the n_rows[i] (nullptr = 1, max kGdnFactorFoldMaxRows) rows from fac_slots[i] on, one store
