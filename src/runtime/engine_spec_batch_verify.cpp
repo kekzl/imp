@@ -21,6 +21,7 @@
 #include "compute/gdn_factor.cuh"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
+#include "runtime/spec_accept.h"
 #include "runtime/spec_verify_factor_rows.h"
 #include "runtime/stop_mask.h"
 #include "runtime/suffix_draft.h"
@@ -794,27 +795,20 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         auto& req = reqs[g];
         const int nd = n_draft[g];
         const int32_t* dr = draft.data() + (static_cast<size_t>(g) * D);
-        const bool think_at_start = req->in_think_block;
-        int matched = 0, emitted = 0;
-        for (int j = 0; j <= nd; ++j) {
-            const int32_t tok = h_am[(static_cast<size_t>(T) * g) + j];
+        const auto emit = [&](int, int32_t tok) {
             req->output_tokens.push_back(tok);
             track_think_state(*req, tok);
-            emitted++;
             const bool hard_stop = should_stop(*req, tok) ||
                                    static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
             if (req->constraints)
                 req->constraints->update(tok);
-            if (hard_stop) {
+            if (hard_stop)
                 finish_request(req);
-                break;
-            }
-            if (j == nd || tok != dr[j])
-                break;  // bonus reached, or the draft diverged
-            matched++;
-            if (req->think_budget > 0.0f && req->in_think_block != think_at_start)
-                break;
-        }
+            return hard_stop;
+        };
+        const auto [matched, emitted] = spec_accept_rows(h_am + (static_cast<size_t>(T) * g), dr, nd, nd + 1,
+                                                         req->think_budget > 0.0f, req->in_think_block, emit,
+                                                         [](int) { return true; });
         row0[g] = T * g;
         emitted_of[g] = emitted;
         // The binding's economics tally (judged at its lone verifies); a finished request has none.

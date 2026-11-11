@@ -1,0 +1,9 @@
+# Mutants of src/runtime/spec_accept.h against SpecAcceptRows.* (tests/test_spec_gates.cpp, test-core)
+M1 think break behind matched++ (main before the fix): [  FAILED  ] SpecAcceptRows.UnfinishedChunkLeavesExactlyTheBonusOutsideTheKeptRows [  FAILED  ] SpecAcceptRows.ThinkEdgeAcceptedDraftStaysTheBonus [  PASSED  ] 1 test. [  FAILED  ] 2 tests
+M2 no think break: [  FAILED  ] SpecAcceptRows.UnfinishedChunkLeavesExactlyTheBonusOutsideTheKeptRows [  FAILED  ] SpecAcceptRows.ThinkEdgeAcceptedDraftStaysTheBonus [  PASSED  ] 1 test. [  FAILED  ] 2 tests
+M3 think break without the budget condition: [  FAILED  ] SpecAcceptRows.ThinkEdgeAcceptedDraftStaysTheBonus [  PASSED  ] 2 tests. [  FAILED  ] 1 test
+M4 extends() ignored: [  FAILED  ] SpecAcceptRows.MaskedNextRowAndStopEndTheChunk [  PASSED  ] 2 tests. [  FAILED  ] 1 test
+M5 draft compare dropped: [  FAILED  ] SpecAcceptRows.UnfinishedChunkLeavesExactlyTheBonusOutsideTheKeptRows [  FAILED  ] SpecAcceptRows.MaskedNextRowAndStopEndTheChunk [  PASSED  ] 1 test. [  FAILED  ] 2 tests
+M6 emit() stop ignored: [  FAILED  ] SpecAcceptRows.MaskedNextRowAndStopEndTheChunk [  PASSED  ] 2 tests. [  FAILED  ] 1 test
+clean: [  PASSED  ] 3 tests. 
+header restored

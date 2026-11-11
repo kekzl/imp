@@ -1,0 +1,51 @@
+# GPU gates on images built from the shipped src/ + tests/: degen runs 2026-11-11T06:11:19,
+# fidelity + verify-fast 2026-11-11T06:33:29 (make rebuilt it after a docs edit)
+# RTX 5090, Qwen3.8-27B-NVFP4-vllm. Raw logs: scratch, not in the repo.
+
+## degen_suite.py against imp-server (defaults, bound batched verify)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (40s)
+[05:26:00.637][INFO] mtp_auto.cpp:118: speculative.mtp_k: auto -> 3 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; mea
+[05:26:09.523][INFO] engine_spec_batch_verify.cpp:273: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 3 draft(s) each (4 spare recurrent slots, the drafts before the l
+stderr hits 0
+
+## degen_suite.py against imp-server --max-batch 1 (single-stream verify)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (58s)
+[05:26:58.095][INFO] mtp_auto.cpp:118: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen3
+stderr hits 0
+
+## make test-spec-fidelity
+[==========] Running 1 test from 1 test suite.
+[==========] 1 test from 1 test suite ran. (46014 ms total)
+[  PASSED  ] 1 test.
+
+## make verify-fast
+  prefill pp512 = 50069.47 tok/s  (baseline 50374.39, delta -0.61%)
+  GPU during bench: sm=2891MHz(med) mem=13801MHz(med) power=523W(max) n=12
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50264.12 tok/s  (baseline 50318.99, delta -0.11%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+
+== peak VRAM vs baseline ==
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+
+== PPL drift vs baseline ==
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+
+== graphs ON vs OFF decode gate ==
+  graphs OFF tg256 =  191.40 tok/s
+  graphs ON  tg256 =  296.26 tok/s   (1.55x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+
+== server throughput vs baseline ==
+  server c8 = 1954.20 tok/s, slowest request 515 ms  (baseline 1899.81, delta 2.86%)
+PASS server throughput within 8% of baseline
+
+== smoke prompts (degeneration check) ==
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+
+=== verify fast: OK === (started 05:34:32Z, ended 05:36:07Z)
