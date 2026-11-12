@@ -1,0 +1,77 @@
+# B-80 final tree (imp:b80, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+image imp:b80 created 2026-11-12T12:58:05.63226857+01:00 tree a0c56e23912497c5008716bd163aa5353dfbdd97 want a0c56e23912497c5008716bd163aa5353dfbdd97
+
+# GPU tests (image): test-core 'MtpWorkspaceBytes.*:MtpAuto.*:ShadowPlan.*:MemoryPlan.*:MtpDraftRows.*';
+# test-moe-gdn 'GdnVerifyTwoDraftsTest.*:MtpFeedBatchTest.*:GdnBatchedScanTest.*'
+test-core: [  PASSED  ] 76 tests.
+test-moe-gdn: [  PASSED  ] 38 tests.
+
+# make dev-test / make preflight
+100% tests passed, 0 tests failed out of 13
+preflight: base 312da716, 10 changed file(s)
+preflight: 0 failure(s), 27 s wall
+
+# tools/analysis/degen_suite.py --quick, server defaults
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 1 skipped (32s)
+skipped: [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 5935 blocks -> plan 9832 blocks, APPLIED (1669 -> 2765 MiB)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+head graphs 30, WARN lines on mtp_body_fp8 / plan row 0
+
+# tools/analysis/degen_suite.py --quick, --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 1 skipped (35s)
+skipped: [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+head graphs 17, WARN lines on mtp_body_fp8 / plan row 0
+
+stderr pattern: head graphs 30 stderr hits 0
+stderr pattern: head graphs 17 stderr hits 0
+
+# make test-spec-fidelity DOCKER_IMG=imp:b80
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:b80
+PASS fast gtest filter
+  decode  tg128 =  293.02 tok/s  (baseline  282.84, delta 3.60%)
+  prefill pp512 = 49708.40 tok/s  (baseline 50374.39, delta -1.32%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50476.37 tok/s  (baseline 50318.99, delta 0.31%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  160.98 tok/s
+  graphs ON  tg256 =  296.62 tok/s   (1.84x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1957.93 tok/s, slowest request 512 ms  (baseline 1899.81, delta 3.06%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 12:01:22Z, ended 12:03:03Z)
+
+# paired agent replay on the final image (pin 7, mtp_k 7, deterministic, 1 chat, 3 x 30 serial), /mnt/data/scratch/tail_2026_11_11/bf_b80.out
+image imp:b80 created 2026-11-12T12:58:05.63226857+01:00 tree a0c56e23912497c5008716bd163aa5353dfbdd97 want a0c56e23912497c5008716bd163aa5353dfbdd97
+arm grp rc=0 13:08:40
+== grp
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    91.51 |  224.67 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    52.31 |  236.72 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    91.64 |  209.12 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 250.34 s | 208.14 tok/s wall | 221.30 tok/s decode per chat
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+  KV: live pass 10527 blocks -> plan 13477 blocks, APPLIED (2961 -> 3790 MiB)
+head graphs 10 stderr hits 0
+# /s/bf_b80_grp/server.log
+  all       steps  14653 tok  52099 tok/step 3.556 fwd 13.200 head 2.807 sum 16.007 ms tok/ms 0.2221
+  n=1 T=8  steps  14653 share 100.0 % tok/step 3.556 fwd 13.200 head 2.807 drafted/step 4.76 matched/step 2.56

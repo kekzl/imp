@@ -1,0 +1,45 @@
+# Mutants of src/compute/mtp_attn_scan.cu against build-dev test-moe-gdn --gtest_filter='MtpFeedBatchTest.*' (GPU, imp:toolchain).
+# Scripts /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/b77/mutants_build.sh, mutants_build2.sh, mutants_gpu.sh. Each: backup, apply (diff checked), make dev, keep the binary, restore.
+m1: MUTANT APPLIED (2 diff lines)
+>         const int64_t rh = (static_cast<int64_t>(r) * num_heads) + g + (j * num_kv_heads);
+m1: build rc=0 compile errors 0
+m2: MUTANT APPLIED (2 diff lines)
+>     if (true || n_rows > kScanGroupRows || head_dim > 256 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0)
+m2: build rc=0 compile errors 0
+m3: MUTANT APPLIED (4 diff lines)
+>     if (const int g = mtp_attn_scan_group_of(func); g > 0 && false)
+>     const int scores = mtp_scan_split_chunk(rows);
+m3: build rc=0 compile errors 0
+m4: MUTANT APPLIED (2 diff lines)
+>     for (; t + ((kScanUnroll - 1) * kScanWarps) <= seq_len; t += kScanUnroll * kScanWarps) {
+m4: build rc=0 compile errors 0
+m5: MUTANT APPLIED (2 diff lines)
+>                 const float p = s_group_scores[t];
+m5: build rc=0 compile errors 0
+restored: build rc=0 compile errors 0
+staged diff equal to pre-mutant: yes; unstaged lines: 0
+base: test rc=0 [  PASSED  ] 10 tests. failed:
+m1: test rc=1 [  PASSED  ] 8 tests. [  FAILED  ] 2 tests, listed below: failed: MtpFeedBatchTest.AttnScanRingWindowMatchesReference MtpFeedBatchTest.AttnScanSlotsSplitMatchesDirect
+m2: test rc=1 [  PASSED  ] 9 tests. [  FAILED  ] 1 test, listed below: failed: MtpFeedBatchTest.CapturedHeadPassMatchesEagerBytewise
+m3: test rc=1 [  PASSED  ] 9 tests. [  FAILED  ] 1 test, listed below: failed: MtpFeedBatchTest.CapturedHeadPassMatchesEagerBytewise
+m4: test rc=0 [  PASSED  ] 10 tests. failed:
+m5: test rc=1 [  PASSED  ] 8 tests. [  FAILED  ] 2 tests, listed below: failed: MtpFeedBatchTest.AttnScanRingWindowMatchesReference MtpFeedBatchTest.AttnScanSlotsSplitMatchesDirect
+## m4 survived: new test MtpFeedBatchTest.AttnScanIgnoresTheRowPastTheWindow (tests/test_mtp_feed_batch.cu), re-run
+base2: build rc=0 compile errors 0
+m4b: MUTANT APPLIED: >     for (; t + ((kScanUnroll - 1) * kScanWarps) <= seq_len; t += kScanUnroll * kScanWarps) {
+m4b: build rc=0 compile errors 0
+restored: build rc=0 compile errors 0
+staged diff equal to pre-mutant: yes; unstaged lines: 0
+base2: test rc=0 [  PASSED  ] 11 tests. failed:
+m4b: test rc=1 [  PASSED  ] 8 tests. [  FAILED  ] 3 tests, listed below: failed: MtpFeedBatchTest.AttnScanIgnoresTheRowPastTheWindow MtpFeedBatchTest.AttnScanRingWindowMatchesReference MtpFeedBatchTest.AttnScanSlotsSplitMatchesDirect
+## after the preflight fixes (PV + store moved to group_pv_store for CCN 29 > 25, int64 head index for clang-tidy
+## bugprone-implicit-widening): head map and PV score index mutants again (/tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/b77/mutants_build3.sh)
+m1c: MUTANT APPLIED: >         const int64_t rh = (static_cast<int64_t>(r) * num_heads) + g + (j * num_kv_heads);
+m1c: build rc=0 compile errors 0
+m5c: MUTANT APPLIED: >                 const float p = s_scores[t];
+m5c: build rc=0 compile errors 0
+base3: build rc=0 compile errors 0
+staged diff equal to pre-mutant: yes; unstaged lines: 0
+base3: test rc=0 [  PASSED  ] 11 tests. failed:
+m1c: test rc=1 [  PASSED  ] 9 tests. [  FAILED  ] 2 tests, listed below: failed: MtpFeedBatchTest.AttnScanRingWindowMatchesReference MtpFeedBatchTest.AttnScanSlotsSplitMatchesDirect
+m5c: test rc=1 [  PASSED  ] 9 tests. [  FAILED  ] 2 tests, listed below: failed: MtpFeedBatchTest.AttnScanRingWindowMatchesReference MtpFeedBatchTest.AttnScanSlotsSplitMatchesDirect
