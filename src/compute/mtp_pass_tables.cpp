@@ -91,7 +91,8 @@ bool mtp_scan_nodes_find(cudaGraph_t graph, MtpScanNodes& out) {
         cudaKernelNodeParams p{};
         // Driver-API nodes (cuBLASLt) report no runtime func and set the last error: not a scan node.
         if (cudaGraphKernelNodeGetParams(node, &p) != cudaSuccess ||
-            (p.func != mtp_attn_scan_rows_fn() && p.func != mtp_attn_scan_rows_split_fn())) {
+            (p.func != mtp_attn_scan_rows_fn() && p.func != mtp_attn_scan_rows_split_fn() &&
+             mtp_attn_scan_group_of(p.func) == 0)) {
             (void)cudaGetLastError();
             continue;
         }
@@ -103,9 +104,7 @@ bool mtp_scan_nodes_find(cudaGraph_t graph, MtpScanNodes& out) {
 
 bool mtp_scan_nodes_set_rows(cudaGraphExec_t exec, MtpScanNodes& scan, int rows) {
     for (size_t i = 0; i < scan.nodes.size(); ++i) {
-        const int scores = scan.params[i].func == mtp_attn_scan_rows_split_fn() ? mtp_scan_split_chunk(rows)
-                                                                                : rows;
-        const auto smem = static_cast<unsigned>(scores) * static_cast<unsigned>(sizeof(float));
+        const auto smem = static_cast<unsigned>(mtp_scan_node_smem(scan.params[i].func, rows));
         if (scan.params[i].sharedMemBytes == smem)
             continue;
         scan.params[i].sharedMemBytes = smem;

@@ -23,6 +23,20 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
+// Rows per warp loaded before the first is reduced (scan_scores, scan_pv): ncu at 27k context, 1 row, read
+// 28.6 % DRAM and 47.0 % L2 throughput at 18.5 cycles per issued instruction.
+constexpr int kScanUnroll = 4;
+
+// The lane's 8-dim slices of one cache row (zero past head_dim).
+__device__ __forceinline__ void load_row(const __half* __restrict__ row, int head_dim, int lane,
+                                         uint4 (&out)[kScanPasses]) {
+#pragma unroll
+    for (int p = 0; p < kScanPasses; ++p) {
+        const int d0 = (p * 256) + (lane * 8);
+        out[p] = d0 < head_dim ? __ldg(reinterpret_cast<const uint4*>(row + d0)) : make_uint4(0, 0, 0, 0);
+    }
+}
+
 // q.k * scale for window rows [0, seq_len) (cache row mtp_ring_row(t0 + t, ring)) into s_scores: one warp per
 // row, lane = 8 contiguous dims.
 // Returns this warp's max (identical in every lane).
@@ -38,16 +52,14 @@ __device__ __forceinline__ float scan_scores(const __half* __restrict__ q_row, c
         qv[p] = d0 < head_dim ? *reinterpret_cast<const uint4*>(q_row + d0) : make_uint4(0, 0, 0, 0);
     }
     float wmax = -1.0e30f;
-    for (int t = warp; t < seq_len; t += kScanWarps) {
-        const __half* k_row = k_h + (mtp_ring_row(t0 + t, ring) * row_stride);
+    auto score = [&](const uint4(&kv)[kScanPasses], int t) {
         float acc = 0.0f;
 #pragma unroll
         for (int p = 0; p < kScanPasses; ++p) {
             const int d0 = (p * 256) + (lane * 8);
             if (d0 < head_dim) {
-                const uint4 kv = __ldg(reinterpret_cast<const uint4*>(k_row + d0));
                 const auto* q2 = reinterpret_cast<const __half2*>(&qv[p]);
-                const auto* k2 = reinterpret_cast<const __half2*>(&kv);
+                const auto* k2 = reinterpret_cast<const __half2*>(&kv[p]);
 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
                     const float2 a = __half22float2(q2[i]);
@@ -60,6 +72,24 @@ __device__ __forceinline__ float scan_scores(const __half* __restrict__ q_row, c
         if (lane == 0)
             s_scores[t] = s;
         wmax = fmaxf(wmax, s);
+    };
+    // kScanUnroll rows per warp in flight (the scan is load-latency bound); each row's sum order is
+    // unchanged.
+    int t = warp;
+    for (; t + ((kScanUnroll - 1) * kScanWarps) < seq_len; t += kScanUnroll * kScanWarps) {
+        uint4 kv[kScanUnroll][kScanPasses];
+#pragma unroll
+        for (int u = 0; u < kScanUnroll; ++u)
+            load_row(k_h + (mtp_ring_row(t0 + t + (u * kScanWarps), ring) * row_stride), head_dim, lane,
+                     kv[u]);
+#pragma unroll
+        for (int u = 0; u < kScanUnroll; ++u)
+            score(kv[u], t + (u * kScanWarps));
+    }
+    for (; t < seq_len; t += kScanWarps) {
+        uint4 kv[kScanPasses];
+        load_row(k_h + (mtp_ring_row(t0 + t, ring) * row_stride), head_dim, lane, kv);
+        score(kv, t);
     }
     return wmax;
 }
@@ -89,20 +119,33 @@ __device__ __forceinline__ void scan_pv(const __half* __restrict__ v_h, int64_t 
     for (int c = 0; c < head_dim; c += 256) {
         const int d0 = c + (lane * 8);
         float acc[8] = {};
-        if (d0 < head_dim) {
-            for (int t = warp; t < seq_len; t += kScanWarps) {
-                const __half* v_row = v_h + (mtp_ring_row(t0 + t, ring) * row_stride);
-                const uint4 vv = __ldg(reinterpret_cast<const uint4*>(v_row + d0));
-                const auto* v2 = reinterpret_cast<const __half2*>(&vv);
-                const float pt = s_scores[t];
+        auto accumulate = [&](const uint4& vv, float pt) {
+            const auto* v2 = reinterpret_cast<const __half2*>(&vv);
 #pragma unroll
-                for (int i = 0; i < 4; ++i) {
-                    const float2 b = __half22float2(v2[i]);
-                    const int j = 2 * i;
-                    acc[j] += pt * b.x;
-                    acc[j + 1] += pt * b.y;
-                }
+            for (int i = 0; i < 4; ++i) {
+                const float2 b = __half22float2(v2[i]);
+                const int j = 2 * i;
+                acc[j] += pt * b.x;
+                acc[j + 1] += pt * b.y;
             }
+        };
+        if (d0 < head_dim) {
+            // kScanUnroll rows in flight, accumulated in row order (same sums as one row at a time).
+            int t = warp;
+            for (; t + ((kScanUnroll - 1) * kScanWarps) < seq_len; t += kScanUnroll * kScanWarps) {
+                uint4 vv[kScanUnroll];
+#pragma unroll
+                for (int u = 0; u < kScanUnroll; ++u)
+                    vv[u] = __ldg(reinterpret_cast<const uint4*>(
+                        v_h + (mtp_ring_row(t0 + t + (u * kScanWarps), ring) * row_stride) + d0));
+#pragma unroll
+                for (int u = 0; u < kScanUnroll; ++u)
+                    accumulate(vv[u], s_scores[t + (u * kScanWarps)]);
+            }
+            for (; t < seq_len; t += kScanWarps)
+                accumulate(__ldg(reinterpret_cast<const uint4*>(
+                               v_h + (mtp_ring_row(t0 + t, ring) * row_stride) + d0)),
+                           s_scores[t]);
         }
 #pragma unroll
         for (int i = 0; i < 8; ++i)
@@ -272,11 +315,240 @@ __global__ void mtp_attn_kv_scan_rows_split_kernel(
                       mtp_ring_row(w0 + t0, ring), ring);
 }
 
+// GQA-grouped split-K of mtp_attn_kv_scan_rows_split_kernel: CTA (kv head g, split s, row r) reads each
+// window row once for the G query heads g * G + j and writes their partials (same layout and combine).
+// head_dim <= 256.
+constexpr int kGroupThreads = 256;
+constexpr int kGroupWarps = kGroupThreads / 32;
+// P.V of the G heads over the split's n rows (weights s_scores[j * cap + t]) into their partials at rh0 + j.
+template <int G>
+__device__ __forceinline__ void group_pv_store(const __half* __restrict__ v_h, int base, int ring,
+                                               int64_t row_stride, int n, int cap, const float* s_scores,
+                                               float (*s_part)[256], float* __restrict__ part, int64_t rh0,
+                                               int n_split, int s, int head_dim) {
+    const int lane = static_cast<int>(threadIdx.x) % 32;
+    const int warp = static_cast<int>(threadIdx.x) / 32;
+    const int d0 = lane * 8;
+    const int64_t stride = head_dim + 2;
+    float acc[G][8] = {};
+    if (d0 < head_dim) {
+        for (int t = warp; t < n; t += kGroupWarps) {
+            const uint4 vv = __ldg(
+                reinterpret_cast<const uint4*>(v_h + (mtp_ring_row(base + t, ring) * row_stride) + d0));
+            const auto* v2 = reinterpret_cast<const __half2*>(&vv);
+#pragma unroll
+            for (int j = 0; j < G; ++j) {
+                const float p = s_scores[(j * cap) + t];
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const float2 b = __half22float2(v2[i]);
+                    acc[j][2 * i] += p * b.x;
+                    acc[j][(2 * i) + 1] += p * b.y;
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < G; ++j) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+            s_part[warp][(lane * 8) + i] = acc[j][i];
+        __syncthreads();
+        if (static_cast<int>(threadIdx.x) < head_dim) {
+            float o = 0.0f;
+            for (int w = 0; w < kGroupWarps; ++w)
+                o += s_part[w][threadIdx.x];
+            part[((((rh0 + j) * n_split) + s) * stride) + 2 + threadIdx.x] = o;
+        }
+        __syncthreads();
+    }
+}
+
+template <int G>
+__global__ void __launch_bounds__(kGroupThreads) mtp_attn_kv_scan_rows_group_kernel(
+    const __half* __restrict__ q_attn, const __half* __restrict__ k_base, const __half* __restrict__ v_base,
+    float* __restrict__ part, const int* __restrict__ slots, const int* __restrict__ pos, int64_t slot_elems,
+    int num_heads, int num_kv_heads, int head_dim, float scale, int ring, const int* __restrict__ hi) {
+    __shared__ float s_red[kGroupWarps][G];
+    __shared__ float s_part[kGroupWarps][256];
+    extern __shared__ float s_group_scores[];  // [G][cap]
+    const int g = static_cast<int>(blockIdx.x);
+    const int s = static_cast<int>(blockIdx.y);
+    const int r = static_cast<int>(blockIdx.z);
+    const int n_split = static_cast<int>(gridDim.y);
+    const int lane = static_cast<int>(threadIdx.x) % 32;
+    const int warp = static_cast<int>(threadIdx.x) / 32;
+    unsigned dyn_smem = 0;
+    asm volatile("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
+    const int cap = static_cast<int>(dyn_smem / (G * sizeof(float)));
+    int w0 = 0;
+    const int len = ring_window(pos[r], hi != nullptr ? hi + slots[r] : nullptr, ring, &w0);
+    const int chunk = (len + n_split - 1) / n_split;
+    if (chunk > cap)
+        __trap();
+    const int n = max(0, min(chunk, len - (s * chunk)));
+    const int base = mtp_ring_row(w0 + (s * chunk), ring);
+    const int64_t row_stride = static_cast<int64_t>(num_kv_heads) * head_dim;
+    const __half* k_h = k_base + (static_cast<int64_t>(slots[r]) * slot_elems) +
+                        (static_cast<int64_t>(g) * head_dim);
+    const __half* v_h = v_base + (static_cast<int64_t>(slots[r]) * slot_elems) +
+                        (static_cast<int64_t>(g) * head_dim);
+    const int d0 = lane * 8;
+    const bool live = d0 < head_dim;
+    uint4 qv[G];
+#pragma unroll
+    for (int j = 0; j < G; ++j) {
+        const int64_t rh = (static_cast<int64_t>(r) * num_heads) + (static_cast<int64_t>(g) * G) + j;
+        qv[j] = live ? *reinterpret_cast<const uint4*>(q_attn + (rh * head_dim) + d0)
+                     : make_uint4(0, 0, 0, 0);
+    }
+    float wmax[G];
+#pragma unroll
+    for (int j = 0; j < G; ++j)
+        wmax[j] = -1.0e30f;
+    for (int t = warp; t < n; t += kGroupWarps) {
+        const uint4 kv = live ? __ldg(reinterpret_cast<const uint4*>(
+                                    k_h + (mtp_ring_row(base + t, ring) * row_stride) + d0))
+                              : make_uint4(0, 0, 0, 0);
+        const auto* k2 = reinterpret_cast<const __half2*>(&kv);
+#pragma unroll
+        for (int j = 0; j < G; ++j) {
+            const auto* q2 = reinterpret_cast<const __half2*>(&qv[j]);
+            float acc = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const float2 a = __half22float2(q2[i]);
+                const float2 b = __half22float2(k2[i]);
+                acc += (a.x * b.x) + (a.y * b.y);
+            }
+            const float sc = warp_sum(acc) * scale;
+            if (lane == 0)
+                s_group_scores[(j * cap) + t] = sc;
+            wmax[j] = fmaxf(wmax[j], sc);
+        }
+    }
+    if (lane == 0) {
+#pragma unroll
+        for (int j = 0; j < G; ++j)
+            s_red[warp][j] = wmax[j];
+    }
+    __syncthreads();
+    float gmax[G];
+#pragma unroll
+    for (int j = 0; j < G; ++j) {
+        gmax[j] = s_red[0][j];
+        for (int w = 1; w < kGroupWarps; ++w)
+            gmax[j] = fmaxf(gmax[j], s_red[w][j]);
+    }
+    __syncthreads();
+    float lsum[G];
+#pragma unroll
+    for (int j = 0; j < G; ++j) {
+        lsum[j] = 0.0f;
+        for (int t = static_cast<int>(threadIdx.x); t < n; t += kGroupThreads) {
+            const float e = expf(s_group_scores[(j * cap) + t] - gmax[j]);
+            s_group_scores[(j * cap) + t] = e;
+            lsum[j] += e;
+        }
+        lsum[j] = warp_sum(lsum[j]);
+    }
+    if (lane == 0) {
+#pragma unroll
+        for (int j = 0; j < G; ++j)
+            s_red[warp][j] = lsum[j];
+    }
+    __syncthreads();
+    const int64_t stride = head_dim + 2;
+    if (threadIdx.x < G) {
+        const int j = static_cast<int>(threadIdx.x);
+        float denom = 0.0f;
+        for (int w = 0; w < kGroupWarps; ++w)
+            denom += s_red[w][j];
+        const int64_t rh = (static_cast<int64_t>(r) * num_heads) + (static_cast<int64_t>(g) * G) + j;
+        float* pt = part + (((rh * n_split) + s) * stride);
+        pt[0] = gmax[j];
+        pt[1] = denom;
+    }
+    group_pv_store<G>(v_h, base, ring, row_stride, n, cap, s_group_scores, s_part, part,
+                      (static_cast<int64_t>(r) * num_heads) + (static_cast<int64_t>(g) * G), n_split, s,
+                      head_dim);
+}
+
+// Rows per launch the grouped scan serves: kMtpScanSlotSplits x kMtpScanSlotSplitRows partials per head
+// become kGroupSplits splits of up to kScanGroupRows rows.
+constexpr int kScanGroupRows = 4;
+constexpr int kGroupSplits = (kMtpScanSlotSplits * kMtpScanSlotSplitRows) / kScanGroupRows;
+constexpr size_t kGroupSmemMax = size_t{48} << 10;
+constexpr size_t group_smem(int g, int rows) {
+    return static_cast<size_t>(g) * static_cast<size_t>((rows + kGroupSplits - 1) / kGroupSplits) *
+           sizeof(float);
+}
+
+template <int G>
+bool launch_group(const void* q, const void* k_base, const void* v_base, float* part, const int* d_slots,
+                  const int* d_pos, int64_t slot_elems, int rows, int n_rows, int num_heads, int num_kv_heads,
+                  int head_dim, float scale, int ring, const int* d_hi, cudaStream_t stream) {
+    // A captured pass grows its smem up to the ring (mtp_scan_nodes_set_rows): stay under the default 48 KiB.
+    if (group_smem(G, ring > 0 ? ring : rows) > kGroupSmemMax)
+        return false;
+    const size_t smem = group_smem(G, rows);
+    mtp_attn_kv_scan_rows_group_kernel<G>
+        <<<dim3(num_kv_heads, kGroupSplits, n_rows), kGroupThreads, smem, stream>>>(
+            static_cast<const __half*>(q), static_cast<const __half*>(k_base),
+            static_cast<const __half*>(v_base), part, d_slots, d_pos, slot_elems, num_heads, num_kv_heads,
+            head_dim, scale, ring, d_hi);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+// The grouped scan when it serves the shape (<= kScanGroupRows rows, G in {2, 4, 6, 8}, head_dim <= 256).
+bool scan_group(const void* q, const void* k_base, const void* v_base, float* part, const int* d_slots,
+                const int* d_pos, int64_t slot_elems, int rows, int n_rows, int num_heads, int num_kv_heads,
+                int head_dim, float scale, int ring, const int* d_hi, cudaStream_t stream) {
+    if (n_rows > kScanGroupRows || head_dim > 256 || num_kv_heads <= 0 || num_heads % num_kv_heads != 0)
+        return false;
+    switch (num_heads / num_kv_heads) {
+        case 2:
+            return launch_group<2>(q, k_base, v_base, part, d_slots, d_pos, slot_elems, rows, n_rows,
+                                   num_heads, num_kv_heads, head_dim, scale, ring, d_hi, stream);
+        case 4:
+            return launch_group<4>(q, k_base, v_base, part, d_slots, d_pos, slot_elems, rows, n_rows,
+                                   num_heads, num_kv_heads, head_dim, scale, ring, d_hi, stream);
+        case 6:
+            return launch_group<6>(q, k_base, v_base, part, d_slots, d_pos, slot_elems, rows, n_rows,
+                                   num_heads, num_kv_heads, head_dim, scale, ring, d_hi, stream);
+        case 8:
+            return launch_group<8>(q, k_base, v_base, part, d_slots, d_pos, slot_elems, rows, n_rows,
+                                   num_heads, num_kv_heads, head_dim, scale, ring, d_hi, stream);
+        default:
+            return false;
+    }
+}
+
 }  // namespace
 
 const void* mtp_attn_scan_rows_fn() { return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_kernel); }
 const void* mtp_attn_scan_rows_split_fn() {
     return reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_split_kernel);
+}
+
+int mtp_attn_scan_group_of(const void* func) {
+    if (func == reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_group_kernel<2>))
+        return 2;
+    if (func == reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_group_kernel<4>))
+        return 4;
+    if (func == reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_group_kernel<6>))
+        return 6;
+    if (func == reinterpret_cast<const void*>(&mtp_attn_kv_scan_rows_group_kernel<8>))
+        return 8;
+    return 0;
+}
+
+size_t mtp_scan_node_smem(const void* func, int rows) {
+    if (const int g = mtp_attn_scan_group_of(func); g > 0)
+        return group_smem(g, rows);
+    const int scores = func == mtp_attn_scan_rows_split_fn() ? mtp_scan_split_chunk(rows) : rows;
+    return static_cast<size_t>(scores) * sizeof(float);
 }
 
 bool mtp_scan_smem_opt_in() {
@@ -354,6 +626,15 @@ void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, 
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
     // A few decode rows give heads x rows CTAs walking up to the whole ring each: split the window (the grid
     // depends on n_rows only, so a captured pass replays it at any window).
+    if (split_part != nullptr &&
+        scan_group(q, k_base, v_base, split_part, d_slots, d_pos, slot_elems, rows, n_rows, num_heads,
+                   num_kv_heads, head_dim, scale, ring, d_hi, stream)) {
+        mtp_attn_kv_combine_kernel<<<dim3(num_heads, n_rows), 256, 0, stream>>>(split_part,
+                                                                                static_cast<__half*>(out),
+                                                                                kGroupSplits, head_dim);
+        IMP_CUDA_CHECK_LAUNCH();
+        return;
+    }
     if (split_part != nullptr && n_rows <= kMtpScanSlotSplitRows) {
         constexpr int kSplits = kMtpScanSlotSplits;
         const size_t smem = static_cast<size_t>(mtp_scan_split_chunk(rows)) * sizeof(float);

@@ -1,0 +1,61 @@
+# ncu, imp-cli lane (build-dev), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, 27686-token prompt (/mnt/data/scratch/head_prof/ncu/long.txt), --launch-skip 40 --launch-count 3
+# harness /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/head/ncu_scan2.sh (env TAG, KREGEX). Grid 384 = 1 row (24 heads x 16 splits), 768 = 2 rows; grouped grid 256 = 4 kv heads x 64 splits x 1 row
+## before: mtp_attn_kv_scan_rows_split_kernel (/mnt/data/scratch/head_prof/ncu/details.txt)
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        28.62
+    Duration                         us       132.96
+    L2 Cache Throughput               %        47.02
+    Warp Cycles Per Issued Instruction             cycle        18.53
+    Grid Size                                                    384
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        21.96
+    Duration                         us       177.92
+    L2 Cache Throughput               %        70.28
+    Warp Cycles Per Issued Instruction             cycle        17.29
+    Grid Size                                                    768
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        28.60
+    Duration                         us       133.06
+    L2 Cache Throughput               %        46.83
+    Warp Cycles Per Issued Instruction             cycle        18.47
+    Grid Size                                                    384
+## kScanUnroll=4 only (/mnt/data/scratch/head_prof/ncu/scan2.details.txt)
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        35.43
+    Duration                         us       108.32
+    L2 Cache Throughput               %        58.04
+    Warp Cycles Per Issued Instruction             cycle        14.96
+    Grid Size                                                    384
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        23.00
+    Duration                         us       165.50
+    L2 Cache Throughput               %        76.45
+    Warp Cycles Per Issued Instruction             cycle        14.50
+    Grid Size                                                    768
+  unnamed>::mtp_attn_kv_scan_rows_split_kernel
+    DRAM Throughput                   %        37.56
+    Duration                         us       106.88
+    L2 Cache Throughput               %        58.58
+    Warp Cycles Per Issued Instruction             cycle        15.01
+    Grid Size                                                    384
+## grouped: mtp_attn_kv_scan_rows_group_kernel<6> (/mnt/data/scratch/head_prof/ncu/scan4.details.txt; scan3 = before the graph-patch fix, its gtest failed CapturedHeadPass)
+  void unnamed>::mtp_attn_kv_scan_rows_group_kernel<6>
+    DRAM Throughput                   %        71.12
+    Duration                         us        53.54
+    L2 Cache Throughput               %        38.70
+    Warp Cycles Per Issued Instruction             cycle         9.09
+    Grid Size                                                    256
+  void unnamed>::mtp_attn_kv_scan_rows_group_kernel<6>
+    DRAM Throughput                   %        71.14
+    Duration                         us        53.54
+    L2 Cache Throughput               %        38.61
+    Warp Cycles Per Issued Instruction             cycle         9.12
+    Grid Size                                                    256
+  void unnamed>::mtp_attn_kv_scan_rows_group_kernel<6>
+    DRAM Throughput                   %        73.03
+    Duration                         us        53.82
+    L2 Cache Throughput               %        38.39
+    Warp Cycles Per Issued Instruction             cycle         9.01
+    Grid Size                                                    256
+## build-dev MtpFeedBatchTest.* on the scan4 code (/mnt/data/scratch/head_prof/ncu/scan4.gtest.log)
+[  PASSED  ] 10 tests.

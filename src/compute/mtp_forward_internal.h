@@ -42,6 +42,10 @@ void mtp_attn_scan_slots(const void* q, const void* k_base, const void* v_base, 
 // in a captured graph (mtp_scan_nodes_find).
 const void* mtp_attn_scan_rows_fn();
 const void* mtp_attn_scan_rows_split_fn();
+// Query heads per CTA of a GQA-grouped scan kernel func (0 = not one).
+int mtp_attn_scan_group_of(const void* func);
+// Dynamic smem a scan node of `func` needs for a window of `rows` (direct, split or grouped).
+size_t mtp_scan_node_smem(const void* func, int rows);
 
 // lm_head over ws.d_h_final, then argmax / top-W into the caller's slot (mtp_draft_step contract).
 [[nodiscard]] bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,

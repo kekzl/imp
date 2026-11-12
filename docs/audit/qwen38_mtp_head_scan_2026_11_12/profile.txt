@@ -1,0 +1,18 @@
+# 50k-context decode step profile (tools/analysis/mtp_longctx_nsys.sh, runtime.no_pdl=true), attribution only.
+## before (old scan): /mnt/data/scratch/head_prof/longprof_c50.log
+window 1: t=2.3s prefill kernels 976, decode wall 2456.6 ms, 167787 kernels, anchor ^mtp_attn_kv_scan_rows(_split)?_kernel$ x504 / 1.0 = 504 steps
+  per step: wall 4.874 ms, busy union 3.514 ms, idle 1.360 ms, kernel sum 3.514 ms
+      0.156 ms/step    3.43 n/step     45.54 us/call  sparse_score_blocks_kernel
+      0.137 ms/step    1.00 n/step    136.62 us/call  mtp_attn_kv_scan_rows_split_kernel
+## after, image imp:b77a (grouped scan): /mnt/data/scratch/head_prof/long_b77/summary.txt
+harness: md5=d0bb266d0bdd profile_md5=f1bf084b7117 image=imp:b77a tree=4a1382f542e1532d484babb5e7ee45b2d88c8922 conc=1 sets=runtime.no_pdl=true
+REQ c1 ctx 50000 rep 0 s0 prompt 49846 comp 384 ttft_s 4.61 decode_tps 158.49 drafted 569 accepted 254 think 193 md5 16d7f8ee4419
+## the default anchor (^mtp_attn_kv_scan_rows(_split)?_kernel$) misses the grouped kernel: x0 / 31 steps in /mnt/data/scratch/head_prof/longprof_b77.log;
+## re-run of tools/analysis/mtp_step_profile.py on the same sqlite with --anchor '^mtp_attn_kv_scan_rows(_split|_group)?_kernel$':
+window 1: t=2.5s prefill kernels 560, decode wall 2490.4 ms, 109179 kernels, anchor ^mtp_attn_kv_scan_rows(_split|_group)?_kernel$ x0 / 1.0 = 0 steps
+window 2: t=9.5s prefill kernels 416, decode wall 2742.1 ms, 199469 kernels, anchor ^mtp_attn_kv_scan_rows(_split|_group)?_kernel$ x565 / 1.0 = 565 steps
+  per step: wall 4.853 ms, busy union 3.616 ms, idle 1.238 ms, kernel sum 3.616 ms
+      0.159 ms/step    3.65 n/step     43.58 us/call  sparse_score_blocks_kernel
+      0.048 ms/step    0.95 n/step     51.26 us/call  mtp_attn_kv_scan_rows_group_kernel
+      0.018 ms/step    0.05 n/step    333.04 us/call  mtp_attn_kv_scan_rows_split_kernel
+      0.010 ms/step    1.04 n/step      9.69 us/call  mtp_attn_kv_combine_kernel

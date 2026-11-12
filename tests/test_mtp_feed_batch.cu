@@ -401,7 +401,8 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     imp::MtpScanNodes scan;
     ASSERT_TRUE(imp::mtp_scan_nodes_find(graph, scan));
     ASSERT_EQ(scan.nodes.size(), 2u) << "feed scan + chain scan";
-    EXPECT_EQ(scan.params[0].sharedMemBytes, sizeof(float));
+    EXPECT_EQ(scan.params[0].sharedMemBytes, imp::mtp_scan_node_smem(scan.params[0].func, 1));
+    EXPECT_GT(imp::mtp_attn_scan_group_of(scan.params[0].func), 0) << "3 feed rows take the GQA-grouped scan";
     cudaGraphExec_t exec = nullptr;
     ASSERT_EQ(cudaGraphInstantiate(&exec, graph, 0), cudaSuccess);
     const int rows = imp::mtp_scan_smem_rows(std::max(tab_g.max_pos, tab_g.chain_max_pos), kSeqLong);
@@ -610,6 +611,51 @@ TEST_F(MtpFeedBatchTest, AttnScanMatchesSoftmaxReference) {
             }
         }
     }
+}
+
+// The unrolled score loop stops at the window: a 48-row window (warp 0's 4-row group ends at row 47) with a
+// row 48 whose score would underflow every real row's exp. FP64 reference over rows [0, 48).
+TEST_F(MtpFeedBatchTest, AttnScanIgnoresTheRowPastTheWindow) {
+    const int nh = 8, nkv = 2, hd = 128, seq = 48;
+    const size_t row = static_cast<size_t>(nkv) * hd;
+    std::mt19937 rng(48);
+    const std::vector<__half> q(static_cast<size_t>(nh) * hd, __float2half(1.0f));
+    auto k = random_h(rng, (seq + 1) * row, 0.1f);
+    std::fill(k.begin() + static_cast<std::ptrdiff_t>(seq * row), k.end(), __float2half(16.0f));
+    const auto v = random_h(rng, (seq + 1) * row, 1.0f);
+    std::vector<__half> out(q.size());
+    const imp::Tensor dq = upload(q, {1, nh * hd});
+    const imp::Tensor dk = upload(k, {seq + 1, static_cast<int64_t>(row)});
+    const imp::Tensor dv = upload(v, {seq + 1, static_cast<int64_t>(row)});
+    const imp::Tensor dout = upload(out, {1, nh * hd});
+    imp::mtp_attn_scan(dq.data, dk.data, dv.data, dout.data, seq - 1, 1, nh, nkv, hd, nullptr, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(out.data(), dout.data, out.size() * sizeof(__half), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    double diff2 = 0.0, ref2 = 0.0;
+    for (int h = 0; h < nh; ++h) {
+        const int kv_h = h / (nh / nkv);
+        std::vector<double> p(seq);
+        double mx = -1e300, sum = 0.0;
+        for (int t = 0; t < seq; ++t) {
+            double dot = 0.0;
+            for (int d = 0; d < hd; ++d)
+                dot += __half2float(k[(t * row) + (kv_h * hd) + d]);
+            p[t] = dot / std::sqrt(static_cast<double>(hd));
+            mx = std::max(mx, p[t]);
+        }
+        for (double& x : p)
+            sum += (x = std::exp(x - mx));
+        for (int d = 0; d < hd; ++d) {
+            double ref = 0.0;
+            for (int t = 0; t < seq; ++t)
+                ref += p[t] / sum * __half2float(v[(t * row) + (kv_h * hd) + d]);
+            const double got = __half2float(out[(h * hd) + d]);
+            diff2 += (got - ref) * (got - ref);
+            ref2 += ref * ref;
+        }
+    }
+    EXPECT_LT(std::sqrt(diff2 / ref2), 2e-3);
 }
 
 // Head KV ring (speculative.mtp_kv_window): position t lives in row t % ring. The query at p attends
