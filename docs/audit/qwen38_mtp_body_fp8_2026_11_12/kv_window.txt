@@ -1,0 +1,101 @@
+# speculative.mtp_kv_window 16384 (w16, default) / 8192 (w8) / 4096 (w4) / 32768 (w32), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB,
+# default imp-server, image imp:bfp8d (#3100 code). Paired: diagnostics.mtp_verify_pin=7, speculative.mtp_k=7,
+# runtime.deterministic=true, 1 chat, 3 sessions x 30 turns, --serial --seed 1000. Longest prompt 31573 tokens (prompt tok column).
+## /mnt/data/scratch/head_prof/bf_w1.out (w16, w8, w4)
+image imp:bfp8d created 2026-11-12T10:14:48.958184145+01:00 tree 489147e3dc74de8e351455e8dd60ff79dec6dba3 want 4b31a3845f535c775de2ba98911b3269e388d5ff
+arm w16 rc=0 11:36:38
+arm w8 rc=0 11:41:35
+arm w4 rc=0 11:46:41
+== w16
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    92.98 |  221.12 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    52.99 |  233.69 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    92.00 |  208.28 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 252.91 s | 206.03 tok/s wall | 218.96 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8103.1 MiB, kv=10527 blocks (2960.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 10527 blocks -> plan 13477 blocks, APPLIED (2961 -> 3790 MiB)
+head graphs 10 stderr hits 0
+== w8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    95.20 |  215.96 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    54.36 |  227.80 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    92.23 |  207.76 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 256.80 s | 202.91 tok/s wall | 215.50 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8231.1 MiB, kv=10982 blocks (3088.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 10982 blocks -> plan 13849 blocks, APPLIED (3089 -> 3895 MiB)
+head graphs 10 stderr hits 0
+== w4
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    98.03 |  209.73 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    56.63 |  218.70 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    96.95 |  197.65 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 266.51 s | 195.51 tok/s wall | 207.09 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8295.1 MiB, kv=11210 blocks (3152.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 11210 blocks -> plan 14035 blocks, APPLIED (3153 -> 3947 MiB)
+head graphs 10 stderr hits 0
+# /s/bf_w1_w16/server.log
+  all       steps  14649 tok  52099 tok/step 3.556 fwd 13.213 head 2.970 sum 16.183 ms tok/ms 0.2198
+  n=1 T=8  steps  14649 share 100.0 % tok/step 3.556 fwd 13.213 head 2.970 drafted/step 4.76 matched/step 2.56
+# /s/bf_w1_w8/server.log
+  all       steps  15048 tok  52099 tok/step 3.462 fwd 13.215 head 2.792 sum 16.007 ms tok/ms 0.2163
+  n=1 T=8  steps  15048 share 100.0 % tok/step 3.462 fwd 13.215 head 2.792 drafted/step 4.71 matched/step 2.46
+# /s/bf_w1_w4/server.log
+  all       steps  15797 tok  52099 tok/step 3.298 fwd 13.235 head 2.631 sum 15.865 ms tok/ms 0.2079
+  n=1 T=8  steps  15797 share 100.0 % tok/step 3.298 fwd 13.235 head 2.631 drafted/step 4.64 matched/step 2.30
+## /mnt/data/scratch/head_prof/bf_w2.out (w32)
+image imp:bfp8d created 2026-11-12T10:14:48.958184145+01:00 tree 489147e3dc74de8e351455e8dd60ff79dec6dba3 want 4b31a3845f535c775de2ba98911b3269e388d5ff
+arm w32 rc=0 11:52:19
+== w32
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    92.34 |  222.65 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    53.57 |  231.15 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    94.49 |  202.80 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 255.36 s | 204.05 tok/s wall | 216.75 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=7847.1 MiB, kv=9617 blocks (2704.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 9617 blocks -> plan 12732 blocks, APPLIED (2705 -> 3581 MiB)
+head graphs 10 stderr hits 0
+# /s/bf_w2_w32/server.log
+  all       steps  14649 tok  52099 tok/step 3.556 fwd 13.198 head 3.150 sum 16.348 ms tok/ms 0.2176
+  n=1 T=8  steps  14649 share 100.0 % tok/step 3.556 fwd 13.198 head 3.150 drafted/step 4.76 matched/step 2.56
+## bf_w1_w16: server.log MTP workspace / KV plan, per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_w1_w16/c3.client.txt)
+240:  KV: live pass 10527 blocks -> plan 13477 blocks, APPLIED (2961 -> 3790 MiB)
+353:engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    92.98 |  221.12 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    52.99 |  233.69 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    92.00 |  208.28 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 252.91 s | 206.03 tok/s wall | 218.96 tok/s decode per chat
+## bf_w1_w8: server.log MTP workspace / KV plan, per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_w1_w8/c3.client.txt)
+240:  KV: live pass 10982 blocks -> plan 13849 blocks, APPLIED (3089 -> 3895 MiB)
+353:engine_spec_mtp.cpp:802: MTP workspace: 644.72 MiB allocated = the plan row
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    95.20 |  215.96 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    54.36 |  227.80 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    92.23 |  207.76 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 256.80 s | 202.91 tok/s wall | 215.50 tok/s decode per chat
+## bf_w1_w4: server.log MTP workspace / KV plan, per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_w1_w4/c3.client.txt)
+240:  KV: live pass 11210 blocks -> plan 14035 blocks, APPLIED (3153 -> 3947 MiB)
+353:engine_spec_mtp.cpp:802: MTP workspace: 580.72 MiB allocated = the plan row
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    98.03 |  209.73 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    56.63 |  218.70 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    96.95 |  197.65 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 266.51 s | 195.51 tok/s wall | 207.09 tok/s decode per chat
+## bf_w2_w32: server.log MTP workspace / KV plan, per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_w2_w32/c3.client.txt)
+240:  KV: live pass 9617 blocks -> plan 12732 blocks, APPLIED (2705 -> 3581 MiB)
+353:engine_spec_mtp.cpp:802: MTP workspace: 1028.72 MiB allocated = the plan row
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    92.34 |  222.65 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    53.57 |  231.15 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    94.49 |  202.80 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 255.36 s | 204.05 tok/s wall | 216.75 tok/s decode per chat
+
+# Attribution only (no A/B): 50k-context decode step profile, runtime.no_pdl=true, /mnt/data/scratch/head_prof/longprof_c50.log
+window 1: t=2.3s prefill kernels 976, decode wall 2456.6 ms, 167787 kernels, anchor ^mtp_attn_kv_scan_rows(_split)?_kernel$ x504 / 1.0 = 504 steps
+  per step: wall 4.874 ms, busy union 3.514 ms, idle 1.360 ms, kernel sum 3.514 ms
+      0.156 ms/step    3.43 n/step     45.54 us/call  sparse_score_blocks_kernel
+      0.137 ms/step    1.00 n/step    136.62 us/call  mtp_attn_kv_scan_rows_split_kernel
