@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- The sparse attention block score splits each warp over the kv heads with interleaved 4-dim lane reads (Qwen3.8-27B: 8 lanes per kv head). Qwen3.8-27B-NVFP4 server at 50k context: 45.54 -> 32.93 us per call (nsys); NIAH 6 of 6 hits on both images; 1 chat at 50k 183.41 -> 184.33 tok/s, same text. (#3107)
+
 ## [0.66.0] - 2026-11-12
 
 ### Added

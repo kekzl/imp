@@ -229,6 +229,7 @@ struct ScoreMeanStd {
 constexpr int kScoreThreads = 256;
 constexpr int kScoreWarps = kScoreThreads / kWarpSize;
 constexpr int kMaxGroup = 16;  // n_heads / n_kv_heads ceiling (host-gated)
+constexpr int kQPad = 8;       // split score kernel: halves of padding per staged q row
 
 template <typename Score>
 __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
@@ -323,6 +324,134 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
         if (lane == 0)
             sc[b] = best;
     }
+}
+
+// Same score with the warp split over (kv head, dim span): kLanesPerKv = 32 / n_kv_heads lanes per kv head,
+// head_dim / kLanesPerKv dims per lane, all of a lane's 16-byte metadata loads issued before its sums, then a
+// log2(kLanesPerKv)-step reduce per q head. Qwen3.8-27B at 50k context: the one-lane-per-4-dims form ran 8
+// rows in 60.1 us (nsys), 120 shuffles per block per warp.
+template <typename Score, int kLanesPerKv>
+__global__ void sparse_score_blocks_split_kernel(
+    const half* __restrict__ q, const __half2* __restrict__ minmax_base, const int* __restrict__ block_tables,
+    const int* __restrict__ context_lens, float* __restrict__ scores, int n_heads, int n_kv_heads,
+    int head_dim, int block_size, int scores_stride, int engage_blocks, float std_coef, int q_stride,
+    int bt_stride, int ctx_const) {
+    const int seq = blockIdx.y;
+    const int ctx_len = context_lens ? context_lens[seq] : ctx_const;
+    const int n_blocks = (ctx_len + block_size - 1) / block_size;
+    if (n_blocks <= engage_blocks || blockIdx.x * kScoreWarps >= n_blocks)
+        return;
+    const int q_elems = n_heads * head_dim;
+    extern __shared__ half q_smem[];
+    const half* q_seq = q + ((int64_t)seq * q_stride);
+    // Rows of head_dim + kQPad halves: the kLanesPerKv-lane groups of different kv heads hit different banks.
+    for (int i = threadIdx.x; i < q_elems; i += blockDim.x)
+        q_smem[((i / head_dim) * (head_dim + kQPad)) + (i % head_dim)] = q_seq[i];
+    __syncthreads();
+
+    const int warp = threadIdx.x / kWarpSize;
+    const int lane = threadIdx.x % kWarpSize;
+    const int g = n_heads / n_kv_heads;
+    const int row_elems = n_kv_heads * head_dim;
+    const int kvh = lane / kLanesPerKv;
+    const int d_lane = (lane % kLanesPerKv) * 4;  // a lane reads dims d_lane + 4 * kLanesPerKv * k
+    const int* bt = block_tables + ((int64_t)seq * bt_stride);
+    float* sc = scores + ((int64_t)seq * scores_stride);
+
+    for (int b = (blockIdx.x * kScoreWarps) + warp; b < n_blocks; b += gridDim.x * kScoreWarps) {
+        const int block_id = bt[b];
+        if (block_id < 0) {
+            if (lane == 0)
+                sc[b] = -FLT_MAX;
+            continue;
+        }
+        const __half2* mm = minmax_base + ((int64_t)block_id * row_elems) +
+                            (static_cast<int64_t>(kvh) * head_dim) + d_lane;
+        float part[kMaxGroup];
+#pragma unroll
+        for (int h = 0; h < kMaxGroup; h++)
+            part[h] = 0.0f;
+        for (int d = 0; d < head_dim; d += 4 * kLanesPerKv) {
+            const float4 raw = *reinterpret_cast<const float4*>(&mm[d]);
+            const __half2 m01[2] = {*reinterpret_cast<const __half2*>(&raw.x),
+                                    *reinterpret_cast<const __half2*>(&raw.y)};
+            const __half2 m23[2] = {*reinterpret_cast<const __half2*>(&raw.z),
+                                    *reinterpret_cast<const __half2*>(&raw.w)};
+#pragma unroll
+            for (int h = 0; h < kMaxGroup; h++) {
+                if (h >= g)
+                    break;
+                const half* qp = &q_smem[(((kvh * g) + h) * (head_dim + kQPad)) + d_lane + d];
+                const __half2 q01 = *reinterpret_cast<const __half2*>(qp);
+                const __half2 q23 = *reinterpret_cast<const __half2*>(qp + 2);
+                float acc = 0.0f;
+                acc += Score::term(__low2float(q01), __low2float(m01[0]), __high2float(m01[0]), std_coef);
+                acc += Score::term(__high2float(q01), __low2float(m01[1]), __high2float(m01[1]), std_coef);
+                acc += Score::term(__low2float(q23), __low2float(m23[0]), __high2float(m23[0]), std_coef);
+                acc += Score::term(__high2float(q23), __low2float(m23[1]), __high2float(m23[1]), std_coef);
+                part[h] += acc;
+            }
+        }
+        float best = -FLT_MAX;
+#pragma unroll
+        for (int h = 0; h < kMaxGroup; h++) {
+            if (h >= g)
+                break;
+            float s = part[h];
+#pragma unroll
+            for (int off = kLanesPerKv / 2; off > 0; off >>= 1)
+                s += __shfl_xor_sync(0xFFFFFFFFu, s, off);
+            best = fmaxf(best, s);
+        }
+#pragma unroll
+        for (int off = kLanesPerKv; off < kWarpSize; off <<= 1)
+            best = fmaxf(best, __shfl_xor_sync(0xFFFFFFFFu, best, off));
+        if (lane == 0)
+            sc[b] = best;
+    }
+}
+
+// The split score kernel for this shape, nullptr = the per-4-dims kernel serves it.
+template <typename Score>
+using SplitScoreFn = void (*)(const half*, const __half2*, const int*, const int*, float*, int, int, int, int,
+                              int, int, float, int, int, int);
+template <typename Score>
+SplitScoreFn<Score> split_score_kernel(int n_kv_heads, int head_dim) {
+    if (n_kv_heads <= 0 || kWarpSize % n_kv_heads != 0)
+        return nullptr;
+    const int lanes = kWarpSize / n_kv_heads;
+    if (head_dim % (4 * lanes) != 0)
+        return nullptr;
+    switch (lanes) {
+        case 4:
+            return sparse_score_blocks_split_kernel<Score, 4>;
+        case 8:
+            return sparse_score_blocks_split_kernel<Score, 8>;
+        case 16:
+            return sparse_score_blocks_split_kernel<Score, 16>;
+        default:
+            return nullptr;
+    }
+}
+
+template <typename Score>
+void launch_score(dim3 grid, size_t q_smem, cudaStream_t stream, const half* q, const __half2* mm,
+                  const int* block_tables, const int* context_lens, float* scores, int n_heads,
+                  int n_kv_heads, int head_dim, int block_size, int max_blocks_per_seq, int scores_stride,
+                  int engage_blocks, float std_coef, int q_stride, int bt_stride, int ctx_const) {
+    if (auto* split = split_score_kernel<Score>(n_kv_heads, head_dim)) {
+        split<<<grid, kScoreThreads, static_cast<size_t>(n_heads) * (head_dim + kQPad) * sizeof(half),
+                stream>>>(q, mm, block_tables, context_lens, scores, n_heads, n_kv_heads, head_dim,
+                          block_size, scores_stride, engage_blocks, std_coef, q_stride, bt_stride, ctx_const);
+        IMP_CUDA_CHECK_LAUNCH();
+        return;
+    }
+    sparse_score_blocks_kernel<Score>
+        <<<grid, kScoreThreads, q_smem, stream>>>(q, mm, block_tables, context_lens, scores, n_heads,
+                                                  n_kv_heads, head_dim, block_size, max_blocks_per_seq,
+                                                  scores_stride, engage_blocks, std_coef, q_stride, bt_stride,
+                                                  ctx_const);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Sparse prefill: one past-page selection per query chunk from sampled rows. A block's
@@ -544,6 +673,11 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
 
 }  // namespace
 
+bool sparse_score_uses_split(int n_kv_heads, int head_dim) {
+    return split_score_kernel<ScoreCornerBound>(n_kv_heads, head_dim) != nullptr &&
+           split_score_kernel<ScoreMeanStd>(n_kv_heads, head_dim) != nullptr;
+}
+
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
                                          const void* k_scale_base, int64_t sc_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
@@ -640,15 +774,17 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     // free at short ctx.
     dim3 score_grid(256, n_seq);
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
-    auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
-                               : sparse_score_blocks_kernel<ScoreCornerBound>;
-    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(q, static_cast<const __half2*>(minmax_base),
-                                                              block_tables, context_lens, scores_scratch,
-                                                              n_heads, n_kv_heads, head_dim, block_size,
-                                                              max_blocks_per_seq, max_blocks_per_seq,
-                                                              engage_blocks, std_coef, n_heads * head_dim,
-                                                              max_blocks_per_seq, 0);
-    IMP_CUDA_CHECK_LAUNCH();
+    const auto* mm = static_cast<const __half2*>(minmax_base);
+    if (meanstd)
+        launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q, mm, block_tables, context_lens,
+                                   scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
+                                   max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef,
+                                   n_heads * head_dim, max_blocks_per_seq, 0);
+    else
+        launch_score<ScoreCornerBound>(score_grid, q_smem, stream, q, mm, block_tables, context_lens,
+                                       scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
+                                       max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef,
+                                       n_heads * head_dim, max_blocks_per_seq, 0);
 
     launch_select_topk(n_seq, scores_scratch, block_tables, context_lens, sparse_block_tables,
                        sparse_context_lens, block_size, max_blocks_per_seq, budget_blocks, sink_blocks,
@@ -679,13 +815,19 @@ int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const
     if (n_blocks > budget_blocks) {
         dim3 score_grid(256, rows);
         const size_t q_smem = (size_t)q_elems * sizeof(half);
-        auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
-                                   : sparse_score_blocks_kernel<ScoreCornerBound>;
-        score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(
-            q + ((int64_t)first * q_elems), static_cast<const __half2*>(minmax_layer), past_block_table,
-            nullptr, scores_scratch, n_heads, n_kv_heads, head_dim, block_size, capacity_blocks,
-            capacity_blocks, /*engage_blocks=*/0, std_coef, step * q_elems, /*bt_stride=*/0, past_len);
-        IMP_CUDA_CHECK_LAUNCH();
+        const half* q_first = q + ((int64_t)first * q_elems);
+        const auto* mm = static_cast<const __half2*>(minmax_layer);
+        if (meanstd)
+            launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q_first, mm, past_block_table, nullptr,
+                                       scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
+                                       capacity_blocks, capacity_blocks, /*engage_blocks=*/0, std_coef,
+                                       step * q_elems,
+                                       /*bt_stride=*/0, past_len);
+        else
+            launch_score<ScoreCornerBound>(score_grid, q_smem, stream, q_first, mm, past_block_table, nullptr,
+                                           scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
+                                           capacity_blocks, capacity_blocks, /*engage_blocks=*/0, std_coef,
+                                           step * q_elems, /*bt_stride=*/0, past_len);
         sparse_prefill_merge_rows_kernel<<<1, kMergeThreads, 0, stream>>>(scores_scratch, agg_scratch, rows,
                                                                           n_blocks, capacity_blocks);
         IMP_CUDA_CHECK_LAUNCH();

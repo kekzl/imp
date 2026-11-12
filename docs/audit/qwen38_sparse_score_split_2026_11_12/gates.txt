@@ -1,0 +1,57 @@
+# B-81 final tree (imp:b81, image tree label = working tree before this file), RTX 5090 32 GB
+image imp:b81 created 2026-11-12T16:25:43.261133448+01:00 tree 3584b5b30905ecda7f467a70b0acbccaa7f25661 want 3584b5b30905ecda7f467a70b0acbccaa7f25661
+
+# GPU tests (image): test-attention and test-core, all tests
+test-attention: [  PASSED  ] 274 tests.
+test-core: [  PASSED  ] 2267 tests.
+
+# make dev-test / make preflight
+100% tests passed, 0 tests failed out of 13
+preflight: base ba0903a7, 10 changed file(s)
+preflight: 0 failure(s), 28 s wall
+
+# tools/analysis/degen_suite.py, Qwen3.8-27B-NVFP4-vllm, server defaults
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (37s)
+engine_init_resolver.cpp:921: attention.sparse_topk_tokens: auto -> 4096 (arch=qwen35)
+engine_kv_cache_init.cpp:374: sparse decode attention: key min/max pool 614.5 MiB for 9832 blocks, priced in the KV plan (22.22% of the K+V pool)
+executor_attention_decode.cpp:130: sparse decode attention ACTIVE: ctx 65536 > budget 4096 tokens
+
+# tools/analysis/degen_suite.py, Qwen3.8-27B-NVFP4-vllm, --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (40s)
+engine_init_resolver.cpp:921: attention.sparse_topk_tokens: auto -> 4096 (arch=qwen35)
+engine_kv_cache_init.cpp:374: sparse decode attention: key min/max pool 512.0 MiB for 8192 blocks, priced in the KV plan (22.22% of the K+V pool)
+executor_attention_decode.cpp:130: sparse decode attention ACTIVE: ctx 65536 > budget 4096 tokens
+
+stderr pattern: head graphs 31 stderr hits 0
+stderr pattern: head graphs 17 stderr hits 0
+
+# make test-niah DOCKER_IMG=imp:b81 (Makefile NIAH_MODEL, lengths 16000,32000, depths 0.1,0.5,0.9)
+  [PASS] len~16000 depth=0.1 ptok=13141: want ZEBRA-16000-10 got 'ZEBRA-16000-10'
+  [PASS] len~16000 depth=0.5 ptok=13141: want ZEBRA-16000-50 got 'ZEBRA-16000-50'
+  [PASS] len~16000 depth=0.9 ptok=13141: want ZEBRA-16000-90 got 'ZEBRA-16000-90'
+  [PASS] len~32000 depth=0.1 ptok=26227: want ZEBRA-32000-10 got 'ZEBRA-32000-10'
+  [PASS] len~32000 depth=0.5 ptok=26227: want ZEBRA-32000-50 got 'ZEBRA-32000-50'
+  [PASS] len~32000 depth=0.9 ptok=26227: want ZEBRA-32000-90 got 'ZEBRA-32000-90'
+niah_check: 6 probes, 0 FAIL (5s)
+
+# make verify-fast DOCKER_IMG=imp:b81
+PASS fast gtest filter
+  decode  tg128 =  293.17 tok/s  (baseline  282.84, delta 3.65%)
+  prefill pp512 = 49780.66 tok/s  (baseline 50374.39, delta -1.18%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50474.22 tok/s  (baseline 50318.99, delta 0.31%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  184.00 tok/s
+  graphs ON  tg256 =  296.41 tok/s   (1.61x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1965.45 tok/s, slowest request 512 ms  (baseline 1899.81, delta 3.46%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 15:34:40Z, ended 15:36:19Z)

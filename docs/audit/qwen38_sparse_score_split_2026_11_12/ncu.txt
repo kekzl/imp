@@ -1,0 +1,49 @@
+# ncu, imp-cli, Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, 27k prompt (/mnt/data/scratch/head_prof/ncu/long.txt): prefill score launches, grid 256 x 16
+## old sparse_score_blocks_kernel (/mnt/data/scratch/head_prof/ncu/sparse1.details.txt)
+  void unnamed>::sparse_score_blocks_kernel<unnamed>::ScoreMeanStd>
+    DRAM Throughput                   %         2.89
+    Duration                         us        76.45
+    Compute (SM) Throughput           %        30.24
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_kernel<unnamed>::ScoreMeanStd>
+    DRAM Throughput                   %         2.80
+    Duration                         us        78.82
+    Compute (SM) Throughput           %        29.55
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_kernel<unnamed>::ScoreMeanStd>
+    DRAM Throughput                   %         4.76
+    Duration                         us        74.78
+    Compute (SM) Throughput           %        31.03
+    Grid Size                                                   4096
+## final split kernel (/mnt/data/scratch/head_prof/ncu/sparse4.details.txt)
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.85
+    Duration                         us        57.54
+    Compute (SM) Throughput           %        39.32
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.82
+    Duration                         us        57.86
+    Compute (SM) Throughput           %        38.79
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.88
+    Duration                         us        57.02
+    Compute (SM) Throughput           %        39.34
+    Grid Size                                                   4096
+## rejected unrolled variant (/mnt/data/scratch/head_prof/ncu/sparse5.details.txt)
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.31
+    Duration                         us        67.55
+    Compute (SM) Throughput           %        32.23
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.26
+    Duration                         us        68.48
+    Compute (SM) Throughput           %        32.03
+    Grid Size                                                   4096
+  void unnamed>::sparse_score_blocks_split_kernel<unnamed>::ScoreMeanStd, 8>
+    DRAM Throughput                   %         3.33
+    Duration                         us        67.10
+    Compute (SM) Throughput           %        32.55
+    Grid Size                                                   4096

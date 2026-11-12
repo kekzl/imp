@@ -46,6 +46,9 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
                           int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
                           cudaStream_t stream);
+// True when both launch sites score this shape with the kv-head-split kernel (32 / n_kv_heads in {4, 8, 16}
+// lanes per kv head, head_dim a multiple of 4 x lanes); false = the per-4-dims kernel.
+[[nodiscard]] bool sparse_score_uses_split(int n_kv_heads, int head_dim);
 
 // Sparse prefill (attention.sparse_prefill_topk_tokens): past tokens a continuation chunk attends
 // to under a budget_blocks page budget; the partial tail block always stays. past_len when

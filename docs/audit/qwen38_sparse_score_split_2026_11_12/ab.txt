@@ -1,0 +1,26 @@
+# A/B old imp:v0.66.0 vs new (code-final image imp:b81a), /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/b81/ab.sh, /mnt/data/scratch/tail_2026_11_11/b81_ab/
+image imp:v0.66.0 created 2026-11-12T13:23:30.358738048+01:00 tree e09a828e8717a9c57a8bb3201d82b2eea67ac611
+image imp:b81a created 2026-11-12T16:13:15.723749303+01:00 tree 72d83edb500388329f92af1d4eb14da145c56c6a
+## NIAH, Qwen3.8-27B-NVFP4-vllm, runtime.max_seq_len=40000, lengths 16000,32000 depths 0.1,0.5,0.9: old
+  [PASS] len~16000 depth=0.1 ptok=13183: want ZEBRA-16000-10 got 'ZEBRA-16000-10'
+  [PASS] len~16000 depth=0.5 ptok=13183: want ZEBRA-16000-50 got 'ZEBRA-16000-50'
+  [PASS] len~16000 depth=0.9 ptok=13183: want ZEBRA-16000-90 got 'ZEBRA-16000-90'
+  [PASS] len~32000 depth=0.1 ptok=26269: want ZEBRA-32000-10 got 'ZEBRA-32000-10'
+  [PASS] len~32000 depth=0.5 ptok=26269: want ZEBRA-32000-50 got 'ZEBRA-32000-50'
+  [PASS] len~32000 depth=0.9 ptok=26269: want ZEBRA-32000-90 got 'ZEBRA-32000-90'
+niah_check: 6 probes, 0 FAIL (11s)
+executor_attention_decode.cpp:130: sparse decode attention ACTIVE: ctx 16384 > budget 4096 tokens
+## NIAH, Qwen3.8-27B-NVFP4-vllm, runtime.max_seq_len=40000, lengths 16000,32000 depths 0.1,0.5,0.9: new
+  [PASS] len~16000 depth=0.1 ptok=13183: want ZEBRA-16000-10 got 'ZEBRA-16000-10'
+  [PASS] len~16000 depth=0.5 ptok=13183: want ZEBRA-16000-50 got 'ZEBRA-16000-50'
+  [PASS] len~16000 depth=0.9 ptok=13183: want ZEBRA-16000-90 got 'ZEBRA-16000-90'
+  [PASS] len~32000 depth=0.1 ptok=26269: want ZEBRA-32000-10 got 'ZEBRA-32000-10'
+  [PASS] len~32000 depth=0.5 ptok=26269: want ZEBRA-32000-50 got 'ZEBRA-32000-50'
+  [PASS] len~32000 depth=0.9 ptok=26269: want ZEBRA-32000-90 got 'ZEBRA-32000-90'
+niah_check: 6 probes, 0 FAIL (11s)
+executor_attention_decode.cpp:130: sparse decode attention ACTIVE: ctx 16384 > budget 4096 tokens
+## tools/analysis/mtp_longctx_ab.sh, 1 chat at 50k, PAIRS=1, default server per arm
+REQ p1_old ctx 50000 rep 0 s0 prompt 49856 comp 384 ttft_s 4.44 decode_tps 183.41 drafted 567 accepted 257 think 193 md5 da9f3ce8f845
+p1_old own_peak_mib 22330 kv_blocks 6433 kv_cap=16384 x 4 slot(s) = 256.0 MiB
+REQ p1_new ctx 50000 rep 0 s0 prompt 49856 comp 384 ttft_s 4.43 decode_tps 184.33 drafted 567 accepted 257 think 193 md5 da9f3ce8f845
+p1_new own_peak_mib 22330 kv_blocks 6433 kv_cap=16384 x 4 slot(s) = 256.0 MiB

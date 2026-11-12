@@ -1,0 +1,21 @@
+# Mutants of src/exec/sparse_attn_select.cu against build-dev test-attention --gtest_filter='Sparse*:*Sparse*' (GPU)
+# /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/b81/mutants_build.sh, mutants_gpu.sh; each: backup, apply (diff checked), make dev, keep the binary, restore
+k1: MUTANT APPLIED: >             for (int off = kLanesPerKv / 4; off > 0; off >>= 1)
+k1: build rc=0 compile errors 0
+k2: MUTANT APPLIED: >         for (int off = 2 * kLanesPerKv; off < kWarpSize; off <<= 1)
+k2: build rc=0 compile errors 0
+k3: MUTANT APPLIED: >     const int d_lane = (lane % kLanesPerKv) * 2;  // a lane reads dims d_lane + 4 * kLanesPerKv * k
+k3: build rc=0 compile errors 0
+k4: MUTANT APPLIED: >         q_smem[i] = q_seq[i];
+k4: build rc=0 compile errors 0
+k5: MUTANT APPLIED: >     if (true || n_kv_heads <= 0 || kWarpSize % n_kv_heads != 0)
+k5: build rc=0 compile errors 0
+base: build rc=0 compile errors 0
+staged diff equal to pre-mutant: yes; unstaged lines: 0
+base: test rc=0 [  PASSED  ] 21 tests. failed:
+k1: test rc=1 [  PASSED  ] 20 tests. [  FAILED  ] 1 test, listed below: failed: SparseScoreSplit.QwenShapeScoresMatchReference
+k2: test rc=1 [  PASSED  ] 20 tests. [  FAILED  ] 1 test, listed below: failed: SparseScoreSplit.QwenShapeScoresMatchReference
+k3: test rc=11 failed:
+k4: test rc=1 [  PASSED  ] 19 tests. [  FAILED  ] 2 tests, listed below: failed: SparseScoreSplit.QwenShapeScoresMatchReference SparseSelectTest.NegativeScoresStillSelect
+k5: test rc=1 [  PASSED  ] 20 tests. [  FAILED  ] 1 test, listed below: failed: SparseScoreSplit.QwenShapeScoresMatchReference
+## k3 rc=11: [ RUN      ] SparseSelectTest.TopKForcedAscendingDeterministic /src/tests/test_sparse_attn_select.cu:543: Failure  (cudaDeviceSynchronize 716 = misaligned address)
