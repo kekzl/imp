@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-11-12
+
 ### Added
 - `diagnostics.spec_trace` also logs `spec-sfx-shadow` per bound request step: the suffix draft at that position, scored against the tokens emitted. `tools/analysis/agent_turn_replay.py` replays recorded agent sessions, `sfx_shadow.py` sizes suffix precedence. Qwen3.8-27B-NVFP4 server, 166353 tokens: best replay +3.08 % at 1 chat, not built (#3093).
 
