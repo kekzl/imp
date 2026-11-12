@@ -1,0 +1,10 @@
+# KV plan and MTP workspace, default server, image imp:bfp8b, off = speculative.mtp_body_fp8=false, on = default
+== off (/mnt/data/scratch/tail_2026_11_11/bf_r2_off/server.log)
+241:  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+333:engine_kv_replan.cpp:34: library reserve: applied this start's 366 MiB measurement in place of the 1536 MiB charge: KV plan 16977 -> 20380 blocks, committed 4225 -> 5075 (target 5075), ceiling 16977 -> 20380
+354:engine_spec_mtp.cpp:798: MTP workspace: 366.72 MiB allocated = the plan row
+== on (/mnt/data/scratch/tail_2026_11_11/bf_r2_on/server.log)
+241:  KV: live pass 13158 blocks -> plan 15795 blocks, APPLIED (3701 -> 4442 MiB)
+333:engine_kv_replan.cpp:34: library reserve: applied this start's 366 MiB measurement in place of the 1536 MiB charge: KV plan 15795 -> 19199 blocks, committed 3925 -> 4775 (target 4775), ceiling 15795 -> 19199
+354:engine_spec_mtp.cpp:778: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+355:engine_spec_mtp.cpp:798: MTP workspace: 772.72 MiB allocated = the plan row

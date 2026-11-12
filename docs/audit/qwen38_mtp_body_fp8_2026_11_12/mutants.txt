@@ -1,0 +1,10 @@
+# CPU mutants against MtpWorkspaceBytes.BodyFp8CopyIsPricedForADenseHead (/tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/head/mutants.sh): make dev, test-core --gtest_filter='MtpWorkspaceBytes.*'
+unpriced | compile errors 0 | [  PASSED  ] 1 test. [  FAILED  ] 1 test, listed below: | MtpWorkspaceBytes.BodyFp8CopyIsPricedForADenseHead
+moebody | compile errors 0 | [  PASSED  ] 1 test. [  FAILED  ] 1 test, listed below: | MtpWorkspaceBytes.BodyFp8CopyIsPricedForADenseHead
+oddk | compile errors 0 | [  PASSED  ] 1 test. [  FAILED  ] 1 test, listed below: | MtpWorkspaceBytes.BodyFp8CopyIsPricedForADenseHead
+noscale | compile errors 0 | [  PASSED  ] 1 test. [  FAILED  ] 1 test, listed below: | MtpWorkspaceBytes.BodyFp8CopyIsPricedForADenseHead
+unpriced src/compute/mtp_workspace_bytes.h 's/        t.add(s.body_fp8_bytes);/        t.add(0);/'
+moebody src/compute/mtp_forward.cu 's/    if (mtp.hc_count > 0 || mtp.router.ndim > 0)/    if (mtp.hc_count > 0)/'
+oddk src/compute/mtp_forward.cu 's/        if (t->ndim != 2 || t->shape\[0\] <= 0 || t->shape\[1\] % 512 != 0)/        if (t->ndim != 2 || t->shape[0] <= 0)/'
+noscale src/compute/mtp_forward.cu 's/        bytes += static_cast<size_t>(t->shape\[0\]) \* (static_cast<size_t>(t->shape\[1\]) + sizeof(float));/        bytes += static_cast<size_t>(t->shape[0]) * static_cast<size_t>(t->shape[1]);/'
+# make dev-test on the staged tree: 100% tests passed, 0 tests failed out of 13

@@ -216,6 +216,11 @@ struct MtpDraftWorkspace {
     // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
     int prenorm_rows_cap = 0;
+    // speculative.mtp_body_fp8: per-row E4M3 copies of the dense body (MtpBodyWeight order) the feed reads at
+    // <= 32 rows; nullptr = the FP16 weights.
+    void* d_fp8_body = nullptr;
+    const void* fp8_w[8] = {};
+    const float* fp8_s[8] = {};
     // speculative.mtp_carry: per KV slot [carry_rows_cap, h_prev cols] FP16, a bound request's target hidden
     // rows from batched decode steps until the head takes them (engine_spec_mtp_batched.cpp, 2.5 MiB per
     // slot on Qwen3.8).
@@ -376,6 +381,11 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 [[nodiscard]] bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows);
 // diagnostics.mtp_prenorm_h feed scratch [rows, hidden] FP16 on a plain head; false = none.
 [[nodiscard]] bool mtp_prenorm_allocate(MtpDraftWorkspace& ws, int rows);
+// speculative.mtp_body_fp8 after mtp_workspace_allocate: E4M3 rows + per-row scales of fc, q/k/v/o and the
+// dense MLP of a plain FP16 head (Qwen3.8-27B: 405 MiB). false = none; mtp_workspace_free releases it.
+[[nodiscard]] bool mtp_body_fp8_allocate(const MtpHead& mtp, MtpDraftWorkspace& ws, cudaStream_t stream);
+// Bytes mtp_body_fp8_allocate takes (MtpWorkspaceShape::body_fp8_bytes); 0 = not a plain FP16 dense head.
+[[nodiscard]] size_t mtp_body_fp8_bytes(const MtpHead& mtp);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V

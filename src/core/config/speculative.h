@@ -260,6 +260,10 @@ struct Speculative {
     // draft copy holds only those rows, for the lone chain too. 99.94 % of familiar dev50h output (1.54M
     // tokens) sits below 98304. Verify stays full vocab. Unset, a concurrent GDN-hybrid server takes 98304.
     int mtp_draft_vocab = 0;
+    // On the bound verify lane, MTP draft passes (<= 32 rows) read a per-row E4M3 copy of a dense head body
+    // (fc, q/k/v/o, MLP; Qwen3.8-27B 406 MiB on top of the FP16 weights, priced in the plan). Draft-only:
+    // agent replay, md5-equal texts, head 4.151 -> 2.968 ms per step, 204.28 -> 218.78 tok/s per chat.
+    bool mtp_body_fp8 = true;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw
     // measurement). Negative (default) = k-aware threshold 1 + f*k with f=0.40,
