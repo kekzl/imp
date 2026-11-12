@@ -1301,15 +1301,18 @@ mtp_adaptive_k       = true
 # cache when one exists (~4x less HBM traffic per drafted token; the chain
 # re-reads the LM head once per draft). Draft-only precision — verification
 # stays lossless. false = keep the FP16 chain GEMV. A 16-bit head served as FP8
-# gets an NVFP4 draft copy while MTP is on (+682 MiB on Qwen3.8-27B-NVFP4).
-# The batched draft passes (mtp_batch_verify) read it too, 4 rows per weight pass.
-# Unset, a concurrent GDN-hybrid server with MTP on takes false (KV pool kept for
-# concurrent chats); this line sets it, so drop it there.
+# gets an NVFP4 draft copy of rows [0, mtp_draft_vocab) while MTP is on
+# (Qwen3.8-27B-NVFP4: 682 MiB at all rows, 270 MiB at 98304). The batched draft
+# passes (mtp_batch_verify) read it too, 4 rows per weight pass. A concurrent
+# GDN-hybrid server with MTP on keeps it over a row prefix only: with
+# mtp_draft_vocab = 0 set and this key unset it takes false (the full copy
+# costs 1990 KV blocks); this line sets it, so drop it there.
 mtp_nvfp4_head       = true
-# Batched MTP drafts on the FP8 head score only its first N rows (0 = all);
-# verification stays full vocab. BPE ids follow merge order: 99.94 % of
-# Qwen3.8 agent output tokens sit below 98304. Unset, a concurrent GDN-hybrid
-# server that drafts on the FP8 head takes 98304.
+# Batched MTP drafts score only the first N LM-head rows; the NVFP4 draft copy
+# holds only those rows, for the lone chain too. Without the copy they read
+# the FP8 head (0 = all); verification stays full vocab. BPE ids follow merge
+# order: 99.94 % of Qwen3.8 agent output tokens sit below 98304. Unset, a
+# concurrent GDN-hybrid server takes 98304; this line sets it, so drop it there.
 mtp_draft_vocab      = 0
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables

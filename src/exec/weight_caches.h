@@ -95,8 +95,9 @@ struct WeightCaches {
     // Source-head bytes Phase 4b returned to the driver, minus the FP8 head (expert-cache regrow).
     size_t lm_head_released_bytes = 0;
     size_t lm_head_fp8_bytes = 0;  // the FP8 head bulk (codes + scales)
-    // MTP draft-only NVFP4 copy of a 16-bit head served as FP8 (speculative.mtp_nvfp4_head): the chain reads
-    // the head once per draft, 682 vs 1213 MiB on Qwen3.8-27B. Verify keeps the FP8 head. Empty = absent.
+    // MTP draft-only NVFP4 copy of a 16-bit head served as FP8 (speculative.mtp_nvfp4_head), rows
+    // [0, speculative.mtp_draft_vocab): 270 MiB at 98304 rows, 682 MiB at all 248320 (Qwen3.8-27B; FP8 head
+    // 1213 MiB). Verify keeps the FP8 head. Empty = absent.
     NvFP4QuantResult mtp_lm_head_nvfp4;
     // Bytes Phase 4b freed: GDN (F16 input packs; with host-resident experts also the F16
     // ssm_in / gdn_gate / ssm_out), F16 q/k/v/o with host-resident experts, and what of them

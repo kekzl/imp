@@ -249,13 +249,14 @@ struct Speculative {
     // decode cache when one exists (#847 lever 3): the chain re-reads the LM
     // head once per drafted token, more traffic than the main forward at k=4.
     // Draft-only precision; verification stays lossless. Off = keep the FP16 chain GEMV. A 16-bit head
-    // served as FP8 gets an NVFP4 draft copy while MTP is on (+682 MiB on Qwen3.8-27B-NVFP4). The batched
-    // draft passes (mtp_batch_verify) read it too, 4 rows per weight pass: head pass 3.74 -> 2.73 ms at 2
-    // requests. A concurrent GDN-hybrid server with MTP on defaults to false unless set (pool kept: SWE-bench
-    // dev 50, 4 agents on Qwen3.8-27B-NVFP4, agent time 13.43 h MTP off -> 10.81 h with both pool defaults).
+    // served as FP8 gets an NVFP4 draft copy of rows [0, mtp_draft_vocab) while MTP is on (Qwen3.8-27B-NVFP4:
+    // 682 MiB at all rows, 270 MiB at 98304). The batched draft passes (mtp_batch_verify) read it too, 4 rows
+    // per weight pass. A concurrent GDN-hybrid server with MTP on keeps it only over a row prefix: with
+    // mtp_draft_vocab=0 set it defaults to false unless set (the full copy costs 1990 KV blocks).
     bool mtp_nvfp4_head = true;
-    // Batched MTP drafts score only LM-head rows [0, mtp_draft_vocab) on the FP8 head (0 = all). BPE ids
-    // follow merge order: familiar dev50h output, 1.54M tokens, 99.94 % below 98304. Verify stays full vocab.
+    // Batched MTP drafts score only LM-head rows [0, mtp_draft_vocab) of the FP8 head (0 = all); the NVFP4
+    // draft copy holds only those rows, for the lone chain too. 99.94 % of familiar dev50h output (1.54M
+    // tokens) sits below 98304. Verify stays full vocab. Unset, a concurrent GDN-hybrid server takes 98304.
     int mtp_draft_vocab = 0;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw

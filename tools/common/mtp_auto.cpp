@@ -44,35 +44,33 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
 }
 
 namespace {
-// A concurrent GDN-hybrid server keeps the KV pool: no NVFP4 draft head copy (682 MiB on Qwen3.8-27B).
-// Drafts past the first per bound request stay while factor rows replace their spare slots
-// (speculative.mtp_batch_verify_factor_row, 3.22 MiB per request and draft vs 79.5 MiB per row); else they
-// go.
+// A concurrent GDN-hybrid server keeps the KV pool: drafts score LM-head rows [0, 98304) and the NVFP4
+// draft copy holds only those. Drafts past the first per bound request stay while factor rows replace
+// their spare slots (speculative.mtp_batch_verify_factor_row, 3.22 MiB vs 79.5 MiB per row); else they go.
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
-    // KV host spill restores an evicted prefix by H2D, so the second draft per row stays; the NVFP4 head
-    // copy still costs pool: 8 agents x ~97k, spill 16384: ceiling 18503 -> 20492 blocks, wall
-    // 703.9/763.7 -> 672.3/597.4 s.
+    // KV host spill restores an evicted prefix by H2D, so the second draft per row stays.
     const bool spill = cfg.kv_cache.host_spill_mb > 0;
-    const bool head = !cfg.was_set("speculative.mtp_nvfp4_head");
     const bool k = !spill && !cfg.speculative.mtp_batch_verify_factor_row &&
                    !cfg.was_set("speculative.mtp_batch_verify_k");
-    if (head)
-        cfg.speculative.mtp_nvfp4_head = false;
     if (k)
         cfg.speculative.mtp_batch_verify_k = 1;
-    if (head || k)
-        IMP_LOG_INFO(
-            "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_batch_verify_k=%d (KV pool kept "
-            "for concurrent chats; set either key to override)",
-            cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_batch_verify_k);
-    // Drafts then read the FP8 head: its first 98304 rows hold 99.94 % of Qwen3.8 agent output tokens.
-    // 1 chat x 50k replay 122.0-123.4 -> 125.4-130.5 tok/s, 4 chats 91.3-91.4 -> 94.6 per request.
-    if (!cfg.speculative.mtp_nvfp4_head && !cfg.was_set("speculative.mtp_draft_vocab")) {
+    // Rows [0, 98304) hold 99.94 % of Qwen3.8 agent output tokens.
+    const bool vocab = !cfg.was_set("speculative.mtp_draft_vocab");
+    if (vocab)
         cfg.speculative.mtp_draft_vocab = 98304;
-        IMP_LOG_INFO("speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)");
-    }
+    // Qwen3.8-27B, 1 chat: prefix copy (270 MiB, 786 KV blocks) 204.26 tok/s, FP8 head 198.04, full copy
+    // (682 MiB, 1990 blocks) 192.68. The full copy (mtp_draft_vocab=0 set) stays off.
+    const bool head = !cfg.was_set("speculative.mtp_nvfp4_head") && cfg.speculative.mtp_draft_vocab <= 0;
+    if (head)
+        cfg.speculative.mtp_nvfp4_head = false;
+    if (head || k || vocab)
+        IMP_LOG_INFO(
+            "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_draft_vocab=%d, mtp_batch_verify_k=%d "
+            "(KV pool kept for concurrent chats; set a key to override)",
+            cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_draft_vocab,
+            cfg.speculative.mtp_batch_verify_k);
 }
 }  // namespace
 

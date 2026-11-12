@@ -1,0 +1,13 @@
+# KV-saturated agent loop: 8 agents x 8 turns on /v1/messages (thinking 1024, tools, temperature 0), turn-0 prompt 82089 tokens,
+# prompt median 99550 to 102062 tokens per run, max 126268 to 129597; server --max-batch 8 --request-timeout 1800 --set kv_cache.host_spill_mb=16384, image tree ae98e402083a.
+# fp8: speculative.mtp_nvfp4_head=false (draft on FP8 head rows [0, 98304)); nvp: server default (NVFP4 copy of rows [0, 98304)).
+# Order r1..r6, a fresh server per run. One request per run ends HTTP 400 (prompt past the 131072 context) in 5 of 6 runs.
+run | KV ceiling blocks | requests | wall s | output tok | output tok per wall s | uncached prompt tok (turns 1-7) | queue s | prefix evictions | spill restores | drafted | accepted | stderr hits
+r1_fp8 | 21166 | 63 | 572.8 | 72734 | 127.0 | 2965985 | 2653.72 | 418896 | 208981 | 90255 | 52680 | 0
+r2_nvp | 20380 | 63 | 637.3 | 95701 | 150.2 | 2928987 | 3212.48 | 419571 | 209747 | 125912 | 68717 | 0
+r3_nvp | 20380 | 64 | 582.7 | 67238 | 115.4 | 3201145 | 2950.84 | 437829 | 212773 | 87958 | 48934 | 0
+r4_fp8 | 21166 | 63 | 601.8 | 83744 | 139.2 | 2971141 | 2935.33 | 420412 | 209486 | 107092 | 60295 | 0
+r5_fp8 | 21166 | 63 | 629.8 | 82555 | 131.1 | 3137294 | 3005.85 | 432279 | 211047 | 109303 | 58395 | 0
+r6_nvp | 20380 | 63 | 638.9 | 98198 | 153.7 | 2807806 | 3263.48 | 414577 | 212175 | 132368 | 70233 | 0
+sum fp8 | 3 runs | wall 1804.4 s | output tok 239033 | output tok per wall s 132.5 | uncached prompt tok 9074420 | wall s per run 601.5
+sum nvp | 3 runs | wall 1858.9 s | output tok 261137 | output tok per wall s 140.5 | uncached prompt tok 8937938 | wall s per run 619.6

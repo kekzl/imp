@@ -581,8 +581,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
                                         int draw_top_k) {
     if (!initialized_ || n_rows <= 0 || d_out == nullptr || d_rows == nullptr)
         return false;
-    // Draft copy first: 682 MiB read once per 4 rows. An FP8-served head (Qwen3.8-27B-NVFP4) builds no W4A4
-    // head: one FP8 GEMV over all rows reads the 1213 MiB head once.
+    // Draft copy first, one weight read per 4 rows: 270 MiB over rows [0, 98304), 682 MiB over all. Without
+    // it an FP8-served head (Qwen3.8-27B-NVFP4) reads its rows once in one FP8 GEMV: no W4A4 head is built.
     const bool w4a16 = draft_nvfp4 != nullptr && draft_nvfp4->packed_data != nullptr;
     const void* w8 = nullptr;
     const float* s8 = nullptr;
@@ -592,7 +592,7 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
          qscratch_.cutlass_act_sf == nullptr))
         return false;
     const auto& cfg = model_->config();
-    // Rows of the FP8 head scored: a prefix of the vocabulary, the logits packed V to a row.
+    // Rows scored: a head prefix (speculative.mtp_draft_vocab, the draft copy), the logits packed V to a row.
     const int V = draft_rows_vocab_(draft_nvfp4, draft_vocab);
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     if (!ensure_verify_scratch(/*with_penalties=*/false))

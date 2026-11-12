@@ -53,15 +53,15 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     EXPECT_FALSE(cfg.speculative.ngram);
 }
 
-// A concurrent hybrid server keeps its KV pool: no NVFP4 draft head copy; drafts 1 and 2 leave as factor
-// rows.
+// A concurrent hybrid server keeps its KV pool: the NVFP4 draft head copy holds rows [0, 98304) only
+// (270 MiB of 682 MiB on Qwen3.8-27B); drafts 1 and 2 leave as factor rows.
 TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
-    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head) << "1 chat: 204.26 vs 198.04 tok/s on the FP8 head";
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 4);
-    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "FP8 draft head scores the first 98304 rows";
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "drafts score the first 98304 rows";
 }
 
 TEST(MtpAuto, SingleStreamKeepsTheFullDraft) {
@@ -80,25 +80,34 @@ TEST(MtpAuto, ConcurrentPoolDefaultsYieldToTheOperator) {
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
-    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0) << "the NVFP4 draft head scores every row";
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "an unset prefix follows the server default";
 }
 
-TEST(MtpAuto, ExplicitDraftVocabSurvivesTheConcurrentDefaults) {
+TEST(MtpAuto, FullDraftVocabTurnsTheHeadCopyOff) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_draft_vocab=0"}).empty());
     tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
-    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head) << "the 682 MiB full copy is KV pool: 1990 blocks";
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
 }
 
-TEST(MtpAuto, HostSpillKeepsBothDraftsButNotTheHeadCopy) {
+TEST(MtpAuto, HeadOffKeepsTheFp8PrefixDraft) {
+    RuntimeConfig cfg;
+    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_nvfp4_head=false"}).empty());
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+                             tools::MtpAutoServing::ConcurrentHybrid);
+    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "the FP8 head scores the first 98304 rows";
+}
+
+TEST(MtpAuto, HostSpillKeepsBothDraftsAndThePrefixCopy) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"kv_cache.host_spill_mb=16384"}).empty());
     tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_GT(cfg.speculative.mtp_k, 0);
-    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head) << "the 682 MiB head copy is KV pool";
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 4) << "spill restores evicted prefixes";
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
 }
@@ -107,7 +116,8 @@ TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=2"}).empty());
     tools::mtp_auto_finalize(cfg, 2, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
-    EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
 }
 

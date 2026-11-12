@@ -1,0 +1,54 @@
+# 1 chat, 3 sessions x 30 turns in turn, diagnostics.mtp_verify_pin=7, speculative.mtp_k=7, runtime.deterministic=true
+# p_fp8 / p_fp8b: speculative.mtp_nvfp4_head=false; p_nvp: head=true + mtp_draft_vocab=98304; p_nvf: head=true + mtp_draft_vocab=0
+== p_fp8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |   102.33 |  200.92 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    58.76 |  210.74 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |   102.02 |  187.83 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 278.67 s | 186.99 tok/s wall | 198.04 tok/s decode per chat
+mtp_auto.cpp:66: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set either key to override)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8509.1 MiB, kv=11971 blocks (3366.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 11971 blocks -> plan 14658 blocks, APPLIED (3367 -> 4123 MiB)
+head graphs 10 stderr hits 0
+== p_nvp
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    99.25 |  207.16 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    57.06 |  217.04 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    98.79 |  193.97 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 270.18 s | 192.86 tok/s wall | 204.26 tok/s decode per chat
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8509.1 MiB, kv=11971 blocks (3366.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 11971 blocks -> plan 14658 blocks, APPLIED (3367 -> 4123 MiB)
+head graphs 10 stderr hits 0
+== p_nvf
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |   105.32 |  195.21 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    60.50 |  204.69 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |   104.61 |  183.18 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 285.74 s | 182.36 tok/s wall | 192.68 tok/s decode per chat
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8509.1 MiB, kv=11971 blocks (3366.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 11971 blocks -> plan 14658 blocks, APPLIED (3367 -> 4123 MiB)
+head graphs 10 stderr hits 0
+== p_fp8b
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |   102.38 |  200.82 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    58.72 |  210.89 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |   102.02 |  187.83 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 278.63 s | 187.01 tok/s wall | 198.03 tok/s decode per chat
+mtp_auto.cpp:66: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set either key to override)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8509.1 MiB, kv=11971 blocks (3366.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 11971 blocks -> plan 14658 blocks, APPLIED (3367 -> 4123 MiB)
+head graphs 10 stderr hits 0
+# hd_b_p_fp8/server.log
+  all       steps  14532 tok  52099 tok/step 3.585 fwd 13.218 head 4.822 sum 18.041 ms tok/ms 0.1987
+  n=1 T=8  steps  14532 share 100.0 % tok/step 3.585 fwd 13.218 head 4.822 drafted/step 4.77 matched/step 2.59
+# hd_b_p_nvp/server.log
+  all       steps  14630 tok  52099 tok/step 3.561 fwd 13.225 head 4.148 sum 17.373 ms tok/ms 0.2050
+  n=1 T=8  steps  14630 share 100.0 % tok/step 3.561 fwd 13.225 head 4.148 drafted/step 4.76 matched/step 2.56
+# hd_b_p_nvf/server.log
+  all       steps  14461 tok  52099 tok/step 3.603 fwd 13.231 head 5.405 sum 18.635 ms tok/ms 0.1933
+  n=1 T=8  steps  14461 share 100.0 % tok/step 3.603 fwd 13.231 head 5.405 drafted/step 4.79 matched/step 2.60
+# hd_b_p_fp8b/server.log
+  all       steps  14532 tok  52099 tok/step 3.585 fwd 13.215 head 4.824 sum 18.040 ms tok/ms 0.1987
+  n=1 T=8  steps  14532 share 100.0 % tok/step 3.585 fwd 13.215 head 4.824 drafted/step 4.77 matched/step 2.59

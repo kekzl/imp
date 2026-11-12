@@ -1,6 +1,7 @@
 // Coupled MTP draft draws (speculative.mtp_draft_coupled): scratch and host staging of the rows
 // lm_head_rows_argmax draws inside the head pass. No kernel launch in this TU.
 
+#include "compute/mtp_draft_rows.h"
 #include "compute/sampling.h"
 #include "exec/executor.h"
 #include "exec/executor_sampling_internal.h"
@@ -31,8 +32,8 @@ int GraphExecutor::draft_rows_vocab_(const NvFP4QuantResult* draft_nvfp4, int dr
     const float* s8 = nullptr;
     const bool w4a16 = draft_nvfp4 != nullptr && draft_nvfp4->packed_data != nullptr;
     const bool fp8 = !w4a16 && !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
-    const int vocab = model_->config().vocab_size;
-    return fp8 && draft_vocab > 0 ? std::min(draft_vocab, vocab) : vocab;
+    // A draft copy over a head prefix (QuantPipeline::mtp_draft_lm_head_nvfp4_) holds N < vocab rows.
+    return mtp_draft_pass_rows(model_->config().vocab_size, w4a16 ? draft_nvfp4->N : 0, fp8, draft_vocab);
 }
 
 int GraphExecutor::stage_draft_draws(const VerifySampling* draws, int n, int m,

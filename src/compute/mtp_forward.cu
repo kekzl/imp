@@ -10,6 +10,7 @@
 #include "compute/warp_reduce.cuh"
 #include "compute/mtp_forward.h"
 #include "compute/mtp_forward_internal.h"
+#include "compute/mtp_draft_rows.h"
 #include "compute/activation.h"     // swiglu, shared_expert_gate_scale
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
@@ -874,6 +875,10 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     // available: full-vocab weight read dominates per-draft cost (~2.5 GB FP16 on Qwen3.6's
     // 248k vocab); NVFP4 reads ~4x less. Draft-only precision; verification stays lossless.
     // FP8 head (gemm.nvfp4_lm_head=fp8) first: its source head may be freed after load.
+    // An NVFP4 draft copy over a head prefix (speculative.mtp_draft_vocab) scores rows [0, N) only.
+    if (lm_head_nvfp4 != nullptr && lm_head_nvfp4->N > 0 && ws.d_logits_f32 != nullptr &&
+        (lm_head_fp8 == nullptr || lm_head_fp8_scales == nullptr))
+        vocab_size = mtp_draft_pass_rows(vocab_size, lm_head_nvfp4->N, /*fp8=*/false, /*draft_vocab=*/0);
     bool f32_lm = false;
     if (!mtp_lm_head_logits(ws, main_lm_head, hidden_dim, vocab_size, stream, lm_head_nvfp4, lm_head_fp8,
                             lm_head_fp8_scales, f32_lm))

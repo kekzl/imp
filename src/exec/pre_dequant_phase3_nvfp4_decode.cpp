@@ -13,6 +13,7 @@
 #include "model/mtp_head.h"
 #include "model/nvfp4_module_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/mtp_draft_rows.h"
 #include "quant/mxfp4_sfatom.h"
 #include "quant/dequant_gpu.h"
 #include "quant/gpt_oss_mxfp4_convert.h"
@@ -257,11 +258,18 @@ void QuantPipeline::mtp_draft_lm_head_nvfp4_(cudaStream_t stream) {
     if (!mtp_on || wcache_->lm_head_fp8.weight.data == nullptr || wcache_->mtp_lm_head_nvfp4.packed_data ||
         !lm.data || !lm.on_device || lm.qtype != QType::F16 || lm.ndim != 2 || lm.shape[1] % 16 != 0)
         return;
+    // speculative.mtp_draft_vocab > 0: the copy holds head rows [0, mtp_draft_vocab) only.
+    Tensor rows(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
+    rows.shape[0] = mtp_draft_copy_rows(static_cast<int>(lm.shape[0]),
+                                        dispatch_policy().speculative.mtp_draft_vocab);
     NvFP4QuantResult& r = wcache_->mtp_lm_head_nvfp4;
-    if (!quantize_head_nvfp4(lm, r, "MTP draft NVFP4 LM head", stream))
+    if (!quantize_head_nvfp4(rows, r, "MTP draft NVFP4 LM head", stream))
         return;
-    IMP_LOG_INFO("MTP draft LM head: NVFP4 copy of the FP16 head (%.1f MiB), verification stays on FP8",
-                 static_cast<double>(nvfp4_result_bytes(r)) / (1024.0 * 1024.0));
+    IMP_LOG_INFO(
+        "MTP draft LM head: NVFP4 copy of FP16 head rows [0, %lld) of %lld (%.1f MiB), verification "
+        "stays on FP8",
+        static_cast<long long>(r.N), static_cast<long long>(lm.shape[0]),
+        static_cast<double>(nvfp4_result_bytes(r)) / (1024.0 * 1024.0));
 }
 
 // Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a native-NVFP4

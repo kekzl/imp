@@ -1,0 +1,8 @@
+# KV ceiling after the library-reserve replan (engine_kv_replan.cpp), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+hd_b_p_fp8 |  | applied this start's 94 MiB measurement in place of the 1536 MiB charge: KV plan 14658 -> 18853 blocks, committed 3650 -> 4700 (target 4700), ceiling 14658 -> 18853
+hd_b_p_nvp | NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8 | applied this start's 364 MiB measurement in place of the 1536 MiB charge: KV plan 14658 -> 18067 blocks, committed 3650 -> 4500 (target 4500), ceiling 14658 -> 18067
+hd_b_p_nvf | NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8 | applied this start's 778 MiB measurement in place of the 1536 MiB charge: KV plan 14658 -> 16863 blocks, committed 3650 -> 4200 (target 4200), ceiling 14658 -> 16863
+hd_c_c2_fp8 |  | applied this start's 96 MiB measurement in place of the 1536 MiB charge: KV plan 16977 -> 21166 blocks, committed 4225 -> 5275 (target 5275), ceiling 16977 -> 21166
+hd_c_c2_nvp | NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8 | applied this start's 366 MiB measurement in place of the 1536 MiB charge: KV plan 16977 -> 20380 blocks, committed 4225 -> 5075 (target 5075), ceiling 16977 -> 20380
+hd_c_c8_fp8 |  | applied this start's 96 MiB measurement in place of the 1536 MiB charge: KV plan 16977 -> 21166 blocks, committed 4225 -> 5275 (target 5275), ceiling 16977 -> 21166
+hd_c_c8_nvp | NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8 | applied this start's 366 MiB measurement in place of the 1536 MiB charge: KV plan 16977 -> 20380 blocks, committed 4225 -> 5075 (target 5075), ceiling 16977 -> 20380

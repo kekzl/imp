@@ -34,6 +34,10 @@ Status (2026-11-11, ladder): below 4 requests a step that accepted all of its dr
 4 -> 6 -> 7 drafts inside the 8-row GEMM tile (`speculative.mtp_batch_verify_k_streak`, default 7, section "Verify
 depth ladder after a full accept" at the end).
 
+Status (2026-11-12, draft head): a concurrent GDN-hybrid server drafts on an NVFP4 copy of the first 98304 LM-head
+rows by default, 270.0 MiB (`speculative.mtp_nvfp4_head`, `speculative.mtp_draft_vocab`, section "NVFP4 draft copy
+over the row prefix" at the end).
+
 ## Why
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
@@ -794,5 +798,62 @@ and a 9th row costs 1.04 ms forward plus about 1.0 ms head per chain level.
 
 Draft head format (B-73 lead, `draft_head_fp8_vs_nvfp4.txt`, pin 4, texts md5-equal, 48176 output tokens): FP8
 draft head over rows [0, 98304) (server default) 4.084 ms head per step, 203.59 tok/s decode per chat; the full
-NVFP4 copy (`speculative.mtp_nvfp4_head=true`, 682 MiB) 4.553 ms, 199.31 tok/s. The full copy stays off. Open: an
-NVFP4 copy over the first `speculative.mtp_draft_vocab` rows only.
+NVFP4 copy (`speculative.mtp_nvfp4_head=true`, 682 MiB) 4.553 ms, 199.31 tok/s. The full copy stays off. Built as
+B-73: section "NVFP4 draft copy over the row prefix" below.
+
+## NVFP4 draft copy over the row prefix (2026-11-12, B-73, `speculative.mtp_nvfp4_head` on a concurrent server)
+
+A concurrent GDN-hybrid server drafts on an NVFP4 copy of LM-head rows [0, `speculative.mtp_draft_vocab`) instead of
+the FP8 head's rows [0, 98304). Evidence: `docs/audit/qwen38_draft_head_prefix_2026_11_12/`.
+
+| Server default (`mtp_concurrent_pool_defaults`, `tools/common/mtp_auto.cpp`) | before | after |
+|---|---|---|
+| `speculative.mtp_draft_vocab` unset | 98304 while the copy is off | 98304 |
+| `speculative.mtp_nvfp4_head` unset | false | true; false with `mtp_draft_vocab=0` set |
+| Draft head, Qwen3.8-27B-NVFP4-vllm | FP8 head, rows [0, 98304) | NVFP4 copy, 98304 of 248320 rows, 270.0 MiB |
+| KV ceiling after the library-reserve replan (`kv_ceiling.txt`) | 21166 blocks | 20380 blocks |
+
+The copy holds `mtp_draft_copy_rows` rows (`QuantPipeline::mtp_draft_lm_head_nvfp4_`,
+`src/exec/pre_dequant_phase3_nvfp4_decode.cpp`); every draft pass reads `mtp_draft_pass_rows` rows
+(`src/compute/mtp_draft_rows.h`): the batched passes (`GraphExecutor::draft_rows_vocab_`) and the lone chain
+(`mtp_emit_token`, log line `MTP chain lm_head: NVFP4 decode-cache view engaged`). Verification stays on the full
+FP8 head.
+
+Paired, same text (`paired_pin7.txt`): Qwen3.8-27B-NVFP4-vllm server, recorded familiar SWE-bench sessions
+(`tools/analysis/agent_turn_replay.py --serial --seed 1000`), 3 chats x 30 turns in turn,
+`diagnostics.mtp_verify_pin=7`, `speculative.mtp_k=7`, `runtime.deterministic=true`, 52107 output tokens, 3 of 3
+texts md5-equal across the 4 arms:
+
+| Draft head | copy MiB | KV ceiling blocks | head ms per step | tokens per step | tok/s decode per chat |
+|---|---|---|---|---|---|
+| FP8, rows [0, 98304) | 0 | 18853 | 4.822 / 4.824 | 3.585 | 198.04 / 198.03 |
+| NVFP4 copy, rows [0, 98304) | 270.0 | 18067 | 4.148 | 3.561 | 204.26 |
+| NVFP4 copy, all rows | 682.0 | 16863 | 5.405 | 3.603 | 192.68 |
+
+Unpaired, default mode (`default_1chat.txt`, `default_2_4_8_chats.txt`, `default_8chats_repeat.txt`), FP8 -> NVFP4
+prefix copy:
+
+| Chats | tok/s decode per chat | tok/s wall | head ms per step |
+|---|---|---|---|
+| 1, 3 x 30 turns in turn | 200.89 -> 205.35 | 194.37 -> 198.32 | 4.688 -> 3.995 |
+| 2 overlapping | 185.08 -> 197.14 | 299.40 -> 291.19 | 5.828 -> 5.080 at 2 requests x 4 drafts |
+| 4 overlapping | 147.12 -> 149.95 | 402.78 -> 427.63 | 3.972 -> 3.540 at 4 requests x 3 drafts |
+| 8 x 20 turns, 3 runs each | 79.00 / 73.68 / 74.30 -> 75.47 / 77.61 / 75.82 | 359.94 / 402.00 / 376.36 -> 432.93 / 417.59 / 448.68 | 4.529 / 4.101 / 4.187 -> 4.050 / 3.852 / 4.102 at 4 requests x 3 drafts |
+
+The wall gain at 8 chats has no isolated mechanism (output token counts differ per run): read as no loss.
+
+KV-saturated (`kv_saturated_agents.txt`): 8 agents x 8 turns on `/v1/messages`, prompt median 99550 to 102062
+tokens per run, `kv_cache.host_spill_mb=16384`, a fresh server per run, order fp8 nvp nvp fp8 fp8 nvp:
+
+| Draft head | KV ceiling blocks | wall s, 3 runs | output tok, 3 runs | output tok per wall s (sum) | uncached prompt tok (sum) | prefix evictions |
+|---|---|---|---|---|---|---|
+| FP8, rows [0, 98304) | 21166 | 572.8 / 601.8 / 629.8 | 72734 / 83744 / 82555 | 132.5 | 9074420 | 418896 to 432279 |
+| NVFP4 copy, rows [0, 98304) | 20380 | 637.3 / 582.7 / 638.9 | 95701 / 67238 / 98198 | 140.5 | 8937938 | 414577 to 437829 |
+
+No loss resolved in the KV-saturated regime, no gain claimed: the FP8 wall spread between equal arms (572.8 to
+629.8 s) is larger than the arm difference in wall per run (601.5 vs 619.6 s), and texts are not paired (output
+token counts differ per run).
+
+Not measured: a GDN hybrid with `gemm.nvfp4_lm_head_gdn` or a natively NVFP4 head on a concurrent server (drafts
+read rows [0, 98304) of the main-head view, no copy). Tests: `MtpDraftRows.*` (`tests/test_mtp_draft_rows.cpp`),
+`MtpAuto.*`; 8 of 8 CPU mutants red (`mutants.txt`). Final-tree gates: `gates.txt`.

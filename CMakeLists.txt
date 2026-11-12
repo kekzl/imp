@@ -1033,6 +1033,7 @@ if(IMP_BUILD_TESTS)
         tests/test_config.cpp
         tests/test_config_bindings.cpp
         tests/test_mtp_auto.cpp
+        tests/test_mtp_draft_rows.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull
         # neither nlohmann nor httplib. Must build outside IMP_BUILD_SERVER so test-core still links
         # under -DIMP_BUILD_SERVER=OFF (Sanitizers lane, make asan).
