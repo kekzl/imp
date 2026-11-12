@@ -159,11 +159,20 @@ int main(int argc, char** argv) {
     imp::tools::mtp_attach_external_head(*model->model, runtime_cfg, mtp_k);
     // What the load produced decides the pair: a checkpoint without a head must
     // not end up with ngram off and nothing drafting (mtp_auto_after_load).
-    mtp_k = imp::tools::mtp_auto_after_load(runtime_cfg, mtp_k,
-                                            model->model->mtp_ && model->model->mtp_->loaded,
-                                            args.mtp_spec_decode_k,
-                                            model->model->mtp_ ? imp::mtp_auto_k_cap(*model->model->mtp_)
-                                                               : 0);
+    const bool head_loaded = model->model->mtp_ && model->model->mtp_->loaded;
+    const int head_k_cap = model->model->mtp_ ? imp::mtp_auto_k_cap(*model->model->mtp_) : 0;
+    const imp::ModelProfile prof = imp::derive_model_profile(*model->model, model->model->config());
+    const bool gdn_hybrid = prof.is_gdn && prof.is_hybrid && !prof.has_pure_ssm;
+    // A chat run on a GDN hybrid verifies its MTP drafts on the bound path like a one-chat server
+    // (engine batch 2, one request). --bench, --perplexity and --mtp-spec-decode keep engine batch 1.
+    const bool chat_run = args.mtp_spec_decode_k <= 0 && !args.bench && args.perplexity_file.empty();
+    const int engine_batch = chat_run ? imp::tools::mtp_auto_engine_batch(runtime_cfg, 1, gdn_hybrid, mtp_k,
+                                                                          head_loaded, head_k_cap)
+                                      : 1;
+    mtp_k = imp::tools::mtp_auto_after_load(runtime_cfg, mtp_k, head_loaded, args.mtp_spec_decode_k,
+                                            head_k_cap,
+                                            imp::tools::mtp_auto_serving(runtime_cfg, engine_batch,
+                                                                         gdn_hybrid));
     if (mtp_k <= 0)
         model->model->decline_mtp_head();
 
@@ -175,8 +184,8 @@ int main(int argc, char** argv) {
     const imp::SamplingDefaults sampling = imp::resolve_sampling_defaults(model->model->config().arch, gen);
 
     // CLI flags override auto-detection (only when explicitly set)
-    // CLI is single-request — always cap batch size to 1
-    config.max_batch_size = 1;
+    // The CLI runs one request: engine batch 1, or 2 with admission 1 for the bound MTP verify.
+    config.max_batch_size = engine_batch;
     // max_seq_len: 0 = auto-detect in engine (from model metadata + VRAM)
     if (args.max_seq_len > 0)
         config.max_seq_len = args.max_seq_len;

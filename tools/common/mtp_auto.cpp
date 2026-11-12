@@ -54,10 +54,10 @@ MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, 
 }
 
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
-                        int head_auto_k_cap) {
+                        int head_auto_k_cap, MtpAutoServing serving) {
     if (explicit_flag > 0)
         return explicit_flag;  // a tool flag outranks the config
-    mtp_auto_finalize(cfg, requested_k, head_loaded, head_auto_k_cap);
+    mtp_auto_finalize(cfg, requested_k, head_loaded, head_auto_k_cap, serving);
     // The pending slot was stashed before the load (it gates loader
     // behaviour); re-publish so the engine takes the resolved pair.
     set_pending_runtime_config(cfg);

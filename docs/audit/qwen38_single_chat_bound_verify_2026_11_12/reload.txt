@@ -76,3 +76,11 @@ bdef_post	sampled	decode_tok_s 187.42	drafted 6163	accepted 2704
 1011:  KV: live pass 8092 blocks -> plan 14321 blocks, APPLIED (2276 -> 4028 MiB)
 1028:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
 1056:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 re
+## bdef KV plan 11014 -> 14321 blocks across the resume (both images): library reserve, not a defect.
+## /mnt/data/scratch/tail_2026_11_11/reload_b_bdef/server.log, grep -n 'library reserve\|KV: live pass\|KV plan':
+226:engine_kv_cache_init.cpp:211: library reserve: no measurement for this model in /home/imp/.cache/imp/library_reserve - planning with the 1536 MiB constant. It is recorded after the first forward
+241:  KV: live pass 7378 blocks -> plan 11014 blocks, APPLIED (2075 -> 3098 MiB)
+331:engine_kv_replan.cpp:34: library reserve: applied this start's 367 MiB measurement in place of the 1536 MiB charge: KV plan 11014 -> 14414 blocks, committed 2750 -> 3600 (target 3600), ceiling 110
+997:engine_kv_cache_init.cpp:203: library reserve: 367 MiB from the measurement cache (/home/imp/.cache/imp/library_reserve) - the default constant is 1536 MiB
+1011:  KV: live pass 8092 blocks -> plan 14321 blocks, APPLIED (2276 -> 4028 MiB)
+## first load plans with the 1536 MiB constant, replans to 14414 after measuring 367 MiB; the resume plans with 367 MiB from the cache.

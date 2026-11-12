@@ -1,0 +1,75 @@
+# imp-cli one-shot, Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, 4 plain prompts x 1024 tokens, one process per prompt;
+# greedy (temperature 0) and sampled (temperature 0.7). lane = default (B-75), chain = --set speculative.mtp_concurrent=false.
+# Run a: lane then chain; run b: chain then lane (+ --interactive, 4 turns over stdin, greedy). Harness /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/b75/cli.sh
+## run a, /mnt/data/scratch/tail_2026_11_11/cli_a.out
+image imp:b75 created 2026-11-12T06:48:49.381952195+01:00 tree 2cbd4076a953e41f4ad8155836592a68f9436869 want 2cbd4076a953e41f4ad8155836592a68f9436869
+arm lane greedy 0 rc=0 06:49:43 tg  1024 tokens in  6163.75 ms  ( 165.97 tok/s)
+arm lane greedy 1 rc=0 06:50:01 tg  1024 tokens in  5945.16 ms  ( 172.07 tok/s)
+arm lane greedy 2 rc=0 06:50:19 tg  1024 tokens in  5833.19 ms  ( 175.38 tok/s)
+arm lane greedy 3 rc=0 06:50:37 tg  1024 tokens in  6471.60 ms  ( 158.08 tok/s)
+arm lane sampled 0 rc=0 06:50:56 tg  1024 tokens in  6310.85 ms  ( 162.10 tok/s)
+arm lane sampled 1 rc=0 06:51:13 tg  1024 tokens in  4823.55 ms  ( 212.08 tok/s)
+arm lane sampled 2 rc=0 06:51:30 tg  1024 tokens in  5094.88 ms  ( 200.79 tok/s)
+arm lane sampled 3 rc=0 06:51:49 tg  1024 tokens in  6240.50 ms  ( 163.93 tok/s)
+arm chain greedy 0 rc=0 06:52:09 tg  1024 tokens in  8609.57 ms  ( 118.82 tok/s)
+arm chain greedy 1 rc=0 06:52:29 tg  1024 tokens in  8223.28 ms  ( 124.40 tok/s)
+arm chain greedy 2 rc=0 06:52:49 tg  1024 tokens in  7125.81 ms  ( 143.56 tok/s)
+arm chain greedy 3 rc=0 06:53:09 tg  1024 tokens in  8485.01 ms  ( 120.57 tok/s)
+arm chain sampled 0 rc=0 06:53:30 tg  1024 tokens in  8904.00 ms  ( 114.89 tok/s)
+arm chain sampled 1 rc=0 06:53:50 tg  1024 tokens in  7960.22 ms  ( 128.51 tok/s)
+arm chain sampled 2 rc=0 06:54:09 tg  1024 tokens in  7595.06 ms  ( 134.69 tok/s)
+arm chain sampled 3 rc=0 06:54:29 tg  1024 tokens in  8626.00 ms  ( 118.59 tok/s)
+## run b, /mnt/data/scratch/tail_2026_11_11/cli_b.out
+image imp:b75 created 2026-11-12T06:48:49.381952195+01:00 tree 2cbd4076a953e41f4ad8155836592a68f9436869 want 2cbd4076a953e41f4ad8155836592a68f9436869
+arm chain greedy 0 rc=0 06:55:52 tg  1024 tokens in  8601.52 ms  ( 118.93 tok/s)
+arm chain greedy 1 rc=0 06:56:12 tg  1024 tokens in  8219.71 ms  ( 124.46 tok/s)
+arm chain greedy 2 rc=0 06:56:31 tg  1024 tokens in  7153.39 ms  ( 143.01 tok/s)
+arm chain greedy 3 rc=0 06:56:51 tg  1024 tokens in  8498.36 ms  ( 120.38 tok/s)
+arm chain sampled 0 rc=0 06:57:12 tg  1024 tokens in  8944.18 ms  ( 114.38 tok/s)
+arm chain sampled 1 rc=0 06:57:32 tg  1024 tokens in  7944.82 ms  ( 128.76 tok/s)
+arm chain sampled 2 rc=0 06:57:52 tg  1024 tokens in  7600.21 ms  ( 134.60 tok/s)
+arm chain sampled 3 rc=0 06:58:13 tg  1024 tokens in  8673.83 ms  ( 117.94 tok/s)
+arm chain interactive rc=0 06:58:29 7421: 4 Brimble: 4 bytes 51711
+arm lane greedy 0 rc=0 06:58:48 tg  1024 tokens in  6194.19 ms  ( 165.15 tok/s)
+arm lane greedy 1 rc=0 06:59:06 tg  1024 tokens in  5918.55 ms  ( 172.85 tok/s)
+arm lane greedy 2 rc=0 06:59:24 tg  1024 tokens in  5872.80 ms  ( 174.19 tok/s)
+arm lane greedy 3 rc=0 06:59:43 tg  1024 tokens in  6454.94 ms  ( 158.48 tok/s)
+arm lane sampled 0 rc=0 07:00:01 tg  1024 tokens in  6297.34 ms  ( 162.45 tok/s)
+arm lane sampled 1 rc=0 07:00:18 tg  1024 tokens in  4798.64 ms  ( 213.19 tok/s)
+arm lane sampled 2 rc=0 07:00:36 tg  1024 tokens in  5093.25 ms  ( 200.85 tok/s)
+arm lane sampled 3 rc=0 07:00:54 tg  1024 tokens in  6220.97 ms  ( 164.44 tok/s)
+arm lane interactive rc=0 07:01:13 7421: 4 Brimble: 4 bytes 64895
+## rate = sum(tokens - 1) * 1000 / sum(decode ms) over the arm lines
+a chain greedy: sum(tokens-1) 4092, sum ms 32443.67, runs 4, 126.13 tok/s
+a chain sampled: sum(tokens-1) 4092, sum ms 33085.28, runs 4, 123.68 tok/s
+a lane greedy: sum(tokens-1) 4092, sum ms 24413.70, runs 4, 167.61 tok/s
+a lane sampled: sum(tokens-1) 4092, sum ms 22469.78, runs 4, 182.11 tok/s
+b chain greedy: sum(tokens-1) 4092, sum ms 32472.98, runs 4, 126.01 tok/s
+b chain sampled: sum(tokens-1) 4092, sum ms 33163.04, runs 4, 123.39 tok/s
+b lane greedy: sum(tokens-1) 4092, sum ms 24440.48, runs 4, 167.43 tok/s
+b lane sampled: sum(tokens-1) 4092, sum ms 22410.20, runs 4, 182.60 tok/s
+## activity, lane: /mnt/data/scratch/tail_2026_11_11/cli_a_lane/greedy_0.out
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+## activity, chain: /mnt/data/scratch/tail_2026_11_11/cli_a_chain/greedy_0.out
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen3.8-27B-NVFP4). Set sp
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8
+## stderr pattern hits and empty outputs per arm (summary lines of both runs)
+  stderr hits 0 empty outputs 0
+  stderr hits 0 empty outputs 0
+  stderr hits 0 empty outputs 0
+  stderr hits 0 empty outputs 0
+## interactive (turns: My favorite number is 7421 and my dog is called Brimble. Remember both.|What is my favorite number? Reply with the number only.|What is my dog called? Reply with the name only.|Write five sentences about how a steam engine turns heat into motion.|quit|): grep counts of 7421 / Brimble in the output
+lane: 7421 4, Brimble 4
+chain: 7421 4, Brimble 4
+## shutdown VRAM audit (pool current_MiB peak_MiB), last TRACKED TOTAL line per arm
+lane: TRACKED TOTAL                   19057.6      21521.8
+chain: TRACKED TOTAL                   18976.6      21401.6
+## CPU: make dev-test, /mnt/data/scratch/tail_2026_11_11/b75_devtest1.log: 100% tests passed, 0 tests failed out of 13
+## mutant noserving2 (mtp_auto_after_load hands SingleStream to mtp_auto_finalize), /mnt/data/scratch/tail_2026_11_11/b75_mut_noserving2.log:
+compile errors 0 | 92% tests passed, 1 tests failed out of 13 | MtpAuto.AfterLoadTakesTheServingOfTheEngineBatch
+sed -i 's/    mtp_auto_finalize(cfg, requested_k, head_loaded, head_auto_k_cap, serving);/    mtp_auto_finalize(cfg, requested_k, head_loaded, head_auto_k_cap, (void(serving), MtpAutoServing::SingleStream));/' "$f"

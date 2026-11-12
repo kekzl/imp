@@ -183,8 +183,8 @@ struct Speculative {
     // mtp_k=auto on a concurrent GDN-hybrid server (Qwen3.8-27B) loads the head too: the one
     // request that prefills while the head is free binds it and verifies while it decodes alone;
     // batch > 1 decodes plain. false = the pre-v0.63 rule (concurrent servers leave the head unloaded).
-    // A one-chat server (--max-batch 1) verifies on the same bound path (mtp_auto_engine_batch,
-    // Qwen3.8-27B agent replay 69.28 -> 205.58 tok/s); false keeps its single-stream chain (mtp_k=2).
+    // A one-chat server (--max-batch 1) and imp-cli chat runs verify on the same bound path
+    // (mtp_auto_engine_batch); false keeps their single-stream chain (mtp_k=2).
     bool mtp_concurrent = true;
     // MTP head KV slots when the batched verify is off: one request binds, the others keep the head
     // cache of other chats, so a chat UI's title / follow-up request between two turns no longer wipes
