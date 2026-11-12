@@ -12,6 +12,7 @@
 #include <cuda_fp8.h>
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <float.h>
 #include <cstdint>
 #include <numeric>
@@ -920,6 +921,81 @@ TEST(SparseAttnE2E, MlaGeometrySmallBudgetKeepsTheNeedle) {
     const auto kept = std::vector<int>(table.begin(), table.begin() + 6);
     EXPECT_NE(std::find(kept.begin(), kept.end(), MlaSparseFixture::needle), kept.end())
         << "the block whose keys align with q must survive a 6-block budget at head_dim 192";
+    cudaFree(d_sbt);
+    cudaFree(d_sctx);
+}
+
+// Block scores at the Qwen3.8-27B attention shape (24 q heads, 4 kv heads, head_dim 256: 8 lanes per kv
+// head in the split score kernel) against an FP64 corner-bound and mean/std reference, two rows with their
+// own q over a shared 300-block table, one hole (-1) in it.
+TEST(SparseScoreSplit, QwenShapeScoresMatchReference) {
+    constexpr int nh = 24, nkv = 4, hd = 256, n_blocks = 300, n_seq = 2, row_elems = nkv * hd;
+    ASSERT_TRUE(sparse_score_uses_split(nkv, hd)) << "this shape must take the split score kernel";
+    EXPECT_FALSE(sparse_score_uses_split(3, hd)) << "32 % 3 != 0 keeps the per-4-dims kernel";
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    std::vector<__half2> mm(static_cast<size_t>(n_blocks + 7) * row_elems);
+    for (auto& x : mm) {
+        const float a = u(rng), b = u(rng);
+        x = __floats2half2_rn(std::min(a, b), std::max(a, b));
+    }
+    std::vector<half> q(static_cast<size_t>(n_seq) * nh * hd);
+    for (auto& x : q)
+        x = __float2half(u(rng));
+    std::vector<int> bt(static_cast<size_t>(n_seq) * n_blocks);
+    for (int s = 0; s < n_seq; s++)
+        for (int b = 0; b < n_blocks; b++)
+            bt[(static_cast<size_t>(s) * n_blocks) + b] = b == 17 ? -1 : b + 7;
+    const std::vector<int> ctx = {n_blocks * kBS, (n_blocks * kBS) - 5};
+    __half2* d_mm = dmalloc<__half2>(mm.size());
+    dcopy(d_mm, mm);
+    half* d_q = dmalloc<half>(q.size());
+    dcopy(d_q, q);
+    int* d_bt = dmalloc<int>(bt.size());
+    dcopy(d_bt, bt);
+    int* d_ctx = dmalloc<int>(ctx.size());
+    dcopy(d_ctx, ctx);
+    float* d_scores = dmalloc<float>(static_cast<size_t>(n_seq) * n_blocks);
+    int* d_sbt = dmalloc<int>(static_cast<size_t>(n_seq) * n_blocks);
+    int* d_sctx = dmalloc<int>(n_seq);
+    for (const bool meanstd : {false, true}) {
+        const float coef = 0.5f;
+        sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, n_seq, nh, nkv, hd, kBS, n_blocks, /*budget=*/32,
+                             /*sink=*/1, /*recent=*/2, /*engage=*/32, n_blocks, d_scores, d_sbt, d_sctx,
+                             meanstd, coef, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const auto got = dread(d_scores, static_cast<size_t>(n_seq) * n_blocks);
+        double diff2 = 0.0, ref2 = 0.0;
+        for (int s = 0; s < n_seq; s++) {
+            for (int b = 0; b < n_blocks; b++) {
+                const float g = got[(static_cast<size_t>(s) * n_blocks) + b];
+                if (b == 17) {
+                    EXPECT_EQ(g, -FLT_MAX) << "hole";
+                    continue;
+                }
+                double best = -1e300;
+                for (int h = 0; h < nh; h++) {
+                    const int kvh = h / (nh / nkv);
+                    double sum = 0.0;
+                    for (int d = 0; d < hd; d++) {
+                        const __half2 m = mm[(static_cast<size_t>(b + 7) * row_elems) + (kvh * hd) + d];
+                        const double lo = __low2float(m), hi = __high2float(m);
+                        const double qv = __half2float(q[(((static_cast<size_t>(s) * nh) + h) * hd) + d]);
+                        sum += meanstd ? (qv * lo) + (std::fabs(qv) * coef * hi) : std::max(qv * lo, qv * hi);
+                    }
+                    best = std::max(best, sum);
+                }
+                diff2 += (g - best) * (g - best);
+                ref2 += best * best;
+            }
+        }
+        EXPECT_LT(std::sqrt(diff2 / ref2), 1e-5) << "meanstd=" << meanstd;
+    }
+    cudaFree(d_mm);
+    cudaFree(d_q);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_scores);
     cudaFree(d_sbt);
     cudaFree(d_sctx);
 }

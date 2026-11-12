@@ -1,0 +1,18 @@
+# nsys, default imp-server, Qwen3.8-27B-NVFP4-vllm, 50k context, runtime.no_pdl=true (tools/analysis/mtp_longctx_nsys.sh)
+# launches by grid shape (grid y = rows), /tmp/claude-1000/-home-kekz-github-com-kekzl-imp/24779cc2-5d5a-4673-a140-62546120cc33/scratchpad/head/shapes.py on serving.sqlite
+## old: /mnt/data/scratch/head_prof/long_c50/serving.sqlite
+sparse_score_blocks_kernel: 2064 launches, 104.5 ms
+grid   256 x   5 x  1 block  256  n   1136  avg    41.2 us   44.9 %
+grid   256 x  16 x  1 block  256  n    336  avg    76.7 us   24.7 %
+grid   256 x   7 x  1 block  256  n    336  avg    52.9 us   17.0 %
+grid   256 x   8 x  1 block  256  n    224  avg    60.1 us   12.9 %
+grid   256 x   1 x  1 block  256  n     32  avg    18.7 us    0.6 %
+      0.156 ms/step    3.43 n/step     45.54 us/call  sparse_score_blocks_kernel
+## final split kernel: /mnt/data/scratch/head_prof/long_sp50b/serving.sqlite
+sparse_score_blocks_split_kernel: 2352 launches, 85.6 ms
+grid   256 x   5 x  1 block  256  n   1472  avg    30.9 us   53.1 %
+grid   256 x  16 x  1 block  256  n    336  avg    57.1 us   22.4 %
+grid   256 x   7 x  1 block  256  n    400  avg    38.6 us   18.0 %
+grid   256 x   8 x  1 block  256  n    112  avg    44.2 us    5.8 %
+grid   256 x   1 x  1 block  256  n     32  avg    16.3 us    0.6 %
+      1.844 ms/step   56.00 n/step     32.93 us/call  sparse_score_blocks_split_kernel

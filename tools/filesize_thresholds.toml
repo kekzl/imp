@@ -103,6 +103,8 @@ roots = ["src", "tools", "tests"]
 "tests/test_kv_cache.cpp" = { code_loc = 927, reason = "(c) 54 bookkeeping tests across KV allocator/cache/manager - one test target" }
 "tests/test_paged_attention.cu" = { code_loc = 1202, reason = "(c) 26 tests of the paged-attention kernel - one test target" }
 "tests/test_quant_integration.cu" = { code_loc = 1512, reason = "(c) 25 tests, all exercising the quant_gemm/dequant unit - one test target; 1471 -> 1512 = FusedGateUpExpertsSplitAndFreeTheSource" }
+"src/exec/sparse_attn_select.cu" = { code_loc = 691, reason = "(c) one feature: sparse decode / prefill page selection (key min/max update, block score, top-k select, prefill row merge); 91 over the 600 kernel line = the kv-head-split score kernel beside the per-4-dims kernel it falls back to, sharing the Score policies and both launch sites (B-81)" }
+"tests/test_sparse_attn_select.cu" = { code_loc = 861, reason = "(c) one test target for sparse_attn_select.cu (selection, prefill merge, E2E needle, split score vs FP64) sharing the device helpers; 61 over the 800 TU line = SparseScoreSplit.QwenShapeScoresMatchReference (B-81)" }
 # Measured as ONE translation unit since 2026-09-04: this file textually
 # #include's executor_attention_{qkv,prefill,decode}.cu inside the body of
 # GraphExecutor::run_attention, and the fragments' own headers say they are not
