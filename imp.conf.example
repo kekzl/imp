@@ -1223,7 +1223,9 @@ mtp_k                = -1
 # A one-chat GDN-hybrid server (imp-server --max-batch 1) verifies on the same
 # bound path: engine batch 2 with runtime.max_batch_size=1, admission and the KV
 # pool stay at one chat. Qwen3.8-27B-NVFP4 agent replay, 1 chat: 69.28 -> 205.58
-# tok/s. false = that server keeps the single-stream chain (mtp_k=2).
+# tok/s. imp-cli chat runs (--prompt, --prompt-file, --interactive) too: one-shot
+# greedy 126.01 -> 167.43 tok/s; --bench, --perplexity, --mtp-spec-decode keep
+# engine batch 1. false = both keep the single-stream chain (mtp_k=2).
 mtp_concurrent       = true
 # MTP head KV slots when the batched verify is off: one request binds, the
 # others keep other chats' head caches, so a chat UI's title / follow-up

@@ -1,0 +1,54 @@
+# B-75 final tree (imp:b75, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+image imp:b75 created 2026-11-12T07:11:39.706662864+01:00 tree 71cb9e3565e2341f0e242ffe3dde1599905a1f3a want 71cb9e3565e2341f0e242ffe3dde1599905a1f3a
+
+# GPU tests (image): test-core 'MtpAuto.*:ExpertBatchPolicy.*:ShadowPlan.*:MemoryPlan.*:MtpDraftRows.*'
+test-core: [  PASSED  ] 83 tests.
+
+# make dev-test / make preflight
+100% tests passed, 0 tests failed out of 13
+preflight: base 5d4a824a, 11 changed file(s)
+preflight: 0 failure(s), 29 s wall
+
+# imp-cli --bench (opposite check: engine batch 1, no lane line)
+bench rc=0
+  KV: live pass 224 blocks -> plan 56 blocks, APPLIED (63 -> 16 MiB)
+bench: engine batch 2 lines 0, stderr hits 0
+safetensors_loader.cpp:1171: MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it on a single-stream run or a concurrent GDN-hybrid server (speculative.mtp_concurrent) w
+engine_init_resolver.cpp:556: max_batch_size: 1 (configured)
+pp   512 tokens  avg    44.36 ms  (11542.54 tok/s)  [1 reps]
+tg   128 tokens  avg  1301.99 ms  (  98.31 tok/s)  [1 reps]
+
+# imp-cli --prompt, greedy, 256 tokens (lane activity on the final tree)
+lane rc=0
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+lane: engine batch 2 lines 2, stderr hits 0
+pp    63 tokens in    62.15 ms  (1013.73 tok/s)
+tg   216 tokens in  1010.46 ms  ( 212.77 tok/s)
+
+# make test-niah: not run, it drives imp-server (Makefile test-niah), not imp-cli
+
+# make verify-fast DOCKER_IMG=imp:b75
+PASS fast gtest filter
+  decode  tg128 =  293.42 tok/s  (baseline  282.84, delta 3.74%)
+  prefill pp512 = 50141.66 tok/s  (baseline 50374.39, delta -0.46%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50455.89 tok/s  (baseline 50318.99, delta 0.27%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  175.23 tok/s
+  graphs ON  tg256 =  296.57 tok/s   (1.69x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1939.39 tok/s, slowest request 518 ms  (baseline 1899.81, delta 2.08%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 06:12:44Z, ended 06:14:21Z)

@@ -220,6 +220,28 @@ TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
 }
 
+// imp-cli resolves through mtp_auto_after_load: a chat run takes the batch, depth and pool of the lane.
+TEST(MtpAuto, AfterLoadTakesTheServingOfTheEngineBatch) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, /*gdn_hybrid=*/true, k,
+                                                   /*head_loaded=*/true);
+    EXPECT_EQ(tools::mtp_auto_after_load(cfg, k, /*head_loaded=*/true, /*explicit_flag=*/0,
+                                         /*head_auto_k_cap=*/0,
+                                         tools::mtp_auto_serving(cfg, batch, /*gdn_hybrid=*/true)),
+              7);
+    const RuntimeConfig pending = take_pending_runtime_config();
+    EXPECT_EQ(pending.speculative.mtp_k, 7) << "the engine takes the resolved config";
+    EXPECT_EQ(pending.speculative.mtp_draft_vocab, 98304);
+    EXPECT_EQ(pending.runtime.max_batch_size, 1);
+
+    RuntimeConfig chain;
+    EXPECT_EQ(tools::mtp_auto_after_load(chain, k, /*head_loaded=*/true, /*explicit_flag=*/0),
+              tools::kMtpAutoK)
+        << "the default serving stays the single-stream chain";
+    EXPECT_EQ(take_pending_runtime_config().speculative.mtp_draft_vocab, 0);
+}
+
 // A reload (resume, idle unload, swap) resolves auto again: plain probe 179.66 -> 133.63 tok/s without.
 TEST(MtpAuto, ReloadResolvesAgainstTheStartupConfig) {
     RuntimeConfig cfg;

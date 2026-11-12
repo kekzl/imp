@@ -23,7 +23,7 @@ MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, 
 
 // Engine batch of a batch-1 GDN hybrid auto drafts on: the bound verify stages its rows only at engine
 // batch 2, so this returns 2 and pins runtime.max_batch_size=1 (admission, decode and KV ceiling stay
-// at one chat). Else configured_batch. Qwen3.8-27B agent replay, 1 chat: 69.28 -> 205.58 tok/s.
+// at one chat). Else configured_batch. Callers: imp-server --max-batch 1 and imp-cli chat runs.
 inline constexpr int kMtpBoundVerifyEngineBatch = 2;
 int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid, int requested_k,
                           bool head_loaded, int head_auto_k_cap = 0);
@@ -50,7 +50,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
 // finalize, re-publish the resolved config so Engine::init takes it, return the depth to
 // enable. explicit_flag (--mtp-spec-decode) outranks the config; pass 0 when there is none.
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
-                        int head_auto_k_cap = 0);
+                        int head_auto_k_cap = 0, MtpAutoServing serving = MtpAutoServing::SingleStream);
 
 // Between load and phase 2: speculative.mtp_head attaches an external head when MTP was requested
 // (requested_k > 0) and the checkpoint brought none. No-op otherwise.
