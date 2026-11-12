@@ -60,6 +60,9 @@ struct FeatureSet {
 
 struct ConcurrencyLimits {
     int max_batch_size = 1;
+    // Sequences the KV pool is sized for, 0 = max_batch_size. Below it when admission is capped under
+    // the engine batch (runtime.max_batch_size): rows past admission hold no context.
+    int kv_seqs = 0;
     int max_seq_len = 0;
     int kv_block_size = 16;
     // K+V bytes of one block for ONE layer, packing- and scale-aware.

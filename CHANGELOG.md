@@ -17,11 +17,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - A sampled chat bound to the MTP head drafts by drawing from the head's logits with the seed of its verify row (`speculative.mtp_draft_coupled`, default true); top-k / top-p sampling draws by a race keyed on (seed, token id), so seeded texts change once. Qwen3.8-27B-NVFP4 agent replay, 1 chat, 2 runs: 168.43 / 168.71 -> 194.79 / 193.70 tok/s. (#3095)
 - 1 or 2 chats decoding together on a concurrent GDN-hybrid server verify 6, then 7 MTP drafts after a step that accepted all of its drafts (new `speculative.mtp_batch_verify_k_streak`, default 7). Qwen3.8-27B-NVFP4 server, agent replay, 1 chat: 193.79 -> 200.95 tok/s decode; same text paired +2.84 % tokens per ms. (#3096)
 - A concurrent GDN-hybrid server drafts MTP on an NVFP4 copy of LM-head rows [0, 98304), 270.0 MiB, instead of the FP8 head (`speculative.mtp_nvfp4_head`, `speculative.mtp_draft_vocab`). Qwen3.8-27B-NVFP4 server, agent replay, 1 chat, same text: 198.04 -> 204.26 tok/s decode; KV ceiling 21166 -> 20380 blocks. (#3097)
+- A GDN-hybrid `imp-server --max-batch 1` with MTP auto verifies its drafts on the bound batched path (engine batch 2, admission and KV pool at 1 chat) instead of the single-stream chain; `speculative.mtp_concurrent=false` keeps the chain. Qwen3.8-27B-NVFP4 agent replay, 1 chat: 69.28 -> 205.58 tok/s decode. (#3098)
 
 ### Fixed
 - `/v1/messages` dropped `seed`: a seeded request drew a fresh sampler base per call (3 identical requests, 3 texts; `/v1/chat/completions` 3 of 3 equal). The field now reaches the sampler. Qwen3.8-27B-NVFP4, `runtime.deterministic=true`: a repeated seeded 15-turn agent replay gives 15 of 15 identical turns. (#3094)
 - A speculative draft that matched `</think>` under a think budget was kept and then forwarded a second time at the same position, advancing the GDN recurrent state twice. The token now stays the chunk's bonus. Qwen3.8-27B-NVFP4, 12 thinking chats x 2, `--max-batch 1`: double forwards 8 of 24 requests -> 0 (#3090).
 - With MTP drafts on, a thinking chat ran up to `mtp_k` tokens past its think budget before `</think>` was forced. A verify chunk now ends at the budget. Qwen3.8-27B-NVFP4 server, 1 chat x 20k, `max_tokens` 384, reasoning tokens at `mtp_k` 1 / 2 / 3 / 4: 193 / 194 / 195 / 196 -> 193 each, as with MTP off (#3092).
+- imp-server resolves `speculative.mtp_k=auto` against the startup config on every model load (`/admin/resume`, idle unload, model swap); a reload took the resolved keys as explicit, a resumed `--max-batch 1` server left the bound verify. Qwen3.8-27B-NVFP4, resumed: greedy 133.63 -> 179.80, sampled 123.66 -> 187.72 tok/s; default server unchanged. (#3098)
 
 ## [0.65.0] - 2026-11-09
 

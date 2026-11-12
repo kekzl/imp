@@ -635,6 +635,33 @@ TEST(ShadowPlan, NoCeilingWarningWhenBothPoolsServeTheBatch) {
     EXPECT_EQ(dr.find("WARN"), std::string::npos) << "no state was bought per slot:\n" << dr;
 }
 
+// Admission capped under the engine batch (runtime.max_batch_size 1 at engine batch 2): the pool holds
+// the admitted sequences, 256 blocks instead of 512, and the report names the cap.
+TEST(ShadowPlan, CappedAdmissionSizesKvForTheAdmittedSequences) {
+    auto p = hybrid_probe();
+    p.max_batch_size = 2;
+    p.ssm_state_bytes = 2ull * 77 * kMiB + 1 * kMiB;
+    const auto full = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(full) << full.failure.report();
+    EXPECT_EQ(full.plan.kv.blocks, 2 * 256);
+
+    p.kv_seqs = 1;
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res) << res.failure.report();
+    EXPECT_EQ(res.plan.kv.blocks, 256);
+    EXPECT_EQ(res.plan.kv.bytes * 2, full.plan.kv.bytes);
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/256);
+    EXPECT_NE(r.find("ceiling: recurrent 1 seqs, KV 1 seqs"), std::string::npos) << r;
+    EXPECT_NE(r.find("admission 1 of engine batch 2"), std::string::npos) << r;
+    EXPECT_EQ(r.find("WARN"), std::string::npos) << "the idle engine row is not an unserved slot:\n" << r;
+
+    p.kv_seqs = 8;  // a cap above the batch changes nothing
+    const auto over = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(over) << over.failure.report();
+    EXPECT_EQ(over.plan.kv.blocks, 2 * 256);
+    EXPECT_EQ(shadow_plan_report(p, over, 512).find("admission"), std::string::npos);
+}
+
 TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
     // A 131072-token max_seq_len against a pool of a few thousand blocks makes blocks_per_seq
     // exceed blocks, so M is 0. The pool still serves all N slots at a shorter context, and the

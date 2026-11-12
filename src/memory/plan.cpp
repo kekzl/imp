@@ -29,6 +29,11 @@ int swa_group_blocks(const FeatureSet& f, int n_kv_layers, int bs, int batch) {
     return (per_seq * batch) + shared;
 }
 
+// Sequences the KV pool is sized for: kv_seqs (admitted) when set, never above the engine batch.
+int kv_pool_seqs(const ConcurrencyLimits& l, int batch) {
+    return l.kv_seqs > 0 ? std::min(batch, l.kv_seqs) : batch;
+}
+
 }  // namespace
 
 size_t MemoryPlan::total() const {
@@ -84,6 +89,7 @@ PlanResult plan_memory(const PlanInput& in) {
 
     const int bs = in.limits.kv_block_size > 0 ? in.limits.kv_block_size : 16;
     const int batch = std::max(1, in.limits.max_batch_size);
+    const int kv_batch = kv_pool_seqs(in.limits, batch);
     const int seq = std::max(0, in.limits.max_seq_len);
 
     // Fixed charges, subtracted before anything is distributed. Order matters: these are
@@ -162,7 +168,7 @@ PlanResult plan_memory(const PlanInput& in) {
         p.optional_caches = std::min(optional_cache_demand, grantable);
 
         const size_t kv_residual = residual - p.optional_caches;
-        const int want_blocks = p.kv.blocks_per_seq * batch;
+        const int want_blocks = p.kv.blocks_per_seq * kv_batch;
         const int fits_blocks = static_cast<int>(kv_residual / per_block);
         p.kv.blocks = std::min(want_blocks, fits_blocks);
         p.kv.bytes = static_cast<size_t>(p.kv.blocks) * kv_per_block;
@@ -217,7 +223,7 @@ PlanResult plan_memory(const PlanInput& in) {
         // Everything batch-shaped: the KV share per slot AND the SSM/GDN state
         // per slot. Without the state the lever read "64 -> 63 frees 0 MiB" on
         // a hybrid whose 4968 MiB state was the whole overrun (2026-09-08).
-        const size_t frees = (p.kv.bytes / static_cast<size_t>(batch)) +
+        const size_t frees = (kv_batch == batch ? p.kv.bytes / static_cast<size_t>(batch) : 0) +
                              (p.kv.swa_bytes / static_cast<size_t>(batch)) +
                              (in.features.ssm_state_bytes / static_cast<size_t>(batch));
         f.levers.push_back(

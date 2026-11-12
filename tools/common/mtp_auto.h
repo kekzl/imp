@@ -9,6 +9,8 @@
 #include "model/model.h"
 #include "runtime/config.h"
 
+#include <optional>
+
 namespace imp::tools {
 
 // Chain depth auto engages on a single-stream run with a head.
@@ -18,6 +20,17 @@ inline constexpr int kMtpAutoK = 2;
 // (speculative.mtp_concurrent): batch > 1 never verifies there, so ngram=false costs nothing.
 enum class MtpAutoServing { SingleStream, ConcurrentHybrid, ConcurrentOther };
 MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid);
+
+// Engine batch of a batch-1 GDN hybrid auto drafts on: the bound verify stages its rows only at engine
+// batch 2, so this returns 2 and pins runtime.max_batch_size=1 (admission, decode and KV ceiling stay
+// at one chat). Else configured_batch. Qwen3.8-27B agent replay, 1 chat: 69.28 -> 205.58 tok/s.
+inline constexpr int kMtpBoundVerifyEngineBatch = 2;
+int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid, int requested_k,
+                          bool head_loaded, int head_auto_k_cap = 0);
+
+// Top of every server model load: the phases below write resolved keys into cfg, and a reload (resume,
+// idle unload, swap) would read them as explicit. First call snapshots cfg, later calls restore it.
+void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& startup);
 
 // Phase 1, before model load: how many rows to ask for, i.e. whether the head is worth
 // loading at all (host mmap only; the upload is Engine::init's). Returns the configured value

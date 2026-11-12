@@ -1,0 +1,15 @@
+# KV plan at --max-batch 1, Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, max_seq_len 131072
+## final code (kv_seqs = admitted sequences), /mnt/data/scratch/tail_2026_11_11/sgl_d_b1_def/server.log
+mtp_auto.cpp:34: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.mtp_concurrent=false for the single-stre
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  ceiling: recurrent 1 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 1 seqs at <= 131072 tokens
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+gpu used 21102 MiB
+## chain arm, /mnt/data/scratch/tail_2026_11_11/sgl_d_b1_chain/server.log
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  ceiling: recurrent 1 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 1 seqs at <= 131072 tokens
+gpu used 21178 MiB
+## before the kv_seqs fix (KV sized for engine batch 2), /mnt/data/scratch/tail_2026_11_11/sgl_c_b1_def/server.log
+  KV: live pass 8192 blocks -> plan 16384 blocks, APPLIED (2304 -> 4608 MiB)
+  ceiling: recurrent 2 seqs, KV 2 seqs at max_seq_len 131072 (8192 blocks/seq), all 2 seqs at <= 131072 tokens
+  gpu used 21806 MiB client errors 0 std

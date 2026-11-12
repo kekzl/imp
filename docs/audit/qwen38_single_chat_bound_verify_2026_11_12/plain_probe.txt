@@ -1,0 +1,21 @@
+# Qwen3.8-27B-NVFP4-vllm, imp-server --max-batch 1 --set kv_cache.host_spill_mb=16384, /v1/chat/completions
+# 4 plain prompts x 1024 tokens serial, greedy (temperature 0) and sampled (temperature 0.7, seeded);
+# pair = 2 requests sent at once (admission: the second queues behind the first)
+# b1_def / b1_def2 = default (B-74 lane), b1_chain = speculative.mtp_concurrent=false
+# decode_batch_max = /metrics imp_decode_batch_max (server batching loop); the chain arm reads 2 as well
+image imp:b74 created 2026-11-12T05:14:24.451576107+01:00 tree 05cd5080d41b83362c2207f1cf286eb11a6ab750 want 05cd5080d41b83362c2207f1cf286eb11a6ab750
+b1_def	greedy	tok 4096	wall_s 22.91	tok_per_wall_s 178.77	decode_tok_s 179.72	drafted 6385	accepted 2634	finish length,length,length,length
+b1_def	sampled	tok 4096	wall_s 21.95	tok_per_wall_s 186.62	decode_tok_s 187.43	drafted 6163	accepted 2704	finish length,length,length,length
+b1_def	pair	tok 2048	wall_s 11.78	tok_per_wall_s 173.90	req_s 11.78,5.64	decode_batch_max 2	queue_s 5.64	drafted 3246
+  gpu used 21102 MiB client errors 0 stderr hits 0 auto -> 7 with ngram=false (concurrent server: drafts while
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+b1_chain	greedy	tok 4096	wall_s 31.74	tok_per_wall_s 129.05	decode_tok_s 129.49	drafted 3120	accepted 2183	finish length,length,length,length
+b1_chain	sampled	tok 4096	wall_s 32.53	tok_per_wall_s 125.91	decode_tok_s 126.23	drafted 3172	accepted 2116	finish length,length,length,length
+b1_chain	pair	tok 2048	wall_s 16.93	tok_per_wall_s 120.95	req_s 8.53,16.93	decode_batch_max 2	queue_s 8.53	drafted 1602
+  gpu used 21178 MiB client errors 0 stderr hits 0 auto -> 2 with ngram=false (single-stream run, checkpoint sh
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+b1_def2	greedy	tok 4096	wall_s 22.87	tok_per_wall_s 179.07	decode_tok_s 179.85	drafted 6385	accepted 2634	finish length,length,length,length
+b1_def2	sampled	tok 4096	wall_s 21.93	tok_per_wall_s 186.76	decode_tok_s 187.55	drafted 6163	accepted 2704	finish length,length,length,length
+b1_def2	pair	tok 2048	wall_s 11.77	tok_per_wall_s 174.02	req_s 11.77,5.64	decode_batch_max 2	queue_s 5.63	drafted 3246
+  gpu used 21102 MiB client errors 0 stderr hits 0 auto -> 7 with ngram=false (concurrent server: drafts while
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)

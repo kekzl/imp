@@ -1,0 +1,78 @@
+# Reload: imp-server suspend (/admin/suspend) + resume (/admin/resume) reloads the model through load_model_into_state.
+# Qwen3.8-27B-NVFP4-vllm, 4 plain prompts x 1024 tokens serial, greedy and sampled (temperature 0.7, seeded), before (pre) and after (post) the resume.
+# b1 = --max-batch 1 (B-74 lane), bdef = server default. Numbered lines: server.log line of the lane / MTP auto / KV plan lines.
+## unfixed (lane without mtp_auto_restore_startup), /mnt/data/scratch/tail_2026_11_11/reload_a.out
+image imp:b74 created 2026-11-12T05:14:24.451576107+01:00 tree 05cd5080d41b83362c2207f1cf286eb11a6ab750 want 935d951b93cdd4d45e5cbae67cdb73d3f0b3b1ce
+suspend http rc=0 {"device_reset":true,"model":"Qwen3.8-27B-NVFP4-vllm","snapshot_bytes":13029303296,"suspended":true,"vram_free_before":11690573824}
+resume http rc=0 {"model":"Qwen3.8-27B-NVFP4-vllm","resume_ms":8816,"suspended":false,"warm_hits":704}
+suspend http rc=0 {"device_reset":true,"model":"Qwen3.8-27B-NVFP4-vllm","snapshot_bytes":13029303296,"suspended":true,"vram_free_before":10444865536}
+resume http rc=0 {"model":"Qwen3.8-27B-NVFP4-vllm","resume_ms":10732,"suspended":false,"warm_hits":704}
+== b1
+b1_pre	greedy	decode_tok_s 179.66	drafted 6385	accepted 2634
+b1_pre	sampled	decode_tok_s 187.34	drafted 6163	accepted 2704
+b1_post	greedy	decode_tok_s 133.63	drafted 4401	accepted 2497
+b1_post	sampled	decode_tok_s 123.66	drafted 4383	accepted 2302
+  client errors 0 stderr hits 0
+175:mtp_auto.cpp:34: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool
+176:mtp_auto.cpp:130: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+177:mtp_auto.cpp:85: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+242:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+258:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+286:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+919:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+934:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+== bdef
+bdef_pre	greedy	decode_tok_s 179.22	drafted 6385	accepted 2634
+bdef_pre	sampled	decode_tok_s 186.71	drafted 6163	accepted 2704
+bdef_post	greedy	decode_tok_s 178.95	drafted 6385	accepted 2634
+bdef_post	sampled	decode_tok_s 187.56	drafted 6163	accepted 2704
+  client errors 0 stderr hits 0
+175:mtp_auto.cpp:130: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+176:mtp_auto.cpp:85: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+241:  KV: live pass 7378 blocks -> plan 11014 blocks, APPLIED (2075 -> 3098 MiB)
+258:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+286:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+941:mtp_auto.cpp:85: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+1005:  KV: live pass 8092 blocks -> plan 14321 blocks, APPLIED (2276 -> 4028 MiB)
+1022:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+1050:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 re
+## fixed (mtp_auto_restore_startup), /mnt/data/scratch/tail_2026_11_11/reload_b.out
+image imp:b74 created 2026-11-12T05:59:15.284735889+01:00 tree 63710e39481c1a4c9fa6b776c537c9259a20eb87 want 63710e39481c1a4c9fa6b776c537c9259a20eb87
+suspend http rc=0 {"device_reset":true,"model":"Qwen3.8-27B-NVFP4-vllm","snapshot_bytes":13029303296,"suspended":true,"vram_free_before":11690573824}
+resume http rc=0 {"model":"Qwen3.8-27B-NVFP4-vllm","resume_ms":9246,"suspended":false,"warm_hits":704}
+suspend http rc=0 {"device_reset":true,"model":"Qwen3.8-27B-NVFP4-vllm","snapshot_bytes":13029303296,"suspended":true,"vram_free_before":10444865536}
+resume http rc=0 {"model":"Qwen3.8-27B-NVFP4-vllm","resume_ms":10542,"suspended":false,"warm_hits":704}
+== b1
+b1_pre	greedy	decode_tok_s 179.93	drafted 6385	accepted 2634
+b1_pre	sampled	decode_tok_s 187.75	drafted 6163	accepted 2704
+b1_post	greedy	decode_tok_s 179.80	drafted 6385	accepted 2634
+b1_post	sampled	decode_tok_s 187.72	drafted 6163	accepted 2704
+  client errors 0 stderr hits 0
+175:mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool
+176:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+177:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+242:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+258:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+286:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+858:mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool
+859:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+860:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+924:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+940:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+968:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+== bdef
+bdef_pre	greedy	decode_tok_s 179.82	drafted 6385	accepted 2634
+bdef_pre	sampled	decode_tok_s 187.52	drafted 6163	accepted 2704
+bdef_post	greedy	decode_tok_s 179.64	drafted 6385	accepted 2634
+bdef_post	sampled	decode_tok_s 187.42	drafted 6163	accepted 2704
+  client errors 0 stderr hits 0
+175:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+176:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+241:  KV: live pass 7378 blocks -> plan 11014 blocks, APPLIED (2075 -> 3098 MiB)
+258:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+286:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+946:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+947:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+1011:  KV: live pass 8092 blocks -> plan 14321 blocks, APPLIED (2276 -> 4028 MiB)
+1028:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+1056:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 4 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 re

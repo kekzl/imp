@@ -42,6 +42,14 @@ TEST(ExpertBatchPolicy, KvCeilingIsOneContextWithHostNvfp4Experts) {
     EXPECT_EQ(kv_ceiling_seqs(8, false), 8);
 }
 
+// runtime.max_batch_size caps admission and the KV ceiling: engine batch 2, decode cap 1 = 1 context.
+TEST(ExpertBatchPolicy, AdmittedBatchIsTheSmallerOfEngineBatchAndDecodeCap) {
+    EXPECT_EQ(admitted_batch(2, 1), 1);
+    EXPECT_EQ(admitted_batch(8, 0), 8) << "0 = decode cap unset";
+    EXPECT_EQ(admitted_batch(4, 8), 4);
+    EXPECT_EQ(kv_ceiling_seqs(admitted_batch(2, 1), false), 1);
+}
+
 TEST(ExpertBatchPolicy, WarnsPastDeviceRowsWithBudgetAndSlots) {
     // 422 slots/layer x 48 layers x 0.88 MiB (Flash-Next): 17.39 GiB.
     const size_t bytes = 422ull * 48 * 922746;

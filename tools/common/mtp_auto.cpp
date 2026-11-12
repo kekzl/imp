@@ -9,6 +9,13 @@
 
 namespace imp::tools {
 
+void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& startup) {
+    if (startup)
+        cfg = *startup;
+    else
+        startup = cfg;
+}
+
 int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
     const int configured = cfg.speculative.mtp_k;
     if (configured >= 0)
@@ -21,6 +28,22 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
     if (configured_batch != 1 && !cfg.speculative.batch_verify && !cfg.speculative.mtp_concurrent)
         return 0;
     return kMtpAutoK;
+}
+
+int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid, int requested_k,
+                          bool head_loaded, int head_auto_k_cap) {
+    const bool bound = configured_batch == 1 && gdn_hybrid && cfg.speculative.mtp_k < 0 && requested_k > 0 &&
+                       head_loaded && head_auto_k_cap >= 0 && cfg.speculative.mtp_concurrent &&
+                       mtp_bound_verify_config_rows(cfg) >= kMtpBoundVerifyEngineBatch;
+    if (!bound)
+        return configured_batch;
+    cfg.runtime.max_batch_size = 1;
+    IMP_LOG_INFO(
+        "max_batch_size 1: engine batch %d with runtime.max_batch_size=1, the one chat verifies its MTP "
+        "drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set "
+        "speculative.mtp_concurrent=false for the single-stream chain.",
+        kMtpBoundVerifyEngineBatch);
+    return kMtpBoundVerifyEngineBatch;
 }
 
 MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid) {
