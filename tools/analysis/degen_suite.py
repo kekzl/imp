@@ -660,9 +660,15 @@ class Suite:
         # the turn-1 transcript is the rendered history.
         name = "turn 2 resent from a prefix snapshot gives the same answer"
         kw = {"chat_template_kwargs": {"enable_thinking": False}}
+        # The fixed paragraph keeps the turn-2 prompt past server.snapshot_min_prompt_tokens (256) plus the
+        # hybrid tail rows for any reply length: at 274 tokens (Qwen3.8-27B, 893-char reply) no prompt
+        # snapshot was taken and the check skipped on cached=[0, 0].
         sys_msg = ("You are a precise assistant. Answer in full sentences and explain your reasoning "
                    "step by step so the reader can follow along without prior knowledge of the topic. "
-                   "Prefer concrete physical mechanisms over vague generalities, and name the quantities involved.")
+                   "Prefer concrete physical mechanisms over vague generalities, and name the quantities involved. "
+                   + "Earth science background: water evaporates from oceans, lakes and soil, condenses into "
+                   "clouds as air rises and cools, falls as rain or snow, and returns through rivers, "
+                   "groundwater and glaciers; energy from the sun drives each step. " * 6)
         msgs = [{"role": "system", "content": sys_msg},
                 {"role": "user", "content": "Describe the water cycle in about 150 words."}]
         a1 = self.srv.chat(msgs, max_tokens=250, **kw)["content"]

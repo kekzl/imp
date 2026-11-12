@@ -1,0 +1,39 @@
+# degen_suite 'turn 2 resent from a prefix snapshot gives the same answer', Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+## gate history (tools/analysis/degen_suite.py, full suite)
+B-74 gates (imp:b74):   [PASS] turn 2 resent from a prefix snapshot gives the same answer
+B-74 mid run, /mnt/data/scratch/tail_2026_11_11/degen_mid/degen.json: PASS cached=[0, 256] first='While climate change impacts the entire hydrological cycle, ' again='While climate change impacts
+B-76 gates (imp:bfp8d, --quick):   [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+B-80 gates (imp:b80, --quick):   [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+## rule: a hybrid prompt snapshot needs the prompt past server.snapshot_min_prompt_tokens
+359:        int snapshot_min_prompt_tokens = 256;
+9:inline constexpr int kMinPromptChunkRows = 33;
+## test servers of imp:v0.66.0, the check's requests replayed (/mnt/data/scratch/head_prof/resend_ab/): prompt tokens per request (server log)
+## def = defaults, nofac = speculative.mtp_batch_verify_factor_row=false; imp-0 turn 1, imp-1..3 turn-2 sends, imp-4.. padded system prompt
+### def
+handlers_chat_core.cpp:1012: [imp-0] 78 prompt + 169 completion tokens (1 choices), 1056.1 ms
+handlers_chat_core.cpp:1012: [imp-1] 274 prompt + 120 completion tokens (1 choices), 682.0 ms
+handlers_chat_core.cpp:1012: [imp-2] 274 prompt + 120 completion tokens (1 choices), 674.4 ms
+handlers_chat_core.cpp:1012: [imp-3] 274 prompt + 120 completion tokens (1 choices), 672.5 ms
+handlers_chat_core.cpp:1012: [imp-4] 441 prompt + 189 completion tokens (1 choices), 1079.6 ms
+handlers_chat_core.cpp:1012: [imp-5] 657 prompt + 120 completion tokens (1 choices), 624.9 ms
+handlers_chat_core.cpp:1012: [imp-6] 657 prompt + 120 completion tokens (1 choices), 591.0 ms
+handlers_chat_core.cpp:1012: [imp-7] 657 prompt + 120 completion tokens (1 choices), 591.6 ms
+### nofac
+handlers_chat_core.cpp:1012: [imp-0] 78 prompt + 203 completion tokens (1 choices), 1348.4 ms
+handlers_chat_core.cpp:1012: [imp-1] 308 prompt + 120 completion tokens (1 choices), 800.5 ms
+handlers_chat_core.cpp:1012: [imp-2] 308 prompt + 120 completion tokens (1 choices), 760.7 ms
+handlers_chat_core.cpp:1012: [imp-3] 308 prompt + 120 completion tokens (1 choices), 759.9 ms
+handlers_chat_core.cpp:1012: [imp-4] 441 prompt + 191 completion tokens (1 choices), 1176.4 ms
+handlers_chat_core.cpp:1012: [imp-5] 659 prompt + 120 completion tokens (1 choices), 719.9 ms
+handlers_chat_core.cpp:1012: [imp-6] 659 prompt + 120 completion tokens (1 choices), 685.4 ms
+handlers_chat_core.cpp:1012: [imp-7] 659 prompt + 120 completion tokens (1 choices), 682.4 ms
+## cached tokens per send were printed by resend.py to the terminal and not saved; not repeated here
+## observed, unexplained, not part of this fix: the first turn-2 send never restored from the turn-1 transcript snapshot
+## fix (tools/analysis/degen_suite.py): fixed background paragraph x6 in the system prompt; prod imp-server v0.66.0 (idle), multi-turn only
+before, /mnt/data/scratch/head_prof/repro_mt_prod.txt:
+  [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+degen_suite: 3 checks, 0 FAIL, 0 XFAIL, 1 skipped (7s)
+after, /mnt/data/scratch/head_prof/repro_mt_fix.txt and /mnt/data/scratch/head_prof/mt/mt.json:
+  [PASS] turn 2 resent from a prefix snapshot gives the same answer
+degen_suite: 3 checks, 0 FAIL, 0 XFAIL, 0 skipped (7s)
+PASS cached=[560, 560] first='While climate change impacts every stage of the water cycle,' again='While climate change impac
