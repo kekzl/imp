@@ -15,6 +15,7 @@
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
 #include "quant/nvfp4_gemm.h"       // gemv_nvfp4_kpar_fp32 (NVFP4 chain lm_head)
+#include "quant/fp8_quant.h"        // quantize_fp8_rows_async (speculative.mtp_body_fp8)
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
 // relu_sqr_inplace — activation for the non-gated (Nemotron) MTP experts.
@@ -29,6 +30,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 namespace imp {
 
@@ -371,6 +373,62 @@ bool mtp_prenorm_allocate(MtpDraftWorkspace& ws, int rows) {
     return true;
 }
 
+static void mtp_body_weights(const MtpHead& mtp, const Tensor* (&w)[8]) {
+    const Tensor* all[8] = {&mtp.fc,
+                            &mtp.q_proj,
+                            &mtp.k_proj,
+                            &mtp.v_proj,
+                            &mtp.o_proj,
+                            &mtp.shared_expert_gate_proj,
+                            &mtp.shared_expert_up_proj,
+                            &mtp.shared_expert_down_proj};
+    std::copy(std::begin(all), std::end(all), std::begin(w));
+}
+
+size_t mtp_body_fp8_bytes(const MtpHead& mtp) {
+    const Tensor* w[8];
+    mtp_body_weights(mtp, w);
+    if (mtp.hc_count > 0 || mtp.router.ndim > 0)
+        return 0;
+    size_t bytes = 0;
+    for (const Tensor* t : w) {
+        // Shapes only: the plan prices this before the BF16 -> FP16 upload.
+        if (t->ndim != 2 || t->shape[0] <= 0 || t->shape[1] % 512 != 0)
+            return 0;
+        bytes += static_cast<size_t>(t->shape[0]) * (static_cast<size_t>(t->shape[1]) + sizeof(float));
+        bytes = (bytes + 255) / 256 * 256;
+    }
+    return bytes;
+}
+
+bool mtp_body_fp8_allocate(const MtpHead& mtp, MtpDraftWorkspace& ws, cudaStream_t stream) {
+    const Tensor* w[8];
+    mtp_body_weights(mtp, w);
+    const size_t bytes = mtp_body_fp8_bytes(mtp);
+    if (ws.d_fp8_body != nullptr || ws.hc_count > 0 || bytes == 0)
+        return false;
+    for (const Tensor* t : w)
+        if (!t->data || !t->on_device || t->qtype != QType::F16)
+            return false;
+    if (!mtp_dev_alloc(ws, &ws.d_fp8_body, bytes)) {
+        ws.d_fp8_body = nullptr;
+        return false;
+    }
+    char* p = static_cast<char*>(ws.d_fp8_body);
+    for (int i = 0; i < 8; i++) {
+        const int rows = static_cast<int>(w[i]->shape[0]);
+        const int k = static_cast<int>(w[i]->shape[1]);
+        float* scales = reinterpret_cast<float*>(p + static_cast<size_t>(rows) * k);
+        quantize_fp8_rows_async(w[i]->data, p, rows, k, scales, stream);
+        ws.fp8_w[i] = p;
+        ws.fp8_s[i] = scales;
+        const size_t used = static_cast<size_t>(p - static_cast<char*>(ws.d_fp8_body)) +
+                            static_cast<size_t>(rows) * (k + sizeof(float));
+        p = static_cast<char*>(ws.d_fp8_body) + (used + 255) / 256 * 256;
+    }
+    return cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
 bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts, int top_k, int expert_d_ff, int shared_d_ff,
                             int num_heads, int num_kv_heads, int head_dim,
@@ -585,6 +643,9 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
     frfn(ws.d_prenorm_rows);
+    frfn(ws.d_fp8_body);
+    std::fill(std::begin(ws.fp8_w), std::end(ws.fp8_w), nullptr);
+    std::fill(std::begin(ws.fp8_s), std::end(ws.fp8_s), nullptr);
     ws.prenorm_rows_cap = 0;
     frfn(ws.d_carry);
     ws.carry_rows_cap = 0;
@@ -651,6 +712,18 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.num_heads = ws.num_kv_heads = ws.head_dim = 0;
 }
 
+// Body weight w (mtp_body_fp8_allocate order) applied to `in`: the E4M3 copy at <= 32 rows, else FP16 gemm.
+static void mtp_body_proj(const MtpDraftWorkspace& ws, int w, const Tensor& in, const Tensor& W, Tensor& out,
+                          cudaStream_t stream) {
+    const int rows = static_cast<int>(in.shape[0]);
+    if (ws.fp8_w[w] != nullptr && rows <= 32 &&
+        gemv_fp8_rowscale_f16(ws.fp8_w[w], ws.fp8_s[w], static_cast<const half*>(in.data),
+                              static_cast<half*>(out.data), static_cast<int>(W.shape[0]),
+                              static_cast<int>(W.shape[1]), rows, stream))
+        return;
+    imp::gemm(in, W, out, 1.0f, 0.0f, stream);
+}
+
 // ---------------------------------------------------------------------------
 // Draft step
 // ---------------------------------------------------------------------------
@@ -667,7 +740,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         int64_t out_shape[2] = {1, int64_t{2} * nh * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_q_full,     QType::F16, 2, out_shape, true);
-        imp::gemm(in_view, mtp.q_proj, out_view, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 1, in_view, mtp.q_proj, out_view, stream);
     }
     // 5.A.3 — K, V: k_proj/v_proj @ d_input_norm → [nkv * hdh] each
     if (ws.d_k_proj && nkv > 0) {
@@ -675,14 +748,14 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         int64_t out_shape[2] = {1, static_cast<int64_t>(nkv) * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_k_proj,     QType::F16, 2, out_shape, true);
-        imp::gemm(in_view, mtp.k_proj, out_view, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 2, in_view, mtp.k_proj, out_view, stream);
     }
     if (ws.d_v_proj && nkv > 0) {
         int64_t in_shape[2]  = {1, hd};
         int64_t out_shape[2] = {1, static_cast<int64_t>(nkv) * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_v_proj,     QType::F16, 2, out_shape, true);
-        imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 3, in_view, mtp.v_proj, out_view, stream);
     }
 
     // Attention path: with a KV ring present, extract Q per-head, apply fused qk-norm+RoPE,
@@ -791,7 +864,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         int64_t out_shape[2] = {1, hd};
         Tensor in_view (ws.d_attn_out,      QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_attn_residual, QType::F16, 2, out_shape, true);
-        imp::gemm(in_view, mtp.o_proj, out_view, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 4, in_view, mtp.o_proj, out_view, stream);
     }
     return true;
 }
@@ -1071,7 +1144,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
         int64_t fc_out_shape[2] = {1, hidden_dim};
         Tensor fc_in_view (ws.d_fc_in,  QType::F16, 2, fc_in_shape,  true);
         Tensor fc_out_view(ws.d_fc_out, QType::F16, 2, fc_out_shape, true);
-        imp::gemm(fc_in_view, mtp.fc, fc_out_view, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 0, fc_in_view, mtp.fc, fc_out_view, stream);
     }
 
     // Attention (Qwen3.6 MTP attn_output_gate=True, vllm Qwen3NextAttention): q_proj ->
@@ -1276,7 +1349,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                 int64_t out_shape[2] = {1, d_ff_s};
                 Tensor in_view (ws.d_post_norm,   QType::F16, 2, in_shape,  true);
                 Tensor out_view(ws.d_shared_gate, QType::F16, 2, out_shape, true);
-                imp::gemm(in_view, mtp.shared_expert_gate_proj, out_view, 1.0f, 0.0f, stream);
+                mtp_body_proj(ws, 5, in_view, mtp.shared_expert_gate_proj, out_view, stream);
             }
             // shared_up = shared_expert_up_proj @ post_norm  → [d_ff_s]
             {
@@ -1284,7 +1357,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                 int64_t out_shape[2] = {1, d_ff_s};
                 Tensor in_view (ws.d_post_norm, QType::F16, 2, in_shape,  true);
                 Tensor out_view(ws.d_shared_up, QType::F16, 2, out_shape, true);
-                imp::gemm(in_view, mtp.shared_expert_up_proj, out_view, 1.0f, 0.0f, stream);
+                mtp_body_proj(ws, 6, in_view, mtp.shared_expert_up_proj, out_view, stream);
             }
             // shared_act = silu(shared_gate) * shared_up, or relu(up)^2 when the
             // checkpoint has no gate half.
@@ -1309,7 +1382,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                 int64_t out_shape[2] = {1, hd};
                 Tensor in_view (ws.d_shared_act, QType::F16, 2, in_shape,  true);
                 Tensor out_view(ws.d_shared_out, QType::F16, 2, out_shape, true);
-                imp::gemm(in_view, mtp.shared_expert_down_proj, out_view, 1.0f, 0.0f, stream);
+                mtp_body_proj(ws, 7, in_view, mtp.shared_expert_down_proj, out_view, stream);
             }
             // Apply sigmoid(shared_expert_gate · post_norm) scalar to shared_out
             // in-place via the existing fused kernel. MoE checkpoints only —
@@ -1406,7 +1479,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
         int64_t in_s[2] = {n, int64_t{2} * H};
         Tensor in_v(ws.d_b_fc_in, QType::F16, 2, in_s, true);
         Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        imp::gemm(in_v, mtp.fc, out_v, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 0, in_v, mtp.fc, out_v, stream);
     }
 
     // 5 - attention block. K/V of all n rows; Q, attention, o_proj and the MLP only for the last m rows
@@ -1426,14 +1499,14 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
             int64_t out_s[2] = {m, q_out};
             Tensor in_m(rows_at(ws.d_b_norm, H), QType::F16, 2, mH, true);
             Tensor out_v(ws.d_b_q_full, QType::F16, 2, out_s, true);
-            imp::gemm(in_m, mtp.q_proj, out_v, 1.0f, 0.0f, stream);
+            mtp_body_proj(ws, 1, in_m, mtp.q_proj, out_v, stream);
         }
         {
             int64_t out_s[2] = {n, static_cast<int64_t>(nkv) * hdh};
             Tensor k_v(ws.d_b_k, QType::F16, 2, out_s, true);
             Tensor v_v(ws.d_b_v, QType::F16, 2, out_s, true);
-            imp::gemm(in_v, mtp.k_proj, k_v, 1.0f, 0.0f, stream);
-            imp::gemm(in_v, mtp.v_proj, v_v, 1.0f, 0.0f, stream);
+            mtp_body_proj(ws, 2, in_v, mtp.k_proj, k_v, stream);
+            mtp_body_proj(ws, 3, in_v, mtp.v_proj, v_v, stream);
         }
         // Q extract: per-head [q | gate] -> contiguous Q rows; one 2D copy of height m*nh.
         const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) * sizeof(__half);
@@ -1474,7 +1547,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
             int64_t in_s[2] = {m, static_cast<int64_t>(nh) * hdh};
             Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
             Tensor out_v(ws.d_b_res, QType::F16, 2, mH, true);
-            imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
+            mtp_body_proj(ws, 4, in_a, mtp.o_proj, out_v, stream);
             int grid = ((m * H) + kBlock - 1) / kBlock;
             mtp_add_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(rows_at(ws.d_b_fc_out, H)),
                                                         static_cast<const __half*>(ws.d_b_res), m * H);
@@ -1491,11 +1564,11 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
         Tensor gate_v(ws.d_b_gate, QType::F16, 2, ff_s, true);
         Tensor up_v(ws.d_b_up, QType::F16, 2, ff_s, true);
         Tensor act_v(ws.d_b_act, QType::F16, 2, ff_s, true);
-        imp::gemm(pn_v, mtp.shared_expert_gate_proj, gate_v, 1.0f, 0.0f, stream);
-        imp::gemm(pn_v, mtp.shared_expert_up_proj, up_v, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 5, pn_v, mtp.shared_expert_gate_proj, gate_v, stream);
+        mtp_body_proj(ws, 6, pn_v, mtp.shared_expert_up_proj, up_v, stream);
         imp::swiglu(gate_v, up_v, act_v, stream);
         Tensor down_v(ws.d_b_res, QType::F16, 2, mH, true);
-        imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
+        mtp_body_proj(ws, 7, act_v, mtp.shared_expert_down_proj, down_v, stream);
         int grid = ((m * H) + kBlock - 1) / kBlock;
         mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(rows_at(ws.d_b_fc_out, H)),
                                                            static_cast<const __half*>(ws.d_b_res), m * H);

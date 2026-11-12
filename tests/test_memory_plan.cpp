@@ -916,6 +916,7 @@ TEST(MemoryPlan, SparseMinmaxRuleCoversEveryDtypeTheGateAdmits) {
 // ── MTP draft workspace: the probe carries it into the plan and the report ──
 
 #include "compute/mtp_workspace_bytes.h"
+#include "compute/mtp_forward.h"  // mtp_body_fp8_bytes
 
 TEST(ShadowPlan, MtpWorkspaceReachesThePlanAndTheReport) {
     auto p = dense_probe();
@@ -963,4 +964,33 @@ TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     hc.hc_count = 4;  // Qwen4Exp layout: no carry, no prenorm scratch
     hc.hc_lowrank = 0;
     EXPECT_EQ(mtp_workspace_bytes(hc), mtp_workspace_bytes(s) - 10485760u);
+}
+
+// speculative.mtp_body_fp8: E4M3 rows + FP32 row scales of the dense body, priced with the head before the
+// FP16 upload (Qwen3.8-27B 406.0 MiB measured).
+TEST(MtpWorkspaceBytes, BodyFp8CopyIsPricedForADenseHead) {
+    auto w = [](int64_t rows, int64_t k) {
+        const int64_t shape[2] = {rows, k};
+        return Tensor(nullptr, QType::BF16, 2, shape, false);
+    };
+    MtpHead head;
+    head.fc = w(5120, 10240);
+    head.q_proj = w(12288, 5120);
+    head.k_proj = w(1024, 5120);
+    head.v_proj = w(1024, 5120);
+    head.o_proj = w(5120, 6144);
+    head.shared_expert_gate_proj = w(17408, 5120);
+    head.shared_expert_up_proj = w(17408, 5120);
+    head.shared_expert_down_proj = w(5120, 17408);
+    EXPECT_EQ(mtp_body_fp8_bytes(head), 424931328u);
+    const auto s = qwen38_27b_head();
+    auto fp8 = s;
+    fp8.body_fp8_bytes = mtp_body_fp8_bytes(head);
+    EXPECT_EQ(mtp_workspace_bytes(fp8) - mtp_workspace_bytes(s), 425721856u);
+    auto moe = head;
+    moe.router = w(256, 5120);
+    EXPECT_EQ(mtp_body_fp8_bytes(moe), 0u) << "an MoE head keeps its FP16 body";
+    auto odd = head;
+    odd.o_proj = w(5120, 6000);
+    EXPECT_EQ(mtp_body_fp8_bytes(odd), 0u) << "K % 512 != 0 has no streamed FP8 GEMV";
 }

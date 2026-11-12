@@ -1,0 +1,67 @@
+# Activity check on the final image: imp-cli lane / chain (/mnt/data/scratch/tail_2026_11_11/cli_bf3.out), default server replay arm 'on' (/mnt/data/scratch/tail_2026_11_11/bf_r3.out)
+image imp:bfp8c created 2026-11-12T09:54:18.833644938+01:00 tree 5247f09a5a1b1ba5e93eec00ce27195ed3328f8f want 5247f09a5a1b1ba5e93eec00ce27195ed3328f8f
+arm lane greedy 0 rc=0 09:55:13 tg  1024 tokens in  5570.07 ms  ( 183.66 tok/s)
+arm lane greedy 1 rc=0 09:55:30 tg  1024 tokens in  5174.39 ms  ( 197.70 tok/s)
+arm lane greedy 2 rc=0 09:55:46 tg  1024 tokens in  4283.46 ms  ( 238.83 tok/s)
+arm lane greedy 3 rc=0 09:56:06 tg  1024 tokens in  4969.49 ms  ( 205.86 tok/s)
+arm lane sampled 0 rc=0 09:56:24 tg  1024 tokens in  6141.49 ms  ( 166.57 tok/s)
+arm lane sampled 1 rc=0 09:56:40 tg  1024 tokens in  4816.68 ms  ( 212.39 tok/s)
+arm lane sampled 2 rc=0 09:56:57 tg  1024 tokens in  4581.02 ms  ( 223.31 tok/s)
+arm lane sampled 3 rc=0 09:57:16 tg  1024 tokens in  6060.49 ms  ( 168.80 tok/s)
+arm lane interactive rc=0 09:57:32 7421: 4 Brimble: 4 bytes 58296
+arm chain greedy 0 rc=0 09:57:52 tg  1024 tokens in  8621.49 ms  ( 118.66 tok/s)
+arm chain greedy 1 rc=0 09:58:11 tg  1024 tokens in  8237.87 ms  ( 124.18 tok/s)
+arm chain greedy 2 rc=0 09:58:30 tg  1024 tokens in  7102.85 ms  ( 144.03 tok/s)
+arm chain greedy 3 rc=0 09:58:49 tg  1024 tokens in  8485.55 ms  ( 120.56 tok/s)
+arm chain sampled 0 rc=0 09:59:12 tg  1024 tokens in  8889.93 ms  ( 115.07 tok/s)
+arm chain sampled 1 rc=0 09:59:31 tg  1024 tokens in  7937.30 ms  ( 128.89 tok/s)
+arm chain sampled 2 rc=0 09:59:50 tg  1024 tokens in  7637.02 ms  ( 133.95 tok/s)
+arm chain sampled 3 rc=0 10:00:11 tg  1024 tokens in  8589.59 ms  ( 119.10 tok/s)
+arm chain interactive rc=0 10:00:27 7421: 4 Brimble: 4 bytes 51711
+chain greedy: sum(tokens-1) 4092, sum ms 32447.76, runs 4, 126.11 tok/s
+chain sampled: sum(tokens-1) 4092, sum ms 33053.84, runs 4, 123.80 tok/s
+lane greedy: sum(tokens-1) 4092, sum ms 19997.41, runs 4, 204.63 tok/s
+lane sampled: sum(tokens-1) 4092, sum ms 21599.68, runs 4, 189.45 tok/s
+== lane
+  greedy: 4096 tok in 19997 ms = 204.63 tok/s (4 runs)
+  sampled: 4096 tok in 21600 ms = 189.45 tok/s (4 runs)
+  stderr hits 0 empty outputs 0
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool sta
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to overr
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 request
+== chain
+  greedy: 4096 tok in 32448 ms = 126.11 tok/s (4 runs)
+  sampled: 4096 tok in 33054 ms = 123.80 tok/s (4 runs)
+  stderr hits 0 empty outputs 0
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8
+## lane (/mnt/data/scratch/tail_2026_11_11/cli_bf3_lane): files with the copy line 9 of 9, WARN lines on mtp_body_fp8 / MTP workspace / plan row 0
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+## chain (/mnt/data/scratch/tail_2026_11_11/cli_bf3_chain): files with the copy line 0 of 9, WARN lines on mtp_body_fp8 / MTP workspace / plan row 0
+engine_spec_mtp.cpp:802: MTP workspace: 366.72 MiB allocated = the plan row
+## server (same image; 'want' differs because docs were edited during the run, code tree unchanged)
+image imp:bfp8c created 2026-11-12T09:54:18.833644938+01:00 tree 5247f09a5a1b1ba5e93eec00ce27195ed3328f8f want d6a66ca6b03277388eb572668b5362aa6a95455d
+== on
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   23135 |  82.1 |   103.35 |  223.85 | 30/0/0 | f325c411f715
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10465 |  58.7 |    42.56 |  245.91 | 30/0/0 | 0aab7f944b7f
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19627 |  88.3 |    96.09 |  204.25 | 30/0/0 | f148804cff2f
+total | requests 90 | output tok 53227 | reasoning 79.8 % | wall 253.12 s | 210.28 tok/s wall | 219.95 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8843.1 MiB, kv=13158 blocks (3700.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 13158 blocks -> plan 15795 blocks, APPLIED (3701 -> 4442 MiB)
+head graphs 10 stderr hits 0
+# /s/bf_r3_on/server.log
+  all       steps  15363 tok  53223 tok/step 3.464 fwd 12.808 head 2.886 sum 15.694 ms tok/ms 0.2207
+  n=1 T=5  steps  10808 share  70.4 % tok/step 2.958 fwd 12.650 head 2.770 drafted/step 4.00 matched/step 1.96
+  n=1 T=7  steps   3014 share  19.6 % tok/step 4.117 fwd 13.057 head 3.015 drafted/step 6.00 matched/step 3.12
+  n=1 T=8  steps   1541 share  10.0 % tok/step 5.740 fwd 13.426 head 3.452 drafted/step 7.00 matched/step 4.74
+354:engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+355:engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row

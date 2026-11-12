@@ -1,0 +1,15 @@
+# nsys, imp-cli lane, Qwen3.8-27B-NVFP4-vllm, FP16 MTP body: /mnt/data/scratch/head_prof/lane512_cuda_gpu_kern_sum.csv (header + top 11 kernels)
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+42.5,2095467756,74352,28183.1,34080.0,12672,572253,13036.1,"void imp::<unnamed>::gemm_nvfp4_smallm_v2_kernel<(int)6, __half>(const unsigned char *, const unsigned char *, const unsigned char *, const unsigned char *, flo
+7.5,371302752,5677,65404.7,75487.0,7232,484062,42782.9,"imp::gemv_fp16_kernel(const __half *, const __half *, __half *, int, int)"
+6.8,337227436,9952,33885.4,34784.0,640,350782,10935.9,"imp::elementwise_add_store_fp16_kernel(const __half *, const __half *, __half *, long)"
+4.7,231150706,39376,5870.3,864.0,640,299486,9156.1,"imp::device_copy_v4_kernel(const uint4 *, uint4 *, unsigned long)"
+4.0,199538284,13056,15283.3,15584.0,1248,322079,5316.6,"void imp::gated_fp16_nvfp4_kernel<(bool)0>(const __half *, const __half *, __half *, unsigned char *, unsigned char *, long, float)"
+3.8,185811677,6528,28463.8,18752.0,2304,345406,13823.1,"void imp::rmsnorm_fp16_rowblock_nvfp4_kernel<(int)2, (bool)1>(const __half *, const __half *, __half *, unsigned char *, unsigned char *, int, float, float, const _
+3.6,177637437,227,782543.8,777597.0,765692,1032892,32353.8,"void imp::<unnamed>::fp8_head_cpasync_kernel<(int)1, (int)4, (int)3, float>(const unsigned char *, const float *, const __half *, T4 *, int, int, int)"
+3.3,163213014,9792,16668.0,16960.0,4064,326975,4550.7,imp::<unnamed>::gemm_f16_narrow_smallm_kernel(imp::<unnamed>::NarrowArgs)
+2.9,144163132,850,169603.7,169247.0,168159,194943,1604.3,"void imp::<unnamed>::gemv_nvfp4_kpar_mb_fp32_kernel<(int)1>(const unsigned char *, const unsigned char *, float, const __half *, float *, int, int)"
+2.6,128846554,9888,13030.6,13408.0,607,232511,3200.5,"imp::elementwise_add_fp16_kernel(__half *, const __half *, long)"
+2.4,117263456,10848,10809.7,10400.0,3424,267615,8328.5,"void imp::gdn_scan_fused_kernel<(int)128, (int)128, __half, (int)2, __nv_bfloat16, (int)4>(const float *, const __half *, const __half *, const float *, const float
+# the draft LM head row:
+2.9,144163132,850,169603.7,169247.0,168159,194943,1604.3,"void imp::<unnamed>::gemv_nvfp4_kpar_mb_fp32_kernel<(int)1>(const unsigned char *, const unsigned char *, float, const __half *, float *, int, int)"

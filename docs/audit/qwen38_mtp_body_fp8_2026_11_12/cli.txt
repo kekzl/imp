@@ -1,0 +1,55 @@
+# imp-cli, Qwen3.8-27B-NVFP4-vllm, 4 plain prompts x 1024 tokens, one process per prompt, greedy / sampled (temperature 0.7)
+# rate = sum(tokens - 1) * 1000 / sum(decode ms) over the arm lines
+## chain (speculative.mtp_concurrent=false, mtp_k auto -> 2), image imp:bfp8b: c16 = mtp_body_fp8=false, c8 = true (before the lane-only gate)
+image imp:bfp8b created 2026-11-12T09:27:58.814150289+01:00 tree aeaac7ae109e5688b5f01a48c4136c9479ef5150 want aeaac7ae109e5688b5f01a48c4136c9479ef5150
+arm c16 greedy 0 rc=0 09:40:20 tg  1024 tokens in  8592.26 ms  ( 119.06 tok/s)
+arm c16 greedy 1 rc=0 09:40:41 tg  1024 tokens in  8245.67 ms  ( 124.07 tok/s)
+arm c16 greedy 2 rc=0 09:41:02 tg  1024 tokens in  7172.76 ms  ( 142.62 tok/s)
+arm c16 greedy 3 rc=0 09:41:23 tg  1024 tokens in  8503.10 ms  ( 120.31 tok/s)
+arm c16 sampled 0 rc=0 09:41:44 tg  1024 tokens in  8928.97 ms  ( 114.57 tok/s)
+arm c16 sampled 1 rc=0 09:42:04 tg  1024 tokens in  7980.40 ms  ( 128.19 tok/s)
+arm c16 sampled 2 rc=0 09:42:24 tg  1024 tokens in  7618.76 ms  ( 134.27 tok/s)
+arm c16 sampled 3 rc=0 09:42:44 tg  1024 tokens in  8613.59 ms  ( 118.77 tok/s)
+arm c16 interactive rc=0 09:43:01 7421: 4 Brimble: 4 bytes 51711
+arm c8 greedy 0 rc=0 09:43:23 tg  1024 tokens in  8110.48 ms  ( 126.13 tok/s)
+arm c8 greedy 1 rc=0 09:43:43 tg  1024 tokens in  7360.45 ms  ( 138.99 tok/s)
+arm c8 greedy 2 rc=0 09:44:02 tg  1024 tokens in  7889.66 ms  ( 129.66 tok/s)
+arm c8 greedy 3 rc=0 09:44:23 tg  1024 tokens in  8448.99 ms  ( 121.08 tok/s)
+arm c8 sampled 0 rc=0 09:44:44 tg  1024 tokens in  8874.06 ms  ( 115.28 tok/s)
+arm c8 sampled 1 rc=0 09:45:04 tg  1024 tokens in  8052.91 ms  ( 127.03 tok/s)
+arm c8 sampled 2 rc=0 09:45:25 tg  1024 tokens in  8588.33 ms  ( 119.12 tok/s)
+arm c8 sampled 3 rc=0 09:45:45 tg  1024 tokens in  8373.72 ms  ( 122.17 tok/s)
+arm c8 interactive rc=0 09:46:02 7421: 4 Brimble: 4 bytes 51483
+c16 greedy: sum(tokens-1) 4092, sum ms 32513.79, runs 4, 125.85 tok/s
+c16 sampled: sum(tokens-1) 4092, sum ms 33141.72, runs 4, 123.47 tok/s
+c8 greedy: sum(tokens-1) 4092, sum ms 31809.58, runs 4, 128.64 tok/s
+c8 sampled: sum(tokens-1) 4092, sum ms 33889.02, runs 4, 120.75 tok/s
+  stderr hits 0 empty outputs 0
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% pl
+  stderr hits 0 empty outputs 0
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% pl
+## lane (default chat run, mtp_k auto -> 7), dev binary prototype: fp16 / fp8 body, texts differ (unpaired)
+binary build-dev/imp-cli ca689323 dirty 6
+arm fp16 greedy 0 rc=0 08:36:33 tg  1024 tokens in  6175.24 ms  ( 165.66 tok/s) | verify_steps=395 miss_steps=0 drafted=1670 accepted=628
+arm fp16 greedy 1 rc=0 08:36:51 tg  1024 tokens in  5924.66 ms  ( 172.67 tok/s) | verify_steps=377 miss_steps=0 drafted=1650 accepted=646
+arm fp16 greedy 2 rc=0 08:37:09 tg  1024 tokens in  5835.32 ms  ( 175.31 tok/s) | verify_steps=371 miss_steps=0 drafted=1617 accepted=652
+arm fp16 greedy 3 rc=0 08:37:27 tg  1024 tokens in  6497.19 ms  ( 157.45 tok/s) | verify_steps=411 miss_steps=0 drafted=1780 accepted=612
+arm fp16 sampled 0 rc=0 08:37:46 tg  1024 tokens in  6287.31 ms  ( 162.71 tok/s) | verify_steps=401 miss_steps=0 drafted=1714 accepted=622
+arm fp16 sampled 1 rc=0 08:38:04 tg  1024 tokens in  4848.91 ms  ( 210.98 tok/s) | verify_steps=298 miss_steps=0 drafted=1393 accepted=725
+arm fp16 sampled 2 rc=0 08:38:23 tg  1024 tokens in  5093.99 ms  ( 200.83 tok/s) | verify_steps=319 miss_steps=0 drafted=1463 accepted=704
+arm fp16 sampled 3 rc=0 08:38:41 tg  1024 tokens in  6219.31 ms  ( 164.49 tok/s) | verify_steps=396 miss_steps=0 drafted=1713 accepted=627
+arm fp16 interactive rc=0 08:38:57 7421: 4 Brimble: 4 bytes 65238
+arm fp8 greedy 0 rc=0 08:39:16 tg  1024 tokens in  5875.44 ms  ( 174.11 tok/s) | verify_steps=400 miss_steps=0 drafted=1697 accepted=623
+arm fp8 greedy 1 rc=0 08:39:34 tg  1024 tokens in  5156.97 ms  ( 198.37 tok/s) | verify_steps=352 miss_steps=0 drafted=1567 accepted=671
+arm fp8 greedy 2 rc=0 08:39:53 tg  1024 tokens in  4587.06 ms  ( 223.02 tok/s) | verify_steps=310 miss_steps=0 drafted=1426 accepted=713
+arm fp8 greedy 3 rc=0 08:40:10 tg  1024 tokens in  4969.59 ms  ( 205.85 tok/s) | verify_steps=335 miss_steps=0 drafted=1538 accepted=688
+arm fp8 sampled 0 rc=0 08:40:29 tg  1024 tokens in  6128.01 ms  ( 166.94 tok/s) | verify_steps=419 miss_steps=0 drafted=1792 accepted=604
+arm fp8 sampled 1 rc=0 08:40:48 tg  1024 tokens in  4803.53 ms  ( 212.97 tok/s) | verify_steps=325 miss_steps=0 drafted=1474 accepted=698
+arm fp8 sampled 2 rc=0 08:41:05 tg  1024 tokens in  4561.23 ms  ( 224.28 tok/s) | verify_steps=307 miss_steps=0 drafted=1398 accepted=716
+arm fp8 sampled 3 rc=0 08:41:23 tg  1024 tokens in  6087.11 ms  ( 168.06 tok/s) | verify_steps=415 miss_steps=0 drafted=1758 accepted=608
+arm fp8 interactive rc=0 08:41:40 7421: 4 Brimble: 4 bytes 59233
+fp16 greedy: sum(tokens-1) 4092, sum ms 24432.41, runs 4, 167.48 tok/s
+fp16 sampled: sum(tokens-1) 4092, sum ms 22449.52, runs 4, 182.28 tok/s
+fp8 greedy: sum(tokens-1) 4092, sum ms 20589.06, runs 4, 198.75 tok/s
+fp8 sampled: sum(tokens-1) 4092, sum ms 21579.88, runs 4, 189.62 tok/s
+## trap: /mnt/data/scratch/head_prof/cli_f2.out ran runtime.deterministic=true: 'MTP head present in this checkpoint but not loaded' (MTP off in both arms), not evidence

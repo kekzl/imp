@@ -1320,6 +1320,13 @@ mtp_nvfp4_head       = true
 # order: 99.94 % of Qwen3.8 agent output tokens sit below 98304. Unset, a
 # concurrent GDN-hybrid server takes 98304; this line sets it, so drop it there.
 mtp_draft_vocab      = 0
+# On the bound verify lane (concurrent GDN-hybrid server, one-chat server,
+# imp-cli chat) MTP draft passes (<= 32 rows) read a per-row E4M3 copy of a
+# dense head body (fc, q/k/v/o, MLP; Qwen3.8-27B 406 MiB on top of the FP16
+# weights, priced in the memory plan). Draft-only; verification stays exact.
+# The mtp_k = 2 chain takes no copy (measured neutral). false = FP16 body
+# (Qwen3.8-27B agent replay 218.78 -> 204.28 tok/s per chat).
+mtp_body_fp8         = true
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.

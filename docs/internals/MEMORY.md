@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-11-11
-commit: 7f3d3adb
+verified: 2026-11-12
+commit: ca689323
 -->
 
 # imp Memory Architecture
@@ -222,7 +222,7 @@ Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, o
 
 Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculative.k`/`suffix_k_max`/MTP depth, invalidated together. Per-request spec toggling must not resize anything: buffers are planned for the config's maximum `k` and stay unused when a request does not qualify.
 
-MTP draft workspace (head KV slots, batched-feed scratch, carry, post-norm feed rows):
+MTP draft workspace (head KV slots, batched-feed scratch, carry, post-norm feed rows; on the bound verify lane the E4M3 copy of a dense head body, `speculative.mtp_body_fp8`, Qwen3.8-27B 406.0 MiB):
 
 - Plan row `MTP draft workspace`, priced by `mtp_workspace_bytes()` (`src/compute/mtp_workspace_bytes.h`, CPU) when `speculative.mtp_k > 0` and the head is uploaded.
 - Taken inside `Engine::init` before the Serving phase (`take_planned_mtp_workspace_`); audit pool `mtp_workspace`, and `MtpDraftWorkspace::device_bytes` must equal the row or enable logs a WARN.

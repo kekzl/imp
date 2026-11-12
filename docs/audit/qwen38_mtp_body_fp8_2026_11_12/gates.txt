@@ -1,0 +1,62 @@
+# B-76 final tree (imp:bfp8d, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+image imp:bfp8d created 2026-11-12T10:14:48.958184145+01:00 tree 489147e3dc74de8e351455e8dd60ff79dec6dba3 want 489147e3dc74de8e351455e8dd60ff79dec6dba3
+
+# GPU tests (image): test-core 'MtpWorkspaceBytes.*:MtpAuto.*:ShadowPlan.*:MemoryPlan.*:MtpDraftRows.*';
+# test-moe-gdn 'GdnVerifyTwoDraftsTest.*:MtpFeedBatchTest.*:GdnBatchedScanTest.*'
+test-core: [  PASSED  ] 76 tests.
+test-moe-gdn: [  PASSED  ] 37 tests.
+
+# make dev-test / make preflight
+100% tests passed, 0 tests failed out of 13
+preflight: base ca689323, 19 changed file(s)
+preflight: 0 failure(s), 30 s wall
+
+# tools/analysis/degen_suite.py --quick, server defaults
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 1 skipped (31s)
+skipped: [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 5935 blocks -> plan 9832 blocks, APPLIED (1669 -> 2765 MiB)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+head graphs 31, WARN lines on mtp_body_fp8 / plan row 0
+
+# tools/analysis/degen_suite.py --quick, --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 1 skipped (35s)
+skipped: [SKIP] turn 2 resent from a prefix snapshot gives the same answer - resend did not restore (cached=[0, 0])
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+engine_spec_mtp.cpp:802: MTP workspace: 772.72 MiB allocated = the plan row
+head graphs 17, WARN lines on mtp_body_fp8 / plan row 0
+
+stderr pattern: head graphs 31 stderr hits 0
+stderr pattern: head graphs 17 stderr hits 0
+
+# make test-spec-fidelity DOCKER_IMG=imp:bfp8d
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:bfp8d
+PASS fast gtest filter
+  decode  tg128 =  292.99 tok/s  (baseline  282.84, delta 3.59%)
+  prefill pp512 = 49521.96 tok/s  (baseline 50374.39, delta -1.69%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50473.15 tok/s  (baseline 50318.99, delta 0.31%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  187.38 tok/s
+  graphs ON  tg256 =  296.40 tok/s   (1.58x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1954.20 tok/s, slowest request 514 ms  (baseline 1899.81, delta 2.86%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 09:18:01Z, ended 09:19:39Z)

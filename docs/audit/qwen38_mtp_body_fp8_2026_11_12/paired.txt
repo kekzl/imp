@@ -1,0 +1,25 @@
+# Paired agent replay, Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, default imp-server (concurrent GDN hybrid), 1 chat:
+# tools/analysis/agent_turn_replay.py --serial --seed 1000, 3 recorded sessions x 30 turns in turn;
+# diagnostics.mtp_verify_pin=7, speculative.mtp_k=7, runtime.deterministic=true. Prototype image (key opt-in):
+# p16 = FP16 MTP body, p8 = speculative.mtp_body_fp8=true. Columns: chat | session | requests | prompt tok (last) |
+# cached % | output tok | reasoning % | decode s | tok/s decode | stops | text md5
+image imp:bfp8 created 2026-11-12T08:55:19.760256887+01:00 tree 716ccf74b0d94280b6ff07e5daddfc9a1cec5aaf want 716ccf74b0d94280b6ff07e5daddfc9a1cec5aaf
+== p16 (/mnt/data/scratch/tail_2026_11_11/bf_r1_p16/c3.client.txt)
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    99.24 |  207.18 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    57.06 |  217.04 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    98.78 |  194.00 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 270.19 s | 192.85 tok/s wall | 204.28 tok/s decode per chat
+head graphs 10 stderr hits 0
+step table:
+  all       steps  14630 tok  52099 tok/step 3.561 fwd 13.220 head 4.151 sum 17.371 ms tok/ms 0.2050
+  n=1 T=8  steps  14630 share 100.0 % tok/step 3.561 fwd 13.220 head 4.151 drafted/step 4.76 matched/step 2.56
+== p8 (/mnt/data/scratch/tail_2026_11_11/bf_r1_p8/c3.client.txt)
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    92.95 |  221.20 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    53.10 |  233.22 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    92.12 |  208.02 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 253.22 s | 205.78 tok/s wall | 218.78 tok/s decode per chat
+engine_spec_mtp.cpp:776: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+head graphs 10 stderr hits 0
+step table:
+  all       steps  14656 tok  52099 tok/step 3.555 fwd 13.219 head 2.968 sum 16.187 ms tok/ms 0.2196
+  n=1 T=8  steps  14656 share 100.0 % tok/step 3.555 fwd 13.219 head 2.968 drafted/step 4.76 matched/step 2.55
