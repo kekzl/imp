@@ -52,6 +52,7 @@ struct ShadowPlanProbe {
     int swa_live_tokens = 0;
     int swa_shared_tokens = 0;
     int max_batch_size = 1;
+    int kv_seqs = 0;  // admitted sequences the KV pool is sized for, 0 = max_batch_size
     int max_seq_len = 0;
     int kv_block_size = 16;
     int min_kv_tokens = 0;

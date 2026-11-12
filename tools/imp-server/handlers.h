@@ -24,6 +24,7 @@
 #include "responses_store.h"
 
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -251,6 +252,9 @@ struct ServerState {
     // re-stashes this via set_pending_runtime_config() before each Engine
     // construction (server may swap models at runtime via /v1/models POST).
     imp::RuntimeConfig runtime_config;
+    // runtime_config as the first load found it: each load resolves speculative.mtp_k=auto against this,
+    // not against the keys the previous load resolved (mtp_auto_restore_startup).
+    std::optional<imp::RuntimeConfig> startup_runtime_config;
     std::timed_mutex mtx;
     int default_max_tokens = 0;  // 0 = the request's remaining context (--max-tokens sets a fixed default)
     int max_seq_len = 0;

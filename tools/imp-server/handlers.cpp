@@ -657,6 +657,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // speculative.mtp_k=auto engages only for a single-stream server: read the RESOLVED batch size
     // (imp.conf/--set/--max-batch all count), not the raw CLI flag, or auto declines wrongly
     // (2026-08-29: cost 88.1 -> 117.2 tok/s on such a config).
+    imp::tools::mtp_auto_restore_startup(state.runtime_config, state.startup_runtime_config);
     state.resolved_max_batch_size = resolve_max_batch_size(state.default_args, state.runtime_config);
     int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config, state.resolved_max_batch_size);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
@@ -671,11 +672,16 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // config is stashed for Engine::init below.
     const imp::ModelProfile prof = imp::derive_model_profile(*state.model->model,
                                                              state.model->model->config());
-    imp::tools::mtp_auto_finalize(
-        state.runtime_config, mtp_k, state.model->model->mtp_ && state.model->model->mtp_->loaded,
-        state.model->model->mtp_ ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0,
-        imp::tools::mtp_auto_serving(state.runtime_config, state.resolved_max_batch_size,
-                                     prof.is_gdn && prof.is_hybrid && !prof.has_pure_ssm));
+    const bool gdn_hybrid = prof.is_gdn && prof.is_hybrid && !prof.has_pure_ssm;
+    const bool head_loaded = state.model->model->mtp_ && state.model->model->mtp_->loaded;
+    const int head_k_cap = state.model->model->mtp_ ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0;
+    // A one-chat GDN hybrid takes engine batch 2 for the bound verify; resolved_max_batch_size stays 1.
+    const int engine_batch = imp::tools::mtp_auto_engine_batch(state.runtime_config,
+                                                               state.resolved_max_batch_size, gdn_hybrid,
+                                                               mtp_k, head_loaded, head_k_cap);
+    imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k, head_loaded, head_k_cap,
+                                  imp::tools::mtp_auto_serving(state.runtime_config, engine_batch,
+                                                               gdn_hybrid));
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
     if (mtp_k <= 0)
@@ -685,6 +691,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // picks it up: a runtime model load rebuilds the Engine and consumes the pending slot.
     imp::set_pending_runtime_config(state.runtime_config);
     ImpConfig config = build_config(state.default_args, state.runtime_config, path);
+    config.max_batch_size = engine_batch;
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to create context: ") + imp_error_string(err);

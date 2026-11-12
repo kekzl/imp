@@ -1,0 +1,81 @@
+# final tree (imp:b74, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB
+image imp:b74 created 2026-11-12T06:15:18.370753008+01:00 tree 2ac7901f96f97bba22c4dfcc9b0f69b3d93d485b want 2ac7901f96f97bba22c4dfcc9b0f69b3d93d485b
+
+# GPU tests (image): test-core 'MtpAuto.*:ExpertBatchPolicy.*:ShadowPlan.*:MemoryPlan.*:MtpDraftRows.*';
+# test-moe-gdn 'GdnVerifyTwoDraftsTest.*:MtpFeedBatchTest.*:GdnBatchedScanTest.*'
+test-core: [  PASSED  ] 82 tests.
+test-moe-gdn: [  PASSED  ] 37 tests.
+
+# make dev-test
+100% tests passed, 0 tests failed out of 13
+Total Test time (real) =  21.64 sec
+
+# make preflight
+preflight: base 7b5c26bf, 24 changed file(s)
+static gates                                               ok       20  259 ok
+clang-tidy                                                 ok       11  6 changed file(s)
+clang-format                                               ok        1  changed lines clean
+actionlint                                                 skip      0  no .github change
+preflight: 0 failure(s), 32 s wall
+
+# tools/analysis/degen_suite.py, server defaults
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (39s)
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 7378 blocks -> plan 11014 blocks, APPLIED (2075 -> 3098 MiB)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+# --max-batch 1 (B-74 lane)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (42s)
+mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.
+mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thin
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+  admission 1 of engine batch 2 (runtime.max_batch_size): KV sized for 1 seqs
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+head graphs: 35 / 18
+
+# reload: --max-batch 1, 4 plain prompts x 1024 tokens before (pre) and after (post) /admin/suspend + /admin/resume
+image imp:b74 created 2026-11-12T06:15:18.370753008+01:00 tree 2ac7901f96f97bba22c4dfcc9b0f69b3d93d485b want 2ac7901f96f97bba22c4dfcc9b0f69b3d93d485b
+suspend http rc=0 {"device_reset":true,"model":"Qwen3.8-27B-NVFP4-vllm","snapshot_bytes":13029303296,"suspended":true,"vram_free_before":11690573824}
+resume http rc=0 {"model":"Qwen3.8-27B-NVFP4-vllm","resume_ms":9229,"suspended":false,"warm_hits":704}
+== b1
+b1_pre	greedy	decode_tok_s 179.68	drafted 6385	accepted 2634
+b1_pre	sampled	decode_tok_s 187.43	drafted 6163	accepted 2704
+b1_post	greedy	decode_tok_s 179.90	drafted 6385	accepted 2634
+b1_post	sampled	decode_tok_s 187.53	drafted 6163	accepted 2704
+  client errors 0 stderr hits 0
+175:mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool
+176:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+177:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+242:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+258:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+286:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+858:mtp_auto.cpp:41: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool
+859:mtp_auto.cpp:137: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an
+860:mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to o
+924:  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+940:pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+968:engine_spec_batch_verify.cpp:298: speculative.mtp_batch_verify: bound requests verify together while <= 2 decode, 4 draft(s) each, 7 after a full accept, 3 from 4 req
+
+# make test-spec-fidelity DOCKER_IMG=imp:b74
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:b74
+PASS fast gtest filter
+  decode  tg128 =  292.66 tok/s  (baseline  282.84, delta 3.47%)
+  prefill pp512 = 50013.60 tok/s  (baseline 50374.39, delta -0.72%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50489.01 tok/s  (baseline 50318.99, delta 0.34%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  173.53 tok/s
+  graphs ON  tg256 =  296.77 tok/s   (1.71x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1892.79 tok/s, slowest request 532 ms  (baseline 1899.81, delta -0.37%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 05:18:44Z, ended 05:20:22Z)

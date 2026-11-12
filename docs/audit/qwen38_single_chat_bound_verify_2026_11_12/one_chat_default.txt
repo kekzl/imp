@@ -1,0 +1,42 @@
+# Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, imp-server --max-batch 1 --set kv_cache.host_spill_mb=16384
+# tools/analysis/agent_turn_replay.py --serial --seed 1000: 3 recorded agent sessions x 30 turns in turn, 1 chat at a time
+# b1_def = server default (B-74 lane), b1_chain = --set speculative.mtp_concurrent=false (single-stream chain)
+# image line: tree label of the image the arms ran on
+image imp:b74 created 2026-11-12T05:14:24.451576107+01:00 tree 05cd5080d41b83362c2207f1cf286eb11a6ab750 want 05cd5080d41b83362c2207f1cf286eb11a6ab750
+== b1_def
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   22496 |  81.4 |   103.68 |  216.98 | 30/0/0 | a42e5987a744
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10295 |  59.1 |    45.97 |  223.95 | 30/0/0 | 39336a28a9a6
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   32587 |  91.8 |   168.37 |  193.54 | 30/0/0 | fee9717737f1
+total | requests 90 | output tok 65378 | reasoning 83.1 % | wall 329.37 s | 198.50 tok/s wall | 205.58 tok/s decode per chat
+mtp_auto.cpp:85: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9885.6 MiB, kv=8192 blocks (2304.0 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+head graphs 10 stderr hits 0
+== b1_chain
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   24059 |  84.2 |   454.74 |   52.91 | 30/0/0 | cc6fe7b002b4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   11856 |  68.0 |   169.89 |   69.79 | 30/0/0 | 9734062f46a0
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   27385 |  88.7 |   289.10 |   94.72 | 30/0/0 | 2a94cd43c480
+total | requests 90 | output tok 63300 | reasoning 83.1 % | wall 924.69 s | 68.46 tok/s wall | 69.28 tok/s decode per chat
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=10124.1 MiB, kv=8192 blocks (2304.0 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 8192 blocks -> plan 8192 blocks, APPLIED (2304 -> 2304 MiB)
+head graphs 0 stderr hits 0
+# /s/hd_s5_b1_def/server.log
+  all       steps  18988 tok  65370 tok/step 3.443 fwd 12.691 head 3.998 sum 16.689 ms tok/ms 0.2063
+  n=1 T=5  steps  13413 share  70.6 % tok/step 2.922 fwd 12.547 head 3.838 drafted/step 4.00 matched/step 1.92
+  n=1 T=7  steps   3639 share  19.2 % tok/step 4.068 fwd 12.935 head 4.131 drafted/step 6.00 matched/step 3.07
+  n=1 T=8  steps   1936 share  10.2 % tok/step 5.873 fwd 13.228 head 4.856 drafted/step 7.00 matched/step 4.87
+# bound verify steps per arm (spec_trace): b1_def above; b1_chain has 0 (chain path, the step tool divides by 0)
+# lane activity, /mnt/data/scratch/tail_2026_11_11/hd_s5_b1_def/server.log
+mtp_auto.cpp:34: max_batch_size 1: engine batch 2 with runtime.max_batch_size=1, the one chat verifies its MTP drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set speculative.mtp_concurrent=false for the single-stre
+mtp_auto.cpp:130: speculative.mtp_k: auto -> 7 with ngram=false (concurrent server: drafts while one request decodes, speculative.mtp_concurrent, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen
+# chain arm, /mnt/data/scratch/tail_2026_11_11/hd_s5_b1_chain/server.log
+mtp_auto.cpp:130: speculative.mtp_k: auto -> 2 with ngram=false (single-stream run, checkpoint ships an MTP head; measured +27-30% on thinking chats, +17-21% plain decode on Qwen3.8-27B-NVFP4). Set speculative.mtp_k=0 to opt out.
+
+# control, MTP off (head not loaded), image imp:hd3 = B-73 (#3097) final tree without B-74 code, same replay; b1_def there = pre-B-74 default (chain)
+image imp:hd3 created 2026-11-12T02:36:52.083676073+01:00 tree 28e386f601da411d4b861586d9e4a041796c54da want b6465cb64c7e2f605a18a314ea460a9a8173c561
+== b1_off
+total | requests 90 | output tok 63544 | reasoning 83.8 % | wall 663.06 s | 95.83 tok/s wall | 97.36 tok/s decode per chat
+== b1_def
+total | requests 90 | output tok 58597 | reasoning 82.3 % | wall 832.10 s | 70.42 tok/s wall | 71.36 tok/s decode per chat

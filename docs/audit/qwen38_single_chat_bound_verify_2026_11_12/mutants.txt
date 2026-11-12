@@ -1,0 +1,17 @@
+# CPU mutants, make dev-test (ctest -L unit, 13 tests). Each mutant applied, dev-test, restored.
+# mutated file | mutant | compile errors | ctest | failed gtest
+tools/common/mtp_auto.cpp | nocap | 0 | 92% tests passed, 1 tests failed out of 13 | MtpAuto.OneChatHybridTakesTheBoundVerifyBatch
+tools/common/mtp_auto.cpp | noconc | 0 | 92% tests passed, 1 tests failed out of 13 | MtpAuto.BoundVerifyBatchIsForAOneChatAutoHybridOnly
+tools/common/mtp_auto.cpp | nohybrid2 | 0 | 92% tests passed, 1 tests failed out of 13 | MtpAuto.BoundVerifyBatchIsForAOneChatAutoHybridOnly
+src/exec/expert_batch_policy.h | admit2 | 0 | 92% tests passed, 1 tests failed out of 13 | ExpertBatchPolicy.AdmittedBatchIsTheSmallerOfEngineBatchAndDecodeCap
+src/memory/plan.cpp | plankv | 0 | 92% tests passed, 1 tests failed out of 13 | ShadowPlan.CappedAdmissionSizesKvForTheAdmittedSequences
+src/runtime/plan_shadow.cpp | report | 0 | 92% tests passed, 1 tests failed out of 13 | ShadowPlan.CappedAdmissionSizesKvForTheAdmittedSequences
+src/runtime/plan_shadow.cpp | probein | 0 | 92% tests passed, 1 tests failed out of 13 | ShadowPlan.CappedAdmissionSizesKvForTheAdmittedSequences
+tools/common/mtp_auto.cpp | noreload | 0 | 92% tests passed, 1 tests failed out of 13 | MtpAuto.ReloadResolvesAgainstTheStartupConfig
+# restored tree after the first 7: 100% tests passed, 0 tests failed out of 13
+# restored tree after noreload: 100% tests passed, 0 tests failed out of 13
+# expressions of plankv, report, probein, noreload:
+plankv src/memory/plan.cpp 's/const int want_blocks = p.kv.blocks_per_seq \* kv_batch;/const int want_blocks = p.kv.blocks_per_seq * (kv_batch > 0 ? batch : batch);/'
+report src/runtime/plan_shadow.cpp 's/const int recurrent_seqs = probe.kv_seqs > 0 ? std::min(probe.kv_seqs, probe.max_batch_size)/const int recurrent_seqs = probe.kv_seqs > 0 ? std::max(probe.kv_seqs, probe.max_batch_size)/'
+probein src/runtime/plan_shadow.cpp 's/in.limits.kv_seqs = probe.kv_seqs;/in.limits.kv_seqs = probe.kv_seqs * 0;/'
+noreload tools/common/mtp_auto.cpp 's/^        cfg = \*startup;$/        (void)cfg;/'

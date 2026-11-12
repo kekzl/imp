@@ -217,9 +217,9 @@ bool Engine::init_kv_cache() {
 
     // Reserved pool slots: mc verify W-1 + batched-verify spares (recomputed after the clamp).
     int ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
-    config_.kv_ceiling_seqs = kv_ceiling_seqs(config_.max_batch_size,
-                                              experts_on_host_ && executor_ &&
-                                                  executor_->expert_cache_nvfp4_slots());
+    config_.kv_ceiling_seqs =
+        kv_ceiling_seqs(admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size),
+                        experts_on_host_ && executor_ && executor_->expert_cache_nvfp4_slots());
     config_.mxfp4_fp16_cache = runtime_config_.attention.mxfp4_fp16_fallback;  // FP16 decode cache reserve
     // MTP draft workspace: allocated at the end of init (take_planned_mtp_workspace_), so both passes
     // size KV without it; the live pass sees it as already spent.
@@ -307,6 +307,7 @@ bool Engine::init_kv_cache() {
         probe.swa_live_tokens = swa_live_tokens;
         probe.swa_shared_tokens = config_.swa_shared_tokens;
         probe.max_batch_size = config_.max_batch_size;
+        probe.kv_seqs = admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size);
         probe.max_seq_len = config_.max_seq_len;
         probe.kv_block_size = kv_bs;
         probe.min_kv_tokens = config_.min_kv_tokens;

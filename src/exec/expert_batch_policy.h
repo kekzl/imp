@@ -18,6 +18,12 @@ inline constexpr int kHostExpertAutoBatch = 8;
 // (admission bounds them), the VRAM a batch-sized ceiling held goes to the expert cache.
 inline constexpr int kHostExpertKvSeqs = 1;
 
+// Sequences the scheduler admits: runtime.max_batch_size (decode cap, 0 = unset) clamps the engine
+// batch (#1637). The KV ceiling follows it: a row past admission never holds a context.
+inline int admitted_batch(int engine_batch, int decode_cap) {
+    return decode_cap > 0 ? std::min(engine_batch, decode_cap) : engine_batch;
+}
+
 // Auto max_batch_size: min(auto, kHostExpertAutoBatch) when MoE layers are expected on the host
 // and the host can pin them, 1 when they are expected on the host expert tier, else unchanged.
 inline int auto_batch_for_host_experts(int auto_batch, int host_expert_layers, bool host_pins_experts) {

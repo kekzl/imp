@@ -24,6 +24,7 @@
 #include "memory/engine_arena.h"
 #include "memory/graph_slots.h"
 #include "memory/plan.h"
+#include "exec/expert_batch_policy.h"
 #include "exec/workspace_sizes.h"
 #include "memory/backend.h"
 #include "memory/vram_query.h"
@@ -805,15 +806,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // smaller, rows admitted beyond it hold KV and never decode until a head row finishes.
     // Admission clamps to whichever is smaller. Names stay as-is: one is the
     // C-API field, the other a documented imp.conf key; renaming either breaks a published surface.
-    int admit_cap = config_.max_batch_size;
-    const int decode_cap = runtime_config_.runtime.max_batch_size;
-    if (decode_cap > 0 && admit_cap > decode_cap) {
+    const int admit_cap = admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size);
+    if (admit_cap < config_.max_batch_size) {
         IMP_LOG_INFO(
             "admission capped at %d to match runtime.max_batch_size (EngineConfig::max_batch_size "
             "is %d). Admitting more than the decode batch can serve parks the extra rows on their "
             "KV until a head row finishes.",
-            decode_cap, admit_cap);
-        admit_cap = decode_cap;
+            admit_cap, config_.max_batch_size);
     }
     scheduler_ = std::make_unique<Scheduler>(admit_cap);
     (void)stream_.create(cudaStreamNonBlocking);

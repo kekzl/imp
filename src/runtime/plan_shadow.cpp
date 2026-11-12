@@ -2,6 +2,7 @@
 #include "runtime/vram_budget.h"
 #include "core/logging.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace imp {
@@ -39,6 +40,7 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     in.features.swa_shared_tokens = probe.swa_shared_tokens;
 
     in.limits.max_batch_size = probe.max_batch_size;
+    in.limits.kv_seqs = probe.kv_seqs;
     in.limits.max_seq_len = probe.max_seq_len;
     in.limits.kv_block_size = probe.kv_block_size;
     in.limits.kv_block_bytes_per_layer = probe.kv_block_bytes_per_layer;
@@ -71,7 +73,9 @@ static std::string slot_ceiling_lines(const ShadowPlanProbe& probe, const PlanRe
     // operator needs the binding ceiling.
     // The pool the engine runs: the plan's on accept, the live pass's on reject (#2347: a rejected
     // plan has 0 blocks and printed "Set runtime.max_seq_len=0").
-    const int recurrent_seqs = probe.max_batch_size;
+    // Slots that take a request: admission below the engine batch (kv_seqs) leaves the rest idle.
+    const int recurrent_seqs = probe.kv_seqs > 0 ? std::min(probe.kv_seqs, probe.max_batch_size)
+                                                 : probe.max_batch_size;
     const int pool_blocks = shadow.ok ? shadow.plan.kv.blocks : live_kv_blocks;
     const int blocks_per_seq = shadow.ok && shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks_per_seq
                                : probe.kv_block_size > 0
@@ -86,6 +90,9 @@ static std::string slot_ceiling_lines(const ShadowPlanProbe& probe, const PlanRe
         "  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq), all %d seqs at "
         "<= %d tokens",
         recurrent_seqs, kv_seqs, probe.max_seq_len, blocks_per_seq, recurrent_seqs, ctx_all);
+    if (recurrent_seqs < probe.max_batch_size)
+        emit("  admission %d of engine batch %d (runtime.max_batch_size): KV sized for %d seqs",
+             recurrent_seqs, probe.max_batch_size, recurrent_seqs);
     // Only where there IS per-slot state to over-buy. A dense pool that holds
     // fewer full-context sequences than max_batch_size is ordinary continuous
     // batching: nothing was pre-charged per slot, so nothing was wasted.

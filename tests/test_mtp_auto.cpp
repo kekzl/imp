@@ -205,6 +205,77 @@ TEST(MtpAuto, ConcurrentOptOutRestoresTheDecline) {
     EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), tools::kMtpAutoK) << "single stream unchanged";
 }
 
+// A one-chat GDN hybrid verifies on the bound path: engine batch 2, admission and decode stay 1.
+TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
+    RuntimeConfig cfg;
+    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, /*gdn_hybrid=*/true, k,
+                                                   /*head_loaded=*/true);
+    EXPECT_EQ(batch, 2) << "the bound verify stages rows from engine batch 2 up";
+    EXPECT_EQ(cfg.runtime.max_batch_size, 1) << "admission and decode stay at one chat";
+    const auto serving = tools::mtp_auto_serving(cfg, batch, /*gdn_hybrid=*/true);
+    EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
+    tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
+    EXPECT_EQ(cfg.speculative.mtp_k, 7) << "agent replay 1 chat: 205.58 vs 69.28 tok/s on the chain";
+    EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304);
+}
+
+// A reload (resume, idle unload, swap) resolves auto again: plain probe 179.66 -> 133.63 tok/s without.
+TEST(MtpAuto, ReloadResolvesAgainstTheStartupConfig) {
+    RuntimeConfig cfg;
+    std::optional<RuntimeConfig> startup;
+    auto load = [&](bool gdn_hybrid, bool head_loaded) {
+        tools::mtp_auto_restore_startup(cfg, startup);
+        EXPECT_EQ(cfg.speculative.mtp_k, -1) << "auto again, not the previous load's depth";
+        const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+        const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, gdn_hybrid, k, head_loaded);
+        tools::mtp_auto_finalize(cfg, k, head_loaded, /*head_auto_k_cap=*/0,
+                                 tools::mtp_auto_serving(cfg, batch, gdn_hybrid));
+        return batch;
+    };
+    EXPECT_EQ(load(/*gdn_hybrid=*/true, /*head_loaded=*/true), 2);
+    EXPECT_EQ(cfg.speculative.mtp_k, 7);
+    EXPECT_EQ(load(true, true), 2) << "the resumed one-chat server keeps the bound verify";
+    EXPECT_EQ(cfg.speculative.mtp_k, 7);
+    EXPECT_EQ(cfg.runtime.max_batch_size, 1);
+    EXPECT_EQ(load(false, false), 1) << "a head-less model";
+    EXPECT_EQ(cfg.speculative.mtp_k, 0);
+    EXPECT_EQ(load(true, true), 2) << "swapping back drafts again";
+    EXPECT_EQ(cfg.speculative.mtp_k, 7);
+    EXPECT_FALSE(cfg.speculative.ngram);
+}
+
+// Everything else keeps its batch and its runtime.max_batch_size.
+TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
+    auto batch = [](const std::vector<std::string>& ov, int configured, bool gdn_hybrid, bool head_loaded,
+                    int head_auto_k_cap) {
+        RuntimeConfig cfg;
+        EXPECT_TRUE(cfg.apply_overrides(ov).empty());
+        const int before = cfg.runtime.max_batch_size;
+        const int k = tools::mtp_auto_request_k(cfg, configured);
+        const int b = tools::mtp_auto_engine_batch(cfg, configured, gdn_hybrid, k, head_loaded,
+                                                   head_auto_k_cap);
+        if (b == configured)
+            EXPECT_EQ(cfg.runtime.max_batch_size, before) << "a decline writes nothing";
+        return b;
+    };
+    EXPECT_EQ(batch({}, kSingleStream, false, true, 0), 1) << "not a GDN hybrid";
+    EXPECT_EQ(batch({}, kSingleStream, true, false, 0), 1) << "no head";
+    EXPECT_EQ(batch({}, kSingleStream, true, true, -1), 1) << "the head declines auto";
+    EXPECT_EQ(batch({"speculative.mtp_concurrent=false"}, kSingleStream, true, true, 0), 1) << "opt-out";
+    EXPECT_EQ(batch({"speculative.mtp_k=2"}, kSingleStream, true, true, 0), 1)
+        << "explicit depth keeps the chain";
+    EXPECT_EQ(batch({"speculative.mtp_k=0"}, kSingleStream, true, true, 0), 1);
+    EXPECT_EQ(batch({"runtime.deterministic=true"}, kSingleStream, true, true, 0), 1);
+    EXPECT_EQ(batch({"speculative.mtp_batch_verify=0"}, kSingleStream, true, true, 0), 1)
+        << "no bound verify";
+    EXPECT_EQ(batch({"speculative.batch_verify=true"}, kSingleStream, true, true, 0), 1);
+    EXPECT_EQ(batch({}, kServingAutoBatch, true, true, 0), 0) << "an auto batch stays auto";
+    EXPECT_EQ(batch({}, 4, true, true, 0), 4);
+    EXPECT_EQ(batch({"runtime.max_batch_size=1"}, kSingleStream, true, true, 0), 2)
+        << "the imp.conf key counts";
+}
+
 // A Qwen4Exp head declines on a concurrent hybrid exactly as on a single stream.
 TEST(MtpAuto, ConcurrentHybridKeepsTheHeadDecline) {
     RuntimeConfig cfg;
