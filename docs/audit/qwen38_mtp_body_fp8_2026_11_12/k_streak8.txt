@@ -1,0 +1,45 @@
+# speculative.mtp_batch_verify_k_streak 7 (s7, default) vs 8 (s8), 1 chat, Qwen3.8-27B-NVFP4-vllm, image imp:bfp8d.
+# Paired: diagnostics.mtp_verify_pin=8, speculative.mtp_k=8, runtime.deterministic=true, --serial --seed 1000, 3 sessions x 30 turns.
+# Inert: mtp_bound_verify_tile_depth (src/runtime/spec_batch_verify_state.h) clamps 1 chat to 7 drafts (8 rows) before the streak cap.
+# Source /mnt/data/scratch/head_prof/bf_k1.out
+image imp:bfp8d created 2026-11-12T10:14:48.958184145+01:00 tree 489147e3dc74de8e351455e8dd60ff79dec6dba3 want 2a8385c746188dc7c4a20b6f2b5cdf3e907f9c86
+arm s7 rc=0 10:38:21
+arm s8 rc=0 10:42:30
+== s7
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   18287 |  81.3 |    87.25 |  209.60 | 30/0/0 | b72203a5da9f
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10931 |  67.9 |    48.50 |  225.40 | 30/0/0 | 6e8160560420
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   11041 |  79.7 |    57.62 |  191.62 | 30/0/0 | 93aac2c51fe9
+total | requests 90 | output tok 40259 | reasoning 77.2 % | wall 208.32 s | 193.26 tok/s wall | 208.21 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8103.1 MiB, kv=10527 blocks (2960.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 10527 blocks -> plan 13439 blocks, APPLIED (2961 -> 3780 MiB)
+head graphs 12 stderr hits 0
+== s8
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   18287 |  81.3 |    87.34 |  209.37 | 30/0/0 | b72203a5da9f
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10931 |  67.9 |    48.50 |  225.38 | 30/0/0 | 6e8160560420
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   11041 |  79.7 |    57.66 |  191.47 | 30/0/0 | 93aac2c51fe9
+total | requests 90 | output tok 40259 | reasoning 77.2 % | wall 208.48 s | 193.11 tok/s wall | 208.05 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8103.1 MiB, kv=10527 blocks (2960.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 10527 blocks -> plan 13439 blocks, APPLIED (2961 -> 3780 MiB)
+head graphs 12 stderr hits 0
+# /s/bf_k1_s7/server.log
+  all       steps  11203 tok  40257 tok/step 3.593 fwd 14.175 head 3.026 sum 17.202 ms tok/ms 0.2089
+  n=1 T=9  steps  11203 share 100.0 % tok/step 3.593 fwd 14.175 head 3.026 drafted/step 4.79 matched/step 2.59
+# /s/bf_k1_s8/server.log
+  all       steps  11203 tok  40257 tok/step 3.593 fwd 14.191 head 3.024 sum 17.215 ms tok/ms 0.2087
+  n=1 T=9  steps  11203 share 100.0 % tok/step 3.593 fwd 14.191 head 3.024 drafted/step 4.79 matched/step 2.59
+## s7 per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_k1_s7/c3.client.txt)
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   18287 |  81.3 |    87.25 |  209.60 | 30/0/0 | b72203a5da9f
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10931 |  67.9 |    48.50 |  225.40 | 30/0/0 | 6e8160560420
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   11041 |  79.7 |    57.62 |  191.62 | 30/0/0 | 93aac2c51fe9
+total | requests 90 | output tok 40259 | reasoning 77.2 % | wall 208.32 s | 193.26 tok/s wall | 208.21 tok/s decode per chat
+## s8 per-session rows with text md5 (/mnt/data/scratch/tail_2026_11_11/bf_k1_s8/c3.client.txt)
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   18287 |  81.3 |    87.34 |  209.37 | 30/0/0 | b72203a5da9f
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   10931 |  67.9 |    48.50 |  225.38 | 30/0/0 | 6e8160560420
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   11041 |  79.7 |    57.66 |  191.47 | 30/0/0 | 93aac2c51fe9
+total | requests 90 | output tok 40259 | reasoning 77.2 % | wall 208.48 s | 193.11 tok/s wall | 208.05 tok/s decode per chat
