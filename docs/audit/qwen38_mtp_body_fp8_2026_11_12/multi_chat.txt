@@ -1,0 +1,87 @@
+# B-76 at 2 and 4 overlapping chats, Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, default imp-server, image imp:bfp8d (#3100 code).
+# tools/analysis/agent_turn_replay.py without --serial, --seed 1000; loads 2 chats x 30 turns, 4 chats x 20 turns.
+# off = speculative.mtp_body_fp8=false, on = default. Unpaired: texts differ (md5 column). Source /mnt/data/scratch/head_prof/bf_m1.out
+image imp:bfp8d created 2026-11-12T10:14:48.958184145+01:00 tree 489147e3dc74de8e351455e8dd60ff79dec6dba3 want 2a8385c746188dc7c4a20b6f2b5cdf3e907f9c86
+arm off2 rc=0 10:46:30
+arm on2 rc=0 10:48:53
+arm on4 rc=0 10:50:59
+arm off4 rc=0 10:53:12
+== off2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20009 |  80.6 |   104.70 |  191.12 | 30/0/0 | fa69952ad596
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   14189 |  68.4 |    75.29 |  188.45 | 30/0/0 | 41d19af2943d
+total | requests 60 | output tok 34198 | reasoning 75.5 % | wall 111.12 s | 307.75 tok/s wall | 190.00 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 36 stderr hits 0
+== on2
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   19800 |  78.8 |    97.88 |  202.28 | 30/0/0 | 5636eee8b6c2
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12480 |  65.9 |    63.36 |  196.98 | 30/0/0 | 78e30c8e2694
+total | requests 60 | output tok 32280 | reasoning 73.8 % | wall 104.45 s | 309.04 tok/s wall | 200.20 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8843.1 MiB, kv=13158 blocks (3700.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 13158 blocks -> plan 15795 blocks, APPLIED (3701 -> 4442 MiB)
+head graphs 36 stderr hits 0
+== on4
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    6520 |  61.9 |    42.23 |  154.39 | 20/0/0 | b4758f58debe
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    8638 |  73.3 |    56.48 |  152.93 | 20/0/0 | 124626273b88
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   13411 |  80.1 |    83.82 |  159.99 | 19/1/0 | 2f18444bd72d
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   12270 |  73.6 |    74.52 |  164.66 | 20/0/0 | 7ff7c2dc8e4c
+total | requests 80 | output tok 40839 | reasoning 73.8 % | wall 87.05 s | 469.17 tok/s wall | 158.87 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:782: speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, 406.0 MiB
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=8843.1 MiB, kv=13158 blocks (3700.7 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 13158 blocks -> plan 15795 blocks, APPLIED (3701 -> 4442 MiB)
+head graphs 62 stderr hits 0
+== off4
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    7882 |  69.9 |    52.81 |  149.26 | 20/0/0 | 75b4e9ebfcfb
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    9398 |  73.5 |    65.64 |  143.18 | 20/0/0 | 488c40120419
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   13061 |  85.4 |    89.79 |  145.46 | 19/1/0 | 217717938b5b
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   12910 |  77.1 |    83.58 |  154.47 | 20/0/0 | e84b0a0a002c
+total | requests 80 | output tok 43251 | reasoning 77.5 % | wall 93.30 s | 463.57 tok/s wall | 148.22 tok/s decode per chat
+mtp_auto.cpp:92: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 60 stderr hits 0
+# /s/bf_m1_off2/server.log
+  all       steps   5255 tok  34198 tok/step 6.508 fwd 14.491 head 5.085 sum 19.576 ms tok/ms 0.3324
+  n=1 T=5  steps   1197 share  22.8 % tok/step 3.094 fwd 13.305 head 4.194 drafted/step 4.00 matched/step 2.09
+  n=1 T=7  steps    386 share   7.3 % tok/step 4.557 fwd 13.819 head 4.595 drafted/step 6.00 matched/step 3.56
+  n=1 T=8  steps    239 share   4.5 % tok/step 5.728 fwd 15.262 head 5.018 drafted/step 7.00 matched/step 4.73
+  n=2 T=5  steps   1529 share  29.1 % tok/step 6.266 fwd 14.548 head 5.080 drafted/step 8.00 matched/step 4.27
+  n=2 T=7  steps    838 share  15.9 % tok/step 8.210 fwd 15.084 head 5.444 drafted/step 12.00 matched/step 6.21
+  n=2 T=8  steps   1066 share  20.3 % tok/step 10.232 fwd 15.346 head 6.003 drafted/step 14.00 matched/step 8.23
+# /s/bf_m1_on2/server.log
+  all       steps   5353 tok  32278 tok/step 6.030 fwd 14.352 head 3.606 sum 17.957 ms tok/ms 0.3358
+  n=1 T=5  steps   1535 share  28.7 % tok/step 3.038 fwd 13.422 head 3.005 drafted/step 4.00 matched/step 2.04
+  n=1 T=7  steps    471 share   8.8 % tok/step 4.231 fwd 13.689 head 3.274 drafted/step 6.00 matched/step 3.23
+  n=1 T=8  steps    255 share   4.8 % tok/step 5.639 fwd 13.973 head 3.593 drafted/step 7.00 matched/step 4.64
+  n=2 T=5  steps   1405 share  26.2 % tok/step 6.234 fwd 14.545 head 3.704 drafted/step 8.00 matched/step 4.23
+  n=2 T=7  steps    772 share  14.4 % tok/step 8.054 fwd 15.132 head 3.956 drafted/step 12.00 matched/step 6.05
+  n=2 T=8  steps    915 share  17.1 % tok/step 10.062 fwd 15.402 head 4.341 drafted/step 14.00 matched/step 8.06
+# /s/bf_m1_on4/server.log
+  all       steps   4046 tok  40839 tok/step 10.094 fwd 15.740 head 3.072 sum 18.812 ms tok/ms 0.5366
+  n=1 T=5  steps    318 share   7.9 % tok/step 3.154 fwd 13.639 head 2.733 drafted/step 4.00 matched/step 2.15
+  n=1 T=7  steps    112 share   2.8 % tok/step 4.259 fwd 13.991 head 3.010 drafted/step 6.00 matched/step 3.26
+  n=1 T=8  steps     63 share   1.6 % tok/step 5.603 fwd 13.456 head 3.151 drafted/step 7.00 matched/step 4.60
+  n=2 T=5  steps    401 share   9.9 % tok/step 6.344 fwd 14.412 head 3.555 drafted/step 8.00 matched/step 4.34
+  n=2 T=6  steps      1 share   0.0 % tok/step 12.000 fwd 19.388 head 5.520 drafted/step 10.00 matched/step 10.00
+  n=2 T=7  steps    233 share   5.8 % tok/step 8.296 fwd 15.423 head 3.871 drafted/step 12.00 matched/step 6.30
+  n=2 T=8  steps    250 share   6.2 % tok/step 10.120 fwd 15.844 head 4.178 drafted/step 14.00 matched/step 8.12
+  n=3 T=5  steps    708 share  17.5 % tok/step 10.511 fwd 17.871 head 3.290 drafted/step 12.00 matched/step 7.51
+  n=4 T=4  steps   1960 share  48.4 % tok/step 12.523 fwd 15.778 head 2.713 drafted/step 12.00 matched/step 8.52
+# /s/bf_m1_off4/server.log
+  all       steps   4108 tok  43227 tok/step 10.523 fwd 15.925 head 4.030 sum 19.956 ms tok/ms 0.5273
+  n=1 T=5  steps    212 share   5.2 % tok/step 2.915 fwd 14.300 head 3.857 drafted/step 4.00 matched/step 1.92
+  n=1 T=7  steps     55 share   1.3 % tok/step 3.982 fwd 16.076 head 4.025 drafted/step 6.00 matched/step 2.98
+  n=1 T=8  steps     16 share   0.4 % tok/step 5.250 fwd 14.878 head 4.527 drafted/step 7.00 matched/step 4.25
+  n=2 T=5  steps    365 share   8.9 % tok/step 6.318 fwd 14.475 head 4.931 drafted/step 8.00 matched/step 4.32
+  n=2 T=7  steps    212 share   5.2 % tok/step 8.057 fwd 16.284 head 5.340 drafted/step 12.00 matched/step 6.06
+  n=2 T=8  steps    250 share   6.1 % tok/step 10.224 fwd 15.728 head 5.834 drafted/step 14.00 matched/step 8.22
+  n=3 T=5  steps    544 share  13.2 % tok/step 10.075 fwd 18.112 head 4.414 drafted/step 12.00 matched/step 7.08
+  n=4 T=4  steps   2454 share  59.7 % tok/step 12.329 fwd 15.789 head 3.526 drafted/step 12.00 matched/step 8.33
