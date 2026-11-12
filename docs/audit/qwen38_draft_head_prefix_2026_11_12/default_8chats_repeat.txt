@@ -1,0 +1,101 @@
+# 8 chats x 20 turns overlapping, default mode, runs 2 and 3 per arm
+== c8_nvp2
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    6718 |  62.9 |   101.39 |   66.26 | 20/0/0 | 834ba34d537e
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    9725 |  72.7 |   146.07 |   66.58 | 20/0/0 | 1d0751646aa6
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   10350 |  72.6 |   154.18 |   67.13 | 19/1/0 | 192150e4a938
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   12177 |  74.5 |   163.22 |   74.61 | 20/0/0 | 717f1bda4cde
+   4 | 20261109-225159-61ec65 |  20 |    4346 |  92.2 |    9401 |  84.1 |   144.26 |   65.17 | 20/0/0 | efb0a8dec562
+   5 | 20261109-225314-f557c4 |  20 |   20528 |  91.1 |    7046 |  68.8 |   109.93 |   64.10 | 20/0/0 | e4f24219ca62
+   6 | 20261109-225527-a4bd60 |  20 |   60706 |  93.1 |   19931 |  77.1 |   207.23 |   96.18 | 19/0/1 | f5bcdba93e71
+   7 | 20261109-225719-0b07d6 |  20 |   42335 |  91.2 |   21713 |  85.9 |   224.32 |   96.80 | 20/0/0 | a95922f3577c
+total | requests 160 | output tok 97061 | reasoning 76.9 % | wall 232.43 s | 417.59 tok/s wall | 77.61 tok/s decode per chat
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 52 stderr hits 0
+== c8_fp82
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    8284 |  67.0 |   127.51 |   64.97 | 20/0/0 | 04620df7f8ae
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    9854 |  74.1 |   149.84 |   65.77 | 20/0/0 | 61bffd8664d0
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   14660 |  86.4 |   186.47 |   78.62 | 19/1/0 | f396445ade3a
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   11242 |  73.7 |   161.16 |   69.76 | 20/0/0 | 457cf83eed9f
+   4 | 20261109-225159-61ec65 |  20 |    4346 |  92.2 |   12832 |  89.2 |   177.28 |   72.38 | 20/0/0 | e501298e5923
+   5 | 20261109-225314-f557c4 |  20 |   20528 |  91.1 |    7880 |  70.8 |   125.40 |   62.84 | 20/0/0 | 55f9b6bfb64d
+   6 | 20261109-225527-a4bd60 |  20 |   60706 |  93.1 |    6942 |  60.9 |   106.09 |   65.43 | 20/0/0 | 07342db09aea
+   7 | 20261109-225719-0b07d6 |  20 |   42335 |  91.2 |   20868 |  88.0 |   222.46 |   93.81 | 20/0/0 | 6cd490270f8f
+total | requests 160 | output tok 92562 | reasoning 79.3 % | wall 230.25 s | 402.00 tok/s wall | 73.68 tok/s decode per chat
+mtp_auto.cpp:66: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set either key to override)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 59 stderr hits 0
+== c8_fp83
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    6885 |  68.7 |   106.13 |   64.87 | 20/0/0 | 49a47f36895a
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |    8474 |  73.9 |   129.57 |   65.40 | 20/0/0 | ff5c034d0c38
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |   12542 |  80.3 |   173.37 |   72.34 | 19/1/0 | 3ee1b97421ce
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |   10520 |  64.5 |   157.80 |   66.67 | 20/0/0 | ed0b17678350
+   4 | 20261109-225159-61ec65 |  20 |    4346 |  92.2 |   11442 |  85.9 |   166.13 |   68.87 | 20/0/0 | 566e5974a4d5
+   5 | 20261109-225314-f557c4 |  20 |   20528 |  90.2 |    6478 |  65.0 |   102.44 |   63.23 | 20/0/0 | 36750318e8ba
+   6 | 20261109-225527-a4bd60 |  20 |   60706 |  93.1 |   20969 |  85.4 |   241.64 |   86.78 | 20/0/0 | 883ed2713ef8
+   7 | 20261109-225719-0b07d6 |  20 |   42335 |  91.2 |   18042 |  86.6 |   206.25 |   87.48 | 20/0/0 | acac395dcb0a
+total | requests 160 | output tok 95352 | reasoning 79.1 % | wall 253.35 s | 376.36 tok/s wall | 74.30 tok/s decode per chat
+mtp_auto.cpp:66: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set either key to override)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+mtp_auto.cpp:74: speculative: concurrent server -> mtp_draft_vocab=98304 (FP8 draft head rows)
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 45 stderr hits 0
+== c8_nvp3
+   0 | 20261109-225000-ba61bb |  20 |   42853 |  93.2 |    7730 |  72.7 |   116.53 |   66.33 | 20/0/0 | bab3ac25a6c6
+   1 | 20261109-225000-effbb6 |  20 |   25274 |  93.2 |   10348 |  74.5 |   148.62 |   69.63 | 20/0/0 | c40104edb5d7
+   2 | 20261109-225000-4c9280 |  20 |    5796 |  90.4 |    9084 |  76.0 |   141.70 |   64.11 | 19/1/0 | e3a99f6a5f78
+   3 | 20261109-225000-1df3b6 |  20 |   25241 |  91.2 |    8609 |  61.6 |   131.98 |   65.23 | 20/0/0 | 1aa882f57f90
+   4 | 20261109-225159-61ec65 |  20 |    4346 |  92.2 |   16017 |  89.5 |   206.72 |   77.48 | 20/0/0 | 56891a6a487b
+   5 | 20261109-225314-f557c4 |  20 |   20528 |  91.1 |    9089 |  81.2 |   139.54 |   65.14 | 20/0/0 | 9b713b9e7e79
+   6 | 20261109-225527-a4bd60 |  20 |   60706 |  93.1 |   20126 |  78.6 |   204.50 |   98.41 | 20/0/0 | cd941a4b5f17
+   7 | 20261109-225719-0b07d6 |  20 |   42335 |  91.2 |   16297 |  79.9 |   193.78 |   84.10 | 20/0/0 | f107b63c12e7
+total | requests 160 | output tok 97300 | reasoning 78.2 % | wall 216.86 s | 448.68 tok/s wall | 75.82 tok/s decode per chat
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+vram_budget.cpp:700: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=9249.1 MiB, kv=14602 blocks (4106.8 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=1536 MiB, second_pass=yes
+  KV: live pass 14602 blocks -> plan 16977 blocks, APPLIED (4107 -> 4775 MiB)
+head graphs 50 stderr hits 0
+# hd_d_c8_nvp2/server.log
+  all       steps   3624 tok  25242 tok/step 6.965 fwd 15.656 head 4.921 sum 20.577 ms tok/ms 0.3385
+  n=1 T=5  steps    615 share  17.0 % tok/step 2.828 fwd 14.118 head 4.036 drafted/step 4.00 matched/step 1.83
+  n=1 T=7  steps    141 share   3.9 % tok/step 3.617 fwd 15.123 head 4.228 drafted/step 6.00 matched/step 2.62
+  n=1 T=8  steps     67 share   1.8 % tok/step 6.090 fwd 15.497 head 5.385 drafted/step 7.00 matched/step 5.09
+  n=2 T=5  steps    958 share  26.4 % tok/step 5.926 fwd 15.298 head 4.967 drafted/step 7.99 matched/step 3.93
+  n=2 T=7  steps    477 share  13.2 % tok/step 7.818 fwd 16.323 head 5.328 drafted/step 12.00 matched/step 5.82
+  n=2 T=8  steps    658 share  18.2 % tok/step 10.470 fwd 16.664 head 6.241 drafted/step 14.00 matched/step 8.47
+  n=3 T=5  steps    525 share  14.5 % tok/step 8.630 fwd 15.997 head 4.350 drafted/step 9.77 matched/step 5.63
+  n=4 T=4  steps    183 share   5.0 % tok/step 9.612 fwd 16.822 head 3.852 drafted/step 8.79 matched/step 5.61
+# hd_d_c8_fp82/server.log
+  all       steps   3672 tok  20499 tok/step 5.583 fwd 14.372 head 4.704 sum 19.076 ms tok/ms 0.2926
+  n=1 T=5  steps   1504 share  41.0 % tok/step 2.925 fwd 13.284 head 4.747 drafted/step 4.00 matched/step 1.92
+  n=1 T=7  steps    428 share  11.7 % tok/step 3.687 fwd 13.875 head 4.846 drafted/step 6.00 matched/step 2.69
+  n=1 T=8  steps    176 share   4.8 % tok/step 6.062 fwd 14.031 head 5.846 drafted/step 7.00 matched/step 5.06
+  n=2 T=5  steps    252 share   6.9 % tok/step 5.841 fwd 14.898 head 5.062 drafted/step 8.00 matched/step 3.84
+  n=2 T=7  steps    121 share   3.3 % tok/step 7.066 fwd 15.425 head 5.487 drafted/step 11.95 matched/step 5.07
+  n=2 T=8  steps     78 share   2.1 % tok/step 8.218 fwd 15.785 head 5.537 drafted/step 14.00 matched/step 6.22
+  n=3 T=5  steps    666 share  18.1 % tok/step 9.041 fwd 15.574 head 4.244 drafted/step 11.90 matched/step 6.04
+  n=4 T=4  steps    447 share  12.2 % tok/step 9.991 fwd 16.026 head 4.101 drafted/step 9.57 matched/step 5.99
+# hd_d_c8_fp83/server.log
+  all       steps   4144 tok  20985 tok/step 5.064 fwd 14.705 head 4.982 sum 19.687 ms tok/ms 0.2572
+  n=1 T=5  steps   1236 share  29.8 % tok/step 3.032 fwd 13.833 head 4.758 drafted/step 4.00 matched/step 2.03
+  n=1 T=7  steps    370 share   8.9 % tok/step 4.324 fwd 13.880 head 5.110 drafted/step 6.00 matched/step 3.32
+  n=1 T=8  steps    218 share   5.3 % tok/step 5.817 fwd 14.172 head 5.738 drafted/step 7.00 matched/step 4.82
+  n=2 T=5  steps   1099 share  26.5 % tok/step 4.398 fwd 14.841 head 4.838 drafted/step 4.75 matched/step 2.40
+  n=2 T=7  steps    367 share   8.9 % tok/step 5.782 fwd 15.323 head 5.167 drafted/step 7.91 matched/step 3.78
+  n=2 T=8  steps    222 share   5.4 % tok/step 8.604 fwd 15.925 head 6.391 drafted/step 11.07 matched/step 6.60
+  n=3 T=5  steps    278 share   6.7 % tok/step 7.457 fwd 15.311 head 5.430 drafted/step 8.00 matched/step 4.46
+  n=4 T=4  steps    354 share   8.5 % tok/step 9.692 fwd 16.638 head 4.187 drafted/step 9.01 matched/step 5.69
+# hd_d_c8_nvp3/server.log
+  all       steps   3201 tok  26161 tok/step 8.173 fwd 16.110 head 4.424 sum 20.533 ms tok/ms 0.3980
+  n=1 T=5  steps    201 share   6.3 % tok/step 2.935 fwd 15.568 head 4.019 drafted/step 4.00 matched/step 1.94
+  n=1 T=7  steps     52 share   1.6 % tok/step 4.615 fwd 14.234 head 4.589 drafted/step 6.00 matched/step 3.62
+  n=1 T=8  steps     29 share   0.9 % tok/step 5.793 fwd 14.675 head 5.037 drafted/step 7.00 matched/step 4.79
+  n=2 T=5  steps    262 share   8.2 % tok/step 5.790 fwd 17.386 head 4.713 drafted/step 7.86 matched/step 3.79
+  n=2 T=7  steps    143 share   4.5 % tok/step 7.301 fwd 17.286 head 5.013 drafted/step 11.83 matched/step 5.30
+  n=2 T=8  steps     98 share   3.1 % tok/step 8.582 fwd 18.119 head 5.512 drafted/step 13.79 matched/step 6.58
+  n=3 T=5  steps   2012 share  62.9 % tok/step 9.209 fwd 15.796 head 4.383 drafted/step 10.87 matched/step 6.21
+  n=4 T=4  steps    404 share  12.6 % tok/step 8.000 fwd 16.554 head 4.102 drafted/step 6.52 matched/step 4.00

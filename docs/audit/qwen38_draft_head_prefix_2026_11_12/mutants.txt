@@ -1,0 +1,10 @@
+# CPU mutants, test-core --gtest_filter='MtpDraftRows.*:MtpAuto.*' (30 tests)
+R2_pass_reads_past_copy | diff lines 2 | build rc=0 | test rc=1 | 29 ok | failed: MtpDraftRows.PassNeverReadsPastThePrefixCopy 
+R4_prefix_ge_rows | diff lines 2 | build rc=0 | test rc=1 | 28 ok | failed: MtpDraftRows.FullCopyAndFp8HeadFollowDraftVocab MtpDraftRows.PassNeverReadsPastThePrefixCopy 
+A1_head_always_off | diff lines 2 | build rc=0 | test rc=1 | 27 ok | failed: MtpAuto.ConcurrentHybridKeepsThePool MtpAuto.ExplicitDepthOnAConcurrentHybridKeepsThePoolToo MtpAuto.HostSpillKeepsBothDraftsAndThePrefixCopy 
+A2_head_never_off | diff lines 2 | build rc=0 | test rc=1 | 29 ok | failed: MtpAuto.FullDraftVocabTurnsTheHeadCopyOff 
+A3_no_vocab_default | diff lines 2 | build rc=0 | test rc=1 | 25 ok | failed: MtpAuto.ConcurrentHybridKeepsThePool MtpAuto.ConcurrentPoolDefaultsYieldToTheOperator MtpAuto.ExplicitDepthOnAConcurrentHybridKeepsThePoolToo MtpAuto.HeadOffKeepsTheFp8PrefixDraft MtpAuto.HostSpillKeepsBothDraftsAndThePrefixCopy 
+A4_vocab_overrides_operator | diff lines 2 | build rc=0 | test rc=1 | 29 ok | failed: MtpAuto.FullDraftVocabTurnsTheHeadCopyOff 
+R1_copy_ignores_prefix | diff lines 2 | build rc=0 | test rc=1 | 29 ok | failed: MtpDraftRows.CopyHoldsThePrefixOrEveryRow 
+R3_cutlass_takes_prefix | diff lines 2 | build rc=0 | test rc=1 | 29 ok | failed: MtpDraftRows.CutlassHeadScoresEveryRow 
+control | build rc=0 | test rc=0 | [  PASSED  ] 30 tests.

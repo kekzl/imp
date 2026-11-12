@@ -201,7 +201,7 @@ public:
     // FP16, e.g. MTP head output): draft_nvfp4 (W4A16, one weight pass per 4 rows) when given, else the
     // batched-decode W4A4 LM head, else the FP8 head, no output norm applied. False (nothing written) when
     // none is built or on a GEMM failure.
-    // draft_vocab > 0: the FP8 head scores only rows [0, draft_vocab) (speculative.mtp_draft_vocab).
+    // draft_vocab > 0: the draft copy or the FP8 head scores rows [0, draft_vocab) only (mtp_draft_vocab).
     // draw_top_k > 0: rows draw_row0.. of stage_draft_draws are drawn instead of the argmax.
     [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out,
                                            cudaStream_t stream, const NvFP4QuantResult* draft_nvfp4 = nullptr,

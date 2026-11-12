@@ -1,0 +1,75 @@
+# final tree (imp:hd3, image tree label = working tree before this file), Qwen3.8-27B-NVFP4-vllm
+image imp:hd3 created 2026-11-12T02:36:52.083676073+01:00 tree 28e386f601da411d4b861586d9e4a041796c54da want 28e386f601da411d4b861586d9e4a041796c54da
+# pair: 3 chats x 30 turns in turn (--serial --seed 1000), runtime.deterministic=true, speculative.ngram=false,
+# speculative.mtp_k=7, diagnostics.mtp_verify_pin=7; def = server default (NVFP4 copy of rows [0, 98304)),
+# fp8 = speculative.mtp_nvfp4_head=false (FP8 head rows [0, 98304))
+arm def rc=0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |    99.19 |  207.27 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    57.06 |  217.05 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |    98.73 |  194.10 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 270.09 s | 192.93 tok/s wall | 204.36 tok/s decode per chat
+mtp_auto.cpp:69: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+engine_spec_mtp.cpp:933: MTP chain lm_head: NVFP4 decode-cache view engaged (N=98304 K=5120)
+head graphs 10 stderr hits 0
+arm fp8 rc=0
+   0 | 20261109-225000-effbb6 |  30 |   31573 |  95.1 |   20560 |  83.7 |   102.42 |  200.74 | 30/0/0 | bfdc110eddc4
+   1 | 20261109-225000-1df3b6 |  30 |   28754 |  94.8 |   12384 |  66.7 |    58.70 |  210.96 | 30/0/0 | 261e1112c4a2
+   2 | 20261109-225159-61ec65 |  30 |    5811 |  94.0 |   19163 |  87.7 |   102.03 |  187.82 | 30/0/0 | e6ba4b137ab5
+total | requests 90 | output tok 52107 | reasoning 81.2 % | wall 278.71 s | 186.96 tok/s wall | 198.01 tok/s decode per chat
+mtp_auto.cpp:69: speculative: concurrent server -> mtp_nvfp4_head=false, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+head graphs 10 stderr hits 0
+# /o/pair_def/server.log
+  all       steps  14630 tok  52099 tok/step 3.561 fwd 13.219 head 4.146 sum 17.365 ms tok/ms 0.2051
+  n=1 T=8  steps  14630 share 100.0 % tok/step 3.561 fwd 13.219 head 4.146 drafted/step 4.76 matched/step 2.56
+# /o/pair_fp8/server.log
+  all       steps  14532 tok  52099 tok/step 3.585 fwd 13.220 head 4.823 sum 18.043 ms tok/ms 0.1987
+  n=1 T=8  steps  14532 share 100.0 % tok/step 3.585 fwd 13.220 head 4.823 drafted/step 4.77 matched/step 2.59
+
+# GPU tests (image): test-quant 'LmHeadDraftRows.*'; test-moe-gdn
+# 'GdnVerifyTwoDraftsTest.*:MtpFeedBatchTest.*:GdnBatchedScanTest.*'; test-core 'MtpDraftRows.*:MtpAuto.*'
+test-quant: [  PASSED  ] 1 test.
+test-moe-gdn: [  PASSED  ] 37 tests.
+test-core: [  PASSED  ] 30 tests.
+
+# make preflight
+preflight: base 10332d13, 24 changed file(s)
+static gates                                               ok       19  259 ok
+clang-tidy                                                 ok        8  6 changed file(s)
+clang-format                                               ok        0  changed lines clean
+actionlint                                                 skip      0  no .github change
+preflight: 0 failure(s), 28 s wall
+
+# tools/analysis/degen_suite.py, server defaults / --max-batch 1
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (37s)
+degen_suite: 52 checks, 0 FAIL, 0 XFAIL, 0 skipped (56s)
+mtp_auto.cpp:69: speculative: concurrent server -> mtp_nvfp4_head=true, mtp_draft_vocab=98304, mtp_batch_verify_k=4 (KV pool kept for concurrent chats; set a key to override)
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 98304) of 248320 (270.0 MiB), verification stays on FP8
+# --max-batch 1: no concurrent server, the unchanged single-chat default keeps the full copy
+pre_dequant_phase3_nvfp4_decode.cpp:268: MTP draft LM head: NVFP4 copy of FP16 head rows [0, 248320) of 248320 (682.0 MiB), verification stays on FP8
+head graphs with chain >= 5: 11 / 0
+
+# make test-spec-fidelity DOCKER_IMG=imp:hd3
+[  PASSED  ] 1 test.
+
+# make verify-fast DOCKER_IMG=imp:hd3
+PASS fast gtest filter
+  decode  tg128 =  293.17 tok/s  (baseline  282.84, delta 3.65%)
+  prefill pp512 = 49791.44 tok/s  (baseline 50374.39, delta -1.16%)
+PASS decode within 8% threshold
+PASS prefill within 8% threshold
+  prefill pp4096 = 50461.52 tok/s  (baseline 50318.99, delta 0.28%, FA2)
+PASS long-ctx prefill (pp4096/FA2) within 8% threshold
+  own peak VRAM = 6140 MiB  (baseline 6140, delta 0.00%)
+PASS peak VRAM within 10% of baseline
+  PPL ppl_corpus_45k = 11.2352  (baseline 11.2352, delta 0.000%)
+PASS PPL within 0.5% of baseline
+  PPL ppl_corpus_45k, APA = 11.2181  (baseline 11.2352, delta -0.152%)
+PASS APA PPL within 0.25% of baseline
+  graphs OFF tg256 =  173.70 tok/s
+  graphs ON  tg256 =  296.67 tok/s   (1.71x, threshold 1.3x)
+PASS graphs ON delivers ≥1.3x decode speedup
+  server c8 = 1939.39 tok/s, slowest request 518 ms  (baseline 1899.81, delta 2.08%)
+PASS server throughput within 8% of baseline
+PASS Qwen3-8B NVFP4 (dense) (distinct=15/32 need 8, tokens=64, max-run=1, 3gram=9 repeat=29%, contains 'Paris')
+=== verify fast: OK === (started 01:51:13Z, ended 01:52:50Z)

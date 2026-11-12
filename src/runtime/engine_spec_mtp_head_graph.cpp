@@ -130,7 +130,7 @@ struct HeadPassInputs {
     const void* hidden;            // the verify chunk's hidden rows (tab.src indexes them)
     const NvFP4QuantResult* head;  // NVFP4 draft LM head, or null
     const Tensor* post_norm;       // the target's final norm on the gathered rows, or null
-    int draft_vocab;               // speculative.mtp_draft_vocab: FP8 head rows scored, 0 = all
+    int draft_vocab;               // speculative.mtp_draft_vocab: head rows scored, 0 = all
     int draw_top_k;                // staged draft draws (stage_draft_draws), 0 = argmax drafts
 };
 
