@@ -724,13 +724,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                               std::memory_order_relaxed);
     state.cfg_ok.store(state.ctx && state.ctx->engine->cfg_supported(), std::memory_order_relaxed);
 
-    // Strip trailing path separators first: a directory path ending in "/" must still yield a
-    // non-empty model id (#756), or the model becomes unaddressable over the HTTP API.
-    std::string id_path = path;
-    while (id_path.size() > 1 && (id_path.back() == '/' || id_path.back() == '\\'))
-        id_path.pop_back();
-    size_t slash = id_path.find_last_of('/');
-    state.model_name = (slash != std::string::npos) ? id_path.substr(slash + 1) : id_path;
+    // A trailing "/" still yields a non-empty id (#756); an HF cache snapshot dir is listed as
+    // <org>/<name>, so a client sending the repo id matches instead of swapping (model_id_for_path).
+    state.model_name = imp_server::model_id_for_path(path);
     state.loaded_model_path = path;  // remembered for /admin/resume
     state.publish_model_status(true, state.model_name);
 

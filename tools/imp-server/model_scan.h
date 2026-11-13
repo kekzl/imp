@@ -16,6 +16,23 @@
 
 namespace imp_server {
 
+// API model id of a weight path: its basename, except an HF cache snapshot directory
+// (.../models--<org>--<name>/snapshots/<rev>), which is "<org>/<name>", not the 40-hex <rev>.
+inline std::string model_id_for_path(std::string path) {
+    while (path.size() > 1 && (path.back() == '/' || path.back() == '\\'))
+        path.pop_back();
+    const std::filesystem::path p(path);
+    const std::string repo_dir = p.parent_path().parent_path().filename().string();
+    if (p.parent_path().filename() == "snapshots" && repo_dir.starts_with("models--") &&
+        repo_dir.size() > 8) {
+        std::string repo = repo_dir.substr(8);  // "<org>--<name>", HF's '/' -> "--"
+        if (const size_t sep = repo.find("--"); sep != std::string::npos)
+            repo.replace(sep, 2, "/");
+        return repo;
+    }
+    return p.filename().string();
+}
+
 inline std::vector<std::pair<std::string, std::string>> scan_model_files(const std::string& dir) {
     namespace fs = std::filesystem;
     std::vector<std::pair<std::string, std::string>> results;
@@ -55,7 +72,7 @@ inline std::vector<std::pair<std::string, std::string>> scan_model_files(const s
                 results.emplace_back(path.filename().string(), real);
         }
         if (is_dir && imp::is_safetensors_dir(path.string()) && inside_base(path, real))
-            results.emplace_back(path.filename().string(), real);
+            results.emplace_back(model_id_for_path(path.string()), real);
     }
     std::sort(results.begin(), results.end());
     return results;
