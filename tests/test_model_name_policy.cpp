@@ -142,4 +142,24 @@ TEST_F(ModelScan, UnreadableDirectoryDoesNotHideTheRest) {
         EXPECT_NE(std::find(got.begin(), got.end(), want), got.end()) << want;
 }
 
+// An hf:// model resolves to <cache>/models--<org>--<name>/snapshots/<rev>; the API id was the
+// 40-hex <rev>, so a client sending the repo id never matched the loaded model.
+TEST(ModelIdForPath, HfSnapshotDirIsTheRepoId) {
+    const std::string snap =
+        "/models/huggingface/hub/models--kekzle--Qwen3.8-27B-NVFP4-vllm/snapshots/"
+        "3fa10589acf5435f5278b52767bbda937be89192";
+    EXPECT_EQ(imp_server::model_id_for_path(snap), "kekzle/Qwen3.8-27B-NVFP4-vllm");
+    EXPECT_EQ(imp_server::model_id_for_path(snap + "/"), "kekzle/Qwen3.8-27B-NVFP4-vllm");
+    EXPECT_EQ(imp_server::model_id_for_path("/models/Qwen3.8-27B-NVFP4-vllm/"), "Qwen3.8-27B-NVFP4-vllm");
+    EXPECT_EQ(imp_server::model_id_for_path(snap + "/model-Q4_K_M.gguf"), "model-Q4_K_M.gguf");
+    EXPECT_EQ(imp_server::model_id_for_path("/x/snapshots/abc"), "abc") << "not an HF cache layout";
+}
+
+TEST_F(ModelScan, HfSnapshotDirIsListedAsTheRepoId) {
+    const auto snap = base_ / "hub" / "models--org--name" / "snapshots" / "1de9996b";
+    std::filesystem::create_directories(snap);
+    std::ofstream(snap / "model.safetensors") << "x";
+    EXPECT_EQ(names(), (std::vector<std::string>{"a-model", "m.gguf", "org/name", "z-model"}));
+}
+
 }  // namespace

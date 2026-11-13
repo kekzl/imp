@@ -11,6 +11,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `docker compose up` starts only `imp-server`. Open WebUI, Prometheus and Grafana moved to `docker-compose.full.yml` (`docker compose -f docker-compose.full.yml up -d`, includes the base file); project and volume names stay `imp_*`, so existing UI and dashboard data is kept.
 - The sparse attention block score splits each warp over the kv heads with interleaved 4-dim lane reads (Qwen3.8-27B: 8 lanes per kv head). Qwen3.8-27B-NVFP4 server at 50k context: 45.54 -> 32.93 us per call (nsys); NIAH 6 of 6 hits on both images; 1 chat at 50k 183.41 -> 184.33 tok/s, same text. (#3107)
 
+### Fixed
+- A model loaded from the HF cache (`--model hf://org/name`) is listed in `/v1/models` as `org/name` instead of its 40-hex snapshot revision, so a request naming the repo id matches the loaded model instead of triggering a swap to the same weights (`tools/imp-server/model_scan.h` `model_id_for_path`).
+
 ## [0.66.0] - 2026-11-12
 
 ### Added
