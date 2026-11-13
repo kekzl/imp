@@ -1,3 +1,6 @@
+# imp-server only. Open WebUI + Prometheus + Grafana on top of it:
+#   docker compose -f docker-compose.full.yml up -d
+
 services:
   imp-server:
     build:
@@ -60,88 +63,5 @@ services:
       start_period: 120s
       retries: 10
 
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.13.2@sha256:4f1dd4d81ef1445d4e4bfb4a7a55838dfb1de38a834a0fbe7615d92990333a71
-    restart: unless-stopped
-    ports:
-      - "${WEBUI_PORT:-3000}:8080"
-    volumes:
-      - open-webui:/app/backend/data
-    environment:
-      - OPENAI_API_BASE_URL=http://imp-server:${IMP_PORT:-8080}/v1
-      - OPENAI_API_KEY=not-needed
-      - WEBUI_AUTH=false
-      - ENABLE_OLLAMA_API=false
-
-      # --- Tool support ---
-      # Native function calling: model emits tool_calls JSON, Open WebUI dispatches.
-      # imp's chat-template plumbing already handles this; per-model toggle still
-      # lives in the UI (Settings → Models → [model] → Advanced → Function Calling).
-      - ENABLE_DIRECT_CONNECTIONS=true
-
-      # Built-in Web Search (DuckDuckGo — no API key needed). User toggles the
-      # globe icon in the chat input to enable per-message.
-      - ENABLE_RAG_WEB_SEARCH=true
-      - RAG_WEB_SEARCH_ENGINE=duckduckgo
-      - RAG_WEB_SEARCH_RESULT_COUNT=3
-      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=10
-      - ENABLE_SEARCH_QUERY_GENERATION=true
-
-      # URL fetching from chat (paste a URL, Open WebUI loads + indexes).
-      - ENABLE_RAG_LOCAL_WEB_FETCH=true
-      - RAG_WEB_LOADER_ENGINE=safe_web
-
-      # Code Interpreter — runs Python in the browser via Pyodide (no sandbox
-      # service needed, no host risk).
-      - ENABLE_CODE_INTERPRETER=true
-      - CODE_EXECUTION_ENGINE=pyodide
-      - CODE_INTERPRETER_ENGINE=pyodide
-
-      # User-defined Tools / Functions (admin UI: Workspace → Tools / Functions).
-      - ENABLE_COMMUNITY_SHARING=false
-    depends_on:
-      imp-server:
-        condition: service_healthy
-
-  prometheus:
-    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
-    restart: unless-stopped
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=30d'
-      - '--web.enable-lifecycle'
-    depends_on:
-      imp-server:
-        condition: service_healthy
-
-  grafana:
-    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
-    restart: unless-stopped
-    ports:
-      - "${GRAFANA_PORT:-3002}:3000"
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-data:/var/lib/grafana
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_INSTALL_PLUGINS=
-      - GF_FEATURE_TOGGLES_ENABLE=
-    depends_on:
-      - prometheus
-
 volumes:
   imp-cache:
-  open-webui:
-  prometheus-data:
-  grafana-data:
