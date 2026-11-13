@@ -133,8 +133,8 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
         body["mtp_head_hint"] =
             state.runtime_config.speculative.mtp_k == 0 && state.resolved_max_batch_size != 1
                 ? "this checkpoint ships an MTP head; speculative.mtp_k=auto left it unloaded "
-                  "because this server takes concurrent requests and is not a GDN hybrid with "
-                  "speculative.mtp_concurrent on (MTP drafts for one request at a time). "
+                  "because this server takes concurrent requests and is not a GDN hybrid "
+                  "(MTP drafts for one request at a time). "
                   "--set speculative.mtp_k=2 --set speculative.ngram=false forces it: measured "
                   "+27-30% single-stream decode on Qwen3.8-27B-NVFP4 thinking chats (2026-08-27)."
                 : "this checkpoint ships an MTP head that is not loaded "
@@ -659,7 +659,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // (2026-08-29: cost 88.1 -> 117.2 tok/s on such a config).
     imp::tools::mtp_auto_restore_startup(state.runtime_config, state.startup_runtime_config);
     state.resolved_max_batch_size = resolve_max_batch_size(state.default_args, state.runtime_config);
-    int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config, state.resolved_max_batch_size);
+    int mtp_k = imp::tools::mtp_auto_request_k(state.runtime_config);
     ImpError err = imp_model_load_ex(path.c_str(), format, /*load_mtp_head=*/mtp_k > 0 ? 1 : 0,
                                      &state.model);
     if (err != IMP_SUCCESS) {

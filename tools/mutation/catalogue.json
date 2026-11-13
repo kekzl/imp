@@ -599,7 +599,7 @@
    "id": "M66",
    "category": "config",
    "file": "src/runtime/config.cpp",
-   "desc": "Trailing garbage on an integer key accepted again: `--set speculative.k=16k` binds 16 and says nothing (#1627).",
+   "desc": "Trailing garbage on an integer key accepted again: `--set speculative.mtp_history_slots=16k` binds 16 and says nothing (#1627).",
    "focus": "test-core",
    "find": "        int out = std::stoi(v, &used);\n        // stoi stops at the first non-digit, so \"16k\" and \"1,2\" parsed as 16\n        // and 1 without complaint. Trailing garbage is a bad value.\n        if (used != v.size() && ok)\n            *ok = false;\n        return out;",
    "replace": "        int out = std::stoi(v, &used);\n        // [MUTANT] trailing garbage accepted\n        return out;"

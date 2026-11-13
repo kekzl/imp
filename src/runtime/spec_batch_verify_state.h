@@ -104,7 +104,7 @@ struct MtpBind {
     int econ_batched = 0;  // of econ_verifies, from the batched verify (speculative.mtp_batch_verify)
     int k_live = 0;
     bool stale_logged = false;  // "drafting off" logged once per binding
-    int carry_n = 0;  // speculative.mtp_carry: hidden rows waiting in the slot's carry, -1 = a step missed
+    int carry_n = 0;            // the MTP carry: hidden rows waiting in the slot's carry, -1 = a step missed
 };
 
 struct MtpBindPool {
@@ -166,15 +166,16 @@ inline constexpr int kMtpResumeMinPairs = 64;
 // Head KV slot for a prompt whose prefill starts at `offset` (prefix-cache hit), or -1. A slot resumes
 // at min(pos, L - 1) pairs, L = common prefix of its history and the prompt. Longest resume wins; without
 // a kMtpResumeMinPairs resume the least recently used slot. Pairs below `offset` need hidden rows the
-// cached prefix never forwarded: with no slot covering it, gap_bind picks as above (the head starts at
-// `offset`, mtp_bind_has_gap), else -1 = draft nothing and leave every history intact.
+// cached prefix never forwarded: with no slot covering it the pick is as above and the head starts at
+// `offset` (mtp_bind_has_gap): agent chats resend whole transcripts, and declining kept 84 % of requests
+// unbound.
 struct MtpSlotCand {
     int pos = 0;                                    // pairs its head KV holds
     const std::vector<int32_t>* history = nullptr;  // tokens t_0..t_pos
     uint64_t last_use = 0;
 };
 [[nodiscard]] inline int mtp_pick_slot(const std::vector<MtpSlotCand>& cands, const std::vector<int32_t>& in,
-                                       int offset, bool gap_bind = true) {
+                                       int offset) {
     int best = -1, best_r = -1, lru = -1;
     for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
         const auto& h = *cands[i].history;
@@ -191,8 +192,6 @@ struct MtpSlotCand {
     }
     if (offset > 0 && best_r >= offset)
         return best;
-    if (offset > 0 && !gap_bind)
-        return -1;
     return best_r >= kMtpResumeMinPairs ? best : lru;
 }
 
@@ -206,11 +205,11 @@ struct MtpSlotCand {
 }
 
 // A bound request drafts only while the head cache covers exactly its pre-step context. Tokens
-// decoded without a host feed and without a carried row (speculative.mtp_carry off, a ragged rider row,
+// decoded without a host feed and without a carried row (carry scratch refused, a ragged rider row,
 // a loop burst) leave no hidden rows to catch up from: such a binding is dead.
 [[nodiscard]] constexpr bool mtp_cache_behind(int mtp_pos, int cur_pos) { return mtp_pos != cur_pos; }
 
-// speculative.mtp_carry: hidden rows per head KV slot, fed in one pass when full (2.5 MiB per slot on
+// the MTP carry: hidden rows per head KV slot, fed in one pass when full (2.5 MiB per slot on
 // Qwen3.8).
 inline constexpr int kMtpCarryRows = 256;
 // Carry row of a batched step whose input token sits at `pos` (carry rows are
@@ -256,9 +255,10 @@ void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
     return rows_cap >= 2 && decoding >= (solo ? 1 : 2) && decoding <= rows_cap && drafted >= 1 &&
            2 * drafted >= decoding;
 }
-// speculative.mtp_batch_verify_solo: a lone bound request takes the batched verify step as a group of one.
-[[nodiscard]] constexpr bool mtp_bound_verify_solo(bool solo_on, int decoding, bool bound) {
-    return solo_on && decoding == 1 && bound;
+// A lone bound request takes the batched verify step as a group of one, not the single verify chunk
+// (Qwen3.8-27B-NVFP4 at 20k: the chunk walks the whole context per CTA, 1 ms per layer).
+[[nodiscard]] constexpr bool mtp_bound_verify_solo(int decoding, bool bound) {
+    return decoding == 1 && bound;
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 2 drafts per request on spares alone (two
 // snapshots), kMtpBoundVerifyMaxDepth with factor rows (a fold applies kGdnFactorFoldMaxRows of them).
@@ -382,9 +382,9 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
 // that 0, and the pool fell to 1 slot (1 draft per verify step at 24 streams).
 int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // Requests bound to the head at once: one per batch slot under the batched verify, else
-// speculative.mtp_history_slots with speculative.mtp_carry (carry_live: its scratch exists), else 1.
+// speculative.mtp_history_slots with the MTP carry (carry_live: its scratch exists), else 1.
 int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live = true);
-// Carry rows per head KV slot to allocate: kMtpCarryRows with speculative.mtp_carry and no batched verify.
+// Carry rows per head KV slot to allocate: kMtpCarryRows with the MTP carry and no batched verify.
 int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 
 }  // namespace imp

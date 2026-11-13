@@ -46,12 +46,6 @@ bool Engine::spec_arm_verify_sampling_(const Request& req) {
 
 namespace engine_internal {
 
-const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on) {
-    if (sampling_refusal != nullptr)
-        return sampling_refusal;
-    return !batch_on && !greedy_request(r) ? "sampled_batch_verify_off" : nullptr;
-}
-
 std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<Request>>& reqs, int T,
                                              int vocab_size) {
     std::vector<VerifySampling> rows;

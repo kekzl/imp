@@ -19,7 +19,7 @@ TEST(StepSeed, SeededRequestAddsTheOutputCount) {
 }
 
 // An unseeded request keeps one base: a draft drawn for output index i + lv before the verify step must see
-// the seed the verify row gets (speculative.mtp_draft_coupled). hash(id) ^ clock per call gave two bases.
+// the seed the verify row gets (coupled MTP drafts). hash(id) ^ clock per call gave two bases.
 TEST(StepSeed, UnseededRequestKeepsOneBase) {
     Request req;
     req.id = 5;

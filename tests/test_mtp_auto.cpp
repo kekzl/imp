@@ -26,7 +26,7 @@ TEST(MtpAuto, DefaultIsTheAutoSentinel) {
 
 TEST(MtpAuto, SingleStreamWithHeadTakesThePair) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     EXPECT_EQ(k, tools::kMtpAutoK);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true);
     EXPECT_EQ(cfg.speculative.mtp_k, tools::kMtpAutoK);
@@ -35,16 +35,16 @@ TEST(MtpAuto, SingleStreamWithHeadTakesThePair) {
 
 TEST(MtpAuto, NoHeadFallsBackWithTheMatcherIntact) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/false);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
     EXPECT_TRUE(cfg.speculative.ngram) << "ngram off with nothing drafting is worse than the default";
 }
 
-// speculative.mtp_concurrent: a concurrent GDN-hybrid server takes the pair (batch > 1 never verifies there).
+// A concurrent GDN-hybrid server takes the pair (batch > 1 never verifies there).
 TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    const int k = tools::mtp_auto_request_k(cfg);
     EXPECT_EQ(k, tools::kMtpAutoK) << "phase 1 asks for the head; phase 2 knows the model";
     const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
@@ -57,7 +57,7 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
 // (270 MiB of 682 MiB on Qwen3.8-27B); drafts 1 and 2 leave as factor rows.
 TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    const int k = tools::mtp_auto_request_k(cfg);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, 0, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head) << "1 chat: 204.26 vs 198.04 tok/s on the FP8 head";
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 4);
@@ -66,7 +66,7 @@ TEST(MtpAuto, ConcurrentHybridKeepsThePool) {
 
 TEST(MtpAuto, SingleStreamKeepsTheFullDraft) {
     RuntimeConfig cfg;
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kSingleStream), /*head_loaded=*/true);
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head) << "1 chat at 50k: 138 vs 123 tok/s";
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
@@ -76,7 +76,7 @@ TEST(MtpAuto, ConcurrentPoolDefaultsYieldToTheOperator) {
     RuntimeConfig cfg;
     ASSERT_TRUE(
         cfg.apply_overrides({"speculative.mtp_nvfp4_head=true", "speculative.mtp_batch_verify_k=2"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
@@ -86,7 +86,7 @@ TEST(MtpAuto, ConcurrentPoolDefaultsYieldToTheOperator) {
 TEST(MtpAuto, FullDraftVocabTurnsTheHeadCopyOff) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_draft_vocab=0"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head) << "the 682 MiB full copy is KV pool: 1990 blocks";
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 0);
@@ -95,7 +95,7 @@ TEST(MtpAuto, FullDraftVocabTurnsTheHeadCopyOff) {
 TEST(MtpAuto, HeadOffKeepsTheFp8PrefixDraft) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_nvfp4_head=false"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_FALSE(cfg.speculative.mtp_nvfp4_head);
     EXPECT_EQ(cfg.speculative.mtp_draft_vocab, 98304) << "the FP8 head scores the first 98304 rows";
@@ -104,7 +104,7 @@ TEST(MtpAuto, HeadOffKeepsTheFp8PrefixDraft) {
 TEST(MtpAuto, HostSpillKeepsBothDraftsAndThePrefixCopy) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"kv_cache.host_spill_mb=16384"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_GT(cfg.speculative.mtp_k, 0);
     EXPECT_TRUE(cfg.speculative.mtp_nvfp4_head);
@@ -125,14 +125,14 @@ TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
 TEST(MtpAuto, ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_batch_verify_factor_row=false"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
     RuntimeConfig set;
     ASSERT_TRUE(set.apply_overrides(
                        {"speculative.mtp_batch_verify_factor_row=false", "speculative.mtp_batch_verify_k=2"})
                     .empty());
-    tools::mtp_auto_finalize(set, tools::mtp_auto_request_k(set, kServingAutoBatch), /*head_loaded=*/true, 0,
+    tools::mtp_auto_finalize(set, tools::mtp_auto_request_k(set), /*head_loaded=*/true, 0,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(set.speculative.mtp_batch_verify_k, 2) << "the operator set it";
     EXPECT_EQ(cfg.speculative.mtp_k, 2) << "no factor rows: the step stages 2 drafts at most";
@@ -144,8 +144,8 @@ TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
     const auto resolve = [](std::vector<std::string> sets) {
         RuntimeConfig cfg;
         EXPECT_TRUE(cfg.apply_overrides(sets).empty());
-        tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg, kServingAutoBatch), /*head_loaded=*/true,
-                                 0, tools::MtpAutoServing::ConcurrentHybrid);
+        tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
+                                 tools::MtpAutoServing::ConcurrentHybrid);
         return std::pair{cfg.speculative.mtp_k, cfg.speculative.mtp_batch_verify_k};
     };
     EXPECT_EQ(resolve({}), (std::pair{7, 4})) << "the streak key reaches 7 drafts";
@@ -157,7 +157,6 @@ TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
         << "auto follows the key";
     EXPECT_EQ(resolve({"speculative.mtp_batch_verify_k=1"}), (std::pair{2, 1})) << "auto keeps kMtpAutoK";
     EXPECT_EQ(resolve({"speculative.mtp_batch_verify=0"}), (std::pair{2, 2})) << "no bound verify";
-    EXPECT_EQ(resolve({"speculative.mtp_carry=false"}), (std::pair{2, 2}));
     EXPECT_EQ(resolve({"speculative.mtp_history_slots=1"}), (std::pair{2, 2})) << "one binding";
     EXPECT_EQ(resolve({"speculative.hybrid=false"}), (std::pair{2, 2})) << "no grouped verify scan";
     EXPECT_EQ(resolve({"speculative.mtp_k=1"}), (std::pair{1, 1})) << "2 rows per request, no pad";
@@ -170,7 +169,7 @@ TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
               (std::pair{2, 2}))
         << "a second spare per row holds 2 drafts";
     RuntimeConfig cap;
-    tools::mtp_auto_finalize(cap, tools::mtp_auto_request_k(cap, kServingAutoBatch), /*head_loaded=*/true,
+    tools::mtp_auto_finalize(cap, tools::mtp_auto_request_k(cap), /*head_loaded=*/true,
                              /*head_auto_k_cap=*/1, tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(cap.speculative.mtp_k, 1) << "the head's own cap outranks the verify depth";
     EXPECT_EQ(cap.speculative.mtp_batch_verify_k, 1);
@@ -188,7 +187,7 @@ TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {
 // Off a GDN hybrid, batch > 1 round-robin verifies with the matcher: the pair would turn it off.
 TEST(MtpAuto, ConcurrentNonHybridDeclines) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    const int k = tools::mtp_auto_request_k(cfg);
     const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/false);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentOther);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
@@ -196,19 +195,11 @@ TEST(MtpAuto, ConcurrentNonHybridDeclines) {
     EXPECT_TRUE(cfg.speculative.ngram);
 }
 
-TEST(MtpAuto, ConcurrentOptOutRestoresTheDecline) {
-    RuntimeConfig cfg;
-    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_concurrent=false"}).empty());
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kServingAutoBatch), 0) << "the head is not even loaded";
-    EXPECT_EQ(tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true),
-              tools::MtpAutoServing::ConcurrentOther);
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), tools::kMtpAutoK) << "single stream unchanged";
-}
 
 // A one-chat GDN hybrid verifies on the bound path: engine batch 2, admission and decode stay 1.
 TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, /*gdn_hybrid=*/true, k,
                                                    /*head_loaded=*/true);
     EXPECT_EQ(batch, 2) << "the bound verify stages rows from engine batch 2 up";
@@ -223,7 +214,7 @@ TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
 // imp-cli resolves through mtp_auto_after_load: a chat run takes the batch, depth and pool of the lane.
 TEST(MtpAuto, AfterLoadTakesTheServingOfTheEngineBatch) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, /*gdn_hybrid=*/true, k,
                                                    /*head_loaded=*/true);
     EXPECT_EQ(tools::mtp_auto_after_load(cfg, k, /*head_loaded=*/true, /*explicit_flag=*/0,
@@ -249,7 +240,7 @@ TEST(MtpAuto, ReloadResolvesAgainstTheStartupConfig) {
     auto load = [&](bool gdn_hybrid, bool head_loaded) {
         tools::mtp_auto_restore_startup(cfg, startup);
         EXPECT_EQ(cfg.speculative.mtp_k, -1) << "auto again, not the previous load's depth";
-        const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+        const int k = tools::mtp_auto_request_k(cfg);
         const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, gdn_hybrid, k, head_loaded);
         tools::mtp_auto_finalize(cfg, k, head_loaded, /*head_auto_k_cap=*/0,
                                  tools::mtp_auto_serving(cfg, batch, gdn_hybrid));
@@ -274,7 +265,7 @@ TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
         RuntimeConfig cfg;
         EXPECT_TRUE(cfg.apply_overrides(ov).empty());
         const int before = cfg.runtime.max_batch_size;
-        const int k = tools::mtp_auto_request_k(cfg, configured);
+        const int k = tools::mtp_auto_request_k(cfg);
         const int b = tools::mtp_auto_engine_batch(cfg, configured, gdn_hybrid, k, head_loaded,
                                                    head_auto_k_cap);
         if (b == configured)
@@ -284,7 +275,6 @@ TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
     EXPECT_EQ(batch({}, kSingleStream, false, true, 0), 1) << "not a GDN hybrid";
     EXPECT_EQ(batch({}, kSingleStream, true, false, 0), 1) << "no head";
     EXPECT_EQ(batch({}, kSingleStream, true, true, -1), 1) << "the head declines auto";
-    EXPECT_EQ(batch({"speculative.mtp_concurrent=false"}, kSingleStream, true, true, 0), 1) << "opt-out";
     EXPECT_EQ(batch({"speculative.mtp_k=2"}, kSingleStream, true, true, 0), 1)
         << "explicit depth keeps the chain";
     EXPECT_EQ(batch({"speculative.mtp_k=0"}, kSingleStream, true, true, 0), 1);
@@ -301,7 +291,7 @@ TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
 // A Qwen4Exp head declines on a concurrent hybrid exactly as on a single stream.
 TEST(MtpAuto, ConcurrentHybridKeepsTheHeadDecline) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kServingAutoBatch);
+    const int k = tools::mtp_auto_request_k(cfg);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/-1,
                              tools::MtpAutoServing::ConcurrentHybrid);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
@@ -310,13 +300,13 @@ TEST(MtpAuto, ConcurrentHybridKeepsTheHeadDecline) {
 TEST(MtpAuto, DeterminismOutranksTheSpeedup) {
     RuntimeConfig cfg;
     cfg.runtime.deterministic = true;
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), 0);
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg), 0);
 }
 
 TEST(MtpAuto, ExplicitDepthIsUntouched) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=3"}).empty());
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), 3);
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg), 3);
     tools::mtp_auto_finalize(cfg, 3, /*head_loaded=*/true);
     EXPECT_EQ(cfg.speculative.mtp_k, 3);
     EXPECT_TRUE(cfg.speculative.ngram) << "an explicit depth does not drag ngram with it";
@@ -325,7 +315,7 @@ TEST(MtpAuto, ExplicitDepthIsUntouched) {
 TEST(MtpAuto, ExplicitOffStaysOff) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_k=0"}).empty());
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), 0);
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg), 0);
     tools::mtp_auto_finalize(cfg, 0, /*head_loaded=*/true);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
     EXPECT_TRUE(cfg.speculative.ngram);
@@ -334,7 +324,7 @@ TEST(MtpAuto, ExplicitOffStaysOff) {
 TEST(MtpAuto, ExplicitNgramSurvivesTheAutoPair) {
     RuntimeConfig cfg;
     ASSERT_TRUE(cfg.apply_overrides({"speculative.ngram=true"}).empty());
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true);
     EXPECT_EQ(cfg.speculative.mtp_k, tools::kMtpAutoK);
     EXPECT_TRUE(cfg.speculative.ngram) << "auto must not overrule a key the operator set";
@@ -343,7 +333,7 @@ TEST(MtpAuto, ExplicitNgramSurvivesTheAutoPair) {
 // A head with its own auto depth (qwen4_exp: 1) caps auto only; explicit settings and the tool flag pass.
 TEST(MtpAuto, HeadAutoKCapClampsAutoOnly) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     ASSERT_GT(k, 1);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/1);
     EXPECT_EQ(cfg.speculative.mtp_k, 1);
@@ -363,7 +353,7 @@ TEST(MtpAuto, HeadAutoKCapClampsAutoOnly) {
 // A head whose verify costs more than it emits (qwen4_exp) turns auto off; explicit settings pass.
 TEST(MtpAuto, HeadAutoDeclineTurnsAutoOff) {
     RuntimeConfig cfg;
-    const int k = tools::mtp_auto_request_k(cfg, kSingleStream);
+    const int k = tools::mtp_auto_request_k(cfg);
     ASSERT_GT(k, 0);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/-1);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
@@ -382,7 +372,7 @@ TEST(MtpAuto, BenchModePinsAutoOff) {
     args.bench = true;
     apply_config_pins(cfg, args);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
-    EXPECT_EQ(tools::mtp_auto_request_k(cfg, kSingleStream), 0);
+    EXPECT_EQ(tools::mtp_auto_request_k(cfg), 0);
 }
 
 TEST(MtpAuto, BenchModeKeepsAnExplicitDepth) {

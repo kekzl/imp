@@ -1091,9 +1091,9 @@ private:
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
     // The batched head pass over tables already on the device: feed, draft LM head and, per verify depth past
     // 1 and the KV has room, one more feed + LM head for the next draft per request (a graph replay with
-    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
+    // the MTP head graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
     // level); -1 = feed, -2 = LM head, -3 = D2H failed.
-    // draws: n_draws draft_row_draws() rows of the bound requests (speculative.mtp_draft_coupled), 0 =
+    // draws: n_draws draft_row_draws() rows of the bound requests (coupled MTP drafts), 0 =
     // argmax.
     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
                                      const NvFP4QuantResult* head, cudaStream_t stream,
@@ -1260,21 +1260,13 @@ private:
     // and the model profile are final.
     [[nodiscard]] bool spec_ngram_model_capable_uncached_() const;
     bool spec_ngram_model_capable_flag_ = false;
-    // Prompt-lookup drafting is cold by construction: it matches a suffix of
-    // generated text against earlier occurrences, so early on there is
-    // nothing to match and a lost verify costs ~8 decode steps for 2 tokens.
-    // Conditions on tokens generated SO FAR (known at the decision point),
-    // not the request's eventual length (not known). Inline here because
-    // engine_spec_ngram.cpp is at its hard-review ceiling. See
-    // speculative.min_history.
-    [[nodiscard]] bool spec_history_too_short_(const Request& req) const;
     // Which gate refuses, or nullptr when none does. See the definition in
     // engine_spec_ngram.cpp for why the reason is a string and not a bool.
     const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;
     [[nodiscard]] bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
     // Sampled verify (speculative.sampled), engine_spec_sampled.cpp. Refusal: nullptr = verify may run.
     const char* spec_sampling_refusal_(const Request& req) const;
-    // A constrained request the verify cannot serve: sampled, or speculative.constrained off.
+    // A constrained request the verify cannot serve: a sampled one.
     [[nodiscard]] bool spec_constrained_refused_(const Request& req) const;
     // Does req's constraint mask, in its current FSM state, allow `tok`? apply_mask over a zero row,
     // one float back; false on any error (the caller then stops accepting).
@@ -1288,8 +1280,8 @@ private:
     // The MTP head is bound to this request: its per-step feed needs every token on the host (no async loop).
     [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
     [[nodiscard]] bool mtp_takes_prompt_(const Request& req) const;  // binds the head: serial prefill
-    void mtp_unbind_if_behind_(int req_id, int cur_pos);  // speculative.mtp_concurrent: batched steps unbind
-    // speculative.mtp_carry: after a batched decode forward, copy each bound row's hidden row into its slot's
+    void mtp_unbind_if_behind_(int req_id, int cur_pos);  // concurrent server: batched steps unbind
+    // the MTP carry: after a batched decode forward, copy each bound row's hidden row into its slot's
     // carry (input position context_len - 1 + pos_bias; 1 = a chained pipeline step); a full carry feeds
     // first.
     void mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,

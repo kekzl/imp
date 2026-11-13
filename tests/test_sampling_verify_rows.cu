@@ -254,7 +254,7 @@ std::vector<VerifySampling> seeded_rows(int n_rows, int seed0) {
 }  // namespace
 
 TEST(SampleVerifyRows, DraftRowDrawsWhatTheVerifyRowDrawsOnTheSameLogits) {
-    // speculative.mtp_draft_coupled: a draft row with the verify row's seed and params is that row's draw.
+    // Coupled drafts: a draft row with the verify row's seed and params is that row's draw.
     const int n_rows = 64, vocab = 4096;
     const std::vector<float> h = peaked_rows(n_rows, vocab, 0.0f);
     const std::vector<VerifySampling> rows = seeded_rows(n_rows, 1000);

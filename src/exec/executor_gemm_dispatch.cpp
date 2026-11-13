@@ -330,8 +330,7 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
     // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
-    if (cur_spec_verify_ && dispatch_policy().speculative.verify_nvfp4_gemm && M <= 4 &&
-        h.source_data != nullptr && h.source_scales != nullptr)
+    if (cur_spec_verify_ && M <= 4 && h.source_data != nullptr && h.source_scales != nullptr)
         return false;
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
@@ -534,12 +533,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         StorageTier prefill = h.prefill_tier;
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
-        // Verify chunk to the small-M block: speculative.verify_smallm, or a graph-captured verify step
-        // under verify_smallm_captured.
-        const auto& spec = dispatch_policy().speculative;
-        const bool verify_smallm = ctx.spec_verify_small_m &&
-                                   (spec.verify_smallm ||
-                                    (cur_spec_verify_smallm_ && spec.verify_smallm_captured));
+        // Graph-captured verify steps take the small-M block; eager verify keeps the batched GEMV
+        // (smallm there: 10.93 -> 15.02 ms per verify).
+        const bool verify_smallm = ctx.spec_verify_small_m && cur_spec_verify_smallm_;
 
         // Spec-verify chunk (#998): reads the NVFP4 decode overlay in one weight
         // pass per MR<=4 tile instead of dequantizing the source (GGUF K-quants
@@ -548,7 +544,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // = largest capture bucket (33). Scoped to dequantable GGUF sources;
         // native-ST NVFP4 weights read NVFP4 directly via the NVFP4 tile block below
         // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
-        // speculative.verify_smallm routes the chunk to the small-M block instead.
+        // A graph-captured verify routes the chunk to the small-M block instead.
         if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && h.source_data != nullptr &&
             dequant_gpu_supported(h.source_qtype)) {

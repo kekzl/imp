@@ -1170,7 +1170,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // nobody is told about isn't a choice the operator gets to make. Costs a name scan, no bytes.
         IMP_LOG_INFO(
             "MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it "
-            "on a single-stream run or a concurrent GDN-hybrid server (speculative.mtp_concurrent) with "
+            "on a single-stream run or a concurrent GDN-hybrid server with "
             "runtime.deterministic off; "
             "force it with --set speculative.mtp_k=2 --set speculative.ngram=false: measured "
             "+17-21 %% plain and +27-30 %% thinking single-stream decode on Qwen3.8-27B-NVFP4 "

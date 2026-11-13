@@ -105,7 +105,7 @@ struct Request {
     int top_k = 0;
     int seed = -1;
     // Unseeded sampler base, fixed at the first draw: output index i draws with draw_base + i (a draft drawn
-    // with that seed guesses the verify row, speculative.mtp_draft_coupled).
+    // with that seed guesses the verify row, coupled MTP drafts).
     mutable unsigned draw_base = 0;
     mutable bool draw_base_set = false;
     float min_p = 0.0f;               // Min probability threshold (0 = disabled)

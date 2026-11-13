@@ -96,16 +96,15 @@ int stage_eager_replay_kv_len(int* d_ctx_len, int p0, int chunk_pad, int matched
 }  // namespace
 
 // Burst-hybrid re-arm: a given-up request whose async-loop burst
-// (speculative.burst tokens) has completed gets a short probe window: two
+// (kSpecBurst tokens) has completed gets a short probe window: two
 // draft attempts and a fresh acceptance sample. Think models produce their
 // draft-rich region only after the reasoning prose; a sticky give-up would
 // lock them out exactly there.
 void Engine::spec_maybe_rearm_(Request& req) const {
     const auto& scfg = runtime_config_.speculative;
-    if (!req.spec_ngram_given_up || req.spec_acceptance_doomed || scfg.burst <= 0 ||
-        scfg.give_up_after <= 0)
+    if (!req.spec_ngram_given_up || req.spec_acceptance_doomed || scfg.give_up_after <= 0)
         return;
-    if (static_cast<int>(req.output_tokens.size()) - req.spec_last_giveup_pos < scfg.burst)
+    if (static_cast<int>(req.output_tokens.size()) - req.spec_last_giveup_pos < cfg::kSpecBurst)
         return;
     req.spec_ngram_given_up = false;
     req.spec_consecutive_misses = std::max(0, scfg.give_up_after - 2);
@@ -116,18 +115,15 @@ void Engine::spec_maybe_rearm_(Request& req) const {
 
 // Adaptive miss burst: consecutive draft misses double the burst length
 // (boundary overhead amortizes on draft-poor stretches), a hit resets it.
-// Capped at speculative.burst so re-probing never stops entirely.
+// Capped at kSpecBurst so re-probing never stops entirely.
 int Engine::spec_effective_miss_burst_(const Request& req) const {
-    const auto& scfg = runtime_config_.speculative;
-    int burst = scfg.miss_burst;
-    if (burst <= 0)
-        return 0;
+    int burst = cfg::kSpecMissBurst;
     // Cap growth at 4x: longer bursts overshoot draft-rich regions right
     // after a transition (think prose -> code), losing more speculation
     // upside than the saved boundary overhead is worth.
     const int doublings = std::min(2, req.spec_consecutive_misses / 8);
     burst <<= doublings;
-    const int cap = scfg.burst > 0 ? scfg.burst : 128;
+    const int cap = cfg::kSpecBurst;
     return std::min(burst, cap);
 }
 
@@ -199,23 +195,6 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
             return "think_budget_in_block";
     }
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";
-    if (spec_history_too_short_(req)) return "cold_start";  // see speculative.min_history
-    // Long-context economics on the DENSE path (#964): the captured chunk
-    // verify runs the FA2 tile + paged-KV gather over the ctx TIER (pow2,
-    // floor 4096, clamped to max_seq_len), so its cost follows the tier, not
-    // the live context, and dense ngram's shallow payout turns net-negative
-    // past a few k of context. Gate drafting once the request's context
-    // crosses the cap. MoE-NVFP4 and GDN-hybrid requests are exempt: their
-    // drafts run much deeper, which pays for the verify at any context.
-    {
-        const int cap = runtime_config_.speculative.draft_ctx_cap;
-        const bool moe_nvfp4_path = model_->profile().is_moe &&
-                                    runtime_config_.speculative.moe &&
-                                    model_->profile().moe_experts_nvfp4;
-        const bool hybrid_path = ssm_state_ != nullptr;  // only reachable with speculative.hybrid
-        if (!moe_nvfp4_path && !hybrid_path && cap > 0 && req.context_len() > cap)
-            return "draft_ctx_cap";
-    }
     // Recurrent state (SSM/GDN) advances on every forwarded token. The
     // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
     // per-sequence slab for snapshot/restore.
@@ -296,7 +275,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int pred_begin = static_cast<int>(req->input_tokens.size());
     const int pred_end = pred_begin + static_cast<int>(req->prediction_tokens.size());
 
-    const int k = std::max(1, scfg.k);
+    const int k = cfg::kSpecDraftK;
     // One object, two names: the draft and the history index it came from
     // are produced together.
     NgramDraft nd;
@@ -317,7 +296,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const int out_indexed = std::clamp(idx.size() - pred_end, 0,
                                            static_cast<int>(req->output_tokens.size()));
         idx.append(std::span(req->output_tokens).subspan(static_cast<size_t>(out_indexed)));
-        nd = with_corpus_fallback(idx, spec_suffix_idx_, k, std::max(k, scfg.suffix_k_max));
+        nd = with_corpus_fallback(idx, spec_suffix_idx_, k, std::max(k, cfg::kSpecSuffixKMax));
     } else {
         std::vector<int32_t> history;
         history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +
@@ -338,8 +317,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // plain decode speed. MoE-NVFP4 and hybrids are exempt (deep drafts pay
     // for the verify at any context).
     if (!draft.empty() && static_cast<int>(draft.size()) < 2 &&
-        scfg.shallow_draft_ctx > 0 && req->context_len() > scfg.shallow_draft_ctx &&
-        ssm_state_ == nullptr &&
+        req->context_len() > cfg::kSpecShallowDraftCtx && ssm_state_ == nullptr &&
         !(model_->profile().is_moe && scfg.moe && model_->profile().moe_experts_nvfp4)) {
         nd = {};
     }
@@ -366,8 +344,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // 3): W candidates as W scan sequences on W slots, see the hybrid
         // block below and spec_mc_hybrid_ok_ for what it needs.
         const int mtp_w = runtime_config_.speculative.mtp_tree_width;
-        const bool mtp_mc_ok = scfg.verify_decode_attn &&
-                               (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
+        const bool mtp_mc_ok = (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
                                !model_->profile().is_moe && !model_->config().is_mla() &&
                                !swa_sizing_active_ && !mc_refused;
         if (mtp_w > 1 && mtp_mc_ok) {
@@ -399,15 +376,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Route (a) preconditions: per-row block tables exist only on the
         // decode-attn verify route; the grouped rows are incompatible with
         // the linear-draft penalty replication and the MTP row consumer.
-        const bool mc_route_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
-                                 !model_->profile().is_moe && !model_->config().is_mla() &&
-                                 !swa_sizing_active_ && !mc_refused && !mtp_spec_decode_enabled();
+        const bool mc_route_ok = ssm_state_ == nullptr && !model_->profile().is_moe &&
+                                 !model_->config().is_mla() && !swa_sizing_active_ && !mc_refused &&
+                                 !mtp_spec_decode_enabled();
         if (draft.empty()) {
-            const auto [width, depth] = recycle_mc_shape(scfg.recycle_width, scfg.recycle_depth, k,
+            const auto [width, depth] = recycle_mc_shape(scfg.recycle_width, cfg::kRecycleDepth, k,
                                                          offload_mgr_ != nullptr);
             if (mc_route_ok && width > 1) {
-                auto cands = spec_recycle_table_().draft_multi(scfg.recycle_tree, req->output_tokens.back(),
-                                                               width, depth);
+                auto cands = spec_recycle_table_().draft_candidates(req->output_tokens.back(), width, depth);
                 if (cands.size() > 1) {
                     mc = std::move(cands);
                     mc_depth = 0;
@@ -417,13 +393,11 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                     draft = std::move(cands.front());
                 }
             } else {
-                draft = spec_recycle_table_().draft_linear(
-                    req->output_tokens.back(), depth,
-                    std::max(0, scfg.recycle_min_streak));
-                if (static_cast<int>(draft.size()) < 2 && scfg.shallow_draft_ctx > 0 &&
-                    req->context_len() > scfg.shallow_draft_ctx && ssm_state_ == nullptr &&
-                    !(model_->profile().is_moe && scfg.moe &&
-                      model_->profile().moe_experts_nvfp4))
+                draft = spec_recycle_table_().draft_linear(req->output_tokens.back(), depth,
+                                                           cfg::kRecycleMinStreak);
+                if (static_cast<int>(draft.size()) < 2 && req->context_len() > cfg::kSpecShallowDraftCtx &&
+                    ssm_state_ == nullptr &&
+                    !(model_->profile().is_moe && scfg.moe && model_->profile().moe_experts_nvfp4))
                     draft.clear();
             }
         }
@@ -453,7 +427,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // burst forwards output.back() itself. Not while MTP is bound to
         // this request: a burst desyncs the MTP cache for the rest of the
         // generation (#847 sync gate).
-        if (scfg.miss_burst > 0 && !req->spec_ngram_given_up &&
+        if (!req->spec_ngram_given_up &&
             !(mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req->id)) &&
             spec_burst_launch_ok_(*req) &&
             try_launch_async_graph_loop(req, req->output_tokens.back(), stream,
@@ -523,8 +497,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // tables exactly like the dense mc chunk. mc_on implies the mc gate
     // above passed (spec_mc_hybrid_ok_ when ssm_state_ != nullptr).
     const bool hybrid_mc = mc_on && ssm_state_ != nullptr;
-    const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
-                                   (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
+    const bool decode_attn_route = (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
                                    !model_->config().is_mla() && !swa_sizing_active_;
     const int bucket = spec_capture_bucket_(chunk_len);
     const bool capture_on = !swa_sizing_active_ && spec_capture_ready_(p0 + bucket, bucket);
@@ -580,8 +553,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // is usually much larger than this chunk needs. Captured graphs bake the
     // staging pointers, so size for the largest bucket up front (a later
     // realloc would silently invalidate every cached graph).
-    const int chunk_cap =
-        std::max({chunk_pad, scfg.k + 1, capture_on ? spec_capture_bucket_max_() : 0});
+    const int chunk_cap = std::max(
+        {chunk_pad, cfg::kSpecDraftK + 1, capture_on ? spec_capture_bucket_max_() : 0});
     const int table_cap = capture_on
                               ? std::max(n_blocks + 16, ((spec_capture_ctx_cap_ + kv_bs - 1) / kv_bs) + 16)
                               : n_blocks + 16;
@@ -877,11 +850,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // token_recycling the same lm-head pass also harvests each row's top-M
     // logit ids for the adjacency table (the model's own successor
     // candidates, Token Recycling's feed signal).
-    const int recycle_m =
-        runtime_config_.speculative.token_recycling
-            ? std::min({std::max(1, runtime_config_.speculative.recycle_slots),
-                        kRowwiseTopMMax})
-            : 0;
+    const int recycle_m = runtime_config_.speculative.token_recycling
+                              ? std::min({cfg::kRecycleSlots, kRowwiseTopMMax})
+                              : 0;
     // Stop mask (mirrors fill_sampling_params) at the request's state when the
     // chunk starts: a verified stop inside the think block is a rejected draft.
     const bool mask = stop_mask_active(*req, think_end_id_);
@@ -996,8 +967,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // acceptance; that breadth is what makes the next draft fire).
     if (recycle_m > 0) {
         TokenRecycleTable& tr = spec_recycle_table_();
-        // Before observe_topk below rewrites the rows: draft_tree's slot costs.
-        observe_candidate_ranks(tr, scfg.recycle_tree, t0, mc, h_spec_argmax_.as<int32_t>());
         for (int j = 0; j < chunk_len; ++j) {
             int32_t tok;
             if (mc_on) {
@@ -1162,16 +1131,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // row next draft (up to the configured k), any rejection sheds one.
         // Draft-poor prompts converge to k=1 verifies instead of paying the
         // deep-chunk cost at low accept; draft-rich prompts climb back.
-        if (runtime_config_.speculative.mtp_adaptive_k) {
-            // Ceiling is the depth THIS request resolved to, not the
-            // process-wide one: a caller that asked for mtp_k=1 must not ride
-            // the ladder back up to the server default.
-            const int req_ceiling = mtp_request_k_(*req);
-            if (matched >= K)
-                mtp_active_.k_live = std::min(req_ceiling, mtp_chain_k_() + 1);
-            else
-                mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
-        }
+        // Ceiling is the depth THIS request resolved to, not the process-wide
+        // one: a caller that asked for mtp_k=1 must not ride the ladder back up.
+        const int req_ceiling = mtp_request_k_(*req);
+        if (matched >= K)
+            mtp_active_.k_live = std::min(req_ceiling, mtp_chain_k_() + 1);
+        else
+            mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
         // Break-even avg emitted/verify is configurable (0 disables): the
         // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
         // the verify-chunk cost, both of which have moved since #852.
@@ -1192,8 +1158,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
     const SpecEconVerdict econ = spec_economics({req->spec_verifies, req->spec_drafted, req->spec_accepted,
-                                                 req->spec_emitted, dspark_ != nullptr,
-                                                 scfg.dspark_min_emit});
+                                                 req->spec_emitted, dspark_ != nullptr, cfg::kDsparkMinEmit});
     const bool acceptance_poor = econ.stop;
     // Layer offload: a verify costs one streamed pass like a decode step (190.5 vs 188.6 ms), nothing to
     // amortize.

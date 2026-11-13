@@ -16,24 +16,21 @@ void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& 
         startup = cfg;
 }
 
-int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
+int mtp_auto_request_k(const RuntimeConfig& cfg) {
     const int configured = cfg.speculative.mtp_k;
     if (configured >= 0)
         return configured;  // explicit: off (0) or a pinned depth
     if (cfg.runtime.deterministic)
         return 0;  // MTP greedy trajectories are not eager-equal
-    // Concurrent serving: the head binds one request - unless the batched verify drafts for every
-    // request, or speculative.mtp_concurrent lets it draft while one request decodes (phase 2
-    // keeps that for GDN hybrids only, the request costs no VRAM before Engine::init).
-    if (configured_batch != 1 && !cfg.speculative.batch_verify && !cfg.speculative.mtp_concurrent)
-        return 0;
+    // Concurrent serving loads the head too: on a GDN hybrid it drafts while one request decodes;
+    // mtp_auto_finalize turns it off on other concurrent servers.
     return kMtpAutoK;
 }
 
 int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid, int requested_k,
                           bool head_loaded, int head_auto_k_cap) {
     const bool bound = configured_batch == 1 && gdn_hybrid && cfg.speculative.mtp_k < 0 && requested_k > 0 &&
-                       head_loaded && head_auto_k_cap >= 0 && cfg.speculative.mtp_concurrent &&
+                       head_loaded && head_auto_k_cap >= 0 &&
                        mtp_bound_verify_config_rows(cfg) >= kMtpBoundVerifyEngineBatch;
     if (!bound)
         return configured_batch;
@@ -41,7 +38,7 @@ int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hyb
     IMP_LOG_INFO(
         "max_batch_size 1: engine batch %d with runtime.max_batch_size=1, the one chat verifies its MTP "
         "drafts on the bound path (admission, decode and KV pool stay at 1 chat). Set "
-        "speculative.mtp_concurrent=false for the single-stream chain.",
+        "speculative.mtp_k=2 for the single-stream chain.",
         kMtpBoundVerifyEngineBatch);
     return kMtpBoundVerifyEngineBatch;
 }
@@ -49,8 +46,7 @@ int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hyb
 MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid) {
     if (configured_batch == 1 || cfg.speculative.batch_verify)
         return MtpAutoServing::SingleStream;
-    return gdn_hybrid && cfg.speculative.mtp_concurrent ? MtpAutoServing::ConcurrentHybrid
-                                                        : MtpAutoServing::ConcurrentOther;
+    return gdn_hybrid ? MtpAutoServing::ConcurrentHybrid : MtpAutoServing::ConcurrentOther;
 }
 
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
@@ -140,7 +136,7 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
             "Qwen3.8-27B-NVFP4). Set speculative.mtp_k=0 to opt out.",
             requested_k, cfg.speculative.ngram ? "true (explicitly set)" : "false",
             serving == MtpAutoServing::ConcurrentHybrid
-                ? "concurrent server: drafts while one request decodes, speculative.mtp_concurrent"
+                ? "concurrent server: drafts while one request decodes"
                 : "single-stream run");
         mtp_concurrent_pool_defaults(cfg, serving);
         mtp_verify_depth_follows_k(cfg);

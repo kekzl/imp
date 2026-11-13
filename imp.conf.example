@@ -1111,29 +1111,18 @@ ngram                = true
 # draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
 # and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
 sampled              = true
-# With sampled: sampled rows verify in the batched step too (mtp_batch_verify,
-# a lone bound chat included), each row with its own request's seed. false =
-# the single verify chunk, a batch holding a sampled row decodes plain.
-sampled_batch_verify = true
-# Context cap for DENSE chunk-verify drafting (#964): the captured verify
-# costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
-# pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
-# ~2k. Per-step gate; MoE-NVFP4 and GDN-hybrid drafts are exempt. 0 = no cap.
-draft_ctx_cap        = 0        # embedded default is 0, not 2048 (#1672)
 # Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
 # code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
 # batched verify re-dequants every activated expert per step, measured -22%)
 # and stays on the async decode loop. imp-cli --bench pins this off to keep
 # the gated tg baseline a raw-decode signal.
 moe                  = true
-# Draft tokens proposed per verify step (verify cost is ~flat in k).
-k                    = 16
 # Token-Recycling adjacency drafting (arXiv 2408.08696): engine-scoped
 # `token -> top-M successors` table fed from emitted bigrams and the
 # model's own verify-chunk top-K logits; drafts where suffix/n-gram find
-# nothing (fresh reasoning prose). recycle_depth 3 keeps the chunk in
+# nothing (fresh reasoning prose). Depth 3 (kRecycleDepth) keeps the chunk in
 # capture bucket 4 = one batched-GEMV weight sweep (#1055);
-# recycle_min_streak only drafts re-confirmed successors (precision gate);
+# a hop drafts only a re-confirmed successor (kRecycleMinStreak, precision gate);
 # recycle_width > 1 verifies that many candidates per chunk (measured: the
 # accept lift does not pay for the bigger chunk — keep 1). EXPERIMENTAL,
 # default OFF: cold-start accept on fresh reasoning measures ~1.4
@@ -1144,21 +1133,14 @@ k                    = 16
 # Under --gpu-layers it turns on with recycle_width 8 unless set here: a verify costs one
 # streamed pass there, flat to 64 rows (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 7.22, code 6.85 -> 9.80 tok/s).
 token_recycling      = false
-recycle_slots        = 8
-recycle_depth        = 3
 recycle_width        = 1
-# Multi-candidate shape: true = best-first tree, the recycle_width lowest-rank-sum paths
-# branching at every depth; false = branch at the first hop only.
-recycle_tree         = false
-recycle_min_streak   = 1
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a
 # draft backed by multiple agreeing occurrences (or a maximal-length
-# context match, e.g. the `prediction` region) extends past k up to
-# suffix_k_max. false = legacy single-most-recent scan.
+# context match, e.g. the `prediction` region) extends past 16 drafts up to
+# 64 (kSpecSuffixKMax). false = legacy single-most-recent scan.
 suffix               = true
-suffix_k_max         = 64
 # Corpus drafting: text files under this path (a file or a directory, read
 # up to 64 MiB, binary files skipped) form one engine-wide suffix index that
 # drafts when the request's own history has no match (needs suffix = true).
@@ -1168,14 +1150,6 @@ ngram_corpus         = ""
 # DSpark / DFlash block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 or
 # z-lab/Qwen3-8B-DFlash-b16 for Qwen3-8B; DFlash reads embed / lm_head from the target); forces batch 1.
 dspark_model         = ""
-# Block drafter economics: after 8 verifies, below this many emitted tokens per verify the request stops
-# drafting until the next burst re-arm (0 = the n-gram 15 % acceptance rule, final for the request).
-dspark_min_emit      = 1.8
-# DSpark drafter q / o / gate / up / down / lm_head as per-row FP8: propose 3.07 -> 1.76 ms with the graph.
-dspark_fp8           = true
-# Greedy JSON / schema / regex / grammar / tool-constrained requests verify drafts (rows checked
-# against the request's own mask); sampled constrained requests stay eager.
-constrained          = true
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).
@@ -1185,17 +1159,6 @@ max_match            = 12
 # this many consecutive draft misses, or when acceptance stays under 15%.
 # 0 = never give up.
 give_up_after        = 64
-# Burst-hybrid: a given-up request runs the async loop in bursts of this
-# many tokens and re-probes for drafts in between (think models reach their
-# draft-rich region only after the reasoning prose). 0 = give-up is final.
-burst                = 128
-# On a draft miss, run the async loop for this many tokens (cheap rearm,
-# no graph recapture) instead of stepping eagerly until the next draft.
-# 0 = stay eager between drafts.
-miss_burst           = 8
-# Re-arm an existing conditional decode graph on a draft miss instead of a
-# fresh capture (both share the same first-forward semantics since #692).
-burst_rearm          = true
 # Speculation on hybrid (GDN/SSM) models: the committed recurrent-state slab
 # is snapshotted around the verify chunk; a partial acceptance restores it and
 # re-forwards the accepted prefix. imp-cli --bench pins this false.
@@ -1210,23 +1173,10 @@ hybrid               = true
 # one stream - and only with runtime.deterministic off. Measured on
 # Qwen3.8-27B-NVFP4 (2026-08-29, 3 alternating rounds): 95.8 -> 141.6 tok/s
 # on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. A concurrent
-# GDN-hybrid server (Qwen3.8-27B) takes the pair too, see mtp_concurrent; other
+# GDN-hybrid server (Qwen3.8-27B) takes the pair too (bound verify); other
 # concurrent servers and determinism (chunk-greedy is not the eager
 # trajectory) keep it off. An explicitly set `ngram` is never overruled by auto.
 mtp_k                = -1
-# mtp_k=auto on a concurrent GDN-hybrid server: load the head; a prompt that
-# prefills alone while the head is free binds it and verifies while it decodes
-# alone; batch > 1 decodes plain, and a bound request that decoded in a batch
-# unbinds (plain decode from there). Qwen3.8-27B-NVFP4, default server, 1
-# stream 96.87 -> 131.28 tok/s, c32 unchanged, own peak VRAM +2773 MiB.
-# false = concurrent servers leave the head unloaded (the rule before).
-# A one-chat GDN-hybrid server (imp-server --max-batch 1) verifies on the same
-# bound path: engine batch 2 with runtime.max_batch_size=1, admission and the KV
-# pool stay at one chat. Qwen3.8-27B-NVFP4 agent replay, 1 chat: 69.28 -> 205.58
-# tok/s. imp-cli chat runs (--prompt, --prompt-file, --interactive) too: one-shot
-# greedy 126.01 -> 167.43 tok/s; --bench, --perplexity, --mtp-spec-decode keep
-# engine batch 1. false = both keep the single-stream chain (mtp_k=2).
-mtp_concurrent       = true
 # MTP head KV slots when the batched verify is off: one request binds, the
 # others keep other chats' head caches, so a chat UI's title / follow-up
 # request between two turns no longer wipes it and the next turn drafts over
@@ -1237,17 +1187,7 @@ mtp_history_slots    = 4
 # Clamped to the model context; with many slots (batched verify) a 1 GiB budget
 # caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
 mtp_kv_window        = 16384
-# A prompt whose prefix-cache hit reaches past every head slot's rows still
-# binds: the head starts at the hit with no rows below it. false = it drafts
-# nothing, and an agent chat that missed one turn stays unbound.
-mtp_gap_bind         = true
-# With mtp_history_slots: up to that many requests bind the head at once, and
-# a bound request's hidden rows from batched decode steps feed its head slot
-# in 256-row passes (2.5 MiB per slot), so two chats decoding together draft
-# again once one decodes alone and keep their head caches for the next turn.
-# false = one binding, a batched step unbinds it (the rule before).
-mtp_carry            = true
-# With mtp_carry: while at most this many requests decode (capped at
+# While at most this many requests decode (capped at
 # mtp_history_slots), one forward verifies every bound request's MTP draft (2
 # rows per request; one spare recurrent slot per row, 79.5 MiB each on
 # Qwen3.8-27B, charged in the KV plan); a bigger batch decodes plain.
@@ -1277,32 +1217,11 @@ mtp_batch_verify_k_streak = 7
 # a partial accept. false = a second spare slot per row (79.5 MiB each), 2
 # drafts at most.
 mtp_batch_verify_factor_row = true
-# A bound request decoding alone verifies in that batched step too (rows on
-# paged decode attention, split-K over the context) instead of the single
-# verify chunk, whose prefill attention walks the whole context per CTA.
-# false = the single chunk.
-mtp_batch_verify_solo = true
-# That step's head pass (feed, draft LM head, chain) replays a CUDA graph per
-# (fed rows, requests, chain), at most 96; the second use of a shape captures
-# it. false = eager launches. Qwen3.8-27B-NVFP4: head pass at 2 requests
-# 2.66-2.77 -> 2.33-2.46 ms, 4 overlapping chats 140.40 -> 143.47 tok/s.
-mtp_head_graph       = true
-# Sampled bound requests: an MTP draft draws from the head's logits with the
-# request's top_k / top_p / temperature and the seed of the verify row that
-# checks it (the sampler's noise is keyed on (seed, token id)). The emitted
-# tokens stay the verify rows' draws. false = argmax drafts. Qwen3.8-27B-NVFP4
-# agent replay: 2.981 -> 3.461 tokens per step.
-mtp_draft_coupled    = true
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.
 # e.g. "/models/Qwen3.8-27B-NVFP4-vllm/mtp.safetensors"; empty = off.
 mtp_head             = ""
-# Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next draft
-# by one row (up to mtp_k), any rejection sheds one (floor 1). Draft-poor
-# prompts converge to k=1 verifies; draft-rich prompts climb back to mtp_k.
-# false = fixed chain depth mtp_k (A/B kill switch).
-mtp_adaptive_k       = true
 # Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head decode
 # cache when one exists (~4x less HBM traffic per drafted token; the chain
 # re-reads the LM head once per draft). Draft-only precision — verification
@@ -1320,13 +1239,6 @@ mtp_nvfp4_head       = true
 # order: 99.94 % of Qwen3.8 agent output tokens sit below 98304. Unset, a
 # concurrent GDN-hybrid server takes 98304; this line sets it, so drop it there.
 mtp_draft_vocab      = 0
-# On the bound verify lane (concurrent GDN-hybrid server, one-chat server,
-# imp-cli chat) MTP draft passes (<= 32 rows) read a per-row E4M3 copy of a
-# dense head body (fc, q/k/v/o, MLP; Qwen3.8-27B 406 MiB on top of the FP16
-# weights, priced in the memory plan). Draft-only; verification stays exact.
-# The mtp_k = 2 chain takes no copy (measured neutral). false = FP16 body
-# (Qwen3.8-27B agent replay 218.78 -> 204.28 tok/s per chat).
-mtp_body_fp8         = true
 # MTP economics guard: after an 8-verify sample, avg emitted tokens per
 # MTP-filled verify below this dooms MTP drafting for the request. 0 disables
 # the guard. Note: a chain of k emits at most k+1 per verify.
@@ -1338,13 +1250,6 @@ mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # on non-hybrid models; capture failures fall back to the eager verify.
 # imp-cli --bench pins this false (raw-decode baseline semantics).
 capture              = true
-# Context capacity the captured grids and the persistent K/V scratch cover
-# (2 x cap x nkv x hd x 2B VRAM); verify steps beyond it run eager. Clamped
-# to the model's max_seq_len.
-capture_ctx_cap      = 32768
-# Serve batched speculation round-robin with an adaptive yield cadence (8 -> 64
-# steps backoff on empty turns). Kill switch for A/B; batch-1 unaffected.
-batch_rr             = true
 # Batched verify on the GDN hybrid: every decoding request forwards its last
 # token plus one MTP draft per step (one spare recurrent slot per batch slot,
 # halves the auto batch). Measured Qwen3.8-27B 8 streams +20..+26 %; at 32
@@ -1357,36 +1262,12 @@ batch_verify         = false
 # 3.3 MiB. Opt-in while the two paths are compared against each other.
 # docs/plans/2026-09-12-factored-verify-spare.md.
 factored_spare       = false
-# Do not speculate before this many tokens were generated for the request (the
-# economics guard arms at 8 verifies per request, a short one never gets there).
-# 0 = no gate.
-min_history          = 0
 # MTP multi-candidate width; 1 = the linear chain. Run diagnostics.mtp_tree_probe
 # before raising it (docs/plans/2026-08-31-mtp-multicandidate-hybrid.md).
 mtp_tree_width       = 1
 # With mtp_tree_width > 1: verify the extra chains only when the head's
 # top-1/top-2 logit margin is below this. 0 = always branch.
 mtp_tree_margin      = 2.0
-# Above this context, depth-1 drafts are discarded instead of verified (verify
-# costs ~2x a decode step near 14k on Qwen3-8B Q8_0); depth >= 2 is always
-# verified. MoE-NVFP4 and hybrid requests are exempt. 0 = never gate.
-shallow_draft_ctx    = 12288
-# Dense verify-chunk attention through the batched-decode split-K paged kernels
-# instead of the small-M FA2 tile (+25..44 % e2e on Qwen3-8B Q8_0). Dense
-# non-MLA/non-SWA/non-MoE/non-hybrid only. Kill switch for A/B.
-verify_decode_attn   = true
-# Verify-chunk GEMMs read the NVFP4 decode overlay instead of the M>1 source
-# dequant path (on Q6_K the dequant was 52 % of the tg window). Kill switch.
-verify_nvfp4_gemm    = true
-# Verify-chunk NVFP4 GEMV reduces K exactly like the M=1 decode GEMV (bit
-# parity between the two paths). Off pending its own measurement.
-verify_row_parity    = false
-# Verify-chunk native-NVFP4 GEMMs through the small-M pipeline kernel instead
-# of the batched GEMV: +1-2 %, inside the trajectory variance (2026-08-27).
-verify_smallm        = false
-# verify_smallm for graph-captured verify chunks only; eager verify keeps the
-# batched GEMV. Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s.
-verify_smallm_captured = true
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM

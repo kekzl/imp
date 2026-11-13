@@ -1,5 +1,5 @@
 #!/bin/sh
-# Guard: batch>1 speculation must gate on "is there a draft source", not speculative.ngram
+# Guard: batch>1 speculation (round-robin verify, #1003) must gate on "is there a draft source", not speculative.ngram
 # (the key the measured MTP recipe sets false, docs/MODELS.md). Source-reading script, not a
 # GTest body: shipped test binaries run without the tree (imp:test has no /src).
 
@@ -46,10 +46,10 @@ check() {
 
 check src/runtime/engine_scheduler.cpp "SpecBatchRrState rr_state" "spec_rr_yield_interval_ =" \
       "the scheduler round-robin branch"
-check src/runtime/engine_spec_batch_verify.cpp "speculative.batch_rr" "bool Engine::step_spec_verify_batched_" \
+check src/runtime/engine_spec_batch_verify.cpp "++bd_pipe_.steps_since_spec_yield" "bool Engine::step_spec_verify_batched_" \
       "the #1003 pipeline spec yield (pipeline_yields_)"
 
 if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
-echo "check_spec_rr_wiring: both batch_rr sites ask the drafter question"
+echo "check_spec_rr_wiring: both round-robin sites ask the drafter question"

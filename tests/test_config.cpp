@@ -463,11 +463,11 @@ TEST(ConfigBadValue, BoolKeyRejectsANonBoolean) {
 
 TEST(ConfigBadValue, IntKeyRejectsWordsAndTrailingGarbage) {
     imp::RuntimeConfig cfg;
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=one"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=one"}).size(), 1u);
     // stoi stops at the first non-digit, so this parsed as 16 and reported
     // nothing. The whole string has to be consumed.
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=16k"}).size(), 1u);
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=1,2"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=16k"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=1,2"}).size(), 1u);
 }
 
 TEST(ConfigBadValue, FloatKeyRejectsANonNumber) {
@@ -509,16 +509,6 @@ TEST(ConfigBinding, DenseWeightCacheDefaultsOnAndBinds) {
     EXPECT_TRUE(cfg.was_set("gemm.dense_weight_cache"));
     EXPECT_TRUE(cfg.apply_overrides({"gemm.dense_weight_cache=true"}).empty());
     EXPECT_TRUE(cfg.gemm.dense_weight_cache);
-}
-
-// ---- #1638: a decode-path switch nothing could set ----
-
-TEST(ConfigBinding, SpeculativeBatchRrIsBound) {
-    imp::RuntimeConfig cfg;
-    ASSERT_TRUE(cfg.speculative.batch_rr) << "default is on";
-    EXPECT_TRUE(cfg.apply_overrides({"speculative.batch_rr=false"}).empty())
-        << "read at engine_scheduler.cpp:1422 and :2882, bound to no key until #1638";
-    EXPECT_FALSE(cfg.speculative.batch_rr);
 }
 
 // #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,

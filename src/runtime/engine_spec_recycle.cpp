@@ -11,9 +11,7 @@ namespace imp {
 
 TokenRecycleTable& Engine::spec_recycle_table_() {
     if (!spec_recycle_) {
-        const auto& scfg = runtime_config_.speculative;
-        spec_recycle_ = std::make_unique<TokenRecycleTable>(model_->config_.vocab_size,
-                                                            std::max(1, scfg.recycle_slots));
+        spec_recycle_ = std::make_unique<TokenRecycleTable>(model_->config_.vocab_size, cfg::kRecycleSlots);
     }
     return *spec_recycle_;
 }

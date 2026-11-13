@@ -147,9 +147,8 @@ int main(int argc, char** argv) {
     // MTP spec-decode, else it is dead VRAM. speculative.mtp_k is tri-state: -1 auto, 0 off, >0
     // fixed; the CLI is always single-stream, so auto engages whenever the checkpoint ships a
     // head. --mtp-spec-decode still wins.
-    int mtp_k = args.mtp_spec_decode_k > 0
-                    ? args.mtp_spec_decode_k
-                    : imp::tools::mtp_auto_request_k(runtime_cfg, /*configured_batch=*/1);
+    int mtp_k = args.mtp_spec_decode_k > 0 ? args.mtp_spec_decode_k
+                                           : imp::tools::mtp_auto_request_k(runtime_cfg);
     ImpError err = imp_model_load_ex(resolved_model.c_str(), format,
                                      /*load_mtp_head=*/mtp_k > 0, &model);
     if (err != IMP_SUCCESS) {

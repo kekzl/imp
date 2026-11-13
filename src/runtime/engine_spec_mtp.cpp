@@ -115,7 +115,7 @@ int Engine::mtp_acquire_slot_(const Request& req, int offset) {
         cands.push_back({.pos = s == ws->cur_slot ? ws->mtp_pos : ws->slot_pos[static_cast<size_t>(s)],
                          .history = &mtp_pool_.slot_history[static_cast<size_t>(s)],
                          .last_use = mtp_pool_.slot_used[static_cast<size_t>(s)]});
-    const int pick = mtp_pick_slot(cands, req.input_tokens, offset, runtime_config_.speculative.mtp_gap_bind);
+    const int pick = mtp_pick_slot(cands, req.input_tokens, offset);
     if (pick < 0)
         return -1;
     const int slot = mtp_pool_.free_slots[static_cast<size_t>(pick)];
@@ -140,11 +140,6 @@ void Engine::mtp_release_(int req_id) {
         mtp_pool_.free_slots.push_back(it->second.slot);
     }
     mtp_pool_.binds.erase(it);
-}
-
-bool Engine::spec_history_too_short_(const Request& req) const {
-    const int n = runtime_config_.speculative.min_history;
-    return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
 }
 
 bool Engine::mtp_feed_wanted_(const Request& req) const {
@@ -487,7 +482,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
 // Bind req's first prefill chunk (at `offset`) to a head KV slot, resuming over the longest common
 // prefix of the slot's fed history and this prompt (multi-turn agent loops re-send the prior turn
 // verbatim, so the cache carries over). A resume past every slot's rows starts the head at `offset`
-// (speculative.mtp_gap_bind). false = req drafts nothing; no slot's history is touched.
+// with no head rows below it. Returns false when req drafts nothing; no slot's history is touched.
 bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
@@ -533,7 +528,7 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     mtp_active_.econ_batched = 0;
     mtp_active_.k_live = mtp_spec_k_;
     mtp_active_.carry_n = 0;
-    if (runtime_config_.speculative.mtp_gap_bind && imp::mtp_bind_has_gap(offset, keep_pairs, ring_lost)) {
+    if (imp::mtp_bind_has_gap(offset, keep_pairs, ring_lost)) {
         if (!imp::mtp_kv_hi_floor(*ws, slot, offset, decode_stream())) {
             mtp_unbind_("head KV ring floor failed");
             return false;
@@ -694,7 +689,7 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(s.n_kv_slots)));
         s.max_seq_len = std::min(std::max(fit, 2048), s.max_seq_len);
     }
-    // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8).
+    // the MTP carry scratch (2.5 MiB per slot on Qwen3.8).
     s.carry_rows = mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size);
     // Post-norm feed scratch (diagnostics.mtp_prenorm_h): sized to the executor's token cap, the
     // widest feed a prefill chunk can hand mtp_feed_pairs_.
@@ -702,8 +697,7 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
     // E4M3 body copy for the bound verify lane only: the mtp_k=2 chain measured neutral (imp-cli 125.85 ->
     // 128.64 greedy, 123.47 -> 120.75 tok/s sampled).
-    if (runtime_config_.speculative.mtp_body_fp8 &&
-        mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0)
+    if (mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0)
         s.body_fp8_bytes = imp::mtp_body_fp8_bytes(head);
     return true;
 }
@@ -772,17 +766,17 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
-    // speculative.mtp_carry scratch; refused = one binding, as without it.
+    // the MTP carry scratch; refused = one binding, as without it.
     (void)imp::mtp_carry_allocate(*ws, shape.carry_rows);
     // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
     prewarm_spec_state_scratch_();
     if (shape.body_fp8_bytes > 0) {
         const size_t before = ws->device_bytes;
         if (imp::mtp_body_fp8_allocate(*model_->mtp_, *ws, decode_stream()))
-            IMP_LOG_INFO("speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, %.1f MiB",
+            IMP_LOG_INFO("mtp: E4M3 copy of the dense MTP body, %.1f MiB",
                          static_cast<double>(ws->device_bytes - before) / 1048576.0);
         else
-            IMP_LOG_WARN("speculative.mtp_body_fp8: no E4M3 body copy (not a plain FP16 head or no VRAM)");
+            IMP_LOG_WARN("mtp: no E4M3 body copy (not a plain FP16 head or no VRAM)");
     }
     if (shape.prenorm_rows > 0 && !imp::mtp_prenorm_allocate(*ws, shape.prenorm_rows))
         IMP_LOG_WARN(

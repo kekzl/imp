@@ -457,27 +457,23 @@ TEST(EngineIntegrationTest, RearmedBurstKeepsPenaltyHistory) {
         Engine engine;
         ASSERT_TRUE(engine.init(tm.model, cfg));
         engine.mutable_runtime_config().runtime.decode_burst = 64;
-        for (bool rearm : {true, false}) {
-            engine.mutable_runtime_config().speculative.burst_rearm = rearm;
-            auto req = std::make_shared<Request>();
-            req->input_tokens = {1, 2, 3};
-            req->max_tokens = 200;
-            req->ignore_eos = true;
-            req->temperature = 0.0f;
-            req->presence_penalty = 1000.0f;
-            engine.add_request(req);
-            for (int steps = 0; req->status != RequestStatus::FINISHED && steps < 1000; steps++)
-                (void)engine.step();
-            ASSERT_EQ(req->status, RequestStatus::FINISHED) << "burst_rearm=" << rearm;
-            ASSERT_EQ(req->output_tokens.size(), 200u) << "burst_rearm=" << rearm;
-            std::vector<int> seen(256, -1);
-            for (int i = 0; i < 200; i++) {
-                const int32_t t = req->output_tokens[i];
-                ASSERT_TRUE(t >= 0 && t < 256);
-                EXPECT_EQ(seen[t], -1) << "token " << t << " at " << i << " repeats " << seen[t]
-                                       << " (burst_rearm=" << rearm << ")";
-                seen[t] = i;
-            }
+        auto req = std::make_shared<Request>();
+        req->input_tokens = {1, 2, 3};
+        req->max_tokens = 200;
+        req->ignore_eos = true;
+        req->temperature = 0.0f;
+        req->presence_penalty = 1000.0f;
+        engine.add_request(req);
+        for (int steps = 0; req->status != RequestStatus::FINISHED && steps < 1000; steps++)
+            (void)engine.step();
+        ASSERT_EQ(req->status, RequestStatus::FINISHED);
+        ASSERT_EQ(req->output_tokens.size(), 200u);
+        std::vector<int> seen(256, -1);
+        for (int i = 0; i < 200; i++) {
+            const int32_t t = req->output_tokens[i];
+            ASSERT_TRUE(t >= 0 && t < 256);
+            EXPECT_EQ(seen[t], -1) << "token " << t << " at " << i << " repeats " << seen[t];
+            seen[t] = i;
         }
     }
     tm.cleanup();

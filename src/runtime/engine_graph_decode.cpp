@@ -61,7 +61,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
 
     // Reserves for the burst about to run, not the whole generation (#1636): the
     // launch is clamped to runtime.decode_burst (128), 16 while another request
-    // waits, or speculative.miss_burst (8); the loop relaunches per burst anyway.
+    // waits, or kSpecMissBurst (8); the loop relaunches per burst anyway.
     // With plan_tokens set (max_tokens = remaining context) reserve up to the planning horizon only,
     // or one request would pull the whole pool.
     int reserve_tokens = std::max(1, planning_max_tokens(*req) - static_cast<int>(req->output_tokens.size()));
@@ -287,8 +287,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // Fast relaunch: a parked runner from a previous burst of the SAME request
     // keeps its captured graph, reseeding device state instead of recapturing
     // (full setup costs ~10-20 ms/launch). Rearm and fresh-capture share the same eager first-forward semantics (#683).
-    if (runtime_config_.speculative.burst_rearm && async_graph_runner_.is_setup() &&
-        async_parked_req_id_ >= 0) {
+    if (async_graph_runner_.is_setup() && async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);
         const int ctx = req->context_len();
         // SWA table must exist at matching length for a rearm (swa_prepare in

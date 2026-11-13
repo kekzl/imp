@@ -1,5 +1,5 @@
 #pragma once
-// CUDA graphs of the batched MTP head pass (Engine::mtp_head_pass_, speculative.mtp_head_graph): one per
+// CUDA graphs of the batched MTP head pass (Engine::mtp_head_pass_, the MTP head graph): one per
 // (fed rows, requests, chain). First use eager (cuBLASLt picks and caches the shapes' algos), second use
 // captured, then replayed; the scan nodes' smem follows the pass's largest position
 // (mtp_scan_nodes_set_rows).
@@ -25,7 +25,7 @@ struct MtpHeadGraphKey {
 
 // Bound: 1..3 requests x 1..9 fed rows each (51 (n, m) pairs, chain 3, 5 or 6 on the default ladder, 7 at
 // mtp_batch_verify_k_streak 8) + 4 requests x 1..4 rows (13 pairs, chain 2, mtp_bound_verify_step_depth),
-// once more with speculative.mtp_draft_coupled (draw > 0).
+// once more with coupled MTP drafts (draw > 0).
 inline constexpr size_t kMtpHeadGraphMax = 384;
 // Consecutive capture / instantiate / launch failures before the cache turns itself off.
 inline constexpr int kMtpHeadGraphMaxFailures = 2;

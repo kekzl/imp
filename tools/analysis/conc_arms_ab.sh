@@ -14,7 +14,7 @@ WAVES=${WAVES:-3}
 TRIALS=${TRIALS:-3}
 MBS=${MBS:-32}
 SEQ=${SEQ:-4096}
-COMMON=${COMMON:-"--set speculative.verify_smallm=true --set speculative.mtp_k=2 --set speculative.ngram=false"}
+COMMON=${COMMON:-"--set speculative.mtp_k=2 --set speculative.ngram=false"}
 ARMS=${ARMS:-'OFF=--set speculative.batch_verify=false;ON=--set speculative.batch_verify=true --set speculative.factored_spare=true'}
 LOG="${TMPDIR:-/tmp}/ab_arms_${CONC}.log"
 : > "$LOG"

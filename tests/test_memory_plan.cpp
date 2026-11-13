@@ -966,7 +966,7 @@ TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     EXPECT_EQ(mtp_workspace_bytes(hc), mtp_workspace_bytes(s) - 10485760u);
 }
 
-// speculative.mtp_body_fp8: E4M3 rows + FP32 row scales of the dense body, priced with the head before the
+// The MTP body FP8 copy: E4M3 rows + FP32 row scales of the dense body, priced with the head before the
 // FP16 upload (Qwen3.8-27B 406.0 MiB measured).
 TEST(MtpWorkspaceBytes, BodyFp8CopyIsPricedForADenseHead) {
     auto w = [](int64_t rows, int64_t k) {

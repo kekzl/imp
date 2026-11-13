@@ -139,7 +139,6 @@ TEST(SpecRequest, ResolvedDepthNeverExceedsTheArmedChain) {
 // MTP recipe sets to false.
 TEST(SpecBatchRr, MtpOnlyServerStillGetsRoundRobinVerify) {
     SpecBatchRrState s;
-    s.enabled = true;
     s.batch_rows = 4;
     s.any_drafter = true;  // ngram off, MTP on
     EXPECT_TRUE(spec_batch_rr_active(s));
@@ -147,7 +146,6 @@ TEST(SpecBatchRr, MtpOnlyServerStillGetsRoundRobinVerify) {
 
 TEST(SpecBatchRr, NoDrafterNoRoundRobin) {
     SpecBatchRrState s;
-    s.enabled = true;
     s.batch_rows = 4;
     s.any_drafter = false;
     EXPECT_FALSE(spec_batch_rr_active(s));
@@ -155,7 +153,6 @@ TEST(SpecBatchRr, NoDrafterNoRoundRobin) {
 
 TEST(SpecBatchRr, NeedsABatchAndANonRecurrentModel) {
     SpecBatchRrState s;
-    s.enabled = true;
     s.any_drafter = true;
     s.batch_rows = 1;
     EXPECT_FALSE(spec_batch_rr_active(s)) << "batch 1 takes the plain verify dispatch";
@@ -164,8 +161,6 @@ TEST(SpecBatchRr, NeedsABatchAndANonRecurrentModel) {
     EXPECT_FALSE(spec_batch_rr_active(s));
     s.recurrent = false;
     EXPECT_TRUE(spec_batch_rr_active(s));
-    s.enabled = false;
-    EXPECT_FALSE(spec_batch_rr_active(s));
 }
 
 // --------------------------------------------------------------- dequant cap

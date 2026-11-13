@@ -62,18 +62,17 @@ int bound_rows(const std::vector<std::shared_ptr<Request>>& batch, const MtpBind
                                           [&](const auto& r) { return mtp_bound(active, pool, r->id); }));
 }
 
-// speculative.mtp_batch_verify_solo: a lone bound request verifies in the bound batched step, a group of one.
+// A lone bound request verifies in the bound batched step, a group of one.
 bool bound_solo(const RuntimeConfig& cfg, const Model* model, const BatchVerifyState& bv,
                 const MtpBind& active, const MtpBindPool& pool,
                 const std::vector<std::shared_ptr<Request>>& batch) {
     return bv.bound_only && !batch.empty() && !batch_verify_on(cfg, model) &&
-           mtp_bound_verify_solo(cfg.speculative.mtp_batch_verify_solo, static_cast<int>(batch.size()),
-                                 mtp_bound(active, pool, batch[0]->id));
+           mtp_bound_verify_solo(static_cast<int>(batch.size()), mtp_bound(active, pool, batch[0]->id));
 }
 
 // Mode and batch-shape gates ahead of the per-row ones: the full batch_verify takes any batch of two or more;
 // the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows; solo
-// = a lone bound request under speculative.mtp_batch_verify_solo.
+// = a lone bound request under the solo bound verify.
 const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on,
                                bool solo) {
     if (!full && !bv.bound_only)
@@ -165,7 +164,7 @@ bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
 
 int mtp_bound_verify_config_rows(const RuntimeConfig& cfg) {
     const auto& scfg = cfg.speculative;
-    if (scfg.mtp_batch_verify < 2 || scfg.mtp_k == 0 || !scfg.mtp_carry || !scfg.hybrid || scfg.batch_verify)
+    if (scfg.mtp_batch_verify < 2 || scfg.mtp_k == 0 || !scfg.hybrid || scfg.batch_verify)
         return 0;
     const int rows = std::min(scfg.mtp_batch_verify, std::max(1, scfg.mtp_history_slots));
     return rows >= 2 ? rows : 0;
@@ -210,11 +209,11 @@ int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_bat
 int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live) {
     if (batch_verify_full(cfg, model, max_batch_size))
         return max_batch_size;
-    return cfg.speculative.mtp_carry && carry_live ? std::max(1, cfg.speculative.mtp_history_slots) : 1;
+    return carry_live ? std::max(1, cfg.speculative.mtp_history_slots) : 1;
 }
 
 int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return cfg.speculative.mtp_carry && !batch_verify_full(cfg, model, max_batch_size) ? kMtpCarryRows : 0;
+    return !batch_verify_full(cfg, model, max_batch_size) ? kMtpCarryRows : 0;
 }
 
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
@@ -416,7 +415,7 @@ int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& fro
     const auto& scfg = runtime_config_.speculative;
     NgramDraft nd;
     if (scfg.suffix) {
-        nd = synced_index().draft(depth, std::max(depth, scfg.suffix_k_max));
+        nd = synced_index().draft(depth, std::max(depth, cfg::kSpecSuffixKMax));
     } else {
         std::vector<int32_t> history;
         history.reserve(req.input_tokens.size() + req.prediction_tokens.size() + req.output_tokens.size());
@@ -460,8 +459,7 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
                 continue;
             if (!batch_verify_row_ok(*r))
                 return "row_shaped";
-            if (const char* sampled = engine_internal::sampled_row_refusal(
-                    *r, spec_sampling_refusal_(*r), runtime_config_.speculative.sampled_batch_verify))
+            if (const char* sampled = spec_sampling_refusal_(*r))
                 return sampled;
             if (think_closer_pending_(*r))
                 return "think_forcing_due";
@@ -490,8 +488,7 @@ bool Engine::pipeline_yields_(const std::vector<std::shared_ptr<Request>>& rows)
         if (batch_verify_refusal_(rows) == nullptr)
             return true;
     }
-    if (!runtime_config_.speculative.batch_rr || ssm_state_ ||
-        ++bd_pipe_.steps_since_spec_yield < spec_rr_yield_interval_)
+    if (ssm_state_ || ++bd_pipe_.steps_since_spec_yield < spec_rr_yield_interval_)
         return false;
     bd_pipe_.steps_since_spec_yield = 0;
     return std::any_of(rows.begin(), rows.end(), [this](const auto& r) {

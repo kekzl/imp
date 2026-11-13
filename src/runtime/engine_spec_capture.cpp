@@ -63,7 +63,7 @@ void Engine::prewarm_spec_scratch_() {
     // Staging + block tables, at the caps engine_spec_ngram.cpp would reach:
     // the largest capture bucket, and a block table covering the whole context.
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    const int chunk_cap = std::max({spec_capture_bucket_max_(), scfg.k + 1, 33});
+    const int chunk_cap = std::max({spec_capture_bucket_max_(), cfg::kSpecDraftK + 1, 33});
     const int ctx_for_table = std::max(config_.max_seq_len, spec_capture_ctx_cap_);
     const int table_cap = ((ctx_for_table + kv_bs - 1) / kv_bs) + 16;
     if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
@@ -72,7 +72,7 @@ void Engine::prewarm_spec_scratch_() {
                      chunk_cap, table_cap);
         return;
     }
-    executor_->prewarm_verify_scratch(scfg.sampled ? chunk_cap : 0, scfg.sampled && scfg.mtp_draft_coupled);
+    executor_->prewarm_verify_scratch(scfg.sampled ? chunk_cap : 0, scfg.sampled);
     // Hybrid verify state scratch: 2 x one recurrent slot, charged in the KV plan (#2452).
     prewarm_spec_state_scratch_();
     IMP_LOG_INFO("[spec] scratch prewarmed: chunk_cap=%d table_cap=%d ctx_cap=%d", chunk_cap,
@@ -81,10 +81,10 @@ void Engine::prewarm_spec_scratch_() {
 
 int Engine::spec_capture_bucket_max_() const {
     const auto& scfg = runtime_config_.speculative;
-    // speculative.k / suffix_k_max size the matcher and recycling drafts; an MTP-only run keeps k + 1 rows.
-    int k_max = (scfg.ngram || scfg.token_recycling) ? std::max(1, scfg.k) : 1;
+    // kSpecDraftK / kSpecSuffixKMax size the matcher and recycling drafts; an MTP-only run keeps k + 1 rows.
+    int k_max = (scfg.ngram || scfg.token_recycling) ? cfg::kSpecDraftK : 1;
     if (scfg.suffix && scfg.ngram)
-        k_max = std::max(k_max, scfg.suffix_k_max);
+        k_max = std::max(k_max, cfg::kSpecSuffixKMax);
     if (mtp_spec_decode_enabled())
         k_max = std::max(k_max, mtp_spec_decode_k());
     return k_max + 1;
@@ -93,7 +93,7 @@ int Engine::spec_capture_bucket_max_() const {
 // Context tier: power of two >= ctx (floor 4096), clamped to the resolved
 // capacity. Sizes the baked gather grids close to the real context.
 // paged_attn: the batched verify (rows on paged decode attention, no K/V gather scratch) captures up to the
-// context, not speculative.capture_ctx_cap. Qwen3.8-27B-NVFP4, 1 chat at 40k: eager 92.52 -> 126.77 tok/s.
+// context, not kSpecCaptureCtxCap. Qwen3.8-27B-NVFP4, 1 chat at 40k: eager 92.52 -> 126.77 tok/s.
 int Engine::spec_capture_ctx_tier_(int ctx_padded, bool paged_attn) const {
     int tier = 4096;
     while (tier < ctx_padded)
@@ -139,7 +139,7 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
     if (spec_capture_ctx_cap_ < 0) {  // resolve once per engine
         spec_capture_ctx_cap_ = 0;
         if (executor_->chunk_capture_supported()) {
-            int cap = scfg.capture_ctx_cap;
+            int cap = cfg::kSpecCaptureCtxCap;
             if (config_.max_seq_len > 0)
                 cap = std::min(cap, config_.max_seq_len);
             if (cap > 0 && executor_->ensure_chunk_capture_scratch(cap))

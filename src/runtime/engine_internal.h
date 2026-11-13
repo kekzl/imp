@@ -76,7 +76,7 @@ inline VerifySampling verify_sampling_for(const Request& req, int vocab_size) {
 // greedy.
 std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<Request>>& reqs, int T,
                                              int vocab_size);
-// MTP draft draws (speculative.mtp_draft_coupled), row lv * m + i: request reqs[bound[i]]'s draft level lv
+// MTP draft draws (coupled MTP drafts), row lv * m + i: request reqs[bound[i]]'s draft level lv
 // draws with its params and the seed of output index size() + lv, the seed of the verify row that checks
 // it. A greedy request's rows take top_k 1. Empty: no bound request samples.
 inline std::vector<VerifySampling> draft_row_draws(const std::vector<std::shared_ptr<Request>>& reqs,
@@ -99,9 +99,6 @@ inline std::vector<VerifySampling> draft_row_draws(const std::vector<std::shared
     }
     return rows;
 }
-// A batched-verify row: the engine's sampled-verify refusal, then speculative.sampled_batch_verify
-// (batch_on).
-const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on);
 
 // Build a TokenLogprobInfo on the host from the PROCESSED logits: the row the
 // sampler drew from, after penalties, logit_bias, bans, the constraint mask,

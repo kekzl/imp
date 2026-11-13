@@ -1,8 +1,7 @@
 // NVFP4 GEMV/GEMM kernels serving MANY activation rows (spec-verify M=1..4, batched LM
 // head). Split from nvfp4_gemv_dense.cu (2026-08-21): every kernel there computes ONE
 // activation row against many weight rows, every kernel here computes MANY rows against the
-// same weight read - also the boundary numerical-parity work runs along
-// (gemv_nvfp4_multirow_mb_kernel reduces K exactly like the one-row side). Templated over
+// same weight read. Templated over
 // MR, so compile-time isolation stops every touch from re-ptxasing four instantiations and
 // dragging the single-row decode kernels through it.
 
@@ -136,63 +135,6 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     }
 }
 
-// Batched twin of gemv_nvfp4_multirow_kernel, existing for NUMERICAL PARITY not speed: the
-// spec-verify chunk and M=1 decode compute the same projections with instruction-identical
-// inner loops that differ in ONE thing, K-reduction width. Decode's multirow kernel gives
-// each WARP an output row (32 partial sums, mi=lane;+=32); the verify chunk's kpar kernel
-// gave the whole 128-thread BLOCK an output row (128 partial sums). Same math, different
-// float rounding - reached the stop decision on Qwen3.8-27B-NVFP4 mtp_k=1, truncating 2/6
-// answers after ~40 tokens (docs/LIMITATIONS.md). This kernel keeps the 32-lane warp
-// partition so each row reproduces decode bit-for-bit, while still reading each weight
-// micro-block once for all MR rows. Only fires for shapes where decode takes the multirow
-// branch (use_multirow(): true for 10240x5120/12288x5120 q/k/v, false for
-// 5120x5120/5120x17408 o/down, where the existing batched kernel already agrees).
-template <int NR, int MR, bool kAcc = false>
-__global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
-    const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
-    const half* __restrict__ x, half* __restrict__ y, int N_out, int K) {
-    const int warp_id = threadIdx.x / 32;
-    const int lane = threadIdx.x & 31;
-    const int K_half = K / 2;
-    const int n_mb = K / kMicroBlockSize;
-
-    const int row = (blockIdx.x * NR) + warp_id;
-    if (row >= N_out || warp_id >= NR)
-        return;
-    pdl_wait();
-
-    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
-    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
-
-    float acc[MR];
-#pragma unroll
-    for (int m = 0; m < MR; ++m)
-        acc[m] = 0.0f;
-
-    // Same stride/order/helper as warp_k_loop+dot_micro_block in gemv_nvfp4_multirow_kernel.
-    // Do not "optimise" the accumulation without re-running tools/analysis/mtp_truncation_check.sh:
-    // the parity IS the feature.
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        const int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        const float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-#pragma unroll
-        for (int m = 0; m < MR; ++m)
-            acc[m] = __fmaf_rn(dot_micro_block(pb, x + ((int64_t)m * K), byte_off * 2), cs, acc[m]);
-    }
-
-    pdl_trigger();
-#pragma unroll
-    for (int m = 0; m < MR; ++m) {
-        const float total = warp_reduce(acc[m]);
-        if (lane == 0) {
-            half* yp = y + ((int64_t)m * N_out) + row;
-            *yp = __float2half(kAcc ? total + __half2float(*yp) : total);
-        }
-    }
-}
-
 // FP16-output twin of gemv_nvfp4_kpar_mb_fp32_kernel for spec-verify chunk GEMMs (#998):
 // one block per weight row n, decoded once and reused across the MR rows of this launch.
 // kAcc adds into the existing output (cuBLAS beta=1 semantics) for the o/down residual-add
@@ -273,11 +215,6 @@ namespace {
 
 template <bool kAcc>
 void register_verify_mb() {
-    constexpr int NR = 8;  // = gemm_nvfp4_batched(_acc)
-    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 1, kAcc>);
-    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 2, kAcc>);
-    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 3, kAcc>);
-    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 4, kAcc>);
     pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<1, kAcc>);
     pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<2, kAcc>);
     pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<3, kAcc>);
@@ -287,7 +224,7 @@ void register_verify_mb() {
 }  // namespace
 
 // PDL for every batched-M kernel: kpar_mb_fp32 (batched decode LM head) and
-// the multirow_mb / kpar_mb_fp16 spec-verify chunk kernels (gemm_nvfp4_batched(_acc)). Each
+// the kpar_mb_fp16 spec-verify chunk kernels (gemm_nvfp4_batched(_acc)). Each
 // waits before its first global read (core/pdl_device.cuh contract).
 void nvfp4_gemv_batched_pdl_register() {
     pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp32_kernel<1>);
@@ -345,45 +282,6 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K, int n_act,
                         cudaStream_t stream) {
     const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
-    // Numerical parity with the M=1 decode path, when decode would take the 32-lane multirow
-    // branch for this shape (see gemv_nvfp4_multirow_mb_kernel): the 128-wide kpar reduction
-    // below is a different float grouping of the same products, and on a speculative arm that
-    // difference reaches the stop decision.
-    if (nvfp4_verify_row_parity()) {
-        constexpr int NR = 8;
-        const int n_mb_p = K / kMicroBlockSize;
-        const int mr_blocks_p = (N_out + NR - 1) / NR;
-        if (use_multirow(n_mb_p, mr_blocks_p)) {
-            const auto* msp = reinterpret_cast<const uint8_t*>(A.micro_scales);
-            const float tsp = A.tensor_scale;
-            int d = 0;
-            while (d < n_act) {
-                const int rem = n_act - d;
-                const half* xm = x + ((int64_t)d * K);
-                half* ym = y + ((int64_t)d * N_out);
-                int used;
-                if (rem >= 4) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 4, false>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 4;
-                } else if (rem == 3) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 3, false>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 3;
-                } else if (rem >= 2) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 2, false>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 2;
-                } else {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 1, false>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 1;
-                }
-                d += used;
-            }
-            return;
-        }
-    }
     const auto* ms = reinterpret_cast<const uint8_t*>(A.micro_scales);
     const float ts = A.tensor_scale;
     int done = 0;
@@ -419,45 +317,6 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
 void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, int N_out, int K, int n_act,
                             cudaStream_t stream) {
     const auto* pd = reinterpret_cast<const uint8_t*>(A.packed_data);
-    // Numerical parity with the M=1 decode path, when decode would take the 32-lane multirow
-    // branch for this shape (see gemv_nvfp4_multirow_mb_kernel): the 128-wide kpar reduction
-    // below is a different float grouping of the same products, and on a speculative arm that
-    // difference reaches the stop decision.
-    if (nvfp4_verify_row_parity()) {
-        constexpr int NR = 8;
-        const int n_mb_p = K / kMicroBlockSize;
-        const int mr_blocks_p = (N_out + NR - 1) / NR;
-        if (use_multirow(n_mb_p, mr_blocks_p)) {
-            const auto* msp = reinterpret_cast<const uint8_t*>(A.micro_scales);
-            const float tsp = A.tensor_scale;
-            int d = 0;
-            while (d < n_act) {
-                const int rem = n_act - d;
-                const half* xm = x + ((int64_t)d * K);
-                half* ym = y + ((int64_t)d * N_out);
-                int used;
-                if (rem >= 4) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 4, true>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 4;
-                } else if (rem == 3) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 3, true>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 3;
-                } else if (rem >= 2) {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 2, true>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 2;
-                } else {
-                    pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 1, true>, dim3(mr_blocks_p),
-                                dim3(kMRThreads), size_t(0), stream, pd, msp, tsp, xm, ym, N_out, K);
-                    used = 1;
-                }
-                d += used;
-            }
-            return;
-        }
-    }
     const auto* ms = reinterpret_cast<const uint8_t*>(A.micro_scales);
     const float ts = A.tensor_scale;
     int done = 0;
