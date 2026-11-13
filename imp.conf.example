@@ -1120,9 +1120,9 @@ moe                  = true
 # Token-Recycling adjacency drafting (arXiv 2408.08696): engine-scoped
 # `token -> top-M successors` table fed from emitted bigrams and the
 # model's own verify-chunk top-K logits; drafts where suffix/n-gram find
-# nothing (fresh reasoning prose). recycle_depth 3 keeps the chunk in
+# nothing (fresh reasoning prose). Depth 3 (kRecycleDepth) keeps the chunk in
 # capture bucket 4 = one batched-GEMV weight sweep (#1055);
-# recycle_min_streak only drafts re-confirmed successors (precision gate);
+# a hop drafts only a re-confirmed successor (kRecycleMinStreak, precision gate);
 # recycle_width > 1 verifies that many candidates per chunk (measured: the
 # accept lift does not pay for the bigger chunk — keep 1). EXPERIMENTAL,
 # default OFF: cold-start accept on fresh reasoning measures ~1.4
@@ -1138,8 +1138,8 @@ recycle_width        = 1
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a
 # draft backed by multiple agreeing occurrences (or a maximal-length
-# context match, e.g. the `prediction` region) extends past k up to
-# suffix_k_max. false = legacy single-most-recent scan.
+# context match, e.g. the `prediction` region) extends past 16 drafts up to
+# 64 (kSpecSuffixKMax). false = legacy single-most-recent scan.
 suffix               = true
 # Corpus drafting: text files under this path (a file or a directory, read
 # up to 64 MiB, binary files skipped) form one engine-wide suffix index that
@@ -1173,7 +1173,7 @@ hybrid               = true
 # one stream - and only with runtime.deterministic off. Measured on
 # Qwen3.8-27B-NVFP4 (2026-08-29, 3 alternating rounds): 95.8 -> 141.6 tok/s
 # on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. A concurrent
-# GDN-hybrid server (Qwen3.8-27B) takes the pair too, see mtp_concurrent; other
+# GDN-hybrid server (Qwen3.8-27B) takes the pair too (bound verify); other
 # concurrent servers and determinism (chunk-greedy is not the eager
 # trajectory) keep it off. An explicitly set `ngram` is never overruled by auto.
 mtp_k                = -1
@@ -1187,7 +1187,7 @@ mtp_history_slots    = 4
 # Clamped to the model context; with many slots (batched verify) a 1 GiB budget
 # caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
 mtp_kv_window        = 16384
-# With mtp_carry: while at most this many requests decode (capped at
+# While at most this many requests decode (capped at
 # mtp_history_slots), one forward verifies every bound request's MTP draft (2
 # rows per request; one spare recurrent slot per row, 79.5 MiB each on
 # Qwen3.8-27B, charged in the KV plan); a bigger batch decodes plain.
