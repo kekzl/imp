@@ -85,8 +85,6 @@ bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback;
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
-bool process_diag_verify_row_parity() { return slot().verify_row_parity; }
-void process_diag_set_verify_row_parity(bool v) { slot().verify_row_parity = v; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
 bool process_diag_moe_pin_host_experts() { return slot().moe_pin_host_experts; }

@@ -202,13 +202,9 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     };
     const MtpHeadGraphKey key{tab.n, tab.m, chain, draw_top_k};
     const void* head_data = head != nullptr ? head->packed_data : nullptr;
-    MtpHeadGraph* g = runtime_config_.speculative.mtp_head_graph && !G.doomed
-                          ? cached_graph(G, key, hidden, head_data)
-                          : nullptr;
+    MtpHeadGraph* g = !G.doomed ? cached_graph(G, key, hidden, head_data) : nullptr;
     const int uses = G.by_key.contains(key) ? G.by_key[key].eager_uses : 0;
-    const MtpHeadGraphStep step = runtime_config_.speculative.mtp_head_graph
-                                      ? mtp_head_graph_step(g != nullptr, uses, G.n_graphs, G.doomed)
-                                      : MtpHeadGraphStep::Eager;
+    const MtpHeadGraphStep step = mtp_head_graph_step(g != nullptr, uses, G.n_graphs, G.doomed);
     const int rows = mtp_scan_smem_rows(std::max(tab.max_pos, chain > 0 ? tab.chain_max_pos + chain - 1 : 0),
                                         max_seq);
     int n_out = -1;
@@ -217,7 +213,7 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
     else if (step == MtpHeadGraphStep::Capture)
         n_out = capture(
             G, key, rows, hidden, head_data, [&](int max_pos) { return run(max_pos, max_pos); }, stream);
-    else if (runtime_config_.speculative.mtp_head_graph && !G.doomed && G.n_graphs < kMtpHeadGraphMax)
+    else if (!G.doomed && G.n_graphs < kMtpHeadGraphMax)
         G.by_key[key].eager_uses++;
     if (n_out < 0)
         n_out = run(tab.max_pos, tab.chain_max_pos);

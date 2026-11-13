@@ -10,7 +10,6 @@
 #include "quant/fp8_utils.cuh"
 #include "core/device_info.h"
 #include "core/logging.h"
-#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -34,12 +33,6 @@ static constexpr int kMRThreads = kMRWarps * 32;  // 256
 // Minimum blocks/SM for multi-row to be efficient. Below this, kpar is better
 // because more blocks (M instead of M/NR) give higher warp occupancy.
 static constexpr int kMinBlocksPerSM = 6;
-
-// Cached SM count for dispatch decisions; process_diag is the seam since kernel TUs don't
-// include runtime/config.h. NOT cached in a function-local static like nvfp4_n_sms(): read
-// once per GEMM launch on the host costs nothing, and caching would make the knob
-// impossible to toggle in a test.
-[[nodiscard]] static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
 
 // 0 on a failed query: multirow gated on K only.
 static int nvfp4_n_sms() { return device_sm_count_or_0(); }

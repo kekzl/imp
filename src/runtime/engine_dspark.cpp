@@ -28,9 +28,7 @@ bool Engine::init_dspark_() {
     }
     auto dr = std::make_unique<DSparkDrafter>();
     const int max_ctx = config_.max_seq_len > 0 ? config_.max_seq_len : mc.max_seq_len;
-    const DSparkOptions opt{.fp8 = runtime_config_.speculative.dspark_fp8,
-                            .graph = config_.use_cuda_graphs,
-                            .target_path = model_->source_path()};
+    const DSparkOptions opt{.graph = config_.use_cuda_graphs, .target_path = model_->source_path()};
     if (std::string err = dr->load(vram_alloc_, dir, mc.d_model, mc.n_layers, max_ctx, stream_, opt);
         !err.empty()) {
         IMP_LOG_ERROR("speculative.dspark_model %s: %s", dir.c_str(), err.c_str());

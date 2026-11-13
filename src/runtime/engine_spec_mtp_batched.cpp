@@ -119,12 +119,11 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     // The lone chain's draft head: 682 MiB per pass instead of the 1213 MiB FP8 head.
     imp::NvFP4QuantResult head_view;
     const int32_t* h_out = nullptr;
-    // speculative.mtp_draft_coupled: sampled requests' drafts draw with their verify rows' seeds.
-    const std::vector<VerifySampling> draws =
-        runtime_config_.speculative.mtp_draft_coupled
-            ? engine_internal::draft_row_draws(reqs, bound_g, kMtpBoundVerifyMaxDepth,
-                                               model_->config_.vocab_size)
-            : std::vector<VerifySampling>{};
+    // Sampled requests' drafts draw with their verify rows' seeds (agent replay: 2.981 -> 3.461 tokens per
+    // step).
+    const std::vector<VerifySampling> draws = engine_internal::draft_row_draws(reqs, bound_g,
+                                                                               kMtpBoundVerifyMaxDepth,
+                                                                               model_->config_.vocab_size);
     const int n_out = mtp_head_pass_(tab, h.data, mtp_draft_lm_head_nvfp4_(head_view), stream, &h_out,
                                      draws.empty() ? nullptr : draws.data(), static_cast<int>(draws.size()));
     if (n_out < 0) {

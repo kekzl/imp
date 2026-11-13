@@ -166,15 +166,16 @@ inline constexpr int kMtpResumeMinPairs = 64;
 // Head KV slot for a prompt whose prefill starts at `offset` (prefix-cache hit), or -1. A slot resumes
 // at min(pos, L - 1) pairs, L = common prefix of its history and the prompt. Longest resume wins; without
 // a kMtpResumeMinPairs resume the least recently used slot. Pairs below `offset` need hidden rows the
-// cached prefix never forwarded: with no slot covering it, gap_bind picks as above (the head starts at
-// `offset`, mtp_bind_has_gap), else -1 = draft nothing and leave every history intact.
+// cached prefix never forwarded: with no slot covering it the pick is as above and the head starts at
+// `offset` (mtp_bind_has_gap): agent chats resend whole transcripts, and declining kept 84 % of requests
+// unbound.
 struct MtpSlotCand {
     int pos = 0;                                    // pairs its head KV holds
     const std::vector<int32_t>* history = nullptr;  // tokens t_0..t_pos
     uint64_t last_use = 0;
 };
 [[nodiscard]] inline int mtp_pick_slot(const std::vector<MtpSlotCand>& cands, const std::vector<int32_t>& in,
-                                       int offset, bool gap_bind = true) {
+                                       int offset) {
     int best = -1, best_r = -1, lru = -1;
     for (int i = 0; i < static_cast<int>(cands.size()); ++i) {
         const auto& h = *cands[i].history;
@@ -191,8 +192,6 @@ struct MtpSlotCand {
     }
     if (offset > 0 && best_r >= offset)
         return best;
-    if (offset > 0 && !gap_bind)
-        return -1;
     return best_r >= kMtpResumeMinPairs ? best : lru;
 }
 
@@ -256,9 +255,10 @@ void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
     return rows_cap >= 2 && decoding >= (solo ? 1 : 2) && decoding <= rows_cap && drafted >= 1 &&
            2 * drafted >= decoding;
 }
-// speculative.mtp_batch_verify_solo: a lone bound request takes the batched verify step as a group of one.
-[[nodiscard]] constexpr bool mtp_bound_verify_solo(bool solo_on, int decoding, bool bound) {
-    return solo_on && decoding == 1 && bound;
+// A lone bound request takes the batched verify step as a group of one, not the single verify chunk
+// (Qwen3.8-27B-NVFP4 at 20k: the chunk walks the whole context per CTA, 1 ms per layer).
+[[nodiscard]] constexpr bool mtp_bound_verify_solo(int decoding, bool bound) {
+    return decoding == 1 && bound;
 }
 // speculative.mtp_batch_verify_k clamped to what the step stages: 2 drafts per request on spares alone (two
 // snapshots), kMtpBoundVerifyMaxDepth with factor rows (a fold applies kGdnFactorFoldMaxRows of them).

@@ -99,9 +99,6 @@ inline std::vector<VerifySampling> draft_row_draws(const std::vector<std::shared
     }
     return rows;
 }
-// A batched-verify row: the engine's sampled-verify refusal, then speculative.sampled_batch_verify
-// (batch_on).
-const char* sampled_row_refusal(const Request& r, const char* sampling_refusal, bool batch_on);
 
 // Build a TokenLogprobInfo on the host from the PROCESSED logits: the row the
 // sampler drew from, after penalties, logit_bias, bans, the constraint mask,

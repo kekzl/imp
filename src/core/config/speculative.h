@@ -19,54 +19,15 @@ struct Speculative {
     // sampler's seed, a draft token is accepted while the draw equals it (exact, compute/sampling.h).
     // Off = greedy requests only.
     bool sampled = true;
-    // With sampled: a sampled row verifies in the batched step too (speculative.mtp_batch_verify, its solo
-    // group of one included), each row drawing with its own request's seed. false = sampled rows take the
-    // single verify chunk, and a batch holding one decodes plain.
-    bool sampled_batch_verify = true;
-    // Context cap for dense chunk-verify drafting (#964): past this context,
-    // drafting is gated per step. MoE-NVFP4 and GDN-hybrid requests are exempt
-    // (deep drafts pay for themselves). Superseded in practice by the
-    // depth-aware gate below (shallow_draft_ctx); default off (0 = no cap).
-    int draft_ctx_cap = 0;
     // #964 stage 2: past this request context, 1-token n-gram/suffix drafts are
     // discarded instead of verified (miss-burst path serves at plain decode
     // speed); depth>=2 drafts always verify. MoE-NVFP4 and hybrid exempt. 0 = never gate.
     int shallow_draft_ctx = 12288;
-    // #964: run the dense verify chunk's attention through the batched-decode
-    // split-K paged kernels (rows as same-KV "sequences" with per-row context
-    // len; causal by construction) instead of the small-M prefill FA2 tile +
-    // full-context FP16 KV gather. Requires the 3/5 capture buckets. Dense
-    // non-MLA/non-SWA/non-MoE/non-hybrid only; MoE/hybrid keep the FA2 chunk path.
-    bool verify_decode_attn = true;
-    // #998: verify-chunk GEMMs (M<=largest capture bucket) read the NVFP4
-    // decode overlay in one weight pass per MR tile instead of the M>1 prefill
-    // dequant path. Also aligns verify argmax with the decode path. Kill switch for A/B.
-    bool verify_nvfp4_gemm = true;
-    // Route the verify chunk's native-NVFP4 GEMMs through the small-M mxf4nvf4
-    // pipeline (gemm.nvfp4_smallm) instead of the batched multi-row GEMV, which
-    // reads weights slower at small M. Argmax parity is not a concern: a
-    // speculative arm never reproduces non-speculative greedy output anyway. Default off.
-    bool verify_smallm = false;
-    // verify_smallm for graph-captured verify steps (their warmup and fidelity forwards too).
-    // Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s, Q6_K 16-row verify 31.47 -> 12.17 ms.
-    // Eager verify keeps the batched GEMV (smallm there: 10.93 -> 15.02 ms/verify).
-    bool verify_smallm_captured = true;
-    // Make the verify chunk's NVFP4 GEMV reduce K exactly like the M=1 decode
-    // GEMV (32 partial sums, one per warp lane, vs the batched kernel's 128).
-    // The rounding difference reached the STOP decision and truncated answers
-    // at speculative.mtp_k=1 (docs/LIMITATIONS.md). Off by default, pending its own measurement.
-    bool verify_row_parity = false;
     // Speculation on MoE models with NATIVE-NVFP4 experts (gate also requires
     // profile().moe_experts_nvfp4). GGUF-MoE verify re-dequants every activated
     // expert per step and never engages regardless of this flag. imp-cli
     // --bench pins this false so the perf-baseline decode signal stays raw.
     bool moe = true;
-    // #1003 stage 1: at decode batch>1, one request per step may run its spec
-    // verify (round-robin) while the rest decode batched. Three guards: a
-    // draft-depth floor (min_draft = 2x batch), a pipeline yield, and an
-    // adaptive yield cadence (8->64 steps exponential backoff on empty turns).
-    // Batch-1 behavior unchanged. Kill switch for A/B.
-    bool batch_rr = true;
     // Batched verify on the GDN hybrid: every decoding request forwards 2 rows
     // (last token + draft) per step; needs a spare recurrent slot per batch
     // slot (halves the auto batch). Default off (docs/plans/2026-09-11-batched-mtp-verify.md).
@@ -98,10 +59,6 @@ struct Speculative {
     // (width*(1+depth)<=17). Default 1 (linear): wider buckets run CUTLASS at
     // low effective bandwidth, not worth the accept lift.
     int recycle_width = 1;
-    // Multi-candidate shape: false = branch at the first hop only (candidate i = successor i,
-    // then front-slot chains); true = best-first tree, the `recycle_width` lowest-rank-sum paths
-    // branching at every depth (TokenRecycleTable::draft_tree, roadmap 119.5).
-    bool recycle_tree = false;
     // MTP multi-candidate width: W>1 drafts W chains per verify step (chain 0
     // continues the head's top-1, chains 1..W-1 branch at the first position on
     // top-W ids). Chains verify as one multi-candidate chunk (private KV blocks,
@@ -130,13 +87,6 @@ struct Speculative {
     // drafting until the next speculative.burst re-arm. 0 = the n-gram rule (15 % of drafted tokens
     // accepted, final), which stopped Qwen3-8B-NVFP4 prose at 287 tok/s; 1.8: 348, 2.0: 300 (nospec 282).
     float dspark_min_emit = 1.8f;
-    // DSpark drafter q / o / gate / up / down / lm_head as per-row FP8 E4M3 instead of FP16: half the
-    // bytes per propose. Drafts only: verify keeps greedy output exact either way.
-    bool dspark_fp8 = true;
-    // Greedy JSON / schema / regex / grammar / tool-constrained requests verify drafts: a row's
-    // argmax is kept only if the request's own mask allows it (exact: the masked argmax equals the
-    // unmasked one exactly when the latter is allowed). Sampled constrained requests stay eager.
-    bool constrained = true;
     // Longer suffix matches trade draft frequency for precision, and precision
     // wins: a higher min_match cuts false n-gram matches (e.g. in number
     // tables) that never verify, at the cost of fewer drafts overall.
@@ -146,11 +96,6 @@ struct Speculative {
     // speculation and re-enters the async conditional graph loop (eager
     // per-token path costs ~2x). 0 = never give up.
     int give_up_after = 64;
-    // Prompt-lookup drafting is cold by construction (matches against earlier
-    // generated text). The economics guard (mtp_econ_min_emit) can't catch the
-    // cold phase: it arms at spec_verifies>=8 per request, and a short request
-    // never reaches that. This gates on tokens generated SO FAR instead. 0 = disabled.
-    int min_history = 0;
     // Burst-hybrid: while given up, the async loop runs in bursts of this many
     // tokens; after each burst the request re-probes drafts for a couple of
     // steps. 0 = give-up is final.
@@ -159,11 +104,6 @@ struct Speculative {
     // rearm, no graph recapture) instead of paying the ~2x eager tax until the
     // next draft. 0 = stay eager between drafts (legacy).
     int miss_burst = 8;
-    // Reuse the parked captured graph across bursts (rearm instead of
-    // recapture). The #683 wrong-token bug was the fresh-capture loop
-    // initializing position/context one too high, not the rearm itself; both paths now share first-forward
-    // semantics.
-    bool burst_rearm = true;
     // Speculation on hybrid (GDN/SSM) models: the verify chunk advances
     // recurrent state through rejected draft positions, so the committed state
     // slab is snapshotted before the chunk (restored on partial acceptance).
@@ -180,12 +120,6 @@ struct Speculative {
     // docs/LIMITATIONS.md).
     // Resolution lives in tools/common/mtp_auto.* (both tools decide before an engine exists).
     int mtp_k = -1;
-    // mtp_k=auto on a concurrent GDN-hybrid server (Qwen3.8-27B) loads the head too: the one
-    // request that prefills while the head is free binds it and verifies while it decodes alone;
-    // batch > 1 decodes plain. false = the pre-v0.63 rule (concurrent servers leave the head unloaded).
-    // A one-chat server (--max-batch 1) and imp-cli chat runs verify on the same bound path
-    // (mtp_auto_engine_batch); false keeps their single-stream chain (mtp_k=2).
-    bool mtp_concurrent = true;
     // MTP head KV slots when the batched verify is off: one request binds, the others keep the head
     // cache of other chats, so a chat UI's title / follow-up request between two turns no longer wipes
     // it and the next turn drafts over its prefix-cache hit (Qwen3.8-27B-NVFP4: 64 MiB per slot).
@@ -196,15 +130,6 @@ struct Speculative {
     // floor 2048. Qwen3.8-27B: 4 KiB per row per slot; 40k prompt 222 / 276 drafts accepted (full: 222 /
     // 277).
     int mtp_kv_window = 16384;
-    // A prompt whose prefix-cache hit reaches past every head slot's rows still binds: the head starts at
-    // the hit, with no rows below it, and drafts from there. Agent chats resend whole transcripts, so one
-    // unbound turn kept a chat unbound for good (84 % of requests, 0.11 % of tokens through the head).
-    // false = such a prompt drafts nothing.
-    bool mtp_gap_bind = true;
-    // With mtp_history_slots: up to that many requests bind at once, and a bound request's hidden rows from
-    // batched decode steps feed its head slot in 256-row passes, so it drafts again once it decodes alone
-    // and its chat's next turn resumes the head cache. false = one binding, a batched step unbinds it.
-    bool mtp_carry = true;
     // With mtp_carry: while at most this many requests decode (capped at mtp_history_slots), one
     // forward verifies every bound request's MTP draft (2 rows per request, one spare recurrent slot
     // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
@@ -226,27 +151,10 @@ struct Speculative {
     // factor row + conv tap (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
     // a partial accept. false = a second spare per row (79.5 MiB each), 2 drafts at most.
     bool mtp_batch_verify_factor_row = true;
-    // With mtp_batch_verify: a bound request decoding alone verifies in that batched step too (rows on paged
-    // decode attention, split-K over the context) instead of the single verify chunk, whose prefill attention
-    // walks the whole context per CTA (Qwen3.8-27B-NVFP4 at 20k: 1 ms per layer). false = the single chunk.
-    bool mtp_batch_verify_solo = true;
-    // That step's head pass (feed, draft LM head, chain) replays a CUDA graph per (fed rows, requests,
-    // chain), at most 96: the second use of a shape captures it. Off = eager launches. Qwen3.8-27B-NVFP4:
-    // head pass at 2 requests 2.66-2.77 -> 2.33-2.46 ms, 4 overlapping chats 140.40 -> 143.47 tok/s.
-    bool mtp_head_graph = true;
-    // Sampled bound requests: an MTP draft draws from the head's logits with the request's params and the
-    // seed of its verify row (sampler noise is keyed on (seed, token id)); emitted tokens stay the verify
-    // rows' draws. Off = argmax drafts. Qwen3.8-27B-NVFP4 agent replay: 2.981 -> 3.461 tokens per step.
-    bool mtp_draft_coupled = true;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.
     std::string mtp_head;
-    // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
-    // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
-    // The economics guard prices the average depth that actually ran, not the
-    // configured ceiling. Off = fixed depth mtp_k (A/B kill switch).
-    bool mtp_adaptive_k = true;
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3): the chain re-reads the LM
     // head once per drafted token, more traffic than the main forward at k=4.
@@ -260,10 +168,6 @@ struct Speculative {
     // draft copy holds only those rows, for the lone chain too. 99.94 % of familiar dev50h output (1.54M
     // tokens) sits below 98304. Verify stays full vocab. Unset, a concurrent GDN-hybrid server takes 98304.
     int mtp_draft_vocab = 0;
-    // On the bound verify lane, MTP draft passes (<= 32 rows) read a per-row E4M3 copy of a dense head body
-    // (fc, q/k/v/o, MLP; Qwen3.8-27B 406 MiB on top of the FP16 weights, priced in the plan). Draft-only:
-    // agent replay, md5-equal texts, head 4.151 -> 2.968 ms per step, 204.28 -> 218.78 tok/s per chat.
-    bool mtp_body_fp8 = true;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw
     // measurement). Negative (default) = k-aware threshold 1 + f*k with f=0.40,

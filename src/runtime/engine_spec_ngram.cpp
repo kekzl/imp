@@ -199,23 +199,6 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
             return "think_budget_in_block";
     }
     if (req.status != RequestStatus::DECODING || req.output_tokens.empty()) return "not_decoding";
-    if (spec_history_too_short_(req)) return "cold_start";  // see speculative.min_history
-    // Long-context economics on the DENSE path (#964): the captured chunk
-    // verify runs the FA2 tile + paged-KV gather over the ctx TIER (pow2,
-    // floor 4096, clamped to max_seq_len), so its cost follows the tier, not
-    // the live context, and dense ngram's shallow payout turns net-negative
-    // past a few k of context. Gate drafting once the request's context
-    // crosses the cap. MoE-NVFP4 and GDN-hybrid requests are exempt: their
-    // drafts run much deeper, which pays for the verify at any context.
-    {
-        const int cap = runtime_config_.speculative.draft_ctx_cap;
-        const bool moe_nvfp4_path = model_->profile().is_moe &&
-                                    runtime_config_.speculative.moe &&
-                                    model_->profile().moe_experts_nvfp4;
-        const bool hybrid_path = ssm_state_ != nullptr;  // only reachable with speculative.hybrid
-        if (!moe_nvfp4_path && !hybrid_path && cap > 0 && req.context_len() > cap)
-            return "draft_ctx_cap";
-    }
     // Recurrent state (SSM/GDN) advances on every forwarded token. The
     // hybrid verify path (speculative.hybrid) rides SSMState's contiguous
     // per-sequence slab for snapshot/restore.
@@ -366,8 +349,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // 3): W candidates as W scan sequences on W slots, see the hybrid
         // block below and spec_mc_hybrid_ok_ for what it needs.
         const int mtp_w = runtime_config_.speculative.mtp_tree_width;
-        const bool mtp_mc_ok = scfg.verify_decode_attn &&
-                               (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
+        const bool mtp_mc_ok = (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
                                !model_->profile().is_moe && !model_->config().is_mla() &&
                                !swa_sizing_active_ && !mc_refused;
         if (mtp_w > 1 && mtp_mc_ok) {
@@ -399,15 +381,14 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // Route (a) preconditions: per-row block tables exist only on the
         // decode-attn verify route; the grouped rows are incompatible with
         // the linear-draft penalty replication and the MTP row consumer.
-        const bool mc_route_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
-                                 !model_->profile().is_moe && !model_->config().is_mla() &&
-                                 !swa_sizing_active_ && !mc_refused && !mtp_spec_decode_enabled();
+        const bool mc_route_ok = ssm_state_ == nullptr && !model_->profile().is_moe &&
+                                 !model_->config().is_mla() && !swa_sizing_active_ && !mc_refused &&
+                                 !mtp_spec_decode_enabled();
         if (draft.empty()) {
             const auto [width, depth] = recycle_mc_shape(scfg.recycle_width, scfg.recycle_depth, k,
                                                          offload_mgr_ != nullptr);
             if (mc_route_ok && width > 1) {
-                auto cands = spec_recycle_table_().draft_multi(scfg.recycle_tree, req->output_tokens.back(),
-                                                               width, depth);
+                auto cands = spec_recycle_table_().draft_candidates(req->output_tokens.back(), width, depth);
                 if (cands.size() > 1) {
                     mc = std::move(cands);
                     mc_depth = 0;
@@ -523,8 +504,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // tables exactly like the dense mc chunk. mc_on implies the mc gate
     // above passed (spec_mc_hybrid_ok_ when ssm_state_ != nullptr).
     const bool hybrid_mc = mc_on && ssm_state_ != nullptr;
-    const bool decode_attn_route = runtime_config_.speculative.verify_decode_attn &&
-                                   (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
+    const bool decode_attn_route = (ssm_state_ == nullptr || hybrid_mc) && !model_->profile().is_moe &&
                                    !model_->config().is_mla() && !swa_sizing_active_;
     const int bucket = spec_capture_bucket_(chunk_len);
     const bool capture_on = !swa_sizing_active_ && spec_capture_ready_(p0 + bucket, bucket);
@@ -996,8 +976,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // acceptance; that breadth is what makes the next draft fire).
     if (recycle_m > 0) {
         TokenRecycleTable& tr = spec_recycle_table_();
-        // Before observe_topk below rewrites the rows: draft_tree's slot costs.
-        observe_candidate_ranks(tr, scfg.recycle_tree, t0, mc, h_spec_argmax_.as<int32_t>());
         for (int j = 0; j < chunk_len; ++j) {
             int32_t tok;
             if (mc_on) {
@@ -1162,16 +1140,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // row next draft (up to the configured k), any rejection sheds one.
         // Draft-poor prompts converge to k=1 verifies instead of paying the
         // deep-chunk cost at low accept; draft-rich prompts climb back.
-        if (runtime_config_.speculative.mtp_adaptive_k) {
-            // Ceiling is the depth THIS request resolved to, not the
-            // process-wide one: a caller that asked for mtp_k=1 must not ride
-            // the ladder back up to the server default.
-            const int req_ceiling = mtp_request_k_(*req);
-            if (matched >= K)
-                mtp_active_.k_live = std::min(req_ceiling, mtp_chain_k_() + 1);
-            else
-                mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
-        }
+        // Ceiling is the depth THIS request resolved to, not the process-wide
+        // one: a caller that asked for mtp_k=1 must not ride the ladder back up.
+        const int req_ceiling = mtp_request_k_(*req);
+        if (matched >= K)
+            mtp_active_.k_live = std::min(req_ceiling, mtp_chain_k_() + 1);
+        else
+            mtp_active_.k_live = std::max(1, mtp_chain_k_() - 1);
         // Break-even avg emitted/verify is configurable (0 disables): the
         // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
         // the verify-chunk cost, both of which have moved since #852.

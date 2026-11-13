@@ -287,8 +287,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // Fast relaunch: a parked runner from a previous burst of the SAME request
     // keeps its captured graph, reseeding device state instead of recapturing
     // (full setup costs ~10-20 ms/launch). Rearm and fresh-capture share the same eager first-forward semantics (#683).
-    if (runtime_config_.speculative.burst_rearm && async_graph_runner_.is_setup() &&
-        async_parked_req_id_ >= 0) {
+    if (async_graph_runner_.is_setup() && async_parked_req_id_ >= 0) {
         const auto& bt = kv_manager_->block_table(req->id);
         const int ctx = req->context_len();
         // SWA table must exist at matching length for a rearm (swa_prepare in

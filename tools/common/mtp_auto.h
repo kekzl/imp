@@ -17,7 +17,7 @@ namespace imp::tools {
 inline constexpr int kMtpAutoK = 2;
 
 // The serving regime auto resolves for. A concurrent GDN hybrid takes the head too
-// (speculative.mtp_concurrent): batch > 1 never verifies there, so ngram=false costs nothing.
+// as well: batch > 1 never verifies there, so ngram=false costs nothing.
 enum class MtpAutoServing { SingleStream, ConcurrentHybrid, ConcurrentOther };
 MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid);
 
@@ -34,9 +34,8 @@ void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& 
 
 // Phase 1, before model load: how many rows to ask for, i.e. whether the head is worth
 // loading at all (host mmap only; the upload is Engine::init's). Returns the configured value
-// untouched unless it's the auto sentinel. configured_batch is the max_batch_size the tool will
-// pass (0 = engine auto-sizes).
-int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch);
+// untouched unless it's the auto sentinel.
+int mtp_auto_request_k(const RuntimeConfig& cfg);
 
 // Phase 2, after load: installs the resolved pair into cfg and logs the decision once.
 // head_loaded is what the load actually produced: a checkpoint without a head must fall back

@@ -1,4 +1,4 @@
-// engine_spec_constrained.cpp: speculative verify for greedy constrained requests (speculative.constrained).
+// engine_spec_constrained.cpp: speculative verify for greedy constrained requests (row argmax mask-checked).
 //
 // The masked argmax of a verify row equals its unmasked argmax exactly when the request's mask allows
 // that token. step_spec_verify_ keeps a row only if spec_constraint_allows_ says so in the FSM state
@@ -19,7 +19,7 @@ bool greedy(const Request& req) { return req.temperature <= 0.0f || req.top_k ==
 }  // namespace
 
 bool Engine::spec_constrained_refused_(const Request& req) const {
-    return req.wants_constraints() && !(runtime_config_.speculative.constrained && greedy(req));
+    return req.wants_constraints() && !greedy(req);
 }
 
 bool Engine::spec_constraint_allows_(const Request& req, int32_t tok, cudaStream_t stream) {

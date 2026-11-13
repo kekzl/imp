@@ -47,21 +47,20 @@ constexpr bool mtp_binds_request(const MtpBindState& s) {
     return s.mtp_armed && !s.constrained && !s.sampling_refused;
 }
 
-// Round-robin batched speculation (speculative.batch_rr, #1003 stage 1): at
+// Round-robin batched speculation (#1003 stage 1): at
 // batch > 1 one request per step runs its verify while the rest decode
 // batched. Entering it is the same question as any verify step: is there a
 // draft source, not just `speculative.ngram` by name - the MTP recipe
 // (docs/MODELS.md) turns that key off, which silently loses batched
 // speculation on an MTP-drafting server.
 struct SpecBatchRrState {
-    bool enabled = false;      // speculative.batch_rr
     bool recurrent = false;    // ssm_state_ != nullptr (the verify shape differs)
     int batch_rows = 0;        // rows in this step's decode batch
     bool any_drafter = false;  // spec_any_drafter() over the server-wide config
 };
 
 constexpr bool spec_batch_rr_active(const SpecBatchRrState& s) {
-    return s.enabled && !s.recurrent && s.batch_rows > 1 && s.any_drafter;
+    return !s.recurrent && s.batch_rows > 1 && s.any_drafter;
 }
 
 // Hybrid partial-accept replay: device KV length to stage. Capture-mode FA2 derives

@@ -35,13 +35,9 @@ TEST(BatchVerifyPredicates, HistorySlotsWhenTheBatchedVerifyDoesNotRun) {
     EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), h) << "mtp_carry: every history slot can bind";
     EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24, /*carry_live=*/false), 1) << "carry scratch refused";
     EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), kMtpCarryRows);
-    cfg.speculative.mtp_carry = false;
-    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), 0);
-    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 1) << "without the carry a second binding dies in a batch";
     cfg.speculative.batch_verify = true;
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 1), h);  // batch of one
     EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 24);
-    cfg.speculative.mtp_carry = true;
     EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), 0) << "the batched verify feeds every bound row itself";
     Model dense;                                        // no recurrent state
     EXPECT_EQ(mtp_draft_kv_slots(cfg, &dense, 24), h);
@@ -184,9 +180,8 @@ TEST(BatchVerifyPredicates, PickSlotKeepsAChatsHeadCacheAcrossASideRequest) {
     EXPECT_EQ(mtp_pick_slot(c, a_next, 864), 0);
     EXPECT_EQ(mtp_pick_slot(c, a_next, 0), 0) << "a long resume wins on a fresh prompt too";
     EXPECT_EQ(mtp_pick_slot(c, a_next, 899), 0) << "resume min(pos, L - 1) = 899 covers offset 899";
-    EXPECT_EQ(mtp_pick_slot(c, a_next, 900, /*gap_bind=*/false), -1)
-        << "pair 899 needs h_899, the prefix never forwarded it";
-    EXPECT_EQ(mtp_pick_slot(c, a_next, 900), 0) << "gap bind: the chat's own stale slot, not another one";
+    EXPECT_EQ(mtp_pick_slot(c, a_next, 900), 0)
+        << "pair 899 is past the prefix: the chat's own stale slot binds at 900";
     // The side request took slot 1; its history is no match for A, the decline keeps slot 0 intact.
     const auto side_hist = side;
     c[1] = {.pos = 502, .history = &side_hist, .last_use = 2};
@@ -254,9 +249,6 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     EXPECT_FALSE(batch_verify_wants_bufs(cfg, &m, 32));
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 0);
     cfg.speculative.mtp_batch_verify = 4;
-    cfg.speculative.mtp_carry = false;
-    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "one binding: nothing to batch";
-    cfg.speculative.mtp_carry = true;
     cfg.speculative.mtp_k = 0;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "imp-cli --bench pins mtp_k=0: no spares priced";
     cfg.speculative.mtp_k = -1;
@@ -309,17 +301,15 @@ TEST(BatchVerifyPredicates, BoundVerifyRunsWhenHalfTheRowsDraft) {
     EXPECT_FALSE(mtp_bound_verify_fits(0, 2, 2)) << "off";
 }
 
-// speculative.mtp_batch_verify_solo: a lone bound request with a draft is a group of one; no draft, no step.
+// A lone bound request with a draft is a group of one; no draft, no step.
 TEST(BatchVerifyPredicates, LoneBoundRequestVerifiesAsAGroupOfOne) {
     EXPECT_TRUE(mtp_bound_verify_fits(4, 1, 1, /*solo=*/true));
     EXPECT_FALSE(mtp_bound_verify_fits(4, 1, 0, /*solo=*/true));
     EXPECT_FALSE(mtp_bound_verify_fits(0, 1, 1, /*solo=*/true)) << "bound verify off";
-    EXPECT_TRUE(mtp_bound_verify_solo(true, 1, true));
-    EXPECT_FALSE(mtp_bound_verify_solo(false, 1, true)) << "key off";
-    EXPECT_FALSE(mtp_bound_verify_solo(true, 2, true)) << "two decode: the plain bound verify";
-    EXPECT_FALSE(mtp_bound_verify_solo(true, 1, false)) << "not bound: nothing drafts";
+    EXPECT_TRUE(mtp_bound_verify_solo(1, true));
+    EXPECT_FALSE(mtp_bound_verify_solo(2, true)) << "two decode: the plain bound verify";
+    EXPECT_FALSE(mtp_bound_verify_solo(1, false)) << "not bound: nothing drafts";
     RuntimeConfig cfg;
-    EXPECT_TRUE(cfg.speculative.mtp_batch_verify_solo);
 }
 
 // speculative.mtp_batch_verify_k: 1 + k accepted rows name the slot that holds the state after them.

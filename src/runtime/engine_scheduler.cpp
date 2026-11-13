@@ -910,11 +910,11 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // matcher on": demanding speculative.ngram here breaks the MTP recipe
     // (`speculative.mtp_k=2` paired with `speculative.ngram=false`,
     // docs/MODELS.md).
-    const SpecBatchRrState rr_state{
-        runtime_config_.speculative.batch_rr, ssm_state_ != nullptr,
-        static_cast<int>(decode_batch.size()),
-        std::any_of(decode_batch.begin(), decode_batch.end(),
-                    [this](const auto& r) { return spec_any_drafter_enabled_(*r); })};
+    const SpecBatchRrState rr_state{ssm_state_ != nullptr, static_cast<int>(decode_batch.size()),
+                                    std::any_of(decode_batch.begin(), decode_batch.end(),
+                                                [this](const auto& r) {
+                                                    return spec_any_drafter_enabled_(*r);
+                                                })};
     if (spec_batch_rr_active(rr_state)) {
         int cand = -1;
         int best_id = INT_MAX, wrap_id = INT_MAX, wrap_idx = -1;

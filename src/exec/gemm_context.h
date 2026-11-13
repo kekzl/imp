@@ -74,7 +74,7 @@ struct GemmContext {
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
         ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
         ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
-        ctx.spec_verify_small_m = spec_verify && rcfg.speculative.verify_nvfp4_gemm;
+        ctx.spec_verify_small_m = spec_verify;
         return ctx;
     }
 

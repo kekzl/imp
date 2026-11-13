@@ -115,7 +115,7 @@ int Engine::mtp_acquire_slot_(const Request& req, int offset) {
         cands.push_back({.pos = s == ws->cur_slot ? ws->mtp_pos : ws->slot_pos[static_cast<size_t>(s)],
                          .history = &mtp_pool_.slot_history[static_cast<size_t>(s)],
                          .last_use = mtp_pool_.slot_used[static_cast<size_t>(s)]});
-    const int pick = mtp_pick_slot(cands, req.input_tokens, offset, runtime_config_.speculative.mtp_gap_bind);
+    const int pick = mtp_pick_slot(cands, req.input_tokens, offset);
     if (pick < 0)
         return -1;
     const int slot = mtp_pool_.free_slots[static_cast<size_t>(pick)];
@@ -140,11 +140,6 @@ void Engine::mtp_release_(int req_id) {
         mtp_pool_.free_slots.push_back(it->second.slot);
     }
     mtp_pool_.binds.erase(it);
-}
-
-bool Engine::spec_history_too_short_(const Request& req) const {
-    const int n = runtime_config_.speculative.min_history;
-    return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
 }
 
 bool Engine::mtp_feed_wanted_(const Request& req) const {
@@ -487,7 +482,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
 // Bind req's first prefill chunk (at `offset`) to a head KV slot, resuming over the longest common
 // prefix of the slot's fed history and this prompt (multi-turn agent loops re-send the prior turn
 // verbatim, so the cache carries over). A resume past every slot's rows starts the head at `offset`
-// (speculative.mtp_gap_bind). false = req drafts nothing; no slot's history is touched.
+// with no head rows below it. Returns false when req drafts nothing; no slot's history is touched.
 bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
@@ -533,7 +528,7 @@ bool Engine::mtp_bind_prompt_(const Request& req, int offset) {
     mtp_active_.econ_batched = 0;
     mtp_active_.k_live = mtp_spec_k_;
     mtp_active_.carry_n = 0;
-    if (runtime_config_.speculative.mtp_gap_bind && imp::mtp_bind_has_gap(offset, keep_pairs, ring_lost)) {
+    if (imp::mtp_bind_has_gap(offset, keep_pairs, ring_lost)) {
         if (!imp::mtp_kv_hi_floor(*ws, slot, offset, decode_stream())) {
             mtp_unbind_("head KV ring floor failed");
             return false;
@@ -702,8 +697,7 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
     // E4M3 body copy for the bound verify lane only: the mtp_k=2 chain measured neutral (imp-cli 125.85 ->
     // 128.64 greedy, 123.47 -> 120.75 tok/s sampled).
-    if (runtime_config_.speculative.mtp_body_fp8 &&
-        mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0)
+    if (mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0)
         s.body_fp8_bytes = imp::mtp_body_fp8_bytes(head);
     return true;
 }

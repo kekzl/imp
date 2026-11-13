@@ -511,16 +511,6 @@ TEST(ConfigBinding, DenseWeightCacheDefaultsOnAndBinds) {
     EXPECT_TRUE(cfg.gemm.dense_weight_cache);
 }
 
-// ---- #1638: a decode-path switch nothing could set ----
-
-TEST(ConfigBinding, SpeculativeBatchRrIsBound) {
-    imp::RuntimeConfig cfg;
-    ASSERT_TRUE(cfg.speculative.batch_rr) << "default is on";
-    EXPECT_TRUE(cfg.apply_overrides({"speculative.batch_rr=false"}).empty())
-        << "read at engine_scheduler.cpp:1422 and :2882, bound to no key until #1638";
-    EXPECT_FALSE(cfg.speculative.batch_rr);
-}
-
 // #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,
 // while the knob that merely caps it did.
 TEST(ConfigBinding, PrefillChunkSizeIsBound) {

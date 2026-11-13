@@ -261,7 +261,7 @@ void expect_near_tie_only(const std::vector<GreedyRun>& baseline, const std::vec
 }
 
 // json: both arms json_mode, so the MTP arm's verify keeps a row only if the mask allows it
-// (speculative.constrained, engine_spec_constrained.cpp).
+// (engine_spec_constrained.cpp).
 void mtp_identity(bool json) {
     const std::string dir = model_or("IMP_TEST_MODEL_MTP", "/models/Qwen3.8-27B-NVFP4-vllm");
     if (!present(dir))
