@@ -19,10 +19,6 @@ struct Speculative {
     // sampler's seed, a draft token is accepted while the draw equals it (exact, compute/sampling.h).
     // Off = greedy requests only.
     bool sampled = true;
-    // #964 stage 2: past this request context, 1-token n-gram/suffix drafts are
-    // discarded instead of verified (miss-burst path serves at plain decode
-    // speed); depth>=2 drafts always verify. MoE-NVFP4 and hybrid exempt. 0 = never gate.
-    int shallow_draft_ctx = 12288;
     // Speculation on MoE models with NATIVE-NVFP4 experts (gate also requires
     // profile().moe_experts_nvfp4). GGUF-MoE verify re-dequants every activated
     // expert per step and never engages regardless of this flag. imp-cli
@@ -37,22 +33,12 @@ struct Speculative {
     // full state pool (79.5 MiB/slot on Qwen3.8-27B, clamping max_batch 32->18);
     // the factored form is ~3.3 MiB. Opt-in (docs/plans/2026-09-12-factored-verify-spare.md).
     bool factored_spare = false;
-    int k = 16;  // draft tokens per verify step (verify cost is ~flat in k)
     // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696): engine-
     // scoped cross-request token->top-M successors table fed from emitted
     // bigrams + verify-chunk top-K logits. Runs as a fallback AFTER suffix/
     // n-gram and MTP; lossless via greedy argmax verify. Default off; on with recycle_width 8 under
     // --gpu-layers unless set (offload_spec_defaults.h, a verify costs one streamed pass there).
     bool token_recycling = false;
-    int recycle_slots = 8;  // successors kept per token (MRU/rank order)
-    // Linear draft length. Default 3 -> chunk 4 -> capture bucket 4 =
-    // exactly one batched-GEMV weight sweep (M=4, #1055); deeper chains
-    // pad into bucket 5+ and pay a second sweep.
-    int recycle_depth = 3;
-    // Precision gate (#1055): only draft hops whose front slot was
-    // re-confirmed at least this many times (bigram repeat / model top-1
-    // stable). A verify costs ~1.4x a decode step; precision beats recall. 0 = draft on any known successor.
-    int recycle_min_streak = 1;
     // Multi-candidate verify: verify `recycle_width` adjacency candidates in
     // one chunk, each with its own t0 row and private KV-block copies (no token
     // mask needed, argmax accept stays lossless). Rows capped at bucket 17, 64 under --gpu-layers
@@ -74,7 +60,6 @@ struct Speculative {
     // frequency-voted continuations and adaptive draft length past k up to
     // suffix_k_max. false = legacy single-most-recent scan.
     bool suffix = true;
-    int suffix_k_max = 64;
     // Corpus drafting (#2421): text files under this path (file or directory, <= 64 MiB) form an
     // engine-wide suffix index, asked when the request's own history has no match (speculative.suffix).
     // "" = off.
@@ -83,10 +68,6 @@ struct Speculative {
     // z-lab/Qwen3-8B-DFlash-b16: 15 drafts, embed / lm_head read from the target): drafts from the target's
     // hidden states; forces batch 1. "" = off.
     std::string dspark_model;
-    // Block drafter economics: after 8 verifies a request below this many emitted tokens per verify stops
-    // drafting until the next speculative.burst re-arm. 0 = the n-gram rule (15 % of drafted tokens
-    // accepted, final), which stopped Qwen3-8B-NVFP4 prose at 287 tok/s; 1.8: 348, 2.0: 300 (nospec 282).
-    float dspark_min_emit = 1.8f;
     // Longer suffix matches trade draft frequency for precision, and precision
     // wins: a higher min_match cuts false n-gram matches (e.g. in number
     // tables) that never verify, at the cost of fewer drafts overall.
@@ -96,14 +77,6 @@ struct Speculative {
     // speculation and re-enters the async conditional graph loop (eager
     // per-token path costs ~2x). 0 = never give up.
     int give_up_after = 64;
-    // Burst-hybrid: while given up, the async loop runs in bursts of this many
-    // tokens; after each burst the request re-probes drafts for a couple of
-    // steps. 0 = give-up is final.
-    int burst = 128;
-    // On a draft miss, fall back to the async loop for this many tokens (cheap
-    // rearm, no graph recapture) instead of paying the ~2x eager tax until the
-    // next draft. 0 = stay eager between drafts (legacy).
-    int miss_burst = 8;
     // Speculation on hybrid (GDN/SSM) models: the verify chunk advances
     // recurrent state through rejected draft positions, so the committed state
     // slab is snapshotted before the chunk (restored on partial acceptance).
@@ -184,9 +157,29 @@ struct Speculative {
     // rejected drafts). Engages only where FP16-QK FA2 serves the chunk
     // (uniform hd=128, no sinks/MLA/LongRoPE) on non-hybrid models. Falls back to eager on capture failure.
     bool capture = true;
-    // Context capacity the captured gather grids and persistent K/V scratch are
-    // sized for: 2 * ctx_cap * nkv * hd * 2B VRAM. Verify steps beyond this run
-    // eager. Clamped to the model's max_seq_len.
-    int capture_ctx_cap = 32768;
 };
+
+// Speculation tuning constants, former keys measured once and never moved.
+// Draft tokens per n-gram / recycling verify step (verify cost is ~flat in k).
+inline constexpr int kSpecDraftK = 16;
+// Suffix drafter: frequency-voted continuations extend a draft past kSpecDraftK up to this.
+inline constexpr int kSpecSuffixKMax = 64;
+// #964 stage 2: past this context a 1-token draft is dropped (depth >= 2 still verifies);
+// MoE-NVFP4 and hybrids are exempt.
+inline constexpr int kSpecShallowDraftCtx = 12288;
+// A request that gave up on drafts runs async-loop bursts of this many tokens between re-probes.
+inline constexpr int kSpecBurst = 128;
+// A draft miss falls back to this many async-loop tokens (no recapture) instead of ~2x eager steps.
+inline constexpr int kSpecMissBurst = 8;
+// Token recycling: successors kept per token, linear depth 3 = chunk 4 = one batched-GEMV
+// weight sweep (#1055), and a hop drafts only after 1 re-confirmation (a verify costs ~1.4x a decode).
+inline constexpr int kRecycleSlots = 8;
+inline constexpr int kRecycleDepth = 3;
+inline constexpr int kRecycleMinStreak = 1;
+// Block drafter (DSpark): below 1.8 emitted tokens per verify after 8 verifies a request stops
+// drafting until the next burst re-arm. Qwen3-8B-NVFP4 prose: 1.8 348, 2.0 300, nospec 282 tok/s.
+inline constexpr float kDsparkMinEmit = 1.8f;
+// Captured verify: gather grids and K/V scratch sized for this context (2 * cap * nkv * hd * 2 B,
+// clamped to max_seq_len); longer verify steps run eager.
+inline constexpr int kSpecCaptureCtxCap = 32768;
 }  // namespace imp::cfg

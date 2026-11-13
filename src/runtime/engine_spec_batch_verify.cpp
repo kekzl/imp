@@ -72,7 +72,7 @@ bool bound_solo(const RuntimeConfig& cfg, const Model* model, const BatchVerifyS
 
 // Mode and batch-shape gates ahead of the per-row ones: the full batch_verify takes any batch of two or more;
 // the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows; solo
-// = a lone bound request under speculative.mtp_batch_verify_solo.
+// = a lone bound request under the solo bound verify.
 const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on,
                                bool solo) {
     if (!full && !bv.bound_only)
@@ -415,7 +415,7 @@ int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& fro
     const auto& scfg = runtime_config_.speculative;
     NgramDraft nd;
     if (scfg.suffix) {
-        nd = synced_index().draft(depth, std::max(depth, scfg.suffix_k_max));
+        nd = synced_index().draft(depth, std::max(depth, cfg::kSpecSuffixKMax));
     } else {
         std::vector<int32_t> history;
         history.reserve(req.input_tokens.size() + req.prediction_tokens.size() + req.output_tokens.size());

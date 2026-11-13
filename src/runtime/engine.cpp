@@ -718,9 +718,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // charged only when speculation can actually take that path.
         const int capture_cap = runtime_config_.speculative.capture
                                     ? (config_.max_seq_len > 0
-                                           ? std::min(runtime_config_.speculative.capture_ctx_cap,
-                                                      config_.max_seq_len)
-                                           : runtime_config_.speculative.capture_ctx_cap)
+                                           ? std::min(cfg::kSpecCaptureCtxCap, config_.max_seq_len)
+                                           : cfg::kSpecCaptureCtxCap)
                                     : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
                                       fp8_act_scratch_needed(*model_, config_.use_fp8_prefill,

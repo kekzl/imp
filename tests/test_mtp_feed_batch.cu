@@ -343,7 +343,7 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
     imp::mtp_workspace_free(ws_pass);
 }
 
-// The head pass as a captured graph (speculative.mtp_head_graph): feed + chain captured with 1-row scan
+// The head pass as a captured graph: feed + chain captured with 1-row scan
 // smem, replayed after mtp_scan_nodes_set_rows widened both scan nodes to the pass's largest position (2002:
 // 8 KiB of scores). KV slots and final_norm rows bytewise equal to the eager pass; 1-row smem left in place
 // traps in the scan kernel.

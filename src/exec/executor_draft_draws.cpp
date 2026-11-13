@@ -1,4 +1,4 @@
-// Coupled MTP draft draws (speculative.mtp_draft_coupled): scratch and host staging of the rows
+// Coupled MTP draft draws (coupled MTP drafts): scratch and host staging of the rows
 // lm_head_rows_argmax draws inside the head pass. No kernel launch in this TU.
 
 #include "compute/mtp_draft_rows.h"

@@ -12,7 +12,7 @@ IMG=${IMP_IMAGE:-imp:test}
 MODEL=${MTP_MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 PORT=8099
 ROUNDS=${ROUNDS:-3}
-ARMS=${ARMS:-"k1 k2fix k2ad"}
+ARMS=${ARMS:-"k0 k1 k2ad"}
 CLASSES=${CLASSES:-"poor rich"}
 OUTDIR=${OUTDIR:-/tmp/mtp_adaptive_ab}
 THINK=${THINK:-0}
@@ -27,11 +27,9 @@ arm_flags(){ # arm -> --set flags
   case "$1" in
     k0)    echo "--set speculative.mtp_k=0" ;;
     k1)    echo "--set speculative.mtp_k=1" ;;
-    k2fix) echo "--set speculative.mtp_k=2 --set speculative.mtp_adaptive_k=false" ;;
     k2ad)  echo "--set speculative.mtp_k=2" ;;
     # Width axis (roadmap gap 5): W=2 multi-candidate chains on top of the
-    # fixed / adaptive depth-2 arms.
-    w2fix) echo "--set speculative.mtp_k=2 --set speculative.mtp_adaptive_k=false --set speculative.mtp_tree_width=2" ;;
+    # adaptive depth-2 arm.
     w2ad)  echo "--set speculative.mtp_k=2 --set speculative.mtp_tree_width=2" ;;
   esac
 }

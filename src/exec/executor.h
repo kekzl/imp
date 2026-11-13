@@ -206,7 +206,7 @@ public:
     [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out,
                                            cudaStream_t stream, const NvFP4QuantResult* draft_nvfp4 = nullptr,
                                            int draft_vocab = 0, int draw_row0 = 0, int draw_top_k = 0);
-    // Coupled MTP drafts (speculative.mtp_draft_coupled): stages draws[n] (row lv * m + i = the i-th row of
+    // Coupled MTP drafts (coupled MTP drafts): stages draws[n] (row lv * m + i = the i-th row of
     // the lv-th lm_head_rows_argmax call of one head pass, top_k in [1, SAMPLE_MAX_TOP_K]) and uploads the
     // args. Returns the largest top_k, 0 = nothing staged (the pass takes the argmax).
     static constexpr int kDraftDrawRows = 32;  // 4 draft levels x 8 requests, 2.02 MiB

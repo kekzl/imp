@@ -463,11 +463,11 @@ TEST(ConfigBadValue, BoolKeyRejectsANonBoolean) {
 
 TEST(ConfigBadValue, IntKeyRejectsWordsAndTrailingGarbage) {
     imp::RuntimeConfig cfg;
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=one"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=one"}).size(), 1u);
     // stoi stops at the first non-digit, so this parsed as 16 and reported
     // nothing. The whole string has to be consumed.
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=16k"}).size(), 1u);
-    EXPECT_EQ(cfg.apply_overrides({"speculative.k=1,2"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=16k"}).size(), 1u);
+    EXPECT_EQ(cfg.apply_overrides({"speculative.mtp_history_slots=1,2"}).size(), 1u);
 }
 
 TEST(ConfigBadValue, FloatKeyRejectsANonNumber) {

@@ -544,7 +544,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // = largest capture bucket (33). Scoped to dequantable GGUF sources;
         // native-ST NVFP4 weights read NVFP4 directly via the NVFP4 tile block below
         // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
-        // speculative.verify_smallm routes the chunk to the small-M block instead.
+        // A graph-captured verify routes the chunk to the small-M block instead.
         if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && h.source_data != nullptr &&
             dequant_gpu_supported(h.source_qtype)) {

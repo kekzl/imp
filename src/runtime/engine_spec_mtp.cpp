@@ -689,7 +689,7 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
         const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(s.n_kv_slots)));
         s.max_seq_len = std::min(std::max(fit, 2048), s.max_seq_len);
     }
-    // speculative.mtp_carry scratch (2.5 MiB per slot on Qwen3.8).
+    // the MTP carry scratch (2.5 MiB per slot on Qwen3.8).
     s.carry_rows = mtp_carry_rows(runtime_config_, model_.get(), config_.max_batch_size);
     // Post-norm feed scratch (diagnostics.mtp_prenorm_h): sized to the executor's token cap, the
     // widest feed a prefill chunk can hand mtp_feed_pairs_.
@@ -766,17 +766,17 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
-    // speculative.mtp_carry scratch; refused = one binding, as without it.
+    // the MTP carry scratch; refused = one binding, as without it.
     (void)imp::mtp_carry_allocate(*ws, shape.carry_rows);
     // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
     prewarm_spec_state_scratch_();
     if (shape.body_fp8_bytes > 0) {
         const size_t before = ws->device_bytes;
         if (imp::mtp_body_fp8_allocate(*model_->mtp_, *ws, decode_stream()))
-            IMP_LOG_INFO("speculative.mtp_body_fp8: E4M3 copy of the dense MTP body, %.1f MiB",
+            IMP_LOG_INFO("mtp: E4M3 copy of the dense MTP body, %.1f MiB",
                          static_cast<double>(ws->device_bytes - before) / 1048576.0);
         else
-            IMP_LOG_WARN("speculative.mtp_body_fp8: no E4M3 body copy (not a plain FP16 head or no VRAM)");
+            IMP_LOG_WARN("mtp: no E4M3 body copy (not a plain FP16 head or no VRAM)");
     }
     if (shape.prenorm_rows > 0 && !imp::mtp_prenorm_allocate(*ws, shape.prenorm_rows))
         IMP_LOG_WARN(

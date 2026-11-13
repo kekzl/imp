@@ -1,5 +1,5 @@
 // The batched MTP head pass (Engine::mtp_head_pass_): feed, draft LM head, chain, drafts D2H. With
-// speculative.mtp_head_graph one CUDA graph per (fed rows, requests, chain) replays it instead of ~56
+// the MTP head graph one CUDA graph per (fed rows, requests, chain) replays it instead of ~56
 // launches; cache and bound in mtp_head_graph.h.
 
 #include "compute/gemm.h"

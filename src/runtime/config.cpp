@@ -485,26 +485,17 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [speculative]
     B("speculative.ngram", cfg.speculative.ngram);
     B("speculative.sampled", cfg.speculative.sampled);
-    I("speculative.shallow_draft_ctx", cfg.speculative.shallow_draft_ctx);
     B("speculative.moe", cfg.speculative.moe);
-    I("speculative.k", cfg.speculative.k);
     B("speculative.token_recycling", cfg.speculative.token_recycling);
-    I("speculative.recycle_slots", cfg.speculative.recycle_slots);
-    I("speculative.recycle_depth", cfg.speculative.recycle_depth);
     I("speculative.recycle_width", cfg.speculative.recycle_width);
     I("speculative.mtp_tree_width", cfg.speculative.mtp_tree_width);
     F("speculative.mtp_tree_margin", cfg.speculative.mtp_tree_margin);
-    I("speculative.recycle_min_streak", cfg.speculative.recycle_min_streak);
     B("speculative.suffix", cfg.speculative.suffix);
-    I("speculative.suffix_k_max", cfg.speculative.suffix_k_max);
     S("speculative.ngram_corpus", cfg.speculative.ngram_corpus);
     S("speculative.dspark_model", cfg.speculative.dspark_model);
-    F("speculative.dspark_min_emit", cfg.speculative.dspark_min_emit);
     I("speculative.min_match", cfg.speculative.min_match);
     I("speculative.max_match", cfg.speculative.max_match);
     I("speculative.give_up_after", cfg.speculative.give_up_after);
-    I("speculative.burst", cfg.speculative.burst);
-    I("speculative.miss_burst", cfg.speculative.miss_burst);
     B("speculative.hybrid", cfg.speculative.hybrid);
     I("speculative.mtp_k", cfg.speculative.mtp_k);
     S("speculative.mtp_head", cfg.speculative.mtp_head);
@@ -522,7 +513,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.batch_verify", cfg.speculative.batch_verify);
     B("speculative.factored_spare", cfg.speculative.factored_spare);
     B("speculative.capture", cfg.speculative.capture);
-    I("speculative.capture_ctx_cap", cfg.speculative.capture_ctx_cap);
 
     // Record what the operator actually chose. An "auto" default that resolves
     // into several keys reads this to leave an explicit setting alone (see

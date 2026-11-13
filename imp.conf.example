@@ -1117,8 +1117,6 @@ sampled              = true
 # and stays on the async decode loop. imp-cli --bench pins this off to keep
 # the gated tg baseline a raw-decode signal.
 moe                  = true
-# Draft tokens proposed per verify step (verify cost is ~flat in k).
-k                    = 16
 # Token-Recycling adjacency drafting (arXiv 2408.08696): engine-scoped
 # `token -> top-M successors` table fed from emitted bigrams and the
 # model's own verify-chunk top-K logits; drafts where suffix/n-gram find
@@ -1135,10 +1133,7 @@ k                    = 16
 # Under --gpu-layers it turns on with recycle_width 8 unless set here: a verify costs one
 # streamed pass there, flat to 64 rows (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 7.22, code 6.85 -> 9.80 tok/s).
 token_recycling      = false
-recycle_slots        = 8
-recycle_depth        = 3
 recycle_width        = 1
-recycle_min_streak   = 1
 # Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
 # matching instead of a per-step backward scan, continuations picked by
 # frequency vote across all occurrences, and adaptive draft length — a
@@ -1146,7 +1141,6 @@ recycle_min_streak   = 1
 # context match, e.g. the `prediction` region) extends past k up to
 # suffix_k_max. false = legacy single-most-recent scan.
 suffix               = true
-suffix_k_max         = 64
 # Corpus drafting: text files under this path (a file or a directory, read
 # up to 64 MiB, binary files skipped) form one engine-wide suffix index that
 # drafts when the request's own history has no match (needs suffix = true).
@@ -1156,9 +1150,6 @@ ngram_corpus         = ""
 # DSpark / DFlash block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 or
 # z-lab/Qwen3-8B-DFlash-b16 for Qwen3-8B; DFlash reads embed / lm_head from the target); forces batch 1.
 dspark_model         = ""
-# Block drafter economics: after 8 verifies, below this many emitted tokens per verify the request stops
-# drafting until the next burst re-arm (0 = the n-gram 15 % acceptance rule, final for the request).
-dspark_min_emit      = 1.8
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).
@@ -1168,14 +1159,6 @@ max_match            = 12
 # this many consecutive draft misses, or when acceptance stays under 15%.
 # 0 = never give up.
 give_up_after        = 64
-# Burst-hybrid: a given-up request runs the async loop in bursts of this
-# many tokens and re-probes for drafts in between (think models reach their
-# draft-rich region only after the reasoning prose). 0 = give-up is final.
-burst                = 128
-# On a draft miss, run the async loop for this many tokens (cheap rearm,
-# no graph recapture) instead of stepping eagerly until the next draft.
-# 0 = stay eager between drafts.
-miss_burst           = 8
 # Speculation on hybrid (GDN/SSM) models: the committed recurrent-state slab
 # is snapshotted around the verify chunk; a partial acceptance restores it and
 # re-forwards the accepted prefix. imp-cli --bench pins this false.
@@ -1267,10 +1250,6 @@ mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # on non-hybrid models; capture failures fall back to the eager verify.
 # imp-cli --bench pins this false (raw-decode baseline semantics).
 capture              = true
-# Context capacity the captured grids and the persistent K/V scratch cover
-# (2 x cap x nkv x hd x 2B VRAM); verify steps beyond it run eager. Clamped
-# to the model's max_seq_len.
-capture_ctx_cap      = 32768
 # Batched verify on the GDN hybrid: every decoding request forwards its last
 # token plus one MTP draft per step (one spare recurrent slot per batch slot,
 # halves the auto batch). Measured Qwen3.8-27B 8 streams +20..+26 %; at 32
@@ -1289,10 +1268,6 @@ mtp_tree_width       = 1
 # With mtp_tree_width > 1: verify the extra chains only when the head's
 # top-1/top-2 logit margin is below this. 0 = always branch.
 mtp_tree_margin      = 2.0
-# Above this context, depth-1 drafts are discarded instead of verified (verify
-# costs ~2x a decode step near 14k on Qwen3-8B Q8_0); depth >= 2 is always
-# verified. MoE-NVFP4 and hybrid requests are exempt. 0 = never gate.
-shallow_draft_ctx    = 12288
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM

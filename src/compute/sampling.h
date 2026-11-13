@@ -98,7 +98,7 @@ struct VerifySampling {
                                                   const VerifySampling* per_row, TopkRowArgs* h_args,
                                                   TopkRowArgs* d_args, void* d_slots, int32_t* d_out,
                                                   cudaStream_t stream = nullptr);
-// MTP draft row (speculative.mtp_draft_coupled), staged on the host: the top_k/top_p/temperature draw of lp
+// MTP draft row (coupled MTP drafts), staged on the host: the top_k/top_p/temperature draw of lp
 // with seed s.seed0, no min_p / typical_p filter (a draft is a guess). s.top_k in [1, SAMPLE_MAX_TOP_K].
 void stage_draft_row(const float* lp, const VerifySampling& s, void* slot, TopkRowArgs& a);
 // Draws n_rows rows whose staged args are on the device already: the row sampler, then the tokens (first

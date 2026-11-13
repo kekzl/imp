@@ -68,7 +68,7 @@ struct InferenceState {
         return is_prefill && ssm_seq_slots != nullptr && (ssm_n_seq > 1 || ssm_group_verify) &&
                ssm_seq_tokens > 0;
     }
-    // Batched verify sets it: a group of one (speculative.mtp_batch_verify_solo) is still a grouped chunk.
+    // Batched verify sets it: a group of one (the solo bound verify) is still a grouped chunk.
     bool ssm_group_verify = false;
     // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md): a grouped
     // chunk whose groups are DIFFERENT requests. Group g reads slot ssm_seq_slots[g], commits

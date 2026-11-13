@@ -85,7 +85,7 @@ struct SpecEconState {
     int verifies = 0;
     long long drafted = 0, accepted = 0, emitted = 0;
     bool block_drafter = false;  // speculative.dspark_model loaded
-    float min_emit = 0.0f;       // speculative.dspark_min_emit, 0 = the n-gram rule
+    float min_emit = 0.0f;       // kDsparkMinEmit, 0 = the n-gram rule
 };
 struct SpecEconVerdict {
     bool stop = false;

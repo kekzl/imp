@@ -84,7 +84,7 @@ struct ExecShape {
     // under-reserve on the others.
     int kv_heads_max = 0;
     int head_dim_max = 0;
-    // min(speculative.capture_ctx_cap, max_seq_len) as engine_spec_capture.cpp
+    // min(cfg::kSpecCaptureCtxCap, max_seq_len) as engine_spec_capture.cpp
     // computes it. 0 = the captured-verify path is off, charge nothing.
     int capture_ctx_cap = 0;
     // The RESOLVED KV block size (Engine::init_resolve_kv_block_size_), not kKVBlockSize:

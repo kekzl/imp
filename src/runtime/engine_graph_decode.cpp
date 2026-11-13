@@ -61,7 +61,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
 
     // Reserves for the burst about to run, not the whole generation (#1636): the
     // launch is clamped to runtime.decode_burst (128), 16 while another request
-    // waits, or speculative.miss_burst (8); the loop relaunches per burst anyway.
+    // waits, or kSpecMissBurst (8); the loop relaunches per burst anyway.
     // With plan_tokens set (max_tokens = remaining context) reserve up to the planning horizon only,
     // or one request would pull the whole pool.
     int reserve_tokens = std::max(1, planning_max_tokens(*req) - static_cast<int>(req->output_tokens.size()));

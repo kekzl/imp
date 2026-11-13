@@ -1,5 +1,5 @@
 // Batched feeds of the MTP head: the batched verify's ragged pass over every bound request's emitted pairs
-// (mtp_batched_feed_), and speculative.mtp_carry, which keeps a bound request's head cache in step through
+// (mtp_batched_feed_), and the MTP carry, which keeps a bound request's head cache in step through
 // batched decode by carrying its hidden rows (mtp_carry_rows_) until their next token is known
 // (mtp_carry_flush_). Pairing convention and the binding invariant: engine_spec_mtp.cpp.
 

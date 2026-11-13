@@ -146,7 +146,7 @@ bool Engine::init_kv_cache() {
             // chunks roll back rejected drafts) plus the partial boundary
             // block. Sized from the spec config so the assert can't trip.
             const auto& sc = runtime_config_.speculative;
-            int spec_depth = std::max({sc.k, sc.suffix_k_max, sc.mtp_k + 1, kJumpRowsCap});
+            int spec_depth = std::max({cfg::kSpecDraftK, cfg::kSpecSuffixKMax, sc.mtp_k + 1, kJumpRowsCap});
             swa_slack_tokens_ = std::max(2 * kv_bs, spec_depth + kv_bs);
             // Per sequence: the on-device decode burst (graph loop clamp). Once per pool: the
             // prefill chunk the scheduler runs (resolver incl. --set runtime.prefill_chunk_size,

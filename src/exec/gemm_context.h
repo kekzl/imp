@@ -45,9 +45,8 @@ struct GemmContext {
 
     // Spec-verify chunk forward (#998): small-M GEMMs (M <= largest capture
     // bucket) prefer the NVFP4 decode overlay over the M>1 prefill dequant
-    // path. Set from InferenceState::spec_verify_chunk gated on
-    // speculative.verify_nvfp4_gemm; never set for real prefills, so prompt
-    // processing quality is unaffected.
+    // path. Set from InferenceState::spec_verify_chunk; never set for real
+    // prefills, so prompt processing quality is unaffected.
     bool spec_verify_small_m = false;
 
     // Quantization scratch buffers (non-owning)

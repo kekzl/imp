@@ -3,8 +3,7 @@
 # imp-server --max-batch 1, greedy, 256 tokens with ignore_eos, /no_think, one server start per arm and round,
 # one warmup request, then prose / code / list x 2. Arms alternate order every round.
 # tok/s = completion tokens / request wall; tok/verify = emitted / verify steps from the /metrics delta.
-# Arms: nospec (speculative.ngram=false), dspark (block7), dflash (z-lab b16, 15 drafts),
-# dsparkeX (block7, speculative.dspark_min_emit X; dsparke0 = the n-gram 15 % rule).
+# Arms: nospec (speculative.ngram=false), dspark (block7), dflash (z-lab b16, 15 drafts).
 # Usage: ROUNDS=3 ARMS="nospec dspark dflash" tools/analysis/block_drafter_ab.sh
 #   IMP_SERVER_IMG=imp:toolchain runs build-dev/imp-server from this tree; IMP_SERVER_IMG=imp:test the image's.
 #   EXTRA="--set k=v ..." is appended to every arm.
@@ -25,8 +24,6 @@ arm_flags() {
         nospec) echo "--set speculative.ngram=false" ;;
         dspark) echo "--set speculative.dspark_model=$DSPARK" ;;
         dflash) echo "--set speculative.dspark_model=$DFLASH" ;;
-        dsparke*) echo "--set speculative.dspark_model=$DSPARK --set speculative.dspark_min_emit=${1#dsparke}" ;;
-        dflashe*) echo "--set speculative.dspark_model=$DFLASH --set speculative.dspark_min_emit=${1#dflashe}" ;;
         *) echo "unknown arm $1" >&2; return 1 ;;
     esac
 }

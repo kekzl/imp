@@ -15,7 +15,7 @@
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
 #include "quant/nvfp4_gemm.h"       // gemv_nvfp4_kpar_fp32 (NVFP4 chain lm_head)
-#include "quant/fp8_quant.h"        // quantize_fp8_rows_async (speculative.mtp_body_fp8)
+#include "quant/fp8_quant.h"        // quantize_fp8_rows_async (the MTP body FP8 copy)
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
 // relu_sqr_inplace — activation for the non-gated (Nemotron) MTP experts.

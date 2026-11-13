@@ -822,7 +822,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     // step emits for every row and replaces the batched decode below. Any
     // gate failure (a non-greedy row, no spare slot, no draft anywhere) takes
     // the plain path this step. A batch of one only as a lone bound request
-    // (speculative.mtp_batch_verify_solo): paged decode attention instead of the verify chunk's FA2.
+    // (the solo bound verify): paged decode attention instead of the verify chunk's FA2.
     if (ssm_state_ && batch_verify_refusal_(decode_batch) == nullptr) {
         if (step_spec_verify_batched_(decode_batch, dec_stream))
             return;
@@ -838,8 +838,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             // step). Doomed = acceptance verdict final → run unbounded;
             // otherwise bounded so spec_maybe_rearm_ can re-probe later.
             auto& sreq = decode_batch[0];
-            const int lim =
-                sreq->spec_acceptance_doomed ? 0 : runtime_config_.speculative.burst;
+            const int lim = sreq->spec_acceptance_doomed ? 0 : cfg::kSpecBurst;
             if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream, lim))
                 return;
         } else if (decode_batch[0]->think_budget > 0.0f && decode_batch[0]->in_think_block &&
@@ -865,10 +864,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             // are not draft misses, and inflating it would instantly trip
             // give-up on the first real probe after </think>).
             auto& sreq = decode_batch[0];
-            const int think_burst =
-                std::min(32, runtime_config_.speculative.burst > 0
-                                 ? runtime_config_.speculative.burst
-                                 : 32);
+            constexpr int think_burst = std::min(32, cfg::kSpecBurst);
             if (try_launch_async_graph_loop(sreq, sreq->output_tokens.back(), dec_stream,
                                             think_burst))
                 return;
@@ -1718,7 +1714,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // the active one before the sync gate reads its cache position.
         if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
             mtp_activate_(valid_decode[0]->id);
-        // Decoded in a batch since the last feed: the carried rows catch the head up (speculative.mtp_carry);
+        // Decoded in a batch since the last feed: the carried rows catch the head up (the MTP carry);
         // a step without a row (loop burst, carry off) leaves it behind for good.
         mtp_carry_flush_(*valid_decode[0]);
         mtp_unbind_if_behind_(valid_decode[0]->id, cur_pos);
@@ -1958,13 +1954,9 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                                       // MTP feed + telemetry hook the per-step path; the async
                                       // conditional-graph loop bypasses it. Stay eager while the head
                                       // is bound to this request (a never-verifying one is not bound).
-                                      !mtp_holds_eager_(*dreq) &&
-                                      // n-gram speculation: the loop runs in bounded bursts
-                                      // (miss_burst) so the host can probe for drafts between
-                                      // bursts; with miss_burst=0 the loop stays blocked while
-                                      // speculation is engaged (legacy eager-miss behavior).
-                                      (!spec_ngram_enabled_(*dreq) || dreq->spec_ngram_given_up ||
-                                       runtime_config_.speculative.miss_burst > 0);
+                                      // n-gram speculation runs the loop in kSpecMissBurst bursts and
+                                      // probes for drafts between them.
+                                      !mtp_holds_eager_(*dreq);
         // Text-fallback think tracking: when <think>/</think> are not single
         // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
         // ship them as added_tokens with special=False, leaving think_end_id_
@@ -1986,8 +1978,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // run to completion).
             int spec_limit = 0;
             if (spec_ngram_enabled_(*dreq)) {
-                spec_limit = dreq->spec_ngram_given_up ? runtime_config_.speculative.burst
-                                                       : spec_effective_miss_burst_(*dreq);
+                spec_limit = dreq->spec_ngram_given_up ? cfg::kSpecBurst : spec_effective_miss_burst_(*dreq);
                 spec_limit = std::max(spec_limit, 0);
             }
             // #754: streaming requests run the loop too, since

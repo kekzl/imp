@@ -104,7 +104,7 @@ struct MtpBind {
     int econ_batched = 0;  // of econ_verifies, from the batched verify (speculative.mtp_batch_verify)
     int k_live = 0;
     bool stale_logged = false;  // "drafting off" logged once per binding
-    int carry_n = 0;  // speculative.mtp_carry: hidden rows waiting in the slot's carry, -1 = a step missed
+    int carry_n = 0;            // the MTP carry: hidden rows waiting in the slot's carry, -1 = a step missed
 };
 
 struct MtpBindPool {
@@ -205,11 +205,11 @@ struct MtpSlotCand {
 }
 
 // A bound request drafts only while the head cache covers exactly its pre-step context. Tokens
-// decoded without a host feed and without a carried row (speculative.mtp_carry off, a ragged rider row,
+// decoded without a host feed and without a carried row (carry scratch refused, a ragged rider row,
 // a loop burst) leave no hidden rows to catch up from: such a binding is dead.
 [[nodiscard]] constexpr bool mtp_cache_behind(int mtp_pos, int cur_pos) { return mtp_pos != cur_pos; }
 
-// speculative.mtp_carry: hidden rows per head KV slot, fed in one pass when full (2.5 MiB per slot on
+// the MTP carry: hidden rows per head KV slot, fed in one pass when full (2.5 MiB per slot on
 // Qwen3.8).
 inline constexpr int kMtpCarryRows = 256;
 // Carry row of a batched step whose input token sits at `pos` (carry rows are
@@ -382,9 +382,9 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
 // that 0, and the pool fell to 1 slot (1 draft per verify step at 24 streams).
 int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // Requests bound to the head at once: one per batch slot under the batched verify, else
-// speculative.mtp_history_slots with speculative.mtp_carry (carry_live: its scratch exists), else 1.
+// speculative.mtp_history_slots with the MTP carry (carry_live: its scratch exists), else 1.
 int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live = true);
-// Carry rows per head KV slot to allocate: kMtpCarryRows with speculative.mtp_carry and no batched verify.
+// Carry rows per head KV slot to allocate: kMtpCarryRows with the MTP carry and no batched verify.
 int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 
 }  // namespace imp

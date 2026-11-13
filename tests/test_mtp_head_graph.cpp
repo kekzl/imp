@@ -66,7 +66,7 @@ TEST(MtpHeadGraph, RingResumeLostOnlyBehindTheRing) {
     EXPECT_EQ(mtp_slot_hi_bound(100, 40), 142);
 }
 
-// speculative.mtp_gap_bind: a slot started at `floor` attends from there on, until the ring moves past it.
+// Gap bind: a slot started at `floor` attends from there on, until the ring moves past it.
 TEST(MtpHeadGraph, RingFloorHidesEveryRowBelowIt) {
     const int ring = 16384, floor = 52392;
     const int hi = mtp_ring_floor_hi(floor, ring);

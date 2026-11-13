@@ -1091,9 +1091,9 @@ private:
     [[nodiscard]] const NvFP4QuantResult* mtp_draft_lm_head_nvfp4_(NvFP4QuantResult& view) const;
     // The batched head pass over tables already on the device: feed, draft LM head and, per verify depth past
     // 1 and the KV has room, one more feed + LM head for the next draft per request (a graph replay with
-    // speculative.mtp_head_graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
+    // the MTP head graph), then the drafts' D2H + sync into *drafts. Returns the draft count (m per
     // level); -1 = feed, -2 = LM head, -3 = D2H failed.
-    // draws: n_draws draft_row_draws() rows of the bound requests (speculative.mtp_draft_coupled), 0 =
+    // draws: n_draws draft_row_draws() rows of the bound requests (coupled MTP drafts), 0 =
     // argmax.
     [[nodiscard]] int mtp_head_pass_(const MtpPassTables& tab, const void* hidden,
                                      const NvFP4QuantResult* head, cudaStream_t stream,
@@ -1281,7 +1281,7 @@ private:
     [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
     [[nodiscard]] bool mtp_takes_prompt_(const Request& req) const;  // binds the head: serial prefill
     void mtp_unbind_if_behind_(int req_id, int cur_pos);  // concurrent server: batched steps unbind
-    // speculative.mtp_carry: after a batched decode forward, copy each bound row's hidden row into its slot's
+    // the MTP carry: after a batched decode forward, copy each bound row's hidden row into its slot's
     // carry (input position context_len - 1 + pos_bias; 1 = a chained pipeline step); a full carry feeds
     // first.
     void mtp_carry_rows_(const std::vector<std::shared_ptr<Request>>& rows, int pos_bias,
