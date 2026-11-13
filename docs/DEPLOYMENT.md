@@ -38,6 +38,15 @@ The cache volume is not optional in a service context: without it every restart 
 - It also keeps the measured library reserve (v0.60.0: 16-107 MiB per model, Qwen3.8-Flash-Next ~1 GiB). Without it the plan starts from a 1536 MiB constant; warmup then re-sizes the KV pool to its own measurement (#2436), so a cold start ends at the same KV blocks (Qwen3.8-27B 4950, Flash-Next 2025). Weight caches and auto `max_batch_size` / `max_seq_len` are still resolved under the constant.
   [PROV: commit=cc0936bb date=2026-10-31 hw=RTX5090 model=12 SafeTensors models + Qwen3.8-27B/Flash-Next servers quant=NVFP4/FP8/FP16 cuda=13.4.3 path=library-reserve cmd=`imp-cli --bench` cold `--rm` + `tools/analysis/launch_server_bench.sh` without CACHE_VOL n=1 per model note=ghcr 0.60.0 (3900) and this tree (1536) end at the same KV blocks]
 
+The repo ships two compose files, both project `imp`:
+
+| File | Services | Command |
+|---|---|---|
+| `docker-compose.yml` | `imp-server` (`IMP_MODEL`, `IMP_SET`, ... from `.env`) | `docker compose up -d` |
+| `docker-compose.full.yml` | includes the above + Open WebUI :3000, Prometheus :9090, Grafana :3002 | `docker compose -f docker-compose.full.yml up -d` |
+
+Stop the full stack with the same `-f`: a bare `docker compose down` only knows `imp-server`.
+
 ## Verify the image
 
 Release images (from the first release after #2428) carry a keyless cosign signature, an SPDX SBOM and `mode=max` SLSA provenance.
