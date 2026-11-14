@@ -303,6 +303,12 @@ imp-server, 3 imp-cli, 3 C-API) each name an `Engine` member; the next cut is a 
 **187 -> 24**, body **687 -> 153** code LOC, 26 file-static helpers (largest `make_kv_cache`, CCN 17),
 `engine.h` +0 lines; the file is allowlisted at 888 code LOC instead of the function at 687.
 
+**2026-11-14, `Engine::step_spec_verify_` split into phases in its own TU (S-32 rule):** CCN
+**238 -> 60**, body **624 -> 195** code LOC, 33 file-static helpers (largest `restore_hybrid_after_accept`, CCN 12),
+`engine.h` +0 lines; file pinned at 803 code LOC. The allow reason "the graph-capture window forbids an early
+return" was wrong: begin/end capture sit in `spec_captured_forward_` (`engine_spec_capture.cpp`). The 60 left are
+gates on private Engine calls (draft sources, burst launch, hybrid bind); below 25 needs members in `engine.h`.
+
 **Method note that decided two of these.** A grep for who "uses Engine" reported
 the wrong set, the same way F-24 records it did. Deleting the include and letting
 the compiler name the failures gave the true set — 8 TUs, not 15 and not 2.
