@@ -1,5 +1,5 @@
 // Decode side streams of the device expert cache path (executor_forward_moe_nvfp4_host.cu): the shared
-// expert FFN (moe.shared_expert_overlap) and the miss gather (moe.expert_gather_overlap) run beside the
+// expert FFN and the miss gather run beside the
 // routed GEMVs; joins keep the add order, so output bits match the serial path.
 #include "exec/executor.h"
 #include "exec/executor_helpers.h"
@@ -20,8 +20,7 @@ static_assert(kHostExpertAutoBatch <= kDevExpertMaxRows, "auto batch rows must f
 void GraphExecutor::init_shexp_overlap_() {
     free_shexp_overlap_();
     const auto& prof = model_->profile();
-    if (!dispatch_policy().moe.shared_expert_overlap || dispatch_policy().moe.no_shared_mlp ||
-        compute_dtype_ != QType::F16 || prof.sandwich_norms || prof.sanitize_ffn_fp16)
+    if (compute_dtype_ != QType::F16 || prof.sandwich_norms || prof.sanitize_ffn_fp16)
         return;
     const auto& cfg = model_->config();
     int eff = 0;
@@ -36,14 +35,14 @@ void GraphExecutor::init_shexp_overlap_() {
     const size_t bytes = kDevExpertMaxRows * ((3 * static_cast<size_t>(eff)) + cfg.d_model) * sizeof(half);
     o.buf = static_cast<char*>(vram_alloc(vram_alloc_, bytes, "shexp_overlap"));
     if (o.buf == nullptr || !o.stream.create() || !o.fork.create() || !o.join.create()) {
-        IMP_LOG_WARN("moe.shared_expert_overlap: side stream setup failed, shared expert stays serial");
+        IMP_LOG_WARN("shared_expert_overlap: side stream setup failed, shared expert stays serial");
         free_shexp_overlap_();
         return;
     }
     o.eff = eff;
     o.d = cfg.d_model;
-    IMP_LOG_INFO(
-        "moe.shared_expert_overlap: decode shared expert (eff %d) runs beside the expert miss gather", eff);
+    IMP_LOG_INFO("shared_expert_overlap: decode shared expert (eff %d) runs beside the expert miss gather",
+                 eff);
 }
 
 void GraphExecutor::free_shexp_overlap_() {
@@ -64,31 +63,29 @@ void GraphExecutor::init_gather_overlap_() {
     g.gathered.reset();
     g.pf_stream.reset();
     g.pf_layer = -1;
-    if (!dispatch_policy().moe.expert_gather_overlap || moe_.entry_miss() == nullptr)
+    if (moe_.entry_miss() == nullptr)
         return;
     if (!g.stream.create() || !g.resolved.create() || !g.gathered.create()) {
-        IMP_LOG_WARN("moe.expert_gather_overlap: side stream setup failed, the gather stays in line");
+        IMP_LOG_WARN("expert_gather_overlap: side stream setup failed, the gather stays in line");
         g.stream.reset();
         return;
     }
-    IMP_LOG_INFO("moe.expert_gather_overlap: routed experts that hit run beside the expert miss gather");
-    // moe.expert_prefetch issues prefetches; diagnostics.moe_expert_trace alone records the predictions
-    // (main stream, in trace order) without prefetching.
-    const int budget = std::clamp(dispatch_policy().moe.expert_prefetch, 0, kDevExpertPrefetchMax);
+    IMP_LOG_INFO("expert_gather_overlap: routed experts that hit run beside the expert miss gather");
+    // imp::cfg::kMoeExpertPrefetch keys issue prefetches; diagnostics.moe_expert_trace alone records the
+    // predictions (main stream, in trace order) without prefetching.
+    const int budget = std::clamp(imp::cfg::kMoeExpertPrefetch, 0, kDevExpertPrefetchMax);
     const bool trace = !dispatch_policy().diagnostics.moe_expert_trace.empty();
     if ((budget > 0 || trace) &&
-        !dev_expert_cache_.enable_prefetch(budget > 0 ? budget : 1,
-                                           dispatch_policy().moe.expert_prefetch_blocks))
-        IMP_LOG_WARN("moe.expert_prefetch: tables not allocated, no next-layer prediction");
+        !dev_expert_cache_.enable_prefetch(budget > 0 ? budget : 1, imp::cfg::kMoeExpertPrefetchBlocks))
+        IMP_LOG_WARN("expert_prefetch: tables not allocated, no next-layer prediction");
     if (budget > 0 && dev_expert_cache_.prefetch_on() &&
         (!g.pf_stream.create() || !g.pf_fork.create() || !g.pf_read.create() || !g.pf_ready.create() ||
          !g.pf_gathered.create())) {
-        IMP_LOG_WARN("moe.expert_prefetch: side stream setup failed, no prefetch");
+        IMP_LOG_WARN("expert_prefetch: side stream setup failed, no prefetch");
         g.pf_stream.reset();
     }
     g.pf_x = {};
-    if (dev_expert_cache_.prefetch_on() && dispatch_policy().moe.expert_prefetch_hc_norm &&
-        model_->profile().gated_residual && vram_alloc_ != nullptr)
+    if (dev_expert_cache_.prefetch_on() && model_->profile().gated_residual && vram_alloc_ != nullptr)
         g.pf_x = VramOwned<char>(*vram_alloc_, model_->config().d_model * sizeof(half), "expert_prefetch_x");
 }
 

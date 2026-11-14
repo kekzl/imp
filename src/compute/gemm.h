@@ -40,7 +40,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.
                    cudaStream_t stream = nullptr,
                    const std::source_location& loc = std::source_location::current());
 
-// Block-scaled NVFP4 GEMM via cuBLASLt (gemm.nvfp4_cublaslt_min_m): D[M,N] fp16 = alpha * A W^T, A/W packed
+// Block-scaled NVFP4 GEMM via cuBLASLt (kNvfp4CublasltMinM): D[M,N] fp16 = alpha * A W^T, A/W packed
 // E2M1 row-major with SfAtom UE4M3 scales (same bytes as gemm_nvfp4_tile). False = not run.
 [[nodiscard]] bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_data,
                                        const void* w_sf, float alpha, void* d_fp16, int M, int N, int K,

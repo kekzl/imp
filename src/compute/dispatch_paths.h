@@ -57,7 +57,6 @@ enum class MoePrefillOuter {
 // (exec/executor_forward_moe_cutlass.cpp).
 enum class MoePrefillPath {
     DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)
-    SMALL_M,      // gemm_grouped_nvfp4_smallM (small token counts)
     GROUPED,      // gemm_grouped_nvfp4_host_args (+ gpt-oss bias seams)
     LEGACY,       // per-expert legacy fallback (gather + serial GEMM)
 };

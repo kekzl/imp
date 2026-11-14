@@ -38,14 +38,13 @@ enum class G3 { SfAtom, SkipQ8, SfLess };
 
 // G3: no SfAtom for a dense GGUF source: its M>1 GEMM reads the source (IMMA or dequant,
 // gemm_via_handle_ returns before the CUTLASS block). Decode keeps the plain wcache.nvfp4 GEMV.
-// Q8_0 under IMMA takes no entry (tier NVFP4); every other qtype gets an SfAtom-less entry here
+// Q8_0 (IMMA) takes no entry (tier NVFP4); every other qtype gets an SfAtom-less entry here
 // so its handle keeps the CUTLASS_NVFP4 tier and routes. Qwen3-14B-Q6_K: 788 MiB.
-G3 g3_classify(const StoragePlan& plan, const DispatchPolicy& policy, WeightCaches& wc, const void* ptr,
-               const NvFP4QuantResult& nvfp4) {
+G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const NvFP4QuantResult& nvfp4) {
     const auto* pe = plan.entry_of(ptr);
     if (!pe)
         return G3::SfAtom;
-    if (pe->source_qtype == QType::Q8_0 && policy.gemm.q8_imma_enabled)
+    if (pe->source_qtype == QType::Q8_0)
         return G3::SkipQ8;
     const bool expert = pe->kind == TensorKind::EXPERT_GATE || pe->kind == TensorKind::EXPERT_UP ||
                         pe->kind == TensorKind::EXPERT_DOWN;
@@ -184,8 +183,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
             if (grouped.contains(ptr))
                 continue;  // converted by a batched MoE group above
-            if (const G3 g3 = g3_classify(storage_plan_, dispatch_policy(), *wcache_, ptr, nvfp4);
-                g3 != G3::SfAtom) {
+            if (const G3 g3 = g3_classify(storage_plan_, *wcache_, ptr, nvfp4); g3 != G3::SfAtom) {
                 ++(g3 == G3::SkipQ8 ? ct_skipped_dead : ct_sfless);
                 continue;
             }

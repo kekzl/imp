@@ -164,7 +164,7 @@ array, building an NvFP4MoEQuantResult that points at the existing data. This en
 fast `gemv_nvfp4_moe_*` decode kernels (base+stride) instead of the CUTLASS grouped GEMM (which
 under-utilizes the GPU at M=1). Added `borrowed` flag to NvFP4MoEQuantResult so free_nvfp4_moe_result
 skips cudaFree on borrowed/VRAMAllocator pointers (fixed a teardown double-free). Config
-`gemm.nvfp4_moe_decode` (default on); `IMP_NO_NVFP4_MOE_DECODE=1` disables.
+`gemm.nvfp4_moe_decode` (default on) (key removed 2026-11-14); `IMP_NO_NVFP4_MOE_DECODE=1` disabled it.
 
 **Measured (pp512, reps 6-8) — decode tok/s before → after:**
 - Qwen3-30B-A3B NVFP4: 170.7 → **307.5 (+80%)** — now > Q4_K_M 276, ≈ llama.cpp 317.

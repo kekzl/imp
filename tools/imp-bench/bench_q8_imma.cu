@@ -1,5 +1,6 @@
-// #2267: Q8_0 prefill GEMM per shape: dequant -> FP16-acc cuBLAS (the gemm.q8_imma_enabled=false
-// route) against the IMMA kernel (BM=128). Shapes: Qwen3-8B and Qwen3-4B projections.
+// #2267: Q8_0 prefill GEMM per shape: dequant -> FP16-acc cuBLAS (the off route of the former
+// gemm.q8_imma_enabled, key removed 2026-11-14) against the IMMA kernel (BM=128).
+// Shapes: Qwen3-8B and Qwen3-4B projections.
 // Output: one `q8imma` line per (shape, M) and one `layer` line per (model, M), times in ms.
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"

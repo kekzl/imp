@@ -21,7 +21,7 @@ namespace {
 
 constexpr int kHeads = 8, kHeadDim = 128, kStateSize = 128, kGroups = 8, kRows = 17;
 
-enum Variant { kFusedF32, kChunkwiseF32, kChunkwiseFp32Out };
+enum Variant { kFusedF32, kChunkwiseF32 };
 
 void fill(std::vector<float>& v, uint32_t seed, float lo = -1.0f, float hi = 1.0f) {
     std::mt19937 rng(seed);
@@ -87,18 +87,14 @@ void check_snapshot_is_row_state(int variant, int rows = kRows, int snap_row = 1
     cudaMemcpy(d_snap_n, &snap_row, sizeof(int), cudaMemcpyHostToDevice);
 
     half* const y16 = reinterpret_cast<half*>(d_y);
-    float* const y32 = reinterpret_cast<float*>(d_y);
     auto scan = [&](int v, StateT* h, int n, StateT* snap, const int* snap_n) {
         if constexpr (std::is_same_v<StateT, float>) {
             if (v == kFusedF32)
                 gdn_scan_fused_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
                                    kHeadDim, kStateSize, kGroups, 0, 0, nullptr, snap, snap_n);
-            else if (v == kChunkwiseF32)
+            else
                 gdn_scan_chunkwise_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
                                        kHeadDim, kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n);
-            else
-                gdn_scan_chunkwise_fp32out(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y32, n, kHeads,
-                                           kHeadDim, kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n);
         } else {
             gdn_scan_fused_bf16(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads, kHeadDim,
                                 kStateSize, kGroups, 0, 0, nullptr, snap, snap_n);
@@ -147,13 +143,6 @@ TEST_F(GdnVerifySnapshotTest, ChunkwiseF32SnapshotPastOneChunk) {
 }
 TEST_F(GdnVerifySnapshotTest, ChunkwiseF32SnapshotOnAFullChunk) {
     check_snapshot_is_row_state<float>(kChunkwiseF32, 64, 33);
-}
-TEST_F(GdnVerifySnapshotTest, ChunkwiseFp32OutSnapshotPastOneChunk) {
-    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 65, 1);
-    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 65, 64);
-}
-TEST_F(GdnVerifySnapshotTest, ChunkwiseFp32OutSnapshotOnAFullChunk) {
-    check_snapshot_is_row_state<float>(kChunkwiseFp32Out, 64, 33);
 }
 
 }  // namespace

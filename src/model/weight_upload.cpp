@@ -463,7 +463,7 @@ struct UploadCtx {
         }                                                                                           \
     } while (0)
 
-// A dense layer weight Phase 4c may free (Q8_0, gemm.q8_drop_source) uploads into its own
+// A dense layer weight Phase 4c may free (Q8_0) uploads into its own
 // release-on-free pool: the default pool kept 2336 of 7038 freed MiB on Qwen3-8B-Q8_0.
 #define UPLOAD_DENSE_OR_FAIL(tensor, msg, layer_idx, ctx)            \
     do {                                                             \
@@ -1428,14 +1428,12 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_mem, &total_mem);
 
-    // Auto-pick default: 10% (aggressive) if ALL experts fit with that overhead, else 30%
+    // Overhead 10 % (aggressive, former moe.expert_overhead_pct) if ALL experts fit with it, else 30 %
     // (conservative). Saves users from a silent large perf penalty on Qwen3-Coder-30B/
     // Qwen3.6-35B-class MoE models where the conservative default unnecessarily offloads
     // experts to host.
-    int overhead_pct = process_diag_moe_expert_overhead_pct();
-    if (overhead_pct < 0 || overhead_pct > 50) {
-        overhead_pct = 30;
-    } else if (overhead_pct == 10) {
+    int overhead_pct = 10;
+    {
         size_t aggressive_overhead = static_cast<size_t>(free_mem * 10 / 100);
         size_t aggressive_reserve = expert_reserve_bytes + aggressive_overhead;
         size_t aggressive_budget = (free_mem > aggressive_reserve) ? (free_mem - aggressive_reserve) : 0;

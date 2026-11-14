@@ -199,7 +199,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // plan-vs-actual parity diagnostic runs in Phase 4. Per-phase cache SIZING
     // stays with the heuristic budget (a separate unconstrained plan feeds the #875 weight-cache reserve).
     hints_->vram_budget_bytes = remaining_budget;
-    hints_->q4k_in_place = rcfg.gemm.q4k_in_place && rcfg.gemm.q4k_imma_prefill;
+    hints_->q4k_in_place = true;
     storage_plan_ = plan_storage(*model_, cfg, *hints_);
     apply_arch_rules_(storage_plan_, cfg);
     if (storage_plan_.failed) {
@@ -210,17 +210,13 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
                      storage_plan_.projected_vram_bytes / (1024.0 * 1024.0));
     }
 
-    // --- Phase 1a: FP8 checkpoint weights served from their own bytes (gemm.fp8_native_prefill) ---
+    // --- Phase 1a: FP8 checkpoint weights served from their own bytes ---
     pre_dequant_phase1a_native_fp8_(cfg, stream);
 
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up; Phase 2: FP8 cache for uncached
-    // weights. gemm.dense_weight_cache=false skips both: dense weights take their source route.
-    if (rcfg.gemm.dense_weight_cache) {
-        pre_dequant_phase1_fp16_cache_(cfg, budget, early_budget, stream);
-        pre_dequant_phase2_fp8_cache_(cfg, budget, early_budget, stream);
-    } else {
-        IMP_LOG_INFO("gemm.dense_weight_cache=false: pre_dequant phases 1-2 skipped");
-    }
+    // weights.
+    pre_dequant_phase1_fp16_cache_(cfg, budget, early_budget, stream);
+    pre_dequant_phase2_fp8_cache_(cfg, budget, early_budget, stream);
 
     // Phases 1/2 decrement their own budget as they allocate. Charge exactly
     // what they spent against the shared budget — the untouched NVFP4
@@ -228,7 +224,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     pre_dequant_internal::deduct_budget(remaining_budget, early_budget_start - early_budget);
 
     // --- Phase 2b: FP8 decode sidecar for native-precision GDN/SSM
-    // projections (gemm.fp8_ssm_proj) ---
+    // projections ---
     pre_dequant_phase2b_fp8_ssm_sidecar_(cfg, stream);
 
     // --- Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8) ---
@@ -332,8 +328,8 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // FP8 prefill unavailable (sm_120 cuBLAS, and disabled for gemma/GDN): the
     // FP8-floor kinds (WK/WV/QKV_FUSED) the plan picked from the kind table fall
     // back to FP16 at build time. Encode that so the plan matches. FP8 checkpoint weights keep the
-    // FP8 tier under gemm.fp8_native_prefill: Phase 1a serves them, no FP16 copy.
-    const QType keep_fp8 = dispatch_policy().gemm.fp8_native_prefill ? QType::FP8_E4M3 : QType::NONE;
+    // FP8 tier: Phase 1a serves them, no FP16 copy.
+    const QType keep_fp8 = QType::FP8_E4M3;
     if (!wcache_->use_fp8) {
         for (auto& e : plan.entries)
             if (e.tier == StorageTier::FP8 && e.source_qtype != keep_fp8)
@@ -373,15 +369,8 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
                 e.fp16_companion = true;
         }
     }
-
-    // Weights stored as FP8 on disk (Modelopt FP8 / MIXED_PRECISION): gemm.fp8_native_prefill serves
-    // prefill FP8 x FP8 from the checkpoint bytes. Off, an FP16 companion serves prefill.
-    if (dispatch_policy().gemm.fp8_native_prefill)
-        return;
-    for (auto& e : plan.entries) {
-        if (e.source_qtype == QType::FP8_E4M3)
-            e.fp16_companion = true;
-    }
+    // Weights stored as FP8 on disk (Modelopt FP8 / MIXED_PRECISION) prefill FP8 x FP8 from the
+    // checkpoint bytes (Phase 1a), no FP16 companion.
 }
 
 }  // namespace imp

@@ -59,7 +59,7 @@ feature.
 
 | Date | Commit | Model (quant) | Feature | Result |
 |---|---|---|---|---|
-| 2026-07-11 | `fp8-ssm-gguf` | Qwen3.6-35B-A3B hybrid (Q4_K_M) | `gemm.fp8_ssm_proj` on Q8_0-kept GDN projections | tg256 224.4 -> **272.0** (+21%), PPL +1.8% (201-tok corpus) |
+| 2026-07-11 | `fp8-ssm-gguf` | Qwen3.6-35B-A3B hybrid (Q4_K_M) | `gemm.fp8_ssm_proj` (key removed 2026-11-14) on Q8_0-kept GDN projections | tg256 224.4 -> **272.0** (+21%), PPL +1.8% (201-tok corpus) |
 | 2026-08-28 | `899301c6` | Qwen3-8B (Q8_0, fp8 KV) | sparse decode attention, 32k ctx | tg136 160.3 -> **199.5** (+24.5%, 3/3 alternating) |
 | 2026-08-29 | `sparse-serving` | Qwen3-8B (Q8_0, fp8 KV) | sparse attn, 3 streams x 25k ctx | 155.6 -> **197.7** (+27%, `tools/analysis/serving_sparse_ab.sh`) |
 | 2026-08-30 | `nvfp4-loadwidth` | Qwen3.8-27B (NVFP4, nvfp4 KV) | server decode @77k ctx, batch 8 | 64.1 -> **74.2** (+15.7%, 18/18 runs at 125 chunks) |
@@ -80,7 +80,7 @@ process, 10 reps), command `imp-cli --model <dir>/ --bench --bench-pp 16 --bench
 | Qwen3-14B | 14B | 159 |
 | Qwen3-30B-A3B-Modelopt | 30B (3B) | 305 |
 | Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
-| Qwen3.6-35B-A3B | 35B (3B) | 257 -> **320** (2026-07-10, `80864b06`, `gemm.fp8_ssm_proj` sidecar, +19.2% spec-off) |
+| Qwen3.6-35B-A3B | 35B (3B) | 257 -> **320** (2026-07-10, `80864b06`, `gemm.fp8_ssm_proj` (key removed 2026-11-14) sidecar, +19.2% spec-off) |
 | Gemma-4-26B-A4B | 26B (4B) | 266 |
 | Nemotron-3-Nano-30B | 30B (3B) | 148 -> **386** (2026-08-12, PR #1389: CUDA graphs were wrongly demoted for pure-SSM layers, not an arch limit) |
 | gpt-oss-20b | 21B (3.6B) | 325 -> **391** (2026-07-13, `63df2d30`, `gemm.fp8_attn_proj` sidecar, +12%, teacher-forced PPL unaffected by construction) |

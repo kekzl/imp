@@ -16,7 +16,7 @@ namespace imp {
 [[nodiscard]] bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
                                    int variant = -1, void* workspace = nullptr, size_t workspace_bytes = 0);
-// Same GEMM as the up projection of a SwiGLU MLP (gemm.swiglu_quant_epilogue): instead of D writes
+// Same GEMM as the up projection of a SwiGLU MLP: instead of D writes
 // quantize(swiglu(gate, fp16(D))) as packed [M,N/2] + SfAtom scales (cutlass_nvfp4_sf_size(M, N)) at
 // q_act_scale, the bytes of gemm_nvfp4_tile + swiglu_quantize_fp16_to_nvfp4_cutlass with the same workspace.
 // gate [M,N] fp16. N % 16 == 0; false = refused, nothing written. Auto variant.

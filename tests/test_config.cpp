@@ -34,14 +34,13 @@ void set_(RuntimeConfig& cfg, const std::vector<std::string>& kvs) {
 TEST(RuntimeConfigTest, DefaultsAreSane) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
-    EXPECT_FALSE(cfg.gemm.algo_timed);  // timed cuBLASLt picks flip per process
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
     EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/DETERMINISM.md)
     EXPECT_EQ(cfg.kv_cache.dtype, "auto");
     EXPECT_EQ(cfg.kv_cache.swa_sizing, "auto");
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
-    EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
-    EXPECT_FALSE(cfg.gdn.fp32_scan);
+    EXPECT_EQ(cfg.moe.reserve_mib, 0);
+    EXPECT_FALSE(cfg.gdn.ref_kernel);
 }
 
 // kv_cache.block_size: the operator surface AUDIT_ARCH_2026 B-5 found missing.
@@ -51,15 +50,6 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 0);
     set_(cfg, {"kv_cache.block_size=32"});
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
-}
-
-// moe.expert_prefetch_blocks: copy blocks per prefetched key, default 1 beside 6 prefetched keys.
-TEST(RuntimeConfigTest, ExpertPrefetchBlocksBinds) {
-    RuntimeConfig cfg;
-    EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 1);
-    EXPECT_EQ(cfg.moe.expert_prefetch, 6);
-    set_(cfg, {"moe.expert_prefetch_blocks=4"});
-    EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 4);
 }
 
 // AUDIT_ARCH_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old
@@ -249,7 +239,7 @@ cuda_graphs = "never"
 dtype = "fp8"
 
 [moe]
-expert_overhead_pct = 30
+reserve_mib = 30
 )");
 
     RuntimeConfig cfg;
@@ -257,7 +247,7 @@ expert_overhead_pct = 30
     EXPECT_TRUE(cfg.runtime.deterministic_gemm);
     EXPECT_EQ(cfg.runtime.cuda_graphs, "never");
     EXPECT_EQ(cfg.kv_cache.dtype, "fp8");
-    EXPECT_EQ(cfg.moe.expert_overhead_pct, 30);
+    EXPECT_EQ(cfg.moe.reserve_mib, 30);
 }
 
 TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
@@ -321,15 +311,15 @@ warmup              = false
 TEST(RuntimeConfigTest, ApplyOverrides) {
     RuntimeConfig cfg;
     set_(cfg, {
-        "kv_cache.dtype=fp8",
-        "runtime.cuda_graphs=never",
-        "moe.expert_overhead_pct=30",
-        "gdn.fp32_scan=true",
-    });
+                  "kv_cache.dtype=fp8",
+                  "runtime.cuda_graphs=never",
+                  "moe.reserve_mib=30",
+                  "gdn.ref_kernel=true",
+              });
     EXPECT_EQ(cfg.kv_cache.dtype, "fp8");
     EXPECT_EQ(cfg.runtime.cuda_graphs, "never");
-    EXPECT_EQ(cfg.moe.expert_overhead_pct, 30);
-    EXPECT_TRUE(cfg.gdn.fp32_scan);
+    EXPECT_EQ(cfg.moe.reserve_mib, 30);
+    EXPECT_TRUE(cfg.gdn.ref_kernel);
 }
 
 TEST(RuntimeConfigTest, OverrideWinsOverFile) {
@@ -450,17 +440,6 @@ TEST(ConfigBadValue, TriStateKeyKeepsItsThreeSpellings) {
     }
     imp::RuntimeConfig cfg;
     EXPECT_EQ(cfg.apply_overrides({"gemm.cublas_fp16_acc=sometimes"}).size(), 1u);
-}
-
-// ---- #2298: gemm.dense_weight_cache (A/B control for --gpu-layers) binds, default on ----
-TEST(ConfigBinding, DenseWeightCacheDefaultsOnAndBinds) {
-    imp::RuntimeConfig cfg;
-    EXPECT_TRUE(cfg.gemm.dense_weight_cache);
-    EXPECT_TRUE(cfg.apply_overrides({"gemm.dense_weight_cache=false"}).empty());
-    EXPECT_FALSE(cfg.gemm.dense_weight_cache);
-    EXPECT_TRUE(cfg.was_set("gemm.dense_weight_cache"));
-    EXPECT_TRUE(cfg.apply_overrides({"gemm.dense_weight_cache=true"}).empty());
-    EXPECT_TRUE(cfg.gemm.dense_weight_cache);
 }
 
 // #1645: the knob that sets the prefill TTFT/ITL trade had no imp.conf key,

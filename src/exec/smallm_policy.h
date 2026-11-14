@@ -11,6 +11,9 @@ namespace imp {
 enum class SmallMKernel { kNone, kV1, kV2, kWs };
 
 inline constexpr int kSmallMWsMinStripes = 4;
+// Production small-M impl (former gemm.nvfp4_smallm_impl): 1 = W4A16 dequant+HMMA, 2 = v2 only, 3 = v2 / ws
+// as above. smallm_kernel_for keeps 1 and 2 for the A16 instrument and the kernel tests.
+inline constexpr int kSmallMImpl = 3;
 
 inline SmallMKernel smallm_kernel_for(int impl, int N_total, int K, bool all_n64, bool all_ws,
                                       bool siblings) {

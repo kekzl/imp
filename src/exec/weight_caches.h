@@ -27,7 +27,7 @@ struct FP8CacheEntry {
     // input with it instead of a per-call absmax. Null = dynamic.
     const float* d_act_scale{};
     // True when `weight` borrows the checkpoint's own FP8 bytes (Modelopt FP8 / MIXED_PRECISION):
-    // the entry owns neither weight nor scales (fp8_native_scales). gemm.fp8_native_prefill
+    // the entry owns neither weight nor scales (fp8_native_scales). Native FP8 prefill
     // makes it primary (FP8 x FP8 cuBLASLt prefill); off, it is a decode sidecar beside an FP16 copy.
     bool native_source = false;
 };
@@ -83,7 +83,7 @@ struct WeightCaches {
     void* fp8_overflow_data = nullptr;
     size_t fp8_overflow_data_size = 0;
 
-    // FP8 decode sidecar for GDN/SSM projections (gemm.fp8_ssm_proj); entries
+    // FP8 decode sidecar for GDN/SSM projections; entries
     // carry per-row scales (d_row_scales into the bulk below, d_scale = null).
     void* fp8_ssm_sidecar_data = nullptr;
     size_t fp8_ssm_sidecar_data_size = 0;
@@ -113,7 +113,7 @@ struct WeightCaches {
     // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
     void* released_f16_scratch = nullptr;
     size_t released_f16_scratch_bytes = 0;
-    // Phase 4c (gemm.q8_drop_source): dense Q8_0 weights whose source is freed, keyed by the freed
+    // Phase 4c: dense Q8_0 weights whose source is freed, keyed by the freed
     // pointer; their IMMA planes are the only 8-bit copy until mmq_q8_imma_release_all (teardown).
     std::unordered_set<const void*> q8_planes_only;
     size_t q8_source_freed_bytes = 0;

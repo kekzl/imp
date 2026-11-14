@@ -235,7 +235,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     deduct_budget(remaining_budget, wcache_->fp8_bytes + phase2_fp16_bytes);
 }
 
-// Phase 2b: FP8 E4M3 decode sidecar for GDN/Mamba in/out projections (gemm.fp8_ssm_proj).
+// Phase 2b: FP8 E4M3 decode sidecar for GDN/Mamba in/out projections.
 // On native-NVFP4 hybrids these stay BF16 (decode as FP16 GEMVs, the largest decode
 // slice); NVFP4 regresses on these wide GDN shapes, so FP8 halves the bytes instead.
 // Serves only the M=1 decode GEMV; prefill/verify keep full precision and the recurrent
@@ -245,7 +245,6 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 // 1.2 % slower at batch 1. Only F16 sources qualify.
 void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
-    const bool ssm_on = dispatch_policy().gemm.fp8_ssm_proj;
     // gemm.fp8_attn_proj (#984): decode-only per-row-scale sidecar for full-precision
     // attention projections. "auto" = q/k/v/o on gpt-oss and Qwen4Exp (BF16 dense projections get
     // no NVFP4 decode cache and decode as FP16 GEMVs). Teacher-forced PPL is unaffected by
@@ -257,8 +256,6 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     const bool attn_qo = attn_full || ap == "qo";
     const bool attn_kv = attn_full;
     const bool attn_on = attn_qo || attn_kv;
-    if (!ssm_on && !attn_on)
-        return;
 
     struct Entry {
         const void* ptr;
@@ -275,12 +272,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         // the pack where it exists, and ssm_in then only serves prefill. Without a pack
         // (quantized GGUF sources never build one), decode runs ssm_in AND gdn_gate GEMVs
         // separately, so both are sidecar targets there.
-        const Tensor* in_side = (ssm_on && L.gdn_input_packed.data) ? &L.gdn_input_packed
-                                : ssm_on                            ? &L.ssm_in
-                                                                    : nullptr;
-        const Tensor* gate_side =
-            (ssm_on && !L.gdn_input_packed.data) ? &L.gdn_gate : nullptr;
-        const Tensor* ssm_out_side = ssm_on ? &L.ssm_out : nullptr;
+        const Tensor* in_side = L.gdn_input_packed.data ? &L.gdn_input_packed : &L.ssm_in;
+        const Tensor* gate_side = L.gdn_input_packed.data ? nullptr : &L.gdn_gate;
+        const Tensor* ssm_out_side = &L.ssm_out;
         const Tensor* q_side = attn_qo ? &L.wq : nullptr;
         const Tensor* k_side = attn_kv ? &L.wk : nullptr;
         const Tensor* v_side = attn_kv ? &L.wv : nullptr;
@@ -353,10 +347,10 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
 
-    IMP_LOG_INFO("fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
-                 "full-precision source retained for prefill)",
-                 entries.size(), ssm_on ? " [ssm]" : "", attn_on ? " [attn]" : "",
-                 total_bytes / (1024.0 * 1024.0), total_rows);
+    IMP_LOG_INFO(
+        "fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "
+        "full-precision source retained for prefill)",
+        entries.size(), " [ssm]", attn_on ? " [attn]" : "", total_bytes / (1024.0 * 1024.0), total_rows);
 }
 
 }  // namespace imp

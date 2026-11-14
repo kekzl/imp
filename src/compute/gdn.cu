@@ -314,41 +314,6 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
 
 // Gated-norm family (FP16/FP32 variants) lives in gdn_gated_norm.cu.
 
-// V-head reorder: tiled -> grouped (undoes the GGUF converter reorder for ssm_out). FP32 variant
-// for conv1d-SiLU output (= scan V input): used when GGUF stored V in tiled layout but the scan
-// kernel reads V[h*HD+d] assuming grouped layout.
-__global__ void vhead_tiled_to_grouped_f32_kernel(const float* __restrict__ src, float* __restrict__ dst,
-                                                  int n_tokens, int n_heads, int head_dim, int n_groups) {
-    int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
-    int total = n_tokens * n_heads * head_dim;
-    if (tid >= total)
-        return;
-
-    int d = tid % head_dim;
-    int h_tiled = (tid / head_dim) % n_heads;
-    int t = tid / (n_heads * head_dim);
-
-    int n_v_per_k = n_heads / n_groups;
-    int replica = h_tiled / n_groups;
-    int group = h_tiled % n_groups;
-    int h_grouped = (group * n_v_per_k) + replica;
-
-    dst[(t * n_heads * head_dim) + (h_grouped * head_dim) + d] =
-        src[(t * n_heads * head_dim) + (h_tiled * head_dim) + d];
-}
-
-void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int n_heads, int head_dim,
-                                int n_groups, cudaStream_t stream) {
-    if (n_heads == n_groups)
-        return;
-    int total = n_tokens * n_heads * head_dim;
-    int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    vhead_tiled_to_grouped_f32_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
-                                                                      n_groups);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
 // ---------------------------------------------------------------------------
 // Host launchers
 // ---------------------------------------------------------------------------
@@ -517,61 +482,6 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
                                         h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
                                         static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
                                         static_cast<const int*>(nullptr), static_cast<float*>(nullptr), 0);
-}
-
-// FP32-output variant — writes scan result as FP32 for downstream
-// FP32-input RMSNorm+Gate (avoids FP16 subnormal-truncation at ~6e-5).
-void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout, const int* d_real_n, float* h_snap,
-                            const int* d_snap_n) {
-    size_t smem = ((2 * state_size) + head_dim_ssm) * sizeof(float);
-    if (head_dim_ssm == 128 && state_size == 128) {
-        launch_scan128<float, float>(n_heads, 1, stream, conv_f32, alpha, beta, A_log, dt_bias, h_state,
-                                     y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
-                                     d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
-                                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
-                                     static_cast<const int*>(nullptr), static_cast<float*>(nullptr), 0);
-    } else if (head_dim_ssm == 64 && state_size == 64) {
-        pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, float>);
-        pdl::launch(gdn_scan_fused_kernel<64, 64, float>, dim3(n_heads), dim3(64), size_t(smem), stream,
-                    conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups,
-                    conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n,
-                    static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr),
-                    static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
-                    static_cast<float*>(nullptr), 0);
-        IMP_CUDA_CHECK_LAUNCH();
-    } else {
-        // Refuse, do not approximate: an unsupported HD throws immediately rather than silently no-op
-        // (same failure shape as #654 - an unchecked fallback that keeps serving). Every GDN checkpoint
-        // today is HD=SS=128 (Qwen3.5/3.6/3.8), so nothing reaches this path; other Mamba2 shapes
-        // (Nemotron-3.5: head_dim 64, state 128) use the separate Mamba2 scan, not this one.
-        throw std::runtime_error("gdn_scan_fused_fp32out: no kernel for HD=" + std::to_string(head_dim_ssm) +
-                                 " SS=" + std::to_string(state_size) +
-                                 " (supported: 128/128 and 64/64). The FP16 decode fallback never wrote "
-                                 "its FP32 output, so serving this shape would return a scan that did "
-                                 "nothing.");
-    }
-}
-
-// BF16-state twin of gdn_scan_fused_fp32out (the gdn.fp32_scan combo).
-// HD=SS=128 only — see the batched twin's comment.
-void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const half* alpha,
-                                 const half* beta, const float* A_log, const float* dt_bias,
-                                 __nv_bfloat16* h_state, float* y_fp32, int n_tokens, int n_heads,
-                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout, const int* d_real_n, __nv_bfloat16* h_snap,
-                                 const int* d_snap_n) {
-    if (head_dim_ssm != 128 || state_size != 128)
-        throw std::runtime_error("gdn_scan_fused_fp32out_bf16: no kernel for HD=" +
-                                 std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
-    launch_scan128<float, __nv_bfloat16>(n_heads, 1, stream, conv_f32, alpha, beta, A_log, dt_bias, h_state,
-                                         y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
-                                         d_real_n, h_snap, d_snap_n, static_cast<const int*>(nullptr),
-                                         int64_t(0), static_cast<const int*>(nullptr),
-                                         static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
-                                         static_cast<float*>(nullptr), 0);
 }
 
 // Reference scan kernel: unfused semantics for validation. One block/v_head, block size =

@@ -778,7 +778,7 @@ TEST(VramBudgetReserve, ImmaPlanesAreChargedForQ8Weights) {
                                         /*q8_imma_prefill=*/true, /*moe_imma_prefill=*/true);
     EXPECT_EQ(on.imma_plane_bytes, expect) << "the plan must charge exactly what mmq_q8_imma allocates";
 
-    // gemm.q8_imma_enabled=false: no planes are built, so charging them would
+    // q8_imma_prefill=false: no planes are built, so charging them would
     // hand the KV pool ~5 GiB less for nothing.
     VRAMBudget off = compute_vram_budget(m, config, 32, 128, 24 * GiB, 0, 0, nullptr, 0,
                                          /*q8_imma_prefill=*/false, /*moe_imma_prefill=*/false);

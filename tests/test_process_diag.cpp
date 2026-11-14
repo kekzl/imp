@@ -37,10 +37,6 @@ RuntimeConfig make_non_default() {
 
     c.gemm.cublas_fp16_acc = "on";
 
-    c.gemm.nvfp4_cublaslt_min_m = 1024;
-
-    c.moe.mr_nr = 32;
-    c.moe.expert_overhead_pct = 42;
     c.moe.force_host_experts = 7;
     c.moe.host_expert_pool_mib = 12345;
 
@@ -86,10 +82,8 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_TRUE(process_diag_deterministic_gemm());
     EXPECT_TRUE(process_diag_cublas_fp16_acc());
 
-    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), 1024);
+    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), imp::cfg::kNvfp4CublasltMinM);
 
-    EXPECT_EQ(process_diag_moe_mr_nr(), 32);
-    EXPECT_EQ(process_diag_moe_expert_overhead_pct(), 42);
     EXPECT_EQ(process_diag_moe_force_host_experts(), 7);
     EXPECT_EQ(process_diag_moe_host_expert_pool_mib(), 12345);
 
@@ -111,9 +105,7 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_no_pdl(), d.runtime.no_pdl);
     EXPECT_EQ(process_diag_prefill_graph_enabled(), d.runtime.prefill_graph);
     EXPECT_EQ(process_diag_deterministic_gemm(), d.runtime.deterministic_gemm);
-    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), d.gemm.nvfp4_cublaslt_min_m);
-    EXPECT_EQ(process_diag_moe_mr_nr(), d.moe.mr_nr);
-    EXPECT_EQ(process_diag_moe_expert_overhead_pct(), d.moe.expert_overhead_pct);
+    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), imp::cfg::kNvfp4CublasltMinM);
     EXPECT_EQ(process_diag_moe_force_host_experts(), d.moe.force_host_experts);
     EXPECT_EQ(process_diag_moe_host_expert_pool_mib(), d.moe.host_expert_pool_mib);
     EXPECT_EQ(process_diag_gdn_layout_override(), d.gdn.layout_override);

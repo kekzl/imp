@@ -359,7 +359,7 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
 
 // T2 (A7 step 8), same AUDIT B13 argument as mmq_q8_imma.cu: these are graph kernel params;
 // bump arena never frees so a grow never invalidates a replayed graph's captured slice.
-// Not charged in exec_t2_demand: gated by gemm.q4k_imma_prefill (off by default, config.h);
+// Not charged in exec_t2_demand: gated by the Q4_K IMMA prefill path (off by default);
 // draws on arena alignment slack instead, and a short arena falls back to the dequant path.
 bool ensure_act_scratch(int M, int K) {
     const uint64_t gen = engine_arena().generation();
@@ -378,7 +378,7 @@ bool ensure_act_scratch(int M, int K) {
     if (xs8.empty() || xscale.empty() || xrowsum.empty()) {
         IMP_LOG_WARN(
             "mmq_q4k_imma_tile: activation scratch for M=%d K=%d unavailable from the T2 "
-            "arena (%.1f MiB free) — gemm.q4k_imma_prefill falls back to dequant",
+            "arena (%.1f MiB free) — Q4_K IMMA prefill falls back to dequant",
             new_M, new_K, engine_arena().remaining() / (1024.0 * 1024.0));
         return false;
     }

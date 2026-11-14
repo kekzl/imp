@@ -578,21 +578,6 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
         }
 
-        // Gemma-4 FP32 residual sync: run_moe_ffn already updates fp32_hidden_ via
-        // rmsnorm_fp32_accum_to_fp16_kernel when post_ffn_norm + fp32_accum_buf_
-        // are active. A forced FP16->FP32 sync here would clobber that precision
-        // and drift ~1-2%/layer; only sync when the MoE path did NOT go through the FP32 accum kernel.
-        if (fp32_accum_buf_ && model_->profile().fp32_residual_norms &&
-            dispatch_policy().moe.force_fp16_sync) {
-            Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-            int threads = 256;
-            int blocks = static_cast<int>((total + threads - 1) / threads);
-            fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(h.data),
-                                                                static_cast<float*>(fp32_h.data), total);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-
         // Control vector (row 114): after every residual and layer_out_scale, before the snapshot.
         if (cvec_ != nullptr && cvec_->layer_mask[i])
             control_vector_add_(i, n, stream);
@@ -693,11 +678,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Q6_K/Q8_0 output projection at n=1 uses fused RMSNorm->Q8_1 + dp4a GEMV
     // with FP32 output (reads quantized weights directly, saves bandwidth vs cuBLAS FP16).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
-                             !dispatch_policy().gemm.no_dp4a_lm;
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype);
 
     // GemmContext for LM head GEMM dispatches.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
 
     // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).

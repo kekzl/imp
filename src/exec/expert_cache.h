@@ -51,22 +51,10 @@ struct PerLayerLRU {
     std::unordered_map<ExpertCacheKey, std::pair<int, LRUIter>, ExpertCacheKeyHash> lookup;
 };
 
-// Per-layer access history ring — Phase 4 prefetch signal. Records every
-// get_or_load(layer, proj, expert) hit OR miss into a fixed-size ring, so
-// `prefetch_layer(layer)` can consult the most-recent (proj, expert) pairs
-// even after they've been evicted from the LRU. Recency-resilient — survives
-// across-token churn that the per-layer LRU's "currently cached" view doesn't.
-struct PerLayerAccessRing {
-    // Capacity is per-layer; sized at init so writes never reallocate.
-    std::vector<std::pair<int, int>> entries;  // (proj, expert) pairs
-    int head = 0;       // next write position (mod entries.size())
-    int filled = 0;     // entries actually populated (clamped to capacity)
-};
-
 struct ExpertLRUCache {
     ExpertLRUCache() = default;
-    // Owns a GPU pool + prefetch stream/events freed by destroy(); a copy would
-    // alias them and double-free on the second destroy(). Non-copyable.
+    // Owns a GPU pool freed by destroy(); a copy would alias it and
+    // double-free on the second destroy(). Non-copyable.
     ExpertLRUCache(const ExpertLRUCache&) = delete;
     ExpertLRUCache& operator=(const ExpertLRUCache&) = delete;
 
@@ -127,22 +115,6 @@ struct ExpertLRUCache {
     std::vector<PerLayerLRU> per_layer_lru_;
     using LRUIter = PerLayerLRU::LRUIter;
 
-    // Phase 4: per-layer access history ring + prefetch infrastructure.
-    // - `per_layer_history_[layer]` records every get_or_load() (proj, expert)
-    //   into a fixed-size ring. Even after eviction the access is remembered,
-    //   so prefetch_layer() can pre-warm the cache with experts likely to
-    //   recur next token.
-    // - `prefetch_stream_` is a dedicated CUDA stream where prefetch H2Ds run
-    //   concurrent with the engine's compute stream. Compute waits on
-    //   `prefetch_done_[layer]` before dispatching layer L's reads.
-    std::vector<PerLayerAccessRing> per_layer_history_;
-    int history_capacity_ = 0;        // entries per layer (sized at init)
-    CudaStream prefetch_stream_;
-    std::vector<CudaEvent> prefetch_done_;  // one event per layer, signaled by prefetch_layer
-    std::vector<bool> prefetch_issued_;       // per-layer flag — has prefetch_layer been called?
-    int64_t prefetch_h2ds_ = 0;       // count of async H2Ds the prefetcher actually issued
-    int64_t prefetch_skipped_cached_ = 0;  // ring entries already cached at prefetch time
-
     // Phase 3: pre-computed host source pointers for capture-safe memcpy.
     // host_expert_addrs_[layer][proj * n_experts + expert] = packed.data +
     // expert_idx * expert_raw. Populated lazily on first get_or_load per
@@ -151,20 +123,6 @@ struct ExpertLRUCache {
     // `src` argument of cudaGraphAddMemcpyNode so the graph can replay
     // without recomputing host pointers each iteration.
     std::vector<std::vector<const void*>> host_expert_addrs_;
-
-    // Phase 4: canonical packed_ptr per (layer, proj). The ExpertCacheKey
-    // hashes on packed_ptr, so prefetch must rebuild keys that match what
-    // dispatch will pass on its next get_or_load. Sized [n_layers × 3];
-    // populated on first get_or_load per (layer, proj).
-    std::vector<const void*> host_packed_ptrs_;
-
-    // Phase 5: per-(layer, proj) expert byte size. The prefetch path can't
-    // reuse the global slot_size_ (max across projs) because smaller
-    // projections — e.g. Qwen3.6 gate @ 144 MiB vs down @ 176 MiB — would
-    // overflow the pinned host region during cudaMemcpyAsync and fail with
-    // "invalid argument". Populated on first get_or_load per (layer, proj)
-    // when the caller passes the actual per-expert byte size.
-    std::vector<size_t> host_expert_bytes_;
 
     int64_t hits_ = 0;
     int64_t misses_ = 0;
@@ -281,11 +239,11 @@ struct ExpertLRUCache {
 
     // Shared LRU body behind both get_or_load variants: returns the slot that
     // holds (layer, proj, key) — an existing one on a hit, a free or evicted
-    // one on a miss — with the bookkeeping (host pointer table, access ring,
-    // recency, device mirror) already done. `*hit` says whether the caller
+    // one on a miss - with the bookkeeping (host pointer table, recency,
+    // device mirror) already done. `*hit` says whether the caller
     // still has to copy anything in. Returns nullptr on a bad layer index.
     Slot* acquire_slot_(int layer, int proj_idx, ExpertCacheKey key, const void* src_host,
-                        size_t stamp_bytes, cudaStream_t stream, bool* hit);
+                        cudaStream_t stream, bool* hit);
 
     void destroy();
 
@@ -305,28 +263,6 @@ struct ExpertLRUCache {
         size_t flat = layer_flat_base(layer) + slot_idx_within_layer;
         return static_cast<char*>(pool_) + (flat * slot_size_);
     }
-
-    // Phase 4 — async prefetch.
-    //
-    // prefetch_layer(layer, top_k, expert_bytes): walk per_layer_history_[layer]
-    // from the most-recent entry backward, gather up to top_k unique
-    // (proj, expert) pairs that AREN'T currently cached, and kick off an
-    // async H2D into a freshly-allocated slot for each on prefetch_stream_.
-    // The host LRU + device mirror are updated synchronously on the host
-    // side, so a follow-up get_or_load(layer, …) on the compute stream sees
-    // the slot as "cached". Records prefetch_done_[layer] when the H2Ds
-    // finish — the compute stream must wait on this before reading any
-    // affected slot.
-    //
-    // expert_bytes is the H2D copy size; pass `slot_size_` if you don't
-    // know it precisely (over-copy is wasted bandwidth but correct).
-    // Returns the number of async H2Ds issued (0..top_k). No-op if
-    // prefetch_stream_ is null or top_k <= 0.
-    int prefetch_layer(int layer, int top_k, size_t expert_bytes);
-
-    // Compute stream waits on prefetch_done_[layer]. Safe to call even if
-    // prefetch_layer wasn't called for `layer` (skip on no-issue).
-    void await_prefetch(int layer, cudaStream_t compute_stream);
 
     // Phase 2 debug helper: copy the device lookup mirror back to host and
     // assert every cell matches the host-side LRU state. Returns true on

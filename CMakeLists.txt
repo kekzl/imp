@@ -409,16 +409,11 @@ set(IMP_COMPUTE_SOURCES
 )
 
 list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_sfatom_quant.cu)
-list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
-if(IMP_BUILD_TESTS)
-    set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
-        PROPERTIES COMPILE_DEFINITIONS "SMALLM_TEST_HOOKS=1")
-endif()
 
 set(IMP_RUNTIME_SOURCES
     src/runtime/process_diag_install.cpp
@@ -1422,8 +1417,6 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_smallm_ws.cu
         tests/test_nvfp4_static_act_scale.cu
         tests/test_nvfp4_merged_scale_spread.cu
-        tests/test_smallm_dense_bench.cu
-        tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_nvfp4_gemm_tile.cu
         tests/test_gemm_mxfp8_tile.cu
@@ -1569,12 +1562,10 @@ if(IMP_BUILD_TESTS)
         tests/test_engine_relaunch.cpp
         tests/test_serving_signals.cpp
         tests/test_batching_engine_fault.cu
-        tests/test_moe_alloc_failure.cu
         tests/test_suspend_resume.cu
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
-        tests/test_fp32_residual_e2e.cpp
         # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
         tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of

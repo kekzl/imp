@@ -36,7 +36,7 @@ Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
 - `executor_pre_dequant.cpp` - 76 LOC orchestrator that calls each phase in order
 - `pre_dequant_internal.h` - 6 shared helpers (`borrow_payload_from_wcache`, `for_each_dense_weight`, etc.)
-- `pre_dequant_phase0_nvfp4_loader.cpp` - Phase 0 + 0b: NVFP4 sidecar promotion + `StorageTier::CUTLASS_NVFP4` registration (tier name kept; the weights feed the own tile GEMM). The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: `gemm.nvfp4_smallm` up to M = 32, the own NVFP4 x NVFP4 tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) above.
+- `pre_dequant_phase0_nvfp4_loader.cpp` - Phase 0 + 0b: NVFP4 sidecar promotion + `StorageTier::CUTLASS_NVFP4` registration (tier name kept; the weights feed the own tile GEMM). The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: the small-M kernel up to M = 32, the own NVFP4 x NVFP4 tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) above.
 - `pre_dequant_phase1_fp16_cache.cpp` - Phase 1: GGUF Q*_K -> FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
 - `pre_dequant_phase2_fp8_cache.cpp` - Phase 2: FP16 -> FP8 device tensors for the `fp8_prefill` path
 - `pre_dequant_phase3_nvfp4_decode.cpp` - Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers), split further into `pre_dequant_phase3_fp8.cpp`, `pre_dequant_phase3_cutlass.cpp` and `pre_dequant_phase3_moe.cpp` (the MoE expert stacks, where #1106 gave the `nvfp4_moe_sfatom` scale-factor slabs an owner)
@@ -91,7 +91,7 @@ AUDIT_ARCH_2026 dispatch #8, decision (b), `docs/audit/SETTLED.md` section H).
 A new key lands together with its dispatch site; `GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys`
 pins the count at 13. Registered tiers:
 
-- `gemm_kernel_cutlass_nvfp4.cpp`: `{CUTLASS_NVFP4, F16, M>1}`, NVFP4 prefill: own tile GEMM `gemm_nvfp4_tile` from `gemm.nvfp4_tile_min_m` (1), cuBLASLt `gemm_nvfp4_cublaslt` on refusal from `gemm.nvfp4_cublaslt_min_m` (2048), else the dequant fallback (file and tier names kept from CUTLASS)
+- `gemm_kernel_cutlass_nvfp4.cpp`: `{CUTLASS_NVFP4, F16, M>1}`, NVFP4 prefill: own tile GEMM `gemm_nvfp4_tile` from `kNvfp4TileMinM` (1), cuBLASLt `gemm_nvfp4_cublaslt` on refusal from `kNvfp4CublasltMinM` (2048), else the dequant fallback (file and tier names kept from CUTLASS)
 - `gemm_kernel_gguf.cpp`: `{FP16, <qtype>, M==1}` for Q4_K, Q5_K, Q5_1, Q8_0, Q6_K, Q4_0, Q2_K, Q3_K, IQ4_NL, IQ4_XS, IQ3_S; GGUF small-M (dp4a + mmvq + fused-gemv fallback)
 - `gemm_kernel_generic_dequant.cpp`: `{FP16, NONE, M>1}`, dequant -> `gemm()` catch-all (own FP16 tile or cuBLASLt) for uncached weights
 

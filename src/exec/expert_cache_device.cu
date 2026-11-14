@@ -48,7 +48,7 @@ __device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, i
         *L.pf_count = 0;  // every pending slot is covered by this layer's gather event from here on
 }
 
-// Slot s in the next-layer prefetch list (moe.expert_prefetch): 0 not listed, 2 still copying, 3 landed
+// Slot s in the next-layer prefetch list: 0 not listed, 2 still copying, 3 landed
 // (every copy block counted in pf_done; its stores were fenced before the count).
 __device__ __forceinline__ int pf_state(const DevExpertLayer& L, int s) {
     const int c = L.pf_count ? *L.pf_count : 0;

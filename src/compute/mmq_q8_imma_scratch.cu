@@ -130,8 +130,7 @@ bool imma_plane_budget_take(size_t need, const char* what, int64_t N, int64_t K)
         IMP_LOG_WARN(
             "mmq_q8_imma: %s cache reached its planned budget (%.0f MiB used, %.0f MiB "
             "planned, %.0f MiB wanted for N=%lld K=%lld) — the remaining prefill GEMMs run "
-            "the dequant path. Raise it by giving the plan more room (smaller KV pool) or "
-            "set gemm.q8_imma_enabled=false to drop the cache entirely.",
+            "the dequant path. Raise it by giving the plan more room (smaller KV pool).",
             what, g_imma_plane_used / (1024.0 * 1024.0), g_imma_plane_budget / (1024.0 * 1024.0),
             need / (1024.0 * 1024.0), static_cast<long long>(N), static_cast<long long>(K));
     }

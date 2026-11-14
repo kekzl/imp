@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Price moe.expert_prefetch offline from a diagnostics.moe_expert_trace with prediction records.
+"""Price the next-layer expert prefetch (kMoeExpertPrefetch, former moe.expert_prefetch) offline from a diagnostics.moe_expert_trace with prediction records.
 
 Usage: expert_prefetch_sim.py trace.json SLOTS [budget ...] [--window K] [--tag B[,B...]] [--drop] [--margin M]
 

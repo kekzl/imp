@@ -25,7 +25,7 @@ struct Tensor;
 [[nodiscard]] size_t gemm_f16_splitk_workspace_bytes(int M, int N);
 
 // gemm() hook: runs the own kernel for an fp16-accumulate F16 GEMM when it beats cuBLASLt in situ
-// (gemm.f16_tile, K >= N, 128x256 grid >= one wave). False = not taken.
+// (K >= N, 128x256 grid >= one wave). False = not taken.
 [[nodiscard]] bool gemm_f16_tile_route(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                                        cudaStream_t stream);
 

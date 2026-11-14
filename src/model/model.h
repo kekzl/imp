@@ -87,7 +87,7 @@ public:
     // release_gpu_allocation() (dangling .data) or destructively transformed in place
     // (mark_sources_consumed()). A second engine on this handle would read freed/transformed
     // memory (#830); reload for a fresh engine. Intact sources support create/free/create;
-    // dense Q8_0 keeps them only with gemm.q8_drop_source=false (Phase 4c frees them).
+    // dense Q8_0 never keeps them (Phase 4c frees them).
     void mark_sources_consumed() { sources_consumed_ = true; }
     [[nodiscard]] bool sources_consumed() const { return sources_consumed_; }
 

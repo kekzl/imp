@@ -10,7 +10,6 @@
 #include "compute/gemm_f16_tile_core.cuh"
 #include "core/device_info.h"
 #include "core/logging.h"
-#include "core/process_diag.h"
 #include "core/tensor.h"
 
 #include <cuda.h>
@@ -270,7 +269,7 @@ bool gemm_f16_tile(const void* a, const void* w, void* d, int M, int N, int K, f
                         : launch<Cfg<256, 64, 2, true, 16>>(p, a, w, stream);
 }
 
-// gemm.f16_tile: own fp16-accumulate GEMM (bit-equal to COMPUTE_16F, capture-safe) for deep K
+// Own fp16-accumulate GEMM (bit-equal to COMPUTE_16F, capture-safe) for deep K
 // (K >= N) once its 128x256 grid fills >= 80 % of its last wave. Wins: 2048x5120x17408 (320 tiles,
 // 94 %); loses: 2048x2688x4096 Nemotron out_proj (176 tiles, 52 %) 220 vs cuBLASLt 122 us in situ.
 bool gemm_f16_tile_route(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
@@ -281,14 +280,14 @@ bool gemm_f16_tile_route(const Tensor& A, const Tensor& B, Tensor& C, float alph
     constexpr int64_t kSms = 170;
     const int64_t tiles = ((N + 255) / 256) * ((M + 127) / 128);
     const int64_t wave_slots = ((tiles + kSms - 1) / kSms) * kSms;
-    if (!process_diag_f16_tile() || K < N || tiles < kSms || tiles * 5 < wave_slots * 4 ||
+    if (K < N || tiles < kSms || tiles * 5 < wave_slots * 4 ||
         !gemm_f16_tile(A.data, B.data, C.data, static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                        alpha, beta, /*acc_fp16=*/true, stream))
         return false;
     static bool logged = false;  // activity proof, once
     if (!logged) {
         logged = true;
-        IMP_LOG_INFO("gemm.f16_tile: own FP16 GEMM ACTIVE (M=%ld N=%ld K=%ld)", (long)M, (long)N, (long)K);
+        IMP_LOG_INFO("f16_tile: own FP16 GEMM ACTIVE (M=%ld N=%ld K=%ld)", (long)M, (long)N, (long)K);
     }
     return true;
 }

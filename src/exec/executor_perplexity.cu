@@ -116,7 +116,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     const int chunk_len = n_rows;
 
-    GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy());
+    GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_);
 
     // LM-head tier detection (mirror forward_logits): NVFP4 decode-cache LM heads
     // must use the per-row gemv_nvfp4_kpar_fp32 path, NOT gemm_via_handle_ (which
@@ -134,8 +134,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     // illegal memory access on gemma-3-12b that poisoned context and surfaced as PPL=1.0000 (zeroed NLL
     // buffer).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
-                             is_dp4a_qtype(out_qtype) && !dispatch_policy().gemm.no_dp4a_lm &&
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
                              lm_tier != StorageTier::MXFP4 && !lm_has_fp8;
     NvFP4QuantResult nvfp4_lm_r{};
     if (lm_is_nvfp4) {

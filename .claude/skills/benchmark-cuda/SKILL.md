@@ -77,7 +77,7 @@ Phantom: gemma-3-12b `--bench` prints bogus tok/s (#514); trust its PPL only.
 - Pin `runtime.max_batch_size`, `runtime.max_seq_len`, `kv_cache.max_blocks` in BOTH arms (free-VRAM swing ~1.6 GB re-resolves auto batch: 5 -> 28 once moved 224.68 -> 630.19 tok/s with no code change).
 - `MEDIAN 0.0` = broken client (exceptions become `(0, elapsed)`, model name hardcoded), not a regression. Read stderr and per-wave token counts.
 - Discard wave 1 (graph captures + ramp: 629 vs 954-991 steady).
-- Default-ON knobs that define "same flags": `runtime.prefill_batch`, `gdn.state_bf16`, `gemm.nvfp4_smallm` (+`_impl=2`, `_pair`), `speculative.mtp_adaptive_k`, `runtime.prefill_chunk_decode_cap` (1024; 4096 = +~10% burst lever).
+- Default-ON knobs that define "same flags": `runtime.prefill_batch`, `gdn.state_bf16`, `speculative.mtp_adaptive_k`, `runtime.prefill_chunk_decode_cap` (1024; 4096 = +~10% burst lever).
 - Profile the right binary: `make build` tags only `imp:test`; `imp:builder` can be days old.
 - Method behind #1750-#1793: two-image A/B, all pairs same sign. Prefill-bound bursts cannot see KV capacity (32x8k with 60-token completions: identical walls while the pool grew 3.2x); capacity levers need `max_tokens >= 512`.
 - PDL kernels start before their producer ends: an nsys duration includes the `griddepcontrol.wait`, overlapping kernels sum past the wall. Per-kernel bandwidth from exclusive time: `tools/analysis/nsys_exclusive_time.py` (Qwen3.8 verify gate/up 1.20 TB/s by duration, 1.65 exclusive).

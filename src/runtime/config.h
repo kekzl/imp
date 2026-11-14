@@ -109,7 +109,7 @@ struct RuntimeConfig {
         // and the GDN conv loop per sequence, GDN scan via a row-offset
         // table), instead of one sequence per forward. Requests with vision,
         // constraints, logprobs, embeddings/rerank scoring, and Mamba2/MLA
-        // models, MTP, SWA sizing, gdn.fp32_scan/ref_kernel
+        // models, MTP, SWA sizing, gdn.ref_kernel
         // keep the serial path.
         bool prefill_batch = true;
 

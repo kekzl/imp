@@ -84,35 +84,6 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     for (auto& plru : per_layer_lru_)
         plru.lookup.reserve(static_cast<int64_t>(slots_per_layer_) * 2);
 
-    // Phase 4: per-layer access history ring. Capacity = slots_per_layer ×
-    // kExpertProjCount × 2 - a heuristic giving ~2 tokens worth of memory
-    // per layer (each token touches up to top_k experts × 3 projs).
-    history_capacity_ = std::max(8, slots_per_layer_ * kExpertProjCount * 2);
-    per_layer_history_.assign(n_layers_, PerLayerAccessRing{});
-    for (auto& ring : per_layer_history_)
-        ring.entries.assign(history_capacity_, {-1, -1});
-
-    // Prefetch stream + per-layer completion events. Skipped if cudaStream
-    // creation fails - prefetch APIs become no-ops in that case.
-    cudaError_t serr = prefetch_stream_.try_create(cudaStreamNonBlocking);
-    if (serr != cudaSuccess) {
-        IMP_LOG_WARN("Expert LRU cache: prefetch_stream alloc failed (%s) - Phase 4 disabled",
-                     cudaGetErrorString(serr));
-    } else {
-        prefetch_done_.clear();
-        prefetch_done_.resize(n_layers_);
-        for (int li = 0; li < n_layers_; ++li) {
-            cudaError_t eerr = prefetch_done_[li].try_create(cudaEventDisableTiming);
-            if (eerr != cudaSuccess) {
-                IMP_LOG_WARN("Expert LRU cache: prefetch event[%d] alloc failed (%s)", li,
-                             cudaGetErrorString(eerr));
-            }
-        }
-        prefetch_issued_.assign(n_layers_, false);
-    }
-    prefetch_h2ds_ = 0;
-    prefetch_skipped_cached_ = 0;
-
     hits_ = 0;
     misses_ = 0;
 
@@ -125,8 +96,8 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     // pointer, which leaves the mirror write-only in production - two extra
     // 4-byte cudaMemcpyAsync per cache miss maintaining a structure with no
     // consumer. Its only reader is check_parity(), which is a debug facility.
-    // If a kernel ever does read it, re-enable maintenance in get_or_load and
-    // prefetch_layer alongside this allocation.
+    // If a kernel ever does read it, re-enable maintenance in get_or_load
+    // alongside this allocation.
     if (n_experts_ > 0 && debug_parity_) {
         size_t cells = static_cast<size_t>(n_layers_) * kExpertProjCount * n_experts_;
         size_t bytes = cells * sizeof(int);
@@ -164,12 +135,6 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
                                   std::vector<const void*>(static_cast<size_t>(kExpertProjCount) *
                                                               n_experts_,
                                                           nullptr));
-        // Canonical packed_ptr per (layer, proj) - the prefetcher needs this to
-        // rebuild cache keys that match dispatch's get_or_load calls.
-        host_packed_ptrs_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, nullptr);
-        // Per-(layer, proj) expert byte size. Avoids overflowing pinned host
-        // regions when projections have different sizes (Qwen3.6 gate < down).
-        host_expert_bytes_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, 0);
     }
 
     IMP_LOG_INFO("Expert LRU cache: %d of %d layers × %d slots × %.2f MiB = %.2f MiB GPU memory%s%s", n_rows_,
@@ -228,8 +193,7 @@ void* ExpertLRUCache::find(int layer, ExpertCacheKey key) {
 }
 
 ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key,
-                                                    const void* src_host, size_t stamp_bytes,
-                                                    cudaStream_t stream, bool* hit) {
+                                                    const void* src_host, cudaStream_t stream, bool* hit) {
     *hit = false;
     if (!layer_cached(layer)) {
         IMP_LOG_ERROR("ExpertLRUCache::acquire_slot_: layer %d has no slots (%d of %d layers cached)", layer,
@@ -250,30 +214,6 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         size_t off = (static_cast<size_t>(proj_idx) * n_experts_) + key.expert_idx;
         if (off < table.size())
             table[off] = src_host;
-    }
-    // Stamp the canonical packed_ptr per (layer, proj) - Phase 4 needs it
-    // to rebuild keys for prefetch_layer.
-    if (!host_packed_ptrs_.empty()) {
-        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj_idx;
-        if (pp_off < host_packed_ptrs_.size())
-            host_packed_ptrs_[pp_off] = key.packed_ptr;
-    }
-    // Stamp the per-(layer, proj) expert byte size - prefetch must use this
-    // (not slot_size_) to avoid reading past the pinned host region.
-    if (!host_expert_bytes_.empty()) {
-        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj_idx;
-        if (pp_off < host_expert_bytes_.size() && stamp_bytes > 0)
-            host_expert_bytes_[pp_off] = stamp_bytes;
-    }
-
-    // Phase 4: record the access into the per-layer history ring (regardless
-    // of hit/miss). The prefetcher consults this on subsequent layers.
-    if (!per_layer_history_.empty() && history_capacity_ > 0) {
-        auto& ring = per_layer_history_[layer];
-        ring.entries[ring.head] = {proj_idx, key.expert_idx};
-        ring.head = (ring.head + 1) % history_capacity_;
-        if (ring.filled < history_capacity_)
-            ++ring.filled;
     }
 
     // Check cache hit - find() handles per-layer LRU front-update. Hits
@@ -359,7 +299,7 @@ void* ExpertLRUCache::get_or_load(int layer, ExpertProj proj, ExpertCacheKey key
                   layer);
     }
     bool hit = false;
-    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_host, expert_bytes, stream, &hit);
+    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_host, stream, &hit);
     if (!slot)
         return nullptr;
     if (!hit)
@@ -388,8 +328,7 @@ void* ExpertLRUCache::get_or_load_nvfp4(int layer, ExpertProj proj, ExpertCacheK
                   layer, packed_bytes, ms_off, ms_bytes, slot_size_);
     }
     bool hit = false;
-    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_packed, packed_bytes, stream,
-                               &hit);
+    Slot* slot = acquire_slot_(layer, std::to_underlying(proj), key, src_packed, stream, &hit);
     if (!slot)
         return nullptr;
 
@@ -490,142 +429,6 @@ void ExpertLRUCache::flush_staging(cudaStream_t stream) {
     pending_scales_.clear();
 }
 
-int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback) {
-    if (!prefetch_stream_ || top_k <= 0 || !layer_cached(layer))
-        return 0;
-    if (per_layer_history_.empty() || history_capacity_ <= 0)
-        return 0;
-
-    auto& ring = per_layer_history_[layer];
-    if (ring.filled == 0)
-        return 0;
-    if (host_expert_addrs_.empty() || host_packed_ptrs_.empty())
-        return 0;
-
-    auto& plru = per_layer_lru_[layer];
-    auto& addr_table = host_expert_addrs_[layer];
-
-    // Walk the ring from most-recent backward, collecting unique (proj,
-    // expert) pairs that aren't currently cached. Stop at top_k issued
-    // H2Ds or when we've scanned the whole filled portion of the ring.
-    int issued = 0;
-    int scanned = 0;
-    int pos = (ring.head - 1 + history_capacity_) % history_capacity_;
-    std::vector<std::pair<int, int>> considered;
-    considered.reserve(static_cast<int64_t>(top_k) * 2);
-
-    while (issued < top_k && scanned < ring.filled) {
-        auto [proj, expert] = ring.entries[pos];
-        pos = (pos - 1 + history_capacity_) % history_capacity_;
-        ++scanned;
-        if (proj < 0 || expert < 0)
-            continue;
-        bool dup = false;
-        for (auto& seen : considered) {
-            if (seen.first == proj && seen.second == expert) { dup = true; break; }
-        }
-        if (dup)
-            continue;
-        considered.emplace_back(proj, expert);
-
-        // Rebuild the cache key from the canonical packed_ptr stamped by
-        // get_or_load - this guarantees prefetched entries are found by
-        // subsequent dispatch lookups that use the same packed.data.
-        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj;
-        if (pp_off >= host_packed_ptrs_.size())
-            continue;
-        const void* canonical_packed_ptr = host_packed_ptrs_[pp_off];
-        if (!canonical_packed_ptr)
-            continue;
-        size_t addr_off = (static_cast<size_t>(proj) * n_experts_) + expert;
-        if (addr_off >= addr_table.size())
-            continue;
-        const void* src_host = addr_table[addr_off];
-        if (!src_host)
-            continue;
-
-        ExpertCacheKey key{canonical_packed_ptr, expert};
-
-        // Already cached? Bump LRU recency and skip the H2D.
-        auto it = plru.lookup.find(key);
-        if (it != plru.lookup.end()) {
-            auto& [slot_in_layer, lru_it] = it->second;
-            plru.lru_order.erase(lru_it);
-            plru.lru_order.push_front(slot_in_layer);
-            it->second.second = plru.lru_order.begin();
-            ++prefetch_skipped_cached_;
-            continue;
-        }
-
-        // Cache miss: allocate a slot via LRU, issue async H2D on prefetch_stream_.
-        int slot_in_layer = -1;
-        if (static_cast<int>(plru.lookup.size()) < slots_per_layer_) {
-            for (int s = 0; s < slots_per_layer_; ++s) {
-                if (!slots_[static_cast<int>(layer_flat_base(layer)) + s].occupied) {
-                    slot_in_layer = s;
-                    break;
-                }
-            }
-        }
-        if (slot_in_layer < 0) {
-            slot_in_layer = plru.lru_order.back();
-            plru.lru_order.pop_back();
-            const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
-            plru.lookup.erase(slots_[flat].key);
-            if (debug_parity_)
-                write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
-                                  slots_[flat].expert, -1, prefetch_stream_);
-            slots_[flat].occupied = false;
-        }
-
-        const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
-        Slot& slot = slots_[flat];
-        // Prefer the per-(layer, proj) byte size - using slot_size_ as the
-        // fallback overflows for smaller projections and produces a CUDA
-        // "invalid argument" on pinned-but-narrower host regions.
-        size_t copy_bytes = expert_bytes_fallback;
-        if (!host_expert_bytes_.empty()) {
-            size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj;
-            if (pp_off < host_expert_bytes_.size() && host_expert_bytes_[pp_off] > 0)
-                copy_bytes = host_expert_bytes_[pp_off];
-        }
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, copy_bytes,
-                                           cudaMemcpyHostToDevice, prefetch_stream_));
-        slot.key = key;
-        slot.occupied = true;
-        slot.layer = layer;
-        slot.proj = proj;
-        slot.expert = expert;
-        plru.lru_order.push_front(slot_in_layer);
-        plru.lookup[key] = {slot_in_layer, plru.lru_order.begin()};
-        if (debug_parity_)
-            write_lookup_cell(d_lookup_, n_experts_, layer, proj, expert, slot_in_layer, prefetch_stream_);
-        ++prefetch_h2ds_;
-        ++issued;
-    }
-
-    // Record the completion event so compute_stream can wait on it before
-    // reading layer L's slots. Always record (even if 0 H2Ds issued) so
-    // await_prefetch's wait becomes a cheap no-op rather than a NULL deref.
-    if (!prefetch_done_.empty() && prefetch_done_[layer]) {
-        IMP_CUDA_CHECK_LOG(cudaEventRecord(prefetch_done_[layer], prefetch_stream_));
-        if (!prefetch_issued_.empty())
-            prefetch_issued_[layer] = true;
-    }
-    return issued;
-}
-
-void ExpertLRUCache::await_prefetch(int layer, cudaStream_t compute_stream) {
-    if (!prefetch_stream_ || !layer_cached(layer))
-        return;
-    if (prefetch_issued_.empty() || !prefetch_issued_[layer])
-        return;
-    if (prefetch_done_.empty() || !prefetch_done_[layer])
-        return;
-    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(compute_stream, prefetch_done_[layer], 0));
-    prefetch_issued_[layer] = false;
-}
-
 bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
     if (!d_lookup_ || n_layers_ <= 0 || n_experts_ <= 0)
         return true;
@@ -649,13 +452,6 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
         host[off] = slot_in_layer;
     }
 
-    // Phase 4: mirror writes from prefetch_layer happen on prefetch_stream_,
-    // which is independent of the supplied `stream`. The compute-side check
-    // would otherwise read the mirror before the prefetch stream's writes
-    // are visible. Sync the prefetch stream first so the readback reflects
-    // every pending mirror write.
-    if (prefetch_stream_)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(prefetch_stream_));
     std::vector<int> dev(cells);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dev.data(), d_lookup_, cells * sizeof(int),
                                        cudaMemcpyDeviceToHost, stream));
@@ -734,21 +530,9 @@ void ExpertLRUCache::destroy() {
     pending_scales_.clear();
     pending_copies_.clear();
     nvfp4_slots_ = false;
-    if (!prefetch_done_.empty()) {
-        if (prefetch_h2ds_ > 0 || prefetch_skipped_cached_ > 0) {
-            IMP_LOG_INFO("Expert LRU prefetch stats: %ld H2Ds issued, %ld skipped (already cached)",
-                         (long)prefetch_h2ds_, (long)prefetch_skipped_cached_);
-        }
-        prefetch_done_.clear();  // events destroyed before the prefetch stream, as before
-    }
-    prefetch_stream_.reset();
     slots_.clear();
     per_layer_lru_.clear();
     host_expert_addrs_.clear();
-    host_packed_ptrs_.clear();
-    host_expert_bytes_.clear();
-    per_layer_history_.clear();
-    prefetch_issued_.clear();
     n_slots_ = 0;
     slots_per_layer_ = 0;
     n_layers_ = 0;
@@ -756,11 +540,8 @@ void ExpertLRUCache::destroy() {
     layer_row_.clear();
     row_layer_.clear();
     n_experts_ = 0;
-    history_capacity_ = 0;
     hits_ = 0;
     misses_ = 0;
-    prefetch_h2ds_ = 0;
-    prefetch_skipped_cached_ = 0;
     parity_checks_ok_ = 0;
     debug_parity_ = false;
 }

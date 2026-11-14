@@ -58,12 +58,6 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                          cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
                          __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr);
-void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const half* alpha,
-                                 const half* beta, const float* A_log, const float* dt_bias,
-                                 __nv_bfloat16* h_state, float* y_fp32, int n_tokens, int n_heads,
-                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout = 0, const int* d_real_n = nullptr,
-                                 __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr);
 
 // EXPERIMENTAL scaffolding for chunkwise SSD scan (Mamba2 SSD adapted to GDN's rank-1
 // (I - beta k k^T) update, unlike standard scalar-decay SSD; cf. Yang et al. 2024 delta rule).
@@ -74,16 +68,6 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
                             cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0,
                             const int* d_real_n = nullptr, float* h_snap = nullptr,
                             const int* d_snap_n = nullptr);
-
-// FP32-output chunkwise variant — matches `gdn_scan_fused_fp32out`'s contract.
-// Same chunked shared-memory layout as `gdn_scan_chunkwise_f32`, output kept
-// in FP32 for the gdn.fp32_scan path (RMSNorm+Gate+SiLU pipeline).
-void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                                const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
-                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                                cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0,
-                                const int* d_real_n = nullptr, float* h_snap = nullptr,
-                                const int* d_snap_n = nullptr);
 
 // Phase 2a WY-rep parallel delta-rule scan: numerically equivalent to the sequential delta
 // rule, factors the chunk-internal dependency into a triangular solve + matmuls (naive
@@ -114,7 +98,7 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
 // (chunks x heads), only a short matmul chain stays sequential. HD=SS=128 only; needs
 // gdn_scan_chunkpar_workspace_bytes(n_heads) bytes, 256B aligned; no d_real_n (padded verify
 // chunks use the fused kernel). StateT float or BF16, rounds to BF16 once at commit.
-// strip_chunks (gdn.chunkpar_strip): 0 = auto, else clamped to [1, 16].
+// strip_chunks (kGdnChunkparStrip): 0 = auto, else clamped to [1, 16].
 size_t gdn_scan_chunkpar_workspace_bytes(int n_heads);
 void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -132,21 +116,6 @@ void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half
 void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
                             int n_heads, int head_dim, cudaStream_t stream, bool sigmoid_gate = false);
 
-// FP32-in, FP32-out variant. Keeps precision all the way through the normalized
-// gated activation so the downstream ssm_out GEMM can accumulate over 4096
-// terms without 6% FP16 drift (the Qwen 3.6 L0 sign-flip root cause).
-void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in, const half* gate,
-                                      const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                      cudaStream_t stream, bool sigmoid_gate = false);
-
-// FP32-output scan. Same math as `gdn_scan_fused_f32` but keeps result in FP32
-// for feeding into `gdn_rmsnorm_gated_silu_fp32inout`.
-void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
-                            float* h_snap = nullptr, const int* d_snap_n = nullptr);
-
 // Reference multi-token GDN scan: deliberately unfused, state in global memory, per-token
 // serial loop; L2-norm via shared-memory reductions (no register-cached state). Same
 // delta-rule math as gdn_scan_fused_f32. Selected by gdn.ref_kernel.
@@ -162,11 +131,5 @@ void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const h
                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
                          int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                          int grouped_layout = 0);
-
-// V-head reorder tiled -> grouped (FP32, conv1d-SiLU output). GGUF may store V tiled
-// (h0_g0,h1_g1,...,h0_g0_r1,...) while the scan kernel expects grouped V[h*HD+d]; Qwen 3.6
-// (16K/32V) triggers this. Skipped when n_heads == n_groups.
-void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int n_heads, int head_dim,
-                                int n_groups, cudaStream_t stream);
 
 }  // namespace imp

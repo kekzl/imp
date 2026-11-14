@@ -943,7 +943,7 @@ TEST(GemmStrategy, EqualityIsByValue) {
 
 // The generic dequant catch-all must decline a weight larger than the dequant scratch instead
 // of writing past it: Gemma-4's Q6_K LM head (262144 x 2816, 1408 MiB FP16) against the
-// 44 MiB per-layer-sized scratch crashed `--perplexity` under gemm.no_dp4a_lm (#2046). The
+// 44 MiB per-layer-sized scratch crashed `--perplexity` without the dp4a LM head (#2046). The
 // weight pointer is never dereferenced before the size check, so no allocation is needed.
 TEST_F(GemmKernelRegistryTest, GenericDequantDeclinesWeightLargerThanScratch) {
     constexpr int M = 8;

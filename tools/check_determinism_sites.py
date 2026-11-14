@@ -43,9 +43,10 @@ READER = "process_diag_deterministic_gemm()"
 
 # Files the doc's known-limit 5 enumerates as reading the determinism flag; keep this list and
 # that paragraph in sync. Count is pinned per file, not just presence: gemm.cpp reads the flag
-# in two dispatch branches, and losing one is the same drift as losing the file.
+# in the re-pick branch (the timed-pick read left with gemm.algo_timed, 2026-11-14); losing it is the
+# same drift as losing the file.
 EXPECTED = {
-    "src/compute/gemm.cpp": 2,
+    "src/compute/gemm.cpp": 1,
     "src/compute/sampling_topk_topp.cu": 1,
     "src/compute/sampling_filters.cu": 1,
     "src/compute/moe_routing_permute.cu": 1,
@@ -145,7 +146,7 @@ def selftest():
     call = f"return {READER};"
     doc = "nvfp4_gemm_tile.cu process_diag_deterministic_gemm"
     base = {
-        "src/compute/gemm.cpp": 2,
+        "src/compute/gemm.cpp": 1,
             "src/compute/sampling_topk_topp.cu": 1,
         "src/compute/sampling_filters.cu": 1,
         "src/compute/moe_routing_permute.cu": 1,
@@ -171,8 +172,8 @@ def selftest():
                                    f"// {READER} in prose\n"),), None, 0),
         ("accessor's own definition", (("src/core/process_diag.cpp",
                                         f"bool {READER[:-2]}() {{ return true; }}\n"),), None, 0),
-        ("branch lost the flag", (), {**base, "src/compute/gemm.cpp": 1}, 1),
-        ("branch gained the flag", (), {**base, "src/compute/gemm.cpp": 3}, 1),
+        ("branch lost the flag", (), {**base, "src/compute/gemm.cpp": 0}, 1),
+        ("branch gained the flag", (), {**base, "src/compute/gemm.cpp": 2}, 1),
         ("file lost the flag", (), {k: v for k, v in base.items()
                                     if k != "src/compute/moe_routing_permute.cu"}, 1),
     ]

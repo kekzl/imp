@@ -23,12 +23,10 @@ using imp::pre_dequant_internal::infer_tier_from_wcache;
 
 namespace imp {
 
-// WeightHandle::act_scale of a native NVFP4 weight: its checkpoint scale under gemm.nvfp4_static_act_scale.
-static float static_act_scale(const Tensor& t, bool on) {
-    return on && t.qtype == QType::NVFP4 ? t.act_scale : 1.0f;
-}
+// WeightHandle::act_scale of a native NVFP4 weight: its checkpoint scale (1.0 = none).
+static float static_act_scale(const Tensor& t) { return t.qtype == QType::NVFP4 ? t.act_scale : 1.0f; }
 
-// Per-layer MoE static act scales (1.0 unless gemm.nvfp4_static_act_scale): the max over the experts,
+// Per-layer MoE static act scales (1.0 without a checkpoint scale): the max over the experts,
 // so the shared quantize clips no expert's calibrated range. gu = gate|up input, dn = down input.
 static void fill_moe_act_scales(const Model& model, const WeightRegistry& reg, int n_layers,
                                 std::vector<MoEWorkspace::ActScales>& out) {
@@ -48,7 +46,7 @@ static void fill_moe_act_scales(const Model& model, const WeightRegistry& reg, i
         n_scaled += (out[li].gu != 1.0f || out[li].dn != 1.0f) ? 1 : 0;
     }
     if (n_scaled > 0)
-        IMP_LOG_INFO("NVFP4 MoE: static act scales on %d layers (gemm.nvfp4_static_act_scale)", n_scaled);
+        IMP_LOG_INFO("NVFP4 MoE: static act scales on %d layers", n_scaled);
 }
 
 void QuantPipeline::pre_dequant_phase4_tensor_registry_(
@@ -63,7 +61,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         if (!t.data)
             return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(*wcache_, t.data);
-        // FP8 decode SIDECAR (gemm.fp8_ssm_proj): the wcache fp8 entry must not become the
+        // FP8 decode SIDECAR: the wcache fp8 entry must not become the
         // primary tier; prefill and M>1 verify chunks stay on the full-precision source, only
         // the M=1 decode GEMV takes the FP8 copy. Demote BEFORE the payload borrow below, or the
         // union would carry an fp8 payload into FP16 paths.
@@ -71,7 +69,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // phase-2 prefill cache never keys F16 sources). A quantized (GGUF) source is the
         // sidecar only when the entry carries per-row scales (the phase-2 FP8 prefill cache
         // keys quantized sources with a per-tensor scale and must stay primary). A native-FP8
-        // source (Modelopt) is a sidecar only beside an FP16 companion (gemm.fp8_native_prefill
+        // source (Modelopt) is a sidecar only beside an FP16 companion (native FP8 prefill
         // off); without one it is primary and prefill runs FP8 x FP8.
         bool fp8_decode_sidecar = false;
         if (tier == StorageTier::FP8) {
@@ -94,7 +92,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         h.source_qtype = t.qtype;
         h.source_scales = t.scales;
         h.source_tensor_scale = t.tensor_scale;
-        h.act_scale = static_act_scale(t, dispatch_policy().gemm.nvfp4_static_act_scale);
+        h.act_scale = static_act_scale(t);
         borrow_payload_from_wcache(h, *wcache_, t.data);
 
         // Dual-tier dispatch: pick the best tier per operation type.
@@ -413,7 +411,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     }
 
     // Phase 3c-full Step 3: pre-cache per-layer NVFP4 device-args ptr arrays. The grouped
-    // NVFP4 device-args dispatch (moe.nvfp4_device_args) consumes per-expert weight pointers
+    // NVFP4 device-args dispatch consumes per-expert weight pointers
     // as device-resident arrays; per-call host iteration + cudaMemcpyAsync was the residual
     // overhead blocking full CUDA-graph capture of the MoE prefill. Build the caches once
     // here while handle payloads are populated; the forward path then uses device pointers

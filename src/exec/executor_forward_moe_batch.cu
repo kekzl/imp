@@ -29,7 +29,6 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_f16_tile.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
-#include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -678,8 +677,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         run_topk(gate_logits_f32);
     } else if (router_fused_route(router_in, ly.moe_gate, compute_dtype_, n, ne, top_k, use_sigmoid,
                                   norm_weights, router_bias_ptr,
-                                  RouterFusedGate{dispatch_policy().moe.router_fused, grp.active(),
-                                                  model_->profile().moe_router_logit_bias,
+                                  RouterFusedGate{grp.active(), model_->profile().moe_router_logit_bias,
                                                   ly.router_bias.data},
                                   moe_.routing_buffers, moe_.router_fused_ws, moe_.router_fused_ws_bytes,
                                   stream)) {
@@ -1100,9 +1098,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
 
 void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
                                           float eps, const Tensor& no, Tensor& h) {
-    // DIAGNOSTIC: moe.no_shared_mlp config flag (was IMP_NO_SHARED_MLP env).
-    static const bool s_no_shared_mlp = dispatch_policy().moe.no_shared_mlp;
-    if (model_->layer(layer).w_up_shared.data == nullptr || s_no_shared_mlp)
+    if (model_->layer(layer).w_up_shared.data == nullptr)
         return;
     if (join_shared_expert_(stream, n, d, h))
         return;
@@ -1129,7 +1125,7 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
     Tensor sh_down(down_buf, compute_dtype_, 2, sh_down_shape, true);
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
     if (shared_gated) {
         Tensor sh_gate(gate_buf, compute_dtype_, 2, sh_shape, true);
@@ -1139,7 +1135,7 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
             gemm_via_handle_(ly.w_gate_shared_id, no, sh_gate, ctx);
         }
         // Decode rows, GeGLU: the down input's small-M NVFP4 quantize inside the activation kernel
-        // (gemm.geglu_quant_fuse); declines to geglu() + the down GEMM's own quantize.
+        // (fused GeGLU quant); declines to geglu() + the down GEMM's own quantize.
         if (cfg.ffn_activation == FFNActivation::GEGLU && n <= 32)
             (void)swiglu_for_smallm_(sh_gate, sh_up, sh_swiglu, ly.w_down_shared_id, n, stream,
                                      /*gelu=*/true);
@@ -1190,9 +1186,8 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
         debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
     }
     // Qwen3-Next / Qwen3.6: per-token sigmoid gate on shared-expert output.
-    static const bool skip_shexp_gate = dispatch_policy().moe.no_shexp_gate;
-    if (!skip_shexp_gate && ly.shared_expert_gate_inp.data != nullptr &&
-        ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
+    if (ly.shared_expert_gate_inp.data != nullptr && ly.shared_expert_gate_inp.on_device &&
+        compute_dtype_ == QType::F16) {
         shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);
     }
     return sh_down;

@@ -134,11 +134,6 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         cutlass3x_sfa_ptrs = nullptr;
         cutlass3x_sfa_ptrs_count = 0;
     }
-    smallM_scales = nullptr;
-    smallM_ptrs = nullptr;
-    smallM_count = 0;
-    smallM_tables = nullptr;
-    smallM_tables_bytes = 0;
 }
 
 }  // namespace imp

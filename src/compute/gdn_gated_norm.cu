@@ -1,6 +1,5 @@
-// gdn_gated_norm.cu — the RMSNormGated + SiLU family (FP16, FP32-in and
-// FP32-in/out). Split out of gdn.cu (one logical unit per TU; the
-// hard-review size gate was the trigger). Kernels moved VERBATIM.
+// gdn_gated_norm.cu: the RMSNormGated + SiLU kernel (FP16). Split out of gdn.cu (one
+// logical unit per TU; the hard-review size gate was the trigger). Kernels moved VERBATIM.
 #include "compute/gdn.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -51,53 +50,6 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
     pdl_trigger();
 
     y[base + d] = __float2half(normed * silu_g);
-}
-
-// FP32-in, FP32-out: keeps full precision through gated norm so ssm_out GEMM
-// sees FP32 input (fixes 6% accumulation drift in FP16-input matmul).
-__global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp32_out,
-                                                        const float* __restrict__ y_fp32_in,
-                                                        const half* __restrict__ gate,
-                                                        const half* __restrict__ weight, float eps,
-                                                        int n_heads, int head_dim, int gate_act) {
-    const int t = blockIdx.x;
-    const int h = blockIdx.y;
-    const int d = threadIdx.x;
-    if (d >= head_dim)
-        return;
-
-    const int inner = n_heads * head_dim;
-    const int base = (t * inner) + (h * head_dim);
-
-    float val = y_fp32_in[base + d];
-
-    extern __shared__ float s_buf[];
-    s_buf[d] = val * val;
-    __syncthreads();
-    for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride)
-            s_buf[d] += s_buf[d + stride];
-        __syncthreads();
-    }
-    float inv_rms = rsqrtf((s_buf[0] / static_cast<float>(head_dim)) + eps);
-
-    float normed = val * inv_rms * __half2float(weight[d]);
-
-    float g = __half2float(gate[base + d]);
-    // gate_act 0: SiLU (Qwen3.5/3.6 hidden_act), 1: sigmoid (Qwen4Exp output_gate_type). Uniform branch.
-    float silu_g = gate_act ? 1.0f / (1.0f + expf(-g)) : g / (1.0f + expf(-g));
-
-    y_fp32_out[base + d] = normed * silu_g;
-}
-
-void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in, const half* gate,
-                                      const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
-                                      cudaStream_t stream, bool sigmoid_gate) {
-    size_t smem = head_dim * sizeof(float);
-    dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(
-        y_fp32_out, y_fp32_in, gate, weight, eps, n_heads, head_dim, sigmoid_gate ? 1 : 0);
-    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Fused RMSNormGated + SiLU

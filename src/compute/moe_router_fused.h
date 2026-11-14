@@ -1,6 +1,6 @@
 #pragma once
 
-// Fused MoE router (moe.router_fused): logits GEMM x W^T + softmax / sigmoid (+ selection bias) + top-k
+// Fused MoE router: logits GEMM x W^T + softmax / sigmoid (+ selection bias) + top-k
 // + renorm in one launch, writes only expert ids and weights (no fp16 logits, no split-K reduce, no
 // conversion, no top-k launch). Semantics of topk_gating_kernel; ties pick the lowest expert index.
 

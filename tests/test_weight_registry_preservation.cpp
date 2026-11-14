@@ -379,7 +379,7 @@ TEST(StoragePlanner, Q4KSourceDoesNotPickNVFP4UnderPreferHint) {
     EXPECT_EQ(gate_count, 3) << "expected 3 FFN entries (gate, up, down)";
 }
 
-// gemm.q4k_in_place: dense Q4_K projections stay Undefined at 0 bytes (FP16 floor and the WK/WV
+// Q4_K in place: dense Q4_K projections stay Undefined at 0 bytes (FP16 floor and the WK/WV
 // FP8 floor alike); a Q6_K projection and the Q4_K LM head keep their tiers. Budget too small for
 // one FP16 copy: the plan must not fail on weights it no longer copies.
 TEST(StoragePlanner, Q4KInPlaceHintKeepsDenseProjectionsUncopied) {

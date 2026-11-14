@@ -111,7 +111,7 @@ void GraphExecutor::verify_host_expert_placement() const {
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
 bool GraphExecutor::init_device_expert_cache() {
-    if (!dispatch_policy().moe.device_expert_cache || !expert_cache_.pool_)  // no pool: no host experts
+    if (!expert_cache_.pool_)  // no pool: no host experts
         return device_expert_cache_covers_host_layers();
     const int top_k = std::max(1, model_->config().n_experts_active);
     dev_expert_cache_.set_host_pool_mib(dispatch_policy().moe.host_expert_pool_mib);
@@ -159,8 +159,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
     // gather kernel copies just the experts with tokens, all three projections in one
     // launch, from the mapped pinned slabs. Whole-layer memcpys stay the fallback.
     bool touched_staged = false;
-    if (dispatch_policy().moe.stage_touched_only && expert_offsets &&
-        nvfp4_host_experts_servable(ly.expert_w_up) &&
+    if (expert_offsets && nvfp4_host_experts_servable(ly.expert_w_up) &&
         static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_experts) {
         const auto& up0 = ly.expert_w_up[0];
         const auto layout = nvfp4_slot_layout(up0.shape[0], up0.shape[1] * 2);
@@ -263,7 +262,7 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
     const int slot_proj[2] = {p0, p1};
     const auto& up0 = ly.expert_w_up[0];
     const auto layout = nvfp4_slot_layout(up0.shape[0], up0.shape[1] * 2);
-    const bool gathered = dispatch_policy().moe.stage_touched_only && expert_offsets &&
+    const bool gathered = expert_offsets &&
                           dev_expert_cache_.stage_touched_range(layer, expert_offsets,
                                                                 static_cast<char*>(moe_.layer_stage_buf),
                                                                 moe_.layer_stage_proj_bytes,
@@ -390,9 +389,8 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
     // Chunked buffer: the grouped NVFP4 dispatch stages expert blocks itself (stage_nvfp4_block_).
     if (moe_.layer_stage_slots == 2) {
         const auto& ly = model_->layer(layer);
-        ctx.staged_blocks = dispatch_policy().moe.staged_cutlass_prefill && ctx.n > 1 &&
-                            moe_.layer_stage_buf && moe_.layer_stage_sf && moe_.layer_stage_b_ptrs &&
-                            nvfp4_host_experts_servable(ly.expert_w_up) &&
+        ctx.staged_blocks = ctx.n > 1 && moe_.layer_stage_buf && moe_.layer_stage_sf &&
+                            moe_.layer_stage_b_ptrs && nvfp4_host_experts_servable(ly.expert_w_up) &&
                             nvfp4_host_experts_servable(ly.expert_w_down) &&
                             (ctx.non_gated_experts || nvfp4_host_experts_servable(ly.expert_w_gate)) &&
                             static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_ptr_stride;
@@ -404,7 +402,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
         ctx.staged_done = stage_nvfp4_layer_(
             layer, stream, static_cast<const int32_t*>(ctx.routing.expert_offsets.data),
             ctx.staged);
-    if (!dispatch_policy().moe.staged_cutlass_prefill || !ctx.staged_done)
+    if (!ctx.staged_done)
         return false;
     ctx.staged_alpha = stage_alpha_row_(layer, stream);
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
@@ -415,12 +413,11 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
 // Presents a staged layer to the grouped NVFP4 prefill as if
 // device-resident: the staging pass already wrote per-expert pointer and
 // alpha arrays, this just slices them per projection.
-// moe.staged_cutlass_prefill (default on).
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
-    if (!dispatch_policy().moe.staged_cutlass_prefill || !(ctx.staged_done || ctx.staged_blocks) ||
-        !moe_.layer_stage_b_ptrs || moe_.layer_stage_ptr_stride <= 0 || !ctx.staged_alpha)
+    if (!(ctx.staged_done || ctx.staged_blocks) || !moe_.layer_stage_b_ptrs ||
+        moe_.layer_stage_ptr_stride <= 0 || !ctx.staged_alpha)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
     if (!ctx.staged_blocks &&

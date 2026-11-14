@@ -679,8 +679,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                            : cfg::kSpecCaptureCtxCap)
                                     : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
-                                      fp8_act_scratch_needed(*model_, config_.use_fp8_prefill,
-                                                             runtime_config_.gemm.fp8_native_prefill),
+                                      fp8_act_scratch_needed(*model_, config_.use_fp8_prefill),
                                       runtime_config_.attention.mla_absorb, capture_cap,
                                       config_.kv_block_size, runtime_config_.attention.ra2_prefill,
                                       runtime_config_.attention.apa_eps > 0.0f,

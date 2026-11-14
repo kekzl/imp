@@ -19,7 +19,6 @@
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
-#include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 #include "compute/moe_router_fused.h"           // moe_router_fused_workspace_bytes
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
@@ -56,30 +55,11 @@ namespace {
 struct HostStageGeometry {
     int chunks, experts, slots;
 };
-// Host-expert prefill staging: moe.stage_expert_chunks blocks (grouped NVFP4 path only) hold 2 projection
+// Host-expert prefill staging: imp::cfg::kMoeStageExpertChunks blocks (grouped NVFP4 path) hold 2 projection
 // slots of n_experts/chunks experts; 1 block holds all 3 projections of every expert.
-HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int want_chunks) {
-    const int chunks = staged_cutlass ? std::clamp(want_chunks, 1, std::max(1, n_experts)) : 1;
+HostStageGeometry host_stage_geometry(int n_experts) {
+    const int chunks = std::clamp(imp::cfg::kMoeStageExpertChunks, 1, std::max(1, n_experts));
     return {chunks, (n_experts + chunks - 1) / chunks, chunks > 1 ? 2 : kExpertProjCount};
-}
-
-// smallM prefill scratch, one T2 take, no per-forward alloc (#2446, #2451): kernel tables
-// (smallM_table_bytes, at the 256 B take base), then 2*ne pointers, then 3*ne floats.
-// A failed take leaves smallM_count 0, which turns the smallM branch off.
-void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
-    const size_t ne = static_cast<size_t>(n_experts);
-    const size_t tables = smallM_table_bytes(n_experts);
-    auto sl = engine_arena().take_bytes(tables + (2 * ne * sizeof(void*)) + (3 * ne * sizeof(float)));
-    if (sl.empty()) {
-        IMP_LOG_WARN("smallM MoE prefill scratch unavailable from the T2 arena; smallM branch off");
-        return;
-    }
-    moe.smallM_tables = sl.data();
-    moe.smallM_tables_bytes = tables;
-    moe.smallM_ptrs = reinterpret_cast<void**>(sl.data() + tables);
-    moe.smallM_scales = reinterpret_cast<float*>(moe.smallM_ptrs +
-                                                 (2 * ne));  // floats follow the 2*ne pointers
-    moe.smallM_count = n_experts;
 }
 }  // namespace
 
@@ -658,8 +638,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             const bool want_layer_stage = nvfp4_host_experts && stage_cfg.n_experts > 0 &&
                                           !model_->host_pinned_allocs().empty();
             size_t stage_proj_bytes = 0, stage_sf_proj = 0;
-            const auto [stage_chunks, stage_experts, stage_slots] = host_stage_geometry(
-                stage_cfg.n_experts, dispatch_policy().moe.staged_cutlass_prefill, dispatch_policy().moe.stage_expert_chunks);
+            const auto [stage_chunks, stage_experts, stage_slots] = host_stage_geometry(stage_cfg.n_experts);
             if (want_layer_stage) {
                 const int64_t d_model = stage_cfg.d_model;
                 const int64_t eff_ff = stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
@@ -894,7 +873,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     IMP_LOG_WARN("CUTLASS 3.x SFA pointer array unavailable from the T2 arena");
                     moe_.cutlass3x_sfa_ptrs = nullptr;
                 }
-                take_smallM_scratch(moe_, cfg.n_experts);
                 IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
                              (packed_sz + sf_sz) / (1024.0 * 1024.0), packed_sz / (1024.0 * 1024.0),
                              sf_sz / (1024.0 * 1024.0), max_expanded);
@@ -1013,10 +991,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K partials +
+    // GDN alpha/beta narrow GEMM workspace (batched decode): split-K partials +
     // tickets for N = 2 x n_heads. Kernel resets its tickets, so zeroing here is the whole
     // init. nullptr keeps the two-GEMM route.
-    if (has_gdn_ && dispatch_policy().gdn.alpha_beta_smallm && cfg.ssm_dt_rank > 0) {
+    if (has_gdn_ && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_bytes = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
         gdn_ws_.ab = vram_alloc(vram_alloc_, gdn_ws_.ab_bytes, "gdn_ab_ws");
         if (gdn_ws_.ab) {
@@ -1026,10 +1004,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             gdn_ws_.ab_bytes = 0;
         }
     }
-    // Prefill alpha/beta launch (gdn.alpha_beta_prefill): 8 MiB of split-K partials, its own
+    // Prefill alpha/beta launch: 8 MiB of split-K partials, its own
     // buffer because the narrow kernel's tickets live behind its partials in gdn_ws_.ab. The
     // split adapts to what fits (split 1 needs none); nullptr keeps the two-GEMM route.
-    if (has_gdn_ && dispatch_policy().gdn.alpha_beta_prefill && cfg.ssm_dt_rank > 0) {
+    if (has_gdn_ && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_prefill_bytes = size_t(8) << 20;
         gdn_ws_.ab_prefill = vram_alloc(vram_alloc_, gdn_ws_.ab_prefill_bytes, "gdn_ab_prefill_ws");
         if (gdn_ws_.ab_prefill) {
@@ -1049,7 +1027,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (!moe_.router_ws)
             moe_.router_ws_bytes = 0;
     }
-    if (has_moe_ && dispatch_policy().moe.router_fused && cfg.n_experts > 0 && cfg.n_experts <= 128) {
+    if (has_moe_ && cfg.n_experts > 0 && cfg.n_experts <= 128) {
         moe_.router_fused_ws_bytes = moe_router_fused_workspace_bytes(max_tokens_);
         moe_.router_fused_ws = vram_alloc(vram_alloc_, moe_.router_fused_ws_bytes, "moe_router_fused_ws");
         if (moe_.router_fused_ws)
@@ -1059,7 +1037,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 
     // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
-    if (fp8_act_scratch_needed(*model_, wcache_.use_fp8, dispatch_policy().gemm.fp8_native_prefill)) {
+    if (fp8_act_scratch_needed(*model_, wcache_.use_fp8)) {
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0)
             max_dim = std::max(max_dim, cfg.d_ff);
@@ -1081,9 +1059,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                          qscratch_.fp8_act_size / (1024.0 * 1024.0));
             qscratch_.fp8_act_size = 0;
         }
-        // Stream-K partials of the own FP8 tile GEMM (gemm.fp8_tile_min_m); without them it runs
+        // Stream-K partials of the own FP8 tile GEMM (imp::cfg::kFp8TileMinM); without them it runs
         // data-parallel only. Qwen3-8B-FP8 pp4096 FP8 GEMM sum 907.5-909.1 -> 898.4-901.7 ms with them.
-        if (dispatch_policy().gemm.fp8_tile_min_m > 0) {
+        {
             qscratch_.fp8_tile_ws_size = gemm_tile_streamk_workspace_bytes();
             qscratch_.fp8_tile_ws = vram_alloc(vram_alloc_, qscratch_.fp8_tile_ws_size, "fp8_tile_ws");
             if (!qscratch_.fp8_tile_ws)
@@ -1813,8 +1791,6 @@ bool GraphExecutor::chunk_capture_supported() const {
     if (any_moe && !dispatch_policy().moe.skip) {
         if (moe_host_rows_capture_max() > 0)
             return true;  // per-row device expert cache path; the engine caps the chunk rows
-        if (dispatch_policy().moe.no_cutlass3x || !dispatch_policy().moe.nvfp4_device_args)
-            return false;
         if (!gemm_grouped_nvfp4_moe_supports(cfg.n_experts, cfg.d_model, max_expert_eff_))
             return false;
         const int ne = cfg.n_experts;

@@ -41,7 +41,6 @@ const MoePrefillOuter kAllMoeOuter[] = {
 };
 const MoePrefillPath kAllMoeTiers[] = {
     MoePrefillPath::DEVICE_ARGS,
-    MoePrefillPath::SMALL_M,
     MoePrefillPath::GROUPED,
     MoePrefillPath::LEGACY,
 };

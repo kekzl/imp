@@ -110,7 +110,7 @@ private:
 
     void pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
-    // Phase 1a (gemm.fp8_native_prefill): FP8 checkpoint weights become primary FP8 entries on
+    // Phase 1a (native FP8 prefill): FP8 checkpoint weights become primary FP8 entries on
     // their own bytes, no FP16 copy. Lives in pre_dequant_phase1_fp16_cache.cpp.
     void pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
@@ -118,7 +118,7 @@ private:
     void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                        size_t& remaining_budget, cudaStream_t stream);
     // FP8 E4M3 decode sidecar for native-precision GDN/SSM projections
-    // (gemm.fp8_ssm_proj) — lives in pre_dequant_phase2_fp8_cache.cpp.
+    // (SSM FP8 sidecar) — lives in pre_dequant_phase2_fp8_cache.cpp.
     void pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8), pre_dequant_fp8_lm_head.cpp.
     void fp8_lm_head_cache_(cudaStream_t stream);
@@ -131,7 +131,6 @@ private:
     void nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
     void nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream);
     void mtp_draft_lm_head_nvfp4_(cudaStream_t stream);  // FP8-served head: NVFP4 copy for MTP drafts
-    void nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 3d: NVFP4 prefill copies of F16 GDN in/gate/out (gemm.nvfp4_gdn_proj_prefill).
     void nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream);
     void nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx);
@@ -164,7 +163,7 @@ private:
     [[nodiscard]] bool ensure_released_scratch_(size_t bytes);
     // Phase 4b: the source of an FP8 or NVFP4 served LM head, freed through the phase's one free site.
     void release_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
-    // Phase 4c (gemm.q8_drop_source): pin the IMMA planes of dense Q8_0 weights, free their source.
+    // Phase 4c: pin the IMMA planes of dense Q8_0 weights, free their source.
     void pre_dequant_phase4c_q8_planes_only_(const ModelConfig& cfg, cudaStream_t stream);
     void free_source_(Tensor& t, cudaStream_t stream);
 };

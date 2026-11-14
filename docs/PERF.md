@@ -161,8 +161,8 @@ sequence, rows 1..31 carry different content at different lengths.
 | control M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
 | re-init M=1 vs M=1 | 3.440330 -> 3.440330 | 0 | 0 | 64/64 |
 | **M=1 vs M=32** | 3.440330 -> 3.488856 | 0.242 | 1.636 | **57/64** |
-| M=1 vs M=32, `gemm.nvfp4_smallm=false` (CUTLASS GEMM, also W4A4) | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
-| `gemm.nvfp4_smallm=false` alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
+| M=1 vs M=32, `gemm.nvfp4_smallm=false` (key removed 2026-11-14) (CUTLASS GEMM, also W4A4) | 3.419378 -> 3.512672 | 0.261 | 1.633 | 57/64 |
+| `gemm.nvfp4_smallm=false` (key removed 2026-11-14) alone, both M=1 | 3.440330 -> 3.419378 | 0.100 | 0.493 | 63/64 |
 
 [PROV: commit=814ada2e date=2026-10-31 hw=RTX5090 model=Qwen3-14B-NVFP4 quant=NVFP4 cuda=13.4.3
  path=smallm_v2_a4 vs smallm_v2 FP16 activations cmd="test-e2e --gtest_filter=BatchInvarianceTest.NativeNvfp4DecodeSoloVsBatched" n=1
@@ -196,14 +196,14 @@ What the table settles:
 - **Batching is not a rounding-sized effect.** 7 of 64 greedy tokens change,
   and mean NLL rises 1.4 %. The 0.22 % figure the docs carried came from a
   2-layer FP16 synthetic harness that runs no quantized kernel.
-- **`gemm.nvfp4_smallm=false` does not test the activation format.** It moves
+- **`gemm.nvfp4_smallm=false` (key removed 2026-11-14) does not test the activation format.** It moves
   2..32 rows from the small-M kernel to the NVFP4 tile GEMM (CUTLASS when
   measured), which quantizes the activations too
-  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:43 quantize_fp16_to_nvfp4_cutlass`):
+  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:44 quantize_fp16_to_nvfp4_cutlass`):
   W4A4 in both arms, same gap (0.261 vs 0.242, 7 flips either way), about 11 %
   less aggregate throughput at 32 streams for no numerical closeness.
 - **FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`**
-  (`src/exec/executor_gemm_dispatch.cpp:602 !dispatch_policy().gemm.nvfp4_smallm_a4`), plus
+  (`src/exec/executor_gemm_dispatch.cpp:598 !dispatch_policy().gemm.nvfp4_smallm_a4`), plus
   `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
   NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
   fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams
@@ -212,7 +212,7 @@ What the table settles:
   (2026-10-31 table): the activation quantize, not the batch shape, is most
   of the gap.
 - **Two identical inits agree bit for bit**, so the numbers above are the batch
-  effect and not run-to-run noise. Flipping `gemm.nvfp4_smallm` does not: the
+  effect and not run-to-run noise. Flipping `gemm.nvfp4_smallm` (key removed 2026-11-14) did not: the
   24-token prompt (M = 24) leaves the small-M kernel for the tile GEMM, and
   solo decode moves by one greedy token in 64.
 

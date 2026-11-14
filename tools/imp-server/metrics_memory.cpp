@@ -50,8 +50,8 @@ for (const auto& t : imp::memory_tier_stats()) {
 // control actually rations.
 if (state.ctx && state.ctx->engine) {
     // MoE expert-imbalance ratio (#1548): max(M_e) per launch sets grouped-GEMM cost (kernel pads
-    // every expert to one M tile) - computed on the host for tiling and then dropped, so "would
-    // moe.nvfp4_smallM fire here" needed enabling it and reading a once-per-process INFO line.
+    // every expert to one M tile) - computed on the host for tiling and then dropped, so asking
+    // the M distribution meant reading a once-per-process INFO line.
     // Scraped live (not written at shutdown): a serving process is exactly the one that couldn't be asked
     // before.
     if (const auto* ex = state.ctx->engine->executor()) {

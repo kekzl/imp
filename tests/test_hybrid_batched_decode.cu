@@ -191,7 +191,7 @@ void HybridBatchedDecodeTest::rows_decode_independently_of_their_order() {
         }
     }
     // Diagnostic, not asserted: the batched step runs the small-M GEMMs and the batched scan,
-    // solo runs the GEMV path (gdn.m1_fused), so their rounding differs and greedy flips at a
+    // solo runs the fused M=1 GEMV path, so their rounding differs and greedy flips at a
     // near-tie are expected (2 of 8 rows at tokens 9 and 18 on Qwen3.5-4B-mxfp4, 2026-09-15).
     std::printf("[batched] %d of %d rows differ from their solo run (rounding class, not asserted)\n",
                 mismatched, kRows);
@@ -258,7 +258,7 @@ TEST_F(HybridBatchedDecodeTest, BatchedLogitDeltaVsSolo) {
     RuntimeConfig rc;
     rc.runtime.deterministic = true;
     rc.server.prefix_cache = false;
-    // IMP_TEST_SET="gdn.ref_kernel=true,gemm.nvfp4_smallm=false": knob ablation with this oracle.
+    // IMP_TEST_SET="gdn.ref_kernel=true,...": knob ablation with this oracle.
     if (const char* kv = std::getenv("IMP_TEST_SET"); kv && *kv) {
         std::vector<std::string> sets;
         std::string s(kv);

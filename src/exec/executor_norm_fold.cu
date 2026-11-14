@@ -27,9 +27,8 @@ void GraphExecutor::norm_fold_begin_(int n, cudaStream_t stream) {
     norm_fold_gamma_ = nullptr;
     norm_fold_out_ = nullptr;
     norm_fold_pending_ = nullptr;
-    norm_fold_on_ = n == 1 && dispatch_policy().gemm.nvfp4_norm_fold && !calib_ && lora_ == nullptr &&
-                    cvec_ == nullptr && sae_rows_.empty() && compute_dtype_ == QType::F16 &&
-                    !model_->config().parallel_block;
+    norm_fold_on_ = n == 1 && !calib_ && lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() &&
+                    compute_dtype_ == QType::F16 && !model_->config().parallel_block;
     if (!norm_fold_on_)
         return;
     const size_t bytes = sizeof(unsigned long long) *

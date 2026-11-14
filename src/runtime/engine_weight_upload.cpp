@@ -373,38 +373,12 @@ bool Engine::init_weights() {
                 break;
             }
         }
-        // Device expert cache (moe.device_expert_cache; NVFP4 prequant or GGUF packed experts):
-        // routing, residency and the miss copies resolve on the device, so the captured
-        // decode replays correctly. init_device_expert_cache() demotes later if a
-        // host-resident layer stays on the host path.
-        // pin_host_experts is no longer part of the condition: host-resident NVFP4 experts
-        // are pinned unless the host is out of RAM (weight_upload.cpp), and a failed pin
-        // demotes through init_device_expert_cache() below.
-        const bool device_cache_planned = runtime_config_.moe.device_expert_cache;
-        if (experts_on_host_ && config_.use_cuda_graphs && device_cache_planned) {
+        // Device expert cache (NVFP4 prequant or GGUF packed experts): routing, residency and the
+        // miss copies resolve on the device, so the captured decode replays correctly.
+        // init_device_expert_cache() demotes later if a host-resident layer stays on the host path.
+        if (experts_on_host_ && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Experts on host: CUDA graphs stay on, the device expert cache serves decode "
                          "(demoted after init if it cannot cover every host-resident layer)");
-        } else if (experts_on_host_ && config_.use_cuda_graphs) {
-            // `moe.allow_graphs_under_offload` skips this guard but buys nothing:
-            // every MoE path serving host-resident experts reads routing on the
-            // host, and moe_host_args_capture_guard throws unconditionally under
-            // capture. Kept as the escape hatch for the day routing + residency resolve device-side
-            // (docs/ROADMAP.md).
-            if (runtime_config_.moe.allow_graphs_under_offload) {
-                IMP_LOG_WARN(
-                    "moe.allow_graphs_under_offload=true: the graphs-off guard is skipped, but "
-                    "capture will still ABORT on every attempt and fall back to per-step decode "
-                    "— the MoE decode path reads routing on the host, which is not capturable. "
-                    "This flag currently changes nothing except adding failed capture attempts.");
-            } else {
-                demote_graphs_(GraphDemotionReason::ExpertsOnHost);
-                IMP_LOG_INFO(
-                    "  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
-                    "(default 30) to upload ALL experts and re-enable CUDA graphs "
-                    "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
-                // Deliberately no longer advertised as an alternative: it
-                // does not deliver captured decode (see the branch above).
-            }
         }
         // MoE decode fast path is fully device-side (no D2H memcpy): graph-safe.
         // Only MoE prefill paths use D2H sync for expert_offsets, but prefill is

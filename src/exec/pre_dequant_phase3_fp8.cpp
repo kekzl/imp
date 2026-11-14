@@ -122,7 +122,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             continue;
         }
         const bool has_nvfp4 = (wcache_->nvfp4.contains(ptr));
-        // A native-FP8 entry beside an FP16 copy (gemm.fp8_native_prefill off) serves only the
+        // A native-FP8 entry beside an FP16 copy (native FP8 prefill off) serves only the
         // M=1 GEMV; prefill reads the copy. Freeing FP16 on its account leaves
         // prefill with a dangling pointer (cublasLtMatmul status 14) and an illegal access at the
         // next cudaFree, only under decode mode 2.

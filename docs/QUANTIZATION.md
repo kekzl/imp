@@ -77,11 +77,11 @@ default `auto` = per-row FP8), see below; `--set gemm.nvfp4_lm_head=false` serve
 
 **W4A16 on disk, W4A4 from M >= 2.** These checkpoints declare `input_activations: null`
 (W4A16), which imp does not read: at `n == 1` decode the activations stay FP16 (the NVFP4 GEMV
-family), from M >= 2 they are quantized to NVFP4 too and the GEMM runs W4A4 (`gemm.nvfp4_smallm`, default on,
+family), from M >= 2 they are quantized to NVFP4 too and the GEMM runs W4A4 (the small-M kernel, always on,
 for M <= 32, the own NVFP4 x NVFP4 tile GEMM above it, and the batched LM head). Deliberate and measured
 (+16% at 32 streams, +36% at 8, #1766); `--set gemm.nvfp4_smallm_a4=false` keeps FP16 activations at M <= 32,
 -38 % at 32 streams on Qwen3.8-27B ([`PERF.md`](PERF.md#batch-invariance), with the NVFP4 LM-head switches);
-`gemm.nvfp4_smallm=false` stays W4A4 (the tile GEMM quantizes those rows too).
+Without the small-M kernel the tile GEMM quantizes those rows too: the activation format stays W4A4.
 
 ## imp-quantize: converting a checkpoint yourself (EXPERIMENTAL)
 

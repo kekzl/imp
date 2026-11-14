@@ -6,7 +6,6 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -170,55 +169,6 @@ TEST(PrefillRowInvariance, MoeActivationQuantIndependentOfBatch) {
     EXPECT_EQ(a.packed, c.packed);
     EXPECT_EQ(a.sf, b.sf);
     EXPECT_EQ(a.sf, c.sf);
-}
-
-// Opt-in smallM path (moe.nvfp4_smallM): the native MoE quantize took a per-expert batch absmax as
-// tensor scale, so the probe row's bytes moved with its expert mates. Now a fixed scale.
-TEST(PrefillRowInvariance, SmallMNativeActivationQuantIndependentOfBatch) {
-    if (!is_sm120())
-        GTEST_SKIP() << "SM120 required";
-    const int K = 2816;
-    std::vector<half> probe(K);
-    fill(probe, 4, 2.0f);
-    auto run = [&](int m_e, int probe_local, uint32_t seed, float amp) {
-        std::vector<half> rows(static_cast<size_t>(m_e) * K);
-        fill(rows, seed, amp);
-        std::copy(probe.begin(), probe.end(), rows.begin() + static_cast<size_t>(probe_local) * K);
-        half* d_src = to_dev(rows);
-        const std::vector<int> offsets = {0, m_e};
-        int* d_off = to_dev(offsets);
-        void* packed = nullptr;
-        void* sf = nullptr;
-        cudaMalloc(&packed, static_cast<size_t>(m_e) * K / 2);
-        cudaMalloc(&sf, static_cast<size_t>(m_e) * K / 16);
-        float* d_ts = nullptr;
-        cudaMalloc(&d_ts, sizeof(float));
-        void* hp[1] = {packed};
-        void* hs[1] = {sf};
-        EXPECT_TRUE(quantize_fp16_to_nvfp4_moe_native_with_scales(d_src, hp, hs, d_ts, d_off, m_e, K, 1,
-                                                                  /*d_ptr_scratch=*/nullptr, nullptr));
-        cudaDeviceSynchronize();
-        MoeQuantOut out;
-        out.packed.resize(static_cast<size_t>(K) / 2);
-        out.sf.resize(static_cast<size_t>(K) / 16);
-        cudaMemcpy(out.packed.data(), static_cast<uint8_t*>(packed) + static_cast<size_t>(probe_local) * K / 2,
-                   K / 2, cudaMemcpyDeviceToHost);
-        cudaMemcpy(out.sf.data(), static_cast<uint8_t*>(sf) + static_cast<size_t>(probe_local) * K / 16, K / 16,
-                   cudaMemcpyDeviceToHost);
-        float ts = 0.0f;
-        cudaMemcpy(&ts, d_ts, sizeof(float), cudaMemcpyDeviceToHost);
-        EXPECT_EQ(ts, 1.0f);
-        cudaFree(d_src);
-        cudaFree(d_off);
-        cudaFree(packed);
-        cudaFree(sf);
-        cudaFree(d_ts);
-        return out;
-    };
-    const auto a = run(1, 0, 31, 1.0f);
-    const auto b = run(40, 17, 32, 300.0f);
-    EXPECT_EQ(a.packed, b.packed);
-    EXPECT_EQ(a.sf, b.sf);
 }
 
 // hd=512 prefill attention with a fixed KV order: rows of a single 150-row prefill vs the same

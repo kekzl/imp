@@ -84,7 +84,7 @@ struct DevExpertLayer {
     size_t slot_bytes;
     int n_experts;
     int slots;
-    // moe.expert_prefetch: slots the next-layer prefetch fills; resolve treats a hit on one as waiting
+    // Expert prefetch: slots the next-layer prefetch fills; resolve treats a hit on one as waiting
     // for the gather unless pf_done shows every copy block finished, and clears the list. Null when off.
     int32_t* pf_slots;  // [kDevExpertPrefetchMax]
     int32_t* pf_count;  // [1]
@@ -94,7 +94,7 @@ struct DevExpertLayer {
 
 inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per row
 inline constexpr int kDevExpertMaxRows = 8;   // decode rows one resolve serves (non-tiered layers)
-inline constexpr int kDevExpertPrefetchMax = 32;  // moe.expert_prefetch ceiling, keys per layer
+inline constexpr int kDevExpertPrefetchMax = 32;   // expert prefetch ceiling, keys per layer
 inline constexpr int kDevExpertGatherBlocks = 16;  // gather copy blocks per key (grid.x)
 
 // GPU <-> host handshake for tiered decode layers, in mapped pinned memory. The resolve kernel
@@ -158,7 +158,7 @@ public:
     [[nodiscard]] bool stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
                              size_t pb, size_t mb, int e0, int n, int proj0, int proj1, cudaStream_t stream);
 
-    // Next-layer prefetch (moe.expert_prefetch, expert_cache_prefetch.cu). enable_prefetch allocates the
+    // Next-layer prefetch (expert_cache_prefetch.cu). enable_prefetch allocates the
     // pending lists and the predict scratch; false = off. predict_topk: top_k ids of logits[ne] into
     // pred_out, plus a trace record [1000 + layer, ids] when trace is set. prefetch_resolve stamps the
     // predicted keys of `layer`, assigns LRU victims to up to `budget` absent ones and lists them as

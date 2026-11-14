@@ -166,8 +166,8 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
     const int conv_channels = cfg.ssm_conv_channels();
     const int n_heads = cfg.ssm_dt_rank;
     const size_t es = dtype_size(compute_dtype_);
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
-                                 cfg.overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_, cfg.overrides.gemma4.force_mmvq,
+                                 cur_spec_verify_);
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);

@@ -1,5 +1,5 @@
-// gemm.q8_drop_source (Phase 4c) on a dense Q8_0 GGUF: the sources go, greedy decode stays
-// token-identical to the arm that keeps them. GTEST_SKIPs without the model.
+// Phase 4c on a dense Q8_0 GGUF: the sources go, the planner credits them, greedy decode runs 48 tokens
+// (the keep-sources arm left with gemm.q8_drop_source, 2026-11-14). GTEST_SKIPs without the model.
 
 #include "imp/imp.h"
 #include "runtime/config.h"
@@ -21,15 +21,14 @@ struct Arm {
     std::vector<int32_t> tokens;
 };
 
-// Loads the model with gemm.q8_drop_source = `drop`, returns the init log and 48 greedy tokens.
-Arm run_arm(bool drop) {
+// Loads the model, returns the init log and 48 greedy tokens.
+Arm run_arm() {
     Arm arm;
     imp::RuntimeConfig rc;
     rc.speculative.ngram = false;
     rc.speculative.suffix = false;
     rc.speculative.token_recycling = false;
     rc.speculative.mtp_k = 0;
-    rc.gemm.q8_drop_source = drop;
     imp::set_pending_runtime_config(rc);
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
@@ -64,15 +63,13 @@ Arm run_arm(bool drop) {
     return arm;
 }
 
-TEST(Q8DropSourceE2E, SourcesGoGreedyStaysIdentical) {
+TEST(Q8DropSourceE2E, SourcesGoGreedyDecodes) {
     if (!std::filesystem::exists(kModel))
         GTEST_SKIP() << "model not present at " << kModel;
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || (free_b >> 20) < 14000)
         GTEST_SKIP() << "needs ~14000 MiB free";
-    const Arm keep = run_arm(false);
-    const Arm drop = run_arm(true);
-    EXPECT_EQ(keep.log.find("Phase-4c:"), std::string::npos) << "q8_drop_source=false still freed sources";
+    const Arm drop = run_arm();
     std::smatch m;
     ASSERT_TRUE(
         std::regex_search(drop.log, m, std::regex(R"(Phase-4c: freed (\d+) Q8_0 sources \(([0-9.]+) MiB)")))
@@ -81,8 +78,7 @@ TEST(Q8DropSourceE2E, SourcesGoGreedyStaysIdentical) {
     EXPECT_GT(std::stod(m[2].str()), 0.0);
     EXPECT_NE(drop.log.find("of Q8_0 sources freed for their planes"), std::string::npos)
         << "the planner charged the planes on top of sources Phase 4c frees";
-    ASSERT_EQ(keep.tokens.size(), 48u);
-    EXPECT_EQ(drop.tokens, keep.tokens) << "dropping the Q8_0 sources changed greedy decode";
+    EXPECT_EQ(drop.tokens.size(), 48u) << "greedy decode on the planes-only weights stopped early";
 }
 
 }  // namespace

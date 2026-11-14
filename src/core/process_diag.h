@@ -30,8 +30,6 @@ struct ProcessDiag {
 
     // GEMM (may be promoted in place by engine_init_resolver)
     bool deterministic_gemm = false;
-    // gemm.algo_timed: time cuBLAS(Lt) algo candidates; off = heuristic order, same pick every process.
-    bool gemm_algo_timed = false;
     // runtime.deterministic as the user set it; never promoted by an arch resolver.
     bool deterministic = false;
     bool cublas_fp16_acc = false;
@@ -50,19 +48,11 @@ struct ProcessDiag {
     int attention_paged_nvfp4_mma = 64;      // MMA decode kernel max splits, 0 = off
     int attention_paged_fp8_hpc = 0;        // 0 = auto; -1 = the per-head four-token kernel; tests sweep 1..5
     bool attention_fa2_heavy_first = true;
-    int nvfp4_cublaslt_min_m = 2048;     // matches the config.h default
-    int nvfp4_tile_min_m = 1;            // matches the config.h default
+    int nvfp4_cublaslt_min_m = 2048;     // imp::cfg::kNvfp4CublasltMinM, 0 under runtime.deterministic
     bool nvfp4_prompt_streamk = true;    // gemm.nvfp4_prompt_streamk, auto resolved at engine init
-    bool f16_tile = true;                // matches the config.h default
-    bool q6k_tile = true;                // matches the config.h default
-    bool mxfp4_tile = true;              // matches the config.h default
-    bool q45k_tile = true;               // matches the config.h default
-    int fp8_tile_min_m = 2048;           // matches the config.h default
     bool force_splitk_fallback = false;  // test hook
 
     // MoE
-    int moe_mr_nr = 8;
-    int moe_expert_overhead_pct = 10;
     int moe_force_host_experts = 0;
     bool moe_pin_host_experts = false;
     int moe_host_expert_pool_mib = 0;
@@ -92,8 +82,6 @@ const char* process_diag_graph_dump_dir();    // nullptr when unset
 // process_diag_set_deterministic_gemm() lets the resolver update the cache in place.
 [[nodiscard]] bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
-// gemm.algo_timed: pick cuBLAS(Lt) algos by timing; the call sites also refuse under deterministic_gemm.
-[[nodiscard]] bool process_diag_gemm_algo_timed();
 // runtime.deterministic (user intent). Unlike deterministic_gemm, Gemma-4 and FP8 KV do not
 // promote it: gates that cost speed or accuracy key on this one (#2167).
 [[nodiscard]] bool process_diag_deterministic();
@@ -130,15 +118,9 @@ void process_diag_set_paged_fp8_hpc(int v);
 void process_diag_set_fa2_dense_2cta(bool v);
 [[nodiscard]] bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first
 void process_diag_set_fa2_heavy_first(bool v);
-int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
-[[nodiscard]] int process_diag_nvfp4_tile_min_m();  // gemm.nvfp4_tile_min_m: 0 off
+int process_diag_nvfp4_cublaslt_min_m();  // imp::cfg::kNvfp4CublasltMinM, 0 off (runtime.deterministic)
 [[nodiscard]] bool process_diag_nvfp4_prompt_streamk();  // gemm.nvfp4_prompt_streamk (resolved)
 void process_diag_set_nvfp4_prompt_streamk(bool v);
-[[nodiscard]] bool process_diag_f16_tile();         // gemm.f16_tile
-[[nodiscard]] bool process_diag_q6k_tile();         // gemm.q6k_tile
-[[nodiscard]] bool process_diag_mxfp4_tile();       // gemm.mxfp4_tile
-[[nodiscard]] bool process_diag_q45k_tile();        // gemm.q45k_tile
-[[nodiscard]] int process_diag_fp8_tile_min_m();    // gemm.fp8_tile_min_m: 0 off
 // test hook: force the paged-decode split-K path onto its single-split GQA/MHA
 // fallback even on a clean launch, so the fallback can be verified against the
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
@@ -146,10 +128,7 @@ void process_diag_set_nvfp4_prompt_streamk(bool v);
 void process_diag_set_force_splitk_fallback(bool v);
 
 // MoE
-int process_diag_moe_mr_nr();  // rows-per-block for NVFP4 MoE decode (4/8/16/32)
-// Read at model-load time by weight_upload (Pass 2 expert offload budget
-// + force-host-experts). No per-Engine context at that point.
-int process_diag_moe_expert_overhead_pct();
+// Read at model-load time by weight_upload (force-host-experts). No per-Engine context at that point.
 int process_diag_moe_force_host_experts();
 // Copy host-resident NVFP4 experts into pinned host memory at load (a trade:
 // +14.7 % prefill for 4.6x model-load time — see dispatch_policy.h).

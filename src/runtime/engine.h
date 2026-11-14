@@ -129,9 +129,9 @@ struct EngineConfig {
     // FP8 head instead of NVFP4 (larger than NVFP4, so an auto fallback to NVFP4 stays inside it).
     // lm_head_source_only: auto with an 8-bit quantized head, neither FP8 nor NVFP4 is built (#2224).
     bool nvfp4_decode_all = false, fp8_lm_head = false, lm_head_source_only = false;
-    // gemm.q8_drop_source: the planner credits the Q8_0 sources Phase 4c frees for their IMMA planes.
+    // Planner credits the Q8_0 sources Phase 4c frees for their IMMA planes (engine init sets it).
     bool q8_drop_source = false;
-    // gemm.q4k_in_place && gemm.q4k_imma_prefill: the planner prices dense Q4_K weights at 0 (no FP16 copy).
+    // Planner prices dense Q4_K weights at 0, no FP16 copy (engine init sets it).
     bool q4k_in_place = false;
 
     // Minimum KV cache tokens. Budget planner guarantees at least this many

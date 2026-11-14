@@ -298,7 +298,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         // MIXED_PRECISION export (Nemotron-3.5) stores Mamba in/out projections as F8_E4M3 with a
         // single FP32 weight_scale and no weight_scale_2; treating that as NVFP4's two-level
         // layout would mislabel the scale as per-16 micro-scales. Record the scalar (and the
-        // input_scale) and stop: Phase 1 serves the bytes as FP8 (gemm.fp8_native_prefill).
+        // input_scale) and stop: Phase 1 serves the bytes as FP8 (native FP8 prefill).
         if (w.qtype == QType::FP8_E4M3) {
             float s = 1.0f;
             if (sc.weight_scale.data) {
@@ -614,12 +614,9 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         }
         if (n_with_input_scale > 0) {
             // The scalar per-tensor activation scale (Modelopt input_scale, compressed-tensors
-            // input_global_scale): the W4A4 quantizers use it under gemm.nvfp4_static_act_scale.
-            IMP_LOG_INFO(
-                "NVFP4 prequant: %d Linears carry an input scale, %d decoded to a static act scale "
-                "(gemm.nvfp4_static_act_scale=%s)",
-                n_with_input_scale, n_act_scale,
-                dispatch_policy().gemm.nvfp4_static_act_scale ? "on" : "off");
+            // input_global_scale): the W4A4 quantizers use it.
+            IMP_LOG_INFO("NVFP4 prequant: %d Linears carry an input scale, %d decoded to a static act scale",
+                         n_with_input_scale, n_act_scale);
         }
     }
     if (n_native_fp8 > 0) {
@@ -645,7 +642,7 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         // Native-NVFP4 checkpoints: in_proj/out_proj (ssm_in/ssm_out) exist ONLY as NVFP4 bytes
         // (no FP16 copy, dequant_gpu has no NVFP4 path), so they MUST be registered here or
         // decode hands raw NVFP4 to gemm(), whose packed-weight guard skips it. GGUF-quant hybrids use the
-        // gemm.fp8_ssm_proj sidecar instead (phase 2b). Always register.
+        // SSM FP8 sidecar instead (phase 2b). Always register.
         auto register_prequant = [&](const Tensor& w) {
             if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
                 return;

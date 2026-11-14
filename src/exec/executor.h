@@ -374,7 +374,7 @@ public:
     const void* prenorm_out_ = nullptr;
     const void* prenorm_w_ = nullptr;
     int prenorm_n_ = 0;
-    // FP32-residual sandwich-norm fusion (gemm.fp32_residual_fuse, executor_fp32_residual.cpp, Gemma-4
+    // FP32-residual sandwich-norm fusion (executor_fp32_residual.cpp, Gemma-4
     // decode): each replaces a chain of norm / add / copy / scale / quantize launches, same bits.
     [[nodiscard]] bool fp32_resid_fuse_ok_(int n) const;
     // Q/K/V input from fp32_hidden_: skipped when the previous layer's tail wrote it, else one launch
@@ -466,11 +466,11 @@ public:
     unsigned long long* norm_fold_pending_ = nullptr;
     // Fused swiglu+quantize when the down projection takes the small-M
     // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
-    // small-M rows only (gemm.geglu_quant_fuse, K % 64: Gemma-4 shared down K 2112), else plain geglu().
+    // small-M rows only (K % 64: Gemma-4 shared down K 2112), else plain geglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
                                           TensorID consumer_id, int n, cudaStream_t stream,
                                           bool gelu = false);
-    // Gate + up GEMMs (NVFP4 act-quant dedupe). gemm.swiglu_quant_epilogue: the up epilogue writes the down
+    // Gate + up GEMMs (NVFP4 act-quant dedupe). SwiGLU quant epilogue: the up epilogue writes the down
     // input (packed + SfAtom in uo's buffer) into swiglu_epi_, uo / so stay unwritten; reset per run_ffn.
     void gate_up_prefill_(const TransformerLayer& ly, const Tensor& no, Tensor& go, Tensor& uo, int n,
                           const GemmContext& ctx);
@@ -551,19 +551,6 @@ public:
     // the small-M block first, so without this every captured batched-decode
     // graph baked in the dequant fallback (#1897). Falls back to lazy cudaMalloc growth otherwise.
     void allocate_smallm_scratch(cudaStream_t stream);
-
-    // Batched-decode residual accumulation eligibility (gemm.nvfp4_residual_beta1):
-    // the o/down/GDN-out projection may run beta=1 into hidden when it will
-    // take the smallm accumulate path. Shared by three call sites so the gates cannot drift apart.
-    [[nodiscard]] bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
-        if (!dispatch_policy().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
-            return false;
-        if (n <= 1 || n > 32 || h.qtype != QType::F16)
-            return false;
-        if (cur_spec_verify_ || lora_ != nullptr)
-            return false;
-        return registry_.handle(id).primary_tier == StorageTier::CUTLASS_NVFP4;
-    }
 
     // Capacity of the [n_heads, attn_seq, attn_seq] FP16 attn-scores workspace.
     // Engine's chunked-prefill path must clamp chunk_len so n × ctx_len ≤ cap².
@@ -962,16 +949,16 @@ private:
         int d = 0;
         bool pending = false;  // forked, phase 8 has not joined yet
     } shexp_overlap_;
-    // moe.expert_gather_overlap: the miss gather on its own stream, the hit GEMVs beside it.
+    // Expert gather overlap: the miss gather on its own stream, the hit GEMVs beside it.
     struct GatherOverlap {
         CudaStream stream;
         CudaEvent resolved;
         CudaEvent gathered;
-        // moe.expert_prefetch: predict + prefetch resolve on pf_stream, the prefetch gather on `stream`.
+        // Expert prefetch: predict + prefetch resolve on pf_stream, the prefetch gather on `stream`.
         CudaStream pf_stream;
         CudaEvent pf_fork, pf_read, pf_ready, pf_gathered;
         int pf_layer = -1;  // layer whose prefetch is in flight
-        VramOwned<char> pf_x;  // [d_model] FP16, moe.expert_prefetch_hc_norm router input (Qwen4Exp)
+        VramOwned<char> pf_x;  // [d_model] FP16, hc-norm router input (Qwen4Exp)
     } gather_overlap_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
@@ -1228,7 +1215,7 @@ private:
     [[nodiscard]] bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                    Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
     // Batched-decode GDN alpha+beta projections in one narrow FP16 launch
-    // (gdn.alpha_beta_smallm). False and no-op when a weight is not
+    // False and no-op when a weight is not
     // FP16-resident or a shape doesn't fit; caller then issues its two calls.
     [[nodiscard]] bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
                                     Tensor& beta_out, cudaStream_t stream);
@@ -1237,13 +1224,13 @@ private:
     // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
     // its source bytes). false = that dispatch would not take the GEMV.
     [[nodiscard]] bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
-    // M=1 GDN launch fusion (gdn.m1_fused): in_proj+gate+alpha+beta in one
+    // M=1 GDN launch fusion : in_proj+gate+alpha+beta in one
     // GEMV; out-proj adds the residual in its epilogue. False and no-op when a
     // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,
     // beta at the 256-byte-aligned offset) for the scan to read.
     [[nodiscard]] bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
                                  int n_heads, cudaStream_t stream, const NvFP4NormFoldIn& fold);
-    // M=1 GGUF twin (gdn.m1_dp4a): the dp4a-routed ones of in_proj / gate / alpha+beta in one gemv_dp4a_multi
+    // M=1 GGUF twin: the dp4a-routed ones of in_proj / gate / alpha+beta in one gemv_dp4a_multi
     // launch on one q8_1 quantize. Returns the kGdnDp4a* bits written (alpha/beta as above); 0 = no launch.
     enum : int { kGdnDp4aIn = 1, kGdnDp4aGate = 2, kGdnDp4aAb = 4, kGdnGateDone = 8, kGdnM1Fused = 16 };
     [[nodiscard]] int try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
@@ -1279,7 +1266,7 @@ private:
     [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
-    void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);
+    void moe_ffn_phase1_setup_();
     void moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
@@ -1321,12 +1308,12 @@ private:
     // Shared expert up to its gated down output in the given [n, eff] / [n, d] scratch, no add.
     Tensor shared_expert_core_(int layer, cudaStream_t stream, int n, int d, float eps, const Tensor& no,
                                void* gate_buf, void* up_buf, void* act_buf, void* down_buf, bool raw = false);
-    // moe.shared_expert_overlap (executor_forward_moe_nvfp4_host.cu): fork runs the shared expert
+    // Shared-expert overlap (executor_forward_moe_nvfp4_host.cu): fork runs the shared expert
     // on shexp_overlap_.stream; join waits for it and does the add. False = not forked.
     void init_shexp_overlap_();
     void free_shexp_overlap_();
-    void init_gather_overlap_();  // moe.expert_gather_overlap, moe.expert_prefetch
-    // Layer + 1's routing from layer's MoE input x (Qwen4Exp with moe.expert_prefetch_hc_norm: the hc
+    void init_gather_overlap_();  // expert gather overlap, expert prefetch
+    // Layer + 1's routing from layer's MoE input x (Qwen4Exp with the hc-norm router input: the hc
     // streams normed for layer + 1); true = its prefetch resolve runs on pf_stream.
     [[nodiscard]] bool predict_next_experts_(int layer, const void* x, cudaStream_t stream);
     void join_expert_prefetch_(cudaStream_t stream);  // waits for an unconsumed prefetch
@@ -1397,7 +1384,7 @@ public:
     // Phase 0's promotion and the initialised expert cache.
     void verify_host_expert_placement() const;
     // Builds the device-driven expert cache over the host-resident NVFP4 layers
-    // (moe.device_expert_cache); no-op when the pool or the mapped pinned slabs are missing.
+    // (device expert cache); no-op when the pool or the mapped pinned slabs are missing.
     // Returns true when every MoE layer whose experts stay on the host is served by it (a
     // captured decode step then replays correctly); the engine demotes graphs otherwise.
     [[nodiscard]] bool init_device_expert_cache();

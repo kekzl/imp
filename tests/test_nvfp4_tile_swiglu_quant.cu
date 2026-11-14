@@ -1,4 +1,4 @@
-// gemm_nvfp4_tile_swiglu_quant (gemm.swiglu_quant_epilogue): packed FP4 and SfAtom bytes of the down input
+// gemm_nvfp4_tile_swiglu_quant: packed FP4 and SfAtom bytes of the down input
 // equal gemm_nvfp4_tile (up, fp16) + swiglu_quantize_fp16_to_nvfp4_cutlass, per tile plan (data-parallel
 // 128x64 / 128x128 / 128x256, stream-K uniform / hybrid / split), ragged M, both act-scale modes, 2^-9 clamp
 // blocks.

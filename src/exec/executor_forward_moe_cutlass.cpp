@@ -9,11 +9,10 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
-#include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
-#include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
+#include "compute/quantize_fp16_nvfp4_moe_native.h"  // compute_M_per_from_offsets_device, bzero_sfa_active
 #include "quant/nvfp4_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
@@ -36,9 +35,9 @@ namespace imp {
 // must name the same winner. KNOWN LIMIT: a tier reordered ahead of the
 // winner that would have accepted stays invisible (chain short-circuits).
 // One-shot logging so a divergence cannot flood the serving log.
-static void verify_against_moe_routing_model(bool expert_bias_glu, const DispatchPolicy& rcfg,
-                                             const MoePrefillWorkspace& obs, MoePrefillPath chosen) {
-    const MoePrefillPath modeled = select_moe_prefill_path(expert_bias_glu, rcfg, obs);
+static void verify_against_moe_routing_model(bool expert_bias_glu, const MoePrefillWorkspace& obs,
+                                             MoePrefillPath chosen) {
+    const MoePrefillPath modeled = select_moe_prefill_path(expert_bias_glu, obs);
     if (modeled == chosen)
         return;
     static bool warned = false;
@@ -51,26 +50,6 @@ static void verify_against_moe_routing_model(bool expert_bias_glu, const Dispatc
         "moe_prefill_decision.h have drifted apart (F-3) — the routing unit test "
         "is now describing a dispatch that does not exist.",
         moe_prefill_path_name(chosen), moe_prefill_path_name(modeled));
-}
-
-// smallM alpha for the active experts (M_per[e] > 0): D2H d_alpha [ne], compact on host, H2D into
-// d_out. Cheaper than the activation-scale D2H it replaced. False on a failed copy: d_out unwritten.
-static bool compact_smallM_alpha(const float* d_alpha, float* d_out, const std::vector<int>& M_per,
-                                 cudaStream_t stream) {
-    std::vector<float> h_alpha(M_per.size());
-    cudaError_t err = cudaMemcpyAsync(h_alpha.data(), d_alpha, h_alpha.size() * sizeof(float),
-                                      cudaMemcpyDeviceToHost, stream);
-    if (err == cudaSuccess)
-        err = cudaStreamSynchronize(stream);
-    size_t na = 0;
-    for (size_t e = 0; err == cudaSuccess && e < M_per.size(); ++e)
-        if (M_per[e] > 0)
-            h_alpha[na++] = h_alpha[e];
-    if (err == cudaSuccess)
-        err = cudaMemcpyAsync(d_out, h_alpha.data(), na * sizeof(float), cudaMemcpyHostToDevice, stream);
-    if (err != cudaSuccess)
-        IMP_LOG_ERROR("smallM alpha compaction failed: %s", cudaGetErrorString(err));
-    return err == cudaSuccess;
 }
 
 // Pre-cache miss: per-call H2D of the expert pointer / alpha tables into the workspace caches. NOT
@@ -158,7 +137,7 @@ struct MoeDecodeGroupedIn {
     const MoEWorkspace& moe;
     const int32_t* d_offsets;
     int n, ne, d, eff, expanded;
-    int max_rows;   // moe.nvfp4_decode_rows
+    int max_rows;   // imp::cfg::kMoeNvfp4DecodeRows
     bool eligible;  // no calibration, no expert bias GLU (gpt-oss)
     bool non_gated;
     FFNActivation act;
@@ -215,8 +194,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         }
         return true;
     };
-    // Grouped NVFP4 path predicate. moe.no_cutlass3x forces legacy
-    // for debugging. Observations for the routing-model replay are filled in
+    // Grouped NVFP4 path predicate.
+    // Observations for the routing-model replay are filled in
     // as the chain is walked; a tier the chain never reaches keeps its false
     // (see verify_against_moe_routing_model's KNOWN LIMIT). Host-resident
     // NVFP4 experts: staging the layer here is why `covers_ids` cannot see these weights.
@@ -224,32 +203,27 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
 
     MoePrefillWorkspace obs{};
     obs.staged_blocks = ctx.staged_blocks;
-    static const bool force_off = dispatch_policy().moe.no_cutlass3x;
     const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
-    obs.grouped_available = !force_off && gemm_grouped_nvfp4_moe_supports(ne, d, eff) &&
-                            moe_.cutlass3x_packed && moe_.cutlass3x_sf && (staged_covers || ids_cover);
+    obs.grouped_available = gemm_grouped_nvfp4_moe_supports(ne, d, eff) && moe_.cutlass3x_packed &&
+                            moe_.cutlass3x_sf && (staged_covers || ids_cover);
     if (!obs.grouped_available) {
-        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
-                                         MoePrefillPath::LEGACY);
+        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, obs, MoePrefillPath::LEGACY);
         return false;
     }
 
     // Grouped NVFP4xNVFP4->FP16 tile GEMM (gemm_grouped_nvfp4_dispatch), no dequant pass, per-expert alpha
-    // from dargs.d_alpha in the epilogue; moe.no_cutlass3x forces legacy. Device-args: gate/up/act/down on
+    // from dargs.d_alpha in the epilogue. Device-args: gate/up/act/down on
     // device before any D2H+sync (MoE prefill graph capture). Legacy on dispatch failure or empty workspace.
     bool device_args_done = false;
     {
-        // moe.nvfp4_device_args: default on; set false to force the legacy
-        // host-args + smallM dispatch for A/B or workarounds.
-        const bool da_enabled = dispatch_policy().moe.nvfp4_device_args;
         // gpt-oss (#547): the fused act+quantize kernel knows SwiGLU/GeGLU/ReLU2 only and has no
         // per-expert bias hooks; the unstaged path below runs bias + apply_expert_activation
         // (GPT_OSS_GLU) + a plain quantize instead. The staged path keeps gpt-oss on legacy.
-        const bool use_device_args = da_enabled && (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) &&
-                                     moe_.d_M_per && moe_.d_M_per_count >= ne && moe_.d_sfa_offsets &&
-                                     moe_.d_B_ptrs_cache && moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
-                                     moe_.cutlass3x_packed && moe_.cutlass3x_sf && moe_.cutlass3x_sfa_ptrs &&
+        const bool use_device_args = (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) && moe_.d_M_per &&
+                                     moe_.d_M_per_count >= ne && moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
+                                     moe_.d_SFB_ptrs_cache && moe_.d_alpha_full && moe_.cutlass3x_packed &&
+                                     moe_.cutlass3x_sf && moe_.cutlass3x_sfa_ptrs &&
                                      moe_.cutlass3x_sfa_ptrs_count >= ne;
         if (use_device_args) {
             // Log once per process; layer==0 fires on every
@@ -259,7 +233,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             if (layer == 0 && !s_da_logged.exchange(true))
                 IMP_LOG_INFO(
                     "MoE prefill: CUTLASS 3.x device-args full path "
-                    "(default; set moe.nvfp4_device_args=false to disable)");
+                    "(default)");
             // Populate device-resident d_M_per (no D2H).
             imp::compute_M_per_from_offsets_device(static_cast<const int32_t*>(routing.expert_offsets.data),
                                                    moe_.d_M_per, ne, stream);
@@ -376,7 +350,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                     });
             } else if (run_moe_decode_grouped({da_cache, moe_,
                                                static_cast<const int32_t*>(routing.expert_offsets.data), n,
-                                               ne, d, eff, expanded, dispatch_policy().moe.nvfp4_decode_rows,
+                                               ne, d, eff, expanded, imp::cfg::kMoeNvfp4DecodeRows,
                                                calib_ == nullptr && !model_->profile().moe_expert_bias_glu,
                                                non_gated_experts, cfg.ffn_activation, expert_down_base,
                                                las.dn},
@@ -420,408 +394,167 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                 // host-args path below.
                 obs.device_args_ready = true;
                 dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
-                verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(),
-                                                 obs, MoePrefillPath::DEVICE_ARGS);
+                verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, obs,
+                                                 MoePrefillPath::DEVICE_ARGS);
             } else {
                 IMP_LOG_ERROR("device-args full path failed; falling back to legacy");
             }
         }
     }
 
-if (!device_args_done) {
-// Lazy moe_gather: caller skipped the upstream gather when this path was
-// predicted to fire; the fast path didn't, so the legacy fallback needs
-// the gathered FP16 intermediate. Idempotent (moe_gather_done guard).
-if (!ctx.moe_gather_done) {
-    int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
-    Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
-    moe_gather(ctx.no, routing, gathered, stream);
-    ctx.moe_gather_done = true;
-    IMP_LOG_WARN(
-        "MoE prefill: device-args predicted but inner gate refused — "
-        "lazy moe_gather + legacy fallback (one wasted decision; "
-        "investigate moe_cutlass3x_will_use_device_args_ mismatch)");
-}
-
-// Legacy D2H+sync + smallM + non-smallM dispatch path.
-moe_host_args_capture_guard(stream);
-std::vector<int32_t> h_offsets(ne + 1);
-moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                          static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                          cudaMemcpyDeviceToHost, stream),
-                          "cutlass3x legacy prefill");
-// Populate device-resident d_M_per in parallel with the D2H copy.
-// Phase 1 of MoE-prefill-graphs lever: foundation for graph-safe
-// dispatch (Phase 2+ migrates host M_per[] uses to this buffer).
-if (moe_.d_M_per && moe_.d_M_per_count >= ne) {
-    imp::compute_M_per_from_offsets_device(
-        static_cast<const int32_t*>(routing.expert_offsets.data),
-        moe_.d_M_per, ne, stream);
-}
-moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "cutlass3x legacy prefill");
-
-std::vector<int> M_per(ne);
-for (int e = 0; e < ne; ++e)
-    M_per[e] = h_offsets[e + 1] - h_offsets[e];
-
-char* gathered_base = static_cast<char*>(moe_.gathered.data);
-char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
-char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
-char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
-char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
-
-// Optional smallM kernel branch (opt-in moe.nvfp4_smallM): activates when
-// max(M_per) <= moe.nvfp4_smallM_threshold (default 64) AND all three
-// native NVFP4 MoE pointers are populated ([n_experts,N,K/16] layout).
-// Falls through to the grouped GEMM on any failure/unavailability.
-bool smallM_done = false;
-{
-    const auto& moe_cfg = dispatch_policy().moe;
-    const bool smallM_optin = moe_cfg.nvfp4_smallM && cfg.arch != ModelArch::GPT_OSS;
-    if (smallM_optin && imp::gemm_grouped_nvfp4_smallM_available()) {
-        const int smallM_threshold = moe_cfg.nvfp4_smallM_threshold;
-        int max_M = 0;
-        for (int e = 0; e < ne; ++e)
-            max_M = std::max(max_M, M_per[e]);
-        const bool native_up_ok = (ly.nvfp4_moe_up_ptr != nullptr);
-        const bool native_down_ok = (ly.nvfp4_moe_down_ptr != nullptr);
-        const bool native_gate_ok =
-            non_gated_experts || (ly.nvfp4_moe_gate_ptr != nullptr);
-        const bool gate_ne_ok =
-            non_gated_experts ||
-            (ly.nvfp4_moe_gate_ptr && ly.nvfp4_moe_gate_ptr->n_experts == ne);
-        const bool up_ne_ok =
-            native_up_ok && ly.nvfp4_moe_up_ptr->n_experts == ne;
-        const bool down_ne_ok =
-            native_down_ok && ly.nvfp4_moe_down_ptr->n_experts == ne;
-        const bool scratch_ok = moe_.smallM_count >= ne;  // set only with both scratch pointers
-        const bool use_smallM = max_M > 0 && max_M <= smallM_threshold && native_up_ok && native_down_ok &&
-                                native_gate_ok && up_ne_ok && down_ne_ok && gate_ne_ok && scratch_ok;
-        if (use_smallM) {
-            if (layer == 0) {
-                IMP_LOG_INFO(
-                    "MoE prefill: smallM kernel branch (n=%d, expanded=%d, "
-                    "max_M=%d, thr=%d)",
-                    n, expanded, max_M, smallM_threshold);
-            }
-
-            // Per-expert offsets into the activation scratch (native
-            // row-major: K/2 bytes per FP4 row, K/16 per UE4M3-SF row).
-            auto compute_offsets =
-                [&](int K_in, std::vector<size_t>& packed_offs,
-                    std::vector<size_t>& sf_offs) {
-                    packed_offs.assign(ne + 1, 0);
-                    sf_offs.assign(ne + 1, 0);
-                    for (int e = 0; e < ne; ++e) {
-                        packed_offs[e + 1] = packed_offs[e] + (static_cast<size_t>(M_per[e]) * K_in / 2);
-                        sf_offs[e + 1] = sf_offs[e] + (static_cast<size_t>(M_per[e]) * K_in / 16);
-                    }
-                };
-
-            char* act_packed_base =
-                static_cast<char*>(moe_.cutlass3x_packed);
-            char* act_sf_base = static_cast<char*>(moe_.cutlass3x_sf);
-
-            std::vector<size_t> packed_offs_du, sf_offs_du;
-            compute_offsets(d, packed_offs_du, sf_offs_du);
-
-            bool ok = (packed_offs_du[ne] <= moe_.cutlass3x_packed_size) &&
-                      (sf_offs_du[ne] <= moe_.cutlass3x_sf_size);
-            if (!ok) {
-                IMP_LOG_ERROR(
-                    "smallM gate/up scratch too small (need %zu/%zu, "
-                    "have %zu/%zu); falling back to the grouped GEMM",
-                    packed_offs_du[ne], sf_offs_du[ne], moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
-            }
-
-            std::vector<void*> act_packed_ptrs(ne), act_sf_ptrs(ne);
-            // Workspace scratch (#2446), stream-ordered reuse across projections:
-            // [0,ne) act tensor scales, [ne,2ne) alpha, [2ne,3ne) compacted alpha.
-            float* d_act_tscales = moe_.smallM_scales;
-            float* d_alpha = moe_.smallM_scales + ne;
-            float* d_alpha_compact_dev = moe_.smallM_scales + (2 * static_cast<ptrdiff_t>(ne));
-            if (ok) {
-                for (int e = 0; e < ne; ++e) {
-                    act_packed_ptrs[e] = act_packed_base + packed_offs_du[e];
-                    act_sf_ptrs[e] = act_sf_base + sf_offs_du[e];
-                }
-
-                // Quantize gathered FP16 activations native row-major,
-                // and have the kernel emit per-expert tensor_scales.
-                ok = imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
-                    reinterpret_cast<const __half*>(gathered_base), act_packed_ptrs.data(),
-                    act_sf_ptrs.data(), d_act_tscales, static_cast<const int*>(routing.expert_offsets.data),
-                    expanded, d, ne, moe_.smallM_ptrs, stream);
-                if (!ok)
-                    IMP_LOG_ERROR("smallM gate/up quantize failed; falling back to the grouped GEMM");
-            }
-
-            // Builds per-expert weight pointer arrays from the native
-            // NvFP4MoEQuantResult cache; alpha = act_ts*weight_ts, computed entirely
-            // on device (compute_moe_alpha_device). run_proj takes d_act_ts (device
-            // float*), not a host vector; weight scales H2D once per projection (~ne*4 bytes), multiplied on
-            // device.
-            auto run_proj = [&](const NvFP4MoEQuantResult* W,
-                                const std::vector<void*>& act_packed,
-                                const std::vector<void*>& act_sf,
-                                const float* d_act_ts,  // device ptr
-                                char* c_base,
-                                int K_in, int N_out) -> bool {
-                if (!W)  // no NVFP4 weights for this projection: fail, caller falls back
-                    return false;
-                // W->tensor_scales is already on device if non-null.
-                if (W->tensor_scales) {
-                    // Compute alpha = act_ts * weight_ts on device.
-                    imp::compute_moe_alpha_device(
-                        d_act_ts, W->tensor_scales, d_alpha, ne, stream);
-                } else {
-                    // No weight tensor_scale: alpha = act_ts * 1.0
-                    // Copy act_ts into d_alpha directly.
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                        d_alpha, d_act_ts,
-                        static_cast<size_t>(ne) * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream));
-                }
-                std::vector<int> active_M_local;
-                std::vector<const void*> hA, hSFA, hB, hSFB;
-                std::vector<void*> hD;
-                active_M_local.reserve(ne);
-                hA.reserve(ne);
-                hSFA.reserve(ne);
-                hB.reserve(ne);
-                hSFB.reserve(ne);
-                hD.reserve(ne);
-                // Compacting alpha for active experts is only needed when some M_per[e]==0
-                // experts are skipped; reads d_alpha back only then, otherwise passes d_alpha directly.
-                bool all_active = true;
-                for (int e = 0; e < ne; ++e)
-                    if (M_per[e] == 0) { all_active = false; break; }
-
-                for (int e = 0; e < ne; ++e) {
-                    if (M_per[e] == 0)
-                        continue;
-                    active_M_local.push_back(M_per[e]);
-                    hA.push_back(act_packed[e]);
-                    hSFA.push_back(act_sf[e]);
-                    hB.push_back(static_cast<char*>(W->packed_data) +
-                                 (static_cast<size_t>(e) * W->expert_stride_packed));
-                    hSFB.push_back(static_cast<char*>(W->micro_scales) +
-                                   (static_cast<size_t>(e) * W->expert_stride_ms));
-                    hD.push_back(c_base + (static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half)));
-                }
-                const int na = static_cast<int>(active_M_local.size());
-                if (na == 0)
-                    return true;
-
-                // d_alpha_active: compact device buffer for the na active
-                // experts. When all experts are active, d_alpha == d_alpha_active.
-                float* d_alpha_active = d_alpha;
-                if (!all_active) {
-                    if (!compact_smallM_alpha(d_alpha, d_alpha_compact_dev, M_per, stream))
-                        return false;
-                    d_alpha_active = d_alpha_compact_dev;
-                }
-
-                return imp::gemm_grouped_nvfp4_smallM(na, active_M_local.data(), N_out, K_in, hA.data(),
-                                                      hSFA.data(), hB.data(), hSFB.data(), hD.data(),
-                                                      d_alpha_active, moe_.smallM_tables,
-                                                      moe_.smallM_tables_bytes, stream);
-            };
-
-            bool ok_gate = ok;
-            if (ok && !non_gated_experts) {
-                ok_gate = run_proj(ly.nvfp4_moe_gate_ptr, act_packed_ptrs,
-                                   act_sf_ptrs, d_act_tscales,
-                                   expert_gate_base, d, eff);
-            }
-            bool ok_up = ok;
-            if (ok) {
-                ok_up = run_proj(ly.nvfp4_moe_up_ptr, act_packed_ptrs,
-                                 act_sf_ptrs, d_act_tscales,
-                                 expert_up_base, d, eff);
-            }
-
-            if (ok && ok_gate && ok_up) {
-                apply_expert_activation(
-                    moe_.expert_gate.data, moe_.expert_up.data,
-                    moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
-                    compute_dtype_, cfg.ffn_activation, stream);
-
-                // Down projection: re-quantize post-activation buffer
-                // (K_in = eff). Reuse staging via stream-ordered
-                // overwrite.
-                std::vector<size_t> packed_offs_dn, sf_offs_dn;
-                compute_offsets(eff, packed_offs_dn, sf_offs_dn);
-                bool down_ok =
-                    (packed_offs_dn[ne] <= moe_.cutlass3x_packed_size) &&
-                    (sf_offs_dn[ne] <= moe_.cutlass3x_sf_size);
-                if (!down_ok) {
-                    IMP_LOG_ERROR(
-                        "smallM down scratch too small (need %zu/%zu, "
-                        "have %zu/%zu); falling back to the grouped GEMM",
-                        packed_offs_dn[ne], sf_offs_dn[ne], moe_.cutlass3x_packed_size,
-                        moe_.cutlass3x_sf_size);
-                }
-                if (down_ok) {
-                    for (int e = 0; e < ne; ++e) {
-                        act_packed_ptrs[e] =
-                            act_packed_base + packed_offs_dn[e];
-                        act_sf_ptrs[e] = act_sf_base + sf_offs_dn[e];
-                    }
-                    char* down_act = non_gated_experts ? expert_up_base
-                                                        : expert_swiglu_base;
-                    // Re-quantize post-SwiGLU activations into the same scale slot
-                    // (gate/up are done with it, stream-ordered).
-                    const bool ok_down = imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
-                                             reinterpret_cast<const __half*>(down_act),
-                                             act_packed_ptrs.data(), act_sf_ptrs.data(), d_act_tscales,
-                                             static_cast<const int*>(routing.expert_offsets.data), expanded,
-                                             eff, ne, moe_.smallM_ptrs, stream) &&
-                                         run_proj(ly.nvfp4_moe_down_ptr, act_packed_ptrs, act_sf_ptrs,
-                                                  d_act_tscales, expert_down_base, eff, d);
-                    if (ok_down) {
-                        smallM_done = true;
-                        // Again the outcome, not the gate: a smallM gate/up or
-                        // down dispatch failure falls through to GROUPED below.
-                        obs.smallM_available = true;
-                        obs.smallM_under_threshold = true;
-                        dispatch_record::set_moe_prefill_tier(MoePrefillPath::SMALL_M);
-                        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu,
-                                                         dispatch_policy(), obs, MoePrefillPath::SMALL_M);
-                    } else {
-                        IMP_LOG_ERROR(
-                            "smallM down dispatch failed; falling back to "
-                            "the grouped GEMM");
-                    }
-                }
-            } else if (ok) {
-                IMP_LOG_ERROR(
-                    "smallM gate/up dispatch failed; falling back to "
-                    "the grouped GEMM");
-            }
+    if (!device_args_done) {
+        // Lazy moe_gather: caller skipped the upstream gather when this path was
+        // predicted to fire; the fast path didn't, so the legacy fallback needs
+        // the gathered FP16 intermediate. Idempotent (moe_gather_done guard).
+        if (!ctx.moe_gather_done) {
+            int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+            Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
+            moe_gather(ctx.no, routing, gathered, stream);
+            ctx.moe_gather_done = true;
+            IMP_LOG_WARN(
+                "MoE prefill: device-args predicted but inner gate refused — "
+                "lazy moe_gather + legacy fallback (one wasted decision; "
+                "investigate moe_cutlass3x_will_use_device_args_ mismatch)");
         }
-    }
-}
 
-if (!smallM_done) {
-    dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
-    obs.grouped_ready = true;
-    verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
-                                     MoePrefillPath::GROUPED);
-    if (layer == 0)
-        IMP_LOG_INFO("MoE prefill: grouped NVFP4 host-args (n=%d, expanded=%d)", n, expanded);
-}
+        // Legacy D2H+sync grouped dispatch path.
+        moe_host_args_capture_guard(stream);
+        std::vector<int32_t> h_offsets(ne + 1);
+        moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                                  static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                                  cudaMemcpyDeviceToHost, stream),
+                                  "cutlass3x legacy prefill");
+        // Populate device-resident d_M_per in parallel with the D2H copy.
+        // Phase 1 of MoE-prefill-graphs lever: foundation for graph-safe
+        // dispatch (Phase 2+ migrates host M_per[] uses to this buffer).
+        if (moe_.d_M_per && moe_.d_M_per_count >= ne) {
+            imp::compute_M_per_from_offsets_device(static_cast<const int32_t*>(routing.expert_offsets.data),
+                                                   moe_.d_M_per, ne, stream);
+        }
+        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "cutlass3x legacy prefill");
 
-if (!smallM_done) {
+        std::vector<int> M_per(ne);
+        for (int e = 0; e < ne; ++e)
+            M_per[e] = h_offsets[e + 1] - h_offsets[e];
 
-// Active-expert SFA offset table, computed per K_in (differs for d vs
-// eff). Gate and up share K_in=d, so one quantize of gathered_base +
-// pointer array is reused for both grouped GEMMs; down reuses the staging
-// buffer with a fresh quantize for K_in=eff.
-auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_offsets,
-                         std::vector<uint8_t*>& h_sfa_bases, float act_scale) -> bool {
-    sfa_offsets.assign(ne + 1, 0);
-    h_sfa_bases.assign(ne, nullptr);
-    size_t total_packed = 0;
-    for (int e = 0; e < ne; ++e) {
-        total_packed += static_cast<size_t>(M_per[e]) * K_in / 2;
-        sfa_offsets[e + 1] = sfa_offsets[e] + cutlass_nvfp4_sf_size(M_per[e], K_in);
-    }
-    const size_t total_sfa = sfa_offsets[ne];
-    if (total_packed > moe_.cutlass3x_packed_size || total_sfa > moe_.cutlass3x_sf_size) {
-        IMP_LOG_ERROR(
-            "CUTLASS 3.x MoE staging too small: need packed=%zu sf=%zu, have %zu/%zu",
-            total_packed, total_sfa, moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
-        return false;
-    }
-    uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
-    for (int e = 0; e < ne; ++e) {
-        if (M_per[e] > 0)
-            h_sfa_bases[e] = all_sfa + sfa_offsets[e];
-    }
-    // Upload SFA pointer array to device (~1 KB).
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.cutlass3x_sfa_ptrs),
-                                       static_cast<const void*>(h_sfa_bases.data()),
-                                       static_cast<size_t>(ne) * sizeof(uint8_t*), cudaMemcpyHostToDevice,
-                                       stream));
-    // Zero active SFA region (SfAtom pads rows to 128).
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
-    // Fused per-expert quantize in one kernel launch.
-    quantize_fp16_to_nvfp4_cutlass_moe(a_base, moe_.cutlass3x_packed, moe_.cutlass3x_sfa_ptrs,
-                                       routing.expert_offsets.data
-                                           ? static_cast<const int*>(routing.expert_offsets.data)
-                                           : nullptr,
-                                       expanded, K_in, ne, stream, act_scale);
-    return true;
-};
+        char* gathered_base = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base = static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 
-// Legacy host-args dispatch, entered only when the default-on device-args
-// full path failed its precondition check (workspace buffers not
-// populated). Kept as the safety-net fallback path.
-auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in, int N_out,
-                        const std::vector<size_t>& sfa_offsets, float act_scale) {
-    std::vector<const void*> hB(ne), hSFB(ne);
-    std::vector<float> hAlpha(ne);
-    for (int e = 0; e < ne; ++e) {
-        const auto& h = registry_.handle(weight_ids[e]);
-        hB[e] = h.payload.cutlass_nvfp4.weight;
-        hSFB[e] = h.payload.cutlass_nvfp4.sf;
-        hAlpha[e] = h.cutlass_nvfp4_alpha(act_scale);
-    }
-    GroupedNvfp4HostArgs args{};
-    args.offsets = h_offsets.data();
-    args.sfa_offsets = sfa_offsets.data();
-    args.B = hB.data();
-    args.SFB = hSFB.data();
-    args.alpha = hAlpha.data();
-    args.base_A_packed = moe_.cutlass3x_packed;
-    args.base_A_sf = moe_.cutlass3x_sf;
-    args.base_D = c_base;
-    // Last tier: an unwritten expert output fails the request instead of reaching the logits (#2446).
-    if (!gemm_grouped_nvfp4_host_args(ne, N_out, K_in, expanded, args, stream))
-        throw std::runtime_error("grouped NVFP4 host-args dispatch failed (K=" + std::to_string(K_in) +
-                                 " N=" + std::to_string(N_out) + " ne=" + std::to_string(ne) + ")");
-};
+        dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
+        obs.grouped_ready = true;
+        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, obs, MoePrefillPath::GROUPED);
+        if (layer == 0)
+            IMP_LOG_INFO("MoE prefill: grouped NVFP4 host-args (n=%d, expanded=%d)", n, expanded);
 
-// Gate+Up share the same input (gathered_base, K_in=d) → quantize once,
-// run two grouped GEMMs reusing staging buffers.
-std::vector<size_t> sfa_offs;
-std::vector<uint8_t*> sfa_bases;
-if (quantize_once(gathered_base, d, sfa_offs, sfa_bases, las.gu)) {
-    if (!non_gated_experts)
-        grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs, las.gu);
-    grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs, las.gu);
-}
+        // Active-expert SFA offset table, computed per K_in (differs for d vs
+        // eff). Gate and up share K_in=d, so one quantize of gathered_base +
+        // pointer array is reused for both grouped GEMMs; down reuses the staging
+        // buffer with a fresh quantize for K_in=eff.
+        auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_offsets,
+                                 std::vector<uint8_t*>& h_sfa_bases, float act_scale) -> bool {
+            sfa_offsets.assign(ne + 1, 0);
+            h_sfa_bases.assign(ne, nullptr);
+            size_t total_packed = 0;
+            for (int e = 0; e < ne; ++e) {
+                total_packed += static_cast<size_t>(M_per[e]) * K_in / 2;
+                sfa_offsets[e + 1] = sfa_offsets[e] + cutlass_nvfp4_sf_size(M_per[e], K_in);
+            }
+            const size_t total_sfa = sfa_offsets[ne];
+            if (total_packed > moe_.cutlass3x_packed_size || total_sfa > moe_.cutlass3x_sf_size) {
+                IMP_LOG_ERROR("CUTLASS 3.x MoE staging too small: need packed=%zu sf=%zu, have %zu/%zu",
+                              total_packed, total_sfa, moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                return false;
+            }
+            uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
+            for (int e = 0; e < ne; ++e) {
+                if (M_per[e] > 0)
+                    h_sfa_bases[e] = all_sfa + sfa_offsets[e];
+            }
+            // Upload SFA pointer array to device (~1 KB).
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.cutlass3x_sfa_ptrs),
+                                               static_cast<const void*>(h_sfa_bases.data()),
+                                               static_cast<size_t>(ne) * sizeof(uint8_t*),
+                                               cudaMemcpyHostToDevice, stream));
+            // Zero active SFA region (SfAtom pads rows to 128).
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
+            // Fused per-expert quantize in one kernel launch.
+            quantize_fp16_to_nvfp4_cutlass_moe(a_base, moe_.cutlass3x_packed, moe_.cutlass3x_sfa_ptrs,
+                                               routing.expert_offsets.data
+                                                   ? static_cast<const int*>(routing.expert_offsets.data)
+                                                   : nullptr,
+                                               expanded, K_in, ne, stream, act_scale);
+            return true;
+        };
 
-// gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
-// expert-sorted — same seam as the dequant batch path).
-const int32_t* gpt_oss_offsets = model_->profile().moe_expert_bias_glu
-                                     ? static_cast<const int32_t*>(routing.expert_offsets.data)
-                                     : nullptr;
-if (gpt_oss_offsets) {
-    moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, gpt_oss_offsets, ne,
-                               expanded, eff, stream);
-    moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, gpt_oss_offsets, ne,
-                               expanded, eff, stream);
-}
+        // Legacy host-args dispatch, entered only when the default-on device-args
+        // full path failed its precondition check (workspace buffers not
+        // populated). Kept as the safety-net fallback path.
+        auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in, int N_out,
+                                const std::vector<size_t>& sfa_offsets, float act_scale) {
+            std::vector<const void*> hB(ne), hSFB(ne);
+            std::vector<float> hAlpha(ne);
+            for (int e = 0; e < ne; ++e) {
+                const auto& h = registry_.handle(weight_ids[e]);
+                hB[e] = h.payload.cutlass_nvfp4.weight;
+                hSFB[e] = h.payload.cutlass_nvfp4.sf;
+                hAlpha[e] = h.cutlass_nvfp4_alpha(act_scale);
+            }
+            GroupedNvfp4HostArgs args{};
+            args.offsets = h_offsets.data();
+            args.sfa_offsets = sfa_offsets.data();
+            args.B = hB.data();
+            args.SFB = hSFB.data();
+            args.alpha = hAlpha.data();
+            args.base_A_packed = moe_.cutlass3x_packed;
+            args.base_A_sf = moe_.cutlass3x_sf;
+            args.base_D = c_base;
+            // Last tier: an unwritten expert output fails the request instead of reaching the logits (#2446).
+            if (!gemm_grouped_nvfp4_host_args(ne, N_out, K_in, expanded, args, stream))
+                throw std::runtime_error(
+                    "grouped NVFP4 host-args dispatch failed (K=" + std::to_string(K_in) +
+                    " N=" + std::to_string(N_out) + " ne=" + std::to_string(ne) + ")");
+        };
 
-apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
-                        moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
-                        compute_dtype_, cfg.ffn_activation, stream);
+        // Gate+Up share the same input (gathered_base, K_in=d) → quantize once,
+        // run two grouped GEMMs reusing staging buffers.
+        std::vector<size_t> sfa_offs;
+        std::vector<uint8_t*> sfa_bases;
+        if (quantize_once(gathered_base, d, sfa_offs, sfa_bases, las.gu)) {
+            if (!non_gated_experts)
+                grouped_gemm(ly.expert_gate_ids, expert_gate_base, d, eff, sfa_offs, las.gu);
+            grouped_gemm(ly.expert_up_ids, expert_up_base, d, eff, sfa_offs, las.gu);
+        }
 
-// Down has a different activation (post-SwiGLU, K_in=eff): re-quantize.
-// A fused silu(gate)*up+quantize kernel regressed short-prompt decode
-// (~11%, low SM occupancy at small expanded); the separate swiglu kernel
-// has better per-element parallelism, kept separate.
-char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-if (quantize_once(down_act, eff, sfa_offs, sfa_bases, las.dn)) {
-    grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs, las.dn);
-    if (gpt_oss_offsets)
-        moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, gpt_oss_offsets, ne,
-                                   expanded, d, stream);
-}
-}  // !smallM_done
-}  // !device_args_done
+        // gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
+        // expert-sorted — same seam as the dequant batch path).
+        const int32_t* gpt_oss_offsets = model_->profile().moe_expert_bias_glu
+                                             ? static_cast<const int32_t*>(routing.expert_offsets.data)
+                                             : nullptr;
+        if (gpt_oss_offsets) {
+            moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, gpt_oss_offsets, ne,
+                                       expanded, eff, stream);
+            moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, gpt_oss_offsets, ne, expanded,
+                                       eff, stream);
+        }
+
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                                non_gated_experts, expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
+
+        // Down has a different activation (post-SwiGLU, K_in=eff): re-quantize.
+        // A fused silu(gate)*up+quantize kernel regressed short-prompt decode
+        // (~11%, low SM occupancy at small expanded); the separate swiglu kernel
+        // has better per-element parallelism, kept separate.
+        char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+        if (quantize_once(down_act, eff, sfa_offs, sfa_bases, las.dn)) {
+            grouped_gemm(ly.expert_down_ids, expert_down_base, eff, d, sfa_offs, las.dn);
+            if (gpt_oss_offsets)
+                moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, gpt_oss_offsets, ne,
+                                           expanded, d, stream);
+        }
+    }  // !device_args_done
     return true;
 }
 

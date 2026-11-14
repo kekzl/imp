@@ -2,7 +2,6 @@
 
 #include "model/model.h"
 #include "quant/nvfp4_gemm.h"
-#include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 #include "compute/fp4_attn_geometry.h"
 
 #include <algorithm>
@@ -408,8 +407,8 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
 
     // Small-M NVFP4 scratch (executor_gemm_smallm.cpp): the largest of the v1/v2 split-K
     // workspaces over the dense projections (the LM head never takes this route), plus the
-    // packed 32-row activation for the widest K. Both kernel variants are charged because
-    // the choice is a runtime knob (gemm.nvfp4_smallm_impl). The ws kernel (impl 3, the only one at
+    // packed 32-row activation for the widest K. Both kernel variants are charged: kSmallMImpl
+    // picks v2 per shape, gemm.nvfp4_smallm_a4=false runs v1. The ws kernel (impl 3, the only one at
     // K % 128 == 64) needs the activation only; executor_gemm_smallm.cpp takes >= 256 workspace bytes.
     {
         size_t ws = 0;
@@ -442,20 +441,17 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // sum (ne+1) int64. A few KiB total; charged so the arena is sized for them.
     if (shape.n_experts > 0) {
         const size_t ne = static_cast<size_t>(shape.n_experts);
-        out.moe_arrays = (3 * ne * sizeof(void*))               // d_work_ptrs
-                         + (ne * sizeof(float))                 // d_fp8_scales
-                         + (ne * sizeof(int32_t))               // d_M_per
-                         + (ne * sizeof(float))                 // d_alpha_compact
-                         + sizeof(int32_t)                      // d_na
-                         + ((ne + 1) * sizeof(int64_t))         // d_sfa_offsets
-                         + (2 * ne * sizeof(void*))             // d_B_ptrs_cache, d_SFB_ptrs_cache
-                         + (ne * sizeof(float))                 // d_alpha_full
-                         + (ne * sizeof(void*))                 // d_weight_ptrs
-                         + (ne * sizeof(void*))                 // cutlass3x_sfa_ptrs
-                         + (2 * ne * sizeof(void*))             // smallM_ptrs (#2446)
-                         + (3 * ne * sizeof(float))             // smallM_scales (#2446)
-                         + smallM_table_bytes(shape.n_experts)  // smallM kernel tables (#2451)
-                         + (12 * kTakeAlign);                   // per-take 256 B alignment
+        out.moe_arrays = (3 * ne * sizeof(void*))        // d_work_ptrs
+                         + (ne * sizeof(float))          // d_fp8_scales
+                         + (ne * sizeof(int32_t))        // d_M_per
+                         + (ne * sizeof(float))          // d_alpha_compact
+                         + sizeof(int32_t)               // d_na
+                         + ((ne + 1) * sizeof(int64_t))  // d_sfa_offsets
+                         + (2 * ne * sizeof(void*))      // d_B_ptrs_cache, d_SFB_ptrs_cache
+                         + (ne * sizeof(float))          // d_alpha_full
+                         + (ne * sizeof(void*))          // d_weight_ptrs
+                         + (ne * sizeof(void*))          // cutlass3x_sfa_ptrs
+                         + (11 * kTakeAlign);            // per-take 256 B alignment
     }
 
     // dp4a input staging, all three tenants of one sizing family. max_blocks = max(max_k/32,
@@ -637,10 +633,10 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
     return exec_t2_demand(model, max_seq_len, 1, false);
 }
 
-bool fp8_act_scratch_needed(const Model& model, bool use_fp8_prefill, bool fp8_native_prefill) {
+bool fp8_act_scratch_needed(const Model& model, bool use_fp8_prefill) {
     if (use_fp8_prefill)
         return true;
-    for (int i = 0; fp8_native_prefill && i < model.n_layers(); ++i) {
+    for (int i = 0; i < model.n_layers(); ++i) {
         const auto& L = model.layer(i);
         for (const Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in,
                                 &L.ssm_out, &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared})

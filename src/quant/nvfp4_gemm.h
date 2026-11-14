@@ -98,7 +98,7 @@ struct SmallMV2Sibling {
                                   const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
                                   int K, cudaStream_t stream);
 
-// Weight-streaming small-M GEMM (nvfp4_gemm_smallm_ws.cu, gemm.nvfp4_smallm_impl 3): plain NVFP4 W and
+// Weight-streaming small-M GEMM (nvfp4_gemm_smallm_ws.cu, kSmallMImpl 3): plain NVFP4 W and
 // Xq, y = ts * Xq W^T + beta * y, one launch, no workspace. M 1..32, K % 64 == 0, N % 16 == 0; false
 // (y untouched) otherwise. A row's bits depend on K only, never on M, N or its neighbours.
 inline constexpr int kNvfp4SmallMWsMaxM = 32;

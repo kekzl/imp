@@ -6,7 +6,6 @@
 #include "quant/nvfp4_gemm_internal.cuh"
 #include "quant/nvfp4_quant.h"
 #include "core/pdl_launch.cuh"
-#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -177,14 +176,10 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(const uint8_t* __restrict__ pack
 // reduction (n_mb <= 512, i.e., K <= 8192).
 static bool use_moe_multirow(int K) { return (K / kMicroBlockSize) <= 512; }
 
-// Tile-tuning knob: NR from RuntimeConfig, clamped to {4,8,16,32}. Default 8: the
-// 2026-09-06 sweep found 16/32 losses (-0.96%, -5.15% tg128); 4 unresolved (led 8/9 paired
-// runs, but by less than this host's noise floor once busy). See src/core/config/moe.h.
-static int resolve_mr_nr() {
-    int v = imp::process_diag_moe_mr_nr();
-    if (v == 4 || v == 8 || v == 16 || v == 32) return v;
-    return 8;
-}
+// Rows per block (former moe.mr_nr), one of {4,8,16,32}: 2026-09-06 sweep, 16/32 lose tg128 -0.96 % /
+// -5.15 %, 4 led 8/9 paired runs by less than the host's noise floor. Output bit-identical across NR.
+static constexpr int kMoeMrNr = 8;
+static int resolve_mr_nr() { return kMoeMrNr; }
 
 // Dispatches a single-output MR-decode launch for the requested NR (one warp/row,
 // threads-per-block = NR*32). The thread-count match keeps the

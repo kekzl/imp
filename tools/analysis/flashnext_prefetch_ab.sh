@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Flash-Next server decode A/B for moe.expert_prefetch: fresh imp-server per arm, one warm request, then
+# Flash-Next server decode A/B of images (next-layer expert prefetch, kMoeExpertPrefetch): fresh imp-server
+# per arm, one warm request, then
 # seq_stream_client.py (6 real prompts x GEN greedy tokens, decode tok/s per request + MEDIAN, answers in
 # OUT/TAG.NAME.txt for byte compares), graceful stop so
 # the device expert cache stats line (hits, misses, prefetched, routed) reaches the log. Arms alternate PAIRS times.

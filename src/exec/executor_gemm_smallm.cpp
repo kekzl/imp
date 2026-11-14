@@ -77,8 +77,6 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out)
 }
 
 void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
-    if (!dispatch_policy().gemm.nvfp4_smallm)
-        return;
     // Size for decode rows: that is when the GGUF overlay arm is live.
     const bool saved = cur_decode_rows_;
     cur_decode_rows_ = true;
@@ -97,7 +95,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
         // A16 (gemm.nvfp4_smallm_a4=false) runs the dequant+HMMA kernel at every shape; the ws kernel needs
         // no workspace.
         const SmallMKernel kern = dispatch_policy().gemm.nvfp4_smallm_a4
-                                      ? smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, N, K)
+                                      ? smallm_kernel_for(kSmallMImpl, N, K)
                                       : ((K % 128) == 0 ? SmallMKernel::kV1 : SmallMKernel::kNone);
         ws_need = std::max(ws_need, smallm_workspace_bytes(kern, N, K));
         xq_need = std::max(xq_need, ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16)));
@@ -135,7 +133,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out, float* act_scale_out, int k_align) {
-    if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4)
+    if (!dispatch_policy().gemm.nvfp4_smallm_a4)
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K % k_align) != 0)
         return nullptr;
@@ -143,8 +141,7 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
         return nullptr;
     NvFP4QuantResult nv;
     if (!smallm_weight_(registry_.handle(consumer_id), nv) || static_cast<int>(nv.K) != K ||
-        smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, static_cast<int>(nv.N), K) ==
-            SmallMKernel::kNone)
+        smallm_kernel_for(kSmallMImpl, static_cast<int>(nv.N), K) == SmallMKernel::kNone)
         return nullptr;
     const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
     ensure_smallm_xq_(xq_need, stream);
@@ -246,7 +243,7 @@ void GraphExecutor::ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Te
 
 bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
                                        int n, cudaStream_t stream, bool gelu) {
-    if (swiglu_epi_.act != nullptr)  // the up GEMM's epilogue did it (gemm.swiglu_quant_epilogue)
+    if (swiglu_epi_.act != nullptr)  // the up GEMM's epilogue did it (swiglu_epi_eligible_)
         return false;
     const int K = static_cast<int>(so.shape[1]);
     // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
@@ -261,10 +258,8 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     }
     uint8_t* xq_scales = nullptr;
     float as = 1.0f;
-    // GeGLU: K % 64 (the ws kernel's K; Gemma-4 shared down K 2112), behind gemm.geglu_quant_fuse.
-    uint8_t* xq_packed = nullptr;
-    if (!gelu || dispatch_policy().gemm.geglu_quant_fuse)
-        xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as, gelu ? 64 : 256);
+    // GeGLU: K % 64 (the ws kernel's K; Gemma-4 shared down K 2112).
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as, gelu ? 64 : 256);
     if (xq_packed != nullptr &&
         (gelu ? geglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as)
               : swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as))) {
@@ -290,11 +285,9 @@ static size_t swiglu_epi_sf_offset(int n, int N) {
 // nothing reads uo / so after the activation (LoRA, calibration, debug dumps).
 bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tensor& no, const Tensor& go,
                                          const Tensor& uo, int n) const {
-    const int tile_min_m = process_diag_nvfp4_tile_min_m();
-    if (!dispatch_policy().gemm.swiglu_quant_epilogue || n <= 32 || tile_min_m <= 0 || n < tile_min_m ||
-        model_->config().ffn_activation != FFNActivation::SWIGLU || lora_ != nullptr || calib_ ||
-        cur_spec_verify_ || debug_forward_enabled() || go.qtype != QType::F16 || uo.qtype != QType::F16 ||
-        dequant_gpu_supported(ly.w_down.qtype))
+    if (n <= 32 || n < imp::cfg::kNvfp4TileMinM || model_->config().ffn_activation != FFNActivation::SWIGLU ||
+        lora_ != nullptr || calib_ || cur_spec_verify_ || debug_forward_enabled() || go.qtype != QType::F16 ||
+        uo.qtype != QType::F16 || dequant_gpu_supported(ly.w_down.qtype))
         return false;
     for (const TensorID id : {ly.w_gate_id, ly.w_up_id, ly.w_down_id}) {
         if (id == kInvalidTensorID || !prefill_routes_cutlass_nvfp4_(id, n))
@@ -338,7 +331,7 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
             if (!logged) {
                 logged = true;
                 IMP_LOG_INFO(
-                    "gemm.swiglu_quant_epilogue: SwiGLU + down NVFP4 quantize in the up GEMM ACTIVE "
+                    "swiglu_quant_epilogue: SwiGLU + down NVFP4 quantize in the up GEMM ACTIVE "
                     "(M=%d N=%d K=%d)",
                     n, N, K);
             }
@@ -368,10 +361,8 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     // Mirror of the single-tensor smallm eligibility in gemm_via_handle_, applied to EVERY weight,
     // plus: same K, smallm_kernel_for() on the combined N (v2 only when single-stripe), fresh outputs
     // only. Every decline is a plain false; the caller issues the single dispatches.
-    const int impl = dispatch_policy().gemm.nvfp4_smallm_impl;
-    if (!dispatch_policy().gemm.nvfp4_smallm || (impl != 2 && impl != 3) ||
-        !dispatch_policy().gemm.nvfp4_smallm_pair || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
-        ctx.spec_verify_small_m || ctx.beta != 0.0f || count < 2 || count > kSmallMV2MaxSiblings)
+    if (!dispatch_policy().gemm.nvfp4_smallm_a4 || ctx.spec_verify_small_m || ctx.beta != 0.0f || count < 2 ||
+        count > kSmallMV2MaxSiblings)
         return false;
     const int M = static_cast<int>(input.shape[0]);
     // M==1 stays on the fused decode GEMVs; M>32 is prefill.
@@ -393,7 +384,7 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
             return false;
         sib[i] = {&nv[i], reinterpret_cast<half*>(outs[i]->data), N};
     }
-    const SmallMKernel kern = sibling_kernel(impl, sib, count, K);
+    const SmallMKernel kern = sibling_kernel(kSmallMImpl, sib, count, K);
     if (kern == SmallMKernel::kNone)
         return false;
     const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
