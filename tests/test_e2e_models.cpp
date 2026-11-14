@@ -2,6 +2,7 @@
 #include "imp/imp.h"
 #include "test_models.h"
 #include "compute/attention_cublas.h"  // executed-kernel coverage counter
+#include "compute/attention_fa2_hd512.h"  // split-D FA2 launch counter
 
 #include <cstdlib>
 #include <cstring>
@@ -345,14 +346,12 @@ TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
     EXPECT_GT(len, 0u);
 }
 
-TEST_F(Gemma4ModelTest, PrefillFusesSwaLayers_Hd512StaysCublas) {
-    // Executed-kernel gate: Gemma-4's 5:1 SWA:global layer pattern (~24 hd=256 SWA + ~6 hd=512
-    // global of 30) must route hd=256 SWA layers to FA2 f16-QK per-layer (previously a
-    // model-level force_cublas gate sent EVERY layer to cuBLAS); hd=512 global layers must STAY
-    // on materialized cuBLAS since the SMEM-capped fused hd=512 kernel is 2.8-4.6x slower
-    // (docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md). Checks the executed kernel (a
-    // launch counter), not just the dispatch branch.
+TEST_F(Gemma4ModelTest, PrefillRoutesSwaToFa2_Hd512ToSplitDFa2) {
+    // Executed-kernel gate, Gemma-4's 5:1 SWA:global pattern (30 layers): hd=256 SWA layers on FA2,
+    // hd=512 global layers on the split-D FA2 (attention_fa2_hd512.cu, #2900; was cuBLAS, pp4096
+    // +3.4..4.2 %). Short prompt, S fits: no layer may fall back to materialized cuBLAS.
     imp::attention_cublas_prefill_reset_count();
+    imp::fa2_hd512_prefill_reset_count();
 
     int32_t tokens[128];
     int n_tokens = 0;
@@ -360,15 +359,12 @@ TEST_F(Gemma4ModelTest, PrefillFusesSwaLayers_Hd512StaysCublas) {
     ASSERT_GT(n_tokens, 0);
     ASSERT_EQ(imp_prefill(ctx_, tokens, n_tokens), IMP_SUCCESS);
 
-    uint64_t cublas_calls = imp::attention_cublas_prefill_call_count();
-    // > 0: the hd=512 global layers DO use cuBLAS (the deliberate hybrid).
-    EXPECT_GT(cublas_calls, 0u) << "expected the hd=512 global layers to use cuBLAS";
-    // << 30: the hd=256 SWA layers (the majority) moved OFF cuBLAS to FA2. If the
-    // SWA layers still used cuBLAS (routing regression) this would be ~30.
-    EXPECT_LT(cublas_calls, 15u)
-        << "Gemma-4 prefill used cuBLAS attention " << cublas_calls << " times — expected only the ~6 "
-        << "hd=512 global layers (<15). A value near 30 means the hd=256 SWA layers regressed back "
-        << "onto cuBLAS instead of FA2.";
+    const uint64_t hd512_calls = imp::fa2_hd512_prefill_call_count();
+    EXPECT_GT(hd512_calls, 0u) << "the hd=512 global layers did not run the split-D FA2";
+    // One call per global layer (~5 of 30); near 30 means the SWA layers took the hd=512 path.
+    EXPECT_LT(hd512_calls, 15u) << "split-D FA2 ran " << hd512_calls << " times";
+    EXPECT_EQ(imp::attention_cublas_prefill_call_count(), 0u)
+        << "a layer fell back to materialized cuBLAS attention";
 }
 
 TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {

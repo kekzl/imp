@@ -10,10 +10,13 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include <atomic>
 #include <cstdint>
 
 namespace imp {
 namespace {
+// Launches since the last reset; diagnostic only, never gates behaviour (Gemma4ModelTest).
+std::atomic<uint64_t> s_launches{0};
 
 constexpr int kHD = 512;
 constexpr int kHalf = 256;  // D columns per warp
@@ -272,7 +275,11 @@ bool fa2_hd512_prefill(const half* q, const half* k, const half* v, half* o, int
     const Args a{q, k, v, o, n, kv_len, nh, nkv, q_offset, scale, softcap};
     fa2_hd512_kernel<<<dim3((n + kBq - 1) / kBq, nh), kThreads, kSmemBytes, stream>>>(a);
     IMP_CUDA_CHECK_LAUNCH();
+    s_launches.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+
+uint64_t fa2_hd512_prefill_call_count() { return s_launches.load(std::memory_order_relaxed); }
+void fa2_hd512_prefill_reset_count() { s_launches.store(0, std::memory_order_relaxed); }
 
 }  // namespace imp
