@@ -48,7 +48,6 @@ namespace imp {
 using engine_internal::build_logprob_info;
 using engine_internal::compute_step_seed;
 using engine_internal::copy_d2h_sync;
-using engine_internal::ensure_prefill_workspace;
 using engine_internal::free_prefill_buffers;
 
 // =====================================================================
@@ -165,7 +164,6 @@ bool Engine::step_impl_() {
         o3 = std::chrono::steady_clock::now();
     if (!sched_prefill_batch_.empty()) {
         step_prefill(prefill_stream());
-        ensure_prefill_workspace(executor_.get());
     }
 
     // Process decode requests (batched).
@@ -190,7 +188,6 @@ bool Engine::step_impl_() {
     // feed every row its own token twice.
     if (!sched_decode_batch_.empty() && !mixed_served_this_step_) {
         step_decode(decode_stream());
-        ensure_prefill_workspace(executor_.get());
     }
 
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
@@ -1328,16 +1325,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing.outside +=
                 std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
     }
-    // Switch workspace for decode: slot 1 serves bs==1. The workspace choice must be a
-    // pure function of (flags, batch size) so graph captures stay consistent with replays.
-    const bool slot1 = executor_->has_decode_workspace() && valid_decode.size() == 1;
-    if (slot1) {
-        executor_->use_workspace(1);
-    } else {
-        if (executor_->active_workspace() == 1)
-            executor_->use_workspace(0);
-        (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
-    }
+    (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
 
     // Build batched decode
     decode_builder_.reset();

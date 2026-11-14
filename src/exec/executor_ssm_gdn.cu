@@ -422,34 +422,23 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                     static_cast<int64_t>(conv_channels)};
             Tensor xBC_g(xBC_out.data, compute_dtype_, 2, grp_shape, true);
             // Batched verify: per-group commit/snapshot slots replace the slab
-            // snapshot (ssm_out_slots/ssm_snap_slots). Factored spare: commits the
-            // window at the SNAPSHOT length into the live slot and stashes the
-            // drafted row's tap, equivalent to committing at both lengths into two slots.
-            // A tap WITH ssm_out_slots (bound verify, 2+ drafts): the commits stay, the taps are the
-            // ssm_tap_levels rows from d_snap_n on, by group: a partial accept folds them
-            // (ssm_conv_tap_fold).
-            const bool factored = state.ssm_tap_out != nullptr && state.ssm_out_slots == nullptr;
-            const bool per_group =
-                !factored && state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
+            // snapshot (ssm_out_slots/ssm_snap_slots). Taps (bound verify, 2+ drafts, always with
+            // ssm_out_slots): the commits stay, the taps are the ssm_tap_levels rows from d_snap_n on,
+            // by group: a partial accept folds them (ssm_conv_tap_fold).
+            const bool per_group = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
             ssm_conv1d_prefill_f32_silu_grouped(
                 state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
                 static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)), state.ssm_n_seq,
-                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream,
-                factored ? state.d_snap_n : state.d_chunk_len,
+                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
                 (conv_prev && !per_group) ? conv_snap : nullptr,
-                (!factored && (conv_prev || per_group)) ? state.d_snap_n : nullptr,
-                per_group ? nullptr : conv_prev, factored ? nullptr : state.ssm_out_slots,
-                per_group ? state.ssm_snap_slots : nullptr, per_group ? state.ssm_snap_rows : 1);
+                (conv_prev || per_group) ? state.d_snap_n : nullptr, per_group ? nullptr : conv_prev,
+                state.ssm_out_slots, per_group ? state.ssm_snap_slots : nullptr);
             void* const tap_out = state.ssm_tap_out == nullptr
                                       ? nullptr
                                       : static_cast<char*>(state.ssm_tap_out) +
                                             (state.ssm_tap_layer_stride * ssm_idx * 2);
-            if (factored)
-                ssm_conv_tap_stash(tap_out, xBC_g.data, T, conv_channels, state.d_chunk_len,
-                                   state.ssm_seq_slots, state.ssm_n_seq, stream);
-            else
-                ssm_conv_tap_stash_mid(tap_out, xBC_g.data, T, conv_channels, state.d_snap_n,
-                                       state.ssm_tap_levels, state.ssm_n_seq, stream);
+            ssm_conv_tap_stash_mid(tap_out, xBC_g.data, T, conv_channels, state.d_snap_n,
+                                   state.ssm_tap_levels, state.ssm_n_seq, stream);
             // Bucket pad rows past the last group belong to no sequence: no conv ran
             // for them and the scan writes no y for them. Both are zeroed so the
             // (discarded) pad outputs read finite values instead of stale buffer contents.
@@ -713,11 +702,6 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                         outs, snaps, fac_out, state.ssm_fac_stride);
                 }
             };
-            // Second snapshot (ssm_snap_rows 2): the state after d_snap_n[1] rows into ssm_snap_slots[n_seq +
-            // g], a commit-only pass BEFORE the main one rewrites the live slot in place (its y rows are
-            // identical).
-            if (!ragged_split && per_group_snap && state.ssm_snap_rows > 1)
-                scan(state.d_snap_n + 1, nullptr, nullptr, state.ssm_snap_slots + state.ssm_n_seq, nullptr);
             if (!ragged_split)
                 scan(real_n, snap, snap_n, grouped ? state.ssm_out_slots : nullptr,
                      grouped ? state.ssm_snap_slots : nullptr);

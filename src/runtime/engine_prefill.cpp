@@ -697,9 +697,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
     sae_arm_prefill_(*req, state.n_tokens, is_last_chunk, pf_stream);  // SAE clamps/features (row 116)
     if (!is_last_chunk) {
-        if (executor_->has_decode_workspace()) {
-            executor_->use_workspace(0);
-        }
         Tensor logits_out;
 
         forward_prefill_logits(logits_out);

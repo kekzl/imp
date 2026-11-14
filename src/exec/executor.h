@@ -529,20 +529,6 @@ public:
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream) {
         return ws_.resize_workspace(new_max_tokens, stream);
     }
-
-    // Dual workspace for concurrent prefill/decode overlap.
-    // allocate_decode_workspace: creates a second workspace for decode (up to max_batch tokens).
-    // use_workspace(0) = prefill (default), use_workspace(1) = decode.
-    [[nodiscard]] bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
-        return ws_.allocate_decode_workspace(stream, max_batch);
-    }
-    // 0=prefill, 1=decode. Also swaps the collision-prone quant-scratch family
-    // (fp8 activation + q8_1) onto per-slot copies when the decode set exists
-    // (required for prefill/decode overlap); no-op otherwise.
-    void use_workspace(int slot);
-    bool has_decode_workspace() const { return ws_.has_decode_workspace(); }
-    int decode_max_batch() const { return ws_.decode_max_batch(); }
-    int active_workspace() const { return ws_.active(); }
     int max_tokens() const { return max_tokens_; }
 
     // Takes the small-M NVFP4 workspace + activation scratch for the largest
@@ -1136,10 +1122,6 @@ private:
     // recurrent layer of every forward, and computing it scans all layers.
     int ssm_z_cols_ = 0;
 
-    // The dual prefill/decode workspace swap state (decode_workspace_,
-    // decode_shared_workspace_, the sizes, decode_max_batch_, active_workspace_,
-    // SavedWorkspace saved_prefill_ws_) moved into ws_ (exec/workspace.h).
-
     // --- Layer offload manager (non-owning, set by engine) ---
     LayerOffloadManager* offload_mgr_ = nullptr;
 
@@ -1148,9 +1130,8 @@ private:
     // Replaces RuntimeConfig::current() inside GraphExecutor::* methods.
     const DispatchPolicy* dispatch_policy_ = nullptr;
 
-    // The shared/persistent/decode scratch arena (allocate_*_workspace,
-    // compute_shared_sizes, workspace_estimate, resize_workspace,
-    // allocate_decode_workspace, use_workspace) moved into Workspace
+    // The shared/persistent scratch arena (allocate_*_workspace,
+    // compute_shared_sizes, workspace_estimate, resize_workspace) moved into Workspace
     // (exec/workspace.h); GraphExecutor owns ws_ and delegates. The four
     // per-phase carvers stay here: they write GraphExecutor's activation-tensor
     // members by slicing the shared buffer, so they belong on GraphExecutor.

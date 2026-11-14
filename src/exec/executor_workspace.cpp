@@ -728,8 +728,7 @@ void Workspace::free_buffers() {
 // executor_workspace_buffers.cpp
 
 // pre_dequant_weights() is in executor_pre_dequant.cpp
-// configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),
-// use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
-// are in executor_workspace_config.cu
+// configure_*_workspace(), resize_workspace(), layer_has_*(), view_tokens(),
+// ensure_logits_pinned() are in executor_workspace_config.cu
 
 }  // namespace imp

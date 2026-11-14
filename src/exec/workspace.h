@@ -12,8 +12,8 @@ class Model;
 class VRAMAllocator;
 struct MoEWorkspace;
 
-// Shared/persistent/decode scratch arena, extracted from GraphExecutor (D2, component
-// 3): owns the forward-pass scratch arena (buffers + sizes + decode/prefill swap state).
+// Shared/persistent scratch arena, extracted from GraphExecutor (D2, component
+// 3): owns the forward-pass scratch arena (buffers + sizes).
 // The cross-cutting auxiliary-buffer hub (qscratch/moe/attn) stays on GraphExecutor.
 // PER-PHASE activation tensors are still carved by GraphExecutor's
 // configure_*_workspace methods (pure slicing, they read the buffer via ws_.shared());
@@ -31,9 +31,9 @@ public:
               // model-feature flags (read for phase sizing)
               const bool* has_moe, const bool* has_ssm, const bool* has_gdn, const bool* has_dense_ffn,
               const int* max_expert_eff, const int* max_logit_tokens,
-              // persistent activation tensors (carved by allocate_persistent + swapped by
-              // allocate_decode/use_workspace — the four per-phase configure_* carvers are
-              // back on GraphExecutor, so the 16 phase tensors no longer pass through here)
+              // persistent activation tensors (carved by allocate_persistent; the four
+              // per-phase configure_* carvers are back on GraphExecutor, so the 16 phase
+              // tensors no longer pass through here)
               Tensor* hidden, Tensor* residual, Tensor* norm_out, Tensor* logits, void** fp32_accum_buf,
               Tensor* fp32_hidden) {
         model_ = &model;
@@ -62,9 +62,6 @@ public:
     // Persistent + shared bytes currently held; resident before the KV plan reads free VRAM (#2365).
     size_t allocated_bytes() const { return persistent_workspace_size_ + shared_workspace_size_; }
     int shared_max_tokens() const { return shared_workspace_max_tokens_; }
-    int active() const { return active_workspace_; }
-    bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
-    int decode_max_batch() const { return decode_max_batch_; }
     // Bumped whenever shared_workspace_ is (re)allocated or freed — consumers
     // holding raw pointers into the arena (captured verify graphs, #847) use
     // this to detect that their baked addresses died.
@@ -73,8 +70,6 @@ public:
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
     [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
-    [[nodiscard]] bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1);
-    void use_workspace(int slot);
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);
     // include_attn_scores: charge the cuBLAS S-matrix term (capped 256 MiB, non-MoE only).
@@ -83,8 +78,7 @@ public:
     size_t workspace_estimate(bool include_attn_scores) const;
 
     // Frees the owned shared + persistent workspace buffers (called from
-    // GraphExecutor::free_buffers). Mirrors the original free path: decode-swap buffers are
-    // intentionally NOT freed here (matching pre-extraction behaviour).
+    // GraphExecutor::free_buffers).
     void free_buffers();
 
 private:
@@ -103,8 +97,7 @@ private:
     const int* max_logit_tokens_ = nullptr;
 
     // Persistent activation tensors owned by GraphExecutor, carved by
-    // allocate_persistent_workspace and swapped by allocate_decode_workspace/use_workspace,
-    // which stay here. The 16 per-phase activation tensors moved out with the
+    // allocate_persistent_workspace, which stays here. The 16 per-phase activation tensors moved out with the
     // configure_*_workspace carvers (back on GraphExecutor).
     Tensor* hidden_ = nullptr;
     Tensor* residual_ = nullptr;
@@ -128,27 +121,6 @@ private:
     size_t ffn_shared_size_ = 0;
     size_t moe_shared_size_ = 0;
     size_t ssm_shared_size_ = 0;
-
-    // --- owned: dual workspace for concurrent prefill/decode overlap ---
-    void* decode_workspace_ = nullptr;         // persistent buf for decode
-    void* decode_shared_workspace_ = nullptr;  // shared buf for decode
-    size_t decode_persistent_size_ = 0;
-    size_t decode_shared_size_ = 0;
-    int decode_max_batch_ = 1;  // max decode batch size this workspace supports
-    int active_workspace_ = 0;
-
-    // Saved prefill workspace pointers (restored when switching back).
-    struct SavedWorkspace {
-        void* persistent{};
-        size_t persistent_size{};
-        void* shared{};
-        size_t shared_size{};
-        int shared_max_tokens{};
-        Tensor hidden, residual, norm_out, logits;
-        void* fp32_accum{};
-        Tensor fp32_hidden;
-    };
-    SavedWorkspace saved_prefill_ws_;
 };
 
 }  // namespace imp

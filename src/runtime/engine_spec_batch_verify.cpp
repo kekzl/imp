@@ -2,12 +2,11 @@
 //
 // One forward per decode step for N requests, D + 1 rows each: the request's
 // last emitted token and up to D drafts (D = 1; the bound verify takes
-// speculative.mtp_batch_verify_k, up to 4). Group g runs the GDN layers on its
+// speculative.mtp_batch_verify_k, up to 8). Group g runs the GDN layers on its
 // live slot L_g, commits the (D + 1)-row state into the spare P_g, the 1-row
-// state in place into L_g and the states between as factor rows (or, D = 2 without
-// them, the 2-row state into a second spare Q_g; compute/gdn.h out_slots /
-// snap_slots / snap_rows). Accepting k drafts swaps the slot holding 1 + k rows
-// with L_g on the host, or folds k factor rows into L_g. No state copies, no replay
+// state in place into L_g and the states between as factor rows (compute/gdn.h
+// out_slots / snap_slots). Accepting all D drafts swaps P_g with L_g on the host,
+// accepting k < D folds k factor rows into L_g. No state copies, no replay
 // (docs/plans/2026-09-11-batched-mtp-verify.md).
 // Attention rows take the decode-attention route with per-row block tables
 // and context lengths, the same shape as the multi-candidate chunk.
@@ -189,10 +188,7 @@ int mtp_bind_cap(const RuntimeConfig& cfg, bool carry_live) {
 }
 
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    const bool factor_row = mtp_bound_verify_factor_row(cfg);
-    return mtp_bound_verify_rows(cfg, model, max_batch_size) *
-           bound_verify_spares_per_row(mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k, factor_row),
-                                       factor_row);
+    return mtp_bound_verify_rows(cfg, model, max_batch_size);  // one spare per bound row
 }
 
 bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
@@ -280,10 +276,9 @@ void Engine::free_batch_verify_bufs_() {
 
 // Spare slots are the reserved pool slots past the multi-candidate ones.
 // Committed on first use (lazy pool), held for the request's lifetime.
-int Engine::acquire_spare_slot_(int req_id, bool second) {
-    auto& spare_of = second ? bv_.spare2_of : bv_.spare_of;
-    auto it = spare_of.find(req_id);
-    if (it != spare_of.end())
+int Engine::acquire_spare_slot_(int req_id) {
+    auto it = bv_.spare_of.find(req_id);
+    if (it != bv_.spare_of.end())
         return it->second;
     if (!ssm_state_)
         return -1;
@@ -299,17 +294,17 @@ int Engine::acquire_spare_slot_(int req_id, bool second) {
     if (!ssm_state_->ensure_slot(slot))
         return -1;  // stays free; the step falls back to plain decode
     bv_.free.pop_back();
-    spare_of[req_id] = slot;
+    bv_.spare_of[req_id] = slot;
     return slot;
 }
 
-// A verify left the state after 1 + matched rows in `slot` (role from bound_verify_state_slot, 0 = the live
-// slot already): that slot becomes the live one and the old live slot takes its place among the spares.
+// A verify left the state after 1 + matched rows in `slot` (role from bound_verify_kept_slot, 0 = the live
+// slot already): that slot becomes the live one and the old live slot takes its place as the spare.
 void Engine::bound_verify_adopt_slot_(int req_id, int role, int live, int slot) {
     if (role == 0)
         return;
     recurrent_slot_of_[req_id] = slot;
-    (role == 1 ? bv_.spare_of : bv_.spare2_of)[req_id] = live;
+    bv_.spare_of[req_id] = live;
     if (async_parked_req_id_ == req_id) {  // its parked graph loop baked the old live slot
         async_graph_runner_.cleanup();
         release_async_block_tables_();
@@ -469,18 +464,13 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Rows per request: the last token plus up to D drafts (D >= 2 only on the bound verify).
     const int D = bound_verify_stage_depth(bv_, N);
     const int T = D + 1;
-    std::vector<int> live(N), spare(N), spare2(N, -1);
-    const bool second_spare = bound_verify_spares_per_row(D, bv_.factor_row) > 1;
+    std::vector<int> live(N), spare(N);
     for (int g = 0; g < N; ++g) {
         live[g] = recurrent_slot_for_(reqs[g]->id);
         if (live[g] < 0)
             return decline("no_live_slot");
         spare[g] = acquire_spare_slot_(reqs[g]->id);
         if (spare[g] < 0)
-            return decline("spare_slot_unavailable");
-        // Factor row: no second spare, h_snap[N + g] is not read (ssm_snap_rows 1).
-        spare2[g] = second_spare ? acquire_spare_slot_(reqs[g]->id, /*second=*/true) : spare[g];
-        if (spare2[g] < 0)
             return decline("spare_slot_unavailable");
     }
 
@@ -573,8 +563,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     }
 
     // Stage: [tokens | positions | row ctx lens | seq slots | out slots |
-    // snap slots x2 | chunk_len, snap_n x2], one H2D; row tables, one H2D.
-    // Second snapshot (D == 2, no factor rows): row 2's state into spare2, indexed N + g (the scan's n_seq).
+    // snap slots | chunk_len, snap_n], one H2D; row tables, one H2D.
     const int cap_rows = bv_.cap_rows, cap_seq = bv_.cap_seq, table_cap = bv_.table_cap;
     int32_t* h = bv_.h_stage.as<int32_t>();
     int32_t* h_tok = h;
@@ -583,7 +572,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* h_seq = h + (3ull * cap_rows);
     int32_t* h_out = h_seq + cap_seq;
     int32_t* h_snap = h_out + cap_seq;
-    int32_t* h_misc = h_snap + (2ull * cap_seq);
+    int32_t* h_misc = h_snap + cap_seq;
     int32_t* h_tab = bv_.h_row_tables.as<int32_t>();
     for (int g = 0; g < N; ++g) {
         stage_group_rows(h_tok, h_pos, h_ctx, T, g, reqs[g]->output_tokens.back(),
@@ -591,12 +580,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         h_seq[g] = live[g];
         h_out[g] = spare[g];
         h_snap[g] = live[g];
-        h_snap[N + g] = spare2[g];  // read only with a second spare
         stage_group_tables(h_tab, table_cap, T, g, kv_manager_->block_table(reqs[g]->id));
     }
     h_misc[0] = T;  // real rows per group
     h_misc[1] = 1;  // snapshot row (live slot, in place)
-    h_misc[2] = 2;  // second snapshot row (spare2)
     int32_t* d = bv_.d_stage;
     int32_t* d_tok = d;
     int32_t* d_pos = d + cap_rows;
@@ -604,7 +591,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* d_seq = d + (3ull * cap_rows);
     int32_t* d_out = d_seq + cap_seq;
     int32_t* d_snap = d_out + cap_seq;
-    int32_t* d_misc = d_snap + (2ull * cap_seq);
+    int32_t* d_misc = d_snap + cap_seq;
     auto check = [&](cudaError_t err, const char* op) {
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("spec-batch: %s failed: %s", op, cudaGetErrorString(err));
@@ -643,8 +630,6 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         rollback_all(N);
         return false;
     }
-    if (executor_->has_decode_workspace())
-        executor_->use_workspace(0);
     // Graph replay (engine_spec_capture.cpp): one graph per (rows, ctx tier).
     // Everything that varies per step is device data the H2D above refreshed;
     // the split-K grid bakes the tier ceiling.
@@ -673,7 +658,6 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_seq_tokens = T;
     state.ssm_out_slots = d_out;
     state.ssm_snap_slots = d_snap;
-    state.ssm_snap_rows = bound_verify_spares_per_row(D, bv_.factor_row);
     // Factor rows: 1 row in place, all T rows into the spare, rows 2 .. D as factor rows + taps by group
     // and level. d_fac is null unless factor_row.
     state.ssm_fac_out = bv_.d_fac;
@@ -782,17 +766,17 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
-        // State after 1 + matched rows: the live slot holds row 1 (in-place snapshot), the spare all T rows,
-        // spare2 row 2 (D == 2); taking one swaps it with the live slot.
-        // Factor rows (D >= 2): no spare2, 1 .. D - 1 accepted drafts fold their rows into the live slot.
+        // State after 1 + matched rows: the live slot holds row 1 (in-place snapshot), the spare all T rows;
+        // taking the spare swaps it with the live slot.
+        // Factor rows (D >= 2): 1 .. D - 1 accepted drafts fold their rows into the live slot.
         const bool done = req->status == RequestStatus::FINISHED;
-        const int role = done ? 0 : bound_verify_kept_slot(matched, D, bv_.factor_row);
+        const int role = done ? 0 : bound_verify_kept_slot(matched, D);
         fold_of[g] = bound_verify_factor_row_folds(bv_.factor_row, done, matched, D);
         if (mtp_bound_verify_full_accept(nd, matched, done))
             full_nd = std::max(full_nd, nd);
         if (runtime_config_.diagnostics.spec_trace)
             bv_.sfx_shadow.trace_step(req->id, N, T, nd, matched, emitted, req->output_tokens, done);
-        bound_verify_adopt_slot_(req->id, role, live[g], role == 1 ? spare[g] : spare2[g]);
+        bound_verify_adopt_slot_(req->id, role, live[g], spare[g]);
         if (nd > 0) {
             req->spec_verifies++;
             req->spec_drafted += nd;

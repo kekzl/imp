@@ -415,8 +415,6 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     p.d_banned = const_cast<int32_t*>(banned_tokens_device_(stream));
 
     // Decode workspace (mirrors step_decode_forward).
-    if (executor_->has_decode_workspace())
-        executor_->use_workspace(1);
     (void)executor_->resize_workspace(1, stream);
 
     InferenceState& st = p.state;

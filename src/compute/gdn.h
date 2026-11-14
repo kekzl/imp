@@ -29,9 +29,8 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
                                 const int* seq_row_offsets = nullptr, float* h_snap = nullptr,
                                 const int* d_snap_n = nullptr, const int* out_slots = nullptr,
                                 const int* snap_slots = nullptr,
-                                // Factor rows (compute/gdn_factor.cuh): fac_out without out_slots gets the
-                                // rank-1 row for real_n instead of a state copy, with out_slots row
-                                // d_snap_n + 1 beside the commit.
+                                // Factor rows (compute/gdn_factor.cuh), with out_slots only: rows
+                                // d_snap_n + 1 .. real_n - 1 beside the commit.
                                 float* fac_out = nullptr, int fac_stride = 0);
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,

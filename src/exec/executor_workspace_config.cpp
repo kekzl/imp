@@ -139,12 +139,6 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
     // needs `stream`. Parameter stays: eight call sites pass it, matching the stream-ordered
     // variant this branch would take if it ever goes live.
     (void)stream;
-    // Resize targets the prefill shared arena. While the decode workspace is active (slot 1),
-    // shared_workspace_ aliases the fixed-size decode buffer; growing through that alias
-    // frees the decode buffer and leaves decode_shared_workspace_ dangling (#948). Restore
-    // the prefill workspace first, like the decode path does before its own resize.
-    if (active_workspace_ == 1)
-        use_workspace(0);
     if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0)
         return true;
     new_max_tokens = std::min(new_max_tokens, *max_tokens_);  // never exceed init-time max
@@ -181,125 +175,6 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
     }
     shared_workspace_max_tokens_ = new_max_tokens;
     return true;
-}
-
-// ---------------------------------------------------------------------------
-// Dual workspace for concurrent prefill/decode overlap
-// ---------------------------------------------------------------------------
-
-bool Workspace::allocate_decode_workspace(cudaStream_t /*stream*/, int max_batch) {
-    if (decode_workspace_)
-        return true;  // already allocated
-    if (max_batch <= 0)
-        max_batch = 1;
-
-    const auto& cfg = model_->config();
-    int dm = cfg.d_model;
-    decode_max_batch_ = max_batch;
-
-    // Persistent workspace for max_batch tokens: hidden + residual + norm_out + logits
-    size_t persistent = (static_cast<size_t>(dm) * sizeof(half) * 3 *
-                         max_batch)  // hidden + residual + norm_out
-                        + (static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch);  // logits
-    if ((*fp32_accum_buf_))
-        persistent += static_cast<size_t>(dm) * sizeof(float) * max_batch;  // fp32_hidden
-
-    decode_workspace_ = vram_alloc(vram_alloc_, persistent, "decode_workspace");
-    if (!decode_workspace_) {
-        IMP_LOG_ERROR("Failed to allocate decode workspace");
-        return false;
-    }
-    decode_persistent_size_ = persistent;
-
-    // Shared workspace for max_batch tokens
-    int saved = *max_tokens_;
-    *max_tokens_ = max_batch;
-    compute_shared_sizes(max_batch);
-    *max_tokens_ = saved;
-
-    size_t shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
-    if (shared > 0) {
-        decode_shared_workspace_ = vram_alloc(vram_alloc_, shared, "decode_shared_workspace");
-        if (!decode_shared_workspace_) {
-            IMP_LOG_ERROR("Failed to allocate decode shared workspace");
-            vram_free(vram_alloc_, decode_workspace_);
-            decode_workspace_ = nullptr;
-            return false;
-        }
-    }
-    decode_shared_size_ = shared;
-
-    // Recompute sizes for original max_tokens
-    compute_shared_sizes(*max_tokens_);
-
-    IMP_LOG_INFO("Decode overlap workspace: %.2f MiB for max_batch=%d (persistent=%.1f KB, shared=%.1f KB)",
-                 (persistent + shared) / (1024.0 * 1024.0), max_batch, persistent / 1024.0, shared / 1024.0);
-    return true;
-}
-
-void Workspace::use_workspace(int slot) {
-    if (slot == active_workspace_)
-        return;
-
-    const auto& cfg = model_->config();
-    int dm = cfg.d_model;
-
-    if (slot == 1 && decode_workspace_) {
-        // Save prefill workspace
-        saved_prefill_ws_.persistent = persistent_workspace_;
-        saved_prefill_ws_.persistent_size = persistent_workspace_size_;
-        saved_prefill_ws_.shared = shared_workspace_;
-        saved_prefill_ws_.shared_size = shared_workspace_size_;
-        saved_prefill_ws_.shared_max_tokens = shared_workspace_max_tokens_;
-        saved_prefill_ws_.hidden = (*hidden_);
-        saved_prefill_ws_.residual = (*residual_);
-        saved_prefill_ws_.norm_out = (*norm_out_);
-        saved_prefill_ws_.logits = (*logits_);
-        saved_prefill_ws_.fp32_accum = (*fp32_accum_buf_);
-        saved_prefill_ws_.fp32_hidden = (*fp32_hidden_);
-
-        // Switch to decode workspace
-        persistent_workspace_ = decode_workspace_;
-        persistent_workspace_size_ = decode_persistent_size_;
-        shared_workspace_ = decode_shared_workspace_;
-        shared_workspace_size_ = decode_shared_size_;
-        shared_workspace_max_tokens_ = decode_max_batch_;
-
-        // Set up tensor views into decode workspace (sized for decode_max_batch_)
-        int mb = decode_max_batch_;
-        char* p = static_cast<char*>(decode_workspace_);
-        int64_t shape_mb[2] = {mb, dm};
-        (*hidden_) = Tensor(p, QType::F16, 2, shape_mb, true);
-        p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        (*residual_) = Tensor(p, QType::F16, 2, shape_mb, true);
-        p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        (*norm_out_) = Tensor(p, QType::F16, 2, shape_mb, true);
-        p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        int64_t shape_logits[2] = {mb, cfg.vocab_size};
-        (*logits_) = Tensor(p, QType::F32, 2, shape_logits, true);
-        p += static_cast<size_t>(cfg.vocab_size) * sizeof(float) * mb;
-        if (saved_prefill_ws_.fp32_accum) {
-            (*fp32_accum_buf_) = p;
-            int64_t shape_fp32[2] = {mb, dm};
-            (*fp32_hidden_) = Tensor(p, QType::F32, 2, shape_fp32, true);
-        }
-
-        active_workspace_ = 1;
-    } else if (slot == 0) {
-        // Restore prefill workspace
-        persistent_workspace_ = saved_prefill_ws_.persistent;
-        persistent_workspace_size_ = saved_prefill_ws_.persistent_size;
-        shared_workspace_ = saved_prefill_ws_.shared;
-        shared_workspace_size_ = saved_prefill_ws_.shared_size;
-        shared_workspace_max_tokens_ = saved_prefill_ws_.shared_max_tokens;
-        (*hidden_) = saved_prefill_ws_.hidden;
-        (*residual_) = saved_prefill_ws_.residual;
-        (*norm_out_) = saved_prefill_ws_.norm_out;
-        (*logits_) = saved_prefill_ws_.logits;
-        (*fp32_accum_buf_) = saved_prefill_ws_.fp32_accum;
-        (*fp32_hidden_) = saved_prefill_ws_.fp32_hidden;
-        active_workspace_ = 0;
-    }
 }
 
 bool GraphExecutor::layer_has_attention(int layer) const { return model_->layer(layer).wq.data != nullptr; }

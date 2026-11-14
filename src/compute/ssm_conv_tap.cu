@@ -15,23 +15,6 @@ namespace imp {
 
 namespace {
 
-// Stash the drafted row's conv input. Reads the row the commit kernel would
-// have folded into the spare window, indexed by SLOT so the row survives the
-// request moving within the batch.
-__global__ void ssm_conv_tap_stash_kernel(half* __restrict__ tap_pool, const half* __restrict__ x_in,
-                                          int n_tokens, int channels, const int* __restrict__ d_real_n,
-                                          const int* __restrict__ slots) {
-    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (ch >= channels)
-        return;
-    const int seq = blockIdx.y;
-    const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
-    if (real_n <= 0)
-        return;
-    const half* row = x_in + (((static_cast<size_t>(seq) * n_tokens) + (real_n - 1)) * channels);
-    tap_pool[(static_cast<size_t>(slots[seq]) * channels) + ch] = row[ch];
-}
-
 // Mid rows of the bound verify: group seq's row snap_n + level leaves as tap [seq * n_levels + level].
 __global__ void ssm_conv_tap_stash_mid_kernel(half* __restrict__ tap_pool, const half* __restrict__ x_in,
                                               int n_tokens, int channels, const int* __restrict__ d_snap_n,
@@ -98,17 +81,6 @@ void ssm_conv_tap_stash_mid(void* tap_pool, const void* x_in, int n_tokens, int 
     ssm_conv_tap_stash_mid_kernel<<<grid, kTapThreads, 0, stream>>>(static_cast<half*>(tap_pool),
                                                                     static_cast<const half*>(x_in), n_tokens,
                                                                     channels, d_snap_n, n_levels);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_real_n,
-                        const int* slots, int n_seq, cudaStream_t stream) {
-    if (!tap_pool || !x_in || !slots || n_seq <= 0 || channels <= 0 || n_tokens <= 0)
-        return;
-    dim3 grid((channels + kTapThreads - 1) / kTapThreads, n_seq);
-    ssm_conv_tap_stash_kernel<<<grid, kTapThreads, 0, stream>>>(static_cast<half*>(tap_pool),
-                                                                static_cast<const half*>(x_in), n_tokens,
-                                                                channels, d_real_n, slots);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

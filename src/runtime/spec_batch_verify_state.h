@@ -41,10 +41,8 @@ struct BatchVerifyState {
     int streak_depth = 1;
     int streak = 0;
     int pin = 0;  // diagnostics.mtp_verify_pin, 0 or depth..kMtpBoundVerifyMaxDepth
-    std::unordered_map<int, int> spare_of;   // req.id -> spare slot (state after all depth + 1 rows)
-    std::unordered_map<int, int>
-        spare2_of;  // req.id -> second spare (state after 2 rows), depth 2, no factor row
-    // Depth 2..4 with speculative.mtp_batch_verify_factor_row: no second spare, drafts 1..depth - 1 are also
+    std::unordered_map<int, int> spare_of;  // req.id -> spare slot (state after all depth + 1 rows)
+    // Depth 2..kMtpBoundVerifyMaxDepth (factor rows): drafts 1..depth - 1 are also
     // rows of d_fac + d_tap at [group * (step depth - 1) + level], folded into the live slot on a partial
     // accept (bound_verify_factor_row_fold).
     bool factor_row = false;
@@ -231,11 +229,11 @@ void mtp_verify_depth_follows_k(RuntimeConfig& cfg);
 [[nodiscard]] constexpr bool mtp_bound_verify_solo(int decoding, bool bound) {
     return decoding == 1 && bound;
 }
-// speculative.mtp_batch_verify_k clamped to what the step stages: 2 drafts per request on spares alone (two
-// snapshots), kMtpBoundVerifyMaxDepth with factor rows (a fold applies kGdnFactorFoldMaxRows of them).
+// speculative.mtp_batch_verify_k clamped to what the step stages: 1 draft per request without factor rows,
+// kMtpBoundVerifyMaxDepth with them (a fold applies kGdnFactorFoldMaxRows of them).
 inline constexpr int kMtpBoundVerifyMaxDepth = 8;
 [[nodiscard]] constexpr int mtp_bound_verify_depth(int key, bool factor_row) {
-    return std::clamp(key, 1, factor_row ? kMtpBoundVerifyMaxDepth : 2);
+    return std::clamp(key, 1, factor_row ? kMtpBoundVerifyMaxDepth : 1);
 }
 // speculative.mtp_batch_verify_k_wide: a step of kMtpBoundVerifyWideRows+ requests verifies that many drafts
 // (2..depth, factor rows only: each chain level is one more head pass over every request).
@@ -286,20 +284,11 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
     const int step = bound_verify_step_depth(bv, n);
     return n >= kMtpBoundVerifyWideRows ? step : std::max(step, bv.pin);
 }
-// Which recurrent slot holds the state after a group's 1 + matched rows: 0 the live slot (its in-place
-// snapshot at row 1), 1 the spare (commit at all depth + 1 rows), 2 the second spare (snapshot at row 2).
-[[nodiscard]] constexpr int bound_verify_state_slot(int matched, int depth) {
-    return matched <= 0 ? 0 : (matched >= depth ? 1 : 2);
-}
-// Factor rows (speculative.mtp_batch_verify_factor_row at 2+ drafts): the one spare holds the state after
-// all depth + 1 rows, so only a full accept adopts it (role 1); a partial accept keeps the live slot and
-// folds.
-[[nodiscard]] constexpr int bound_verify_factor_row_slot(int matched, int depth) {
+// Which recurrent slot holds the state after a group's 1 + matched rows: the one spare holds the state after
+// all depth + 1 rows, so only a full accept adopts it (1); a reject or a partial accept keeps the live slot
+// (0, its in-place snapshot at row 1), which a partial accept then folds (factor rows).
+[[nodiscard]] constexpr int bound_verify_kept_slot(int matched, int depth) {
     return matched >= depth ? 1 : 0;
-}
-[[nodiscard]] constexpr int bound_verify_kept_slot(int matched, int depth, bool factor_row) {
-    return factor_row ? bound_verify_factor_row_slot(matched, depth)
-                      : bound_verify_state_slot(matched, depth);
 }
 // Factor rows and conv taps a partial accept folds into the live slot (1 row -> 1 + matched rows): the
 // matched drafts, 0 on a full accept (the spare), a reject or a finished request.
@@ -324,10 +313,6 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
     }
     return n;
 }
-// Spare recurrent slots per bound row.
-[[nodiscard]] constexpr int bound_verify_spares_per_row(int depth, bool factor_row) {
-    return factor_row ? 1 : depth;
-}
 // Device bytes of the factor rows: (4 + ss + hd) floats per (layer, group, level, head), ch halfs per (layer,
 // group, level), 3 fold-list ints per group. Qwen3.8-27B (48 layers, 48 heads, 128/128, 10240 channels):
 // 3.22 MiB per (group, level).
@@ -343,9 +328,9 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
 // Plan charge of the factor rows: one per (verify group, draft before the last).
 [[nodiscard]] size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Model* model,
                                                             int max_batch_size);
-// Staged ints: [tok | pos | row ctx] per row, [seq | out | snap x2] per request, [chunk_len, snap_n x2].
+// Staged ints: [tok | pos | row ctx] per row, [seq | out | snap] per request, [chunk_len, snap_n].
 [[nodiscard]] constexpr size_t batch_verify_stage_ints(int cap_rows, int cap_seq) {
-    return (3ull * cap_rows) + (4ull * cap_seq) + 3;
+    return (3ull * cap_rows) + (3ull * cap_seq) + 2;
 }
 // MTP draft KV slots: speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
 int mtp_draft_kv_slots(const RuntimeConfig& cfg);
