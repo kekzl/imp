@@ -306,8 +306,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_grouped_nvfp4_tile.cu
     src/compute/gemm_grouped_nvfp4_decode.cu
     src/compute/attention_fa2_hd512.cu
-    src/compute/ffn_sparsity_probe.cu
-    src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
     src/compute/gemv_dp4a_rows.cu
@@ -1376,7 +1374,6 @@ if(IMP_BUILD_TESTS)
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
-        tests/test_ffn_sparsity.cu
     )
 
     imp_add_test_module(test-attention GPU SOURCES

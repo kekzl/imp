@@ -64,9 +64,6 @@ struct ProcessDiag {
     int fp8_tile_min_m = 2048;           // matches the config.h default
     bool force_splitk_fallback = false;  // test hook
 
-    // FFN
-    bool ffn_sparsity_probe = false;
-
     // MoE
     int moe_mr_nr = 8;
     int moe_expert_overhead_pct = 10;
@@ -162,9 +159,6 @@ void process_diag_set_nvfp4_prompt_streamk(bool v);
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
 [[nodiscard]] bool process_diag_force_splitk_fallback();
 void process_diag_set_force_splitk_fallback(bool v);
-
-// FFN
-[[nodiscard]] bool process_diag_ffn_sparsity_probe();
 
 // MoE
 int process_diag_moe_mr_nr();  // rows-per-block for NVFP4 MoE decode (4/8/16/32)

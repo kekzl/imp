@@ -30,7 +30,6 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
-#include "compute/ffn_sparsity_probe.h"
 #include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
 #include "compute/gemm.h"
@@ -124,10 +123,6 @@ Engine::~Engine() {
     }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
-    // FFN sparsity probe: drain per-layer counters to stderr if any decode
-    // steps ran with it enabled. Counters are an arena slice, so this must run
-    // BEFORE the arena closes.
-    flush_ffn_sparsity_probe_log();
     engine_arena_close();
     // The arena is gone; every module static that took a slice from it now
     // dangles. reset_static_cuda_state() re-arms them (previously wired only to

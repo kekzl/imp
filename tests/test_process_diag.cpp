@@ -48,8 +48,6 @@ RuntimeConfig make_non_default() {
     c.attention.fp8_qk_scaled = true;
     c.gemm.nvfp4_cublaslt_min_m = 1024;
 
-    c.ffn.sparsity_probe = true;
-
     c.moe.mr_nr = 32;
     c.moe.expert_overhead_pct = 42;
     c.moe.force_host_experts = 7;
@@ -108,8 +106,6 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_TRUE(process_diag_fp8_qk_scaled());
     EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), 1024);
 
-    EXPECT_TRUE(process_diag_ffn_sparsity_probe());
-
     EXPECT_EQ(process_diag_moe_mr_nr(), 32);
     EXPECT_EQ(process_diag_moe_expert_overhead_pct(), 42);
     EXPECT_EQ(process_diag_moe_force_host_experts(), 7);
@@ -143,7 +139,6 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_fa2_dense_2cta(), d.attention.fa2_dense_2cta);
     EXPECT_EQ(process_diag_fp8_qk_scaled(), d.attention.fp8_qk_scaled);
     EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), d.gemm.nvfp4_cublaslt_min_m);
-    EXPECT_EQ(process_diag_ffn_sparsity_probe(), d.ffn.sparsity_probe);
     EXPECT_EQ(process_diag_moe_mr_nr(), d.moe.mr_nr);
     EXPECT_EQ(process_diag_moe_expert_overhead_pct(), d.moe.expert_overhead_pct);
     EXPECT_EQ(process_diag_moe_force_host_experts(), d.moe.force_host_experts);

@@ -75,11 +75,6 @@ struct QuantScratch {
     size_t q8_1_prefill_bytes = 0;
     size_t d8_prefill_bytes = 0;
 
-    // --- FFN sparsity mask (Phase 2): 1 bit per Q8 block, packed uint32. ---
-    // Sized (q8_1_max_blocks + 31) / 32 uint32s. Tiny (~tens of bytes).
-    uint32_t* ffn_block_mask = nullptr;
-    int ffn_block_mask_words = 0;
-
     // --- Split-K paged attention scratch ---
     void* splitk = nullptr;
     size_t splitk_size = 0;

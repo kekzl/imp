@@ -76,7 +76,6 @@ bool process_diag_q45k_tile() { return slot().q45k_tile; }
 int process_diag_fp8_tile_min_m() { return slot().fp8_tile_min_m; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
-bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }

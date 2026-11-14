@@ -12,8 +12,6 @@
 #include "compute/gemv_dp4a_multi.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/activation.h"
-#include "compute/ffn_sparsity_mask.h"
-#include "compute/ffn_sparsity_probe.h"
 #include "compute/hadamard.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -305,16 +303,6 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (const LoraWeights* w = lora_->get(layer, LoraProj::UP))
                 lora_delta_(*w, no.data, uo.data, n, stream);
         }
-
-        // Instrumentation-only: measure contextual FFN sparsity (decode only).
-        // Reads go and uo, counts rows with |silu(gate)*up| under each of 5
-        // thresholds. Cheap (~1 µs / layer) when on, no-op when off.
-        if (n == 1 && dispatch_policy().ffn.sparsity_probe &&
-            go.qtype == QType::F16 && uo.qtype == QType::F16) {
-            const int K_ff = static_cast<int>(ly.w_gate.shape[0]);
-            probe_ffn_silu_sparsity(layer, static_cast<const half*>(go.data),
-                                    static_cast<const half*>(uo.data), K_ff, stream);
-        }
     }
 
     // Gated activation + down projection + residual add. Decode (n=1, dp4a):
@@ -415,24 +403,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
-
-            // Phase 2 FFN sparsity: when threshold > 0 and Q8_0 down_proj, build
-            // a per-Q8-block mask from gate*up and dispatch the masked GEMV.
-            // Falls through to standard dispatch for other qtypes or when off.
-            const float sparsity_thr = dispatch_policy().ffn.sparsity_threshold;
-            if (sparsity_thr > 0.0f && ly.w_down.qtype == QType::Q8_0 &&
-                qscratch_.ffn_block_mask != nullptr &&
-                cfg.ffn_activation != FFNActivation::GEGLU) {
-                build_swiglu_block_mask(static_cast<const half*>(go.data),
-                                        static_cast<const half*>(uo.data), qscratch_.ffn_block_mask,
-                                        K_d, sparsity_thr, stream);
-                gemv_q8_0_q8_1_residual_masked(ly.w_down.data, q8, qscratch_.d8_buf,
-                                               qscratch_.ffn_block_mask,
-                                               static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
-            } else {
-                dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf,
-                                       static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
-            }
+            dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf,
+                                   static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4 &&
                    h.qtype == QType::F16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.

@@ -19,12 +19,11 @@
 #include "core/config/gdn.h"
 #include "core/config/gemm.h"
 #include "core/config/speculative.h"
-#include "core/config/ffn.h"
 #include "core/config/diagnostics.h"
 
 namespace imp {
 
-// The eight sections now live one per header under core/config/; this file
+// The seven sections now live one per header under core/config/; this file
 // keeps `#include "core/dispatch_policy.h"` compiling unchanged. A TU that
 // needs one section should include that header directly instead.
 
@@ -37,7 +36,6 @@ struct DispatchPolicy {
     cfg::GDN gdn;
     cfg::GEMM gemm;
     cfg::Speculative speculative;
-    cfg::FFN ffn;
     cfg::Diagnostics diagnostics;
 };
 

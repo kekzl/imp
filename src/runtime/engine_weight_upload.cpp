@@ -207,7 +207,6 @@ bool Engine::init_weights() {
     dispatch_policy_.gdn = runtime_config_.gdn;
     dispatch_policy_.gemm = runtime_config_.gemm;
     dispatch_policy_.speculative = runtime_config_.speculative;
-    dispatch_policy_.ffn = runtime_config_.ffn;
     dispatch_policy_.diagnostics = runtime_config_.diagnostics;
     executor_->set_dispatch_policy(dispatch_policy_);
     // Before init(): allocate_workspaces() sizes the sparse decode budget in

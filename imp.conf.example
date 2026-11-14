@@ -1060,15 +1060,6 @@ mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # imp-cli --bench pins this false (raw-decode baseline semantics).
 capture              = true
 
-[ffn]
-# SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
-# intermediate rows per threshold; no skipping (~1 µs/layer/token when on).
-sparsity_probe       = false
-# FFN down_proj row-skipping per Q8_0 block: skip blocks whose
-# |silu(gate)*up| amax is below this (0.0 = disabled = bit-identical;
-# recommended 0.005..0.05; Q8_0 decode only).
-sparsity_threshold   = 0.0
-
 [diagnostics]
 # Process log level: debug | info | warn | error | fatal.
 # "debug" is what unlocks the IMP_LOG_DEBUG statements throughout the engine;

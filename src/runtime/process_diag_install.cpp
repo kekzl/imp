@@ -68,7 +68,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.mxfp4_tile = cfg.gemm.mxfp4_tile;
     d.q45k_tile = cfg.gemm.q45k_tile;
     d.fp8_tile_min_m = cfg.gemm.fp8_tile_min_m;
-    d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;

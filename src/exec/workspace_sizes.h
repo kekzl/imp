@@ -125,7 +125,7 @@ struct ExecT2Demand {
     // capped at 512 MiB (targets above the cap are served by the uncapturable
     // path, exactly as allocate_nvfp4_dequant_workspace decides).
     size_t nvfp4_dequant = 0;
-    // dp4a input staging: the q8_1/d8 decode pair, the FFN sparsity mask and
+    // dp4a input staging: the q8_1/d8 decode pair and
     // the Q4_K/Q5_K dense-prefill pair. One sizing family (the max-K scan), one
     // degradation contract ("dp4a path disabled"), so they migrate as a unit.
     size_t quant_scratch = 0;

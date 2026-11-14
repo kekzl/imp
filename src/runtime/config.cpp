@@ -414,10 +414,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("calibration.out_path", cfg.calibration.out_path);
     B("calibration.hessian", cfg.calibration.hessian);
 
-    // [ffn]
-    B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
-    F("ffn.sparsity_threshold", cfg.ffn.sparsity_threshold);
-
     // [speculative]
     B("speculative.ngram", cfg.speculative.ngram);
     B("speculative.sampled", cfg.speculative.sampled);

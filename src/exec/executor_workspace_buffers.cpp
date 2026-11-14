@@ -336,23 +336,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // FFN sparsity mask (Phase 2): one bit per Q8 block, packed uint32.
-        if (qscratch_.q8_1_max_blocks > 0) {
-            int mask_words = (qscratch_.q8_1_max_blocks + 31) / 32;
-            size_t mask_sz = static_cast<size_t>(mask_words) * sizeof(uint32_t);
-            // Same family, same tier: tens of bytes, engine-lifetime, and the
-            // sparsity path in executor_ffn.cu already tests the pointer.
-            auto slab = engine_arena().take_bytes(mask_sz);
-            if (slab.empty()) {
-                IMP_LOG_WARN("FFN sparsity mask unavailable from the T2 arena (%zu bytes)", mask_sz);
-                qscratch_.ffn_block_mask = nullptr;
-                qscratch_.ffn_block_mask_words = 0;
-            } else {
-                qscratch_.ffn_block_mask = reinterpret_cast<uint32_t*>(slab.data());
-                qscratch_.ffn_block_mask_words = mask_words;
-            }
-        }
-
         // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
         // ggml_mmvq_q*_kernel hot-path (gemm_kernel_gguf.cpp). Every GGUF strategy is
         // registered m_is_one: one row x max_k, not max_tokens rows (Qwen3-14B 153 MiB -> 39 KiB).

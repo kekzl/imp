@@ -276,8 +276,6 @@ struct RuntimeConfig {
     // is a no-op elsewhere.
     cfg::Speculative speculative;
 
-    cfg::FFN ffn;
-
     cfg::Diagnostics diagnostics;
 
     // Collects per-input-channel activation magnitudes during a forward
