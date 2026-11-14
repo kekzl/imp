@@ -4,7 +4,7 @@
 One streaming decoder, then k concurrent long ingests. Reports the decoder's
 inter-token latency (what the ingests interfere with) and each ingest's wall
 time (what bounding them costs). This is the harness behind the
-`runtime.prefill_batch_decode_cap` numbers in src/runtime/config.h.
+`runtime.prefill_batch_decode_cap` numbers (key removed 2026-11-14).
 
 It exists because the sibling knob's pinned numbers were taken against ONE
 active decoder and one ingest, and nothing in the tree could re-run them - so

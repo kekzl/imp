@@ -152,39 +152,21 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     }
     S("runtime.cuda_graphs", cfg.runtime.cuda_graphs);
     B("runtime.warmup", cfg.runtime.warmup);
-    B("runtime.graph_prewarm", cfg.runtime.graph_prewarm);
     I("runtime.max_seq_len", cfg.runtime.max_seq_len);
     B("runtime.no_pdl", cfg.runtime.no_pdl);
-    B("runtime.debug_raw", cfg.runtime.debug_raw);
-    B("runtime.no_vision_graph", cfg.runtime.no_vision_graph);
     B("runtime.no_vision", cfg.runtime.no_vision);
     B("runtime.no_audio", cfg.runtime.no_audio);
     I("runtime.vision_max_patches", cfg.runtime.vision_max_patches);
     F("runtime.video_pruning_rate", cfg.runtime.video_pruning_rate);  // range: apply_one_checked
-    S("runtime.graph_capture_mode", cfg.runtime.graph_capture_mode);
     B("runtime.prefill_graph", cfg.runtime.prefill_graph);
     I("runtime.prefill_graph_prewarm", cfg.runtime.prefill_graph_prewarm);
     I("runtime.max_batch_size", cfg.runtime.max_batch_size);
-    I("runtime.decode_burst", cfg.runtime.decode_burst);
     I("runtime.prefill_chunk_size", cfg.runtime.prefill_chunk_size);
     I("runtime.prefill_chunk_decode_cap", cfg.runtime.prefill_chunk_decode_cap);
-    I("runtime.prefill_chunk_decode_cap_hybrid", cfg.runtime.prefill_chunk_decode_cap_hybrid);
-    I("runtime.prefill_cap_fairness", cfg.runtime.prefill_cap_fairness);
-    I("runtime.prefill_batch_decode_cap", cfg.runtime.prefill_batch_decode_cap);
-    B("runtime.prefill_mixed_decode", cfg.runtime.prefill_mixed_decode);
-    B("runtime.prefill_mixed_decode_hybrid", cfg.runtime.prefill_mixed_decode_hybrid);
-    B("runtime.penalty_append_early", cfg.runtime.penalty_append_early);
-    B("runtime.decode_pipeline_hybrid", cfg.runtime.decode_pipeline_hybrid);
     I("runtime.think_answer_reserve", cfg.runtime.think_answer_reserve);
     I("runtime.think_max_tokens", cfg.runtime.think_max_tokens);
-    I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
-    B("runtime.gdn_batched_decode", cfg.runtime.gdn_batched_decode);
-    B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
     B("runtime.prefill_batch", cfg.runtime.prefill_batch);
-    B("runtime.prefill_ffn_graph", cfg.runtime.prefill_ffn_graph);
     I("runtime.admission_decode_tokens", cfg.runtime.admission_decode_tokens);
-    B("runtime.kv_swap", cfg.runtime.kv_swap);
-    B("runtime.prefill_overlap", cfg.runtime.prefill_overlap);
     I("runtime.vram_budget_mb", cfg.runtime.vram_budget_mb);
 
     // [kv_cache]
@@ -224,9 +206,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     F("vram.kv_fraction", cfg.vram.kv_fraction);
     I("vram.reserve_floor_pct", cfg.vram.reserve_floor_pct);
     I("vram.library_reserve_mb", cfg.vram.library_reserve_mb);
-    I("vram.upload_ring_depth", cfg.vram.upload_ring_depth);
-    I("vram.upload_ring_chunk_mib", cfg.vram.upload_ring_chunk_mib);
-    B("vram.host_token_embedding", cfg.vram.host_token_embedding);
     S("vram.library_reserve_cache", cfg.vram.library_reserve_cache);
 
     // [attention]
@@ -261,7 +240,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.spec_trace", cfg.diagnostics.spec_trace);
     I("diagnostics.mtp_verify_pin", cfg.diagnostics.mtp_verify_pin);
     B("diagnostics.spec_capture_fidelity", cfg.diagnostics.spec_capture_fidelity);
-    B("diagnostics.jump_trace", cfg.diagnostics.jump_trace);
     S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
     B("attention.splitk_pipe", cfg.attention.splitk_pipe);
     B("attention.fp8_tile", cfg.attention.fp8_tile);
@@ -394,27 +372,16 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     // [gemma4] section: per-model knobs live in ModelConfig::Overrides::Gemma4,
     // populated by the GGUF/SafeTensors loader or the engine init resolver.
 
-    // [generation]
-    B("generation.no_logit_softcap", cfg.generation.no_logit_softcap);
-    B("generation.force_bos", cfg.generation.force_bos);
-    B("generation.no_ban", cfg.generation.no_ban);
-    B("generation.mtp_no_rope", cfg.generation.mtp_no_rope);
-
     // [server]
     B("server.prefix_cache", cfg.server.prefix_cache);
     I("server.prefix_pin_budget_pct", cfg.server.prefix_pin_budget_pct);
     I("server.session_ttl_s", cfg.server.session_ttl_s);
     B("server.model_swap", cfg.server.model_swap);
     I("server.model_swap_drain_ms", cfg.server.model_swap_drain_ms);
-    I("server.agent_scan_limit", cfg.server.agent_scan_limit);
     I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
-    I("server.snapshot_min_prompt_tokens", cfg.server.snapshot_min_prompt_tokens);
-    B("server.transcript_snapshot", cfg.server.transcript_snapshot);
-    B("server.transcript_token_reuse", cfg.server.transcript_token_reuse);
     S("server.otlp_endpoint", cfg.server.otlp_endpoint);
     S("server.otlp_service_name", cfg.server.otlp_service_name);
-    B("server.green_contexts", cfg.server.green_contexts);
 
     // [warm_cache]
     B("warm_cache.enabled", cfg.warm_cache.enabled);
@@ -424,9 +391,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("suspend.device_reset", cfg.suspend.device_reset);
     I("suspend.host_ram_headroom_mb", cfg.suspend.host_ram_headroom_mb);
 
-    // [bench]
-    B("bench.generate", cfg.bench.generate);
-
     // [paths]
     S("paths.mmproj", cfg.paths.mmproj);
 
@@ -435,29 +399,21 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.debug_forward", cfg.diagnostics.debug_forward);
     B("diagnostics.debug_template", cfg.diagnostics.debug_template);
     S("diagnostics.dump_hidden_dir", cfg.diagnostics.dump_hidden_dir);
-    S("diagnostics.dump_logits_dir", cfg.diagnostics.dump_logits_dir);
     S("diagnostics.dump_final_logits_dir", cfg.diagnostics.dump_final_logits_dir);
     S("diagnostics.dump_gdn_state_dir", cfg.diagnostics.dump_gdn_state_dir);
-    S("diagnostics.dump_routing_dir", cfg.diagnostics.dump_routing_dir);
     S("diagnostics.moe_expert_hist", cfg.diagnostics.moe_expert_hist);
     S("diagnostics.moe_expert_trace", cfg.diagnostics.moe_expert_trace);
     B("diagnostics.dump_tokens", cfg.diagnostics.dump_tokens);
     I("diagnostics.ppl_first", cfg.diagnostics.ppl_first);
     I("diagnostics.ppl_last", cfg.diagnostics.ppl_last);
-    I("diagnostics.exit_layer", cfg.diagnostics.exit_layer);
     B("diagnostics.profile", cfg.diagnostics.profile);
     B("diagnostics.graph_diag", cfg.diagnostics.graph_diag);
     S("diagnostics.graph_dump_dir", cfg.diagnostics.graph_dump_dir);
-    B("diagnostics.nvfp4_force_dequant", cfg.diagnostics.nvfp4_force_dequant);
     B("diagnostics.no_nvfp4_decode_cache", cfg.diagnostics.no_nvfp4_decode_cache);
-    B("diagnostics.prefill_graph_ignore_dequant_cap", cfg.diagnostics.prefill_graph_ignore_dequant_cap);
-    B("diagnostics.spec_capture_probe", cfg.diagnostics.spec_capture_probe);
     B("diagnostics.log_gemm_algo", cfg.diagnostics.log_gemm_algo);
-    B("diagnostics.mtp_pattern_log", cfg.diagnostics.mtp_pattern_log);
     B("diagnostics.step_timing", cfg.diagnostics.step_timing);
     B("diagnostics.worker_timing", cfg.diagnostics.worker_timing);
     B("diagnostics.tool_fault_raw", cfg.diagnostics.tool_fault_raw);
-    B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
     B("diagnostics.lm_dequant_fp16", cfg.diagnostics.lm_dequant_fp16);
@@ -467,15 +423,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("calibration.enabled", cfg.calibration.enabled);
     S("calibration.out_path", cfg.calibration.out_path);
     B("calibration.hessian", cfg.calibration.hessian);
-    S("calibration.pair_dump", cfg.calibration.pair_dump);
-    S("calibration.pair_read", cfg.calibration.pair_read);
-    I("calibration.pair_layer_begin", cfg.calibration.pair_layer_begin);
-    I("calibration.pair_layer_end", cfg.calibration.pair_layer_end);
-
-    // [constrained]
-    B("constrained.jump_ahead", cfg.constrained.jump_ahead);
-    B("constrained.jump_ahead_trust", cfg.constrained.jump_ahead_trust);
-    I("constrained.jump_min_run", cfg.constrained.jump_min_run);
 
     // [ffn]
     B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
@@ -554,7 +501,7 @@ std::string home_dir() {
 //     inject determinism through the public API without a config file.
 //   IMP_FMHA_FA2: set by the roofline A/B harness (tools/roofline/roofline.py)
 //     to toggle the FA2 prefill kernel per subprocess.
-// IMP_SPEC_TRACE / IMP_JUMP_TRACE / IMP_PPL_DUMP (#1207) are seeded too, so
+// IMP_SPEC_TRACE / IMP_PPL_DUMP (#1207) are seeded too, so
 // the raw getenv() habit at their use sites stays reachable from imp.conf/--set.
 void seed_from_env(RuntimeConfig& cfg) {
     // runtime.deterministic: IMP_DETERMINISTIC '1'/'true' enables full
@@ -576,12 +523,10 @@ void seed_from_env(RuntimeConfig& cfg) {
             IMP_LOG_WARN("IMP_FMHA_FA2='%s' is not a boolean (0/1); ignored", e);
     }
 
-    // diagnostics.spec_trace / jump_trace / ppl_dump: presence-is-truth
+    // diagnostics.spec_trace / ppl_dump: presence-is-truth
     // (empty value counts as ON) to match old shell/getenv() habits.
     if (std::getenv("IMP_SPEC_TRACE"))
         cfg.diagnostics.spec_trace = true;
-    if (std::getenv("IMP_JUMP_TRACE"))
-        cfg.diagnostics.jump_trace = true;
     if (const char* e = std::getenv("IMP_PPL_DUMP"))
         cfg.diagnostics.ppl_dump = e;
     // diagnostics.worker_timing: IMP_WORKER_TIMING '1' (AUDIT_ARCH_2026 J-10).

@@ -1,7 +1,7 @@
 #pragma once
 
 // Ragged GDN forward (cross-sequence prefill, runtime.prefill_batch), with or without the
-// one-row decode riders of a mixed step (runtime.prefill_mixed_decode_hybrid). Prompt members
+// one-row decode riders of a mixed step. Prompt members
 // take one prefill conv and one scan each; riders take ONE batched decode conv and ONE batched
 // decode scan (the separate decode step's kernels), so 31 riders cost 2 launches, not 62.
 

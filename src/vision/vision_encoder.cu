@@ -486,12 +486,6 @@ bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t st
     // Captures/replays the full encoder forward as a CUDA graph: the 27-layer SigLIP ViT
     // launches 200+ kernels per image, graph replay eliminates per-kernel launch overhead. Keyed
     // on (d_pixels, d_output); any pointer change invalidates the captured slot.
-    // [runtime] no_vision_graph=true forces the eager path (debugging).
-    const bool disable_graph = process_diag_no_vision_graph();
-    if (disable_graph) {
-        return encode_impl(d_pixels, d_output, stream);
-    }
-
     if (d_pixels != graph_d_pixels_ || d_output != graph_d_output_) {
         encode_graph_.invalidate();
         graph_d_pixels_ = d_pixels;

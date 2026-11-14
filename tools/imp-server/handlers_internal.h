@@ -431,8 +431,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
 void send_capacity_error_(httplib::Response& res, const ServerState& state, bool recurrent);
 // The reasoning/content splitter both transports run (stream_driver.cpp). use_reasoning allows
 // SCAN (the model decides); ctx.snap.enable_thinking starts in REASONING.
-imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, const ServerState& state,
-                                                          bool use_reasoning);
+imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestContext& ctx, bool use_reasoning);
 // Non-streaming stop sequences match the answer only when the request has stops and a reasoning
 // split applies: Harmony (final channel) or deepseek (that splitter).
 bool stops_skip_reasoning_(const ChatRequestContext& ctx, const ServerState& state);

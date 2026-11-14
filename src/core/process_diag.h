@@ -2,9 +2,8 @@
 
 // Process-wide diagnostic/runtime-mode flags, snapshotted from RuntimeConfig
 // once at startup by process_diag_install() (called from tool mains and
-// Engine::init). Exists because leaf utilities (graph_diag, executor_debug,
-// CUDA-graph capture-mode selector, PDL gate, vision-encoder graph gate) are
-// called from hundreds of sites that can't carry a RuntimeConfig. Defaults
+// Engine::init). Exists because leaf utilities (graph_diag, executor_debug, PDL gate)
+// are called from hundreds of sites that can't carry a RuntimeConfig. Defaults
 // match RuntimeConfig so library users that skip install() still get sane behavior.
 
 #include <string>
@@ -19,8 +18,6 @@ struct ProcessDiag {
     bool debug_forward = false;
     bool debug_template = false;
     bool graph_diag = false;
-    bool nvfp4_force_dequant = false;
-    bool prefill_graph_ignore_dequant_cap = false;
     bool log_gemm_algo = false;
     bool audit_nvfp4_scales = false;
     std::string dump_hidden_dir;
@@ -29,12 +26,6 @@ struct ProcessDiag {
 
     // Runtime
     bool no_pdl = false;
-    // Pinned staging ring for the weight upload (#1653).
-    int upload_ring_depth = 4;
-    int upload_ring_chunk_mib = 4;
-    bool host_token_embedding = true;  // vram.host_token_embedding (#2484)
-    bool no_vision_graph = false;
-    std::string graph_capture_mode = "relaxed";
     bool prefill_graph_enabled = true;
 
     // GEMM (may be promoted in place by engine_init_resolver)
@@ -94,8 +85,6 @@ void process_diag_set(const ProcessDiag& d);
 [[nodiscard]] bool process_diag_debug_forward();
 [[nodiscard]] bool process_diag_debug_template();
 [[nodiscard]] bool process_diag_graph_diag();
-[[nodiscard]] bool process_diag_nvfp4_force_dequant();
-[[nodiscard]] bool process_diag_prefill_graph_ignore_dequant_cap();
 [[nodiscard]] bool process_diag_log_gemm_algo();
 [[nodiscard]] bool process_diag_audit_nvfp4_scales();
 const char* process_diag_dump_hidden_dir();   // nullptr when unset; "1"/"all" → "/tmp"
@@ -103,17 +92,6 @@ const char* process_diag_graph_dump_dir();    // nullptr when unset
 
 // Runtime modes
 [[nodiscard]] bool process_diag_no_pdl();
-
-// Pinned staging ring for the weight upload (#1653). Depth and chunk size in
-// MiB; the defaults are 4 and 4. Load-time only - the ring is built once per
-// upload pass and destroyed with it.
-int process_diag_upload_ring_depth();
-int process_diag_upload_ring_chunk_mib();
-// Untied token embedding in mapped pinned host memory instead of VRAM (#2484). Load-time only.
-[[nodiscard]] bool process_diag_host_token_embedding();
-[[nodiscard]] bool process_diag_no_vision_graph();
-// "global" | "relaxed" | "thread_local" (default "relaxed")
-const std::string& process_diag_graph_capture_mode();
 [[nodiscard]] bool process_diag_prefill_graph_enabled();
 
 // Mirrored at engine init from cfg.runtime.deterministic_gemm; some arch

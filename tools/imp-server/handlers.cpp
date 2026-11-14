@@ -607,8 +607,6 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     config.use_prefix_caching = runtime_cfg.server.prefix_cache ? 1 : 0;
     config.prefix_pin_budget_pct = runtime_cfg.server.prefix_pin_budget_pct;
 
-    // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
-    config.enable_green_contexts = runtime_cfg.server.green_contexts ? 1 : 0;
     if (!args.prefix_cache_path.empty()) {
         snprintf(config.prefix_cache_path, sizeof(config.prefix_cache_path), "%s",
                  args.prefix_cache_path.c_str());

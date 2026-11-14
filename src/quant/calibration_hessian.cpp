@@ -1,6 +1,5 @@
 #include "quant/calibration_hessian.h"
 
-#include <algorithm>
 #include <cstring>
 
 namespace imp {
@@ -8,7 +7,6 @@ namespace imp {
 namespace {
 
 constexpr char kMagic[8] = {'I', 'M', 'P', 'H', 'E', 'S', '0', '1'};
-constexpr char kMagic2[8] = {'I', 'M', 'P', 'H', 'E', 'S', '0', '2'};
 constexpr int64_t kMaxK = 1 << 16;
 constexpr uint32_t kMaxEntries = 1u << 16;
 constexpr uint32_t kMaxStrLen = 64;
@@ -29,30 +27,21 @@ HessianWriter::~HessianWriter() {
         std::fclose(f_);
 }
 
-std::string HessianWriter::open(const std::string& path, uint32_t count, uint32_t mats) {
-    if (mats != 1 && mats != 2)
-        return "unsupported matrix count " + std::to_string(mats);
-    mats_ = mats;
+std::string HessianWriter::open(const std::string& path, uint32_t count) {
     f_ = std::fopen(path.c_str(), "wb");
     if (!f_)
         return "cannot open " + path + " for writing";
-    const char* magic = mats == 1 ? kMagic : kMagic2;
-    if (std::fwrite(magic, 1, sizeof(kMagic), f_) != sizeof(kMagic) || !put(f_, count) ||
-        (mats == 2 && !put(f_, mats)))
+    if (std::fwrite(kMagic, 1, sizeof(kMagic), f_) != sizeof(kMagic) || !put(f_, count))
         return "write failed: " + path;
     return "";
 }
 
-std::string HessianWriter::add(int layer, const std::string& kind, int64_t K, uint64_t rows, const float* m0,
-                               const float* m1) {
+std::string HessianWriter::add(int layer, const std::string& kind, int64_t K, uint64_t rows, const float* h) {
     const auto len = static_cast<uint32_t>(kind.size());
     const size_t n = static_cast<size_t>(K) * static_cast<size_t>(K);
-    if (mats_ == 2 && !m1)
-        return "second matrix missing at layer " + std::to_string(layer) + " " + kind;
     if (!f_ || !put(f_, static_cast<int32_t>(layer)) || !put(f_, len) ||
         std::fwrite(kind.data(), 1, len, f_) != len || !put(f_, K) || !put(f_, rows) ||
-        std::fwrite(m0, sizeof(float), n, f_) != n ||
-        (mats_ == 2 && std::fwrite(m1, sizeof(float), n, f_) != n))
+        std::fwrite(h, sizeof(float), n, f_) != n)
         return "write failed at layer " + std::to_string(layer) + " " + kind;
     return "";
 }
@@ -76,12 +65,10 @@ std::string read_hessian_index(const std::string& path, std::vector<HessianIndex
     std::fseek(f, 0, SEEK_SET);
     std::string err;
     char magic[8];
-    uint32_t count = 0, mats = 1;
-    const bool read_magic = std::fread(magic, 1, sizeof(magic), f) == sizeof(magic);
-    const bool v2 = read_magic && std::memcmp(magic, kMagic2, sizeof(magic)) == 0;
-    if (!read_magic || (!v2 && std::memcmp(magic, kMagic, sizeof(magic)) != 0) || !get(f, count) ||
-        count > kMaxEntries || (v2 && (!get(f, mats) || mats != 2))) {
-        err = path + ": not an IMPHES01/IMPHES02 file";
+    uint32_t count = 0;
+    if (std::fread(magic, 1, sizeof(magic), f) != sizeof(magic) ||
+        std::memcmp(magic, kMagic, sizeof(magic)) != 0 || !get(f, count) || count > kMaxEntries) {
+        err = path + ": not an IMPHES01 file";
     }
     for (uint32_t i = 0; err.empty() && i < count; i++) {
         HessianIndexEntry e;
@@ -98,10 +85,9 @@ std::string read_hessian_index(const std::string& path, std::vector<HessianIndex
             break;
         }
         e.layer = layer;
-        e.mats = mats;
         e.offset = static_cast<uint64_t>(std::ftell(f));
         const auto bytes = static_cast<long>(static_cast<uint64_t>(e.K) * static_cast<uint64_t>(e.K) *
-                                             sizeof(float) * mats);
+                                             sizeof(float));
         if (std::fseek(f, bytes, SEEK_CUR) != 0 || std::ftell(f) > size) {
             err = path + ": truncated data " + std::to_string(i);
             break;
@@ -112,47 +98,14 @@ std::string read_hessian_index(const std::string& path, std::vector<HessianIndex
     return err;
 }
 
-std::string read_hessian_set(const std::string& paths_csv, std::vector<std::string>& files,
-                             std::vector<HessianIndexEntry>& out) {
-    files.clear();
-    out.clear();
-    for (size_t at = 0; at <= paths_csv.size();) {
-        const size_t comma = std::min(paths_csv.find(',', at), paths_csv.size());
-        if (comma > at)
-            files.push_back(paths_csv.substr(at, comma - at));
-        at = comma + 1;
-    }
-    if (files.empty())
-        return "no Hessian file in '" + paths_csv + "'";
-    std::vector<HessianIndexEntry> one;
-    for (size_t i = 0; i < files.size(); i++) {
-        if (std::string err = read_hessian_index(files[i], one); !err.empty())
-            return err;
-        for (auto& e : one) {
-            if (!out.empty() && e.mats != out.front().mats)
-                return files[i] + ": IMPHES01 and IMPHES02 mixed";
-            for (const auto& o : out)
-                if (o.layer == e.layer && o.kind == e.kind)
-                    return files[i] + ": layer " + std::to_string(e.layer) + " " + e.kind + " also in " +
-                           files[o.file];
-            e.file = static_cast<uint32_t>(i);
-            out.push_back(std::move(e));
-        }
-    }
-    return "";
-}
-
-std::string read_hessian(const std::string& path, const HessianIndexEntry& e, std::vector<float>& out,
-                         uint32_t mat) {
-    if (mat >= e.mats)
-        return path + ": entry has no matrix " + std::to_string(mat);
+std::string read_hessian(const std::string& path, const HessianIndexEntry& e, std::vector<float>& out) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f)
         return "cannot open " + path;
     const size_t n = static_cast<size_t>(e.K) * static_cast<size_t>(e.K);
     out.resize(n);
-    const auto at = static_cast<long>(e.offset + (static_cast<uint64_t>(mat) * n * sizeof(float)));
-    const bool ok = std::fseek(f, at, SEEK_SET) == 0 && std::fread(out.data(), sizeof(float), n, f) == n;
+    const bool ok = std::fseek(f, static_cast<long>(e.offset), SEEK_SET) == 0 &&
+                    std::fread(out.data(), sizeof(float), n, f) == n;
     std::fclose(f);
     return ok ? "" : path + ": short read at layer " + std::to_string(e.layer) + " " + e.kind;
 }

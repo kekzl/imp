@@ -521,7 +521,7 @@ static bool snapshot_still_paired(RecurrentSnapshotStore& store, const KVCacheMa
 bool Engine::transcript_snapshot_active_() const {
     if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
         return false;
-    if (!runtime_config_.server.transcript_snapshot || !supports_chunked_prefill_())
+    if (!supports_chunked_prefill_())
         return false;
     return true;
 }
@@ -536,7 +536,7 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int n = static_cast<int>(forwarded.size());
-    // No snapshot_min_prompt_tokens floor here: that floor prices the prefill SPLIT a
+    // No kSnapshotMinPromptTokens floor here: that floor prices the prefill SPLIT a
     // prompt-boundary snapshot costs, and a finish-time save splits nothing (0.1-2 ms).
     // Short chats are the common case: a 73-token prompt + 174-token reply re-prefilled
     // its whole 247-token transcript on turn 2 (cached 0) under the 256 floor.
@@ -649,10 +649,11 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
     // >= kMinPromptChunkRows rows after the snapshot, the chunk a restore re-prefills (#2560, #2562).
-    return next_snapshot_boundary(
-        static_cast<int>(req.input_tokens.size()), bs, runtime_config_.server.snapshot_min_prompt_tokens,
-        ssm_state_ ? (req.snapshot_hint_tokens > 0 ? req.snapshot_hint_tokens : req.branch_point_tokens) : 0,
-        offset, kMinPromptChunkRows);
+    return next_snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs, kSnapshotMinPromptTokens,
+                                  ssm_state_ ? (req.snapshot_hint_tokens > 0 ? req.snapshot_hint_tokens
+                                                                             : req.branch_point_tokens)
+                                             : 0,
+                                  offset, kMinPromptChunkRows);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.

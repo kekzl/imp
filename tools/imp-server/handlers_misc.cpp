@@ -279,7 +279,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
             mixed_steps = state.ctx->engine->mixed_decode_steps();
         out +=
             "# HELP imp_mixed_decode_steps_total Engine steps whose decoders rode the ragged prefill "
-            "forward (runtime.prefill_mixed_decode)\n";
+            "forward (mixed prefill+decode step)\n";
         out += "# TYPE imp_mixed_decode_steps_total counter\n";
         out += "imp_mixed_decode_steps_total " + std::to_string(mixed_steps) + "\n";
         out += "# HELP imp_kv_pool_growths_total Times the growable KV pool committed more memory\n";

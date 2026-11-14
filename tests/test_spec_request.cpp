@@ -196,16 +196,6 @@ TEST(DequantCap, ExactlyAtTheCapIsCovered) {
     EXPECT_FALSE(dequant_cap_decide(in).over_cap);
 }
 
-TEST(DequantCap, TheDiagnosticOverrideKeepsCaptureOnButNotTheVerdict) {
-    DequantCapInputs in;
-    in.max_eligible_bytes = 900 * kMiB;
-    in.cap_bytes = 512 * kMiB;
-    in.ignore_cap = true;
-    const auto d = dequant_cap_decide(in);
-    EXPECT_TRUE(d.over_cap) << "the override must not rewrite the measurement";
-    EXPECT_TRUE(d.graph_capture_ok);
-}
-
 // ------------------------------------------------------- FP8 decode kernels
 
 // kv_cache.dtype=fp8 passes init on head_dim-256 (FP8 covers 64/96/128/256/512) but lands on

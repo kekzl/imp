@@ -64,52 +64,6 @@ bool Engine::init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok
 bool Engine::init_features() {
     const auto& mcfg = model_->config();
 
-    // Green contexts
-    if (config_.use_green_contexts) {
-        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
-            IMP_LOG_WARN("Green context init failed — falling back to regular streams");
-            // Clear the CUDA error state so it doesn't corrupt subsequent operations. Green context
-            // failure on sm_120 consumer GPUs is expected (requires data-center features); without
-            // clearing, the stale error causes cublasLtMatmul to fail with CUBLAS_STATUS_INVALID_VALUE.
-            cudaGetLastError();
-        }
-        if (green_ctx_.is_available() && resolve_prefill_chunk_size_() > 0)
-            if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size))
-                IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
-    }
-
-    // Prefill/decode overlap gates (runtime.prefill_overlap): each DECLINE is logged once
-    // (#1755), since a gate that refuses silently is a gate nobody can see. The per-step gate
-    // (decode batch >= 2, no spec-verify sharing the NVFP4 activation scratch) lives in step_impl_.
-    if (runtime_config_.runtime.prefill_overlap) {
-        const char* decline = nullptr;
-        if (!green_ctx_.is_available())
-            decline = "no stream pair (green-context init failed entirely)";
-        else if (!executor_->has_decode_workspace() ||
-                 executor_->decode_max_batch() < config_.max_batch_size)
-            decline = "decode workspace not allocated at max_batch";
-        else if (model_->ngram_table() != nullptr)
-            decline = "PLE model (n-gram staging and rows shared between prefill and decode)";
-        else if (executor_->model_has_moe())
-            decline = "MoE model (expert workspace not per-slot yet — plan phase 2)";
-        else if (executor_->has_gguf_nvfp4_overlay())
-            decline = "GGUF decode overlay (dp4a/dequant scratch shared with prefill)";
-        else if (!executor_->allocate_decode_qscratch(config_.max_batch_size))
-            decline = "per-slot quant scratch allocation failed";
-        if (!decline) {
-            auto slab = engine_arena().take_bytes(SAMPLE_SCRATCH_BYTES);
-            if (slab.empty())
-                decline = "prefill sample slot allocation failed";
-            else
-                d_prefill_sample_ = reinterpret_cast<int32_t*>(slab.data());
-        }
-        overlap_ready_ = (decline == nullptr);
-        if (overlap_ready_)
-            IMP_LOG_INFO("prefill overlap: ENTERED (engages at decode batch >= 2)");
-        else
-            IMP_LOG_INFO("prefill overlap: DECLINED — %s; serial prefill path", decline);
-    }
-
     // Chat template
     if (Tokenizer* tok = model_->tokenizer()) {
         auto family = ChatTemplate::detect_family(tok->chat_template_str());
@@ -127,7 +81,7 @@ bool Engine::init_features() {
                 "Chat template init failed for family %s — requests will use raw "
                 "prompt concatenation (no role markers)",
                 chat_template_family_name(family));
-        // Finished transcripts' ids (server.transcript_token_reuse); server copies of
+        // Finished transcripts' ids (transcript token reuse); server copies of
         // chat_template_ share the store.
         chat_template_.set_transcript_store(std::make_shared<TranscriptIdStore>());
     }
@@ -267,14 +221,6 @@ bool Engine::init_features() {
 }
 
 void Engine::build_banned_token_list() {
-    // Diagnostic bypass: generation.no_ban disables the
-    // ban list. Used to bisect Mistral-Small-3.2-NVFP4 long-form repetition
-    // (ban vs weight quality).
-    if (runtime_config_.generation.no_ban) {
-        banned_token_ids_.clear();
-        IMP_LOG_WARN("generation.no_ban=true: skipping banned-token list (debug)");
-        return;
-    }
     banned_token_ids_.clear();
     auto add_if_valid = [this](int32_t id) {
         if (id >= 0) banned_token_ids_.push_back(id);
@@ -598,7 +544,7 @@ void Engine::warmup() {
                          committed, prewarm_n, committed);
         prewarm_n = committed;
     }
-    if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs && prewarm_n > 1) {
+    if (config_.use_cuda_graphs && prewarm_n > 1) {
         const auto t0 = std::chrono::steady_clock::now();
         const int n = prewarm_n;
         const int anchor_budget = (3 * n) + 8;

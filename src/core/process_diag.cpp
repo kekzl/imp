@@ -17,8 +17,6 @@ void process_diag_set(const ProcessDiag& d) { slot() = d; }
 bool process_diag_debug_forward() { return slot().debug_forward; }
 bool process_diag_debug_template() { return slot().debug_template; }
 bool process_diag_graph_diag() { return slot().graph_diag; }
-bool process_diag_nvfp4_force_dequant() { return slot().nvfp4_force_dequant; }
-bool process_diag_prefill_graph_ignore_dequant_cap() { return slot().prefill_graph_ignore_dequant_cap; }
 bool process_diag_log_gemm_algo() { return slot().log_gemm_algo; }
 bool process_diag_audit_nvfp4_scales() { return slot().audit_nvfp4_scales; }
 const char* process_diag_dump_hidden_dir() {
@@ -29,11 +27,6 @@ const char* process_diag_graph_dump_dir() {
     return slot().graph_dump_dir.empty() ? nullptr : slot().graph_dump_dir.c_str();
 }
 bool process_diag_no_pdl() { return slot().no_pdl; }
-int process_diag_upload_ring_depth() { return slot().upload_ring_depth; }
-int process_diag_upload_ring_chunk_mib() { return slot().upload_ring_chunk_mib; }
-bool process_diag_host_token_embedding() { return slot().host_token_embedding; }
-bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
-const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }
 bool process_diag_deterministic_gemm() { return slot().deterministic_gemm; }
 bool process_diag_deterministic() { return slot().deterministic; }

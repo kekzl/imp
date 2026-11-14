@@ -241,11 +241,11 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     const bool device_chain = chain_after && ws->n_experts == 0 &&
                               ws->d_chain_tokens != nullptr && K <= imp::kMtpMaxChainK;
 
-    // diagnostics.mtp_prenorm_h: feed the head the POST-final-norm hidden
+    // Feed the head the POST-final-norm hidden
     // (upstream vLLM/HF taps the target's post-norm hidden; imp's executor
     // hidden_ is pre-norm). Covers every fed pair, not just the chain input.
     // Not on an hc head (Qwen4Exp): its h_prev is the multi_hidden stream, fed un-normed (V:302-308).
-    if (runtime_config_.diagnostics.mtp_prenorm_h && ws->hc_count == 0) {
+    if (ws->hc_count == 0) {
         // ws->d_prenorm_rows is sized once at enable time (executor's token cap,
         // bounding every prefill feed); a feed past it fails, and the caller
         // unbinds drafting for the request.
@@ -598,9 +598,9 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
     }
     // the MTP carry scratch (2.5 MiB per slot on Qwen3.8).
     s.carry_rows = kMtpCarryRows;
-    // Post-norm feed scratch (diagnostics.mtp_prenorm_h): sized to the executor's token cap, the
+    // Post-norm feed scratch: sized to the executor's token cap, the
     // widest feed a prefill chunk can hand mtp_feed_pairs_.
-    if (runtime_config_.diagnostics.mtp_prenorm_h && head.hc_count == 0)
+    if (head.hc_count == 0)
         s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
     // E4M3 body copy for the bound verify lane only: the mtp_k=2 chain measured neutral (imp-cli 125.85 ->
     // 128.64 greedy, 123.47 -> 120.75 tok/s sampled).
@@ -760,10 +760,6 @@ bool Engine::enable_mtp_spec_decode(int k) {
             "— draft rope will diverge from the verifier; expect degraded acceptance");
     }
 
-    // Diagnostic: generation.mtp_no_rope disables RoPE entirely.
-    if (runtime_config_.generation.mtp_no_rope) {
-        ws->rope_dim = 0;
-    }
     // weight_offset matches the main model's rmsnorm calls (norm_weight_offset
     // from ModelConfig): 0.0 for Qwen3.5/3.6 (the +1 gamma=1+W is already baked
     // in at upload, see upload_mtp_weights in weight_upload.cpp), 1.0 for Gemma-3. Don't double-apply.

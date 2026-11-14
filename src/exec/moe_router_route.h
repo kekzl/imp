@@ -12,10 +12,9 @@
 
 namespace imp {
 
-// What the fused router cannot serve: policy off, logit dumps (no logits), group limit, gpt-oss logit bias.
+// What the fused router cannot serve: policy off, group limit, gpt-oss logit bias.
 struct RouterFusedGate {
     bool policy_on;
-    bool dump_logits;
     bool group_limit;
     bool logit_bias_profile;
     const void* logit_bias;

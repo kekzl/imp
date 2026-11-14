@@ -26,8 +26,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.debug_forward = cfg.diagnostics.debug_forward;
     d.debug_template = cfg.diagnostics.debug_template;
     d.graph_diag = cfg.diagnostics.graph_diag;
-    d.nvfp4_force_dequant = cfg.diagnostics.nvfp4_force_dequant;
-    d.prefill_graph_ignore_dequant_cap = cfg.diagnostics.prefill_graph_ignore_dequant_cap;
     d.log_gemm_algo = cfg.diagnostics.log_gemm_algo;
     d.audit_nvfp4_scales = cfg.diagnostics.audit_nvfp4_scales;
     d.dump_hidden_dir = cfg.diagnostics.dump_hidden_dir;
@@ -38,11 +36,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     }
     d.graph_dump_dir = cfg.diagnostics.graph_dump_dir;
     d.no_pdl = cfg.runtime.no_pdl;
-    d.upload_ring_depth = cfg.vram.upload_ring_depth;
-    d.upload_ring_chunk_mib = cfg.vram.upload_ring_chunk_mib;
-    d.host_token_embedding = cfg.vram.host_token_embedding;
-    d.no_vision_graph = cfg.runtime.no_vision_graph;
-    d.graph_capture_mode = cfg.runtime.graph_capture_mode;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;
     d.deterministic_gemm = cfg.runtime.deterministic_gemm;
     d.gemm_algo_timed = cfg.gemm.algo_timed;

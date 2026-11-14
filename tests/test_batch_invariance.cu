@@ -292,7 +292,6 @@ EngineConfig batch_invariance_config() {
     cfg.kv_cache_dtype = QType::F16;  // pin it: an auto upgrade would confound the arms
     cfg.compute_dtype = QType::F16;
     cfg.kv_block_size = 16;
-    cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
     cfg.use_prefix_caching = false;
     cfg.dual_path_quant = false;

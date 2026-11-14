@@ -20,7 +20,7 @@ SRC = REPO / "src"
 OWNER = "src/core/cuda_raii.h"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh", ".hpp")
 
-# cudaExecutionCtxStreamCreate: green-context streams (CudaStream::create_on_ctx).
+# cudaExecutionCtxStreamCreate: green-context streams (none since the 2026-11-14 removal; stays guarded).
 PATTERN = re.compile(
     r"\b(cudaStreamCreate\w*|cudaEventCreate\w*|cudaExecutionCtxStreamCreate"
     r"|cudaStreamDestroy|cudaEventDestroy)\s*\("

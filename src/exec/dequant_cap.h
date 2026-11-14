@@ -15,7 +15,6 @@ struct DequantCapInputs {
     size_t max_eligible_bytes = 0;  // largest plane that CAN take the M>1 fallback
     size_t max_excluded_bytes = 0;  // largest plane that cannot (the LM head), for the log
     size_t cap_bytes = 0;           // the workspace cap
-    bool ignore_cap = false;        // diagnostics.prefill_graph_ignore_dequant_cap
 };
 
 struct DequantCapDecision {
@@ -26,7 +25,7 @@ struct DequantCapDecision {
 constexpr DequantCapDecision dequant_cap_decide(const DequantCapInputs& in) {
     DequantCapDecision d;
     d.over_cap = in.max_eligible_bytes > in.cap_bytes;
-    d.graph_capture_ok = !d.over_cap || in.ignore_cap;
+    d.graph_capture_ok = !d.over_cap;
     return d;
 }
 

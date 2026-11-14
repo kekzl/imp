@@ -42,7 +42,6 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
     EXPECT_FALSE(cfg.gdn.fp32_scan);
-    EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
 }
 
 // kv_cache.block_size: the operator surface AUDIT_ARCH_2026 B-5 found missing.
@@ -63,8 +62,6 @@ TEST(RuntimeConfigTest, ExpertPrefetchBlocksBinds) {
     EXPECT_EQ(cfg.moe.expert_prefetch_blocks, 4);
 }
 
-// AUDIT_ARCH_2026 E-4: the agent-path SCAN hold was a constant in stream_driver.cpp; it is
-// the whole TTFT of a prose reply on tool requests.
 // AUDIT_ARCH_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old
 // generation.* spelling is unknown and --set rejects it.
 TEST(RuntimeConfigTest, LmDequantBisectBindsUnderDiagnosticsOnly) {
@@ -73,20 +70,6 @@ TEST(RuntimeConfigTest, LmDequantBisectBindsUnderDiagnosticsOnly) {
     set_(cfg, {"diagnostics.lm_dequant_fp16=true"});
     EXPECT_TRUE(cfg.diagnostics.lm_dequant_fp16);
     EXPECT_EQ(cfg.apply_overrides({"generation.lm_dequant_fp16=true"}).size(), 1u);
-}
-
-TEST(RuntimeConfigTest, AgentScanLimitBindsAndDefaultsTo256) {
-    RuntimeConfig cfg;
-    EXPECT_EQ(cfg.server.agent_scan_limit, 256);
-    set_(cfg, {"server.agent_scan_limit=8"});
-    EXPECT_EQ(cfg.server.agent_scan_limit, 8);
-}
-
-TEST(RuntimeConfigTest, SnapshotMinPromptTokensBindsAndDefaultsTo256) {
-    RuntimeConfig cfg;
-    EXPECT_EQ(cfg.server.snapshot_min_prompt_tokens, 256);
-    set_(cfg, {"server.snapshot_min_prompt_tokens=0"});
-    EXPECT_EQ(cfg.server.snapshot_min_prompt_tokens, 0);
 }
 
 // kv_cache.swa_sizing tri-state: "auto"/"on"/"off" plus legacy bool literals
@@ -286,10 +269,6 @@ TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
     EXPECT_FLOAT_EQ(defaults.rope.attn_factor, 1.0f);
     EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 1.0f);
     EXPECT_EQ(defaults.vram.reserve_floor_pct, 0);
-    // #1653: 4x4 MiB, not the 4x128 that shipped until the sweep. A default
-    // that drifts back silently costs 0.68 s of every process start.
-    EXPECT_EQ(defaults.vram.upload_ring_depth, 4);
-    EXPECT_EQ(defaults.vram.upload_ring_chunk_mib, 4);
 
     TempFile f(R"(
 [rope]
@@ -316,10 +295,6 @@ reserve_floor_pct = 5
     EXPECT_FLOAT_EQ(cfg.vram.kv_fraction, 0.5f);
     EXPECT_EQ(cfg.vram.reserve_floor_pct, 5);
 
-    // --set style overrides reach the same fields.
-    set_(cfg, {"vram.upload_ring_depth=2", "vram.upload_ring_chunk_mib=64"});
-    EXPECT_EQ(cfg.vram.upload_ring_depth, 2);
-    EXPECT_EQ(cfg.vram.upload_ring_chunk_mib, 64);
 
     set_(cfg, {"rope.scaling=linear", "rope.factor=2", "vram.kv_fraction=0.9"});
     EXPECT_EQ(cfg.rope.scaling, "linear");

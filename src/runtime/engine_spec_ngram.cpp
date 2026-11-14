@@ -736,9 +736,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     state.ple_host_ready = !mc_on && verify_prep(*executor_, *model_, *req, h_tokens, chunk_pad, p0, stream);
 
     Tensor logits_out;
-    if (runtime_config().diagnostics.spec_capture_probe) {
-        spec_capture_probe_forward_(state, logits_out, stream);
-    } else if (capture_on) {
+    if (capture_on) {
         if (!spec_captured_forward_(state, logits_out, stream)) {
             // Warmup use, or capture/launch failed (nothing executed): run
             // eagerly. A doomed capture means the capture-mode path itself
@@ -1048,7 +1046,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     return true;
 }
 
-// spec_capture_probe_forward_ (diagnostics census) and the production
-// graph-captured verify (#847) live in engine_spec_capture.cpp.
+// The graph-captured verify (#847) lives in engine_spec_capture.cpp.
 
 }  // namespace imp

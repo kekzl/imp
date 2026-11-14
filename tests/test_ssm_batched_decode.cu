@@ -1,4 +1,4 @@
-// Batched Mamba2 decode (runtime.gdn_batched_decode on Nemotron-H): N sequences, one token
+// Batched Mamba2 decode (batched GDN/SSM decode on Nemotron-H): N sequences, one token
 // each, slot table in device memory. Asserted bitwise per row against the single-sequence
 // kernels (ssm_conv1d_decode, ssm_scan_decode) on the same slot, with a permuted slot table and
 // an untouched spare slot, so a row reading a neighbour's slot or row fails.

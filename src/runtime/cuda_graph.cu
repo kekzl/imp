@@ -2,7 +2,6 @@
 #include "runtime/think_stop_logic.h"
 #include "core/graph_diag.h"
 #include "core/pdl.h"
-#include "core/process_diag.h"
 #include "exec/executor.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
@@ -23,49 +22,10 @@ void trim_graph_mem() {
 }
 }  // namespace
 
-// runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local": selects the
-// cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and the ConditionalRunner
-// body-graph capture. Probed at first call and cached.
-//
-// "relaxed" is the default: the CUTLASS 3.x grouped GEMM (removed #2929) HUNG under
-// cudaStreamCaptureModeGlobal during NVFP4 MoE prefill capture (Blocker B,
-// prefill_graph_blockers_2026_05_14 memo). Relaxed drops the cross-thread synchronization
-// constraint CUTLASS's collective scheduler was suspected to deadlock on, and is a strict
-// superset of capturable behaviors, so the decode fast path still works under it.
-cudaStreamCaptureMode get_capture_mode() {
-    static cudaStreamCaptureMode cached = []() {
-        const std::string& mode = process_diag_graph_capture_mode();
-        const bool prefill_graph = process_diag_prefill_graph_enabled();
-        if (mode == "global") {
-            // Warn loudly when the user has both opted into prefill_graph AND the known-deadlocking
-            // strict capture mode: most common cause of a silent hang at first NVFP4 MoE prefill replay.
-            if (prefill_graph) {
-                IMP_LOG_WARN(
-                    "CudaGraphCapture: runtime.graph_capture_mode=\"global\" + "
-                    "runtime.prefill_graph=true is the known-hangy combination "
-                    "(prefill_graph_blockers_2026_05_14 memo Blocker B). "
-                    "Recommended: keep graph_capture_mode=\"relaxed\" (current "
-                    "default) when prefill_graph is enabled.");
-            }
-            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeGlobal");
-            return cudaStreamCaptureModeGlobal;
-        }
-        if (mode == "thread_local") {
-            IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeThreadLocal (runtime.graph_capture_mode=thread_local)");
-            return cudaStreamCaptureModeThreadLocal;
-        }
-        // Default + "relaxed" branch:
-        if (mode != "relaxed") {
-            IMP_LOG_WARN(
-                "CudaGraphCapture: unknown runtime.graph_capture_mode=\"%s\", "
-                "falling back to \"relaxed\".",
-                mode.c_str());
-        }
-        IMP_LOG_INFO("CudaGraphCapture: using cudaStreamCaptureModeRelaxed (default for prefill-safe capture)");
-        return cudaStreamCaptureModeRelaxed;
-    }();
-    return cached;
-}
+// Every capture (CudaGraphCapture::begin_capture, the ConditionalRunner body graph, the MTP head) runs
+// relaxed: Global HUNG the CUTLASS grouped GEMM (removed #2929) under NVFP4 MoE prefill capture, and
+// relaxed is a strict superset of capturable behaviour (prefill_graph_blockers_2026_05_14 Blocker B).
+cudaStreamCaptureMode get_capture_mode() { return cudaStreamCaptureModeRelaxed; }
 
 // ---------------------------------------------------------------------------
 // apply_pdl_edges: convert kernel→kernel edges to PDL edges in a graph

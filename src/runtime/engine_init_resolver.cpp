@@ -81,45 +81,6 @@ bool host_pins_experts(const Model& model, int host_expert_pool_mib) {
 
 }  // namespace
 
-// IMP_DEBUG_RAW meta-flag: forces the engine into a "naked" FP16 forward pass
-// for reproducible byte-level comparison against a reference implementation
-// (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs) and
-// cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
-void Engine::init_apply_debug_raw_overrides_() {
-    const bool debug_raw_ = runtime_config_.runtime.debug_raw;
-    if (!debug_raw_)
-        return;
-    IMP_LOG_INFO(
-        "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert "
-        "cache off; deterministic cuBLAS, GDN reference scan)");
-    // Weight storage: keep FP16 (skip the lossy cache paths)
-    config_.use_fp8_prefill = false;
-    config_.use_nvfp4_decode = 0;
-    config_.dual_path_quant = false;
-    // #1628: these were dead setenv() calls (nothing in the tree reads the
-    // IMP_* vars); now direct config assignments.
-    //
-    // CUDA graphs off (capture can mask state bugs). Via demote_graphs_, not
-    // by writing use_cuda_graphs directly: that left graph_demotion_ at None,
-    // so the dispatch summary printed graphs=0(none) with no reason (#1658).
-    demote_graphs_(GraphDemotionReason::DebugRaw);
-    // No warmup (warmup can leak state into first request)
-    runtime_config_.runtime.warmup = false;
-    // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
-    runtime_config_.runtime.deterministic_gemm = true;
-    // CUBLAS_WORKSPACE_CONFIG is read by cuBLAS itself, not by imp, so this one
-    // stays an environment variable.
-    setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 0);
-    // MoE: no expert LRU cache (state-carrying)
-    runtime_config_.moe.no_expert_cache = true;
-    // GDN: reference unfused scan (no register-state reordering); config key
-    // `gdn.ref_kernel`, read at executor_ssm_gdn.cu:491.
-    runtime_config_.gdn.ref_kernel = true;
-    // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
-    // IMP_NO_MMVQ: those trigger incompatible kernel paths that IMA on some
-    // combinations. debug_raw disables caches and approximations, not kernel variants.
-}
-
 // Runtime RoPE-scaling override (imp.conf [rope]): injects YaRN/linear
 // scaling into a model, mirroring HF-loader semantics (hf_config_loader.cpp):
 // rope_freq_scale stores the FACTOR, the kernel applies 1/factor and
@@ -213,7 +174,6 @@ void Engine::init_apply_rope_override_() {
 // opt-in.
 void Engine::init_resolve_kv_dtype_policy_() {
     const auto& mcfg = model_->config();
-    const bool debug_raw_ = runtime_config_.runtime.debug_raw;
     const bool force_kv_fp16 = (runtime_config_.kv_cache.dtype == "fp16");
     const bool fp8_auto_legacy = runtime_config_.kv_cache.fp8_auto_legacy;
 
@@ -353,8 +313,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16 &&
-        true) {
+    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !force_kv_fp16 && true) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
     } else if (config_.kv_cache_dtype == QType::F16) {
@@ -617,8 +576,7 @@ void Engine::init_resolve_ssm_dtype_() {
     }
 }
 
-// Auto-detect FP8 prefill. Under runtime.debug_raw or
-// [attention] fp8_prefill = "never", keep disabled. The "never" escape
+// Auto-detect FP8 prefill. Under [attention] fp8_prefill = "never", keep disabled. The "never" escape
 // hatch is for models (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) that
 // produce garbage decode with FP8 weight cache active: accumulated
 // dequant error through deep narrow-GQA stacks.
@@ -627,7 +585,7 @@ void Engine::init_resolve_fp8_prefill_() {
     const bool is_nvfp4_native = model_->config().is_nvfp4_prequant;
     if (is_nvfp4_native && !config_.use_fp8_prefill) {
         IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
-    } else if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
+    } else if (!config_.use_fp8_prefill && !no_fp8_prefill) {
         int sm_major = 0;
         int sm_minor = 0;
         const bool sm_ok = cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0) == cudaSuccess &&

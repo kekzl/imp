@@ -18,19 +18,15 @@ struct Diagnostics {
     bool debug_forward = false;
     bool debug_template = false;
     std::string dump_hidden_dir;
-    std::string dump_logits_dir;   // path or empty
     // Directory for the final LM logits per forward pass ([rows,vocab] FP32
-    // .npy). Distinct from dump_logits_dir (MoE gate logits at one layer): this
-    // is what the sampler sees, written post soft-cap. Empty = off.
+    // .npy): what the sampler sees, written post soft-cap. Empty = off.
     std::string dump_final_logits_dir;
     // Directory for the GDN recurrent state: gdn_state.npy ([n_gdn_layers,
     // heads*head_dim*state_size] FP32, last pass wins) + gdn_state_stats.jsonl
     // (per-pass min/max/RMS/non-finite count). State is FP32 by contract (mamba_ssm_dtype). Empty = off.
     std::string dump_gdn_state_dir;
-    std::string dump_routing_dir;  // path or empty
     // Path for the per-layer MoE expert-activation histogram (JSON), written at
-    // executor teardown. Counts every routing decision of the run (unlike
-    // dump_routing_dir's one-token DEBUG line). Empty = off.
+    // executor teardown. Counts every routing decision of the run. Empty = off.
     std::string moe_expert_hist;
     // Path for a per-token MoE expert trace (JSON), written at executor
     // teardown. Unlike the histogram, preserves temporal locality (needed to
@@ -42,43 +38,29 @@ struct Diagnostics {
     // llama-perplexity's window (first=n_ctx/2, [first, n_ctx-2]) for cross-engine PPL parity (GOAL bar 1).
     int ppl_first = 0;
     int ppl_last = -1;
-    int exit_layer = -1;
     bool profile = false;
     bool graph_diag = false;
     // Was a raw getenv() read in the hot path (#1207). IMP_SPEC_TRACE /
-    // IMP_JUMP_TRACE / IMP_PPL_DUMP still work as env names but are seeded into
+    // IMP_PPL_DUMP still work as env names but are seeded into
     // these keys at load, so --set and imp.conf reach them too.
     bool spec_trace = false;  // per-step speculative draft/verify trace
     // Paired depth A/Bs: N draft rows staged per request at every bound verify step below 4 requests (pad
     // rows past the drafts, mtp_batch_verify_k..8): texts then match across depth policies. 0 = off.
     int mtp_verify_pin = 0;
-    bool jump_trace = false;  // conditional-graph jump trace
     // Per-row NLL from --perplexity: "1" sparse / "full" to the debug log, a path ('/') to a file.
     std::string ppl_dump;
     std::string graph_dump_dir;
-    // Force NVFP4 dispatch through dequant->FP16 GEMV (M=1 bisection
-    // tool — see Mistral-Small-3.2-NVFP4 long-form repetition loops).
-    bool nvfp4_force_dequant = false;
     // Skip building the NVFP4 decode cache (bisection/eval): decode runs the
     // pre-cache source-precision paths (dp4a GEMV for GGUF, FP16 GEMV
-    // otherwise). Distinct from nvfp4_force_dequant (dequantizes the NVFP4 cache itself).
+    // otherwise).
     bool no_nvfp4_decode_cache = false;
-    // Probe: don't let the NVFP4 dequant-workspace cap (kCap=512 MiB,
-    // executor_workspace_buffers.cu) disable prefill-graph capture. With this
-    // set, gemm_nvfp4's fail-loud path answers whether the M>1 dequant fallback is reached under capture.
-    bool prefill_graph_ignore_dequant_cap = false;
-    // #847 feasibility probe: stream-captures every verify chunk forward, falls
-    // back to eager on failure; logs a capturability census, not a perf path.
     // Fidelity check: replays a cached verify graph vs an eager forward and
     // diffs row-0 logits (costs a full extra forward + 2 D2H per step). Diagnostic only.
     bool spec_capture_fidelity = false;
-    bool spec_capture_probe = false;
     // Log shape + per-candidate algoId/tileId + chosen algo for every
     // benchmark_and_select_algo call; at engine teardown one [lt-route] line per cuBLASLt
     // (route, caller file:line, m n k batch) with its host call count.
     bool log_gemm_algo = false;
-    // MTP pattern logging (predicted, actual, match per step).
-    bool mtp_pattern_log = false;
     // Host-side phase attribution for batched decode steps (build / forward /
     // sample / distribute / outside), aggregated every 256 steps. The GPU gap
     // profile locates idle; this says which HOST phase produces it.
@@ -90,10 +72,6 @@ struct Diagnostics {
     // imp-server: a failed tool call logs the model's raw call text, first 2000 bytes. Off by default,
     // the text can hold request content.
     bool tool_fault_raw = false;
-    // MTP: feed the draft head the main model's post-RMSNorm hidden (vLLM
-    // variant), matching how the head was trained; imp's executor hidden_ is
-    // pre-norm, so this normalizes the fed pair. Default on; false restores the pre-norm feed.
-    bool mtp_prenorm_h = true;
     // Audit NVFP4 weight scales at load time.
     bool audit_nvfp4_scales = false;
     // Per-component VRAM accounting harness (MemAccount): lifecycle

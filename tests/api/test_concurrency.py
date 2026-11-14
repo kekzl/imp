@@ -136,7 +136,7 @@ class TestDecodeFairness:
 
         Dense models decode batched, so this holds trivially. Hybrid (SSM/GDN)
         models decode one sequence per step — before the quantum rotation
-        (runtime.hybrid_decode_quantum) the head request ran to completion
+        (kHybridDecodeQuantum) the head request ran to completion
         while the second starved (FIFO head-of-line). This is the regression
         test for that rotation.
         """

@@ -438,94 +438,36 @@ TEST(AwqCalibration, MatrixTransformIgnoresMismatchedVectors) {
     EXPECT_NEAR(h2f(w[0]), 2.0f, 1e-3f);
 }
 
-// IMPHES02 (GPTAQ): two matrices per entry, each read back bit-exact by index; IMPHES01 still
-// reads with one matrix; a truncated v2 body is an error, not a short index.
-TEST(GptqHessianFile, V2RoundTripsBothMatricesAndV1StillReads) {
-    const std::string p1 = temp_path("imp_hes01.bin"), p2 = temp_path("imp_hes02.bin");
+// IMPHES01 (--gptq, --fp8-score): each entry reads back bit-exact by index, WK maps to WQ's entry,
+// a truncated body is an error, not a short index.
+TEST(GptqHessianFile, RoundTripsEntriesAndRejectsTruncation) {
+    const std::string p = temp_path("imp_hes01.bin");
     const int64_t K = 5;
-    std::vector<float> a(K * K), b(K * K), c(3 * 3);
-    for (size_t i = 0; i < a.size(); i++) {
+    std::vector<float> a(K * K), c(3 * 3);
+    for (size_t i = 0; i < a.size(); i++)
         a[i] = 0.5f + static_cast<float>(i);
-        b[i] = -1.0f - static_cast<float>(i);
-    }
     for (size_t i = 0; i < c.size(); i++)
         c[i] = 7.0f * static_cast<float>(i);
     {
         HessianWriter w;
-        ASSERT_EQ(w.open(p2, 2, 2), "");
-        ASSERT_EQ(w.add(3, "WQ", K, 100, a.data(), b.data()), "");
-        ASSERT_EQ(w.add(3, "W_DOWN", 3, 40, c.data(), c.data()), "");
-        ASSERT_EQ(w.close(), "");
-    }
-    {
-        HessianWriter w;
-        ASSERT_EQ(w.open(p1, 1), "");
-        ASSERT_EQ(w.add(0, "WO", K, 9, a.data()), "");
+        ASSERT_EQ(w.open(p, 2), "");
+        ASSERT_EQ(w.add(3, "WQ", K, 100, a.data()), "");
+        ASSERT_EQ(w.add(3, "W_DOWN", 3, 40, c.data()), "");
         ASSERT_EQ(w.close(), "");
     }
     std::vector<HessianIndexEntry> idx;
-    ASSERT_EQ(read_hessian_index(p2, idx), "");
+    ASSERT_EQ(read_hessian_index(p, idx), "");
     ASSERT_EQ(idx.size(), 2u);
-    EXPECT_EQ(idx[0].mats, 2u);
     EXPECT_EQ(idx[0].rows, 100u);
     EXPECT_EQ(idx[1].kind, "W_DOWN");
     std::vector<float> got;
-    ASSERT_EQ(read_hessian(p2, idx[0], got, 0), "");
+    ASSERT_EQ(read_hessian(p, idx[0], got), "");
     EXPECT_EQ(got, a);
-    ASSERT_EQ(read_hessian(p2, idx[0], got, 1), "");
-    EXPECT_EQ(got, b);
-    ASSERT_EQ(read_hessian(p2, idx[1], got, 1), "");
+    ASSERT_EQ(read_hessian(p, idx[1], got), "");
     EXPECT_EQ(got, c);
-    EXPECT_NE(read_hessian(p2, idx[0], got, 2), "");
     ASSERT_EQ(find_hessian(idx, 3, "WK"), &idx[0]);
 
-    ASSERT_EQ(read_hessian_index(p1, idx), "");
-    ASSERT_EQ(idx.size(), 1u);
-    EXPECT_EQ(idx[0].mats, 1u);
-    ASSERT_EQ(read_hessian(p1, idx[0], got, 0), "");
-    EXPECT_EQ(got, a);
-    EXPECT_NE(read_hessian(p1, idx[0], got, 1), "");
-
-    std::filesystem::resize_file(p2, std::filesystem::file_size(p2) - 4);
-    EXPECT_NE(read_hessian_index(p2, idx), "");
-    HessianWriter bad;
-    EXPECT_NE(bad.open(p2, 1, 3), "");
-    std::filesystem::remove(p1);
-    std::filesystem::remove(p2);
-}
-
-// Sequential GPTAQ: one IMPHES02 file per layer group, merged by read_hessian_set; each entry reads
-// from its own file; a (layer, kind) in two files and mixed versions are errors.
-TEST(GptqHessianFile, SetMergesGroupFilesAndRejectsOverlap) {
-    const std::string g0 = temp_path("imp_hes_g0.bin"), g1 = temp_path("imp_hes_g1.bin"),
-                      v1 = temp_path("imp_hes_v1.bin");
-    const int64_t K = 3;
-    std::vector<float> a(K * K, 1.0f), b(K * K, 2.0f), c(K * K, 3.0f);
-    auto write = [&](const std::string& p, int layer, const float* m, uint32_t mats) {
-        HessianWriter w;
-        ASSERT_EQ(w.open(p, 1, mats), "");
-        ASSERT_EQ(w.add(layer, "WQ", K, 10, m, m), "");
-        ASSERT_EQ(w.close(), "");
-    };
-    write(g0, 0, a.data(), 2);
-    write(g1, 1, b.data(), 2);
-    write(v1, 2, c.data(), 1);
-    std::vector<std::string> files;
-    std::vector<HessianIndexEntry> idx;
-    ASSERT_EQ(read_hessian_set(g0 + "," + g1, files, idx), "");
-    ASSERT_EQ(files.size(), 2u);
-    ASSERT_EQ(idx.size(), 2u);
-    const HessianIndexEntry* e1 = find_hessian(idx, 1, "WV");
-    ASSERT_NE(e1, nullptr);
-    EXPECT_EQ(e1->file, 1u);
-    std::vector<float> got;
-    ASSERT_EQ(read_hessian(files[e1->file], *e1, got, 1), "");
-    EXPECT_EQ(got, b);
-    ASSERT_EQ(read_hessian_set(g0, files, idx), "");
-    EXPECT_EQ(find_hessian(idx, 1, "WQ"), nullptr) << "layer 1 rounds to nearest";
-    EXPECT_NE(read_hessian_set(g0 + "," + g0, files, idx), "");
-    EXPECT_NE(read_hessian_set(g0 + "," + v1, files, idx), "");
-    EXPECT_NE(read_hessian_set(",", files, idx), "");
-    for (const auto& p : {g0, g1, v1})
-        std::filesystem::remove(p);
+    std::filesystem::resize_file(p, std::filesystem::file_size(p) - 4);
+    EXPECT_NE(read_hessian_index(p, idx), "");
+    std::filesystem::remove(p);
 }

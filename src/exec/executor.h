@@ -216,8 +216,8 @@ public:
 
     // Materializes the LM-head projection of hidden_[0..n_rows) into
     // d_out[n_rows,vocab_size] fp32 (same re-projection as greedy_argmax_all,
-    // but copying rows instead of reducing). Consumed by the constrained-
-    // pipeline jump-ahead (#844). Call while the chunk-forward workspace is still active.
+    // but copying rows instead of reducing). Consumed by the spec trace
+    // (spec_trace.cpp). Call while the chunk-forward workspace is still active.
     void project_logits_all(int n_rows, float* d_out, cudaStream_t stream);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
@@ -522,7 +522,7 @@ public:
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
     // Piecewise FFN prefill graphs (#2435, executor_ffn_graph.cpp); replays for /metrics and tests.
-    void set_ffn_graphs_enabled(bool on, bool cuda_graphs);
+    void set_ffn_graphs_enabled(bool cuda_graphs);
     [[nodiscard]] uint64_t ffn_graph_replays() const { return ffn_graphs_.replays(); }
 
     // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
@@ -546,26 +546,12 @@ public:
     int active_workspace() const { return ws_.active(); }
     int max_tokens() const { return max_tokens_; }
 
-    // Prefill/decode overlap support. allocate_decode_qscratch: per-slot
-    // copies of quant scratches both paths would otherwise share (fp8_act +
-    // q8_1/d8), sized for max_batch rows. set_overlap_prefill_active: marks a
-    // prefill forward enqueued concurrently with an in-flight decode; the
-    // smallm/producer-xq dispatch paths decline for it (scratch+tags are decode-owned under overlap).
-    [[nodiscard]] bool allocate_decode_qscratch(int max_batch);
-    void set_overlap_prefill_active(bool v) { overlap_prefill_active_ = v; }
-
     // Takes the small-M NVFP4 workspace + activation scratch for the largest
     // eligible weight from the T2 arena before the first captured decode step:
     // a capture cannot allocate, and on a GGUF source no eager forward reaches
     // the small-M block first, so without this every captured batched-decode
     // graph baked in the dequant fallback (#1897). Falls back to lazy cudaMalloc growth otherwise.
     void allocate_smallm_scratch(cudaStream_t stream);
-    // The prefill sample must not land in the decode batch's parity slots
-    // while both run concurrently: the engine points the prefill-side
-    // samplers at a dedicated slot for the duration of an overlap prefill.
-    void set_sample_slot_override(int32_t* slot) { sample_slot_override_ = slot; }
-    bool has_gguf_nvfp4_overlay() const;
-    [[nodiscard]] bool model_has_moe() const { return has_moe_; }
 
     // Batched-decode residual accumulation eligibility (gemm.nvfp4_residual_beta1):
     // the o/down/GDN-out projection may run beta=1 into hidden when it will
@@ -575,7 +561,7 @@ public:
             return false;
         if (n <= 1 || n > 32 || h.qtype != QType::F16)
             return false;
-        if (cur_spec_verify_ || overlap_prefill_active_ || lora_ != nullptr)
+        if (cur_spec_verify_ || lora_ != nullptr)
             return false;
         return registry_.handle(id).primary_tier == StorageTier::CUTLASS_NVFP4;
     }
@@ -712,7 +698,6 @@ public:
             calib_->enable_hessian();
     }
     const ActivationCalibrator* calibration() const { return calib_.get(); }
-    ActivationCalibrator* calibration() { return calib_.get(); }
 
     const DispatchPolicy& dispatch_policy() const noexcept {
         // CRITICAL: set_dispatch_policy() must be called before any forward.
@@ -1074,19 +1059,6 @@ private:
 
     // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
     QuantScratch qscratch_;
-    // Per-slot decode copies of the shared quant scratches (overlap only;
-    // null when allocate_decode_qscratch never ran). use_workspace swaps the
-    // seven fields between qscratch_ and the saved prefill values.
-    QuantScratch qscratch_decode_;
-    bool qscratch_decode_ready_ = false;
-    struct {
-        void* fp8_act; size_t fp8_act_size; float* d_act_scale; float* d_fp8_block_maxes;
-        float* d_fp8_absmax; int fp8_max_grid; void* q8_1_buf; float* d8_buf; int q8_1_rows;
-        float* d_act_row_scales;
-        int act_row_scales_n;
-    } qscratch_prefill_save_{};
-    bool overlap_prefill_active_ = false;
-    int32_t* sample_slot_override_ = nullptr;
 
     // SfAtom NVFP4 LM head for the batched-decode (n>1) tile GEMM (#2937). Borrows
     // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.
@@ -1582,8 +1554,8 @@ public:
     int64_t expert_cache_misses() const { return expert_cache_.misses_; }
     // Test hook: the state a failed T2 take of the q8_1/d8 scratch leaves (MoE decode -> FP16 arm).
     void drop_dp4a_scratch_for_test() {
-        qscratch_.q8_1_buf = qscratch_decode_.q8_1_buf = nullptr;
-        qscratch_.d8_buf = qscratch_decode_.d8_buf = nullptr;
+        qscratch_.q8_1_buf = nullptr;
+        qscratch_.d8_buf = nullptr;
     }
     std::vector<int32_t>& ngram_step_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 

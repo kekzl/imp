@@ -1,6 +1,6 @@
 #pragma once
 
-// The nine RuntimeConfig sections src/exec reads, lifted from
+// The eight RuntimeConfig sections src/exec reads, lifted from
 // runtime/config.h so the hot layer doesn't depend on the top one; live in
 // namespace imp::cfg to avoid collisions (imp::KVCache is the paged cache).
 // DispatchPolicy is a SNAPSHOT filled after the init resolvers; one writer
@@ -18,14 +18,13 @@
 #include "core/config/moe.h"
 #include "core/config/gdn.h"
 #include "core/config/gemm.h"
-#include "core/config/generation.h"
 #include "core/config/speculative.h"
 #include "core/config/ffn.h"
 #include "core/config/diagnostics.h"
 
 namespace imp {
 
-// The nine sections now live one per header under core/config/; this file
+// The eight sections now live one per header under core/config/; this file
 // keeps `#include "core/dispatch_policy.h"` compiling unchanged. A TU that
 // needs one section should include that header directly instead.
 
@@ -37,7 +36,6 @@ struct DispatchPolicy {
     cfg::MoE moe;
     cfg::GDN gdn;
     cfg::GEMM gemm;
-    cfg::Generation generation;
     cfg::Speculative speculative;
     cfg::FFN ffn;
     cfg::Diagnostics diagnostics;

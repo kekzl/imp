@@ -30,9 +30,6 @@ deterministic        = false
 # CUDA Graph capture: "auto" picks per-model based on architecture support;
 # "always" forces capture (fails for MoE with D2H routing); "never" disables.
 cuda_graphs          = "auto"
-# cudaStreamCaptureMode for graph capture: "relaxed" (default since
-# 2026-05-16) | "global" (legacy strict) | "thread_local".
-graph_capture_mode   = "relaxed"
 # Capture prefill into a CUDA graph too (default ON since 2026-05-17).
 # Auto-disabled when the model's prefill path is uncapturable.
 prefill_graph        = true
@@ -40,25 +37,11 @@ prefill_graph        = true
 # dummy prefills per length): the first request of a short length replays
 # instead of running eager. Longer prompts share one re-captured runner.
 prefill_graph_prewarm = 32
-# Every other prefill (ragged waves, continuation chunks, prefix hits): the
-# FFN/MoE phase replays per (layer, padded rows) from a CUDA graph, attention
-# stays eager (#2435).
-prefill_ffn_graph    = true
 # Max concurrent sequences in a decode batch (server continuous batching).
 # 0 = auto: the engine sizes it from the model's weight footprint (a >20 GiB
 # MoE auto-picks 1). Set a positive value to force it (e.g. 4). The --max-batch
 # CLI flag and a per-request "max_batch_size" override take precedence.
 max_batch_size       = 0
-# Burst size for the autonomous decode graph loop on a NON-streaming request
-# with speculation off. The loop runs in bursts of this many tokens and returns
-# to the host to re-poll cancellation/timeout (so a disconnected client doesn't
-# burn a full generation). Larger = less relaunch overhead but higher cancel
-# latency. NOT output-identical to the unbounded loop: with a growable KV pool a
-# relaunch after the pool grew can flip a greedy token (degen_suite kv-growth,
-# 2026-09-21). Set 0 for order-independent greedy output. Streaming + speculation
-# paths are unaffected. 0 = legacy unbounded behavior. Ignored when
-# deterministic = true (the unbounded loop stays for bit-reproducible evals).
-decode_burst         = 128
 # Prefill chunk size. -1 = per-arch default (2048 where chunked prefill is
 # supported, 0 otherwise), 0 = no chunking. Sets the TTFT/ITL trade for every
 # prefill: chunked prefill re-reads every weight once per chunk, so 512-token
@@ -75,49 +58,9 @@ prefill_chunk_size   = -1
 # (2026-09-03, Qwen3.8-27B) 2048 reads +4.4% aggregate and TTFT p90 3.8 -> 3.5 s
 # (+8.6% on dense Qwen3-14B), but while a 4.7k-token prompt is ingested next
 # to 31 decoding streams their inter-token p95 goes 109 -> 186 ms; that stall
-# is what this knob bounds, so 1024 stays the default.
+# is what this knob bounds, so 1024 stays the default. GDN hybrids with riders
+# take min(this, 512); the cap scales by 4 x waiting / decoding once that exceeds 1.
 prefill_chunk_decode_cap = 1024
-# GDN hybrids whose decoders ride the mixed step: min(this, the cap above) per
-# chunk, 0 = the cap above. Qwen3.8-27B-NVFP4, 31 riders + a 4151-token ingest:
-# their ITL max 105-107 -> 68-69 ms, ingest TTFT 458-475 -> 532-539 ms.
-prefill_chunk_decode_cap_hybrid = 512
-# Scale the cap above by W x waiting / decoding once that exceeds 1, up to
-# the full chunk; W is how many waiters one decoder's smoothness is worth,
-# 0 = off, 1 = symmetric. A burst then packs two ~1k-token prompts per
-# forward while the wave still waits; with the 31-streams-plus-one-ingest
-# case above the ratio stays below 1 for every W under 31 and nothing
-# changes. Measured on Qwen3-14B-NVFP4, 32 x ~1k-token burst: W=1 vs off
-# +3.0..+4.2% aggregate, TTFT p50 -18..-23%, ITL max 106 -> 139 ms; W=4 vs
-# W=1 a further +1.9..+2.5%, TTFT p90 -8..-9%, ITL max unchanged.
-prefill_cap_fairness = 4
-# How MANY prefill FORWARDS run per engine step while others decode (a ragged
-# cross-sequence forward counts once, however many prompts it packs; its rows
-# are bounded by the cap above). Measured with three concurrent ingests: worst
-# inter-token gap 259 -> 112 ms, gaps over 100 ms 6 -> 1, at +18% ingest wall
-# time. 0 = unbounded (the default since the token-charged budget above took
-# over the pacing). The starting index rotates, so no ingest is starved.
-prefill_batch_decode_cap = 0
-# Mixed prefill+decode step: while prompts prefill, the decoding requests ride
-# the ragged prefill forward as one-row members and the step runs no separate
-# decode forward. Hybrids: next key; any decoder the ragged path does not
-# admit (vision, logprobs, constraints) keeps the batch on the separate step.
-# Measured on Qwen3-14B-NVFP4: 32 x ~1k-token burst +6.6..+7.8% aggregate,
-# TTFT p50 -20..-23%, ITL max 141 -> 80 ms; 31 streams + a 4.4k-token ingest:
-# their ITL during the ingest p95 63 -> 51 ms.
-prefill_mixed_decode = true
-# GDN hybrids in the mixed step: riders decode through one batched decode conv
-# + scan per layer. Qwen3.8-27B-NVFP4, 31 streams + a 4151-token ingest: their
-# ITL max during it 122-124 -> 104-108 ms, ingest TTFT 618-630 -> 461-469 ms.
-prefill_mixed_decode_hybrid = true
-# Batched decode: the penalty-history append rides behind the sampler flush
-# before the host waits on the token gather (event split) instead of after
-# the sync; nsys at 32 streams read 62 us of GPU idle on each side of the
-# append per step. false = sync first, then append.
-penalty_append_early = true
-# GDN/SSM hybrids enter the pipelined batched decode; the #1750 verdict that
-# the chained advance was slower on the hybrid step re-measured on the batched
-# GDN path (Qwen3.8-27B, 32 streams, six alternating pairs: medians +1.4%).
-decode_pipeline_hybrid = true
 # Tokens of max_tokens the think budget keeps for the ANSWER on a reasoning
 # model. The engine injects </think> once reasoning reaches
 # max_tokens - max(think_answer_reserve, max_tokens/4), or the think_budget
@@ -129,22 +72,6 @@ think_answer_reserve = 256
 # Upper bound on reasoning tokens, whatever max_tokens is (imp-server defaults
 # max_tokens to the remaining context). 0 = no cap.
 think_max_tokens = 32768
-# Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
-# sequence, so concurrent sessions time-slice the decode. Slice length in
-# tokens; after it the engine rotates round-robin to the next decoding
-# request. Rotation re-captures the decode graphs (~10-20 ms), which the
-# slice amortizes (~1-2% at 128). 0 = old head-of-line behavior (the first
-# request runs to completion before the next produces a token).
-hybrid_decode_quantum = 128
-# Pipelined batched decode (concurrent serving, n>=2, CUDA graphs on): keep
-# one decode step in flight — step N+1 (device-side token chain + graph
-# replay) is enqueued before step N's tokens are read back, so host
-# bookkeeping and SSE delivery overlap GPU compute instead of idling it.
-# Engages for async-sampleable requests (greedy / top-k<=128 / top-p,
-# rep/freq/presence penalties included); DRY/mirostat/logit_bias/
-# constraints/logprobs requests use the per-step path. false = always
-# per-step.
-decode_pipeline      = true
 # Cross-sequence prefill batching: run the prefill chunks of several admitted
 # requests as ONE ragged forward (GEMMs/norms over the concatenated rows,
 # attention and the GDN conv per sequence, GDN scan batched via a row-offset
@@ -156,11 +83,8 @@ decode_pipeline      = true
 prefill_batch        = true
 # KV admission (#2486): decode tokens reserved per request. 0 = p90 of the
 # last 64 finished outputs (1024 before 8 finished, floor 256), -1 = the full
-# max_tokens, > 0 = fixed. Below max_tokens only with kv_swap = true.
+# max_tokens, > 0 = fixed. Below max_tokens only where KV swap catches an overrun.
 admission_decode_tokens = 0
-# A decoding request that finds the KV pool dry moves its KV to pinned host
-# memory and resumes once blocks free up, instead of being cancelled (#2486).
-kv_swap              = true
 # Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
 # handles + L2 AND pre-arms the decode graph pool so the FIRST real request
 # takes the same graph-kernel path as every later one — without it greedy
@@ -185,12 +109,6 @@ max_seq_len          = 0
 vram_budget_mb       = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
-# Naked FP16 path: FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert cache off,
-# deterministic cuBLAS and the GDN reference scan on. Four of those went through
-# dead env vars until #1628 and did nothing at all.
-debug_raw            = false
-# Disable SigLIP vision encoder CUDA-graph capture (debug).
-no_vision_graph      = false
 # Drop the checkpoint's Qwen3-VL vision tower at init: image and video parts answer 400,
 # the tower's VRAM reservation goes to the expert cache instead (Flash-Next text-only).
 no_vision            = false
@@ -205,18 +123,6 @@ vision_max_patches   = 4096
 # max(tokens per frame pair, int(tokens * (1 - q))) tokens, dropping those least changed
 # from the previous frame pair. 0 = off; a video part's "pruning_rate" overrides it.
 video_pruning_rate   = 0
-# Batched GDN/Mamba2 decode: separate sequences parallelise across blockIdx.y
-# in the recurrent scan, so a 32-stream step runs its GEMMs at M=32 instead of
-# M=1 (82 % of GPU time sat in M=1 GEMVs at 32-way load without it).
-gdn_batched_decode   = true
-# Capture every decode-batch pool slot before the engine goes ready (one
-# staggered dummy batch from max_batch_size down to 1, anchor prompt ~1000
-# tokens so the 1024 context bucket is baked). Costs init time.
-graph_prewarm        = true
-# Run prefill on its own stream concurrently with decode steps. Off by
-# measurement: two compute-bound streams displace each other on one GPU
-# (docs/plans/2026-08-27-prefill-decode-overlap.md).
-prefill_overlap      = false
 
 [kv_cache]
 # KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
@@ -422,24 +328,6 @@ library_reserve_mb = -1
 # since #2436 a cold start re-sizes the KV pool after warmup to the same blocks
 # (Qwen3.8-27B-NVFP4 4950 either way, 2026-10-31).
 library_reserve_cache =
-# Pinned staging ring for the weight upload: depth x chunk size in MiB.
-# Pinning host memory is expensive on WDDM, and the ring's cost is paid at every
-# process start. Swept on Qwen3-8B-Q8_0 (load time only, 3 starts per point):
-#
-#   4x128 MiB  4.55 s   4x32  4.16 s   2x64  4.12 s   2x32  4.00 s
-#   4x16 MiB   4.00 s   4x8   3.93 s   4x4   3.84 s   4x2   3.96 s
-#
-# Monotone down to 4 MiB and back up at 2 - the pinning cost dominates the
-# overlap the whole way, and below 4 MiB the per-chunk event pairs cost more
-# than the pinning saves. The defaults were 4 and 128 until #1653; the pair is a
-# key rather than a constant because the optimum is a property of the host's
-# pinning cost, not of imp. Re-run the sweep on a different host or driver.
-upload_ring_depth = 4
-upload_ring_chunk_mib = 4
-
-# Untied token embedding in mapped pinned host memory; the lookup reads one row per token
-# over PCIe. Tied tables (shared with the LM head) stay in VRAM. false = upload to VRAM.
-host_token_embedding = true
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
@@ -976,15 +864,6 @@ nvfp4_smallm_a4      = true
 # (-2.7/-0.9/-0.2 %) at 32 streams; the adds already overlap inside the graph.
 nvfp4_residual_beta1 = false
 
-[generation]
-no_logit_softcap     = false
-# Force-prepend BOS token even when the tokenizer says no.
-force_bos            = false
-# Disable the banned-token list (debug).
-no_ban               = false
-# Disable RoPE inside the MTP draft head (diagnostic).
-mtp_no_rope          = false
-
 [server]
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system
 # prompts, multi-turn history). Read by the engine and ORed into the live
@@ -1011,13 +890,6 @@ model_swap           = true
 # How long a swap waits for in-flight generations to finish before giving
 # up and keeping the current model (503, nothing torn down).
 model_swap_drain_ms  = 60000
-# Tokens the streaming driver holds back on a TOOL request while it is still
-# unknown whether the model is reasoning (a tool request renders a pre-closed
-# think block, so a reasoning model emits only the closer). The hold is the
-# whole TTFT of a prose reply on the agent path (8 tokens ~85 ms on
-# Qwen3.8-27B, so 256 is ~2.7 s); lower it on a model that never reasons.
-# Plain chat requests hold 8 tokens and release on the first word.
-agent_scan_limit     = 256
 # Device budget (MiB) for recurrent-state snapshots — what makes prefix
 # caching work on hybrid (SSM/GDN) models: reused KV blocks alone cannot
 # skip prefill there, the recurrent state at the skip boundary must be
@@ -1033,22 +905,6 @@ recurrent_snapshot_mb = 256
 # rises to host_spill_mb / 2: a spilled hybrid prefix restores only with its
 # snapshot.
 recurrent_snapshot_host_mb = 2048
-# Prompts whose block-aligned prefix is shorter than this take no snapshot
-# and no prefill split at the boundary (the split is two eager chunks plus a
-# sync: 35-token prompt TTFT floor 36 -> 22 ms unsplit on Qwen3.8-27B-NVFP4,
-# the turn-2 saving of a 32-token prefix is under 3 ms). 0 = always snapshot.
-snapshot_min_prompt_tokens = 256
-# Hybrid models also snapshot the recurrent state at the END of every
-# generation (prompt + reply, unaligned; the partial KV block is kept with
-# it): a next turn that resends the whole transcript restores there and
-# prefills only the new message. One slab copy plus a sync per finished
-# request. The block clone carries the sparse key min/max metadata.
-transcript_snapshot = true
-# Every finished transcript keeps its token ids (256 entries); a next turn
-# that resends the reply verbatim tokenizes it with those ids, so a
-# non-canonical BPE split the model wrote (` pre`+`pref` re-encodes as
-# ` prep`+`ref`) no longer breaks the prefix-cache chain inside the reply.
-transcript_token_reuse = true
 # OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
 # URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
 # generation request becomes one SERVER span (queue / prefill / decode
@@ -1059,10 +915,6 @@ transcript_token_reuse = true
 # Counters: /metrics imp_otlp_*.
 otlp_endpoint = ""
 otlp_service_name = "imp-server"
-# Green Contexts / prefill-decode overlap streams in the server engine.
-# Opt-in (off by default): suspected memSyncDomain race on sm_120 fallback
-# streams (gemma-3-12b IMA). Set true to enable.
-green_contexts       = false
 
 [warm_cache]
 # On-disk warm weight cache: the first fully-cold model load persists its
@@ -1088,10 +940,6 @@ device_reset         = true
 # Host RAM (MiB) the snapshot must leave free on top of its own size —
 # capture fails with a clear error instead of driving the host into swap.
 host_ram_headroom_mb = 2048
-
-[bench]
-# imp-cli --bench: also run Engine::generate() loop for accurate timing.
-generate             = false
 
 [paths]
 # Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
@@ -1244,26 +1092,6 @@ mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # imp-cli --bench pins this false (raw-decode baseline semantics).
 capture              = true
 
-[constrained]
-# Jump-ahead over schema-forced spans (#844): when the json_schema FSM
-# forces the next characters (skeleton keys/punctuation), one speculative
-# chunk forward drafts their canonical tokenization and materializes the
-# per-position logits; subsequent tokens are sampled from those rows with
-# no forward per token. Output is exact for greedy AND sampling (each row
-# is the true logits given the accepted prefix); a diverging token just
-# re-enters normal pipelining at the cost of the one chunk forward.
-# Opt-in: on Qwen3-8B the model's context-dependent tokenization splits
-# miss the canonical draft often enough that wasted chunk forwards cost
-# more than the consumed rows save (measured -3-5%, Q8 + NVFP4).
-jump_ahead           = false
-# With jump_ahead: emit each forced span in the draft's split (the grammar fixes the text)
-# instead of exiting where the model splits differently. Qwen3-14B-NVFP4, one-key array
-# schema: 159.9 -> 163.1 tok/s with it, 155.4 without (roadmap row 46).
-jump_ahead_trust     = true
-# Minimum draft length (tokens) worth the speculative chunk; shorter
-# forced spans stay on the per-token pipeline.
-jump_min_run         = 4
-
 [ffn]
 # SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
 # intermediate rows per threshold; no skipping (~1 µs/layer/token when on).
@@ -1290,10 +1118,6 @@ debug_template       = false
 # If non-empty, dump per-layer hidden states as .npy files to this directory.
 # Special values: "1" or "all" → /tmp.
 dump_hidden_dir      = ""
-# If non-empty, dump MoE gate logits (pre-topk) and routing weights to file.
-# Special value "all" dumps every layer (default: only last + selected layers).
-dump_logits_dir      = ""
-dump_routing_dir     = ""
 # Print prefill token IDs to stderr (truncated to 20).
 dump_tokens          = false
 # Teacher-forced perplexity (--perplexity): restrict the NLL sum to logit
@@ -1302,27 +1126,16 @@ dump_tokens          = false
 # cross-engine PPL-parity bar — see docs/GOAL.md release bar 1.
 ppl_first            = 0
 ppl_last             = -1
-# Stop forward pass after layer N (-1 = run full forward).
-exit_layer           = -1
 profile              = false
 graph_diag           = false
 graph_dump_dir       = ""
-# Force NVFP4 dispatch through dequant→FP16 GEMV (M=1 bisection tool).
-nvfp4_force_dequant  = false
 # Skip building the NVFP4 decode cache: decode runs on the source-precision
 # paths (dp4a GEMV / FP16 GEMV) — bisection / quality-baseline tool (CLI: --no-nvfp4).
 # Dense GGUF decode-path PPL with the cache (default): Qwen3-8B Q8_0 +6.0 %, Qwen3-14B Q6_K +2.4 %.
 no_nvfp4_decode_cache = false
-# #847 graph-captured-verify feasibility probe: stream-capture every spec
-# verify chunk forward and log per-attempt outcomes (capturability census,
-# not a perf path; falls back to the eager forward on any failure).
-spec_capture_probe   = false
 # Log shape + per-candidate algo for every cuBLASLt algo selection, and at
 # teardown every cuBLASLt call site with its shape and count ([lt-route]).
 log_gemm_algo        = false
-# MTP diagnostics: per-step pattern log / pass post-RMSNorm hidden to head.
-mtp_pattern_log      = false
-mtp_prenorm_h        = true
 # Audit NVFP4 weight scales at load time.
 audit_nvfp4_scales   = false
 # VRAM accounting audit: allocation checkpoints + per-pool notes + device-used
@@ -1349,8 +1162,6 @@ spec_trace           = false
 # 4 requests (pad rows past the drafts, mtp_batch_verify_k..8): texts then match
 # across depth policies. 0 = off.
 mtp_verify_pin       = 0
-# Conditional-graph jump trace on the log. Legacy env: IMP_JUMP_TRACE.
-jump_trace           = false
 # Path to dump per-token NLL from --perplexity ("" = off). Legacy env: IMP_PPL_DUMP.
 ppl_dump             = ""
 # Host-side phase attribution for batched decode steps (build / forward /
@@ -1362,9 +1173,6 @@ worker_timing        = false
 # imp-server: a failed tool call logs the model's raw call text, first 2000 bytes.
 # Off by default, the text can hold request content.
 tool_fault_raw       = false
-# Attempt prefill graph capture even when the dequant scratch exceeds the cap
-# (the fail-loud in gemm_nvfp4 then answers whether the M>1 fallback fires).
-prefill_graph_ignore_dequant_cap = false
 # Compare every cached verify-chunk graph replay against an eager forward of
 # the same state (one extra forward + two vocab-sized D2H per verify step).
 spec_capture_fidelity = false
@@ -1386,12 +1194,3 @@ out_path             = ""
 # Also mean x^T x per weight input for imp-quantize --gptq, written as <out>.hess
 # (FP32 [K, K] each, Qwen3-1.7B 5.3 GB). Rows above 20x the median row norm are left out.
 hessian              = false
-# GPTAQ pairs for imp-quantize --gptaq: the BF16 source pass writes every weight input to
-# pair_dump (tens of GB, never tmpfs); the AWQ export pass over the same corpus reads it with
-# pair_read and writes <out>.gptaq (IMPHES02). Both start with the corpus, after warmup.
-pair_dump            = ""
-pair_read            = ""
-# pair_read accumulates only layers [pair_layer_begin, pair_layer_end), end 0 = all: sequential
-# GPTAQ runs one export pass per layer group (tools/analysis/gptaq_ab.sh SEQ_GROUP=N).
-pair_layer_begin     = 0
-pair_layer_end       = 0

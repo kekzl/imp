@@ -293,24 +293,6 @@ TEST(SchemaEnumLiteral, NumbersBooleansNullAndMixed) {
     EXPECT_FALSE(sc->token_legal(R"({"n": 1, "b": true, "m": "a", "c": 6)"));
 }
 
-// Jump-ahead forcing: a mixed enum is a real first-char choice, a single literal is forced whole.
-TEST(SchemaEnumLiteral, ForcedTextRespectsLiterals) {
-    std::string out;
-    auto mixed = make_fsm(R"({"enum":["a",1]})");
-    ASSERT_NE(mixed, nullptr);
-    EXPECT_EQ(mixed->forced_text(out, 8), 0) << "forcing '\"' would make the literal 1 unreachable";
-    auto strings = make_fsm(R"({"enum":["a","b"]})");
-    ASSERT_NE(strings, nullptr);
-    out.clear();
-    EXPECT_EQ(strings->forced_text(out, 8), 1);
-    EXPECT_EQ(out, "\"");
-    auto single = make_fsm(R"({"const":-5})");
-    ASSERT_NE(single, nullptr);
-    out.clear();
-    single->forced_text(out, 8);
-    EXPECT_EQ(out.substr(0, 1), "-");
-}
-
 // A root-level literal enum admits nothing after its last member char.
 TEST(SchemaEnumLiteral, RootLiteralRejectsTrailingChars) {
     auto sc = make_fsm(R"({"enum":[true]})");

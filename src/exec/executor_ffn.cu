@@ -139,12 +139,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // Batched-decode residual accumulation on CUTLASS_NVFP4 (gemm.nvfp4_residual_beta1):
     // h += down(so) via the smallm accumulate path, replacing GEMM-to-scratch
     // + elementwise_add_store (o-projection twin: executor_attention.cu).
-    bool will_fuse_down_beta1_nvfp4 =
-        (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
-         !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
-         n <= 32 && h.qtype == QType::F16 && wd_tier == StorageTier::CUTLASS_NVFP4 &&
-         dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ && !overlap_prefill_active_ &&
-         lora_ == nullptr && !using_fp32_accum);
+    bool will_fuse_down_beta1_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_residual &&
+                                       !will_fuse_down_nvfp4 && !will_fuse_down_beta1 &&
+                                       !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
+                                       n <= 32 && h.qtype == QType::F16 &&
+                                       wd_tier == StorageTier::CUTLASS_NVFP4 &&
+                                       dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ &&
+                                       lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
         !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !will_fuse_down_beta1_nvfp4 &&
         !using_fp32_accum) {

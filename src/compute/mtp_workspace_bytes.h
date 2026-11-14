@@ -90,7 +90,7 @@ struct MtpWorkspaceShape {
     int hc_count = 0;
     int hc_lowrank = 0;
     int carry_rows = 0;    // the MTP carry rows per KV slot (mtp_carry_allocate)
-    int prenorm_rows = 0;  // diagnostics.mtp_prenorm_h feed scratch rows
+    int prenorm_rows = 0;  // post-norm MTP feed scratch rows
     size_t body_fp8_bytes = 0;  // the MTP body FP8 copy E4M3 body copy (mtp_body_fp8_bytes)
 };
 

@@ -264,7 +264,7 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     ASSERT_NE(engine, nullptr);
     ASSERT_NE(engine->kv_cache(), nullptr);
     const int kv_bs = engine->kv_cache()->block_size();
-    const int min_snap = engine->runtime_config().server.snapshot_min_prompt_tokens;
+    const int min_snap = imp::kSnapshotMinPromptTokens;
 
     // Tokenize once; the arms are prefixes of the same token vector so their
     // block hashes share a prefix by construction.
@@ -383,10 +383,9 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
            "cold prefill that forwards the same tokens through the same chunk boundaries";
 }
 
-// Transcript snapshot (server.transcript_snapshot): at finish the recurrent state covers
+// Transcript snapshot: at finish the recurrent state covers
 // prompt + reply minus the final sample, an UNALIGNED position whose last KV block is partial.
-// A turn that resends the whole transcript must restore there (cached_tokens == that
-// position), and with the knob off it must fall back to the prompt's block boundary.
+// A turn that resends the whole transcript must restore there (cached_tokens == that position).
 // Tokens are not compared against a cold arm here: the warm state's history (turn-1 chunks,
 // then one token per decode step) has no cold chunking that reproduces it (SETTLED.md
 // 2026-09-09); the state itself is measured in test_hybrid_restore_chain.cu.
@@ -405,7 +404,7 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
     ASSERT_NE(engine, nullptr);
     ASSERT_NE(engine->kv_cache(), nullptr);
     const int kv_bs = engine->kv_cache()->block_size();
-    const int min_snap = engine->runtime_config().server.snapshot_min_prompt_tokens;
+    const int min_snap = imp::kSnapshotMinPromptTokens;
 
     std::vector<int32_t> full(4096);
     int n_full = 0;
@@ -473,19 +472,8 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
     (void)run(prompt3, 8, &c3);
     EXPECT_EQ(c3, static_cast<int>(prompt2.size()) + 15) << "turn 3 must restore at the end of reply 2";
 
-    // The destructive opposite: with the knob off, the same two turns restore at the prompt's
-    // block boundary, >= kMinPromptChunkRows rows short of the prompt (#2560).
-    go_cold();
-    engine->mutable_runtime_config().server.transcript_snapshot = false;
-    (void)run(prompt1, kReply, nullptr);
-    int c_off = -1;
-    (void)run(prompt2, 16, &c_off);
-    engine->mutable_runtime_config().server.transcript_snapshot = true;
-    EXPECT_EQ(c_off, imp::snapshot_boundary(prompt_len, kv_bs, min_snap, imp::kMinPromptChunkRows))
-        << "with transcript snapshots off, turn 2 must fall back to the prompt-boundary snapshot";
-
     // Short chat, the common web-UI turn: prompt AND transcript both under
-    // snapshot_min_prompt_tokens. That floor prices the prefill split of a prompt-boundary
+    // kSnapshotMinPromptTokens. That floor prices the prefill split of a prompt-boundary
     // snapshot; a finish-time save splits nothing, so it must still restore (a 73-token prompt
     // + 174-token reply re-prefilled its whole transcript on turn 2 under the floor, 2026-09-15).
     const int short_len = 4 * kv_bs;
@@ -500,7 +488,7 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
     int c_short = -1;
     (void)run(short2, 8, &c_short);
     EXPECT_EQ(c_short, short_len + kReply - 1)
-        << "a transcript under snapshot_min_prompt_tokens must still restore at the reply end";
+        << "a transcript under kSnapshotMinPromptTokens must still restore at the reply end";
 }
 
 // Greedy request through the engine loop: output tokens, cached prompt tokens, chosen-token logprobs.

@@ -206,7 +206,6 @@ bool Engine::init_weights() {
     dispatch_policy_.moe = runtime_config_.moe;
     dispatch_policy_.gdn = runtime_config_.gdn;
     dispatch_policy_.gemm = runtime_config_.gemm;
-    dispatch_policy_.generation = runtime_config_.generation;
     dispatch_policy_.speculative = runtime_config_.speculative;
     dispatch_policy_.ffn = runtime_config_.ffn;
     dispatch_policy_.diagnostics = runtime_config_.diagnostics;
@@ -233,18 +232,6 @@ bool Engine::init_weights() {
             // The collector allocates an accumulator the first time it sees a
             // weight, which a graph capture rejects outright.
             demote_graphs_(GraphDemotionReason::CalibrationActive);
-            const auto& cal = runtime_config_.calibration;
-            if (!cal.pair_dump.empty() || !cal.pair_read.empty()) {
-                ActivationCalibrator* c = executor_->calibration();
-                const std::string err = !cal.pair_dump.empty()
-                                            ? c->enable_pair_dump(cal.pair_dump)
-                                            : c->enable_pair_read(cal.pair_read, cal.pair_layer_begin,
-                                                                  cal.pair_layer_end);
-                if (!err.empty()) {
-                    IMP_LOG_ERROR("calibration: %s", err.c_str());
-                    return false;
-                }
-            }
         }
 
         if (config_.streaming_kv_enabled) {
@@ -435,7 +422,6 @@ bool Engine::init_weights() {
     // Layer offloading: one forward at a time owns the two staging slots, none captured.
     if (layer_offload_blocks_graphs(config_.gpu_layers)) {
         offload_mgr_ = std::make_unique<LayerOffloadManager>();
-        runtime_config_.runtime.prefill_overlap = false;
         demote_graphs_(GraphDemotionReason::LayerOffload);
         if (!offload_mgr_->init(model_.get(), config_.gpu_layers)) {
             IMP_LOG_ERROR("Layer offloading init failed for --gpu-layers %d: %s", config_.gpu_layers,

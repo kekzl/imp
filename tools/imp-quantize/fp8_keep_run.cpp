@@ -109,9 +109,8 @@ std::string Fp8Keep::score_units(const Options& opt,
     }
     if (opt.dry_run)
         return "--fp8-score with a Hessian file needs the weights: not with --dry-run";
-    std::vector<std::string> files;
     std::vector<HessianIndexEntry> index;
-    if (std::string err = read_hessian_set(opt.fp8_score, files, index); !err.empty())
+    if (std::string err = read_hessian_index(opt.fp8_score, index); !err.empty())
         return err;
     // Proxy: per tensor tr(dW H dW^T) of the NVFP4 codes the writer would emit minus that of FP8,
     // in the AWQ-scaled space (H / (s_i s_j)), summed over the unit.
@@ -124,7 +123,7 @@ std::string Fp8Keep::score_units(const Options& opt,
             if (!he || he->K != K)
                 return t->name + ": no Hessian of width " + std::to_string(K) + " in " + opt.fp8_score;
             std::vector<float> H;
-            if (std::string err = read_hessian(files[he->file], *he, H); !err.empty())
+            if (std::string err = read_hessian(opt.fp8_score, *he, H); !err.empty())
                 return err;
             if (const auto cs = col_scale.find(t->name);
                 cs != col_scale.end() && cs->second.size() == size_t(K))

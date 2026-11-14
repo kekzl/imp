@@ -391,8 +391,8 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return "swa_or_streaming_kv";
         if (kv_manager_ && kv_manager_->residual_enabled())
             return "residual_kv";
-        if (!runtime_config_.runtime.gdn_batched_decode || d_ssm_seq_slots_ == nullptr)
-            return "gdn_batched_decode_off";
+        if (d_ssm_seq_slots_ == nullptr)
+            return "no_gdn_slot_table";
         // A think budget whose forcing is due needs the eager step (it forces
         // </think>); any such row sends the whole batch to the plain step.
         for (const auto& r : batch) {

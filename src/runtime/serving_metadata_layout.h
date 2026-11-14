@@ -15,8 +15,8 @@ struct ServingMetadataLayout {
     size_t pf_tok = 0, pf_pos = 0, pf_bt = 0, pf_bt_swa = 0, pf_ctx = 0;
     // Ragged prefill (engine_prefill_ragged.cpp): rows in total, seq_cap tables.
     size_t rg_tok = 0, rg_pos = 0, rg_bt = 0, rg_ctx = 0, rg_soff = 0, rg_slots = 0;
-    // Single-sequence graph loops (engine_graph_decode.cpp): one table each.
-    size_t gl_bt = 0, gl_bt_swa = 0, agl_bt = 0, agl_bt_swa = 0;
+    // Async single-sequence graph loop (engine_graph_decode.cpp): one table.
+    size_t agl_bt = 0, agl_bt_swa = 0;
     // Constrained pipeline: table, sampled token + sampler scratch, pos, ctx.
     size_t cp_bt = 0, cp_token = 0, cp_pos = 0, cp_ctx = 0;
     size_t total = 0;
@@ -51,8 +51,6 @@ struct ServingMetadataLayout {
         l.rg_ctx = region(s * sizeof(int));
         l.rg_soff = region((s + 1) * sizeof(int));
         l.rg_slots = region(s * sizeof(int));
-        l.gl_bt = region(bt_bytes);
-        l.gl_bt_swa = region(swa_bytes);
         l.agl_bt = region(bt_bytes);
         l.agl_bt_swa = region(swa_bytes);
         l.cp_bt = region(bt_bytes);

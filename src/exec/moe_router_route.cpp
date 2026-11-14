@@ -19,7 +19,7 @@ bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int
                         bool use_sigmoid, bool norm_weights, const void* score_bias, const RouterFusedGate& g,
                         MoeRoutingBuffers& buf, void* ws, size_t ws_bytes, cudaStream_t stream) {
     const int d = static_cast<int>(in.shape[1]);
-    if (!g.policy_on || g.dump_logits || g.group_limit || (g.logit_bias_profile && g.logit_bias != nullptr) ||
+    if (!g.policy_on || g.group_limit || (g.logit_bias_profile && g.logit_bias != nullptr) ||
         debug_forward_enabled())
         return false;
     // Deterministic mode keeps the row-invariant router (a row must not depend on M, #2152).

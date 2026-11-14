@@ -170,25 +170,16 @@ namespace {
 // back to synchronous driver-side staging. Pre-allocates two pinned buffers and pipelines
 // CPU memcpy(pinned[i], mmap) against GPU DMA(gpu, pinned[i^1]) for full-bandwidth async DMA.
 struct PinnedStager {
-    // Ring of N pinned buffers: depth and chunk size come from vram.upload_ring_{depth,
-    // chunk_mib} (#1653), keys rather than constants because the optimum is a property of the
-    // host's WDDM pinning cost, not of imp. Pinning cost dominates the H2D overlap it exists to
-    // buy; smaller rings/chunks win on this host, down to a point where per-chunk event/memcpy
-    // overhead starts costing more than the pinning saves.
-    static int ring() {
-        static const int n = std::clamp(process_diag_upload_ring_depth(), 1, kRingMax);
-        return n;
-    }
-    static size_t chunk_size() {
-        static const size_t n = static_cast<size_t>(std::clamp(process_diag_upload_ring_chunk_mib(), 1, 1024))
-                                << 20;
-        return n;
-    }
-    static constexpr int kRingMax = 16;
+    // Ring of 4 pinned buffers x 4 MiB (#1653): WDDM pinning cost dominates the H2D overlap it
+    // buys; the 4 x 128 MiB ring that shipped before the sweep cost 0.68 s of every process start.
+    static constexpr int kRingDepth = 4;
+    static constexpr size_t kChunkMiB = 4;
+    static int ring() { return kRingDepth; }
+    static size_t chunk_size() { return kChunkMiB << 20; }
     // T5a: transient load-time staging. PinnedBuffer owns it, so the partial
     // failure path below no longer has to unwind by hand (memory/host_pinned.h).
-    PinnedBuffer buf[kRingMax];
-    CudaEvent done[kRingMax];
+    PinnedBuffer buf[kRingDepth];
+    CudaEvent done[kRingDepth];
     int idx = 0;
 
     bool init() {
@@ -514,7 +505,7 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
     const QType tok_emb_orig_qtype = tok_emb.qtype;
     // Untied: the table only feeds embedding_lookup, which reads a mapped host view (#2484).
     const bool tied_source = out_proj.data == tok_emb_host_ptr;
-    if (tok_emb.data && !tok_emb.on_device && !tied_source && process_diag_host_token_embedding())
+    if (tok_emb.data && !tok_emb.on_device && !tied_source)
         (void)place_embedding_on_host(tok_emb, ctx.host_pinned_allocs);  // false: VRAM upload below
     if (tok_emb.data && !tok_emb.on_device) {
         const bool emb_raw = (tok_emb.qtype == QType::Q8_0 || tok_emb.qtype == QType::Q6_K);

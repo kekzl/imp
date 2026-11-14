@@ -199,11 +199,11 @@ What the table settles:
 - **`gemm.nvfp4_smallm=false` does not test the activation format.** It moves
   2..32 rows from the small-M kernel to the NVFP4 tile GEMM (CUTLASS when
   measured), which quantizes the activations too
-  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:42 quantize_fp16_to_nvfp4_cutlass`):
+  (`src/exec/gemm_kernel_cutlass_nvfp4.cpp:43 quantize_fp16_to_nvfp4_cutlass`):
   W4A4 in both arms, same gap (0.261 vs 0.242, 7 flips either way), about 11 %
   less aggregate throughput at 32 streams for no numerical closeness.
 - **FP16 activations at 2..32 rows are `gemm.nvfp4_smallm_a4=false`**
-  (`src/exec/executor_gemm_dispatch.cpp:581 !dispatch_policy().gemm.nvfp4_smallm_a4`), plus
+  (`src/exec/executor_gemm_dispatch.cpp:602 !dispatch_policy().gemm.nvfp4_smallm_a4`), plus
   `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
   NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
   fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams
@@ -252,7 +252,7 @@ Only relevant when a MoE model's experts do not fit in VRAM; both GGUF and
 NVFP4 experts have a working host path. NVFP4 was refused at load in #1403;
 the refusal was replaced by an implementation
 (`src/exec/executor_forward_moe_nvfp4_host.cu`, doc corrected in #1670;
-`LIMITATIONS.md:64 23.3 tok/s against 384.0 resident` carries the measurement, 23.3 tok/s against 384.0
+`LIMITATIONS.md:68 23.3 tok/s against 384.0 resident` carries the measurement, 23.3 tok/s against 384.0
 resident); a placement the expert cache cannot hold at all is still refused,
 that part of #1403 stands.
 

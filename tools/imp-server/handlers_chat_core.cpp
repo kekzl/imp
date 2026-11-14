@@ -702,7 +702,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // Stop sequences match the answer only, as on the streaming path (same splitter): matched on raw
         // output they ended Qwen3.8 inside its reasoning with empty content. Cut after extraction below.
         const bool stops_skip_reasoning = stops_skip_reasoning_(ctx, state);
-        auto stop_split = make_think_splitter_(ctx, state, /*use_reasoning=*/stops_skip_reasoning);
+        auto stop_split = make_think_splitter_(ctx, /*use_reasoning=*/stops_skip_reasoning);
         std::string stop_content;  // answer text seen so far, when stops_skip_reasoning
 
         auto ns_request_start = std::chrono::steady_clock::now();

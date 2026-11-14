@@ -1,4 +1,4 @@
-// Pipelined batched-decode chain advance (runtime.decode_pipeline): makes
+// Pipelined batched-decode chain advance (engine_decode_pipeline.cpp): makes
 // step N+1 runnable before the host reads step N's tokens by feeding
 // step N's sampled slot tokens as step N+1 input, bumping positions/context
 // lens, appending to per-row output history, and scattering new KV

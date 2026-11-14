@@ -103,7 +103,7 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
         if (!ctx.snap.cfg_ok)
             return {
                 "\"cfg_scale\" needs a model that decodes two sequences in one step (hybrids: "
-                "runtime.gdn_batched_decode)",
+                "batched GDN decode)",
                 "cfg_scale"};
         if (!p.images.empty() || !p.videos.empty() || !p.audios.empty() || p.has_tools ||
             !p.banned_strings.empty() || !p.banned_regex.empty())

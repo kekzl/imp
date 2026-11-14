@@ -27,7 +27,6 @@ static EngineConfig test_engine_config() {
     cfg.kv_cache_dtype = QType::F16;
     cfg.compute_dtype = QType::F16;
     cfg.kv_block_size = 16;
-    cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
     cfg.use_prefix_caching = false;
     cfg.dual_path_quant = false;
@@ -312,7 +311,7 @@ TEST(EngineIntegrationTest, FP8PrefillNVFP4Decode) {
     tm.cleanup();
 }
 
-// Pipelined batched decode (runtime.decode_pipeline) vs per-step: 4 concurrent requests with
+// Pipelined batched decode vs per-step: 4 concurrent requests with
 // CUDA graphs ON (pipeline requires a captured decode graph), mixed greedy+seeded top-k
 // rows, ignore_eos, long enough to cross a KV block boundary (exercises the device-side
 // block-table patch of the chain-advance kernel).
@@ -325,7 +324,8 @@ namespace {
 // SAME captured execs every step, so tokens must match bit-for-bit.
 std::vector<std::vector<int32_t>> run_pipelined_batch(Engine& engine, bool pipeline,
                                                       const std::vector<int>& max_tokens) {
-    engine.mutable_runtime_config().runtime.decode_pipeline = pipeline;
+    // logprobs rows are pipeline-ineligible (pipeline_row_eligible_) and sample the same tokens:
+    // the per-step reference arm.
 
     std::vector<std::shared_ptr<Request>> reqs;
     for (int r = 0; r < static_cast<int>(max_tokens.size()); r++) {
@@ -349,6 +349,7 @@ std::vector<std::vector<int32_t>> run_pipelined_batch(Engine& engine, bool pipel
             req->presence_penalty = 0.2f;
         }
         req->seed = 1234 + r;
+        req->logprobs = !pipeline;
         reqs.push_back(req);
         engine.add_request(req);
     }
@@ -444,7 +445,8 @@ TEST(EngineIntegrationTest, PipelinedBatchedDecodeStaggeredFinish) {
 }
 
 // A rearmed graph burst penalizes the whole output history, not only its own burst: greedy with
-// a presence penalty past any logit gap never repeats a token (vocab 256 > 200 outputs, bursts 64).
+// a presence penalty past any logit gap never repeats a token (vocab 256 > 200 outputs, bursts of
+// kDecodeBurst 128).
 TEST(EngineIntegrationTest, RearmedBurstKeepsPenaltyHistory) {
     SKIP_IF_NO_CUDA();
 
@@ -456,7 +458,6 @@ TEST(EngineIntegrationTest, RearmedBurstKeepsPenaltyHistory) {
     {
         Engine engine;
         ASSERT_TRUE(engine.init(tm.model, cfg));
-        engine.mutable_runtime_config().runtime.decode_burst = 64;
         auto req = std::make_shared<Request>();
         req->input_tokens = {1, 2, 3};
         req->max_tokens = 200;

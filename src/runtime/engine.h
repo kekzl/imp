@@ -7,7 +7,7 @@
 #include "runtime/spec_batch_verify_state.h"
 #include "runtime/spec_request.h"
 #include "runtime/batch.h"
-#include "runtime/green_ctx.h"
+#include "core/cuda_raii.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/prefill_graph_cache.h"
 #include "vision/vision_pipeline.h"
@@ -78,8 +78,6 @@ struct EngineConfig {
     int kv_cache_max_blocks = 0;  // 0 = auto
     int kv_ceiling_seqs = 0;      // KV pool ceiling in max_seq_len sequences, 0 = max_batch_size
     int swa_shared_tokens = 0;    // SWA group tokens charged once per pool (prefill chunk past the burst)
-    bool use_green_contexts = false;
-    float green_ctx_prefill_ratio = 0.8f;
     bool use_cuda_graphs = true;
     bool use_pdl = true;
     QType compute_dtype = QType::F16;
@@ -181,12 +179,6 @@ public:
 
     // Run one step of inference (prefill or decode depending on scheduler)
     [[nodiscard]] bool step();
-
-    // High-level generate with sampling parameters
-    std::string generate(const std::string& prompt, int max_tokens, float temperature = 1.0f,
-                         float top_p = 1.0f, int top_k = 0, int seed = -1, bool apply_chat_template = true,
-                         float min_p = 0.0f, float repetition_penalty = 1.0f, float frequency_penalty = 0.0f,
-                         float presence_penalty = 0.0f);
 
     void add_request(std::shared_ptr<Request> req);
 
@@ -393,7 +385,7 @@ public:
     // Requests swapped to host instead of cancelled on a dry pool, process total (#2486).
     uint64_t kv_swaps_out() const noexcept { return kv_swaps_out_.load(std::memory_order_relaxed); }
     // Steps whose decoders rode the ragged prefill forward
-    // (runtime.prefill_mixed_decode); the test and /metrics read it.
+    // (mixed step); the test and /metrics read it.
     uint64_t mixed_decode_steps() const noexcept {
         return mixed_decode_steps_.load(std::memory_order_relaxed);
     }
@@ -494,19 +486,10 @@ private:
     std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
     std::atomic<uint64_t> graph_repromotions_{0};
     std::unique_ptr<GraphExecutor> executor_;
-    GreenContextManager green_ctx_;
     CudaStream stream_;
     CudaEvent prefill_done_;
     CudaEvent decode_done_;
     int next_request_id_ = 0;
-
-    // Prefill/decode overlap (runtime.prefill_overlap): static gates checked
-    // at warmup (stream pair up, decode workspace + qscratch at max_batch,
-    // model class eligible); the per-step gate (decode batch >= 2) lives in
-    // step_impl_. d_prefill_sample_ (arena-owned): dedicated slot for the
-    // prefill last-chunk greedy sample, never aliasing decode parity slots.
-    bool overlap_ready_ = false;
-    int32_t* d_prefill_sample_ = nullptr;
 
     // ── Decode batching ──────────────────────────────────────────────
     GPUBatchPool decode_batch_pool_;
@@ -514,7 +497,7 @@ private:
     std::vector<int> padded_block_table_;
     std::vector<int> padded_swa_block_table_;
     std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
-    // Round-robin cursor for runtime.prefill_batch_decode_cap (#1643): taking a
+    // Round-robin cursor for the prefill token budget (#1643): taking a
     // fixed prefix of the batch would starve every later ingest, which is the
     // failure #1634/#1637 came from.
     int sched_prefill_last_id_ = -1;
@@ -697,38 +680,8 @@ private:
         int budget = 0;              // tokens coverable by pre-allocated KV
         int produced = 0;            // tokens harvested by this pipeline
         bool forward_in_flight = false;
-        // Jump-ahead (#844): forced-span speculative precompute. fdraft is
-        // the canonical tokenization of the schema-forced text; one chunk
-        // forward writes KV + logits rows (d_frows) per draft position, and
-        // later ticks masked-sample from those rows instead of forwarding.
-        // Exact for greedy and sampling: each row IS the true logits given
-        // the accepted prefix. A token diverging from the draft re-enters
-        // normal pipelining (KV rewritten by the replay; stale draft KV
-        // beyond d_ctx is never read).
-        std::vector<int32_t> fdraft;
-        int fnext = 0;      // 1-based draft index the next harvested token must match; 0 = off
-        int fbase_pos = 0;  // position of fdraft[0]
-        float* d_frows = nullptr;  // [kJumpRowsCap, vocab] fp32 draft-prediction rows
-        int frows = 0;             // valid rows in d_frows (== fdraft.size())
-        // Free leading-token verify: the probe only PENDS the draft; the
-        // next kJumpFreeVerify ticks run normally and each harvested token
-        // must match the draft before the remainder is committed. A model
-        // that diverges early costs nothing but the host probe.
-        std::vector<int32_t> fpending;
-        int fpend_cursor = 0;  // draft tokens confirmed for free so far
-        int jumps = 0;             // spans committed (stats, logged at teardown)
-        long long jumped_tokens = 0;  // forward-free harvested tokens
     };
     ConstrainedPipeline cpipe_;
-    // Max draft tokens per forced span (d_frows rows; ~0.6 MiB/row at 150k
-    // vocab, allocated lazily for the pipeline's lifetime). Longer forced
-    // skeletons simply re-probe after the span is consumed.
-    static constexpr int kJumpRowsCap = 16;
-    // Draft tokens confirmed for free (their ticks run forwards anyway)
-    // before the chunk is committed. The model diverges from the canonical
-    // tokenization mostly within the first two tokens; 2 eliminates nearly
-    // all wasted forwards at the cost of not precomputing those positions.
-    static constexpr int kJumpFreeVerify = 2;
 
     // Teacher-forced perplexity capture (begin/end_perplexity_capture).
     // Device buffers of length n; step_prefill_one writes per-position NLL
@@ -932,8 +885,6 @@ private:
     int* d_rg_context_lens_ = nullptr;
     int* d_rg_seq_offsets_ = nullptr;  // [rg_seq_cap_ + 1]
     int* d_rg_ssm_slots_ = nullptr;
-    int* d_gl_block_tables_ = nullptr;  // try_graph_loop_decode
-    int* d_gl_block_tables_swa_ = nullptr;
     int* d_agl_block_tables_ = nullptr;  // try_launch_async_graph_loop
     int* d_agl_block_tables_swa_ = nullptr;
     int* d_cp_block_tables_ = nullptr;  // constrained pipeline (cpipe_)
@@ -1125,11 +1076,6 @@ private:
     // roll the KV back to p0, count a miss if asked. Always false (the eager step runs).
     [[nodiscard]] bool spec_verify_abandon_(int req_id, bool hybrid, int rec_slot, int p0, bool count_miss,
                                             cudaStream_t stream);
-    // #847 capturability census for the verify chunk forward (see
-    // diagnostics.spec_capture_probe). Runs the forward via stream capture +
-    // graph launch when possible, eagerly otherwise.
-    void spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
-                                     cudaStream_t stream);
     // ── Graph-captured verify chunk (#847), engine_spec_capture.cpp ──
     // One cached cudaGraphExec_t per padded chunk length (bucket); replayed
     // every verify step after per-step device-buffer refresh. The chunk
@@ -1385,7 +1331,6 @@ private:
     // mutates config_ / RuntimeConfig in place, then init() executes
     // init_weights / init_kv_cache / init_features. Order matters: see the
     // call sequence in init() for which flag each one resolves.
-    void init_apply_debug_raw_overrides_();
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has
@@ -1442,8 +1387,7 @@ private:
     // Build banned_token_ids_: special/control tokens that must never appear
     // in generated output (e.g. <|im_start|>, <|endoftext|>). Scans tokenizer
     // for control-tagged tokens (authoritative GGUF token_types) or falls back
-    // to heuristic patterns. Excludes stop/EOS/think/channel tokens. Bypassed
-    // by generation.no_ban for bisecting NVFP4 repetition issues.
+    // to heuristic patterns. Excludes stop/EOS/think/channel tokens.
     void build_banned_token_list();
 
     // ── Inference helpers ────────────────────────────────────────────
@@ -1519,7 +1463,7 @@ private:
     // admission hook (longest restorable prefix, in blocks) + save/position helpers.
     int hybrid_prefix_reuse_limit_(Request& req);
     void maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cudaStream_t stream);
-    // Transcript snapshot at request finish (server.transcript_snapshot): the state after
+    // Transcript snapshot at request finish (hybrids, always on): the state after
     // every forwarded token, keyed by transcript_snapshot_key(); the partial tail block stays
     // cached with it and fill_recurrent_state clones it on the restore.
     [[nodiscard]] bool transcript_snapshot_active_() const;
@@ -1560,13 +1504,6 @@ private:
     // 1 = produced a token and continues, -1 = generation finished.
     [[nodiscard]] bool try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream);
     int step_constrained_pipeline();
-    // Jump-ahead (#844): probe the schema FSM for a forced continuation and
-    // pend its canonical-tokenization draft (host-only, no GPU work).
-    void constrained_jump_probe_(std::shared_ptr<Request>& req);
-    // Commit a pending draft whose first token the pipeline just confirmed:
-    // enqueue the speculative chunk over fpending[1..] (KV + logits rows).
-    // Pure on failure: nothing emitted, no FSM advance.
-    void constrained_jump_commit_(std::shared_ptr<Request>& req, cudaStream_t stream);
     void teardown_constrained_pipeline(bool synchronize);
 
     // Schedule prefill/decode batches and reconfigure green contexts.
@@ -1590,7 +1527,7 @@ private:
     // (capped at effective_chunk total rows); requests that do not fit stay in
     // sched_prefill_batch_ for the next step. Implementation:
     // engine_prefill_ragged.cpp.
-    // `riders` (runtime.prefill_mixed_decode): decoding requests whose next
+    // `riders` (mixed step): decoding requests whose next
     // token rides the same forward as one-row members, sampled with the
     // decode sampler and distributed by step_decode_process_outputs, so the
     // step needs no separate decode forward.
@@ -1600,7 +1537,7 @@ private:
     void ragged_finish_row_(std::shared_ptr<Request>& req, const Tensor& row, cudaStream_t stream);
     int prefill_ragged_model_ok_ = -1;  // lazy probe: -1 unknown, 0 no, 1 yes
 
-    // ── Mixed prefill+decode step (runtime.prefill_mixed_decode) ──
+    // ── Mixed prefill+decode step ──
     // While a burst ingests, every prefill step is followed by a decode step
     // for the wave's finishers, plus its host turnaround. Riding the
     // decoders as one-row members of the ragged prefill forward removes it:
@@ -1653,7 +1590,7 @@ private:
 
     // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
     // Static per-row / per-batch eligibility for the one-step-in-flight
-    // pipeline (the clean serving case; see runtime.decode_pipeline).
+    // pipeline (the clean serving case; see engine_decode_pipeline.cpp).
     [[nodiscard]] bool pipeline_row_eligible_(const Request& r) const;
     [[nodiscard]] bool pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>>& rows) const;
     // Build the per-row sampling InferenceState for a CHAINED step (seed one
@@ -1700,12 +1637,11 @@ public:
     void abandon_decode_pipeline();
 
 private:
-
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.
     // Returns remaining tokens (>0 = ok, <=0 = cannot use graph).
     // step_limit > 0 books KV for that burst only; 0 books the whole
-    // remaining generation (the synchronous generate() loop, which runs it).
+    // remaining generation.
     int prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit = 0);
     // Graph loop refused: PLE host n-gram rows, host-resident experts (async loop only) and
     // teacher-forced requests (the host substitutes every token) decode per step.
@@ -1714,8 +1650,6 @@ private:
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
     CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;
 
-    std::vector<int32_t> try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
-                                               cudaStream_t stream);
     [[nodiscard]] bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
                                      cudaStream_t stream, int step_limit = 0);
 };

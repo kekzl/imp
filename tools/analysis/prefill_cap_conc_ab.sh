@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Alternating config A/B/C at CONC streams on one image with the streaming burst client:
 # aggregate tok/s, TTFT p50/p90/max, ITL p50/p95/max, gaps>100ms per wave. Built for the
-# long-prompt serving question (runtime.prefill_chunk_decode_cap/prefill_batch_decode_cap); any
+# long-prompt serving question (runtime.prefill_chunk_decode_cap); any
 # --set string works as an arm. Fresh server per arm, arm order rotates per trial.
 # Two-image form (IMG_A/IMG_B) A/Bs a code change; IGNORE_EOS=1 forces equal token counts.
 # LATE_PLEN/LATE_DELAY add a late long ingest per wave (the cap's protection scenario).

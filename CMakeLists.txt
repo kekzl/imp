@@ -429,7 +429,6 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/config.cpp
     src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
-    src/runtime/green_ctx.cpp
     src/runtime/scheduler.cpp
     src/runtime/request.cpp
     src/runtime/batch.cpp
@@ -447,7 +446,6 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_kv_replan.cpp
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
-    src/runtime/jump_draft.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
     src/runtime/prefill_graph_cache.cpp
@@ -517,7 +515,6 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
     src/exec/activation_calibrator_hessian.cu
-    src/exec/activation_calibrator_pair.cpp
     src/exec/gemm_kernel_registry.cpp
     src/exec/gemm_kernel_cutlass_nvfp4.cpp
     src/exec/gemm_kernel_gguf.cpp
@@ -1006,8 +1003,6 @@ if(IMP_BUILD_TESTS)
         # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
         tests/test_host_embedding.cpp
         tests/test_mxfp8_widen.cpp
-        # Jump-ahead drafts from the request's own tokenization (roadmap row 46).
-        tests/test_jump_draft.cpp
         # Qwen3-Next fused GDN inputs regrouped into the Qwen3.5 slots (#2410).
         tests/test_gdn_fused_split.cpp
         # Golden ModelConfig dump per HF config fixture (#2537).
@@ -1054,7 +1049,7 @@ if(IMP_BUILD_TESTS)
         tests/test_graph_eligibility.cpp
         tests/test_offload_spec_defaults.cpp
         tests/test_snapshot_host_default.cpp
-        # Prefill pacing under decode (runtime.prefill_cap_fairness). CPU-only:
+        # Prefill pacing under decode (kPrefillCapFairness). CPU-only:
         # the cap-by-ratio table, with the many-decoders-one-ingest schedule
         # pinned unchanged.
         tests/test_prefill_pacing.cpp
@@ -1510,7 +1505,6 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_block_copy.cu
         tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
-        tests/test_green_ctx.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_kv_cache_gpu.cpp

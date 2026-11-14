@@ -25,24 +25,6 @@ public:
         return err;
     }
 
-    // cudaStreamCreateWithPriority: lower number = higher priority.
-    [[nodiscard]] cudaError_t create_with_priority(unsigned int flags, int priority) {
-        reset();
-        cudaError_t err = cudaStreamCreateWithPriority(&stream_, flags, priority);
-        if (err != cudaSuccess)
-            stream_ = nullptr;
-        return err;
-    }
-
-    // Stream bound to a green context; must be reset() before that context is destroyed.
-    [[nodiscard]] cudaError_t create_on_ctx(cudaExecutionContext_t ctx, unsigned int flags, int priority) {
-        reset();
-        cudaError_t err = cudaExecutionCtxStreamCreate(&stream_, ctx, flags, priority);
-        if (err != cudaSuccess)
-            stream_ = nullptr;
-        return err;
-    }
-
     // Destroy the held stream now (does not wait for queued work).
     void reset() noexcept {
         if (stream_)

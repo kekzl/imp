@@ -73,6 +73,9 @@ bool Engine::step() {
 }
 
 namespace {
+// Recurrent decode time slice when batched GDN decode has no slot table: a rotation re-captures the
+// decode graph for the next state slot (~10-20 ms); 128 tokens keep that at ~1-2 % of decode time.
+constexpr int kHybridDecodeQuantum = 128;
 struct OutsideTiming {
     double resume = 0, cp = 0, sched = 0, prefill = 0, decode_wrap = 0;
     int n = 0;
@@ -153,32 +156,17 @@ bool Engine::step_impl_() {
         return false;
     }
 
-    // Prefill/decode overlap engages only when the in-flight decode runs in
-    // workspace slot 1 (>= 2 rows; the bs==1 regimes carry spec-verify
-    // chunks, which share the NVFP4 activation scratch qscratch_.cutlass_act_* with prefill).
-    const bool overlap_step = overlap_ready_ && sched_decode_batch_.size() >= 2;
-
     // A pipelined decode step in flight shares workspace 0 with prefill and
     // pins the batch composition — collect it before any prefill work or
-    // when this step has no decode batch to continue it with. Under overlap
-    // the decode step lives in slot 1 with its own quant scratches, so the
-    // prefill no longer forces the drain: it enqueues on the low-priority
-    // stream while the decode step is still running.
-    if (bd_pipe_.in_flight &&
-        ((!overlap_step && !sched_prefill_batch_.empty()) || sched_decode_batch_.empty()))
+    // when this step has no decode batch to continue it with.
+    if (bd_pipe_.in_flight && (!sched_prefill_batch_.empty() || sched_decode_batch_.empty()))
         drain_decode_pipeline();
 
     // Process prefill requests.
     if (s_ot)
         o3 = std::chrono::steady_clock::now();
     if (!sched_prefill_batch_.empty()) {
-        if (overlap_step) {
-            executor_->set_overlap_prefill_active(true);
-            executor_->set_sample_slot_override(d_prefill_sample_);
-        }
         step_prefill(prefill_stream());
-        executor_->set_overlap_prefill_active(false);
-        executor_->set_sample_slot_override(nullptr);
         ensure_prefill_workspace(executor_.get());
     }
 
@@ -200,7 +188,7 @@ bool Engine::step_impl_() {
         }
     }
     // A mixed step already decoded this batch inside the ragged prefill
-    // forward (runtime.prefill_mixed_decode); a second decode forward would
+    // forward (mixed step); a second decode forward would
     // feed every row its own token twice.
     if (!sched_decode_batch_.empty() && !mixed_served_this_step_) {
         step_decode(decode_stream());
@@ -403,25 +391,7 @@ bool Engine::step_schedule() {
     sched_decode_batch_.clear();
     scheduler_->schedule(sched_prefill_batch_, sched_decode_batch_);
 
-    if (sched_prefill_batch_.empty() && sched_decode_batch_.empty()) {
-        return false;
-    }
-
-    // Dynamic Green Context SM reconfiguration
-    if (config_.use_green_contexts && green_ctx_.is_available() && green_ctx_.has_green_contexts()) {
-        float target_ratio = config_.green_ctx_prefill_ratio;
-        if (sched_prefill_batch_.empty() && !sched_decode_batch_.empty()) {
-            target_ratio = 0.0f;
-        } else if (!sched_prefill_batch_.empty() && sched_decode_batch_.empty()) {
-            target_ratio = 1.0f;
-        }
-        if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
-            // false: init logged ERROR, is_available() is false, prefill/decode fall back to stream_.
-            (void)green_ctx_.reconfigure(target_ratio);
-        }
-    }
-
-    return true;
+    return !(sched_prefill_batch_.empty() && sched_decode_batch_.empty());
 }
 
 // =====================================================================
@@ -958,57 +928,53 @@ void Engine::step_decode(cudaStream_t dec_stream) {
 
     // SSM/GDN: the recurrent scan kernels are single-sequence, so decode one
     // sequence per step. Rotate the slice holder round-robin every
-    // hybrid_decode_quantum tokens (keeping one active request every step
+    // kHybridDecodeQuantum tokens (keeping one active request every step
     // would serialize concurrent sessions head-of-line); the decode graphs
     // re-capture for the new sequence's state slot on rotation, which the
     // quantum amortizes.
     hybrid_decode_waiting_ = false;
     // Batched GDN decode runs all of them in one step; the rotation below is
-    // the fallback for when it is off or unavailable (no slot table). See
-    // runtime.gdn_batched_decode.
-    const bool gdn_batch_ok = runtime_config_.runtime.gdn_batched_decode && d_ssm_seq_slots_ != nullptr;
+    // the fallback for when it is unavailable (no slot table).
+    const bool gdn_batch_ok = d_ssm_seq_slots_ != nullptr;
     if (ssm_state_ && decode_batch.size() > 1 && !gdn_batch_ok) {
-        const int quantum = runtime_config_.runtime.hybrid_decode_quantum;
-        if (quantum > 0) {
-            int cur = -1;
-            for (size_t i = 0; i < decode_batch.size(); ++i) {
-                if (decode_batch[i]->id == hybrid_active_req_) {
-                    cur = static_cast<int>(i);
-                    break;
-                }
+        int cur = -1;
+        for (size_t i = 0; i < decode_batch.size(); ++i) {
+            if (decode_batch[i]->id == hybrid_active_req_) {
+                cur = static_cast<int>(i);
+                break;
             }
-            bool rotate = (cur < 0) || (static_cast<int>(decode_batch[cur]->output_tokens.size()) -
-                                            hybrid_slice_start_ >=
-                                        quantum);
-            if (rotate) {
-                // Next request in cyclic id order after the current holder:
-                // ids are monotonically increasing, so this is admission
-                // round-robin.
-                int next = 0;
-                int best_id = INT_MAX, best_wrap_id = INT_MAX;
-                int next_wrap = 0;
-                for (size_t i = 0; i < decode_batch.size(); ++i) {
-                    int id = decode_batch[i]->id;
-                    if (id > hybrid_active_req_ && id < best_id) {
-                        best_id = id;
-                        next = static_cast<int>(i);
-                    }
-                    if (id < best_wrap_id) {
-                        best_wrap_id = id;
-                        next_wrap = static_cast<int>(i);
-                    }
-                }
-                cur = (best_id != INT_MAX) ? next : next_wrap;
-                hybrid_active_req_ = decode_batch[cur]->id;
-                hybrid_slice_start_ = static_cast<int>(decode_batch[cur]->output_tokens.size());
-            }
-            if (cur > 0)
-                std::swap(decode_batch[0], decode_batch[cur]);
-            // Others are waiting: bound the async graph-loop burst to the
-            // slice remainder (step_decode_process_outputs) so rotation
-            // actually gets a chance to run.
-            hybrid_decode_waiting_ = true;
         }
+        bool rotate = (cur < 0) ||
+                      (static_cast<int>(decode_batch[cur]->output_tokens.size()) - hybrid_slice_start_ >=
+                       kHybridDecodeQuantum);
+        if (rotate) {
+            // Next request in cyclic id order after the current holder:
+            // ids are monotonically increasing, so this is admission
+            // round-robin.
+            int next = 0;
+            int best_id = INT_MAX, best_wrap_id = INT_MAX;
+            int next_wrap = 0;
+            for (size_t i = 0; i < decode_batch.size(); ++i) {
+                int id = decode_batch[i]->id;
+                if (id > hybrid_active_req_ && id < best_id) {
+                    best_id = id;
+                    next = static_cast<int>(i);
+                }
+                if (id < best_wrap_id) {
+                    best_wrap_id = id;
+                    next_wrap = static_cast<int>(i);
+                }
+            }
+            cur = (best_id != INT_MAX) ? next : next_wrap;
+            hybrid_active_req_ = decode_batch[cur]->id;
+            hybrid_slice_start_ = static_cast<int>(decode_batch[cur]->output_tokens.size());
+        }
+        if (cur > 0)
+            std::swap(decode_batch[0], decode_batch[cur]);
+        // Others are waiting: bound the async graph-loop burst to the
+        // slice remainder (step_decode_process_outputs) so rotation
+        // actually gets a chance to run.
+        hybrid_decode_waiting_ = true;
         decode_batch.resize(1);
     }
 
@@ -1359,11 +1325,10 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
         // stash flush on the stream (the parity has not flipped yet). With
         // the event split it rides behind the flush BEFORE the host waits on
         // the gather: measured 62 us of GPU idle on each side of the append
-        // when it was launched only after the sync (runtime.penalty_append_early).
+        // when it was launched only after the sync (+0.5 % median, 3 alternating pairs).
         const int32_t* toks = nullptr;
         bool appended = false;
-        if (runtime_config_.runtime.penalty_append_early &&
-            executor_->gather_sampled_tokens_async(n, dec_stream)) {
+        if (executor_->gather_sampled_tokens_async(n, dec_stream)) {
             if (any_append)
                 appended = executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream);
             toks = executor_->wait_gathered_tokens(executor_->sample_parity());
@@ -1436,14 +1401,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing.outside +=
                 std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
     }
-    // Switch workspace for decode. Slot 1 serves bs==1, and under prefill
-    // overlap also small batches (warmup sized slot 1 and the per-slot quant
-    // scratches for max_batch). The workspace choice must be a pure function
-    // of (flags, batch size) so graph captures stay consistent with replays.
-    const bool slot1 = executor_->has_decode_workspace() &&
-                       (valid_decode.size() == 1 ||
-                        (overlap_ready_ &&
-                         static_cast<int>(valid_decode.size()) <= executor_->decode_max_batch()));
+    // Switch workspace for decode: slot 1 serves bs==1. The workspace choice must be a
+    // pure function of (flags, batch size) so graph captures stay consistent with replays.
+    const bool slot1 = executor_->has_decode_workspace() && valid_decode.size() == 1;
     if (slot1) {
         executor_->use_workspace(1);
     } else {
@@ -1649,18 +1609,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             mtp_accuracy_.total++;
             bool match = (mtp_pool_.pending_prediction == next_token);
             if (match) mtp_accuracy_.matches++;
-            // Optional verbose log: prints (predicted, actual, match) with
-            // decoded strings so accept patterns can be analyzed offline.
-            const bool s_pattern_log = runtime_config_.diagnostics.mtp_pattern_log;
-            if (s_pattern_log) {
-                Tokenizer* tok = model_->tokenizer();
-                std::string ps = tok ? tok->decode_token(mtp_pool_.pending_prediction) : std::string();
-                std::string as = tok ? tok->decode_token(next_token) : std::string();
-                IMP_LOG_INFO("MTP-PAT %s pred=%d '%s' actual=%d '%s'",
-                             match ? "+" : "-",
-                             mtp_pool_.pending_prediction, ps.c_str(),
-                             next_token, as.c_str());
-            }
         }
         // K-chain measurement: verify pending predictions, then draft fresh.
         // Current position is the index of the token we just emitted (=
@@ -1718,10 +1666,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
 
-            // Optional: apply the main model's output norm before passing
-            // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
-            // in some MTP variants; gate by env so we can A/B.
-            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h && ws_gate->hc_count == 0;
+            // Apply the main model's output norm before passing h_prev to MTP: the head was
+            // trained on post-RMSNorm hiddens (vLLM feed); HC heads (hc_count > 0) take it raw.
+            const bool s_pre_norm_h = ws_gate->hc_count == 0;
             const void* h_for_mtp = h_view.data;
             if (void* normed = s_pre_norm_h ? mtp_prenorm_scratch(hidden_dim * sizeof(__half)) : nullptr) {
                 int64_t hd_shape[2] = {1, hidden_dim};
@@ -1960,10 +1907,9 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // on-device loop (spec_limit == 0) all the way to max_tokens;
             // is_cancelled()/timeout are only polled between bursts, so a
             // client disconnect could not interrupt it. Bound it to
-            // runtime.decode_burst so the worker regains control to re-poll
+            // kDecodeBurst so the worker regains control to re-poll
             // cancellation; output is identical (same decode, chunked and
-            // relaunched). Speculation keeps its own miss_burst limit; <=0
-            // restores the unbounded behavior.
+            // relaunched). Speculation keeps its own miss_burst limit.
             int launch_limit = spec_limit;
             // Bound only in the default (non-deterministic) serving mode.
             // The fully-on-device unbounded loop is the one decode path that
@@ -1974,16 +1920,15 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // mid-burst cancellation, so keep it unbounded there. In
             // production the model is already non-deterministic, so bounding
             // costs no reproducibility and buys cancel responsiveness.
-            if (launch_limit == 0 && runtime_config_.runtime.decode_burst > 0 &&
-                !runtime_config_.runtime.deterministic)
-                launch_limit = runtime_config_.runtime.decode_burst;
+            if (launch_limit == 0 && !runtime_config_.runtime.deterministic)
+                launch_limit = kDecodeBurst;
             // Admission-aware burst: while another request is waiting (still
             // pending admission or mid-prefill), Engine::step short-circuits
             // to the resume path for the whole burst, inflating the waiting
             // request's TTFT by ~0.5-1 s per 128-token burst. Shorten the
             // burst so scheduling work interleaves every few tokens; the
             // full burst returns when nothing is waiting. Deterministic mode
-            // is exempt (same reasoning as decode_burst above: reproducible
+            // is exempt (same reasoning as kDecodeBurst above: reproducible
             // evals are single-stream, nothing ever waits).
             if (!runtime_config_.runtime.deterministic &&
                 (scheduler_->has_pending() || !sched_prefill_batch_.empty())) {
@@ -1995,7 +1940,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // for the slice — bound the burst to the slice remainder so the
             // round-robin rotation in step_decode actually runs.
             if (!runtime_config_.runtime.deterministic && hybrid_decode_waiting_) {
-                const int quantum = runtime_config_.runtime.hybrid_decode_quantum;
+                const int quantum = kHybridDecodeQuantum;
                 int slice_left = quantum - (static_cast<int>(dreq->output_tokens.size()) -
                                             hybrid_slice_start_);
                 slice_left = std::max(1, slice_left);

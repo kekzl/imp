@@ -1,4 +1,4 @@
-// Batched GDN decode (runtime.gdn_batched_decode) at the ENGINE level, greedy under
+// Batched GDN decode at the ENGINE level, greedy under
 // runtime.deterministic. Asserted: eight different prompts admitted in reverse row order give
 // every request the tokens it got in forward order (per-row plumbing: slot table, conv state,
 // residual and alpha/beta paths, sampling state copies), and eight rows of ONE prompt decode

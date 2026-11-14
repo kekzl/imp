@@ -8,8 +8,6 @@ const char* graph_demotion_reason_name(GraphDemotionReason r) {
             return "none";
         case GraphDemotionReason::ConfigNever:
             return "runtime.cuda_graphs=never";
-        case GraphDemotionReason::DebugRaw:
-            return "runtime.debug_raw=true";
         case GraphDemotionReason::CalibrationActive:
             return "calibration_active";
         case GraphDemotionReason::StreamingKvConfigured:

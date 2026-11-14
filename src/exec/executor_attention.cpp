@@ -227,11 +227,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // h += o_proj(ao) via the smallm accumulate path, replacing GEMM-to-scratch
     // + elementwise_add_store and skipping the residual save. Ragged prefill
     // chunks n<=32 take it too (same accumulate, one launch fewer).
-    bool will_fuse_o_beta1_nvfp4 =
-        (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
-         !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 && h.qtype == QType::F16 &&
-         wo_tier == StorageTier::CUTLASS_NVFP4 && dispatch_policy().gemm.nvfp4_residual_beta1 &&
-         !cur_spec_verify_ && !overlap_prefill_active_ && lora_ == nullptr && !using_fp32_accum);
+    bool will_fuse_o_beta1_nvfp4 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
+                                    !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 &&
+                                    h.qtype == QType::F16 && wo_tier == StorageTier::CUTLASS_NVFP4 &&
+                                    dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ &&
+                                    lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
         !will_fuse_o_beta1_nvfp4 && !using_fp32_accum) {
         // Kernel copy, not cudaMemcpyAsync: a memcpy node has no programmatic
