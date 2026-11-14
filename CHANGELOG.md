@@ -9,6 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Removed
 - 31 `speculative.*` keys left the config (60 -> 29): 16 settled kill switches are hardcoded at their default, 5 off-by-default experiments are deleted with their code (`verify_row_parity`, `verify_smallm`, `recycle_tree`, `draft_ctx_cap`, `min_history`), 10 tuning numbers are constants in `src/core/config/speculative.h`. `--set` rejects them.
+- 5 more `speculative.*` keys (29 -> 24) and `diagnostics.mtp_tree_probe` are gone with their code: the MTP tree (`mtp_tree_width`, `mtp_tree_margin`, `mtp_topw.cu`), the full `batch_verify` (32 streams 1966 -> 1159 tok/s) and `factored_spare`; `mtp_batch_verify_factor_row` is always on. Qwen3.8-27B MTP workspace -14400 B.
 
 ### Changed
 - `docker compose up` starts only `imp-server`. Open WebUI, Prometheus and Grafana moved to `docker-compose.full.yml` (`docker compose -f docker-compose.full.yml up -d`, includes the base file); project and volume names stay `imp_*`, so existing UI and dashboard data is kept.
