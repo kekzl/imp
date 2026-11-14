@@ -214,7 +214,7 @@ attention ACTIVE` asserted in every arm:
 Wall time on a 77k-token prompt at 128 emitted tokens, arms alternating over two
 rounds: corner 11.54 / 11.70 / 11.84 / 11.67 s, mean+std 11.53 / 11.54 / 11.56 /
 11.69 s. Neutral, so the default is now mean+std and
-`attention.sparse_score_meanstd=false` restores the corner bound.
+`attention.sparse_score_meanstd=false` restored the corner bound (key and corner bound removed 2026-11-14).
 
 **The first run of this A/B measured nothing**: both arms read 10/10 because
 `kv_cache.growable` defaults true and `enable_key_minmax()` refuses a growable
@@ -228,7 +228,7 @@ sparsity, and StreamingLLM eviction as the only answer under KV-pool pressure.
 
 ## Budget floor under the mean+std score (2026-09-12)
 
-Same harness and model as the score A/B above, `tools/analysis/sparse_score_niah_ab.sh` and a
+Same harness and model as the score A/B above, `sparse_score_niah_ab.sh` (removed 2026-11-14 with the corner bound) and a
 single-arm sweep:
 
 | budget | min/max corner | mean + std |

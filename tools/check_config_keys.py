@@ -5,7 +5,7 @@ WHY THIS EXISTS
 ---------------
 The example file is the only key catalogue an operator has (`imp-cli --help` does
 not print the binder). On 2026-09-05 it carried 192 of 223 bound keys; the 31
-missing ones included `attention.sparse_min_ctx`, the threshold that silently
+missing ones included `attention.sparse_min_ctx` (now the constant `kSparseMinCtx`), the threshold that silently
 turns `attention.sparse_topk_tokens` into a no-op below 12288 context
 (AUDIT_ARCH_2026 J-2). Nothing gated the gap. The reverse direction (a key in
 the example that no binder reads) is what `imp.conf: unknown key` reports at

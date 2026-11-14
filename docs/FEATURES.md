@@ -81,7 +81,7 @@ GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10
 | RA2 prefill (INT8 QK^T, two-term NVFP4 PV) | ✅ opt-in | `attention.ra2_prefill`; hd 64/128/256, GQA; PPL within +0.1 % on 3 models (#2628) |
 | Paged KV cache | ✅ | default block `n=16`; the geometry is per-configuration |
 | Growable KV pool | ✅ opt-in | `kv_cache.growable`: reserves address space for the planned pool, commits what the card can spare, grows on demand. Needs CUDA virtual memory management |
-| Sparse decode attention (top-k page selection) | ✅ default on (7 arch families) | `attention.sparse_topk_tokens` (auto per arch, `0` = off): decode reads only the top-scoring KV blocks, bit-identical at ctx <= budget. Page score defaults to the page mean plus its standard deviation (`attention.sparse_score_meanstd`); the Quest min/max corner bound is the opt-out. F16/FP8 KV; gates in [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
+| Sparse decode attention (top-k page selection) | ✅ default on (7 arch families) | `attention.sparse_topk_tokens` (auto per arch, `0` = off): decode reads only the top-scoring KV blocks, bit-identical at ctx <= budget. Page score: the page mean plus its standard deviation (the Quest min/max corner bound was removed 2026-11-14). F16/FP8 KV; gates in [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
 | CUDA graphs, decode | ✅ | gate asserts ≥1.3x, measured 2.28x |
 | CUDA graphs, prefill | ✅ | default on; disabled per-model when one NVFP4 weight exceeds the dequant-workspace cap |
 | continuous batching, concurrent decode | ✅ | |
