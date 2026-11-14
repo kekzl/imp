@@ -200,26 +200,12 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [attention]
     S("attention.fp8_prefill", cfg.attention.fp8_prefill);
-    S("attention.fp8_fmha", cfg.attention.fp8_fmha);
-    S("attention.fmha_sm120", cfg.attention.fmha_sm120);
     S("attention.fmha_fa2", cfg.attention.fmha_fa2);
-    S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
-    B("attention.fa2_f16acc", cfg.attention.fa2_f16acc);
-    B("attention.fa2_hd256", cfg.attention.fa2_hd256);
     S("attention.hd512_prefill", cfg.attention.hd512_prefill);
-    I("attention.fa2_hd256_bkv", cfg.attention.fa2_hd256_bkv);
-    B("attention.fa2_dense_2cta", cfg.attention.fa2_dense_2cta);
     B("attention.ra2_prefill", cfg.attention.ra2_prefill);
     F("attention.apa_eps", cfg.attention.apa_eps);
     I("attention.apa_min_kv", cfg.attention.apa_min_kv);
     B("attention.apa_tile_cache", cfg.attention.apa_tile_cache);
-    I("attention.paged_fp8_multitok", cfg.attention.paged_fp8_multitok);
-    I("attention.paged_nvfp4_multitok", cfg.attention.paged_nvfp4_multitok);
-    B("attention.paged_nvfp4_mma", cfg.attention.paged_nvfp4_mma);
-    I("attention.paged_f16_multitok", cfg.attention.paged_f16_multitok);
-    B("attention.fa2_heavy_first", cfg.attention.fa2_heavy_first);
-    B("attention.fa2_pv_f16acc", cfg.attention.fa2_pv_f16acc);
-    B("attention.fp8_qk_scaled", cfg.attention.fp8_qk_scaled);
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
     I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
     B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
@@ -231,9 +217,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("diagnostics.mtp_verify_pin", cfg.diagnostics.mtp_verify_pin);
     B("diagnostics.spec_capture_fidelity", cfg.diagnostics.spec_capture_fidelity);
     S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
-    B("attention.splitk_pipe", cfg.attention.splitk_pipe);
-    B("attention.fp8_tile", cfg.attention.fp8_tile);
-    B("attention.fp8_tile_gqa", cfg.attention.fp8_tile_gqa);
     B("attention.gate_concat", cfg.attention.gate_concat);
     I("attention.sparse_topk_tokens", cfg.attention.sparse_topk_tokens);
     B("attention.qsa", cfg.attention.qsa);

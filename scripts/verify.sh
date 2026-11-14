@@ -241,9 +241,8 @@ else
         # attention tests ran, #1586); check_verify_filter.sh now fails on any pattern matching nothing.
         # `*Attention*` covers paged decode only, not FMHA prefill; default-path FA2 fixtures
         # (FmhaFA2Test etc, ~40s total) are added by name. Left out on purpose (run via make test-gpu):
-        # FmhaSm120Test (legacy tier), FmhaFP8Test (opt-in), FmhaFA2Dense2CtaTest,
-        # FmhaFA2Hd256Bkv32Test (opt-in bkv=32).
-        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*:FmhaFA2Test.*:FmhaFA2Hd256Test.*:FmhaFA2PvF16Test.*:FmhaHd512Test.*:FmhaFA2HeavyFirstTest.*:FmhaFA2Fp8ScaledTest.*"
+        # FmhaSm120Test (legacy tier), FmhaFA2Dense2CtaTest.
+        FILTER="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:KVCache*:GemmTest.*:FP8GemmTest.*:SamplingTest.*:SoftmaxTest.*:*Attention*:VramBudget*:ForwardPassTest.*:FmhaFA2Test.*:FmhaFA2Hd256Test.*:FmhaFA2PvF16Test.*:FmhaHd512Test.*:FmhaFA2HeavyFirstTest.*"
         if "$TESTS_BIN" --gtest_filter="$FILTER" >/tmp/imp_verify_tests.log 2>&1; then
             pass "fast gtest filter"
         else

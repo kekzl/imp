@@ -36,24 +36,20 @@ struct ProcessDiag {
     bool deterministic = false;
     bool cublas_fp16_acc = false;
 
-    // Attention
-    bool attention_splitk_pipe = true;
-    bool attention_fp8_tile = true;
-    bool attention_fp8_tile_gqa = true;
-    bool attention_fa2_f16acc = true;     // matches the config.h default
-    bool attention_fa2_pv_f16acc = true;  // matches the config.h default
-    bool attention_fa2_hd256 = true;  // matches the config.h default (on since #932)
-    int attention_fa2_hd256_bkv = 64;  // matches the config.h default
-    bool attention_fa2_dense_2cta = true;  // matches the config.h default
-    int attention_paged_fp8_multitok = 4;  // matches the config.h default
-    int attention_paged_nvfp4_multitok = 4;  // matches the config.h default
-    int attention_paged_f16_multitok = 4;    // matches the config.h default
+    // Attention kernel variants: production values, never set from RuntimeConfig (keys removed
+    // 2026-11-14). Test hooks only: GPU oracle tests flip them to reach the reference kernels.
+    bool attention_fa2_f16acc = true;
+    bool attention_fa2_pv_f16acc = true;
+    bool attention_fa2_hd256 = true;  // on since #932
+    bool attention_fa2_dense_2cta = true;
+    int attention_paged_fp8_multitok = 4;
+    int attention_paged_nvfp4_multitok = 4;
+    int attention_paged_f16_multitok = 4;
     int attention_paged_f16_hpc = 0;         // 0 = auto; tests sweep 1/2/4
     int attention_paged_nvfp4_hpc = 0;       // 0 = auto; tests sweep 1/2/3/4
-    int attention_paged_nvfp4_mma = 64;      // MMA decode kernel max splits (config.h default on), 0 = off
+    int attention_paged_nvfp4_mma = 64;      // MMA decode kernel max splits, 0 = off
     int attention_paged_fp8_hpc = 0;        // 0 = auto; -1 = the per-head four-token kernel; tests sweep 1..5
-    bool attention_fa2_heavy_first = true;  // matches the config.h default
-    bool attention_fp8_qk_scaled = false;
+    bool attention_fa2_heavy_first = true;
     int nvfp4_cublaslt_min_m = 2048;     // matches the config.h default
     int nvfp4_tile_min_m = 1;            // matches the config.h default
     bool nvfp4_prompt_streamk = true;    // gemm.nvfp4_prompt_streamk, auto resolved at engine init
@@ -107,44 +103,33 @@ void process_diag_set_deterministic_gemm(bool v);
 [[nodiscard]] bool process_diag_cublas_fp16_acc();
 void process_diag_set_cublas_fp16_acc(bool v);
 
-// Attention
-[[nodiscard]] bool process_diag_attention_splitk_pipe();
-[[nodiscard]] bool process_diag_attention_fp8_tile();
-[[nodiscard]] bool process_diag_attention_fp8_tile_gqa();
+// Attention kernel variants (test hooks, see the slot above)
 [[nodiscard]] bool process_diag_fa2_f16acc();  // f16-accumulate QK^T in the fp16-qk FA2 kernel (#597)
 [[nodiscard]] bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follow-up)
 // test hooks (mirror process_diag_set_cublas_fp16_acc)
 void process_diag_set_fa2_f16acc(bool v);
 void process_diag_set_fa2_pv_f16acc(bool v);
-[[nodiscard]] bool process_diag_fa2_hd256();  // HD=256 FA2 port (attention.fa2_hd256, default on since #932)
+[[nodiscard]] bool process_diag_fa2_hd256();  // HD=256 FA2 port (default on since #932)
 void process_diag_set_fa2_hd256(bool v);
-[[nodiscard]] bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM (attention.fa2_dense_2cta)
-int process_diag_paged_fp8_multitok();  // FP8 paged decode tokens per warp iteration
-                                        // (attention.paged_fp8_multitok)
+[[nodiscard]] bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM
+int process_diag_paged_fp8_multitok();  // FP8 paged decode tokens per warp iteration (4; 1 = per-head kernel)
 void process_diag_set_paged_fp8_multitok(int v);
-int process_diag_paged_nvfp4_multitok();  // NVFP4 paged decode tokens per warp iteration
-                                          // (attention.paged_nvfp4_multitok)
+int process_diag_paged_nvfp4_multitok();  // NVFP4 paged decode tokens per warp iteration (4; 1 = scalar)
 void process_diag_set_paged_nvfp4_multitok(int v);
-int process_diag_paged_f16_multitok();  // F16 paged decode tokens per warp iteration
-                                        // (attention.paged_f16_multitok)
+int process_diag_paged_f16_multitok();  // F16 paged decode tokens per warp iteration (4; 1 = split-K kernels)
 void process_diag_set_paged_f16_multitok(int v);
 int process_diag_paged_f16_hpc();  // F16 multitok Q heads per CTA, 0 = auto (tests only)
 void process_diag_set_paged_f16_hpc(int v);
 int process_diag_paged_nvfp4_hpc();  // NVFP4 multitok Q heads per CTA, 0 = auto, 1 = per-head (tests only)
 void process_diag_set_paged_nvfp4_hpc(int v);
-int process_diag_paged_nvfp4_mma();  // NVFP4 MMA split-K decode max splits (attention.paged_nvfp4_mma), 0 =
-                                     // off
+int process_diag_paged_nvfp4_mma();  // NVFP4 MMA split-K decode max splits, 0 = off
 void process_diag_set_paged_nvfp4_mma(int v);
 int process_diag_paged_fp8_hpc();  // FP8 grouped-kernel Q heads per CTA, 0 = auto, -1 = four-token kernel
                                    // (tests only)
 void process_diag_set_paged_fp8_hpc(int v);
 void process_diag_set_fa2_dense_2cta(bool v);
-[[nodiscard]] bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first (attention.fa2_heavy_first)
+[[nodiscard]] bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first
 void process_diag_set_fa2_heavy_first(bool v);
-int process_diag_fa2_hd256_bkv();  // KV tile rows of the HD=256 instance (attention.fa2_hd256_bkv)
-void process_diag_set_fa2_hd256_bkv(int v);
-[[nodiscard]] bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
-void process_diag_set_fp8_qk_scaled(bool v);
 int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
 [[nodiscard]] int process_diag_nvfp4_tile_min_m();  // gemm.nvfp4_tile_min_m: 0 off
 [[nodiscard]] bool process_diag_nvfp4_prompt_streamk();  // gemm.nvfp4_prompt_streamk (resolved)

@@ -1,7 +1,7 @@
-// Cross-path agreement across six prefill-attention impls (cuBLAS, WMMA, fp8 FMHA, FA2
-// e4m3/f16, blackwell): the #493 regression shipped with no test on realistic data.
+// Cross-path agreement across four prefill-attention impls (cuBLAS, WMMA, FA2 f16,
+// blackwell): the #493 regression shipped with no test on realistic data.
 // Ground truth: fp64 CPU ref verified vs a committed golden (attention_crosspath_golden.h,
-// 1e-9 rel). Tolerances: f16-class 1e-2 rel, fp8-class 5e-2 rel, pairwise f16-class 1e-2.
+// 1e-9 rel). Tolerances: f16-class 1e-2 rel, pairwise f16-class 1e-2.
 
 #include <gtest/gtest.h>
 #include "compute/attention_cublas.h"
@@ -79,7 +79,6 @@ void ref_attention_f64(const std::vector<half>& Qh, const std::vector<half>& Kh,
 
 struct PathResult {
     std::string name;
-    bool fp8_class = false;
     bool ran = false;
     std::vector<float> O;
 };
@@ -223,31 +222,15 @@ protected:
                 collect(r);
             results.push_back(std::move(r));
         }
-        {  // 3. fp8 FMHA (smem-materializing)
-            PathResult r{"fmha_fp8", /*fp8_class=*/true};
-            clear_o();
-            r.ran = fmha_sm120_fp8_prefill(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_);
-            if (r.ran)
-                collect(r);
-            results.push_back(std::move(r));
-        }
-        {  // 4. FA2 register-resident, e4m3 QK
-            PathResult r{"fa2_e4m3", /*fp8_class=*/true};
-            clear_o();
-            r.ran = fmha_sm120_fa2_prefill(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0, false);
-            if (r.ran)
-                collect(r);
-            results.push_back(std::move(r));
-        }
-        {  // 5. FA2 register-resident, f16 QK (the short-prefill production path, #525)
+        {  // 3. FA2 register-resident, f16 QK (the short-prefill production path, #525)
             PathResult r{"fa2_f16"};
             clear_o();
-            r.ran = fmha_sm120_fa2_prefill(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0, true);
+            r.ran = fmha_sm120_fa2_prefill(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0);
             if (r.ran)
                 collect(r);
             results.push_back(std::move(r));
         }
-        {  // 6. flash_attention_blackwell (the dispatcher's final tier)
+        {  // 4. flash_attention_blackwell (the dispatcher's final tier)
             PathResult r{"blackwell"};
             clear_o();
             r.ran = flash_attention_blackwell(Q4, K4, V4, O4, scale, causal, sw, softcap, stream_, 0);
@@ -265,8 +248,7 @@ protected:
         // hd=128 is the production hot shape: register-resident paths must not silently decline.
         // Gated on Sq>=16: 1-/2-token prefill legitimately routes to the decode path instead.
         for (auto& r : results)
-            if (HD == 128 && Sq >= 16 &&
-                (r.name == "fa2_e4m3" || r.name == "fa2_f16" || r.name == "fmha_sm120_f16"))
+            if (HD == 128 && Sq >= 16 && (r.name == "fa2_f16" || r.name == "fmha_sm120_f16"))
                 EXPECT_TRUE(r.ran) << r.name << " declined hd=128 config " << name;
 
         // f32-score-chain paths: exact-ish QK accumulation + f32 softmax —

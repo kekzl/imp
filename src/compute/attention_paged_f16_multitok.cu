@@ -1,4 +1,4 @@
-// F16 paged decode, TOK tokens/warp iteration, HPC Q heads/CTA (attention.paged_f16_multitok).
+// F16 paged decode, TOK tokens/warp iteration, HPC Q heads/CTA (process_diag_paged_f16_multitok).
 // A lane holds HEAD_DIM/32 contiguous elements, loads TOK rows straight from global before any
 // reduction; the K row is converted once and dotted against HPC Q heads. Grid: n_kv_heads x
 // (n_q_per_kv/HPC) CTAs/sequence. Softmax state is unnormalized (m,l,o), normalized once at the

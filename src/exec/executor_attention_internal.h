@@ -41,17 +41,16 @@ namespace imp {
 // resident FA2 in f16-QK mode instead of materialized cuBLAS+softmax; same
 // numerical class as cuBLAS (f16 in, f32 accumulate), avoids the e4m3
 // quality cliff (#511/#512), no S-matrix. Declined configs (hd!=128,
-// non-F16, chunk continuation) return false; the fp8 FMHA family is NOT a fallback here.
-[[nodiscard]] static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
-                                   const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
-                                   float scale, int sliding_window, float softcap, int q_offset,
-                                   cudaStream_t stream, const int* d_kv_len = nullptr,
-                                   const void* sinks = nullptr) {
-    if (rcfg.attention.fa2_fp16qk == "never")
-        return false;
-    // hd=256: stage-1 FA2 port (attention.fa2_hd256, default on since #932).
+// non-F16, chunk continuation) return false.
+[[nodiscard]] static bool try_fa2_fp16qk_prefill(const DispatchPolicy& /*rcfg*/, const Tensor& q,
+                                                 const Tensor& k, const Tensor& v, Tensor& o, int n,
+                                                 int kv_len, int nh, int nkv, int hd, float scale,
+                                                 int sliding_window, float softcap, int q_offset,
+                                                 cudaStream_t stream, const int* d_kv_len = nullptr,
+                                                 const void* sinks = nullptr) {
+    // hd=256: stage-1 FA2 port (default on since #932).
     // Other head dims decline as before; the kernel wrapper re-checks the gate.
-    if (hd != 64 && hd != 128 && !(hd == 256 && rcfg.attention.fa2_hd256))
+    if (hd != 64 && hd != 128 && hd != 256)
         return false;
     // Chunk CONTINUATION (q_offset>0) declines the f16-QK kernel: wrong
     // attention on the Llama family at chunk boundaries (conservative blanket
@@ -69,7 +68,7 @@ namespace imp {
     Tensor v4 = v.reshape(4, kv4s);
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
-                                  q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
+                                  q_offset, d_kv_len, static_cast<const half*>(sinks));
 }
 
 // APA serves kv_len >= attention.apa_min_kv (below: RA2 if on, else FA2) and n >= kApaMinRows: small

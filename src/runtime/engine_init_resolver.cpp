@@ -329,15 +329,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     // The deterministic forcing below (#680) works around NaNs in the
     // cuBLAS-attention + FP8 round-trip; unneeded once FA2 serves all
-    // attention (hd=128, and hd=256 since #930/fa2_hd256 default-on), since
-    // cuBLAS attention never touches the FP8 KV there. Non-FA2 configs
-    // (learned sinks/hd=64, heterogeneous per-layer shapes like gemma-4)
-    // still need it.
-    const bool fa2_hd_ok = mcfg.head_dim == 128 ||
-                           (mcfg.head_dim == 256 && runtime_config_.attention.fa2_hd256);
-    const bool fa2_serves_attention = fa2_hd_ok &&
-                                      runtime_config_.attention.fmha_fa2 != "never" &&
-                                      runtime_config_.attention.fa2_fp16qk != "never";
+    // attention (hd=128, and hd=256 since #930), since cuBLAS attention never
+    // touches the FP8 KV there. Non-FA2 configs (learned sinks/hd=64,
+    // heterogeneous per-layer shapes like gemma-4) still need it.
+    const bool fa2_hd_ok = mcfg.head_dim == 128 || mcfg.head_dim == 256;
+    const bool fa2_serves_attention = fa2_hd_ok && runtime_config_.attention.fmha_fa2 != "never";
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
         !runtime_config_.runtime.deterministic_gemm) {
         IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128/256) — skipping the legacy "

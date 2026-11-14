@@ -6,8 +6,6 @@ const char* attn_prefill_path_name(AttnPrefillPath p) {
     switch (p) {
         case AttnPrefillPath::FA2:
             return "fmha_fa2";
-        case AttnPrefillPath::FP8:
-            return "fmha_fp8";
         case AttnPrefillPath::FMHA_SM120:
             return "fmha_sm120_wmma";
         case AttnPrefillPath::BLACKWELL:

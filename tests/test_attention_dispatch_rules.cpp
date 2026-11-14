@@ -18,24 +18,24 @@ TEST(AttentionDispatchRules, FmhaDoesNotCoverMla) {
     // DeepSeek-V2 MLA: qk_nope 128 + qk_rope 64. Neither family serves it, so
     // the chunk MUST stay bounded by the S-matrix.
     EXPECT_FALSE(fmha_serves_head_dim(192));
-    EXPECT_FALSE(fa2_serves_head_dim(192, true));
-    EXPECT_FALSE(o_n_attention_serves_head_dim(192, /*fa2_hd256_enabled=*/true));
+    EXPECT_FALSE(fa2_serves_head_dim(192));
+    EXPECT_FALSE(o_n_attention_serves_head_dim(192));
 }
 
-TEST(AttentionDispatchRules, Fa2IsHd128AndOptionallyHd256) {
-    EXPECT_TRUE(fa2_serves_head_dim(128, false));
-    EXPECT_TRUE(fa2_serves_head_dim(256, true));
-    EXPECT_FALSE(fa2_serves_head_dim(256, false));  // gated by attention.fa2_hd256
-    EXPECT_FALSE(fa2_serves_head_dim(512, true));   // hd=512 is FMHA/cuBLAS only
+TEST(AttentionDispatchRules, Fa2IsHd64And128And256) {
+    EXPECT_TRUE(fa2_serves_head_dim(64));
+    EXPECT_TRUE(fa2_serves_head_dim(128));
+    EXPECT_TRUE(fa2_serves_head_dim(256));
+    EXPECT_FALSE(fa2_serves_head_dim(512));  // hd=512 is FMHA/cuBLAS only
 }
 
 TEST(AttentionDispatchRules, OnlyUnservedHeadDimsNeedTheSmatrix) {
     // The union is what decides whether a chunk is unconstrained. Anything
     // outside it is served by materialising [n, ctx_len] and must be clamped.
     for (int hd : {128, 256, 512, 64, 96})
-        EXPECT_TRUE(o_n_attention_serves_head_dim(hd, true)) << "hd=" << hd;
+        EXPECT_TRUE(o_n_attention_serves_head_dim(hd)) << "hd=" << hd;
     for (int hd : {192, 80, 160, 320})
-        EXPECT_FALSE(o_n_attention_serves_head_dim(hd, true)) << "hd=" << hd;
+        EXPECT_FALSE(o_n_attention_serves_head_dim(hd)) << "hd=" << hd;
 }
 
 // A dtype outside paged_attention_serves_head_dim's switch defeated the #1674 guard:

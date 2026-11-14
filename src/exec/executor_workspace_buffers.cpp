@@ -1708,8 +1708,7 @@ bool GraphExecutor::fa2_serves_all_prefill() const {
         }
     }
     // hd=64 and learned sinks ride FA2 too (try_fa2_fp16qk_prefill passes sinks): gpt-oss 378 MiB.
-    const bool fa2_hd_ok = fa2_serves_head_dim(hd_for_attn, dispatch_policy().attention.fa2_hd256);
-    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" && attn_shapes_uniform();
+    return fa2_serves_head_dim(hd_for_attn) && attn_shapes_uniform();
 }
 
 int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {
@@ -1738,11 +1737,11 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     // chunk collapsing with offset, at no benefit. The condition mirrors the
     // dispatch exactly: if the tier declines, the dispatch throws rather than
     // falling back to something that would need the S-matrix.
-    if (sinks && uniform && att.fmha_sm120 != "never" && fmha_serves_head_dim(hd_u))
+    if (sinks && uniform && fmha_serves_head_dim(hd_u))
         return desired;
     // Mirrors the chunked dispatch in executor_attention_prefill.cu:
     // FP16-QK FA2 serves every hd=128 chunk with no S-matrix.
-    if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")
+    if (uniform && !sinks && hd_u == 128)
         return desired;
     // Tiled FMHA dispatch serves chunks whose ctx_len crosses the threshold (or that the
     // S-matrix cannot hold) with no S-matrix, but only for head dims it covers. Without this
@@ -1760,7 +1759,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
         for (int x : cfg.head_dim_per_layer) {
             if (x <= 0)
                 continue;  // non-attention layers (GDN/Mamba2 hybrids)
-            const bool fa2 = fa2_serves_head_dim(x, att.fa2_hd256) && att.fa2_fp16qk != "never";
+            const bool fa2 = fa2_serves_head_dim(x);
             const bool fmha = fmha_serves_head_dim(x);
             if (!fa2 && !fmha) {
                 all_served = false;
@@ -1801,11 +1800,8 @@ bool GraphExecutor::chunk_capture_supported() const {
     }
     // FP16-QK FA2 is the only device-length chunked attention kernel. hd=256 rides the #930
     // port (d_kv_len is a runtime kernel arg); GDN/Mamba2 recurrent kernels stop state
-    // updates at the device chunk length, so hd=256 hybrids are capture-eligible only when
-    // fa2_hd256 is on.
-    if (hd_u != 128 && !(hd_u == 256 && dispatch_policy().attention.fa2_hd256))
-        return false;
-    if (dispatch_policy().attention.fa2_fp16qk == "never")
+    // updates at the device chunk length, so hd=256 hybrids are capture-eligible.
+    if (hd_u != 128 && hd_u != 256)
         return false;
     // MoE: only the grouped NVFP4 device-args path records into a graph without
     // host-side routing reads; every other MoE prefill path does a D2H+sync per layer to size

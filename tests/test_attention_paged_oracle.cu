@@ -820,7 +820,7 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
 }
 
 }  // namespace
-// Multitok FP8 decode (attention.paged_fp8_multitok=4) vs the FP8 oracle's fp64 reference;
+// Multitok FP8 decode (process_diag_paged_fp8_multitok=4) vs the FP8 oracle's fp64 reference;
 // the oracle's batch-1 shapes take split-K (32 CTAs) so single-split only runs with fallback
 // forced. Covers the non-block-aligned 333 (partial tail of 1 token).
 TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
@@ -1008,7 +1008,7 @@ TEST(PagedFp8Multitok, GroupedSplitRowsMatchReferenceAndIgnoreNeighbours) {
     cudaStreamDestroy(stream);
 }
 
-// Four-token NVFP4 kernels (attention.paged_nvfp4_multitok=4), plain and split-K, vs fp64
+// Four-token NVFP4 kernels (process_diag_paged_nvfp4_multitok=4), plain and split-K, vs fp64
 // ref across kv_len {16,64,333,1024} x {split-K registered, fallback forced}; both routes
 // must stay inside the NVFP4 envelope.
 TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
@@ -1089,7 +1089,7 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     cudaStreamDestroy(stream);
 }
 
-// MMA split-K decode (attention.paged_nvfp4_mma) vs fp64 over GQA ratios 8/6/4 at HD 256/256/128,
+// MMA split-K decode (process_diag_paged_nvfp4_mma) vs fp64 over GQA ratios 8/6/4 at HD 256/256/128,
 // MHA and kv_len 64 (declined: equal to the multitok output bit for bit), a sliding window, evicted middle
 // blocks with sinks, and softcap (MMA vs multitok only: the reference has no softcap). Served
 // cases must differ from the multitok output: proof the MMA kernel ran.
@@ -1190,7 +1190,7 @@ TEST(PagedNvfp4Mma, MatchesReferenceAndMultitok) {
     cudaStreamDestroy(stream);
 }
 
-// F16 multitok kernel (attention.paged_f16_multitok) vs fp64 ref, both routes (split-K on
+// F16 multitok kernel (process_diag_paged_f16_multitok) vs fp64 ref, both routes (split-K on
 // batch-1 shapes, forced single-split) and every heads-per-CTA instance the ratio allows.
 TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     cudaStream_t stream;

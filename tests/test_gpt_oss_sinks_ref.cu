@@ -204,7 +204,7 @@ std::vector<double> run_kernel_fmha(const std::vector<half>& Qh, const std::vect
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     bool ok = fa2 ? fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, /*softcap=*/0.0f,
-                                           /*stream=*/nullptr, /*q_offset=*/kv_len - q_len, /*fp16_qk=*/true,
+                                           /*stream=*/nullptr, /*q_offset=*/kv_len - q_len,
                                            /*d_kv_len=*/nullptr, sinks_ptr)
                   : fmha_sm120_prefill(Q, K, V, O, scale, causal, /*sliding_window=*/sliding_window,
                                        /*softcap=*/0.0f, /*stream=*/nullptr, /*q_offset=*/kv_len - q_len,
@@ -377,7 +377,7 @@ TEST(GptOssSinkRef, Fa2Hd64SinkMatchesReference) {
     }
 }
 
-// attention.fa2_dense_2cta at hd=64: the 2-CTA wrapper runs the same body, so output is
+// process_diag_fa2_dense_2cta at hd=64: the 2-CTA wrapper runs the same body, so output is
 // byte-identical to the 1-CTA instance (777 rows x 64 heads = 448 CTAs, Bq=128 band).
 TEST(GptOssSinkRef, Fa2Hd64TwoCtaByteIdentical) {
     const SinkCfg cfgs[] = {
@@ -409,7 +409,7 @@ TEST(GptOssSinkRef, Fa2Hd64TwoCtaByteIdentical) {
 
 // Paged F16 decode at the gpt-oss geometry (64/8 heads, hd=64) with learned sinks: the multitok
 // kernel (split-K and single-split) against the fp64 reference, and against the per-head kernels
-// it replaced (attention.paged_f16_multitok=1).
+// it replaced (process_diag_paged_f16_multitok=1).
 TEST(GptOssSinkRef, PagedDecodeHd64SinkMatchesReference) {
     constexpr int kBs = 16, n_heads = 64, n_kv = 8, hd = 64;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));

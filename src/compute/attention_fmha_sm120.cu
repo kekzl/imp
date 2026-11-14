@@ -1,4 +1,4 @@
-// FA2 prefill on WMMA HMMA fragments (mma.sync.m16n8k16.f16 QK^T/PV; FP8 variant mma.m16n8k32.e4m3).
+// FA2 prefill on WMMA HMMA fragments (mma.sync.m16n8k16.f16 QK^T/PV).
 // NOT wgmma/tcgen05/TMEM (sm_90a, sm_100+ only, unavailable on sm_120a). 256 threads (8 warps).
 // Bq/Bkv by head_dim (99KB smem budget): HD64 Bq128/Bkv64 (~89KB); HD96 Bq64/Bkv64 (~65KB);
 // HD128 Bq64/Bkv64 (~81KB); HD256 Bq32/Bkv64 (~88KB).
@@ -7,7 +7,6 @@
 
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
-#include "compute/fmha_fp8_tile_select.h"
 #include "compute/fmha_sm120_tile_select.h"
 #include "core/cuda_static_reset.h"
 #include "core/device_info.h"
@@ -545,510 +544,8 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
     return false;
 }
 
-// FP8 QK^T (m16n8k32 e4m3), PV in FP16 WMMA. mma.sync.aligned.kind::f8f6f4.m16n8k32.e4m3.e4m3.f32.
-// A[4xu32]=16x32 FP8, B[2xu32]=8x32 FP8, D[4xfloat]=16x8. For a 16x16 tile: 2 MMA calls
-// (n=8 each), k-loop over head_dim/32 - vs FP16 WMMA's 1 MMA/tile, k-loop over head_dim/16
-// (2x k-throughput, same iteration count).
-
-// FP8 FMHA requires sm_120a for .kind::f8f6f4 MMA (guarded by __CUDA_ARCH__ >= 1200).
-// !defined(__CUDA_ARCH__) lets host-side launcher code compile unconditionally.
-
-// Device helper: convert 4 FP16 values to 4 FP8 E4M3 packed in uint32
-__device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3(const half* src) {
-    // Use the PTX cvt instruction for paired FP16→FP8 conversion
-    uint32_t result;
-    uint16_t lo, hi;
-    // Convert pairs: [src[0], src[1]] → 2 FP8 bytes, [src[2], src[3]] → 2 FP8 bytes
-    const uint32_t* src32 = reinterpret_cast<const uint32_t*>(src);
-    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(lo) : "r"(src32[0]));
-    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(hi) : "r"(src32[1]));
-    result = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
-    return result;
-}
-
-// Scaled variant (#680 fp8-QK campaign): multiply by 1/s before the convert so
-// the operand uses the full e4m3 dynamic range. The raw (unscaled) conversion
-// is the #511 quality cliff — ~10% relative score error on real activations.
-__device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3_scaled(const half* src, __half2 inv_s) {
-    uint32_t result;
-    uint16_t lo, hi;
-    const __half2* s2 = reinterpret_cast<const __half2*>(src);
-    __half2 a = __hmul2(s2[0], inv_s);
-    __half2 b = __hmul2(s2[1], inv_s);
-    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(lo)
-                 : "r"(*reinterpret_cast<uint32_t*>(&a)));
-    asm volatile("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(hi)
-                 : "r"(*reinterpret_cast<uint32_t*>(&b)));
-    result = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
-    return result;
-}
-
-// Grid-stride |x| max over a contiguous fp16 buffer (Q or gathered K of one
-// chunk — small next to the attention itself). Caller zeroes `amax` first.
-__global__ void fa2_amax_fp16_kernel(const half* __restrict__ x, int64_t n, float* __restrict__ amax) {
-    float m = 0.f;
-    for (int64_t i = (blockIdx.x * (int64_t)blockDim.x) + threadIdx.x; i < n;
-         i += (int64_t)gridDim.x * blockDim.x)
-        m = fmaxf(m, fabsf(__half2float(x[i])));
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
-    if ((threadIdx.x & 31) == 0)
-        atomicMax(reinterpret_cast<unsigned int*>(amax), __float_as_uint(m));
-}
-
-template <int Bq, int HD>
-__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
-    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
-    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset) {
-    constexpr int Bkv = SM120_Bkv;
-    constexpr int head_dim = HD;
-    constexpr int TPR = SM120_BLOCK_THREADS / Bq;
-    static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
-
-    const int tile_q = blockIdx.x;
-    const int batch_head = blockIdx.y;
-    const int batch_idx = batch_head / n_heads;
-    const int head_idx = batch_head % n_heads;
-    const int kv_head = head_idx / (n_heads / n_kv_heads);
-
-    const int tid = threadIdx.x + (threadIdx.y * blockDim.x);
-    const int warp_id = tid / SM120_WARP_SIZE;
-    const int lane_id = tid % SM120_WARP_SIZE;
-    const int q_start = tile_q * Bq;
-
-    const int sm_row = tid / TPR;
-    const int sm_lane = tid % TPR;
-
-    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
-    const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
-
-    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
-                        ((int64_t)head_idx * head_dim);
-    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
-    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
-    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
-                  ((int64_t)head_idx * head_dim);
-
-    // Shared memory layout:
-    //   Q_fp8:  uint8[Bq x HD]      — Q converted to FP8 E4M3
-    //   KV_fp8: uint8[Bkv x HD]     — K converted to FP8 (reused for V as FP16)
-    //   KV_fp16: half[Bkv x HD]     — V loaded as FP16 (overlaps KV_fp8 for V phase)
-    //   S_tile: float[Bq x Bkv]     — score tile
-    //   O_acc:  float[Bq x HD]      — output accumulator
-    //   row_m/l: float[Bq] × 2      — softmax state
-    extern __shared__ char smem[];
-
-    uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);
-    uint8_t* KV_fp8 = Q_fp8 + static_cast<ptrdiff_t>(Bq * head_dim);  // K as FP8 (first half of KV region)
-    half* KV_fp16 = reinterpret_cast<half*>(KV_fp8);  // V as FP16 (reuses full KV region)
-    // S_tile must sit after the FULL V-as-half region, not just the FP8 K region: V writes
-    // Bkv*head_dim halves (2x the FP8 K bytes); advancing only Bkv*head_dim bytes would place
-    // S_tile inside V's area, letting V rows overwrite P and poison the PV MMA with garbage/NaN.
-    float* S_tile = reinterpret_cast<float*>(KV_fp8 + (static_cast<size_t>(Bkv * head_dim) * sizeof(half)));
-    float* O_acc = S_tile + static_cast<ptrdiff_t>(Bq * Bkv);
-    float* row_m = O_acc + static_cast<ptrdiff_t>(Bq * head_dim);
-    float* row_l = row_m + Bq;
-
-    // Load Q tile and convert to FP8 E4M3 (vectorized: 4 halves → 4 FP8 bytes per cvt pair).
-    // HW cvt.rn.satfinite.e4m3x2.f16x2 already clamps to ±448 — no manual saturate.
-    {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
-            int i = vi * 4;
-            int r = i / head_dim;
-            int d = i % head_dim;
-            // Out-of-range rows zero-fill as u32 (4 bytes)
-            if (q_start + r >= seq_q) {
-                reinterpret_cast<uint32_t*>(Q_fp8)[vi] = 0;
-                continue;
-            }
-            // 4 consecutive halves are always within head_dim (HD % 4 == 0 for Bq multiples).
-            const half* src = &Q_ptr[((int64_t)r * q_row_stride) + d];
-            reinterpret_cast<uint32_t*>(Q_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
-        }
-        // Scalar tail if Bq*head_dim isn't a multiple of 4 (shouldn't happen on
-        // supported HDs: 64,96,128,256 × Bq divisible configs all hit the vec4 fast path).
-    }
-
-    // Zero O_acc (vectorized float4 = 4 FP32 zeros/iter) + init softmax
-    {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
-            reinterpret_cast<float4*>(O_acc)[vi] = zero;
-        }
-    }
-    if (tid < Bq) {
-        row_m[tid] = -FLT_MAX;
-        row_l[tid] = 0.0f;
-    }
-    __syncthreads();
-
-    // KV tile bounds
-    int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
-                           num_kv_tiles, q_offset);
-
-    // FP8 MMA tiling: m16n8k32 → output is 16×8, need 2 calls for 16×16 score tile
-    constexpr int S_M = 16;
-    constexpr int S_N = 8;   // MMA output width
-    constexpr int S_K = 32;  // FP8 k-dim
-    const int hd_chunks_fp8 = head_dim / S_K;
-    const int s_row_tiles = Bq / S_M;
-    const int s_col_tiles_half = Bkv / S_N;  // each m16n8 tile
-    const int s_total_tiles = s_row_tiles * s_col_tiles_half;
-
-    // FP16 WMMA tiling for PV (unchanged)
-    const int o_row_tiles = Bq / SM120_WMMA_M;
-    const int o_col_tiles = head_dim / SM120_WMMA_N;
-    const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks = Bkv / SM120_WMMA_K;
-
-    // Main KV tile loop
-    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
-        const int kv_start = j * Bkv;
-
-        // Load K tile and convert to FP8 (vectorized: 4 halves → 4 FP8 bytes).
-        {
-            const int total_vec4 = (Bkv * head_dim) / 4;
-            for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
-                int i = vi * 4;
-                int r = i / head_dim;
-                int d = i % head_dim;
-                if (kv_start + r >= seq_kv) {
-                    reinterpret_cast<uint32_t*>(KV_fp8)[vi] = 0;
-                    continue;
-                }
-                const half* src = &K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d];
-                reinterpret_cast<uint32_t*>(KV_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
-            }
-        }
-        __syncthreads();
-
-        // Phase 1: S = Q_fp8 @ K_fp8^T using FP8 m16n8k32 MMA
-        for (int tile_idx = warp_id; tile_idx < s_total_tiles; tile_idx += SM120_NUM_WARPS) {
-            int ri = tile_idx / s_col_tiles_half;
-            int ci = tile_idx % s_col_tiles_half;
-
-            float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
-
-            for (int k = 0; k < hd_chunks_fp8; k++) {
-                // Load A fragment: Q_fp8[ri*16+lane_row, k*32+lane_col]. 4xuint32 = 16 FP8 values/thread; row
-                // =
-                // lane_id/4 within the 16-row tile, 4 consecutive FP8 values at col (lane_id%4)*4 + k*32.
-                uint32_t a0, a1, a2, a3;
-                {
-                    const uint8_t* q_base = Q_fp8 + (static_cast<ptrdiff_t>(ri) * S_M * head_dim) +
-                                            static_cast<ptrdiff_t>(k * S_K);
-                    int row_in_tile = lane_id / 4;
-                    int col_base = (lane_id % 4) * 4;
-                    // Each register holds 4 FP8 values from the same row
-                    const uint32_t* q_row0 = reinterpret_cast<const uint32_t*>(
-                        q_base + static_cast<ptrdiff_t>(row_in_tile * head_dim) + col_base);
-                    const uint32_t* q_row8 = reinterpret_cast<const uint32_t*>(
-                        q_base + static_cast<ptrdiff_t>((row_in_tile + 8) * head_dim) + col_base);
-                    a0 = q_row0[0];
-                    a1 = q_row0[4];  // +16 bytes offset
-                    a2 = q_row8[0];
-                    a3 = q_row8[4];
-                }
-
-                // Load B fragment: K_fp8[ci*8+lane_col, k*32+lane_row]. 2xuint32 = 8 FP8 values/thread. K is
-                // row-major but MMA needs col-major B, so B[col,k] = K_fp8[ci*8+col][k*32+...] (K^T).
-                uint32_t b0, b1;
-                {
-                    const uint8_t* k_base = KV_fp8 + (static_cast<ptrdiff_t>(ci) * S_N * head_dim) +
-                                            static_cast<ptrdiff_t>(k * S_K);
-                    int col_in_tile = lane_id / 4;
-                    int k_base_offset = (lane_id % 4) * 4;
-                    const uint32_t* k_ptr0 = reinterpret_cast<const uint32_t*>(
-                        k_base + static_cast<ptrdiff_t>(col_in_tile * head_dim) + k_base_offset);
-                    b0 = k_ptr0[0];
-                    b1 = k_ptr0[4];  // +16 bytes
-                }
-
-                // FP8 MMA: d += A × B^T (SM120+ only)
-#if __CUDA_ARCH__ >= 1200
-                asm volatile(
-                    "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-                    "{%0, %1, %2, %3},"
-                    "{%4, %5, %6, %7},"
-                    "{%8, %9},"
-                    "{%10, %11, %12, %13};\n"
-                    : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2),
-                      "f"(d3));
-#endif
-            }
-
-            // Store 16×8 result to S_tile
-            // MMA output mapping: thread lane_id writes to specific (row, col) positions
-            // m16n8k32 output: each thread owns a 2×1 chunk of the 16×8 output
-            {
-                // Canonical m16n8 output mapping:
-                //   Thread t: row = (t/4)%8 + (d_idx >= 2 ? 8 : 0), col = (t%4)*2 + d_idx%2
-                int base_row = ri * S_M;
-                int base_col = ci * S_N;
-                int r0 = (lane_id / 4) % 8;
-                int c0 = (lane_id % 4) * 2;
-                S_tile[((base_row + r0) * Bkv) + base_col + c0] = d0;
-                S_tile[((base_row + r0) * Bkv) + base_col + c0 + 1] = d1;
-                S_tile[((base_row + r0 + 8) * Bkv) + base_col + c0] = d2;
-                S_tile[((base_row + r0 + 8) * Bkv) + base_col + c0 + 1] = d3;
-            }
-        }
-        __syncthreads();
-
-        // Apply scale, softcap, masks (same as FP16 path)
-        apply_score_masks(S_tile, Bq, Bkv, SM120_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
-                          softcap, causal, sliding_window, q_offset);
-        __syncthreads();
-
-        // Phase 2+3: Parallel online softmax + convert to FP16 P (same as FP16 kernel)
-        {
-            half* SP_half = reinterpret_cast<half*>(S_tile);
-            const int r = sm_row;
-            const bool row_valid = (r < Bq) && (q_start + r < seq_q);
-
-            float partial_max = -FLT_MAX;
-            if (row_valid) {
-                for (int c = sm_lane; c < Bkv; c += TPR)
-                    partial_max = fmaxf(partial_max, S_tile[(r * Bkv) + c]);
-            }
-#pragma unroll
-            for (int offset = TPR / 2; offset >= 1; offset >>= 1)
-                partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
-            float m_ij = partial_max;
-
-            float m_old = row_valid ? row_m[r] : -FLT_MAX;
-            float m_new = fmaxf(m_old, m_ij);
-            float alpha = __expf(m_old - m_new);
-
-            // Mask guard: see Step 3 of the other fmha_sm120_kernel template above.
-            // Fully-masked tile (Gemma-4 SWA query > sliding_window) would
-            // otherwise poison partial_sum via __expf(-FLT_MAX - (-FLT_MAX)) = 1.
-            float partial_sum = 0.0f;
-            if (row_valid) {
-                for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float s_val = S_tile[(r * Bkv) + c];
-                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
-                    partial_sum += p;
-                    S_tile[(r * Bkv) + c] = p;
-                }
-            }
-#pragma unroll
-            for (int offset = TPR / 2; offset >= 1; offset >>= 1)
-                partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
-
-            float l_old = row_valid ? row_l[r] : 0.0f;
-            float l_new = (alpha * l_old) + partial_sum;
-            if (sm_lane == 0 && row_valid) {
-                row_m[r] = m_new;
-                row_l[r] = l_new;
-            }
-
-            float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
-            if (row_valid) {
-                for (int d = sm_lane; d < head_dim; d += TPR)
-                    O_acc[(r * head_dim) + d] *= rescale;
-            }
-
-            // In-place float→half compaction: stage in registers + barrier
-            // (SP_half row r aliases the bytes of float row r/2 — issue #528,
-            // see the f16 kernel above).
-            constexpr int CPT = Bkv / TPR;
-            float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
-            half hbuf[CPT];
-#pragma unroll
-            for (int i = 0; i < CPT; i++) {
-                int c = sm_lane + (i * TPR);
-                hbuf[i] = __float2half(row_valid ? S_tile[(r * Bkv) + c] * spv : 0.0f);
-            }
-            __syncthreads();  // all float reads of S_tile complete before any half write
-#pragma unroll
-            for (int i = 0; i < CPT; i++)
-                SP_half[(r * Bkv) + sm_lane + (i * TPR)] = hbuf[i];
-        }
-        __syncthreads();
-
-        // Load V tile as FP16 (vectorized float4 = 8 halves per iter)
-        {
-            const int total_vec8 = (Bkv * head_dim) / 8;
-            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
-                int i = vi * 8;
-                int r = i / head_dim;
-                int d = i % head_dim;
-                float4* dst = reinterpret_cast<float4*>(&KV_fp16[i]);
-                if (kv_start + r < seq_kv) {
-                    const float4* src = reinterpret_cast<const float4*>(
-                        &V_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
-                    *dst = *src;
-                } else {
-                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                }
-            }
-        }
-        __syncthreads();
-
-        // Phase 3: O_acc += P @ V using FP16 WMMA (same as FP16 kernel)
-        {
-            half* P_half = reinterpret_cast<half*>(S_tile);
-            for (int tile_idx = warp_id; tile_idx < o_total_tiles; tile_idx += SM120_NUM_WARPS) {
-                int ri = tile_idx / o_col_tiles;
-                int di = tile_idx % o_col_tiles;
-
-                wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag,
-                                       O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
-                                           static_cast<ptrdiff_t>(di * SM120_WMMA_N),
-                                       head_dim, wmma::mem_row_major);
-
-                for (int k = 0; k < pv_chunks; k++) {
-                    wmma::fragment<wmma::matrix_a, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
-                                   wmma::row_major>
-                        p_frag;
-                    wmma::load_matrix_sync(p_frag,
-                                           P_half + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv) +
-                                               static_cast<ptrdiff_t>(k * SM120_WMMA_K),
-                                           Bkv);
-
-                    wmma::fragment<wmma::matrix_b, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, half,
-                                   wmma::row_major>
-                        v_frag;
-                    wmma::load_matrix_sync(v_frag,
-                                           KV_fp16 + (static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim) +
-                                               static_cast<ptrdiff_t>(di * SM120_WMMA_N),
-                                           head_dim);
-
-                    wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
-                }
-
-                wmma::store_matrix_sync(O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
-                                            static_cast<ptrdiff_t>(di * SM120_WMMA_N),
-                                        o_frag, head_dim, wmma::mem_row_major);
-            }
-        }
-        __syncthreads();
-    }
-
-    // Write output (vectorized: 4 FP32 → 4 FP16 per iter)
-    {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
-            int i = vi * 4;
-            int r = i / head_dim;
-            if (q_start + r >= seq_q)
-                continue;
-            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
-            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
-            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
-            uint2 packed;
-            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
-            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(&O_ptr[((int64_t)r * q_row_stride) + (i % head_dim)]) = packed;
-        }
-    }
-}
-
-struct Fp8FmhaLaunch {
-    const Tensor& Q;
-    const Tensor& K;
-    const Tensor& V;
-    Tensor& O;
-    int batch_size, seq_q, seq_kv, n_heads, n_kv_heads;
-    float scale;
-    bool causal;
-    int sliding_window;
-    float softcap;
-    int q_offset;
-    size_t smem;
-    dim3 grid, block;
-    cudaStream_t stream;
-};
-
-template <int BQ, int HD>
-static bool launch_fp8_fmha(const Fp8FmhaLaunch& a) {
-    cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,
-                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                static_cast<int>(a.smem));
-    if (attr_err != cudaSuccess)
-        return false;
-    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,
-                                            cudaFuncAttributePreferredSharedMemoryCarveout,
-                                            cudaSharedmemCarveoutMaxShared));
-    fmha_sm120_fp8_kernel<BQ, HD><<<a.grid, a.block, a.smem, a.stream>>>(
-        reinterpret_cast<const half*>(a.Q.data), reinterpret_cast<const half*>(a.K.data),
-        reinterpret_cast<const half*>(a.V.data), reinterpret_cast<half*>(a.O.data), a.batch_size, a.seq_q,
-        a.seq_kv, a.n_heads, a.n_kv_heads, a.scale, a.causal, a.sliding_window, a.softcap, a.q_offset);
-    IMP_CUDA_CHECK_LAUNCH();
-    return true;
-}
-
-// One instance per kFp8FmhaTiles entry: the table is the instantiation set.
-template <size_t... I>
-static bool launch_fp8_fmha_tile(int bq, int head_dim, const Fp8FmhaLaunch& a, std::index_sequence<I...>) {
-    bool ok = false;
-    (void)((kFp8FmhaTiles[I].bq == bq && kFp8FmhaTiles[I].head_dim == head_dim &&
-            (ok = launch_fp8_fmha<kFp8FmhaTiles[I].bq, kFp8FmhaTiles[I].head_dim>(a), true)) ||
-           ...);
-    return ok;
-}
-
-bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                            bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                            int q_offset) {
-    if (Q.qtype != QType::F16)
-        return false;
-
-    const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q = static_cast<int>(Q.shape[1]);
-    const int n_heads = static_cast<int>(Q.shape[2]);
-    const int head_dim = static_cast<int>(Q.shape[3]);
-    const int seq_kv = static_cast<int>(K.shape[1]);
-    const int n_kv_heads = static_cast<int>(K.shape[2]);
-
-    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0)
-        return false;
-    if (seq_q == 0 || seq_kv == 0)
-        return false;
-    if (head_dim % 32 != 0)
-        return false;  // FP8 MMA needs k%32==0
-
-    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
-
-    // Largest Bq with an instance for head_dim that fits smem (#2195: HD64 fit Bq=128, had no instance).
-    const int Bq = fp8_fmha_select_bq(head_dim, SM120_Bkv, (size_t)max_smem);
-    if (Bq == 0)
-        return false;
-    const size_t smem = fp8_fmha_smem_bytes(Bq, SM120_Bkv, head_dim);
-
-    const int num_q_tiles = (seq_q + Bq - 1) / Bq;
-    const Fp8FmhaLaunch launch{.Q = Q,
-                               .K = K,
-                               .V = V,
-                               .O = O,
-                               .batch_size = batch_size,
-                               .seq_q = seq_q,
-                               .seq_kv = seq_kv,
-                               .n_heads = n_heads,
-                               .n_kv_heads = n_kv_heads,
-                               .scale = scale,
-                               .causal = causal,
-                               .sliding_window = sliding_window,
-                               .softcap = softcap,
-                               .q_offset = q_offset,
-                               .smem = smem,
-                               .grid = dim3(num_q_tiles, batch_size * n_heads),
-                               .block = dim3(SM120_WARP_SIZE, SM120_NUM_WARPS),
-                               .stream = stream};
-    return launch_fp8_fmha_tile(Bq, head_dim, launch, std::make_index_sequence<std::size(kFp8FmhaTiles)>{});
-}
-
-// FA2 register-resident kernel ("echtes FA"): keeps S/P/O entirely in registers (unlike the
-// smem-materializing FP8 kernel above, which round-trips S/P/O every KV tile behind barriers).
-// Only K(fp8)/V(f16) stage in smem. 8 warps x 16 rows = Bq=128; each warp runs an independent
+// FA2 register-resident kernel ("echtes FA"): keeps S/P/O entirely in registers. Only K/V (f16)
+// stage in smem, Q stays in registers. 8 warps x 16 rows = Bq=128; each warp runs an independent
 // online softmax (no cross-warp reduction). KV tiles Bkv=64.
 // Transpose-free PV: the QK m16n8 accumulator layout (thread t: rows{t/4,t/4+8} x
 // cols{(t%4)*2,+1}) is byte-identical to the m16n8k16 PV A-operand layout, so two adjacent
@@ -1104,12 +601,9 @@ __device__ __forceinline__ float quad_sum(float v) {
 // cp.async primitives (cp_async_cg_16 / cp_async_commit / cp_async_wait_group)
 // come from compute/attention_paged_common.cuh (included above).
 
-// Prefetch Bkv x HD KV tile (raw f16) via cp.async into double-buffer slots; K stays f16 in smem,
-// converted to fp8 inline at QK-MMA fetch (spare ALU, kernel is barrier-bound). Bank-conflict
+// Prefetch Bkv x HD KV tile (raw f16) via cp.async into double-buffer slots. Bank-conflict
 // padding: head_dim=128 row stride is exactly 32 banks, aliasing every row onto the same banks.
-//   Q_fp8: +16B -> stride 144B (36 words), 0..31 bank permutation, conflict-free.
 //   K/V (halfs): +8B -> stride 136B (preserves 16B cp.async alignment), cuts wide reads to ~2-way.
-constexpr int FA2_Q_PAD = 16;  // extra bytes per Q_fp8 row
 constexpr int FA2_KV_PAD = 8;  // extra halfs per K/V row (16 B, cp.async-aligned)
 
 // Out-of-range rows: K left stale (masked out in the score step), V zero-filled
@@ -1173,24 +667,20 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
     }
 }
 
-// FP16QK=false: QK via mma.m16n8k32.e4m3 (Q/K as e4m3, 2x throughput); validated only at long
-// context, e4m3 noise compounds at short seq (#511/#512). FP16QK=true: QK via mma.m16n8k16.f16,
-// full accuracy - the short-sequence path replacing materialized cuBLAS+softmax below
-// fmha_prefill_threshold.
+// QK via mma.m16n8k16.f16, full accuracy: the short-sequence path replacing materialized
+// cuBLAS+softmax below fmha_prefill_threshold (the e4m3 QK variant compounded noise, #511/#512).
 // TWOSLOT (#597): one K slot + one V slot (not a double-buffer) keeps the full Bkv=64 tile at
 // ~35KB smem, seating 2 CTAs/SM with half BKV=32's per-tile barrier overhead.
 // PVF16 (#667): f16-accumulate PV, O as packed half2 - safe since online-softmax O is a convex
 // combination of V rows (weights in [0,1]); halves PV MMA cost and O register footprint.
-// Requires FP16QK.
-// FP8SCALED (#680): amax-scaled e4m3 (x*(448/amax)) avoids saturation/mantissa cliff; score
-// scale absorbs amax_q*amax_k/448^2, d_amax from fa2_amax_fp16_kernel pre-launch.
-template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
-          bool PVF16 = false, bool FP8SCALED = false>
-__device__ __forceinline__ void fmha_sm120_fa2_body(
-    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
-    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax,
-    const int* __restrict__ d_kv_len, bool heavy_first, const half* __restrict__ sinks) {
+template <int Bq, int HD, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false, bool PVF16 = false>
+__device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, const half* __restrict__ K,
+                                                    const half* __restrict__ V, half* __restrict__ O,
+                                                    int batch_size, int seq_q, int seq_kv, int n_heads,
+                                                    int n_kv_heads, float scale, bool causal,
+                                                    int sliding_window, float softcap, int q_offset,
+                                                    const int* __restrict__ d_kv_len, bool heavy_first,
+                                                    const half* __restrict__ sinks) {
     constexpr int Bkv = BKV;
     static_assert(BKV % 16 == 0 && (BKV / 8) % 2 == 0, "QK n-pair loop and PV K-groups need BKV % 16 == 0");
     constexpr int head_dim = HD;
@@ -1202,7 +692,6 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     constexpr int N_S = Bkv / 8;    // QK N-tiles (8-col groups) per row tile = 8
     constexpr int N_O = HD / 8;     // PV N-tiles (8 HD-col groups)
     constexpr int N_KG = Bkv / 16;  // PV K-groups (16 Bkv-col groups) = 4
-    constexpr int KC = HD / 32;     // QK k-chunks (32 each)
 
     // Causal: q-tile t attends (t+1)*Bq/Bkv KV tiles, so CTAs of one head differ up to 16x in work.
     // blockIdx.x is the fastest scheduling index; handing out heavy tiles first (fa2_heavy_first)
@@ -1238,62 +727,20 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
                   ((int64_t)head_idx * head_dim);
 
-    // Padded smem row strides (see FA2_Q_PAD / FA2_KV_PAD — bank-conflict relief).
-    // fp16 mode keeps Q in registers (no smem tile at all); fp8 mode stages
-    // e4m3 bytes with the byte-stride layout.
-    constexpr int QSTRIDE = head_dim + FA2_Q_PAD;    // bytes (fp8 mode only)
+    // Padded smem row stride (see FA2_KV_PAD, bank-conflict relief). Q stays in registers: no smem
+    // tile, which frees enough smem for the 8-warp Bq=128 config.
     constexpr int KVSTRIDE = head_dim + FA2_KV_PAD;  // K/V row stride in HALFS
-    constexpr size_t Q_SMEM_BYTES = FP16QK ? 0 : (size_t)Bq * QSTRIDE * sizeof(uint8_t);
 
     extern __shared__ char smem[];
-    uint8_t* Q_fp8 = reinterpret_cast<uint8_t*>(smem);           // fp8 mode view
     // Double-buffer mode: K_buf/V_buf are [2][Bkv*KVSTRIDE]. TWOSLOT mode:
     // one slot each — half the footprint, rotation handled by load phases.
     constexpr int KV_SLOTS = TWOSLOT ? 1 : 2;
-    half* K_buf = reinterpret_cast<half*>(smem + Q_SMEM_BYTES);  // [KV_SLOTS][Bkv*KVSTRIDE] f16
+    half* K_buf = reinterpret_cast<half*>(smem);                              // [KV_SLOTS][Bkv*KVSTRIDE] f16
     half* V_buf = K_buf + static_cast<ptrdiff_t>(KV_SLOTS * Bkv * KVSTRIDE);  // [KV_SLOTS][Bkv*KVSTRIDE] f16
-
-    // Loads Q once: fp8 mode converts halves->e4m3 into smem; fp16 mode skips smem entirely (each
-    // lane pulls its loop-invariant A-fragment straight from global into registers) - frees enough
-    // smem for the 8-warp Bq=128 config (latency-bound at 4 warps, 1 warp/scheduler).
-    float fp8_sq = 1.0f, fp8_sk = 1.0f;
-    __half2 fp8_inv_sq2 = __float2half2_rn(1.0f);
-    __half2 fp8_inv_sk2 = __float2half2_rn(1.0f);
-    if constexpr (FP8SCALED) {
-        const float aq = d_amax ? d_amax[0] : 0.0f;
-        const float ak = d_amax ? d_amax[1] : 0.0f;
-        if (aq > 0.0f) {
-            fp8_sq = aq / 448.0f;
-            fp8_inv_sq2 = __float2half2_rn(448.0f / aq);
-        }
-        if (ak > 0.0f) {
-            fp8_sk = ak / 448.0f;
-            fp8_inv_sk2 = __float2half2_rn(448.0f / ak);
-        }
-    }
-    (void)fp8_sq;
-    (void)fp8_sk;
-    if constexpr (!FP16QK) {
-        const int total_vec4 = (Bq * head_dim) / 4;
-        for (int vi = tid; vi < total_vec4; vi += NTHREADS) {
-            int i = vi * 4;
-            int r = i / head_dim;
-            int d = i % head_dim;  // multiple of 4 → uint32-aligned into the padded row
-            uint32_t* dst = reinterpret_cast<uint32_t*>(Q_fp8 + static_cast<ptrdiff_t>(r * QSTRIDE) + d);
-            if (q_start + r >= seq_q) {
-                *dst = 0;
-            } else if constexpr (FP8SCALED) {
-                *dst = cvt_4xfp16_to_4xe4m3_scaled(&Q_ptr[((int64_t)r * q_row_stride) + d], fp8_inv_sq2);
-            } else {
-                *dst = cvt_4xfp16_to_4xe4m3(&Q_ptr[((int64_t)r * q_row_stride) + d]);
-            }
-        }
-    }
 
     // ---- per-warp register state ----
     // PVF16: O held as packed half2 — reg [0] = (row rl, cols cl,cl+1),
     // reg [1] = (row rl+8, same cols), matching the m16n8k16 f16-D layout.
-    static_assert(!PVF16 || FP16QK, "PVF16 requires the fp16-qk path");
     float O_frag[PVF16 ? 1 : N_O][4];
     uint32_t O_h2[PVF16 ? N_O : 1][2];
     if constexpr (PVF16) {
@@ -1322,13 +769,13 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
                                             kv_row_stride, tid, NTHREADS);
     }
     cp_async_commit();
-    __syncthreads();  // Q_fp8 (produced above) visible before QK reads it
+    __syncthreads();
 
-    // fp16 mode: Q A-fragments are loop-invariant, loaded once straight from global into registers
+    // Q A-fragments are loop-invariant, loaded once straight from global into registers
     // (rows past seq_q zero-filled). Layout matches the QK MMA's a0..a3: a0=(rl,cl) a1=(rl+8,cl)
     // a2=(rl,cl+8) a3=(rl+8,cl+8).
-    uint32_t a_frag[FP16QK ? (HD / 16) : 1][4];
-    if constexpr (FP16QK) {
+    uint32_t a_frag[HD / 16][4];
+    {
         const int r0 = (warp_id * 16) + rl;
         const int r1 = r0 + 8;
         const bool v0 = (q_start + r0) < seq_q;
@@ -1347,9 +794,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     // Scores stay raw dot products; softmax applies the scale inside one FMA feeding __expf so the
     // per-element v*=scale pass is avoided. softcap works in the natural domain and writes the
     // capped score back in raw units, keeping this FMA the single scale point.
-    float s_eff = scale;  // the fp8-scaled path folds its operand amax factors in
-    if constexpr (FP8SCALED)
-        s_eff *= fp8_sq * fp8_sk;
+    const float s_eff = scale;
     const float inv_scale = 1.0f / scale;
     if (sinks != nullptr) {
         // gpt-oss learned sink: extra logit column without a V row. Seed m with it in raw-score units
@@ -1388,9 +833,9 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         const half* V_cur = V_buf + static_cast<ptrdiff_t>(slot * Bkv * KVSTRIDE);
 
         // ---- QK: S[n] = Q(warp rows) @ K[n-tile]^T ----
-        // fp8 mode: m16n8k32.e4m3 (K cvt f16→fp8 inline). fp16 mode: m16n8k16.f16.
+        // m16n8k16.f16.
         float S[N_S][4];
-        if constexpr (FP16QK) {
+        {
             // n-tiles processed in pairs: one ldmatrix.x4 fetches K B-fragments (b0,b1) of both tiles -
             // lanes 0-7/8-15 address {rows n*8+0..7,k-lo}/{same rows,k-hi}, lanes 16-31 the same for tile
             // n+1. A comes from the hoisted loop-invariant a_frag.
@@ -1490,55 +935,6 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
                     }
                 }
             }
-        } else {
-#pragma unroll
-        for (int n = 0; n < N_S; n++) {
-            float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
-            {
-#pragma unroll
-                for (int k = 0; k < KC; k++) {
-                    const uint8_t* qb = Q_fp8 + (static_cast<ptrdiff_t>(warp_id) * 16 * QSTRIDE) +
-                                        static_cast<ptrdiff_t>(k * 32);
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
-                        qb + (static_cast<ptrdiff_t>(rl) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2));
-                    uint32_t a1 = *reinterpret_cast<const uint32_t*>(
-                        qb + (static_cast<ptrdiff_t>(rl) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2) + 16);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
-                        qb + (static_cast<ptrdiff_t>(rl + 8) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2));
-                    uint32_t a3 = *reinterpret_cast<const uint32_t*>(
-                        qb + (static_cast<ptrdiff_t>(rl + 8) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2) +
-                        16);
-                    const half* kb = K_cur + (static_cast<ptrdiff_t>(n) * 8 * KVSTRIDE) +
-                                     static_cast<ptrdiff_t>(k * 32);
-                    uint32_t b0, b1;
-                    if constexpr (FP8SCALED) {
-                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
-                                                             static_cast<ptrdiff_t>(cl * 2),
-                                                         fp8_inv_sk2);
-                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
-                                                             static_cast<ptrdiff_t>(cl * 2) + 16,
-                                                         fp8_inv_sk2);
-                    } else {
-                        b0 = cvt_4xfp16_to_4xe4m3(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
-                                                  static_cast<ptrdiff_t>(cl * 2));
-                        b1 = cvt_4xfp16_to_4xe4m3(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
-                                                  static_cast<ptrdiff_t>(cl * 2) + 16);
-                    }
-#if __CUDA_ARCH__ >= 1200
-                    asm volatile(
-                        "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-                        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
-                        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2),
-                          "f"(d3));
-#endif
-                }
-            }
-            S[n][0] = d0;
-            S[n][1] = d1;
-            S[n][2] = d2;
-            S[n][3] = d3;
-        }
         }
 
         if constexpr (TWOSLOT) {
@@ -1561,7 +957,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         const bool tile_masked = (kv_start + Bkv > seq_kv) || (q_start + Bq > seq_q) ||
                                  (causal && (kv_start + Bkv - 1) > gq_lo) ||
                                  (sliding_window > 0 && (gq_hi - kv_start) >= sliding_window);
-        if (FP16QK && !tile_masked) {
+        if (!tile_masked) {
             if (softcap > 0.0f) {
 #pragma unroll
                 for (int n = 0; n < N_S; n++)
@@ -1585,11 +981,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
                     if (lq < seq_q && col < seq_kv) {
                         if (softcap > 0.0f) {
                             float v_nat = v * scale;
-                            if constexpr (FP8SCALED)
-                                v_nat *= fp8_sq * fp8_sk;
                             v = softcap * tanhf(v_nat / softcap) * inv_scale;
-                            if constexpr (FP8SCALED)
-                                v /= fp8_sq * fp8_sk;
                         }
                         if (causal && gq < col)
                             v = -FLT_MAX;
@@ -1619,7 +1011,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         const float mlA2 = -mnA * s_eff, mlB2 = -mnB * s_eff;
 
         float psA = 0.f, psB = 0.f;
-        if (FP16QK && !tile_masked) {
+        if (!tile_masked) {
 #pragma unroll
             for (int n = 0; n < N_S; n++) {
                 float p0 = __expf(fmaf(S[n][0], s_eff, mlA2));
@@ -1772,104 +1164,58 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     }
 }
 
-template <int Bq, int HD, bool FP16QK = false, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false,
-          bool PVF16 = false, bool FP8SCALED = false>
+template <int Bq, int HD, bool F16ACC = false, int BKV = 64, bool TWOSLOT = false, bool PVF16 = false>
 __global__ void fmha_sm120_fa2_kernel(const half* __restrict__ Q, const half* __restrict__ K,
                                       const half* __restrict__ V, half* __restrict__ O, int batch_size,
                                       int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale,
                                       bool causal, int sliding_window, float softcap, int q_offset,
-                                      const float* __restrict__ d_amax = nullptr,
                                       const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true,
                                       const half* __restrict__ sinks = nullptr) {
-    fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
-                                                                                seq_kv, n_heads, n_kv_heads,
-                                                                                scale, causal, sliding_window,
-                                                                                softcap, q_offset, d_amax,
-                                                                                d_kv_len, heavy_first, sinks);
+    fmha_sm120_fa2_body<Bq, HD, F16ACC, BKV, TWOSLOT, PVF16>(Q, K, V, O, batch_size, seq_q, seq_kv, n_heads,
+                                                             n_kv_heads, scale, causal, sliding_window,
+                                                             softcap, q_offset, d_kv_len, heavy_first, sinks);
 }
 
-// attention.fa2_dense_2cta: the Bq=128 TWOSLOT instance at two CTAs per SM.
-template <int Bq, int HD, bool FP16QK, bool F16ACC, int BKV, bool TWOSLOT, bool PVF16, bool FP8SCALED>
+// Dense FA2 (process_diag_fa2_dense_2cta): the Bq=128 TWOSLOT instance at two CTAs per SM.
+template <int Bq, int HD, bool F16ACC, int BKV, bool TWOSLOT, bool PVF16>
 __global__ void __launch_bounds__(Bq / 16 * 32, 2) fmha_sm120_fa2_kernel_2cta(
     const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
     int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
-    int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax = nullptr,
-    const int* __restrict__ d_kv_len = nullptr, bool heavy_first = true,
-    const half* __restrict__ sinks = nullptr) {
-    fmha_sm120_fa2_body<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>(Q, K, V, O, batch_size, seq_q,
-                                                                                seq_kv, n_heads, n_kv_heads,
-                                                                                scale, causal, sliding_window,
-                                                                                softcap, q_offset, d_amax,
-                                                                                d_kv_len, heavy_first, sinks);
+    int sliding_window, float softcap, int q_offset, const int* __restrict__ d_kv_len = nullptr,
+    bool heavy_first = true, const half* __restrict__ sinks = nullptr) {
+    fmha_sm120_fa2_body<Bq, HD, F16ACC, BKV, TWOSLOT, PVF16>(Q, K, V, O, batch_size, seq_q, seq_kv, n_heads,
+                                                             n_kv_heads, scale, causal, sliding_window,
+                                                             softcap, q_offset, d_kv_len, heavy_first, sinks);
 }
 
-static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool twoslot = false) {
+// Q stays in registers (loop-invariant A-fragments loaded once from global): no smem tile, which
+// is what lets Bq=128 (8 warps) fit.
+static size_t compute_smem_fa2(int head_dim, int Bkv, bool twoslot = false) {
     const size_t kvstride = head_dim + FA2_KV_PAD;  // halfs (bank-conflict pad)
-    // Q tile: fp8 mode stages e4m3 bytes (FA2_Q_PAD); fp16 mode keeps Q in
-    // registers (loop-invariant A-fragments loaded once from global) — no
-    // smem tile at all, which is what lets Bq=128 (8 warps) fit.
-    const size_t q_bytes = fp16_qk ? 0 : (size_t)Bq * (head_dim + FA2_Q_PAD) * sizeof(uint8_t);
-    const size_t slots = twoslot ? 1 : 2;  // TWOSLOT: one K + one V slot
-    return q_bytes + (slots * Bkv * kvstride * sizeof(half))  // K_buf f16 (padded)
-           + (slots * Bkv * kvstride * sizeof(half));         // V_buf f16 (padded)
+    const size_t slots = twoslot ? 1 : 2;           // TWOSLOT: one K + one V slot
+    return (slots * Bkv * kvstride * sizeof(half))  // K_buf f16 (padded)
+           + (slots * Bkv * kvstride * sizeof(half));  // V_buf f16 (padded)
 }
 
-// hd=64: the hd=128 fp16-qk bands, f32 accumulators (f16acc/pv_f16 flags do not apply), Bkv=64.
-// attention.fa2_dense_2cta: 2 x 36864 B dbuf smem fits one SM; the bound caps 163 -> 128 regs.
+// hd=64: the hd=128 bands, f32 accumulators (f16acc/pv_f16 flags do not apply), Bkv=64.
+// Dense 2-CTA: 2 x 36864 B dbuf smem fits one SM; the bound caps 163 -> 128 regs.
 static decltype(&fmha_sm120_fa2_kernel<128, 128>) fa2_hd64_kernel(long blocks_128, int sm_count, int& Bq,
                                                                   bool& twoslot) {
     Bq = blocks_128 >= (long)sm_count ? 128 : 64;
     twoslot = Bq == 64 && blocks_128 >= (long)(sm_count / 2);
     if (Bq == 128)
         return imp::process_diag_fa2_dense_2cta()
-                   ? fmha_sm120_fa2_kernel_2cta<128, 64, true, false, 64, false, false, false>
-                   : fmha_sm120_fa2_kernel<128, 64, true, false, 64>;
-    return twoslot ? fmha_sm120_fa2_kernel<64, 64, true, false, 64, true>
-                   : fmha_sm120_fa2_kernel<64, 64, true, false, 64>;
-}
-
-// FP8SCALED per-chunk operand amax buffer (persistent 2-float device buffer,
-// lazily created below; file-scope so the reset hook can free it).
-static float* s_d_amax = nullptr;
-
-// Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void fmha_sm120_reset_static_cuda_state() {
-    if (s_d_amax) {
-        (void)cudaFree(s_d_amax);
-        s_d_amax = nullptr;
-    }
-}
-
-// Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
-namespace {
-IMP_REGISTER_CUDA_STATIC_RESET(fmha_sm120_reset_static_cuda_state);
-}  // namespace
-
-// FP8SCALED: per-chunk operand amaxes of Q (qn elems) and the gathered K (kn) into s_d_amax, two
-// tiny grid-stride passes. false = raw FP8 conversion this call (alloc or reset failed).
-static bool fa2_operand_amax(const Tensor& Q, const Tensor& K, int64_t qn, int64_t kn, cudaStream_t stream) {
-    if (!s_d_amax && cudaMalloc(&s_d_amax, 2 * sizeof(float)) != cudaSuccess) {
-        s_d_amax = nullptr;
-        return false;
-    }
-    if (cudaMemsetAsync(s_d_amax, 0, 2 * sizeof(float), stream) != cudaSuccess) {
-        IMP_LOG_WARN("FMHA FA2: amax reset failed, raw FP8 conversion this call");
-        return false;  // a stale amax would be a wrong scale
-    }
-    fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(Q.data), qn, s_d_amax);
-    IMP_CUDA_CHECK_LAUNCH();
-    fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(K.data), kn, s_d_amax + 1);
-    IMP_CUDA_CHECK_LAUNCH();
-    return true;
+                   ? fmha_sm120_fa2_kernel_2cta<128, 64, false, 64, false, false>
+                   : fmha_sm120_fa2_kernel<128, 64, false, 64>;
+    return twoslot ? fmha_sm120_fa2_kernel<64, 64, false, 64, true>
+                   : fmha_sm120_fa2_kernel<64, 64, false, 64>;
 }
 
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
-                            bool fp16_qk, const int* d_kv_len, const half* sinks) {
+                            const int* d_kv_len, const half* sinks) {
     if (Q.qtype != QType::F16)
         return false;
-    if (d_kv_len != nullptr && !fp16_qk)
-        return false;  // device-length replay is wired for the f16-QK path only
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q = static_cast<int>(Q.shape[1]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -1881,19 +1227,17 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         return false;
     if (seq_q == 0 || seq_kv == 0)
         return false;
-    // HD=128 is the tuned mainline. HD=256 (Qwen3.6 hybrids, gemma-class) is a stage-1 port behind
-    // attention.fa2_hd256 (default on, #932): fp16-qk only, fixed Bq=64/Bkv=64/TWOSLOT (a double
-    // buffer at HD=256 needs 135KB smem > the 99KB opt-in; TWOSLOT fits at 67.6KB).
-    // HD=64 (gpt-oss): fp16-qk operands, f32 accumulators for QK and PV. gpt-oss has no QK norm:
-    // f16-accumulated raw logits moved its PPL 308.48 (cuBLAS) -> 267.28.
-    const bool hd64_ok = head_dim == 64 && fp16_qk;
-    if (head_dim != 128 && !hd64_ok && !(head_dim == 256 && fp16_qk && imp::process_diag_fa2_hd256()))
+    // HD=128 is the tuned mainline. HD=256 (Qwen3.6 hybrids, gemma-class) is a stage-1 port, default
+    // on since #932: fixed Bq=64/Bkv=64/TWOSLOT (a double buffer at HD=256 needs 135KB smem > the 99KB
+    // opt-in; TWOSLOT fits at 67.6KB). HD=64 (gpt-oss): f32 accumulators for QK and PV. gpt-oss has no
+    // QK norm: f16-accumulated raw logits moved its PPL 308.48 (cuBLAS) -> 267.28.
+    if (head_dim != 128 && head_dim != 64 && !(head_dim == 256 && imp::process_diag_fa2_hd256()))
         return false;
 
     const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
     const int sm_count = device_sm_count_or_0();                                     // 0: tile bands only
 
-    // Bq/Bkv bands (fp16qk path, #597 occupancy surgery), grid = q_tiles x batch*heads:
+    // Bq/Bkv bands (#597 occupancy surgery), grid = q_tiles x batch*heads:
     //   blocks_128 >= sm_count: Bq=128/Bkv=64, 1 CTA/SM, 8 warps latency-hiding, deepest cp.async.
     //   sm_count/2 <= blocks_128 < sm_count (underfill): Bq=64 doubles the grid, Bkv=32 halves the
     //     KV double-buffer (~70KB->~35KB) for 2 CTAs/SM; Bq=128 can't fit (2x8 warps x ~175 regs
@@ -1901,78 +1245,52 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     //   blocks_128 < sm_count/2: stays below SM count even at Bq=64; keep Bkv=64 for deeper overlap.
     const long blocks_128 = (long)((seq_q + 127) / 128) * batch_size * n_heads;
 
-    // f16-acc QK^T (#597) only applies to the fp16_qk path (the fp8 path keeps
-    // its f32 accumulate). Opt-in: +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
-    bool f16acc = fp16_qk && imp::process_diag_fa2_f16acc();
+    // f16-acc QK^T (#597): +3-4% pp2048/pp4096 NVFP4 for +0.37% PPL.
+    bool f16acc = imp::process_diag_fa2_f16acc();
     // PV f16-accumulate rides on the f16acc path (full-rate PV MMA + halved
-    // O-fragment registers); attention.fa2_pv_f16acc, default on.
+    // O-fragment registers), default on.
     bool pv_f16 = f16acc && imp::process_diag_fa2_pv_f16acc();
     int Bq, Bkv;
     bool twoslot = false;
-    bool fp8_scaled = false;
     decltype(&fmha_sm120_fa2_kernel<128, 128>) kern;
     if (head_dim == 256) {
-        // Stage-1 HD=256 port (fp16-qk only): Bq=64 (4 warps), TWOSLOT keeps the full Bkv=64 tile at
-        // 67.6KB (double-buffer needs 135KB). Registers ~2x the HD=128 profile, so pv_f16 is preferred;
+        // Stage-1 HD=256 port: Bq=64 (4 warps), TWOSLOT keeps the full Bkv=64 tile at 67.6KB
+        // (double-buffer needs 135KB). Registers ~2x the HD=128 profile, so pv_f16 is preferred;
         // f32-acc variant exists for A/B but is expected to spill.
-        // Bkv=32 (attention.fa2_hd256_bkv, opt-in): halves the TWOSLOT tile to 33.8KB, seating 2 CTAs/SM
-        // (vs 1 at Bkv=64); trades PPL for throughput, stays opt-in.
-        Bq = 64, twoslot = true;
-        Bkv = imp::process_diag_fa2_hd256_bkv() == 32 ? 32 : 64;
-        if (Bkv == 32) {
-            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, true>
-                   : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 32, true>
-                            : fmha_sm120_fa2_kernel<64, 256, true, false, 32, true>;
-        } else {
-            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, true>
-                   : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, true, 64, true>
-                            : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
-        }
+        Bq = 64, Bkv = 64, twoslot = true;
+        kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 256, true, 64, true, true>
+               : f16acc ? fmha_sm120_fa2_kernel<64, 256, true, 64, true>
+                        : fmha_sm120_fa2_kernel<64, 256, false, 64, true>;
     } else if (head_dim == 64) {
         f16acc = pv_f16 = false;
         Bkv = 64;
         kern = fa2_hd64_kernel(blocks_128, sm_count, Bq, twoslot);
-    } else if (fp16_qk) {
-        if (blocks_128 >= (long)sm_count) {
-            Bq = 128, Bkv = 64;
-            // attention.fa2_dense_2cta: TWOSLOT at Bq=128 (35 KB smem) with the
-            // kernel pinned to <= 128 registers, so two 8-warp CTAs share an SM.
-            const bool two_cta = pv_f16 && imp::process_diag_fa2_dense_2cta();
-            twoslot = two_cta;
-            kern = two_cta  ? fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>
-                   : pv_f16 ? fmha_sm120_fa2_kernel<128, 128, true, true, 64, false, true>
-                   : f16acc ? fmha_sm120_fa2_kernel<128, 128, true, true, 64>
-                            : fmha_sm120_fa2_kernel<128, 128, true, false, 64>;
-        } else if (blocks_128 >= (long)(sm_count / 2)) {
-            // Underfill band (#597): Bq=64 doubles the grid and TWOSLOT halves the KV smem (~70KB->~35KB)
-            // at the full Bkv=64 tile, seating 2 CTAs/SM. Supersedes the Bkv=32 double-buffer at HD=128
-            // (same residency, fewer barriers); HD=256 combines TWOSLOT with Bkv=32.
-            Bq = 64, Bkv = 64, twoslot = true;
-            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true, true>
-                   : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, true>
-                            : fmha_sm120_fa2_kernel<64, 128, true, false, 64, true>;
-        } else {
-            Bq = 64, Bkv = 64;
-            kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, true, 64, false, true>
-                   : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, true, 64>
-                            : fmha_sm120_fa2_kernel<64, 128, true, false, 64>;
-        }
+    } else if (blocks_128 >= (long)sm_count) {
+        Bq = 128, Bkv = 64;
+        // Dense 2-CTA: TWOSLOT at Bq=128 (35 KB smem) with the kernel pinned to <= 128 registers,
+        // so two 8-warp CTAs share an SM.
+        const bool two_cta = pv_f16 && imp::process_diag_fa2_dense_2cta();
+        twoslot = two_cta;
+        kern = two_cta  ? fmha_sm120_fa2_kernel_2cta<128, 128, true, 64, true, true>
+               : pv_f16 ? fmha_sm120_fa2_kernel<128, 128, true, 64, false, true>
+               : f16acc ? fmha_sm120_fa2_kernel<128, 128, true, 64>
+                        : fmha_sm120_fa2_kernel<128, 128, false, 64>;
+    } else if (blocks_128 >= (long)(sm_count / 2)) {
+        // Underfill band (#597): Bq=64 doubles the grid and TWOSLOT halves the KV smem (~70KB->~35KB)
+        // at the full Bkv=64 tile, seating 2 CTAs/SM. Supersedes the Bkv=32 double-buffer at HD=128
+        // (same residency, fewer barriers).
+        Bq = 64, Bkv = 64, twoslot = true;
+        kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, 64, true, true>
+               : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, 64, true>
+                        : fmha_sm120_fa2_kernel<64, 128, false, 64, true>;
     } else {
-        const bool use_bq64 = blocks_128 < (long)sm_count;
-        Bq = use_bq64 ? 64 : 128;
-        Bkv = 64;
-        // #680 fp8-QK campaign: amax-scaled e4m3 conversion (the raw variant
-        // is the #511 quality cliff and stays the default for A/B).
-        if (imp::process_diag_fp8_qk_scaled()) {
-            fp8_scaled = true;
-            kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128, false, false, 64, false, false, true>
-                            : fmha_sm120_fa2_kernel<128, 128, false, false, 64, false, false, true>;
-        } else {
-            kern = use_bq64 ? fmha_sm120_fa2_kernel<64, 128> : fmha_sm120_fa2_kernel<128, 128>;
-        }
+        Bq = 64, Bkv = 64;
+        kern = pv_f16   ? fmha_sm120_fa2_kernel<64, 128, true, 64, false, true>
+               : f16acc ? fmha_sm120_fa2_kernel<64, 128, true, 64>
+                        : fmha_sm120_fa2_kernel<64, 128, false, 64>;
     }
 
-    const size_t smem = compute_smem_fa2(Bq, head_dim, fp16_qk, Bkv, twoslot);
+    const size_t smem = compute_smem_fa2(head_dim, Bkv, twoslot);
     if (smem > (size_t)max_smem)
         return false;
 
@@ -1988,22 +1306,17 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (!logged_once) {
         logged_once = true;
         IMP_LOG_INFO(
-            "FMHA FA2 register-resident kernel ACTIVE (hd=%d, Bq=%d, Bkv=%d, qk=%s, qk_acc=%s, "
+            "FMHA FA2 register-resident kernel ACTIVE (hd=%d, Bq=%d, Bkv=%d, qk=f16, qk_acc=%s, "
             "pv_acc=%s, kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",
-            head_dim, Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
-            twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
+            head_dim, Bq, Bkv, f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32", twoslot ? "twoslot" : "dbuf",
+            smem, seq_q, seq_kv);
     }
-    // FP8SCALED: operand amaxes into the file-scope persistent s_d_amax (fa2_operand_amax).
-    if (fp8_scaled)
-        fp8_scaled = fa2_operand_amax(Q, K, (int64_t)batch_size * seq_q * n_heads * head_dim,
-                                      (int64_t)batch_size * seq_kv * n_kv_heads * head_dim, stream);
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
                                         reinterpret_cast<const half*>(V.data),
                                         reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv, n_heads,
                                         n_kv_heads, scale, causal, sliding_window, softcap, q_offset,
-                                        fp8_scaled ? s_d_amax : nullptr, d_kv_len,
-                                        imp::process_diag_fa2_heavy_first(), sinks);
+                                        d_kv_len, imp::process_diag_fa2_heavy_first(), sinks);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

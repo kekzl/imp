@@ -1,5 +1,5 @@
 // FP8 E4M3 paged decode, HD=128, LPR lanes/KV row, TOK rows/lane-group/iteration, HPC Q
-// heads/CTA (attention.paged_fp8_multitok with Q-head grouping). LPR lanes hold one row
+// heads/CTA (process_diag_paged_fp8_multitok with Q-head grouping). LPR lanes hold one row
 // (128/LPR bytes/lane), a warp holds 32/LPR rows/load, a dot reduces over log2(LPR) shuffles;
 // a CTA holds HPC Q heads of one KV head, converting each row once and dotting against HPC q
 // slices in shared memory (kept out of registers so two CTAs fit an SM). The warp keeps DEPTH

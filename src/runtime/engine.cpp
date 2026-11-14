@@ -632,7 +632,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // Publishes THIS engine's RuntimeConfig to the process_diag snapshot that
     // leaf kernels read, so exec/ and the kernels agree (a mismatch, e.g.
-    // attention.fa2_hd256, walks the FMHA chain to the #654 throw).
+    // the FA2 head_dim gate, walks the FMHA chain to the #654 throw).
     // Ordering matters twice: BEFORE the arch resolvers below (install() writes
     // gemm.cublas_fp16_acc/deterministic_gemm verbatim; resolvers then promote
     // them - installing after would undo arch-specific decisions), and BEFORE

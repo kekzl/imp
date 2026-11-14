@@ -391,7 +391,7 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
 
-// HD=128 GQA (ratio > 1) with attention.paged_fp8_multitok: the grouped kernel's split-K instance
+// HD=128 GQA (ratio > 1) with process_diag_paged_fp8_multitok: the grouped kernel's split-K instance
 // when the one-wave rule on its CTAs (2 per SM) splits and every split holds >= 8 KV blocks.
 // False = not taken (the caller's routes: unsplit grouped kernel, tile split-K, plain).
 static bool fp8_gqa_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
@@ -474,8 +474,7 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
-        if (paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads) &&
-            process_diag_attention_fp8_tile() && process_diag_attention_fp8_tile_gqa()) {
+        if (paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads)) {
             // GQA-batched tile variant: grid.y = n_kv_heads instead of n_heads (each block computes all G
             // Q heads from one shared smem tile, cutting KV L2 traffic by G). Split count re-derived nearby.
             num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads,
@@ -485,8 +484,7 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
                 reinterpret_cast<const uint8_t*>(V_cache.data), partial, block_tables, context_lens,
                 batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
                 sliding_window, softcap, stream);
-        } else if (paged_attention_splitk_fp8_tile_supported(head_dim, block_size) &&
-                   process_diag_attention_fp8_tile()) {
+        } else if (paged_attention_splitk_fp8_tile_supported(head_dim, block_size)) {
             // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV pages instead of per-token
             // latency chain. hd=128, block_size multiple of 16.
             // Wave-aware split count: the tile kernel is smem-capped at 1 block/SM, so wall time quantizes

@@ -119,7 +119,7 @@ protected:
             V(vf_, QType::F16, 4, ks, true);
         Tensor O(o, QType::F16, 4, qs, true);
         EXPECT_TRUE(fmha_sm120_fa2_prefill(Q, K, V, O, 1.0f / std::sqrt(static_cast<float>(kHd)), true, 0,
-                                           0.0f, nullptr, past, /*fp16_qk=*/true));
+                                           0.0f, nullptr, past));
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         std::vector<uint16_t> out(static_cast<size_t>(kN) * kNh * kHd);
         EXPECT_EQ(cudaMemcpy(out.data(), o, out.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost),

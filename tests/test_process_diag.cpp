@@ -37,15 +37,6 @@ RuntimeConfig make_non_default() {
 
     c.gemm.cublas_fp16_acc = "on";
 
-    c.attention.splitk_pipe = false;
-    c.attention.fp8_tile = false;
-    c.attention.fp8_tile_gqa = false;
-    c.attention.fa2_f16acc = false;
-    c.attention.fa2_pv_f16acc = false;
-    c.attention.fa2_hd256 = false;
-    c.attention.fa2_hd256_bkv = 32;
-    c.attention.fa2_dense_2cta = false;
-    c.attention.fp8_qk_scaled = true;
     c.gemm.nvfp4_cublaslt_min_m = 1024;
 
     c.moe.mr_nr = 32;
@@ -95,15 +86,6 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_TRUE(process_diag_deterministic_gemm());
     EXPECT_TRUE(process_diag_cublas_fp16_acc());
 
-    EXPECT_FALSE(process_diag_attention_splitk_pipe());
-    EXPECT_FALSE(process_diag_attention_fp8_tile());
-    EXPECT_FALSE(process_diag_attention_fp8_tile_gqa());
-    EXPECT_FALSE(process_diag_fa2_f16acc());
-    EXPECT_FALSE(process_diag_fa2_pv_f16acc());
-    EXPECT_FALSE(process_diag_fa2_hd256());
-    EXPECT_EQ(process_diag_fa2_hd256_bkv(), 32);
-    EXPECT_FALSE(process_diag_fa2_dense_2cta());
-    EXPECT_TRUE(process_diag_fp8_qk_scaled());
     EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), 1024);
 
     EXPECT_EQ(process_diag_moe_mr_nr(), 32);
@@ -129,15 +111,6 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_no_pdl(), d.runtime.no_pdl);
     EXPECT_EQ(process_diag_prefill_graph_enabled(), d.runtime.prefill_graph);
     EXPECT_EQ(process_diag_deterministic_gemm(), d.runtime.deterministic_gemm);
-    EXPECT_EQ(process_diag_attention_splitk_pipe(), d.attention.splitk_pipe);
-    EXPECT_EQ(process_diag_attention_fp8_tile(), d.attention.fp8_tile);
-    EXPECT_EQ(process_diag_attention_fp8_tile_gqa(), d.attention.fp8_tile_gqa);
-    EXPECT_EQ(process_diag_fa2_f16acc(), d.attention.fa2_f16acc);
-    EXPECT_EQ(process_diag_fa2_pv_f16acc(), d.attention.fa2_pv_f16acc);
-    EXPECT_EQ(process_diag_fa2_hd256(), d.attention.fa2_hd256);
-    EXPECT_EQ(process_diag_fa2_hd256_bkv(), d.attention.fa2_hd256_bkv);
-    EXPECT_EQ(process_diag_fa2_dense_2cta(), d.attention.fa2_dense_2cta);
-    EXPECT_EQ(process_diag_fp8_qk_scaled(), d.attention.fp8_qk_scaled);
     EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), d.gemm.nvfp4_cublaslt_min_m);
     EXPECT_EQ(process_diag_moe_mr_nr(), d.moe.mr_nr);
     EXPECT_EQ(process_diag_moe_expert_overhead_pct(), d.moe.expert_overhead_pct);

@@ -379,19 +379,18 @@ TEST(ExecT2Demand, QuantScratchFollowsTheSitesOwnMaxKAndNotTheLogicalOne) {
     s.mmvq_max_k = 8192;
     EXPECT_GT(exec_t2_demand(s, 1024).quant_scratch, at_4096) << "it must follow the site's max_k";
 
-    // 128 blocks x 8 rows x (48 + 4) bytes + the 4-word mask + alignment.
+    // 128 blocks x 8 rows x (48 + 4) bytes + alignment.
     ExecShape exact = dense_shape();
     exact.mmvq_max_k = 4096;  // 128 blocks
     exact.max_batch_size = 1;  // rows = max(1, 8) = 8
-    const size_t expect = 128ull * 8 * (48 + sizeof(float)) + 4 * sizeof(uint32_t) + 5 * 256;
+    const size_t expect = 128ull * 8 * (48 + sizeof(float)) + 5 * 256;
     EXPECT_EQ(exec_t2_demand(exact, 1024).quant_scratch, expect);
 
     // Rows follow the batch but cap at 16, so a 64-way server does not inflate a
     // K-sized buffer 8x. The site caps it; a term that did not would over-reserve
     // exactly where VRAM is tightest.
     exact.max_batch_size = 64;
-    EXPECT_EQ(exec_t2_demand(exact, 1024).quant_scratch,
-              128ull * 16 * (48 + sizeof(float)) + 4 * sizeof(uint32_t) + 5 * 256);
+    EXPECT_EQ(exec_t2_demand(exact, 1024).quant_scratch, 128ull * 16 * (48 + sizeof(float)) + 5 * 256);
 }
 
 // The MoE down projection quantizes top_k expert activations contiguously, so on

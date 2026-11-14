@@ -38,15 +38,13 @@
             // (hd=128) and tiled FMHA are O(n), no S-matrix. Uniform per-layer shapes
             // (GDN/Mamba2 hybrids) are served by the O(n) family too; only truly
             // heterogeneous shapes (Gemma-4 dual hd 256/512) require cuBLAS; learned sinks (gpt-oss, hd=64) ride FA2.
-            // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
-            // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
-            const bool fa2_hd_ok = fa2_serves_head_dim(hd, dispatch_policy().attention.fa2_hd256);
+            // hd=256 rides the stage-1 FA2 port (default on since #932): same fp16-qk
+            // kernel family, Bq=64/TWOSLOT instance.
             // FA2 is chosen per-layer: heterogeneous Gemma-4 SWA layers (hd=256)
             // qualify even though the model isn't uniform, since the gather and
             // attention are per-layer. Previously gated on shapes_uniform, forcing all
             // Gemma-4 layers onto cuBLAS.
-            const bool chunk_fa2_serves = fa2_hd_ok &&
-                                          dispatch_policy().attention.fa2_fp16qk != "never";
+            const bool chunk_fa2_serves = fa2_serves_head_dim(hd);
             // The tiled WMMA FMHA serves any fused head_dim (incl. hd=512), per-layer,
             // so Gemma-4 global layers qualify too. Learned sinks fold into FA2 (hd=64) and WMMA FMHA (#992).
             const bool fmha_hd_ok = fmha_serves_head_dim(hd);
@@ -212,7 +210,7 @@
                                               nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                               att_off, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise); declines exactly where
-                // chunk_fa2_serves is false (fa2_serves_head_dim + fa2_fp16qk != never).
+                // chunk_fa2_serves is false (fa2_serves_head_dim).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, seq_q, k_full_t, v_full_t, seq_ao, seq_n,
                                                        att_ctx, nh, nkv, scale, layer_sliding_window,
@@ -286,11 +284,11 @@
         // range. Tried BEFORE the S-matrix gate so the fast path doesn't depend on
         // attn_scores_ being allocated large enough for n (a too-small buffer used
         // to drop n~512 chunks into the slow tiled dispatch). cuBLAS is the
-        // below-threshold fallback for configs FA2 declines (hd not in {64,128,256},
-        // or hd=256 with fa2_hd256 off). Sliding-window
+        // below-threshold fallback for configs FA2 declines (hd not in {64,128,256}).
+        // Sliding-window
         // prefill (#566) uses the same cuBLAS path (it grew a sliding_window
         // softmax mask); the historic hd=256+window failure was root-caused to
-        // the fp8-QK kernel's raw e4m3 conversion (#511), now opt-in only - the
+        // the deleted fp8-QK kernel's raw e4m3 conversion (#511); the
         // FP16 WMMA kernel serving hd=256 is PPL-identical to cuBLAS.
         if (const AttnPrefillOuter fp4 = try_fp4_prefill(dispatch_policy(), seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv, hd,
                                                          scale, layer_sliding_window, cfg.attn_logit_softcap,
