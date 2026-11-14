@@ -120,13 +120,6 @@ inline TokenLogprobInfo build_logprob_info(const float* h_logits, int vocab_size
     return info;
 }
 
-// Ensure workspace 0 is active (used before prefill and after decode).
-inline void ensure_prefill_workspace(GraphExecutor* executor) {
-    if (executor->has_decode_workspace() && executor->active_workspace() != 0) {
-        executor->use_workspace(0);
-    }
-}
-
 // runtime.no_vision: drop the tower before the arena demand is read, so it reserves nothing.
 inline void drop_vision_tower_if_disabled(Model& model, bool no_vision) {
     if (no_vision && model.vision_tower) {

@@ -112,11 +112,6 @@ public:
     // into an explicit set of physical blocks.
     void prefill(const std::vector<int32_t>& tokens, const std::vector<int>& blocks) {
         const int n = static_cast<int>(tokens.size());
-        // Workspace discipline, copied from Engine::step_prefill: slot 1 is the
-        // single-row decode workspace and its row buffers are one token tall,
-        // so a prefill left on it dies in slice_rows (shape[0]=1).
-        if (ex_.has_decode_workspace())
-            ex_.use_workspace(0);
         (void)ex_.resize_workspace(n, nullptr);
         std::vector<int> positions(n);
         for (int i = 0; i < n; i++)
@@ -148,16 +143,8 @@ public:
     const std::vector<float>& step(const std::vector<int32_t>& tokens, const std::vector<int>& positions,
                                    const std::vector<int>& ctx_lens, const std::vector<int>& block_tables) {
         const int n = static_cast<int>(tokens.size());
-        // Mirrors engine_scheduler.cpp's per-step slot rule: n==1 uses the dedicated decode
-        // workspace, else slot 0 sized to the batch - getting this wrong would silently change which
-        // kernel the arm runs, the thing under comparison.
-        if (n == 1 && ex_.has_decode_workspace()) {
-            ex_.use_workspace(1);
-        } else {
-            if (ex_.active_workspace() == 1)
-                ex_.use_workspace(0);
-            (void)ex_.resize_workspace(n, nullptr);
-        }
+        // Mirrors engine_scheduler.cpp's step_decode_forward: the workspace is sized to the batch.
+        (void)ex_.resize_workspace(n, nullptr);
         cudaMemcpy(d_tokens_, tokens.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice);
         cudaMemcpy(d_pos_, positions.data(), n * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_ctx_, ctx_lens.data(), n * sizeof(int), cudaMemcpyHostToDevice);

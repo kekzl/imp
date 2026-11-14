@@ -78,15 +78,14 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
 // (conv_snap/d_snap_n/conv_prev) is written from group 0 only.
 // out_slots/snap_slots (batched speculative verify): group z commits at d_real_n rows into
 // out_slots[z] instead of in place, and at d_snap_n rows into snap_slots[z]. snap_slots
-// requires out_slots; snap_slots[z] may equal seq_slots[z]. snap_rows 2: also d_snap_n[1] rows
-// into snap_slots[n_seq + z] (the 3-row bound verify).
+// requires out_slots; snap_slots[z] may equal seq_slots[z].
 void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_slots, int64_t slot_stride,
                                          int n_seq, const Tensor& x_in, const Tensor& weight,
                                          const Tensor& bias, float* x_out_f32, int conv_kernel,
                                          cudaStream_t stream, const int* d_real_n = nullptr,
                                          void* conv_snap = nullptr, const int* d_snap_n = nullptr,
                                          const void* conv_prev = nullptr, const int* out_slots = nullptr,
-                                         const int* snap_slots = nullptr, int snap_rows = 1);
+                                         const int* snap_slots = nullptr);
 
 // Mamba2 SSM scan decode (single step/sequence). x:[inner_size]; B,C:[n_groups*state_size];
 // dt:[n_heads] (raw, pre-softplus); A_log/D/dt_bias:[n_heads] float;
@@ -140,11 +139,7 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
 // Factored conv window for the batched speculative verify
 // (compute/ssm_conv_tap.cu, docs/plans/2026-09-12-factored-verify-spare.md).
 // The drafted row shifts the window by one, so only the single new tap (channels halfs)
-// need survive the step, not the whole window (channels*kernel_size floats). Both pools
-// indexed by recurrent SLOT so a request keeps its row while moving within the batch.
-// stash: x_in is [n_seq,n_tokens,channels] half, row taken is real_n-1.
-void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_real_n,
-                        const int* slots, int n_seq, cudaStream_t stream);
+// need survive the step, not the whole window (channels*kernel_size floats).
 // Mid rows of the bound verify, by batch group: rows d_snap_n .. d_snap_n + n_levels - 1 of group g leave as
 // the taps [g * n_levels + level] (rows past n_tokens write nothing).
 void ssm_conv_tap_stash_mid(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_snap_n,

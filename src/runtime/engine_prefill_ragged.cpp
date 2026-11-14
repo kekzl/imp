@@ -438,8 +438,6 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         bind_mrope_prefill_ragged_(state, rr, ro, rl, total, stream);
     }
 
-    if (executor_->has_decode_workspace())
-        executor_->use_workspace(0);
     (void)executor_->resize_workspace(total, stream);
 
     IMP_LOG_DEBUG("Ragged prefill: %d seqs, %d rows (chunk cap %d, %d riders)", n_seq, total, effective_chunk,

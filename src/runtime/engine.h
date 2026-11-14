@@ -1264,7 +1264,7 @@ private:
     [[nodiscard]] bool ensure_batch_verify_bufs_(
         cudaStream_t stream);  // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
-    int acquire_spare_slot_(int req_id, bool second = false);
+    int acquire_spare_slot_(int req_id);
     void bound_verify_adopt_slot_(int req_id, int role, int live, int slot);
     // Up to depth draft tokens for the request's next positions, written to out; returns the count.
     int batch_verify_draft_(Request& req, int depth, int32_t* out, bool& from_mtp);

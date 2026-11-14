@@ -59,9 +59,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     // snap_slots[seq] receives state at snap_n rows for EVERY sequence (nullptr = the one-slab
     // h_snap contract). In-place snapshot (snap_slots[seq]==seq_slots[seq]) is safe: read precedes write.
     const int* __restrict__ out_slots = nullptr, const int* __restrict__ snap_slots = nullptr,
-    // Factor rows (gdn_factor.cuh): fac_out receives the rank-1 row for real_n instead of a second full
-    // state copy,
-    // [n_seq,n_heads,fac_stride]; nullptr keeps the full-state contract above.
+    // Factor rows (gdn_factor.cuh), with out_slots only: the rows after snap_n before the commit leave as
+    // rank-1 rows [n_seq, levels, n_heads, fac_stride] (gdn_factor_mid); nullptr = none.
     float* __restrict__ fac_out = nullptr, int fac_stride = 0) {
     const int h = blockIdx.x;
     if (h >= n_heads)
@@ -143,12 +142,6 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         for (int s = 0; s < SS_PER; s++)
             H_reg[s] = static_cast<float>(H_col[static_cast<ptrdiff_t>((s_base + s) * HD)]);
     }
-    // Factor rows are indexed by the recurrent SLOT, not by the batch
-    // position: a request keeps its slot across steps but moves within the
-    // batch, so indexing by seq would hand the next step another request's row.
-    const size_t fac_row = ((static_cast<size_t>(seq_slots ? seq_slots[seq] : seq) * n_heads) + h) *
-                           static_cast<size_t>(fac_stride);
-    float* const fac_last = out_slots ? nullptr : fac_out;  // the row replaces the commit
     const int fac_mid_t = gdn_factor_mid_row(out_slots, fac_out, snap_n, real_n);  // commit stays
 
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce_buf[HD]
@@ -280,19 +273,10 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         // no barrier needed). For the unpadded case real_n == n_tokens and
         // this is the single end-of-scan store the kernel always did.
         if (t + 1 == real_n) {
-            // Factored only when a drafted row exists past the snapshot: otherwise the row would re-describe
-            // a transition the snapshot already holds and the next step would apply it twice; the 0 sentinel
-            // keeps the buffer defined against a stale row from an earlier step.
-            if (fac_last && snap_n >= 1 && real_n > snap_n) {
-                gdn_factor_store<SS_PER>(fac_last + fac_row, s_k, SS, s_base, d, part, g_t, delta_d);
-            } else {
-                if (fac_last && d == 0 && part == 0)
-                    fac_last[fac_row] = 0.0f;
-                StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
+            StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
-                for (int s = 0; s < SS_PER; s++)
-                    H_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
-            }
+            for (int s = 0; s < SS_PER; s++)
+                H_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
         }
         float* const fac_mid = gdn_factor_mid(fac_out, fac_mid_t, t, real_n, seq, n_heads, h, fac_stride);
         gdn_factor_store<SS_PER>(fac_mid, s_k, SS, s_base, d, part, g_t, delta_d);

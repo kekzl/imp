@@ -346,10 +346,6 @@ void Engine::release_recurrent_slot_(int req_id) {
         bv_.free.push_back(sp->second);
         bv_.spare_of.erase(sp);
     }
-    if (auto sp = bv_.spare2_of.find(req_id); sp != bv_.spare2_of.end()) {
-        bv_.free.push_back(sp->second);
-        bv_.spare2_of.erase(sp);
-    }
     phrase_release_(req_id);  // banned-phrase recurrent slabs
     if (recurrent_snapshots_)
         recurrent_snapshots_->unprotect(req_id);

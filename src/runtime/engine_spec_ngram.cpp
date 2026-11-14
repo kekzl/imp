@@ -600,7 +600,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         spec_stats_.miss_steps++;
         return false;
     }
-    if (executor_->has_decode_workspace()) executor_->use_workspace(0);
 
     InferenceState state;
     state.token_ids = d_spec_tokens_;
