@@ -752,6 +752,15 @@ tidy: lint-image
 	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake && \
 	  bash scripts/tidy_lane.sh --all'
 
+# Symbol references through clangd (tools/clangd_refs.py): resolves .cpp and .cu, aliases, no string
+# or same-name-member hits. Index in build-dev/clangd: 73 s cold, 4 s warm. Needs `make dev` first.
+#   make refs SYM="Speculative::mtp_k gemm_nvfp4_batched"   make refs AT=src/core/config/speculative.h:95:mtp_k
+.PHONY: refs
+refs: lint-image
+	@test -n "$(SYM)$(AT)" || { echo 'usage: make refs SYM="name Scope::name" | AT=path:line:token'; exit 2; }
+	@docker run --rm -v $(PWD):/src -w /src $(LINT_IMG) python3 -I tools/clangd_refs.py \
+	  $(foreach s,$(SYM),--sym $(s)) $(foreach a,$(AT),--at $(a))
+
 # Pre-push gate, CPU only (scripts/preflight.sh): every ci_static_gates.sh group, clang-tidy on
 # changed TUs, git clang-format on changed lines, actionlint on a .github change. No GPU, no build.
 .PHONY: preflight

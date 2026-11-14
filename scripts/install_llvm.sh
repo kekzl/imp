@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs pinned LLVM tools from apt.llvm.org. Single source of the LLVM pin for CI,
-# the Dockerfile `lint` stage and the Makefile. Usage (root): install_llvm.sh clang-format [clang-tidy clang libclang-rt]
+# the Dockerfile `lint` stage and the Makefile. Usage (root): install_llvm.sh clang-format [clang-tidy clangd clang libclang-rt]
 # Pin is 23.1.*: apt.llvm.org keeps one build per branch in its pool, an exact =version dies at its next rebuild.
 set -euo pipefail
 
@@ -50,7 +50,7 @@ apt_get update -qq
 pkgs=()
 for t in "$@"; do
     case "$t" in
-        clang-format|clang-tidy|clang) pkgs+=("$t-$LLVM_MAJOR=$LLVM_APT_VERSION") ;;
+        clang-format|clang-tidy|clangd|clang) pkgs+=("$t-$LLVM_MAJOR=$LLVM_APT_VERSION") ;;
         libclang-rt) pkgs+=("libclang-rt-$LLVM_MAJOR-dev=$LLVM_APT_VERSION") ;;
         *) echo "$0: unknown tool '$t'" >&2; exit 2 ;;
     esac

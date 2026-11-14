@@ -68,10 +68,10 @@ RUN set -eu; \
     pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json; \
     pin https://github.com/PCRE2Project/pcre2.git  ${IMP_DEP_PCRE2_TAG}         ${IMP_DEP_PCRE2_SHA}         /deps/pcre2
 
-# clang-format + clang-tidy for `make format`, `make tidy`. Pin: scripts/install_llvm.sh.
+# clang-format + clang-tidy + clangd for `make format`, `make tidy`, `make refs`. Pin: scripts/install_llvm.sh.
 FROM toolchain AS lint
 COPY scripts/install_llvm.sh /tmp/install_llvm.sh
-RUN bash /tmp/install_llvm.sh clang-format clang-tidy \
+RUN bash /tmp/install_llvm.sh clang-format clang-tidy clangd \
     && rm -rf /var/lib/apt/lists/* /tmp/install_llvm.sh
 
 FROM toolchain AS builder
