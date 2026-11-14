@@ -7,7 +7,7 @@
 
 #include "model/model_config.h"
 #include "runtime/config.h"
-#include "runtime/engine.h"
+#include "runtime/rope_override.h"
 
 namespace imp {
 namespace {

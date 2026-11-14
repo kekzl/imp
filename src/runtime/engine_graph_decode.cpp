@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"

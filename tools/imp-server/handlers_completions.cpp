@@ -1,7 +1,6 @@
 // Text completion endpoints: handle_completions (/v1/completions) and handle_infill (POST /infill,
 // fill-in-the-middle, #2201). Moved out of handlers_chat.cpp (file-size gate, 800 code LOC).
 
-#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "request_field_types.h"

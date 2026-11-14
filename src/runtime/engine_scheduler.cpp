@@ -15,6 +15,7 @@
 //   step_async_graph_resume — for the CUDA-graph-captured decode path.
 
 #include "runtime/engine.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/decode_graph_ctx.h"

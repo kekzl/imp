@@ -13,9 +13,9 @@
 #include "memory/vram_query.h"
 #include "model/model.h"
 #include "model/model_config.h"
-#include "runtime/engine.h"
 #include "exec/storage_planner.h"
 #include "exec/moe_nvfp4_cache_rule.h"
+#include "runtime/engine_config.h"
 #include "runtime/vram_budget.h"
 
 #include <algorithm>

@@ -4,6 +4,8 @@
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/engine.h"
+#include "memory/recurrent_snapshot_store.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"

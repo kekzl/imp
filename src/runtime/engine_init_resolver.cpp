@@ -4,6 +4,7 @@
 // Engine::* with declarations in engine.h.
 
 #include "runtime/engine.h"
+#include "runtime/rope_override.h"
 
 #include <algorithm>
 #include <set>
