@@ -24,7 +24,6 @@
 #include "memory/library_reserve_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
-#include "memory/recurrent_snapshot_store.h"
 #include <span>
 #include "memory/vram_allocator.h"
 #include "memory/vram_owned.h"
@@ -59,12 +58,13 @@ struct EncoderWorkspace;   // src/compute/encoder_forward.h
 struct NvFP4QuantResult;   // src/quant/nvfp4_quant.h
 class DSparkDrafter;       // src/runtime/dspark_drafter.h
 class LoraAdapter;         // src/lora/lora_adapter.h
-struct ControlVectorDevice;  // src/lora/control_vector.h
-struct SaeDevice;            // src/exec/sae.h
-class LayerOffloadManager;   // src/memory/layer_offload.h
-class TokenRecycleTable;     // src/runtime/token_recycle_draft.h
-class ConstraintManager;     // src/runtime/constraint_manager.h
-struct MtpRequestState;      // src/runtime/spec_request.h
+struct ControlVectorDevice;    // src/lora/control_vector.h
+struct SaeDevice;              // src/exec/sae.h
+class LayerOffloadManager;     // src/memory/layer_offload.h
+class TokenRecycleTable;       // src/runtime/token_recycle_draft.h
+class ConstraintManager;       // src/runtime/constraint_manager.h
+struct MtpRequestState;        // src/runtime/spec_request.h
+class RecurrentSnapshotStore;  // src/memory/recurrent_snapshot_store.h
 
 // Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
 struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
@@ -90,10 +90,7 @@ public:
 
     // Drop all recurrent-state snapshots (call on context_reset alongside the
     // prefix-cache block eviction — stale snapshots must not match new data)
-    void clear_recurrent_snapshots() {
-        if (recurrent_snapshots_)
-            recurrent_snapshots_->clear();
-    }
+    void clear_recurrent_snapshots();
 
     // Invalidate all cached CUDA graphs (call on context_reset to ensure
     // deterministic output — stale graph captures can produce different results)

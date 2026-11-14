@@ -1,6 +1,7 @@
 // Engine init phase: paged KV cache allocation. Declaration in engine.h.
 
 #include "runtime/engine.h"
+#include "memory/recurrent_snapshot_store.h"
 #include "runtime/engine_internal.h"
 #include "runtime/kv_fp8_scale_init.h"
 #include "runtime/config.h"

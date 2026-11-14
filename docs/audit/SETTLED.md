@@ -292,8 +292,10 @@ Full write-up with every number: [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), secti
 **S-33, 2026-11-14: the include-only half is spent.** Per `engine.h` touch, `make dev` recompiles
 **75 -> 67 TUs**, uncached **43.1 / 42.8 -> 40.3 / 40.7 s** (ccache hits: 3.5 s either way), x205
 commits/6mo. `EngineConfig` moved to `runtime/engine_config.h`, `apply_rope_override` to
-`runtime/rope_override.h`; 7 includes became forward declarations (`constraint_manager.h` fan-in
-76 -> 9, `lora_adapter.h` 81 -> 7). The 67 left (35 `src/runtime/engine*.cpp`, 18 tests, 8
+`runtime/rope_override.h`; 8 includes became forward declarations (`constraint_manager.h` fan-in
+76 -> 9, `lora_adapter.h` 81 -> 7, `recurrent_snapshot_store.h` 70 -> 8 with
+`clear_recurrent_snapshots()` out of line in `engine.cpp`, called only from `imp_context_reset`
+and tests). The 67 left (35 `src/runtime/engine*.cpp`, 18 tests, 8
 imp-server, 3 imp-cli, 3 C-API) each name an `Engine` member; the next cut is a code change.
 
 **Method note that decided two of these.** A grep for who "uses Engine" reported

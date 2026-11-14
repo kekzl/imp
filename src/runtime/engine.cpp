@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "memory/recurrent_snapshot_store.h"
 #include "runtime/token_recycle_draft.h"
 #include "lora/control_vector.h"
 #include "runtime/constraint_manager.h"
@@ -224,6 +225,11 @@ void Engine::reset_ssm_state(int seq_id) {
     }
     release_recurrent_slot_(seq_id);
     mtp_release_(seq_id);
+}
+
+void Engine::clear_recurrent_snapshots() {
+    if (recurrent_snapshots_)
+        recurrent_snapshots_->clear();
 }
 
 void Engine::reset_batch_pool_cache() { decode_batch_pool_.reset_upload_cache(); }
