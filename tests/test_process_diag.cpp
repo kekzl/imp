@@ -36,6 +36,7 @@ RuntimeConfig make_non_default() {
     c.runtime.deterministic_gemm = true;
 
     c.gemm.cublas_fp16_acc = "on";
+    c.gemm.nvfp4_prompt_streamk = "on";
 
     c.moe.force_host_experts = 7;
     c.moe.host_expert_pool_mib = 12345;
@@ -81,6 +82,7 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
 
     EXPECT_TRUE(process_diag_deterministic_gemm());
     EXPECT_TRUE(process_diag_cublas_fp16_acc());
+    EXPECT_TRUE(process_diag_nvfp4_prompt_streamk());
 
     EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), imp::cfg::kNvfp4CublasltMinM);
 
@@ -113,6 +115,9 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     // "auto" (the default) maps to OFF — the arch resolvers promote it later.
     EXPECT_EQ(d.gemm.cublas_fp16_acc, "auto");
     EXPECT_FALSE(process_diag_cublas_fp16_acc());
+    // NVFP4 prompt stream-K: "auto" is off on every model, a prefix-cache resend must not move.
+    EXPECT_EQ(d.gemm.nvfp4_prompt_streamk, "auto");
+    EXPECT_FALSE(process_diag_nvfp4_prompt_streamk());
 }
 
 // dump_hidden_dir carries a documented shorthand: "1"/"all" resolve to /tmp.

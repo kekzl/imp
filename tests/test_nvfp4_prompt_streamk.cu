@@ -1,4 +1,4 @@
-// gemm.nvfp4_prompt_streamk off (auto on MoE): prompt rows (chunks >= 33) of the CUTLASS_NVFP4 registry
+// gemm.nvfp4_prompt_streamk off (auto = off): prompt rows (chunks >= 33) of the CUTLASS_NVFP4 registry
 // kernel never take stream-K, whose K split follows M (Gemma-4-26B global q_proj N 8192 K 2816: 218 rows
 // data-parallel, 42 rows split in 2; prefix resend 0.179 nats).
 
