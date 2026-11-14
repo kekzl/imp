@@ -38,6 +38,8 @@
 #include "memory/kv_cache_manager.h"
 #include "model/ngram_table.h"
 #include "runtime/engine.h"
+#include "runtime/token_recycle_draft.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/offload_spec_defaults.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"

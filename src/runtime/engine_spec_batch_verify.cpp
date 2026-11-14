@@ -16,6 +16,7 @@
 #include "memory/kv_cache_manager.h"
 #include "model/mtp_head.h"
 #include "runtime/engine.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "compute/gdn_factor.cuh"
 #include "runtime/ngram_draft.h"

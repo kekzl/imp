@@ -10,7 +10,6 @@
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
 
-#include "runtime/engine.h"
 #include "runtime/request.h"
 
 #include <chrono>

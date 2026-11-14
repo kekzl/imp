@@ -5,7 +5,8 @@
 // Internal helpers shared across engine_*.cpp translation units.
 // Not part of any public API; included only by src/runtime/engine*.cpp.
 
-#include "runtime/engine.h"
+#include "audio/audio_pipeline.h"
+#include "vision/vision_model.h"
 #include "runtime/request.h"
 #include "compute/sampling.h"
 #include "model/tokenizer.h"

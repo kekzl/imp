@@ -1,7 +1,6 @@
 // Anthropic /v1/messages: handle_messages endpoint plus its streaming machinery (AnthropicSSE
 // event writer, dialect adapter for the shared token loop) emitting native Anthropic SSE events.
 
-#include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "stream_driver.h"

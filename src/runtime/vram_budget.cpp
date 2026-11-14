@@ -1,5 +1,5 @@
 #include "runtime/vram_budget.h"
-#include "runtime/engine.h"  // EngineConfig full definition
+#include "runtime/engine_config.h"
 #include "exec/storage_planner.h"
 #include "exec/moe_nvfp4_cache_rule.h"
 #include "quant/dequant_gpu.h"           // dequant_gpu_supported

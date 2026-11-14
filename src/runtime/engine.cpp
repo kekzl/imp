@@ -1,4 +1,7 @@
 #include "runtime/engine.h"
+#include "runtime/token_recycle_draft.h"
+#include "lora/control_vector.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/kv_fp8_scale_init.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"

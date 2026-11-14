@@ -5,6 +5,7 @@
 // state, FSM, finish).
 
 #include "runtime/engine.h"
+#include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "runtime/batch.h"
 #include "runtime/phrase_ban.h"
