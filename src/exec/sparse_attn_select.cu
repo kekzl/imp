@@ -1,5 +1,5 @@
 // Sparse decode attention: Quest-class top-k page selection. Three kernels: per-block
-// key min/max maintenance, block scoring against the current queries, top-k selection
+// key mean/std maintenance, block scoring against the current queries, top-k selection
 // into a compacted block table the unmodified paged decode kernels consume. All
 // device-side from device inputs, so the whole path is CUDA-graph-safe while context
 // grows during replay. Design: docs/plans/2026-08-28-sparse-decode-attention.md.
@@ -61,8 +61,7 @@ struct KeyReaderNvfp4 {
 // slots [0, slot + span): a rolled-back draft row leaves no trace, and neither does a
 // reused block's old content.
 // Metadata layout per (layer, block): row_elems half2 per (kv_head, dim) element, index
-// e = kv_head * head_dim + d. The pair carries (min, max), or (mean, std) under
-// attention.sparse_score_meanstd; same layout, same pass, same read by the score kernel.
+// e = kv_head * head_dim + d. The pair carries (mean, std) over the block's written rows.
 // Batched decode variant: one launch covers every KV layer (grid.y), legal because
 // decode selection force-includes recent blocks, so metadata may lag by one step without
 // affecting the bound.
@@ -113,13 +112,12 @@ __device__ __forceinline__ int sparse_owner_block(const int* block_tables, const
     return block_id;
 }
 
-// Mean/std twin (attention.sparse_score_meanstd): same storage, same owner scheme, but
-// the pair holds (mean, std) over the block's rows instead of (min, max). One Welford
-// pass per element rather than sum/sumsq: E[x^2]-E[x]^2 cancels most of the mantissa
-// once |mean| is a few multiples of the spread.
+// The pair holds (mean, std) over the block's rows. One Welford pass per element rather
+// than sum/sumsq: E[x^2]-E[x]^2 cancels most of the mantissa once |mean| is a few
+// multiples of the spread.
 template <typename Reader>
-__device__ __forceinline__ void sparse_rebuild_block_meanstd(Reader rd, __half2* __restrict__ mm, int rows,
-                                                             int row_elems) {
+__device__ __forceinline__ void sparse_rebuild_block(Reader rd, __half2* __restrict__ mm, int rows,
+                                                     int row_elems) {
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
         float mean = 0.0f, m2 = 0.0f;
         for (int j = 0; j < rows; j++) {
@@ -132,38 +130,13 @@ __device__ __forceinline__ void sparse_rebuild_block_meanstd(Reader rd, __half2*
     }
 }
 
-template <typename Reader>
-__device__ __forceinline__ void sparse_rebuild_block_minmax(Reader rd, __half2* __restrict__ mm, int rows,
-                                                            int row_elems) {
-    for (int e = threadIdx.x; e < row_elems; e += blockDim.x) {
-        float mn = FLT_MAX, mx = -FLT_MAX;
-        for (int j = 0; j < rows; j++) {
-            const float v = rd.get(j, e);
-            mn = fminf(mn, v);
-            mx = fmaxf(mx, v);
-        }
-        mm[e] = __floats2half2_rn(mn, mx);
-    }
-}
-
-// kMeanStd picks which statistic the pair carries; everything around it (owner
-// resolution, span walk, strides) is shared.
-template <bool kMeanStd, typename Reader>
-__device__ __forceinline__ void sparse_rebuild_block(Reader rd, __half2* __restrict__ mm, int rows,
-                                                     int row_elems) {
-    if constexpr (kMeanStd)
-        sparse_rebuild_block_meanstd(rd, mm, rows, row_elems);
-    else
-        sparse_rebuild_block_minmax(rd, mm, rows, row_elems);
-}
-
-template <typename CacheT, bool kMeanStd>
+template <typename CacheT>
 __global__ void sparse_update_key_minmax_layers_kernel(
     const CacheT* __restrict__ k_base, int64_t k_layer_stride,  // elems
     __half2* __restrict__ mm_base, int64_t mm_layer_stride,     // half2 elems
     const int* __restrict__ positions, const int* __restrict__ block_tables,
-    const int* __restrict__ seq_offsets, int row_elems, int block_size, int n_tokens,
-    int max_blocks_per_seq, int n_sequences) {
+    const int* __restrict__ seq_offsets, int row_elems, int block_size, int n_tokens, int max_blocks_per_seq,
+    int n_sequences) {
     const int token_idx = blockIdx.x;
     const int layer = blockIdx.y;
     if (token_idx >= n_tokens)
@@ -175,13 +148,12 @@ __global__ void sparse_update_key_minmax_layers_kernel(
         return;
     KeyReaderPlain<CacheT> rd{k_base + layer * k_layer_stride + (int64_t)block_id * block_size * row_elems,
                               row_elems};
-    sparse_rebuild_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
-                                   slot + span, row_elems);
+    sparse_rebuild_block(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
+                         slot + span, row_elems);
 }
 
 // NVFP4 twin: same owner scheme, two base pointers (packed nibbles + UE4M3
 // group scales). Strides are in bytes because both regions are byte arrays.
-template <bool kMeanStd>
 __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
     const uint8_t* __restrict__ k_base, int64_t k_layer_stride_bytes,
     const uint8_t* __restrict__ sc_base, int64_t sc_layer_stride_bytes,
@@ -202,24 +174,16 @@ __global__ void sparse_update_key_minmax_layers_nvfp4_kernel(
     KeyReaderNvfp4 rd{k_base + (layer * k_layer_stride_bytes) + ((int64_t)block_id * block_size * row_bytes),
                       sc_base + (layer * sc_layer_stride_bytes) + ((int64_t)block_id * block_size * sc_row),
                       row_bytes, sc_row};
-    sparse_rebuild_block<kMeanStd>(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
-                                   slot + span, row_elems);
+    sparse_rebuild_block(rd, mm_base + (layer * mm_layer_stride) + ((int64_t)block_id * row_elems),
+                         slot + span, row_elems);
 }
 
 // Block scoring: one warp per block, grid-stride over blocks (context-independent grid
 // shape, capture-safe while ctx grows during replay).
-//   score(b) = max over q heads h of sum_d (q_h[d]*center[d] + |q_h[d]|*off[d])
-// Corner bound (Quest): (min, max); max(q*min, q*max) == q*(min+max)/2 + |q|*(max-min)/2,
-// an upper bound on any softmax logit the block can produce, but bounded by the single
-// most extreme token per dimension.
+//   score(b) = max over q heads h of sum_d (q_h[d]*mean[d] + |q_h[d]|*coef*std[d])
 // Mean/std (arXiv 2605.27740): the page's own centre and spread, not a bound but an
-// estimate; top-k only ranks blocks, so admissibility buys nothing and outlier
-// sensitivity costs recall.
-struct ScoreCornerBound {
-    __device__ __forceinline__ static float term(float q, float lo, float hi, float) {
-        return fmaxf(q * lo, q * hi);
-    }
-};
+// estimate. It replaced the Quest min/max corner bound, which one extreme token per dimension
+// drives (NIAH 2/10 vs 10/10 at a 4096 budget, Qwen3.8-27B, 2026-09-12).
 struct ScoreMeanStd {
     __device__ __forceinline__ static float term(float q, float mean, float sd, float coef) {
         return (q * mean) + (fabsf(q) * coef * sd);
@@ -674,8 +638,7 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
 }  // namespace
 
 bool sparse_score_uses_split(int n_kv_heads, int head_dim) {
-    return split_score_kernel<ScoreCornerBound>(n_kv_heads, head_dim) != nullptr &&
-           split_score_kernel<ScoreMeanStd>(n_kv_heads, head_dim) != nullptr;
+    return split_score_kernel<ScoreMeanStd>(n_kv_heads, head_dim) != nullptr;
 }
 
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
@@ -684,7 +647,7 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
                                          int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, bool meanstd, cudaStream_t stream) {
+                                         int n_sequences, cudaStream_t stream) {
     if (n_tokens <= 0 || n_layers <= 0)
         return;
     const int row_elems = n_kv_heads * head_dim;
@@ -699,28 +662,22 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
             IMP_LOG_ERROR("sparse_update_key_minmax: NVFP4 cache without a scale pool");
             return;
         }
-        // Both instantiations share one signature, so the statistic is a
-        // pointer choice and the dispatch shape below stays as it was.
-        auto* kern = meanstd ? sparse_update_key_minmax_layers_nvfp4_kernel<true>
-                             : sparse_update_key_minmax_layers_nvfp4_kernel<false>;
-        kern<<<grid, threads, 0, stream>>>(
+        sparse_update_key_minmax_layers_nvfp4_kernel<<<grid, threads, 0, stream>>>(
             static_cast<const uint8_t*>(k_base), k_layer_stride_bytes,
             static_cast<const uint8_t*>(k_scale_base), sc_layer_stride_bytes,
             static_cast<__half2*>(minmax_base), mm_stride, positions, block_tables, seq_offsets, row_elems,
             block_size, n_tokens, max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (cache_dtype == QType::FP8_E4M3) {
-        auto* kern = meanstd ? sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3, true>
-                             : sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3, false>;
-        kern<<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
+        sparse_update_key_minmax_layers_kernel<__nv_fp8_e4m3>
+            <<<grid, threads, 0, stream>>>(static_cast<const __nv_fp8_e4m3*>(k_base), k_layer_stride_bytes,
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
                                            block_tables, seq_offsets, row_elems, block_size, n_tokens,
                                            max_blocks_per_seq, n_sequences);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        auto* kern = meanstd ? sparse_update_key_minmax_layers_kernel<half, true>
-                             : sparse_update_key_minmax_layers_kernel<half, false>;
-        kern<<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
+        sparse_update_key_minmax_layers_kernel<half>
+            <<<grid, threads, 0, stream>>>(static_cast<const half*>(k_base),
                                            k_layer_stride_bytes / (int64_t)sizeof(half),
                                            static_cast<__half2*>(minmax_base), mm_stride, positions,
                                            block_tables, seq_offsets, row_elems, block_size, n_tokens,
@@ -766,7 +723,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
                           int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
+                          int* sparse_block_tables, int* sparse_context_lens, float std_coef,
                           cudaStream_t stream) {
     // Fixed grid.x: work distribution adapts device-side via grid-stride, so a captured
     // graph stays correct while the context grows during replay. 256 CTAs: fewer leaves the
@@ -775,16 +732,10 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     dim3 score_grid(256, n_seq);
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
     const auto* mm = static_cast<const __half2*>(minmax_base);
-    if (meanstd)
-        launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q, mm, block_tables, context_lens,
-                                   scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
-                                   max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef,
-                                   n_heads * head_dim, max_blocks_per_seq, 0);
-    else
-        launch_score<ScoreCornerBound>(score_grid, q_smem, stream, q, mm, block_tables, context_lens,
-                                       scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
-                                       max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef,
-                                       n_heads * head_dim, max_blocks_per_seq, 0);
+    launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q, mm, block_tables, context_lens, scores_scratch,
+                               n_heads, n_kv_heads, head_dim, block_size, max_blocks_per_seq,
+                               max_blocks_per_seq, engage_blocks, std_coef, n_heads * head_dim,
+                               max_blocks_per_seq, 0);
 
     launch_select_topk(n_seq, scores_scratch, block_tables, context_lens, sparse_block_tables,
                        sparse_context_lens, block_size, max_blocks_per_seq, budget_blocks, sink_blocks,
@@ -801,9 +752,9 @@ int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks) 
 int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
                                const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
                                int head_dim, int block_size, int capacity_blocks, int budget_blocks,
-                               int sink_blocks, int recent_blocks, bool meanstd, float std_coef,
-                               float* scores_scratch, float* agg_scratch, int* out_block_table,
-                               int* out_ctx_scratch, cudaStream_t stream) {
+                               int sink_blocks, int recent_blocks, float std_coef, float* scores_scratch,
+                               float* agg_scratch, int* out_block_table, int* out_ctx_scratch,
+                               cudaStream_t stream) {
     const int n_blocks = (past_len + block_size - 1) / block_size;
     if (n_rows <= 0 || past_len <= 0 || n_blocks > capacity_blocks)
         return -1;
@@ -817,17 +768,10 @@ int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const
         const size_t q_smem = (size_t)q_elems * sizeof(half);
         const half* q_first = q + ((int64_t)first * q_elems);
         const auto* mm = static_cast<const __half2*>(minmax_layer);
-        if (meanstd)
-            launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q_first, mm, past_block_table, nullptr,
-                                       scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
-                                       capacity_blocks, capacity_blocks, /*engage_blocks=*/0, std_coef,
-                                       step * q_elems,
-                                       /*bt_stride=*/0, past_len);
-        else
-            launch_score<ScoreCornerBound>(score_grid, q_smem, stream, q_first, mm, past_block_table, nullptr,
-                                           scores_scratch, n_heads, n_kv_heads, head_dim, block_size,
-                                           capacity_blocks, capacity_blocks, /*engage_blocks=*/0, std_coef,
-                                           step * q_elems, /*bt_stride=*/0, past_len);
+        launch_score<ScoreMeanStd>(score_grid, q_smem, stream, q_first, mm, past_block_table, nullptr,
+                                   scores_scratch, n_heads, n_kv_heads, head_dim, block_size, capacity_blocks,
+                                   capacity_blocks, /*engage_blocks=*/0, std_coef, step * q_elems,
+                                   /*bt_stride=*/0, past_len);
         sparse_prefill_merge_rows_kernel<<<1, kMergeThreads, 0, stream>>>(scores_scratch, agg_scratch, rows,
                                                                           n_blocks, capacity_blocks);
         IMP_CUDA_CHECK_LAUNCH();

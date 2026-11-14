@@ -19,7 +19,6 @@ namespace imp {
 // specialized kernels accept.
 struct AttnKernelSupport {
     bool fa2_accepts = false;       // fmha_sm120_fa2_prefill(...) succeeded
-    bool fp8_accepts = false;       // fmha_sm120_fp8_prefill(...) succeeded
     bool fmha_sm120_accepts = false;// fmha_sm120_prefill(...) succeeded
     bool blackwell_accepts = false; // flash_attention_blackwell(...) succeeded
                                     // (declines hd ∉ {64,96,128,256} and
@@ -28,14 +27,14 @@ struct AttnKernelSupport {
 
 // Reproduces attention_prefill_dispatch()'s path selection (config gates + kernel-decline
 // fall-through). has_sinks mirrors the #992 pre-gate: learned sinks route to the sink-capable tiers
-// only (fp16-qk FA2, then the FP16 WMMA FMHA); dispatch throws on decline instead of falling through.
+// only (FA2, then the FP16 WMMA FMHA); dispatch throws on decline instead of falling through.
 inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, const AttnKernelSupport& sup,
                                                 bool has_sinks = false) {
-    // 0. Learned sinks (#992): fp16-qk FA2, FP16 WMMA FMHA, or nothing.
+    // 0. Learned sinks (#992): FA2, FP16 WMMA FMHA, or nothing.
     if (has_sinks) {
-        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never" && sup.fa2_accepts)
+        if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)
             return AttnPrefillPath::FA2;
-        if (rcfg.attention.fmha_sm120 != "never" && sup.fmha_sm120_accepts)
+        if (sup.fmha_sm120_accepts)
             return AttnPrefillPath::FMHA_SM120;
         return AttnPrefillPath::NONE;  // dispatcher throws (silent-wrong guard)
     }
@@ -44,13 +43,8 @@ inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, cons
     if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)
         return AttnPrefillPath::FA2;
 
-    // fp8-QK FMHA: strictly opt-in (== "on"). Raw e4m3 Q/K conversion compounds relative score
-    // error per layer on real activations (#511). Default routes hd!=128 to the FP16 WMMA kernel.
-    if (rcfg.attention.fp8_fmha == "on" && sup.fp8_accepts)
-        return AttnPrefillPath::FP8;
-
-    // 4. Native FP16 WMMA FMHA — ON unless fmha_sm120 == "never".
-    if (rcfg.attention.fmha_sm120 != "never" && sup.fmha_sm120_accepts)
+    // 4. Native FP16 WMMA FMHA (always tried; declines unsupported configs).
+    if (sup.fmha_sm120_accepts)
         return AttnPrefillPath::FMHA_SM120;
 
     // 5. Final tier: WMMA 128x64 Blackwell flash attention (no config gate,

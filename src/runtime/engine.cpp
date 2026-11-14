@@ -1,5 +1,4 @@
 #include "runtime/engine.h"
-#include "runtime/engine_kv_evict.h"
 #include "runtime/kv_fp8_scale_init.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"
@@ -31,7 +30,6 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
-#include "compute/ffn_sparsity_probe.h"
 #include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
 #include "compute/gemm.h"
@@ -64,33 +62,13 @@ namespace {
 // After warmup's raise_ceiling (it refuses once the worker runs). Needs relaxed capture (cuda_graph.cu):
 // a global capture would forbid the worker's driver calls while the engine captures. The retry window
 // starts with serving: init growth (replan) always reads free VRAM.
-void start_kv_grow_ahead(KVCache* kv, const RuntimeConfig& rc) {
-    if (kv != nullptr)
-        kv->set_serving_growth(rc.kv_cache.grow_retry_ms, rc.kv_cache.grow_ahead_fit_last);
-    if (kv != nullptr && rc.kv_cache.grow_ahead)
-        kv->start_grow_ahead();
+void start_kv_grow_ahead(KVCache* kv) {
+    if (kv == nullptr)
+        return;
+    kv->set_grow_retry_ms(cfg::kKvGrowRetryMs);
+    kv->start_grow_ahead();
 }
 }  // namespace
-
-namespace engine_internal {
-void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
-                                   int& meta_cap) {
-    const std::vector<int> init_slots(n, -1), init_meta(3 * static_cast<size_t>(n), 0);
-    const size_t slot_bytes = init_slots.size() * sizeof(int), meta_bytes = init_meta.size() * sizeof(int);
-    slot_uploaded.assign(n, -1);
-    if (cudaMalloc(&d_slot, slot_bytes) != cudaSuccess)
-        d_slot = nullptr;
-    else if (cudaMemcpy(d_slot, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice) != cudaSuccess)
-        slot_uploaded.clear();  // the first decode step uploads before use
-    if (cudaMalloc(&d_meta, meta_bytes) != cudaSuccess)
-        d_meta = nullptr;
-    else if (cudaMemcpy(d_meta, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice) == cudaSuccess)
-        meta_cap = n;
-    if (!d_slot || slot_uploaded.empty() || meta_cap != n)
-        IMP_LOG_WARN("residual decode buffers: alloc/init failed (slot=%p, meta capacity %d of %d)",
-                     static_cast<void*>(d_slot), meta_cap, n);
-}
-}  // namespace engine_internal
 
 void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
@@ -125,10 +103,6 @@ Engine::~Engine() {
     }
     MemAccount::instance().sampler_stop();
     MemAccount::instance().report("shutdown");
-    // FFN sparsity probe: drain per-layer counters to stderr if any decode
-    // steps ran with it enabled. Counters are an arena slice, so this must run
-    // BEFORE the arena closes.
-    flush_ffn_sparsity_probe_log();
     engine_arena_close();
     // The arena is gone; every module static that took a slice from it now
     // dangles. reset_static_cuda_state() re-arms them (previously wired only to
@@ -177,15 +151,6 @@ Engine::~Engine() {
     if (d_token_is_whitespace_) {
         vram_alloc_.free(d_token_is_whitespace_);
         d_token_is_whitespace_ = nullptr;
-    }
-    if (d_kv_slot_buf_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_kv_slot_buf_));
-        d_kv_slot_buf_ = nullptr;
-    }
-    if (residual_meta_d_buf_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(residual_meta_d_buf_));
-        residual_meta_d_buf_ = nullptr;
-        residual_meta_capacity_ = 0;
     }
     abandon_decode_pipeline();
     for (int p = 0; p < 2; ++p) {
@@ -638,7 +603,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // Publishes THIS engine's RuntimeConfig to the process_diag snapshot that
     // leaf kernels read, so exec/ and the kernels agree (a mismatch, e.g.
-    // attention.fa2_hd256, walks the FMHA chain to the #654 throw).
+    // the FA2 head_dim gate, walks the FMHA chain to the #654 throw).
     // Ordering matters twice: BEFORE the arch resolvers below (install() writes
     // gemm.cublas_fp16_acc/deterministic_gemm verbatim; resolvers then promote
     // them - installing after would undo arch-specific decisions), and BEFORE
@@ -670,7 +635,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_resolve_quant_flags_();
     init_resolve_kv_block_size_();
     init_resolve_sparse_attention_();
-    kv_evict_resolve(runtime_config_, model_->config(), config_.kv_cache_dtype, config_.streaming_kv_enabled);
 
     init_compute_max_seq_len_();
 
@@ -877,7 +841,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // serving-phase acquisition; release builds count it per tag and log once,
     // since a production server must not die over an accounting bug.
     set_alloc_phase(AllocPhase::Serving);
-    start_kv_grow_ahead(kv_cache_raw_, runtime_config_);
+    start_kv_grow_ahead(kv_cache_raw_);
     // Arm the CUDA-side watermarks too: the phase guard only sees Backend
     // traffic, these see every cudaMallocAsync and every graph-owned
     // allocation regardless of who made it (AUDIT B8).

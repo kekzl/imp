@@ -261,11 +261,6 @@ public:
     // of physical blocks freed.
     int evict_middle_blocks(int seq_id, int n_sink_tokens, int n_window_tokens);
 
-    // Score-based eviction (kv_cache.evict_keep_ratio): frees the listed logical blocks, leaving
-    // -1 holes like evict_middle_blocks. Shared blocks (ref_count != 1) and pinned blocks stay;
-    // the prefix-hash chain from the first freed block on is dropped. Returns blocks freed.
-    int evict_blocks(int seq_id, std::span<const int> logical_blocks);
-
     // ── Stats ────────────────────────────────────────────────────────
 
     // Snapshot of all cache statistics.
@@ -288,65 +283,6 @@ public:
     // mappings. Returns number of blocks restored, or -1 on error/mismatch.
     int load_prefix_cache(const std::string& path, uint64_t model_fingerprint,
                           cudaStream_t stream = nullptr);
-
-    // BitDecoding Phase 3: optional per-sequence ring buffer of FP16 K/V for the newest N
-    // tokens. Decode kernel reads attention from BOTH the NVFP4 paged cache and the FP16
-    // residual; the write path appends FP16 to the ring first and only quantizes to NVFP4
-    // when the ring fills (evicting the overwritten entry to the paged cache).
-    // Layout: [max_seqs, n_layers, 2 (K|V), residual_n, n_kv_heads, head_dim] FP16
-    // contiguous, indexed by (seq_slot, layer, k_or_v).
-
-    struct ResidualRingState {
-        int write_idx = 0;    // next slot to write into [0, residual_n)
-        int fill_count = 0;   // populated entries [0, residual_n]
-    };
-
-    // Allocate the residual pool. Idempotent: returns false if already enabled.
-    // Returns true on success, false on alloc failure or if residual_n==0.
-    [[nodiscard]] bool enable_residual_buffer(int max_seqs, int residual_n, VRAMAllocator* alloc);
-
-    [[nodiscard]] bool residual_enabled() const { return residual_pool_ != nullptr; }
-    int residual_n_tokens() const { return residual_n_tokens_; }
-
-    // Per-(seq, layer) K/V pointer into the residual pool. Returns nullptr if residual is
-    // not enabled, seq_id has no allocated slot, or layer is out of range.
-    void* residual_k_ptr(int seq_id, int layer) const;
-    void* residual_v_ptr(int seq_id, int layer) const;
-
-    // Layer-base pointers (slot 0's K or V data for the given layer). Combined with
-    // residual_seq_stride_bytes() a kernel addresses per-batch-idx data:
-    // K_for_slot_s = K_layer_base + s * stride. Returns nullptr if residual not enabled or
-    // layer out of range.
-    void* residual_k_layer_base(int layer) const;
-    void* residual_v_layer_base(int layer) const;
-
-    // Stride (in bytes) between consecutive seq slots in the residual pool.
-    // Same value for K and V — the (slot, layer, K|V) layout makes this
-    // the per-slot row stride independent of layer.
-    size_t residual_seq_stride_bytes() const { return residual_per_seq_bytes_; }
-
-    // Device-resident ring state buffers ([max_seqs] ints each), replacing the per-step host
-    // upload of write_idx/fill_count: kernels read directly, and
-    // advance_residual_state_kernel updates them once per decode step (graph-capture-safe).
-    // Zeroed on slot allocation and release.
-    int* d_residual_widx_ptr() const { return d_residual_widx_; }
-    int* d_residual_fc_ptr() const { return d_residual_fc_; }
-
-    // Slot allocation (multi-seq batch support): each active sequence holds one slot in
-    // [0, residual_max_seqs_) for the duration of its decode. FIFO from a free-list. Returns
-    // the assigned slot, or -1 if residual not enabled / pool full / slot zero failed. Idempotent: re-allocating
-    // for the same seq returns the existing slot.
-    [[nodiscard]] int allocate_residual_slot(int seq_id, cudaStream_t stream);
-
-    // Release a sequence's slot (no-op if not allocated). Called on
-    // free_sequence; safe to call eagerly. Resets the ring state too.
-    void release_residual_slot(int seq_id);
-
-    // Look up a sequence's slot, or -1 if not allocated.
-    int residual_slot_of(int seq_id) const;
-
-    // Per-sequence ring state. Returns {0, 0} for unknown / out-of-range seq.
-    ResidualRingState residual_state(int seq_id) const;
 
     // ── Hashing utility (public for testing) ─────────────────────────
 
@@ -577,30 +513,6 @@ private:
     // Internal: allocate a fresh block, reclaiming cached blocks if needed.
     [[nodiscard]] BlockRef allocate_block_ref_with_eviction();
     [[nodiscard]] BlockRef acquire_block_with_eviction_();
-
-    // Residual FP16 cache state: single contiguous pool. Layout per element:
-    //   pool[seq_slot, layer, k_or_v, ring_idx, kv_head, hd_elem]
-    // where seq_slot in [0, residual_max_seqs_), layer in [0, n_layers), k_or_v in {0,1},
-    // ring_idx in [0, residual_n_tokens_).
-    void* residual_pool_ = nullptr;
-    VRAMAllocator* residual_alloc_ = nullptr;
-    int residual_n_tokens_ = 0;
-    int residual_max_seqs_ = 0;
-    size_t residual_per_layer_bytes_ = 0;     // bytes per (seq, layer, K-or-V)
-    size_t residual_per_seq_bytes_ = 0;       // bytes per seq across all layers
-    int residual_n_layers_ = 0;               // cached from cache_->n_layers()
-    int residual_n_kv_heads_ = 0;             // cached from cache_->n_kv_heads()
-    int residual_head_dim_ = 0;               // cached from cache_->head_dim()
-    std::unordered_map<int, ResidualRingState> seq_residual_state_;
-    // Slot allocator (multi-seq batch): free list of unused slot indices in
-    // [0, residual_max_seqs_). Admission pops one off the back (LIFO for cache-
-    // friendliness); release pushes back. seq_slot_map_ tracks the currently-assigned slot
-    // per active seq_id.
-    std::vector<int> residual_free_slots_;
-    std::unordered_map<int, int> residual_seq_slot_;
-    // Device-resident ring state, [max_seqs] ints each. Zeroed at alloc.
-    int* d_residual_widx_ = nullptr;
-    int* d_residual_fc_ = nullptr;
 };
 
 }  // namespace imp

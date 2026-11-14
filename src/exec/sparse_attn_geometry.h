@@ -36,7 +36,7 @@ inline SparseGeometry sparse_geometry(int topk_tokens, int sink_tokens, int rece
         g.budget_blocks = g.sink_blocks + g.recent_blocks + 1;
         g.budget_raised = true;
     }
-    // Identity below sparse_min_ctx (the selection's win only outgrows its
+    // Identity below kSparseMinCtx (the selection's win only outgrows its
     // overhead past ~12k measured); the table rows must hold an identity copy
     // up to that length.
     g.engage_blocks = std::min(g.max_ctx_blocks, std::max(g.budget_blocks, up(min_ctx)));

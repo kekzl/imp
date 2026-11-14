@@ -32,7 +32,7 @@ Corrections the site census (archive A1.7) forced:
 |---|---|
 | T5 splits a/b | 26 pinned-host sites are reused every decode step, so T5a's "load only" discipline could not hold them; moved to T5b |
 | T1 and T2 need separate arenas | `server.model_swap` unloads/loads without a process restart: T1 releases wholesale at swap, T2 survives it |
-| T3 is a group of pools, not one | KV runs two block groups (global + SWA); residual FP16 ring, SSM state and recurrent snapshots are separate fixed-stride slabs. One `BlockPool` class, four instances (stride is a runtime constructor argument, not a template parameter) |
+| T3 is a group of pools, not one | KV runs two block groups (global + SWA); SSM state and recurrent snapshots are separate fixed-stride slabs. One `BlockPool` class, four instances (stride is a runtime constructor argument, not a template parameter) |
 
 No tier holds the library reservation: not imp's memory, a **charge** the planner subtracts before distributing anything (A4). Per-request `cudaMallocAsync` traffic (`engine_graph_decode.cpp`/`engine_scheduler.cpp`) is logically T4; since 2026-09-07 it is one T2 pool carved at init (`Engine::init_serving_metadata_pool_()`, `runtime/serving_metadata_layout.h`), the driver calls remaining only as the fallback for a pool that failed to allocate.
 
@@ -58,8 +58,8 @@ All in `src/memory/`; nothing above L1 calls the driver.
 | VMM for the KV pool | the pool must be sized before the weight caches exist, from a free-VRAM reading wrong by ~3.9 GiB (archive 0, F3/F4); `cuMemAddressReserve` the maximum KV the config could want, commit 64-256 MiB chunks on demand, decommit when idle |
 | WSL2/WDDM spike: GO (2026-07-29, `tools/analysis/vmm_wsl2_probe.cu`, 24/24 checks) | 24 GiB reserve costs 0 MiB physical; commit granularity 2 MiB (not 64 KiB); base address invariant across an 8-chunk grow/shrink cycle; a graph captured over a fixed VA survives +1.5 GiB growth with the same checksum three times; decommit costs ~2x commit (~2.4-2.6 ms per 256 MiB) |
 | Not `cudaMallocAsync` as the backend | imp already pins its default pool's release threshold to `UINT64_MAX` (a de-facto arena without an arena's guarantees); its reserved-vs-used split is a recurring accounting-confusion source |
-| Refused growth is not asked again per block (`kv_cache.grow_retry_ms`, default 100) | a pool capped by free VRAM below its ceiling took each block of a prompt off the prefix cache after one `cudaMemGetInfo` (Gemma-4 pp8192: 334-503 readings, 22.9-36.0 ms queue; pp15000: 920, 49.6-68.6 ms); a refused growth opens a 100 ms window in which `try_grow_to` and the grow-ahead tick skip the reading; a cancel decision (`try_grow_to_now`) still reads |
-| Growth off the admission path (`kv_cache.grow_ahead`, default on) | a synchronous growth was the request's queue time (34.8-64.7 ms on Qwen3-8B, `docs/audit/VLLM_GAP_2026_11_02.md`); a worker thread commits the next step (max(64, 25 %, the last admitted request: `kv_cache.grow_ahead_fit_last`, Gemma-4 fresh pp8192 queue 21.0-36.3 -> 0.1 ms)) once the free list drops below it, zeroes it on its own stream, the scheduler adopts it next round; same free-VRAM cap, same ceiling |
+| Refused growth is not asked again per block (`cfg::kKvGrowRetryMs` = 100 ms) | a pool capped by free VRAM below its ceiling took each block of a prompt off the prefix cache after one `cudaMemGetInfo` (Gemma-4 pp8192: 334-503 readings, 22.9-36.0 ms queue; pp15000: 920, 49.6-68.6 ms); a refused growth opens a 100 ms window in which `try_grow_to` and the grow-ahead tick skip the reading; a cancel decision (`try_grow_to_now`) still reads |
+| Growth off the admission path (always on for a growable pool) | a synchronous growth was the request's queue time (34.8-64.7 ms on Qwen3-8B, `docs/audit/VLLM_GAP_2026_11_02.md`); a worker thread commits the next step (max(64, 25 %, the last admitted request, Gemma-4 fresh pp8192 queue 21.0-36.3 -> 0.1 ms)) once the free list drops below it, zeroes it on its own stream, the scheduler adopts it next round; same free-VRAM cap, same ceiling |
 
 ```cpp
 // src/memory/backend.h - the ONLY place in imp that calls the driver.
@@ -142,7 +142,7 @@ struct MemoryPlan {
     size_t engine_persistent;   // T2
     size_t forward_scratch;     // T4
     KvPlan kv;                  // blocks, bytes, below_floor (loud, not silent, on underflow)
-    std::vector<PlanLine> pools;         // SWA group, SSM state, residual ring, ...
+    std::vector<PlanLine> pools;         // SWA group, SSM state, recurrent snapshots, ...
     size_t library_reserve; size_t context_reserve;
     size_t total() const;
     std::vector<PlanLine> lines() const;  // every line item, largest first - the VRAM audit table body

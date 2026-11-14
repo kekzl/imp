@@ -123,9 +123,7 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
         return {};
     const char* field = p.banned_strings.empty() ? "banned_regex" : "banned_strings";
     if (!ctx.snap.phrase_ban_ok)
-        return {"\"" + std::string(field) +
-                    "\" needs a model without the residual KV ring: a rewind cannot restore it",
-                field};
+        return {"\"" + std::string(field) + "\" needs a loaded model", field};
     if (p.json_mode || !p.json_schema_str.empty() || !p.regex_pattern.empty() || !p.grammar.empty() ||
         !p.tool_constraint_tools.empty() || p.mirostat != 0)
         return {

@@ -32,7 +32,6 @@
 #include "compute/sampling.h"
 #include "compute/ssm.h"
 #include "compute/gdn.h"
-#include "memory/kv_cache_manager.h"
 #include "exec/executor_kernels.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -661,36 +660,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 : 0;
         sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride, k_sc, sc_stride,
                                             kvc->key_minmax_ptr(0, 0), mm_stride, state.positions,
-                                            state.block_tables, state.seq_offsets, n_kv,
-                                            kvc->n_kv_heads(), kvc->head_dim(), kvc->block_size(),
-                                            state.n_tokens, state.max_blocks_per_seq, state.n_sequences,
-                                            qscratch_.sparse_score_meanstd, stream);
-    }
-
-    // BitDecoding Phase 3: advances the residual ring state once per decode
-    // step, inside the captured graph (else replays reuse the captured-time
-    // write_idx). Must run AFTER the layer loop: each layer reads the same
-    // write_idx for its KV write/attention. Decode-only (n==1 or n==n_sequences).
-    if (!state.is_prefill && state.kv_manager != nullptr &&
-        state.kv_manager->residual_enabled() && state.kv_seq_id >= 0) {
-        int slot = state.kv_manager->residual_slot_of(state.kv_seq_id);
-        if (slot >= 0) {
-            advance_residual_state_kernel<<<1, 1, 0, stream>>>(
-                state.kv_manager->d_residual_widx_ptr(),
-                state.kv_manager->d_residual_fc_ptr(),
-                slot,
-                state.kv_manager->residual_n_tokens());
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-    } else if (!state.is_prefill && state.kv_manager != nullptr && state.kv_manager->residual_enabled() &&
-               state.d_residual_seq_slots != nullptr && state.n_sequences > 1) {
-        // Multi-seq: kv_seq_id is only set on the N==1 path, so the branch above
-        // never fires here; the ring was advanced host-side instead, which a graph
-        // replay does not run (#1708). Slots come from the engine's per-step upload, correct across replays.
-        advance_residual_state_multi_kernel<<<1, state.n_sequences, 0, stream>>>(
-            state.kv_manager->d_residual_widx_ptr(), state.kv_manager->d_residual_fc_ptr(),
-            state.d_residual_seq_slots, state.n_sequences, state.kv_manager->residual_n_tokens());
-        IMP_CUDA_CHECK_LAUNCH();
+                                            state.block_tables, state.seq_offsets, n_kv, kvc->n_kv_heads(),
+                                            kvc->head_dim(), kvc->block_size(), state.n_tokens,
+                                            state.max_blocks_per_seq, state.n_sequences, stream);
     }
 
     join_expert_prefetch_(stream);  // a skipped or exited layer left its prefetch unconsumed

@@ -1,4 +1,4 @@
-// FP8 E4M3 paged decode, TOK tokens/warp iteration (attention.paged_fp8_multitok). The plain
+// FP8 E4M3 paged decode, TOK tokens/warp iteration (process_diag_paged_fp8_multitok). The plain
 // kernel serializes one token per warp iteration (K row, 5-shuffle reduce, softmax, V row); here
 // a warp issues K rows of TOK tokens before reducing any, so TOK*2 loads are in flight per warp
 // instead of two. Softmax state is unnormalized (m,l,o), divided by l once at the end so the

@@ -336,23 +336,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // FFN sparsity mask (Phase 2): one bit per Q8 block, packed uint32.
-        if (qscratch_.q8_1_max_blocks > 0) {
-            int mask_words = (qscratch_.q8_1_max_blocks + 31) / 32;
-            size_t mask_sz = static_cast<size_t>(mask_words) * sizeof(uint32_t);
-            // Same family, same tier: tens of bytes, engine-lifetime, and the
-            // sparsity path in executor_ffn.cu already tests the pointer.
-            auto slab = engine_arena().take_bytes(mask_sz);
-            if (slab.empty()) {
-                IMP_LOG_WARN("FFN sparsity mask unavailable from the T2 arena (%zu bytes)", mask_sz);
-                qscratch_.ffn_block_mask = nullptr;
-                qscratch_.ffn_block_mask_words = 0;
-            } else {
-                qscratch_.ffn_block_mask = reinterpret_cast<uint32_t*>(slab.data());
-                qscratch_.ffn_block_mask_words = mask_words;
-            }
-        }
-
         // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
         // ggml_mmvq_q*_kernel hot-path (gemm_kernel_gguf.cpp). Every GGUF strategy is
         // registered m_is_one: one row x max_k, not max_tokens rows (Qwen3-14B 153 MiB -> 39 KiB).
@@ -452,9 +435,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Every token->block conversion must use the cache's real block size, not kKVBlockSize:
             // n_kv_heads <= 4 models use block size 32, not 16, or budgets silently double (#1819).
             const int kv_bs = kv_block_size_;
-            const SparseGeometry geo =
-                sparse_geometry(acfg.sparse_topk_tokens, acfg.sparse_sink_tokens,
-                                acfg.sparse_recent_tokens, acfg.sparse_min_ctx, max_ctx_tokens, kv_bs);
+            const SparseGeometry geo = sparse_geometry(acfg.sparse_topk_tokens, cfg::kSparseSinkTokens,
+                                                       cfg::kSparseRecentTokens, cfg::kSparseMinCtx,
+                                                       max_ctx_tokens, kv_bs);
             const int max_ctx_blocks = geo.max_ctx_blocks;
             const int sink_blocks = geo.sink_blocks;
             const int recent_blocks = geo.recent_blocks;
@@ -464,7 +447,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              "blocks (%d tokens)",
                              budget_blocks, budget_blocks * kv_bs);
             }
-            // Identity below sparse_min_ctx (the selection's win only outgrows
+            // Identity below kSparseMinCtx (the selection's win only outgrows
             // its overhead past ~12k measured); the table rows must hold an
             // identity copy up to that length.
             const int engage_blocks = geo.engage_blocks;
@@ -494,25 +477,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_table_blocks = table_blocks;
                 qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
                 qscratch_.sparse_max_rows = max_batch;
-                qscratch_.sparse_score_meanstd = acfg.sparse_score_meanstd;
-                qscratch_.sparse_score_std_coef = acfg.sparse_score_std_coef;
-                IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
-                             "recent %d blocks, engage above %d tokens, score %s, scratch %.1f KiB",
-                             budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks,
-                             engage_blocks * kv_bs, acfg.sparse_score_meanstd ? "mean+std" : "minmax",
-                             (scores_sz + bt_sz + ctx_sz) / 1024.0);
+                IMP_LOG_INFO(
+                    "Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
+                    "recent %d blocks, engage above %d tokens, score mean+std, scratch %.1f KiB",
+                    budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks, engage_blocks * kv_bs,
+                    (scores_sz + bt_sz + ctx_sz) / 1024.0);
             }
         }
     }
 
     allocate_sparse_prefill_scratch_();  // attention.sparse_prefill_topk_tokens (executor_sparse_prefill.cpp)
-    allocate_kv_evict_scratch_();        // kv_cache.evict_keep_ratio (executor_kv_evict.cpp)
 
     // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
     // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill
-    // (uniform per-layer shapes, head_dim 64, 128 or 256 with fa2_hd256, sinks included).
-    // cuBLAS remains the reference for heterogeneous shapes, hd=256 without fa2_hd256,
-    // and fa2_fp16qk=never.
+    // (uniform per-layer shapes, head_dim 64, 128 or 256, sinks included). cuBLAS remains the
+    // reference for heterogeneous shapes.
     if (fa2_serves_all_prefill()) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — "
                      "no S-matrix needed)");
@@ -1726,8 +1705,7 @@ bool GraphExecutor::fa2_serves_all_prefill() const {
         }
     }
     // hd=64 and learned sinks ride FA2 too (try_fa2_fp16qk_prefill passes sinks): gpt-oss 378 MiB.
-    const bool fa2_hd_ok = fa2_serves_head_dim(hd_for_attn, dispatch_policy().attention.fa2_hd256);
-    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" && attn_shapes_uniform();
+    return fa2_serves_head_dim(hd_for_attn) && attn_shapes_uniform();
 }
 
 int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {
@@ -1756,11 +1734,11 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     // chunk collapsing with offset, at no benefit. The condition mirrors the
     // dispatch exactly: if the tier declines, the dispatch throws rather than
     // falling back to something that would need the S-matrix.
-    if (sinks && uniform && att.fmha_sm120 != "never" && fmha_serves_head_dim(hd_u))
+    if (sinks && uniform && fmha_serves_head_dim(hd_u))
         return desired;
     // Mirrors the chunked dispatch in executor_attention_prefill.cu:
     // FP16-QK FA2 serves every hd=128 chunk with no S-matrix.
-    if (uniform && !sinks && hd_u == 128 && att.fa2_fp16qk != "never")
+    if (uniform && !sinks && hd_u == 128)
         return desired;
     // Tiled FMHA dispatch serves chunks whose ctx_len crosses the threshold (or that the
     // S-matrix cannot hold) with no S-matrix, but only for head dims it covers. Without this
@@ -1778,7 +1756,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
         for (int x : cfg.head_dim_per_layer) {
             if (x <= 0)
                 continue;  // non-attention layers (GDN/Mamba2 hybrids)
-            const bool fa2 = fa2_serves_head_dim(x, att.fa2_hd256) && att.fa2_fp16qk != "never";
+            const bool fa2 = fa2_serves_head_dim(x);
             const bool fmha = fmha_serves_head_dim(x);
             if (!fa2 && !fmha) {
                 all_served = false;
@@ -1819,11 +1797,8 @@ bool GraphExecutor::chunk_capture_supported() const {
     }
     // FP16-QK FA2 is the only device-length chunked attention kernel. hd=256 rides the #930
     // port (d_kv_len is a runtime kernel arg); GDN/Mamba2 recurrent kernels stop state
-    // updates at the device chunk length, so hd=256 hybrids are capture-eligible only when
-    // fa2_hd256 is on.
-    if (hd_u != 128 && !(hd_u == 256 && dispatch_policy().attention.fa2_hd256))
-        return false;
-    if (dispatch_policy().attention.fa2_fp16qk == "never")
+    // updates at the device chunk length, so hd=256 hybrids are capture-eligible.
+    if (hd_u != 128 && hd_u != 256)
         return false;
     // MoE: only the grouped NVFP4 device-args path records into a graph without
     // host-side routing reads; every other MoE prefill path does a D2H+sync per layer to size

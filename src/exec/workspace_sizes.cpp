@@ -472,9 +472,6 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                 static_cast<size_t>(std::min(std::max(shape.max_batch_size, 8), 16));
             out.quant_scratch = static_cast<size_t>(max_blocks) * rows *
                                 (kExecBlockQ81Bytes + sizeof(float));
-            // FFN sparsity mask: one bit per Q8 block, packed uint32.
-            out.quant_scratch +=
-                ((static_cast<size_t>(max_blocks) + 31) / 32) * sizeof(uint32_t);
             // dp4a dense prefill pair. Gated on a Q4_K/Q5_K dense weight existing
             // at all, and sized from kDp4aDenseMaxM=64 — the M above which the
             // weight-stationary tile stops winning and the path is not taken.

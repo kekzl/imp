@@ -26,7 +26,6 @@ enum class RegionTag {
     EnginePersistent,    // T2 arena: workspaces, cuBLASLt/own-GEMM scratch, graph buffers
     KvBlockPool,         // T3: the global paged KV block group
     SwaBlockPool,        // T3: the dedicated sliding-window block group
-    ResidualRing,        // T3: BitDecoding FP16 residual ring
     SsmState,            // T3: per-sequence SSM/GDN conv + h state
     RecurrentSnapshots,  // T3: hybrid prefix-state snapshot store
     ForwardScratch,      // T4: the LIFO scratch stack

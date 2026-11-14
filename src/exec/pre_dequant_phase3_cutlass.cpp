@@ -364,10 +364,8 @@ if (mx_native > 0) {
             IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e));
     }
 
-    // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless the FP16 cache is forced
-    // (attention.mxfp4_fp16_fallback). GDN hybrids were forced onto the cache: the prefill wrote its
-    // activation into the shared workspace that holds the GDN buffers.
-    bool mxfp4_gemv_available = !dispatch_policy().attention.mxfp4_fp16_fallback;
+    // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless a weight lacks linear scales.
+    bool mxfp4_gemv_available = true;
     for (auto& [p, m] : wcache_->cutlass_mxfp4)
         if (!m.linear_scales) {
             mxfp4_gemv_available = false;
@@ -381,48 +379,12 @@ if (mx_native > 0) {
 
     // Dequant MXFP4 -> FP16 for decode (only when MXFP4 GEMV unavailable). Single bulk
     // allocation to avoid CUDA heap fragmentation.
-    // Phase A2: when attention.mxfp4_fp16_cache_policy == "pruned", skip tensor slots not
-    // read on the dispatch hot path (MoE expert_*_packed, consumed only by the pre-cached
-    // FP16 path the MXFP4 batch-dequant route bypasses; the LM head out_proj_, routed
-    // through generic-dequant) to shrink the FP16 fallback substantially.
-    std::unordered_set<const void*> pruned_skip_ptrs;
-    const bool pruned_policy =
-        (dispatch_policy().attention.mxfp4_fp16_cache_policy == "pruned");
-    if (pruned_policy) {
-        for (int li = 0; li < cfg.n_layers; ++li) {
-            const auto& L = model_->layer(li);
-            if (L.expert_gate_packed.data)
-                pruned_skip_ptrs.insert(L.expert_gate_packed.data);
-            if (L.expert_up_packed.data)
-                pruned_skip_ptrs.insert(L.expert_up_packed.data);
-            if (L.expert_down_packed.data)
-                pruned_skip_ptrs.insert(L.expert_down_packed.data);
-        }
-        if (model_->output_proj().data)
-            pruned_skip_ptrs.insert(model_->output_proj().data);
-    }
-    size_t pruned_skipped_bytes = 0;
-    int pruned_skipped_count = 0;
-
     size_t fp16_total = 0;
     if (!mxfp4_gemv_available) {
         for (auto& [p, m] : wcache_->cutlass_mxfp4) {
             if (wcache_->fp16.contains(p))
                 continue;
-            size_t b = static_cast<size_t>(m.N) * m.K * sizeof(half);
-            if (pruned_policy && pruned_skip_ptrs.contains(p)) {
-                pruned_skipped_bytes += b;
-                pruned_skipped_count++;
-                continue;
-            }
-            fp16_total += b;
-        }
-        if (pruned_policy && pruned_skipped_count > 0) {
-            IMP_LOG_INFO(
-                "MXFP4 FP16 cache pruning: skipping %d MoE/LM-head tensors "
-                "(%.2f GiB saved)",
-                pruned_skipped_count,
-                pruned_skipped_bytes / (1024.0 * 1024.0 * 1024.0));
+            fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
         }
     }
 
@@ -438,25 +400,19 @@ if (mx_native > 0) {
         constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
         bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                               fp16_total + kRuntimeHeadroom > free_mem);
-        // The "force anyway despite oversubscription" path is gone: attention.mxfp4_fp16_fallback
-        // is a plain bool now. Opting in via imp.conf is still gated by this oversubscribe check
-        // (matching the old IMP_MXFP4_FP16_FALLBACK=1 semantics); oversubscription is always
-        // refused here.
+        // Oversubscription is always refused.
         if (oversubscribe) {
             // Inside `if (!mxfp4_gemv_available)`: this FP16 fallback is the ONLY valid decode path
             // for these weights (native MXFP4 GEMV unavailable). Skipping it does not degrade
             // gracefully: decode runs against weights with no usable kernel and emits uniform
-            // logits -> token-0 garbage (#934). Fail loud at load instead: the VRAM budget reserves
-            // this fallback up front, so reaching here means the model genuinely does not fit.
+            // logits -> token-0 garbage (#934). Fail loud at load instead.
             throw std::runtime_error(
                 "MXFP4 FP16 decode fallback would oversubscribe VRAM (need " +
                 std::to_string(fp16_total / (static_cast<int64_t>(1024) * 1024)) + " MiB + " +
                 std::to_string(kRuntimeHeadroom / (static_cast<int64_t>(1024) * 1024)) +
                 " MiB runtime headroom, " + std::to_string(free_mem / (static_cast<int64_t>(1024) * 1024)) +
-                " MiB free). The FP16 decode cache was requested (attention.mxfp4_fp16_fallback) or the "
-                "weights "
-                "carry no linear scales, and it does not fit on this GPU at the requested "
-                "context length. Reduce --min-kv-tokens / max context, or use a smaller model.");
+                " MiB free). The weights carry no linear scales, and it does not fit on this GPU at the "
+                "requested context length. Reduce --min-kv-tokens / max context, or use a smaller model.");
         }
     }
     if (fp16_total > 0) {
@@ -478,10 +434,6 @@ if (mx_native > 0) {
         size_t offset = 0;
         for (auto& [ptr, mw] : wcache_->cutlass_mxfp4) {
             if (wcache_->fp16.contains(ptr))
-                continue;
-            // Honor the same pruning filter the fp16_total compute
-            // pass used; otherwise the offset accounting drifts.
-            if (pruned_policy && pruned_skip_ptrs.contains(ptr))
                 continue;
             size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
             void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;

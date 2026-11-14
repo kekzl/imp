@@ -34,7 +34,6 @@ const char* region_tag_name(RegionTag t) {
         case RegionTag::EnginePersistent:   return "engine_persistent";
         case RegionTag::KvBlockPool:        return "kv_block_pool";
         case RegionTag::SwaBlockPool:       return "swa_block_pool";
-        case RegionTag::ResidualRing:       return "residual_ring";
         case RegionTag::SsmState:           return "ssm_state";
         case RegionTag::RecurrentSnapshots: return "recurrent_snapshots";
         case RegionTag::ForwardScratch:     return "forward_scratch";

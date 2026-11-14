@@ -70,7 +70,7 @@ O_acc       -> REGISTERS, not smem (0 KB)
 | 256 | 64 | 32 | 88.2 KB | `max_smem` only, occupancy 1 |
 | 512 | 32 | 16 | 82.1 KB | `max_smem` only, occupancy 1 |
 
-**MMA, dual-precision, both f16-accumulate:** QK^T uses `mma.sync.m16n8k16.f16.f16.f16.f16` (f16 accumulator; online-softmax subtracts the row max so f16 score range is safe; +0.37 % PPL via `attention.fa2_f16acc`) - the 1/4-rate to full-rate jump. PV also f16-accumulate (default-on since #674; the "O sum needs f32 range" objection was refuted).
+**MMA, dual-precision, both f16-accumulate:** QK^T uses `mma.sync.m16n8k16.f16.f16.f16.f16` (f16 accumulator; online-softmax subtracts the row max so f16 score range is safe; +0.37 % PPL, #597) - the 1/4-rate to full-rate jump. PV also f16-accumulate (default-on since #674; the "O sum needs f32 range" objection was refuted).
 
 **Async pipeline:** synchronous `float4` copies replaced by a 3-stage `cp.async.cg.shared.global` 16-byte ring; producer lanes prefetch K tile j+1 and V tile j while consumers run QK/PV on tile j (`commit_group`/`wait_group(N-1)` + `__syncthreads()` before any smem read). At 1 block/SM (0.75 waves) more occupancy cannot hide GDDR7 latency, so deeper software pipelining is the only correct response.
 
@@ -97,7 +97,7 @@ Barriers:      1x __syncthreads / KV tile (cp.async.wait)
 
 | Lever | Status | Evidence |
 |---|---|---|
-| f16-acc QK^T + PV | shipped | `fa2_f16acc` / #674, +3-4 % pp, +0.37 % PPL |
+| f16-acc QK^T + PV | shipped | #674 (`fa2_f16acc`, key removed 2026-11-14), +3-4 % pp, +0.37 % PPL |
 | Register-resident O | shipped | primary FA2 (`mxf4nvf4_sm120.h`) |
 | cp.async K/V double-buffer | shipped | -11.6 % kernel, long ctx |
 | Smem row-stride padding | shipped | 1.54x kernel, #484 |

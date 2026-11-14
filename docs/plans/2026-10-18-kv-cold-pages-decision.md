@@ -78,4 +78,4 @@ Step times (graphs on, same patched image, the dump inert without `IMP_SPARSE_DU
 
 A selection that keeps its pages across steps: ring 2x misses fall to about 21 blocks per layer per step (the 32k ring 4x point, 10.4 % floor).
 
-That changes which pages attention reads, so it needs a quality A/B first (`tools/analysis/sparse_score_niah_ab.sh`).
+That changes which pages attention reads, so it needs a quality A/B first (NIAH, `tools/analysis/niah_check.py`).

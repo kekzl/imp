@@ -341,7 +341,7 @@ TEST(ServingSignalsTest, FirstShortPromptsReplayPrewarmedPrefillGraphs) {
         << "first-request TTFT median " << first_med << " ms vs warm " << warm_med << " ms";
 }
 
-// kv_cache.grow_ahead: a growable pool that has to grow for every new prompt (prefix cache keeps
+// Grow-ahead: a growable pool that has to grow for every new prompt (prefix cache keeps
 // the old ones) commits the next step while the GPU runs, so a request's queue time stays at the
 // scheduler pickup. Synchronous growth put the driver mapping there (Qwen3-8B: 35-65 ms per step).
 TEST(ServingSignalsTest, AdmissionDoesNotWaitForKvGrowth) {

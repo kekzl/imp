@@ -27,7 +27,6 @@
 #include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
-#include "exec/kv_evict.h"
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
@@ -580,8 +579,8 @@ public:
     [[nodiscard]] bool attn_shapes_uniform() const;
 
     // True when FP16-QK FA2 serves ALL prefill for this model (uniform shapes,
-    // no learned sinks, hd=128 always / 256 behind fa2_hd256, fa2_fp16qk !=
-    // "never"). Shared by the S-matrix allocator skip and workspace_estimate() so the two cannot drift
+    // no learned sinks, hd 64/128/256). Shared by the S-matrix allocator skip and
+    // workspace_estimate() so the two cannot drift
     // (#943).
     [[nodiscard]] bool fa2_serves_all_prefill() const;
 
@@ -595,7 +594,7 @@ public:
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
     // device-read lengths: uniform hd=128, no learned sinks, no MLA, no
-    // LongRoPE, fa2_fp16qk not disabled.
+    // LongRoPE.
     [[nodiscard]] bool chunk_capture_supported() const;
     // Rows a captured verify chunk may carry when every MoE layer is host-resident NVFP4 served
     // per row by the device expert cache (the captured decode path); 0 = not that layout.
@@ -643,13 +642,6 @@ public:
         streaming_window_ = (window > 0) ? window : 0;
     }
     int streaming_window() const { return streaming_window_; }
-
-    // kv_cache.evict_keep_ratio (executor_kv_evict.cpp): scores tokens [tok_begin, tok_end) of the prompt
-    // just prefilled from 0; false when off or the query statistics do not cover exactly ctx_len rows.
-    [[nodiscard]] bool kv_evict_score_prompt(KVCache* cache, std::span<const int> h_block_table, int ctx_len,
-                                             int tok_begin, int tok_end, std::vector<float>& token_scores,
-                                             cudaStream_t stream);
-    [[nodiscard]] bool kv_evict_enabled() const { return kv_evict_.enabled; }
 
     // LoRA runtime delta (#522): activation-path low-rank deltas, no weight
     // patching, works with every quant tier. nullptr = base model. Caller
@@ -715,13 +707,6 @@ private:
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
     int streaming_window_ = 0;
-
-    KvEvictScratch kv_evict_;  // kv_cache.evict_keep_ratio (exec/kv_evict.h, executor_kv_evict.cpp)
-    void allocate_kv_evict_scratch_();
-    void kv_evict_prefill_qstats_(int layer, const InferenceState& state, const Tensor& q, int n,
-                                  cudaStream_t stream);
-    void kv_evict_tables_(const InferenceState& st, const int* bt, int sub_n, int n_seq, int kv_bs,
-                          const int*& attn_bt, const int*& attn_ctx, cudaStream_t stream);
 
     class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;

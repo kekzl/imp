@@ -41,7 +41,6 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
-| `kv_cache.grow_ahead`, `kv_cache.grow_ahead_fit_last`, `kv_cache.grow_retry_ms` | `true`, `true`, `100` | a worker thread commits the next growth step (at least the last admitted request) before the free list runs out; admission adopts it instead of waiting for the driver. A refused growth is not asked again for N ms, so a prompt reclaiming prefix-cache blocks on a pool capped by free VRAM reads it once, not per block (`0` = per block) |
 | `kv_cache.host_spill_mb` | `0` | pinned host RAM (MiB) for prefix blocks the pool reclaims; a later prefix hit restores them by H2D instead of re-prefill. Off by default; needs prefix caching, refused with SWA layers; a spilled block carries its sparse key min/max pages; GDN hybrids restore through recurrent snapshot chains (Qwen3.8-27B-NVFP4, 8 chats x ~31k on an 8000-block pool, 16384: TTFT sum 213.1 -> 21.3 s); `/metrics` `imp_kv_host_spill_*` |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
@@ -53,8 +52,6 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `moe.expert_cache_budget_pct` | `0` (auto) | host-expert cache budget; only relevant when MoE experts don't fit, see [`PERF.md`](PERF.md) |
 | `attention.sparse_topk_tokens` | `-1` (auto) | sparse decode token budget; auto = 4096 on qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama, gpt_oss, else 0; `0` = off (#2405) |
 | `attention.sparse_prefill_topk_tokens` | `-1` (auto) | auto = 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe and llama, else 0; `0` = off (#2406, #2529). Sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
-| `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
-| `attention.sparse_prefill_recent_tokens` | `1024` | past positions a continuation chunk always keeps |
 | `attention.apa_eps` | `0.01` | APA prefill (hd 128, causal, no window/softcap/sinks, not `runtime.deterministic`): FP4 pass 1, KV tiles whose share of the running row sum exceeds eps get an exact FP16 pass 2. `0` = off (FA2) |
 | `attention.apa_min_kv` | `8192` | APA serves chunks with `kv_len >= apa_min_kv` and >= 256 rows; FA2 (RA2 when `ra2_prefill`) below. With `ra2_prefill`, 40960 is the measured split |
 | `attention.apa_tile_cache` | `false` | per-layer FP4 tiles reused across prefill chunks of one request; T2 arena n_layers x 72*hd B per 64 tokens per kv head at max_seq_len (Llama-3.2-3B at 108k: 3.7 GiB) |
@@ -123,7 +120,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--bench-teacher-force` | off | with `--bench-prompt-file`: tg decode inputs are the file tokens after the prompt (`imp_set_forced_decode`), the run fails unless all tg inputs were forced; decodes per step (no pipeline, graph loop or speculation) |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
 
-KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:764 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
+KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:753 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
 

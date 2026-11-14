@@ -4,7 +4,6 @@
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/engine.h"
-#include "runtime/engine_kv_evict.h"
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
@@ -574,13 +573,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.is_prefill = true;
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
     state.prefill_req_id = req->id;
-    state.kv_manager = kv_manager_.get();
-    if (kv_manager_ && kv_manager_->residual_enabled()) {
-        // Slot lookup happens inside KVCacheManager::residual_k_ptr; if no
-        // slot is allocated yet (prefill before first decode), the residual
-        // pointers return nullptr and the kernel skips the residual pass.
-        state.kv_seq_id = req->id;
-    }
     fill_sampling_params(*req, state);
 
     // Constraints via the per-request ConstraintManager: prepared once on
@@ -910,9 +902,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
                 kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
             }
-            if (executor_->kv_evict_enabled())  // kv_cache.evict_keep_ratio
-                kv_evict_after_prefill(*executor_, *kv_manager_, kv_cache_raw_, runtime_config_.kv_cache,
-                                       req->id, offset + chunk_len, mtp_spec_decode_enabled(), pf_stream);
         }
     }
 

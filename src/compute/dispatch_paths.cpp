@@ -6,8 +6,6 @@ const char* attn_prefill_path_name(AttnPrefillPath p) {
     switch (p) {
         case AttnPrefillPath::FA2:
             return "fmha_fa2";
-        case AttnPrefillPath::FP8:
-            return "fmha_fp8";
         case AttnPrefillPath::FMHA_SM120:
             return "fmha_sm120_wmma";
         case AttnPrefillPath::BLACKWELL:
@@ -52,8 +50,6 @@ const char* attn_decode_path_name(AttnDecodePath p) {
             return "paged_int4";
         case AttnDecodePath::NVFP4:
             return "paged_nvfp4";
-        case AttnDecodePath::NVFP4_TC:
-            return "paged_nvfp4_tc";
         case AttnDecodePath::MXFP4_KV:
             return "paged_mxfp4_kv";
     }

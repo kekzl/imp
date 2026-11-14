@@ -438,7 +438,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr, split_units, max_splits, split_units > 0 ? 128 : 0);
 
-    // attention.paged_nvfp4_multitok: four tokens per warp iteration for
+    // process_diag_paged_nvfp4_multitok: four tokens per warp iteration for
     // HD=128/256 (attention_paged_nvfp4_multitok.cu), both routes.
     if (process_diag_paged_nvfp4_multitok() > 1 &&
         paged_attention_decode_nvfp4_multitok_launch(

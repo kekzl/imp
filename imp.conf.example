@@ -134,22 +134,13 @@ video_pruning_rate   = 0
 # output); "fp8" restores the faster long-context decode.
 # "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
 dtype                       = "auto"
-# Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
-# but reproducibility is lost.
-allow_nondeterministic_fp8  = false
-# Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
-fp8_auto_legacy             = false
 # FP8 KV scale per layer. "legacy": first real prefill's absmax / 448, floored
 # at 1.0. "checkpoint": the checkpoint's k_scale / v_scale, 1.0 where absent.
-# "calibrate": a fixed-text prefill at warmup, amax * fp8_scale_headroom / 448.
+# "calibrate": a fixed-text prefill at warmup, amax * 2 / 448.
 # Static modes round up to a power of two and stay fixed for the process.
 fp8_scale                   = "legacy"
-fp8_scale_headroom          = 2.0
 # Static modes only: separate K and V scales per layer instead of one shared value.
 fp8_scale_split             = false
-# BitDecoding TC path for NVFP4 paged-attention QK (experimental).
-# Experimental, expires: 2026-12-31 (remove or promote by then).
-bitdecoding_qk              = false
 
 # Growable KV pool: reserve address space for the pool this configuration asks
 # for, commit what the card can spare now, commit more as it frees. Fixes a
@@ -165,20 +156,6 @@ growable                    = true
 # spilled into host memory decodes at a fraction of the bandwidth with nothing
 # reporting an error.
 growable_initial_pct        = 25
-# Commit the next growth step on a worker thread once the free list drops below
-# it, so a request adopts backed blocks instead of waiting in the queue for the
-# driver mapping (35-65 ms per growth on Qwen3-8B). Same free-VRAM cap.
-grow_ahead                  = true
-# A pool capped by free VRAM below its ceiling: after a refused growth, skip
-# the free-VRAM reading for this many ms, so a prompt reclaiming prefix-cache
-# blocks does not read it once per block. 0 = read on every empty-list block.
-grow_retry_ms               = 100
-# Grow-ahead step at least the last admitted request (prompt + decode reserve),
-# not only max(64 blocks, 25 %): a second prompt that size finds it committed.
-grow_ahead_fit_last         = true
-# BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
-# typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
-bitdecoding_residual_tokens = 0
 # SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
 # other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
 # small dedicated block group instead of full-length KV. The saving grows with
@@ -244,21 +221,6 @@ max_blocks                  = 0
 # 4-KV-head model the old "32 when n_kv_heads <= 4" rule was meant for; the
 # key exists so the next model class can be measured, not guessed.
 block_size                  = 0
-# KV eviction proof harness (roadmap row 48, docs/plans/2026-11-01-kv-eviction.md).
-# After the last prefill chunk, prompt blocks are scored by TriAttention (mean
-# pre-RoPE query of the prompt itself, trig distance term + norm term, z-normalized
-# per head, max over heads, mean over layers) and the lowest-scoring whole blocks
-# beyond the budget are freed; decode attention skips them. keep_ratio = fraction
-# of the prompt's blocks kept, 0 = off. Blocks covering the first sink / last
-# recent tokens always stay; prompts below min_tokens are untouched. Refused on
-# hybrid, SWA, MLA, M-RoPE / YaRN / partial RoPE models, INT8/INT4/MXFP4 KV,
-# speculation (ngram, MTP), StreamingLLM, residual KV and sparse decode attention.
-# Refuted 2026-11-01 on Qwen3-8B-NVFP4: keep 0.5 NIAH 60/60 like off, continuation
-# recall F1 -11.2 % (gate 2 %); a measurement tool, not a serving setting.
-evict_keep_ratio            = 0.0
-evict_sink_tokens           = 64
-evict_recent_tokens         = 256
-evict_min_tokens            = 4096
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its
@@ -333,57 +295,9 @@ library_reserve_cache =
 # Each "auto" key picks the kernel automatically based on weight type +
 # context length. Override only for benchmarking or compatibility tests.
 fp8_prefill          = "auto"
-# fp8-QK FMHA family: strictly opt-in ("on"). The raw e4m3 Q/K conversion
-# compounds per-layer score error on real activations (#511) — teacher-forced
-# PPL gemma-3-12b 16.6 -> 549 when it served prefill. Default "never" routes
-# hd!=128 prefill to the FP16 WMMA kernel instead.
-fp8_fmha             = "never"
-# amax-scaled e4m3 QK conversion on the fp8-QK path (only takes effect when
-# fa2_fp16qk=never or declined). Experimental quality probe; default off.
-# Experimental, expires: 2026-12-31 (remove or promote by then).
-fp8_qk_scaled        = false
-
-fmha_sm120           = "auto"
-# Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).
-# Default "on" since PR #478; QK^T runs in f16 unless fa2_fp16qk=never AND
-# fp8_fmha=on (#511). Declines to the FP16 WMMA kernel for unsupported configs.
+# Register-resident FA2 prefill kernel (F16, head_dim 64/128/256, f16 QK^T).
+# Default "on" since PR #478. Declines to the FP16 WMMA kernel for unsupported configs.
 fmha_fa2             = "on"
-# FP16-QK FA2 for SHORT prefill (below fmha_prefill_threshold, hd=128):
-# replaces the materialized cuBLAS+softmax path (PR #525, +25-35% pp512
-# NVFP4). "never" restores the materialized cuBLAS path.
-fa2_fp16qk           = "on"
-# f16-accumulate QK^T in the fp16-qk FA2 kernel (#597). GeForce sm_120 runs
-# f16-src/f32-acc HMMA at 1/4 rate (#606); f16-acc lifts the score MMA to the
-# full-rate class: +4.7-5.0% pp4096 NVFP4 prefill (Qwen3-14B / 30B-A3B). PPL
-# on a 5.8k teacher-forced corpus: 14B identical, 30B +0.10%, Q8 +0.013%.
-# Default true since 2026-06-11; set false to restore f32 accumulate.
-fa2_f16acc           = true
-# Also f16-accumulate the PV MMA (full-rate HMMA + halved O-fragment
-# registers): FA2 kernel −18% pp4096, e2e +9.7% 30B-A3B / +3.7% 14B NVFP4.
-# PPL on a 14.8k teacher-forced corpus: 14B −0.06%, 30B −0.30%, Q8 +0.002%
-# (noise). Default true since 2026-06-11. Needs fa2_f16acc.
-fa2_pv_f16acc        = true
-# HD=256 FA2 port: route head_dim=256 prefill (Qwen3.6 hybrids, gemma-class)
-# through the register-resident FA2 kernel (fp16-qk, Bq=64, TWOSLOT) instead
-# of the SMEM-tiled WMMA FMHA / cuBLAS. Default on since stage 3; also lifts
-# the FP8-KV deterministic-cuBLAS forcing for hd=256 models.
-fa2_hd256            = true
-# KV tile rows of that HD=256 instance, 64 or 32. Bkv=64 keeps one 4-warp
-# CTA per SM (67.6 KB smem of 100 KB); Bkv=32 seats two (33.8 KB each):
-# FA2 kernel -11% at pp4096, e2e +0.1..0.4%, PPL +0.53%. Opt-in.
-fa2_hd256_bkv        = 64
-# hd=512 prefill (Gemma-4 global layers), single-shot and chunk continuation:
-# "fmha" = WMMA FMHA with a forward KV scan, a prompt row is identical in every
-# chunk (#2167); "cublas" = S-matrix cuBLAS, algorithm picked by row count;
-# "fa2" = split-D FA2 (no window / sinks), rows identical in every chunk, Gemma-4-26B pp4096
-# +3.4..4.2 % vs cublas; "auto" = fa2, else fmha under runtime.deterministic, else cublas.
-hd512_prefill        = "auto"
-# Dense hd=128 Bq=128 FA2 at two CTAs per SM (TWOSLOT tile + kernel pinned
-# to 128 registers): FA2 kernel -10% at pp4096 on Qwen3-14B-NVFP4, output
-# bit-identical. hd=64 Bq=128 (gpt-oss, double buffer): 163 -> 128 registers,
-# kernel -13 % at pp4096 on gpt-oss-20b. Default on; false restores the
-# single-CTA instances.
-fa2_dense_2cta       = true
 # RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
 # quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
 # sinks, graph replay and runtime.deterministic. pp ~9k: Qwen3-8B Q8_0 +2.9 %,
@@ -405,68 +319,24 @@ apa_min_kv           = 8192
 # Tile cache across chunks (chunked prefill quantizes only new keys): 106451-token
 # dense prefill 7155.16 -> 6474.33 ms; arena +3.7 GiB at --max-seq-len 108000. Opt-in.
 apa_tile_cache       = false
-# Causal FA2 CTA order: heaviest q-tiles first (a causal q-tile attends 2..32
-# KV tiles at 4096 tokens; natural order started the heaviest last). Kernel
-# sum pp4096: Qwen3-14B-NVFP4 223.532/224.010/223.556 -> 220.748/221.213/221.309 ms
-# (-1.2%, 3/3 pairs), Qwen3.8-27B-NVFP4 120.737/120.594/120.523 -> 117.782/117.953/117.956 ms
-# (-2.2%, 3/3); output byte-identical. Default on.
-fa2_heavy_first      = true
-# FP8 paged decode attention (HD=128, serving path without split-K): tokens per
-# warp iteration. 4 issues the K and V rows of four tokens before reducing any
-# of them; the plain one-token kernel was 33% of the serving kernel time on a
-# dense 40-layer model at 32 streams x 1.1k context at ~25% of bandwidth.
-# Microbench 32 x 1100: 209 -> 107 us per launch. 1 = the plain kernel.
-paged_fp8_multitok   = 4
-# The same for the NVFP4 KV cache (HD=128/256, plain and split-K kernels).
-# Microbench 24/4 heads HD=256: 1 x 77k context 294 -> 210 us per launch with
-# the 4-CTAs-per-SM split-K target, 32 x 1100: 123 -> 90 us; Q heads grouped per
-# CTA (each row converted once): 1 x 32k 102 -> 74 us, 32 x 1100 93 -> 69 us.
-# 1 = scalar kernels.
-paged_nvfp4_multitok = 4
-# NVFP4 split-K decode on m16n8k16 tensor cores (GQA ratio 2..8, HD=128/256):
-# one CTA per KV head x split runs all its Q heads. Microbench 1 x 77k, NVFP4
-# KV read from DRAM: 16/2 heads 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us.
-paged_nvfp4_mma = true
-# The same for the F16 KV cache (HD=64/128/256/512, GQA ratio 1..8): four tokens per
-# warp iteration, each K/V row read once per CTA for up to four Q heads.
-# Microbench 32 x 1100: 32/8 heads HD=128 315 -> 98 us per launch (four heads
-# per CTA), 16/8 HD=256 665 -> 178 us (two); 32 x 4096: 1165 -> 327 and
-# 2445 -> 643 us, i.e. the resident-bandwidth ceiling; single stream (split-K)
-# 32/8 HD=128 at 32k 197 -> 109 us, 64k 375 -> 203 us; Gemma-4 global layers
-# (16/2 HD=512): tg after an 8192-token prompt 232.0 -> 248.9 tok/s. 1 = the per-head kernels.
-paged_f16_multitok   = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
-# MXFP4 GGUF weights decode natively (GEMV) and prefill W4A16 (per-GEMM FP16 dequant scratch);
-# true restores the FP16 decode cache (~4x the MXFP4 bytes; Qwen3.5-4B: 8020 MiB, pp512 28k vs 19-20k tok/s,
-# tg128 156-166 vs 259-267 tok/s).
-mxfp4_fp16_fallback  = false
-# MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
-# tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).
-mxfp4_fp16_cache_policy = "legacy"
-force_cublas_decode  = false
 # MLA absorbed-decode latent KV cache (DeepSeek-V2/V3): decode stores only the
 # compressed latent + decoupled RoPE key and runs the mathematically-equivalent
 # absorbed attention (~9x smaller per-token KV). Prefill stays materialized;
 # single-sequence only (falls back to materialized otherwise). Opt-in.
 mla_absorb           = false
-no_qknorm_fused      = false
-splitk_pipe          = true
-# Token-tiled FP8 split-K decode attention (hd=128/bs=16 only); off = the
-# per-token pipeline kernel (A/B + rollback knob).
-fp8_tile             = true
-# GQA-batched tile variant: one block computes all Q heads of a KV head from
-# a shared smem tile (KV L2 traffic /G); off = per-head tile kernel.
-fp8_tile_gqa         = true
-gate_concat          = false
 # Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
 # long prefill stays on the fast cuBLAS path before falling back to FMHA.
 attn_scores_mib      = 384
 # Sparse decode attention (Quest-class top-k page selection): decode reads
-# only the top-scoring KV blocks (per-block key min/max bound vs the query),
-# up to this many tokens per sequence, selected device-side per step.
+# only the top-scoring KV blocks (per-block key mean + stddev score vs the query;
+# the min/max corner bound scored NIAH 2/10 vs 10/10 at a 4096 budget),
+# up to this many tokens per sequence, selected device-side per step. The first
+# 16 and last 256 positions are always kept; below 12288 tokens of context decode
+# stays dense (8k measured -7 %, 16k +6 %, 32k +25 %).
 # -1 = auto (default): 4096 on qwen3, qwen3moe, qwen35, qwen36moe,
 # nemotron_h_moe, llama, gpt_oss (NIAH + tok/s gate, #2405), 0 elsewhere.
 # 0 = off. Contexts at or below the budget are bit-identical to dense.
@@ -485,36 +355,12 @@ sparse_topk_tokens   = -1
 # PPL 4.7558 vs 4.6978) and flips MoE routing on short prompts (degen_suite 48/50 vs 50/50).
 qsa                  = false
 qsa_force            = false
-qsa_rows             = 16
 qsa_debug            = false
-# Blocks covering the first N positions are always kept (attention sinks).
-sparse_sink_tokens   = 16
-# Blocks covering the last N positions are always kept (local context;
-# includes the partially filled tail block).
-sparse_recent_tokens = 256
-# Below this context length decode stays dense even when sparse_topk_tokens is
-# exceeded: the selection only outgrows its overhead past ~12k (8k measured
-# -7 %, 16k +6 %, 32k +25 %). A sparse_topk_tokens setting is a no-op below it.
-sparse_min_ctx       = 12288
-# Page score. true (default) = mean of the page's keys plus
-# sparse_score_std_coef times their standard deviation; false = the min/max
-# corner bound (Quest). Both are sum_d (q_d*center_d + |q_d|*offset_d) over the
-# same metadata layout at the same cost; the corner bound widens with whichever
-# single token is most extreme per dimension, which is what costs it recall at
-# small budgets. Qwen3.8-27B-NVFP4, NIAH 5 depths x 2 lengths: corner 2/10 at a
-# 4096 budget and 7/10 at 8192, mean+std 10/10 at both, wall time neutral.
-sparse_score_meanstd = true
-# Offset weight for sparse_score_meanstd. 0 ranks on the mean alone.
-sparse_score_std_coef = 1.0
 # Sparse prefill: a continuation chunk attends to its own rows plus the top
 # N past tokens (one page selection per chunk, same page score). -1 = auto
 # (default): 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe
 # and llama (NIAH + two-sided PPL + tok/s gate, #2406, #2529), 0 elsewhere. 0 = off.
 sparse_prefill_topk_tokens = -1
-# Query rows sampled per chunk to score the past pages (max 64).
-sparse_prefill_rows = 16
-# Past positions always kept for a continuation chunk (local context).
-sparse_prefill_recent_tokens = 1024
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload
@@ -1091,15 +937,6 @@ mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
 # on non-hybrid models; capture failures fall back to the eager verify.
 # imp-cli --bench pins this false (raw-decode baseline semantics).
 capture              = true
-
-[ffn]
-# SwiGLU/GeGLU sparsity probe — instrumentation only, counts skippable
-# intermediate rows per threshold; no skipping (~1 µs/layer/token when on).
-sparsity_probe       = false
-# FFN down_proj row-skipping per Q8_0 block: skip blocks whose
-# |silu(gate)*up| amax is below this (0.0 = disabled = bit-identical;
-# recommended 0.005..0.05; Q8_0 decode only).
-sparsity_threshold   = 0.0
 
 [diagnostics]
 # Process log level: debug | info | warn | error | fatal.

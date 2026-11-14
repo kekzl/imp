@@ -10,7 +10,6 @@ namespace imp {
 // Tiers inside the FMHA chain (compute/attention_dispatch.cpp), tried in order.
 enum class AttnPrefillPath {
     FA2,         // fmha_sm120_fa2_prefill (register-resident)
-    FP8,         // fmha_sm120_fp8_prefill
     FMHA_SM120,  // fmha_sm120_prefill (WMMA)
     BLACKWELL,   // flash_attention_blackwell (final tier; declines unsupported configs)
     NONE,        // chain exhausted → attention_prefill_dispatch throws (#654)
@@ -38,7 +37,6 @@ enum class AttnDecodePath {
     INT8,
     INT4,
     NVFP4,
-    NVFP4_TC,
     MXFP4_KV,
 };
 

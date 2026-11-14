@@ -50,8 +50,6 @@ using engine_internal::compute_step_seed;
 using engine_internal::copy_d2h_sync;
 using engine_internal::ensure_prefill_workspace;
 using engine_internal::free_prefill_buffers;
-using engine_internal::upload_residual_meta;
-using engine_internal::upload_residual_slot;
 
 // =====================================================================
 // step() — main inference loop
@@ -1085,78 +1083,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.context_lens = gpu_batch.d_context_lens;
     state.max_context_len = max_ctx;
     state.is_prefill = false;
-    state.kv_manager = kv_manager_.get();
     bind_mrope_decode_(state, valid_decode, dec_stream);
-    if (kv_manager_ && kv_manager_->residual_enabled()) {
-        // Allocate / refresh per-seq residual metadata for this decode step.
-        // Slot allocation is idempotent (returns existing slot on re-call).
-        const int N = gpu_batch.n_sequences;
-        residual_meta_h_seq_ids_.resize(N);
-        for (int i = 0; i < N; i++) {
-            int sid = valid_decode[i]->id;
-            residual_meta_h_seq_ids_[i] = sid;
-            // -1 handled downstream: residual_slot_of() < 0 skips the residual path for this seq.
-            (void)kv_manager_->allocate_residual_slot(sid, dec_stream);
-        }
-        if (N == 1) {
-            // Single-seq path: kernel reads ring state from kv_manager's
-            // persistent device buffers. Slot is a constant per-request
-            // value uploaded into d_kv_slot_buf_[0]; only re-uploads when
-            // it changes (i.e. when the active request rotates).
-            state.kv_seq_id = valid_decode[0]->id;
-            state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
-            int slot_for_req = kv_manager_->residual_slot_of(valid_decode[0]->id);
-            // Failed upload: no slot buffer this step, retried next step.
-            if (d_kv_slot_buf_ != nullptr &&
-                upload_residual_slot(d_kv_slot_buf_, slot_for_req, d_kv_slot_last_uploaded_, dec_stream))
-                state.d_residual_seq_slots = d_kv_slot_buf_;
-        } else {
-            // Multi-seq path: build per-batch metadata arrays + upload to
-            // a per-step device buffer.
-            residual_meta_h_slots_.resize(N);
-            residual_meta_h_counts_.resize(N);
-            residual_meta_h_widxes_.resize(N);
-            for (int i = 0; i < N; i++) {
-                int sid = residual_meta_h_seq_ids_[i];
-                residual_meta_h_slots_[i] = kv_manager_->residual_slot_of(sid);
-                auto rs = kv_manager_->residual_state(sid);
-                residual_meta_h_counts_[i] = rs.fill_count;
-                residual_meta_h_widxes_[i] = rs.write_idx;
-            }
-            // The buffer is persistent and sized for max_batch_size (#1648).
-            // Stride by the CAPACITY, not by N, so the three sub-arrays keep
-            // fixed offsets across steps whatever the batch width: a graph
-            // captured at one N stays correct at another.
-            if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
-                int* base = residual_meta_d_buf_;
-                const ptrdiff_t stride = residual_meta_capacity_;
-                if (const cudaError_t err = upload_residual_meta(
-                        base, stride, residual_meta_h_slots_.data(), residual_meta_h_counts_.data(),
-                        residual_meta_h_widxes_.data(), N, dec_stream);
-                    err == cudaSuccess) {
-                    state.d_residual_seq_slots = base + (0 * stride);
-                    state.d_residual_counts = base + (1 * stride);
-                    state.d_residual_write_idxes = base + (2 * stride);
-                    state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
-                } else {
-                    IMP_LOG_ERROR("residual metadata upload failed (%s); this step runs without it",
-                                  cudaGetErrorString(err));
-                }
-            } else {
-                // Neither case is expected: the buffer is sized for
-                // max_batch_size at init and admission is clamped to it. Say
-                // so once rather than decoding with stale metadata.
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
-                    IMP_LOG_WARN(
-                        "residual metadata unavailable for a %d-sequence decode "
-                        "(buffer=%p, capacity=%d); this step runs without it",
-                        N, static_cast<const void*>(residual_meta_d_buf_), residual_meta_capacity_);
-                }
-            }
-        }
-    }
     fill_sampling_params(*valid_decode[0], state);
 
     // Derive per-step seed: mix request seed with output count so each
@@ -1595,9 +1522,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     if (!decode_batch_pool_.is_allocated()) {
         gpu_batch.free();
     }
-
-    // The residual metadata buffer is persistent since #1648 (allocated once
-    // beside d_kv_slot_buf_, freed with it in the destructor).
 
     // Measures MTP-draft prediction accuracy without changing generation.
     // Single-sequence only (batch=1 simplifies hidden-state addressing).

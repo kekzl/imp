@@ -216,7 +216,6 @@ bool Engine::init_kv_cache() {
     config_.kv_ceiling_seqs =
         kv_ceiling_seqs(admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size),
                         experts_on_host_ && executor_ && executor_->expert_cache_nvfp4_slots());
-    config_.mxfp4_fp16_cache = runtime_config_.attention.mxfp4_fp16_fallback;  // FP16 decode cache reserve
     // MTP draft workspace: allocated at the end of init (take_planned_mtp_workspace_), so both passes
     // size KV without it; the live pass sees it as already spent.
     mtp_workspace_planned_bytes_ = mtp_workspace_plan_bytes_();
@@ -699,25 +698,7 @@ bool Engine::init_kv_cache() {
         swa_sizing_active_ = kv_manager_->swa_sizing_enabled();
     }
 
-    // BitDecoding Phase 3: residual FP16 cache (opt-in). Ring state (write_idx/
-    // fill_count per slot) lives in device memory, updated by
-    // advance_residual_state_kernel at the end of forward_logits - keeps the
-    // whole path graph-capture-safe.
-    {
-        const auto& rcfg = runtime_config_;
-        int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
-        if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
-            int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
-            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_))
-                engine_internal::alloc_residual_decode_buffers(max_seqs, d_kv_slot_buf_, d_kv_slot_last_uploaded_,
-                                                               residual_meta_d_buf_, residual_meta_capacity_);
-        } else if (residual_n > 0) {
-            IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
-                         residual_n);
-        }
-    }
-
-    // attention.sparse_topk_tokens: per-block key min/max metadata pool. Gate rule:
+    // attention.sparse_topk_tokens: per-block key mean/std metadata pool. Gate rule:
     // sparse_minmax_refusal (shared with the plan charge above); enable_key_minmax also
     // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
     // the feature loudly.

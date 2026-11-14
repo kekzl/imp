@@ -1,5 +1,4 @@
 #include "memory/kv_cache_manager.h"
-#include "memory/vram_allocator.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -9,23 +8,11 @@
 #include <functional>
 #include <unistd.h>
 #include <cuda_runtime.h>
-#include <cuda_fp16.h>
 #include <utility>
 
 namespace imp {
 
 namespace {
-// Zero one residual slot's device ring state (write_idx, fill_count) on the decode stream that
-// reads it: a legacy-stream write is not ordered before a non-blocking stream (#2275).
-bool residual_slot_zeroed(int* widx, int* fc, int slot, cudaStream_t stream) {
-    cudaError_t err = cudaMemsetAsync(widx + slot, 0, sizeof(int), stream);
-    if (err == cudaSuccess)
-        err = cudaMemsetAsync(fc + slot, 0, sizeof(int), stream);
-    if (err != cudaSuccess)
-        IMP_LOG_ERROR("KVCacheManager: residual slot %d zero failed: %s", slot, cudaGetErrorString(err));
-    return err == cudaSuccess;
-}
-
 // False after logging: copies enqueued on s did not complete.
 bool stream_synced(cudaStream_t s, const char* what) {
     const cudaError_t err = cudaStreamSynchronize(s);
@@ -74,166 +61,6 @@ KVCacheManager::~KVCacheManager() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_swa_descs_));
         d_swa_descs_ = nullptr;
     }
-    if (residual_pool_ && residual_alloc_) {
-        residual_alloc_->free(residual_pool_);
-        residual_pool_ = nullptr;
-    }
-    if (d_residual_widx_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_residual_widx_));
-        d_residual_widx_ = nullptr;
-    }
-    if (d_residual_fc_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_residual_fc_));
-        d_residual_fc_ = nullptr;
-    }
-}
-
-// ─── BitDecoding Phase 3: residual FP16 cache ────────────────────────
-
-bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAllocator* alloc) {
-    if (residual_pool_) {
-        IMP_LOG_WARN("KVCacheManager: residual buffer already enabled, ignoring re-enable");
-        return false;
-    }
-    if (max_seqs <= 0 || residual_n <= 0 || alloc == nullptr) {
-        return false;
-    }
-
-    residual_n_layers_   = cache_->n_layers();
-    residual_n_kv_heads_ = cache_->n_kv_heads();
-    residual_head_dim_   = cache_->head_dim();
-    if (residual_n_kv_heads_ <= 0 || residual_head_dim_ <= 0) {
-        IMP_LOG_WARN("KVCacheManager: residual buffer needs uniform per-layer head_dim — disabled (multi-head_dim model)");
-        return false;
-    }
-
-    // Per (seq, layer, K|V) live region:
-    //   residual_n × n_kv_heads × head_dim FP16 elems
-    residual_per_layer_bytes_ = static_cast<size_t>(residual_n) *
-                                residual_n_kv_heads_ * residual_head_dim_ * sizeof(__half);
-    // Per (seq) across all layers, both K and V:
-    residual_per_seq_bytes_ = static_cast<size_t>(residual_n_layers_) * 2 *
-                              residual_per_layer_bytes_;
-    size_t total = static_cast<size_t>(max_seqs) * residual_per_seq_bytes_;
-
-    void* pool = alloc->allocate(total, "kv_residual");
-    if (!pool) {
-        IMP_LOG_ERROR("KVCacheManager: residual buffer allocation failed (%.2f MiB)",
-                      static_cast<double>(total) / (1024.0 * 1024.0));
-        return false;
-    }
-
-    residual_pool_ = pool;
-    residual_alloc_ = alloc;
-    residual_n_tokens_ = residual_n;
-    residual_max_seqs_ = max_seqs;
-
-    // Initialize the slot free list. LIFO push so slot 0 is allocated first.
-    residual_free_slots_.clear();
-    residual_free_slots_.reserve(max_seqs);
-    for (int i = max_seqs - 1; i >= 0; i--) {
-        residual_free_slots_.push_back(i);
-    }
-    residual_seq_slot_.clear();
-
-    // Allocate device-resident ring state buffers (graph-capture-safe path).
-    // Zero-initialized so that newly-allocated slots start with write_idx=0,
-    // fill_count=0 without an extra reset call.
-    const size_t state_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
-    if (cudaMalloc(&d_residual_widx_, state_bytes) != cudaSuccess ||
-        cudaMalloc(&d_residual_fc_, state_bytes) != cudaSuccess ||
-        cudaMemset(d_residual_widx_, 0, state_bytes) != cudaSuccess ||
-        cudaMemset(d_residual_fc_, 0, state_bytes) != cudaSuccess) {
-        IMP_LOG_ERROR("KVCacheManager: residual state buffer alloc/zero failed (%zu bytes)", state_bytes);
-        if (d_residual_widx_) { IMP_CUDA_CHECK_LOG(cudaFree(d_residual_widx_)); d_residual_widx_ = nullptr; }
-        if (d_residual_fc_) { IMP_CUDA_CHECK_LOG(cudaFree(d_residual_fc_)); d_residual_fc_ = nullptr; }
-        alloc->free(residual_pool_);
-        residual_pool_ = nullptr;
-        return false;
-    }
-
-    IMP_LOG_INFO("KVCacheManager: residual buffer enabled — max_seqs=%d, residual_n=%d, %.2f MiB",
-                 max_seqs, residual_n, static_cast<double>(total) / (1024.0 * 1024.0));
-    return true;
-}
-
-int KVCacheManager::allocate_residual_slot(int seq_id, cudaStream_t stream) {
-    if (!residual_pool_) return -1;
-    auto it = residual_seq_slot_.find(seq_id);
-    if (it != residual_seq_slot_.end()) return it->second;
-    if (residual_free_slots_.empty()) return -1;
-    int slot = residual_free_slots_.back();
-    // Zero device-resident ring state for this slot, ordered before the decode step on
-    // `stream`. Once per request admission. Failed zero: slot stays free.
-    if (d_residual_widx_ && !residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot, stream))
-        return -1;
-    residual_free_slots_.pop_back();
-    residual_seq_slot_[seq_id] = slot;
-    return slot;
-}
-
-void KVCacheManager::release_residual_slot(int seq_id) {
-    if (!residual_pool_) return;
-    auto it = residual_seq_slot_.find(seq_id);
-    if (it == residual_seq_slot_.end()) return;
-    int slot = it->second;
-    residual_free_slots_.push_back(slot);
-    residual_seq_slot_.erase(it);
-    seq_residual_state_.erase(seq_id);
-    // No zero here: a decode step may still read the slot; allocate_residual_slot zeroes on its stream.
-}
-
-int KVCacheManager::residual_slot_of(int seq_id) const {
-    auto it = residual_seq_slot_.find(seq_id);
-    if (it == residual_seq_slot_.end()) return -1;
-    return it->second;
-}
-
-void* KVCacheManager::residual_k_ptr(int seq_id, int layer) const {
-    if (!residual_pool_) return nullptr;
-    int slot = residual_slot_of(seq_id);
-    if (slot < 0) return nullptr;
-    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
-    auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(slot) * residual_per_seq_bytes_;
-    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
-    // K is k_or_v=0 → offset 0
-    return base;
-}
-
-void* KVCacheManager::residual_v_ptr(int seq_id, int layer) const {
-    if (!residual_pool_) return nullptr;
-    int slot = residual_slot_of(seq_id);
-    if (slot < 0) return nullptr;
-    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
-    auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(slot) * residual_per_seq_bytes_;
-    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
-    base += residual_per_layer_bytes_;  // V is k_or_v=1
-    return base;
-}
-
-void* KVCacheManager::residual_k_layer_base(int layer) const {
-    if (!residual_pool_) return nullptr;
-    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
-    auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
-    return base;
-}
-
-void* KVCacheManager::residual_v_layer_base(int layer) const {
-    if (!residual_pool_) return nullptr;
-    if (layer < 0 || layer >= residual_n_layers_) return nullptr;
-    auto* base = static_cast<char*>(residual_pool_);
-    base += static_cast<size_t>(layer) * 2 * residual_per_layer_bytes_;
-    base += residual_per_layer_bytes_;
-    return base;
-}
-
-KVCacheManager::ResidualRingState KVCacheManager::residual_state(int seq_id) const {
-    auto it = seq_residual_state_.find(seq_id);
-    if (it == seq_residual_state_.end()) return {0, 0};
-    return it->second;
 }
 
 // ─── Hashing utility ─────────────────────────────────────────────────
@@ -381,10 +208,6 @@ void KVCacheManager::free_sequence(int seq_id) {
         seq_swa_blocks_.erase(sit);
         swa_trim_cursor_.erase(seq_id);
     }
-
-    // Phase 3: reset residual ring state AND return the slot to the free list.
-    // release_residual_slot is a no-op if no slot was allocated for this seq.
-    release_residual_slot(seq_id);
 
     // Remove from LRU tracking.
     auto lru_it = lru_map_.find(seq_id);

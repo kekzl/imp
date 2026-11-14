@@ -46,20 +46,17 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     // Learned attention sinks (#547/#992): fp16-qk FA2 and the FP16 WMMA FMHA fold them into online
     // softmax. Route only there; fail loudly on decline instead of a sink-blind fallback.
     if (has_sinks) {
-        if (rcfg.attention.fmha_fa2 == "on" && rcfg.attention.fa2_fp16qk != "never") {
+        if (rcfg.attention.fmha_fa2 == "on") {
             sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                     stream, q_offset, /*fp16_qk=*/true,
-                                                     /*d_kv_len=*/nullptr, attn_sinks);
+                                                     stream, q_offset, /*d_kv_len=*/nullptr, attn_sinks);
         }
         if (sup.fa2_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
             return;
         }
-        if (rcfg.attention.fmha_sm120 != "never") {
-            sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                        stream, q_offset, attn_sinks);
-        }
+        sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
+                                                    stream, q_offset, attn_sinks);
         if (sup.fmha_sm120_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
@@ -73,15 +70,11 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
         throw std::runtime_error(msg);
     }
 
-    // Register-resident FA2 ("echtes FA"): S/P/O in registers, 1 barrier/KV tile (vs FP8 FMHA's
-    // 4-barrier smem path). Default on via [attention] fmha_fa2 / IMP_FMHA_FA2, head_dim=128.
-    // QK^T is FP16 unless fa2_fp16qk="never" AND fp8_fmha="on" (raw fp8 scores compound, #511).
-    // #1676: "never" only restores cuBLAS below fmha_prefill_threshold; above it FA2 still runs fp16.
-    const bool fa2_fp8_optin = rcfg.attention.fa2_fp16qk == "never" && rcfg.attention.fp8_fmha == "on";
-    const bool fa2_opted_out = rcfg.attention.fa2_fp16qk == "never" && !fa2_fp8_optin;
-    if (rcfg.attention.fmha_fa2 == "on" && !fa2_opted_out) {
+    // Register-resident FA2 ("echtes FA"): S/P/O in registers, 1 barrier/KV tile, f16 QK^T.
+    // Default on via [attention] fmha_fa2 / IMP_FMHA_FA2, head_dim 64/128/256.
+    if (rcfg.attention.fmha_fa2 == "on") {
         sup.fa2_accepts = fmha_sm120_fa2_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
-                                                 q_offset, /*fp16_qk=*/!fa2_fp8_optin);
+                                                 q_offset);
         if (sup.fa2_accepts) {
             dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FA2);
             verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FA2);
@@ -89,33 +82,16 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
                           static_cast<int>(Q.shape[3]));
             return;
         }
-        // unsupported config (hd!=128) → fall through to FP16 WMMA path
-    }
-
-    // fp8-QK FMHA (smem-materializing): QK^T in raw e4m3 for 2x score throughput, but conversion
-    // error compounds across layers (#511). Strictly opt-in: [attention] fp8_fmha = "on".
-    if (rcfg.attention.fp8_fmha == "on") {
-        sup.fp8_accepts = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                 stream, q_offset);
-        if (sup.fp8_accepts) {
-            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FP8);
-            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FP8);
-            IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
-            return;
-        }
+        // unsupported config (head_dim, smem) → fall through to FP16 WMMA path
     }
 
     // Native sm_120 FP16 FMHA: WMMA for Blackwell with sliding window support.
-    // Fallback when FP8 is disabled or unsupported config.
-    const bool use_fmha_sm120 = rcfg.attention.fmha_sm120 != "never";
-    if (use_fmha_sm120) {
-        sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                    stream, q_offset);
-        if (sup.fmha_sm120_accepts) {
-            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
-            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
-            return;
-        }
+    sup.fmha_sm120_accepts = fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream,
+                                                q_offset);
+    if (sup.fmha_sm120_accepts) {
+        dispatch_record::set_attn_prefill_tier(AttnPrefillPath::FMHA_SM120);
+        verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::FMHA_SM120);
+        return;
     }
 
     // Final tier: WMMA 128x64 tiles for Blackwell. Declines (returns false)
@@ -130,18 +106,17 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     }
 
     // Chain exhausted: fail loudly rather than leave O unwritten (the old silent fallback at hd=256
-    // produced garbage logits, #654). Reachable only via a disabled FP16 WMMA tier or unsupported
-    // head_dim; both deserve an error, not silent corruption.
+    // produced garbage logits, #654). Reachable only via an unsupported head_dim; an error, not
+    // silent corruption.
     char msg[320];
     snprintf(msg, sizeof(msg),
              "attention_prefill_dispatch: no prefill kernel accepts head_dim=%d "
-             "(check attention.fmha_sm120/fmha_fa2 config) (#654): Q [%d, %d, %d] K [%d, %d] q_offset %d "
-             "qtype %d; fa2 %d (fmha_fa2=%s hd256=%d) fp8 %d fmha_sm120 %d blackwell %d",
+             "(check attention.fmha_fa2 config) (#654): Q [%d, %d, %d] K [%d, %d] q_offset %d "
+             "qtype %d; fa2 %d (fmha_fa2=%s hd256=%d) fmha_sm120 %d blackwell %d",
              static_cast<int>(Q.shape[3]), static_cast<int>(Q.shape[0]), static_cast<int>(Q.shape[1]),
              static_cast<int>(Q.shape[2]), static_cast<int>(K.shape[1]), static_cast<int>(K.shape[2]),
              q_offset, static_cast<int>(Q.qtype), (int)sup.fa2_accepts, rcfg.attention.fmha_fa2.c_str(),
-             (int)imp::process_diag_fa2_hd256(), (int)sup.fp8_accepts, (int)sup.fmha_sm120_accepts,
-             (int)sup.blackwell_accepts);
+             (int)imp::process_diag_fa2_hd256(), (int)sup.fmha_sm120_accepts, (int)sup.blackwell_accepts);
     throw std::runtime_error(msg);
 }
 

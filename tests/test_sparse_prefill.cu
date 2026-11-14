@@ -77,7 +77,7 @@ protected:
         int* d_pos = put(pos);
         mm_ = dalloc<__half2>(static_cast<size_t>(kCap) * kRow);
         sparse_update_key_minmax_all_layers(QType::F16, k_, 0, nullptr, 0, mm_, 0, d_pos, bt_, nullptr, 1,
-                                            kNkv, kHd, kBS, kPast, kNBlocks, 1, /*meanstd=*/true, nullptr);
+                                            kNkv, kHd, kBS, kPast, kNBlocks, 1, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         cudaFree(d_pos);
         scores_ = dalloc<float>(64 * kCap);
@@ -100,8 +100,8 @@ protected:
     }
     int select(int budget_blocks, int sink_blocks, int recent_blocks) {
         return sparse_prefill_select_past(q_, kN, 16, mm_, bt_, kPast, kNh, kNkv, kHd, kBS, kCap,
-                                          budget_blocks, sink_blocks, recent_blocks, /*meanstd=*/true, 1.0f,
-                                          scores_, agg_, tbl_, ctx_, nullptr);
+                                          budget_blocks, sink_blocks, recent_blocks, 1.0f, scores_, agg_,
+                                          tbl_, ctx_, nullptr);
     }
     // Gather `past` tokens through `table`, append the chunk, FA2 with q_offset = past.
     std::vector<uint16_t> attend(const int* table, int past) {
@@ -119,7 +119,7 @@ protected:
             V(vf_, QType::F16, 4, ks, true);
         Tensor O(o, QType::F16, 4, qs, true);
         EXPECT_TRUE(fmha_sm120_fa2_prefill(Q, K, V, O, 1.0f / std::sqrt(static_cast<float>(kHd)), true, 0,
-                                           0.0f, nullptr, past, /*fp16_qk=*/true));
+                                           0.0f, nullptr, past));
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         std::vector<uint16_t> out(static_cast<size_t>(kN) * kNh * kHd);
         EXPECT_EQ(cudaMemcpy(out.data(), o, out.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost),

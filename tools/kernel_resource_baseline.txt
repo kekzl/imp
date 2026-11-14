@@ -13,13 +13,13 @@
 # kernel<tab>arch<tab>reg<tab>stack<tab>local
 void apa::apa_kernel<256, true, false, true, __half, apa::PagedF16KV>	sm_120a	255	128	0
 void apa::apa_kernel<256, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	255	128	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 64, true, false, false>	sm_120a	255	112	0
+void imp::fmha_sm120_fa2_kernel<64, 256, false, 64, true, false>	sm_120a	255	112	0
 void apa::apa_kernel<256, true, true, true, __half, apa::PagedF16KV>	sm_120a	255	96	0
 void apa::apa_kernel<256, false, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	88	0
 void apa::apa_kernel<256, false, false, true, __half, apa::PagedF16KV>	sm_120a	255	88	0
 void apa::apa_kernel<256, true, false, true, __half, apa::FlatKV<__half> >	sm_120a	255	88	0
 void apa::apa_kernel<256, true, true, false, __half, apa::PagedF16KV>	sm_120a	255	88	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	88	0
+void imp::fmha_sm120_fa2_kernel<64, 256, true, 64, true, false>	sm_120a	255	88	0
 void apa::apa_kernel<256, true, true, false, __half, apa::FlatKV<__half> >	sm_120a	255	72	0
 void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	255	64	0
 void imp::(anonymous namespace)::kda_chunk_kernel<__nv_bfloat16>	sm_120a	255	64	0
@@ -41,8 +41,6 @@ void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::(anonymous namespace)::paged_attention_splitk_f16_multitok_kernel<512, 4, 2>	sm_120a	245	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	242	32	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
-void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	242	0	0
 imp::(anonymous namespace)::fa2_hd512_kernel	sm_120a	241	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, false> >	sm_120a	240	0	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<256, 128, 3, true, false, false, (imp::nvfp4_tile::Fmt)0, true> >	sm_120a	240	0	0
@@ -62,11 +60,11 @@ void apa::apa_kernel<128, true, true, false, __half, apa::PagedF16KV>	sm_120a	16
 void apa::apa_kernel<128, true, true, true, __half, apa::PagedF16KV>	sm_120a	168	48	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
 imp::gemm_q6k_fused_moe_prefill_tc_kernel	sm_120a	128	40	0
-void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	40	0
+void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, 64, true, true>	sm_120a	128	40	0
 void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	40	0
 void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::KqDec<false> >	sm_120a	128	16	0
 void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::KqDec<true> >	sm_120a	128	16	0
-void imp::fmha_sm120_fa2_kernel_2cta<128, 64, true, false, 64, false, false, false>	sm_120a	128	8	0
+void imp::fmha_sm120_fa2_kernel_2cta<128, 64, false, 64, false, false>	sm_120a	128	8	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	104	144	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, false, 4>	sm_120a	96	16	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, true, 4>	sm_120a	96	16	0
@@ -123,7 +121,6 @@ imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
-imp::(anonymous namespace)::kv_evict_qstats_kernel	sm_120a	40	40	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0

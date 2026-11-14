@@ -44,20 +44,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     // process_diag_set_cublas_fp16_acc); standalone tools without an engine
     // treat auto as off.
     d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
-    d.attention_splitk_pipe = cfg.attention.splitk_pipe;
-    d.attention_fp8_tile = cfg.attention.fp8_tile;
-    d.attention_fp8_tile_gqa = cfg.attention.fp8_tile_gqa;
-    d.attention_fa2_f16acc = cfg.attention.fa2_f16acc;
-    d.attention_fa2_pv_f16acc = cfg.attention.fa2_pv_f16acc;
-    d.attention_fa2_hd256 = cfg.attention.fa2_hd256;
-    d.attention_fa2_hd256_bkv = cfg.attention.fa2_hd256_bkv;
-    d.attention_fa2_dense_2cta = cfg.attention.fa2_dense_2cta;
-    d.attention_paged_fp8_multitok = cfg.attention.paged_fp8_multitok;
-    d.attention_paged_nvfp4_multitok = cfg.attention.paged_nvfp4_multitok;
-    d.attention_paged_nvfp4_mma = cfg.attention.paged_nvfp4_mma ? 64 : 0;
-    d.attention_paged_f16_multitok = cfg.attention.paged_f16_multitok;
-    d.attention_fa2_heavy_first = cfg.attention.fa2_heavy_first;
-    d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
     // runtime.deterministic: no timed cuBLASLt algo pick.
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
@@ -68,7 +54,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.mxfp4_tile = cfg.gemm.mxfp4_tile;
     d.q45k_tile = cfg.gemm.q45k_tile;
     d.fp8_tile_min_m = cfg.gemm.fp8_tile_min_m;
-    d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;

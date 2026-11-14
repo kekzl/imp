@@ -171,27 +171,15 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [kv_cache]
     S("kv_cache.dtype", cfg.kv_cache.dtype);
-    B("kv_cache.allow_nondeterministic_fp8", cfg.kv_cache.allow_nondeterministic_fp8);
-    B("kv_cache.fp8_auto_legacy", cfg.kv_cache.fp8_auto_legacy);
     S("kv_cache.fp8_scale", cfg.kv_cache.fp8_scale);
-    F("kv_cache.fp8_scale_headroom", cfg.kv_cache.fp8_scale_headroom);
     B("kv_cache.fp8_scale_split", cfg.kv_cache.fp8_scale_split);
-    I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
-    B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
-    B("kv_cache.grow_ahead", cfg.kv_cache.grow_ahead);
-    I("kv_cache.grow_retry_ms", cfg.kv_cache.grow_retry_ms);
-    B("kv_cache.grow_ahead_fit_last", cfg.kv_cache.grow_ahead_fit_last);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);
     I("kv_cache.max_blocks", cfg.kv_cache.max_blocks);
     I("kv_cache.block_size", cfg.kv_cache.block_size);
-    F("kv_cache.evict_keep_ratio", cfg.kv_cache.evict_keep_ratio);
-    I("kv_cache.evict_sink_tokens", cfg.kv_cache.evict_sink_tokens);
-    I("kv_cache.evict_recent_tokens", cfg.kv_cache.evict_recent_tokens);
-    I("kv_cache.evict_min_tokens", cfg.kv_cache.evict_min_tokens);
 
     // [rope]
     S("rope.scaling", cfg.rope.scaling);
@@ -210,54 +198,23 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [attention]
     S("attention.fp8_prefill", cfg.attention.fp8_prefill);
-    S("attention.fp8_fmha", cfg.attention.fp8_fmha);
-    S("attention.fmha_sm120", cfg.attention.fmha_sm120);
     S("attention.fmha_fa2", cfg.attention.fmha_fa2);
-    S("attention.fa2_fp16qk", cfg.attention.fa2_fp16qk);
-    B("attention.fa2_f16acc", cfg.attention.fa2_f16acc);
-    B("attention.fa2_hd256", cfg.attention.fa2_hd256);
-    S("attention.hd512_prefill", cfg.attention.hd512_prefill);
-    I("attention.fa2_hd256_bkv", cfg.attention.fa2_hd256_bkv);
-    B("attention.fa2_dense_2cta", cfg.attention.fa2_dense_2cta);
     B("attention.ra2_prefill", cfg.attention.ra2_prefill);
     F("attention.apa_eps", cfg.attention.apa_eps);
     I("attention.apa_min_kv", cfg.attention.apa_min_kv);
     B("attention.apa_tile_cache", cfg.attention.apa_tile_cache);
-    I("attention.paged_fp8_multitok", cfg.attention.paged_fp8_multitok);
-    I("attention.paged_nvfp4_multitok", cfg.attention.paged_nvfp4_multitok);
-    B("attention.paged_nvfp4_mma", cfg.attention.paged_nvfp4_mma);
-    I("attention.paged_f16_multitok", cfg.attention.paged_f16_multitok);
-    B("attention.fa2_heavy_first", cfg.attention.fa2_heavy_first);
-    B("attention.fa2_pv_f16acc", cfg.attention.fa2_pv_f16acc);
-    B("attention.fp8_qk_scaled", cfg.attention.fp8_qk_scaled);
     I("attention.fmha_prefill_threshold", cfg.attention.fmha_prefill_threshold);
     I("attention.attn_scores_mib", cfg.attention.attn_scores_mib);
-    B("attention.mxfp4_fp16_fallback", cfg.attention.mxfp4_fp16_fallback);
-    S("attention.mxfp4_fp16_cache_policy", cfg.attention.mxfp4_fp16_cache_policy);
-    B("attention.force_cublas_decode", cfg.attention.force_cublas_decode);
     B("attention.mla_absorb", cfg.attention.mla_absorb);
-    B("attention.no_qknorm_fused", cfg.attention.no_qknorm_fused);
     B("diagnostics.spec_trace", cfg.diagnostics.spec_trace);
     I("diagnostics.mtp_verify_pin", cfg.diagnostics.mtp_verify_pin);
     B("diagnostics.spec_capture_fidelity", cfg.diagnostics.spec_capture_fidelity);
     S("diagnostics.ppl_dump", cfg.diagnostics.ppl_dump);
-    B("attention.splitk_pipe", cfg.attention.splitk_pipe);
-    B("attention.fp8_tile", cfg.attention.fp8_tile);
-    B("attention.fp8_tile_gqa", cfg.attention.fp8_tile_gqa);
-    B("attention.gate_concat", cfg.attention.gate_concat);
     I("attention.sparse_topk_tokens", cfg.attention.sparse_topk_tokens);
     B("attention.qsa", cfg.attention.qsa);
     B("attention.qsa_force", cfg.attention.qsa_force);
-    I("attention.qsa_rows", cfg.attention.qsa_rows);
     B("attention.qsa_debug", cfg.attention.qsa_debug);
-    I("attention.sparse_min_ctx", cfg.attention.sparse_min_ctx);
-    I("attention.sparse_sink_tokens", cfg.attention.sparse_sink_tokens);
-    I("attention.sparse_recent_tokens", cfg.attention.sparse_recent_tokens);
-    B("attention.sparse_score_meanstd", cfg.attention.sparse_score_meanstd);
-    F("attention.sparse_score_std_coef", cfg.attention.sparse_score_std_coef);
     I("attention.sparse_prefill_topk_tokens", cfg.attention.sparse_prefill_topk_tokens);
-    I("attention.sparse_prefill_rows", cfg.attention.sparse_prefill_rows);
-    I("attention.sparse_prefill_recent_tokens", cfg.attention.sparse_prefill_recent_tokens);
 
     // [moe]
     I("moe.expert_overhead_pct", cfg.moe.expert_overhead_pct);
@@ -423,10 +380,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("calibration.enabled", cfg.calibration.enabled);
     S("calibration.out_path", cfg.calibration.out_path);
     B("calibration.hessian", cfg.calibration.hessian);
-
-    // [ffn]
-    B("ffn.sparsity_probe", cfg.ffn.sparsity_probe);
-    F("ffn.sparsity_threshold", cfg.ffn.sparsity_threshold);
 
     // [speculative]
     B("speculative.ngram", cfg.speculative.ngram);

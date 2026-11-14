@@ -54,7 +54,7 @@ void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_
 
 // FP8 E4M3 paged attention decode, on-the-fly dequant. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,n_kv_heads,block_size,hd] FP8_E4M3. kv_scale: per-tensor FP32
-// (val = fp8_val * kv_scale). NVFP4 4-token variant (attention.paged_nvfp4_multitok), HD=128/256,
+// (val = fp8_val * kv_scale). NVFP4 4-token variant (process_diag_paged_nvfp4_multitok), HD=128/256,
 // E4M3 scales; num_splits>1 fills `partial` for the reduce. Returns false for unsupported shapes.
 [[nodiscard]] bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* K_cache,
                                                   const uint8_t* V_cache, const uint8_t* K_scales,
@@ -87,7 +87,7 @@ int paged_attention_nvfp4_multitok_heads_per_cta(int head_dim, int n_q_per_kv, i
     int num_splits, int sliding_window, float softcap, cudaStream_t stream);
 
 // HD=128 FP8 decode with four tokens per warp iteration
-// (attention.paged_fp8_multitok, attention_paged_fp8_multitok.cu). Called by
+// (process_diag_paged_fp8_multitok, attention_paged_fp8_multitok.cu). Called by
 // paged_attention_decode_fp8 when the knob is on and split-K is off.
 void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
                                                half* O, const int* block_tables, const int* context_lens,
@@ -216,43 +216,6 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      float softcap = 0.0f, cudaStream_t stream = nullptr,
                                      int max_blocks_per_seq = 0, int n_sinks = 0,
                                      const void* attn_sinks = nullptr);
-
-// BitDecoding-style TC variant of paged_attention_decode_nvfp4: routes QK dot through
-// nvcuda::wmma 16x16x16 MMA.
-// Phase 3b residual: optional FP16 ring of the newest residual_count tokens (write-through
-// duplicate of the paged tail). Splits attention into paged [0,ctx_len-residual_count) (NVFP4
-// dequant) and residual [ctx_len-residual_count,ctx_len) (direct FP16), merged via the same
-// online-softmax invariant.
-// Single-seq (batch_size==1): pass K/V_residual + residual_count/write_idx as scalars.
-// Multi-seq: pass K/V_residual_base (slot 0), residual_seq_stride_elems, and device arrays
-// d_residual_seq_slots/_counts/_write_idxes of length batch_size; slot = base + slot*stride.
-// Residual layout per slot: [residual_n_tokens,n_kv_heads,hd] half, ring-indexed; i-th most
-// recent token at slot (write_idx+residual_n_tokens-residual_count+i) % residual_n_tokens.
-// Split-K forced off when residual is active (only the non-split kernel reads it).
-void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                     const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
-                                     const int* context_lens, int block_size, float scale, int max_context_len,
-                                     int sliding_window = 0, float softcap = 0.0f,
-                                     cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0,
-                                     // Single-seq scalar form
-                                     const half* K_residual = nullptr, const half* V_residual = nullptr,
-                                     int residual_count = 0, int residual_n_tokens = 0,
-                                     int residual_write_idx = 0,
-                                     // Multi-seq array form (overrides the scalars when d_residual_seq_slots != nullptr)
-                                     const half* K_residual_base = nullptr,
-                                     const half* V_residual_base = nullptr,
-                                     int residual_seq_stride_elems = 0,
-                                     const int* d_residual_seq_slots = nullptr,
-                                     const int* d_residual_counts = nullptr,
-                                     const int* d_residual_write_idxes = nullptr,
-                                     // Graph-safe per-slot ring state (KVCacheManager's persistent device
-                                     // buffers). When set along
-                                     // with d_residual_seq_slots, the kernel reads fc/widx via slot
-                                     // indirection (capture-safe, nothing
-                                     // rebuilt per step); replaces d_residual_counts/_write_idxes when both
-                                     // pairs are set.
-                                     const int* d_residual_fc_per_slot = nullptr,
-                                     const int* d_residual_widx_per_slot = nullptr);
 
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.

@@ -61,15 +61,13 @@ size_t Request::deliverable_tokens() const {
     return std::min(phrase->safe, output_tokens.size());
 }
 
-bool Engine::phrase_ban_supported() const {
-    return model_ && !(kv_manager_ && kv_manager_->residual_enabled());
-}
+bool Engine::phrase_ban_supported() const { return model_ != nullptr; }
 
 void Engine::phrase_ban_init_(Request& req) const {
     if (!req.phrase)
         return;
     if (!phrase_ban_supported()) {  // the server answers 400 first; direct API users get no ban
-        IMP_LOG_WARN("phrase ban: req %d dropped, the model keeps a residual KV ring", req.id);
+        IMP_LOG_WARN("phrase ban: req %d dropped, no model loaded", req.id);
         req.phrase.reset();
         return;
     }

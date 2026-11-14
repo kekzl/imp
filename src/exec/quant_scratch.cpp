@@ -64,8 +64,6 @@ void QuantScratch::free(VRAMAllocator* alloc) {
     q8_1_prefill_bytes = 0;
     d8_prefill_bytes = 0;
 
-    ffn_block_mask = nullptr;
-    ffn_block_mask_words = 0;
 
     splitk = nullptr;
     splitk_size = 0;

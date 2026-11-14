@@ -20,8 +20,10 @@ namespace {
 // listed here is not covered — but a new enumerator with no switch arm IS
 // caught, which is the failure that reaches production.
 const AttnPrefillPath kAllPrefillTiers[] = {
-    AttnPrefillPath::FA2,       AttnPrefillPath::FP8,  AttnPrefillPath::FMHA_SM120,
-    AttnPrefillPath::BLACKWELL, AttnPrefillPath::NONE,
+    AttnPrefillPath::FA2,
+    AttnPrefillPath::FMHA_SM120,
+    AttnPrefillPath::BLACKWELL,
+    AttnPrefillPath::NONE,
 };
 const AttnPrefillOuter kAllPrefillOuter[] = {
     AttnPrefillOuter::UNSET,         AttnPrefillOuter::FA2_FP16QK, AttnPrefillOuter::CUBLAS,
@@ -30,7 +32,7 @@ const AttnPrefillOuter kAllPrefillOuter[] = {
 };
 const AttnDecodePath kAllDecode[] = {
     AttnDecodePath::UNSET, AttnDecodePath::FP16,  AttnDecodePath::FP8,      AttnDecodePath::INT8,
-    AttnDecodePath::INT4,  AttnDecodePath::NVFP4, AttnDecodePath::NVFP4_TC, AttnDecodePath::MXFP4_KV,
+    AttnDecodePath::INT4,  AttnDecodePath::NVFP4, AttnDecodePath::MXFP4_KV,
 };
 const MoePrefillOuter kAllMoeOuter[] = {
     MoePrefillOuter::UNSET,       MoePrefillOuter::NONE,      MoePrefillOuter::FP16_BATCH,

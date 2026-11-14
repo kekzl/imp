@@ -344,11 +344,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     }
 
     // Attention output gate (fused Q+gate): per-head interleaved
-    // [Q_h0(hd),Gate_h0(hd),...] is the DEFAULT and correct for every checkpoint
-    // tested (Qwen3.5, Qwen3.6): matches HF's per-head chunk split, and NVFP4
-    // block-scale periodicity on disk confirms it. `attention.gate_concat` is
-    // an escape hatch for a feature-dim-concat checkpoint that has not shipped
-    // yet; flipping it breaks every staged hybrid today.
+    // [Q_h0(hd),Gate_h0(hd),...] is the only layout: correct for every checkpoint
+    // tested (Qwen3.5, Qwen3.6), matches HF's per-head chunk split, and NVFP4
+    // block-scale periodicity on disk confirms it.
     Tensor attn_gate_buf;
     if (has_attn_output_gate) {
         // The gate borrows the SSM z buffer (carved only by
@@ -367,29 +365,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        const bool use_concat = dispatch_policy().attention.gate_concat;
-        if (use_concat) {
-            // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
-            // One 2D copy each, width = q_actual_dim bytes per row.
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(qv.data,
-                                                 static_cast<size_t>(q_actual_dim) * es_q,  // dst pitch
-                                                 q_target.data,
-                                                 static_cast<size_t>(q_out_dim) * es_q,  // src pitch
-                                                 static_cast<size_t>(q_actual_dim) * es_q, n,
-                                                 cudaMemcpyDeviceToDevice, stream));
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(attn_gate_buf.data, static_cast<size_t>(q_actual_dim) * es_q,
-                                                 static_cast<char*>(q_target.data) +
-                                                     (static_cast<size_t>(q_actual_dim) * es_q),
-                                                 static_cast<size_t>(q_out_dim) * es_q,
-                                                 static_cast<size_t>(q_actual_dim) * es_q, n,
-                                                 cudaMemcpyDeviceToDevice, stream));
-        } else {
-            // Per-head interleaved (Qwen 3.5 layout): Q[t,h*hd:(h+1)*hd] =
-            // src[t,h*2*hd:h*2*hd+hd], Gate = src[t,h*2*hd+hd:(h+1)*2*hd]. One fused
-            // kernel replaces an nh x 2 cudaMemcpy2DAsync loop.
-            attn_gate_split_interleaved(q_target.data, qv.data, attn_gate_buf.data, n, nh, hd, q_out_dim,
-                                        static_cast<int>(es_q), stream);
-        }
+        // Per-head interleaved (Qwen 3.5 layout): Q[t,h*hd:(h+1)*hd] =
+        // src[t,h*2*hd:h*2*hd+hd], Gate = src[t,h*2*hd+hd:(h+1)*2*hd]. One fused
+        // kernel replaces an nh x 2 cudaMemcpy2DAsync loop.
+        attn_gate_split_interleaved(q_target.data, qv.data, attn_gate_buf.data, n, nh, hd, q_out_dim,
+                                    static_cast<int>(es_q), stream);
     }
 
     // 4+5+6. QK-norm + RoPE: one fused kernel at every row count (full-head norms);
@@ -419,7 +399,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
         // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate launches per layer.
         // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
         // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
@@ -435,7 +414,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else if (kv_shared) {
             throw std::runtime_error("Gemma 4 KV-shared layer needs q_norm and FP16 Q");
         } else if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
-                   !no_qknorm_fused && layer_rope) {
+                   layer_rope) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -589,7 +568,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                               rows_view(ao, static_cast<int64_t>(nh) * hd, rb, nr), rst.block_tables);
             }
         } else {
-            kv_evict_prefill_qstats_(layer, state, qv, n, stream);  // kv_cache.evict_keep_ratio, off: no-op
             prefill_attend_seq(n, state.prefill_offset, 0, qv, kk, vv, ao, layer_block_tables,
                                /*bt_flat=*/nullptr, /*bt_swa_flat=*/nullptr, /*seq_positions=*/nullptr);
             // Qwen4Exp QSA: the rows past 2050 tokens get the learned block selection

@@ -99,54 +99,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     int scale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 16) (bytes)
     int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences);
 
-// BitDecoding Phase 3c residual write: copies one (K,V) FP16 row pair per
-// token into the per-(seq,layer) residual ring slot, replacing a pair of
-// per-layer cudaMemcpyAsync calls (the D2D copy engine serialized small
-// transfers and dominated decode tg/s, -3x on Qwen3-4B Q8 NVFP4-KV @4K).
-// Graph-capture-safe form: resolves the destination ring slot at kernel
-// execution time from the device-resident `widx` + the persistent slot
-// index. Caller passes the per-(seq_slot,layer) K/V base pointer, not the ring slot (computed inside the
-// kernel).
-__global__ void residual_kv_write_indirect_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    half* __restrict__ residual_k_layer_seq_base,    // (slot, layer, K=0) base
-    half* __restrict__ residual_v_layer_seq_base,    // (slot, layer, V=1) base
-    const int* __restrict__ d_residual_widx_ptr,     // [max_seqs] device array
-    int seq_slot,                                     // index into d_residual_widx_ptr
-    int slot_elems);
-
-// Graph-capture-safe MULTI-seq variant (#1708): the per-batch-index
-// destination is computed on device from the layer base, per-seq stride
-// and ring index, so nothing is frozen at capture time. Replaces a form
-// that built a host device-pointer array with cudaMallocAsync/Free per
-// call inside the captured region, where a replay wrote through freed memory.
-__global__ void residual_kv_write_multi_indirect_kernel(
-    const half* __restrict__ k_in,                // [n_tokens, slot_elems]
-    const half* __restrict__ v_in,                // [n_tokens, slot_elems]
-    half* __restrict__ residual_k_layer_base,     // slot 0 of this layer, K
-    half* __restrict__ residual_v_layer_base,     // slot 0 of this layer, V
-    int64_t seq_stride_elems,                     // half-elements between seq slots
-    const int* __restrict__ d_seq_slots,          // [n_tokens] residual slot per batch idx
-    const int* __restrict__ d_residual_widx_ptr,  // [max_seqs] device array
-    int slot_elems);
-
-// Advance the residual ring state for one slot. Single-thread kernel:
-//   d_widx[slot] = (d_widx[slot] + 1) % residual_n_tokens
-//   d_fc[slot]   = min(d_fc[slot] + 1, residual_n_tokens)
-__global__ void advance_residual_state_kernel(
-    int* __restrict__ d_widx,
-    int* __restrict__ d_fc,
-    int slot,
-    int residual_n_tokens);
-
-// Same, for every sequence in a multi-seq decode step (#1708). The
-// single-slot form above is reached only when state.kv_seq_id>=0 (N==1
-// only), so a multi-seq step advanced the ring on the HOST, which a graph replay never ran.
-__global__ void advance_residual_state_multi_kernel(int* __restrict__ d_widx, int* __restrict__ d_fc,
-                                                    const int* __restrict__ d_seq_slots, int n_seqs,
-                                                    int residual_n_tokens);
-
 __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables, half* __restrict__ k_cache_base, half* __restrict__ v_cache_base,

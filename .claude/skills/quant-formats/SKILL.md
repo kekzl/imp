@@ -39,7 +39,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 
 `kv_cache.dtype = auto | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4` (CLI `--kv-fp8` etc.).
 
-- `auto` (default) has three upgrade arms in `src/runtime/engine_init_resolver.cpp` gated by `src/model/model_arch.h` lists (`kv_nvfp4_default_safe`, `kv_fp8_hint_default_safe`, `kv_fp8_no_hint_default_safe`); an arch missing from them silently gets FP16 KV. Legacy: `kv_cache.fp8_auto_legacy`; FP8 nondeterminism opt-in `allow_nondeterministic_fp8`.
+- `auto` (default) has three upgrade arms in `src/runtime/engine_init_resolver.cpp` gated by `src/model/model_arch.h` lists (`kv_nvfp4_default_safe`, `kv_fp8_hint_default_safe`, `kv_fp8_no_hint_default_safe`); an arch missing from them silently gets FP16 KV.
 - QWEN35 family (Qwen3.5/3.6/3.8 dense hybrids) resolves to NVFP4 since #1750: Qwen3.8-27B `max_model_len` 48512 -> 131072 for +0.29-0.35% PPL; FP8 86 848 -> NVFP4 126 432 tokens (+45.6%). MoE siblings keep the old default.
 - NVFP4 KV decode was 13.5% slower than FP8 until #1817 (byte loads: 20 `LDG.E.U8` per iteration); now 2.3% faster at 77k (74.1 vs 72.4 tok/s). `PagedOracle.HD256_Sweep` covers the shipped 24q/4kv shape across all 7 dtypes.
 - `--kv-fp8` / `IMP_KV_FP8=1` on that family DOUBLES KV bytes (correct when auto meant FP16); the pin logs its context cost since #1823 (`kv_pin_context_cost_factor`, `kv_dtype_is_explicit_pin` in `model.cpp`).

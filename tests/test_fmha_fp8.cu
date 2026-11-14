@@ -1,13 +1,10 @@
-// FP8 E4M3 FMHA (QK^T in FP8, PV in FP16) vs a CPU reference. #511: these parity cases use
-// small synthetic values (+-0.12) where e4m3 quant error is invisible; on real activations
-// the unscaled Q/K->e4m3 conversion compounds into garbage (teacher-forced PPL gemma-3-12b
-// 16.6->549, Qwen3-8B 40.5->4506), which is why the kernel is opt-in
-// (attention.fp8_fmha="on") and not in the default dispatch. These tests pin
-// indexing/masking only, not production quality.
+// FA2 register-resident FMHA (fmha_sm120_fa2_prefill, f16 QK^T) vs a CPU reference: indexing,
+// masking, chunk continuation, accumulate variants and CTA order. The fp8-QK kernels these
+// tests also covered were deleted with attention.fp8_fmha (teacher-forced PPL gemma-3-12b
+// 16.6->549, #511).
 
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
-#include "compute/fmha_fp8_tile_select.h"
 #include "core/tensor.h"
 #include "core/process_diag.h"
 
@@ -22,7 +19,7 @@
 namespace imp {
 namespace {
 
-class FmhaFP8Test : public ::testing::Test {
+class FmhaTestBase : public ::testing::Test {
 protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
     void TearDown() override { cudaStreamDestroy(stream_); }
@@ -75,210 +72,21 @@ protected:
         }
     }
 
-    void run_test(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                  float softcap = 0.0f) {
-        float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-        size_t q_elems = B * Sq * NH * HD;
-        size_t kv_elems = B * Skv * NKV * HD;
-
-        std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
-        // int cast before -6 is load-bearing: (i*7+3)%13-6 with size_t i underflows unsigned at ~46%
-        // of positions (+-3.7e17 -> +-inf as half); the e4m3 satfinite convert masked that in the fp8
-        // kernel while the NaN-poisoned CPU reference's std::max() dropped every comparison, passing
-        // vacuously.
-        for (size_t i = 0; i < q_elems; i++)
-            Q_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
-        for (size_t i = 0; i < kv_elems; i++) {
-            K_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6);
-            V_f[i] = 0.02f * static_cast<float>(static_cast<int>((i * 13 + 7) % 13) - 6);
-        }
-
-        std::vector<float> O_ref(q_elems, 0.0f);
-        ref_attention(Q_f, K_f, V_f, O_ref, B, Sq, Skv, NH, NKV, HD, scale, causal, sw, softcap);
-
-        std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
-        for (size_t i = 0; i < q_elems; i++)
-            Q_h[i] = __float2half(Q_f[i]);
-        for (size_t i = 0; i < kv_elems; i++)
-            K_h[i] = __float2half(K_f[i]);
-        for (size_t i = 0; i < kv_elems; i++)
-            V_h[i] = __float2half(V_f[i]);
-
-        size_t q_bytes = q_elems * sizeof(half);
-        size_t kv_bytes = kv_elems * sizeof(half);
-
-        void *d_q, *d_k, *d_v, *d_o;
-        cudaMalloc(&d_q, q_bytes);
-        cudaMalloc(&d_k, kv_bytes);
-        cudaMalloc(&d_v, kv_bytes);
-        cudaMalloc(&d_o, q_bytes);
-
-        cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
-        cudaMemset(d_o, 0, q_bytes);
-
-        int64_t q_shape[] = {B, Sq, NH, HD};
-        int64_t kv_shape[] = {B, Skv, NKV, HD};
-        Tensor Qt(d_q, QType::F16, 4, q_shape, true);
-        Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
-        Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
-        Tensor Ot(d_o, QType::F16, 4, q_shape, true);
-
-        bool ok = fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_);
-        if (!ok) {
-            cudaFree(d_q);
-            cudaFree(d_k);
-            cudaFree(d_v);
-            cudaFree(d_o);
-            // Only a head_dim without an instance may decline; a supported one returning false is #2195.
-            if (!fp8_fmha_supports_head_dim(HD))
-                GTEST_SKIP() << "no fmha_sm120_fp8_kernel instance for head_dim " << HD;
-            FAIL() << "fmha_sm120_fp8_prefill returned false for supported head_dim " << HD;
-        }
-        cudaStreamSynchronize(stream_);
-        cudaError_t err = cudaGetLastError();
-        ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-
-        std::vector<half> O_h(q_elems);
-        cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
-
-        // FP8 QK^T has lower precision than FP16 — use relaxed tolerance
-        float max_err = 0.0f, max_abs = 0.0f;
-        int nan_count = 0, ref_nan_count = 0;
-        for (size_t i = 0; i < q_elems; i++) {
-            float got = __half2float(O_h[i]);
-            float ref = O_ref[i];
-            if (!std::isfinite(ref)) {
-                ref_nan_count++;  // poisoned reference would silently skip comparisons
-                continue;
-            }
-            if (std::isnan(got)) {
-                nan_count++;
-                continue;
-            }
-            float err = std::abs(got - ref);
-            float denom = std::max(1.0f, std::abs(ref));
-            max_err = std::max(max_err, err / denom);
-            max_abs = std::max(max_abs, err);
-        }
-        EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
-        EXPECT_EQ(nan_count, 0) << "NaN values in FP8 FMHA output";
-        // FP8 E4M3 has ~0.1% precision loss in scores, allow 5% relative error
-        EXPECT_LT(max_err, 0.05f) << "Max relative error too high: " << max_err;
-        printf("[fp8-fmha] HD=%d Sq=%d Skv=%d max_abs=%.6f max_rel=%.6f tol_rel=0.05\n", HD, Sq, Skv, max_abs,
-               max_err);
-
-        cudaFree(d_q);
-        cudaFree(d_k);
-        cudaFree(d_v);
-        cudaFree(d_o);
-    }
-
     cudaStream_t stream_ = nullptr;
 };
 
-TEST_F(FmhaFP8Test, CausalHD128) { run_test(1, 64, 64, 4, 4, 128, true); }
-
-TEST_F(FmhaFP8Test, NonCausalHD128) { run_test(1, 32, 64, 4, 4, 128, false); }
-
-TEST_F(FmhaFP8Test, GQA) { run_test(1, 64, 64, 8, 2, 128, true); }
-
-TEST_F(FmhaFP8Test, CausalMultiTile) { run_test(1, 128, 128, 4, 4, 128, true); }
-
-TEST_F(FmhaFP8Test, SlidingWindow) { run_test(1, 64, 64, 4, 4, 128, true, 32); }
-
-TEST_F(FmhaFP8Test, Softcap) { run_test(1, 32, 32, 4, 4, 128, true, 0, 50.0f); }
-
-TEST_F(FmhaFP8Test, HD64) { run_test(1, 32, 32, 4, 4, 64, true); }
-
-TEST_F(FmhaFP8Test, HD256) { run_test(1, 32, 32, 4, 4, 256, true); }
-
-// #2195 microbench: HD64 FP8 FMHA vs FP16 FMHA (fmha_sm120_prefill), Sq=Skv=2048, 32/8 heads, causal.
-TEST_F(FmhaFP8Test, DISABLED_BenchHD64VsFp16) {
-    const int Sq = 2048, NH = 32, NKV = 8, HD = 64, reps = 20;
-    const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-    const size_t q_elems = (size_t)Sq * NH * HD, kv_elems = (size_t)Sq * NKV * HD;
-    std::vector<half> Q_h(q_elems), K_h(kv_elems);
-    for (size_t i = 0; i < q_elems; i++)
-        Q_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6));
-    for (size_t i = 0; i < kv_elems; i++)
-        K_h[i] = __float2half(0.02f * static_cast<float>(static_cast<int>((i * 11 + 5) % 13) - 6));
-    void *d_q, *d_k, *d_v, *d_o;
-    cudaMalloc(&d_q, q_elems * sizeof(half));
-    cudaMalloc(&d_k, kv_elems * sizeof(half));
-    cudaMalloc(&d_v, kv_elems * sizeof(half));
-    cudaMalloc(&d_o, q_elems * sizeof(half));
-    cudaMemcpy(d_q, Q_h.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_k, K_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_v, K_h.data(), kv_elems * sizeof(half), cudaMemcpyHostToDevice);
-    int64_t q_shape[] = {1, Sq, NH, HD};
-    int64_t kv_shape[] = {1, Sq, NKV, HD};
-    Tensor Qt(d_q, QType::F16, 4, q_shape, true);
-    Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
-    Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
-    Tensor Ot(d_o, QType::F16, 4, q_shape, true);
-
-    auto time_ms = [&](bool fp8) {
-        auto run = [&] {
-            return fp8 ? fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_)
-                       : fmha_sm120_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_);
-        };
-        EXPECT_TRUE(run()) << (fp8 ? "fp8" : "fp16") << " declined HD64";
-        cudaEvent_t a, b;
-        cudaEventCreate(&a);
-        cudaEventCreate(&b);
-        cudaEventRecord(a, stream_);
-        for (int i = 0; i < reps; i++)
-            run();
-        cudaEventRecord(b, stream_);
-        cudaEventSynchronize(b);
-        float ms = 0.0f;
-        cudaEventElapsedTime(&ms, a, b);
-        cudaEventDestroy(a);
-        cudaEventDestroy(b);
-        return ms / reps;
-    };
-    const float fp16_ms = time_ms(false), fp8_ms = time_ms(true);
-    EXPECT_EQ(cudaGetLastError(), cudaSuccess);
-    printf("[fp8-fmha-bench] HD=64 Sq=Skv=%d NH=%d NKV=%d causal fp8=%.4f ms fp16=%.4f ms fp8/fp16=%.3f\n", Sq, NH,
-           NKV, fp8_ms, fp16_ms, fp8_ms / fp16_ms);
-    cudaFree(d_q);
-    cudaFree(d_k);
-    cudaFree(d_v);
-    cudaFree(d_o);
-}
-
-// #566 residue: gemma-3-12b (hd=256) prefill routes through THIS kernel once n crosses the
-// FMHA threshold (a head_dim%32 gate, not the assumed FP16 WMMA); the pre-#569 catastrophic
-// window readings and no-window PPL 10.5 came through here.
-TEST_F(FmhaFP8Test, HD256_LongSeq) { run_test(1, 1536, 1536, 16, 8, 256, true); }
-TEST_F(FmhaFP8Test, HD256_LongSeq_SlidingWindow1024) {
-    run_test(1, 1536, 1536, 16, 8, 256, true, /*sw=*/1024);
-}
-TEST_F(FmhaFP8Test, HD128_LongSeq_SlidingWindow1024) {
-    run_test(1, 1536, 1536, 16, 8, 128, true, /*sw=*/1024);
-}
-
-// Mimics Qwen3.5-4B prefill shape (16Q/4KV heads, hd=256, 128 tokens): multi-tile on both
-// axes with non-zero V throughout catches the S_tile smem overlap bug that the HD256 test
-// (zero-padded V) masked by keeping its reference near zero too.
-TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) { run_test(1, 128, 128, 16, 4, 256, true); }
-
-// FA2 register-resident kernel (fmha_sm120_fa2_prefill): unlike the fp8 fixture (which SKIPs
-// on unsupported configs), this fixture ASSERTs the FA2 path actually ran - a perf rewrite
-// must not silently fall through. Target: head_dim=128.
-class FmhaFA2Test : public FmhaFP8Test {
+// FA2 register-resident kernel (fmha_sm120_fa2_prefill): this fixture ASSERTs the FA2 path
+// actually ran - a perf rewrite must not silently fall through.
+class FmhaFA2Test : public FmhaTestBase {
 protected:
     void run_fa2(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, int sw = 0,
-                 float softcap = 0.0f, float amplitude = 1.0f, bool fp16_qk = false, int q_offset = 0,
-                 float tol_override = 0.0f) {
+                 float softcap = 0.0f, float amplitude = 1.0f, int q_offset = 0, float tol_override = 0.0f) {
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
         size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
-        // int cast before -6 is load-bearing — see run_test above.
+        // int cast before -6 is load-bearing: unsigned wrap-around otherwise.
         for (size_t i = 0; i < q_elems; i++)
             Q_f[i] = amplitude * 0.02f * static_cast<float>(static_cast<int>((i * 7 + 3) % 13) - 6);
         for (size_t i = 0; i < kv_elems; i++) {
@@ -316,8 +124,7 @@ protected:
         Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
         Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-        bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_,
-                                         q_offset, fp16_qk);
+        bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_, q_offset);
         ASSERT_TRUE(ok) << "fmha_sm120_fa2_prefill returned false (config must be supported)";
         cudaStreamSynchronize(stream_);
         cudaError_t err = cudaGetLastError();
@@ -349,67 +156,33 @@ protected:
         cudaFree(d_o);
         EXPECT_EQ(ref_nan_count, 0) << "CPU reference is NaN/inf — test data is broken";
         EXPECT_EQ(nan_count, 0) << "NaN values in FA2 FMHA output";
-        // fp16 QK has no e4m3 score quantization: held to 1% (half-rounded inputs vs float
-        // reference, ~2^-11/elem over a 128-dot + f16 P/V rounding). fp8 QK keeps the historical 5%.
-        const float tol = (tol_override > 0.0f) ? tol_override : (fp16_qk ? 0.01f : 0.05f);
+        // f16 QK has no e4m3 score quantization: held to 1% (half-rounded inputs vs float
+        // reference, ~2^-11/elem over a 128-dot + f16 P/V rounding).
+        const float tol = (tol_override > 0.0f) ? tol_override : 0.01f;
         EXPECT_LT(max_err, tol) << "Max relative error too high: " << max_err;
     }
 };
-
-TEST_F(FmhaFA2Test, CausalHD128) { run_fa2(1, 64, 64, 4, 4, 128, true); }
-
-// Engine-realistic SHORT prefill shapes: the executor prefers FA2 for hd=128 at every length
-// (executor_attention.cu fa2_capable), so short chat prompts hit this kernel too -
-// production corruption (prompt-blind models, degenerate output) appeared exactly there.
-// Qwen3-8B GQA is 32Q/8KV.
-TEST_F(FmhaFA2Test, CausalShortSeq24_GQA32_8) { run_fa2(1, 24, 24, 32, 8, 128, true); }
-TEST_F(FmhaFA2Test, CausalSeq32_GQA32_8) { run_fa2(1, 32, 32, 32, 8, 128, true); }
-TEST_F(FmhaFA2Test, CausalShortSeq24) { run_fa2(1, 24, 24, 4, 4, 128, true); }
-TEST_F(FmhaFA2Test, CausalOddSeq136_GQA32_8) { run_fa2(1, 136, 136, 32, 8, 128, true); }
-TEST_F(FmhaFA2Test, CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true); }
-
-// QK-normed models (Qwen3 family) produce Q/K far beyond the +-0.12 synthetic fill; FA2
-// converts Q/K to FP8 e4m3 WITHOUT a scale factor, so large inputs lose precision or
-// saturate (e4m3 max +-448) - production symptom: prompt-blind models on every hd=128 arch
-// while FP16 cuBLAS stays correct. amplitude=80 gives |Q|,|K|~9.6, QK dots up to ~118
-// pre-scale (in e4m3 range but only ~2 mantissa bits at that scale).
-TEST_F(FmhaFA2Test, RealisticMagnitude_Seq24) {
-    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
-}
-TEST_F(FmhaFA2Test, RealisticMagnitude_Seq64) {
-    run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
-}
-TEST_F(FmhaFA2Test, NonCausalHD128) { run_fa2(1, 32, 64, 4, 4, 128, false); }
-TEST_F(FmhaFA2Test, GQA_HD128) { run_fa2(1, 64, 64, 8, 2, 128, true); }
-TEST_F(FmhaFA2Test, CausalMultiTile_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true); }
-TEST_F(FmhaFA2Test, LongCtx_HD128) { run_fa2(1, 256, 256, 8, 2, 128, true); }
-TEST_F(FmhaFA2Test, SlidingWindow_HD128) { run_fa2(1, 128, 128, 4, 4, 128, true, 64); }
-TEST_F(FmhaFA2Test, Softcap_HD128) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f); }
 
 // FP16-QK variant (mma.m16n8k16.f16): the short-prefill replacement for materialized cuBLAS.
 // No e4m3 quantization in QK, so verified at 1% (5x tighter than fp8); the
 // realistic-magnitude cases are exactly where fp8 QK loses mantissa bits (#511) - fp16 must
 // hold the tight bound there too.
-TEST_F(FmhaFA2Test, FP16QK_CausalShortSeq24_GQA32_8) {
-    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
-}
-TEST_F(FmhaFA2Test, FP16QK_CausalSeq64) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq136_GQA32_8) {
-    run_fa2(1, 136, 136, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
-}
+TEST_F(FmhaFA2Test, FP16QK_CausalShortSeq24_GQA32_8) { run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_CausalSeq64) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq51) { run_fa2(1, 51, 51, 4, 4, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_CausalOddSeq136_GQA32_8) { run_fa2(1, 136, 136, 32, 8, 128, true, 0, 0.0f, 1.0f); }
 TEST_F(FmhaFA2Test, FP16QK_RealisticMagnitude_Seq24) {
-    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f, true);
+    run_fa2(1, 24, 24, 32, 8, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
 }
 TEST_F(FmhaFA2Test, FP16QK_RealisticMagnitude_Seq64) {
-    run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f, true);
+    run_fa2(1, 64, 64, 4, 4, 128, true, 0, 0.0f, /*amplitude=*/80.0f);
 }
-TEST_F(FmhaFA2Test, FP16QK_NonCausal) { run_fa2(1, 32, 64, 4, 4, 128, false, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_GQA) { run_fa2(1, 64, 64, 8, 2, 128, true, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_MultiTile) { run_fa2(1, 128, 128, 4, 4, 128, true, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_LongCtx) { run_fa2(1, 256, 256, 8, 2, 128, true, 0, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_SlidingWindow) { run_fa2(1, 128, 128, 4, 4, 128, true, 64, 0.0f, 1.0f, true); }
-TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f, 1.0f, true); }
+TEST_F(FmhaFA2Test, FP16QK_NonCausal) { run_fa2(1, 32, 64, 4, 4, 128, false, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_GQA) { run_fa2(1, 64, 64, 8, 2, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_MultiTile) { run_fa2(1, 128, 128, 4, 4, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_LongCtx) { run_fa2(1, 256, 256, 8, 2, 128, true, 0, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_SlidingWindow) { run_fa2(1, 128, 128, 4, 4, 128, true, 64, 0.0f, 1.0f); }
+TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.0f, 1.0f); }
 
 // Chunk continuation (q_offset>0), #548: PR #553 measured wrong attention on Llama-3.2-3B
 // chunk continuations (teacher-forced NLL 0.29->7.13 at chunk=64) while Qwen3-4B was
@@ -417,44 +190,38 @@ TEST_F(FmhaFA2Test, FP16QK_Softcap) { run_fa2(1, 64, 64, 4, 4, 128, true, 0, 50.
 // the failing shapes at kernel level: Llama's GQA ratio 3 (24Q/8KV) vs Qwen3's 4 (32/8),
 // non-tile-multiple KV lengths, offsets not Bq/Bkv multiples.
 TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA4) {
-    run_fa2(1, 64, 512, 32, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/448);
+    run_fa2(1, 64, 512, 32, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/448);
 }
 TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA3_LlamaShape) {
-    run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/448);
+    run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/448);
 }
 TEST_F(FmhaFA2Test, FP16QK_Chunked_GQA3_OddKv) {
     // partial last KV tile (seq_kv % 64 != 0) + odd chunk length
-    run_fa2(1, 51, 371, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/320);
+    run_fa2(1, 51, 371, 24, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
 }
 TEST_F(FmhaFA2Test, FP16QK_Chunked_OffsetNotTileMultiple) {
-    run_fa2(1, 64, 292, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/228);
+    run_fa2(1, 64, 292, 24, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/228);
 }
 TEST_F(FmhaFA2Test, FP16QK_Chunked_LongCtx) {
     // continuation chunk far past the threshold-class context (3k)
-    run_fa2(1, 128, 3200, 24, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/3072);
-}
-TEST_F(FmhaFA2Test, FP8_Chunked_GQA3) {
-    // e4m3 path with the same continuation geometry (looser 5% tol)
-    run_fa2(1, 64, 512, 24, 8, 128, true, 0, 0.0f, 1.0f, false, /*q_offset=*/448);
+    run_fa2(1, 128, 3200, 24, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/3072);
 }
 
 // Bq=64/Bkv=32 occupancy band (#597): blocks_128 = ceil(Sq/128)*NH must land in
 // [sm_count/2, sm_count) to select the 2-CTA/SM Bkv=32 kernel - 96 on the 170-SM RTX 5090.
 // Covers multi-tile causal, partial last KV tile, chunk continuation, sliding-window bounds.
 TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_CausalMultiTile) {
-    run_fa2(1, 384, 384, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
+    run_fa2(1, 384, 384, 32, 8, 128, true, 0, 0.0f, 1.0f);
 }
-TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_OddSeq) {
-    run_fa2(1, 333, 333, 32, 8, 128, true, 0, 0.0f, 1.0f, true);
-}
+TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_OddSeq) { run_fa2(1, 333, 333, 32, 8, 128, true, 0, 0.0f, 1.0f); }
 TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_Chunked) {
-    run_fa2(1, 384, 1408, 32, 8, 128, true, 0, 0.0f, 1.0f, true, /*q_offset=*/1024);
+    run_fa2(1, 384, 1408, 32, 8, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/1024);
 }
 TEST_F(FmhaFA2Test, FP16QK_Bkv32Band_SlidingWindow) {
-    run_fa2(1, 384, 384, 32, 8, 128, true, /*sw=*/64, 0.0f, 1.0f, true);
+    run_fa2(1, 384, 384, 32, 8, 128, true, /*sw=*/64, 0.0f, 1.0f);
 }
 
-// PV f16-accumulate (attention.fa2_pv_f16acc, #667 follow-up): tolerance widened to 2% since
+// PV f16-accumulate (process_diag_fa2_pv_f16acc, #667 follow-up): tolerance widened to 2% since
 // O accumulates in f16 across KV tiles (the rescale-and-add rounding this knob trades for
 // full-rate HMMA); production gate is teacher-forced PPL, this pins math/layout only.
 class FmhaFA2PvF16Test : public FmhaFA2Test {
@@ -463,14 +230,14 @@ protected:
                 float softcap = 0.0f, float amplitude = 1.0f, int q_offset = 0) {
         process_diag_set_fa2_f16acc(true);
         process_diag_set_fa2_pv_f16acc(true);
-        run_fa2(B, Sq, Skv, NH, NKV, HD, causal, sw, softcap, amplitude, /*fp16_qk=*/true, q_offset,
+        run_fa2(B, Sq, Skv, NH, NKV, HD, causal, sw, softcap, amplitude, q_offset,
                 /*tol_override=*/0.02f);
         process_diag_set_fa2_f16acc(false);
         process_diag_set_fa2_pv_f16acc(false);
     }
 };
 
-// attention.fa2_dense_2cta: the Bq=128 TWOSLOT instance pinned to 128
+// process_diag_fa2_dense_2cta: the Bq=128 TWOSLOT instance pinned to 128
 // registers, two CTAs per SM. Shapes must reach the Bq=128 band
 // (q-tiles x heads >= SM count): 1024 x 24 heads = 192 CTAs.
 class FmhaFA2Dense2CtaTest : public FmhaFA2PvF16Test {
@@ -491,7 +258,7 @@ TEST_F(FmhaFA2Dense2CtaTest, Chunked) {
     run_pv(1, 1024, 2048, 24, 4, 128, true, 0, 0.0f, 1.0f, /*q_offset=*/1024);
 }
 TEST_F(FmhaFA2Dense2CtaTest, RealisticMagnitude) { run_pv(1, 1024, 1024, 24, 4, 128, true, 0, 0.0f, 80.0f); }
-// attention.fa2_heavy_first: the causal CTA order is only a scheduling choice, every
+// process_diag_fa2_heavy_first: the causal CTA order is only a scheduling choice, every
 // q-tile's rows are computed by exactly one CTA either way, so both orders must produce
 // byte-identical output. 2048 rows x 24 heads (Bq=128, 2-CTA band); a reversal off-by-one
 // leaves a tile's rows unwritten.
@@ -527,8 +294,7 @@ protected:
             cudaMemset(d_o[order], 0, q_bytes);
             process_diag_set_fa2_heavy_first(order == 1);
             Tensor Ot(d_o[order], QType::F16, 4, q_shape, true);
-            bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_, q_offset,
-                                             /*fp16_qk=*/true);
+            bool ok = fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_, q_offset);
             EXPECT_TRUE(ok) << "fa2 path must run in both orders";
         }
         process_diag_set_fa2_heavy_first(true);
@@ -575,28 +341,7 @@ TEST_F(FmhaFA2PvF16Test, Chunked_GQA3_OddKv) {
 TEST_F(FmhaFA2PvF16Test, Bkv32Band_CausalMultiTile) { run_pv(1, 384, 384, 32, 8, 128, true); }
 TEST_F(FmhaFA2PvF16Test, Bq128Band_LongCtx) { run_pv(1, 768, 768, 32, 8, 128, true); }
 
-// --- amax-scaled fp8-QK (attention.fp8_qk_scaled, #680) ---
-// The raw e4m3 conversion loses mantissa bits at realistic Q/K magnitudes
-// (#511); the scaled variant must hold a much tighter bound exactly there.
-class FmhaFA2Fp8ScaledTest : public FmhaFA2Test {
-protected:
-    void run_scaled(int B, int Sq, int Skv, int NH, int NKV, int HD, bool causal, float amp,
-                    int q_offset = 0) {
-        process_diag_set_fp8_qk_scaled(true);
-        run_fa2(B, Sq, Skv, NH, NKV, HD, causal, 0, 0.0f, amp, /*fp16_qk=*/false, q_offset,
-                /*tol_override=*/0.02f);
-        process_diag_set_fp8_qk_scaled(false);
-    }
-};
-
-TEST_F(FmhaFA2Fp8ScaledTest, Causal) { run_scaled(1, 64, 64, 4, 4, 128, true, 1.0f); }
-TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude) { run_scaled(1, 64, 64, 4, 4, 128, true, 80.0f); }
-TEST_F(FmhaFA2Fp8ScaledTest, RealisticMagnitude_GQA) {
-    run_scaled(1, 136, 136, 32, 8, 128, true, 80.0f);
-}
-TEST_F(FmhaFA2Fp8ScaledTest, Chunked) { run_scaled(1, 64, 512, 24, 8, 128, true, 80.0f, 448); }
-
-// Stage-1 HD=256 FA2 port (attention.fa2_hd256): register-resident kernel at HD=256
+// Stage-1 HD=256 FA2 port (process_diag_fa2_hd256): register-resident kernel at HD=256
 // (fp16-qk only, Bq=64/Bkv=64/TWOSLOT), shapes mirroring Qwen3.6 hybrid geometry (hd=256,
 // kv_heads=2, GQA 4:1). pv-f16 is the production candidate; f32/f16-acc variants are pinned
 // for correctness even where they spill registers.
@@ -605,11 +350,9 @@ protected:
     void SetUp() override {
         FmhaFA2Test::SetUp();
         process_diag_set_fa2_hd256(true);
-        process_diag_set_fa2_hd256_bkv(64);
     }
     void TearDown() override {
         process_diag_set_fa2_hd256(false);
-        process_diag_set_fa2_hd256_bkv(64);
         process_diag_set_fa2_f16acc(false);
         process_diag_set_fa2_pv_f16acc(false);
         FmhaFA2Test::TearDown();
@@ -620,7 +363,7 @@ protected:
                    float softcap = 0.0f, float amplitude = 1.0f, int q_offset = 0) {
         process_diag_set_fa2_f16acc(true);
         process_diag_set_fa2_pv_f16acc(true);
-        run_fa2(B, Sq, Skv, NH, NKV, 256, causal, sw, softcap, amplitude, /*fp16_qk=*/true, q_offset,
+        run_fa2(B, Sq, Skv, NH, NKV, 256, causal, sw, softcap, amplitude, q_offset,
                 /*tol_override=*/0.02f);
     }
 };
@@ -641,73 +384,12 @@ TEST_F(FmhaFA2Hd256Test, PvF16_Chunked) {
 }
 TEST_F(FmhaFA2Hd256Test, PvF16_LongCtx1536) { run_pv256(1, 1536, 1536, 8, 2, true); }
 
-// Bkv=32 instance (attention.fa2_hd256_bkv=32): the same kernel with half
-// the KV tile, so every tile-boundary case above is re-run on the 32-row
-// grid (odd lengths, sliding window, chunk offsets not multiple of 32).
-class FmhaFA2Hd256Bkv32Test : public FmhaFA2Hd256Test {
-protected:
-    void SetUp() override {
-        FmhaFA2Hd256Test::SetUp();
-        process_diag_set_fa2_hd256_bkv(32);
-    }
-    void TearDown() override {
-        process_diag_set_fa2_hd256_bkv(64);
-        FmhaFA2Hd256Test::TearDown();
-    }
-};
-
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_CausalSeq64_GQA8_2) { run_pv256(1, 64, 64, 8, 2, true); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_CausalMultiTile) { run_pv256(1, 256, 256, 8, 2, true); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_OddSeq51) { run_pv256(1, 51, 51, 8, 2, true); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_OddSeq200_GQA16_4) { run_pv256(1, 200, 200, 16, 4, true); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_NonCausal) { run_pv256(1, 32, 64, 8, 2, false); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_RealisticMagnitude) {
-    run_pv256(1, 64, 64, 8, 2, true, 0, 0.0f, /*amplitude=*/80.0f);
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_SlidingWindow) { run_pv256(1, 128, 128, 8, 2, true, /*sw=*/64); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_SlidingWindow40) { run_pv256(1, 200, 200, 8, 2, true, /*sw=*/40); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_Softcap) { run_pv256(1, 64, 64, 8, 2, true, 0, /*softcap=*/50.0f); }
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_Chunked) {
-    run_pv256(1, 51, 371, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/320);
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_ChunkedOffset333) {
-    run_pv256(1, 77, 410, 8, 2, true, 0, 0.0f, 1.0f, /*q_offset=*/333);
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, PvF16_LongCtx1536) { run_pv256(1, 1536, 1536, 8, 2, true); }
-TEST_F(FmhaFA2Hd256Bkv32Test, F32Acc_CausalSeq64) {
-    run_fa2(1, 64, 64, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, F16Acc_CausalMultiTile) {
-    process_diag_set_fa2_f16acc(true);
-    run_fa2(1, 200, 200, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
-}
-
 // f32-acc and f16-acc-QK variants: correctness must hold even where the
 // register footprint spills (they are A/B references, not the fast path).
-TEST_F(FmhaFA2Hd256Test, F32Acc_CausalSeq64) {
-    run_fa2(1, 64, 64, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
-}
+TEST_F(FmhaFA2Hd256Test, F32Acc_CausalSeq64) { run_fa2(1, 64, 64, 8, 2, 256, true, 0, 0.0f, 1.0f); }
 TEST_F(FmhaFA2Hd256Test, F16Acc_CausalMultiTile) {
     process_diag_set_fa2_f16acc(true);
-    run_fa2(1, 200, 200, 8, 2, 256, true, 0, 0.0f, 1.0f, /*fp16_qk=*/true);
-}
-
-// fp8-qk mode must keep declining hd=256 (no e4m3 instance in stage 1).
-TEST_F(FmhaFA2Hd256Test, Fp8QkStillDeclines) {
-    float scale = 1.0f / 16.0f;
-    const int elems = 1 * 32 * 8 * 256;
-    void* d;
-    cudaMalloc(&d, elems * sizeof(half) * 4);
-    half* p = static_cast<half*>(d);
-    int64_t q_shape[] = {1, 32, 8, 256};
-    int64_t kv_shape[] = {1, 32, 2, 256};
-    Tensor Qt(p, QType::F16, 4, q_shape, true);
-    Tensor Kt(p + elems, QType::F16, 4, kv_shape, true);
-    Tensor Vt(p + 2 * elems, QType::F16, 4, kv_shape, true);
-    Tensor Ot(p + 3 * elems, QType::F16, 4, q_shape, true);
-    EXPECT_FALSE(fmha_sm120_fa2_prefill(Qt, Kt, Vt, Ot, scale, true, 0, 0.0f, stream_, 0,
-                                        /*fp16_qk=*/false));
-    cudaFree(d);
+    run_fa2(1, 200, 200, 8, 2, 256, true, 0, 0.0f, 1.0f);
 }
 
 // Micro-benchmark: FA2 HD=256 (pv-f16) vs SMEM-tiled WMMA FMHA on the Qwen3.6-35B prefill
@@ -749,7 +431,7 @@ static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const cha
     Tensor O_wmma(d_o_wmma, QType::F16, 4, q_shape, true);
 
     // correctness cross-check first
-    ASSERT_TRUE(fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true));
+    ASSERT_TRUE(fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0));
     ASSERT_TRUE(fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0));
     cudaStreamSynchronize(stream_);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
@@ -793,7 +475,7 @@ static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const cha
     };
     float fa2_ms = time_kernel([&] {
         // timing loop: the launch status is not under test
-        (void)fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true);
+        (void)fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0);
     });
     float wmma_ms = time_kernel([&] {
         // timing loop: the launch status is not under test
@@ -813,15 +495,6 @@ static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const cha
 
 TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen36Shape) { hd256_bench_vs_wmma(stream_, 8, 2, "bkv64 Qwen3.6"); }
 TEST_F(FmhaFA2Hd256Test, BenchVsWmma_Qwen38Shape) { hd256_bench_vs_wmma(stream_, 24, 4, "bkv64 Qwen3.8"); }
-TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen36Shape) {
-    hd256_bench_vs_wmma(stream_, 8, 2, "bkv32 Qwen3.6");
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen38Shape) {
-    hd256_bench_vs_wmma(stream_, 24, 4, "bkv32 Qwen3.8");
-}
-TEST_F(FmhaFA2Hd256Bkv32Test, BenchVsWmma_Qwen38Shape_PvF32) {
-    hd256_bench_vs_wmma(stream_, 24, 4, "bkv32 pv-f32 Qwen3.8", /*pv_f16=*/false);
-}
 
 }  // namespace
 }  // namespace imp

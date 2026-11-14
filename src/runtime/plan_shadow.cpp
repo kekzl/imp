@@ -29,7 +29,6 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     in.features.ssm_state_bytes = probe.ssm_state_bytes;
     in.features.recurrent_snapshot_bytes = probe.recurrent_snapshot_bytes;
     in.features.spec_decode_bytes = probe.spec_decode_bytes;
-    in.features.residual_ring_bytes = probe.residual_ring_bytes;
     in.features.mtp_workspace_bytes = probe.mtp_workspace_bytes;
     // features.vision_tower_bytes stays 0 deliberately: the tower is an
     // engine ARENA tenant, already open when this probe is built, so its
@@ -158,8 +157,6 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     if (probe.spec_decode_bytes)
         emit("  speculative staging      %8.0f MiB  (hybrid verify state scratch, 2 x 1 slot)",
              probe.spec_decode_bytes / kMiB);
-    if (probe.residual_ring_bytes)
-        emit("  residual FP16 ring       %8.0f MiB", probe.residual_ring_bytes / kMiB);
     if (probe.mtp_workspace_bytes)
         emit("  MTP draft workspace      %8.0f MiB  (head KV slots + feed scratch, taken before serving)",
              probe.mtp_workspace_bytes / kMiB);

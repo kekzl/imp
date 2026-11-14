@@ -174,8 +174,6 @@ void Engine::init_apply_rope_override_() {
 // opt-in.
 void Engine::init_resolve_kv_dtype_policy_() {
     const auto& mcfg = model_->config();
-    const bool force_kv_fp16 = (runtime_config_.kv_cache.dtype == "fp16");
-    const bool fp8_auto_legacy = runtime_config_.kv_cache.fp8_auto_legacy;
 
     // Resolve the config-file KV dtype string into the engine enum. CLI flags
     // (--kv-fp8 / --kv-int4 / ...) set config_.kv_cache_dtype directly and win;
@@ -313,10 +311,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !force_kv_fp16 && true) {
-        config_.kv_cache_dtype = QType::FP8_E4M3;
-        IMP_LOG_INFO("KV cache dtype: kv_cache.fp8_auto_legacy → FP8_E4M3 (legacy auto-upgrade)");
-    } else if (config_.kv_cache_dtype == QType::F16) {
+    if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     } else if (config_.kv_cache_dtype == QType::NVFP4) {
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
@@ -334,15 +329,11 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     // The deterministic forcing below (#680) works around NaNs in the
     // cuBLAS-attention + FP8 round-trip; unneeded once FA2 serves all
-    // attention (hd=128, and hd=256 since #930/fa2_hd256 default-on), since
-    // cuBLAS attention never touches the FP8 KV there. Non-FA2 configs
-    // (learned sinks/hd=64, heterogeneous per-layer shapes like gemma-4)
-    // still need it.
-    const bool fa2_hd_ok = mcfg.head_dim == 128 ||
-                           (mcfg.head_dim == 256 && runtime_config_.attention.fa2_hd256);
-    const bool fa2_serves_attention = fa2_hd_ok &&
-                                      runtime_config_.attention.fmha_fa2 != "never" &&
-                                      runtime_config_.attention.fa2_fp16qk != "never";
+    // attention (hd=128, and hd=256 since #930), since cuBLAS attention never
+    // touches the FP8 KV there. Non-FA2 configs (learned sinks/hd=64,
+    // heterogeneous per-layer shapes like gemma-4) still need it.
+    const bool fa2_hd_ok = mcfg.head_dim == 128 || mcfg.head_dim == 256;
+    const bool fa2_serves_attention = fa2_hd_ok && runtime_config_.attention.fmha_fa2 != "never";
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
         !runtime_config_.runtime.deterministic_gemm) {
         IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128/256) — skipping the legacy "
@@ -350,7 +341,6 @@ void Engine::init_resolve_kv_dtype_policy_() {
                      "per-layer shapes — keep it; set runtime.deterministic_gemm=true to force)");
     }
     if (config_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
-        !runtime_config_.kv_cache.allow_nondeterministic_fp8 &&
         !runtime_config_.runtime.deterministic_gemm) {
         // Mutates the per-Engine RuntimeConfig in place; also updates the
         // process_diag cache since free-function readers (gemm.cu's
@@ -361,8 +351,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
-            "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
-            "Set kv_cache.allow_nondeterministic_fp8=true to opt out.");
+            "(non-deterministic cuBLAS + FP8 round-trip → NaN).");
     }
 
     if (config_.max_batch_size <= 0) {

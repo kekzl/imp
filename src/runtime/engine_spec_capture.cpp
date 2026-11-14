@@ -55,7 +55,7 @@ void Engine::prewarm_spec_scratch_() {
         return;
 
     // Goes through spec_capture_ready_ (not a direct resolve) so its
-    // eligibility guards (host-offload, residual KV, census probe) are not
+    // eligibility guards (host-offload, census probe) are not
     // duplicated; ctx_padded=1 makes this a side-effect-only call.
     if (scfg.capture)
         (void)spec_capture_ready_(1, 1);
@@ -126,9 +126,6 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
     // device, cache keyed on the recurrent slot); MoE host-offload is not: it
     // syncs on the host per layer.
     if (offload_mgr_)
-        return false;
-    // BitDecoding residual KV advances ring state on the host per forward.
-    if (kv_manager_ && kv_manager_->residual_enabled())
         return false;
     if (!executor_)
         return false;

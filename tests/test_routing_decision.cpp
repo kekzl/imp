@@ -17,14 +17,13 @@ using namespace imp;
 
 namespace {
 
-// Default config: fmha_fa2="on", fp8_fmha="never" (opt-in, #511), fmha_sm120="auto".
+// Default config: fmha_fa2="on".
 DispatchPolicy default_cfg() { return DispatchPolicy{}; }
 
 // Typical hd=128 F16 prefill: every specialized kernel would accept.
 AttnKernelSupport all_accept() {
     AttnKernelSupport s;
     s.fa2_accepts = true;
-    s.fp8_accepts = true;
     s.fmha_sm120_accepts = true;
     s.blackwell_accepts = true;
     return s;
@@ -33,93 +32,48 @@ AttnKernelSupport all_accept() {
 }  // namespace
 
 TEST(AttnDispatchTable, DefaultConfigPicksFA2) {
-    // fmha_fa2="on" (default) and FA2 accepts hd=128 → FA2 wins over FP8.
+    // fmha_fa2="on" (default) and FA2 accepts hd=128 → FA2 wins.
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept()), AttnPrefillPath::FA2);
 }
 
-TEST(AttnDispatchTable, FA2NeverFallsToFMHANotFP8) {
-    // fp8-QK is opt-in (#511): disabling FA2 must NOT resurrect the e4m3 path.
+TEST(AttnDispatchTable, FA2NeverFallsToFMHA) {
     auto cfg = default_cfg();
     cfg.attention.fmha_fa2 = "never";
     EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FMHA_SM120);
 }
 
 TEST(AttnDispatchTable, FA2OnButDeclinesFallsToFMHA) {
-    // hd != 128 (gemma-3 hd=256, the #511 production victim): FA2 declines
-    // even with fmha_fa2="on" → FP16 WMMA serves, never the fp8-QK kernel.
+    // FA2 declines (head_dim, smem) even with fmha_fa2="on" → FP16 WMMA serves.
     auto cfg = default_cfg();
     auto sup = all_accept();
     sup.fa2_accepts = false;
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
 
-TEST(AttnDispatchTable, FP8AutoIsOff) {
-    // Legacy "auto" (pre-#511-fix default) must behave as OFF, not ON.
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "auto";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FMHA_SM120);
-}
-
-TEST(AttnDispatchTable, FP8OptInServes) {
-    // Explicit fp8_fmha="on" (experiments) restores the fp8 tier behind FA2.
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "on";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FP8);
-}
-
-TEST(AttnDispatchTable, FP8NeverWithFA2NeverFallsToFMHA) {
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "never";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::FMHA_SM120);
-}
-
-TEST(AttnDispatchTable, FP8DeclinesFallsToFMHA) {
+TEST(AttnDispatchTable, FMHADeclinesFallsToBlackwell) {
     auto cfg = default_cfg();
     cfg.attention.fmha_fa2 = "never";
     auto sup = all_accept();
-    sup.fp8_accepts = false;
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
-}
-
-TEST(AttnDispatchTable, AllSpecializedDisabledFallsToBlackwell) {
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "never";
-    cfg.attention.fmha_sm120 = "never";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept()), AttnPrefillPath::BLACKWELL);
+    sup.fmha_sm120_accepts = false;
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::BLACKWELL);
 }
 
 TEST(AttnDispatchTable, AllDeclineIsNoneAndThrows) {
-    // Unsupported config for every kernel incl. the final blackwell tier
-    // (e.g. hd=256 with fmha_sm120=never: blackwell needs ~176 KB smem) →
-    // NONE; the dispatcher throws instead of silently corrupting O (#654).
+    // Unsupported config for every kernel incl. the final blackwell tier → NONE; the dispatcher
+    // throws instead of silently corrupting O (#654).
     auto cfg = default_cfg();
     AttnKernelSupport sup;  // all false
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::NONE);
 }
 
-TEST(AttnDispatchTable, BlackwellDeclineWithFMHADisabledIsNone) {
-    // The exact #654 production-forced config: hd=256, fmha_sm120=never.
-    // FA2 declines (hd!=128), fp8 opt-in/off, blackwell declines (smem).
+TEST(AttnDispatchTable, BlackwellDeclineWithFMHADecliningIsNone) {
+    // The #654 shape: FA2 and the WMMA FMHA decline, blackwell declines (smem).
     auto cfg = default_cfg();
-    cfg.attention.fmha_sm120 = "never";
     auto sup = all_accept();
     sup.fa2_accepts = false;
+    sup.fmha_sm120_accepts = false;
     sup.blackwell_accepts = false;
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::NONE);
-}
-
-TEST(AttnDispatchTable, FMHASm120AutoIsNotNever) {
-    // "auto" (default) must not be treated as "never" for the WMMA tier.
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "never";
-    auto sup = all_accept();
-    EXPECT_EQ(cfg.attention.fmha_sm120, "auto");
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);
 }
 
 // --------------------------------------------------------------------------
@@ -227,15 +181,15 @@ TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
 // ---- #992: learned-sink pre-gate ------------------------------------------
 
 TEST(AttnDispatchTable, SinksRouteToFA2WhenItAccepts) {
-    // gpt-oss learned sinks: fp16-qk FA2 and the FP16 WMMA FMHA fold them into their online
-    // softmax; FP8/Blackwell must not serve sink configs.
+    // gpt-oss learned sinks: FA2 and the FP16 WMMA FMHA fold them into their online
+    // softmax; Blackwell must not serve sink configs.
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept(), /*has_sinks=*/true),
               AttnPrefillPath::FA2);
     auto sup = all_accept();
     sup.fa2_accepts = false;  // e.g. a head_dim FA2 has no instance for
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
     auto cfg = default_cfg();
-    cfg.attention.fa2_fp16qk = "never";  // FA2 would run fp8-qk or not at all: no sink support there
+    cfg.attention.fmha_fa2 = "never";
     EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::FMHA_SM120);
 }
 
@@ -248,11 +202,12 @@ TEST(AttnDispatchTable, SinksWithFMHADeclineIsNoneNotBlackwell) {
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup, /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
-TEST(AttnDispatchTable, SinksWithBothSinkTiersOffIsNone) {
+TEST(AttnDispatchTable, SinksWithFA2OffAndFMHADeclineIsNone) {
     auto cfg = default_cfg();
-    cfg.attention.fmha_sm120 = "never";
     cfg.attention.fmha_fa2 = "off";
-    EXPECT_EQ(select_attn_prefill_path(cfg, all_accept(), /*has_sinks=*/true), AttnPrefillPath::NONE);
+    auto sup = all_accept();
+    sup.fmha_sm120_accepts = false;
+    EXPECT_EQ(select_attn_prefill_path(cfg, sup, /*has_sinks=*/true), AttnPrefillPath::NONE);
 }
 
 // Audit F-3: until #1210 select_attn_prefill_path() was TEST-ONLY (mentioned in a comment,
@@ -271,9 +226,6 @@ AttnKernelSupport observed_when(AttnPrefillPath winner) {
         case AttnPrefillPath::FA2:
             s.fa2_accepts = true;
             break;
-        case AttnPrefillPath::FP8:
-            s.fp8_accepts = true;
-            break;
         case AttnPrefillPath::FMHA_SM120:
             s.fmha_sm120_accepts = true;
             break;
@@ -290,9 +242,8 @@ AttnKernelSupport observed_when(AttnPrefillPath winner) {
 
 TEST(AttnRoutingModelCoupling, EveryTierReplaysToItself) {
     auto cfg = default_cfg();
-    cfg.attention.fp8_fmha = "on";  // so the FP8 tier is reachable at all
 
-    const AttnPrefillPath tiers[] = {AttnPrefillPath::FA2, AttnPrefillPath::FP8, AttnPrefillPath::FMHA_SM120,
+    const AttnPrefillPath tiers[] = {AttnPrefillPath::FA2, AttnPrefillPath::FMHA_SM120,
                                      AttnPrefillPath::BLACKWELL};
     for (AttnPrefillPath t : tiers) {
         EXPECT_EQ(select_attn_prefill_path(cfg, observed_when(t)), t)
@@ -322,34 +273,18 @@ TEST(AttnRoutingModelCoupling, NothingAcceptsReplaysToNone) {
 }
 
 // Replay tests can't catch a reorder: each support pattern has exactly one accepting tier,
-// so swapping two tiers changes nothing (verified by mutation: FP8 ahead of FA2 stayed
-// green). The 16 AttnDispatchTable cases can't either (FP8 cases force fmha_fa2="never", so
-// FA2/FP8 are never both live). These pin actual chain order: both gates on, earlier wins.
+// so swapping two tiers changes nothing (verified by mutation). These pin actual chain order:
+// both tiers accept, the earlier wins.
 
-TEST(AttnTierPrecedence, FA2BeatsFP8WhenBothOnAndBothAccept) {
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "on";
-    cfg.attention.fp8_fmha = "on";
+TEST(AttnTierPrecedence, FA2BeatsFmhaSm120WhenBothAccept) {
     auto sup = all_accept();
-    ASSERT_TRUE(sup.fa2_accepts && sup.fp8_accepts);
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FA2)
-        << "FA2 must precede FP8: the raw-e4m3 FP8 tier compounds ~10% score error "
-           "per layer (#511) and must never win a tie";
-}
-
-TEST(AttnTierPrecedence, FP8BeatsFmhaSm120WhenBothAccept) {
-    auto cfg = default_cfg();
-    cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "on";
-    auto sup = all_accept();
-    ASSERT_TRUE(sup.fp8_accepts && sup.fmha_sm120_accepts);
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FP8);
+    ASSERT_TRUE(sup.fa2_accepts && sup.fmha_sm120_accepts);
+    EXPECT_EQ(select_attn_prefill_path(default_cfg(), sup), AttnPrefillPath::FA2);
 }
 
 TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
     auto cfg = default_cfg();
     cfg.attention.fmha_fa2 = "never";
-    cfg.attention.fp8_fmha = "never";
     auto sup = all_accept();
     ASSERT_TRUE(sup.fmha_sm120_accepts && sup.blackwell_accepts);
     EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FMHA_SM120);

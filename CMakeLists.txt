@@ -191,7 +191,6 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
     src/memory/kv_cache_manager_session.cpp
-    src/memory/kv_cache_manager_evict.cpp
     src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
@@ -307,8 +306,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_grouped_nvfp4_tile.cu
     src/compute/gemm_grouped_nvfp4_decode.cu
     src/compute/attention_fa2_hd512.cu
-    src/compute/ffn_sparsity_probe.cu
-    src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
     src/compute/gemv_dp4a_rows.cu
@@ -334,7 +331,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu
-    src/compute/attention_paged_nvfp4_tc.cu
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
@@ -449,7 +445,6 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
     src/runtime/prefill_graph_cache.cpp
-    src/runtime/engine_kv_evict.cpp
     src/runtime/engine_embed.cpp
     src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
@@ -503,7 +498,6 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/sparse_attn_select.cu
-    src/exec/kv_evict.cu
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cpp
@@ -524,7 +518,6 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_workspace.cpp
     src/exec/executor_workspace_buffers.cpp
     src/exec/executor_sparse_prefill.cpp
-    src/exec/executor_kv_evict.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
     src/exec/pre_dequant_phase0_nvfp4_loader.cpp
@@ -705,7 +698,6 @@ set_source_files_properties(
     src/exec/executor_attention_helpers.cpp
     src/exec/executor_workspace_buffers.cpp
     src/exec/executor_sparse_prefill.cpp
-    src/exec/executor_kv_evict.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
@@ -956,8 +948,6 @@ if(IMP_BUILD_TESTS)
         tests/test_prefill_graph_cache.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
-        # KV eviction block selection (kv_cache.evict_keep_ratio, roadmap row 48).
-        tests/test_kv_evict_select.cpp
         # cuBLASLt route counter labels and table (diagnostics.log_gemm_algo, roadmap row 123).
         tests/test_lt_route_trace.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.
@@ -1229,7 +1219,6 @@ if(IMP_BUILD_TESTS)
         # same way, or nothing bounds the chunk and cuBLAS aborts.
         tests/test_attention_dispatch_rules.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
-        tests/test_fmha_fp8_tile_select.cpp
         # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
         tests/test_fmha_sm120_tile_select.cpp
         # KV host spill tier slot bookkeeping (#2203); the byte round trip is in test-kv.
@@ -1383,7 +1372,6 @@ if(IMP_BUILD_TESTS)
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
-        tests/test_ffn_sparsity.cu
     )
 
     imp_add_test_module(test-attention GPU SOURCES
@@ -1398,11 +1386,8 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_oracle.cu
         tests/test_qsa_indexer.cu
         tests/test_attention_paged_reduce.cu
-        tests/test_attention_paged_nvfp4_tc.cu
-        tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
-        tests/test_kv_evict.cu
         tests/test_sparse_prefill.cu
     )
 

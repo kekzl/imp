@@ -92,23 +92,6 @@ struct InferenceState {
     void* ssm_tap_out = nullptr;
     int64_t ssm_tap_layer_stride = 0;
 
-    // BitDecoding Phase 3 residual KV cache. Two modes: single-seq scalar or multi-seq array
-    // (dispatcher prefers multi-seq whenever the engine sets up the device arrays).
-    // Single-seq: kv_seq_id is the request id used to look up ring state via KVCacheManager;
-    // -1 disables.
-    int kv_seq_id = -1;
-    // KVCacheManager owning the residual buffer + ring-state map.
-    class KVCacheManager* kv_manager = nullptr;
-    // Multi-seq array form: device pointers to per-batch metadata, length n_sequences, built
-    // by the engine each forward step before the attention call. Each element matches the
-    // corresponding row of block_tables/context_lens. nullptr = multi-seq form inactive.
-    const int* d_residual_seq_slots = nullptr;     // [n_sequences] slot in [0, residual_max_seqs)
-    const int* d_residual_counts = nullptr;         // [n_sequences] fill_count
-    const int* d_residual_write_idxes = nullptr;    // [n_sequences] write_idx
-    // Host array of per-batch seq_ids (request ids): the KV write path resolves the
-    // residual ring base per seq. Length = n_sequences.
-    const int* h_residual_seq_ids = nullptr;
-
     // Batching
     int n_sequences = 1;         // number of sequences in the batch
     int max_blocks_per_seq = 0;  // max blocks per sequence (for 2D block_table indexing)
@@ -137,7 +120,7 @@ struct InferenceState {
     // [h_seq_offsets[i], h_seq_offsets[i+1]), falling back to the fused batched GDN kernel
     // with seq_offsets + ssm_seq_slots. h_seq_offsets != nullptr is the activation condition:
     // engine sets it only for n_sequences>1, is_prefill, none of vision/MTP/spec-verify/
-    // logprobs/constraints/ppl capture/SWA sizing/residual KV.
+    // logprobs/constraints/ppl capture/SWA sizing.
     const int* h_seq_offsets = nullptr;    // HOST [n_sequences+1] row prefix sums
     const int* h_seq_q_offsets = nullptr;  // HOST [n_sequences] per-seq prefill_offset
     const int* h_ssm_slots = nullptr;      // HOST [n_sequences] recurrent-state slots

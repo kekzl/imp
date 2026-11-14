@@ -34,9 +34,6 @@ bool process_diag_cublas_fp16_acc() { return slot().cublas_fp16_acc; }
 void process_diag_set_cublas_fp16_acc(bool v) { slot().cublas_fp16_acc = v; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
 bool process_diag_gemm_algo_timed() { return slot().gemm_algo_timed; }
-bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
-bool process_diag_attention_fp8_tile() { return slot().attention_fp8_tile; }
-bool process_diag_attention_fp8_tile_gqa() { return slot().attention_fp8_tile_gqa; }
 bool process_diag_fa2_f16acc() { return slot().attention_fa2_f16acc; }
 bool process_diag_fa2_pv_f16acc() { return slot().attention_fa2_pv_f16acc; }
 void process_diag_set_fa2_f16acc(bool v) { slot().attention_fa2_f16acc = v; }
@@ -61,10 +58,6 @@ void process_diag_set_paged_fp8_hpc(int v) { slot().attention_paged_fp8_hpc = v;
 void process_diag_set_fa2_dense_2cta(bool v) { slot().attention_fa2_dense_2cta = v; }
 bool process_diag_fa2_heavy_first() { return slot().attention_fa2_heavy_first; }
 void process_diag_set_fa2_heavy_first(bool v) { slot().attention_fa2_heavy_first = v; }
-int process_diag_fa2_hd256_bkv() { return slot().attention_fa2_hd256_bkv; }
-void process_diag_set_fa2_hd256_bkv(int v) { slot().attention_fa2_hd256_bkv = v; }
-bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
-void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
 int process_diag_nvfp4_cublaslt_min_m() { return slot().nvfp4_cublaslt_min_m; }
 int process_diag_nvfp4_tile_min_m() { return slot().nvfp4_tile_min_m; }
 bool process_diag_nvfp4_prompt_streamk() { return slot().nvfp4_prompt_streamk; }
@@ -76,7 +69,6 @@ bool process_diag_q45k_tile() { return slot().q45k_tile; }
 int process_diag_fp8_tile_min_m() { return slot().fp8_tile_min_m; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
-bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
