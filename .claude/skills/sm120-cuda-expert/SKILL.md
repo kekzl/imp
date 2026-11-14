@@ -59,7 +59,7 @@ Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold
 | Path | Evidence at init / config |
 |---|---|
 | CUTLASS NVFP4 weight cache | `cutlass_nvfp4 weight cache` log line; without it decode runs dequant->cuBLAS |
-| CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`, `runtime.graph_prewarm` (32/32 captures in 2.3 s) |
+| CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`; graph prewarm always on (32/32 captures in 2.3 s) |
 | PDL both halves | `runtime.no_pdl=false`; registered kernels call `griddepcontrol.wait` before the first global access (`src/compute/pdl_device.cuh`); registered = waits, blanket registrations without a wait RACED (`GreedyDeterminism`) |
 | FA2 prefill family | `attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, `fa2_dense_2cta` (all on); `fa2_hd256_bkv` 64 |
 | Stream-K on the dense NVFP4 prefill GEMM | the own tile plans it per grid (#2934: below half a wave 2 k-pieces, above one wave hybrid vs uniform stream-K by cost); `gemm.nvfp4_cutlass_streamk` left with CUTLASS (#2938). Size a stream-K workspace for every grid it can see: a 0 B workspace refused every CUTLASS launch once (22k -> 4.2k tok/s, #1841) |
