@@ -490,9 +490,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
     // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill
-    // (uniform per-layer shapes, head_dim 64, 128 or 256 with fa2_hd256, sinks included).
-    // cuBLAS remains the reference for heterogeneous shapes, hd=256 without fa2_hd256,
-    // and fa2_fp16qk=never.
+    // (uniform per-layer shapes, head_dim 64, 128 or 256, sinks included). cuBLAS remains the
+    // reference for heterogeneous shapes.
     if (fa2_serves_all_prefill()) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — "
                      "no S-matrix needed)");

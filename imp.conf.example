@@ -298,12 +298,6 @@ fp8_prefill          = "auto"
 # Register-resident FA2 prefill kernel (F16, head_dim 64/128/256, f16 QK^T).
 # Default "on" since PR #478. Declines to the FP16 WMMA kernel for unsupported configs.
 fmha_fa2             = "on"
-# hd=512 prefill (Gemma-4 global layers), single-shot and chunk continuation:
-# "fmha" = WMMA FMHA with a forward KV scan, a prompt row is identical in every
-# chunk (#2167); "cublas" = S-matrix cuBLAS, algorithm picked by row count;
-# "fa2" = split-D FA2 (no window / sinks), rows identical in every chunk, Gemma-4-26B pp4096
-# +3.4..4.2 % vs cublas; "auto" = fa2, else fmha under runtime.deterministic, else cublas.
-hd512_prefill        = "auto"
 # RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
 # quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
 # sinks, graph replay and runtime.deterministic. pp ~9k: Qwen3-8B Q8_0 +2.9 %,
@@ -329,27 +323,20 @@ apa_tile_cache       = false
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
-# MXFP4 GGUF weights decode natively (GEMV) and prefill W4A16 (per-GEMM FP16 dequant scratch);
-# true restores the FP16 decode cache (~4x the MXFP4 bytes; Qwen3.5-4B: 8020 MiB, pp512 28k vs 19-20k tok/s,
-# tg128 156-166 vs 259-267 tok/s).
-mxfp4_fp16_fallback  = false
-# MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
-# tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).
-mxfp4_fp16_cache_policy = "legacy"
-force_cublas_decode  = false
 # MLA absorbed-decode latent KV cache (DeepSeek-V2/V3): decode stores only the
 # compressed latent + decoupled RoPE key and runs the mathematically-equivalent
 # absorbed attention (~9x smaller per-token KV). Prefill stays materialized;
 # single-sequence only (falls back to materialized otherwise). Opt-in.
 mla_absorb           = false
-no_qknorm_fused      = false
-gate_concat          = false
 # Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
 # long prefill stays on the fast cuBLAS path before falling back to FMHA.
 attn_scores_mib      = 384
 # Sparse decode attention (Quest-class top-k page selection): decode reads
-# only the top-scoring KV blocks (per-block key min/max bound vs the query),
-# up to this many tokens per sequence, selected device-side per step.
+# only the top-scoring KV blocks (per-block key mean + stddev score vs the query;
+# the min/max corner bound scored NIAH 2/10 vs 10/10 at a 4096 budget),
+# up to this many tokens per sequence, selected device-side per step. The first
+# 16 and last 256 positions are always kept; below 12288 tokens of context decode
+# stays dense (8k measured -7 %, 16k +6 %, 32k +25 %).
 # -1 = auto (default): 4096 on qwen3, qwen3moe, qwen35, qwen36moe,
 # nemotron_h_moe, llama, gpt_oss (NIAH + tok/s gate, #2405), 0 elsewhere.
 # 0 = off. Contexts at or below the budget are bit-identical to dense.
@@ -368,36 +355,12 @@ sparse_topk_tokens   = -1
 # PPL 4.7558 vs 4.6978) and flips MoE routing on short prompts (degen_suite 48/50 vs 50/50).
 qsa                  = false
 qsa_force            = false
-qsa_rows             = 16
 qsa_debug            = false
-# Blocks covering the first N positions are always kept (attention sinks).
-sparse_sink_tokens   = 16
-# Blocks covering the last N positions are always kept (local context;
-# includes the partially filled tail block).
-sparse_recent_tokens = 256
-# Below this context length decode stays dense even when sparse_topk_tokens is
-# exceeded: the selection only outgrows its overhead past ~12k (8k measured
-# -7 %, 16k +6 %, 32k +25 %). A sparse_topk_tokens setting is a no-op below it.
-sparse_min_ctx       = 12288
-# Page score. true (default) = mean of the page's keys plus
-# sparse_score_std_coef times their standard deviation; false = the min/max
-# corner bound (Quest). Both are sum_d (q_d*center_d + |q_d|*offset_d) over the
-# same metadata layout at the same cost; the corner bound widens with whichever
-# single token is most extreme per dimension, which is what costs it recall at
-# small budgets. Qwen3.8-27B-NVFP4, NIAH 5 depths x 2 lengths: corner 2/10 at a
-# 4096 budget and 7/10 at 8192, mean+std 10/10 at both, wall time neutral.
-sparse_score_meanstd = true
-# Offset weight for sparse_score_meanstd. 0 ranks on the mean alone.
-sparse_score_std_coef = 1.0
 # Sparse prefill: a continuation chunk attends to its own rows plus the top
 # N past tokens (one page selection per chunk, same page score). -1 = auto
 # (default): 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe
 # and llama (NIAH + two-sided PPL + tok/s gate, #2406, #2529), 0 elsewhere. 0 = off.
 sparse_prefill_topk_tokens = -1
-# Query rows sampled per chunk to score the past pages (max 64).
-sparse_prefill_rows = 16
-# Past positions always kept for a continuation chunk (local context).
-sparse_prefill_recent_tokens = 1024
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload

@@ -579,8 +579,8 @@ public:
     [[nodiscard]] bool attn_shapes_uniform() const;
 
     // True when FP16-QK FA2 serves ALL prefill for this model (uniform shapes,
-    // no learned sinks, hd=128 always / 256 behind fa2_hd256, fa2_fp16qk !=
-    // "never"). Shared by the S-matrix allocator skip and workspace_estimate() so the two cannot drift
+    // no learned sinks, hd 64/128/256). Shared by the S-matrix allocator skip and
+    // workspace_estimate() so the two cannot drift
     // (#943).
     [[nodiscard]] bool fa2_serves_all_prefill() const;
 
@@ -594,7 +594,7 @@ public:
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
     // device-read lengths: uniform hd=128, no learned sinks, no MLA, no
-    // LongRoPE, fa2_fp16qk not disabled.
+    // LongRoPE.
     [[nodiscard]] bool chunk_capture_supported() const;
     // Rows a captured verify chunk may carry when every MoE layer is host-resident NVFP4 served
     // per row by the device expert cache (the captured decode path); 0 = not that layout.
