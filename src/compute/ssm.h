@@ -143,11 +143,8 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
 // need survive the step, not the whole window (channels*kernel_size floats). Both pools
 // indexed by recurrent SLOT so a request keeps its row while moving within the batch.
 // stash: x_in is [n_seq,n_tokens,channels] half, row taken is real_n-1.
-// apply: advances slot's window by its stashed tap (single-row ssm_conv1d_commit_kernel).
 void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_real_n,
                         const int* slots, int n_seq, cudaStream_t stream);
-void ssm_conv_tap_apply(void* conv_pool, int64_t slot_stride_floats, const void* tap_pool, int channels,
-                        int kernel_size, const int* slots, int n_seq, cudaStream_t stream);
 // Mid rows of the bound verify, by batch group: rows d_snap_n .. d_snap_n + n_levels - 1 of group g leave as
 // the taps [g * n_levels + level] (rows past n_tokens write nothing).
 void ssm_conv_tap_stash_mid(void* tap_pool, const void* x_in, int n_tokens, int channels, const int* d_snap_n,

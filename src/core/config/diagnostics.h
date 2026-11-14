@@ -90,11 +90,6 @@ struct Diagnostics {
     // imp-server: a failed tool call logs the model's raw call text, first 2000 bytes. Off by default,
     // the text can hold request content.
     bool tool_fault_raw = false;
-    // Stage 0 tree-ceiling probe: for every chain step, ask the MTP head for
-    // top-4 candidates and tally whether the true next token was in top-w per
-    // depth. Off by default: costs a full vocab-scan kernel plus a per-draft
-    // sync (the very thing the device-side chain avoids). Nothing in serving reads the result.
-    bool mtp_tree_probe = false;
     // MTP: feed the draft head the main model's post-RMSNorm hidden (vLLM
     // variant), matching how the head was trained; imp's executor hidden_ is
     // pre-norm, so this normalizes the fed pair. Default on; false restores the pre-norm feed.

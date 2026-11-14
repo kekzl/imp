@@ -43,8 +43,8 @@ int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hyb
     return kMtpBoundVerifyEngineBatch;
 }
 
-MtpAutoServing mtp_auto_serving(const RuntimeConfig& cfg, int configured_batch, bool gdn_hybrid) {
-    if (configured_batch == 1 || cfg.speculative.batch_verify)
+MtpAutoServing mtp_auto_serving(int configured_batch, bool gdn_hybrid) {
+    if (configured_batch == 1)
         return MtpAutoServing::SingleStream;
     return gdn_hybrid ? MtpAutoServing::ConcurrentHybrid : MtpAutoServing::ConcurrentOther;
 }
@@ -64,17 +64,11 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
 
 namespace {
 // A concurrent GDN-hybrid server keeps the KV pool: drafts score LM-head rows [0, 98304) and the NVFP4
-// draft copy holds only those. Drafts past the first per bound request stay while factor rows replace
-// their spare slots (speculative.mtp_batch_verify_factor_row, 3.22 MiB vs 79.5 MiB per row); else they go.
+// draft copy holds only those. Drafts past the first per bound request stay: factor rows replace their
+// spare slots (3.22 MiB vs 79.5 MiB per row).
 void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     if (cfg.speculative.mtp_k <= 0 || serving != MtpAutoServing::ConcurrentHybrid)
         return;
-    // KV host spill restores an evicted prefix by H2D, so the second draft per row stays.
-    const bool spill = cfg.kv_cache.host_spill_mb > 0;
-    const bool k = !spill && !cfg.speculative.mtp_batch_verify_factor_row &&
-                   !cfg.was_set("speculative.mtp_batch_verify_k");
-    if (k)
-        cfg.speculative.mtp_batch_verify_k = 1;
     // Rows [0, 98304) hold 99.94 % of Qwen3.8 agent output tokens.
     const bool vocab = !cfg.was_set("speculative.mtp_draft_vocab");
     if (vocab)
@@ -84,12 +78,11 @@ void mtp_concurrent_pool_defaults(RuntimeConfig& cfg, MtpAutoServing serving) {
     const bool head = !cfg.was_set("speculative.mtp_nvfp4_head") && cfg.speculative.mtp_draft_vocab <= 0;
     if (head)
         cfg.speculative.mtp_nvfp4_head = false;
-    if (head || k || vocab)
+    if (head || vocab)
         IMP_LOG_INFO(
-            "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_draft_vocab=%d, mtp_batch_verify_k=%d "
+            "speculative: concurrent server -> mtp_nvfp4_head=%s, mtp_draft_vocab=%d "
             "(KV pool kept for concurrent chats; set a key to override)",
-            cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_draft_vocab,
-            cfg.speculative.mtp_batch_verify_k);
+            cfg.speculative.mtp_nvfp4_head ? "true" : "false", cfg.speculative.mtp_draft_vocab);
 }
 }  // namespace
 

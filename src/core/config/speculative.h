@@ -24,15 +24,6 @@ struct Speculative {
     // expert per step and never engages regardless of this flag. imp-cli
     // --bench pins this false so the perf-baseline decode signal stays raw.
     bool moe = true;
-    // Batched verify on the GDN hybrid: every decoding request forwards 2 rows
-    // (last token + draft) per step; needs a spare recurrent slot per batch
-    // slot (halves the auto batch). Default off (docs/plans/2026-09-11-batched-mtp-verify.md).
-    bool batch_verify = false;
-    // Carry the drafted row of a batched verify as (g, k, delta) + one conv tap
-    // instead of a second full recurrent slot. The spare slot duplicates the
-    // full state pool (79.5 MiB/slot on Qwen3.8-27B, clamping max_batch 32->18);
-    // the factored form is ~3.3 MiB. Opt-in (docs/plans/2026-09-12-factored-verify-spare.md).
-    bool factored_spare = false;
     // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696): engine-
     // scoped cross-request token->top-M successors table fed from emitted
     // bigrams + verify-chunk top-K logits. Runs as a fallback AFTER suffix/
@@ -45,16 +36,6 @@ struct Speculative {
     // (width*(1+depth)<=17). Default 1 (linear): wider buckets run CUTLASS at
     // low effective bandwidth, not worth the accept lift.
     int recycle_width = 1;
-    // MTP multi-candidate width: W>1 drafts W chains per verify step (chain 0
-    // continues the head's top-1, chains 1..W-1 branch at the first position on
-    // top-W ids). Chains verify as one multi-candidate chunk (private KV blocks,
-    // longest matching prefix wins). Device-side, no per-step host sync; width
-    // capped by kMtpMaxChainK and kMtpMaxTopW. Default 1 = linear path.
-    int mtp_tree_width = 1;
-    // Branch only when the head is unsure: extra chains (mtp_tree_width>1) are
-    // always drafted but verified only when the head's top-1/top-2 logit margin
-    // is below this. 0 = always branch. See docs/plans/2026-08-31-mtp-multicandidate-hybrid.md.
-    float mtp_tree_margin = 2.0f;
     // SuffixDecoding-style indexed drafting (arXiv 2411.04975): hash-indexed
     // suffix matching (O(1) amortized vs legacy O(n) backward scan) with
     // frequency-voted continuations and adaptive draft length past k up to
@@ -108,8 +89,8 @@ struct Speculative {
     // per row, 79.5 MiB each on Qwen3.8-27B); a bigger batch decodes plain. 0 = off.
     // Qwen3.8-27B-NVFP4, 4 overlapping chats: 83.72 -> 117.45 tok/s per turn, c32 unchanged.
     int mtp_batch_verify = 4;
-    // Drafts per bound request in that step (N + 1 rows, N head passes): 4 at most, 2 without
-    // mtp_batch_verify_factor_row. Unset, it follows mtp_k down (a row past the drafted depth is a pad);
+    // Drafts per bound request in that step (N + 1 rows, N head passes): 4 at most, 1 when the factor
+    // rows do not fit. Unset, it follows mtp_k down (a row past the drafted depth is a pad);
     // mtp_k=auto on a concurrent GDN-hybrid server follows it up (tools/common/mtp_auto.cpp).
     int mtp_batch_verify_k = 4;
     // Drafts per request once 4 requests share the step (2..mtp_batch_verify_k, factor rows only): each
@@ -120,10 +101,6 @@ struct Speculative {
     // inside the 8-row GEMM tile): all N drafts accepted -> N + 2 next. 0 = off. Qwen3.8-27B-NVFP4 agent
     // replay, 1 chat, same text: +1.99 % tok/ms at 6, +2.84 % at 7, +2.12 % at 8 (9 rows).
     int mtp_batch_verify_k_streak = 7;
-    // At 2+ drafts: one spare per row holds the full accept, every draft before the last also leaves as a
-    // factor row + conv tap (3.22 MiB per request and draft on Qwen3.8-27B), folded into the live slot on
-    // a partial accept. false = a second spare per row (79.5 MiB each), 2 drafts at most.
-    bool mtp_batch_verify_factor_row = true;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
     // Read only when MTP is requested and the model brings no head; empty = off.

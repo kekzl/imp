@@ -1,5 +1,4 @@
-// Factored rows of the batched verify: the full verify's spare (speculative.factored_spare) and the bound
-// verify's drafts before the last at 2+ drafts (speculative.mtp_batch_verify_factor_row). See
+// Factor rows of the bound batched verify: its drafts before the last at 2+ drafts (#3088). See
 // spec_verify_factor_rows.h.
 
 #include "runtime/spec_verify_factor_rows.h"
@@ -23,9 +22,7 @@ static_assert(bound_verify_factor_row_bytes(1, 1, 1, 1, 128, 128, 0) ==
 static_assert(kMtpBoundVerifyMaxDepth - 1 <= kGdnFactorFoldMaxRows,
               "a partial accept folds up to depth - 1 rows in one gdn_factor_fold");
 
-bool mtp_bound_verify_factor_row(const RuntimeConfig& cfg) {
-    return cfg.speculative.mtp_batch_verify_factor_row && cfg.speculative.mtp_batch_verify_k >= 2;
-}
+bool mtp_bound_verify_factor_row(const RuntimeConfig& cfg) { return cfg.speculative.mtp_batch_verify_k >= 2; }
 
 size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Model* model,
                                               int max_batch_size) {
@@ -44,73 +41,16 @@ size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Mo
                                          mc.ssm_inner_size / heads, mc.ssm_conv_channels());
 }
 
-bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
-                          BatchVerifyState& bv, cudaStream_t stream) {
-    if (!cfg.speculative.factored_spare || bv.d_fac != nullptr)
-        return true;
-    const int layers = ssm ? ssm->n_ssm_layers() : 0;
-    const int slots = ssm ? ssm->max_sequences() : 0;
-    const int heads = mc.ssm_dt_rank;
-    const int hd = heads > 0 ? mc.ssm_inner_size / heads : 0;
-    const int ss = mc.ssm_state_size;
-    const int ch = mc.ssm_conv_channels();
-    if (layers <= 0 || slots <= 0 || heads <= 0 || hd <= 0 || ss <= 0 || ch <= 0) {
-        IMP_LOG_WARN("speculative.factored_spare ignored: no GDN state geometry");
-        cfg.speculative.factored_spare = false;
-        return true;
-    }
-    bv.fac_stride = gdn_factor_floats_per_head(ss, hd);
-    bv.fac_layer_stride = static_cast<int64_t>(slots) * heads * bv.fac_stride;
-    bv.tap_layer_stride = static_cast<int64_t>(slots) * ch;
-    const size_t fac_bytes = static_cast<size_t>(layers) * bv.fac_layer_stride * sizeof(float);
-    const size_t tap_bytes = static_cast<size_t>(layers) * bv.tap_layer_stride * sizeof(uint16_t);
-    bv.d_fac = static_cast<float*>(alloc.allocate(fac_bytes, "spec_factored_rows"));
-    bv.d_tap = alloc.allocate(tap_bytes, "spec_factored_taps");
-    bv.d_pending = static_cast<int*>(
-        alloc.allocate(static_cast<size_t>(slots) * sizeof(int), "spec_factored_pending"));
-    bv.d_clear = static_cast<int*>(
-        alloc.allocate(static_cast<size_t>(slots) * sizeof(int), "spec_factored_clear"));
-    if (bv.d_fac == nullptr || bv.d_tap == nullptr || bv.d_pending == nullptr || bv.d_clear == nullptr) {
-        IMP_LOG_WARN("speculative.factored_spare ignored: %.1f MiB of factored rows would not fit",
-                     (fac_bytes + tap_bytes) / (1024.0 * 1024.0));
-        free_factored_rows(alloc, bv);
-        cfg.speculative.factored_spare = false;
-        return true;
-    }
-    bv.h_pending = PinnedBuffer::acquire(cuda_host_pinned_allocator(), slots * sizeof(int32_t));
-    bv.h_clear = PinnedBuffer::acquire(cuda_host_pinned_allocator(), slots * sizeof(int32_t));
-    if (bv.h_pending.empty() || bv.h_clear.empty()) {
-        IMP_LOG_WARN("speculative.factored_spare ignored: pinned slot staging unavailable");
-        free_factored_rows(alloc, bv);
-        cfg.speculative.factored_spare = false;
-        return true;
-    }
-    // On the verify stream: a legacy-stream memset is not ordered before its kernels (#2275).
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(bv.d_fac, 0, fac_bytes, stream));
-    IMP_LOG_INFO(
-        "speculative.factored_spare: %d layers x %d slots, %.1f MiB of rows + %.1f MiB of conv "
-        "taps (a spare slot pool would be %.1f MiB)",
-        layers, slots, fac_bytes / (1024.0 * 1024.0), tap_bytes / (1024.0 * 1024.0),
-        static_cast<double>(ssm->h_bytes()) * layers * slots / (1024.0 * 1024.0));
-    return true;
-}
-
 void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv) {
     if (bv.d_fac)
         alloc.free(bv.d_fac);
     if (bv.d_tap)
         alloc.free(bv.d_tap);
-    if (bv.d_pending)
-        alloc.free(bv.d_pending);
     if (bv.d_clear)
         alloc.free(bv.d_clear);
     bv.d_fac = nullptr;
     bv.d_tap = nullptr;
-    bv.d_pending = nullptr;
     bv.d_clear = nullptr;
-    bv.pending.clear();
-    bv.clear_slots.clear();
-    bv.h_pending = PinnedBuffer{};
     bv.h_clear = PinnedBuffer{};
 }
 

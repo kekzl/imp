@@ -23,12 +23,12 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
         return true;
     free_spec_buffers_();
     // #1055 consolidated staging: tokens/positions/row_ctx_lens (chunk_cap
-    // each) plus {ctx_len, past_len, chunk_len, snap_n} and kMtpMaxTopW slot
-    // ids live in ONE device block with a PINNED host twin: one H2D per
+    // each) plus {ctx_len, past_len, chunk_len, snap_n}
+    // live in ONE device block with a PINNED host twin: one H2D per
     // verify step instead of six (pageable sources stage through a driver
     // buffer on WSL2). Captured graphs bake the sub-pointers, so the block
     // must stay stable per capacity. Same trick for argmax+topm D2H.
-    const size_t stage_ints = (3ull * chunk_cap) + 4 + kMtpMaxTopW;
+    const size_t stage_ints = (3ull * chunk_cap) + 4;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
     // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
     // && chain still SHORT-CIRCUITS: acquiring them up front would allocate host
@@ -66,7 +66,6 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
     d_spec_snap_n_ = d_spec_context_len_ + 3;
-    d_spec_mc_slots_ = d_spec_context_len_ + 4;
     d_spec_topm_ = d_spec_argmax_ + chunk_cap;
     h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
@@ -164,38 +163,6 @@ void Engine::prewarm_spec_state_scratch_() {
                      (1024.0 * 1024.0),
                  spec_state_scratch_bytes_ / (1024.0 * 1024.0),
                  spec_state_snap_ ? "" : ", snapshot slab failed");
-}
-
-int Engine::spec_mc_reserved_slots_() const {
-    const auto& scfg = runtime_config_.speculative;
-    if (scfg.mtp_tree_width <= 1 || scfg.mtp_k == 0)
-        return 0;
-    if (!model_ || !model_->mtp_ || !model_->mtp_->loaded)
-        return 0;
-    if (model_->config().ssm_inner_size <= 0)
-        return 0;
-    return std::min(scfg.mtp_tree_width, kMtpMaxTopW) - 1;
-}
-
-bool Engine::spec_mc_hybrid_ok_(int width) const {
-    if (!ssm_state_ || width <= 1)
-        return false;
-    if (ssm_state_->n_reserved() < width - 1)
-        return false;
-    // The grouped chunk exists for the fused batched GDN scan only (the
-    // fp32out/ref routes have no slot form), and run_ssm (Mamba2) has no
-    // grouped path at all.
-    const auto& gcfg = runtime_config_.gdn;
-    if (gcfg.fp32_scan || gcfg.ref_kernel)
-        return false;
-    if (!model_ || model_->config().ssm_dt_rank <= 0)
-        return false;
-    for (int i = 0; i < model_->config().n_layers; ++i) {
-        const auto& ly = model_->layer(i);
-        if (ly.ssm_in.data != nullptr && ly.gdn_gate.data == nullptr)
-            return false;  // a Mamba2 layer (GraphExecutor::layer_has_gdn is gdn_gate) — run_ssm route
-    }
-    return true;
 }
 
 // Mirror of fill_recurrent_state's slot resolution (decode requests own a

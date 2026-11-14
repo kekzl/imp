@@ -7,6 +7,9 @@ commit: 2b6a1d37
 
 # Factored spare state for the batched speculative verify
 
+Status (2026-11-14): CLOSED. The factored spare of the full verify (`speculative.factored_spare`) is deleted
+with that mode; its factor rows live on in the bound verify (#3088, `spec_verify_factor_rows.cpp`).
+
 ## The price being paid
 
 `speculative.batch_verify` reserves one spare recurrent slot per batch slot, held for a

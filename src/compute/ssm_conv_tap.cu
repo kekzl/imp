@@ -32,23 +32,6 @@ __global__ void ssm_conv_tap_stash_kernel(half* __restrict__ tap_pool, const hal
     tap_pool[(static_cast<size_t>(slots[seq]) * channels) + ch] = row[ch];
 }
 
-// Advance a window by the stashed tap: drop the oldest entry, append the tap.
-// Equivalent to ssm_conv1d_commit_kernel over a single row, which is what the
-// next step would have seen had the drafted row been committed at the time.
-__global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t slot_stride,
-                                          const half* __restrict__ tap_pool, int channels, int kernel_size,
-                                          const int* __restrict__ slots) {
-    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (ch >= channels)
-        return;
-    const int slot = slots[blockIdx.y];
-    float* w = conv_pool + (static_cast<size_t>(slot) * static_cast<size_t>(slot_stride)) +
-               (static_cast<int64_t>(ch) * kernel_size);
-    for (int k = 0; k + 1 < kernel_size; k++)
-        w[k] = w[k + 1];
-    w[kernel_size - 1] = __half2float(tap_pool[(static_cast<size_t>(slot) * channels) + ch]);
-}
-
 // Mid rows of the bound verify: group seq's row snap_n + level leaves as tap [seq * n_levels + level].
 __global__ void ssm_conv_tap_stash_mid_kernel(half* __restrict__ tap_pool, const half* __restrict__ x_in,
                                               int n_tokens, int channels, const int* __restrict__ d_snap_n,
@@ -126,18 +109,6 @@ void ssm_conv_tap_stash(void* tap_pool, const void* x_in, int n_tokens, int chan
     ssm_conv_tap_stash_kernel<<<grid, kTapThreads, 0, stream>>>(static_cast<half*>(tap_pool),
                                                                 static_cast<const half*>(x_in), n_tokens,
                                                                 channels, d_real_n, slots);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-void ssm_conv_tap_apply(void* conv_pool, int64_t slot_stride_floats, const void* tap_pool, int channels,
-                        int kernel_size, const int* slots, int n_seq, cudaStream_t stream) {
-    if (!conv_pool || !tap_pool || !slots || n_seq <= 0 || channels <= 0 || kernel_size <= 0)
-        return;
-    dim3 grid((channels + kTapThreads - 1) / kTapThreads, n_seq);
-    ssm_conv_tap_apply_kernel<<<grid, kTapThreads, 0, stream>>>(static_cast<float*>(conv_pool),
-                                                                slot_stride_floats,
-                                                                static_cast<const half*>(tap_pool), channels,
-                                                                kernel_size, slots);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

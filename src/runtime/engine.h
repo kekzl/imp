@@ -303,7 +303,6 @@ public:
 
     [[nodiscard]] bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id,
-                       int* out_topk_ids = nullptr, int top_w = 0,
                        const int32_t* d_prev_token = nullptr,
                        int32_t* d_out_token = nullptr);
 
@@ -331,23 +330,6 @@ public:
     // (k+1)-th in a chain at draft time. chain_accept_[0] == mtp_accuracy_;
     // chain_accept_[1] predicts 2 steps ahead, etc.
     std::vector<MtpAccuracy> mtp_chain_accept() const noexcept { return mtp_chain_accept_; }
-
-    // Tree-ceiling probe: per-lookahead, per-width accept rate. matches[w]
-    // counts drafts where the true token was in the top-(w+1) candidates
-    // (cumulative). lookahead 0 is teacher-forced; lookahead >=1 is
-    // self-chained on MTP's own top-1 (a lower bound: a real tree would also
-    // branch on top-w parents).
-    static constexpr int kMtpMeasureW = 4;
-    struct MtpWidthAccuracy {
-        int matches[kMtpMeasureW] = {0, 0, 0, 0};
-        int total = 0;
-        float rate(int w) const {
-            return total > 0 ? static_cast<float>(matches[w]) / total : 0.0f;
-        }
-    };
-    std::vector<MtpWidthAccuracy> mtp_chain_accept_width() const noexcept {
-        return mtp_chain_accept_w_;
-    }
     void mtp_accuracy_reset() noexcept;  // also resets MTP KV cache pos
 
     // Capture-fidelity tallies (diagnostics.spec_capture_fidelity). checked is
@@ -1047,11 +1029,9 @@ private:
         int prediction = 0;
         int lookahead = 0;
         int intended_position = 0;
-        int topk[kMtpMeasureW] = {-1, -1, -1, -1};  // top-W candidates at draft time
     };
     std::vector<MtpChainEntry> mtp_pending_chain_;
     std::vector<MtpAccuracy> mtp_chain_accept_;
-    std::vector<MtpWidthAccuracy> mtp_chain_accept_w_;  // Stage 0 per-width table
 
     // ── MTP verify consumer (#847), engine_spec_mtp.cpp ──
     // The MTP head is a draft SOURCE for step_spec_verify_: when the
@@ -1063,13 +1043,6 @@ private:
     // token after t_P. mtp_active_.history holds tokens t_0..t_P (size ==
     // mtp_pos + 1), letting a follow-up request resume the cache over a
     // shared prefix via longest-common-prefix match.
-    // Multi-candidate chains (speculative.mtp_tree_width > 1): [0] is the
-    // primary chain (== mtp_active_.pending), [1..] branch at the first
-    // position on the head's top-W ids. Empty when W == 1 or the device
-    // chain was unavailable.
-    // Margin gate tallies (W > 1 only): drafts that verified as a
-    // multi-candidate chunk vs. the linear chunk (head margin above
-    // speculative.mtp_tree_margin). Logged with the spec stats.
     // ── Per-request bindings (batched verify, spec_batch_verify_state.h) ──
     // The fields above describe the ACTIVE binding (mtp_active_.req and its
     // workspace KV slot); other live requests keep theirs parked in
@@ -1126,10 +1099,6 @@ private:
     // Consume the pending MTP chain as the verify draft for req (empty when
     // MTP is off / unbound / stale / KV-cap reached).
     std::vector<int32_t> mtp_take_draft_(const Request& req);
-    // Multi-candidate form: all pending chains ([0] primary), or empty under
-    // exactly the conditions mtp_take_draft_ returns empty — plus when fewer
-    // than two chains were drafted (a 1-chain "tree" is the linear path).
-    std::vector<std::vector<int32_t>> mtp_take_chains_(const Request& req);
     // After a verify step: feed the emitted tokens' (token, hidden-row)
     // pairs, then chain-draft the next mtp_spec_k_ tokens for the next
     // verify step. Must run BEFORE the hybrid partial-accept re-forward
@@ -1361,25 +1330,6 @@ private:
     [[nodiscard]] size_t spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const;
     void prewarm_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
-    // ── Multi-candidate verify on a hybrid (roadmap gap 5, Stage 3) ──
-    // W candidates run as W recurrent sequences: candidate 0 on the
-    // request's live slot (like the linear chunk), candidates 1..W-1 on pool
-    // slots reserved past max_batch_size at init (SSMState::reserved_slot),
-    // seeded from the committed state per verify. Slot ids stage through the
-    // consolidated spec block (device twin d_spec_mc_slots_, host order =
-    // candidate order): the captured graph bakes the pointer, the host
-    // refills the values, so a partial accept replays the winner through
-    // the SAME graph by swapping its slot onto the live one.
-    // Reserved slot count for this process (0 = the mc hybrid route is
-    // unavailable): W-1 when mtp_tree_width > 1 on a recurrent model with
-    // an MTP head and MTP not disabled. Resolved before SSMState::init and
-    // priced into the plan.
-    int spec_mc_reserved_slots_() const;
-    // Route gate for the grouped hybrid chunk (needs the reserved slots and
-    // the fused batched scan: no fp32_scan/ref_kernel, GDN layers only).
-    [[nodiscard]] bool spec_mc_hybrid_ok_(int width) const;
-    std::vector<int> h_spec_mc_slots_;
-    int* d_spec_mc_slots_ = nullptr;  // sub-pointer into d_spec_stage_ (kMtpMaxTopW ints)
     // ── Batched speculative verify (speculative.batch_verify) ──
     // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
     // state types in spec_batch_verify_state.h.

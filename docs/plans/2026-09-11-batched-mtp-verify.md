@@ -1,5 +1,8 @@
 # Batched MTP verify on the GDN hybrid (the concurrent-serving lever)
 
+Status (2026-11-14): CLOSED. The full mode (`speculative.batch_verify`, every decoding row) is deleted; the
+bound form below is the shipped one. `mtp_batch_verify_factor_row` is always on.
+
 Status (2026-09-13): stages 1-4 DONE, shipped opt-in as `speculative.batch_verify`
 (#1993, default off). The spare-slot price continues in
 [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md). Stage

@@ -25,8 +25,8 @@ is the other direction: text moved OUT of the roadmap.
 | [2026-08-31-mtp-multicandidate-hybrid](2026-08-31-mtp-multicandidate-hybrid.md) | CLOSED 2026-08-31, built and measured, gate not met | roadmap Closed, "speculation tree" |
 | [2026-08-31-roadmap-ledger-detail](2026-08-31-roadmap-ledger-detail.md) | record, moved out of the roadmap 2026-08-31 | - |
 | [2026-09-04-lever-ledger-detail](2026-09-04-lever-ledger-detail.md) | record, moved out of the roadmap 2026-09-04 | - |
-| [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md) | **OPEN**: stages 1-4 shipped opt-in (#1993), default off | CHANGELOG `speculative.batch_verify` |
-| [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md) | **OPEN**: shipped opt-in (#1996-#1998, #2002), default off | CHANGELOG `speculative.factored_spare` |
+| [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md) | CLOSED 2026-11-14: the bound form ships default on (`speculative.mtp_batch_verify`); the full mode is deleted (32 streams 1966 -> 1159 tok/s) | CHANGELOG `speculative.mtp_batch_verify` |
+| [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md) | CLOSED 2026-11-14: factor rows ship in the bound verify (#3088); the factored spare is deleted | CHANGELOG `speculative.mtp_batch_verify_k` |
 | [2026-09-16-open-rows-closed-detail](2026-09-16-open-rows-closed-detail.md) | record, moved out of the roadmap 2026-09-16 (Open rows 1, 2, 4, 7, 13, 14, 15) | - |
 | [2026-09-19-qwen4exp-port](2026-09-19-qwen4exp-port.md) | record, Qwen3.8-Flash-Next port shipped | CHANGELOG Qwen3.8-Flash-Next |
 | [2026-09-28-qwen4exp-mtp](2026-09-28-qwen4exp-mtp.md) | record, MTP draft-layer reference semantics; drafting shipped (#2272) | CHANGELOG `speculative.mtp_k` |

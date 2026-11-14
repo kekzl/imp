@@ -493,7 +493,6 @@ set(IMP_RUNTIME_SOURCES
     src/compute/mtp_attn_scan.cu
     src/compute/mtp_forward_qwen4exp.cu
     src/compute/gemv_fp8_block_moe.cu
-    src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
 
@@ -1536,7 +1535,6 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn_verify_snapshot.cu
         tests/test_gdn_verify_two_drafts.cu
         tests/test_mtp_feed_batch.cu
-        tests/test_mtp_topw.cu
         tests/test_ssm.cu
         tests/test_ssm_scan_reg.cu
         tests/test_ssm_scan_ssd.cu

@@ -46,7 +46,7 @@ TEST(MtpAuto, ConcurrentHybridTakesThePair) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg);
     EXPECT_EQ(k, tools::kMtpAutoK) << "phase 1 asks for the head; phase 2 knows the model";
-    const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/true);
+    const auto serving = tools::mtp_auto_serving(kServingAutoBatch, /*gdn_hybrid=*/true);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
     EXPECT_EQ(cfg.speculative.mtp_k, 7) << "the bound verify stages up to 7 drafts per request (streak)";
@@ -121,23 +121,6 @@ TEST(MtpAuto, ExplicitDepthOnAConcurrentHybridKeepsThePoolToo) {
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 2);
 }
 
-// Without the factor row a second draft is a second spare slot per row (79.5 MiB each on Qwen3.8-27B).
-TEST(MtpAuto, ConcurrentHybridWithoutTheFactorRowVerifiesOneDraft) {
-    RuntimeConfig cfg;
-    ASSERT_TRUE(cfg.apply_overrides({"speculative.mtp_batch_verify_factor_row=false"}).empty());
-    tools::mtp_auto_finalize(cfg, tools::mtp_auto_request_k(cfg), /*head_loaded=*/true, 0,
-                             tools::MtpAutoServing::ConcurrentHybrid);
-    EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 1);
-    RuntimeConfig set;
-    ASSERT_TRUE(set.apply_overrides(
-                       {"speculative.mtp_batch_verify_factor_row=false", "speculative.mtp_batch_verify_k=2"})
-                    .empty());
-    tools::mtp_auto_finalize(set, tools::mtp_auto_request_k(set), /*head_loaded=*/true, 0,
-                             tools::MtpAutoServing::ConcurrentHybrid);
-    EXPECT_EQ(set.speculative.mtp_batch_verify_k, 2) << "the operator set it";
-    EXPECT_EQ(cfg.speculative.mtp_k, 2) << "no factor rows: the step stages 2 drafts at most";
-}
-
 // mtp_k=auto on a concurrent hybrid drafts what the bound verify stages; unset, the verify depth follows a
 // smaller mtp_k (a row past the drafted depth is a pad).
 TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
@@ -165,9 +148,6 @@ TEST(MtpAuto, AutoDepthAndVerifyDepthFollowEachOther) {
     EXPECT_EQ(resolve({"speculative.mtp_k=6"}), (std::pair{6, 4}));
     EXPECT_EQ(resolve({"speculative.mtp_k=1", "speculative.mtp_batch_verify_k=3"}), (std::pair{1, 3}))
         << "the operator set it";
-    EXPECT_EQ(resolve({"speculative.mtp_batch_verify_factor_row=false", "kv_cache.host_spill_mb=16384"}),
-              (std::pair{2, 2}))
-        << "a second spare per row holds 2 drafts";
     RuntimeConfig cap;
     tools::mtp_auto_finalize(cap, tools::mtp_auto_request_k(cap), /*head_loaded=*/true,
                              /*head_auto_k_cap=*/1, tools::MtpAutoServing::ConcurrentHybrid);
@@ -188,13 +168,12 @@ TEST(MtpAuto, MtpOffLeavesThePoolKeysAlone) {
 TEST(MtpAuto, ConcurrentNonHybridDeclines) {
     RuntimeConfig cfg;
     const int k = tools::mtp_auto_request_k(cfg);
-    const auto serving = tools::mtp_auto_serving(cfg, kServingAutoBatch, /*gdn_hybrid=*/false);
+    const auto serving = tools::mtp_auto_serving(kServingAutoBatch, /*gdn_hybrid=*/false);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentOther);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
     EXPECT_EQ(cfg.speculative.mtp_k, 0);
     EXPECT_TRUE(cfg.speculative.ngram);
 }
-
 
 // A one-chat GDN hybrid verifies on the bound path: engine batch 2, admission and decode stay 1.
 TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
@@ -204,7 +183,7 @@ TEST(MtpAuto, OneChatHybridTakesTheBoundVerifyBatch) {
                                                    /*head_loaded=*/true);
     EXPECT_EQ(batch, 2) << "the bound verify stages rows from engine batch 2 up";
     EXPECT_EQ(cfg.runtime.max_batch_size, 1) << "admission and decode stay at one chat";
-    const auto serving = tools::mtp_auto_serving(cfg, batch, /*gdn_hybrid=*/true);
+    const auto serving = tools::mtp_auto_serving(batch, /*gdn_hybrid=*/true);
     EXPECT_EQ(serving, tools::MtpAutoServing::ConcurrentHybrid);
     tools::mtp_auto_finalize(cfg, k, /*head_loaded=*/true, /*head_auto_k_cap=*/0, serving);
     EXPECT_EQ(cfg.speculative.mtp_k, 7) << "agent replay 1 chat: 205.58 vs 69.28 tok/s on the chain";
@@ -219,7 +198,7 @@ TEST(MtpAuto, AfterLoadTakesTheServingOfTheEngineBatch) {
                                                    /*head_loaded=*/true);
     EXPECT_EQ(tools::mtp_auto_after_load(cfg, k, /*head_loaded=*/true, /*explicit_flag=*/0,
                                          /*head_auto_k_cap=*/0,
-                                         tools::mtp_auto_serving(cfg, batch, /*gdn_hybrid=*/true)),
+                                         tools::mtp_auto_serving(batch, /*gdn_hybrid=*/true)),
               7);
     const RuntimeConfig pending = take_pending_runtime_config();
     EXPECT_EQ(pending.speculative.mtp_k, 7) << "the engine takes the resolved config";
@@ -243,7 +222,7 @@ TEST(MtpAuto, ReloadResolvesAgainstTheStartupConfig) {
         const int k = tools::mtp_auto_request_k(cfg);
         const int batch = tools::mtp_auto_engine_batch(cfg, kSingleStream, gdn_hybrid, k, head_loaded);
         tools::mtp_auto_finalize(cfg, k, head_loaded, /*head_auto_k_cap=*/0,
-                                 tools::mtp_auto_serving(cfg, batch, gdn_hybrid));
+                                 tools::mtp_auto_serving(batch, gdn_hybrid));
         return batch;
     };
     EXPECT_EQ(load(/*gdn_hybrid=*/true, /*head_loaded=*/true), 2);
@@ -281,7 +260,6 @@ TEST(MtpAuto, BoundVerifyBatchIsForAOneChatAutoHybridOnly) {
     EXPECT_EQ(batch({"runtime.deterministic=true"}, kSingleStream, true, true, 0), 1);
     EXPECT_EQ(batch({"speculative.mtp_batch_verify=0"}, kSingleStream, true, true, 0), 1)
         << "no bound verify";
-    EXPECT_EQ(batch({"speculative.batch_verify=true"}, kSingleStream, true, true, 0), 1);
     EXPECT_EQ(batch({}, kServingAutoBatch, true, true, 0), 0) << "an auto batch stays auto";
     EXPECT_EQ(batch({}, 4, true, true, 0), 4);
     EXPECT_EQ(batch({"runtime.max_batch_size=1"}, kSingleStream, true, true, 0), 2)

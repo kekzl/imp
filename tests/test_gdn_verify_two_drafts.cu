@@ -353,13 +353,13 @@ void scan_batched(const float* conv, int conv_channels, const half* alpha, const
                                    slot_stride, y, s.n_seq, s.n_tokens, s.n_heads, s.head_dim, s.state_size,
                                    s.n_groups, nullptr, /*grouped_layout=*/1, rows_n,
                                    /*seq_row_offsets=*/nullptr, /*h_snap=*/nullptr, snap_n, outs, snaps,
-                                   fac_out, /*fac_in=*/nullptr, fac_stride);
+                                   fac_out, fac_stride);
     else
         gdn_scan_fused_bf16_batched(conv, conv_channels, alpha, beta, A_log, dt_bias, pool, seq_slots,
                                     slot_stride, y, s.n_seq, s.n_tokens, s.n_heads, s.head_dim, s.state_size,
                                     s.n_groups, nullptr, /*grouped_layout=*/1, rows_n,
                                     /*seq_row_offsets=*/nullptr, /*h_snap=*/nullptr, snap_n, outs, snaps,
-                                    fac_out, /*fac_in=*/nullptr, fac_stride);
+                                    fac_out, fac_stride);
 }
 
 // As run_gdn stages the factor rows at D drafts: ONE pass (1 row in place into L_z, D + 1 rows into the spare

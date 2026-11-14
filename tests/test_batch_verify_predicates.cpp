@@ -10,41 +10,16 @@
 namespace imp {
 namespace {
 
-// The factored spare reserves no recurrent slot and the verify still runs, so
-// the MTP draft pool keeps one KV slot per batch slot. Keyed on the spare count
-// it fell to 1: 128 drafts over 127 verify steps at 24 streams.
-TEST(BatchVerifyPredicates, FactoredSpareKeepsOneMtpSlotPerBatchSlot) {
-    Model m;
-    m.config_.ssm_inner_size = 6144;
-    RuntimeConfig cfg;
-    cfg.speculative.batch_verify = true;
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 24), 24);
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 24), 24);
-    cfg.speculative.factored_spare = true;
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 24), 0);
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 24), 24);
-}
-
-TEST(BatchVerifyPredicates, HistorySlotsWhenTheBatchedVerifyDoesNotRun) {
-    Model hybrid;
-    hybrid.config_.ssm_inner_size = 6144;
+// MTP draft KV slots and bindings: the history slots, one binding without the carry scratch.
+TEST(BatchVerifyPredicates, HistorySlotsBoundTheHeadSlotsAndBindings) {
     RuntimeConfig cfg;
     const int h = cfg.speculative.mtp_history_slots;
     EXPECT_EQ(h, 4);
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), h);  // batch_verify off
-    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), h) << "mtp_carry: every history slot can bind";
-    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24, /*carry_live=*/false), 1) << "carry scratch refused";
-    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), kMtpCarryRows);
-    cfg.speculative.batch_verify = true;
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 1), h);  // batch of one
-    EXPECT_EQ(mtp_bind_cap(cfg, &hybrid, 24), 24);
-    EXPECT_EQ(mtp_carry_rows(cfg, &hybrid, 24), 0) << "the batched verify feeds every bound row itself";
-    Model dense;                                        // no recurrent state
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &dense, 24), h);
-    cfg.speculative.hybrid = false;
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), h);
+    EXPECT_EQ(mtp_draft_kv_slots(cfg), h);
+    EXPECT_EQ(mtp_bind_cap(cfg), h) << "the carry: every history slot can bind";
+    EXPECT_EQ(mtp_bind_cap(cfg, /*carry_live=*/false), 1) << "carry scratch refused";
     cfg.speculative.mtp_history_slots = 0;
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &hybrid, 24), 1);
+    EXPECT_EQ(mtp_draft_kv_slots(cfg), 1);
 }
 
 // Concurrent server, one head KV slot: the first prompt takes the head (serial prefill), every
@@ -226,27 +201,17 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k, 4) << "default: 4 drafts, 5 rows per request";
     EXPECT_EQ(cfg.speculative.mtp_batch_verify_k_wide, 3)
         << "default: 3 drafts once 4 requests share the step";
-    EXPECT_TRUE(cfg.speculative.mtp_batch_verify_factor_row);
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "factor row: one spare per row";
-    cfg.speculative.mtp_batch_verify_factor_row = false;
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 8) << "slot-swapping spares, two per row at 2 drafts";
-    cfg.speculative.mtp_batch_verify_factor_row = true;
     cfg.speculative.mtp_batch_verify_k = 1;
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "one draft: one spare per row";
-    EXPECT_TRUE(batch_verify_wants_bufs(cfg, &m, 32));
-    EXPECT_FALSE(batch_verify_on(cfg, &m)) << "the full batch_verify stays off";
-    EXPECT_EQ(mtp_draft_kv_slots(cfg, &m, 32), h) << "not one head KV slot per batch slot";
-    EXPECT_EQ(mtp_bind_cap(cfg, &m, 32), h);
-    EXPECT_EQ(mtp_carry_rows(cfg, &m, 32), kMtpCarryRows) << "plain steps above the rows still carry";
-    cfg.speculative.factored_spare = true;
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 4) << "a factored row needs every next step to apply it";
+    EXPECT_EQ(mtp_draft_kv_slots(cfg), h) << "not one head KV slot per batch slot";
+    EXPECT_EQ(mtp_bind_cap(cfg), h);
     cfg.speculative.mtp_batch_verify = 8;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), h) << "capped at the requests that can bind";
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 3), 3);
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 1), 0) << "batch of one: the single verify";
     cfg.speculative.mtp_batch_verify = 1;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0);
-    EXPECT_FALSE(batch_verify_wants_bufs(cfg, &m, 32));
     EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 0);
     cfg.speculative.mtp_batch_verify = 4;
     cfg.speculative.mtp_k = 0;
@@ -255,11 +220,6 @@ TEST(BatchVerifyPredicates, BoundVerifyKeepsTheHistorySlotsAndOneSparePerRow) {
     m.mtp_->loaded = false;
     EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "no head, no spares";
     m.mtp_->loaded = true;
-    cfg.speculative.batch_verify = true;
-    cfg.speculative.factored_spare = false;
-    EXPECT_EQ(mtp_bound_verify_rows(cfg, &m, 32), 0) << "the full batch_verify owns the step";
-    EXPECT_EQ(batch_verify_spare_slots(cfg, &m, 32), 32);
-    cfg.speculative.batch_verify = false;
     Model dense;
     dense.mtp_ = std::make_unique<MtpHead>();
     dense.mtp_->loaded = true;
@@ -369,8 +329,7 @@ TEST(BatchVerifyPredicates, AcceptedDraftsPickTheSlotHoldingTheirState) {
     cfg.speculative.mtp_batch_verify_k = 1;
     EXPECT_FALSE(mtp_bound_verify_factor_row(cfg)) << "one draft: nothing to factor";
     cfg.speculative.mtp_batch_verify_k = 2;
-    cfg.speculative.mtp_batch_verify_factor_row = false;
-    EXPECT_FALSE(mtp_bound_verify_factor_row(cfg));
+    EXPECT_TRUE(mtp_bound_verify_factor_row(cfg)) << "two drafts: factor rows";
     // Stage: 3 ints per row, 4 per request (seq, out, 2 snapshots), 3 row counts.
     EXPECT_EQ(batch_verify_stage_ints(12, 4), 36u + 16u + 3u);
 }
@@ -454,9 +413,6 @@ TEST(BatchVerifyPredicates, StepDepthFollowsTheRequestsInTheStep) {
     EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=12"}), kMtpBoundVerifyMaxDepth);
     EXPECT_EQ(top({"diagnostics.mtp_verify_pin=8"}), 8) << "the pin sizes the stage like a streak";
     EXPECT_EQ(top({"diagnostics.mtp_verify_pin=6", "speculative.mtp_batch_verify_k_streak=8"}), 8);
-    EXPECT_EQ(top({"speculative.mtp_batch_verify_k_streak=6",
-                   "speculative.mtp_batch_verify_factor_row=false"}),
-              2);
     // The wide depth stays in 2..depth and needs the factor rows.
     EXPECT_EQ(mtp_bound_verify_wide_depth(3, 4, true), 3);
     EXPECT_EQ(mtp_bound_verify_wide_depth(9, 4, true), 4);

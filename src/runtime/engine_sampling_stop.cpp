@@ -356,10 +356,6 @@ void Engine::release_recurrent_slot_(int req_id) {
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
-    // Factored spare: a request that finished right after an accept leaves a
-    // row behind, and the next tenant of this slot must not inherit it.
-    if (factored_spare_active(runtime_config_, bv_))
-        bv_.clear_slots.push_back(it->second);
     free_recurrent_slots_.push_back(it->second);
     recurrent_slot_of_.erase(it);
 }
@@ -526,10 +522,6 @@ bool Engine::transcript_snapshot_active_() const {
     if (!recurrent_snapshots_ || !recurrent_snapshots_->enabled() || !ssm_state_)
         return false;
     if (!runtime_config_.server.transcript_snapshot || !supports_chunked_prefill_())
-        return false;
-    // Factored spare: the accepted draft row sits in the factor buffer, not the slab, so
-    // the slab at finish is one token short of the transcript.
-    if (factored_spare_active(runtime_config_, bv_))
         return false;
     return true;
 }
