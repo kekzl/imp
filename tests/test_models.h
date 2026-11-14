@@ -72,7 +72,7 @@ inline constexpr const char* kEnvModelFp8 = "IMP_TEST_MODEL_FP8";
 // Default: /models/DeepSeek-V2-Lite (Docker bind-mount path).
 inline constexpr const char* kEnvModelDeepSeek = "IMP_TEST_MODEL_DEEPSEEK";
 
-// Native-NVFP4 MoE checkpoint for the smallM prefill alloc-failure test (#2446).
+// Native-NVFP4 MoE checkpoint (MoE prefix-cache e2e).
 // Default: /models/Qwen3-30B-A3B-NVFP4-Modelopt.
 inline constexpr const char* kEnvModelNvfp4Moe = "IMP_TEST_MODEL_NVFP4_MOE";
 

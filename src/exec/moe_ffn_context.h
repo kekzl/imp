@@ -60,7 +60,7 @@ struct MoeFfnContext {
     // transfers once even when the grouped NVFP4 attempt falls through to legacy.
     StagedProj staged[kExpertProjCount]{};
     bool staged_done = false;
-    // Chunked staging (moe.stage_expert_chunks > 1): the grouped NVFP4 dispatch stages expert blocks
+    // Chunked staging (kMoeStageExpertChunks > 1): the grouped NVFP4 dispatch stages expert blocks
     // itself, gate+up then down; `staged` stays empty, so a legacy fallback runs unstaged.
     bool staged_blocks = false;
     // This layer's alpha row in MoEWorkspace::layer_stage_alpha, set with staged_done / staged_blocks.

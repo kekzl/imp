@@ -274,7 +274,7 @@
                         (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n))) {
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
-                    } else if (n > 32 && ctx.q8_imma_enabled && ly.wv.data != nullptr &&
+                    } else if (n > 32 && ly.wv.data != nullptr &&
                                registry_.handle(ly.wq_id).source_qtype == QType::Q8_0 &&
                                registry_.handle(ly.wk_id).source_qtype == QType::Q8_0 &&
                                registry_.handle(ly.wv_id).source_qtype == QType::Q8_0) {
@@ -302,7 +302,7 @@
                         qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream, m1_fold);
                     if (!qkv_multi && m1_fold.ssq)
                         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-                    // GGUF twin (gdn.m1_dp4a): q|k|v of mixed qtypes in one dp4a launch, one quantize.
+                    // GGUF twin: q|k|v of mixed qtypes in one dp4a launch, one quantize.
                     if (!qkv_multi && n == 1 && ly.wv.data != nullptr) {
                         const TensorID qkv_ids[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
                         Tensor* qkv_outs[3] = {&q_target, &kk, &vv};

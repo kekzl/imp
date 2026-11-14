@@ -225,7 +225,7 @@ bool Engine::init_kv_cache() {
                                                ? live_free - mtp_workspace_planned_bytes_
                                                : 0,
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
-                                           ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
+                                           ssm_reserved_slots, /*q8_imma_prefill=*/true,
                                            runtime_config_.gemm.moe_imma_prefill);
     // Cap the IMMA prefill planes at what the pass just charged: they are taken
     // lazily on each Q8_0 weight's first prefill, so uncapped the cache would

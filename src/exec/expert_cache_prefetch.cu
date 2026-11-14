@@ -1,4 +1,4 @@
-// Next-layer expert prefetch for the device expert cache (moe.expert_prefetch). Layer L's MoE input
+// Next-layer expert prefetch for the device expert cache (always on). Layer L's MoE input
 // through layer L+1's router predicts L+1's routing; up to `budget` predicted keys that are not
 // resident get LRU victims and are copied on the gather stream behind L's own misses, so PCIe
 // works through L's GEMVs and L+1's attention. Design: expert_cache_device.h.
@@ -232,7 +232,7 @@ bool DeviceExpertCache::enable_prefetch(int budget, int blocks_per_key) {
     }
     pf_budget_ = budget;
     IMP_LOG_INFO(
-        "moe.expert_prefetch: up to %d keys per layer predicted from the previous layer's router input, "
+        "expert prefetch: up to %d keys per layer predicted from the previous layer's router input, "
         "%d copy blocks per key",
         budget, std::clamp(blocks_per_key, 1, kDevExpertGatherBlocks * 4));
     return true;

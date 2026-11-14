@@ -217,71 +217,25 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("attention.sparse_prefill_topk_tokens", cfg.attention.sparse_prefill_topk_tokens);
 
     // [moe]
-    I("moe.expert_overhead_pct", cfg.moe.expert_overhead_pct);
     I("moe.force_host_experts", cfg.moe.force_host_experts);
     B("moe.skip", cfg.moe.skip);
-    B("moe.force_fp16_sync", cfg.moe.force_fp16_sync);
     B("moe.no_expert_cache", cfg.moe.no_expert_cache);
     I("moe.expert_cache_budget_pct", cfg.moe.expert_cache_budget_pct);
     B("moe.pin_host_experts", cfg.moe.pin_host_experts);
-    B("moe.staged_cutlass_prefill", cfg.moe.staged_cutlass_prefill);
-    B("moe.stage_touched_only", cfg.moe.stage_touched_only);
-    I("moe.stage_expert_chunks", cfg.moe.stage_expert_chunks);
     B("moe.expert_cache_debug_parity", cfg.moe.expert_cache_debug_parity);
-    I("moe.prefetch_top_k", cfg.moe.prefetch_top_k);
-    B("moe.allow_graphs_under_offload", cfg.moe.allow_graphs_under_offload);
-    B("moe.zero_workspace", cfg.moe.zero_workspace);
-    B("moe.no_shared_mlp", cfg.moe.no_shared_mlp);
-    B("moe.no_shexp_gate", cfg.moe.no_shexp_gate);
-    B("moe.no_cutlass3x", cfg.moe.no_cutlass3x);
     I("moe.reserve_mib", cfg.moe.reserve_mib);
-    B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
-    I("moe.nvfp4_decode_rows", cfg.moe.nvfp4_decode_rows);
-    B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
-    B("moe.device_expert_cache", cfg.moe.device_expert_cache);
-    B("moe.shared_expert_overlap", cfg.moe.shared_expert_overlap);
-    B("moe.router_fused", cfg.moe.router_fused);
-    B("moe.expert_gather_overlap", cfg.moe.expert_gather_overlap);
-    I("moe.expert_prefetch", cfg.moe.expert_prefetch);
-    B("moe.expert_prefetch_hc_norm", cfg.moe.expert_prefetch_hc_norm);
-    I("moe.expert_prefetch_blocks", cfg.moe.expert_prefetch_blocks);
     I("moe.host_expert_pool_mib", cfg.moe.host_expert_pool_mib);
-    I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
-    I("moe.mr_nr", cfg.moe.mr_nr);
 
     // [gdn]
-    B("gdn.fp32_scan", cfg.gdn.fp32_scan);
-    B("gdn.fp32_out", cfg.gdn.fp32_out);
-    F("gdn.norm_eps_override", cfg.gdn.norm_eps_override);
     S("gdn.layout_override", cfg.gdn.layout_override);
     B("gdn.ref_kernel", cfg.gdn.ref_kernel);
-    B("gdn.vhead_reorder", cfg.gdn.vhead_reorder);
     B("gdn.chunkwise_scan", cfg.gdn.chunkwise_scan);
     B("gdn.chunkpar_scan", cfg.gdn.chunkpar_scan);
     B("gdn.ssd_scan", cfg.gdn.ssd_scan);
-    I("gdn.chunkpar_strip", cfg.gdn.chunkpar_strip);
     B("gdn.state_bf16", cfg.gdn.state_bf16);
-    B("gdn.alpha_beta_smallm", cfg.gdn.alpha_beta_smallm);
-    B("gdn.alpha_beta_prefill", cfg.gdn.alpha_beta_prefill);
-    B("gdn.m1_fused", cfg.gdn.m1_fused);
-    B("gdn.m1_dp4a", cfg.gdn.m1_dp4a);
 
     // [gemm]
-    B("gemm.no_dp4a_gemv", cfg.gemm.no_dp4a_gemv);
-    B("gemm.no_dp4a_lm", cfg.gemm.no_dp4a_lm);
-    B("gemm.no_mmvq", cfg.gemm.no_mmvq);
-    B("gemm.no_mmvq_q8_0", cfg.gemm.no_mmvq_q8_0);
-    B("gemm.algo_timed", cfg.gemm.algo_timed);
-    B("gemm.q8_imma_enabled", cfg.gemm.q8_imma_enabled);
-    B("gemm.q8_drop_source", cfg.gemm.q8_drop_source);
-    B("gemm.q4k_imma_prefill", cfg.gemm.q4k_imma_prefill);
-    B("gemm.q6k_imma_smallm", cfg.gemm.q6k_imma_smallm);
-    B("gemm.q8_0_imma_smallm", cfg.gemm.q8_0_imma_smallm);
-    B("gemm.gguf_imma_smallm", cfg.gemm.gguf_imma_smallm);
-    B("gemm.q4k_in_place", cfg.gemm.q4k_in_place);
     B("gemm.moe_imma_prefill", cfg.gemm.moe_imma_prefill);
-    B("gemm.dense_weight_cache", cfg.gemm.dense_weight_cache);
-    B("gemm.fp8_native_prefill", cfg.gemm.fp8_native_prefill);
     B("gemm.nvfp4_decode_all", cfg.gemm.nvfp4_decode_all);
     if (!matched && dotted_key == "gemm.nvfp4_lm_head") {
         // auto|on|off|fp8; bool spellings map to on/off, anything else is a bad value (#1627)
@@ -297,34 +251,14 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.nvfp4_lm_head_gdn", cfg.gemm.nvfp4_lm_head_gdn);
     B("gemm.nvfp4_lm_head_cutlass", cfg.gemm.nvfp4_lm_head_cutlass);
     B("gemm.nvfp4_lm_head_smallm", cfg.gemm.nvfp4_lm_head_smallm);
-    B("gemm.nvfp4_norm_fold", cfg.gemm.nvfp4_norm_fold);
-    B("gemm.fp32_residual_fuse", cfg.gemm.fp32_residual_fuse);
-    B("gemm.geglu_quant_fuse", cfg.gemm.geglu_quant_fuse);
-    B("gemm.nvfp4_smallm", cfg.gemm.nvfp4_smallm);
-    I("gemm.nvfp4_cublaslt_min_m", cfg.gemm.nvfp4_cublaslt_min_m);
-    I("gemm.nvfp4_tile_min_m", cfg.gemm.nvfp4_tile_min_m);
     T("gemm.nvfp4_prompt_streamk", cfg.gemm.nvfp4_prompt_streamk);
-    B("gemm.swiglu_quant_epilogue", cfg.gemm.swiglu_quant_epilogue);
-    B("gemm.f16_tile", cfg.gemm.f16_tile);
-    B("gemm.q6k_tile", cfg.gemm.q6k_tile);
-    B("gemm.mxfp4_tile", cfg.gemm.mxfp4_tile);
-    B("gemm.q45k_tile", cfg.gemm.q45k_tile);
-    I("gemm.fp8_tile_min_m", cfg.gemm.fp8_tile_min_m);
     I("gemm.fp8_smallm_max_m", cfg.gemm.fp8_smallm_max_m);
-    B("gemm.fp8_smallm_multi", cfg.gemm.fp8_smallm_multi);
     B("gemm.fp8_smallm_m1", cfg.gemm.fp8_smallm_m1);
     B("gemm.fp8_static_act_scale", cfg.gemm.fp8_static_act_scale);
-    B("gemm.nvfp4_static_act_scale", cfg.gemm.nvfp4_static_act_scale);
-    I("gemm.nvfp4_smallm_impl", cfg.gemm.nvfp4_smallm_impl);
-    B("gemm.nvfp4_smallm_pair", cfg.gemm.nvfp4_smallm_pair);
     B("gemm.nvfp4_smallm_a4", cfg.gemm.nvfp4_smallm_a4);
-    B("gemm.nvfp4_residual_beta1", cfg.gemm.nvfp4_residual_beta1);
-    B("gemm.nvfp4_attn_proj", cfg.gemm.nvfp4_attn_proj);
-    B("gemm.fp8_ssm_proj", cfg.gemm.fp8_ssm_proj);
     S("gemm.nvfp4_gdn_proj_prefill", cfg.gemm.nvfp4_gdn_proj_prefill);
     S("gemm.mxfp8_gdn_proj_prefill", cfg.gemm.mxfp8_gdn_proj_prefill);
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);
-    B("gemm.nvfp4_moe_decode", cfg.gemm.nvfp4_moe_decode);
 
     // [gemma4] section: per-model knobs live in ModelConfig::Overrides::Gemma4,
     // populated by the GGUF/SafeTensors loader or the engine init resolver.

@@ -11,12 +11,8 @@
 namespace imp::cfg {
 
 struct GDN {
-    bool fp32_scan = false;
-    bool fp32_out = false;
-    float norm_eps_override = 0.0f;  // 0 = use model default
     bool ref_kernel = false;
-    bool vhead_reorder = false;
-    // GDN chunkwise SSD scan: dispatches gdn_scan_chunkwise_{f32,fp32out}
+    // GDN chunkwise SSD scan: dispatches gdn_scan_chunkwise_f32
     // (chunk-cached K/Q in shared memory) instead of the per-token-loop fused
     // scan. Bit-near-equivalent (FP16 1e-3 / FP32 1e-5 tol). Default on;
     // opt out via gdn.chunkwise_scan=false if a model regresses.
@@ -32,32 +28,16 @@ struct GDN {
     // fp32 accumulate) for chunks >= 128 tokens at state 128; off = ssm_scan_reg.
     // runtime.deterministic turns it off (chunk-partition dependent).
     bool ssd_scan = true;
-    // Chunks (64 tokens each) per chunk-parallel strip: kernel 1 launches
-    // strip*n_heads CTAs at one CTA/SM, so strip sets the wave quantization.
-    // 0 = auto (strip in [4,16], fullest last wave); 1..16 pins it.
-    int chunkpar_strip = 0;
     // GDN recurrent state as BF16 instead of FP32 (halves state traffic;
     // arithmetic stays FP32 in registers). HD=SS=128 only; forces the fused
     // scan (chunkwise/ref kernels are FP32-state only). FP16 state is refuted
     // (subnormal truncation). Default on; opt out via gdn.state_bf16=false.
     bool state_bf16 = true;
-    // Batched decode (2<=M<=32): alpha/beta projections run as one split-K
-    // FP16 tensor-core launch instead of two cuBLAS GEMMs. FP16-resident
-    // alpha/beta weights only; other tiers keep the two-call path.
-    bool alpha_beta_smallm = true;
-    // Prefill (M>32): alpha/beta in one cluster split-K FP32-accumulate launch, not two cuBLASLt
-    // GEMMs + 2 reduces. Qwen3.8-27B per GDN layer pp512 8.1-8.6 vs 11.9-12.1 us, pp4096 20.9-21.0
-    // vs 26.8-27.2 us. Same weight condition as alpha_beta_smallm.
-    bool alpha_beta_prefill = true;
-    // Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj/gate/alpha/
-    // beta fused into one GEMV, out-proj adds the residual in its epilogue,
-    // gated attention runs q|k|v as one launch. false = per-projection launches.
-    bool m1_fused = true;
-    // Single-stream decode (M=1) on GGUF weights: GDN in_proj / gate / alpha + beta, attention q / k / v and
-    // FFN gate / up of mixed qtypes in one dp4a GEMV launch each, one q8_1 quantize (gemv_dp4a_multi). false
-    // = one GEMV + quantize per projection.
-    bool m1_dp4a = true;
     // Override gated-DeltaNet weight layout.
     std::string layout_override;
 };
+
+// Chunks per chunk-parallel strip, 0 = auto (strip in [4,16], fullest last wave); former gdn.chunkpar_strip,
+// removed 2026-11-14.
+inline constexpr int kGdnChunkparStrip = 0;
 }  // namespace imp::cfg

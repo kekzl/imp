@@ -163,7 +163,7 @@ struct ImmaPlaneDemand {
     size_t source_freed = 0;  // Q8_0 source bytes Phase 4c frees (config.q8_drop_source)
 };
 
-// Mandatory INT8 IMMA prefill planes (gemm.q8_imma_enabled / gemm.moe_imma_prefill):
+// Mandatory INT8 IMMA prefill planes (Q8 IMMA / MoE IMMA prefill):
 // mmq_q8_imma keeps an s8 + (alpha, beta) copy per prefilled Q8_0 weight, 1.125 B/element
 // (up to 8.6 GiB on Qwen3-8B-Q8_0). Charge as overhead and cap via
 // mmq_q8_imma_set_plane_budget(), or it grows unbounded into the KV pool (#1899).
@@ -352,7 +352,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         // the room the planes may take is measured before that deduction.
         const size_t available_before = available + imma_plane_bytes;
         size_t cap = available_before > kv_guarantee ? available_before - kv_guarantee : 0;
-        // Planes whose Q8_0 source Phase 4c frees (gemm.q8_drop_source) cost only their excess; when
+        // Planes whose Q8_0 source Phase 4c frees cost only their excess; when
         // even that does not fit, the gross cap applies and every source stays (Gemma-4: cap 0).
         const size_t net = imma_plane_bytes - std::min(imma_plane_bytes, imma_source_freed);
         if (net > cap) {
@@ -504,7 +504,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (imma_source_freed > 0) {
         const size_t credit = std::min(imma_plane_bytes, imma_source_freed);
         available += credit;
-        IMP_LOG_INFO("VRAM budget: %.1f MiB of Q8_0 sources freed for their planes (gemm.q8_drop_source)",
+        IMP_LOG_INFO("VRAM budget: %.1f MiB of Q8_0 sources freed for their planes",
                      credit / (1024.0 * 1024.0));
     }
 

@@ -87,13 +87,11 @@ constexpr bool kExpertBiasGlu = true;
 constexpr bool kPlainMoe = false;
 
 // Workspace with every tier's preconditions satisfied — the path is then
-// decided purely by the config + arch gates.
+// decided purely by the arch gates.
 MoePrefillWorkspace all_ready() {
     MoePrefillWorkspace ws;
     ws.device_args_ready = true;
     ws.grouped_available = true;
-    ws.smallM_available = true;
-    ws.smallM_under_threshold = true;
     ws.grouped_ready = true;
     return ws;
 }
@@ -101,81 +99,48 @@ MoePrefillWorkspace all_ready() {
 }  // namespace
 
 TEST(MoePrefillTable, DefaultPicksDeviceArgs) {
-    // nvfp4_device_args=true (default), non-gpt-oss, workspace ready.
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, default_cfg(), all_ready()), MoePrefillPath::DEVICE_ARGS);
+    // Non-gpt-oss, workspace ready.
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, all_ready()), MoePrefillPath::DEVICE_ARGS);
 }
 
 TEST(MoePrefillTable, GptOssUnstagedTakesDeviceArgs) {
     // #2116: unstaged gpt-oss runs device-args (bias + GPT_OSS_GLU + plain quantize). The
     // model said GROUPED/LEGACY and the dispatch logged "routing model disagrees" once per run.
-    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, default_cfg(), all_ready()),
-              MoePrefillPath::DEVICE_ARGS);
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, all_ready()), MoePrefillPath::DEVICE_ARGS);
 }
 
-TEST(MoePrefillTable, GptOssStagedSkipsDeviceArgsAndSmallMTakesGrouped) {
-    // Staged gpt-oss stays off device-args, and smallM stays off for gpt-oss.
+TEST(MoePrefillTable, GptOssStagedSkipsDeviceArgsTakesGrouped) {
+    // Staged gpt-oss stays off device-args.
     auto ws = all_ready();
     ws.staged_blocks = true;
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_smallM = true;  // would route others to smallM
-    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, ws), MoePrefillPath::GROUPED);
-}
-
-TEST(MoePrefillTable, DeviceArgsDisabledFallsToGrouped) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, DeviceArgsWorkspaceNotReadyFallsToGrouped) {
     auto ws = all_ready();
     ws.device_args_ready = false;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, default_cfg(), ws), MoePrefillPath::GROUPED);
-}
-
-TEST(MoePrefillTable, SmallMWhenOptedInAndUnderThreshold) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;  // so device-args doesn't win first
-    cfg.moe.nvfp4_smallM = true;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::SMALL_M);
-}
-
-TEST(MoePrefillTable, SmallMOverThresholdFallsToGrouped) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;
-    cfg.moe.nvfp4_smallM = true;
-    auto ws = all_ready();
-    ws.smallM_under_threshold = false;  // too many tokens
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::GROUPED);
-}
-
-TEST(MoePrefillTable, NoCutlass3xFallsToLegacy) {
-    auto cfg = default_cfg();
-    cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, GroupedUnavailableFallsToLegacy) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;
     auto ws = all_ready();
+    ws.device_args_ready = false;
     ws.grouped_available = false;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::LEGACY);
 }
 
 TEST(MoePrefillTable, GroupedNotReadyFallsToLegacy) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;
     auto ws = all_ready();
+    ws.device_args_ready = false;
     ws.grouped_ready = false;
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::LEGACY);
 }
 
-TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
+TEST(MoePrefillTable, GptOssGroupedUnavailableFallsToLegacy) {
     // Even gpt-oss drops to legacy when the grouped kernel is unavailable.
-    auto cfg = default_cfg();
-    cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, all_ready()), MoePrefillPath::LEGACY);
+    auto ws = all_ready();
+    ws.grouped_available = false;
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, ws), MoePrefillPath::LEGACY);
 }
 
 // ---- #992: learned-sink pre-gate ------------------------------------------
@@ -293,7 +258,7 @@ TEST(AttnTierPrecedence, FmhaSm120BeatsBlackwellWhenBothAccept) {
 // executor_forward_moe_cutlass.cpp replays select_moe_prefill_path() against what the chain
 // observed (verify_against_moe_routing_model), logging on divergence; these pin the replay so
 // it can't fire on a correct dispatch. Observations mirror what a tier DID, not what its
-// preconditions promised: device-args/smallM can pass their gate then fail inside and fall
+// preconditions promised: device-args can pass its gate then fail inside and fall
 // through, so the flag is set only after the tier actually completed.
 
 namespace {
@@ -304,11 +269,6 @@ MoePrefillWorkspace moe_observed_when(MoePrefillPath winner) {
         case MoePrefillPath::DEVICE_ARGS:
             ws.grouped_available = true;
             ws.device_args_ready = true;
-            break;
-        case MoePrefillPath::SMALL_M:
-            ws.grouped_available = true;
-            ws.smallM_available = true;
-            ws.smallM_under_threshold = true;
             break;
         case MoePrefillPath::GROUPED:
             ws.grouped_available = true;
@@ -323,25 +283,19 @@ MoePrefillWorkspace moe_observed_when(MoePrefillPath winner) {
 }  // namespace
 
 TEST(MoeRoutingModelCoupling, EveryTierReplaysToItself) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_smallM = true;  // so the smallM tier is reachable at all
-
-    const MoePrefillPath tiers[] = {MoePrefillPath::DEVICE_ARGS, MoePrefillPath::SMALL_M,
-                                    MoePrefillPath::GROUPED, MoePrefillPath::LEGACY};
+    const MoePrefillPath tiers[] = {MoePrefillPath::DEVICE_ARGS, MoePrefillPath::GROUPED,
+                                    MoePrefillPath::LEGACY};
     for (MoePrefillPath t : tiers) {
-        EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, moe_observed_when(t)), t)
+        EXPECT_EQ(select_moe_prefill_path(kPlainMoe, moe_observed_when(t)), t)
             << "the dispatch would run " << moe_prefill_path_name(t) << " but the model replays to "
-            << moe_prefill_path_name(select_moe_prefill_path(kPlainMoe, cfg, moe_observed_when(t)))
+            << moe_prefill_path_name(select_moe_prefill_path(kPlainMoe, moe_observed_when(t)))
             << " — verify_against_moe_routing_model() would fire on a correct dispatch";
     }
 }
 
-// gpt-oss enters the same chain but is arch-gated off the two fast tiers, so its
-// only non-legacy answer is GROUPED. The dispatch records exactly that.
+// gpt-oss enters the same chain; its host-args answer is GROUPED. The dispatch records exactly that.
 TEST(MoeRoutingModelCoupling, GptOssReplaysToGrouped) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_smallM = true;
-    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, moe_observed_when(MoePrefillPath::GROUPED)),
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, moe_observed_when(MoePrefillPath::GROUPED)),
               MoePrefillPath::GROUPED);
 }
 
@@ -349,43 +303,27 @@ TEST(MoeRoutingModelCoupling, GptOssReplaysToGrouped) {
 // observation pattern has exactly one eligible tier. These make two tiers eligible at once
 // and assert the earlier one wins.
 
-TEST(MoeTierPrecedence, DeviceArgsBeatsSmallM) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_smallM = true;
+TEST(MoeTierPrecedence, DeviceArgsBeatsGrouped) {
     auto ws = all_ready();
-    ASSERT_TRUE(cfg.moe.nvfp4_device_args && ws.device_args_ready);
-    ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold);
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::DEVICE_ARGS);
-}
-
-TEST(MoeTierPrecedence, SmallMBeatsGrouped) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;  // device-args out of the way
-    cfg.moe.nvfp4_smallM = true;
-    auto ws = all_ready();
-    ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold && ws.grouped_ready);
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::SMALL_M);
+    ASSERT_TRUE(ws.device_args_ready && ws.grouped_ready);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::DEVICE_ARGS);
 }
 
 TEST(MoeTierPrecedence, GroupedBeatsLegacyWhenReady) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_device_args = false;
     auto ws = all_ready();
-    ws.smallM_available = false;  // smallM out of the way
+    ws.device_args_ready = false;  // device-args out of the way
     ASSERT_TRUE(ws.grouped_available && ws.grouped_ready);
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::GROUPED);
 }
 
 // The entry gate short-circuits every grouped tier, however ready they look.
 TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
-    auto cfg = default_cfg();
-    cfg.moe.nvfp4_smallM = true;
     auto ws = all_ready();
     ws.grouped_available = false;  // the six early returns in the .cu
-    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, ws), MoePrefillPath::LEGACY);
 }
 
-// #1548: max(M_e) per launch decides the grouped GEMM's M tile and the smallM tier gate; imp
+// #1548: max(M_e) per launch decides the grouped GEMM's M tile; imp
 // computed it on the host at three sites and dropped it. Arithmetic lives here so it can be
 // wrong in a place a CPU test reaches.
 

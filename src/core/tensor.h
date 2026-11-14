@@ -31,7 +31,7 @@ struct Tensor {
     void* scales = nullptr;
     float tensor_scale = 1.0f;
     // NVFP4 weight only: the checkpoint's static activation scale for this linear's input, dequant
-    // form (calibration amax / 2688); 1.0 = none. Applied only under gemm.nvfp4_static_act_scale.
+    // form (calibration amax / 2688); 1.0 = none. Applied whenever a checkpoint scale exists.
     float act_scale = 1.0f;
 
     // GGUF MXFP4 has two on-disk block layouts: imp legacy (GGML type 31)

@@ -223,17 +223,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                       !will_fuse_o_beta1 && n > 1 && qscratch_.dequant != nullptr &&
                                       dequant_gpu_supported(ly.wo.qtype));
-    // Batched-decode residual accumulation on CUTLASS_NVFP4 (gemm.nvfp4_residual_beta1):
-    // h += o_proj(ao) via the smallm accumulate path, replacing GEMM-to-scratch
-    // + elementwise_add_store and skipping the residual save. Ragged prefill
-    // chunks n<=32 take it too (same accumulate, one launch fewer).
-    bool will_fuse_o_beta1_nvfp4 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
-                                    !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && n > 1 && n <= 32 &&
-                                    h.qtype == QType::F16 && wo_tier == StorageTier::CUTLASS_NVFP4 &&
-                                    dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ &&
-                                    lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
-        !will_fuse_o_beta1_nvfp4 && !using_fp32_accum) {
+        !using_fp32_accum) {
         // Kernel copy, not cudaMemcpyAsync: a memcpy node has no programmatic
         // edge, so it cut the PDL chain add -> copy -> norm -> q GEMM once per
         // layer (the GEMM's weight prefetch overlaps the whole chain).
@@ -244,7 +235,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
 
     // QKV projections [n,d]@W^T -> [n,proj_dim]. Decode (n=1) with matching
@@ -683,11 +674,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         } else {
             gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
         }
-    } else if (will_fuse_o_beta1_nvfp4) {
-        // Batched-decode NVFP4: hidden += attn_out @ wo^T via the smallm
-        // accumulate path (falls through to a beta-honouring handler if the
-        // smallm route declines — the cutlass handler refuses beta != 0).
-        gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
     } else if (will_fuse_o_beta1 && wo_tier == StorageTier::FP16) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.

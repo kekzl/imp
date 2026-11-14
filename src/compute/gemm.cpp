@@ -251,10 +251,6 @@ struct GemmCacheEntry {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
     bool has_algo;
-    // The algo came from the TIMED probe, not the heuristic. Without this flag the reselect
-    // path cannot tell which of the two it is about to overwrite, so discarding a
-    // benchmarked pin looked identical to re-picking a heuristic one (#1545).
-    bool benchmarked = false;
     int64_t desc_M;  // M dimension baked into layout descriptors
     // The ACTUAL M this algo was chosen at, which is not desc_M: the layouts are rebuilt for
     // every M that lands in the bucket, so desc_M always equals the current call's M and says
@@ -353,22 +349,10 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
     IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceDestroy(pref));
 
     if (nresults > 0) {
-        // Logs once when the benchmarked pin is replaced by heuristic results[0] for the rest
-        // of the process: previously only a second failure logged anything, so a shape could
-        // silently run on a different algo than the probe chose, differing per process start
-        // (#1545). `benchmarked` is cleared with it, so this fires once per pin, not per failure.
-        if (entry.benchmarked) {
-            IMP_LOG_WARN(
-                "[gemm-algo] matmul failed with the BENCHMARKED algo for M=%ld K=%ld N=%ld "
-                "(bucket desc_M=%ld) — replacing it with the heuristic pick for the rest of the "
-                "process; the probe's choice is gone until restart",
-                (long)M, (long)K, (long)N, (long)entry.desc_M);
-        }
         entry.algo = results[0].algo;
         entry.algo_M = M;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
-        entry.benchmarked = false;
         log_algo_pick("re-pick after a failed matmul", M, K, N, 0, nresults, entry.algo);
     } else {
         entry.has_algo = false;
@@ -472,40 +456,11 @@ static constexpr int kMaxAlgoCandidates = 8;
 // FP8 x FP8 row pin: cache key M of the one per-(N, K) entry, and the M its algo is picked at.
 static constexpr int64_t kFp8RowPinKeyM = -1;
 static constexpr int64_t kFp8RowPinRefM = 512;
-static constexpr int kBenchmarkIters = 5;
-
-// Selection stability (F-9): a single timed sample per candidate is unstable at small M
-// because the timed window is dominated by scheduling noise; the two fixes are on the
-// estimator, not persistence (an on-disk cache would freeze a mispick permanently and
-// needs driver/cuBLAS version invalidation).
-//   1. Size the timed window per candidate to ~kTargetWindowMs (not a fixed rep count),
-//      so every shape gets comparable measurement quality; costs compared per rep.
-//   2. kAlgoMargin hysteresis toward heuristic order: a candidate replaces the incumbent
-//      only by beating it by more than the margin, else the lower heuristic index wins
-//      (deterministic per shape/device). Margin is set from measured residual spread.
-static constexpr int kBenchmarkRounds = 3;
-static constexpr float kTargetWindowMs = 0.5f;
-static constexpr int kMaxBenchIters = 512;
-static constexpr float kAlgoMargin = 0.10f;
 
 // Diagnostic: when diagnostics.log_gemm_algo is set, log shape + per-candidate algoId/tileId + chosen algo for every
 // benchmark_and_select_algo call. Used to enumerate which exact GEMM shapes
 // select cuBLAS legacy WMMA kernels (Finding 1/5).
 static int gemm_algo_log_enabled() { return imp::process_diag_log_gemm_algo() ? 1 : 0; }
-
-// ms per run() over `iters` runs; 1e30f (= unmeasured, as cand_ms starts) on an event error, never 0.
-template <typename Run>
-static float time_on_stream(cudaEvent_t start, cudaEvent_t stop, cudaStream_t stream, int iters, Run&& run) {
-    cudaError_t err = cudaEventRecord(start, stream);
-    for (int r = 0; r < iters; r++) run();
-    float ms = 0;
-    if (err == cudaSuccess) err = cudaEventRecord(stop, stream);
-    if (err == cudaSuccess) err = cudaEventSynchronize(stop);
-    if (err == cudaSuccess) err = cudaEventElapsedTime(&ms, start, stop);
-    if (err == cudaSuccess) return ms / static_cast<float>(iters);
-    IMP_LOG_WARN("[gemm-algo] candidate timing failed: %s", cudaGetErrorString(err));
-    return 1e30f;
-}
 
 static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
@@ -552,189 +507,51 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
                           results[i].workspaceSize);
         }
     }
-    // Timing-based selection only under gemm.algo_timed: near-tie picks flip per process, and a
-    // different algo changes the numerics every later request sees.
-    if (imp::process_diag_deterministic_gemm() || !imp::process_diag_gemm_algo_timed() || nresults == 1) {
-        // Deterministic selection must still be VALID: the cuBLASLt heuristic can return a
-        // candidate that faults at runtime on sm_120 (status 14 NOT_SUPPORTED at certain M) even
-        // though deterministic mode skips the timing warmup that would normally reject it
-        // (FP8-KV forces this path on models FA2 doesn't serve; pre-#932 that included all
-        // hd=256 models, surfacing as silent repeated-token garbage on FFN GEMMs). Warmup-probe
-        // candidates in heuristic order and pick the first that survives: that order is stable.
-        int pick = 0;
-        if (nresults > 1 && s_bench_scratch && C_bytes <= s_bench_scratch_size) {
-            void* temp_c = s_bench_scratch;
-            constexpr int kDetWarmupIters = 2;
-            pick = -1;
-            for (int i = 0; i < nresults && pick < 0; i++) {
-                if (results[i].workspaceSize > s_workspace_size)
-                    continue;
-                bool ok = true;
-                for (int w = 0; w < kDetWarmupIters; w++) {
-                    cublasStatus_t wst = cublasLtMatmul(
-                        lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero,
-                        temp_c, entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
-                        results[i].workspaceSize, stream);
-                    if (wst != CUBLAS_STATUS_SUCCESS) {
-                        ok = false;
-                        break;
-                    }
+    // Heuristic order only: a timed pick flipped per process (Qwen3.8-27B K=5120 N=48: 3 tiles in 5
+    // starts) and a different algo changes the numerics every later request sees.
+    // The pick must still be VALID: the cuBLASLt heuristic can return a
+    // candidate that faults at runtime on sm_120 (status 14 NOT_SUPPORTED at certain M)
+    // that no timed probe rejects
+    // (FP8-KV forces this path on models FA2 doesn't serve; pre-#932 that included all
+    // hd=256 models, surfacing as silent repeated-token garbage on FFN GEMMs). Warmup-probe
+    // candidates in heuristic order and pick the first that survives: that order is stable.
+    int pick = 0;
+    if (nresults > 1 && s_bench_scratch && C_bytes <= s_bench_scratch_size) {
+        void* temp_c = s_bench_scratch;
+        constexpr int kDetWarmupIters = 2;
+        pick = -1;
+        for (int i = 0; i < nresults && pick < 0; i++) {
+            if (results[i].workspaceSize > s_workspace_size)
+                continue;
+            bool ok = true;
+            for (int w = 0; w < kDetWarmupIters; w++) {
+                cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
+                                                    entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c,
+                                                    entry.Cdesc, &results[i].algo, s_workspace,
+                                                    results[i].workspaceSize, stream);
+                if (wst != CUBLAS_STATUS_SUCCESS) {
+                    ok = false;
+                    break;
                 }
-                if (ok)
-                    pick = i;
             }
-            if (pick < 0) {
-                // Every candidate faults at runtime — leave has_algo=false so
-                // the matmul uses cuBLASLt's own default (and the caller's
-                // fallback chain / fatal guard handles a genuine dead shape).
-                entry.has_algo = false;
-                entry.workspace_size = 0;
-                return;
-            }
+            if (ok)
+                pick = i;
         }
-        entry.algo = results[pick].algo;
-        entry.algo_M = M;
-        entry.workspace_size =
-            (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
-        entry.has_algo = true;
-        entry.benchmarked = false;
-        log_algo_pick("heuristic, warmup-validated", M, K, N, pick, nresults, entry.algo);
-        return;
-    }
-
-    // Use pre-allocated scratch buffer to avoid fragmenting GPU memory
-    if (!s_bench_scratch || C_bytes > s_bench_scratch_size) {
-        entry.algo = results[0].algo;
-        entry.algo_M = M;
-        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
-        entry.has_algo = true;
-        entry.benchmarked = false;
-        log_algo_pick("heuristic, no timing scratch", M, K, N, 0, nresults, entry.algo);
-        return;
-    }
-    void* temp_c = s_bench_scratch;
-
-    CudaEvent start, stop;  // timing enabled for cudaEventElapsedTime
-    (void)start.create(cudaEventDefault);
-    (void)stop.create(cudaEventDefault);
-    std::vector<float> cand_ms(nresults, 1e30f);
-
-    // Warmup all candidates first so steady-state caches are warm before any is timed: a
-    // single warmup per candidate let single-rep bench mode pick legacy WMMA paths whose
-    // first-call cost is competitive but whose steady-state cost is much higher than modern
-    // m16n8k16 tiles. Three warmups covers cuBLASLt's per-algo lazy compile + L2 fill.
-    // Tracks algo_ok per candidate since heuristic algos can fail at runtime.
-    std::vector<bool> algo_ok(nresults, true);
-    constexpr int kWarmupIters = 3;
-    for (int i = 0; i < nresults; i++) {
-        if (results[i].workspaceSize > s_workspace_size) {
-            algo_ok[i] = false;
-            continue;
-        }
-        for (int w = 0; w < kWarmupIters; w++) {
-            cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
-                                                 entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
-                                                 &results[i].algo, s_workspace, results[i].workspaceSize, stream);
-            if (wst != CUBLAS_STATUS_SUCCESS) {
-                algo_ok[i] = false;
-                break;
-            }
+        if (pick < 0) {
+            // Every candidate faults at runtime — leave has_algo=false so
+            // the matmul uses cuBLASLt's own default (and the caller's
+            // fallback chain / fatal guard handles a genuine dead shape).
+            entry.has_algo = false;
+            entry.workspace_size = 0;
+            return;
         }
     }
-
-    auto time_candidate = [&](int i, int iters) {
-        return time_on_stream(start, stop, stream, iters, [&] {
-            IMP_CUBLAS_CHECK_LOG(cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
-                                                entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
-                                                &results[i].algo, s_workspace, results[i].workspaceSize,
-                                                stream));
-        });
-    };
-
-    // Probe round — its timings are thrown away, they only size the real rounds.
-    std::vector<int> reps(nresults, kBenchmarkIters);
-    for (int i = 0; i < nresults; i++) {
-        if (!algo_ok[i])
-            continue;
-        const float per_rep = time_candidate(i, kBenchmarkIters);
-        const int want = (per_rep > 1e-5f) ? static_cast<int>(kTargetWindowMs / per_rep) : kMaxBenchIters;
-        reps[i] = std::clamp(want, kBenchmarkIters, kMaxBenchIters);
-    }
-
-    // The heuristic's own first choice, among candidates that survived warmup.
-    // Everything below is measured against it.
-    int base = -1;
-    for (int i = 0; i < nresults && base < 0; i++) {
-        if (algo_ok[i])
-            base = i;
-    }
-
-    // Interleaved rounds: each round compares every candidate against `base` timed in the
-    // SAME round, and a candidate keeps its claim only by beating base by kAlgoMargin in
-    // every round. Pairing the comparison within a round makes it survive a bad one (cold
-    // clocks / a busy host inflate base and challenger together, so the ratio still carries
-    // signal). Comparing per-candidate minima across rounds does not have this property.
-    std::vector<bool> beats_base(nresults, base >= 0);
-    for (int round = 0; round < kBenchmarkRounds && base >= 0; round++) {
-        // Base is timed first and explicitly — every other candidate in this round
-        // is judged against this number, so it must exist before they are timed.
-        const float base_ms = time_candidate(base, reps[base]);
-        cand_ms[base] = std::min(cand_ms[base], base_ms);
-        beats_base[base] = false;
-        for (int i = 0; i < nresults; i++) {
-            if (i == base)
-                continue;
-            if (!algo_ok[i]) {
-                beats_base[i] = false;
-                continue;
-            }
-            const float per_rep = time_candidate(i, reps[i]);
-            cand_ms[i] = std::min(cand_ms[i], per_rep);
-            if (per_rep >= base_ms * (1.0f - kAlgoMargin))
-                beats_base[i] = false;
-        }
-    }
-
-    start.reset();
-    stop.reset();
-
-    // [diag] per-candidate cost, so the margin below can be chosen from measured
-    // spread instead of guessed. Without this only the winner's time is logged,
-    // which cannot answer "how much does the choice actually matter for this shape".
-    if (gemm_algo_log_enabled() && M > 0) {
-        for (int i = 0; i < nresults; i++)
-            IMP_LOG_DEBUG("[gemm-algo]   cost[%d] per_ms=%.5f reps=%d%s", i, cand_ms[i], reps[i],
-                          algo_ok[i] ? "" : " REJECTED");
-    }
-
-    // Lowest-indexed candidate that beat base in every round wins, not the smallest time:
-    // when two challengers tie with each other but both beat base, picking by time flips
-    // between them run to run. Index order is stable across processes, so this keeps the
-    // gain and stays reproducible. A legacy WMMA candidate whose steady-state cost is much
-    // worse never beats base by the margin in any round.
-    int best_idx = base;
-    for (int i = 0; i < nresults; i++) {
-        if (beats_base[i]) {
-            best_idx = i;
-            break;
-        }
-    }
-
-    const float best_ms = (best_idx >= 0) ? cand_ms[best_idx] : 0.0f;
-
-    if (best_idx < 0 || !algo_ok[best_idx]) {
-        entry.has_algo = false;
-        entry.workspace_size = 0;
-        return;
-    }
-    entry.algo = results[best_idx].algo;
+    entry.algo = results[pick].algo;
     entry.algo_M = M;
-    entry.workspace_size = results[best_idx].workspaceSize;
+    entry.workspace_size = (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize
+                                                                             : 0;
     entry.has_algo = true;
-    entry.benchmarked = true;
-    log_algo_pick("timed", M, K, N, best_idx, nresults, entry.algo);
-    if (gemm_algo_log_enabled() && M > 0)
-        IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] best_ms=%.3f", best_idx, best_ms);
+    log_algo_pick("heuristic, warmup-validated", M, K, N, pick, nresults, entry.algo);
 }
 
 // True when `stream` is not capturing, so the probe may launch and time candidates (#2396).
@@ -778,7 +595,6 @@ static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, in
     }
     const int pick = gemm_capture_safe_pick(std::span(checks.data(), (size_t)std::max(nresults, 0)),
                                             s_workspace_size);
-    entry.benchmarked = false;
     entry.algo_M = M;
     entry.has_algo = pick >= 0;
     entry.workspace_size = pick >= 0 ? checks[pick].workspace : 0;
@@ -817,9 +633,8 @@ static void log_captured_algo_once(GemmCacheEntry& entry, cudaStream_t stream, i
         return;
     entry.capture_logged = true;
     IMP_LOG_INFO("[gemm-algo] captured GEMM M=%ld K=%ld N=%ld uses the %s algo (chosen at M=%ld, tile=%d)",
-                 (long)M, (long)K, (long)N,
-                 !entry.has_algo ? "default" : (entry.benchmarked ? "benchmarked" : "heuristic"),
-                 (long)entry.algo_M, entry.has_algo ? algo_tile_id(entry.algo) : -1);
+                 (long)M, (long)K, (long)N, !entry.has_algo ? "default" : "heuristic", (long)entry.algo_M,
+                 entry.has_algo ? algo_tile_id(entry.algo) : -1);
 }
 
 void gemm_cleanup() {

@@ -295,7 +295,7 @@
     {
       "name": "gdn_norm_gate",
       "group": "ssm",
-      "regex": "gdn_rmsnorm_gated|vhead_tiled_to_grouped"
+      "regex": "gdn_rmsnorm_gated"
     },
     {
       "name": "rmsnorm",

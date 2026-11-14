@@ -11,7 +11,7 @@
 // Scope (phase 1): plain text generation only. Vision, embeddings, rerank
 // scoring, logprobs and constrained decoding stay serial per request;
 // Mamba2/MLA models, MTP, perplexity capture, SWA sizing and
-// the fp32_scan/ref_kernel GDN routes disable the path entirely.
+// the ref_kernel GDN route disables the path entirely.
 
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
@@ -51,12 +51,12 @@ bool Engine::prefill_ragged_enabled_() {
         }
         // GDN ragged rides the fused batched scan; the fp32out/ref routes
         // have no ragged entry (executor throws as defense in depth).
-        if (ok && has_gdn && (runtime_config_.gdn.fp32_scan || runtime_config_.gdn.ref_kernel))
+        if (ok && has_gdn && runtime_config_.gdn.ref_kernel)
             ok = false;
         prefill_ragged_model_ok_ = ok ? 1 : 0;
         if (!ok)
             IMP_LOG_INFO(
-                "prefill_batch: model out of scope (Mamba2/MLA or GDN fp32_scan/ref_kernel) "
+                "prefill_batch: model out of scope (Mamba2/MLA or GDN ref_kernel) "
                 "— serial prefill");
     }
     return prefill_ragged_model_ok_ == 1;

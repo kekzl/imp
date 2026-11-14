@@ -1,4 +1,4 @@
-// Phase 4c (gemm.q8_drop_source): a dense Q8_0 weight with an NVFP4 decode overlay is read at
+// Phase 4c: a dense Q8_0 weight with an NVFP4 decode overlay is read at
 // M <= 32 through the overlay and at M >= 2 through its IMMA planes; the Q8_0 source only feeds
 // the plane build and an IMMA decline (gemm_via_handle_ rebuilds FP16 from the planes then).
 // Build the planes now and free the source: 1.0625 B/elem per weight.
@@ -19,8 +19,7 @@
 namespace imp {
 
 void QuantPipeline::pre_dequant_phase4c_q8_planes_only_(const ModelConfig& cfg, cudaStream_t stream) {
-    const auto& g = dispatch_policy().gemm;
-    if (!g.q8_imma_enabled || !g.q8_drop_source || wcache_->nvfp4_decode_mode <= 0)
+    if (wcache_->nvfp4_decode_mode <= 0)
         return;
     auto* m = const_cast<Model*>(model_);
     int freed = 0;

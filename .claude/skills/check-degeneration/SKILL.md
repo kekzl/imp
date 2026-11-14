@@ -5,7 +5,7 @@ description: Verify coherent output - repetition loops, stuck token, empty conte
 
 # Degeneration Check - imp
 
-Run the battery after touching the forward pass, graph capture, MoE routing, KV cache, GDN state, and every default-ON batched or fused path: ragged prefill (`runtime.prefill_batch`, #1780), batched GDN decode (#1750), chunk-parallel GDN prefill (`gdn.chunkpar_scan`, #1847-#1852), smallm GEMM (`gemm.nvfp4_smallm`, `_pair`, #1766/#1788), producer-fused quantize (#1771/#1773), BF16 GDN state (`gdn.state_bf16`, #1778), PDL device half (#1833), FA2 softmax/2-CTA (#1843/#1844), sparse decode attention (`attention.sparse_topk_tokens`), MTP auto/adaptive (#1809/#1801).
+Run the battery after touching the forward pass, graph capture, MoE routing, KV cache, GDN state, and every default-ON batched or fused path: ragged prefill (`runtime.prefill_batch`, #1780), batched GDN decode (#1750), chunk-parallel GDN prefill (`gdn.chunkpar_scan`, #1847-#1852), smallm GEMM (#1766/#1788), producer-fused quantize (#1771/#1773), BF16 GDN state (`gdn.state_bf16`, #1778), PDL device half (#1833), FA2 softmax/2-CTA (#1843/#1844), sparse decode attention (`attention.sparse_topk_tokens`), MTP auto/adaptive (#1809/#1801).
 
 ## Failure modes
 

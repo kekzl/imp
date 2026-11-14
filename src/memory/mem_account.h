@@ -143,7 +143,7 @@ size_t trim_device_mempool();
 // a cudaFreeAsync'd block goes back to the driver at the next sync instead of sharing a
 // chunk with long-lived allocations. One pool per class Phase 4b (or the FP8 LM head) may free, so a class
 // that stays live does not pin the chunks of one that is freed.
-// Q8Sources: dense Q8_0 layer weights Phase 4c frees (gemm.q8_drop_source).
+// Q8Sources: dense Q8_0 layer weights Phase 4c frees.
 // AttnSources: 16-bit q/k/v/o Phase 4b frees on host-expert models (prefill rebuilds from the FP8 sidecar).
 enum class ReleasePool {
     GdnPacks = 0,

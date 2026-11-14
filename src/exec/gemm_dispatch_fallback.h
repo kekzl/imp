@@ -18,7 +18,7 @@ namespace imp {
 [[nodiscard]] bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
                                           const GemmContext& ctx, bool decode_rows);
 
-// gemm_dispatch_uncached.cpp: Q4_K / Q5_K prompt rows on the fused decode tile (gemm.q45k_tile, fp16
+// gemm_dispatch_uncached.cpp: Q4_K / Q5_K prompt rows on the fused decode tile (fp16
 // accumulate, M > 32 or deterministic); false = declined, nothing launched.
 [[nodiscard]] bool gemm_q45k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& output,
                                        const GemmContext& ctx, bool decode_rows);

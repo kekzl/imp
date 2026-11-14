@@ -384,7 +384,6 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         RuntimeConfig rc;
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
-        rc.gemm.nvfp4_smallm = true;
         rc.gemm.nvfp4_lm_head = kLmHead;
         set_pending_runtime_config(rc);
 
@@ -419,7 +418,6 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         RuntimeConfig rc;
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
-        rc.gemm.nvfp4_smallm = true;
         rc.gemm.nvfp4_lm_head = kLmHead;
         set_pending_runtime_config(rc);
 
@@ -432,15 +430,14 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
     }
 
     // W4A16 at every M: smallm_a4=false feeds FP16 rows to the dequant+HMMA kernel (K % 128),
-    // the LM-head pair off leaves the batched FP16 GEMV. nvfp4_smallm=false would stay W4A4 (own
-    // tile GEMM quantizes). Isolates "batch shape" from "activation quantize": both arms share the shape.
+    // the LM-head pair off leaves the batched FP16 GEMV. The tile GEMM would stay W4A4 (it
+    // quantizes too). Isolates "batch shape" from "activation quantize": both arms share the shape.
     ArmResult batched_w4a16;
     Comparison measured_w4a16{}, solo_vs_solo_cfg{};
     {
         RuntimeConfig rc;
         rc.runtime.deterministic = true;
         rc.server.prefix_cache = false;
-        rc.gemm.nvfp4_smallm = true;
         rc.gemm.nvfp4_smallm_a4 = false;
         rc.gemm.nvfp4_lm_head = kLmHead;
         rc.gemm.nvfp4_lm_head_smallm = false;
@@ -484,7 +481,8 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         << "mean |delta logprob| between M=1 and M=32 is " << measured_a4.mean_abs_lp;
 
     // Same fence on the W4A16 batched arm; no ordering assertion between the two arms: the
-    // 0.261 vs 0.242 reading (docs/PERF.md) came from nvfp4_smallm=false, W4A4 in both arms.
+    // 0.261 vs 0.242 reading (docs/PERF.md) came from the tile GEMM (the former gemm.nvfp4_smallm=false, key
+    // removed 2026-11-14), W4A4 in both arms.
     EXPECT_LT(measured_w4a16.mean_abs_lp, 0.6)
         << "mean |delta logprob| between M=1 and M=32 on FP16 activations is " << measured_w4a16.mean_abs_lp;
 

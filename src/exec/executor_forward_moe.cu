@@ -24,7 +24,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
-#include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
@@ -121,36 +120,9 @@ static bool can_decode_fast(int n, const TransformerLayer& ly, void* dequant_buf
 
 }  // anonymous namespace
 
-void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
+void GraphExecutor::moe_ffn_phase1_setup_() {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(ws_.shared_max_tokens());
-
-    // Phase 4 (MoE host-offload async prefetch), gated by n_slots_ > 0 (cache
-    // initialised only when some experts are host-resident). Order matters:
-    // drain this layer's pending prefetch before reading the cache, then queue the next layer's prefetch for
-    // compute-time overlap.
-    if (expert_cache_.n_slots_ > 0) {
-        const int top_k_prefetch = dispatch_policy().moe.prefetch_top_k;
-        if (top_k_prefetch > 0) {
-            expert_cache_.await_prefetch(layer, stream);
-            const int next_layer = layer + 1;
-            if (next_layer < model_->config().n_layers) {
-                expert_cache_.prefetch_layer(next_layer, top_k_prefetch,
-                                             expert_cache_.slot_size_);
-            }
-        }
-    }
-
-    // Diagnostic (Phase 2 follow-up): zeroes MoE workspace buffers so any
-    // legacy-serial-fallback uninit read becomes a deterministic zero.
-    // Enabled via moe.zero_workspace. Cheap (~1 MiB memset).
-    if (dispatch_policy().moe.zero_workspace) {
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream));
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream));
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream));
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream));
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream));
-    }
 }
 
 void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
@@ -380,8 +352,6 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     // grouped NVFP4 path + packed/scale workspace, every MoE prefill
     // lands in run_moe_legacy_fallback_, whose host-args guard throws under
     // capture (moe_host_args_capture_guard).
-    if (dispatch_policy().moe.no_cutlass3x)
-        return true;
     if (!gemm_grouped_nvfp4_moe_supports(model_->config().n_experts, model_->config().d_model,
                                          max_expert_eff_))
         return true;
@@ -404,8 +374,6 @@ bool GraphExecutor::moe_skip_gather_(int layer, const MoeFfnContext& ctx) const 
 
 bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
-    if (dispatch_policy().moe.no_cutlass3x)
-        return false;
     // gpt-oss: only the unstaged device-args path carries its bias + GLU seam (mirror of the
     // use_device_args gate in executor_forward_moe_cutlass.cpp).
     if (model_->profile().moe_expert_bias_glu && ctx.staged_blocks)
@@ -413,8 +381,6 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
     if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))
         return false;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
-        return false;
-    if (!dispatch_policy().moe.nvfp4_device_args)
         return false;
     if (!moe_.d_M_per || moe_.d_M_per_count < ctx.ne)
         return false;
@@ -449,7 +415,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
 void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     MoeFfnContext ctx;
 
-    moe_ffn_phase1_setup_(layer, stream);
+    moe_ffn_phase1_setup_();
     moe_ffn_phase2_state_and_norm_(layer, stream, ctx);
 
     const auto& cfg = model_->config();

@@ -113,7 +113,7 @@ Other rules:
 - **English only.** PRs (title + body), commit messages, code comments, docs and `.md` files. Deliberate non-English *test data* (tokenizer Unicode fixtures, multilingual probes in `tools/analysis/degen_suite.py`) is exempt and should carry a comment saying so.
 - `#pragma once` in headers (no include guards).
 - `.cu` for CUDA, `.cpp` for plain C++, `.h` for headers (CUDA or not).
-- File names are `snake_case`. Known exception: `gemm_grouped_nvfp4_smallM.{h,cu}` mirrors the user-facing config key `moe.nvfp4_smallM`, which can't change without breaking configs.
+- File names are `snake_case`.
 - Errors return codes (`ImpError` / `bool`); CUDA errors are checked and logged, not thrown.
 - Don't add third-party dependencies without a strong reason - the only runtime deps are the CUDA toolkit (cudart, cuBLASLt) and `stb_image` for vision.
 - **Serving allocates nothing** - the measured steady state is `0 cudaMalloc, 0 cudaMallocAsync, 0 pinned-host allocations while serving`. Acquire memory through `src/memory/backend.h` and the tier allocators (`arena`, `block_pool`, `scratch_stack`, `graph_slots`) rather than raw `cudaMalloc`/`cudaFree`, and resolve capacity at init instead of at first use. The blocking `Alloc sites` CI job (`tools/check_alloc_sites.py` against `tools/alloc_allowlist.txt`) rejects new direct allocation sites. See [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md).

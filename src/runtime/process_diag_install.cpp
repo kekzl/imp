@@ -38,24 +38,15 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.no_pdl = cfg.runtime.no_pdl;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;
     d.deterministic_gemm = cfg.runtime.deterministic_gemm;
-    d.gemm_algo_timed = cfg.gemm.algo_timed;
     d.deterministic = cfg.runtime.deterministic;
     // "auto" resolves per-arch at engine init (init_resolve_quant_flags_ →
     // process_diag_set_cublas_fp16_acc); standalone tools without an engine
     // treat auto as off.
     d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
     // runtime.deterministic: no timed cuBLASLt algo pick.
-    d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
-    d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
+    d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : imp::cfg::kNvfp4CublasltMinM;
     // "auto" resolves per model at engine init (init_resolve_quant_flags_); without an engine: on.
     d.nvfp4_prompt_streamk = cfg.gemm.nvfp4_prompt_streamk != "off";
-    d.f16_tile = cfg.gemm.f16_tile;
-    d.q6k_tile = cfg.gemm.q6k_tile;
-    d.mxfp4_tile = cfg.gemm.mxfp4_tile;
-    d.q45k_tile = cfg.gemm.q45k_tile;
-    d.fp8_tile_min_m = cfg.gemm.fp8_tile_min_m;
-    d.moe_mr_nr = cfg.moe.mr_nr;
-    d.moe_expert_overhead_pct = cfg.moe.expert_overhead_pct;
     d.moe_force_host_experts = cfg.moe.force_host_experts;
     d.moe_pin_host_experts = cfg.moe.pin_host_experts;
     d.moe_host_expert_pool_mib = cfg.moe.host_expert_pool_mib;

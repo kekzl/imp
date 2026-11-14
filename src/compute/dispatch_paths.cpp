@@ -84,8 +84,6 @@ const char* moe_prefill_path_name(MoePrefillPath p) {
     switch (p) {
         case MoePrefillPath::DEVICE_ARGS:
             return "device_args";
-        case MoePrefillPath::SMALL_M:
-            return "small_m";
         case MoePrefillPath::GROUPED:
             return "grouped";
         case MoePrefillPath::LEGACY:

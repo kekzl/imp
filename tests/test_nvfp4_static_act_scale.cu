@@ -1,4 +1,4 @@
-// Static NVFP4 activation tensor scale (gemm.nvfp4_static_act_scale): the quantizers divide by the
+// Static NVFP4 activation tensor scale: the quantizers divide by the
 // checkpoint act scale, the GEMM alpha multiplies it back. Double reference on small-amax activations
 // (the subnormal-UE4M3 regime of Gemma-4 GeGLU / Qwen3-30B o_proj inputs), small-M v2 and the prompt tile;
 // mutants that drop the scale on either side are red; every producer matches the reference quantizer.
@@ -337,7 +337,7 @@ TEST(Nvfp4StaticActScaleTest, ProducersMatchReferenceQuantize) {
 
 namespace {
 
-// Tiny blocks at unit act scale (imp-quantize exports, gemm.nvfp4_static_act_scale off): every block scale
+// Tiny blocks at unit act scale (imp-quantize exports without a checkpoint scale): every block scale
 // amax / 6 sits under the UE4M3 floor 2^-9. Block 0 amax 0, block 1 amax <= 6 * 2^-10 (scale <= 2^-10, rounds
 // to 0 even in RNE), the rest amax 2^-(10 - m % 4) per row m (2^-10 .. 2^-7).
 std::vector<half> tiny_activations(int M, int K, uint32_t seed) {

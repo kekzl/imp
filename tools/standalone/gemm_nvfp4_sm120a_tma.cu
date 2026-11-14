@@ -94,7 +94,7 @@ __device__ __forceinline__ void cp_async_wait() {
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 }
 
-// ---- TMA + mbarrier device wrappers (from gemm_grouped_nvfp4_smallM.cu) ------
+// ---- TMA + mbarrier device wrappers (from the former gemm_grouped_nvfp4_smallM.cu) ----
 __device__ __forceinline__ void mbarrier_init(uint64_t* bar, uint32_t count) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(s), "r"(count));

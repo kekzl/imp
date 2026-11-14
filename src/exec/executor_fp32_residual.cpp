@@ -1,4 +1,4 @@
-// FP32-residual sandwich-norm fusion (Gemma-4 decode, gemm.fp32_residual_fuse). Per layer the unfused
+// FP32-residual sandwich-norm fusion (Gemma-4 decode). Per layer the unfused
 // chain is: attn_norm (+ the Q GEMM's quantize), post_attn accumulate, residual copy, MoE pre-norm,
 // MoE-branch sanitize + post-norm, dense-branch sanitize + post-norm, add, post_ffn accumulate,
 // layer_out_scale on FP16 and FP32. Here: post-attn launch, tail launch (carries the next layer's
@@ -24,10 +24,9 @@ bool f16_weight(const Tensor& t) { return t.data != nullptr && t.qtype == QType:
 
 bool GraphExecutor::fp32_resid_fuse_ok_(int n) const {
     // Decode rows only (n == 1 or batched decode / verify); prefill keeps the unfused chain.
-    return n >= 1 && (n == 1 || cur_decode_rows_) && dispatch_policy().gemm.fp32_residual_fuse &&
-           fp32_accum_buf_ != nullptr && model_->profile().fp32_residual_norms &&
-           compute_dtype_ == QType::F16 && !calib_ && lora_ == nullptr && cvec_ == nullptr &&
-           sae_rows_.empty() && !debug_forward_enabled() && !dispatch_policy().moe.force_fp16_sync &&
+    return n >= 1 && (n == 1 || cur_decode_rows_) && fp32_accum_buf_ != nullptr &&
+           model_->profile().fp32_residual_norms && compute_dtype_ == QType::F16 && !calib_ &&
+           lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() && !debug_forward_enabled() &&
            !model_->config().parallel_block && !model_->profile().gated_residual;
 }
 
@@ -152,8 +151,8 @@ bool GraphExecutor::fp32_tail_ok_(int layer, int n) const {
     return fp32_resid_fuse_ok_(n) && prof.sandwich_norms && prof.sanitize_ffn_fp16 &&
            f16_weight(ly.ffn_post_norm_2) && f16_weight(ly.ffn_post_norm_1) && f16_weight(ly.post_ffn_norm) &&
            f16_weight(ly.ffn_pre_norm_2) && f16_weight(ly.ffn_norm) && ly.w_up_shared.data != nullptr &&
-           ly.shared_expert_gate_inp.data == nullptr && !dispatch_policy().moe.no_shared_mlp &&
-           !shexp_overlap_.pending && (gpli_.inputs.data == nullptr || ly.pli_gate.data == nullptr) &&
+           ly.shared_expert_gate_inp.data == nullptr && !shexp_overlap_.pending &&
+           (gpli_.inputs.data == nullptr || ly.pli_gate.data == nullptr) &&
            fp32_residual_norm_fits(Fp32ResidMode::kTail, model_->config().d_model);
 }
 

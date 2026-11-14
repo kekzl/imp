@@ -36,11 +36,10 @@ static GemmContext prequant_hint(const GemmContext& ctx, bool prequant, const Te
 }
 
 // Mixed-type gate/up (UD GGUF) on the one Q8_1 input: one gemv_dp4a_multi launch instead of two GEMVs
-// (gdn.m1_dp4a). false = a type it does not serve, nothing launched.
-static bool ffn_gate_up_dp4a_multi(bool enabled, const Tensor& w_gate, const Tensor& w_up,
-                                   const block_q8_1* q8, const float* d8, Tensor& go, Tensor& uo, int d,
-                                   cudaStream_t stream) {
-    if (!enabled || !gemv_dp4a_multi_supports(w_gate.qtype, d) || !gemv_dp4a_multi_supports(w_up.qtype, d))
+// false = a type it does not serve, nothing launched.
+static bool ffn_gate_up_dp4a_multi(const Tensor& w_gate, const Tensor& w_up, const block_q8_1* q8,
+                                   const float* d8, Tensor& go, Tensor& uo, int d, cudaStream_t stream) {
+    if (!gemv_dp4a_multi_supports(w_gate.qtype, d) || !gemv_dp4a_multi_supports(w_up.qtype, d))
         return false;
     const Dp4aGemvSeg segs[2] = {{w_gate.data, w_gate.qtype, static_cast<half*>(go.data),
                                   static_cast<int>(w_gate.shape[0])},
@@ -134,24 +133,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
                                          qscratch_.dequant != nullptr &&
                                          dequant_gpu_supported(ly.w_down.qtype));
-    // Batched-decode residual accumulation on CUTLASS_NVFP4 (gemm.nvfp4_residual_beta1):
-    // h += down(so) via the smallm accumulate path, replacing GEMM-to-scratch
-    // + elementwise_add_store (o-projection twin: executor_attention.cu).
-    bool will_fuse_down_beta1_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_residual &&
-                                       !will_fuse_down_nvfp4 && !will_fuse_down_beta1 &&
-                                       !will_fuse_down_dequant_beta1 && !will_fuse_down_mxfp4 && n > 1 &&
-                                       n <= 32 && h.qtype == QType::F16 &&
-                                       wd_tier == StorageTier::CUTLASS_NVFP4 &&
-                                       dispatch_policy().gemm.nvfp4_residual_beta1 && !cur_spec_verify_ &&
-                                       lora_ == nullptr && !using_fp32_accum);
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
-        !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !will_fuse_down_beta1_nvfp4 &&
-        !using_fp32_accum) {
+        !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !using_fp32_accum) {
         save_residual_(r, h, ffn_norm_w, no, n, stream);  // skipped when the producer saved it (#2414)
     }
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
+    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
     swiglu_epi_ = {};  // set by gate_up_prefill_ when the up epilogue wrote the down input
 
@@ -237,8 +225,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
                                    static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                    ly.w_gate.qtype, stream);
-            } else if (!ffn_gate_up_dp4a_multi(dispatch_policy().gdn.m1_dp4a, ly.w_gate, ly.w_up, q8,
-                                               qscratch_.d8_buf, go, uo, d, stream)) {
+            } else if (!ffn_gate_up_dp4a_multi(ly.w_gate, ly.w_up, q8, qscratch_.d8_buf, go, uo, d, stream)) {
                 dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf,
                                    static_cast<half*>(go.data), ffn_rows, d, stream);
                 dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf,
@@ -474,10 +461,6 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
-            } else if (will_fuse_down_beta1_nvfp4) {
-                // Batched-decode NVFP4: hidden += swiglu_out @ w_down^T via
-                // the smallm accumulate path.
-                gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));

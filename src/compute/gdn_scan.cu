@@ -369,8 +369,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
 // <HD,SS,CHUNK> for supported shapes, else falls back to a chunk-iterating wrapper around
 // gdn_scan_fused_f32. Output is bit-near-equivalent to gdn_scan_fused_kernel (FP16 1e-3,
 // FP32 state 1e-5 tolerance), validated by ChunkBoundaryHandoff + ChunkwiseProtoMatchesFused.
-// Templated dispatcher shared by gdn_scan_chunkwise_f32 (YOut=half) and
-// gdn_scan_chunkwise_fp32out (YOut=float).
+// Templated dispatcher of gdn_scan_chunkwise_f32 (YOut=half; the YOut=float launcher left with
+// gdn.fp32_scan, 2026-11-14).
 template <typename YOut, typename FusedFallback>
 static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels, const half* alpha,
                                         const half* beta, const float* A_log, const float* dt_bias,
@@ -456,31 +456,6 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
             gdn_scan_fused_f32(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
                                n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
                                grouped_layout, d_real_n_chunk, h_snap, d_snap_n);
-        });
-}
-
-// FP32-output chunkwise launcher for gdn.fp32_scan: scan output must stay FP32 through
-// RMSNorm+Gate+SiLU (Qwen 3.6 L0 sign-flip root cause; see executor_ssm_gdn.cu:454-457).
-void gdn_scan_chunkwise_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                                const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
-                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                                cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
-                                float* h_snap, const int* d_snap_n) {
-    // Same whole-range fused route for a snapshot request as gdn_scan_chunkwise_f32 (#2214).
-    if (h_snap) {
-        gdn_scan_fused_fp32out(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32,
-                               n_tokens, n_heads, head_dim_ssm, state_size, n_groups, stream, grouped_layout,
-                               d_real_n, h_snap, d_snap_n);
-        return;
-    }
-    gdn_scan_chunkwise_dispatch<float>(
-        conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens, n_heads,
-        head_dim_ssm, state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
-        [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, float* y_,
-            int n_tok_chunk, const int* d_real_n_chunk) {
-            gdn_scan_fused_fp32out(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
-                                   n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                                   grouped_layout, d_real_n_chunk);
         });
 }
 

@@ -11,10 +11,8 @@
 namespace imp::cfg {
 
 struct MoE {
-    int expert_overhead_pct = 10;
     int force_host_experts = 0;  // last N layers forced to host (0 = none)
     bool skip = false;
-    bool force_fp16_sync = false;
     bool no_expert_cache = false;
     // Share of free VRAM the expert LRU cache may claim, percent. Sets how many
     // tokens of routing history the cache holds (a 30B-A3B's 73 slots/layer is
@@ -31,90 +29,27 @@ struct MoE {
     // default; weight_upload pins NVFP4 prequant experts anyway when host RAM allows,
     // and whole-layer staging follows the pinned slabs, not this flag.
     bool pin_host_experts = false;
-    // Dispatch a staged host-resident MoE layer through the own grouped
-    // NVFP4 prefill GEMM instead of the per-expert dequant fallback. Needs pinned slabs.
-    // Qwen3.8-Flash-Next-NVFP4: pp3692 203 -> 1143 tok/s; Qwen3-30B-A3B-NVFP4, 48 host layers:
-    // pp4096 2631-2748 -> 7067-7093. Staged in moe.stage_expert_chunks blocks (below).
-    bool staged_cutlass_prefill = true;
-    // Stage only the experts the routing touched, with a gather kernel from the mapped
-    // pinned slabs, instead of memcpying all n_experts per projection. A prompt that
-    // touches every expert moves the same bytes; a short one moves a fraction.
-    // Needs pin_host_experts + device_expert_cache (it reads the cache's device views).
-    bool stage_touched_only = true;
-    // Stage a host layer in this many expert blocks (gate+up per block, then down per block):
-    // the staging buffer holds 2 projections of n_experts/chunks experts instead of all 3 of
-    // n_experts, the rest goes to the expert cache. 1 = whole-layer staging.
-    int stage_expert_chunks = 4;
     // Phase 2: assert device-side mirror == host-side LRU state after every
     // cache mutation. D2H readback per update (~120 KiB): never enable in perf
     // runs, only CI/regression diagnosis.
     bool expert_cache_debug_parity = false;
-    // Phase 4 async prefetch: at layer L, issue async H2D for up to this many
-    // of layer L+1's most-recent (proj, expert) pairs not currently cached.
-    // 0 = disabled (default). Sensible values 3..16.
-    int prefetch_top_k = 0;
-    // Escape hatch to drop the "experts on host -> graphs off" guard. Currently
-    // a no-op: every host-resident-expert MoE path reads routing on the host,
-    // so moe_host_args_capture_guard always throws under capture. Needs routing
-    // AND expert residency resolved device-side (host-issued H2D on a miss). See docs/ROADMAP.md.
-    bool allow_graphs_under_offload = false;
-    bool zero_workspace = false;
-    bool no_shared_mlp = false;
-    bool no_shexp_gate = false;
-    bool no_cutlass3x = false;
     // Per-process MoE workspace reserve override (MiB). 0 = use computed
     // default.
     int reserve_mib = 0;
-    // Device-args full path for NVFP4 MoE prefill (gemm_grouped_nvfp4_dispatch). Default ON
-    // since 2026-05-14 (+11-39% pp512 on 4-model A/B, then on CUTLASS 3.x).
-    bool nvfp4_device_args = true;
-    // Device-args NVFP4 MoE at up to this many tokens: 16-row grouped decode GEMM, gate + up + act fused
-    // (gemm_grouped_nvfp4_decode.h), bit-equal per row to the tile path. 0 = off.
-    int nvfp4_decode_rows = 64;
-    // Opt-in smallM kernel branch for NVFP4 MoE prefill.
-    bool nvfp4_smallM = false;
-    // Decode on host-resident NVFP4 or GGUF experts: resolve routing to cache slots and gather the
-    // misses on the device (no per-layer D2H + host LRU). Needs pin_host_experts (the
-    // slabs are mapped); otherwise the host LRU path serves. 2026-09-20: see
-    // src/exec/expert_cache_device.h. GGUF (packed experts in a mapped WSL2 slab): Qwen3-30B-A3B-Q4_K_M
-    // 48 host layers tg128 73.6 -> 236 tok/s, CUDA graphs stay on.
-    bool device_expert_cache = true;
-    // Decode (n = 1) on the device expert cache: the shared expert FFN runs on a side stream
-    // while the layer's misses are gathered, into its own scratch; phase 8 joins and adds, so
-    // the add order and the output bits are unchanged.
-    bool shared_expert_overlap = true;
-    // Decode on the device expert cache: the miss gather runs on a side stream while the routed
-    // experts that hit run their GEMVs; the misses follow once the gather lands. Output bits unchanged.
-    bool expert_gather_overlap = true;
-    // Decode (n = 1) on the device expert cache with expert_gather_overlap: layer L's MoE input through
-    // layer L+1's router predicts L+1's top-k, and up to this many predicted keys that are not resident are
-    // gathered behind L's misses. 0 = off; at most 32. Output bits unchanged (a key still copying waits on
-    // the gather). Flash-Next server, 6 prompts, 1 block per key, 2 pairs: 0 / 2 / 4 / 6 / 7 =
-    // 91.9-92.2 / 96.4-96.8 / 99.8-100.2 / 102.6-102.8 / 101.8-103.0 tok/s.
-    int expert_prefetch = 6;
-    // Qwen4Exp (gated residual): that router reads the hc streams normed with layer L+1's mlp norm and
-    // summed, not L's MoE input. Predictor recall 66.0 -> 71.4 % of top-10; server 6 prompts at N=2
-    // 94.42-94.88 -> 95.84-96.11 tok/s. Output bits unchanged.
-    bool expert_prefetch_hc_norm = true;
-    // Copy blocks per prefetched key (1-64), 4 loads in flight per thread. The zero-copy blocks run beside
-    // the next layer's attention and slow its kernels with the PCIe loads in flight. Flash-Next server at
-    // 6 keys, 3 pairs: 1 / 2 blocks = 102.6-103.0 / 99.8-100.3 tok/s.
-    int expert_prefetch_blocks = 1;
-    // Router of rows n >= 2 (prefill, batched decode, verify) as one launch: logits GEMM + softmax /
-    // sigmoid + top-k + renorm (moe_router_fused), instead of GEMM + split-K reduce + fp16 -> fp32 +
-    // top-k. F16 router, <= 128 experts, no group limit; off under runtime.deterministic.
-    bool router_fused = true;
     // Host expert tier for unpinned host-resident NVFP4 experts (#2621): pinned LRU of expert
     // units filled by pread from the checkpoint. 0 = host RAM available - max(6 GiB, 10 % RAM), N = cap MiB
     // (below the experts: they are not pinned, the tier serves), -1 = off.
     int host_expert_pool_mib = 0;
-    // Threshold M for smallM kernel (clamped to [0,128]).
-    int nvfp4_smallM_threshold = 64;
-    // Rows-per-block (NR) for multi-row NVFP4 MoE decode kernels: one warp
-    // computes one row (threads/block = NR*32). Valid: 4, 8 (default), 16, 32;
-    // others fall back to 8. Only reaches single-sequence decode
-    // (can_decode_fast refuses n!=1); output is bit-identical across values.
-    // NR=16/32 measured worse and are settled; NR=4 is NOT settled (noise-level effect).
-    int mr_nr = 8;
 };
+
+// Former MoE keys, values measured once and never moved (keys removed 2026-11-14).
+// Host-layer prefill staging blocks (1 = whole layer); staged Flash-Next pp3692 203 -> 1143 tok/s.
+inline constexpr int kMoeStageExpertChunks = 4;
+// Device-args MoE decode GEMM (16-row grouped, gate + up + act fused) up to this many tokens.
+inline constexpr int kMoeNvfp4DecodeRows = 64;
+// Next-layer expert prefetch keys (max 32): Flash-Next server 0 / 2 / 4 / 6 / 7 keys =
+// 91.9-92.2 / 96.4-96.8 / 99.8-100.2 / 102.6-102.8 / 101.8-103.0 tok/s.
+inline constexpr int kMoeExpertPrefetch = 6;
+// Copy blocks per prefetched key: 1 / 2 blocks = 102.6-103.0 / 99.8-100.3 tok/s (Flash-Next, 6 keys).
+inline constexpr int kMoeExpertPrefetchBlocks = 1;
 }  // namespace imp::cfg

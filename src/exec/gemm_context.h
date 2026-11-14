@@ -31,18 +31,6 @@ struct GemmContext {
     // to false so non-Gemma-4 models behave identically.
     bool force_mmvq = false;
 
-    // Phase 5 Track D follow-up: per-Engine knobs; were read from
-    // RuntimeConfig::current() in gemm_dispatch / gemm_kernel_gguf hot paths.
-    // Wired by the executor's GemmContext::make caller from dispatch_policy().
-    bool q8_imma_enabled = false;
-    bool q4k_imma_prefill = false;
-    bool q6k_imma_smallm = false;
-    bool q8_0_imma_smallm = false;
-    bool gguf_imma_smallm = false;
-    bool gemm_no_mmvq = false;
-    bool gemm_no_mmvq_q8_0 = false;
-    bool gemm_no_dp4a_gemv = false;
-
     // Spec-verify chunk forward (#998): small-M GEMMs (M <= largest capture
     // bucket) prefer the NVFP4 decode overlay over the M>1 prefill dequant
     // path. Set from InferenceState::spec_verify_chunk; never set for real
@@ -52,27 +40,15 @@ struct GemmContext {
     // Quantization scratch buffers (non-owning)
     const QuantScratch* qscratch = nullptr;
 
-    // Helper: create from executor state. `rcfg` is the per-Engine RuntimeConfig
-    // — its gemm.* flags are mirrored into the context once at construction
-    // (replaces the former RuntimeConfig::current() reads in gemm_dispatch
-    // and gemm_kernel_gguf).
+    // Helper: create from executor state.
     static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
-                            const DispatchPolicy& rcfg, bool force_fp16 = false, bool force_mmvq = false,
-                            bool spec_verify = false) {
+                            bool force_fp16 = false, bool force_mmvq = false, bool spec_verify = false) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;
         ctx.qscratch = &qs;
         ctx.force_fp16 = force_fp16;
         ctx.force_mmvq = force_mmvq;
-        ctx.q8_imma_enabled = rcfg.gemm.q8_imma_enabled;
-        ctx.q4k_imma_prefill = rcfg.gemm.q4k_imma_prefill;
-        ctx.q6k_imma_smallm = rcfg.gemm.q6k_imma_smallm;
-        ctx.q8_0_imma_smallm = rcfg.gemm.q8_0_imma_smallm;
-        ctx.gguf_imma_smallm = rcfg.gemm.gguf_imma_smallm;
-        ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
-        ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
-        ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
         ctx.spec_verify_small_m = spec_verify;
         return ctx;
     }

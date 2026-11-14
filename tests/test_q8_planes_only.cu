@@ -1,4 +1,4 @@
-// Phase 4c (gemm.q8_drop_source): the Q8_0 IMMA planes are the weight's only 8-bit copy.
+// Phase 4c (Q8_0 source drop): the Q8_0 IMMA planes are the weight's only 8-bit copy.
 // - planes -> FP16 is bit-equal to dequant_gpu on the Q8_0 source;
 // - gguf_source_fallback (IMMA decline) on a weight without source computes from the planes:
 //   the source is poisoned and the output still matches dequant_gpu + gemm bit for bit.

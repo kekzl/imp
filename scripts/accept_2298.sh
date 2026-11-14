@@ -3,9 +3,10 @@
 #   C1  Qwen3-8B-Q8_0 --gpu-layers 20 loads with 0 ERROR lines and graphs demoted (layer_offload),
 #       logs "16/36 layers offloaded", upload consumes
 #       >= 14 x 195 MiB less VRAM than --gpu-layers -1 (engine line "upload consumed N MiB").
-#   C2  greedy tokens bit-identical, >= 64 on each of 3 prompts, -1 vs 20, same GEMM route per layer
-#       in both arms (AB flags below): no NVFP4 decode cache, no dense FP16/FP8/fused caches
-#       (gemm.dense_weight_cache=false), no n-gram speculation (off under offload), no CUDA graphs.
+#   C2  greedy tokens bit-identical, >= 64 on each of 3 prompts, -1 vs 20, flags equal
+#       in both arms (AB flags below): no NVFP4 decode cache, no n-gram speculation (off under offload),
+#       no CUDA graphs. Device layers keep their dense FP16/FP8 caches since gemm.dense_weight_cache left
+#       (2026-11-14), so C2 compares two GEMM routes there.
 #   C2b teacher-forced mean NLL, default flags, -1 vs 20, over prompt + the -1 arm's 64 tokens:
 #       |delta| <= 0.002 nats/token. INFO: p0 default-flags greedy first diff + top-2 logit margin there.
 #   C3  decode tok/s, default flags (informational).
@@ -38,7 +39,7 @@ LAYER_MIB=195
 MIN_SAVED_MIB=$((14 * LAYER_MIB))
 NTOK=64
 NLL_TOL=0.002
-AB=(--no-nvfp4 --set runtime.deterministic_gemm=true --set gemm.dense_weight_cache=false
+AB=(--no-nvfp4 --set runtime.deterministic_gemm=true
     --set speculative.ngram=false --set runtime.cuda_graphs=never)
 PROMPTS=("The capital of France is" "def fibonacci(n):" "Explain photosynthesis in one sentence.")
 

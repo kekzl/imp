@@ -13,7 +13,7 @@ struct GdnWorkspace {
     void* chunkpar = nullptr;
     size_t chunkpar_bytes = 0;
 
-    // GDN alpha/beta narrow GEMM workspace (gdn.alpha_beta_smallm): split-K
+    // GDN alpha/beta narrow GEMM workspace: split-K
     // partials + per-tile tickets, ~100 KiB, zeroed once at allocation.
     // nullptr keeps the two cuBLAS calls.
     void* ab = nullptr;

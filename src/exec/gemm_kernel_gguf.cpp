@@ -16,9 +16,9 @@ namespace imp {
 // gemm_dispatch_impl. One strategy per qtype (not per backend) because mmvq and dp4a
 // overlap on Q4_K/Q5_K/Q8_0 and would collide on a shared strategy key otherwise.
 //
-// use_mmvq = force_mmvq && qtype in {Q4_K,Q5_K,Q5_1,Q8_0} && K%32==0 && !no_mmvq &&
-//            !no_mmvq_q8_0(Q8_0) && !prefer_fp16_cache && input==F16 && !fp32_output
-// use_dp4a = !no_dp4a_gemv && qtype in {Q6_K,Q8_0,Q4_0,Q4_K,Q5_K,Q2_K,Q3_K,IQ4_NL,IQ4_XS,IQ3_S} && q8_1_buf
+// use_mmvq = force_mmvq && qtype in {Q4_K,Q5_K,Q5_1,Q8_0} && K%32==0 &&
+//            !prefer_fp16_cache && input==F16 && !fp32_output
+// use_dp4a = qtype in {Q6_K,Q8_0,Q4_0,Q4_K,Q5_K,Q2_K,Q3_K,IQ4_NL,IQ4_XS,IQ3_S} && q8_1_buf
 //            && d8_buf && !prefer_fp16_cache && input==F16 && !fp32_output && M==1
 // mmvq wins when both eligible (legacy if/else-if order).
 //
@@ -94,14 +94,12 @@ static GemmDispatchResult run_gguf_smallm(const GemmKernelArgs& args, QType qtyp
     const int K = static_cast<int>(weight.shape[1]);
 
     // mmvq eligibility (legacy line 2216-2220): force_mmvq set, qtype mmvq-supported,
-    // K%32==0, no_mmvq off, no_mmvq_q8_0 off for Q8_0. force_mmvq is the per-model override
+    // K%32==0. force_mmvq is the per-model override
     // from ModelConfig::Overrides::Gemma4::force_mmvq.
-    const bool use_mmvq = args.force_mmvq && mmvq_eligible && (K % 32 == 0) && !args.no_mmvq &&
-                          !(args.no_mmvq_q8_0 && qtype == QType::Q8_0);
+    const bool use_mmvq = args.force_mmvq && mmvq_eligible && (K % 32 == 0);
 
     // dp4a eligibility (legacy line 2221-2222): scratch present + is_dp4a_qtype.
-    const bool use_dp4a = !args.no_dp4a_gemv && args.q8_1_buf != nullptr && args.d8_buf != nullptr &&
-                          is_dp4a_qtype(qtype);
+    const bool use_dp4a = args.q8_1_buf != nullptr && args.d8_buf != nullptr && is_dp4a_qtype(qtype);
 
     // Fused-gemv fallback (legacy lines 2267-2276): only Q6_K/Q8_0 have a fused kernel.
     // dequant_scratch != nullptr is the engine-ready sentinel matching legacy; the fused

@@ -3,6 +3,7 @@
 #include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
 #include "compute/gemm_cutlass_sm120.h"        // CutlassNvFP4Weight, quantize_fp16_to_nvfp4_cutlass
 #include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
+#include "core/config/gemm.h"            // kNvfp4TileMinM
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "core/tensor.h"
@@ -49,9 +50,8 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // tier) but kept because that is one edit away from not being true (#1547).
     if (args.beta != 0.0f)
         return GemmDispatchResult::PreconditionFail;
-    // gemm.nvfp4_tile_min_m: own TMA GEMM on the SfAtom bytes; cuBLASLt on refusal.
-    const int tile_min_m = process_diag_nvfp4_tile_min_m();
-    if (tile_min_m > 0 && M >= tile_min_m &&
+    // Own TMA GEMM on the SfAtom bytes from imp::cfg::kNvfp4TileMinM; cuBLASLt on refusal.
+    if (M >= imp::cfg::kNvfp4TileMinM &&
         gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
                         alpha, args.output->data, M, N, K, args.stream, /*variant=*/-1,
                         // no workspace = no stream-K: its partial sums take another order than the
@@ -64,11 +64,12 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
-            IMP_LOG_INFO("gemm.nvfp4_tile_min_m: own NVFP4 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+            IMP_LOG_INFO("nvfp4_tile: own NVFP4 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
         }
         return GemmDispatchResult::Ok;
     }
-    // gemm.nvfp4_cublaslt_min_m: cuBLASLt on the same SfAtom bytes from M >= min_m.
+    // cuBLASLt on the same SfAtom bytes from M >= imp::cfg::kNvfp4CublasltMinM (0 under
+    // runtime.deterministic).
     const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
     if (lt_min_m > 0 && M >= lt_min_m &&
         gemm_nvfp4_cublaslt(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,

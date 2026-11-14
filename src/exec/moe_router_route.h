@@ -1,6 +1,6 @@
 #pragma once
 
-// moe.router_fused dispatch from compute_moe_routing: rows n >= 2 through moe_router_fused, ids / weights
+// Fused-router dispatch from compute_moe_routing: rows n >= 2 through moe_router_fused, ids / weights
 // straight into the routing buffers; false = not taken (the caller keeps GEMM + top-k).
 
 #include "compute/moe_routing.h"
@@ -14,7 +14,6 @@ namespace imp {
 
 // What the fused router cannot serve: policy off, group limit, gpt-oss logit bias.
 struct RouterFusedGate {
-    bool policy_on;
     bool group_limit;
     bool logit_bias_profile;
     const void* logit_bias;

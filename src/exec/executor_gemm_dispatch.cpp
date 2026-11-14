@@ -47,7 +47,7 @@ namespace imp {
 // IMMA prefill on a GGUF source (Q8_0, Q4_K, Q6_K at 2..32 rows); false = caller dequantizes.
 static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tensor& output,
                                 const GemmContext& ctx, int M, bool decode_rows) {
-    // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled): fused dequant on int8
+    // Q8_0 INT8 IMMA fast path: fused dequant on int8
     // tensor cores instead of materialize-to-FP16 -> cuBLAS. Covers beta=0 and
     // the beta=1 residual-add form; declines fall through to the dequant
     // fallback. M>=2 (was >=64): below 64 the dequant tax dominates even
@@ -56,7 +56,7 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
     // Split-K only on decode/verify rows: a prompt row must not change with its chunk size (#2152).
     const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 && M >= 2 &&
                                input.stride[0] == h.shape[1] && output.stride[0] == h.shape[0];
-    if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
+    if (h.source_qtype == QType::Q8_0 && imma_eligible) {
         // q/k/v share one input: k and v skip the quantize q wrote (tag-checked in the callee).
         const bool reuse_act = ctx.act_quant_hint_matches(input.data, M, static_cast<int>(h.shape[1]));
         if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
@@ -70,7 +70,7 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
         if (gemm_q45k_tile_rows(input, w, output, ctx, decode_rows))
             return true;
     }
-    if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
+    if (h.source_qtype == QType::Q4_K && imma_eligible) {
         if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                               reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
                               static_cast<int>(h.shape[1]), ctx.stream, ctx.beta, q4k_split_ok(decode_rows)))
@@ -78,8 +78,7 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
     }
     // Dense Q6_K above 32 rows stays on dequant + f16-acc cuBLAS (the half-MMA split halves the
     // int8 rate: pp512 6957 vs 3747 tok/s). At 2..32 rows the per-chunk dequant dominates: IMMA.
-    if (ctx.q6k_imma_smallm && h.source_qtype == QType::Q6_K && imma_eligible && M <= 32 &&
-        !process_diag_deterministic()) {
+    if (h.source_qtype == QType::Q6_K && imma_eligible && M <= 32 && !process_diag_deterministic()) {
         if (mmq_q6k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                               reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
                               static_cast<int>(h.shape[1]), ctx.stream, ctx.beta))
@@ -109,9 +108,6 @@ static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& outp
     args.dequant_scratch = qs->dequant;
     args.dequant_scratch_size = qs->dequant_size;
     args.force_mmvq = ctx.force_mmvq;
-    args.no_mmvq = ctx.gemm_no_mmvq;
-    args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
-    args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
     GemmStrategy strat{StorageTier::FP16, h.source_qtype, true};
     return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
 }
@@ -249,13 +245,13 @@ static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight&
 // 11.6369 vs W4A4 14.2956 (ppl_4k). The LM head, larger than the scratch, runs in N slices through
 // mxfp4_slice_out and lands in its columns by a 2-D copy. The shared workspace is off limits: the SSM/GDN
 // buffers are carved from its start (configure_ssm_workspace).
-// gemm.mxfp4_tile: the fused W4A16 tile decodes E2M1 per stage (bit-equal to the scratch path below) where
+// The fused MXFP4 W4A16 tile decodes E2M1 per stage (bit-equal to the scratch path below) where
 // it wins in situ: M <= 1024 and >= 64 128x128 tiles (Qwen3.5-4B pp2048 gate/up 316 vs 254 + 50 us; N <= 128
 // 35 vs ~3 us). fp32 LM-head rows keep the scratch path.
 static bool mxfp4_tile_rows(const uint8_t* w, const uint8_t* s, const Tensor& input, Tensor& output, int M,
                             int N, int K, const GemmContext& ctx) {
     const bool det = process_diag_deterministic();  // every row: tile-invariant bits, chunk-invariant
-    if (!process_diag_mxfp4_tile() || output.qtype != QType::F16 || input.qtype != QType::F16 ||
+    if (output.qtype != QType::F16 || input.qtype != QType::F16 ||
         (!det && (M > 1024 || ((M + 127) / 128) * ((N + 127) / 128) < 64)) || input.stride[0] != K ||
         output.stride[0] != N ||
         !gemm_mxfp4_f16_tile(input.data, w, s, output.data, M, N, K, 1.0f, 0.0f,
@@ -264,7 +260,7 @@ static bool mxfp4_tile_rows(const uint8_t* w, const uint8_t* s, const Tensor& in
     static bool logged = false;  // activity proof, once
     if (!logged) {
         logged = true;
-        IMP_LOG_INFO("gemm.mxfp4_tile: fused MXFP4 W4A16 GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+        IMP_LOG_INFO("mxfp4_tile: fused MXFP4 W4A16 GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
     }
     return true;
 }
@@ -438,7 +434,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     }
 
     if (h.primary_tier == StorageTier::Undefined) {
-        // Q4_K token GEMV without an FP16 tier (gemm.q4k_in_place): the same kernel the FP16 tier runs.
+        // Q4_K token GEMV without an FP16 tier (Q4_K in place): the same kernel the FP16 tier runs.
         if (h.source_qtype == QType::Q4_K && input.shape[0] == 1 && ctx.beta == 0.0f &&
             source_gemv(h, input, output, ctx))
             return;
@@ -584,15 +580,15 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             return;
         }
 
-        // Small-M NVFP4 GEMM (gemm.nvfp4_smallm, default on): batched decode at
-        // n_seq<=32. impl 2 (default) is the native mxf4nvf4 producer/consumer
+        // Small-M NVFP4 GEMM: batched decode at
+        // n_seq<=32. impl 2/3 (kSmallMImpl) is the native mxf4nvf4 producer/consumer
         // pipeline on the SAME plain weight bytes the M=1 decode GEMVs read (vs
         // the CUTLASS 128x128 block-scaled tile it replaces); impl 1 keeps the
         // refuted W4A16 dequant+HMMA kernel for A/B. Spec-verify chunks keep their
         // documented paths (#1055). Weight is the native NVFP4 source or, on
         // decode rows of a GGUF source, its NVFP4 decode overlay (smallm_weight_, #1897).
         NvFP4QuantResult nv;
-        if (dispatch_policy().gemm.nvfp4_smallm && (!ctx.spec_verify_small_m || verify_smallm) && M <= 32 &&
+        if ((!ctx.spec_verify_small_m || verify_smallm) && M <= 32 &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
             output.qtype == QType::F16 && smallm_weight_(h, nv)) {
             const int N = static_cast<int>(nv.N);
@@ -611,7 +607,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // smallm_policy.h: impl 3 = v2 on its single-stripe shapes, else the weight-streaming kernel
             // (ws, K % 64); impl 2 = v2 (K % 256); else the dequant+HMMA kernel on packed activations
             // (v1, K % 128). A shape no kernel serves skips the activation quantize.
-            const SmallMKernel kern = smallm_kernel_for(dispatch_policy().gemm.nvfp4_smallm_impl, N, K);
+            const SmallMKernel kern = smallm_kernel_for(kSmallMImpl, N, K);
             const size_t need = smallm_workspace_bytes(kern, N, K);
             const bool kernel_ok = kern != SmallMKernel::kNone;
             // Capturing with a too-small workspace falls through (the NVFP4 tile on
@@ -901,19 +897,18 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         }
         return;
     }
-    // gemm.fp8_tile_min_m: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own -18
+    // imp::cfg::kFp8TileMinM: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own
+    // -18
     // %). Per-token scales take the tile at every M: cuBLASLt 13.4 refuses FP8 OUTER_VEC_32F on sm_120. They
     // run data-parallel only (no stream-K plan chosen by M), so a prompt row does not change with its chunk.
-    const int min_m = process_diag_fp8_tile_min_m();
     void* sk_ws = (process_diag_deterministic() || a.per_row) ? nullptr : qscratch_.fp8_tile_ws;
-    if ((a.per_row || (min_m > 0 && M >= min_m)) && own_ok &&
+    if ((a.per_row || M >= imp::cfg::kFp8TileMinM) && own_ok &&
         gemm_fp8_tile(a8.data, w8.data, a.d, w_scale, beta, out.data, M, N, K, stream, -1, sk_ws,
                       qscratch_.fp8_tile_ws_size, a.per_row)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
-            IMP_LOG_INFO("gemm.fp8_tile_min_m: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N,
-                         K, beta);
+            IMP_LOG_INFO("fp8_tile: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N, K, beta);
         }
         return;
     }
@@ -932,8 +927,8 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = (cur_decode_rows_ || fp8x8_min_rows_ == 1) && g.fp8_smallm_multi && M <= g.fp8_smallm_max_m &&
-              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = (cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
+              count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
@@ -943,7 +938,7 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
-            IMP_LOG_INFO("gemm.fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
+            IMP_LOG_INFO("fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
                          count, K);
         }
         return;

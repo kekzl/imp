@@ -75,16 +75,15 @@ static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& 
     return ok;
 }
 
-// Rows via IMMA on the GGUF blocks: Q8_0 4..32 (gemm.q8_0_imma_smallm; dp4a reads the weight once per
-// 16 rows, at 2..3 once too with one launch less), IQ4_NL / IQ4_XS / Q5_K from 2 (gemm.gguf_imma_smallm;
-// the alternative is a dequant of the whole weight per call).
+// Rows via IMMA on the GGUF blocks: Q8_0 4..32 (dp4a reads the weight once per 16 rows, at 2..3 once
+// too with one launch less), IQ4_NL / IQ4_XS / Q5_K from 2 (the alternative is a dequant of the whole
+// weight per call).
 static bool gguf_imma_rows(const Tensor& input, const Tensor& weight, Tensor& output,
                            const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
     const int K = static_cast<int>(weight.shape[1]);
     const bool q8 = weight.qtype == QType::Q8_0;
-    const bool on = (q8 && M <= 32) ? ctx.q8_0_imma_smallm : ctx.gguf_imma_smallm;
-    if (M < (q8 ? 4 : 2) || !on ||
+    if (M < (q8 ? 4 : 2) ||
         !mmq_gguf_imma_smallm_gemm(weight.data, weight.qtype, reinterpret_cast<const __half*>(input.data),
                                    reinterpret_cast<__half*>(output.data), M,
                                    static_cast<int>(weight.shape[0]), K, ctx.stream, ctx.beta,
@@ -120,7 +119,7 @@ static bool q8_q4k_rows(const Tensor& input, const Tensor& weight, Tensor& outpu
     // tile (the row kernel re-reads the weight per 4..16 rows: 392 / 560 us per call at 32 streams).
     if (q8 && M > 1 && (decode_rows || short_prompt) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
-    return !q8 && M >= 2 && ctx.q4k_imma_prefill &&
+    return !q8 && M >= 2 &&
            mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
                              static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta,
@@ -131,49 +130,48 @@ static bool q8_q4k_rows(const Tensor& input, const Tensor& weight, Tensor& outpu
 static bool q6k_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx,
                      bool rows_ok) {
     const int M = static_cast<int>(input.shape[0]);
-    return M >= 2 && M <= 32 && ctx.q6k_imma_smallm && rows_ok &&
+    return M >= 2 && M <= 32 && rows_ok &&
            mmq_q6k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
                              static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
 }
 
-// Q6_K prompt rows (gemm.q6k_tile): the fused tile decodes W from the blocks, no whole-weight dequant.
+// Q6_K prompt rows: the fused tile decodes W from the blocks, no whole-weight dequant.
 // Under runtime.deterministic every prompt row takes it (bit-equal across tiles, so chunk-invariant);
 // otherwise only where it wins in situ (gemm_q6k_f16_tile_wins).
 static bool q6k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
     const int N = static_cast<int>(weight.shape[0]);
-    if (!process_diag_q6k_tile() || !gemm_q6k_f16_tile_wins(M, N, process_diag_deterministic()) ||
+    if (!gemm_q6k_f16_tile_wins(M, N, process_diag_deterministic()) ||
         !gemm_q6k_f16_tile(input.data, weight.data, output.data, M, N, static_cast<int>(weight.shape[1]),
                            1.0f, ctx.beta, process_diag_cublas_fp16_acc(), ctx.stream))
         return false;
     static bool logged = false;  // activity proof, once
     if (!logged) {
         logged = true;
-        IMP_LOG_INFO("gemm.q6k_tile: fused Q6_K prompt GEMM ACTIVE (M=%d N=%d K=%ld)", M, N,
+        IMP_LOG_INFO("q6k_tile: fused Q6_K prompt GEMM ACTIVE (M=%d N=%d K=%ld)", M, N,
                      (long)weight.shape[1]);
     }
     return true;
 }
 
-// Q4_K / Q5_K prompt rows (gemm.q45k_tile): the fused tile decodes W from the blocks with fp16 A. Taken
+// Q4_K / Q5_K prompt rows: the fused tile decodes W from the blocks with fp16 A. Taken
 // on fp16-accumulate rows above 32 (the fp32-accumulate tile runs at 1/4 HMMA rate and loses to IMMA:
 // 512x17408x5120 Q5_K 521 vs 370 us); under runtime.deterministic on every prompt row (tile-invariant).
 bool gemm_q45k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx,
                          bool decode_rows) {
     const int M = static_cast<int>(input.shape[0]);
     const bool q5 = weight.qtype == QType::Q5_K;
-    if (decode_rows || !process_diag_q45k_tile() || (!q5 && weight.qtype != QType::Q4_K) ||
-        !dense_f16_rows(input, weight, output) || !process_diag_cublas_fp16_acc() ||
-        (M <= 32 && !process_diag_deterministic()) ||
+    if (decode_rows || (!q5 && weight.qtype != QType::Q4_K) || !dense_f16_rows(input, weight, output) ||
+        !process_diag_cublas_fp16_acc() || (M <= 32 && !process_diag_deterministic()) ||
         !gemm_q45k_f16_tile(q5, input.data, weight.data, output.data, M, static_cast<int>(weight.shape[0]),
                             static_cast<int>(weight.shape[1]), 1.0f, ctx.beta, true, ctx.stream))
         return false;
     static bool s_logged[2] = {};  // activity proof, once per qtype
     if (!s_logged[q5]) {
         s_logged[q5] = true;
-        IMP_LOG_INFO("gemm.q45k_tile: fused %s prompt GEMM ACTIVE (M=%d N=%ld K=%ld)",
-                     qtype_name(weight.qtype), M, (long)weight.shape[0], (long)weight.shape[1]);
+        IMP_LOG_INFO("q45k_tile: fused %s prompt GEMM ACTIVE (M=%d N=%ld K=%ld)", qtype_name(weight.qtype), M,
+                     (long)weight.shape[0], (long)weight.shape[1]);
     }
     return true;
 }
@@ -203,7 +201,7 @@ bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& o
     // tokens: the kernel changes at 33 rows (#2152).
     const bool det = process_diag_deterministic();
     const bool short_prompt = input.shape[0] <= 32 && !det;
-    if ((decode_rows || !det) && ctx.gguf_imma_smallm && dp4a_few_rows(input, weight, output, ctx))
+    if ((decode_rows || !det) && dp4a_few_rows(input, weight, output, ctx))
         return true;
     switch (weight.qtype) {
         case QType::Q8_0:
@@ -234,9 +232,9 @@ static bool dp4a_token_gemv(const Tensor& input, const Tensor& weight, Tensor& o
     const int N = static_cast<int>(weight.shape[0]);
     const int K = static_cast<int>(weight.shape[1]);
     if (input.shape[0] != 1 || !is_dp4a_qtype(weight.qtype) || weight.dropped_source ||
-        ctx.gemm_no_dp4a_gemv || (ctx.beta != 0.0f && ctx.beta != 1.0f) || input.qtype != QType::F16 ||
-        output.qtype != QType::F16 || qs == nullptr || qs->q8_1_buf == nullptr || qs->d8_buf == nullptr ||
-        K % 32 != 0 || K / 32 > qs->q8_1_max_blocks)
+        (ctx.beta != 0.0f && ctx.beta != 1.0f) || input.qtype != QType::F16 || output.qtype != QType::F16 ||
+        qs == nullptr || qs->q8_1_buf == nullptr || qs->d8_buf == nullptr || K % 32 != 0 ||
+        K / 32 > qs->q8_1_max_blocks)
         return false;
     auto* q8 = static_cast<block_q8_1*>(qs->q8_1_buf);
     auto* y = static_cast<half*>(output.data);

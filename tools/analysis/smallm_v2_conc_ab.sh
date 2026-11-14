@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smallm_v2_conc_ab.sh - alternating A/B of two --set lists (default: gemm.nvfp4_smallm off vs on)
+# smallm_v2_conc_ab.sh - alternating A/B of two --set lists (ARM_A, ARM_B; ARM_B required)
 # Env: MODEL, ARM_A, ARM_B, CONC, TRIALS, PORT. Client runs in python:3.12-slim (host network).
 # 3 trials/arm, 3 waves/trial at CONC streams. mbs/seq pinned (free-VRAM swing).
 set -u
@@ -7,7 +7,7 @@ MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 ARM_A=${ARM_A:-}
-ARM_B=${ARM_B:---set gemm.nvfp4_smallm=true}
+ARM_B=${ARM_B:?ARM_B="--set key=value ..."}
 PORT=${PORT:-8097}  # 127.0.0.1:8090 is taken on this host (maria control room)
 CONC=${CONC:-32}
 WAVES=3

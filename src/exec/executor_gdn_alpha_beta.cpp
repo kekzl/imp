@@ -57,9 +57,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     // runtime.deterministic: prefill at split 1 (no workspace), a row's bits independent of M.
     // cuBLAS picks its algorithm per M bucket (#2556).
     const bool det_prefill = prefill && process_diag_deterministic();
-    if (prefill
-            ? (!det_prefill && (!dispatch_policy().gdn.alpha_beta_prefill || gdn_ws_.ab_prefill == nullptr))
-            : (!dispatch_policy().gdn.alpha_beta_smallm || gdn_ws_.ab == nullptr))
+    if (prefill ? (!det_prefill && gdn_ws_.ab_prefill == nullptr) : gdn_ws_.ab == nullptr)
         return false;
     if (alpha_id == kInvalidTensorID || beta_id == kInvalidTensorID)
         return false;
@@ -138,7 +136,7 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                             Tensor& gate_out, int n_heads, cudaStream_t stream,
                                             const NvFP4NormFoldIn& fold) {
-    if (!dispatch_policy().gdn.m1_fused || cur_spec_verify_ || calib_ || n_heads <= 0)
+    if (cur_spec_verify_ || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -183,13 +181,13 @@ int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor&
     // reorder; one smallm v2 launch for both when both route there.
     int64_t gate_shape_early[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
-    // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
+    // M=1: in_proj, gate, alpha and beta in one GEMV
     // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
     if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
     if (in_fold.ssq)
         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-    // M=1 GGUF (gdn.m1_dp4a): the dp4a-routed projections of mixed qtypes in one launch.
+    // M=1 GGUF: the dp4a-routed projections of mixed qtypes in one launch.
     int d = try_gdn_input_dp4a_m1_(ly, no, proj, gate_early, n_heads, ctx, stream);
     bool in_done = (d & kGdnDp4aIn) != 0;
     if ((d & kGdnDp4aGate) != 0)
@@ -221,9 +219,9 @@ const void* GraphExecutor::dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QT
 int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                           Tensor& gate_out, int n_heads, const GemmContext& ctx,
                                           cudaStream_t stream) {
-    if (!dispatch_policy().gdn.m1_dp4a || cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 ||
-        ctx.gemm_no_dp4a_gemv || ctx.force_mmvq || input.shape[0] != 1 || input.qtype != QType::F16 ||
-        proj.qtype != QType::F16 || gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
+    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
+        input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
+        gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
         ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf == nullptr ||
         qscratch_.d8_buf == nullptr)
         return 0;
@@ -271,9 +269,9 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
 
 bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
                                    const GemmContext& ctx, cudaStream_t stream) {
-    if (!dispatch_policy().gdn.m1_dp4a || cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 ||
-        n > kDp4aMultiMaxSegs || ctx.gemm_no_dp4a_gemv || ctx.force_mmvq || input.shape[0] != 1 ||
-        input.qtype != QType::F16 || qscratch_.q8_1_buf == nullptr || qscratch_.d8_buf == nullptr)
+    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs || ctx.force_mmvq ||
+        input.shape[0] != 1 || input.qtype != QType::F16 || qscratch_.q8_1_buf == nullptr ||
+        qscratch_.d8_buf == nullptr)
         return false;
     const int64_t K = input.shape[1];
     if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
@@ -302,7 +300,7 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
 }
 
 bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {
-    if (!dispatch_policy().gdn.m1_fused || n != 1 || h.qtype != QType::F16)
+    if (n != 1 || h.qtype != QType::F16)
         return false;
     if (cur_spec_verify_ || calib_ || lora_ != nullptr)
         return false;
@@ -331,7 +329,7 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
                                            Tensor& k_out, Tensor& v_out, cudaStream_t stream,
                                            const NvFP4NormFoldIn& fold) {
-    if (!dispatch_policy().gdn.m1_fused || cur_spec_verify_ || calib_)
+    if (cur_spec_verify_ || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
         k_out.qtype != QType::F16 || v_out.qtype != QType::F16)

@@ -363,23 +363,11 @@ qsa_debug            = false
 sparse_prefill_topk_tokens = -1
 
 [moe]
-# Expected per-expert overhead (% of expert size) before deciding to upload
-# all experts vs. host-fall-back. 10 = aggressive auto-pick, 30 = conservative.
-expert_overhead_pct  = 10
 # Force the LAST N MoE layers off-GPU regardless of budget (debug path).
 # 0 = disabled (auto-pick).
 force_host_experts   = 0
 skip                 = false
-force_fp16_sync      = false
 no_expert_cache      = false
-# Zero MoE workspace buffers each layer (memory-safety bisect).
-zero_workspace       = false
-# Skip Gemma-4/Qwen3-Next/3.6 always-active shared MLP branch.
-no_shared_mlp        = false
-# Skip Qwen3-Next/3.6 sigmoid gate on shared expert output.
-no_shexp_gate        = false
-# Force-disable CUTLASS 3.x grouped MoE GEMM path (legacy fallback).
-no_cutlass3x         = false
 # Assert device-mirror == host LRU after every expert-cache mutation
 # (CI/regression diagnosis; costly D2H readback — never in perf runs).
 expert_cache_debug_parity = false
@@ -397,83 +385,21 @@ expert_cache_debug_parity = false
 # max_batch_size below the default context leaves unused: Flash-Next at 32768 x 1 +2304 MiB,
 # 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s.
 expert_cache_budget_pct = 15
-# Async H2D prefetch of next layer's top-K (proj, expert) pairs under
-# host-offload (0 = off; sensible 3..16).
-prefetch_top_k       = 0
-# Allow CUDA Graphs while experts are host-offloaded. Currently a no-op in
-# practice: the MoE decode path reads routing on the host, so capture aborts
-# on every attempt and falls back to per-step decode (measured 2026-08-11).
-allow_graphs_under_offload = false
 # Per-process MoE workspace reserve override in MiB (0 = computed default).
 reserve_mib          = 0
-# CUTLASS 3.x device-args full path for NVFP4 MoE prefill (default ON
-# since 2026-05-14, +11-39% pp512).
-nvfp4_device_args    = true
-# Device-args NVFP4 MoE up to this many tokens on the 16-row grouped decode GEMM (gate + up + act in one
-# launch, bit-equal per row to the tile path). 0 = off.
-nvfp4_decode_rows    = 64
-# Opt-in smallM kernel branch for NVFP4 MoE prefill + its M threshold.
-nvfp4_smallM         = false
-nvfp4_smallM_threshold = 64
-# Rows-per-block for multi-row NVFP4 MoE decode GEMV (4|8|16|32). Swept
-# 2026-09-06: 16 and 32 lose (-0.96 %, -5.15 % tg128), 4 is within noise of 8.
-# Single-sequence decode only, and bit-identical output across values.
-mr_nr                = 8
 # Pin host-resident experts in page-locked memory. Decode is unaffected (cache
 # hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
 # fewer: the off arm alone spread 34.7-66.1 tok/s decode.
 pin_host_experts     = false
-# Decode on host-resident NVFP4 or GGUF experts: routing -> cache slots -> zero-copy gather of
-# the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
-device_expert_cache  = true
-# Decode on the device expert cache: the shared expert FFN runs on a side stream while the
-# layer's expert misses cross PCIe; output bits unchanged (the add stays in its place).
-shared_expert_overlap = true
-# Decode on the device expert cache: the miss gather crosses PCIe on a side stream while the
-# routed experts that hit run their GEMVs; output bits unchanged.
-expert_gather_overlap = true
-# Decode on the device expert cache: layer L's MoE input through layer L+1's router predicts L+1's
-# experts; up to this many absent predicted keys cross PCIe behind L's misses. 0 = off, max 32.
-# Qwen3.8-Flash-Next server: 0 / 2 / 6 keys = 92 / 96.6 / 102.7 tok/s; flat from 6 to 8.
-expert_prefetch = 6
-# Qwen4Exp: the prediction reads the hc streams normed with layer L+1's mlp norm and summed instead
-# of L's MoE input (recall 66.0 -> 71.4 % of top-10); output bits unchanged.
-expert_prefetch_hc_norm = true
-# Copy blocks per prefetched key (1-64): the zero-copy blocks run beside the next layer's
-# attention and slow its kernels (6 keys: 1 / 2 blocks = 102.7 / 100.0 tok/s).
-expert_prefetch_blocks = 1
-# Router of n >= 2 rows as one launch (GEMM + softmax / sigmoid + top-k + renorm), F16 router,
-# <= 128 experts, no group limit; off under runtime.deterministic.
-router_fused         = true
 # Host expert tier (#2621): when host RAM cannot pin every host-resident NVFP4 expert, an LRU
 # of pinned expert units is filled from the checkpoint by parallel pread and feeds the device
 # expert cache (CUDA graphs stay on). 0 = host RAM available minus max(6 GiB, 10 % of RAM), N = cap in MiB (a cap
 # below the host-resident experts skips pinning them, so the tier serves even with RAM to spare),
 # -1 = off (decode falls back to the host LRU path).
 host_expert_pool_mib = 0
-# Route a STAGED host-resident layer through the CUTLASS grouped NVFP4 prefill
-# instead of per-expert dequant; needs pinned slabs. Qwen3-30B-A3B-NVFP4, 48 host
-# layers: pp4096 2631-2748 -> 7067-7093 tok/s, tg256 unchanged (device expert cache).
-staged_cutlass_prefill = true
-# Stage only the experts the routing touched (gather kernel from the mapped pinned slabs)
-# instead of memcpying all n_experts per projection. TTFT on Qwen3.8-Flash-Next-NVFP4:
-# 1267 -> 499 ms at 67 prompt tokens, 1328 -> 1038 ms at 1022. Needs pin_host_experts
-# + device_expert_cache.
-stage_touched_only   = true
-# Host layer staged in this many expert blocks (gate+up, then down): the buffer holds 2
-# projections x n_experts/chunks instead of 3 x n_experts, the difference goes to the expert
-# cache. 1 = whole-layer staging.
-stage_expert_chunks  = 4
 
 [gdn]
-# FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but
-# eliminates FP16 precision drift at long context.
-fp32_scan            = false
-fp32_out             = false
-# 0 = use the model's rms_norm_eps; otherwise override (diagnostic).
-norm_eps_override    = 0.0
 ref_kernel           = false
-vhead_reorder        = false
 # Chunkwise SSD scan (chunk-cached K/Q in smem) instead of the per-token
 # loop. Default ON since 2026-05-29 (+16.7% on the GDN scan kernel).
 chunkwise_scan       = true
@@ -484,45 +410,14 @@ chunkpar_scan        = true
 # Mamba2 prefill scan in the chunked SSD form (fp16 tensor-core GEMMs per
 # 64-token chunk) for chunks >= 128 tokens at state 128; false = per-token scan.
 ssd_scan             = true
-# Chunks (64 tokens) per chunk-parallel strip: 0 = auto (fullest kernel-1
-# wave for the model's head count on this GPU), 1..16 pins it.
-chunkpar_strip       = 0
 # Override gated-DeltaNet weight layout (diagnostic; "" = auto).
 layout_override      = ""
 # BF16 recurrent state (HD=SS=128 models, fused scan route only): +12.5 %
 # aggregate at 32 streams on Qwen3.8-27B-NVFP4 for +0.21 % PPL, and the freed
 # bytes go to the KV pool. false = FP32 state.
 state_bf16           = true
-# Batched decode (2..32 rows): alpha and beta projections in one split-K FP16
-# tensor-core launch instead of two cuBLAS GEMMs (4 launches per GDN layer).
-alpha_beta_smallm    = true
-# Prefill (M > 32): alpha and beta projections in one cluster split-K FP16
-# tensor-core launch (FP32 accumulate) instead of two cuBLASLt GEMMs plus two
-# reduces. Qwen3.8-27B per GDN layer: pp512 8.1-8.6 vs 11.9-12.1 us, pp4096
-# 20.9-21.0 vs 26.8-27.2 us. false = the two cuBLASLt calls.
-alpha_beta_prefill   = true
-# Single-stream decode (M=1) on native-NVFP4 hybrids: in_proj, gate, alpha and
-# beta in one GEMV launch, out-projection with the residual in its epilogue,
-# gated attention q|k|v in one launch (6 launches per GDN layer and 2 per
-# attention layer fewer). false = the per-projection launches.
-m1_fused             = true
-# Single-stream decode (M=1) on GGUF weights: GDN in_proj / gate / alpha + beta, attention
-# q / k / v and FFN gate / up of mixed quant types in one dp4a GEMV launch each on one
-# activation quantize. false = per projection.
-m1_dp4a              = true
 
 [gemm]
-# dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
-# quantized GEMM. Disabling forces dequant->cuBLAS path (diagnostic).
-no_dp4a_gemv         = false
-no_dp4a_lm           = false
-no_mmvq              = false
-no_mmvq_q8_0         = false
-# cuBLAS(Lt) algorithm choice. false = first heuristic candidate that survives a
-# warmup, the same in every process. true = time the candidates: near-tie picks
-# flip per server start and with them the numerics (Qwen3.8-27B-NVFP4 seeded
-# temp-1 outputs: 3 different results in 5 starts). Ignored under deterministic_gemm.
-algo_timed           = false
 # Extend NVFP4 decode cache to Q4_K/Q3_K/Q2_K models (default: only Q8/Q6/Q5).
 # Trades VRAM for decode throughput on sub-8-bit models.
 # tg128 on (2026-09-24): Gemma-3-12B Q4_K_M 157.5 -> 165.0 (+4.5 %), Qwen3-30B-A3B Q4_K_M
@@ -541,50 +436,19 @@ nvfp4_lm_head        = "auto"
 # NVFP4 head (on, or auto fallback) also on GDN/SSM hybrids (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
-# cuBLASLt block-scaled NVFP4 GEMM for dense prefill when the own tile refuses,
-# at M >= this (0 = off). Same weight/scale bytes. Measured vs CUTLASS (#2540):
-# pp4096 +4.6..5.2 % Qwen3-14B-NVFP4, +2.5..3.1 % Qwen3.8-27B-NVFP4.
-nvfp4_cublaslt_min_m = 2048
-# Own NVFP4 prefill GEMM (TMA + mxf4nvf4, no library) for dense prefill at M >= this,
-# ahead of cuBLASLt (0 = off). Same bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM
-# kernel sum -0.9 % vs cuBLASLt; from M 1 CUTLASS runs only on refusal.
-nvfp4_tile_min_m = 1
 # Stream-K (a k split picked by the row count) on prompt rows of that tile: auto|on|off. A prompt row
 # then changes with its chunk, so a prefix-cache resend can answer differently. auto = off on MoE
 # (pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep it.
 nvfp4_prompt_streamk = "auto"
-# Dense SwiGLU prompt rows: SwiGLU and the down projection's NVFP4 quantize in the up GEMM's epilogue
-# (no up / SwiGLU fp16 tensors, no separate quantize launch). Bit-equal to the unfused path.
-swiglu_quant_epilogue = true
-# Own FP16 GEMM instead of cuBLASLt for FP16-accumulate prefill GEMMs with K >= N and a full
-# wave of tiles (GGUF FP16 paths). Bit-equal; Qwen3-14B-Q6_K pp2048 +4.0 % e2e.
-f16_tile = true
-# Fused Q6_K prompt GEMM: W decoded per tile from the GGUF blocks, no whole-weight dequant and no
-# cuBLASLt per call. Bit-equal to dequant + the own FP16 tile.
-q6k_tile = true
-# Fused MXFP4 W4A16 prompt GEMM (native MXFP4 GGUF): E2M1 decoded per tile, no weight dequant into a
-# scratch + FP16 GEMM per call. Bit-equal to that path.
-mxfp4_tile = true
-# Fused Q4_K / Q5_K prompt GEMM: W decoded per tile from the GGUF blocks with fp16 activations, before
-# the raw IMMA tiles (fp16-accumulate rows above 32). Bit-equal to dequant + the own FP16 tile.
-q45k_tile = true
-# Own per-tensor FP8 GEMM before cuBLASLt FP8 x FP8 for native FP8 checkpoint prefill rows from this M
-# (0 = off, K % 64 == 0). Qwen3-8B-FP8 pp4096 +0.6 %; below 2048 cuBLASLt is faster.
-fp8_tile_min_m = 2048
 # Own small-M FP8 x FP8 GEMM for batched-decode rows (n > 1, never prompt rows) up to this M (0 = off,
 # max 32), instead of cuBLASLt. A row's bits do not depend on M or its batch position.
 fp8_smallm_max_m = 32
-# q|k|v and gate|up of that GEMM as one launch each (bits equal per tensor).
-fp8_smallm_multi = true
 # M=1 decode rows on that kernel too (W8A8 with the checkpoint's static input scale) instead of the
 # FP16-activation FP8 GEMV.
 fp8_smallm_m1 = true
 # FP8 x FP8 activations quantize with the checkpoint's static input_scale. false (or a checkpoint
 # without one): per-token dynamic scales on the own GEMMs, a row never depends on its batch neighbours.
 fp8_static_act_scale = true
-# NVFP4 x NVFP4 activations quantize with the checkpoint's static per-linear scale (Modelopt input_scale,
-# compressed-tensors 1 / input_global_scale). false (or a checkpoint without one): act tensor scale 1.0.
-nvfp4_static_act_scale = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode
@@ -595,23 +459,6 @@ nvfp4_lm_head_cutlass = true
 # norm-fused activation quantize) ahead of the CUTLASS 128-row tile: Qwen3-14B
 # at 32 streams 365 us per step on CUTLASS against a 268 us weight floor.
 nvfp4_lm_head_smallm = true
-# M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV
-# folds into both kernels (one launch fewer per norm); deterministic.
-nvfp4_norm_fold      = true
-# Decode on an FP32 residual stream (Gemma-4): post-attention accumulate + MoE
-# pre-norm, and the layer tail (branch post-norms, add, post_ffn_norm, layer
-# scale, next attn_norm + NVFP4 quantize) run as one launch each; bit-identical.
-fp32_residual_fuse   = true
-# Decode rows 2-32: the shared-MLP GeGLU (Gemma-4) also writes the down GEMM's
-# small-M NVFP4 input, one launch fewer per layer; bit-identical.
-geglu_quant_fuse     = true
-# Quantize recipe-excluded BF16 attention q/k/v/o on native-NVFP4 hybrids
-# (Nemotron-3-Nano: +3.8% decode, PPL-neutral). Opt-in.
-nvfp4_attn_proj      = false
-# FP8 E4M3 decode sidecar (per-row scales) for the native-precision GDN/Mamba
-# in/out projections on NVFP4 hybrids: halves the dominant FP16-GEMV decode
-# bytes; prefill keeps the FP16 source. Qwen3.6-35B decode +19%, PPL flat.
-fp8_ssm_proj         = true
 # NVFP4 prefill copies of the full-precision GDN projections ("false", "all",
 # or a comma list of in|gate|out): rows M>32 run the CUTLASS W4A4 GEMM instead
 # of cuBLAS FP16 (~320 TFLOPS on sm_120). Decode and M<=32 keep FP16 / the FP8
@@ -631,7 +478,7 @@ nvfp4_gdn_proj_prefill = "in"
 # projections without FP8 decode rows get nvfp4_gdn_proj_prefill copies.
 mxfp8_gdn_proj_prefill = "auto"
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
-# per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
+# per-row-scale mechanism as the GDN/SSM FP8 decode sidecar, decode-only (#984).
 # "auto" = full q/k/v/o on gpt-oss and Qwen4Exp (Flash-Next: decode +4.4 %, decode-path
 # PPL 5.0246 -> 5.0285) (gpt-oss: BF16 dense projections have no NVFP4
 # decode cache and were 33.5% of the decode window as FP16 GEMVs; measured
@@ -639,9 +486,6 @@ mxfp8_gdn_proj_prefill = "auto"
 # the q/o projections (~76% of the bytes, conservative middle mode), "on" =
 # full q/k/v/o for any full-precision attention weights, "off" disables.
 fp8_attn_proj        = "auto"
-# Route native-NVFP4 MoE expert decode (M=1) through per-expert GEMV
-# kernels instead of grouped CUTLASS (+54-80% MoE decode). Default ON.
-nvfp4_moe_decode     = true
 # FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F). GeForce sm_120
 # runs FP32-accumulate tensor cores at 1/4 rate, so 32F caps prefill at
 # ~225 TFLOPS; 16F roughly doubles GEMM throughput (Qwen3-8B Q8_0 pp512
@@ -650,65 +494,18 @@ nvfp4_moe_decode     = true
 # (f16-overflow sensitivity); on = force everywhere; off = always 32F.
 # Decode (M=1) is unaffected.
 cublas_fp16_acc      = auto
-# INT8-IMMA prefill family (fused dequant on int8 tensor cores, 968 TOPS
-# measured). Validated 2026-06-07 with teacher-forced PPL gates on
-# Qwen3-8B/30B-MoE/gemma-4-26B (neutral or better) and Qwen3.6-35B (+0.55%).
-# Q8_0 dense prefill GEMMs (Qwen3-8B Q8_0 pp512 +7% over fp16-acc cuBLAS).
-# >= 1536 prompt tokens: 3-13% slower than false (docs/LIMITATIONS.md, #2267).
-q8_imma_enabled      = true
-# Dense Q8_0 weights with an NVFP4 decode overlay keep only their IMMA planes: the Q8_0
-# source is freed at load (Qwen3-8B-Q8_0: 7669 MiB). false keeps the source.
-q8_drop_source       = true
 # Grouped MoE expert prefill (one launch over all experts). The big one:
 # Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
 moe_imma_prefill     = true
-# Dense Q4_K via IMMA for weights with no FP16 cache: gemma-3-12b Q4_K_M kernel time
-# pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805. Dense Q6_K is not wired (slower).
-q4k_imma_prefill     = true
-# Dense Q6_K prompt chunks of 2..32 rows via IMMA instead of a per-chunk dequant of every weight:
-# Qwen3-14B-Q6_K pp16 39.6 -> 9.95 ms. Off under runtime.deterministic.
-q6k_imma_smallm      = true
-# Dense uncached Q8_0 rows 2..32 (GGUF GDN projections) via raw IMMA on the GGUF blocks instead of
-# dp4a: Qwen3.8-27B-Q4_K_M pp16/pp32 27.8/36.9 -> 23.5/26.1 ms. Off for prompts under
-# runtime.deterministic.
-q8_0_imma_smallm     = true
-# Dense IQ4_NL / IQ4_XS / Q5_K rows via IMMA on the GGUF blocks instead of a per-call dequant of the
-# weight (Unsloth UD files): Qwen3.8-27B-UD-Q4_K_M pp16/pp512 84.1/161.5 -> 22.9/140.7 ms. Off for
-# prompts under runtime.deterministic.
-gguf_imma_smallm     = true
-# With q4k_imma_prefill, non-MoE models: Q4_K projections keep no FP16 copy (prefill IMMA, decode
-# dp4a in place). gemma-3-12b Q4_K_M: FP16 cache 16920 -> 0 MiB. false restores the copy.
-# MoE attention keeps it (Qwen3-30B-A3B pp512 16050 vs 13749 tok/s in place).
-q4k_in_place         = true
-# pre_dequant FP16 cache (with fused KV / gate+up) and FP8 cache for per-layer dense weights.
-# false: dense weights run their source route, as --gpu-layers host layers do (#2298 A/B control).
-dense_weight_cache   = true
-# FP8 checkpoint weights (Modelopt FP8): prefill as FP8 x FP8 cuBLASLt with the checkpoint's
-# input_scale, no FP16 copy. false: FP16 copy for prefill, FP8 GEMV decode.
-fp8_native_prefill   = true
 
 # There is no [gemma4] section. The one per-model Gemma-4 override left
 # (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set
 # by the engine init resolver; the six writer-less bisect flags that used to sit
 # next to it were deleted (AUDIT_ARCH_2026 G-7).
-# Native small-M (2..32 rows) NVFP4 GEMM for batched decode instead of the
-# multi-row GEMV: 32 streams 992.5 -> 1151.7 tok/s on Qwen3.8-27B-NVFP4 (+16 %).
-nvfp4_smallm         = true
-# Which small-M implementation: 1 = the W4A16 dequant+HMMA kernel (A/B), 2 = the
-# native mxf4nvf4 producer/consumer pipeline (nvfp4_gemm_smallm_v2.cu), 3 = v2 where it
-# splits K under 4 ways, else the weight-streaming kernel: one launch, no split-K, K % 64
-# (nvfp4_gemm_smallm_ws.cu).
-nvfp4_smallm_impl    = 3
-# Sibling launch for impl 2 / 3: q|k|v, gate|up and GDN in|z as one launch, output
-# bit-identical per tensor; 112 launches fewer per 64-layer decode step.
-nvfp4_smallm_pair    = true
+
 # Small-M activations packed to NVFP4 (A4). false keeps them FP16 (dequant+HMMA
 # kernel, the M=1 GEMV numerics at 2..32 rows); no pair launch, no fused quantize.
 nvfp4_smallm_a4      = true
-# Batched-decode residual accumulation in the small-M GEMM epilogue (beta=1)
-# instead of scratch + elementwise add. Off by measurement: 3/3 pairs negative
-# (-2.7/-0.9/-0.2 %) at 32 streams; the adds already overlap inside the graph.
-nvfp4_residual_beta1 = false
 
 [server]
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system

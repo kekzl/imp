@@ -11,47 +11,11 @@
 namespace imp::cfg {
 
 struct GEMM {
-    bool no_dp4a_gemv = false;
-    bool no_dp4a_lm = false;
-    bool no_mmvq = false;
-    bool no_mmvq_q8_0 = false;
-    // cuBLASLt algo by timing the candidates (true) or the first heuristic candidate that survives a
-    // warmup (false): timing picks flip per process (Qwen3.8-27B GEMM K=5120 N=48: 3 tiles in 5 starts).
-    bool algo_timed = false;
-    // Q8_0 INT8 IMMA prefill GEMM: fused dequant on int8 tensor cores
-    // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
-    // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.
-    bool q8_imma_enabled = true;
-    // Phase 4c: a dense Q8_0 weight served by its NVFP4 decode overlay (M <= 32) and IMMA planes
-    // (M >= 2) pins the planes at load and frees the Q8_0 source. Qwen3-8B-Q8_0: 7669 MiB.
-    bool q8_drop_source = true;
-    // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
-    // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
-    bool q4k_imma_prefill = true;
-    // With q4k_imma_prefill, non-MoE models: Q4_K projections get no FP16 cache, prefill IMMA and
-    // decode dp4a read the GGUF blocks in place. gemma-3-12b Q4_K_M: FP16 cache 16920 -> 0 MiB.
-    bool q4k_in_place = true;
-    // Dense Q6_K prompt chunks of 2..32 rows via the k256 IMMA kernel instead of dequantizing every
-    // weight per chunk; off under runtime.deterministic (rows then change kernel at 33).
-    bool q6k_imma_smallm = true;
-    // Dense uncached Q8_0 prompt/decode rows 2..32 via the raw IMMA kernel on the GGUF blocks instead of
-    // dp4a (weight once per 16 rows). Same int8 activations; off under runtime.deterministic for prompts.
-    bool q8_0_imma_smallm = true;
-    // Dense IQ4_NL / IQ4_XS / IQ3_S / Q5_K rows via IMMA on the GGUF blocks (BM=32 tiles, BM=128 above 32
-    // rows) instead of a per-call dequant of the weight; off under runtime.deterministic for prompts.
-    bool gguf_imma_smallm = true;
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the
     // per-expert fallback arms. Re-measure by 2026-12-01 (AUDIT_ARCH_2026 A1-2).
     bool moe_imma_prefill = true;
-    // pre_dequant phases 1 (FP16 cache, fused KV / gate+up) and 2 (FP8 cache) for per-layer
-    // dense weights. false: every dense weight runs its source route, as --gpu-layers host
-    // layers do (A/B control for #2298). Default on.
-    bool dense_weight_cache = true;
-    // FP8 checkpoint weights (Modelopt FP8) run prefill as FP8 x FP8 cuBLASLt with the
-    // checkpoint's input_scale, no FP16 copy. false: FP16 copy for prefill, FP8 GEMV decode.
-    bool fp8_native_prefill = true;
     // Extend the NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
     // not just Q8_0/Q6_K/Q5_K. Trades VRAM for decode throughput on sub-8-bit
     // models. Default off.
@@ -82,106 +46,23 @@ struct GEMM {
     // NVFP4 tile GEMM: avoids reading that GEMM's weight sweep below the compute
     // floor at small batch. Same W4A4 numerics as the tile GEMM. Default on.
     bool nvfp4_lm_head_smallm = true;
-    // M=1 decode: the RMSNorm between an NVFP4 residual GEMV and the next NVFP4 GEMV folds into
-    // both (producer writes h*gamma/4 + atomic sum of squares, consumer scales by rsqrt).
-    // Fixed-point integer atomics: deterministic, also under runtime.deterministic.
-    bool nvfp4_norm_fold = true;
-    // Decode on an FP32 residual stream (Gemma-4): post-attn accumulate + MoE pre-norm, and the
-    // layer tail (branch post-norms, add, post_ffn_norm, layer scale, next attn_norm + NVFP4
-    // quantize) as one launch each. Bit-identical to the unfused chain.
-    bool fp32_residual_fuse = true;
-    // Decode rows 2-32: the shared-MLP GeGLU writes the down GEMM's small-M NVFP4 input in the same
-    // kernel (Gemma-4, K % 64). Bit-identical to geglu() + the down GEMM's own quantize.
-    bool geglu_quant_fuse = true;
-    // Small-M (<=32) NVFP4 GEMM for batched decode. v1 (W4A16 dequant+HMMA)
-    // won isolated but lost the real 32-stream step: synchronous SIMT loads
-    // are exposed to the GDN scan's L2 pressure. v2 uses native block-scaled
-    // mxf4nvf4 MMA via a producer/consumer cp.async+mbarrier pipeline on the
-    // same plain weight bytes the M=1 GEMVs read (zero extra VRAM). Default on.
-    bool nvfp4_smallm = true;
-    // cuBLASLt block-scaled NVFP4 (VEC16_UE4M3) for dense prefill when the own tile refuses, at
-    // M >= this, 0 = off. Same SfAtom bytes; M=2048 GEMM -5.8..-7.7 % vs CUTLASS (#2540).
-    // runtime.deterministic forces 0 (timed algo pick).
-    int nvfp4_cublaslt_min_m = 2048;
-    // Own TMA + mxf4nvf4 dense prefill GEMM (src/quant/nvfp4_gemm_tile.cu) from M >= this, 0 = off;
-    // ahead of cuBLASLt, same SfAtom bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM sum
-    // -0.9 % vs cuBLASLt; from M 1 since the per-grid plan + 128x64 tile: pp128 Qwen3-8B 42.8-43.3 ->
-    // 34.8-35.1 ms vs CUTLASS (#2935). On refusal: cuBLASLt from nvfp4_cublaslt_min_m, else dequant.
-    int nvfp4_tile_min_m = 1;
     // Stream-K on prompt rows (M >= 33) of the own NVFP4 tile: its k split follows M, so a prompt row
     // moves with its chunk (prefix-cache resend). "auto": off on MoE (Gemma-4-26B resend 0.179 nats -> 0,
     // pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep stream-K.
     std::string nvfp4_prompt_streamk = "auto";
-    // Dense SwiGLU prompt rows (M > 32) on the own NVFP4 tile: the up GEMM's epilogue applies SwiGLU to the
-    // gate GEMM's fp16 output and writes the down GEMM's NVFP4 activation (gemm_nvfp4_tile_swiglu_quant),
-    // no up / SwiGLU fp16 tensors, no swiglu_quantize launch. Bit-equal to the unfused path.
-    bool swiglu_quant_epilogue = true;
-    // Own FP16 GEMM (src/compute/gemm_f16_tile.cu) instead of cuBLASLt for F16 x F16 -> F16 with fp16
-    // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
-    // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.
-    bool f16_tile = true;
-    // Fused Q6_K prompt GEMM (src/compute/gemm_q6k_f16_tile.cu): W decoded per tile from the GGUF blocks
-    // instead of a whole-weight dequant + cuBLASLt per call; bit-equal to dequant + the own FP16 tile.
-    bool q6k_tile = true;
-    // Fused MXFP4 W4A16 prompt GEMM (src/compute/gemm_mxfp4_f16_tile.cu): E2M1 decoded per tile instead
-    // of a weight dequant into scratch + gemm() per call; bit-equal to that path.
-    bool mxfp4_tile = true;
-    // Fused Q4_K / Q5_K prompt GEMM (src/compute/gemm_q45k_f16_tile.cu) before the raw IMMA tiles on
-    // fp16-accumulate prompt rows above 32 (deterministic: every prompt row); bit-equal to dequant + the
-    // own FP16 tile.
-    bool q45k_tile = true;
-    // Own per-tensor FP8 GEMM (nvfp4_gemm_tile.cu, F8 configs) before cuBLASLt FP8 x FP8 from this M (0 off).
-    // Qwen3-8B-FP8 pp4096 e2e +0.6 %, pp512 -18 % (cuBLASLt below 2048). Refuses K % 64 != 0.
-    int fp8_tile_min_m = 2048;
     // Own small-M FP8 x FP8 GEMM (src/quant/fp8_gemm_smallm.cu) instead of cuBLASLt for decode rows
     // (n > 1, never a prompt row) up to this M (0 off, max 32). Qwen3-8B-FP8 conc 16 +46 %, conc 4 +61 %.
     int fp8_smallm_max_m = 32;
-    // q|k|v and gate|up of the small-M FP8 GEMM above as one launch each, bits equal per tensor (+2 %).
-    bool fp8_smallm_multi = true;
     // M=1 decode rows on the same kernel (activations quantized with the checkpoint's static input
     // scale, W8A8) instead of the FP16-activation FP8 GEMV. Qwen3-8B-FP8 tg128 +4.8 %.
     bool fp8_smallm_m1 = true;
     // FP8 x FP8 activations take the checkpoint's static input_scale; false (or no input_scale): per-token
     // dynamic scales (row absmax / 448) on the own small-M / tile GEMMs, never a batch-wide absmax.
     bool fp8_static_act_scale = true;
-    // NVFP4 x NVFP4 activations quantize with the checkpoint's static per-linear scale (Modelopt
-    // input_scale, compressed-tensors 1 / input_global_scale), alpha = weight x act scale; false or a
-    // checkpoint without one: act tensor scale 1.0 (block scale = amax / 6, UE4M3 range 2^-9..448).
-    // PPL Qwen3-30B-A3B 11.3565 -> 10.9678, Gemma-4 turn corpus 18.2854 -> 17.8489 (default chunk).
-    bool nvfp4_static_act_scale = true;
-    // Which small-M implementation the gate above dispatches: 1 = W4A16
-    // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
-    // pipeline (nvfp4_gemm_smallm_v2.cu), 3 = v2 where it splits K under 4 ways, else the
-    // weight-streaming kernel (nvfp4_gemm_smallm_ws.cu, no split-K, K % 64; exec/smallm_policy.h).
-    int nvfp4_smallm_impl = 3;
-    // Sibling launch for the v2 / ws kernels: weights consuming the SAME
-    // activation (FFN gate|up, GDN in|z) run as ONE launch, same CTA body,
-    // bit-identical per tensor. Saves one launch's overhead plus a tail wave per pair.
-    bool nvfp4_smallm_pair = true;
     // Small-M activations packed to NVFP4 (A4) before the GEMM. false keeps them
     // FP16 (gemm_nvfp4_smallm, dequant+HMMA): the M=1 GEMV numerics at 2..32 rows,
     // no sibling-pair launch, no producer-fused quantize. Quality instrument (#2019).
     bool nvfp4_smallm_a4 = true;
-    // Batched-decode residual accumulation on the CUTLASS_NVFP4 tier: o/down/
-    // GDN-out at 2..32 rows with beta=1 straight into hidden, vs GEMM-to-scratch
-    // + elementwise add. Default off: measured negative, since the scratch+add
-    // already overlaps the next layer's independent GEMMs (wall-free), while the
-    // accumulate path moves those bytes into the critical GEMM's epilogue.
-    bool nvfp4_residual_beta1 = false;
-    // gemm.nvfp4_ssm_proj was REMOVED (superseded by fp8_ssm_proj's GGUF
-    // branch). Recurrent in_proj/out_proj stay OUT of the NVFP4 decode cache
-    // unconditionally: quant error accumulates in the scan state H.
-    // This flag NVFP4-quantizes recipe-excluded BF16 attention q/k/v/o instead
-    // (stateless per step, low risk). The analogous GDN in_proj/out_proj lever
-    // regresses decode (tuned FP16 GEMV wins on wide GDN shapes); no flag exists for it. Default false.
-    bool nvfp4_attn_proj = false;
-    // FP8 (E4M3, per-tensor amax) decode sidecar for native-precision GDN/Mamba
-    // in_proj/out_proj (where NVFP4 above regresses): halves FP16 GEMV bytes
-    // with dense byte-aligned loads, lower quality risk than 4-bit into the
-    // recurrent scan. M=1 decode only (per-row scales); prefill/M>1 keep FP16.
-    // F16 sources only: GGUF Q8_0 projections decode in place via dp4a (#2688, the copy cost
-    // 5280 MiB on Qwen3.8-27B Q4_K_M). Default on.
-    bool fp8_ssm_proj = true;
     // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the own NVFP4
     // tile GEMM (W4A4) instead of the FP16 GEMM (~320 TFLOPS on sm_120, 35-40% of peak).
     // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.
@@ -201,13 +82,17 @@ struct GEMM {
     // (Flash-Next 386 -> 422 slots/layer; Qwen3.6-35B-A3B 26496 -> 23804 MiB, PPL -1.0 %, pp2048 -4.7 %).
     std::string mxfp8_gdn_proj_prefill = "auto";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
-    // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).
+    // same per-row-scale mechanism as the GDN/SSM FP8 decode sidecar, decode-only (M=1).
     // "auto" = on for gpt-oss and Qwen4Exp (dense BF16 weights get no NVFP4 decode
     // cache). Other arches off pending a decode-path PPL gate (--prefill-chunk-size 1).
     std::string fp8_attn_proj = "auto";
-    // Route native-NVFP4 MoE expert decode (M=1) through the fast per-expert
-    // gemv_nvfp4_moe kernels (borrowing resident expert data+scales) instead of
-    // the grouped GEMM (CUTLASS under-utilized the GPU at M=1). Prefill stays on the own grouped GEMM.
-    bool nvfp4_moe_decode = true;
 };
+
+// Former GEMM keys, values measured once and never moved (keys removed 2026-11-14).
+// Own NVFP4 tile GEMM from this M: pp128 Qwen3-8B 42.8-43.3 -> 34.8-35.1 ms vs CUTLASS (#2935).
+inline constexpr int kNvfp4TileMinM = 1;
+// cuBLASLt block-scaled NVFP4 on the own tile's refusal from this M: M=2048 -5.8..-7.7 % vs CUTLASS (#2540).
+inline constexpr int kNvfp4CublasltMinM = 2048;
+// Own per-tensor FP8 tile GEMM from this M: Qwen3-8B-FP8 pp4096 +0.6 %, below it cuBLASLt (own pp512 -18 %).
+inline constexpr int kFp8TileMinM = 2048;
 }  // namespace imp::cfg

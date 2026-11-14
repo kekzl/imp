@@ -19,8 +19,7 @@ bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int
                         bool use_sigmoid, bool norm_weights, const void* score_bias, const RouterFusedGate& g,
                         MoeRoutingBuffers& buf, void* ws, size_t ws_bytes, cudaStream_t stream) {
     const int d = static_cast<int>(in.shape[1]);
-    if (!g.policy_on || g.group_limit || (g.logit_bias_profile && g.logit_bias != nullptr) ||
-        debug_forward_enabled())
+    if (g.group_limit || (g.logit_bias_profile && g.logit_bias != nullptr) || debug_forward_enabled())
         return false;
     // Deterministic mode keeps the row-invariant router (a row must not depend on M, #2152).
     if (n < 2 || compute != QType::F16 || gate.qtype != QType::F16 || buf.pool == nullptr ||
@@ -46,7 +45,7 @@ bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int
         return false;
     static bool logged = false;  // activity proof, once
     if (!std::exchange(logged, true))
-        IMP_LOG_INFO("moe.router_fused: fused router ACTIVE (n=%d ne=%d d=%d top_k=%d)", n, ne, d, top_k);
+        IMP_LOG_INFO("fused MoE router ACTIVE (n=%d ne=%d d=%d top_k=%d)", n, ne, d, top_k);
     return true;
 }
 

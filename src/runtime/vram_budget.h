@@ -114,7 +114,7 @@ struct VRAMBudget {
 // it locally (tests, standalone).
 // ssm_reserved_slots: recurrent-state slots past max_batch_size the multi-candidate
 // speculative verify reserves (SSMState::init n_reserved); priced with the pool.
-// q8_imma_prefill / moe_imma_prefill: gemm.q8_imma_enabled and gemm.moe_imma_prefill;
+// q8_imma_prefill / moe_imma_prefill: the Q8 IMMA and MoE IMMA prefill settings;
 // decide whether IMMA prefill planes (imma_plane_bytes) are charged; with
 // config.q8_drop_source the dense planes cost only their excess over the freed Q8_0 source.
 // The pass cannot read RuntimeConfig itself.

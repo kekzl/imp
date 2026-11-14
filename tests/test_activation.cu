@@ -603,7 +603,7 @@ void gated_nvfp4_producer_bit_identity(bool gelu, float act_scale) {
     }
 }
 
-// 0.0123: a static input scale (#3015 gemm.nvfp4_static_act_scale), block scale = amax / (6 * s).
+// 0.0123: a static input scale (#3015, static act scale), block scale = amax / (6 * s).
 TEST(ActivationTest, SwigluNvfp4ProducerBitIdentity) {
     gated_nvfp4_producer_bit_identity(/*gelu=*/false, 1.0f);
     gated_nvfp4_producer_bit_identity(/*gelu=*/false, 0.0123f);

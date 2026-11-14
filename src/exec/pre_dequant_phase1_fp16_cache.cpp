@@ -48,7 +48,7 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         (void)kind;
         // A weight already FP8 on disk (Modelopt MIXED_PRECISION) is not something dequant_gpu
         // handles: it carries one per-tensor scalar (Phase 0), not inline GGUF block scales.
-        // Phase 1a serves it as FP8 (gemm.fp8_native_prefill); off, the plan asks for an FP16 copy here
+        // Phase 1a serves it as FP8; a plan that still asks for an FP16 copy gets it here
         // (raw FP8 bytes in an F16 cuBLAS call fail with status 15).
         const bool native_fp8 = (qtype == QType::FP8_E4M3);
         if (!fp16_cache_source(w, qtype, dequant_gpu_supported(qtype)))
@@ -94,12 +94,11 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         total_cache_bytes += fp16_bytes;
         cached_count++;
 
-        // Decode keeps the checkpoint's own FP8 bytes; the FP16 copy (gemm.fp8_native_prefill off)
+        // Decode keeps the checkpoint's own FP8 bytes; the FP16 copy
         // serves prefill only. Spending it on the M=1 GEMV too would read 2 B/elem where the
         // file has 1, on the one path that is bandwidth-bound. Lossless and free: these ARE the
-        // published weights, not a requantization. gemm.fp8_ssm_proj=false falls back to FP16
-        // for both paths.
-        if (native_fp8 && dispatch_policy().gemm.fp8_ssm_proj) {
+        // published weights, not a requantization.
+        if (native_fp8) {
             FP8CacheEntry fe;
             fe.weight = Tensor(w.data, QType::FP8_E4M3, w.ndim, w.shape, true);
             fe.host_scale = w.tensor_scale;  // per-tensor: d_row_scales stays null
@@ -211,8 +210,6 @@ static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
 }
 
 void QuantPipeline::pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cudaStream_t stream) {
-    if (!dispatch_policy().gemm.fp8_native_prefill)
-        return;
     std::vector<FP8CacheEntry*> entries;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);

@@ -18,7 +18,7 @@ GGUF is legacy (`docs/DESIGN_DECISIONS.md`, 2026-10-30): fix load blockers and w
 | Prefill | cuBLAS on dequanted source | CUTLASS NVFP4 GEMM (+ stream-K, #1841) |
 | Priority | legacy; community MXFP4 quality bugs: do not sink time | the strategic path |
 
-- GGUF -> NVFP4 decode cache at init; `nvfp4_beneficial` weights skip the FP16 cache; GDN/SSM projections excluded (quality lock) and served by `gemm.fp8_ssm_proj` (default on, native F16 only); GGUF Q8_0 projections decode in place via `gemm_q8_0_dp4a_dense` at every M (#2688: the FP8 copy cost 5280 MiB = 66 recurrent slots on Qwen3.8-27B Q4_K_M). `gemm.nvfp4_attn_proj` opt-in.
+- GGUF -> NVFP4 decode cache at init; `nvfp4_beneficial` weights skip the FP16 cache; GDN/SSM projections excluded (quality lock) and served by the FP8 GDN projection sidecar (always on, native F16 only); GGUF Q8_0 projections decode in place via `gemm_q8_0_dp4a_dense` at every M (#2688: the FP8 copy cost 5280 MiB = 66 recurrent slots on Qwen3.8-27B Q4_K_M).
 - gpt-oss native MXFP4 experts convert to NVFP4 at load.
 - `wcache_.nvfp4` is NOT a GGUF predicate (native models fill it too); GGUF = registry scan on `dequant_gpu_supported(source)` (#1792 trap).
 
@@ -28,7 +28,7 @@ GGUF is legacy (`docs/DESIGN_DECISIONS.md`, 2026-10-30): fix load blockers and w
 
 - ONE decision point since #621: `plan_storage()` in `src/runtime/storage_planner.h`; caches are RAII-owned by the executor. Extend the planner's rules, never add downstream overrides.
 - `NVFP4` != `CUTLASS_NVFP4` at large M: plain NVFP4 falls to `gemm_nvfp4` (dequant -> cuBLAS). SfAtom scales are built at load (`src/exec/pre_dequant_*.cu`); `convert_scales_sfatom` is a load-time artifact.
-- M<=32 since #1766: `gemm.nvfp4_smallm` (`_impl=2`, `_pair` #1788) runs `mma.sync.kind::mxf4nvf4` on the PLAIN packed layout (`src/quant/nvfp4_gemm_smallm_v2.cu`, zero extra VRAM; the CUTLASS SF atom static-asserts 128 rows, so no CTA_M<128 tile exists). +16.0% at 32 streams, +36.0% at 8. At M=1 the GEMV family stays (#1789).
+- M<=32 since #1766: the small-M kernel (#1788, always on) runs `mma.sync.kind::mxf4nvf4` on the PLAIN packed layout (`src/quant/nvfp4_gemm_smallm_v2.cu`, zero extra VRAM; the CUTLASS SF atom static-asserts 128 rows, so no CTA_M<128 tile exists). +16.0% at 32 streams, +36.0% at 8. At M=1 the GEMV family stays (#1789).
 - StoragePlanner prices zero-copy native-NVFP4 entries at incremental cost since #1795 (a ~15 GiB phantom demand printed "plan failed" before).
 
 ## MoE
@@ -64,7 +64,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 | Q8_0 blocks | 34 bytes, not 4-aligned: `memcpy()`, never `reinterpret_cast` |
 | FP8 prefill | auto-disabled on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M); `attention.fp8_prefill=always` for experiments only. FP8 GDN-projection prefill REFUTED e2e (record `docs/plans/2026-08-31-fp8-ssm-prefill.md`): `out / row_scale` in FP16 overflows to inf on small-absmax rows; cuBLASLt `SCALE_OUTER_VEC_32F` applies `scale[n & ~1]` on sm_120/13.3 |
 | Activation quantize | producer-fused since #1771/#1773 (`src/quant/nvfp4_pack.cuh`; skip = act-quant hint AND scratch tag); invariant: bit-identity vs `quantize_fp16_to_nvfp4_into` |
-| NVFP4 act tensor scale | `gemm.nvfp4_static_act_scale` (default on): checkpoint `input_scale` / `1 / input_global_scale` per linear into every W4A4 quantize AND its alpha (`WeightHandle::act_scale`, MoE per-layer max); a producer that drops it is off by the scale, loudly. Qwen3-30B-A3B PPL 11.3565 -> 10.9678. `imp-quantize` exports carry none (unit scale) |
+| NVFP4 act tensor scale | NVFP4 static act scale (always on): checkpoint `input_scale` / `1 / input_global_scale` per linear into every W4A4 quantize AND its alpha (`WeightHandle::act_scale`, MoE per-layer max); a producer that drops it is off by the scale, loudly. Qwen3-30B-A3B PPL 11.3565 -> 10.9678. `imp-quantize` exports carry none (unit scale) |
 | NVFP4 act block-scale floor | one rule, `nvfp4_encode_micro_scale` (`src/quant/nvfp4_pack.cuh`): amax / (6 s) under 2^-9 clamps to 2^-9 in plain, SfAtom and the MoE decode epilogue. The SfAtom and epilogue encodes wrote 0 until 2026-11-03 (block dropped, prompt rows != decode rows); Qwen3-30B-A3B knob-off chunk 0 vs 32 spread 0.3455 -> 0.0030. Test `Nvfp4TinyBlockScaleTest` |
 | MXFP4 GGUF | Qwen3.5-4B MXFP4 works (#935/#937); Qwen3.5-27B MXFP4 blocked (OOM on 32 GB) |
 | MXFP4 on GDN hybrids | decode falls back MXFP4 -> FP16; the planner reserves that fallback (#935) or token-0 `!` garbage; keep the reserve |

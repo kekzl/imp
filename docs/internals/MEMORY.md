@@ -230,7 +230,7 @@ MTP draft workspace (head KV slots, batched-feed scratch, carry, post-norm feed 
 
 ### A5.6 Weight forms: one resident copy
 
-- A second form of a weight stays only while a default path reads it: Q8_0 planes free the source (`gemm.q8_drop_source`), Q4_K and FP8 prefill from their own bytes (`gemm.q4k_in_place`, `gemm.fp8_native_prefill`), GDN prefills on its FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill`), GGUF dense keeps no SfAtom.
+- A second form of a weight stays only while a default path reads it: Q8_0 planes free the source, Q4_K and FP8 prefill from their own bytes, GDN prefills on its FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill`), GGUF dense keeps no SfAtom.
 - Per-PR numbers (#2711-#2717): root `AUDIT.md`, 2026-10-14.
 - Freed bytes return only through a release-on-free pool; a planner credit lands after the weight-cache reserve or the KV ceiling falls (#2712).
 

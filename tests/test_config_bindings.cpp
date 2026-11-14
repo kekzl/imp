@@ -64,7 +64,7 @@ std::map<std::string, std::string> snapshot(const RuntimeConfig& c) {
 }
 
 TEST(ConfigBindings, EveryExampleKeyMovesOnlyItsOwnField) {
-    ASSERT_GT(kKeys.size(), 200u);
+    ASSERT_GT(kKeys.size(), 140u);
     const RuntimeConfig defaults;
     const auto before = snapshot(defaults);
     size_t bound = 0;
