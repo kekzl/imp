@@ -289,6 +289,13 @@ Full write-up with every number: [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), secti
 | S-32 | Splitting `GraphExecutor::run_attention` into three real TUs is worth doing | **REFUTED on measurement — do not re-chase** | The `src/exec/` per-TU floor is ~5 s and header-driven (227-LOC TU = 5.5 s), so a 1279-LOC body is ~1.5 s over it; 16 of 67 commits in six months touched exactly one fragment; the phases share ~40 prologue locals so the split needs a header all four TUs include. Ceiling ~24 s per six months, and full builds pay the 5 s floor three extra times |
 | S-33 | `engine.h`'s remaining cost needs the pimpl F-24 priced at a 42 % ceiling | **Not yet — the cheap fan-in half was still on the table** | `tools/imp-server/batching_engine.h` included `runtime/engine.h` for one symbol (`imp::Request`, which is in `runtime/request.h`) and reached 15 TUs through `handlers.h`. Dropping it: **49 -> 39 rebuilt TUs, 48 -> 33 s** per `engine.h` edit, x146 commits/6mo. F-24's 42 % was measured on a 1229-line `engine.h`; it is **1502** today |
 
+**S-33, 2026-11-14: the include-only half is spent.** Per `engine.h` touch, `make dev` recompiles
+**75 -> 67 TUs**, uncached **43.1 / 42.8 -> 40.3 / 40.7 s** (ccache hits: 3.5 s either way), x205
+commits/6mo. `EngineConfig` moved to `runtime/engine_config.h`, `apply_rope_override` to
+`runtime/rope_override.h`; 7 includes became forward declarations (`constraint_manager.h` fan-in
+76 -> 9, `lora_adapter.h` 81 -> 7). The 67 left (35 `src/runtime/engine*.cpp`, 18 tests, 8
+imp-server, 3 imp-cli, 3 C-API) each name an `Engine` member; the next cut is a code change.
+
 **Method note that decided two of these.** A grep for who "uses Engine" reported
 the wrong set, the same way F-24 records it did. Deleting the include and letting
 the compiler name the failures gave the true set — 8 TUs, not 15 and not 2.
