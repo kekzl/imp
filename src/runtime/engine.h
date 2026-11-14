@@ -216,7 +216,7 @@ public:
     // SAE (row 116): one Gemma Scope layout dir per engine; width, 0 = refused.
     int sae_load(const std::string& dir);
     [[nodiscard]] int sae_width() const;
-    // Banned phrases (row 118): dense attention only (no recurrent state, no residual KV ring).
+    // Banned phrases (row 118): false only without a loaded model.
     [[nodiscard]] bool phrase_ban_supported() const;
     // Classifier-free guidance (row 117): a pair decodes as two rows of one step.
     [[nodiscard]] bool cfg_supported() const;
@@ -934,23 +934,6 @@ private:
     // interleaved chunks of concurrent embedding requests can share it.
     float* d_embed_pool_scratch_ = nullptr;
     size_t d_penalty_tokens_capacity_ = 0;
-
-    // ── BitDecoding residual metadata (per-step) ─────────────
-    // residual_meta_d_buf_ is the multi-seq metadata buffer. d_kv_slot_buf_ is
-    // a persistent [max_batch_size] device array of slot indices indexed by
-    // batch position, updated lazily via cudaMemcpyAsync when the batch
-    // composition changes (graph-capture-safe: kernels read a stable device
-    // pointer, host updates between replays). Persistent since #1648, beside
-    // d_kv_slot_buf_.
-    int* residual_meta_d_buf_ = nullptr;
-    int residual_meta_capacity_ = 0;  // sequences the buffer above can hold
-    int* d_kv_slot_buf_ = nullptr;
-    std::vector<int> residual_meta_h_seq_ids_;
-    std::vector<int> residual_meta_h_slots_;
-    std::vector<int> residual_meta_h_counts_;
-    std::vector<int> residual_meta_h_widxes_;
-    // Last-uploaded slot per batch position; only re-upload when changed.
-    std::vector<int> d_kv_slot_last_uploaded_;
 
     // ── MTP spec-decode ──────────────────────────────────────────
     // Workspace + draft length for MTP-driven speculative decoding. Active

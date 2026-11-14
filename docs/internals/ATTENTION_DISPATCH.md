@@ -65,11 +65,11 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:928 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:926 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
 | FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (`attention.paged_fp8_multitok`): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
-| NVFP4 | `paged_attention_decode_nvfp4` / `_nvfp4_tc` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel`; TC: `_decode_nvfp4_tc_kernel`, `_splitk_nvfp4_tc_kernel`, `_residual_reduce_kernel` |
+| NVFP4 | `paged_attention_decode_nvfp4` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel` |
 | MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:526 void paged_attention_decode_mxfp4_kv(`) | shares the NVFP4 kernels with UE8M0 scales |
 
 **Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674).
@@ -81,13 +81,6 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 | NVFP4 | 64/128/256/512 (**no 96**) |
 
 - `paged_attention_serves_head_dim()` in `attention_paged.h` is the table; the resolver falls back to FP16 KV before init when a model's head_dim is not in it.
-
-### BitDecoding residual cache
-
-When `kv_cache.bitdecoding_qk` is true AND `kv_cache.dtype = nvfp4`, the newest `kv_cache.bitdecoding_residual_tokens` tokens are kept in a residual FP16 buffer and combined with the quantized older blocks at attention time.
-
-- Used by NVFP4-decode for higher fidelity on the recent context.
-- See `src/compute/attention_paged_nvfp4_tc.cu`.
 
 ## MLA (Multi-head Latent Attention)
 

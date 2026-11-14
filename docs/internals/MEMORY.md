@@ -32,7 +32,7 @@ Corrections the site census (archive A1.7) forced:
 |---|---|
 | T5 splits a/b | 26 pinned-host sites are reused every decode step, so T5a's "load only" discipline could not hold them; moved to T5b |
 | T1 and T2 need separate arenas | `server.model_swap` unloads/loads without a process restart: T1 releases wholesale at swap, T2 survives it |
-| T3 is a group of pools, not one | KV runs two block groups (global + SWA); residual FP16 ring, SSM state and recurrent snapshots are separate fixed-stride slabs. One `BlockPool` class, four instances (stride is a runtime constructor argument, not a template parameter) |
+| T3 is a group of pools, not one | KV runs two block groups (global + SWA); SSM state and recurrent snapshots are separate fixed-stride slabs. One `BlockPool` class, four instances (stride is a runtime constructor argument, not a template parameter) |
 
 No tier holds the library reservation: not imp's memory, a **charge** the planner subtracts before distributing anything (A4). Per-request `cudaMallocAsync` traffic (`engine_graph_decode.cpp`/`engine_scheduler.cpp`) is logically T4; since 2026-09-07 it is one T2 pool carved at init (`Engine::init_serving_metadata_pool_()`, `runtime/serving_metadata_layout.h`), the driver calls remaining only as the fallback for a pool that failed to allocate.
 
@@ -142,7 +142,7 @@ struct MemoryPlan {
     size_t engine_persistent;   // T2
     size_t forward_scratch;     // T4
     KvPlan kv;                  // blocks, bytes, below_floor (loud, not silent, on underflow)
-    std::vector<PlanLine> pools;         // SWA group, SSM state, residual ring, ...
+    std::vector<PlanLine> pools;         // SWA group, SSM state, recurrent snapshots, ...
     size_t library_reserve; size_t context_reserve;
     size_t total() const;
     std::vector<PlanLine> lines() const;  // every line item, largest first - the VRAM audit table body

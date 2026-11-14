@@ -2,7 +2,7 @@
 # Invariant I2 (docs/internals/MEMORY.md): nothing allocates device memory while serving.
 # steady_state_allocations() only sees Backend-routed calls; the --wrap interposer closes that
 # gap for every direct allocation site. make check-alloc-interpose builds and runs this.
-# Phase A: batch>1 + NVFP4 residual KV + MTP chain. Phase B: MTP off, default KV, ragged prefill
+# Phase A: batch>1 + NVFP4 KV + MTP chain. Phase B: MTP off, default KV, ragged prefill
 # + json_object constrained pipeline. Phase C: NVFP4 MoE smallM prefill (INTERPOSE_MODEL_NVFP4_MOE).
 # Each phase has its own liveness check and pin.
 set -uo pipefail
@@ -114,9 +114,8 @@ PHASES=${INTERPOSE_PHASES:-ABC}
 if [[ $PHASES == *A* ]]; then
 LOG_A=$(mktemp /tmp/interpose.A.XXXXXX.log)
 start_server --set kv_cache.dtype=nvfp4 \
-             --set kv_cache.bitdecoding_residual_tokens=128 \
              --set speculative.mtp_k=1
-# 20 requests, four at a time: batch > 1 is what reaches the residual allocator.
+# 20 requests, four at a time: batch > 1 decode.
 for round in 1 2 3 4 5; do
     for slot in 1 2 3 4; do
         chat "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain topic $round.$slot in two paragraphs.\"}],\"max_tokens\":96,\"temperature\":0}" &
@@ -124,14 +123,13 @@ for round in 1 2 3 4 5; do
     wait
 done
 stop_server "$LOG_A"
-# Liveness, before any verdict: if the residual pool was declined (wrong kv
-# dtype, non-uniform head_dim) the run cannot reach the allocator it is
-# looking for, and a clean result means nothing.
-if ! grep -q 'residual buffer enabled' "$LOG_A"; then
-    echo "FATAL(A): the residual KV pool was never enabled, so this run did not"   >&2
-    echo "       exercise the path it claims to. Check kv_cache.dtype=nvfp4 and" >&2
-    echo "       kv_cache.bitdecoding_residual_tokens against this model."       >&2
-    grep -i 'residual' "$LOG_A" | head -5                                       >&2
+# Liveness, before any verdict: without an armed MTP head the run cannot reach
+# the MTP chain it is looking for, and a clean result means nothing.
+if ! grep -q 'MTP spec-decode enabled' "$LOG_A"; then
+    echo "FATAL(A): MTP spec-decode was never enabled, so this run did not" >&2
+    echo "       exercise the MTP chain. Check speculative.mtp_k and that"  >&2
+    echo "       the model ships an MTP head."                               >&2
+    grep -i 'mtp' "$LOG_A" | head -5                                       >&2
     exit 1
 fi
 verdict A "$LOG_A" "$PINNED_A"

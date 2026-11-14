@@ -162,93 +162,18 @@
                                         sub_state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
                                         stream, sub_state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
         } else if (cache_dtype == QType::NVFP4) {
-            // TC vs non-TC is decided per shape below.
             dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            // BitDecoding TC dispatch opt-in (kv_cache.bitdecoding_qk): routes to the
-            // WMMA-Q.K variant; default keeps scalar-FFMA. The TC variant has no sink
-            // pointer and its residual reduce would need its own (#1345), so a sink
-            // model stays on the scalar NVFP4 kernel, which applies sinks correctly.
-            bool use_bitdecoding_tc = dispatch_policy().kv_cache.bitdecoding_qk;
-            if (use_bitdecoding_tc && attn_sinks) {
-                static bool warned_tc_sinks = false;
-                if (!warned_tc_sinks) {
-                    warned_tc_sinks = true;
-                    IMP_LOG_WARN(
-                        "kv_cache.bitdecoding_qk: the NVFP4 tensor-core decode kernel does not "
-                        "apply learned attention sinks — using the scalar NVFP4 kernel for this "
-                        "model instead (#1345).");
-                }
-                use_bitdecoding_tc = false;
-            }
-            if (use_bitdecoding_tc) {
-                // QW6 (#604): gate the entire residual-arg marshalling (8+ trailing args)
-                // behind one null-check. Default path (residual_on=false) uses the
-                // function's default arguments, no explicit marshalling at the call site.
-                const bool residual_on = sub_state.kv_manager != nullptr && sub_state.kv_manager->residual_enabled();
-                const uint8_t* k_scales = static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0));
-                const uint8_t* v_scales = static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0));
-                if (!residual_on) {
-                    dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, attn_bt,
-                                                    attn_ctx_lens, kv_bs, scale, attn_max_ctx,
-                                                    layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                                    attn_max_blocks);
-                } else {
-                    // Phase 3b residual read, two activation paths: multi-seq
-                    // (state.d_residual_seq_slots != nullptr) reads per-batch device metadata
-                    // (batched decode); single-seq legacy (state.kv_seq_id >= 0) uses the
-                    // scalar form (unmigrated single-seq decode).
-                    const half* k_res = nullptr;
-                    const half* v_res = nullptr;
-                    int res_count = 0;
-                    int res_n = sub_state.kv_manager->residual_n_tokens();
-                    int res_widx = 0;
-                    const half* k_res_base = nullptr;
-                    const half* v_res_base = nullptr;
-                    int res_seq_stride_elems = 0;
-                    if (sub_state.d_residual_seq_slots != nullptr) {
-                        // Multi-seq array form
-                        k_res_base = static_cast<const half*>(
-                            sub_state.kv_manager->residual_k_layer_base(kv_layer));
-                        v_res_base = static_cast<const half*>(
-                            sub_state.kv_manager->residual_v_layer_base(kv_layer));
-                        res_seq_stride_elems = static_cast<int>(
-                            sub_state.kv_manager->residual_seq_stride_bytes() / sizeof(__half));
-                    } else if (sub_state.n_sequences == 1 && sub_state.kv_seq_id >= 0) {
-                        // Single-seq scalar form
-                        k_res = static_cast<const half*>(
-                            sub_state.kv_manager->residual_k_ptr(sub_state.kv_seq_id, kv_layer));
-                        v_res = static_cast<const half*>(
-                            sub_state.kv_manager->residual_v_ptr(sub_state.kv_seq_id, kv_layer));
-                        auto rs = sub_state.kv_manager->residual_state(sub_state.kv_seq_id);
-                        res_count = rs.fill_count;
-                        res_widx = rs.write_idx;
-                    }
-                    dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
-                    paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, attn_bt,
-                                                    attn_ctx_lens, kv_bs, scale, attn_max_ctx,
-                                                    layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                                    attn_max_blocks, 0, k_res, v_res, res_count, res_n,
-                                                    res_widx, k_res_base, v_res_base, res_seq_stride_elems,
-                                                    sub_state.d_residual_seq_slots, sub_state.d_residual_counts,
-                                                    sub_state.d_residual_write_idxes,
-                                                    sub_state.kv_manager->d_residual_fc_ptr(),
-                                                    sub_state.kv_manager->d_residual_widx_ptr());
-                }
-            } else {
-                paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
-                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             attn_bt, attn_ctx_lens, kv_bs, scale, attn_max_ctx,
-                                             layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                             attn_max_blocks, layer_n_sinks, attn_sinks);
-            }
+            paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
+                                         static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                         static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                         attn_bt, attn_ctx_lens, kv_bs, scale, attn_max_ctx,
+                                         layer_sliding_window, cfg.attn_logit_softcap, stream,
+                                         attn_max_blocks, layer_n_sinks, attn_sinks);
         } else if (cache_dtype == QType::MXFP4_KV) {
             dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);
             // MXFP4-KV paged attention: same kernel as NVFP4 but with UE8M0 scale decode.
-            // BitDecoding TC path not supported for MXFP4_KV in Slice 2 — always scalar.
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),

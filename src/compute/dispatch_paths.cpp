@@ -50,8 +50,6 @@ const char* attn_decode_path_name(AttnDecodePath p) {
             return "paged_int4";
         case AttnDecodePath::NVFP4:
             return "paged_nvfp4";
-        case AttnDecodePath::NVFP4_TC:
-            return "paged_nvfp4_tc";
         case AttnDecodePath::MXFP4_KV:
             return "paged_mxfp4_kv";
     }

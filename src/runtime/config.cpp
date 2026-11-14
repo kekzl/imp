@@ -173,8 +173,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("kv_cache.dtype", cfg.kv_cache.dtype);
     S("kv_cache.fp8_scale", cfg.kv_cache.fp8_scale);
     B("kv_cache.fp8_scale_split", cfg.kv_cache.fp8_scale_split);
-    I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
-    B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);

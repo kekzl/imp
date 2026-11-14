@@ -39,16 +39,12 @@ src/lora/lora_adapter.cpp cudaMemcpy(dev synced  # cudaStreamSynchronize(nullptr
 src/memory/alloc_interpose.cpp cudaMemset(p debug  # IMP_ALLOC_POISON poison fill
 src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction
 src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction (per-layer)
-src/memory/kv_cache_manager.cpp cudaMemset(d_residual_fc_ init  # enable_residual_buffer at KV init
-src/memory/kv_cache_manager.cpp cudaMemset(d_residual_widx_ init  # enable_residual_buffer at KV init
 src/memory/kv_cache_minmax.cu cudaMemset(minmax_pool_ init  # KV cache construction (fixed metadata pool)
 src/memory/kv_cache_scales.cu cudaMemset(scale_pool_ init  # KV cache construction (fixed scale pool)
 src/memory/ssm_state.cpp cudaMemset(pool_ init  # SSM state construction
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ms offline  # load-time weight conversion
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_packed offline  # load-time weight conversion
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ts offline  # load-time weight conversion
-src/runtime/engine.cpp cudaMemcpy(d_meta init  # alloc_residual_decode_buffers at KV init
-src/runtime/engine.cpp cudaMemcpy(d_slot init  # alloc_residual_decode_buffers at KV init
 src/runtime/engine_kv_cache_init.cpp cudaMemset(d_ssm_seq_slots_ init  # KV init; the scheduler uploads the table before each batched step
 src/vision/qwen3vl_vision_upload.cpp cudaMemcpy(d synced  # cudaStreamSynchronize(nullptr) after the upload loop
 src/vision/vision_encoder.cu cudaMemcpy(d_pos_x_ init  # VisionEncoder::init

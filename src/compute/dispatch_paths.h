@@ -37,7 +37,6 @@ enum class AttnDecodePath {
     INT8,
     INT4,
     NVFP4,
-    NVFP4_TC,
     MXFP4_KV,
 };
 

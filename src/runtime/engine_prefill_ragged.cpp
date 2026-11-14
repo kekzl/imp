@@ -10,7 +10,7 @@
 //
 // Scope (phase 1): plain text generation only. Vision, embeddings, rerank
 // scoring, logprobs and constrained decoding stay serial per request;
-// Mamba2/MLA models, MTP, perplexity capture, SWA sizing, residual KV and
+// Mamba2/MLA models, MTP, perplexity capture, SWA sizing and
 // the fp32_scan/ref_kernel GDN routes disable the path entirely.
 
 #include "runtime/prompt_tail.h"
@@ -32,8 +32,6 @@ bool Engine::prefill_ragged_enabled_() {
     if (!runtime_config_.runtime.prefill_batch)
         return false;
     if (ppl_capture_.active || swa_sizing_active_)
-        return false;
-    if (kv_manager_ && kv_manager_->residual_enabled())
         return false;
     // The CLI's engine-global image has no per-request owner — serial only.
     if (vision_.has_input())
@@ -410,7 +408,6 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     state.max_blocks_per_seq = static_cast<int>(max_blocks);
     state.is_prefill = true;
     state.prefill_offset = 0;  // per-seq offsets carry the truth (h_seq_q_offsets)
-    state.kv_manager = kv_manager_.get();
     state.seq_offsets = d_soff;
     state.h_seq_offsets = h_soff.data();
     state.h_seq_q_offsets = h_qoff.data();
@@ -482,7 +479,6 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         dstate.is_prefill = false;
         dstate.n_sequences = 1;
         dstate.kv_cache = kv_cache_raw_;
-        dstate.kv_manager = kv_manager_.get();
         fill_sampling_params(*(*riders)[0], dstate);
         dstate.seed = engine_internal::compute_step_seed(*(*riders)[0]);
         Tensor rider_logits = logits_out.slice(n_pf, n_pf + n_riders);

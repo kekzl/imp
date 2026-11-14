@@ -141,9 +141,6 @@ dtype                       = "auto"
 fp8_scale                   = "legacy"
 # Static modes only: separate K and V scales per layer instead of one shared value.
 fp8_scale_split             = false
-# BitDecoding TC path for NVFP4 paged-attention QK (experimental).
-# Experimental, expires: 2026-12-31 (remove or promote by then).
-bitdecoding_qk              = false
 
 # Growable KV pool: reserve address space for the pool this configuration asks
 # for, commit what the card can spare now, commit more as it frees. Fixes a
@@ -159,9 +156,6 @@ growable                    = true
 # spilled into host memory decodes at a fraction of the bandwidth with nothing
 # reporting an error.
 growable_initial_pct        = 25
-# BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
-# typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
-bitdecoding_residual_tokens = 0
 # SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
 # other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
 # small dedicated block group instead of full-length KV. The saving grows with

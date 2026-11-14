@@ -331,7 +331,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
     src/compute/attention_paged_nvfp4.cu
-    src/compute/attention_paged_nvfp4_tc.cu
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
@@ -1387,8 +1386,6 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_oracle.cu
         tests/test_qsa_indexer.cu
         tests/test_attention_paged_reduce.cu
-        tests/test_attention_paged_nvfp4_tc.cu
-        tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
         tests/test_sparse_prefill.cu

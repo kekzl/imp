@@ -10,7 +10,6 @@
 #include "core/kv_fp8_scale.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
-#include "memory/kv_cache_manager.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -322,88 +321,6 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     // Sparse decode attention metadata is maintained by ONE batched all-layer
     // launch at the end of the forward, not the per-layer inline launch this
     // replaced (cost the multi-stream serving prefill ~12% wall).
-
-    // Phase 3c: appends each seq's just-computed FP16 K/V (one token/seq) to
-    // its residual ring slot, a lookaside copy letting the TC attention kernel
-    // skip dequant on the freshest tokens. Eviction-free (ring overwrite).
-    // Skipped on prefill and non-NVFP4 caches. Two seq-id sources: h_residual_seq_ids (multi-seq) or
-    // kv_seq_id (single-seq legacy).
-    if (!row_range && !state.is_prefill && use_nvfp4 && state.kv_manager != nullptr &&
-        state.kv_manager->residual_enabled() && n == state.n_sequences) {
-        const int res_n_kv = cache->n_kv_heads();
-        const int res_hd = cache->head_dim();
-        // Per-layer geometry must match the residual's allocated stride
-        // (uniform-head_dim guard from enable_residual_buffer); skip on
-        // mismatch (e.g. Gemma-4 dual-head_dim layers).
-        if (res_n_kv == nkv && res_hd == hd) {
-            const int slot_elems = nkv * hd;
-            Tensor kv_src = view_tokens(k_, n);
-            Tensor vv_src = view_tokens(v_, n);
-            const half* src_k_base = static_cast<const half*>(kv_src.data);
-            const half* src_v_base = static_cast<const half*>(vv_src.data);
-            constexpr int kThreads = 256;
-            const int blocks_y = (slot_elems + kThreads - 1) / kThreads;
-
-            if (state.n_sequences == 1) {
-                // Single-seq fast path: resolves the destination on the host and passes
-                // scalar pointers, avoiding a per-step device-pointer-array upload (two
-                // cudaMemcpyAsync had been a -3x decode regression at 4K ctx; one kernel launch is far
-                // cheaper).
-                int seq_id;
-                if (state.h_residual_seq_ids != nullptr) {
-                    seq_id = state.h_residual_seq_ids[0];
-                } else if (state.kv_seq_id >= 0) {
-                    seq_id = state.kv_seq_id;
-                } else {
-                    seq_id = -1;
-                }
-                if (seq_id >= 0) {
-                    int slot = state.kv_manager->residual_slot_of(seq_id);
-                    void* base_k = state.kv_manager->residual_k_ptr(seq_id, kv_layer);
-                    void* base_v = state.kv_manager->residual_v_ptr(seq_id, kv_layer);
-                    if (slot >= 0 && base_k != nullptr && base_v != nullptr) {
-                        // Graph-safe: kernel reads write_idx from device at execution time.
-                        // Per-step advance happens once at end of forward_logits (a tiny
-                        // advance_residual_state_kernel), inside the captured graph, so replays update ring
-                        // state correctly.
-                        dim3 grid_single(2, blocks_y);
-                        residual_kv_write_indirect_kernel<<<grid_single, kThreads, 0, stream>>>(
-                            src_k_base, src_v_base,
-                            static_cast<half*>(base_k), static_cast<half*>(base_v),
-                            state.kv_manager->d_residual_widx_ptr(), slot, slot_elems);
-                        IMP_CUDA_CHECK_LAUNCH();
-                        // Ring state lives on device, advanced
-                        // once per step by advance_residual_state_kernel in forward_logits.
-                    }
-                }
-            } else if (state.d_residual_seq_slots != nullptr) {
-                // Multi-seq, graph-safe (#1708): everything the destination depends on
-                // (layer base + per-seq stride, residual slot from the engine's per-step
-                // upload, ring index from the manager's device array) is resolved on
-                // DEVICE at execution time. Replaces a form that built a device pointer
-                // array per call/layer with cudaMallocAsync/FreeAsync around the launch
-                // inside the captured region: a replay wrote through the freed, reused
-                // address ("illegal memory access"), with the ring index frozen at capture time too.
-                void* k_layer_base = state.kv_manager->residual_k_layer_base(kv_layer);
-                void* v_layer_base = state.kv_manager->residual_v_layer_base(kv_layer);
-                const int* d_widx = state.kv_manager->d_residual_widx_ptr();
-                if (k_layer_base != nullptr && v_layer_base != nullptr && d_widx != nullptr) {
-                    const int64_t seq_stride_elems = static_cast<int64_t>(
-                        state.kv_manager->residual_seq_stride_bytes() / sizeof(half));
-                    dim3 grid_multi(n, 2);
-                    residual_kv_write_multi_indirect_kernel<<<grid_multi, kThreads, 0, stream>>>(
-                        src_k_base, src_v_base, static_cast<half*>(k_layer_base),
-                        static_cast<half*>(v_layer_base), seq_stride_elems, state.d_residual_seq_slots,
-                        d_widx, slot_elems);
-                    IMP_CUDA_CHECK_LAUNCH();
-                }
-                // The ring advances on device once per step via
-                // advance_residual_state_multi_kernel, inside the captured graph. The host
-                // call this replaces ran only at capture time, so replays left the ring where capture found
-                // it.
-            }
-        }
-    }
 }
 
 }  // namespace imp

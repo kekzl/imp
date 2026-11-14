@@ -2,7 +2,7 @@
 // from the ORIGINAL f16 K/V, never from the quantized grid (the prior INT4 test built its ref
 // FROM the dequantized values, an imp-vs-imp tautology blind to a wrong-but-self-consistent
 // quant kernel).
-// Six KV dtypes (F16/FP8/INT8/INT4/NVFP4/NVFP4-TC) are host-quantized into each kernel's
+// Six KV dtypes (F16/FP8/INT8/INT4/NVFP4/MXFP4-KV) are host-quantized into each kernel's
 // exact layout; deviation from the f16-fp64 ref is CHARACTERIZED, never blessed at an
 // unmeetable tolerance - only F16 (no quant) is held strict.
 // kv_len {16,64,333,1024}: 333 is not block-aligned (block_size=16, partial-tail block);
@@ -435,7 +435,7 @@ struct PathINT4 {
     }
 };
 
-// Shared NVFP4 host quantize (scalar + TC use the same cache): per-(token, kv_head,
+// Shared NVFP4 host quantize (NVFP4 + MXFP4-KV): per-(token, kv_head,
 // group-of-16) UE4M3 micro-scale + E2M1 nibble. A CORRECT quantize is mandatory - random-byte
 // NVFP4 NaNs the scalar kernel. `ue8m0` switches the scale byte to UE8M0 for MXFP4-KV.
 static std::vector<uint8_t> nvfp4_quant_kv(const PathCtx& c, const std::vector<half>& kv,
@@ -497,36 +497,6 @@ struct PathNVFP4 {
                                      c.stream, c.num_blocks, c.n_sinks);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 scalar paged launch";
-        ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
-        cudaFree(d_k);
-        cudaFree(d_v);
-        cudaFree(d_ks);
-        cudaFree(d_vs);
-        return e;
-    }
-};
-
-struct PathNVFP4TC {
-    static const char* name() { return "NVFP4-TC"; }
-    static bool strict() { return false; }
-    static float envelope() { return 0.11f; }
-    static ErrStats run(const PathCtx& c) {
-        std::vector<uint8_t> ks, vs;
-        auto Kq = nvfp4_quant_kv(c, *c.Kh, ks), Vq = nvfp4_quant_kv(c, *c.Vh, vs);
-        const int half_hd = c.head_dim / 2;
-        void* d_k = up(Kq.data(), Kq.size());
-        void* d_v = up(Vq.data(), Vq.size());
-        void* d_ks = up(ks.data(), ks.size());
-        void* d_vs = up(vs.data(), vs.size());
-        Tensor K = raw_tensor(d_k, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
-        Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
-        Tensor O = c.O();
-        c.clear_o();
-        paged_attention_decode_nvfp4_tc(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f,
-                                        c.stream, c.num_blocks, c.n_sinks);
-        cudaStreamSynchronize(c.stream);
-        EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
         cudaFree(d_k);
         cudaFree(d_v);
@@ -714,12 +684,11 @@ protected:
     }
 };
 
-using KVDtypes =
-    ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathNVFP4TC, PathMXFP4KV>;
+using KVDtypes = ::testing::Types<PathF16, PathFP8, PathINT8, PathINT4, PathNVFP4, PathMXFP4KV>;
 TYPED_TEST_SUITE(PagedOracle, KVDtypes);
 
 // Ceilings (Path::envelope()) = worst measured max_rel vs fp64 ref + ~50% margin, frozen:
-// F16 1e-2 (strict, no quant); FP8 0.035; INT8 0.007; INT4 0.10; NVFP4 0.11; NVFP4-TC 0.11;
+// F16 1e-2 (strict, no quant); FP8 0.035; INT8 0.007; INT4 0.10; NVFP4 0.11;
 // MXFP4-KV 0.12 (~20% above NVFP4: UE8M0 has no mantissa, coarser scale, not a kernel bug).
 // Error is monotone in kv_len (#512: short rows have no averaging to dilute quant noise).
 
@@ -735,8 +704,6 @@ TYPED_TEST(PagedOracle, HD128_Sweep) {
 // HD=256 (Qwen3.5/3.8 GDN family, 24q/4kv) had no coverage: HEAD_DIM/64 selects a different
 // lane byte count per head_dim in quantised kernels, so HD128 exercises none of what HD256 runs.
 // Ceilings shared with HD128_Sweep (no new envelope needed).
-// Scalar NVFP4 and NVFP4-TC agree to 4 digits at kv_len=1024 - also a check on the scalar
-// kernel's load path since TC reads the same bytes through unrelated code.
 TYPED_TEST(PagedOracle, HD256_Sweep) {
     for (int kv_len : {16, 333, 1024}) {
         // GQA 24q/4kv, the Qwen3.8-27B decode shape.
@@ -1360,10 +1327,10 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     cudaStreamDestroy(stream);
 }
 
-// NVFP4-TC paged decode microbench (hybrid's default decode attention): IMP_NVFP4_BENCH_
+// NVFP4 paged decode microbench (hybrid's default decode attention): IMP_NVFP4_BENCH_
 // {BATCH=1,CTX=77000,HEADS=24,KV_HEADS=4,HD=256,RING=KV copies, default >= 400 MB}. Random packed
 // nibbles + finite UE4M3 scale bytes; prints us/launch and bytes/sec. Finite-output check only.
-TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
+TEST(PagedNvfp4Decode, LongContextMicrobench) {
     auto env_int = [](const char* k, int d) {
         const char* v = std::getenv(k);
         return v ? std::atoi(v) : d;
@@ -1433,7 +1400,6 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     // The engine registers a split-K scratch at init; batch-1 long context
     // takes the split-K route only with one (24 CTAs walk 77k tokens
     // serially otherwise, 11.6 ms per launch measured 2026-09-03).
-    const int use_tc = env_int("IMP_NVFP4_BENCH_TC", 0);
     process_diag_set_paged_nvfp4_multitok(env_int("IMP_NVFP4_BENCH_MULTITOK", 4));
     process_diag_set_paged_nvfp4_hpc(env_int("IMP_NVFP4_BENCH_HPC", 0));
     process_diag_set_paged_nvfp4_mma(env_int("IMP_NVFP4_BENCH_MMA", 64));
@@ -1444,13 +1410,8 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     auto launch = [&]() {
         d_bt = d_bt_ring + (size_t)ring_pos * batch * blocks_per_seq;
         ring_pos = (ring_pos + 1) % ring;
-        if (use_tc)
-            paged_attention_decode_nvfp4_tc(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt,
-                                            d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream,
-                                            blocks_per_seq);
-        else
-            paged_attention_decode_nvfp4(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt, d_ctx,
-                                         BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream, blocks_per_seq);
+        paged_attention_decode_nvfp4(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt, d_ctx,
+                                     BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream, blocks_per_seq);
     };
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
@@ -1467,7 +1428,7 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
         cudaEventElapsedTime(&ms, t0, t1);
         warm_ms += ms;
     }
-    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4-TC paged decode launch";
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 paged decode launch";
     // Median of 7 timed batches: single 3 ms windows scattered 2-3x between runs.
     const int iters = (kv_len >= 20000) ? 100 : 200;
     std::vector<float> batch_ms;
@@ -1485,12 +1446,12 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     const double us = 1000.0 * batch_ms[3] / iters;
     const double bytes = 2.0 * (double)batch * kv_len * n_kv_heads * (half_hd + head_dim / 16);
     printf(
-        "PagedNvfp4TcDecode: ring=%d tc=%d multitok=%d mma=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f "
+        "PagedNvfp4Decode: ring=%d multitok=%d mma=%d batch=%d ctx=%d heads=%d/%d hd=%d: %.1f "
         "us/launch, KV+scales "
         "%.1f MB, "
         "%.0f GB/s (warm %.2f s)\n",
-        ring, use_tc, process_diag_paged_nvfp4_multitok(), process_diag_paged_nvfp4_mma(), batch, kv_len,
-        n_heads, n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9, warm_ms / 1000.0);
+        ring, process_diag_paged_nvfp4_multitok(), process_diag_paged_nvfp4_mma(), batch, kv_len, n_heads,
+        n_kv_heads, head_dim, us, bytes / 1e6, bytes / (us * 1e-6) / 1e9, warm_ms / 1000.0);
     std::vector<float> Oh = read_o(d_o, q_elems);
     size_t nonfinite = 0;
     for (float h : Oh)

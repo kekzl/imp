@@ -389,8 +389,6 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return "no_spare_slots";
         if (swa_sizing_active_ || config_.streaming_kv_enabled)
             return "swa_or_streaming_kv";
-        if (kv_manager_ && kv_manager_->residual_enabled())
-            return "residual_kv";
         if (d_ssm_seq_slots_ == nullptr)
             return "no_gdn_slot_table";
         // A think budget whose forcing is due needs the eager step (it forces
@@ -667,7 +665,6 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.spec_verify_chunk = true;
     state.skip_lm_head = true;  // greedy_argmax_all below projects every row
     state.chunk_decode_attn = true;
-    state.kv_manager = kv_manager_.get();
     state.ssm_state = ssm_state_.get();
     state.ssm_seq_id = live[0];
     state.ssm_seq_slots = d_seq;

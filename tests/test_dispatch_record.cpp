@@ -32,7 +32,7 @@ const AttnPrefillOuter kAllPrefillOuter[] = {
 };
 const AttnDecodePath kAllDecode[] = {
     AttnDecodePath::UNSET, AttnDecodePath::FP16,  AttnDecodePath::FP8,      AttnDecodePath::INT8,
-    AttnDecodePath::INT4,  AttnDecodePath::NVFP4, AttnDecodePath::NVFP4_TC, AttnDecodePath::MXFP4_KV,
+    AttnDecodePath::INT4,  AttnDecodePath::NVFP4, AttnDecodePath::MXFP4_KV,
 };
 const MoePrefillOuter kAllMoeOuter[] = {
     MoePrefillOuter::UNSET,       MoePrefillOuter::NONE,      MoePrefillOuter::FP16_BATCH,

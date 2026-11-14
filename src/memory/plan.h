@@ -48,7 +48,6 @@ struct FeatureSet {
     size_t spec_decode_bytes = 0;       // draft + verify staging, at max k
     size_t ssm_state_bytes = 0;         // batch-shaped, computed by the caller
     size_t recurrent_snapshot_bytes = 0;
-    size_t residual_ring_bytes = 0;
     // MTP draft head workspace (head KV slots, batched-feed scratch, carry), 0 = no head armed.
     size_t mtp_workspace_bytes = 0;
     // SWA-aware sizing: sliding-window layers hold a fixed live span instead
@@ -139,7 +138,7 @@ struct MemoryPlan {
     size_t engine_persistent = 0;
     size_t forward_scratch = 0;
     KvPlan kv;
-    std::vector<PlanLine> pools;    // SWA group, SSM state, residual ring, ...
+    std::vector<PlanLine> pools;  // SWA group, SSM state, recurrent snapshots, ...
     size_t library_reserve = 0;
     size_t context_reserve = 0;
 

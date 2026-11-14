@@ -25,14 +25,6 @@ struct KVCache {
     // checkpoint / calibrate only: K and V each get their own power-of-two scale per layer (Gemma-4 K amax
     // ~1.6, V ~16); false = one shared scale, max of the two. Legacy is always shared.
     bool fp8_scale_split = false;
-    // BitDecoding Phase 3: residual FP16 cache for newest N tokens.
-    // 0 = disabled (keeps Phase 1+2 behavior). Typical: 4..32.
-    // Only meaningful with kv_cache.dtype = "nvfp4" + kv_cache.bitdecoding_qk.
-    int bitdecoding_residual_tokens = 0;
-    // BitDecoding TC path for NVFP4 paged attention QK. Default off: measured
-    // slower than the scalar kernel on 32-stream decode. See
-    // docs/plans/2026-08-24-qwen38-port.md.
-    bool bitdecoding_qk = false;
     // Growable KV pool: reserves the configured address space, commits
     // physical memory for what's free now, grows into more as it frees up.
     // Fixes pools sized once at the least-trustworthy free-VRAM moment. Needs

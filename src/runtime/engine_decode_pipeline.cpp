@@ -97,8 +97,6 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
         return false;
     if (swa_sizing_active_ || config_.streaming_kv_enabled)
         return false;
-    if (kv_manager_ && kv_manager_->residual_enabled())
-        return false;
     if (!executor_->sample_pipeline_ready())
         return false;
     for (const auto& r : rows)
@@ -124,12 +122,11 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
         }
     IMP_LOG_INFO(
         "decode-pipeline: not entering — n=%d graphs=%d profile=%d pool=%d offload=%d "
-        "ple=%d swa=%d streaming_kv=%d residual=%d sampler_ready=%d rows_ok=%d",
+        "ple=%d swa=%d streaming_kv=%d sampler_ready=%d rows_ok=%d",
         (int)rows.size(), (int)config_.use_cuda_graphs, (int)runtime_config_.diagnostics.profile,
         (int)decode_batch_pool_.is_allocated(), (int)(offload_mgr_ != nullptr),
         (int)(model_->ngram_table() != nullptr), (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
-        (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),
-        (int)rows_ok);
+        (int)executor_->sample_pipeline_ready(), (int)rows_ok);
 }
 
 InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {

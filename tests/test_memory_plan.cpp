@@ -366,7 +366,6 @@ TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
     auto in = dense_input();
     in.features.ssm_state_bytes = 101 * kMiB;
     in.features.recurrent_snapshot_bytes = 102 * kMiB;
-    in.features.residual_ring_bytes = 103 * kMiB;
     in.features.spec_decode_bytes = 104 * kMiB;
     in.features.vision_tower_bytes = 105 * kMiB;
     in.features.mtp_workspace_bytes = 106 * kMiB;
@@ -383,7 +382,6 @@ TEST(MemoryPlan, EveryFeatureFieldReachesALine) {
     };
     EXPECT_NE(line_with(101 * kMiB), nullptr) << "features.ssm_state_bytes";
     EXPECT_NE(line_with(102 * kMiB), nullptr) << "features.recurrent_snapshot_bytes";
-    EXPECT_NE(line_with(103 * kMiB), nullptr) << "features.residual_ring_bytes";
     EXPECT_NE(line_with(104 * kMiB), nullptr) << "features.spec_decode_bytes";
     EXPECT_NE(line_with(105 * kMiB), nullptr) << "features.vision_tower_bytes";
     EXPECT_NE(line_with(106 * kMiB), nullptr) << "features.mtp_workspace_bytes";
@@ -431,7 +429,6 @@ TEST(MemoryPlan, MtpWorkspaceIsALeverWhenThePlanFails) {
 TEST(MemoryPlan, TotalEqualsTheSumOfItsLines) {
     auto in = dense_input();
     in.features.ssm_state_bytes = 128 * kMiB;
-    in.features.residual_ring_bytes = 64 * kMiB;
     in.features.vision_tower_bytes = 1610 * kMiB;
     auto res = plan_memory(in);
     ASSERT_TRUE(res) << res.failure.report();

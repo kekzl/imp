@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 64 files, 340 sites
+# remaining: 64 files, 336 sites
 
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
@@ -60,7 +60,7 @@ src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 8
 src/runtime/batch.cpp  # 5
 src/runtime/cuda_graph.cu  # 28
-src/runtime/engine.cpp  # 6
+src/runtime/engine.cpp  # 2
 src/runtime/engine_decode_pipeline.cpp  # 2
 src/runtime/engine_graph_decode.cpp  # 17
 src/runtime/engine_internal.h  # 5

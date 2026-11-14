@@ -474,7 +474,7 @@ All three degen-verified (55 server-suite checks, 0 fail; dense byte-exact strea
   compute-latency-bound on the per-token online-softmax chain — more splits raised occ 35→49% but
   kernel time +5%, DRAM flat ~10%. (e2e long-ctx decode A/B is host-variance noise — trust ncu.)
 - **TC (tensor-core) decode attention:** a WMMA path already exists (`paged_attention_decode_nvfp4_tc`,
-  BitDecoding, opt-in). ncu @16k: WMMA 118.4 µs vs scalar 119.0 µs — IDENTICAL. TC doesn't help; the
+  BitDecoding, opt-in; kernel and key removed 2026-11-14). ncu @16k: WMMA 118.4 µs vs scalar 119.0 µs — IDENTICAL. TC doesn't help; the
   matmul isn't the bottleneck (the softmax/dequant/latency chain is). This is why it's opt-in/default-off.
 - **Graph-preserving spec-verify:** conditional-graph body hardcodes +1 token/iteration (no variable
   accept without a deep rewrite); the only device-side draft (MTP) is ~25-30% acceptance (dead-end).

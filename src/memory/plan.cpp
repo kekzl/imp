@@ -118,7 +118,6 @@ PlanResult plan_memory(const PlanInput& in) {
     push(p.pools, "SSM/GDN state", RegionTag::SsmState, in.features.ssm_state_bytes);
     push(p.pools, "recurrent snapshots", RegionTag::RecurrentSnapshots,
          in.features.recurrent_snapshot_bytes);
-    push(p.pools, "residual FP16 ring", RegionTag::ResidualRing, in.features.residual_ring_bytes);
     push(p.pools, "vision tower", RegionTag::EnginePersistent, in.features.vision_tower_bytes);
     push(p.pools, "speculative decode staging", RegionTag::EnginePersistent,
          in.features.spec_decode_bytes);
