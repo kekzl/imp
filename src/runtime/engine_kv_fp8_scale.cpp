@@ -204,7 +204,7 @@ void calibrate_fp8_kv_scales(Engine& engine, QType kv_dtype, int prefill_chunk_s
     req->status = RequestStatus::CANCELLED;
 
     const std::vector<float>& amax = ex->kv_calibration_amax();  // [2l] K, [2l+1] V
-    const float headroom = rc.kv_cache.fp8_scale_headroom;
+    const float headroom = cfg::kKvFp8ScaleHeadroom;
     const bool split = rc.kv_cache.fp8_scale_split;
     const size_t n_kv = amax.size() / 2;
     std::vector<Fp8KvScalePair> scales(n_kv);

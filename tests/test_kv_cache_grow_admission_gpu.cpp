@@ -1,6 +1,6 @@
 // Growable KV pool on the admission path: a refused growth is not asked again per block
-// (kv_cache.grow_retry_ms), and the grow-ahead step covers the last admission
-// (kv_cache.grow_ahead_fit_last). GPU (VMM) tests, test-kv.
+// (cfg::kKvGrowRetryMs), and the grow-ahead step covers the last admission. GPU (VMM) tests,
+// test-kv.
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -75,27 +75,27 @@ TEST(KVCacheGrowAdmissionTest, CappedPoolReclaimsWithoutAFreeVramReadPerBlock) {
 }
 
 // A pool with 100 free blocks after a 150-block admission wakes the worker for the next 150 (a
-// second prompt that size), though 100 is above the 64-block step. Off: no wake, the second prompt
-// grew on the admission path (Gemma-4 pp8192 fresh: 21.0-36.3 ms queue).
+// second prompt that size), though 100 is above the 64-block step. No admission: no wake, the
+// second prompt grew on the admission path (Gemma-4 pp8192 fresh: 21.0-36.3 ms queue).
 TEST(KVCacheGrowAdmissionTest, GrowAheadStepCoversTheLastAdmission) {
     SKIP_IF_NO_CUDA();
-    for (const bool fit_last : {false, true}) {
-        SCOPED_TRACE(fit_last);
+    for (const bool admitted : {false, true}) {
+        SCOPED_TRACE(admitted);
         KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/250,
                       /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/1024);
         if (!cache.growable())
             GTEST_SKIP() << "no VMM backend on this device";
-        cache.set_grow_ahead_fit_last(fit_last);
         const int have = cache.total_blocks();
         cache.start_grow_ahead();
         std::vector<int> held;
         while (cache.num_free_blocks() > 100)
             held.push_back(cache.allocate_block());
-        cache.note_admitted(150);
+        if (admitted)
+            cache.note_admitted(150);
         cache.grow_ahead_tick();
-        for (int i = 0; i < 400 && cache.growths_ahead() == 0 && fit_last; i++)
+        for (int i = 0; i < 400 && cache.growths_ahead() == 0 && admitted; i++)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if (fit_last) {
+        if (admitted) {
             ASSERT_EQ(cache.growths_ahead(), 1u) << "the step ignored the last admission";
             EXPECT_GE(cache.adopt_grown(), have + 150);
         } else {

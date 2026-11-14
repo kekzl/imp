@@ -642,7 +642,7 @@ TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
     EXPECT_TRUE(std::all_of(meta.begin(), meta.end(), [](uint8_t b) { return b == 0; }));
 }
 
-// kv_cache.grow_ahead: the free list falling below one step (max(64, total / 4)) wakes the worker,
+// Grow-ahead: the free list falling below one step (max(64, total / 4)) wakes the worker,
 // which commits and zeroes the step off the caller's thread; nothing is published until
 // adopt_grown(), and a later try_grow_to finds the step backed without committing again.
 TEST(KVCacheGrowTest, GrowAheadCommitsOffThePathAndAdoptionPublishes) {

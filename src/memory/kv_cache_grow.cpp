@@ -1,4 +1,4 @@
-// KVCache growth: try_grow_to and the grow-ahead worker (kv_cache.grow_ahead). Split from
+// KVCache growth: try_grow_to and the grow-ahead worker (grow-ahead). Split from
 // kv_cache.cu for the file-size gate; same class, same invariants.
 #include "memory/kv_cache.h"
 #include "memory/vram_query.h"
@@ -136,7 +136,7 @@ void KVCache::grow_ahead_tick() {
     const int have = adopt_grown();
     if (have >= max_blocks_)
         return;
-    const int step = std::max({64, have / 4, grow_fit_last_ ? last_admit_blocks_ : 0});
+    const int step = std::max({64, have / 4, last_admit_blocks_});
     if (blocks_.free_count() >= step || grow_refused_recently_())
         return;
     {

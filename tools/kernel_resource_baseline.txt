@@ -123,7 +123,6 @@ imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	40	1056	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
-imp::(anonymous namespace)::kv_evict_qstats_kernel	sm_120a	40	40	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0

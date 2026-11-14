@@ -171,27 +171,17 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [kv_cache]
     S("kv_cache.dtype", cfg.kv_cache.dtype);
-    B("kv_cache.allow_nondeterministic_fp8", cfg.kv_cache.allow_nondeterministic_fp8);
-    B("kv_cache.fp8_auto_legacy", cfg.kv_cache.fp8_auto_legacy);
     S("kv_cache.fp8_scale", cfg.kv_cache.fp8_scale);
-    F("kv_cache.fp8_scale_headroom", cfg.kv_cache.fp8_scale_headroom);
     B("kv_cache.fp8_scale_split", cfg.kv_cache.fp8_scale_split);
     I("kv_cache.bitdecoding_residual_tokens", cfg.kv_cache.bitdecoding_residual_tokens);
     B("kv_cache.bitdecoding_qk", cfg.kv_cache.bitdecoding_qk);
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
-    B("kv_cache.grow_ahead", cfg.kv_cache.grow_ahead);
-    I("kv_cache.grow_retry_ms", cfg.kv_cache.grow_retry_ms);
-    B("kv_cache.grow_ahead_fit_last", cfg.kv_cache.grow_ahead_fit_last);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);
     I("kv_cache.max_blocks", cfg.kv_cache.max_blocks);
     I("kv_cache.block_size", cfg.kv_cache.block_size);
-    F("kv_cache.evict_keep_ratio", cfg.kv_cache.evict_keep_ratio);
-    I("kv_cache.evict_sink_tokens", cfg.kv_cache.evict_sink_tokens);
-    I("kv_cache.evict_recent_tokens", cfg.kv_cache.evict_recent_tokens);
-    I("kv_cache.evict_min_tokens", cfg.kv_cache.evict_min_tokens);
 
     // [rope]
     S("rope.scaling", cfg.rope.scaling);

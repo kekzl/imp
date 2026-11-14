@@ -134,17 +134,11 @@ video_pruning_rate   = 0
 # output); "fp8" restores the faster long-context decode.
 # "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
 dtype                       = "auto"
-# Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
-# but reproducibility is lost.
-allow_nondeterministic_fp8  = false
-# Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
-fp8_auto_legacy             = false
 # FP8 KV scale per layer. "legacy": first real prefill's absmax / 448, floored
 # at 1.0. "checkpoint": the checkpoint's k_scale / v_scale, 1.0 where absent.
-# "calibrate": a fixed-text prefill at warmup, amax * fp8_scale_headroom / 448.
+# "calibrate": a fixed-text prefill at warmup, amax * 2 / 448.
 # Static modes round up to a power of two and stay fixed for the process.
 fp8_scale                   = "legacy"
-fp8_scale_headroom          = 2.0
 # Static modes only: separate K and V scales per layer instead of one shared value.
 fp8_scale_split             = false
 # BitDecoding TC path for NVFP4 paged-attention QK (experimental).
@@ -165,17 +159,6 @@ growable                    = true
 # spilled into host memory decodes at a fraction of the bandwidth with nothing
 # reporting an error.
 growable_initial_pct        = 25
-# Commit the next growth step on a worker thread once the free list drops below
-# it, so a request adopts backed blocks instead of waiting in the queue for the
-# driver mapping (35-65 ms per growth on Qwen3-8B). Same free-VRAM cap.
-grow_ahead                  = true
-# A pool capped by free VRAM below its ceiling: after a refused growth, skip
-# the free-VRAM reading for this many ms, so a prompt reclaiming prefix-cache
-# blocks does not read it once per block. 0 = read on every empty-list block.
-grow_retry_ms               = 100
-# Grow-ahead step at least the last admitted request (prompt + decode reserve),
-# not only max(64 blocks, 25 %): a second prompt that size finds it committed.
-grow_ahead_fit_last         = true
 # BitDecoding residual FP16 cache for the newest N tokens (0 = disabled;
 # typical 4..32; only with dtype = "nvfp4" + bitdecoding_qk).
 bitdecoding_residual_tokens = 0
@@ -244,21 +227,6 @@ max_blocks                  = 0
 # 4-KV-head model the old "32 when n_kv_heads <= 4" rule was meant for; the
 # key exists so the next model class can be measured, not guessed.
 block_size                  = 0
-# KV eviction proof harness (roadmap row 48, docs/plans/2026-11-01-kv-eviction.md).
-# After the last prefill chunk, prompt blocks are scored by TriAttention (mean
-# pre-RoPE query of the prompt itself, trig distance term + norm term, z-normalized
-# per head, max over heads, mean over layers) and the lowest-scoring whole blocks
-# beyond the budget are freed; decode attention skips them. keep_ratio = fraction
-# of the prompt's blocks kept, 0 = off. Blocks covering the first sink / last
-# recent tokens always stay; prompts below min_tokens are untouched. Refused on
-# hybrid, SWA, MLA, M-RoPE / YaRN / partial RoPE models, INT8/INT4/MXFP4 KV,
-# speculation (ngram, MTP), StreamingLLM, residual KV and sparse decode attention.
-# Refuted 2026-11-01 on Qwen3-8B-NVFP4: keep 0.5 NIAH 60/60 like off, continuation
-# recall F1 -11.2 % (gate 2 %); a measurement tool, not a serving setting.
-evict_keep_ratio            = 0.0
-evict_sink_tokens           = 64
-evict_recent_tokens         = 256
-evict_min_tokens            = 4096
 
 [rope]
 # Runtime RoPE-scaling override: stretch a model's usable context past its

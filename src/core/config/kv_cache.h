@@ -17,18 +17,11 @@ struct KVCache {
     // kv_cache_quant_algo=FP8 AND the arch family is hint-verified safe for
     // long-context FP8 KV. "fp16" opts out; fp8|int8|int4|nvfp4|mxfp4 force it.
     std::string dtype = "auto";
-    bool allow_nondeterministic_fp8 = false;
-    // Legacy unconditional FP8 auto-upgrade: force FP8 E4M3 whenever the
-    // dtype resolves to FP16 (pre-hint behavior). imp.conf key only — the
-    // old IMP_KV_FP8_AUTO env var is no longer read.
-    bool fp8_auto_legacy = false;
     // FP8 E4M3 KV scale per layer (src/core/kv_fp8_scale.h). "legacy" (default): first real prefill's
     // absmax / 448, floored at 1.0. "checkpoint": k_scale / v_scale tensors, static from load, 1.0
-    // where absent. "calibrate": fixed-text prefill at warmup, amax * fp8_scale_headroom / 448.
+    // where absent. "calibrate": fixed-text prefill at warmup, amax * kKvFp8ScaleHeadroom / 448.
     // Static modes round up to a power of two and never move after load (prefix cache, row invariance).
     std::string fp8_scale = "legacy";
-    // calibrate only: margin over the calibration amax before E4M3 saturates (448). Values < 1 act as 1.
-    float fp8_scale_headroom = 2.0f;
     // checkpoint / calibrate only: K and V each get their own power-of-two scale per layer (Gemma-4 K amax
     // ~1.6, V ~16); false = one shared scale, max of the two. Legacy is always shared.
     bool fp8_scale_split = false;
@@ -52,16 +45,6 @@ struct KVCache {
     // grows at admission: a successful cudaMalloc proves nothing about free
     // VRAM on WSL2 (a full-size commit can silently spill to host memory).
     int growable_initial_pct = 25;
-    // Growable pool: a worker thread commits the next growth step (max(64, 25 %)) once the free
-    // list drops below it, so admission adopts backed blocks instead of waiting for the driver
-    // mapping (Qwen3-8B: 35-65 ms per growth, the request's queue time). Same cap as growth.
-    bool grow_ahead = true;
-    // Growable pool capped by free VRAM below its ceiling: after a refused growth, skip the
-    // free-VRAM query for this many ms. 0 = query on every block taken from an empty free list.
-    int grow_retry_ms = 100;
-    // Grow-ahead step at least the last admitted request's blocks (prompt + decode reserve), not
-    // only max(64, 25 %): a second prompt of that size finds its blocks committed.
-    bool grow_ahead_fit_last = true;
     // SWA-aware KV sizing: sliding-window layers allocate only the trailing
     // window instead of full-length KV. Auto-disabled for models without SWA,
     // INT8/INT4 KV, hybrids, MLA, StreamingLLM, deterministic mode. Numerically
@@ -91,16 +74,6 @@ struct KVCache {
     // at load when outside that set, not silently rounded (AUDIT_ARCH_2026 B-5).
     int block_size = 0;
 
-    // KV eviction proof harness (roadmap row 48, docs/plans/2026-11-01-kv-eviction.md): after
-    // the last prefill chunk, TriAttention-scored whole blocks beyond the budget are freed and
-    // decode attention skips them. Fraction of the prompt's blocks kept; 0 = off.
-    float evict_keep_ratio = 0.0f;
-    // Blocks covering the first / last N prompt tokens are never evicted.
-    int evict_sink_tokens = 64;
-    int evict_recent_tokens = 256;
-    // Prompts shorter than this are never evicted.
-    int evict_min_tokens = 4096;
-
     SwaSizingMode swa_sizing_mode() const {
         if (swa_sizing == "auto")
             return SwaSizingMode::Auto;
@@ -118,4 +91,10 @@ struct KVCache {
                (m == SwaSizingMode::Auto && (!prefix_caching || swa_snapshot_mb > 0));
     }
 };
+
+// fp8_scale = "calibrate": margin over the calibration amax before E4M3 saturates (448), never swept.
+inline constexpr float kKvFp8ScaleHeadroom = 2.0f;
+// Growable pool capped by free VRAM: after a refused growth, skip the free-VRAM query for this
+// many ms (default since the grow-ahead worker, never swept).
+inline constexpr int kKvGrowRetryMs = 100;
 }  // namespace imp::cfg

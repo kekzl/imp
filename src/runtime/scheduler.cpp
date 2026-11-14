@@ -13,7 +13,7 @@
 namespace imp {
 
 namespace {
-// kv_cache.grow_ahead: a step the worker committed counts for this round's admission.
+// Grow-ahead: a step the worker committed counts for this round's admission.
 void kv_adopt_grown(KVCacheManager* m) {
     if (m)
         (void)m->kv_cache()->adopt_grown();
@@ -252,7 +252,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         continue;
                     }
                 }
-                // kv_cache.grow_ahead_fit_last: the next grow-ahead step covers a request this size.
+                // The next grow-ahead step covers a request this size.
                 kv_manager_->kv_cache()->note_admitted(admit_blocks);
             }
 
@@ -294,7 +294,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         }
     }
 
-    // 5. kv_cache.grow_ahead
+    // 5. grow-ahead
     kv_grow_ahead_tick(kv_manager_);
 }
 

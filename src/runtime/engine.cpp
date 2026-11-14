@@ -1,5 +1,4 @@
 #include "runtime/engine.h"
-#include "runtime/engine_kv_evict.h"
 #include "runtime/kv_fp8_scale_init.h"
 #include "core/buffer.h"
 #include "vision/image_processor.h"
@@ -64,11 +63,11 @@ namespace {
 // After warmup's raise_ceiling (it refuses once the worker runs). Needs relaxed capture (cuda_graph.cu):
 // a global capture would forbid the worker's driver calls while the engine captures. The retry window
 // starts with serving: init growth (replan) always reads free VRAM.
-void start_kv_grow_ahead(KVCache* kv, const RuntimeConfig& rc) {
-    if (kv != nullptr)
-        kv->set_serving_growth(rc.kv_cache.grow_retry_ms, rc.kv_cache.grow_ahead_fit_last);
-    if (kv != nullptr && rc.kv_cache.grow_ahead)
-        kv->start_grow_ahead();
+void start_kv_grow_ahead(KVCache* kv) {
+    if (kv == nullptr)
+        return;
+    kv->set_grow_retry_ms(cfg::kKvGrowRetryMs);
+    kv->start_grow_ahead();
 }
 }  // namespace
 
@@ -670,7 +669,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     init_resolve_quant_flags_();
     init_resolve_kv_block_size_();
     init_resolve_sparse_attention_();
-    kv_evict_resolve(runtime_config_, model_->config(), config_.kv_cache_dtype, config_.streaming_kv_enabled);
 
     init_compute_max_seq_len_();
 
@@ -877,7 +875,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // serving-phase acquisition; release builds count it per tag and log once,
     // since a production server must not die over an accounting bug.
     set_alloc_phase(AllocPhase::Serving);
-    start_kv_grow_ahead(kv_cache_raw_, runtime_config_);
+    start_kv_grow_ahead(kv_cache_raw_);
     // Arm the CUDA-side watermarks too: the phase guard only sees Backend
     // traffic, these see every cudaMallocAsync and every graph-owned
     // allocation regardless of who made it (AUDIT B8).
