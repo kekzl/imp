@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
         if (!rejected_overrides.empty()) {
             for (const auto& bad : rejected_overrides)
                 fprintf(stderr, "Error: --set %s\n", bad.c_str());
-            fprintf(stderr, "See imp.conf.example for the key names.\n");
+            fprintf(stderr, "See imp.conf.reference for the key names.\n");
             return 1;
         }
         imp::process_diag_install(cfg);

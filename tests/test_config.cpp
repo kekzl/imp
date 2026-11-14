@@ -418,7 +418,7 @@ TEST(ConfigBadValue, FloatKeyRejectsANonNumber) {
 }
 
 TEST(ConfigBadValue, EveryAcceptedBooleanSpellingStillWorks) {
-    // Negative control. imp.conf.example uses table values on all 107 boolean
+    // Negative control. imp.conf.reference uses table values on all 63 boolean
     // lines, so a stricter parser must not start rejecting them.
     for (const char* v : {"true", "True", "1", "yes", "on"}) {
         imp::RuntimeConfig cfg;

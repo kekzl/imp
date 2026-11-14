@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Keep docs and config examples coherent after a change - ARCHITECTURE.md, README, GOAL.md, MODELS.md, ROADMAP.md (ledger rows), imp.conf.example, CHANGELOG, MISSION_JOURNAL, "README says X but code does Y". Not layers/lint (docs-layers), code audits (codebase-audit), perf baseline (benchmark-cuda), agent memory.
+description: Keep docs and config examples coherent after a change - ARCHITECTURE.md, README, GOAL.md, MODELS.md, ROADMAP.md (ledger rows), imp.conf.reference and imp.conf.example, CHANGELOG, MISSION_JOURNAL, "README says X but code does Y". Not layers/lint (docs-layers), code audits (codebase-audit), perf baseline (benchmark-cuda), agent memory.
 ---
 
 # Docs sync - imp
@@ -9,7 +9,7 @@ description: Keep docs and config examples coherent after a change - ARCHITECTUR
 
 | # | Rule |
 |---|---|
-| 1 | `imp.conf.example` MUST match the parser: every key is a `B/I/F/S("...")` binder in `src/runtime/config.cpp` (surface in `src/core/config/*.h`); a dropped key logs `imp.conf: unknown key` (stale `q4k_imma_enabled` after #624). Add/remove/rename = `config.h`, `config.cpp`, `imp.conf.example` together, real default. A bogus `--set` key fails at start (`no such key`). |
+| 1 | `imp.conf.reference` MUST match the parser: every key is a `B/I/F/S("...")` binder in `src/runtime/config.cpp` (surface in `src/core/config/*.h`); a dropped key logs `imp.conf: unknown key` (stale `q4k_imma_enabled` after #624). Add/remove/rename = `config.h`, `config.cpp`, `imp.conf.reference` together, real default. `imp.conf.example` (short start file) keys carry the reference's value and its `All N keys` line the bound count (`tools/check_config_keys.py`). A bogus `--set` key fails at start (`no such key`). |
 | 2 | Numbers are commit-anchored; `docs/PERF.md` owns them. `tests/perf_baseline.json` is the gate (8%/8%/10% `own_peak_mb`, `scripts/verify.sh`); the `docs/PERF.md` perf block is GENERATED (`scripts/sync_docs.py`, `<!-- PERF:BEGIN -->`; `--check` blocks). `docs/BENCHMARKS.md` rows: date, commit SHA, CUDA, model, quant, metric, value, exact command. |
 | 3 | Verify before you claim: grep the tree; half the staleness reports are already fixed (the "GOAL.md lists H100" flag was one). |
 | 4 | Env vars are not config: the engine reads only `IMP_CONFIG`, `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`, `IMP_WORKER_TIMING`, `IMP_SPEC_TRACE`, `IMP_PPL_DUMP`; config is `imp.conf` / `--config` / `--set`. The container surface is `IMP_CONFIG` + `IMP_SET` (#1823, `docs/DEPLOYMENT.md` "From a container"); the 19 legacy `IMP_*` entrypoint names are frozen and get no new siblings. |
@@ -41,7 +41,7 @@ description: Keep docs and config examples coherent after a change - ARCHITECTUR
 | Change | Sync |
 |---|---|
 | Perf moved intentionally | `gen_perf_baseline.sh`, `BENCHMARKS.md` row, say so in the PR; measure per benchmark-cuda first |
-| Config key added/removed/renamed | `config.h` + `config.cpp` + `imp.conf.example`; a new auto-default also needs an `imp-cli --bench` pin (`apply_config_pins` in `tools/imp-cli/args.cpp`) or the baseline bakes it in |
+| Config key added/removed/renamed | `config.h` + `config.cpp` + `imp.conf.reference` (+ `imp.conf.example` count, and the key if it is listed there); a new auto-default also needs an `imp-cli --bench` pin (`apply_config_pins` in `tools/imp-cli/args.cpp`) or the baseline bakes it in |
 | New arch / model / quant | `docs/MODELS.md` (+ README if headline) |
 | New endpoint field, header or env | `docs/API.md`, `docs/DEPLOYMENT.md`, `tests/api/mock_server.py` mirrors the contract |
 | Structural refactor | `ARCHITECTURE.md` if the narrative broke, then `python3 scripts/check_doc_citations.py .` (the #1782 scheduler split cost a CI roundtrip on a `ROADMAP.md` citation) |

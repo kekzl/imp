@@ -1294,7 +1294,7 @@ if(IMP_BUILD_TESTS)
         target_compile_definitions(test-core PRIVATE IMP_FUZZ_HAVE_TOOL_STREAM)
     endif()
     target_include_directories(test-core PRIVATE ${IMP_FUZZ_INCLUDE_DIR})
-    # test_config_bindings.cpp: one IMP_CONFIG_KEY line per imp.conf.example key.
+    # test_config_bindings.cpp: one IMP_CONFIG_KEY line per imp.conf.reference key.
     include(config_key_table)
     target_include_directories(test-core PRIVATE ${IMP_CONFIG_KEY_TABLE_DIR})
     # test_stream_pipeline.cpp includes the self-contained pure header

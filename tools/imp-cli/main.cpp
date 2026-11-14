@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
         // in the AWQ reproduction harness doing nothing at all.
         for (const auto& bad : rejected_overrides)
             fprintf(stderr, "Error: --set %s\n", bad.c_str());
-        fprintf(stderr, "See imp.conf.example for the key names.\n");
+        fprintf(stderr, "See imp.conf.reference for the key names.\n");
         return 1;
     }
     apply_config_pins(runtime_cfg, args);

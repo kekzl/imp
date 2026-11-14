@@ -65,7 +65,7 @@ TAGS
 __pycache__/
 .pytest_cache/
 
-# Local runtime config (the tracked template is imp.conf.example)
+# Local runtime config (tracked: imp.conf.example, the short start file; imp.conf.reference, every key)
 imp.conf
 
 # Credentials

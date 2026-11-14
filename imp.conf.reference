@@ -1,0 +1,831 @@
+# imp.conf reference: every key the imp inference engine binds, with its default and full
+# comment. Not a start file: imp.conf.example holds the short commented set most runs touch.
+#
+# Loading precedence (first non-empty wins):
+#   1. --config <path>              CLI flag
+#   2. $IMP_CONFIG                  environment variable
+#   3. ./imp.conf                   working-dir relative
+#   4. ~/.config/imp/imp.conf       user config directory
+#   5. embedded defaults            (no file, all values below)
+#
+# Per-run overrides on top via:
+#   imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never ...
+#
+# Lines starting with '#' are comments; section headers in [brackets].
+# An experimental key carries "expires: YYYY-MM-DD" in its comment block; past that
+# date tools/check_config_keys.py fails until the key is removed, promoted or extended.
+
+[runtime]
+# Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible
+# (decode cost measured below this host's noise floor; ~2-4 % on large-M FP16).
+# It does NOT make a prefix-cache hit bit-equal to a fresh prefill — for that
+# use server.prefix_cache = false (#1314, docs/DETERMINISM.md).
+deterministic_gemm   = false
+# Full reproducibility mode for temp=0 evals: deterministic MoE routing /
+# expert-scatter and top-k sampling kernels, implies deterministic_gemm.
+# Greedy output becomes bit-identical across runs/contexts (DetEvalE2ETest).
+# Guarantees + known limits (ties, top_k>128, typical_p, GDN cross-context):
+# docs/DETERMINISM.md.
+# Legacy env: IMP_DETERMINISTIC=1. Costs a little throughput; off by default.
+deterministic        = false
+# CUDA Graph capture: "auto" picks per-model based on architecture support;
+# "always" forces capture (fails for MoE with D2H routing); "never" disables.
+cuda_graphs          = "auto"
+# Capture prefill into a CUDA graph too (default ON since 2026-05-17).
+# Auto-disabled when the model's prefill path is uncapturable.
+prefill_graph        = true
+# Prompts up to N tokens keep a prefill graph each, captured at startup (two
+# dummy prefills per length): the first request of a short length replays
+# instead of running eager. Longer prompts share one re-captured runner.
+prefill_graph_prewarm = 32
+# Max concurrent sequences in a decode batch (server continuous batching).
+# 0 = auto: the engine sizes it from the model's weight footprint (a >20 GiB
+# MoE auto-picks 1). Set a positive value to force it (e.g. 4). The --max-batch
+# CLI flag and a per-request "max_batch_size" override take precedence.
+max_batch_size       = 0
+# Prefill chunk size. -1 = per-arch default (2048 where chunked prefill is
+# supported, 0 otherwise), 0 = no chunking. Sets the TTFT/ITL trade for every
+# prefill: chunked prefill re-reads every weight once per chunk, so 512-token
+# chunks cost NVFP4-MoE -43 % prefill at pp4096 against 2048. A --prefill-chunk
+# CLI value wins over this. Had no key at all until #1645, while the cap below
+# did.
+prefill_chunk_size   = -1
+# Cap the prefill chunk while other sequences are decoding: prefill and decode
+# share one stream, so every chunk forward inserts its full latency between two
+# decode steps of the active sessions. 1024 is the measured compromise (decoder
+# p95 inter-token 94 ms at +27% ingest TTFT); 512 for latency-critical
+# multi-tenant serving; 0 = disable (full chunk). The full chunk returns as
+# soon as nobody is decoding. On a 32-stream burst of ~1.1k-token prompts
+# (2026-09-03, Qwen3.8-27B) 2048 reads +4.4% aggregate and TTFT p90 3.8 -> 3.5 s
+# (+8.6% on dense Qwen3-14B), but while a 4.7k-token prompt is ingested next
+# to 31 decoding streams their inter-token p95 goes 109 -> 186 ms; that stall
+# is what this knob bounds, so 1024 stays the default. GDN hybrids with riders
+# take min(this, 512); the cap scales by 4 x waiting / decoding once that exceeds 1.
+prefill_chunk_decode_cap = 1024
+# Tokens of max_tokens the think budget keeps for the ANSWER on a reasoning
+# model. The engine injects </think> once reasoning reaches
+# max_tokens - max(think_answer_reserve, max_tokens/4), or the think_budget
+# fraction (--think-budget, default 0.5), whichever is later. Below 0 reads as
+# 0 (no floor). At max_tokens 260 the limit is max(130, 4) = 130 reasoning
+# tokens; raise the reserve for models whose answers are long structured
+# output, lower it for agent loops that only need a short verdict.
+think_answer_reserve = 256
+# Upper bound on reasoning tokens, whatever max_tokens is (imp-server defaults
+# max_tokens to the remaining context). 0 = no cap.
+think_max_tokens = 32768
+# Cross-sequence prefill batching: run the prefill chunks of several admitted
+# requests as ONE ragged forward (GEMMs/norms over the concatenated rows,
+# attention and the GDN conv per sequence, GDN scan batched via a row-offset
+# table). Targets burst arrivals, where prefill otherwise runs one sequence
+# per forward: measured +6.2% aggregate and TTFT p50 4.11 -> 2.55 s on a
+# 32-stream burst (Qwen3.8-27B-NVFP4). Requests with vision, constraints,
+# logprobs, embeddings or rerank scoring keep the serial path, as do
+# Mamba2/MLA models, MTP, SWA sizing and residual KV.
+prefill_batch        = true
+# KV admission (#2486): decode tokens reserved per request. 0 = p90 of the
+# last 64 finished outputs (1024 before 8 finished, floor 256), -1 = the full
+# max_tokens, > 0 = fixed. Below max_tokens only where KV swap catches an overrun.
+admission_decode_tokens = 0
+# Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
+# handles + L2 AND pre-arms the decode graph pool so the FIRST real request
+# takes the same graph-kernel path as every later one — without it greedy
+# output can flip between the first and later requests on near-tie logits
+# (docs/DETERMINISM.md). ON by default; set false in dev/CI where init time
+# matters more than reproducibility.
+warmup               = true
+# Override the model's max_seq_len (0 = auto-detect). Auto-detection caps at
+# 128K (bounded further by VRAM and the model's declared context). A model that
+# declares MORE than 128K needs this set explicitly to run past 128K — the auto
+# path never selects above the 128K ceiling. Long-context TTFT grows with the
+# attention math (Qwen3-14B Q6_K measured ~3.7s at 32K, ~10s at 64K), so cap
+# it deliberately if long-transcript TTFT matters more than reach.
+max_seq_len          = 0
+# Hard VRAM budget for this process in MiB (0 = uncapped). Every sizing
+# decision (weight caches, KV clamp, expert offload, workspaces, upload
+# gates) sees a virtual GPU of this size — run multiple imp-server
+# processes on one card by giving each a slice. Best-effort cap: leave
+# ~1 GiB real headroom between the sum of budgets and the card (small
+# fixed buffers + cuBLAS internals sit outside the gates). CLI flag
+# --vram-budget overrides.
+vram_budget_mb       = 0
+# Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
+no_pdl               = false
+# Drop the checkpoint's Qwen3-VL vision tower at init: image and video parts answer 400,
+# the tower's VRAM reservation goes to the expert cache instead (Flash-Next text-only).
+no_vision            = false
+# Drop the checkpoint's Gemma-4 audio tower at init: input_audio parts answer 400.
+no_audio             = false
+# Image-token budget for the Qwen3-VL encoder: the workspace is sized from it, so
+# it is a hard ceiling — a larger image is scaled down to fit, never refused.
+# 4096 patches ~ 1024x1024. Does not apply to the mmproj (SigLIP/gemma4v) path,
+# which is sized off the checkpoint's fixed image_size.
+vision_max_patches   = 4096
+# EVS video token pruning rate q in [0, 1) (vLLM video_prune/evs.py): a Qwen3-VL video keeps
+# max(tokens per frame pair, int(tokens * (1 - q))) tokens, dropping those least changed
+# from the previous frame pair. 0 = off; a video part's "pruning_rate" overrides it.
+video_pruning_rate   = 0
+
+[kv_cache]
+# KV-cache element type. "auto" (default) keeps FP16 but upgrades to FP8 E4M3 for
+# models whose author declares kv_cache_quant_algo=FP8 and whose arch family is
+# verified safe for long-context FP8 KV (Qwen3 dense/MoE, llama, nemotron_h_moe;
+# ~768 MiB saved, +~1% PPL). "auto" ALSO upgrades hint-less checkpoints (i.e.
+# every GGUF) for arch families measured PPL-neutral at 16k context: Qwen3 MoE
+# only. Qwen3 dense GGUF stays FP16 (#2208: FP8 KV flipped Qwen3-8B-Q8_0 greedy
+# output); "fp8" restores the faster long-context decode.
+# "fp16" forces FP16. fp8|int8|int4|nvfp4|mxfp4 force that dtype.
+dtype                       = "auto"
+# FP8 KV scale per layer. "legacy": first real prefill's absmax / 448, floored
+# at 1.0. "checkpoint": the checkpoint's k_scale / v_scale, 1.0 where absent.
+# "calibrate": a fixed-text prefill at warmup, amax * 2 / 448.
+# Static modes round up to a power of two and stay fixed for the process.
+fp8_scale                   = "legacy"
+# Static modes only: separate K and V scales per layer instead of one shared value.
+fp8_scale_split             = false
+
+# Growable KV pool: reserve address space for the pool this configuration asks
+# for, commit what the card can spare now, commit more as it frees. Fixes a
+# server started while another process still holds the card, which otherwise
+# lands on the KV rescue floor and stays there for its whole life. Needs CUDA
+# virtual memory management; without it the pool is fixed, as before. Growth
+# runs before the prefix cache is reclaimed and stops at the allocator headroom.
+growable                    = true
+# Percent of the planned pool to commit at startup when growable. 100 commits
+# the clamped size; 25 starts at a quarter and grows at admission (+25 % per
+# step) into the same plan, which is the only way to be sure the pool is
+# resident: on WSL2 a successful allocation proves nothing, and a pool that
+# spilled into host memory decodes at a fraction of the bandwidth with nothing
+# reporting an error.
+growable_initial_pct        = 25
+# SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
+# other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
+# small dedicated block group instead of full-length KV. The saving grows with
+# the max_seq_len : window ratio — modest at 16K, large at 64K-128K where the
+# fixed window is a small fraction of the context. VALIDATED on Gemma-4-26B
+# (2026-07-16): windowed layers size to the window while the global layers keep
+# full context, so retrieval is intact — a needle placed early in a 3.2K context
+# is still retrieved (the 5 global layers carry it), output stays coherent, and
+# the full max_seq_len fits in VRAM that otherwise capped short.
+# Auto-disabled (logged) for models without SWA layers, INT8/INT4 KV, hybrids,
+# MLA, StreamingLLM, green contexts, and deterministic mode.
+# Tri-state: "auto" (default) takes the savings only when prefix caching is
+# off — one-shot imp-cli runs qualify automatically; the server (prefix_cache
+# = true) keeps warm-prefix TTFT and full-length KV. "on" forces sizing and
+# disables prefix caching (freed window blocks can't back prefix reuse —
+# snapshot-based reuse is a follow-up); use it for long single-sequence
+# contexts where KV VRAM is the bottleneck. "off" disables entirely.
+swa_sizing                  = auto
+# SWA window snapshots: device budget (MiB) for packed windowed-layer KV
+# snapshots, which make prefix caching valid UNDER swa_sizing — the snapshot
+# restores the trailing window at the reuse boundary, analogous to the
+# recurrent_snapshot_mb store for hybrids. Saved at each prefill end AND at
+# request finish (so the next agent turn reuses the whole previous
+# transcript, generated tokens included), LRU within the budget. With a
+# budget set, swa_sizing=auto no longer yields to prefix caching and the
+# server gets both: the KV savings AND warm-prefix reuse.
+# WHEN TO ENABLE (measured 2026-07-24, gemma-3-12b): cache-hit coverage is
+# identical to full-length-KV prefix caching, and the snapshot machinery
+# itself is ~free (~0.1 ms enqueue per save/restore, <=1 ms finish sync).
+# The tradeoff is the sized attention route: ~+50-100 ms warm TTFT per turn
+# at SHORT contexts (1-2K), but FASTER prefill at long ones (+8% at 13K,
+# growing with context as windowed layers stop scaling) plus the KV VRAM
+# savings. Enable for long-context workloads (~8K+); leave off for
+# short-turn serving. 0 = off (auto yields to prefix caching, on
+# force-disables it).
+# SIZE IT PROPERLY: one snapshot is (windowed layers x window blocks) and can
+# run several hundred MiB (350 MiB on gemma-3-12b). A budget BELOW one snapshot
+# is worse than 0 — the store stays off and prefix caching is disabled with it,
+# so you lose both. The server logs the required size when this happens.
+# Plan 2 snapshots per concurrent session (prompt boundary + finish): 512 MiB
+# on gemma-3-12b is 1 slot and restored 0 of 4 turns for 2 sessions, 2048 MiB
+# (5 slots) restored 4 of 4 (#2565). Under 2 slots the server warns.
+swa_snapshot_mb             = 0
+# Host spill tier for the prefix cache (#2203): pinned host RAM in MiB. Blocks
+# the pool reclaims are copied here and restored by H2D on a later prefix hit
+# instead of re-prefilled. 0 = off. Needs prefix caching; refused with SWA
+# layers. Carries sparse key min/max pages; GDN hybrids restore through their
+# recurrent snapshot chains (Qwen3.8-27B-NVFP4, 8 chats x ~31k, 8000-block
+# pool, 16384: TTFT sum 213.1 -> 21.3 s).
+host_spill_mb               = 0
+# Pin the KV pool to exactly this many blocks instead of sizing it from the
+# VRAM budget. 0 = auto (the default). Useful when several processes share a
+# card and the pool should be a declared quantity rather than "whatever was
+# left" — and it is what makes the admission guardrail reachable: a pool too
+# small for a prompt returns HTTP 503 `capacity_error` rather than a 200 with
+# an empty completion.
+max_blocks                  = 0
+# Tokens per KV block. 0 = auto = 16 for every model. Explicit values must be
+# a multiple of 16 in [16, 256] and are refused at load otherwise (the FP8 tile
+# decode kernel tiles 16 tokens). A block is the prefix cache's reuse
+# granularity, so larger blocks coarsen every prefix hit. Measured 2026-09-07
+# (docs/audit/PERF_LOG.md): 32 never won and lost 1.5-4.3 % tg128 on the
+# 4-KV-head model the old "32 when n_kv_heads <= 4" rule was meant for; the
+# key exists so the next model class can be measured, not guessed.
+block_size                  = 0
+
+[rope]
+# Runtime RoPE-scaling override: stretch a model's usable context past its
+# native window without editing the checkpoint (e.g. a native-32k model to
+# 128k via YaRN). Sets the same fields the loaders set from model-declared
+# rope_scaling metadata and raises the declared context to factor × orig_ctx
+# (KV sizing / max_seq_len auto-detection see the extended window).
+# Refused for models with per-dimension RoPE tables (LongRoPE / llama3),
+# MLA, and NoPE. If the model already declares scaling, the override
+# REPLACES it (a warning is logged — set orig_ctx explicitly there).
+# "" = off (model metadata only) | "yarn" | "linear".
+scaling     = ""
+# Context-extension factor (> 1.0). Example: 4.0 → 32k becomes 128k.
+factor      = 1.0
+# Native training context the factor applies to. 0 = auto (model-declared
+# rope_n_ctx_orig, else the declared context length).
+orig_ctx    = 0
+# HF attn_factor multiplier. The kernel already applies the YaRN-paper
+# mscale 1 + 0.1*ln(factor) internally — leave at 1.0 normally.
+attn_factor = 1.0
+beta_fast   = 32.0
+beta_slow   = 1.0
+
+[vram]
+# Commit the slot-shaped pools on demand: the SSM/GDN state slab commits one
+# slot per admitted sequence, the engine arena commits as tenants take (the
+# vision tower on the first image). The plan still charges every byte and the
+# address space is reserved at init; a commit the card cannot spare is refused
+# (the request waits), never spilled. Needs CUDA VMM, else every pool is fixed.
+lazy_commit       = true
+# Budget-planner tuning. One measured margin by default (B-29f): the library
+# reserve below + the 4 % allocator headroom (1304 MiB on 32 GB, #2482).
+# Share of post-reserve / post-weight-cache VRAM the KV pool targets.
+# Clamped to [0.05, 1.0]; 1.0 = no cap. Lower to keep VRAM for weight caches.
+kv_fraction       = 1.0
+# Extra free-VRAM reserve floor as % of (budget-visible) total VRAM, never
+# below the allocator headroom. Clamped to [0, 50]. 0 = the headroom alone;
+# 10 (the old default) = 3.2 GiB on a 32 GiB card.
+reserve_floor_pct = 0
+# What the libraries (cuBLASLt) claim on the FIRST forward pass, in MiB. -1 = the 1536 MiB
+# constant (measured 2026-10-31: 16-107 MiB on 12 models, Qwen3.8-Flash-Next 973-1032 MiB;
+# 3900 under CUTLASS + cuBLAS v2). This is a FIXED charge: it does not shrink
+# because --vram-budget asked for a smaller slice of the card, so it floors the
+# reserve above, which is otherwise all percentages. Before that floor existed
+# a 16 GiB budget scaled the reserve to 1.6 GiB against a real 3.9 GiB and the
+# plan overran the cap by the difference. Re-measure after a CUDA/driver bump.
+library_reserve_mb = -1
+# Where to remember what the first forward ACTUALLY claimed, so the SECOND start
+# on a model plans with the measured value instead of the constant above. The
+# plan needs this figure before the forward that produces it, so one run cannot
+# both measure and use it — but the value is stable per (model, quant path, CUDA
+# runtime) and invariant to batch and context, so remembering it is enough.
+# Empty = $XDG_CACHE_HOME/imp/library_reserve (or ~/.cache/imp/...); "off"
+# disables it. A miss or an unwritable path warns and charges the constant.
+#
+# IN A CONTAINER, PERSIST THE PATH. The default lands in the container
+# filesystem, so a `docker run --rm` server re-measures on every start and never
+# benefits: it keeps planning with the constant. The named volume from the
+# README / compose file covers the default path, no key needed:
+#   docker run -v imp-cache:/home/imp/.cache/imp ...
+# A bind mount must be writable by the container user `imp` (uid 1001): Docker
+# creates a missing host path as root, and a host user's directory is uid 1000;
+# both log `library reserve: could not write` and re-measure every start.
+#   mkdir -p $HOME/.cache/imp && chown 1001 $HOME/.cache/imp
+#   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
+# Second start on a persisted path plans the measured reserve instead of the constant;
+# since #2436 a cold start re-sizes the KV pool after warmup to the same blocks
+# (Qwen3.8-27B-NVFP4 4950 either way, 2026-10-31).
+library_reserve_cache =
+
+[attention]
+# Each "auto" key picks the kernel automatically based on weight type +
+# context length. Override only for benchmarking or compatibility tests.
+fp8_prefill          = "auto"
+# Register-resident FA2 prefill kernel (F16, head_dim 64/128/256, f16 QK^T).
+# Default "on" since PR #478. Declines to the FP16 WMMA kernel for unsupported configs.
+fmha_fa2             = "on"
+# RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
+# quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
+# sinks, graph replay and runtime.deterministic. pp ~9k: Qwen3-8B Q8_0 +2.9 %,
+# Llama-3.2-3B Q8_0 +11.8 %; PPL (45k corpus) 10.7522 -> 10.6795, 18.2760 ->
+# 18.2939. Lossy, opt-in.
+ra2_prefill          = false
+# APA prefill (compute/apa/): two passes in one launch. Pass 1 is all-FP4 and
+# sends a KV tile to pass 2 (exact FP16, log-sum-exp merge) when its share of the
+# running row sum exceeds apa_eps. hd 128, causal, same declines as ra2_prefill;
+# serves chunks with kv_len >= apa_min_kv and >= 256 rows. 0 = off (FA2).
+# Default sparse prefill, apa_eps 0 -> 0.01: Llama-3.2-3B Q8_0 106451 tokens
+# 6746.01 -> 4824.90 ms, 32043 tokens 1633.00 -> 1285.52 ms; Qwen3-4B-2507 Q8_0
+# 67397 tokens 5014.01 -> 4023.51 ms; Qwen3-8B Q8_0 33727 tokens 3227.40 -> 2848.55 ms.
+# PPL ppl_corpus_45k: Llama 18.2760 -> 18.2836, Qwen3-8B 10.7522 -> 10.7549.
+# With ra2_prefill on too: apa_min_kv 40960 (dense per chunk APA/RA2 1.13 at kv 26624,
+# 0.94 at 43008).
+apa_eps              = 0.01
+apa_min_kv           = 8192
+# Tile cache across chunks (chunked prefill quantizes only new keys): 106451-token
+# dense prefill 7155.16 -> 6474.33 ms; arena +3.7 GiB at --max-seq-len 108000. Opt-in.
+apa_tile_cache       = false
+# Prefill chunk length (tokens) at/above which attention routes to FMHA
+# (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
+# -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
+fmha_prefill_threshold = -1
+# MLA absorbed-decode latent KV cache (DeepSeek-V2/V3): decode stores only the
+# compressed latent + decoupled RoPE key and runs the mathematically-equivalent
+# absorbed attention (~9x smaller per-token KV). Prefill stays materialized;
+# single-sequence only (falls back to materialized otherwise). Opt-in.
+mla_absorb           = false
+# Max VRAM (MiB) for the materialized cuBLAS-attention S-matrix; caps how
+# long prefill stays on the fast cuBLAS path before falling back to FMHA.
+attn_scores_mib      = 384
+# Sparse decode attention (Quest-class top-k page selection): decode reads
+# only the top-scoring KV blocks (per-block key mean + stddev score vs the query;
+# the min/max corner bound scored NIAH 2/10 vs 10/10 at a 4096 budget),
+# up to this many tokens per sequence, selected device-side per step. The first
+# 16 and last 256 positions are always kept; below 12288 tokens of context decode
+# stays dense (8k measured -7 %, 16k +6 %, 32k +25 %).
+# -1 = auto (default): 4096 on qwen3, qwen3moe, qwen35, qwen36moe,
+# nemotron_h_moe, llama, gpt_oss (NIAH + tok/s gate, #2405), 0 elsewhere.
+# 0 = off. Contexts at or below the budget are bit-identical to dense.
+# F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA decode,
+# speculative.token_recycling (on by default under --gpu-layers) or the persistent prefix cache
+# (src/runtime/vram_budget.cpp sparse_minmax_refusal); kv_cache.host_spill_mb carries the
+# pages of a spilled block, so it no longer turns auto off; SWA / StreamingLLM
+# layers and spec verify chunks keep full attention. Costs a metadata pool of
+# ~12.5% (FP8 KV) / ~6.25% (F16 KV) / 22.2% (NVFP4 KV, Qwen3.8-27B) of the K+V
+# pool bytes, planned and grown with a growable KV pool (#2364).
+# Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
+sparse_topk_tokens   = -1
+# Qwen4Exp QSA indexer: learned block top-k over the context (exact below 2051 tokens).
+# qsa_force runs the selected path on every prefill row (A/B against dense).
+# Off by default: at 4503 tokens it is slower and worse (decode 50.6 vs 54.1 tok/s,
+# PPL 4.7558 vs 4.6978) and flips MoE routing on short prompts (degen_suite 48/50 vs 50/50).
+qsa                  = false
+qsa_force            = false
+qsa_debug            = false
+# Sparse prefill: a continuation chunk attends to its own rows plus the top
+# N past tokens (one page selection per chunk, same page score). -1 = auto
+# (default): 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe
+# and llama (NIAH + two-sided PPL + tok/s gate, #2406, #2529), 0 elsewhere. 0 = off.
+sparse_prefill_topk_tokens = -1
+
+[moe]
+# Force the LAST N MoE layers off-GPU regardless of budget (debug path).
+# 0 = disabled (auto-pick).
+force_host_experts   = 0
+skip                 = false
+no_expert_cache      = false
+# Assert device-mirror == host LRU after every expert-cache mutation
+# (CI/regression diagnosis; costly D2H readback — never in perf runs).
+expert_cache_debug_parity = false
+# Share of FREE VRAM the expert LRU cache may claim (percent, 1..90).
+# The pool depth this yields decides how many tokens of routing history the
+# cache holds, and on the host-offload path that is the dominant lever:
+# Qwen3-30B-A3B-Q4_K_M, all experts host-resident, 256 cold decode tokens —
+#   5%  ->  24 slots/layer, 36.6% hit, 10.51 tok/s
+#  15%  ->  73            , 74.1%    , 20.99   (default)
+#  30%  -> 146            , 89.4%    , 30.51
+#  50%  -> 244            , 96.2%    , 51.86
+# Raise it when the KV pool and weight caches do not need the room; the
+# default stays conservative because they usually do.
+# Auto (0) on host-resident NVFP4 experts also takes the KV room a runtime.max_seq_len x
+# max_batch_size below the default context leaves unused: Flash-Next at 32768 x 1 +2304 MiB,
+# 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s.
+expert_cache_budget_pct = 15
+# Per-process MoE workspace reserve override in MiB (0 = computed default).
+reserve_mib          = 0
+# Pin host-resident experts in page-locked memory. Decode is unaffected (cache
+# hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
+# fewer: the off arm alone spread 34.7-66.1 tok/s decode.
+pin_host_experts     = false
+# Host expert tier (#2621): when host RAM cannot pin every host-resident NVFP4 expert, an LRU
+# of pinned expert units is filled from the checkpoint by parallel pread and feeds the device
+# expert cache (CUDA graphs stay on). 0 = host RAM available minus max(6 GiB, 10 % of RAM), N = cap in MiB (a cap
+# below the host-resident experts skips pinning them, so the tier serves even with RAM to spare),
+# -1 = off (decode falls back to the host LRU path).
+host_expert_pool_mib = 0
+
+[gdn]
+ref_kernel           = false
+# Chunkwise SSD scan (chunk-cached K/Q in smem) instead of the per-token
+# loop. Default ON since 2026-05-29 (+16.7% on the GDN scan kernel).
+chunkwise_scan       = true
+# Chunk-PARALLEL prefill scan: WY per-chunk factors on grid (chunks x heads)
+# plus a cheap sequential state pass, instead of 32 CTAs walking every token.
+# Single-sequence prefill (n >= 128), HD=SS=128, either state dtype.
+chunkpar_scan        = true
+# Mamba2 prefill scan in the chunked SSD form (fp16 tensor-core GEMMs per
+# 64-token chunk) for chunks >= 128 tokens at state 128; false = per-token scan.
+ssd_scan             = true
+# Override gated-DeltaNet weight layout (diagnostic; "" = auto).
+layout_override      = ""
+# BF16 recurrent state (HD=SS=128 models, fused scan route only): +12.5 %
+# aggregate at 32 streams on Qwen3.8-27B-NVFP4 for +0.21 % PPL, and the freed
+# bytes go to the KV pool. false = FP32 state.
+state_bf16           = true
+
+[gemm]
+# Extend NVFP4 decode cache to Q4_K/Q3_K/Q2_K models (default: only Q8/Q6/Q5).
+# Trades VRAM for decode throughput on sub-8-bit models.
+# tg128 on (2026-09-24): Gemma-3-12B Q4_K_M 157.5 -> 165.0 (+4.5 %), Qwen3-30B-A3B Q4_K_M
+# 337 -> 361 (+7.2 %). Cost with --decode-nvfp4: decode-path PPL (--perplexity --prefill-chunk-size 1, 45k)
+# Qwen3-30B-A3B 10.9451 -> 11.3011 (+3.25 %). pp512 -10 % unless --decode-nvfp4 (mode 1) keeps FP16 prefill.
+nvfp4_decode_all     = false
+# LM head format: "auto" | "fp8" | "on" | "off" (#2166).
+# auto = per-row FP8 E4M3 head (#2156) from an F16/BF16/F32 head (F16 final norm, d_model a
+# multiple of 256); an 8-bit head (Q8_0, FP8) stays at checkpoint precision (#2224: E4M3 flipped
+# Qwen3-8B-Q8_0's first-token top-1 vs HF fp32); other GGUF heads take the #982 NVFP4 net rule.
+# FP8 vs NVFP4, PPL 45k: Qwen3-8B-Q8_0 11.1108 -> 10.7623, Qwen3-30B-A3B-NVFP4
+# 11.8443 -> 11.3476, Flash-Next-NVFP4 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 %.
+# 1.78x NVFP4 head bytes (Qwen3-8B 594.1 vs 333.8 MiB); the source head is freed after load.
+# "on" = NVFP4 head (speed opt-in), "off" = checkpoint precision, "fp8" = FP8 or source path.
+nvfp4_lm_head        = "auto"
+# NVFP4 head (on, or auto fallback) also on GDN/SSM hybrids (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
+# set false for maximum coherence). Default ON since PR #483.
+nvfp4_lm_head_gdn    = true
+# Stream-K (a k split picked by the row count) on prompt rows of that tile: auto|on|off. A prompt row
+# then changes with its chunk, so a prefix-cache resend can answer differently. auto = off on MoE
+# (pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep it.
+nvfp4_prompt_streamk = "auto"
+# Own small-M FP8 x FP8 GEMM for batched-decode rows (n > 1, never prompt rows) up to this M (0 = off,
+# max 32), instead of cuBLASLt. A row's bits do not depend on M or its batch position.
+fp8_smallm_max_m = 32
+# M=1 decode rows on that kernel too (W8A8 with the checkpoint's static input scale) instead of the
+# FP16-activation FP8 GEMV.
+fp8_smallm_m1 = true
+# FP8 x FP8 activations quantize with the checkpoint's static input_scale. false (or a checkpoint
+# without one): per-token dynamic scales on the own GEMMs, a row never depends on its batch neighbours.
+fp8_static_act_scale = true
+# Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
+# FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
+# forces NVFP4 activations on the final logits. +8% aggregate concurrent decode
+# @16; PPL +1.9-2.1% on MoE/hybrid, +0.2-0.5% (noise-level) on dense. Default ON
+# since 2026-07-12; single-stream and spec-verify are unaffected (bit-identical).
+nvfp4_lm_head_cutlass = true
+# Batched-decode LM head at n <= 32 on the small-M mxf4nvf4 kernel (FP32 logits,
+# norm-fused activation quantize) ahead of the CUTLASS 128-row tile: Qwen3-14B
+# at 32 streams 365 us per step on CUTLASS against a 268 us weight floor.
+nvfp4_lm_head_smallm = true
+# NVFP4 prefill copies of the full-precision GDN projections ("false", "all",
+# or a comma list of in|gate|out): rows M>32 run the CUTLASS W4A4 GEMM instead
+# of cuBLAS FP16 (~320 TFLOPS on sm_120). Decode and M<=32 keep FP16 / the FP8
+# sidecar. Default "in": pp4096 +7.7% (Qwen3.6-35B) / +12.3% (Qwen3.8-27B) for
+# PPL +0.68% / +0.56%. gate +0.60%, out +1.98%, all +4.25% PPL stay opt-in.
+nvfp4_gdn_proj_prefill = "in"
+# MXFP8 (E4M3 + UE8M0 per 32) prefill copies of the same projections, same
+# vocabulary; a projection named here takes MXFP8 ahead of its NVFP4 copy.
+# Twice the copy bytes of NVFP4, 3 mantissa bits per element instead of 1.
+# Qwen3.8-27B 45k PPL in +0.08%, gate -0.51%, out -0.18%; Qwen3.6-35B pp4096
+# in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies leave
+# Qwen3.6-35B's KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
+# "fp8rows": no copy, in/gate/out run the MXFP8 GEMM on the FP8 decode
+# sidecar's own rows and the F16 sources are freed. "auto" = fp8rows
+# (Flash-Next 386 -> 422 expert slots/layer; Qwen3.6-35B-A3B 26496 -> 23804
+# MiB after load, 45k PPL 6.7998 -> 6.7308, pp2048 -4.7 %). With fp8rows only
+# projections without FP8 decode rows get nvfp4_gdn_proj_prefill copies.
+mxfp8_gdn_proj_prefill = "auto"
+# FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
+# per-row-scale mechanism as the GDN/SSM FP8 decode sidecar, decode-only (#984).
+# "auto" = full q/k/v/o on gpt-oss and Qwen4Exp (Flash-Next: decode +4.4 %, decode-path
+# PPL 5.0246 -> 5.0285) (gpt-oss: BF16 dense projections have no NVFP4
+# decode cache and were 33.5% of the decode window as FP16 GEMVs; measured
+# +12.1% decode, teacher-forced PPL unaffected by construction). "qo" = only
+# the q/o projections (~76% of the bytes, conservative middle mode), "on" =
+# full q/k/v/o for any full-precision attention weights, "off" disables.
+fp8_attn_proj        = "auto"
+# FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F). GeForce sm_120
+# runs FP32-accumulate tensor cores at 1/4 rate, so 32F caps prefill at
+# ~225 TFLOPS; 16F roughly doubles GEMM throughput (Qwen3-8B Q8_0 pp512
+# +24.9% measured 2026-06-07, PPL flat, decode neutral). auto (default) =
+# ON per arch except Gemma-3/4 (+0.7% PPL measured) and gpt-oss
+# (f16-overflow sensitivity); on = force everywhere; off = always 32F.
+# Decode (M=1) is unaffected.
+cublas_fp16_acc      = auto
+# Grouped MoE expert prefill (one launch over all experts). The big one:
+# Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
+moe_imma_prefill     = true
+
+# There is no [gemma4] section. The one per-model Gemma-4 override left
+# (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set
+# by the engine init resolver; the six writer-less bisect flags that used to sit
+# next to it were deleted (AUDIT_ARCH_2026 G-7).
+
+# Small-M activations packed to NVFP4 (A4). false keeps them FP16 (dequant+HMMA
+# kernel, the M=1 GEMV numerics at 2..32 rows); no pair launch, no fused quantize.
+nvfp4_smallm_a4      = true
+
+[server]
+# Prefix caching: reuse KV blocks for shared prompt prefixes (system
+# prompts, multi-turn history). Read by the engine and ORed into the live
+# config at init; PrefixCacheE2ETest guards hit==fresh equality.
+# (Library/C-API embedders that do not load imp.conf default to OFF.)
+prefix_cache         = true
+# Cap on KV blocks pinned by Anthropic cache_control / "cache_prompt"
+# requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
+# requests are ignored.
+prefix_pin_budget_pct = 25
+# Requests carrying "session_id" pin their prompt blocks under that session
+# (same budget as above; each turn replaces the pin). A session idle this
+# many seconds is released; POST /v1/sessions/{id}/close releases at once.
+# 0 = no TTL (close or the pin budget only).
+session_ttl_s        = 600
+# Serve a model other than the loaded one by swapping to it instead of
+# answering 404 — agent harnesses drive a big model beside a small one and
+# 32 GB fits one at a time. The swap is serial: in-flight generations drain
+# first (never cancelled), then the requested model is loaded; if that load
+# fails the previous model is restored. The name must resolve in the models
+# directory, so a typo is still a 404, and /v1/models lists what is
+# available. Cost: the requesting call pays one model load.
+model_swap           = true
+# How long a swap waits for in-flight generations to finish before giving
+# up and keeping the current model (503, nothing torn down).
+model_swap_drain_ms  = 60000
+# Device budget (MiB) for recurrent-state snapshots — what makes prefix
+# caching work on hybrid (SSM/GDN) models: reused KV blocks alone cannot
+# skip prefill there, the recurrent state at the skip boundary must be
+# restored too. One snapshot = one per-sequence state slab (~64 MiB on
+# Qwen3.6-35B), saved once per prefill, LRU-evicted; buffers pre-allocated
+# at engine init. imp-cli --bench pins this to 0. 0 disables snapshots and
+# with them hybrid prefix caching (dense models unaffected).
+recurrent_snapshot_mb = 256
+# Host tier for those snapshots: entries evicted from the device slots are
+# copied to pinned host memory instead of dropped and restored from there
+# (one H2D of one slab). Sessions beyond the device slot count keep their
+# tail-only prefill. 0 = off. Left unset with kv_cache.host_spill_mb > 0, it
+# rises to host_spill_mb / 2: a spilled hybrid prefix restores only with its
+# snapshot.
+recurrent_snapshot_host_mb = 2048
+# OpenTelemetry trace export (OTLP/HTTP, JSON encoding): the full traces
+# URL of a collector, e.g. http://localhost:4318/v1/traces; "" = off. Every
+# generation request becomes one SERVER span (queue / prefill / decode
+# children; model, token counts, finish reason, request ids as attributes),
+# joined to the caller's trace when the request carries a W3C traceparent
+# header (sampled flag clear = not exported). Export runs on a background
+# thread; a dead collector costs one warning, never latency. http:// only.
+# Counters: /metrics imp_otlp_*.
+otlp_endpoint = ""
+otlp_service_name = "imp-server"
+
+[warm_cache]
+# On-disk warm weight cache: the first fully-cold model load persists its
+# converted weight buffers next to the model (".impwcache" / ".imp_warm_cache");
+# later boots restore them and skip the conversion work. Raw quant payloads are
+# never duplicated (the model file already holds them), so the cache is tiny
+# for GGUF quants / NVFP4 SafeTensors and ~model-size only for BF16-dense
+# checkpoints. Stale caches (model file changed) are ignored automatically.
+enabled              = true
+# Cache directory. Empty = default: $XDG_CACHE_HOME/imp/warm (or
+# ~/.cache/imp/warm). In containers, mount a persistent volume there (or set
+# this to one) — an ephemeral cache is rewritten on every start.
+dir                  = ""
+
+[suspend]
+# Suspend-to-RAM (POST /admin/suspend): weights are snapshotted to host RAM,
+# all VRAM is freed, and POST /admin/resume restores them in seconds.
+# device_reset additionally resets the CUDA primary context after teardown so
+# the process holds ~0 MiB VRAM (context + module code are ~300-600 MiB
+# otherwise). Set false only if a foreign library in-process holds CUDA state
+# a reset would orphan.
+device_reset         = true
+# Host RAM (MiB) the snapshot must leave free on top of its own size —
+# capture fails with a clear error instead of driving the host into swap.
+host_ram_headroom_mb = 2048
+
+[paths]
+# Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
+# Qwen3-VL does not use this — its tower ships inside the checkpoint.
+mmproj               = ""
+
+[speculative]
+# n-gram (prompt-lookup) speculative decoding: drafts come from suffix
+# matches against the request's own prompt+output — no draft model. Greedy
+# verify accepts the longest matching prefix, so output stays a faithful
+# greedy decode. Batch-1, greedy sampling, non-recurrent models only
+# (SSM/GDN hybrids gate off automatically — their state cannot rewind);
+# disables the async decode graph loop while on. Wins on repetition-heavy
+# (agent/code/RAG) workloads; ~neutral on free-form prose. Default-ON.
+ngram                = true
+# Sampled requests (temperature > 0) speculate too: each verify row draws with the eager seed and a
+# draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
+# and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
+sampled              = true
+# Speculation on MoE models with native-NVFP4 experts (Qwen3-Coder-30B-FP4:
+# code-edit +49-81%, draft-poor floor -3-7%). GGUF-MoE never engages (its
+# batched verify re-dequants every activated expert per step, measured -22%)
+# and stays on the async decode loop. imp-cli --bench pins this off to keep
+# the gated tg baseline a raw-decode signal.
+moe                  = true
+# Token-Recycling adjacency drafting (arXiv 2408.08696): engine-scoped
+# `token -> top-M successors` table fed from emitted bigrams and the
+# model's own verify-chunk top-K logits; drafts where suffix/n-gram find
+# nothing (fresh reasoning prose). Depth 3 (kRecycleDepth) keeps the chunk in
+# capture bucket 4 = one batched-GEMV weight sweep (#1055);
+# a hop drafts only a re-confirmed successor (kRecycleMinStreak, precision gate);
+# recycle_width > 1 verifies that many candidates per chunk (measured: the
+# accept lift does not pay for the bigger chunk — keep 1). EXPERIMENTAL,
+# default OFF: cold-start accept on fresh reasoning measures ~1.4
+# emitted/verify vs the ~1.5x verify break-even (2026-07-23, single
+# request; the cross-request warm table is the open question — see
+# docs/archive/PERF_AUDIT_2026_07_23.md).
+# Experimental, expires: 2026-12-31 (remove or promote by then).
+# Under --gpu-layers it turns on with recycle_width 8 unless set here: a verify costs one
+# streamed pass there, flat to 64 rows (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 7.22, code 6.85 -> 9.80 tok/s).
+token_recycling      = false
+recycle_width        = 1
+# Suffix-indexed drafting (SuffixDecoding-style): hash-indexed suffix
+# matching instead of a per-step backward scan, continuations picked by
+# frequency vote across all occurrences, and adaptive draft length — a
+# draft backed by multiple agreeing occurrences (or a maximal-length
+# context match, e.g. the `prediction` region) extends past 16 drafts up to
+# 64 (kSpecSuffixKMax). false = legacy single-most-recent scan.
+suffix               = true
+# Corpus drafting: text files under this path (a file or a directory, read
+# up to 64 MiB, binary files skipped) form one engine-wide suffix index that
+# drafts when the request's own history has no match (needs suffix = true).
+# Empty = off.
+# Experimental, expires: 2026-12-31 (remove or promote by then).
+ngram_corpus         = ""
+# DSpark / DFlash block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 or
+# z-lab/Qwen3-8B-DFlash-b16 for Qwen3-8B; DFlash reads embed / lm_head from the target); forces batch 1.
+dspark_model         = ""
+# Shortest / longest suffix n-gram match searched. Longer min_match =
+# fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
+# number-table worst case shrinks from -13% to -2%).
+min_match            = 6
+max_match            = 12
+# Give up on speculation (and return to the fast async decode loop) after
+# this many consecutive draft misses, or when acceptance stays under 15%.
+# 0 = never give up.
+give_up_after        = 64
+# Speculation on hybrid (GDN/SSM) models: the committed recurrent-state slab
+# is snapshotted around the verify chunk; a partial acceptance restores it and
+# re-forwards the accepted prefix. imp-cli --bench pins this false.
+hybrid               = true
+# MTP-head chain-draft length (models shipping an mtp.* head, e.g. Qwen3.6 /
+# Qwen3.8). -1 = auto (default), 0 = off, > 0 = fixed depth. When it engages,
+# the head is loaded (0.79 GiB on Qwen3.8-27B) and MTP chains fill verify
+# steps where the suffix matcher has no draft. imp-cli: --mtp-spec-decode <k>.
+#
+# AUTO engages the measured pair (mtp_k=2 with ngram=false) only on a
+# SINGLE-STREAM run - max_batch_size = 1, i.e. imp-cli or a server pinned to
+# one stream - and only with runtime.deterministic off. Measured on
+# Qwen3.8-27B-NVFP4 (2026-08-29, 3 alternating rounds): 95.8 -> 141.6 tok/s
+# on a thinking prompt (+48 %), degen suite 50 checks / 0 fail. A concurrent
+# GDN-hybrid server (Qwen3.8-27B) takes the pair too (bound verify); other
+# concurrent servers and determinism (chunk-greedy is not the eager
+# trajectory) keep it off. An explicitly set `ngram` is never overruled by auto.
+mtp_k                = -1
+# MTP head KV slots when the batched verify is off: one request binds, the
+# others keep other chats' head caches, so a chat UI's title / follow-up
+# request between two turns no longer wipes it and the next turn drafts over
+# its prefix-cache hit. 64 MiB per slot on Qwen3.8-27B-NVFP4; 1 = one slot.
+mtp_history_slots    = 4
+# MTP head KV rows per slot, a ring: past this many positions the head attends
+# the last ones only and keeps drafting.
+# Clamped to the model context; with many slots (batched verify) a 1 GiB budget
+# caps it, floor 2048. 4 KiB per row per slot on Qwen3.8-27B-NVFP4.
+mtp_kv_window        = 16384
+# While at most this many requests decode (capped at
+# mtp_history_slots), one forward verifies every bound request's MTP draft (2
+# rows per request; one spare recurrent slot per row, 79.5 MiB each on
+# Qwen3.8-27B, charged in the KV plan); a bigger batch decodes plain.
+# Qwen3.8-27B-NVFP4, default server: 4 overlapping chats 83.72 -> 117.45
+# tok/s per turn, c4 337.4 -> 460.3, c32 unchanged, KV plan 4812 -> 4531 blocks.
+# 0 = plain batched decode at any batch > 1.
+mtp_batch_verify     = 4
+# Drafts per bound request in that step: N = last token plus an N-token MTP
+# chain (N + 1 rows per request, N head passes), 4 at most, 1 when the factor
+# rows do not fit in VRAM. Unset, it follows mtp_k down (a row past the
+# drafted depth is a pad), mtp_k=auto on a concurrent GDN-hybrid server follows
+# it up.
+mtp_batch_verify_k   = 4
+# Drafts per request once 4 requests share the step (2..mtp_batch_verify_k,
+# factor rows only): each draft is one more head pass over every request.
+# Qwen3.8-27B-NVFP4, 4 chats x 20k, all streams: 530.61 tok/s at 3 drafts, 517.18 at 4.
+mtp_batch_verify_k_wide = 3
+# Deepest step a run of full accepts reaches (mtp_batch_verify_k..8, factor rows only,
+# below 4 requests, inside the 8-row GEMM tile): a step where a request accepts all N
+# drafts is followed by one of N + 2 drafts. 0 = off. Qwen3.8-27B-NVFP4 agent replay,
+# 1 chat, same text: +1.99 % tok/ms at 6, +2.84 % at 7, +2.12 % at 8 (9 rows).
+mtp_batch_verify_k_streak = 7
+# External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
+# same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
+# mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.
+# e.g. "/models/Qwen3.8-27B-NVFP4-vllm/mtp.safetensors"; empty = off.
+mtp_head             = ""
+# Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head decode
+# cache when one exists (~4x less HBM traffic per drafted token; the chain
+# re-reads the LM head once per draft). Draft-only precision — verification
+# stays lossless. false = keep the FP16 chain GEMV. A 16-bit head served as FP8
+# gets an NVFP4 draft copy of rows [0, mtp_draft_vocab) while MTP is on
+# (Qwen3.8-27B-NVFP4: 682 MiB at all rows, 270 MiB at 98304). The batched draft
+# passes (mtp_batch_verify) read it too, 4 rows per weight pass. A concurrent
+# GDN-hybrid server with MTP on keeps it over a row prefix only: with
+# mtp_draft_vocab = 0 set and this key unset it takes false (the full copy
+# costs 1990 KV blocks); this line sets it, so drop it there.
+mtp_nvfp4_head       = true
+# Batched MTP drafts score only the first N LM-head rows; the NVFP4 draft copy
+# holds only those rows, for the lone chain too. Without the copy they read
+# the FP8 head (0 = all); verification stays full vocab. BPE ids follow merge
+# order: 99.94 % of Qwen3.8 agent output tokens sit below 98304. Unset, a
+# concurrent GDN-hybrid server takes 98304; this line sets it, so drop it there.
+mtp_draft_vocab      = 0
+# MTP economics guard: after an 8-verify sample, avg emitted tokens per
+# MTP-filled verify below this dooms MTP drafting for the request. 0 disables
+# the guard. Note: a chain of k emits at most k+1 per verify.
+mtp_econ_min_emit    = -1.0     # embedded default is -1.0, not 4.0 (#1672)
+# Graph-captured verify (#847): cache one CUDA graph per draft-length bucket
+# and replay it each verify step (all growing lengths are read from device
+# buffers), removing the eager launch-pacing tax. Engages only where the
+# FP16-QK FA2 kernel serves the chunk (uniform hd=128, no sinks/MLA/LongRoPE)
+# on non-hybrid models; capture failures fall back to the eager verify.
+# imp-cli --bench pins this false (raw-decode baseline semantics).
+capture              = true
+
+[diagnostics]
+# Process log level: debug | info | warn | error | fatal.
+# "debug" is what unlocks the IMP_LOG_DEBUG statements throughout the engine;
+# before this key existed the level was pinned at info and they never printed.
+# An unrecognised value warns and keeps the current level.
+log_level            = info
+# Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
+debug_forward        = false
+# Bisect for a wrong top logit: the LM head runs dequant -> FP16 -> cuBLAS
+# instead of the fused Q8_1 GEMV, allocating the whole FP16 output projection
+# per forward. Never on in serving (was generation.lm_dequant_fp16).
+lm_dequant_fp16      = false
+# Print intermediate Jinja2 chat-template rendering steps.
+debug_template       = false
+# If non-empty, dump per-layer hidden states as .npy files to this directory.
+# Special values: "1" or "all" → /tmp.
+dump_hidden_dir      = ""
+# Print prefill token IDs to stderr (truncated to 20).
+dump_tokens          = false
+# Teacher-forced perplexity (--perplexity): restrict the NLL sum to logit
+# rows [ppl_first, ppl_last] (row i predicts token i+1; ppl_last=-1 = end).
+# Matches llama-perplexity's counting window (first = n_ctx/2) for the
+# cross-engine PPL-parity bar — see docs/GOAL.md release bar 1.
+ppl_first            = 0
+ppl_last             = -1
+profile              = false
+graph_diag           = false
+graph_dump_dir       = ""
+# Skip building the NVFP4 decode cache: decode runs on the source-precision
+# paths (dp4a GEMV / FP16 GEMV) — bisection / quality-baseline tool (CLI: --no-nvfp4).
+# Dense GGUF decode-path PPL with the cache (default): Qwen3-8B Q8_0 +6.0 %, Qwen3-14B Q6_K +2.4 %.
+no_nvfp4_decode_cache = false
+# Log shape + per-candidate algo for every cuBLASLt algo selection, and at
+# teardown every cuBLASLt call site with its shape and count ([lt-route]).
+log_gemm_algo        = false
+# Audit NVFP4 weight scales at load time.
+audit_nvfp4_scales   = false
+# VRAM accounting audit: allocation checkpoints + per-pool notes + device-used
+# peak sampler. Default off (zero overhead). See src/memory/mem_account.h.
+vram_audit           = false
+# Optional append-only file the VRAM audit table is mirrored into ("" = off).
+vram_audit_dump      = ""
+# Directory for the FINAL LM logits of every forward pass (one .npy per pass,
+# [rows, vocab] FP32, after the soft-cap). "" = off.
+dump_final_logits_dir = ""
+# Directory for the Gated-DeltaNet recurrent state (gdn_state.npy, last pass
+# wins) plus gdn_state_stats.jsonl (per-pass min/max/RMS, non-finite count).
+dump_gdn_state_dir   = ""
+# Per-layer MoE expert-activation histogram (JSON) written at executor
+# teardown; counts every routing decision of the run. "" = off.
+moe_expert_hist      = ""
+# Per-token MoE expert trace (JSON, decode only) written at teardown; the
+# temporal-locality dataset the expert-cache question needs. "" = off.
+moe_expert_trace     = ""
+# Per-step speculative draft/verify trace on the log (bound verify: spec-batch-trace,
+# spec-sfx-shadow). Legacy env: IMP_SPEC_TRACE.
+spec_trace           = false
+# Paired depth A/Bs: N draft rows staged per request at every bound verify step below
+# 4 requests (pad rows past the drafts, mtp_batch_verify_k..8): texts then match
+# across depth policies. 0 = off.
+mtp_verify_pin       = 0
+# Path to dump per-token NLL from --perplexity ("" = off). Legacy env: IMP_PPL_DUMP.
+ppl_dump             = ""
+# Host-side phase attribution for batched decode steps (build / forward /
+# sample / distribute / outside), logged every 256 steps.
+step_timing          = false
+# imp-server worker-loop phase attribution (admission / step / delivery
+# staging), logged every 256 loops. Legacy env: IMP_WORKER_TIMING=1.
+worker_timing        = false
+# imp-server: a failed tool call logs the model's raw call text, first 2000 bytes.
+# Off by default, the text can hold request content.
+tool_fault_raw       = false
+# Compare every cached verify-chunk graph replay against an eager forward of
+# the same state (one extra forward + two vocab-sized D2H per verify step).
+spec_capture_fidelity = false
+
+# ---------------------------------------------------------------------------
+# [calibration] — activation statistics for the offline quantizer
+# ---------------------------------------------------------------------------
+# Not an inference feature. With this on, every weight GEMM also accumulates
+# the mean |activation| per input channel, which imp-quantize --calib turns
+# into AWQ scales. Turning it on turns CUDA graphs off (the collector
+# allocates per-weight accumulators lazily, which a capture forbids), so a
+# server should never run with it.
+#
+# Normally set by `imp-cli --perplexity <corpus> --calibrate <out>` rather
+# than by hand.
+[calibration]
+enabled              = false
+out_path             = ""
+# Also mean x^T x per weight input for imp-quantize --gptq, written as <out>.hess
+# (FP32 [K, K] each, Qwen3-1.7B 5.3 GB). Rows above 20x the median row norm are left out.
+hessian              = false
