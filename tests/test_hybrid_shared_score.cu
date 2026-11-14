@@ -174,8 +174,13 @@ TEST_F(HybridSharedScoreTest, RowsRestoringOneSnapshotAreIndependent) {
     ASSERT_NE(e, nullptr);
     ASSERT_NE(e->ssm_state(), nullptr) << "hybrid checkpoint without a recurrent state pool";
     const int bs = kKVBlockSize;
-    const int restore_at = (hint / bs) * bs;
+    // Where item 0 saves, as the engine computes it: the hint's block floor only with >= 33 prompt rows
+    // after it (#2560), else the prompt boundary. Every wave row shares that prefix and restores there.
+    const int restore_at = imp::next_snapshot_boundary(static_cast<int>(prompts[0].size()), bs,
+                                                       imp::kSnapshotMinPromptTokens, hint, /*offset=*/0,
+                                                       imp::kMinPromptChunkRows);
     ASSERT_GE(restore_at, imp::kSnapshotMinPromptTokens) << "shared evidence too short to be snapshotted";
+    ASSERT_LE(restore_at, hint) << "item 0's snapshot lies past the shared prefix";
     const std::vector<std::vector<int32_t>> wave(prompts.begin() + 1, prompts.end());
     std::vector<std::vector<int32_t>> wave_rev(wave.rbegin(), wave.rend());
 
