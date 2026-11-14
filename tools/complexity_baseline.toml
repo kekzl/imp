@@ -11,6 +11,8 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   init_kv_cache phases (split from init_kv_cache into 26 file-static helpers, largest
+#   make_kv_cache 17): Engine::init_kv_cache 187 -> 24 (below threshold, entry removed)
 #   JSON-Schema keywords PR (keyword groups and phase steps moved to helpers): parse_schema_object
 #   71 -> 19 (entry removed), sim_advance 240 -> 202, compute_category_mask 67 -> 39;
 #   RegexNfa::parse_repeat 32 moved with RegexNfa from json_schema.cpp to regex_nfa.cpp
@@ -183,7 +185,6 @@ skip_dirs = ["apa"]
 "src/runtime/engine_graph_decode.cpp::int Engine::step_constrained_pipeline()" = 36
 "src/runtime/engine_init_resolver.cpp::void Engine::init_resolve_kv_dtype_policy_()" = 97
 "src/runtime/engine_init_resolver.cpp::void Engine::init_resolve_quant_flags_()" = 49
-"src/runtime/engine_kv_cache_init.cpp::bool Engine::init_kv_cache()" = 187
 "src/runtime/engine_prefill.cpp::bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::vector<int>& block_table, const std::vector<int>& swa_block_table, int chunk_len, int offset, int ctx_len, cudaStream_t pf_stream, int32_t*& d_token_ids, int*& d_positions, int*& d_block_tables, int*& d_block_tables_swa, int*& d_context_lens, bool& pf_pool_used)" = 33
 "src/runtime/engine_prefill.cpp::void Engine::step_prefill(cudaStream_t stream)" = 42
 "src/runtime/engine_prefill.cpp::void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t pf_stream)" = 122

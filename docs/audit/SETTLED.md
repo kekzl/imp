@@ -288,6 +288,7 @@ Full write-up with every number: [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), secti
 | S-31 | A file's `[allow]` cohesion reason covers what is inside it | **REFUTED** | `tools/check_function_size.py` — `executor_workspace_buffers.cpp` is allowlisted "(c) one concern" at 1534 code LOC and 884 of them are one body. warn 200 / hard 500, 12 bodies listed with reasons |
 | S-32 | Splitting `GraphExecutor::run_attention` into three real TUs is worth doing | **REFUTED on measurement — do not re-chase** | The `src/exec/` per-TU floor is ~5 s and header-driven (227-LOC TU = 5.5 s), so a 1279-LOC body is ~1.5 s over it; 16 of 67 commits in six months touched exactly one fragment; the phases share ~40 prologue locals so the split needs a header all four TUs include. Ceiling ~24 s per six months, and full builds pay the 5 s floor three extra times |
 | S-33 | `engine.h`'s remaining cost needs the pimpl F-24 priced at a 42 % ceiling | **Not yet — the cheap fan-in half was still on the table** | `tools/imp-server/batching_engine.h` included `runtime/engine.h` for one symbol (`imp::Request`, which is in `runtime/request.h`) and reached 15 TUs through `handlers.h`. Dropping it: **49 -> 39 rebuilt TUs, 48 -> 33 s** per `engine.h` edit, x146 commits/6mo. F-24's 42 % was measured on a 1229-line `engine.h`; it is **1502** today |
+| S-34 | Splitting `jinja.cpp` (2978 lines), `weight_upload.cpp` (2460), `engine_scheduler.cpp` (2079) by size | **REFUTED on measurement 2026-11-14** | Uncached compile 3.4 / 3.7 / 2.2 s each (`engine.cpp` 3.0 s), each a single domain; a split adds a per-TU floor |
 
 **S-33, 2026-11-14: the include-only half is spent.** Per `engine.h` touch, `make dev` recompiles
 **75 -> 67 TUs**, uncached **43.1 / 42.8 -> 40.3 / 40.7 s** (ccache hits: 3.5 s either way), x205
@@ -297,6 +298,10 @@ commits/6mo. `EngineConfig` moved to `runtime/engine_config.h`, `apply_rope_over
 `clear_recurrent_snapshots()` out of line in `engine.cpp`, called only from `imp_context_reset`
 and tests). The 67 left (35 `src/runtime/engine*.cpp`, 18 tests, 8
 imp-server, 3 imp-cli, 3 C-API) each name an `Engine` member; the next cut is a code change.
+
+**2026-11-14, `Engine::init_kv_cache` split into phases in its own TU (S-32 rule):** CCN
+**187 -> 24**, body **687 -> 153** code LOC, 26 file-static helpers (largest `make_kv_cache`, CCN 17),
+`engine.h` +0 lines; the file is allowlisted at 888 code LOC instead of the function at 687.
 
 **Method note that decided two of these.** A grep for who "uses Engine" reported
 the wrong set, the same way F-24 records it did. Deleting the include and letting

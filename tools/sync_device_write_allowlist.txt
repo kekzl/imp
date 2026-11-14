@@ -40,7 +40,7 @@ src/memory/ssm_state.cpp cudaMemset(pool_ init  # SSM state construction
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ms offline  # load-time weight conversion
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_packed offline  # load-time weight conversion
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ts offline  # load-time weight conversion
-src/runtime/engine_kv_cache_init.cpp cudaMemset(d_ssm_seq_slots_ init  # KV init; the scheduler uploads the table before each batched step
+src/runtime/engine_kv_cache_init.cpp cudaMemset(out.d_seq_slots init  # KV init; the scheduler uploads the table before each batched step
 src/vision/qwen3vl_vision_upload.cpp cudaMemcpy(d synced  # cudaStreamSynchronize(nullptr) after the upload loop
 src/vision/vision_encoder.cu cudaMemcpy(d_pos_x_ init  # VisionEncoder::init
 src/vision/vision_encoder.cu cudaMemcpy(d_pos_y_ init  # VisionEncoder::init
