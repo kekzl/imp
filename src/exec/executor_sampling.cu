@@ -83,9 +83,7 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
         Tensor last_logits = flatten_logits(logits.slice(0, 1));
         apply_pre_sample(last_logits, state);
 
-        // Overlap prefill: the parity slots belong to the concurrent decode
-        // batch — the engine points this path at its dedicated slot.
-        int32_t* slot = sample_slot_override_ ? sample_slot_override_ : d_sample_result_;
+        int32_t* slot = d_sample_result_;
         if (state.mirostat == 2) {
             unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
             tokens[0] = slot ? sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,

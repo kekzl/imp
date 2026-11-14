@@ -80,8 +80,6 @@ bool Engine::pipeline_row_eligible_(const Request& r) const {
 }
 
 bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>>& rows) const {
-    if (!runtime_config_.runtime.decode_pipeline)
-        return false;
     const int n = static_cast<int>(rows.size());
     if (n < 2 || n > kMaxGraphPoolSize)
         return false;
@@ -91,13 +89,9 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
         return false;
     if (offload_mgr_)
         return false;
-    // Recurrent hybrids excluded (#975, #1750): the chained advance + event
-    // waits measured slower than the per-step path on the hybrid decode step
-    // of that time. runtime.decode_pipeline_hybrid re-measures on the batched
-    // GDN path (the slot table is per step, the finish release is deferred,
-    // the transcript snapshot keys the drained state with its final token).
-    if (ssm_state_ && !runtime_config_.runtime.decode_pipeline_hybrid)
-        return false;
+    // Recurrent hybrids pipeline too: on the batched GDN path (per-step slot table, deferred finish
+    // release, transcript snapshot keyed with the final token) six alternating pairs at 32 streams
+    // measured +1.4 % median, reversing the #975/#1750 verdict of the older per-step hybrid step.
     // PLE: step N+1 needs step N's token on the host for its n-gram rows.
     if (model_->ngram_table() != nullptr)
         return false;
@@ -129,15 +123,11 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
             break;
         }
     IMP_LOG_INFO(
-        "decode-pipeline: not entering — cfg=%d n=%d graphs=%d profile=%d pool=%d offload=%d "
-        "ssm_ok=%d swa=%d streaming_kv=%d residual=%d sampler_ready=%d rows_ok=%d",
-        (int)runtime_config_.runtime.decode_pipeline, (int)rows.size(), (int)config_.use_cuda_graphs,
-        (int)runtime_config_.diagnostics.profile, (int)decode_batch_pool_.is_allocated(),
-        (int)(offload_mgr_ != nullptr),
-        // Mirrors the gate above: `if (ssm_state_) return false;` is
-        // unconditional since #1750 (AUDIT_ARCH_2026 C-7: the pre-#1750
-        // version printed ssm_ok=1 on hybrids this gate now refuses).
-        (int)!ssm_state_, (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
+        "decode-pipeline: not entering — n=%d graphs=%d profile=%d pool=%d offload=%d "
+        "ple=%d swa=%d streaming_kv=%d residual=%d sampler_ready=%d rows_ok=%d",
+        (int)rows.size(), (int)config_.use_cuda_graphs, (int)runtime_config_.diagnostics.profile,
+        (int)decode_batch_pool_.is_allocated(), (int)(offload_mgr_ != nullptr),
+        (int)(model_->ngram_table() != nullptr), (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
         (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),
         (int)rows_ok);
 }
@@ -438,7 +428,7 @@ void Engine::step_decode_pipeline_(cudaStream_t stream) {
     // Widened like the RR branch itself (engine_scheduler.cpp): checks
     // whether ANY drafter can feed the verify step, not just
     // `speculative.ngram` (dense model + mtp_k=2 + ngram=false is valid).
-    // `runtime.decode_pipeline` defaults on, so this gate, not the RR
+    // The decode pipeline is always on, so this gate, not the RR
     // branch, decides whether batch>1 speculation happens at all.
     // speculative.mtp_batch_verify hands the step back the same way when the bound rows can verify together.
     if (cont && pipeline_yields_(bd_pipe_.rows))

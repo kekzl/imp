@@ -7,9 +7,9 @@
 
 namespace imp {
 
-void GraphExecutor::set_ffn_graphs_enabled(bool on, bool cuda_graphs) {
+void GraphExecutor::set_ffn_graphs_enabled(bool cuda_graphs) {
     // Host-resident experts stage through per-call copies (build_staged_device_args_).
-    ffn_graphs_enabled_ = on && cuda_graphs && model_ != nullptr &&
+    ffn_graphs_enabled_ = cuda_graphs && model_ != nullptr &&
                           !pre_dequant_internal::has_host_resident_experts(*model_);
     if (!ffn_graphs_enabled_)
         ffn_graphs_.clear();

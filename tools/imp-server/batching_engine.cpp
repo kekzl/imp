@@ -598,11 +598,10 @@ void BatchingEngine::worker_loop() {
                     }
                     // The reply's ids as generated, BEFORE the client can see the finish: a
                     // follow-up turn that resends the reply then tokenizes to the same ids
-                    // (server.transcript_token_reuse). The engine's own finish-time release runs
+                    // (transcript token reuse). The engine's own finish-time release runs
                     // a step later under the pipeline, after a fast client already sent turn 2.
                     if (req->status == imp::RequestStatus::FINISHED && !req->ignore_eos &&
-                        req->n_vision_tokens == 0 && req->images.empty() && !req->vision_emb &&
-                        engine->runtime_config().server.transcript_token_reuse) {
+                        req->n_vision_tokens == 0 && req->images.empty() && !req->vision_emb) {
                         if (const auto& store = engine->chat_template().transcript_store()) {
                             std::vector<int32_t> ids(req->input_tokens);
                             ids.insert(ids.end(), req->output_tokens.begin(), req->output_tokens.end());

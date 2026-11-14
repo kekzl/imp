@@ -58,7 +58,7 @@ make verify                # full
 - CHANGELOG: 1-3 lines, <= 360 characters per entry (gated), plus the checkable number. Investigation goes to `docs/`.
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.
 - Perf gate: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, stated in the PR.
-- Runtime config only via `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Seeded env vars: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.
+- Runtime config only via `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Seeded env vars: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.
 - Dependency pins only in `cmake/imp-deps.cmake`. Dockerfile: no `--mount=type=cache` on the build dir (stale ninja objects, 03a2cc19); the `ccache` mount stays.
 - File size gate: per file, per function body (> 500 code LOC hard), per TU (an `#include`d `.cu` counts against its includer). Exceptions: `[allow]` with reason in `docs/audit/AUDIT_FILESIZE.md`.
 - VRAM (WSL2/WDDM): a successful `cudaMalloc` proves nothing, bandwidth tells resident from spilled (#1103), free VRAM only decreases within a process. Capacity is planned: `docs/internals/MEMORY.md`.

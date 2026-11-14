@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-24
-commit: 28185525
+verified: 2026-11-14
+commit: 915395cf
 -->
 
 # src/runtime - engine, scheduler, config, KV
@@ -31,7 +31,7 @@ CPU tests: `make dev-test`, new ones in `test-core`. KV, graphs, scheduling: `ma
 
 ## Pitfalls
 
-- `runtime.prefill_graph` (default `true`) covers serial offset-0 prefill only, not ragged. Eager: legacy host-args MoE prefill, KV dtypes other than F16 / calibrated FP8 (`engine_prefill.cpp`). Other prefills replay only FFN/MoE from per-(layer, padded rows) graphs (`runtime.prefill_ffn_graph`, `exec/ffn_graph_cache.h`). Source of truth: `config.h`.
+- `runtime.prefill_graph` (default `true`) covers serial offset-0 prefill only, not ragged. Eager: legacy host-args MoE prefill, KV dtypes other than F16 / calibrated FP8 (`engine_prefill.cpp`). Other prefills replay only FFN/MoE from per-(layer, padded rows) graphs (always on, `exec/ffn_graph_cache.h`). Source of truth: `config.h`.
 - `kv_cache.swa_snapshot_mb` below one snapshot disables prefix caching entirely (worse than 0).
 - A/B on anything sized off free VRAM: pin `runtime.max_batch_size`.
 

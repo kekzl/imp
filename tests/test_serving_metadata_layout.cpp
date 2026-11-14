@@ -37,8 +37,6 @@ std::vector<Region> regions(const ServingMetadataLayout& l, int rows, int seq_ca
         {"rg_ctx", l.rg_ctx, s * 4},
         {"rg_soff", l.rg_soff, (s + 1) * 4},
         {"rg_slots", l.rg_slots, s * 4},
-        {"gl_bt", l.gl_bt, bt},
-        {"gl_bt_swa", l.gl_bt_swa, swa_bt},
         {"agl_bt", l.agl_bt, bt},
         {"agl_bt_swa", l.agl_bt_swa, swa_bt},
         {"cp_bt", l.cp_bt, bt},
@@ -69,9 +67,9 @@ void check(int rows, int seq_cap, int bt_cap, bool swa, size_t scratch) {
 
 TEST(ServingMetadataLayout, Aligned) {
     const auto l = ServingMetadataLayout::compute(131072, 64, 8192, true, 4096);
-    for (size_t off : {l.pf_tok,     l.pf_pos, l.pf_bt,    l.pf_bt_swa, l.pf_ctx, l.rg_tok,    l.rg_pos,
-                       l.rg_bt,      l.rg_ctx, l.rg_soff,  l.rg_slots,  l.gl_bt,  l.gl_bt_swa, l.agl_bt,
-                       l.agl_bt_swa, l.cp_bt,  l.cp_token, l.cp_pos,    l.cp_ctx, l.total})
+    for (size_t off :
+         {l.pf_tok, l.pf_pos, l.pf_bt, l.pf_bt_swa, l.pf_ctx, l.rg_tok, l.rg_pos, l.rg_bt, l.rg_ctx,
+          l.rg_soff, l.rg_slots, l.agl_bt, l.agl_bt_swa, l.cp_bt, l.cp_token, l.cp_pos, l.cp_ctx, l.total})
         EXPECT_EQ(off % 256, 0u);
 }
 
@@ -93,7 +91,7 @@ TEST(ServingMetadataLayout, SizeIsSmall) {
 TEST(ServingMetadataLayout, SwaOffAddsNothing) {
     const auto on = ServingMetadataLayout::compute(4096, 8, 256, true, 4096);
     const auto off = ServingMetadataLayout::compute(4096, 8, 256, false, 4096);
-    EXPECT_EQ(on.total - off.total, 3u * 1024);  // three 1 KiB mirrors (256 ints each)
+    EXPECT_EQ(on.total - off.total, 2u * 1024);  // two 1 KiB mirrors (256 ints each)
     EXPECT_EQ(off.pf_bt_swa, off.pf_ctx);        // an empty region has no extent
 }
 

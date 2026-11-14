@@ -193,7 +193,7 @@ struct MtpDraftWorkspace {
     void* d_b_up       = nullptr;  // [rows, d_ff]
     void* d_b_act      = nullptr;  // [rows, d_ff]
 
-    // Post-norm feed scratch (diagnostics.mtp_prenorm_h): [prenorm_rows_cap,H] FP16, the fed
+    // Post-norm feed scratch: [prenorm_rows_cap,H] FP16, the fed
     // hidden rows after the target's final norm. Sized once at enable time (engine_spec_mtp.cpp)
     // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
@@ -260,7 +260,7 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
 // Rows of one slot must be in ascending position order (append precedes the scan that reads
 // it). Writes final_norm of every row to ws.d_b_h_final[n_rows,H]; caller advances
 // mtp_pos/slot_pos. post_norm (optional): apply target's final norm before feed
-// (diagnostics.mtp_prenorm_h, upstream convention). h_tokens may be a device pointer (cudaMemcpyDefault):
+// (upstream convention). h_tokens may be a device pointer (cudaMemcpyDefault):
 // the bound verify's chained second draft feeds draft 1 without a sync.
 [[nodiscard]] bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
                              int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
@@ -349,7 +349,7 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 // the MTP carry scratch after mtp_workspace_allocate: `rows` per KV slot, needs the batched feed
 // (rows <= feed_rows_cap) and a plain head. false = none (rows <= 0 too); mtp_workspace_free releases it.
 [[nodiscard]] bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows);
-// diagnostics.mtp_prenorm_h feed scratch [rows, hidden] FP16 on a plain head; false = none.
+// Post-norm MTP feed scratch [rows, hidden] FP16 on a plain head; false = none.
 [[nodiscard]] bool mtp_prenorm_allocate(MtpDraftWorkspace& ws, int rows);
 // the MTP body FP8 copy after mtp_workspace_allocate: E4M3 rows + per-row scales of fc, q/k/v/o and the
 // dense MLP of a plain FP16 head (Qwen3.8-27B: 405 MiB). false = none; mtp_workspace_free releases it.

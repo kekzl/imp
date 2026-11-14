@@ -225,7 +225,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         // Final logit softcap (Gemma-2/3/4): production forward_logits applies
         // it before sampling — without it the eval NLL measures a different
         // model than the one being served.
-        if (cfg.final_logit_softcap > 0.0f && !dispatch_policy().generation.no_logit_softcap) {
+        if (cfg.final_logit_softcap > 0.0f) {
             int64_t total = static_cast<int64_t>(csz) * V;
             int threads = 256;
             int blocks = static_cast<int>((total + threads - 1) / threads);

@@ -199,30 +199,6 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
 
 namespace {
 
-// Dump gate logits or routing decisions for diagnostics. Called from
-// compute_moe_routing under the appropriate config gates.
-void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
-    int last_tok = n - 1;
-    std::vector<float> h_logits(ne);
-    if (!debug_cuda_ok(cudaDeviceSynchronize(), "dump_top8_gate_logits") ||
-        !debug_cuda_ok(cudaMemcpy(h_logits.data(), d_logits + static_cast<ptrdiff_t>(last_tok * ne),
-                                  ne * sizeof(float), cudaMemcpyDeviceToHost),
-                       "dump_top8_gate_logits"))
-        return;
-    std::vector<std::pair<float, int>> sorted;
-    sorted.reserve(ne);
-    for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
-    std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
-                      [](auto& a, auto& b) { return a.first > b.first; });
-    std::string top8;
-    for (int i = 0; i < 8; ++i) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
-        top8 += buf;
-    }
-    IMP_LOG_DEBUG("[LOGITS] L%02d tok=%d top8_by_value: %s", layer, last_tok, top8.c_str());
-}
-
 // DEBUG_FWD: sum / L2 / first 3 router logits of the last token, layer 0.
 void dump_router_logits_l0(int n, int ne, const float* d_logits) {
     std::vector<float> rl(ne);
@@ -238,25 +214,6 @@ void dump_router_logits_l0(int n, int ne, const float* d_logits) {
     }
     IMP_LOG_DEBUG("[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f", last_tok, rsum,
                   std::sqrt(rss), rl[0], rl[1], rl[2]);
-}
-
-// [ROUTE]: expert ids and weights of the last token (first 8 of top_k).
-void dump_routing_decision(int layer, int n, int top_k, const int32_t* d_idx, const float* d_wts) {
-    int last_tok = n - 1;
-    std::vector<int32_t> h_idx(top_k);
-    std::vector<float> h_wts(top_k);
-    if (!debug_cuda_ok(cudaMemcpy(h_idx.data(), d_idx + static_cast<ptrdiff_t>(last_tok * top_k),
-                                  top_k * sizeof(int32_t), cudaMemcpyDeviceToHost),
-                       "ROUTE") ||
-        !debug_cuda_ok(cudaMemcpy(h_wts.data(), d_wts + static_cast<ptrdiff_t>(last_tok * top_k),
-                                  top_k * sizeof(float), cudaMemcpyDeviceToHost),
-                       "ROUTE"))
-        return;
-    IMP_LOG_DEBUG(
-        "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
-        "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
-        layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
-        h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
 }
 
 }  // anonymous namespace
@@ -682,15 +639,6 @@ static void router_logits_gemm(const Tensor& in, const Tensor& gate, void* scrat
     }
 }
 
-// Routing decision dump (diagnostics.dump_routing_dir): layer 0, or every layer for "all".
-static void maybe_dump_routing(const std::string& drv, int layer, int n, int top_k,
-                               const MoeRoutingResult& routing) {
-    if (drv.empty() || (layer != 0 && drv != "all"))
-        return;
-    dump_routing_decision(layer, n, top_k, static_cast<const int32_t*>(routing.expert_indices.data),
-                          static_cast<const float*>(routing.expert_weights.data));
-}
-
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -724,17 +672,14 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // hide DRAM latency across warps. A real speedup needs K split across
     // several warps per row, an algorithm change.
     constexpr int kMaxFusedExperts = 8;
-    const std::string& dl = dispatch_policy().diagnostics.dump_logits_dir;
-    bool dump_logits = !dl.empty() && (layer == 29 || dl == "all");
 
     if (fp32_gate_logits_ready) {
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
-        if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
     } else if (router_fused_route(router_in, ly.moe_gate, compute_dtype_, n, ne, top_k, use_sigmoid,
                                   norm_weights, router_bias_ptr,
-                                  RouterFusedGate{dispatch_policy().moe.router_fused, dump_logits,
-                                                  grp.active(), model_->profile().moe_router_logit_bias,
+                                  RouterFusedGate{dispatch_policy().moe.router_fused, grp.active(),
+                                                  model_->profile().moe_router_logit_bias,
                                                   ly.router_bias.data},
                                   moe_.routing_buffers, moe_.router_fused_ws, moe_.router_fused_ws_bytes,
                                   stream)) {
@@ -764,11 +709,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
 
         if (debug_forward_enabled() && layer == 0)
             dump_router_logits_l0(n, ne, static_cast<const float*>(gate_logits_f32.data));
-        if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
     }
-
-    maybe_dump_routing(dispatch_policy().diagnostics.dump_routing_dir, layer, n, top_k, routing);
 
     // Per-launch expert imbalance (#1548), always on (not diagnostics-gated):
     // answers "is this layer padding-bound" for a running server, unlike the

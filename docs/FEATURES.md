@@ -55,11 +55,11 @@ GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | `make test-embed`: Qwen3-Embedding-0.6B (SafeTensors, last-token pooling read from `1_Pooling/config.json`) against the HF golden `tests/refs/qwen3_embedding_ref.json`, cos >= 0.9999 per text |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the cross-check against a reference reranker is opt-in behind `COMPARE_URL=` (`Makefile:433 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the cross-check against a reference reranker is opt-in behind `COMPARE_URL=` (`Makefile:438 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |
-| prefix caching, `cache_control` per breakpoint | ✅ | on by default for the server; hybrids (GDN/SSM) snapshot the recurrent state at the prompt boundary and at the end of every reply (`server.transcript_snapshot`), so a resent transcript prefills only the new message; a resent reply tokenizes with the ids the model wrote (`server.transcript_token_reuse`), so a non-canonical BPE split in the reply no longer breaks the chain |
+| prefix caching, `cache_control` per breakpoint | ✅ | on by default for the server; hybrids (GDN/SSM) snapshot the recurrent state at the prompt boundary and at the end of every reply (transcript snapshot), so a resent transcript prefills only the new message; a resent reply tokenizes with the ids the model wrote (transcript token reuse), so a non-canonical BPE split in the reply no longer breaks the chain |
 | tool calling | ✅ | gated by real aider, Claude Code and OpenAI Agents SDK runs |
 | constrained decoding: JSON Schema, regex, GBNF | ✅ | an uncompilable constraint is a 400, not a free-text answer |
 | per-request speculative toggle | ✅ | |

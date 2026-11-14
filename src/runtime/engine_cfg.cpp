@@ -36,7 +36,7 @@ std::shared_ptr<Request> cfg_partner(const Request& r) {
 
 bool Engine::cfg_supported() const {
     // A pair decodes as two rows of one step: hybrids need the batched GDN decode for that.
-    const bool gdn_batch_ok = runtime_config_.runtime.gdn_batched_decode && d_ssm_seq_slots_ != nullptr;
+    const bool gdn_batch_ok = d_ssm_seq_slots_ != nullptr;
     return model_ && (!ssm_state_ || gdn_batch_ok);
 }
 

@@ -23,7 +23,6 @@ enum class GraphDemotionReason {
 
     // ── init-time ────────────────────────────────────────────────────
     ConfigNever,                 // runtime.cuda_graphs = "never"
-    DebugRaw,                    // runtime.debug_raw = true (naked FP16 path)
     CalibrationActive,           // the collector allocates on first sight of a weight
     StreamingKvConfigured,       // block table mutates per decode step
     ExpertsOnHost,               // MoE host-offload; captured decode would replay stale pointers
@@ -52,7 +51,7 @@ const char* graph_demotion_reason_name(GraphDemotionReason r);
 
 // The valve looks this many tokens ahead per sequence, not to max_tokens: a
 // worst-case max_tokens evicted a 118k prompt whose reply stopped at 206 tokens.
-// Covers a graph burst between two checks (runtime.decode_burst 128 tokens).
+// Covers a graph burst between two checks (kDecodeBurst, 128 tokens).
 inline constexpr int kKvValveHorizonTokens = 512;
 
 // Blocks one live sequence still needs for its next min(remaining, horizon)

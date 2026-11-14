@@ -106,7 +106,7 @@ Advisory jobs: `Lint`, `clang-tidy`, `Mock API contract`, `Real API contract (mo
 | `std::sort` etc. "not declared" | libstdc++ 15 dropped transitive `<algorithm>` (#906) | add the include |
 | nvcc arch error | target is `compute_120a/sm_120a` + optional `compute_120f` PTX (`IMP_SM120_FLAGS`) | never generic `sm_120` (sm120-cuda-expert) |
 | Compose/container ignores a config key | only `IMP_CONFIG` / `IMP_SET` reach every key (#1823); the 19 legacy `IMP_*` names in `docker-entrypoint.sh` are frozen | `-e IMP_SET="key=v key2=v"`; a bogus key fails at start (`no such key`) |
-| Value looks like an unread env var | engine reads only `IMP_CONFIG IMP_DETERMINISTIC IMP_FMHA_FA2 IMP_WORKER_TIMING IMP_SPEC_TRACE IMP_JUMP_TRACE IMP_PPL_DUMP`; the entrypoint translates the rest | grep `docker-entrypoint.sh` too |
+| Value looks like an unread env var | engine reads only `IMP_CONFIG IMP_DETERMINISTIC IMP_FMHA_FA2 IMP_WORKER_TIMING IMP_SPEC_TRACE IMP_PPL_DUMP`; the entrypoint translates the rest | grep `docker-entrypoint.sh` too |
 | `git worktree remove` fails | root-owned `build-dev/` inside it | `rm -rf` via container, `git worktree prune`; a worktree also needs the `models/` symlink dir or verify-fast fails in the hook |
 | `FAIL model directory not found: /src/models` from `make verify-fast` in a git worktree | `models/` symlink farm exists only in the main checkout (`scripts/verify.sh:192`) | `IMP_VERIFY_MODELS=$HOME/models make verify-fast` (or `ln -s $HOME/models models`) |
 | A gitignored `./imp.conf` in the repo root | dev builds with `-w /src` load it, images do not (#1784 fixed the build context) | read the `imp.conf loaded from` line in every log |

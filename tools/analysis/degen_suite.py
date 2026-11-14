@@ -660,7 +660,7 @@ class Suite:
         # the turn-1 transcript is the rendered history.
         name = "turn 2 resent from a prefix snapshot gives the same answer"
         kw = {"chat_template_kwargs": {"enable_thinking": False}}
-        # The fixed paragraph keeps the turn-2 prompt past server.snapshot_min_prompt_tokens (256) plus the
+        # The fixed paragraph keeps the turn-2 prompt past kSnapshotMinPromptTokens (256) plus the
         # hybrid tail rows for any reply length: at 274 tokens (Qwen3.8-27B, 893-char reply) no prompt
         # snapshot was taken and the check skipped on cached=[0, 0].
         sys_msg = ("You are a precise assistant. Answer in full sentences and explain your reasoning "

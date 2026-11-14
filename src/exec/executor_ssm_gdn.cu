@@ -64,7 +64,7 @@ static bool ssm_prefill_front_fused(const InferenceState& state, void* conv_st, 
     return false;
 }
 
-// Batched decode (runtime.gdn_batched_decode): n sequences, one token each, row i on recurrent
+// Batched decode: n sequences, one token each, row i on recurrent
 // slot ssm_seq_slots[i]. Any other slot-table form (grouped verify) has no Mamba2 kernel.
 static bool ssm_batched_decode_rows(const InferenceState& state, int n, int ssm_idx) {
     if (!state.ssm_seq_slots || state.ssm_n_seq <= 1)

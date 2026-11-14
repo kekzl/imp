@@ -112,10 +112,10 @@ inline TokenLogprobInfo build_logprob_info(const float* h_logits, int vocab_size
 
     TokenLogprobInfo info;
     info.logprob = lp_result.sampled_logprob;
-    info.text = tok->decode_token(sampled_token);
+    info.text = tok ? tok->decode_token(sampled_token) : std::string{};  // no tokenizer: ids only
     info.top.reserve(lp_result.top.size());
     for (const auto& [tid, tlp] : lp_result.top) {
-        info.top.push_back({tid, tlp, tok->decode_token(tid)});
+        info.top.push_back({tid, tlp, tok ? tok->decode_token(tid) : std::string{}});
     }
     return info;
 }

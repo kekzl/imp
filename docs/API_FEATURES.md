@@ -119,9 +119,9 @@ Only this dialect changed. On `/v1/chat/completions` the reasoning is a separate
 
 A prior assistant message may carry its `reasoning_content` back (the Anthropic dialect folds `thinking` blocks into it); the Jinja template decides whether to render it (Qwen3.8 keeps it, `preserve_thinking`).
 
-- Sending it back is what lets a hybrid (GDN) model restore its recurrent state at the end of the previous reply instead of at the prompt boundary (`server.transcript_snapshot`).
+- Sending it back is what lets a hybrid (GDN) model restore its recurrent state at the end of the previous reply instead of at the prompt boundary (transcript snapshot, always on).
 - The reply then re-tokenizes exactly, a forced think end included (it emits `"\n"` before `</think>` like the model's own close).
-- Where the model wrote a non-canonical BPE split, the server splices the ids it forwarded instead of re-encoding the text (`server.transcript_token_reuse`, 256 transcripts).
+- Where the model wrote a non-canonical BPE split, the server splices the ids it forwarded instead of re-encoding the text (transcript token reuse, 256 transcripts).
 - The built-in web UI sends it.
 
 **When you do ask for thinking, `content[0]` is not the text.** Select by
@@ -179,7 +179,7 @@ When answer never starts, response signals it:
 `content_block_stop` (deterministic digest of block text, not attestation).
 Prior-turn block with mismatched signature: `400`.
 
-Stream holds back up to `server.agent_scan_limit` tokens (default 256) with tools
+Stream holds back up to 256 tokens with tools
 to scan for reasoning model (`<think>`). Without tools: holds 8 tokens, releases on first word.
 
 On `/v1/chat/completions` at `max_tokens: 400` with JSON prompt, `think_budget: 0` and `enable_thinking: false` both fully disable reasoning.

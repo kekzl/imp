@@ -127,8 +127,6 @@ bool Engine::init_kv_cache() {
             off_reason = "MLA attention";
         else if (config_.streaming_kv_enabled)
             off_reason = "StreamingLLM is enabled";
-        else if (config_.use_green_contexts)
-            off_reason = "green contexts (cross-stream block reuse unordered)";
         else if (runtime_config_.runtime.deterministic)
             off_reason = "deterministic mode (unbounded graph loop would be burst-chunked)";
         else if (!runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching))
@@ -146,7 +144,7 @@ bool Engine::init_kv_cache() {
             // chunks roll back rejected drafts) plus the partial boundary
             // block. Sized from the spec config so the assert can't trip.
             const auto& sc = runtime_config_.speculative;
-            int spec_depth = std::max({cfg::kSpecDraftK, cfg::kSpecSuffixKMax, sc.mtp_k + 1, kJumpRowsCap});
+            int spec_depth = std::max({cfg::kSpecDraftK, cfg::kSpecSuffixKMax, sc.mtp_k + 1});
             swa_slack_tokens_ = std::max(2 * kv_bs, spec_depth + kv_bs);
             // Per sequence: the on-device decode burst (graph loop clamp). Once per pool: the
             // prefill chunk the scheduler runs (resolver incl. --set runtime.prefill_chunk_size,
@@ -156,9 +154,7 @@ bool Engine::init_kv_cache() {
             int chunk_peak = max_rows > 0 ? base_prefill_chunk(resolved, max_rows, kv_bs) : resolved;
             if (chunk_peak <= 0)
                 chunk_peak = 2048;
-            int burst_peak = runtime_config_.runtime.decode_burst > 0
-                                 ? runtime_config_.runtime.decode_burst
-                                 : 512;
+            const int burst_peak = kDecodeBurst;
             swa_burst_cap_tokens_ = burst_peak;
             swa_chunk_extra_tokens = std::max(0, chunk_peak - burst_peak);
             // Prefix caching cannot reuse freed window blocks. With a SWA
@@ -1025,7 +1021,6 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     d_rg_context_lens_ = ints(lay.rg_ctx);
     d_rg_seq_offsets_ = ints(lay.rg_soff);
     d_rg_ssm_slots_ = ints(lay.rg_slots);
-    d_gl_block_tables_ = ints(lay.gl_bt);
     d_agl_block_tables_ = ints(lay.agl_bt);
     d_cp_block_tables_ = ints(lay.cp_bt);
     d_cp_token_ = reinterpret_cast<int32_t*>(base + lay.cp_token);
@@ -1033,7 +1028,6 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     d_cp_ctx_ = ints(lay.cp_ctx);
     if (swa_sizing_active_) {
         d_pf_block_tables_swa_ = ints(lay.pf_bt_swa);
-        d_gl_block_tables_swa_ = ints(lay.gl_bt_swa);
         d_agl_block_tables_swa_ = ints(lay.agl_bt_swa);
     }
     pool_bt_cap_ = bt_cap;

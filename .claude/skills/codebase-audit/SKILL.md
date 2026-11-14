@@ -14,7 +14,7 @@ description: Structural debt, dead code, god files, duplication, flag sprawl, wh
 
 | Claim | Check | Trap that fooled a past audit |
 |---|---|---|
-| flag/symbol X is dead | `rg` across `src/ tests/ tools/` | `dump_tokens`, `force_bos`, `bench.generate` looked dead in `src/`, read in `tools/imp-cli/main.cpp` |
+| flag/symbol X is dead | `rg` across `src/ tests/ tools/` | `dump_tokens` looked dead in `src/`, read in `tools/imp-cli/main.cpp` |
 | config field never read | grep the leaf for a value-read in a conditional, excluding decl/parse/copy | a local var with the field's name hid the read (`fp8_auto_legacy`) |
 | kernel/function dead | trace the call graph, not `<<<` sites; code-graph has NO launch edges right now (`ccg enrich` broken) so `rg` the launcher | `q4k_imma` CACHE was dead; `mmq_q4k_imma_tile`/`_reorder` live via `q4k_imma_prefill -> mmq_q4k_imma_gemm`; only ~30 LOC dead, not "~1200" |
 | env var dead | grep `docker-entrypoint.sh` too | `IMP_KV_FP8` read nowhere in `src/`, translated by the entrypoint into `--kv-fp8` |

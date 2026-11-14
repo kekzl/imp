@@ -124,17 +124,12 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             tmp.K = static_cast<int>(x.shape[1]);
 
             int M = static_cast<int>(x.shape[0]);
-            // diagnostics.nvfp4_force_dequant routes the M=1 decode path through gemm_nvfp4
-            // (dequant->cuBLAS GEMV) instead of the native gemv_nvfp4_kpar kernel. Used to bisect
-            // Mistral-Small-3.2-NVFP4 long-form repetition loops: if forcing dequant fixes coherence,
-            // the bug is numerical drift in gemv_nvfp4_kpar. Mirrors the Gemma-4 MoE M>1 fallback.
-            const bool force_dequant = imp::process_diag_nvfp4_force_dequant();
-            if (M == 1 && !force_dequant && beta == 0.0f) {
+            if (M == 1 && beta == 0.0f) {
                 // GEMV path (no beta — gemv_nvfp4_kpar overwrites output)
                 gemv_nvfp4_kpar(tmp, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data),
                                 static_cast<int>(tmp.N), static_cast<int>(tmp.K), stream);
             } else {
-                // Prefill, forced-dequant, or beta!=0: dequant + FP16 GEMM.
+                // Prefill or beta!=0: dequant + FP16 GEMM.
                 gemm_nvfp4(tmp, x, y, stream, beta);
             }
             return;

@@ -32,7 +32,6 @@ static EngineConfig ragged_engine_config() {
     cfg.kv_cache_dtype = QType::F16;
     cfg.compute_dtype = QType::F16;
     cfg.kv_block_size = 16;
-    cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
     cfg.use_prefix_caching = false;
     cfg.dual_path_quant = false;
@@ -214,8 +213,9 @@ TEST_F(RaggedPrefillTest, ChunkedRagged) {
 }
 
 // Staggered arrival: two prompts decode while two more prefill, so the late pair's ragged
-// forward carries the early pair as one-row riders (runtime.prefill_mixed_decode). Must match
-// the separate-step arm's tokens, and the engine must report mixed steps actually ran.
+// forward carries the early pair as one-row riders (mixed step). Must match
+// the serial arm's tokens (prefill_batch off: serial prefill, separate decode steps; ragged ==
+// serial is pinned above), and the engine must report mixed steps actually ran.
 static std::vector<std::vector<int32_t>> run_staggered(Engine& engine,
                                                        const std::vector<std::vector<int32_t>>& prompts,
                                                        int max_tokens) {
@@ -262,7 +262,6 @@ TEST_F(RaggedPrefillTest, MixedDecodeRidersMatchSeparateSteps) {
         auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
         gemm_init();
         auto rc = ragged_runtime_config(/*prefill_batch=*/true);
-        rc.runtime.prefill_mixed_decode = true;
         set_pending_runtime_config(rc);
         Engine engine;
         ASSERT_TRUE(engine.init(tm.model, ragged_engine_config()));
@@ -273,9 +272,7 @@ TEST_F(RaggedPrefillTest, MixedDecodeRidersMatchSeparateSteps) {
     {
         auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
         gemm_init();
-        auto rc = ragged_runtime_config(/*prefill_batch=*/true);
-        rc.runtime.prefill_mixed_decode = false;
-        set_pending_runtime_config(rc);
+        set_pending_runtime_config(ragged_runtime_config(/*prefill_batch=*/false));
         Engine engine;
         ASSERT_TRUE(engine.init(tm.model, ragged_engine_config()));
         plain_out = run_staggered(engine, prompts, 8);
@@ -297,7 +294,6 @@ TEST_F(RaggedPrefillTest, FfnGraphReplayMatchesEagerRows) {
     auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
     gemm_init();
     RuntimeConfig rc = ragged_runtime_config(/*prefill_batch=*/true);
-    rc.runtime.prefill_ffn_graph = true;
     // With the startup prefill-graph prewarm (#3017) the first wave already counted 60 FFN replays:
     // off, so the first wave is the first sighting the capture lifecycle is measured from.
     rc.runtime.prefill_graph_prewarm = 0;

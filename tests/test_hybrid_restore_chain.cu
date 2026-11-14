@@ -190,7 +190,7 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
     ASSERT_NE(ssm, nullptr) << "hybrid checkpoint without a recurrent state pool";
     ASSERT_NE(engine->kv_cache(), nullptr);
     const int kv_bs = engine->kv_cache()->block_size();
-    const int min_snap = engine->runtime_config().server.snapshot_min_prompt_tokens;
+    const int min_snap = imp::kSnapshotMinPromptTokens;
 
     // The engine RESOLVES the requested dtype (init_resolve_ssm_dtype_), so the
     // arm asserts against what it got, not against what it asked for.
@@ -421,7 +421,7 @@ TEST_P(HybridRestoreChainTest, HybridRestoreChainStateStaysClose) {
         << "). The restore itself is wrong, not the boundary count.";
 }
 
-// Transcript restore (server.transcript_snapshot): turn 1 is a prompt plus 60 greedy tokens,
+// Transcript restore (finish-time transcript snapshot): turn 1 is a prompt plus 60 greedy tokens,
 // turn 2 resends prompt + reply + new text and restores at the reply's last forwarded token
 // (an unaligned position; its partial KV block is cloned). The warm state after turn 2's
 // prefill is measured against a cold prefill of the same prompt. The warm history (turn-1
@@ -536,7 +536,7 @@ TEST_P(HybridRestoreChainTest, TranscriptRestoreStateStaysClose) {
     // Turn 1: opening + three turns of text, 60 greedy tokens. Turn 2: the transcript + one more.
     constexpr int kReply = 60;
     std::vector<int32_t> prompt1 = tokenize(kOpening + turn_text(0) + turn_text(1) + turn_text(2));
-    ASSERT_GE(static_cast<int>(prompt1.size()), engine->runtime_config().server.snapshot_min_prompt_tokens);
+    ASSERT_GE(static_cast<int>(prompt1.size()), imp::kSnapshotMinPromptTokens);
     go_cold();
     int c1 = -1;
     // runtime.deterministic saves no transcript snapshot at finish (#2568): turn 1 runs without it.

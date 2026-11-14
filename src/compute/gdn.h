@@ -149,7 +149,7 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
 
 // Reference multi-token GDN scan: deliberately unfused, state in global memory, per-token
 // serial loop; L2-norm via shared-memory reductions (no register-cached state). Same
-// delta-rule math as gdn_scan_fused_f32. Selected by gdn.ref_kernel / runtime.debug_raw.
+// delta-rule math as gdn_scan_fused_f32. Selected by gdn.ref_kernel.
 void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                             int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,

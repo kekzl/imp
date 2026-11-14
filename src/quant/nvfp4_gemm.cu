@@ -5,7 +5,6 @@
 #include "core/tensor.h"
 #include "core/logging.h"
 #include "core/pdl.h"
-#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>
@@ -214,12 +213,10 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     // Small-M chunks (spec-verify: M=drafts+1, boundary prefills): the dequant fallback
     // rewrites the whole FP16 weight EVERY call. The batched-M GEMV instead reads the NVFP4
     // weight once per MR=4 tile: at M<=16 that's <=4 passes at 0.25x FP16 bytes vs the
-    // fallback's ~2.25x (dequant read+write + GEMM read). beta!=0, non-F16 output, and the
-    // nvfp4-force-dequant bisect flag keep the fallback. FP32 accumulate + convert, same
-    // numerics class as the M=1 decode GEMV.
+    // fallback's ~2.25x (dequant read+write + GEMM read). beta!=0 and non-F16 output keep the
+    // fallback. FP32 accumulate + convert, same numerics class as the M=1 decode GEMV.
     constexpr int64_t kSmallMBatchedGemv = 16;
-    if (M <= kSmallMBatchedGemv && beta == 0.0f && B.qtype == QType::F16 &&
-        C.qtype == QType::F16 && !process_diag_nvfp4_force_dequant()) {
+    if (M <= kSmallMBatchedGemv && beta == 0.0f && B.qtype == QType::F16 && C.qtype == QType::F16) {
         std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
         const size_t y32_bytes = static_cast<size_t>(M * N) * sizeof(float);
         void* y32 = ensure_dequant_buffer(y32_bytes, stream);

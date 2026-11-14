@@ -46,7 +46,6 @@ imp::EngineConfig knob_engine_config() {
     cfg.kv_cache_dtype = imp::QType::F16;
     cfg.compute_dtype = imp::QType::F16;
     cfg.kv_block_size = 16;
-    cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
     cfg.use_prefix_caching = false;
     cfg.dual_path_quant = false;

@@ -61,13 +61,13 @@ namespace imp {
 // per-subsystem engine_*.cpp translation units.
 
 namespace {
-// After warmup's raise_ceiling (it refuses once the worker runs). A "global" capture forbids the
-// worker's driver calls in every thread while the engine captures. The retry window starts with
-// serving: init growth (replan) always reads free VRAM.
+// After warmup's raise_ceiling (it refuses once the worker runs). Needs relaxed capture (cuda_graph.cu):
+// a global capture would forbid the worker's driver calls while the engine captures. The retry window
+// starts with serving: init growth (replan) always reads free VRAM.
 void start_kv_grow_ahead(KVCache* kv, const RuntimeConfig& rc) {
     if (kv != nullptr)
         kv->set_serving_growth(rc.kv_cache.grow_retry_ms, rc.kv_cache.grow_ahead_fit_last);
-    if (kv != nullptr && rc.kv_cache.grow_ahead && rc.runtime.graph_capture_mode != "global")
+    if (kv != nullptr && rc.kv_cache.grow_ahead)
         kv->start_grow_ahead();
 }
 }  // namespace
@@ -240,13 +240,9 @@ int Engine::encoder_max_tokens() const {
     return encoder_ws_storage_ ? encoder_ws_storage_->max_tokens : 0;
 }
 
-cudaStream_t Engine::prefill_stream() const {
-    return (config_.use_green_contexts && green_ctx_.is_available()) ? green_ctx_.prefill_stream() : stream_;
-}
+cudaStream_t Engine::prefill_stream() const { return stream_; }
 
-cudaStream_t Engine::decode_stream() const {
-    return (config_.use_green_contexts && green_ctx_.is_available()) ? green_ctx_.decode_stream() : stream_;
-}
+cudaStream_t Engine::decode_stream() const { return stream_; }
 
 void Engine::reset_ssm_state(int seq_id) {
     // Public teardown entry point (API re-prefill / context reset / server
@@ -579,7 +575,7 @@ bool Engine::preprocess_image(std::span<const uint8_t> data, ImageData& out) {
     return vision_.preprocess(data, out);
 }
 
-// Initialization decomposed into sub-phases: init_apply_debug_raw_overrides_ /
+// Initialization decomposed into sub-phases: init_apply_rope_override_ /
 // init_resolve_kv_dtype_policy_ / init_resolve_ssm_dtype_ / init_resolve_fp8_prefill_ /
 // init_resolve_quant_flags_ / init_compute_max_seq_len_ live in runtime/engine_init_resolver.cpp.
 
@@ -618,8 +614,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // default to true, OR-ing would silently override an explicit
     // `use_prefix_caching=0` embedder choice. Both shipped tools already pass
     // their own resolved value, so nothing that ships loses caching (#1299/#1314).
-    config_.use_green_contexts = config_.use_green_contexts || runtime_config_.server.green_contexts ||
-                                 runtime_config_.runtime.prefill_overlap;
     if (config_.prefix_pin_budget_pct == 25)  // EngineConfig default untouched → take imp.conf
         config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
     if (config_.mmproj_path.empty())
@@ -668,7 +662,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      mp.is_ssm, mp.is_hybrid, mp.is_dense, attn_variant_name(mp.attn_variant));
     }
 
-    init_apply_debug_raw_overrides_();
     init_apply_rope_override_();
     init_resolve_kv_dtype_policy_();
     init_resolve_prefill_graph_();
@@ -856,7 +849,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     (void)kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
                                    << 20);
     wire_kv_swap_();
-    executor_->set_ffn_graphs_enabled(runtime_config_.runtime.prefill_ffn_graph, config_.use_cuda_graphs);
+    executor_->set_ffn_graphs_enabled(config_.use_cuda_graphs);
     prefill_graphs_.set_short_max(runtime_config_.runtime.prefill_graph_prewarm);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate
@@ -914,118 +907,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     return true;
 }
 
-std::string Engine::generate(const std::string& prompt, int max_tokens, float temperature, float top_p,
-                             int top_k, int seed, bool apply_chat_template, float min_p,
-                             float repetition_penalty, float frequency_penalty, float presence_penalty) {
-    Tokenizer* tok = model_->tokenizer();
-    if (!tok) {
-        return "";
-    }
-
-    std::vector<int32_t> tokens;
-
-    if (apply_chat_template && !chat_template_.is_raw()) {
-        std::vector<ChatMessage> messages = {{"user", prompt}};
-        if (vision_.has_input() && vision_.is_available()) {
-            tokens = chat_template_.apply_with_image(*tok, messages, vision_.num_image_tokens());
-        } else {
-            tokens = chat_template_.apply(*tok, messages);
-        }
-        IMP_LOG_INFO("Applied %s chat template (%zu tokens%s)",
-                     chat_template_family_name(chat_template_.family()), tokens.size(),
-                     vision_.has_input() ? ", with image" : "");
-    } else {
-        tokens = tok->encode(prompt);
-        if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
-            tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
-        }
-    }
-
-    IMP_LOG_INFO("Encoded %zu tokens", tokens.size());
-    {
-        std::string dump;
-        for (size_t i = 0; i < tokens.size() && i < 64; ++i) {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%d", tokens[i]);
-            dump += buf;
-            if (i + 1 < tokens.size())
-                dump += ", ";
-        }
-        if (tokens.size() > 64)
-            dump += "...";
-        IMP_LOG_INFO("Token IDs: [%s]", dump.c_str());
-    }
-
-    auto req = std::make_shared<Request>();
-    req->id = next_request_id_++;
-    req->input_tokens = std::move(tokens);
-    req->max_tokens = clamp_to_context(max_tokens, max_seq_len(), req->input_tokens.size());
-    req->temperature = temperature;
-    req->top_p = top_p;
-    req->top_k = top_k;
-    req->seed = seed;
-    req->min_p = min_p;
-    req->repetition_penalty = repetition_penalty;
-    req->frequency_penalty = frequency_penalty;
-    req->presence_penalty = presence_penalty;
-    req->status = RequestStatus::PENDING;
-
-    scheduler_->add_request(req);
-
-    while (req->status == RequestStatus::PENDING || req->status == RequestStatus::PREFILLING) {
-        bool has_work = step();
-        if (!has_work)
-            break;
-    }
-
-    // Decode: try conditional graph loop, fall back to step(). Think budget is
-    // enforced device-side in post_decode_step_kernel; penalties applied
-    // device-side via apply_penalties_device_count in the graph loop.
-    if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() && config_.use_cuda_graphs &&
-        !offload_mgr_) {
-        int32_t first_token = req->output_tokens.back();
-        auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
-        if (!graph_tokens.empty()) {
-            int32_t last = graph_tokens.back();
-            for (int32_t t : graph_tokens)
-                track_think_state(*req, t);
-            bool hit_stop = should_stop(*req, last);
-            if (hit_stop)
-                graph_tokens.pop_back();
-
-            for (int32_t t : graph_tokens) {
-                req->output_tokens.push_back(t);
-            }
-
-            bool done = hit_stop || static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
-            if (done) {
-                req->status = RequestStatus::FINISHED;
-                kv_manager_->free_sequence(req->id);
-            }
-        }
-    }
-
-    // Fallback: per-step decode.
-    while (req->status != RequestStatus::FINISHED && req->status != RequestStatus::CANCELLED) {
-        bool has_work = step();
-        if (!has_work && req->status != RequestStatus::FINISHED && req->status != RequestStatus::CANCELLED) {
-            break;
-        }
-    }
-
-    if (req->output_tokens.empty()) {
-        return "";
-    }
-
-    vision_.clear_image();
-
-    std::string result = tok->decode(req->output_tokens);
-    return result;
-}
-
 // prepare_graph_loop: moved to engine_speculative.cpp
 // build_graph_config: moved to engine_speculative.cpp
-// try_graph_loop_decode: moved to engine_speculative.cpp
 // try_launch_async_graph_loop: moved to engine_speculative.cpp
 
 void Engine::add_request(std::shared_ptr<Request> req) {

@@ -175,8 +175,7 @@ TEST_F(HybridSharedScoreTest, RowsRestoringOneSnapshotAreIndependent) {
     ASSERT_NE(e->ssm_state(), nullptr) << "hybrid checkpoint without a recurrent state pool";
     const int bs = kKVBlockSize;
     const int restore_at = (hint / bs) * bs;
-    ASSERT_GE(restore_at, e->runtime_config().server.snapshot_min_prompt_tokens)
-        << "shared evidence too short to be snapshotted";
+    ASSERT_GE(restore_at, imp::kSnapshotMinPromptTokens) << "shared evidence too short to be snapshotted";
     const std::vector<std::vector<int32_t>> wave(prompts.begin() + 1, prompts.end());
     std::vector<std::vector<int32_t>> wave_rev(wave.rbegin(), wave.rend());
 

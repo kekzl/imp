@@ -5,9 +5,9 @@
 // inter-token gap stays bounded during concurrent ingest (#1643). It counts
 // only whether anyone decodes, not how many wait, so a waiting burst can
 // starve behind its own first finishers.
-// runtime.prefill_cap_fairness = W scales the cap by W x waiting / decoding
-// once that ratio exceeds 1, clamped to the full chunk. W = 1 is symmetric,
-// W = 4 (default) relaxes once under a quarter of the wave still waits,
+// The fairness weight W scales the cap by W x waiting / decoding once that
+// ratio exceeds 1, clamped to the full chunk. W = 1 is symmetric, W = 4
+// (kPrefillCapFairness) relaxes once under a quarter of the wave still waits,
 // W = 0 disables scaling.
 //
 // CUDA-free and RuntimeConfig-free so the CPU lane can pin the table.
@@ -17,10 +17,14 @@
 
 namespace imp {
 
+// Sweep W 1/2/4 (#1951), Qwen3-14B-NVFP4 32 x 982-token burst: W=4 aggregate +1.9..+2.5 % over
+// W=1, TTFT p90 1600 -> 1456 ms; the 31-stream protection scenario is identical on every arm.
+inline constexpr int kPrefillCapFairness = 4;
+
 // Row cap for this step's prefill, 0 = uncapped. `decode_cap` is the
 // configured cap, `full_chunk` the resolved chunk size (executor max,
 // block-rounded), `n_waiting` the requests in prefill this step, `n_decoding`
-// the requests in the decode batch, `weight` runtime.prefill_cap_fairness.
+// the requests in the decode batch, `weight` the fairness weight W.
 inline int paced_prefill_cap(int decode_cap, int full_chunk, int n_waiting, int n_decoding, int weight) {
     if (decode_cap <= 0 || n_decoding <= 0)
         return 0;

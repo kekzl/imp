@@ -27,10 +27,8 @@ typedef struct {
     int max_tokens;
 
     // CUDA 13.1 features
-    int enable_green_contexts;      // 0 = off, 1 = on
-    float green_ctx_prefill_ratio;  // SM ratio for prefill (default 0.8)
-    int enable_pdl;                 // Programmatic Dependent Launch
-    int enable_cuda_graphs;         // CUDA Graph capture for decode
+    int enable_pdl;          // Programmatic Dependent Launch
+    int enable_cuda_graphs;  // CUDA Graph capture for decode
 
     // Layer offloading
     int gpu_layers;  // Layers to keep on GPU (-1 = all, 0 = all offloaded)

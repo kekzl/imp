@@ -122,10 +122,6 @@ bool Engine::spec_capture_ready_(int ctx_padded, int rows, bool paged_attn) {
     const auto& scfg = runtime_config_.speculative;
     if (!scfg.capture || spec_capture_doomed_)
         return false;
-    // The census probe owns the forward when enabled (capture+destroy per
-    // chunk, diagnostics only).
-    if (runtime_config_.diagnostics.spec_capture_probe)
-        return false;
     // SSMState hybrids ARE capture-eligible (pad rows read chunk length from
     // device, cache keyed on the recurrent slot); MoE host-offload is not: it
     // syncs on the host per layer.
@@ -321,69 +317,6 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         state.n_tokens, state.ctx_capacity, rec_slot, ms(t_cap0, t_inst0), ms(t_inst0, t_launch0),
         ms(t_launch0, std::chrono::steady_clock::now()));
     return true;
-}
-
-// #847 graph-captured-verify feasibility probe (diagnostics.spec_capture_probe).
-// Capture/instantiate failure (e.g. the cuBLASLt status-14 class) falls back
-// to eager, so the verify step always completes. NOT a perf path: answers
-// only whether the forward is capturable, and from which chunk, per model
-// class.
-void Engine::spec_capture_probe_forward_(InferenceState& state, Tensor& logits_out,
-                                         cudaStream_t stream) {
-    static long probes = 0, launched = 0;
-    probes++;
-    cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("[spec-capture-probe] begin capture failed: %s", cudaGetErrorString(err));
-        cudaGetLastError();
-        executor_->forward_logits(state, logits_out, stream);
-        return;
-    }
-    bool forward_threw = false;
-    const char* what = "";
-    try {
-        executor_->forward_logits(state, logits_out, stream);
-    } catch (const std::exception& e) {
-        forward_threw = true;
-        what = e.what();
-    } catch (...) {
-        forward_threw = true;
-        what = "(non-std exception)";
-    }
-    cudaGraph_t raw_graph = nullptr;
-    err = cudaStreamEndCapture(stream, &raw_graph);
-    CudaGraph graph;
-    graph.reset(raw_graph);
-    bool ran = false;
-    if (!forward_threw && err == cudaSuccess && graph) {
-        cudaGraphExec_t raw_exec = nullptr;
-        err = cudaGraphInstantiate(&raw_exec, graph, 0);
-        CudaGraphExec exec;
-        exec.reset(raw_exec);
-        if (err == cudaSuccess) {
-            err = cudaGraphLaunch(exec, stream);
-            if (err == cudaSuccess) {
-                ran = true;
-                launched++;
-            } else {
-                IMP_LOG_WARN("[spec-capture-probe] graph launch failed: %s",
-                             cudaGetErrorString(err));
-            }
-        } else {
-            IMP_LOG_WARN("[spec-capture-probe] instantiate failed: %s", cudaGetErrorString(err));
-        }
-    } else {
-        IMP_LOG_WARN("[spec-capture-probe] capture failed: %s%s%s",
-                     err != cudaSuccess ? cudaGetErrorString(err) : "(forward threw)",
-                     forward_threw ? " forward exception: " : "", forward_threw ? what : "");
-    }
-    cudaGetLastError();
-    IMP_LOG_INFO("[spec-capture-probe] chunk n_tokens=%d %s (launched %ld/%ld)", state.n_tokens,
-                 ran ? "CAPTURED+LAUNCHED" : "eager fallback", launched, probes);
-    if (!ran) {
-        // Nothing executed during a failed capture — run the forward for real.
-        executor_->forward_logits(state, logits_out, stream);
-    }
 }
 
 }  // namespace imp

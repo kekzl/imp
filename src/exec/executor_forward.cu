@@ -422,13 +422,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_emb, stream));
 
     // ---- Step 2: Transformer/Hybrid layers ----
-    int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
-    // [diagnostics] exit_layer = N runs only N layers (-1 = full forward).
-    {
-        const int s_exit = dispatch_policy().diagnostics.exit_layer;
-        if (s_exit > 0)
-            max_layer = std::min(max_layer, s_exit);
-    }
+    const int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
     const int skip_start = state.skip_layer_start;
     const int skip_end = state.skip_layer_end;
     for (int i = 0; i < max_layer; ++i) {
@@ -1141,7 +1135,7 @@ gdn_state_dump_done:
 void GraphExecutor::finalize_logits_(Tensor& logits_out, int n, cudaStream_t stream) {
     const auto& cfg = model_->config();
     // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
-    if (cfg.final_logit_softcap > 0.0f && !dispatch_policy().generation.no_logit_softcap && logits_out.data) {
+    if (cfg.final_logit_softcap > 0.0f && logits_out.data) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
         int blocks = static_cast<int>((n_logits + threads - 1) / threads);

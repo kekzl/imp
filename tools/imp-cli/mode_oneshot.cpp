@@ -134,9 +134,7 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
         } else {
             tokens = tok->encode(args.prompt);
             // Prepend BOS when the tokenizer requires it (e.g. Gemma)
-            bool add_bos = tok->add_bos();
-            if (ctx->engine->runtime_config().generation.force_bos)
-                add_bos = true;
+            const bool add_bos = tok->add_bos();
             if (add_bos) {
                 tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
             }
@@ -322,33 +320,6 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
                             chain[k].matches, chain[k].total, 100.0f * chain[k].rate(), k);
                 }
             }
-        }
-
-        // Benchmark using Engine::generate() (conditional graph loop) for comparison.
-        // This eliminates per-step host overhead — shows true GPU-limited throughput.
-        if (ctx->engine->runtime_config().bench.generate) {
-            // Reset context for fresh generation
-            if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
-                fprintf(stderr, "Context reset error: %s\n", imp_error_string(reset_err));
-                return 1;
-            }
-
-            // Use Engine::generate() directly for accurate timing
-            imp::Engine* engine = ctx->engine.get();
-            auto t_gen_start = std::chrono::high_resolution_clock::now();
-            std::string gen_result = engine->generate(args.prompt, params.max_tokens, params.temperature,
-                                                      params.top_p, params.top_k, params.seed, have_template);
-            auto t_gen_end = std::chrono::high_resolution_clock::now();
-
-            // Count output tokens by encoding the result
-            auto gen_toks = tok->encode(gen_result);
-            int gen_n = static_cast<int>(gen_toks.size());
-            double gen_total_ms = std::chrono::duration<double, std::milli>(t_gen_end - t_gen_start).count();
-            // Estimate decode time: total - prefill (reuse prefill timing from above)
-            double gen_decode_ms = gen_total_ms - prefill_ms;
-            double gen_toks_s = (gen_decode_ms > 0 && gen_n > 0) ? (gen_n / (gen_decode_ms / 1000.0)) : 0;
-            fprintf(stderr, "graph-loop: %d tg tokens in %.2f ms (%.2f tok/s, %.2f ms total)\n", gen_n,
-                    gen_decode_ms, gen_toks_s, gen_total_ms);
         }
     }
     return 0;

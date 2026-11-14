@@ -34,10 +34,11 @@ using engine_internal::build_logprob_info;
 using engine_internal::free_prefill_buffers;
 
 namespace {
-// Hybrid riders wait on the whole chunk forward: runtime.prefill_chunk_decode_cap_hybrid bounds it
-// (min with the cap; either at 0 leaves the cap as configured).
-int step_decode_cap(int cap, int hybrid_cap, bool hybrid, size_t n_riders) {
-    return (hybrid && n_riders > 0 && cap > 0 && hybrid_cap > 0) ? std::min(cap, hybrid_cap) : cap;
+// Hybrid riders wait on the whole chunk forward: min(cap, 512). Qwen3.8-27B-NVFP4, 31 riders + a
+// 4151-token ingest: their ITL max 105-107 -> 68-69 ms, ingest TTFT 458-475 -> 532-539 ms.
+constexpr int kPrefillChunkDecodeCapHybrid = 512;
+int step_decode_cap(int cap, bool hybrid, size_t n_riders) {
+    return (hybrid && n_riders > 0 && cap > 0) ? std::min(cap, kPrefillChunkDecodeCapHybrid) : cap;
 }
 }  // namespace
 
@@ -53,22 +54,22 @@ void Engine::step_prefill(cudaStream_t stream) {
     // every chunk forward inserts its latency (~40-80 ms at 2048) between two
     // decode steps of concurrently DECODING sessions. Caps the chunk while
     // decoders are active; full chunk returns once nobody decodes.
-    // runtime.prefill_cap_fairness=W scales the cap by W x waiting/decoding
-    // (prefill_pacing.h), so a burst's waiters aren't paced behind its first finishers. 0 when nobody decodes.
+    // kPrefillCapFairness = W scales the cap by W x waiting/decoding
+    // (prefill_pacing.h), so a burst's waiters aren't paced behind its first finishers. 0 when nobody
+    // decodes.
 
-    // Mixed step (runtime.prefill_mixed_decode): the decoders ride this step's ragged forward
+    // Mixed step: the decoders ride this step's ragged forward
     // as one-row members, so their rows come off the same row cap and no decode forward runs.
     const bool ragged_mode = prefill_ragged_enabled_();
     std::vector<std::shared_ptr<Request>> riders;
     if (ragged_mode)
         mixed_collect_riders_(riders);
     const int configured_cap = step_decode_cap(runtime_config_.runtime.prefill_chunk_decode_cap,
-                                               runtime_config_.runtime.prefill_chunk_decode_cap_hybrid,
                                                ssm_state_ != nullptr, riders.size());
     const int decode_cap = paced_prefill_cap(configured_cap, effective_chunk,
                                              static_cast<int>(sched_prefill_batch_.size()),
                                              static_cast<int>(sched_decode_batch_.size()),
-                                             runtime_config_.runtime.prefill_cap_fairness);
+                                             kPrefillCapFairness);
     if (decode_cap > configured_cap)
         IMP_LOG_DEBUG("Prefill pacing: %zu waiting / %zu decoding, cap %d -> %d", sched_prefill_batch_.size(),
                       sched_decode_batch_.size(), configured_cap, decode_cap);
@@ -89,11 +90,6 @@ void Engine::step_prefill(cudaStream_t stream) {
     // kPrefillForwardFloorTokens charge per forward).
     // Starting index rotates so the ingests skipped this step are the ones that ran last step.
     const size_t n_prefill = sched_prefill_batch_.size();
-    const int batch_cap = runtime_config_.runtime.prefill_batch_decode_cap;
-    // The count cap bounds FORWARDS: a ragged group is one forward however
-    // many sequences it packs, so it counts once (its rows are bounded by
-    // the token budget below, not by the count).
-    const bool forward_capped = batch_cap > 0 && !sched_decode_batch_.empty();
     constexpr int kPrefillForwardFloorTokens = 256;
     // decode_cap is already 0 when nobody decodes (paced_prefill_cap).
     const bool budgeted = decode_cap > 0;
@@ -123,7 +119,6 @@ void Engine::step_prefill(cudaStream_t stream) {
     // left, so a member is charged the rows it will get, not its full chunk.
     int ragged_rows_left = std::min(effective_chunk, executor_->max_tokens());
     ragged_rows_left -= static_cast<int>(riders.size());
-    size_t forwards = 0;
     for (size_t i = 0; i < n_prefill; i++) {
         auto& req = sched_prefill_batch_[(start + i) % n_prefill];
         // Charge from the PRE-call remaining: step_prefill_one advances
@@ -138,15 +133,10 @@ void Engine::step_prefill(cudaStream_t stream) {
             rows = std::min(chunk_tokens, ragged_rows_left);
             if (ran > 0 && rows <= 0)
                 break;  // the ragged forward is full
-            if (ran > 0 && ragged_batch.empty() && forward_capped &&
-                forwards >= static_cast<size_t>(batch_cap))
-                break;
             charge = (ragged_floor_charged || rows >= kPrefillForwardFloorTokens)
                          ? rows
                          : kPrefillForwardFloorTokens;
         } else {
-            if (ran > 0 && forward_capped && forwards >= static_cast<size_t>(batch_cap))
-                break;
             charge = std::max(kPrefillForwardFloorTokens, chunk_tokens);
         }
         // `budgeted`, not `token_budget > 0`: an exhausted budget must break,
@@ -157,14 +147,11 @@ void Engine::step_prefill(cudaStream_t stream) {
         if (budgeted && ran > 0 && !joins_group && charge > token_budget)
             break;
         if (rides_ragged) {
-            if (ragged_batch.empty())
-                forwards++;
             ragged_batch.push_back(req);
             ragged_floor_charged = true;
             ragged_rows_left -= rows;
         } else {
             step_prefill_one(req, effective_chunk, stream);
-            forwards++;
         }
         kv_manager_->touch(req->id);
         ran++;
@@ -824,11 +811,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 }
             }
 
-            // Under overlap the decode batch owns the parity slots of
-            // d_sample_result_, so the prefill sample gets its own slot
-            // (allocated at warmup when overlap is ready; shared slot is the serial-path default).
-            int32_t* sample_slot =
-                d_prefill_sample_ ? d_prefill_sample_ : executor_->d_sample_result();
+            int32_t* sample_slot = executor_->d_sample_result();
             const bool sample_enqueued = sample_greedy_device(last_logits, sample_slot,
                                                               h_sample_pinned_.as<int32_t>(), pf_stream);
 

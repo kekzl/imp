@@ -142,7 +142,7 @@ struct InferenceState {
     const int* h_seq_q_offsets = nullptr;  // HOST [n_sequences] per-seq prefill_offset
     const int* h_ssm_slots = nullptr;      // HOST [n_sequences] recurrent-state slots
     [[nodiscard]] bool ragged_prefill() const { return is_prefill && n_sequences > 1 && h_seq_offsets != nullptr; }
-    // Mixed prefill+decode step (runtime.prefill_mixed_decode): the LAST n_riders sequences
+    // Mixed prefill+decode step: the LAST n_riders sequences
     // of a ragged prefill state are decoding requests with one row each; run_attention gives
     // them one batched paged-decode launch per layer instead of the per-member prefill
     // dispatch.

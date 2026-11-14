@@ -85,26 +85,20 @@ bool Engine::mixed_rider_ok_(const Request& r) const {
 
 void Engine::mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders) {
     riders.clear();
-    if (!runtime_config_.runtime.prefill_mixed_decode || sched_decode_batch_.empty())
+    if (sched_decode_batch_.empty())
         return;
     // Only when nothing else owns the decode batch: a pipelined step in flight,
-    // the constrained pipeline, the MoE offload manager, or prefill/decode
-    // stream overlap. A PARKED async runner is fine: step_impl_ resumes a
-    // running one before step_prefill is reached.
+    // the constrained pipeline or the MoE offload manager. A PARKED async runner
+    // is fine: step_impl_ resumes a running one before step_prefill is reached.
+    // GDN hybrids ride too: riders decode on their live slots through one batched
+    // decode conv + scan per layer (exec/gdn_ragged.h); Mamba2 never reaches here (model gate).
     const char* why = nullptr;
-    // GDN hybrids: riders decode on their live slots through one batched decode conv
-    // + scan per layer (exec/gdn_ragged.h). Gated by runtime.prefill_mixed_decode_hybrid;
-    // Mamba2 never reaches here (model gate).
-    if (ssm_state_ && !runtime_config_.runtime.prefill_mixed_decode_hybrid)
-        why = "recurrent model";
-    else if (bd_pipe_.in_flight)
+    if (bd_pipe_.in_flight)
         why = "decode pipeline in flight";
     else if (cpipe_.active)
         why = "constrained pipeline";
     else if (offload_mgr_)
         why = "MoE offload";
-    else if (overlap_ready_)
-        why = "prefill_overlap";
     const int max_bs = runtime_config_.runtime.max_batch_size;
     if (!why && max_bs > 0 && static_cast<int>(sched_decode_batch_.size()) > max_bs)
         why = "decode batch over max_batch_size";

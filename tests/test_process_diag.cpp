@@ -26,15 +26,12 @@ RuntimeConfig make_non_default() {
     c.diagnostics.debug_forward = true;
     c.diagnostics.debug_template = true;
     c.diagnostics.graph_diag = true;
-    c.diagnostics.nvfp4_force_dequant = true;
     c.diagnostics.log_gemm_algo = true;
     c.diagnostics.audit_nvfp4_scales = true;
     c.diagnostics.dump_hidden_dir = "/var/tmp/imp-hidden";
     c.diagnostics.graph_dump_dir = "/var/tmp/imp-graphs";
 
     c.runtime.no_pdl = true;
-    c.runtime.no_vision_graph = true;
-    c.runtime.graph_capture_mode = "global";
     c.runtime.prefill_graph = false;
     c.runtime.deterministic_gemm = true;
 
@@ -87,7 +84,6 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_TRUE(process_diag_debug_forward());
     EXPECT_TRUE(process_diag_debug_template());
     EXPECT_TRUE(process_diag_graph_diag());
-    EXPECT_TRUE(process_diag_nvfp4_force_dequant());
     EXPECT_TRUE(process_diag_log_gemm_algo());
     EXPECT_TRUE(process_diag_audit_nvfp4_scales());
     ASSERT_NE(process_diag_dump_hidden_dir(), nullptr);
@@ -96,8 +92,6 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_EQ(std::string(process_diag_graph_dump_dir()), "/var/tmp/imp-graphs");
 
     EXPECT_TRUE(process_diag_no_pdl());
-    EXPECT_TRUE(process_diag_no_vision_graph());
-    EXPECT_EQ(process_diag_graph_capture_mode(), "global");
     EXPECT_FALSE(process_diag_prefill_graph_enabled());
 
     EXPECT_TRUE(process_diag_deterministic_gemm());
@@ -137,8 +131,6 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_debug_forward(), d.diagnostics.debug_forward);
     EXPECT_EQ(process_diag_graph_diag(), d.diagnostics.graph_diag);
     EXPECT_EQ(process_diag_no_pdl(), d.runtime.no_pdl);
-    EXPECT_EQ(process_diag_no_vision_graph(), d.runtime.no_vision_graph);
-    EXPECT_EQ(process_diag_graph_capture_mode(), d.runtime.graph_capture_mode);
     EXPECT_EQ(process_diag_prefill_graph_enabled(), d.runtime.prefill_graph);
     EXPECT_EQ(process_diag_deterministic_gemm(), d.runtime.deterministic_gemm);
     EXPECT_EQ(process_diag_attention_splitk_pipe(), d.attention.splitk_pipe);

@@ -154,7 +154,7 @@ void GraphExecutor::prompt_logprobs_partial(const int32_t* d_targets, int n_rows
             IMP_LOG_ERROR("prompt_logprobs: LM head route changed at row %d", row0);
             return;
         }
-        if (cfg.final_logit_softcap > 0.0f && !dispatch_policy().generation.no_logit_softcap) {
+        if (cfg.final_logit_softcap > 0.0f) {
             const int64_t total = static_cast<int64_t>(csz) * V;
             logit_softcap_fp32_kernel<<<static_cast<int>((total + 255) / 256), 256, 0, stream>>>(
                 d_logits, cfg.final_logit_softcap, 1.0f / cfg.final_logit_softcap, total);

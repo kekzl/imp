@@ -62,7 +62,6 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `server.session_ttl_s` | `600` | a `session_id` prefix pin is released after this many idle seconds; `0` = only `POST /v1/sessions/{id}/close` or the pin budget release it ([API_FEATURES.md](API_FEATURES.md#agent-sessions-session_id)) |
 | `server.model_swap` | `true` | a request naming another model in the directory swaps to it |
 | `server.model_swap_drain_ms` | `60000` | drain budget for in-flight generations during a swap/shutdown |
-| `server.agent_scan_limit` | `256` | tokens held back to scan for `<think>` when tools are present (8 without tools) |
 | `server.otlp_endpoint` | `""` (off) | OTLP/HTTP traces URL |
 | `server.otlp_service_name` | `imp-server` | OpenTelemetry service name |
 | `warm_cache.enabled` | `true` | persist transformed weight uploads across restarts |
@@ -124,7 +123,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--bench-teacher-force` | off | with `--bench-prompt-file`: tg decode inputs are the file tokens after the prompt (`imp_set_forced_decode`), the run fails unless all tg inputs were forced; decodes per step (no pipeline, graph loop or speculation) |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
 
-KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:833 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
+KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:764 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
 
@@ -288,7 +287,7 @@ imp/
 │   ├── model/          Model loading (GGUF + SafeTensors), tokenizer, weight upload
 │   ├── quant/          FP8, NVFP4, INT4/INT8 dequant, quantised GEMM
 │   ├── exec/           GraphExecutor (hardcoded transformer forward pass)
-│   ├── runtime/        Engine, Scheduler, CUDA Graphs, PDL, Green Contexts, RuntimeConfig
+│   ├── runtime/        Engine, Scheduler, CUDA Graphs, PDL, RuntimeConfig
 │   ├── vision/         SigLIP + Qwen3-VL encoders, preprocessing, mmproj loader
 │   └── api/            C API implementation
 ├── tools/

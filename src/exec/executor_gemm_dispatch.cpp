@@ -592,9 +592,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // documented paths (#1055). Weight is the native NVFP4 source or, on
         // decode rows of a GGUF source, its NVFP4 decode overlay (smallm_weight_, #1897).
         NvFP4QuantResult nv;
-        if (dispatch_policy().gemm.nvfp4_smallm && (!ctx.spec_verify_small_m || verify_smallm) &&
-            !overlap_prefill_active_ && M <= 32 && (ctx.beta == 0.0f || ctx.beta == 1.0f) &&
-            input.qtype == QType::F16 && output.qtype == QType::F16 && smallm_weight_(h, nv)) {
+        if (dispatch_policy().gemm.nvfp4_smallm && (!ctx.spec_verify_small_m || verify_smallm) && M <= 32 &&
+            (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
+            output.qtype == QType::F16 && smallm_weight_(h, nv)) {
             const int N = static_cast<int>(nv.N);
             const int K = static_cast<int>(nv.K);
             // A16 (gemm.nvfp4_smallm_a4=false): FP16 activations into the

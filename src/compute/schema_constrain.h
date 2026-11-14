@@ -178,14 +178,6 @@ public:
     // Update state with sampled token.
     void update(int32_t token);
 
-    // Jump-ahead (#844): appends every schema-legal continuation's forced next characters
-    // (braces, quotes, single-candidate keys, colons, literals, unambiguous enum prefixes) to
-    // `out`. Pure probe, never advances the FSM.
-    // CHAR level, not token level: a BPE vocab usually admits several tokens spelling the same
-    // forced text, so exactly-one-legal-token forcing rarely fires; the caller drafts the
-    // canonical tokenization and verifies by sampling.
-    int forced_text(std::string& out, int max_chars) const;
-
     // True iff emitting the whole token keeps the schema satisfiable: every char is a legal
     // transition and nothing trails past the root close. Catches multi-char tokens spanning
     // phase transitions (`{}`, `":"`, `0.98`) that the first-char category mask misses.

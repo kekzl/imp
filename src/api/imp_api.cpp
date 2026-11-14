@@ -71,8 +71,6 @@ ImpConfig imp_config_default(void) {
     config.top_p = 0.95f;
     config.top_k = 0;
     config.max_tokens = 256;
-    config.enable_green_contexts = 0;
-    config.green_ctx_prefill_ratio = 0.8f;
     config.enable_pdl = 1;
     config.enable_cuda_graphs = 1;
     config.gpu_layers = -1;  // all on GPU
@@ -409,8 +407,6 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ecfg.max_seq_len = config->max_seq_len;
         ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
         ecfg.compute_dtype = map_dtype(config->compute_dtype);
-        ecfg.use_green_contexts = (config->enable_green_contexts != 0);
-        ecfg.green_ctx_prefill_ratio = config->green_ctx_prefill_ratio;
         ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
         ecfg.use_pdl = (config->enable_pdl != 0);
         ecfg.gpu_layers = config->gpu_layers;
@@ -820,9 +816,6 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // stale positions once corpus exceeded the resolved chunk size, default 512).
         if (!ctx->engine->begin_perplexity_capture(std::span(tokens, static_cast<size_t>(n_tokens))))
             return IMP_ERROR_INTERNAL;
-        // GPTAQ pairs start with the corpus: warmup forwards differ between source and export.
-        if (imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration())
-            calib->arm_pairs();
         ImpError e = imp_prefill(ctx, tokens, n_tokens);
         double ppl = -1.0;
         const bool reduced = ctx->engine->end_perplexity_capture(&ppl);  // always frees buffers
@@ -850,7 +843,7 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
     if (!ctx->engine || !ctx->engine->executor())
         return IMP_ERROR_INTERNAL;
     try {
-        imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration();
+        const imp::ActivationCalibrator* calib = ctx->engine->executor()->calibration();
         if (!calib || calib->empty()) {
             IMP_LOG_ERROR(
                 "imp_calibration_write: nothing collected — is [calibration] enabled set, and did a "
@@ -866,8 +859,9 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
             return IMP_ERROR_INTERNAL;
         }
         IMP_LOG_INFO("Calibration written: %s (%zu entries)", path, stats.entries.size());
-        // Row 101: GPTQ <path>.hess (calibration.hessian), GPTAQ pairs <path>.gptaq (calibration.pair_*).
-        if (const std::string herr = calib->write_second_moments(path, nullptr); !herr.empty()) {
+        // GPTQ second moments (row 101): <path>.hess, nothing when calibration.hessian is off.
+        if (const std::string herr = calib->write_hessians(std::string(path) + ".hess", nullptr);
+            !herr.empty()) {
             IMP_LOG_ERROR("imp_calibration_write: %s", herr.c_str());
             return IMP_ERROR_INTERNAL;
         }

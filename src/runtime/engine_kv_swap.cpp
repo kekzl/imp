@@ -31,8 +31,7 @@ size_t align16(size_t n) { return (n + 15) & ~static_cast<size_t>(15); }
 bool Engine::kv_swap_supported_() const {
     // SWA layers live in a second id space and StreamingLLM tables hold -1 sentinels: neither
     // round-trips through a flat block image.
-    return runtime_config_.runtime.kv_swap && kv_manager_ && kv_cache_raw_ && !swa_sizing_active_ &&
-           !config_.streaming_kv_enabled;
+    return kv_manager_ && kv_cache_raw_ && !swa_sizing_active_ && !config_.streaming_kv_enabled;
 }
 
 bool Engine::kv_valve_armed_(int free_blocks, int reclaimable, int pool_total, int unmet, int live) const {

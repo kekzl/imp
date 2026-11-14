@@ -192,11 +192,9 @@ int Engine::mtp_head_pass_(const MtpPassTables& tab, const void* hidden, const N
                                ? executor_->stage_draft_draws(draws, draw_rows, tab.m, head, draft_vocab,
                                                               stream)
                                : 0;
-    // diagnostics.mtp_prenorm_h (default on): the head takes the target's post-norm hidden.
-    const HeadPassInputs in{
-        *model_,     *executor_, *mtp_ws_storage_,
-        hidden,      head,       runtime_config_.diagnostics.mtp_prenorm_h ? &model_->output_norm() : nullptr,
-        draft_vocab, draw_top_k};
+    // The head takes the target's post-norm hidden.
+    const HeadPassInputs in{*model_,     *executor_, *mtp_ws_storage_, hidden, head, &model_->output_norm(),
+                            draft_vocab, draw_top_k};
     auto run = [&](int feed_max, int chain_max) {
         return run_head_pass(in, tab, chain, feed_max, chain_max, stream);
     };
