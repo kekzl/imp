@@ -11,6 +11,8 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   step_spec_verify_ phases (33 file-static helpers, largest stage_chunk 11 and
+#   restore_hybrid_after_accept 12): Engine::step_spec_verify_ 238 -> 60
 #   init_kv_cache phases (split from init_kv_cache into 26 file-static helpers, largest
 #   make_kv_cache 17): Engine::init_kv_cache 187 -> 24 (below threshold, entry removed)
 #   JSON-Schema keywords PR (keyword groups and phase steps moved to helpers): parse_schema_object
@@ -202,7 +204,7 @@ skip_dirs = ["apa"]
 "src/runtime/engine_spec_mtp.cpp::bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, int n_pairs, bool chain_after)" = 71
 "src/runtime/engine_spec_mtp_batched.cpp::void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows, const std::vector<int>& emitted, cudaStream_t stream)" = 35
 "src/runtime/engine_spec_mtp.cpp::void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_len, int next_token)" = 27
-"src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = 238
+"src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = 60
 "src/runtime/engine_spec_ngram.cpp::const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_think) const" = 35
 "src/runtime/engine_weight_upload.cpp::bool Engine::init_weights()" = 50
 "src/runtime/engine_workspace_warmup.cpp::bool Engine::init_features()" = 43
