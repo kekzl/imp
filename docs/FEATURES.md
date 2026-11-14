@@ -76,7 +76,7 @@ GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10
 | NVFP4 block-scaled `mma.sync` GEMM/GEMV | ✅ | |
 | FP8 `f8f6f4` attention scores | ✅ | |
 | TMA bulk-tensor loads | ✅ | `gemm_grouped_nvfp4_smallM.cu:67 Emits UTMALDG`, emits UTMALDG |
-| FlashAttention-2 style prefill, hd=64, hd=128 and hd=256 | ✅ | default since #930; hd=64 at two CTAs per SM (`attention.fa2_dense_2cta`, #2656) |
+| FlashAttention-2 style prefill, hd=64, hd=128 and hd=256 | ✅ | default since #930; hd=64 at two CTAs per SM (#2656) |
 | APA prefill (FP4 pass 1, exact FP16 pass 2 for hot KV tiles) | ✅ default on, hd=128 | `attention.apa_eps` 0.01 (`0` = off), `apa_min_kv` 8192; Llama-3.2-3B Q8_0 106451 tokens 6746.01 -> 4824.90 ms (#2640). Source: [kekzl/apa](https://github.com/kekzl/apa), MPL-2.0 |
 | RA2 prefill (INT8 QK^T, two-term NVFP4 PV) | ✅ opt-in | `attention.ra2_prefill`; hd 64/128/256, GQA; PPL within +0.1 % on 3 models (#2628) |
 | Paged KV cache | ✅ | default block `n=16`; the geometry is per-configuration |

@@ -187,7 +187,7 @@ runtime.max_batch_size=32 --set runtime.max_seq_len=4096 --set kv_cache.max_bloc
 | 5 | dense Qwen3-14B-NVFP4, 32 streams, 38-tok, vLLM 0.27.1 | 3480.4 | **3767.9** | -7.6% |
 | 6 | dense Qwen3-14B-NVFP4, 8 streams, 36-tok, vLLM 0.27.1 | **1085.4** | 1005.8 | **+7.9%** |
 | 7 | dense Qwen3-14B-NVFP4, 32 streams, 982-tok, vLLM 0.27.1, imp KV pool 8192 blocks | 1470.6 | **2492.6** | -41.0% |
-| 10 | run 9 with `attention.paged_fp8_multitok=4`, paced serving prefill (#1950-#1952), grouped FP8 decode attention (#1953) | 2491.2 | 2490.9 | +0.0% (2/3 pairs) |
+| 10 | run 9 with `attention.paged_fp8_multitok=4` (key removed 2026-11-14, 4 is the only value), paced serving prefill (#1950-#1952), grouped FP8 decode attention (#1953) | 2491.2 | 2490.9 | +0.0% (2/3 pairs) |
 | 11 | run 5 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31) | **4373.4** (4355.8-4380.5) | 4080.8 (4033.1-4107.9) | **+7.2%** (3/3 pairs) |
 | 12 | run 6 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31) | **1236.5** (1233.7-1238.8) | 1086.5 (1025.8-1116.8) | **+13.8%** (3/3 pairs) |
 | 13 | run 7 on imp v0.60.0 vs vLLM 0.31.0 (2026-10-31), 1000-token prompts | 2547.3 (2545.6-2548.9) | **2658.4** (2631.1-2668.2) | -4.2% (0/3 pairs) |

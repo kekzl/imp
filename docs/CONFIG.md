@@ -41,7 +41,6 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
-| `kv_cache.grow_ahead`, `kv_cache.grow_ahead_fit_last`, `kv_cache.grow_retry_ms` | `true`, `true`, `100` | a worker thread commits the next growth step (at least the last admitted request) before the free list runs out; admission adopts it instead of waiting for the driver. A refused growth is not asked again for N ms, so a prompt reclaiming prefix-cache blocks on a pool capped by free VRAM reads it once, not per block (`0` = per block) |
 | `kv_cache.host_spill_mb` | `0` | pinned host RAM (MiB) for prefix blocks the pool reclaims; a later prefix hit restores them by H2D instead of re-prefill. Off by default; needs prefix caching, refused with SWA layers; a spilled block carries its sparse key min/max pages; GDN hybrids restore through recurrent snapshot chains (Qwen3.8-27B-NVFP4, 8 chats x ~31k on an 8000-block pool, 16384: TTFT sum 213.1 -> 21.3 s); `/metrics` `imp_kv_host_spill_*` |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |

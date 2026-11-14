@@ -33,7 +33,7 @@ No `tcgen05` / TMEM / 2-CTA cluster MMA (SM100 only), no `wgmma` (`sm_90a` only)
 
 - A recurrent state path needs error compensation on EVERY link: plain tf32 on the GDN state GEMMs = state diff 3.4e-4, PPL +0.13%; on P@W it cancels (Qeff = D q - P W). 3xTF32 (a_hi + a_lo) costs +25 us; 3xFP16 `m16n8k16` (a_hi + a_lo in fp16) runs 2x the TF32 rate and shipped on all state-feeding GEMMs (#1852; K1 -22%, K2 -18%). Output-only terms (Y_A, y) stay plain tf32/fp16.
 - Judge: unit-test state diff vs the fused kernel (~1e-6 = fp32-equivalent; 1e-4 fails), deterministic PPL on Qwen3.8-27B-NVFP4-vllm (fused 4.6283), `tools/analysis/layer_ab_diff.py` added divergence of the changed blocks ~0. Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels: no verdict there.
-- Online-softmax tile levers cost precision per extra rescale: HD=256 FA2 at Bkv=32 = kernel -11%, PPL +0.53%, opt-in only (`attention.fa2_hd256_bkv=32`, #1840). Scale inside the exp FMA is free (#1844, PPL 4.6283 both arms); `exp2f` forms and scale-in-Q are +0.35% PPL for the same speed.
+- Online-softmax tile levers cost precision per extra rescale: HD=256 FA2 at Bkv=32 = kernel -11%, PPL +0.53%, never shipped (#1840; key and instance removed 2026-11-14). Scale inside the exp FMA is free (#1844, PPL 4.6283 both arms); `exp2f` forms and scale-in-Q are +0.35% PPL for the same speed.
 - A kernel variant chosen by row count must produce identical per-row bits, or be gated to decode rows (`cur_decode_rows_`): otherwise a prompt row changes with the prefill chunk it lands in (#2152, fixed in #2171). Cases: `src/compute/layernorm.cu` row-block vs warp kernel, fused QK-norm+RoPE capped at n<=64 (`src/exec/executor_attention.cu`), `mmq_q8_imma` split-K at M<=32 (`src/compute/mmq_q8_imma.cu`).
 - FP16 intermediates on `out / row_scale` overflow to inf on small-absmax rows (FP8 SSM_IN, 2026-09-01); keep the rescale in FP32 or fuse it. Uniform-random unit-test rows cannot reach this.
 
@@ -61,7 +61,7 @@ Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold
 | CUTLASS NVFP4 weight cache | `cutlass_nvfp4 weight cache` log line; without it decode runs dequant->cuBLAS |
 | CUDA-graph decode loop, graph prewarm | `runtime.cuda_graphs`; graph prewarm always on (32/32 captures in 2.3 s) |
 | PDL both halves | `runtime.no_pdl=false`; registered kernels call `griddepcontrol.wait` before the first global access (`src/compute/pdl_device.cuh`); registered = waits, blanket registrations without a wait RACED (`GreedyDeterminism`) |
-| FA2 prefill family | `attention.fmha_fa2`, `fa2_hd256`, `fa2_fp16qk`, `fa2_dense_2cta` (all on); `fa2_hd256_bkv` 64 |
+| FA2 prefill family | `attention.fmha_fa2` (on); hd 256, f16 QK, 2-CTA dense and Bkv 64 are fixed since 2026-11-14 (keys removed) |
 | Stream-K on the dense NVFP4 prefill GEMM | the own tile plans it per grid (#2934: below half a wave 2 k-pieces, above one wave hybrid vs uniform stream-K by cost); `gemm.nvfp4_cutlass_streamk` left with CUTLASS (#2938). Size a stream-K workspace for every grid it can see: a 0 B workspace refused every CUTLASS launch once (22k -> 4.2k tok/s, #1841) |
 | Batched-decode sidecars | `gemm.nvfp4_smallm` + `_impl=2` + `_pair`, `gdn.state_bf16` (+0.21% PPL by design), `gemm.fp8_ssm_proj`, `gemm.nvfp4_lm_head*`, `gemm.fp8_attn_proj` |
 | Chunk-parallel GDN prefill | `gdn.chunkpar_scan`, `gdn.chunkpar_strip` |

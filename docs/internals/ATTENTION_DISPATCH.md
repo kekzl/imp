@@ -12,7 +12,7 @@ Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel ru
 - If this doc and the code disagree, the code wins.
 - Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
-> **Measured coverage (2026-06-07, [`docs/archive/ROOFLINE_2026_06_07.md`](../archive/ROOFLINE_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
+> **Measured coverage (2026-06-07, [`docs/archive/ROOFLINE_2026_06_07.md`](../archive/ROOFLINE_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2 the long range (the FP8 FMHA tier was deleted 2026-11-14). Since #930/#932 hd=256 rides the FA2 port too.
 >
 > **This does NOT generalise to Gemma-4** (2026-08-02 audit, F-16). Its global layers are hd=512 and take `attention_cublas_prefill`, or `attention_cublas_prefill_sliced` (#1036) when the S-matrix overflows, *by design and by measurement*: both beat the SMEM-capped fused hd=512 kernel ([`docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md`](../audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md)). On an advertised model the "legacy" path is the *default* prefill path for half the layer stack, and the 384 MiB `attn_scores` workspace is retained for it.
 
@@ -25,7 +25,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 | Condition (per layer) | Path |
 |---|---|
 | `attention.apa_eps > 0` (default on), `hd == 128`, no window, softcap or sinks, `kv_len >= attention.apa_min_kv`, `n >= 256` rows, not `runtime.deterministic` | APA (`try_apa_paged_prefill` on an FP16 cache in chunked prefill, else `try_fp4_prefill`) - FP4 pass 1, exact FP16 pass 2 over hot KV tiles |
-| no learned sinks, and `hd == 128` or (`hd == 256` and `attention.fa2_hd256`), and `fa2_fp16qk != "never"` | `try_fa2_fp16qk_prefill` - FP16-QK FA2, O(n) memory, primary path |
+| no learned sinks, and `hd` 64, 128 or 256 | `try_fa2_fp16qk_prefill` - FP16-QK FA2, O(n) memory, primary path |
 | S-matrix fits and below the FMHA threshold | `attention_cublas_prefill` - materialized `[nh, n, ctx]` FP16 S-matrix |
 | `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1042) - cuBLASLt (`lt_gemm_strided_batched`, `src/compute/attention_cublas.cu`) in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
 | otherwise | `attention_prefill_dispatch` → the FMHA chain below |
@@ -34,7 +34,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
        path=attention_cublas_prefill_sliced cmd=`test_attention_fmha_hd512.cu` DISABLED benches
        n=unknown note=isolated kernel A/B from the #1042 PR body, not an e2e figure]
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:48 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:48 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` (gated by `attention.fmha_fa2 == "on"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill`. If both decline the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
@@ -44,10 +44,9 @@ Tried in order, first hit wins:
 
 | # | Kernel | Condition | Note |
 |---|---|---|---|
-| 1 | `fmha_sm120_fa2_prefill` | register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), hd 128 and 256 (hd=256 via `attention.fa2_hd256`, default on since #932; Bq=64/TWOSLOT instance) | f16-QK mode unless the fp8-QK pair is explicitly opted in (`fa2_fp16qk=never` AND `fp8_fmha=on`) |
-| 2 | `fmha_sm120_fp8_prefill` | strictly opt-in (`attention.fp8_fmha == "on"`), hd%32==0 | raw e4m3 Q/K conversion compounds per-layer score error (#511): teacher-forced PPL gemma-3-12b 16.6→549 / Qwen3-8B 40.5→4506 when it served prefill; off by default |
-| 3 | `fmha_sm120_prefill` | FP16 WMMA, hd%16==0 | fallback for configs FA2 declines: hd=256 with `fa2_hd256=false`, FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window) |
-| 4 | `flash_attention_blackwell` | WMMA 128×64 tiles, last tier | declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in) |
+| 1 | `fmha_sm120_fa2_prefill` | register-resident FA2 (#477/#478, `fmha_fa2 == "on"` default), hd 64, 128 and 256 (hd=256 default on since #932; Bq=64/TWOSLOT instance) | f16-QK only (the fp8-QK FA2 and FP8 FMHA tier were deleted 2026-11-14 with `attention.fp8_fmha`: teacher-forced PPL gemma-3-12b 16.6→549, #511) |
+| 2 | `fmha_sm120_prefill` | FP16 WMMA, hd%16==0 | fallback for configs FA2 declines: FA2-declined chunk continuations (`q_offset > 0`), other head dims (gemma-3 hd=256: PPL-identical to cuBLAS, 15.53 both at n=3441 incl. sliding window) |
+| 3 | `flash_attention_blackwell` | WMMA 128×64 tiles, last tier | declines hd ∉ {64,96,128,256} and smem-over-limit configs (hd=256 needs ~176 KB at Br=64 vs the 99 KB sm_120 opt-in) |
 | 5 | chain exhausted | - | `std::runtime_error` (#654); the old silent fallback to `flash_attention_prefill_tc` swallowed launch failures at hd=256 (smem over limit, unchecked `cudaGetLastError`) and produced garbage logits (teacher-forced PPL ~1e10), and lacked `q_offset` (chunked continuations would mask wrongly even when it launched). Reaching this tier means a config override disabled the FP16 WMMA tier or an unsupported head_dim; both error loudly now |
 
 The MXFP4 FMHA (`attention_fmha_mxfp4_sm120.cu`, `attention.mxfp4`, REFUTED #868) was removed 2026-10-29. The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_fmha_mxf4nvf4_sm120.cu`, `attention_naive.cu`) are summarized in [`archive/README.md`](../archive/README.md); full source in git history.
@@ -65,11 +64,11 @@ The decode dispatch (further down in `executor_attention.cu`) is a single `switc
 
 | `cache_dtype` | Launcher (`src/compute/`) | Kernels it can pick |
 |---|---|---|
-| FP16 | `paged_attention_decode` (`attention_paged.cu:926 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (`attention.paged_f16_multitok`, up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
-| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (`attention.paged_fp8_multitok`): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
+| FP16 | `paged_attention_decode` (`attention_paged.cu:926 void paged_attention_decode(`) | `paged_attention_decode_kernel`, `_gqa_kernel`, `_splitk_pipeline_kernel`; default at concurrency (split-K off, no sink tokens): `_decode_f16_multitok_kernel<HD,4,HPC>` in `attention_paged_f16_multitok.cu` (up to four Q heads per CTA); GQA multitok splits by `paged_attention_f16_multitok_split_count` (one wave, unsplit at a budget <= 2 splits, e.g. 16 Qwen3-8B rows) |
+| FP8 (E4M3) | `paged_attention_decode_fp8` | `_decode_fp8_kernel`, `_splitk_fp8_kernel`, `_splitk_fp8_pipeline_kernel`; HD=128 GQA (four tokens per warp iteration): the Q-head-grouped `_decode_fp8_gqa_kernel<16,2,HPC,2,SPLIT>` in `attention_paged_fp8_multitok_gqa.cu`; its split-K instance when `paged_attention_f16_multitok_split_count` on its own CTAs splits with >= 8 KV blocks per split (8 splits at 4 x 1024 tokens), else unsplit without split-K (16 Qwen3-8B rows) or the tile split-K (short contexts); HD=128 MHA without split-K: `_decode_fp8_multitok_kernel<128,4>`; tile variants in `attention_paged_fp8_tile.cu` |
 | INT8 | `paged_attention_decode_int8` | `_decode_int8_kernel`, `_splitk_int8_kernel` |
 | INT4 | `paged_attention_decode_int4` | `_decode_int4_kernel`, `_splitk_int4_kernel`, `_splitk_int4_pipeline_kernel` |
-| NVFP4 | `paged_attention_decode_nvfp4` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu` (`attention.paged_nvfp4_multitok`); scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel` |
+| NVFP4 | `paged_attention_decode_nvfp4` | default: the Q-head-grouped `_decode_nvfp4_multitok_gqa_kernel<HD,HPC>` and `_splitk_nvfp4_multitok_gqa_kernel<HD,HPC>` in `attention_paged_nvfp4_multitok_gqa.cu` when 2, 3 or 4 divides the GQA ratio, else `_decode_nvfp4_multitok_kernel<HD>` and `_splitk_nvfp4_multitok_kernel<HD>` in `attention_paged_nvfp4_multitok.cu`; scalar: `_decode_nvfp4_kernel`, `_splitk_nvfp4_kernel` |
 | MXFP4 KV | `paged_attention_decode_mxfp4_kv` (`attention_paged_nvfp4.cu:526 void paged_attention_decode_mxfp4_kv(`) | shares the NVFP4 kernels with UE8M0 scales |
 
 **Not every head_dim is served.** Each launcher templates a fixed set; a miss now throws instead of leaving `O` unwritten (#1674).
