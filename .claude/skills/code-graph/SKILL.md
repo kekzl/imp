@@ -15,7 +15,7 @@ imp has a symbol and call graph in `.codegraph/codegraph.db` (CodeGraph v1.5.0, 
 | 1 | Control symbol before believing a negative | run the same query on a live symbol (`codegraph callers write_kv_cache` -> 2); if the control is empty too, the DB or the edge kind is missing (`docs/audit/SETTLED.md`, "control symbol") |
 | 2 | Reverse question -> graph; text question -> `rg` | "who calls / what breaks" ~30 tokens via the graph vs 500-2500 via `rg` + reading; "which files mention X" is grep territory |
 | 3 | The name in the answer must be the name you asked | trap 1 below |
-| 4 | Kernel-launch and destructor questions are `rg` questions right now | the DB has edge kinds `calls contains extends imports instantiates references` and NO `launches` edges (checked 2026-09-02); `ccg enrich`, which materialises them, aborts with `sqlite3.IntegrityError: UNIQUE constraint failed: idx_edges_identity` (`docs/audit/DEBT_LEDGER_2026_08_21.md`). Every `__global__` kernel reads as uncalled |
+| 4 | Kernel-launch questions go to `make refs`, destructor questions to `rg` | the DB has edge kinds `calls contains extends imports instantiates references` and NO `launches` edges (checked 2026-09-02); `ccg enrich`, which materialises them, aborts with `sqlite3.IntegrityError: UNIQUE constraint failed: idx_edges_identity` (`docs/audit/DEBT_LEDGER_2026_08_21.md`). Every `__global__` kernel reads as uncalled |
 
 ## Commands
 
@@ -28,6 +28,16 @@ codegraph node    <symbol>        # source + immediate callers/callees (on a FIL
 codegraph impact  <symbol>        # what a change reaches
 codegraph explore "<topic>"       # symbols + call paths in one shot
 ```
+
+## Exact references: `make refs` (clangd)
+
+```bash
+make dev                                              # once: build-dev/compile_commands.json
+make refs SYM="Speculative::mtp_k gemv_nvfp4_kpar_mb_fp16_kernel"
+make refs AT=src/core/config/speculative.h:95:mtp_k   # path:line:token
+```
+
+`tools/clangd_refs.py` runs clangd 23 in `imp:lint` over the dev build's compile database, its nvcc entries rewritten for clang CUDA. Index in `build-dev/clangd`: 73 s cold, 4 s warm. Answers "who reads this field / calls this function / launches this kernel" across .cpp and .cu, through aliases (`scfg.`, `cfg.speculative.`), with no string-literal or same-name-member hits: `Speculative::mtp_k` 65 refs where `rg '\.mtp_k'` returned 154 lines; a bare `mtp_k` lists `Speculative::mtp_k` and `SpecFieldParse::mtp_k` apart (2026-11-14). Key strings (`"speculative.mtp_k"` in scripts, docs, `imp.conf.example`) stay `rg` work. A reference count reflects the last `make dev`: configure again after adding a TU.
 
 `ccg` = `~/github.com/kekzl/cplusplus-cuda-graph/ccg`: `ccg enrich` (CUDA launch edges + implicit destructor calls + macro-generated symbols; BROKEN, rule 4), `ccg coverage` (one-level: a kernel with a dead launcher still counts as covered), `ccg kernels`, `ccg revert`.
 

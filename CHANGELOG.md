@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `make refs SYM="Scope::name"` (or `AT=path:line:token`) lists every code reference of a symbol through clangd 23 in `imp:lint`, .cu included, without the string-literal and same-name-member hits of `rg`: `Speculative::mtp_k` 65 references where `rg` returned 154 lines. Index 73 s cold, 4 s warm.
+
 ### Removed
 - 31 `speculative.*` keys left the config (60 -> 29): 16 settled kill switches are hardcoded at their default, 5 off-by-default experiments are deleted with their code (`verify_row_parity`, `verify_smallm`, `recycle_tree`, `draft_ctx_cap`, `min_history`), 10 tuning numbers are constants in `src/core/config/speculative.h`. `--set` rejects them.
 

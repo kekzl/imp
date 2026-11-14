@@ -182,6 +182,7 @@ if want layering; then
     # runtime/config.h include in exec/ had come back once (#1388) with no gate.
     run "backward layer includes pinned"        python3 tools/check_layering.py
     run "that gate still classifies its cases"  python3 tools/check_layering.py --selftest
+    run "make refs still rewrites nvcc for clangd" python3 tools/clangd_refs.py --selftest
 fi
 
 if want citations; then
