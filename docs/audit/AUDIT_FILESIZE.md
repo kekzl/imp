@@ -300,7 +300,7 @@ The twelve, and what each rests on:
 | 793 | `load_gguf` | (c) linear load flow, file in maintenance mode |
 | 737 | `imp-cli main` | (a) split candidate, no hot path |
 | 722 | `GraphExecutor::forward_logits` | (c) SETTLED — intrinsically forward-pass-coupled |
-| 658 | `Engine::init_kv_cache` | (c) one sizing decision on the measured residual (#1103 order) |
+| 658 | `Engine::init_kv_cache` | (c) one sizing decision on the measured residual (#1103 order); 2026-11-14 split into 26 file-static phases, body 153, entry removed, file pinned at 888 |
 | 625 | `Engine::step_spec_verify_` | (c) one verify step inside one graph-capture window |
 | 593 | `handle_completions` | (a) split candidate |
 | 588 | `SchemaConstrainer::sim_advance` | (c) SETTLED D2 — one FSM for two grammars |
