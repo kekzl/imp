@@ -1,12 +1,12 @@
-# imp.conf.example -> ${IMP_CONFIG_KEY_TABLE}: one IMP_CONFIG_KEY(section, name) line per key, read
-# by tests/test_config_bindings.cpp. Regenerated at configure time when the example changes.
+# imp.conf.reference -> ${IMP_CONFIG_KEY_TABLE}: one IMP_CONFIG_KEY(section, name) line per key, read
+# by tests/test_config_bindings.cpp. Regenerated at configure time when the reference changes.
 
-set(_example ${CMAKE_CURRENT_SOURCE_DIR}/imp.conf.example)
+set(_reference ${CMAKE_CURRENT_SOURCE_DIR}/imp.conf.reference)
 set(IMP_CONFIG_KEY_TABLE_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 set(IMP_CONFIG_KEY_TABLE ${IMP_CONFIG_KEY_TABLE_DIR}/config_example_keys.inc)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_example})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_reference})
 
-file(STRINGS ${_example} _lines REGEX "^(\\[[a-z0-9_]+\\]|[A-Za-z0-9_]+[ \t]*=)")
+file(STRINGS ${_reference} _lines REGEX "^(\\[[a-z0-9_]+\\]|[A-Za-z0-9_]+[ \t]*=)")
 set(_section "")
 set(_table "")
 foreach(_line IN LISTS _lines)

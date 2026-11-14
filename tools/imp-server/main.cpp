@@ -72,7 +72,7 @@ static int run_server(int argc, char** argv) {
         // than refusing to start.
         for (const auto& bad : rejected_overrides)
             fprintf(stderr, "Error: --set %s\n", bad.c_str());
-        fprintf(stderr, "See imp.conf.example for the key names.\n");
+        fprintf(stderr, "See imp.conf.reference for the key names.\n");
         return 1;
     }
         imp::process_diag_install(state.runtime_config);

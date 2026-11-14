@@ -14,7 +14,10 @@ commit: bd6921fe
 
 ## `imp.conf`
 
-Sectioned TOML-subset config file (PR #72), replacing ~50 former `IMP_*` env vars. Full schema with defaults: `imp.conf.example` in the repo root; source of truth: `src/runtime/config.h`.
+Sectioned TOML-subset config file (PR #72), replacing ~50 former `IMP_*` env vars. Source of truth: `src/runtime/config.h`; two files in the repo root, both gated by `tools/check_config_keys.py`:
+
+- `imp.conf.example`: the start file, the keys most runs touch, each commented out at its default, so a copy changes nothing.
+- `imp.conf.reference`: every bound key with its default and full comment.
 
 **Loading precedence** (first non-empty wins): `--config <path>` CLI flag -> `$IMP_CONFIG` env var -> `./imp.conf` -> `~/.config/imp/imp.conf` -> embedded defaults.
 

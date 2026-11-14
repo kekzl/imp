@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-11
-commit: b5de0dd7
+verified: 2026-11-14
+commit: 02308139
 -->
 
 # AGENTS.md - subagent roles and guardrails for imp
@@ -67,7 +67,7 @@ Rules with no other home:
 - **MAY NOT:** compare across sessions/days as if equal; refresh a baseline silently (must be stated in the PR).
 
 ### docs
-- **Scope:** `*.md`, `docs/`, `imp.conf.example`.
+- **Scope:** `*.md`, `docs/`, `imp.conf.reference`, `imp.conf.example`.
 - **Allowed tools:** edit (docs only).
 - **MUST:** keep docs in sync with code; cite perf numbers from `tests/perf_baseline.json` rather than
   re-typing them; English.

@@ -788,7 +788,7 @@ void Engine::init_resolve_quant_flags_() {
 // that will be allocated. Auto ceiling is kAutoMaxSeqLenCap (128K), bounded
 // further by VRAM and the model's declared context. A model declaring MORE
 // than 128K needs an explicit --max-seq-len / runtime.max_seq_len override
-// to exceed the auto cap (imp.conf.example); the manual path bypasses the
+// to exceed the auto cap (imp.conf.reference); the manual path bypasses the
 // auto resolver entirely.
 //
 // KV block size must be resolved before init_kv_cache()/allocate_workspaces():

@@ -1,6 +1,6 @@
-// Every imp.conf.example key binds to the RuntimeConfig field of the same dotted name: setting it
-// moves that field and no other. The key list is generated from the example at configure time
-// (cmake/config_key_table.cmake); tools/check_config_keys.py keeps example and binder equal.
+// Every imp.conf.reference key binds to the RuntimeConfig field of the same dotted name: setting it
+// moves that field and no other. The key list is generated from the reference at configure time
+// (cmake/config_key_table.cmake); tools/check_config_keys.py keeps reference and binder equal.
 
 #include "runtime/config.h"
 

@@ -13,7 +13,7 @@ struct CliArgs : CommonArgs {
 
     // imp.conf integration. --config overrides the search-path default;
     // --set is a repeatable key=value (e.g. --set kv_cache.dtype=fp8) that
-    // applies on top of the loaded config. See imp.conf.example for keys.
+    // applies on top of the loaded config. See imp.conf.reference for keys.
 
     std::string prompt;
     std::string prompt_file;  // --prompt-file: read the prompt from this path

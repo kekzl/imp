@@ -163,11 +163,11 @@ if want docs; then
     echo "== Docs =="
     run "generated perf blocks match baseline"  python3 scripts/sync_docs.py --check
     run "doc lint (layers, provenance, links)"  python3 scripts/docs_lint.py
-    # imp.conf.example is the only key catalogue; 31 of 223 bound keys were
+    # imp.conf.reference is the only key catalogue; 31 of 223 bound keys were
     # missing from it on 2026-09-05 (AUDIT_ARCH_2026 J-2). CHANGELOG entries:
     # 19 of the last 26 broke the 3-line rule nothing checked (J-8).
-    run "imp.conf.example lists every bound key"   python3 tools/check_config_keys.py
-    run "that gate still sees a missing key"       python3 tools/check_config_keys.py --selftest
+    run "imp.conf.reference lists every bound key, example at its values" python3 tools/check_config_keys.py
+    run "that gate still sees a missing key and a drifted example value" python3 tools/check_config_keys.py --selftest
     run "CHANGELOG [Unreleased] entries <= 3 lines, 360 chars" python3 tools/check_changelog_form.py
     run "that gate still counts a long entry"      python3 tools/check_changelog_form.py --selftest
 fi

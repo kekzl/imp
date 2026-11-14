@@ -122,7 +122,7 @@ TEST(CalibrationOutPath, TheConfigKeyIsUsedWhenTheFlagCarriesNoPath) {
 TEST(CalibrationOutPath, NeitherMeansNoCalibrationRun) { EXPECT_EQ(resolve_calibration_out("", ""), ""); }
 
 TEST(CalibrationOutPath, AnEmptyConfigKeyDoesNotClobberTheFlag) {
-    // imp.conf.example ships `out_path = ""`, so the default value of the key
+    // imp.conf.reference ships `out_path = ""`, so the default value of the key
     // is the empty string on every run that does not set it.
     EXPECT_EQ(resolve_calibration_out("/from/flag.json", ""), "/from/flag.json");
 }
