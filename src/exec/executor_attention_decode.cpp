@@ -63,15 +63,6 @@
             write_kv_cache(layer, sub_state, stream, row_begin, sub_n);
         }
 
-        // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
-        // When enabled, uses the same materialized QK^T path as prefill.
-        const bool force_cublas_decode = dispatch_policy().attention.force_cublas_decode;
-        if (force_cublas_decode && sub_n == 1 && attn_scores_buf_ &&
-            cublas_decode_reference(sub_state, layer, get_kv_layer(kv_layer_map_, layer), sub_block_tables, sub_q,
-                                    sub_ao, nh, nkv, hd, scale, cfg.attn_logit_softcap, layer_sliding_window,
-                                    attn_sinks, stream))
-            return;  // leaves the decode_attend lambda (executor_attention.cu)
-
         // Paged attention: Q shape depends on batch size
         int n_seq = sub_state.n_sequences;
         // For MLA: V head dim may be narrower than Q/K head dim.
@@ -137,8 +128,7 @@
                                  qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
                                  qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
                                  qscratch_.sparse_scores, qscratch_.sparse_block_tables,
-                                 qscratch_.sparse_context_lens, qscratch_.sparse_score_meanstd,
-                                 qscratch_.sparse_score_std_coef, stream);
+                                 qscratch_.sparse_context_lens, cfg::kSparseScoreStdCoef, stream);
             attn_bt = qscratch_.sparse_block_tables;
             attn_ctx_lens = qscratch_.sparse_context_lens;
             attn_max_blocks = qscratch_.sparse_table_blocks;

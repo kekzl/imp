@@ -91,4 +91,19 @@ struct Attention {
     int qsa_rows = 16;  // query rows per selection pass (scratch K/V = rows x 2051 tokens x KV row)
     bool qsa_debug = false;  // log FA2 vs paged-on-cache vs selected max diffs (layer 3, prefill)
 };
+
+// Sparse attention and QSA tuning constants, former keys never moved from their default.
+// Sparse decode stays dense below this context: its win outgrows the selection overhead past ~12k
+// (dense model: 8k -7 %, 16k +6 %, 32k +25 %).
+inline constexpr int kSparseMinCtx = 12288;
+// Blocks covering the first kSparseSinkTokens / last kSparseRecentTokens positions are always kept.
+inline constexpr int kSparseSinkTokens = 16;
+inline constexpr int kSparseRecentTokens = 256;
+// Mean+std page score: weight of the page's key stddev against its mean.
+inline constexpr float kSparseScoreStdCoef = 1.0f;
+// Sparse prefill: query rows sampled per chunk (kernel max 64); past positions always kept.
+inline constexpr int kSparsePrefillRows = 16;
+inline constexpr int kSparsePrefillRecentTokens = 1024;
+// QSA prefill: query rows per selection pass (scratch K/V = rows x 2051 tokens x KV row).
+inline constexpr int kQsaRows = 16;
 }  // namespace imp::cfg

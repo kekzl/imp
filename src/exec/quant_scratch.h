@@ -87,15 +87,10 @@ struct QuantScratch {
     int sparse_budget_blocks = 0;
     int sparse_sink_blocks = 0;
     int sparse_recent_blocks = 0;
-    int sparse_engage_blocks = 0;   // identity below this many ctx blocks (sparse_min_ctx)
+    int sparse_engage_blocks = 0;   // identity below this many ctx blocks (kSparseMinCtx)
     int sparse_table_blocks = 0;    // row capacity of sparse_block_tables (= engage blocks)
     int sparse_max_ctx_blocks = 0;  // capacity of a sparse_scores row
     int sparse_max_rows = 0;        // row count of the scratch buffers (batch / chunk rows)
-    // Page score (attention.sparse_score_meanstd): false = min/max corner
-    // bound, true = mean + coef*std. The metadata pass and the score kernel
-    // must read the same statistic, so both call sites take it from here.
-    bool sparse_score_meanstd = false;
-    float sparse_score_std_coef = 1.0f;
 
     // --- Sparse prefill scratch (attention.sparse_prefill_topk_tokens); budget 0 = off ---
     float* sp_prefill_scores = nullptr;  // [64, sp_prefill_cap_blocks]

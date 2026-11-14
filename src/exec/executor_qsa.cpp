@@ -57,7 +57,7 @@ bool GraphExecutor::qsa_alloc_(int max_tokens) {
         return false;
     }
     const int cap = cfg.qsa_budget + cfg.qsa_ratio - 1;
-    qsa_rows_ = std::clamp(dispatch_policy().attention.qsa_rows, 1, 256);
+    qsa_rows_ = cfg::kQsaRows;
     auto alloc_f16 = [&](Tensor& t, int64_t r, int64_t c, const char* tag) {
         void* p = vram_alloc(vram_alloc_, align256(static_cast<size_t>(r) * c * 2), tag);
         if (!p)

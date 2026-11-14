@@ -660,10 +660,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 : 0;
         sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride, k_sc, sc_stride,
                                             kvc->key_minmax_ptr(0, 0), mm_stride, state.positions,
-                                            state.block_tables, state.seq_offsets, n_kv,
-                                            kvc->n_kv_heads(), kvc->head_dim(), kvc->block_size(),
-                                            state.n_tokens, state.max_blocks_per_seq, state.n_sequences,
-                                            qscratch_.sparse_score_meanstd, stream);
+                                            state.block_tables, state.seq_offsets, n_kv, kvc->n_kv_heads(),
+                                            kvc->head_dim(), kvc->block_size(), state.n_tokens,
+                                            state.max_blocks_per_seq, state.n_sequences, stream);
     }
 
     join_expert_prefetch_(stream);  // a skipped or exited layer left its prefetch unconsumed

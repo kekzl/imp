@@ -295,45 +295,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // MXFP4 -> FP16 decode-cache reserve when attention.mxfp4_fp16_fallback forces the cache
-    // (pre_dequant_phase3_cutlass.cpp): decode then reads the FP16 dequant cache
-    // (~4x the raw MXFP4 bytes) resident alongside it. StoragePlanner sizes at MXFP4 wire size
-    // and misses this: must charge it here or the KV clamp starves the fallback (#934).
-    size_t mxfp4_fp16_fallback_bytes = 0;
-    if (config.mxfp4_fp16_cache) {
-        auto count_mxfp4 = [&](const Tensor& w, QType qt) {
-            if (w.data && qt == QType::MXFP4)
-                mxfp4_fp16_fallback_bytes += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
-        };
-        count_mxfp4(model.output_proj(), model.out_proj_.qtype);
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            const auto& L = model.layer(i);
-            count_mxfp4(L.wq, L.wq.qtype);
-            count_mxfp4(L.wk, L.wk.qtype);
-            count_mxfp4(L.wv, L.wv.qtype);
-            count_mxfp4(L.wo, L.wo.qtype);
-            count_mxfp4(L.w_gate, L.w_gate.qtype);
-            count_mxfp4(L.w_up, L.w_up.qtype);
-            count_mxfp4(L.w_down, L.w_down.qtype);
-            count_mxfp4(L.w_gate_shared, L.w_gate_shared.qtype);
-            count_mxfp4(L.w_up_shared, L.w_up_shared.qtype);
-            count_mxfp4(L.w_down_shared, L.w_down_shared.qtype);
-            count_mxfp4(L.ssm_in, L.ssm_in.qtype);
-            count_mxfp4(L.ssm_out, L.ssm_out.qtype);
-        }
-        if (mxfp4_fp16_fallback_bytes > 0)
-            IMP_LOG_INFO(
-                "VRAM budget: MXFP4 FP16 decode cache reserve %.1f MiB (attention.mxfp4_fp16_fallback)",
-                mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
-    }
-
     const ImmaPlaneDemand imma = imma_plane_demand(model, config, q8_imma_prefill, moe_imma_prefill);
     size_t imma_plane_bytes = imma.planes;
     size_t imma_source_freed = imma.source_freed;
     budget.imma_plane_bytes = imma_plane_bytes;
 
     size_t available = free_vram;
-    size_t overhead = budget.reserve_bytes + ssm_footprint + mxfp4_fp16_fallback_bytes + imma_plane_bytes;
+    size_t overhead = budget.reserve_bytes + ssm_footprint + imma_plane_bytes;
     available = (available > overhead) ? (available - overhead) : 0;
 
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;

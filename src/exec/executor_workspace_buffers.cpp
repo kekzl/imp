@@ -435,9 +435,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Every token->block conversion must use the cache's real block size, not kKVBlockSize:
             // n_kv_heads <= 4 models use block size 32, not 16, or budgets silently double (#1819).
             const int kv_bs = kv_block_size_;
-            const SparseGeometry geo =
-                sparse_geometry(acfg.sparse_topk_tokens, acfg.sparse_sink_tokens,
-                                acfg.sparse_recent_tokens, acfg.sparse_min_ctx, max_ctx_tokens, kv_bs);
+            const SparseGeometry geo = sparse_geometry(acfg.sparse_topk_tokens, cfg::kSparseSinkTokens,
+                                                       cfg::kSparseRecentTokens, cfg::kSparseMinCtx,
+                                                       max_ctx_tokens, kv_bs);
             const int max_ctx_blocks = geo.max_ctx_blocks;
             const int sink_blocks = geo.sink_blocks;
             const int recent_blocks = geo.recent_blocks;
@@ -447,7 +447,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              "blocks (%d tokens)",
                              budget_blocks, budget_blocks * kv_bs);
             }
-            // Identity below sparse_min_ctx (the selection's win only outgrows
+            // Identity below kSparseMinCtx (the selection's win only outgrows
             // its overhead past ~12k measured); the table rows must hold an
             // identity copy up to that length.
             const int engage_blocks = geo.engage_blocks;
@@ -477,13 +477,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 qscratch_.sparse_table_blocks = table_blocks;
                 qscratch_.sparse_max_ctx_blocks = max_ctx_blocks;
                 qscratch_.sparse_max_rows = max_batch;
-                qscratch_.sparse_score_meanstd = acfg.sparse_score_meanstd;
-                qscratch_.sparse_score_std_coef = acfg.sparse_score_std_coef;
-                IMP_LOG_INFO("Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
-                             "recent %d blocks, engage above %d tokens, score %s, scratch %.1f KiB",
-                             budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks,
-                             engage_blocks * kv_bs, acfg.sparse_score_meanstd ? "mean+std" : "minmax",
-                             (scores_sz + bt_sz + ctx_sz) / 1024.0);
+                IMP_LOG_INFO(
+                    "Sparse decode attention: budget %d blocks (%d tokens), sink %d + "
+                    "recent %d blocks, engage above %d tokens, score mean+std, scratch %.1f KiB",
+                    budget_blocks, budget_blocks * kv_bs, sink_blocks, recent_blocks, engage_blocks * kv_bs,
+                    (scores_sz + bt_sz + ctx_sz) / 1024.0);
             }
         }
     }

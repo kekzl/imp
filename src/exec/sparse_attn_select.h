@@ -1,11 +1,9 @@
 #pragma once
 
 // Sparse decode attention (attention.sparse_topk_tokens): Quest-class top-k page
-// selection. Per-block key metadata scores every query dot product; top-scoring blocks
+// selection. Per-block key mean/std metadata scores every query dot product; top-scoring blocks
 // compact into a per-step block table the unmodified paged decode kernels consume. All
-// device-side, graph-safe. meanstd (attention.sparse_score_meanstd) switches the pair
-// the metadata pass stores and the score kernel reads (min,max) <-> (mean,std); both
-// passes must agree, so it's one flag threaded through both calls.
+// device-side, graph-safe.
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
@@ -22,14 +20,14 @@ namespace imp {
 // token->table-row mapping ragged forwards need. Layer strides are in BYTES between
 // consecutive layers' block-0 pointers (uniform scalar geometry only). k_scale_base/
 // sc_layer_stride_bytes carry the NVFP4 UE4M3 group scales (nullptr/0 for F16 and FP8):
-// packed nibbles alone don't define a key value, so the metadata bound needs both regions.
+// packed nibbles alone don't define a key value, so the metadata needs both regions.
 void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, int64_t k_layer_stride_bytes,
                                          const void* k_scale_base, int64_t sc_layer_stride_bytes,
                                          void* minmax_base, int64_t mm_layer_stride_bytes,
                                          const int* positions, const int* block_tables,
                                          const int* seq_offsets, int n_layers, int n_kv_heads, int head_dim,
                                          int block_size, int n_tokens, int max_blocks_per_seq,
-                                         int n_sequences, bool meanstd, cudaStream_t stream);
+                                         int n_sequences, cudaStream_t stream);
 
 // Scores every context block of every sequence against current queries and builds a
 // compacted block table (ascending order, at most budget_blocks entries per sequence;
@@ -44,7 +42,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
                           int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
                           int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
+                          int* sparse_block_tables, int* sparse_context_lens, float std_coef,
                           cudaStream_t stream);
 // True when both launch sites score this shape with the kv-head-split kernel (32 / n_kv_heads in {4, 8, 16}
 // lanes per kv head, head_dim a multiple of 4 x lanes); false = the per-4-dims kernel.
@@ -64,8 +62,8 @@ int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks);
 int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
                                const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
                                int head_dim, int block_size, int capacity_blocks, int budget_blocks,
-                               int sink_blocks, int recent_blocks, bool meanstd, float std_coef,
-                               float* scores_scratch, float* agg_scratch, int* out_block_table,
-                               int* out_ctx_scratch, cudaStream_t stream);
+                               int sink_blocks, int recent_blocks, float std_coef, float* scores_scratch,
+                               float* agg_scratch, int* out_block_table, int* out_ctx_scratch,
+                               cudaStream_t stream);
 
 }  // namespace imp

@@ -8,7 +8,6 @@
 #include "exec/sparse_attn_select.h"
 #include "memory/engine_arena.h"
 #include "memory/kv_cache.h"
-#include <algorithm>
 
 namespace imp {
 
@@ -21,8 +20,8 @@ void GraphExecutor::allocate_sparse_prefill_scratch_() {
     if (acfg.sparse_prefill_topk_tokens <= 0)
         return;
     const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
-    const SparseGeometry geo = sparse_geometry(acfg.sparse_prefill_topk_tokens, acfg.sparse_sink_tokens,
-                                               acfg.sparse_prefill_recent_tokens, 0, max_ctx_tokens,
+    const SparseGeometry geo = sparse_geometry(acfg.sparse_prefill_topk_tokens, cfg::kSparseSinkTokens,
+                                               cfg::kSparsePrefillRecentTokens, 0, max_ctx_tokens,
                                                kv_block_size_);
     const int cap = geo.max_ctx_blocks;
     auto sc = engine_arena().take_bytes((size_t)kPrefillRows * cap * sizeof(float));
@@ -41,15 +40,13 @@ void GraphExecutor::allocate_sparse_prefill_scratch_() {
     qscratch_.sp_prefill_sink_blocks = geo.sink_blocks;
     qscratch_.sp_prefill_recent_blocks = geo.recent_blocks;
     qscratch_.sp_prefill_cap_blocks = cap;
-    qscratch_.sp_prefill_rows = std::clamp(acfg.sparse_prefill_rows, 1, kPrefillRows);
-    // The metadata pass reads this flag too; set it when only the prefill side is on.
-    qscratch_.sparse_score_meanstd = acfg.sparse_score_meanstd;
-    qscratch_.sparse_score_std_coef = acfg.sparse_score_std_coef;
+    static_assert(cfg::kSparsePrefillRows >= 1 && cfg::kSparsePrefillRows <= kPrefillRows);
+    qscratch_.sp_prefill_rows = cfg::kSparsePrefillRows;
     IMP_LOG_INFO(
         "Sparse prefill attention: budget %d blocks (%d tokens), sink %d + recent %d blocks, "
-        "%d query rows, score %s",
+        "%d query rows, score mean+std",
         geo.budget_blocks, geo.budget_blocks * kv_block_size_, geo.sink_blocks, geo.recent_blocks,
-        qscratch_.sp_prefill_rows, acfg.sparse_score_meanstd ? "mean+std" : "minmax");
+        qscratch_.sp_prefill_rows);
 }
 
 GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half* q, int n, KVCache* cache,
@@ -68,10 +65,9 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
     const int past = sparse_prefill_select_past(q, n, s.sp_prefill_rows, cache->key_minmax_ptr(kv_layer, 0),
                                                 table, q_offset, nh, nkv, hd, kv_bs, s.sp_prefill_cap_blocks,
                                                 s.sp_prefill_budget_blocks, s.sp_prefill_sink_blocks,
-                                                s.sp_prefill_recent_blocks, s.sparse_score_meanstd,
-                                                s.sparse_score_std_coef, s.sp_prefill_scores,
-                                                s.sp_prefill_agg, s.sp_prefill_table, s.sp_prefill_ctx,
-                                                stream);
+                                                s.sp_prefill_recent_blocks, cfg::kSparseScoreStdCoef,
+                                                s.sp_prefill_scores, s.sp_prefill_agg, s.sp_prefill_table,
+                                                s.sp_prefill_ctx, stream);
     if (past <= 0)
         return dense;
     // Activity proof (prefill is not graph-captured, so this fires where the selection runs).

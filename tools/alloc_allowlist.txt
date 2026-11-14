@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 64 files, 336 sites
+# remaining: 63 files, 330 sites
 
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
@@ -26,7 +26,6 @@ src/compute/sampling_penalties.cu  # 2
 src/compute/sampling_topk_topp.cu  # 2
 src/core/buffer.cpp  # 2
 src/exec/executor_attention.cpp  # 2
-src/exec/executor_attention_internal.h  # 6
 src/exec/executor_attention_prefill.cpp  # 8
 src/exec/executor_forward.cu  # 2
 src/exec/executor_forward_moe.cu  # 4

@@ -168,25 +168,25 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
     return AttnPrefillOuter::UNSET;
 }
 
-// hd=512 prefill whose rows do not depend on n or q_offset (#2167): the WMMA FMHA with a forward
-// KV scan, used by the single-shot and the chunk-continuation path alike.
-// attention.hd512_prefill: "fa2" / "auto" the split-D FA2 (no window, no sinks), "fmha" the WMMA kernel,
-// "auto" falls back to WMMA under runtime.deterministic, "cublas" never.
-// False = not selected or declined.
-[[nodiscard]] static bool try_hd512_row_invariant_prefill(const DispatchPolicy& rcfg, int hd, const Tensor& q,
-                                                          const Tensor& k, const Tensor& v, Tensor& o, int n,
-                                                          int kv_len, int nh, int nkv, float scale,
-                                                          int sliding_window, float softcap, int q_offset,
-                                                          cudaStream_t stream, const void* sinks) {
-    const std::string& mode = rcfg.attention.hd512_prefill;
-    // "fa2" / "auto": split-D FA2 (attention_fa2_hd512.cu), rows independent of n and q_offset as well;
+// hd=512 prefill whose rows do not depend on n or q_offset (#2167), single-shot and chunk alike: split-D
+// FA2 (no window, no sinks), else under runtime.deterministic the WMMA FMHA with a forward KV scan, else
+// false (the caller falls through to cuBLAS / FMHA). The DispatchPolicy argument is unread.
+[[nodiscard]] static bool try_hd512_row_invariant_prefill(const DispatchPolicy& /*rcfg*/, int hd,
+                                                          const Tensor& q, const Tensor& k, const Tensor& v,
+                                                          Tensor& o, int n, int kv_len, int nh, int nkv,
+                                                          float scale, int sliding_window, float softcap,
+                                                          int q_offset, cudaStream_t stream,
+                                                          const void* sinks) {
+    if (hd != 512)
+        return false;
+    // Split-D FA2 (attention_fa2_hd512.cu), rows independent of n and q_offset as well;
     // Gemma-4-26B pp4096 e2e +3.4..4.2 % vs cuBLAS, PPL 409.5548 -> 407.3936 (deterministic).
-    if (hd == 512 && (mode == "fa2" || mode == "auto") && sliding_window == 0 && sinks == nullptr &&
+    if (sliding_window == 0 && sinks == nullptr &&
         fa2_hd512_prefill(static_cast<const half*>(q.data), static_cast<const half*>(k.data),
                           static_cast<const half*>(v.data), static_cast<half*>(o.data), n, kv_len, nh, nkv,
                           scale, softcap, q_offset, stream))
         return true;
-    if (hd != 512 || !(mode == "fmha" || (mode == "auto" && process_diag_deterministic())))
+    if (!process_diag_deterministic())
         return false;
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
@@ -328,83 +328,6 @@ static void chunk_kv_split(cudaError_t err, half* kv, size_t kv_bytes, half** k,
 static void require_chunk_kv(const half* k, const half* v) {
     if (k == nullptr || v == nullptr)
         throw std::runtime_error("chunked_prefill: K/V gather buffer allocation failed");
-}
-
-// DEBUG attention.force_cublas_decode (n == 1): K/V rebuilt from the paged cache, then the
-// materialized QK^T path prefill uses. false = setup failed (ERROR logged, ao not written): the
-// caller runs paged attention. Sync copies: never under graph capture.
-[[nodiscard]] static bool cublas_decode_reference(const InferenceState& state, int layer, int kv_layer,
-                                    const int* layer_block_tables, const Tensor& qv, Tensor& ao, int nh,
-                                    int nkv, int hd, float scale, float softcap, int sliding_window,
-                                    const void* sinks, cudaStream_t stream) {
-    KVCache* cache_dbg = state.kv_cache;
-    int ctx_len = 0;
-    // First failure stops the setup.
-    cudaError_t dbg_err = cudaMemcpy(&ctx_len, state.context_lens, sizeof(int), cudaMemcpyDeviceToHost);
-    // Allocate temp K/V for all context tokens
-    int kv_elems = ctx_len * nkv * hd;
-    half *k_flat = nullptr, *v_flat = nullptr;
-    if (dbg_err == cudaSuccess)
-        dbg_err = cudaMalloc(&k_flat, kv_elems * sizeof(half));
-    if (dbg_err == cudaSuccess)
-        dbg_err = cudaMalloc(&v_flat, kv_elems * sizeof(half));
-    // Copy from paged KV cache to contiguous buffer
-    int kv_bs = cache_dbg->block_size();
-    int n_blocks = (ctx_len + kv_bs - 1) / kv_bs;
-    // Heap-sized to n_blocks — a fixed [1024] stack array overran 4x at
-    // the 64K context cap (n_blocks=4096) and silently smashed the frame.
-    std::vector<int32_t> h_block_table(n_blocks > 0 ? n_blocks : 1);
-    if (dbg_err == cudaSuccess)
-        dbg_err = cudaMemcpy(h_block_table.data(), layer_block_tables, n_blocks * sizeof(int32_t),
-                             cudaMemcpyDeviceToHost);
-    // SWA trailing-free holes (-1) leave their rows zeroed — they sit
-    // outside the window mask, so the reference output is unaffected.
-    if (dbg_err == cudaSuccess)
-        dbg_err = cudaMemset(k_flat, 0, kv_elems * sizeof(half));
-    if (dbg_err == cudaSuccess)
-        dbg_err = cudaMemset(v_flat, 0, kv_elems * sizeof(half));
-    for (int b = 0; dbg_err == cudaSuccess && b < n_blocks; b++) {
-        int block_id = h_block_table[b];
-        if (block_id < 0)
-            continue;
-        int toks_in_block = std::min(kv_bs, ctx_len - (b * kv_bs));
-        size_t row_bytes = static_cast<size_t>(nkv * hd) * sizeof(half);
-        half* k_src = static_cast<half*>(cache_dbg->k_ptr(kv_layer, block_id));
-        half* v_src = static_cast<half*>(cache_dbg->v_ptr(kv_layer, block_id));
-        dbg_err = cudaMemcpy(k_flat + static_cast<ptrdiff_t>(b * kv_bs * nkv * hd), k_src,
-                             toks_in_block * row_bytes, cudaMemcpyDeviceToDevice);
-        if (dbg_err == cudaSuccess)
-            dbg_err = cudaMemcpy(v_flat + static_cast<ptrdiff_t>(b * kv_bs * nkv * hd), v_src,
-                                 toks_in_block * row_bytes, cudaMemcpyDeviceToDevice);
-    }
-    // Reshape for cuBLAS attention: Q[1,nh,hd], K[ctx_len,nkv,hd], V[ctx_len,nkv,hd]
-    int64_t k_shape[2] = {ctx_len, static_cast<int64_t>(nkv * hd)};
-    int64_t v_shape[2] = {ctx_len, static_cast<int64_t>(nkv * hd)};
-    Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
-    Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
-    // n=1 cuBLAS attention: causal=true + q_offset=ctx_len-1 lets the single
-    // query see the full context AND keeps the sliding-window mask correct
-    // (causal=false/q_offset=0 broke SWA: abs_row=0 never triggered the
-    // window). Sinks pass through so this stays a faithful gpt-oss reference (#547).
-    {
-        int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
-        half* s_buf = nullptr;
-        if (dbg_err == cudaSuccess)
-            dbg_err = cudaMalloc(&s_buf, (size_t)nh * ctx_len * sizeof(half));
-        if (dbg_err == cudaSuccess) {
-            Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
-            attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/true,
-                                     softcap,
-                                     /*q_offset=*/ctx_len - 1, stream, sliding_window, sinks);
-        }
-        IMP_CUDA_CHECK_LOG(cudaFree(s_buf));
-    }
-    IMP_CUDA_CHECK_LOG(cudaFree(k_flat));
-    IMP_CUDA_CHECK_LOG(cudaFree(v_flat));
-    if (dbg_err != cudaSuccess)
-        IMP_LOG_ERROR("force_cublas_decode: reference setup failed (%s), layer %d uses paged attention",
-                      cudaGetErrorString(dbg_err), layer);
-    return dbg_err == cudaSuccess;
 }
 
 }  // namespace imp
