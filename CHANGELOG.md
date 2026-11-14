@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- Dense NVFP4 prefix-cache resend answers like the first send: prompt rows skip the tile's stream-K on every model (`gemm.nvfp4_prompt_streamk` auto = off, was on for dense). `degen_suite.py` turn-2 resend on Qwen3-8B-NVFP4 0/3 -> 3/3. pp512: Qwen3-8B-NVFP4 -2.7 %, Qwen3-14B +0.5 %, Qwen3.8-27B +0.8 %.
+
 ## [0.67.0] - 2026-11-14
 
 ### Added

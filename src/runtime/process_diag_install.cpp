@@ -45,8 +45,8 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.cublas_fp16_acc = (cfg.gemm.cublas_fp16_acc == "on");
     // runtime.deterministic: no timed cuBLASLt algo pick.
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : imp::cfg::kNvfp4CublasltMinM;
-    // "auto" resolves per model at engine init (init_resolve_quant_flags_); without an engine: on.
-    d.nvfp4_prompt_streamk = cfg.gemm.nvfp4_prompt_streamk != "off";
+    // "auto" = off: a prefix-cache resend must answer like the first send (docs/DETERMINISM.md).
+    d.nvfp4_prompt_streamk = (cfg.gemm.nvfp4_prompt_streamk == "on");
     d.moe_force_host_experts = cfg.moe.force_host_experts;
     d.moe_pin_host_experts = cfg.moe.pin_host_experts;
     d.moe_host_expert_pool_mib = cfg.moe.host_expert_pool_mib;

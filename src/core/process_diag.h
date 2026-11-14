@@ -49,7 +49,7 @@ struct ProcessDiag {
     int attention_paged_fp8_hpc = 0;        // 0 = auto; -1 = the per-head four-token kernel; tests sweep 1..5
     bool attention_fa2_heavy_first = true;
     int nvfp4_cublaslt_min_m = 2048;     // imp::cfg::kNvfp4CublasltMinM, 0 under runtime.deterministic
-    bool nvfp4_prompt_streamk = true;    // gemm.nvfp4_prompt_streamk, auto resolved at engine init
+    bool nvfp4_prompt_streamk = false;   // gemm.nvfp4_prompt_streamk == "on"
     bool force_splitk_fallback = false;  // test hook
 
     // MoE

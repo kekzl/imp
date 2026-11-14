@@ -47,8 +47,8 @@ struct GEMM {
     // floor at small batch. Same W4A4 numerics as the tile GEMM. Default on.
     bool nvfp4_lm_head_smallm = true;
     // Stream-K on prompt rows (M >= 33) of the own NVFP4 tile: its k split follows M, so a prompt row
-    // moves with its chunk (prefix-cache resend). "auto": off on MoE (Gemma-4-26B resend 0.179 nats -> 0,
-    // pp512 -0.7 %), on for dense (Qwen3-8B-NVFP4 pp512 -2.1 % without it). Decode rows keep stream-K.
+    // moves with its chunk (prefix-cache resend). "auto" = off on every model (Gemma-4-26B resend 0.179
+    // nats -> 0; Qwen3-8B-NVFP4 pp512 -2.7 %, Qwen3.8-27B +0.8 %); "on" restores it. Decode rows keep it.
     std::string nvfp4_prompt_streamk = "auto";
     // Own small-M FP8 x FP8 GEMM (src/quant/fp8_gemm_smallm.cu) instead of cuBLASLt for decode rows
     // (n > 1, never a prompt row) up to this M (0 off, max 32). Qwen3-8B-FP8 conc 16 +46 %, conc 4 +61 %.
