@@ -170,8 +170,7 @@ int main(int argc, char** argv) {
                                       : 1;
     mtp_k = imp::tools::mtp_auto_after_load(runtime_cfg, mtp_k, head_loaded, args.mtp_spec_decode_k,
                                             head_k_cap,
-                                            imp::tools::mtp_auto_serving(runtime_cfg, engine_batch,
-                                                                         gdn_hybrid));
+                                            imp::tools::mtp_auto_serving(engine_batch, gdn_hybrid));
     if (mtp_k <= 0)
         model->model->decline_mtp_head();
 

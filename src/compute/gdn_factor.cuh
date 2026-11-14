@@ -21,11 +21,6 @@ inline constexpr int gdn_factor_floats_per_head(int state_size, int head_dim) {
     return kGdnFactorPad + state_size + head_dim;
 }
 
-// Write the 0 sentinel into g for every (layer, head) of the named slots: the
-// rows of rejected drafts, finished requests and reassigned slots, which the
-// scan would otherwise apply on the next step. Defined in gdn_factor.cu.
-void gdn_factor_clear(float* fac, int64_t layer_stride, int n_layers, const int* slots, int n_slots,
-                      int n_heads, int fac_stride, cudaStream_t stream);
 
 // Rows one fold applies in order: the bound verify at 8 drafts folds up to 7 matched drafts.
 inline constexpr int kGdnFactorFoldMaxRows = 7;
@@ -55,24 +50,6 @@ __device__ __forceinline__ float* gdn_factor_mid(float* fac_out, int mid_t, int 
 __device__ __forceinline__ int gdn_factor_mid_row(const int* out_slots, const float* fac_out, int snap_n,
                                                   int real_n) {
     return out_slots && fac_out && snap_n >= 1 && snap_n < real_n ? snap_n : -1;
-}
-
-// Applies a pending factored row to the state column this thread owns, in registers, right
-// after the state load and before any token. No-op when fac is null or the 0 sentinel.
-// H_reg holds SS_PER rows from s_base of column d; k indexed by absolute row, delta by column.
-template <int SS_PER>
-__device__ __forceinline__ void gdn_factor_apply(float (&H_reg)[SS_PER], const float* __restrict__ fac,
-                                                 int state_size, int s_base, int d) {
-    if (fac == nullptr)
-        return;
-    const float g = fac[0];
-    if (g == 0.0f)
-        return;
-    const float* __restrict__ k = fac + kGdnFactorPad;
-    const float delta_d = k[state_size + d];
-#pragma unroll
-    for (int s = 0; s < SS_PER; s++)
-        H_reg[s] = g * H_reg[s] + k[s_base + s] * delta_d;
 }
 
 // Writes the factored row for the token just processed. Mirrors scan ownership: thread

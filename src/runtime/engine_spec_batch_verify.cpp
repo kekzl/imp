@@ -63,31 +63,26 @@ int bound_rows(const std::vector<std::shared_ptr<Request>>& batch, const MtpBind
 }
 
 // A lone bound request verifies in the bound batched step, a group of one.
-bool bound_solo(const RuntimeConfig& cfg, const Model* model, const BatchVerifyState& bv,
-                const MtpBind& active, const MtpBindPool& pool,
+bool bound_solo(const BatchVerifyState& bv, const MtpBind& active, const MtpBindPool& pool,
                 const std::vector<std::shared_ptr<Request>>& batch) {
-    return bv.bound_only && !batch.empty() && !batch_verify_on(cfg, model) &&
+    return bv.bound_only && !batch.empty() &&
            mtp_bound_verify_solo(static_cast<int>(batch.size()), mtp_bound(active, pool, batch[0]->id));
 }
 
-// Mode and batch-shape gates ahead of the per-row ones: the full batch_verify takes any batch of two or more;
-// the bound one (speculative.mtp_batch_verify) up to its rows, with a loaded head and enough bound rows; solo
-// = a lone bound request under the solo bound verify.
-const char* batch_mode_refusal(bool full, const BatchVerifyState& bv, int rows, int bound, bool head_on,
-                               bool solo) {
-    if (!full && !bv.bound_only)
+// Mode and batch-shape gates ahead of the per-row ones: up to the bound rows (speculative.mtp_batch_verify),
+// with a loaded head and enough bound rows; solo = a lone bound request.
+const char* batch_mode_refusal(const BatchVerifyState& bv, int rows, int bound, bool head_on, bool solo) {
+    if (!bv.bound_only)
         return "off";
-    if (rows < 2 && (full || !solo))
+    if (rows < 2 && !solo)
         return "batch_of_one";
-    if (full)
-        return nullptr;
     if (!head_on || rows > bv.cap_seq)
         return kAboveBoundRows;
     return mtp_bound_verify_fits(bv.cap_seq, rows, bound, solo) ? nullptr : kTooFewBound;
 }
 
-bool refusal_logged(bool full, const BatchVerifyState& bv, const char* why) {
-    return full || (bv.bound_only && why != kAboveBoundRows && why != kTooFewBound);
+bool refusal_logged(const BatchVerifyState& bv, const char* why) {
+    return bv.bound_only && why != kAboveBoundRows && why != kTooFewBound;
 }
 
 // After drafting: nothing to verify, or (bound verify) too few drafted rows to pay for the pads.
@@ -151,20 +146,11 @@ bool grouped_verify_model(const RuntimeConfig& cfg, const Model* model) {
     return cfg.speculative.hybrid && model != nullptr && model->config().ssm_inner_size > 0 &&
            !model->profile().has_pure_ssm;
 }
-
-// The full batch_verify (every decoding row, one head KV slot per batch slot) at a batch above one.
-bool batch_verify_full(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_on(cfg, model) && max_batch_size > 1;
-}
 }  // namespace
-
-bool batch_verify_on(const RuntimeConfig& cfg, const Model* model) {
-    return cfg.speculative.batch_verify && grouped_verify_model(cfg, model);
-}
 
 int mtp_bound_verify_config_rows(const RuntimeConfig& cfg) {
     const auto& scfg = cfg.speculative;
-    if (scfg.mtp_batch_verify < 2 || scfg.mtp_k == 0 || !scfg.hybrid || scfg.batch_verify)
+    if (scfg.mtp_batch_verify < 2 || scfg.mtp_k == 0 || !scfg.hybrid)
         return 0;
     const int rows = std::min(scfg.mtp_batch_verify, std::max(1, scfg.mtp_history_slots));
     return rows >= 2 ? rows : 0;
@@ -196,71 +182,41 @@ int mtp_bound_verify_top_depth(const RuntimeConfig& cfg) {
                     mtp_bound_verify_pin_depth(cfg.diagnostics.mtp_verify_pin, depth, factor_row));
 }
 
-bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_full(cfg, model, max_batch_size) ||
-           mtp_bound_verify_rows(cfg, model, max_batch_size) > 0;
-}
+int mtp_draft_kv_slots(const RuntimeConfig& cfg) { return std::max(1, cfg.speculative.mtp_history_slots); }
 
-int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return batch_verify_full(cfg, model, max_batch_size) ? max_batch_size
-                                                         : std::max(1, cfg.speculative.mtp_history_slots);
-}
-
-int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live) {
-    if (batch_verify_full(cfg, model, max_batch_size))
-        return max_batch_size;
+int mtp_bind_cap(const RuntimeConfig& cfg, bool carry_live) {
     return carry_live ? std::max(1, cfg.speculative.mtp_history_slots) : 1;
 }
 
-int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    return !batch_verify_full(cfg, model, max_batch_size) ? kMtpCarryRows : 0;
-}
-
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size) {
-    if (!batch_verify_full(cfg, model, max_batch_size)) {  // slot-swapping: no factored rows to apply
-        const bool factor_row = mtp_bound_verify_factor_row(cfg);
-        return mtp_bound_verify_rows(cfg, model, max_batch_size) *
-               bound_verify_spares_per_row(mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k,
-                                                                  factor_row),
-                                           factor_row);
-    }
-    // The whole point of the factored form: the drafted row is (g, k, delta)
-    // plus a conv tap, so the pool stops carrying a second slot per batch slot
-    // and the planner stops charging one.
-    if (cfg.speculative.factored_spare)
-        return 0;
-    return max_batch_size;
+    const bool factor_row = mtp_bound_verify_factor_row(cfg);
+    return mtp_bound_verify_rows(cfg, model, max_batch_size) *
+           bound_verify_spares_per_row(mtp_bound_verify_depth(cfg.speculative.mtp_batch_verify_k, factor_row),
+                                       factor_row);
 }
 
 bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
-    if (!batch_verify_wants_bufs(runtime_config_, model_.get(), config_.max_batch_size))
+    const int cap_seq = mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size);
+    if (cap_seq <= 0)
         return true;  // nothing to stage, and that is not a failure
     if (bv_.d_stage != nullptr)
         return true;
-    const bool full = batch_verify_full(runtime_config_, model_.get(), config_.max_batch_size);
-    const int cap_seq = full ? config_.max_batch_size
-                             : mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size);
     const int table_cap = decode_batch_pool_.is_allocated() ? decode_batch_pool_.max_blocks_per_seq() : 0;
-    if (cap_seq < 2 || table_cap <= 0)
+    if (table_cap <= 0)
         return false;
     // Factor rows: the pool reserved one spare per row, so without its rows the step verifies 1 draft.
-    if (!full && mtp_bound_verify_factor_row(runtime_config_)) {
+    if (mtp_bound_verify_factor_row(runtime_config_)) {
         const int levels = mtp_bound_verify_top_depth(runtime_config_) - 1;
         bv_.factor_row = bound_verify_factor_row_alloc(model_->config(), ssm_state_.get(), vram_alloc_, bv_,
                                                        cap_seq, levels, stream);
         if (!bv_.factor_row)
             runtime_config_.speculative.mtp_batch_verify_k = 1;
     }
-    const int depth = full ? 1
-                           : mtp_bound_verify_depth(runtime_config_.speculative.mtp_batch_verify_k,
-                                                    bv_.factor_row);
-    const int streak_depth =
-        full ? 1
-             : mtp_bound_verify_streak_depth(runtime_config_.speculative.mtp_batch_verify_k_streak, depth,
-                                             bv_.factor_row);
-    const int pin_depth = full ? 0
-                               : mtp_bound_verify_pin_depth(runtime_config_.diagnostics.mtp_verify_pin, depth,
-                                                            bv_.factor_row);
+    const int depth = mtp_bound_verify_depth(runtime_config_.speculative.mtp_batch_verify_k, bv_.factor_row);
+    const int streak_depth = mtp_bound_verify_streak_depth(
+        runtime_config_.speculative.mtp_batch_verify_k_streak, depth, bv_.factor_row);
+    const int pin_depth = mtp_bound_verify_pin_depth(runtime_config_.diagnostics.mtp_verify_pin, depth,
+                                                     bv_.factor_row);
     const int cap_rows = (std::max(streak_depth, pin_depth) + 1) * cap_seq;
     const size_t stage_ints = batch_verify_stage_ints(cap_rows, cap_seq);
     const size_t table_ints = static_cast<size_t>(cap_rows) * table_cap;
@@ -292,24 +248,15 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     bv_.pin = pin_depth;
     bv_.wide_depth = mtp_bound_verify_wide_depth(runtime_config_.speculative.mtp_batch_verify_k_wide, depth,
                                                  bv_.factor_row);
-    bv_.bound_only = !full;
-    if (!full) {
-        IMP_LOG_INFO(
-            "speculative.mtp_batch_verify: bound requests verify together while <= %d decode, %d draft(s) "
-            "each, %d after a full accept, %d from %d requests up "
-            "(%d spare recurrent slots%s)",
-            cap_seq, depth, streak_depth, bv_.wide_depth, kMtpBoundVerifyWideRows,
-            batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
-            bv_.factor_row ? ", the drafts before the last also as factor rows" : "");
-        return true;  // slot-swapping spares: a factored row would need every following step to apply it
-    }
-    return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_,
-                                stream);
-}
-
-// speculative.factored_spare with its rows allocated; the bound verify (bv.factor_row) owns the same buffers.
-bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv) {
-    return cfg.speculative.factored_spare && bv.d_fac != nullptr && !bv.factor_row;
+    bv_.bound_only = true;
+    IMP_LOG_INFO(
+        "speculative.mtp_batch_verify: bound requests verify together while <= %d decode, %d draft(s) "
+        "each, %d after a full accept, %d from %d requests up "
+        "(%d spare recurrent slots%s)",
+        cap_seq, depth, streak_depth, bv_.wide_depth, kMtpBoundVerifyWideRows,
+        batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
+        bv_.factor_row ? ", the drafts before the last also as factor rows" : "");
+    return true;
 }
 
 void Engine::free_batch_verify_bufs_() {
@@ -342,8 +289,7 @@ int Engine::acquire_spare_slot_(int req_id, bool second) {
         return -1;
     if (!bv_.initialized) {
         bv_.free.clear();
-        const int mc = spec_mc_reserved_slots_();
-        for (int i = ssm_state_->n_reserved() - 1; i >= mc; --i)
+        for (int i = ssm_state_->n_reserved() - 1; i >= 0; --i)
             bv_.free.push_back(ssm_state_->reserved_slot(i));
         bv_.initialized = true;
     }
@@ -431,20 +377,15 @@ int Engine::batch_verify_draft_(Request& req, int depth, int32_t* out, bool& fro
 // once per reason: a batch that never verifies must not look like one that
 // does (the pipeline gates had the same blind spot, #1646).
 const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const {
-    const bool full = batch_verify_on(runtime_config_, model_.get());
     const char* why = [&]() -> const char* {
         if (!ssm_state_)
             return "off";
-        if (const char* mode = batch_mode_refusal(full, bv_, static_cast<int>(batch.size()),
+        if (const char* mode = batch_mode_refusal(bv_, static_cast<int>(batch.size()),
                                                   bound_rows(batch, mtp_active_, mtp_pool_),
                                                   mtp_spec_decode_enabled(),
-                                                  bound_solo(runtime_config_, model_.get(), bv_, mtp_active_,
-                                                             mtp_pool_, batch)))
+                                                  bound_solo(bv_, mtp_active_, mtp_pool_, batch)))
             return mode;
-        // The factored form carries the drafted row as (g, k, delta) plus a
-        // conv tap, so it reserves no slots by design; this gate must not
-        // refuse every batch on that basis alone.
-        if (!factored_spare_active(runtime_config_, bv_) && ssm_state_->n_reserved() - spec_mc_reserved_slots_() <= 0)
+        if (ssm_state_->n_reserved() <= 0)
             return "no_spare_slots";
         if (swa_sizing_active_ || config_.streaming_kv_enabled)
             return "swa_or_streaming_kv";
@@ -472,7 +413,7 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
         }
         return nullptr;
     }();
-    if (why != nullptr && batch.size() >= 2 && bv_.last_refusal != why && refusal_logged(full, bv_, why)) {
+    if (why != nullptr && batch.size() >= 2 && bv_.last_refusal != why && refusal_logged(bv_, why)) {
         bv_.last_refusal = why;
         IMP_LOG_INFO("spec-batch: batched verify refused by '%s' (n=%zu)", why, batch.size());
     }
@@ -521,7 +462,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         return false;
     };
-    const bool solo = bound_solo(runtime_config_, model_.get(), bv_, mtp_active_, mtp_pool_, reqs);
+    const bool solo = bound_solo(bv_, mtp_active_, mtp_pool_, reqs);
     if (N + static_cast<int>(solo) < 2)
         return decline("fewer_than_two_decoding");
 
@@ -536,8 +477,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         live[g] = recurrent_slot_for_(reqs[g]->id);
         if (live[g] < 0)
             return decline("no_live_slot");
-        // Factored: no spare slot exists, the drafted row leaves as factors.
-        spare[g] = factored_spare_active(runtime_config_, bv_) ? live[g] : acquire_spare_slot_(reqs[g]->id);
+        spare[g] = acquire_spare_slot_(reqs[g]->id);
         if (spare[g] < 0)
             return decline("spare_slot_unavailable");
         // Factor row: no second spare, h_snap[N + g] is not read (ssm_snap_rows 1).
@@ -734,38 +674,17 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_n_seq = N;
     state.ssm_group_verify = true;
     state.ssm_seq_tokens = T;
-    // Factored spare: no second slot, so no commit destination. The drafted
-    // row leaves as (g, k, delta) plus one conv tap per layer, both addressed
-    // by the live slot; the snapshot at row 1 stays the in-place one.
-    const bool factored = factored_spare_active(runtime_config_, bv_);
-    state.ssm_out_slots = factored ? nullptr : d_out;
-    state.ssm_snap_slots = factored ? d_seq : d_snap;
-    state.ssm_snap_rows = factored ? 1 : bound_verify_spares_per_row(D, bv_.factor_row);
+    state.ssm_out_slots = d_out;
+    state.ssm_snap_slots = d_snap;
+    state.ssm_snap_rows = bound_verify_spares_per_row(D, bv_.factor_row);
     // Factor rows: 1 row in place, all T rows into the spare, rows 2 .. D as factor rows + taps by group
-    // and level. d_fac is null unless factored or factor_row.
+    // and level. d_fac is null unless factor_row.
     state.ssm_fac_out = bv_.d_fac;
     state.ssm_fac_stride = bv_.fac_stride;
     state.ssm_fac_layer_stride = bv_.fac_layer_stride;
     state.ssm_tap_out = bv_.d_tap;
     state.ssm_tap_layer_stride = bv_.tap_layer_stride;
     state.ssm_tap_levels = bv_.factor_row ? D - 1 : 0;
-    if (factored) {
-        // Rows the LAST verify accepted: this forward applies them, to the
-        // conv window before the conv reads it and to the recurrent state
-        // inside the scan's register load.
-        if (!bv_.pending.empty()) {
-            const int np = static_cast<int>(bv_.pending.size());
-            auto* hp = static_cast<int32_t*>(bv_.h_pending.data());
-            std::copy(bv_.pending.begin(), bv_.pending.end(), hp);
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(bv_.d_pending, hp, np * sizeof(int32_t),
-                                               cudaMemcpyHostToDevice, stream));
-            state.ssm_fac_in = bv_.d_fac;
-            state.ssm_tap_in = bv_.d_tap;
-            state.ssm_tap_slots = bv_.d_pending;
-            state.ssm_tap_n = np;
-        }
-        bv_.pending.clear();
-    }
     state.d_chunk_len = d_misc;
     state.d_snap_n = d_misc + 1;
     if (capture_on) {
@@ -867,9 +786,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         kv_manager_->touch(req->id);
         kv_manager_->rollback(req->id, p0[g] + 1 + matched);
         // State after 1 + matched rows: the live slot holds row 1 (in-place snapshot), the spare all T rows,
-        // spare2 row 2 (D == 2); taking one swaps it with the live slot. Factored (D == 1): no spare, the
-        // scan wrote a row for EVERY group, so accept keeps it for the next step and anything else must
-        // clear it (else state advances by a token nobody accepted).
+        // spare2 row 2 (D == 2); taking one swaps it with the live slot.
         // Factor rows (D >= 2): no spare2, 1 .. D - 1 accepted drafts fold their rows into the live slot.
         const bool done = req->status == RequestStatus::FINISHED;
         const int role = done ? 0 : bound_verify_kept_slot(matched, D, bv_.factor_row);
@@ -878,10 +795,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
             full_nd = std::max(full_nd, nd);
         if (runtime_config_.diagnostics.spec_trace)
             bv_.sfx_shadow.trace_step(req->id, N, T, nd, matched, emitted, req->output_tokens, done);
-        if (factored)
-            (role != 0 ? bv_.pending : bv_.clear_slots).push_back(live[g]);
-        else
-            bound_verify_adopt_slot_(req->id, role, live[g], role == 1 ? spare[g] : spare2[g]);
+        bound_verify_adopt_slot_(req->id, role, live[g], role == 1 ? spare[g] : spare2[g]);
         if (nd > 0) {
             req->spec_verifies++;
             req->spec_drafted += nd;
@@ -893,21 +807,6 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         emit_total += emitted;
         drafted_total += nd;
         any_mtp = any_mtp || from_mtp[g];
-    }
-    // Factored: rows nobody may apply - this step's rejects, plus slots
-    // released since the last verify - get the 0 sentinel before the next
-    // forward can read them.
-    if (factored && !bv_.clear_slots.empty()) {
-        const int nc = static_cast<int>(bv_.clear_slots.size());
-        auto* hc = static_cast<int32_t*>(bv_.h_clear.data());
-        std::copy(bv_.clear_slots.begin(), bv_.clear_slots.end(), hc);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(bv_.d_clear, hc, nc * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                           stream));
-        const auto& mc = model_->config();
-        const int heads = mc.ssm_dt_rank;
-        gdn_factor_clear(bv_.d_fac, bv_.fac_layer_stride, ssm_state_->n_ssm_layers(), bv_.d_clear, nc,
-                         heads, bv_.fac_stride, stream);
-        bv_.clear_slots.clear();
     }
     bound_verify_factor_row_fold(model_->config(), *ssm_state_, bv_, D - 1, live.data(), fold_of.data(), N,
                                  stream);

@@ -680,8 +680,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                                                                state.resolved_max_batch_size, gdn_hybrid,
                                                                mtp_k, head_loaded, head_k_cap);
     imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k, head_loaded, head_k_cap,
-                                  imp::tools::mtp_auto_serving(state.runtime_config, engine_batch,
-                                                               gdn_hybrid));
+                                  imp::tools::mtp_auto_serving(engine_batch, gdn_hybrid));
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
     if (mtp_k <= 0)

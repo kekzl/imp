@@ -172,29 +172,6 @@ TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::GENERIC));
 }
 
-// speculative.mtp_tree_width default (1) must mean EXACTLY the linear MTP path - the
-// multi-candidate machinery keys every branch on width>1, so drift above 1 would silently
-// change drafting on every MTP run. Also checks the binder reaches the key (a typo would
-// measure the default instead of failing, apply_overrides' error contract).
-TEST(RuntimeConfigTest, MtpTreeWidthDefaultAndBinding) {
-    RuntimeConfig cfg;
-    EXPECT_EQ(cfg.speculative.mtp_tree_width, 1);
-    set_(cfg, {"speculative.mtp_tree_width=4"});
-    EXPECT_EQ(cfg.speculative.mtp_tree_width, 4);
-}
-
-// speculative.mtp_tree_margin: the branch gate. Positive by default (a W>1
-// run branches only where the head is unsure); 0 must bind and mean "always
-// branch", which is the shape the width A/B measured before the gate existed.
-TEST(RuntimeConfigTest, MtpTreeMarginDefaultAndBinding) {
-    RuntimeConfig cfg;
-    EXPECT_GT(cfg.speculative.mtp_tree_margin, 0.0f);
-    set_(cfg, {"speculative.mtp_tree_margin=0"});
-    EXPECT_EQ(cfg.speculative.mtp_tree_margin, 0.0f);
-    set_(cfg, {"speculative.mtp_tree_margin=3.5"});
-    EXPECT_FLOAT_EQ(cfg.speculative.mtp_tree_margin, 3.5f);
-}
-
 // Cost of an EXPLICIT dtype pin vs the auto default: IMP_KV_FP8=1 was correct when auto meant
 // FP16, but since the NVFP4 default it doubles bytes/token on QWEN35 (max_model_len 90528 vs
 // 126432) while logging nothing, because --kv-fp8 sets the enum directly and skips the

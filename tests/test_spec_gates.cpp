@@ -115,16 +115,7 @@ TEST(SpecGates, MtpBindsOnlyARequestThatCanVerify) {
 TEST(SpecGates, HybridSlabMatchesOnlyAtTheCommittedRow) {
     const int K = 16;
     for (int j = 0; j <= K; ++j)
-        EXPECT_EQ(imp::spec_hybrid_slab_at_row(false, 0, j, K, 0), j == K) << "j=" << j;
-}
-
-// Grouped chunk: candidate 0 runs on the live slot and commits at its group's last row;
-// any other winner leaves candidate 0's state there.
-TEST(SpecGates, HybridGroupedSlabIsCandidateZerosLastRow) {
-    const int rows = 4;  // 1 + mc_depth
-    EXPECT_TRUE(imp::spec_hybrid_slab_at_row(true, 0, rows - 1, rows - 1, rows));
-    EXPECT_FALSE(imp::spec_hybrid_slab_at_row(true, 0, rows - 2, rows - 1, rows));
-    EXPECT_FALSE(imp::spec_hybrid_slab_at_row(true, 1, rows - 1, rows - 1, rows));
+        EXPECT_EQ(imp::spec_hybrid_slab_at_row(j, K), j == K) << "j=" << j;
 }
 
 // Block drafter economics. Measured Qwen3-8B-NVFP4 prose: the n-gram rule stopped DSpark after 12

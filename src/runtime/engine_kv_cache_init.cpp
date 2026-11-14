@@ -216,7 +216,7 @@ bool Engine::init_kv_cache() {
     }
 
     // Reserved pool slots: mc verify W-1 + batched-verify spares (recomputed after the clamp).
-    int ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    int ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
     config_.kv_ceiling_seqs =
         kv_ceiling_seqs(admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size),
                         experts_on_host_ && executor_ && executor_->expert_cache_nvfp4_slots());
@@ -320,7 +320,8 @@ bool Engine::init_kv_cache() {
 
         if (!plan.ok) {
             clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget.kv_max_blocks);
-            ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+            ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(),
+                                                          config_.max_batch_size);
         }
 
         // Mode-2 weight caches stop at the plan's grant and leave its KV pool free (vram_budget.h).
@@ -808,11 +809,9 @@ bool Engine::init_kv_cache() {
                     " recurrent layers; refusing to serve without it (see the SSM/GDN state "
                     "pool line above for the shortfall and the lever)");
             } else if (ssm_reserved_slots > 0) {
-                IMP_LOG_INFO("SSM state: %d slot(s) reserved past max_batch_size=%d: %d multi-candidate verify "
-                             "(mtp_tree_width=%d), %d batched-verify spares (lazy), %.1f MiB each",
-                             ssm_reserved_slots, config_.max_batch_size, spec_mc_reserved_slots_(),
-                             runtime_config_.speculative.mtp_tree_width, batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
-                             ssm_state_->per_seq_bytes() / (1024.0 * 1024.0));
+                IMP_LOG_INFO("SSM state: %d verify spare slots past batch %d (lazy), %.1f MiB each",
+                             ssm_reserved_slots, config_.max_batch_size,
+                             ssm_state_->per_seq_bytes() / 1048576.0);
             }
             // Slot table for batched GDN decode. Allocated once and kept at a
             // stable address so a captured decode graph does not have to be

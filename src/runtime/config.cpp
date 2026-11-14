@@ -457,7 +457,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.step_timing", cfg.diagnostics.step_timing);
     B("diagnostics.worker_timing", cfg.diagnostics.worker_timing);
     B("diagnostics.tool_fault_raw", cfg.diagnostics.tool_fault_raw);
-    B("diagnostics.mtp_tree_probe", cfg.diagnostics.mtp_tree_probe);
     B("diagnostics.mtp_prenorm_h", cfg.diagnostics.mtp_prenorm_h);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
@@ -488,8 +487,6 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.moe", cfg.speculative.moe);
     B("speculative.token_recycling", cfg.speculative.token_recycling);
     I("speculative.recycle_width", cfg.speculative.recycle_width);
-    I("speculative.mtp_tree_width", cfg.speculative.mtp_tree_width);
-    F("speculative.mtp_tree_margin", cfg.speculative.mtp_tree_margin);
     B("speculative.suffix", cfg.speculative.suffix);
     S("speculative.ngram_corpus", cfg.speculative.ngram_corpus);
     S("speculative.dspark_model", cfg.speculative.dspark_model);
@@ -505,13 +502,10 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.mtp_batch_verify_k", cfg.speculative.mtp_batch_verify_k);
     I("speculative.mtp_batch_verify_k_wide", cfg.speculative.mtp_batch_verify_k_wide);
     I("speculative.mtp_batch_verify_k_streak", cfg.speculative.mtp_batch_verify_k_streak);
-    B("speculative.mtp_batch_verify_factor_row", cfg.speculative.mtp_batch_verify_factor_row);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
     I("speculative.mtp_draft_vocab", cfg.speculative.mtp_draft_vocab);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);
     // #1638: also read at engine_scheduler.cpp:1363 and :2882 ("kill switch for A/B").
-    B("speculative.batch_verify", cfg.speculative.batch_verify);
-    B("speculative.factored_spare", cfg.speculative.factored_spare);
     B("speculative.capture", cfg.speculative.capture);
 
     // Record what the operator actually chose. An "auto" default that resolves

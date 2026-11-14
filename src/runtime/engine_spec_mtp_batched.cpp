@@ -104,7 +104,7 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     static long long t_calls = 0, t_rows = 0;
     const auto t0 = std::chrono::steady_clock::now();
     // The next drafts per request land in ws->d_chain_tokens: m rows per draft level (the step depth of m).
-    if (std::max(bv_.depth, bound_verify_step_depth(bv_, m)) * m > imp::kMtpMaxTopW * imp::kMtpMaxChainK ||
+    if (std::max(bv_.depth, bound_verify_step_depth(bv_, m)) * m > imp::kMtpChainSlots * imp::kMtpMaxChainK ||
         ws->d_chain_tokens == nullptr) {
         fail_all("batched draft: too many rows");
         return;
@@ -156,7 +156,6 @@ void Engine::mtp_batched_set_draft_(const Request& req, int emitted, std::span<c
     const int32_t* t = req.output_tokens.data() + req.output_tokens.size() - static_cast<size_t>(emitted);
     mtp_active_.history.insert(mtp_active_.history.end(), t, t + emitted);
     ws->mtp_pos += emitted;
-    mtp_active_.chains.clear();
     mtp_active_.pending.clear();
     const size_t cap = std::min(drafts.size(), static_cast<size_t>(std::max(mtp_request_k_(req), 1)));
     for (size_t i = 0; i < cap && drafts[i] >= 0 && drafts[i] < vocab_size; ++i)

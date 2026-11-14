@@ -46,28 +46,10 @@ struct MtpDraftWorkspace {
     // FP8 form (dp4a GEMV into d_logits_f32).
     void* d_q8_1 = nullptr;
     void* d_d8 = nullptr;
-    // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe,
-    // and the multi-candidate branch seed: chains 1..W-1 start from ranks
-    // 1..W-1 here).
-    int*  d_topk = nullptr;
-    // [kMtpTopWBlocks*kMtpMaxTopW] float/int: partial per-block top-W (value,id) pairs for
-    // the two-pass serving top-W kernel. Probe's single-CTA kernel scans the full vocab per
-    // width (too slow for serving); pass 1 splits vocab across blocks, pass 2 merges.
-    float* d_topk_part_val = nullptr;
-    int* d_topk_part_idx = nullptr;
-    // [kMtpMaxTopW] float: top-W logit values in rank order (serving kernel only).
-    // d_topk_val[0]-d_topk_val[1] is the head's top-1/top-2 margin; gates
-    // speculative.mtp_tree_margin (a confident head skips the second candidate).
-    float* d_topk_val = nullptr;
-    // [kMtpMaxTopW*kMtpMaxChainK] int: device-side chain slots; chain c at
-    // [c*kMtpMaxChainK], step i's argmax lands in slot i, feeding step i+1's embedding
-    // lookup without a host round-trip. One D2H drains all chains at the end.
-    // Chain 0 is the linear path, byte-compatible with the old single-chain layout.
+    // [kMtpChainSlots*kMtpMaxChainK] int: device-side chain slots; step i's argmax lands in
+    // slot i, feeding step i+1's embedding lookup without a host round-trip; one D2H drains
+    // the chain. The bound batched verify uses every slot (requests x depth).
     int32_t* d_chain_tokens = nullptr;
-    // [hidden_dim] FP16: h_final of the last FEED pair, snapshotted before chain 0's first
-    // continuation overwrites d_h_final. Chains 1..W-1 branch at the first position and
-    // need exactly this hidden for their first continuation.
-    void* d_h_final_snap = nullptr;
     // [1] int — persistent argmax scratch for the host-path draft step
     // (replaces a per-draft cudaMallocAsync/cudaFreeAsync pair).
     int*  d_argmax = nullptr;
@@ -251,21 +233,19 @@ inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
 // d_h_prev: main-model final hidden [hidden_dim] FP16 GPU. mtp.loaded must be true.
 // out_token_id=nullptr: skip lm_head GEMV+argmax+sync (feed-only step, ~10x cheaper;
 // used for prefill/verify catch-up positions whose prediction is unused).
-// out_topk_ids (optional, top_w>0): top-W candidate ids descending-logit order,
-// out_topk_ids[0]==*out_token_id (Stage 0 tree-ceiling measurement).
 // lm_head_nvfp4 (optional): NVFP4 decode-cache view of main_lm_head, ~4x less HBM read;
 // draft-only precision; verification stays lossless.
 // lm_head_fp8/_scales (optional): FP8 per-row head (gemm.nvfp4_lm_head=fp8), taken first.
-// d_prev_token/d_out_token: device-chain I/O, no H2D/D2H/sync per step; with top_w>0 the
-// fast top-W kernel fills ws.d_topk and rank 0 lands in d_out_token. Caller drains the
+// d_prev_token/d_out_token: device-chain I/O, no H2D/D2H/sync per step. Caller drains the
 // whole chain with one D2H+sync at the end.
 // Returns false on any precondition violation (mtp not loaded, null buffers).
-[[nodiscard]] bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
-                    const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                    int* out_token_id, cudaStream_t stream, int* out_topk_ids = nullptr, int top_w = 0,
-                    const NvFP4QuantResult* lm_head_nvfp4 = nullptr, const int32_t* d_prev_token = nullptr,
-                    int32_t* d_out_token = nullptr, const void* lm_head_fp8 = nullptr,
-                    const float* lm_head_fp8_scales = nullptr);
+[[nodiscard]] bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
+                                  const Tensor& main_tok_emb, const Tensor& main_lm_head,
+                                  MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id,
+                                  cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4 = nullptr,
+                                  const int32_t* d_prev_token = nullptr, int32_t* d_out_token = nullptr,
+                                  const void* lm_head_fp8 = nullptr,
+                                  const float* lm_head_fp8_scales = nullptr);
 
 // Batched prefill feed: append n_rows (token,hidden) pairs to the MTP KV cache in one
 // M=n_rows pass (embedding/norm/fc/attention/MLP batched, causal attention per query row
@@ -347,16 +327,6 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot);
 // dst[r] = src[d_idx[r]], rows of `cols` FP16 (device index array).
 void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream);
 
-// Top-W over device logits into ws.d_topk (descending-logit order), no D2H/sync.
-// `fast`: two-pass serving kernel (pass1 per-block top-W, pass2 single-block merge);
-// `reference`: probe's single-CTA oracle for the GPU test to compare against.
-// Both break exact-value ties by lowest index within a pass; fast kernel's pass structure
-// can order EQUAL values differently across slice boundaries (test needs distinct values).
-// logits FP32 when fp32_logits (NVFP4 lm_head cache path), FP16 otherwise.
-[[nodiscard]] bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int top_w, MtpDraftWorkspace& ws,
-                   cudaStream_t stream);
-[[nodiscard]] bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, int top_w,
-                        MtpDraftWorkspace& ws, cudaStream_t stream);
 
 // Applies YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim]/K[n_kv_heads,
 // head_dim] FP16 in place at `pos`; mirrors main forward's rope_forward math so draft

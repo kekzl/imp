@@ -74,18 +74,6 @@ static bool ssm_batched_decode_rows(const InferenceState& state, int n, int ssm_
     return true;
 }
 
-// Factored spare: advance the accepted slots' conv windows by the drafted
-// tap before anything reads them. Once per layer, ahead of every branch.
-static void ssm_conv_tap_advance(const InferenceState& state, int ssm_idx, int conv_channels, int conv_kernel,
-                                 cudaStream_t stream) {
-    if (state.ssm_tap_in && state.ssm_tap_n > 0 && state.ssm_state && ssm_idx >= 0)
-        ssm_conv_tap_apply(state.ssm_state->conv_state(0, ssm_idx),
-                           static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
-                           static_cast<const char*>(state.ssm_tap_in) +
-                               (state.ssm_tap_layer_stride * ssm_idx * 2),
-                           conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
-}
-
 // Separate conv1d (prefill, decode or batched decode) + SiLU over the full xBC output.
 static void ssm_conv_silu_separate(const InferenceState& state, bool batched, void* conv_st, int ssm_idx,
                                    const Tensor& xBC_in, Tensor& xBC_out, const Tensor& w, const Tensor& b,
@@ -218,7 +206,6 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     const bool batched_dec = ssm_batched_decode_rows(state, n, ssm_idx);
     void* conv_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
                                                       : nullptr;
-    ssm_conv_tap_advance(state, ssm_idx, conv_channels, conv_kernel, stream);
 
     const int BC_size = n_groups * ssize;
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
@@ -778,12 +765,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 throw std::runtime_error("run_gdn: ragged prefill without device seq_offsets");
             const int scan_n_tokens = grouped ? state.ssm_seq_tokens : 1;  // ignored when row_offs != nullptr
             const int* real_n = grouped ? state.d_chunk_len : nullptr;
-            // Factored spare: this layer's slice of the [layer][slot][head] buffer.
-            // fac_out only on a grouped verify chunk (replaces the full-state commit
-            // there); fac_in on any shape, since the row a verify left is applied by whatever runs next.
+            // Factor rows: this layer's slice of the [layer][row][head] buffer, written only on a grouped
+            // verify chunk.
             const int64_t fac_off = state.ssm_fac_layer_stride * static_cast<int64_t>(ssm_idx);
             float* const fac_out = (grouped && state.ssm_fac_out) ? state.ssm_fac_out + fac_off : nullptr;
-            const float* const fac_in = state.ssm_fac_in ? state.ssm_fac_in + fac_off : nullptr;
             // Batched verify: per-group snapshot slots (ssm_snap_slots) replace
             // the group-0 slab; d_snap_n still names the row.
             const bool per_group_snap = grouped && state.ssm_out_slots && state.ssm_snap_slots;
@@ -825,7 +810,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                         static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
                         static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                         ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<__nv_bfloat16*>(snap_p),
-                        snap_p_n, outs, snaps, fac_out, fac_in, state.ssm_fac_stride);
+                        snap_p_n, outs, snaps, fac_out, state.ssm_fac_stride);
                 } else {
                     gdn_scan_fused_f32_batched(
                         conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
@@ -835,7 +820,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                         static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                         static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
                         ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<float*>(snap_p), snap_p_n,
-                        outs, snaps, fac_out, fac_in, state.ssm_fac_stride);
+                        outs, snaps, fac_out, state.ssm_fac_stride);
                 }
             };
             // Second snapshot (ssm_snap_rows 2): the state after d_snap_n[1] rows into ssm_snap_slots[n_seq +

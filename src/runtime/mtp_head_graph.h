@@ -60,7 +60,7 @@ struct MtpHeadGraphs {
     int failures = 0;
     bool doomed = false;
     long long replays = 0;
-    std::vector<int32_t> h_out;  // the drafts' D2H destination (kMtpMaxTopW * kMtpMaxChainK ints)
+    std::vector<int32_t> h_out;  // the drafts' D2H destination (kMtpChainSlots * kMtpMaxChainK ints)
 };
 
 }  // namespace imp

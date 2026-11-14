@@ -950,7 +950,7 @@ static MtpWorkspaceShape qwen38_27b_head() {
 
 TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     const auto s = qwen38_27b_head();
-    EXPECT_EQ(mtp_workspace_bytes(s), 363557576u);  // 2 MiB page rounding included; scan partials 8 MiB
+    EXPECT_EQ(mtp_workspace_bytes(s), 363543176u);  // 2 MiB page rounding included; scan partials 8 MiB
     EXPECT_EQ(mtp_alloc_footprint(size_t{1} << 20), size_t{1} << 20);
     EXPECT_EQ(mtp_alloc_footprint(2621440), size_t{4} << 20);
     auto no_kv = s;

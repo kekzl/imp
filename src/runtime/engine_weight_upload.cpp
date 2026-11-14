@@ -135,7 +135,7 @@ void retain_async_pool_memory() {
 // The weight-upload reserve as a function of max_batch_size (memory/upload_reserve.h):
 // workspace + capped KV + SSM/GDN state slots + recurrent snapshot store + 256 MiB safety.
 UploadReserve upload_reserve_for(const Model& model, const EngineConfig& cfg, const RuntimeConfig& rc,
-                                 size_t workspace_bytes, int reserved_state_slots) {
+                                 size_t workspace_bytes) {
     const auto& mcfg = model.config();
     UploadReserve r;
     r.fixed_bytes = workspace_bytes + (256ULL << 20);
@@ -174,7 +174,6 @@ UploadReserve upload_reserve_for(const Model& model, const EngineConfig& cfg, co
                                 cfg.ssm_state_dtype,
                                 model.ple_state_bytes()};
     r.state_bytes_per_slot = ssm_bytes_per_slot(geom);
-    r.reserved_state_slots = reserved_state_slots;
     // Recurrent-snapshot store (hybrid prefix caching): pre-allocated eagerly at KV-cache init.
     if (cfg.use_prefix_caching || rc.server.prefix_cache)
         r.fixed_bytes += static_cast<size_t>(std::max(rc.server.recurrent_snapshot_mb, 0)) << 20;
@@ -276,8 +275,7 @@ bool Engine::init_weights() {
 
     // Compute VRAM reserve for expert weight upload
     model_->upload_batch_fit_ = UploadBatchFit{upload_reserve_for(*model_, config_, runtime_config_,
-                                                                  executor_->workspace_estimate(),
-                                                                  spec_mc_reserved_slots_()),
+                                                                  executor_->workspace_estimate()),
                                                config_.max_batch_size, config_.max_batch_size};
     const UploadReserve& upload_reserve = model_->upload_batch_fit_.reserve;
     const size_t expert_reserve = upload_reserve_bytes(upload_reserve, config_.max_batch_size);

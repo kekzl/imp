@@ -23,7 +23,6 @@ UploadReserve qwen38_reserve() {
     r.kv_bytes_per_seq = mib(2304);  // 8192 blocks x 16 attn layers x 18432 B
     r.kv_cap_bytes = mib(6515.89);
     r.state_bytes_per_slot = mib(79.5);
-    r.reserved_state_slots = 0;
     return r;
 }
 
@@ -93,13 +92,6 @@ TEST(UploadReserve, ZeroWhenOneSlotDoesNotFit) {
     const size_t weights = mib(kWeightsMiB);
     EXPECT_EQ(upload_fitting_batch(r, 64, weights + upload_reserve_bytes(r, 1) - 1, weights), 0);
     EXPECT_EQ(upload_fitting_batch(r, 64, weights + upload_reserve_bytes(r, 1), weights), 1);
-}
-
-TEST(UploadReserve, ReservedStateSlotsAreChargedPastTheBatch) {
-    UploadReserve r = qwen38_reserve();
-    const size_t at64 = upload_reserve_bytes(r, 64);
-    r.reserved_state_slots = 3;
-    EXPECT_EQ(upload_reserve_bytes(r, 64), at64 + 3 * mib(79.5));
 }
 
 TEST(UploadReserve, ClampMessageNamesConfiguredFittedAndPerSlotCost) {

@@ -22,7 +22,7 @@ void MtpHeadGraphsDeleter::operator()(MtpHeadGraphs* g) const noexcept { delete 
 
 namespace {
 
-constexpr int kMtpHeadOutInts = kMtpMaxTopW * kMtpMaxChainK;
+constexpr int kMtpHeadOutInts = kMtpChainSlots * kMtpMaxChainK;
 static_assert(kMtpBoundVerifyMaxDepth - 1 <= kMtpPassChainLevels, "one position table per chain level");
 
 void note_failure(MtpHeadGraphs& G, const MtpHeadGraphKey& key, const char* what, cudaError_t err) {

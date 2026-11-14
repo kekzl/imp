@@ -1685,18 +1685,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     if (it->prediction == next_token) {
                         mtp_chain_accept_[it->lookahead].matches++;
                     }
-                    // Stage 0 per-width: was the true next token within top-(w+1)?
-                    if (static_cast<int>(mtp_chain_accept_w_.size()) <= it->lookahead) {
-                        mtp_chain_accept_w_.resize(it->lookahead + 1);
-                    }
-                    auto& wa = mtp_chain_accept_w_[it->lookahead];
-                    wa.total++;
-                    int found_rank = kMtpMeasureW;  // sentinel: not in top-W
-                    for (int w = 0; w < kMtpMeasureW; ++w) {
-                        if (it->topk[w] == next_token) { found_rank = w; break; }
-                    }
-                    // Cumulative: a hit at rank r counts for all widths ≥ r.
-                    for (int w = found_rank; w < kMtpMeasureW; ++w) wa.matches[w]++;
                     it = mtp_pending_chain_.erase(it);
                 } else {
                     ++it;
@@ -1763,25 +1751,19 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             const void* chain_h_prev = h_for_mtp;
             std::vector<int32_t> chain_preds;
             chain_preds.reserve(K);
-            // The top-w probe is opt-in: it costs a single-block scan of the
-            // whole vocabulary per width plus a host sync, per drafted token,
-            // and only imp-cli's tree-ceiling table reads it.
-            const bool want_probe = runtime_config_.diagnostics.mtp_tree_probe;
             // Device-side chain, the same one mtp_feed_pairs_ uses: each step's
             // argmax lands in ws->d_chain_tokens[k] and feeds step k+1's
             // embedding lookup on device, so ONE drain replaces K host
             // round-trips (each drafted token would otherwise end in a
-            // cudaStreamSynchronize while the GPU idles). The probe needs its
-            // top-w on the host per step, so it keeps the round-trip path; it
-            // is a measurement mode, not a serving one.
-            const bool device_chain = !want_probe && ws->d_chain_tokens != nullptr && ws->n_experts == 0 &&
+            // cudaStreamSynchronize while the GPU idles).
+            const bool device_chain = ws->d_chain_tokens != nullptr && ws->n_experts == 0 &&
                                       K <= imp::kMtpMaxChainK;
             if (device_chain) {
                 int launched = 0;
                 for (int k = 0; k < K; ++k) {
                     const bool first = (k == 0);
                     if (!mtp_draft_one(first ? chain_prev_tok : -1, first ? chain_h_prev : ws->d_h_final,
-                                       hidden_dim, vocab_size, nullptr, nullptr, 0,
+                                       hidden_dim, vocab_size, nullptr,
                                        first ? nullptr : ws->d_chain_tokens + k - 1,
                                        ws->d_chain_tokens + k)) {
                         break;
@@ -1795,13 +1777,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                         const int prediction = h_chain[k];
                         if (prediction < 0 || prediction >= vocab_size)
                             break;  // NaN-logits guard: keep the valid prefix
-                        // topk stays unset: -1 is the "not a candidate"
-                        // sentinel the width tally compares against, and a
-                        // zero-filled array would count token id 0 as a hit.
-                        MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
-                        for (int w = 0; w < Engine::kMtpMeasureW; ++w)
-                            entry.topk[w] = -1;
-                        mtp_pending_chain_.push_back(entry);
+                        mtp_pending_chain_.push_back(MtpChainEntry{prediction, k, cur_pos + 1 + k});
                         chain_preds.push_back(prediction);
                         if (k == 0)
                             mtp_pool_.pending_prediction = prediction;
@@ -1810,15 +1786,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             } else {
                 for (int k = 0; k < K; ++k) {
                     int prediction = -1;
-                    int topk[Engine::kMtpMeasureW] = {-1, -1, -1, -1};
-                    if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size, &prediction,
-                                       want_probe ? topk : nullptr, want_probe ? Engine::kMtpMeasureW : 0)) {
+                    if (!mtp_draft_one(chain_prev_tok, chain_h_prev, hidden_dim, vocab_size, &prediction))
                         break;
-                    }
-                    MtpChainEntry entry{prediction, k, cur_pos + 1 + k, {}};
-                    for (int w = 0; w < Engine::kMtpMeasureW; ++w)
-                        entry.topk[w] = topk[w];
-                    mtp_pending_chain_.push_back(entry);
+                    mtp_pending_chain_.push_back(MtpChainEntry{prediction, k, cur_pos + 1 + k});
                     chain_preds.push_back(prediction);
                     // For k=0 only, also feed pending_prediction_ (legacy 1-step
                     // accuracy counter remains in sync with chain_accept_[0]).

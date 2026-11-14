@@ -447,12 +447,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
     ok &= alloc(&ws.d_q8_1, sizeof(block_q8_1) * ((hidden_dim + 31) / 32));
     ok &= alloc(&ws.d_d8, sizeof(float) * ((hidden_dim + 31) / 32));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), sizeof(float) * kMtpTopWBlocks * kMtpMaxTopW);
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), sizeof(int) * kMtpTopWBlocks * kMtpMaxTopW);
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_val), kMtpMaxTopW * sizeof(float));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), sizeof(int32_t) * kMtpMaxTopW * kMtpMaxChainK);
-    ok &= alloc(&ws.d_h_final_snap, hidden_dim * sizeof(__half));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens),
+                sizeof(int32_t) * kMtpChainSlots * kMtpMaxChainK);
     ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_tok), sizeof(int32_t));
 
@@ -610,27 +606,10 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_logits_f32);
     frfn(ws.d_q8_1);
     frfn(ws.d_d8);
-    if (ws.d_topk) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_topk));
-        ws.d_topk = nullptr;
-    }
-    if (ws.d_topk_part_val) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_topk_part_val));
-        ws.d_topk_part_val = nullptr;
-    }
-    if (ws.d_topk_part_idx) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_topk_part_idx));
-        ws.d_topk_part_idx = nullptr;
-    }
-    if (ws.d_topk_val) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_topk_val));
-        ws.d_topk_val = nullptr;
-    }
     if (ws.d_chain_tokens) {
         IMP_CUDA_CHECK_LOG(cudaFree(ws.d_chain_tokens));
         ws.d_chain_tokens = nullptr;
     }
-    frfn(ws.d_h_final_snap);
     if (ws.d_argmax) {
         IMP_CUDA_CHECK_LOG(cudaFree(ws.d_argmax));
         ws.d_argmax = nullptr;
@@ -934,11 +913,10 @@ static bool mtp_lm_head_logits(MtpDraftWorkspace& ws, const Tensor& main_lm_head
     return true;
 }
 
-// Logits of ws.d_h_final, then argmax / top-W into the caller's slot (see mtp_draft_step).
+// Logits of ws.d_h_final, then argmax into the caller's slot (see mtp_draft_step).
 bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,
-                    int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
-                    const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token, const void* lm_head_fp8,
-                    const float* lm_head_fp8_scales) {
+                    int* out_token_id, cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4,
+                    int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales) {
     // Feed-only step (prefill / verify catch-up): the KV append above is the
     // whole point — skip the lm_head GEMV, argmax and stream sync.
     if (out_token_id == nullptr && d_out_token == nullptr)
@@ -958,19 +936,7 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
         return false;
 
     // argmax straight into caller's device slot: no D2H, no sync (caller drains in one copy).
-    // top_w>0: fast top-W kernel fills ws.d_topk instead, rank 0 lands in caller's slot.
-    // Rank 0 can differ from argmax on EXACT logit ties (pass structure); drafts stay lossless.
     if (d_out_token != nullptr) {
-        if (top_w > 0) {
-            const int w = std::min(top_w, kMtpMaxTopW);
-            const void* lg = f32_lm ? ws.d_logits_f32 : ws.d_logits;
-            if (!mtp_topw_fast(lg, f32_lm, vocab_size, w, ws, stream))
-                return false;
-            if (cudaMemcpyAsync(d_out_token, ws.d_topk, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
-                cudaSuccess)
-                return false;
-            return true;
-        }
         if (f32_lm) {
             mtp_argmax_kernel<<<1, 256, 0, stream>>>(
                 static_cast<const float*>(ws.d_logits_f32), vocab_size, d_out_token);
@@ -983,27 +949,7 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
         return true;
     }
 
-    // Step 8: argmax (or top-W) → device int → D2H.
-    const bool want_topk = (out_topk_ids != nullptr && top_w > 0);
-    if (want_topk) {
-        // Top-W path (Stage 0 tree-ceiling probe): reuse the pre-allocated
-        // ws.d_topk buffer. out_token_id is set to the argmax (top-0).
-        const int w = std::min(top_w, kMtpMaxTopW);
-        if (ws.d_topk == nullptr) {
-            IMP_LOG_ERROR("mtp_draft_step: top-W requested but ws.d_topk not allocated");
-            return false;
-        }
-        const void* lg = f32_lm ? ws.d_logits_f32 : ws.d_logits;
-        if (!mtp_topw_reference(lg, f32_lm, vocab_size, w, ws, stream))
-            return false;
-        if (cudaMemcpyAsync(out_topk_ids, ws.d_topk, w * sizeof(int),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-            return false;
-        const cudaError_t serr = cudaStreamSynchronize(stream);
-        *out_token_id = out_topk_ids[0];  // valid only when serr == cudaSuccess
-        return serr == cudaSuccess;
-    }
-
+    // Step 8: argmax -> device int -> D2H.
     // Host path: persistent argmax scratch (ws.d_argmax) — a per-draft
     // cudaMallocAsync/cudaFreeAsync pair costs host time on the chain.
     int* d_idx = ws.d_argmax;
@@ -1052,9 +998,9 @@ static void keep_first(cudaError_t& first, cudaError_t err) {
 
 bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
                     const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
-                    int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w,
-                    const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token,
-                    const void* lm_head_fp8, const float* lm_head_fp8_scales) {
+                    int* out_token_id, cudaStream_t stream, const NvFP4QuantResult* lm_head_nvfp4,
+                    const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8,
+                    const float* lm_head_fp8_scales) {
     if (!mtp.loaded) {
         IMP_LOG_ERROR("mtp_draft_step: MTP head not loaded");
         return false;
@@ -1110,8 +1056,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
     if (mtp.layout == MtpLayout::Qwen4Exp) {
         if (!mtp_qwen4exp_layer(d_h_prev, mtp, ws, hidden_dim, stream))
             return false;
-        return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids,
-                              top_w, lm_head_nvfp4, d_out_token, lm_head_fp8, lm_head_fp8_scales);
+        return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, lm_head_nvfp4,
+                              d_out_token, lm_head_fp8, lm_head_fp8_scales);
     }
     cudaError_t copy_err = cudaSuccess;  // first failed D2D copy below; checked before emitting a token
 
@@ -1427,8 +1373,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
         return false;
     }
 
-    return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, out_topk_ids, top_w,
-                          lm_head_nvfp4, d_out_token, lm_head_fp8, lm_head_fp8_scales);
+    return mtp_emit_token(ws, main_lm_head, hidden_dim, vocab_size, out_token_id, stream, lm_head_nvfp4,
+                          d_out_token, lm_head_fp8, lm_head_fp8_scales);
 }
 
 namespace {

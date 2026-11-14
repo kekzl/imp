@@ -70,12 +70,9 @@ constexpr int spec_replay_kv_len(bool graph_replay, int p0, int chunk_pad, int m
     return graph_replay ? p0 + chunk_pad : p0 + 1 + matched;
 }
 
-// A hybrid verify chunk leaves the live recurrent slab at the last real row of the chunk
-// (linear) or of candidate group 0 (grouped). A request finishing at emit row j is only at
-// that row when j is it; otherwise the slab is ahead of the transcript.
-constexpr bool spec_hybrid_slab_at_row(bool grouped, int winner, int j, int K, int rows_per_cand) {
-    return grouped ? (winner == 0 && j == rows_per_cand - 1) : j == K;
-}
+// A hybrid verify chunk leaves the live recurrent slab at the last real row of the chunk.
+// A request finishing at emit row j is only at that row when j == K; otherwise the slab is ahead.
+constexpr bool spec_hybrid_slab_at_row(int j, int K) { return j == K; }
 
 // Speculation economics after a request's verify step: stop drafting? `final` = for the rest of the
 // request. N-gram drafts are free, so below 15 % of drafted tokens accepted a verify cannot amortize (final).

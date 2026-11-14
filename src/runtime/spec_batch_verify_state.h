@@ -50,33 +50,18 @@ struct BatchVerifyState {
     bool factor_row = false;
     int fac_levels = 0;  // depth - 1 with factor_row: the levels allocated per group
     std::vector<int> free;
-    // Factored spare (speculative.factored_spare,
-    // docs/plans/2026-09-12-factored-verify-spare.md): drafted row as (g, k,
-    // delta) per (layer, slot, head) plus one conv tap per (layer, slot),
-    // instead of a second full recurrent slot. Indexed by recurrent SLOT: a
-    // request keeps its slot across steps while its batch position moves.
+    // Factor rows (docs/plans/2026-09-12-factored-verify-spare.md): a drafted row as (g, k, delta) per
+    // (layer, group x level, head) plus one conv tap per (layer, group x level), instead of a second full
+    // recurrent slot (3.22 MiB vs 79.5 MiB per row on Qwen3.8-27B).
     float* d_fac = nullptr;
     void* d_tap = nullptr;  // half
-    int fac_stride = 0;     // floats per (slot, head)
+    int fac_stride = 0;     // floats per (row, head)
     int64_t fac_layer_stride = 0;
     int64_t tap_layer_stride = 0;
-    // Slots whose row the NEXT forward must apply (drafts accepted last
-    // verify). Rebuilt every verify; the device twin drives the conv tap
-    // apply, and the recurrent half reads the 0 sentinel a clear writes into
-    // rows not listed.
-    std::vector<int> pending;
-    int* d_pending = nullptr;
-    // Rows that must be cleared before anything can apply them: this verify's
-    // rejected groups, plus slots released since the last one (e.g. a request
-    // that finished right after an accept). Separate device buffer from
-    // d_pending: the forward's tap apply may still be reading that one when
-    // the clear is queued.
-    std::vector<int> clear_slots;
+    // Fold lists (live slot, row, count per group) and their pinned staging: a pageable cudaMemcpyAsync
+    // would read the host buffer after it is reused.
     int* d_clear = nullptr;
-    // Pinned staging for the two slot lists. A pageable cudaMemcpyAsync would
-    // read the host vector after it is cleared, and a blocking cudaMemcpy on a
-    // non-default stream synchronises the device once per step.
-    PinnedBuffer h_pending, h_clear;
+    PinnedBuffer h_clear;
     bool initialized = false;
     mutable const char* last_refusal = nullptr;  // one log line per distinct reason
 };
@@ -94,7 +79,6 @@ struct MtpBind {
     int req = -1;
     int slot = 0;
     std::vector<int32_t> history, pending;
-    std::vector<std::vector<int32_t>> chains;
     int draft_ctx = -1;
     // Economics guard (docs/plans/2026-08-31-mtp-multicandidate-hybrid.md):
     // emitted per MTP verify vs the k that ran; adaptive chain depth
@@ -116,10 +100,7 @@ struct MtpBindPool {
     uint64_t use_clock = 0;
     int bind_cap = 1;       // requests bound at once: mtp_bind_cap(); the other slots only keep history
     int declined_req = -1;  // last request refused a slot (one log line, not one per prefill chunk)
-    // Margin-gate tallies (mtp_tree_width > 1) and the legacy one-step
-    // prediction the accuracy counter scores.
-    long long tree_branched = 0;
-    long long tree_linear = 0;
+    // The legacy one-step prediction the accuracy counter scores.
     int pending_prediction = -1;
 };
 
@@ -225,20 +206,10 @@ inline constexpr int kMtpCarryRows = 256;
 
 struct RuntimeConfig;
 class Model;
-// Config + model say yes (no batch-size term): speculative.batch_verify on a
-// recurrent model with speculative.hybrid.
-[[nodiscard]] bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
-// Reserved recurrent slots the batched verify adds to the pool: one per
-// batch slot, 0 when off or at batch 1.
-// Whether the batched verify needs its staging buffers (the full batch_verify or the bound one). Separate
-// from the spare-slot count because the factored form reserves no slots and still runs.
-[[nodiscard]] bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
-// The factored path is live only once its rows exist: a geometry or allocation
-// refusal clears the flag, and everything downstream reads this, not the flag.
-[[nodiscard]] bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
+// Reserved recurrent slots the bound batched verify adds to the pool: its rows x spares per row.
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // speculative.mtp_batch_verify: the most decoding requests whose bound members verify their MTP draft in one
-// batched step (slot-swapping spares, one per row), 0 = never. Off under the full batch_verify, without a
+// batched step (slot-swapping spares, one per row), 0 = never. Off without a
 // loaded head or the carry (one binding), on a model without the grouped verify scan, at batch 1.
 [[nodiscard]] int mtp_bound_verify_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // Its config half, before the model and the batch size cap it (tools/common/mtp_auto.cpp): 0 = never.
@@ -376,15 +347,10 @@ inline constexpr int kMtpBoundVerifyRowTile = 8;
 [[nodiscard]] constexpr size_t batch_verify_stage_ints(int cap_rows, int cap_seq) {
     return (3ull * cap_rows) + (4ull * cap_seq) + 3;
 }
-// MTP draft KV slots: one per batch slot whenever the batched verify runs, else
-// speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
-// Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes
-// that 0, and the pool fell to 1 slot (1 draft per verify step at 24 streams).
-int mtp_draft_kv_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
-// Requests bound to the head at once: one per batch slot under the batched verify, else
-// speculative.mtp_history_slots with the MTP carry (carry_live: its scratch exists), else 1.
-int mtp_bind_cap(const RuntimeConfig& cfg, const Model* model, int max_batch_size, bool carry_live = true);
-// Carry rows per head KV slot to allocate: kMtpCarryRows with the MTP carry and no batched verify.
-int mtp_carry_rows(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+// MTP draft KV slots: speculative.mtp_history_slots (one binds, the rest keep other chats' head caches).
+int mtp_draft_kv_slots(const RuntimeConfig& cfg);
+// Requests bound to the head at once: speculative.mtp_history_slots with the MTP carry (carry_live: its
+// scratch exists), else 1.
+int mtp_bind_cap(const RuntimeConfig& cfg, bool carry_live = true);
 
 }  // namespace imp

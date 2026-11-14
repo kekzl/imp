@@ -9,17 +9,14 @@
 
 namespace imp {
 
-// Max top-W width the MTP draft step can emit per position (tree-ceiling
-// measurement, Stage 0). The draft argmax is top-0.
-constexpr int kMtpMaxTopW = 8;
+// Chains of kMtpMaxChainK slots in MtpDraftWorkspace::d_chain_tokens: the bound batched verify
+// stages up to kMtpChainSlots * kMtpMaxChainK drafts (requests x depth) in one head pass.
+constexpr int kMtpChainSlots = 8;
 
 // Max device-side chain length (per-chain stride of
 // MtpDraftWorkspace::d_chain_tokens). Longer speculative.mtp_k values fall
 // back to the host chain loop.
 constexpr int kMtpMaxChainK = 16;
-
-// Blocks in pass 1 of the two-pass serving top-W kernel.
-constexpr int kMtpTopWBlocks = 64;
 
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
 // scratch: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
@@ -132,18 +129,14 @@ inline size_t kv_elems(const MtpWorkspaceShape& s) {
 // Phase 2.1 buffers, always allocated.
 inline void base_bytes(const MtpWorkspaceShape& s, Tally& t) {
     const size_t H = static_cast<size_t>(s.hidden_dim);
-    for (int i = 0; i < 5; ++i)  // emb_norm, h_norm, fc_out, h_final, h_final_snap
+    for (int i = 0; i < 4; ++i)  // emb_norm, h_norm, fc_out, h_final
         t.add(H * kH2);
     t.add(2 * H * kH2);  // fc_in
     t.add(static_cast<size_t>(s.vocab_size) * kH2);
     t.add(static_cast<size_t>(s.vocab_size) * sizeof(float));
     t.add(((H + 31) / 32) * kMtpQ8_1BlockBytes);
     t.add(((H + 31) / 32) * sizeof(float));
-    t.add(static_cast<size_t>(kMtpMaxTopW) * sizeof(int));
-    t.add(static_cast<size_t>(kMtpTopWBlocks) * kMtpMaxTopW * sizeof(float));
-    t.add(static_cast<size_t>(kMtpTopWBlocks) * kMtpMaxTopW * sizeof(int));
-    t.add(static_cast<size_t>(kMtpMaxTopW) * sizeof(float));
-    t.add(sizeof(int32_t) * kMtpMaxTopW * kMtpMaxChainK);
+    t.add(sizeof(int32_t) * kMtpChainSlots * kMtpMaxChainK);
     t.add(sizeof(int));      // d_argmax
     t.add(sizeof(int32_t));  // d_tok
 }

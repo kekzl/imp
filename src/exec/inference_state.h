@@ -81,22 +81,15 @@ struct InferenceState {
     // factor rows + taps, indexed [group * ssm_tap_levels + level] (d_chunk_len = d_snap_n + levels + 1).
     int ssm_snap_rows = 1;
     int ssm_tap_levels = 0;
-    // Factored spare (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md):
-    // ssm_fac_out replaces ssm_out_slots, carrying the drafted row as (g,k,delta) per head
-    // instead of a second full state slot. ssm_fac_in carries the row a previous verify left
-    // for an accepted request. Both are [n_ssm_layers][slot][head][ssm_fac_stride] float,
-    // per-layer stride ssm_fac_layer_stride.
+    // Factor rows (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md):
+    // ssm_fac_out carries a drafted row as (g,k,delta) per head instead of a full state slot,
+    // [n_ssm_layers][row][head][ssm_fac_stride] float, per-layer stride ssm_fac_layer_stride.
     float* ssm_fac_out = nullptr;
-    const float* ssm_fac_in = nullptr;
     int ssm_fac_stride = 0;
     int64_t ssm_fac_layer_stride = 0;
-    // Conv half of the same spare (compute/ssm_conv_tap.cu): ssm_tap_out stashes the drafted
-    // row's conv input; ssm_tap_in + ssm_tap_slots advance accepted slots' windows before
-    // this layer's conv reads them.
+    // Conv half of the same rows (compute/ssm_conv_tap.cu): ssm_tap_out stashes the drafted
+    // row's conv input.
     void* ssm_tap_out = nullptr;
-    const void* ssm_tap_in = nullptr;
-    const int* ssm_tap_slots = nullptr;
-    int ssm_tap_n = 0;
     int64_t ssm_tap_layer_stride = 0;
 
     // BitDecoding Phase 3 residual KV cache. Two modes: single-seq scalar or multi-seq array

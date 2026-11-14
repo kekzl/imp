@@ -17,7 +17,6 @@ struct UploadReserve {
     size_t kv_bytes_per_seq = 0;      // one sequence at max_seq_len
     size_t kv_cap_bytes = 0;          // total VRAM / 5 (MoE > 16 experts: / 10)
     size_t state_bytes_per_slot = 0;  // SSM/GDN state slot, 0 without recurrent layers
-    int reserved_state_slots = 0;     // spec multi-candidate verify slots past the batch
 };
 
 // Engine -> upload: the reserve and the configured batch; upload -> Engine: the batch Pass 1 fits.
@@ -37,7 +36,7 @@ inline size_t upload_reserve_kv_bytes(const UploadReserve& r, int batch) {
 inline size_t upload_reserve_kv_floor(const UploadReserve& r) { return upload_reserve_kv_bytes(r, 1); }
 
 inline size_t upload_reserve_bytes(const UploadReserve& r, int batch) {
-    const int slots = std::max(batch, 0) + std::max(r.reserved_state_slots, 0);
+    const int slots = std::max(batch, 0);
     return r.fixed_bytes + upload_reserve_kv_bytes(r, batch) +
            (r.state_bytes_per_slot * static_cast<size_t>(slots));
 }

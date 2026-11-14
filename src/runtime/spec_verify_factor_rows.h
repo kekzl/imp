@@ -1,8 +1,7 @@
 #pragma once
 
-// Factored rows of the batched verify (docs/plans/2026-09-12-factored-verify-spare.md): the full verify's
-// spare (speculative.factored_spare) and the bound verify's drafts before the last at 2+ drafts
-// (speculative.mtp_batch_verify_factor_row), buffers and the accept-time fold.
+// Factor rows of the bound batched verify (docs/plans/2026-09-12-factored-verify-spare.md): its drafts before
+// the last at 2+ drafts, buffers and the accept-time fold.
 
 #include <cuda_runtime.h>
 
@@ -14,10 +13,6 @@ struct RuntimeConfig;
 class SSMState;
 class VRAMAllocator;
 
-// Factored spare pools, sized over the LIVE slots only: rows are addressed by the slot ids the scheduler
-// hands out. A failure clears cfg.speculative.factored_spare (slot-swapping) rather than failing the verify.
-[[nodiscard]] bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm,
-                                        VRAMAllocator& alloc, BatchVerifyState& bv, cudaStream_t stream);
 void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
 
 // Factor rows and conv taps per (verify group, level) and the fold lists (bv.d_fac, d_tap, d_clear), levels =

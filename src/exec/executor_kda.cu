@@ -160,7 +160,7 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
     const int ssm_idx = ssm_layer_map_.empty() ? -1 : ssm_layer_map_[layer];
     if (!state.ssm_state || ssm_idx < 0)
         throw std::runtime_error("run_kda: no recurrent state slot for layer " + std::to_string(layer));
-    if (state.ssm_grouped_chunk() || state.spec_snap_slab || state.ssm_tap_out || state.ssm_fac_in)
+    if (state.ssm_grouped_chunk() || state.spec_snap_slab || state.ssm_tap_out)
         throw std::runtime_error("run_kda: speculative verify chunks are not supported on KDA layers");
     const int inner = cfg.ssm_inner_size;
     const int conv_channels = cfg.ssm_conv_channels();
