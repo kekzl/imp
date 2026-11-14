@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-11-14
+
 ### Added
 - `make refs SYM="Scope::name"` (or `AT=path:line:token`) lists every code reference of a symbol through clangd 23 in `imp:lint`, .cu included, without the string-literal and same-name-member hits of `rg`: `Speculative::mtp_k` 65 references where `rg` returned 154 lines. Index 73 s cold, 4 s warm.
 
