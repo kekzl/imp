@@ -1,5 +1,6 @@
 // Streamed FP16 FP8 row-scale GEMM (gemv_fp8_rowscale_f16.cu): bit identity against the split-K twin and
-// the isolated sweep behind its dispatch (docs/audit/fp8_proj_stream_2026_11_04/).
+// the isolated sweep behind its dispatch
+// (https://github.com/kekzl/imp/tree/d53d594b/docs/audit/fp8_proj_stream_2026_11_04).
 #include <gtest/gtest.h>
 #include "compute/gemm.h"
 #include "quant/fp8_quant.h"

@@ -21,7 +21,7 @@ Table: `docs/launch/CLAIMS.md` (local) section Phase 1. Four findings: README ~1
 
 | Item | Result |
 |---|---|
-| protocol | image `ghcr.io/kekzl/imp:latest` v0.59.0 for every imp number; 3 fresh-server trials per arm; PERF_LOG entries 2026-10-27; raw `docs/audit/launch_2026_10_27/` |
+| protocol | image `ghcr.io/kekzl/imp:latest` v0.59.0 for every imp number; 3 fresh-server trials per arm; PERF_LOG entries 2026-10-27; raw [`docs/audit/launch_2026_10_27/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/launch_2026_10_27) |
 | 91-94 vs ~102 | both stale: same workload today reads 96.3 (spec off) / 116.2 (MTP, `--max-batch 1`); the README `docker run` (batch auto 32, no MTP) reads 96.5 |
 | 1.3x vLLM | 1.38x one user without speculation, 1.40x at 32 users; with MTP on both vLLM leads one user 124.4 vs 116.2 (new LIMITATIONS row) |
 | 1.4x llama.cpp | replaced by 1.23x on the same Q4_K_M file (77.1 vs 62.9) |
@@ -36,7 +36,7 @@ Table: `docs/launch/CLAIMS.md` (local) section Phase 1. Four findings: README ~1
 | Phase | Result | Commit |
 |---|---|---|
 | 3 README | first screen: scope sentence, 27B three-engine table with workload, MTP loss beside it, "Where imp loses", Flash-Next line, "Models larger than VRAM" section; 159 -> 145 lines (gate `tools/filesize_thresholds.toml` readme = 159 kept) | `7ac69531` |
-| 4 quickstart | `ghcr.io/kekzl/imp:latest` (v0.59.0) pulls anonymously (token endpoint 200, tags to 0.59.0); README install = clone, `stage-model.sh`, `docker run`; 3 bugs in `stage-model.sh` fixed (default image, df on a fresh dir, compressed-tensors NVFP4 sent to imp-quantize); clean shell (`env -i`): 19.2 GiB in 5 min 17 s, ready 14 s, chat answer; transcript `launch_2026_10_27/quickstart_clean_shell.txt`. `--model hf://` into a bind-mounted `~/models` fails without `--user` (uid 1001 vs 1000), README says so | `6487f00a` |
+| 4 quickstart | `ghcr.io/kekzl/imp:latest` (v0.59.0) pulls anonymously (token endpoint 200, tags to 0.59.0); README install = clone, `stage-model.sh`, `docker run`; 3 bugs in `stage-model.sh` fixed (default image, df on a fresh dir, compressed-tensors NVFP4 sent to imp-quantize); clean shell (`env -i`): 19.2 GiB in 5 min 17 s, ready 14 s, chat answer; transcript [`launch_2026_10_27/quickstart_clean_shell.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_27/quickstart_clean_shell.txt). `--model hf://` into a bind-mounted `~/models` fails without `--user` (uid 1001 vs 1000), README says so | `6487f00a` |
 | 5 demo | `docs/assets/demo.tape` + `demo-chat.sh` + `vhs.Dockerfile`; recorded here: `demo.gif` 18.0 s, 759340 bytes, Flash-Next, nvidia-smi 27069 / 32607 MiB, 193 tokens at 92.9 tok/s | `7ac69531` |
 | 6 community bench | `scripts/bench-community.sh`, RTX 5090 block in `launch_2026_10_27/community_rtx5090.md`; Discussions already on | `b75aaffc` |
 | 7 release + metadata | drafts only: `docs/launch/RELEASE_NOTES.md` (v0.59.1, patch: no engine change since v0.59.0), `REPO_METADATA.md` (316-character description), `docs/assets/social-preview.png` | `7941f7d3` |

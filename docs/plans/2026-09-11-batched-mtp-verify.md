@@ -220,7 +220,7 @@ Next: deeper drafts (3 rows per request, a second head pass per step), section b
 
 Each bound request forwards its last token plus a 2-token MTP chain (3 rows). Per-step price on the
 same image, `spec-batch price` log lines, cumulative per arm (`overlap_and_step_price.txt` in
-docs/audit/qwen38_mtp_batch_verify_k2_2026_11_04/):
+https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_batch_verify_k2_2026_11_04):
 
 | requests | k 1: rows, forward + argmax, head, tokens/step | k 2: rows, forward + argmax, head, tokens/step |
 |---:|---|---|
@@ -247,7 +247,7 @@ counts only lone verifies (1-2 unbinds per arm, main too).
 
 Both batched draft passes read the lone chain's NVFP4 draft head (`speculative.mtp_nvfp4_head`)
 through `gemv_nvfp4_kpar_batched_fp32` (one weight pass per 4 rows) instead of the FP8 head;
-verification stays on FP8. Evidence: docs/audit/qwen38_mtp_batched_draft_head_2026_11_04/.
+verification stays on FP8. Evidence: https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_batched_draft_head_2026_11_04.
 
 | per pass, [248320 x 5120] (`microbench.txt`) | 1 row | 2 rows | 3 rows | 4 rows |
 |---|---:|---:|---:|---:|
@@ -275,7 +275,7 @@ weights each).
 The batched head pass copied 8 pageable host tables per step (feed tokens / slots / positions /
 source rows, the draft gather rows, the chain's source rows / slots / positions); `mtp_head_pass_upload`
 packs all 7 (4n + 3m ints) into a pinned buffer, one H2D, and both feeds read them on the device
-(`mtp_feed_rows_multislot_dev`). Evidence: docs/audit/qwen38_mtp_head_pass_one_h2d_2026_11_04/.
+(`mtp_feed_rows_multislot_dev`). Evidence: https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_head_pass_one_h2d_2026_11_04.
 
 | per head pass, nsys c2 (`nsys_head_pass.txt`, ~375 passes) | main 11088fbb | this branch |
 |---|---:|---:|
@@ -309,7 +309,7 @@ nodes' dynamic smem to the pass's largest position + 1, rounded up to 256 rows
 (`cudaGraphExecKernelNodeSetParams`), and the scan kernel traps when a row's scores exceed it. Bound: 48
 graphs (4 requests x 1-3 rows x chain); the A/B servers held 19-24. The pinned draft D2H was priced and
 dropped (nsys c2 host window 2561.8 -> 2687.2 us, n=1). Evidence:
-docs/audit/qwen38_mtp_head_pass_graph_2026_11_04/.
+https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_head_pass_graph_2026_11_04.
 
 | per head pass, nsys c2 (`nsys_head_pass.txt`, ~360 passes) | main 0989c2bb | this branch |
 |---|---:|---:|
@@ -344,7 +344,7 @@ before the `FFMA`. Now a block takes `kKparNR` = 4 weight rows against x fragmen
 multiplies with `fma.rn.f32.f16` (SASS `FHFMA`, one rounding, equal to `__fmaf_rn` on the converted halves)
 and reduces all rows behind one barrier. Per (row, x row) the float op order is unchanged: bit-identical,
 pinned by `LmHeadDraftRows` against a host replica of that order (red under a swapped-FMA mutant).
-Evidence: docs/audit/qwen38_nvfp4_head_kpar_nr4_2026_11_04/.
+Evidence: https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_nvfp4_head_kpar_nr4_2026_11_04.
 
 | [248320 x 5120], per pass (`microbench.txt`) | 1 row | 2 rows | 3 rows | 4 rows |
 |---|---:|---:|---:|---:|
@@ -375,14 +375,14 @@ Next: one pass for 5-8 rows (MR 8, 4 rows per block: rows 8 667.9 us vs 947.9 fo
 batched decode LM head and `gemm_nvfp4` at M <= 16, not the draft head (<= 4 rows). The FP16 twin
 `gemv_nvfp4_kpar_mb_fp16_kernel` is refuted as a lever: 0 launches on Qwen3.8-27B-NVFP4 at c1 / c4 / c32
 and a 33612-token prompt (captured verify chunks take the small-M kernel, MTP stops past its 16384-row
-head KV); `docs/audit/qwen38_kpar_fp16_verify_share_2026_11_04/`, SETTLED.md section H.
+head KV); [`docs/audit/qwen38_kpar_fp16_verify_share_2026_11_04/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_kpar_fp16_verify_share_2026_11_04), SETTLED.md section H.
 
 ## Draft 1 as a factor row (2026-11-11, `speculative.mtp_batch_verify_factor_row`, default true)
 
 At 2 drafts the second spare slot per row (the 1 + 1 row state) is gone: draft 1 leaves the main scan pass
 as a GDN factor row plus a conv tap, folded into the live slot when exactly 1 of 2 drafts is accepted. A
 concurrent GDN-hybrid server keeps 2 drafts by default again (`tools/common/mtp_auto.cpp`; the NVFP4 draft
-head stays off there). Evidence: docs/audit/qwen38_mtp_verify_factor_row_2026_11_11/.
+head stays off there). Evidence: https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_verify_factor_row_2026_11_11.
 
 | piece | rule |
 |---|---|
@@ -434,7 +434,7 @@ Next: factor rows indexed by verify group instead of by recurrent slot (4 groups
 
 A bound request stages D drafts + its last token = T = D + 1 rows; one spare slot per row keeps the state
 after all T rows, every shorter accept is rebuilt from factor rows. Evidence:
-`docs/audit/qwen38_mtp_verify_depth3_2026_11_11/`.
+[`docs/audit/qwen38_mtp_verify_depth3_2026_11_11/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_verify_depth3_2026_11_11).
 
 | Piece | Rule |
 |---|---|
@@ -493,7 +493,7 @@ request's own chain is shorter than D.
 ## 4 drafts per bound request, 3 from 4 requests up (2026-11-11, `speculative.mtp_batch_verify_k` 4, `_k_wide` 3)
 
 The verify depth is a property of the step: 1 to 3 requests stage 4 drafts each (T = 5 rows), 4 requests stage
-3 (T = 4). Evidence: `docs/audit/qwen38_mtp_verify_depth4_2026_11_11/`.
+3 (T = 4). Evidence: [`docs/audit/qwen38_mtp_verify_depth4_2026_11_11/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_mtp_verify_depth4_2026_11_11).
 
 | Piece | Rule |
 |---|---|
@@ -576,7 +576,7 @@ batched verify (`engine_spec_batch_verify.cpp`) and the single-stream verify (`e
 
 Qwen3.8-27B-NVFP4-vllm server, 1 greedy chat x 20k, 384 tokens, default think budget, reasoning tokens before
 the closer (`reasoning_content` through `/tokenize`, the `think` field of `mtp_longctx_client.py`), main
-e2906af1 -> fix, evidence `docs/audit/qwen38_think_budget_exact_2026_11_11/think.txt`:
+e2906af1 -> fix, evidence [`docs/audit/qwen38_think_budget_exact_2026_11_11/think.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_think_budget_exact_2026_11_11/think.txt):
 
 | Path | `mtp_k` | main | fix |
 |---|---|---|---|
@@ -656,7 +656,7 @@ and graph shapes up to 17 rows and a ragged row count per request to stop losing
 (`tests/test_suffix_shadow.cpp`, 5 tests), 6 of 6 mutants red (`mutants.txt`); 1 greedy chat x 20k, main, branch and
 branch + trace md5-equal with 460 drafted, 266 accepted each, 115 shadow lines in the trace arm; `make verify-fast`
 OK (`gates.txt`). Evidence
-`docs/audit/qwen38_suffix_shadow_2026_11_11/`.
+[`docs/audit/qwen38_suffix_shadow_2026_11_11/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_suffix_shadow_2026_11_11).
 
 The same directory holds the profile behind ledger row B-69.2 (`head_level_*.txt`): the fourth head chain
 level costs 1.32 ms at 4 requests; 3 matrix kernels hold 12.376 of 17.043 ms exclusive per step at 1 chat, every
@@ -720,13 +720,13 @@ Gates: `SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank` (503 of 512 rows
 `SampleVerifyRows.DraftRowDrawsWhatTheVerifyRowDrawsOnTheSameLogits`, `DraftRowDraws.*`,
 `StepSeed.UnseededRequestKeepsOneBase`; 5 of 5 mutants red, control 39 + 4 tests green (`mutants.txt`); `make verify-fast`
 and the degeneration suite on the shipped tree in `gates.txt`. Evidence
-`docs/audit/qwen38_coupled_draft_2026_11_11/`.
+[`docs/audit/qwen38_coupled_draft_2026_11_11/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_coupled_draft_2026_11_11).
 
 ## Verify depth ladder after a full accept (2026-11-11, B-72, `speculative.mtp_batch_verify_k_streak`, default 7)
 
 A step in which a request accepts all N drafts is followed by a step at N + 2 drafts, up to the key: 4 -> 6 -> 7.
 A step without a full accept returns to `speculative.mtp_batch_verify_k`. Evidence:
-`docs/audit/qwen38_verify_ladder_2026_11_11/`.
+[`docs/audit/qwen38_verify_ladder_2026_11_11/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_verify_ladder_2026_11_11).
 
 Why a ladder and not a deeper default: the deeper drafts hold only after a full accept. Qwen3.8-27B-NVFP4-vllm,
 recorded familiar SWE-bench sessions (`tools/analysis/agent_turn_replay.py --serial --seed 1000`, 3 chats x 30
@@ -807,7 +807,7 @@ B-73: section "NVFP4 draft copy over the row prefix" below.
 ## NVFP4 draft copy over the row prefix (2026-11-12, B-73, `speculative.mtp_nvfp4_head` on a concurrent server)
 
 A concurrent GDN-hybrid server drafts on an NVFP4 copy of LM-head rows [0, `speculative.mtp_draft_vocab`) instead of
-the FP8 head's rows [0, 98304). Evidence: `docs/audit/qwen38_draft_head_prefix_2026_11_12/`.
+the FP8 head's rows [0, 98304). Evidence: [`docs/audit/qwen38_draft_head_prefix_2026_11_12/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_draft_head_prefix_2026_11_12).
 
 | Server default (`mtp_concurrent_pool_defaults`, `tools/common/mtp_auto.cpp`) | before | after |
 |---|---|---|

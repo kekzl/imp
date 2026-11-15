@@ -1,18 +1,18 @@
 # Qwen3.8-27B-NVFP4 MTP: adaptive draft depth in the batched verify, 2026-11-04
 
-REFUTED. Default `imp-server`, RTX 5090 (WSL2). Main 1346f2c4 (`imp:mtpdepth-main`) vs `adaptive_depth.diff.txt` on it (`imp:mtpdepth-br`).
+REFUTED. Default `imp-server`, RTX 5090 (WSL2). Main 1346f2c4 (`imp:mtpdepth-main`) vs [`adaptive_depth.diff.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/adaptive_depth.diff.txt) on it (`imp:mtpdepth-br`).
 Candidate: `speculative.mtp_adaptive_k` (AIMD, the single verify chunk's rule) in the bound batched verify: a rejection drafts 1 token next (its row a pad, the chain head pass skipped), a full accept drafts 2 again (ceiling `speculative.mtp_batch_verify_k` = 2).
 Prompts: `tools/analysis/mtp_longctx_client.py` over the #3050 frozen corpus (`git archive b3c0087d docs/internals src/runtime src/compute`), greedy, 384 tokens, `ignore_eos`.
 
 | File | What |
 |---|---|
-| `adaptive_depth.diff.txt` | the candidate, plus `[bv-verify]` / `[bv-step]` lines under `diagnostics.spec_trace` and the n=1 row of `spec-batch price` |
-| `explore_fix_vs_ada.txt` | branch image, `speculative.mtp_adaptive_k=false` (fix) vs default (ada), spec_trace on, 1 chat 8k / 20k / 80k |
-| `price_trace.txt` | `tools/analysis/mtp_bv_depth_price.py` on those traces: accept distribution per depth and per previous outcome, step price per depth, AIMD estimate |
-| `ab_c1_long.txt` | A/B, 3 alternating pairs, 1 chat 8k / 20k / 80k |
-| `ab_c1_reps.txt` | A/B, 2 pairs x 4 prompts (`REPS=4`) per context: each arm repeats its bytes across pairs, so the spread is per prompt |
-| `ab_c2_long.txt` | A/B, 3 pairs, 2 overlapping chats 20k / 40k / 80k |
-| `ab_short_c1_c4_c32.txt` | A/B, 3 pairs, `tools/analysis/mtp_concurrent_ab.sh` (6 chats x 400, c4, c32) |
+| [`adaptive_depth.diff.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/adaptive_depth.diff.txt) | the candidate, plus `[bv-verify]` / `[bv-step]` lines under `diagnostics.spec_trace` and the n=1 row of `spec-batch price` |
+| [`explore_fix_vs_ada.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/explore_fix_vs_ada.txt) | branch image, `speculative.mtp_adaptive_k=false` (fix) vs default (ada), spec_trace on, 1 chat 8k / 20k / 80k |
+| [`price_trace.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/price_trace.txt) | `tools/analysis/mtp_bv_depth_price.py` on those traces: accept distribution per depth and per previous outcome, step price per depth, AIMD estimate |
+| [`ab_c1_long.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/ab_c1_long.txt) | A/B, 3 alternating pairs, 1 chat 8k / 20k / 80k |
+| [`ab_c1_reps.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/ab_c1_reps.txt) | A/B, 2 pairs x 4 prompts (`REPS=4`) per context: each arm repeats its bytes across pairs, so the spread is per prompt |
+| [`ab_c2_long.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/ab_c2_long.txt) | A/B, 3 pairs, 2 overlapping chats 20k / 40k / 80k |
+| [`ab_short_c1_c4_c32.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/ab_short_c1_c4_c32.txt) | A/B, 3 pairs, `tools/analysis/mtp_concurrent_ab.sh` (6 chats x 400, c4, c32) |
 
 ## Price (fixed depth 2, lone request)
 

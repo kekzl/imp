@@ -2,7 +2,7 @@
 """Price the MTP draft depth of the lone batched verify from diagnostics.spec_trace server logs.
 
 Reads the [bv-verify] (per request) and [bv-step] (per step) lines that
-docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/adaptive_depth.diff.txt adds to the batched verify (main has
+https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_bv_adaptive_depth_2026_11_04/adaptive_depth.diff.txt adds to the batched verify (main has
 none), lone steps only (n=1). Per request: the accept distribution at each draft depth, the same conditioned on
 the previous step's outcome, step prices split by the depth that ran (forward) and by the chain the head pass
 ran (= the next step's depth), and an AIMD estimate (depth 1 after a rejection, 2 after a full accept) priced

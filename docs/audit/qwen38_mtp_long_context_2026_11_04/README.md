@@ -5,16 +5,16 @@ Prompts: `tools/analysis/mtp_longctx_client.py` over a frozen corpus (`git archi
 
 | File | What |
 |---|---|
-| `step1_main_baseline.txt` | main: drafting stops above 16384 (`prompt exceeds the head KV capacity`), 4 x 16384-row slots |
-| `window_arms_c1.txt` | head KV ring 16384 / 4096 vs full attention (131072 rows, 1 slot) on the single verify chunk; corpus not frozen yet (prompts 7705-79671) |
-| `nsys_ring_classic_verify_20k.txt` | last 2.5 s of decode at 20k on the single verify chunk: `fmha_sm120_fa2_kernel` 41.6 %, 0.99 ms per call (16 per verify) |
-| `solo_vs_chunk_explore.txt` | dev build, lone request: batched verify (`solo1`) vs the single verify chunk (`solo0`), 1k-40k |
-| `identity_vs_mtp_off.txt`, `divergence_vs_mtp_off.txt` | dev build, `solo1` / `solo0` (= main's verify path) / MTP off (`off`): common greedy prefix vs MTP off |
-| `ab_c1_long.txt` | A/B, 3 alternating pairs, 1 chat at 8k / 20k / 40k / 80k |
-| `ab_c2_long.txt` | A/B, 3 pairs, 2 overlapping chats at 20k / 40k / 80k (`AGG` = both streams' tokens over their delta span) |
-| `ab_short_c1_c4_c32.txt` | A/B, 3 pairs, `tools/analysis/mtp_concurrent_ab.sh` (6 chat prompts x 400, c4, c32) |
-| `gates.txt` | `degen_suite.py --quick`, `niah_check.py` 32k / 64k / 100k on the branch |
-| `identity_short_main_vs_solo_off.txt` | main vs branch with `speculative.mtp_batch_verify_solo=false`, 1k / 4k / 8k |
+| [`step1_main_baseline.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/step1_main_baseline.txt) | main: drafting stops above 16384 (`prompt exceeds the head KV capacity`), 4 x 16384-row slots |
+| [`window_arms_c1.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/window_arms_c1.txt) | head KV ring 16384 / 4096 vs full attention (131072 rows, 1 slot) on the single verify chunk; corpus not frozen yet (prompts 7705-79671) |
+| [`nsys_ring_classic_verify_20k.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/nsys_ring_classic_verify_20k.txt) | last 2.5 s of decode at 20k on the single verify chunk: `fmha_sm120_fa2_kernel` 41.6 %, 0.99 ms per call (16 per verify) |
+| [`solo_vs_chunk_explore.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/solo_vs_chunk_explore.txt) | dev build, lone request: batched verify (`solo1`) vs the single verify chunk (`solo0`), 1k-40k |
+| [`identity_vs_mtp_off.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/identity_vs_mtp_off.txt), [`divergence_vs_mtp_off.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/divergence_vs_mtp_off.txt) | dev build, `solo1` / `solo0` (= main's verify path) / MTP off (`off`): common greedy prefix vs MTP off |
+| [`ab_c1_long.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/ab_c1_long.txt) | A/B, 3 alternating pairs, 1 chat at 8k / 20k / 40k / 80k |
+| [`ab_c2_long.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/ab_c2_long.txt) | A/B, 3 pairs, 2 overlapping chats at 20k / 40k / 80k (`AGG` = both streams' tokens over their delta span) |
+| [`ab_short_c1_c4_c32.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/ab_short_c1_c4_c32.txt) | A/B, 3 pairs, `tools/analysis/mtp_concurrent_ab.sh` (6 chat prompts x 400, c4, c32) |
+| [`gates.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/gates.txt) | `degen_suite.py --quick`, `niah_check.py` 32k / 64k / 100k on the branch |
+| [`identity_short_main_vs_solo_off.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/qwen38_mtp_long_context_2026_11_04/identity_short_main_vs_solo_off.txt) | main vs branch with `speculative.mtp_batch_verify_solo=false`, 1k / 4k / 8k |
 
 ## Refuted on the way
 

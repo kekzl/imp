@@ -30,12 +30,12 @@ RTX 5050 to 5090 · RTX PRO 2000 to 6000 · one <code>docker run</code> · OpenA
 | 32 users at once (total) | **1974.8** | 1380.1 |
 
 <!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (Qwen3.8-27B-NVFP4-vllm on both) cuda=13.4.3 path=server-api
-       cmd=`tools/analysis/engine3_conc.sh` n=3 trials x 3 waves note=imp v0.60.0 tree 0937bac4; one-user imp row speculative.mtp_k=0 ngram=false; harness_md5=5525cd20; docs/audit/launch_2026_10_31/] -->
+       cmd=`tools/analysis/engine3_conc.sh` n=3 trials x 3 waves note=imp v0.60.0 tree 0937bac4; one-user imp row speculative.mtp_k=0 ngram=false; harness_md5=5525cd20; https://github.com/kekzl/imp/tree/d53d594b/docs/audit/launch_2026_10_31] -->
 
 Both engines read the same model file. A token is about ¾ of a word, so 95 tokens/s is roughly 70 words per second. Every model, method and raw log: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 **Bigger than the card:** the 123.6 GiB Qwen3.8-Flash-Next answers at **91.8 tokens/s** on a 32 GB card, its experts in host RAM ([how](docs/BIG_MODELS.md)).
-<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts note=harness_md5=7ade1eb1; docs/audit/launch_2026_10_31/fn.txt] -->
+<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts note=harness_md5=7ade1eb1; https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_31/fn.txt] -->
 
 ## Quickstart (Docker)
 
@@ -51,7 +51,7 @@ docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
 ```
 
 When the log says `Server listening`, open <http://localhost:8080> and chat. On an RTX 5090 this setup answers at **96.3 tokens/s** and uses 19.7 GiB of the card.
-<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.3 path=server-api cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=5 server starts x 6 prompts note=max_batch_size auto 32, no speculation; VRAM = card peak minus idle (21359 - 1233 MiB); docs/audit/launch_2026_10_31/q27.txt] -->
+<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.3 path=server-api cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=5 server starts x 6 prompts note=max_batch_size auto 32, no speculation; VRAM = card peak minus idle (21359 - 1233 MiB); https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_31/q27.txt] -->
 
 **Qwen3.8-Flash-Next**, the biggest: 123.6 GiB on a 32 GB card, needs ~67 GiB free RAM and 124 GiB of disk.
 
@@ -62,7 +62,7 @@ docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
 ```
 
 Ready after about 50 s. How a model bigger than the card runs: [`docs/BIG_MODELS.md`](docs/BIG_MODELS.md).
-<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts note=load 45-50 s with the imp-cache volume, 76 s on the first start; host MemAvailable 74.7-75.9 -> 8.4-8.7 GiB; docs/audit/launch_2026_10_31/fn.txt] -->
+<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts note=load 45-50 s with the imp-cache volume, 76 s on the first start; host MemAvailable 74.7-75.9 -> 8.4-8.7 GiB; https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_31/fn.txt] -->
 
 Step by step, what the log should say, other models: [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Build the image yourself or run without Docker: [`docs/BUILD.md`](docs/BUILD.md).
 
