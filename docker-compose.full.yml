@@ -6,7 +6,7 @@ include:
 
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.13.2@sha256:4f1dd4d81ef1445d4e4bfb4a7a55838dfb1de38a834a0fbe7615d92990333a71
+    image: ghcr.io/open-webui/open-webui:v0.13.3@sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14
     restart: unless-stopped
     ports:
       - "${WEBUI_PORT:-3000}:8080"
@@ -66,7 +66,7 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     restart: unless-stopped
     ports:
       - "${GRAFANA_PORT:-3002}:3000"
