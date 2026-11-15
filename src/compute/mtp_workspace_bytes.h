@@ -91,7 +91,8 @@ struct MtpWorkspaceShape {
     int hc_lowrank = 0;
     int carry_rows = 0;    // the MTP carry rows per KV slot (mtp_carry_allocate)
     int prenorm_rows = 0;  // post-norm MTP feed scratch rows
-    size_t body_fp8_bytes = 0;  // the MTP body FP8 copy E4M3 body copy (mtp_body_fp8_bytes)
+    size_t body_nvfp4_bytes = 0;     // NVFP4 body copy (mtp_body_nvfp4_bytes), 0 = none
+    size_t body_nvfp4_ws_bytes = 0;  // its small-M scratch (mtp_body_nvfp4_ws_bytes)
 };
 
 // Device footprint of one cudaMalloc: above 1 MiB it takes whole 2 MiB pages. Qwen3.8-27B head: 344.5 MiB
@@ -237,8 +238,10 @@ inline size_t mtp_workspace_bytes(const MtpWorkspaceShape& s) {
     feed_bytes(s, t);
     if (s.prenorm_rows > 0 && s.hc_count == 0)
         t.add(static_cast<size_t>(s.prenorm_rows) * static_cast<size_t>(s.hidden_dim) * kH2);
-    if (s.body_fp8_bytes > 0 && s.hc_count == 0)
-        t.add(s.body_fp8_bytes);
+    if (s.body_nvfp4_bytes > 0 && s.hc_count == 0) {
+        t.add(s.body_nvfp4_bytes);
+        t.add(s.body_nvfp4_ws_bytes);
+    }
     return t.bytes;
 }
 

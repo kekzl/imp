@@ -1507,6 +1507,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn_verify_snapshot.cu
         tests/test_gdn_verify_two_drafts.cu
         tests/test_mtp_feed_batch.cu
+        tests/test_mtp_body_nvfp4.cu
         tests/test_ssm.cu
         tests/test_ssm_scan_reg.cu
         tests/test_ssm_scan_ssd.cu
