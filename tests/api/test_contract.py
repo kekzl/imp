@@ -83,6 +83,34 @@ class TestModelsEndpoint:
             assert effort["values"] and all(isinstance(v, str) and v for v in effort["values"])
             assert effort["default"] in effort["values"]
 
+    def test_models_anthropic_capabilities(self, client):
+        # Anthropic Models API shape on the same objects: client.models.retrieve(id) reads
+        # capabilities["image_input"]["supported"] to decide whether to send an image block.
+        body = client.get("/v1/models").json()
+        assert body["has_more"] is False
+        if body["data"]:
+            assert body["first_id"] == body["data"][0]["id"]
+            assert body["last_id"] == body["data"][-1]["id"]
+        for entry in body["data"]:
+            assert entry["type"] == "model"
+            assert entry["display_name"] == entry["id"]
+            assert entry["created_at"].endswith("Z")
+            if not entry.get("loaded"):
+                assert "capabilities" not in entry  # nothing is known about weights not loaded
+                continue
+            assert entry["max_input_tokens"] == entry["max_model_len"]
+            assert entry["max_tokens"] > 0
+            caps = entry["capabilities"]
+            for leaf in ("image_input", "pdf_input", "structured_outputs"):
+                assert isinstance(caps[leaf]["supported"], bool)
+            think = caps["thinking"]
+            assert think["types"]["adaptive"]["supported"] == think["supported"]
+            effort = caps.get("effort")
+            listed = entry.get("meta", {}).get("reasoning_effort", {}).get("values")
+            if effort is not None and listed is not None:
+                assert effort["supported"] is True
+                assert all(effort[v]["supported"] for v in listed)
+
 
 class TestContextProbes:
     """Context-window auto-detection endpoints for OpenAI-compatible clients."""

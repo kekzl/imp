@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <vector>
 
@@ -185,29 +186,33 @@ void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, Serve
 
 using imp_server::scan_model_files;
 
-void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
-    json data = json::array();
+namespace {
 
-    // Snapshot state fields under a bounded lock (see #889 — do not block
-    // behind a long /v1/embeddings holder). On contention, fall back to the
-    // lock-free status snapshot rather than hang.
+// What the two model routes report about the loaded model, read once under the bounded lock (#889).
+struct LoadedModelView {
     bool loaded = false;
-    std::string model_name;
-    int max_seq_len = 0;
+    std::string name;
+    int max_seq_len = 0;  // min(plan, KV pool), same number as /props and /info (#1542)
+    bool vision = false;
+    bool thinking = false;
+    bool effort_known = false;  // false on lock contention: the template list is read under the lock only
+    std::vector<std::string> effort_values;
+    std::string effort_default;
+};
+
+LoadedModelView loaded_model_view(ServerState& state) {
+    LoadedModelView v;
     // kv_capacity_tokens = what the pool can actually hold, not max_seq_len (the plan); they can
     // differ hugely on a tight card (#1542). Growable pools report their ceiling, not current commit.
     long long kv_capacity_tokens = -1;
-    std::vector<std::string> effort_values;
-    std::string effort_default;
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
         if (lock.owns_lock()) {
-            loaded = state.model_loaded();
-            model_name = state.model_name;
-            max_seq_len = state.max_seq_len;
-            // The template's own reasoning_effort list, read under the lock only (skipped on a snapshot).
-            effort_values = state.chat_tpl.reasoning_effort_values();
-            effort_default = state.chat_tpl.reasoning_effort_default();
+            v.loaded = state.model_loaded();
+            v.name = state.model_name;
+            v.effort_values = state.chat_tpl.reasoning_effort_values();
+            v.effort_default = state.chat_tpl.reasoning_effort_default();
+            v.effort_known = true;
             if (state.ctx && state.ctx->engine) {
                 if (const auto* kv = state.ctx->engine->kv_cache())
                     kv_capacity_tokens = kv_capacity_ceiling_tokens(kv->total_blocks(), kv->ceiling_blocks(),
@@ -215,84 +220,104 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
             }
         } else {
             ServerState::ObsStatus snap = state.model_status_snapshot();
-            loaded = snap.loaded;
-            model_name = snap.model_name;
-            max_seq_len = state.max_seq_len;  // plain int, set once at load
+            v.loaded = snap.loaded;
+            v.name = snap.model_name;
         }
     }
-    max_seq_len = servable_context_tokens(max_seq_len, kv_capacity_tokens);
+    // Set once per load, read without the lock like max_seq_len.
+    v.max_seq_len = servable_context_tokens(state.max_seq_len, kv_capacity_tokens);
+    v.vision = state.vision_ok.load(std::memory_order_relaxed);
+    v.thinking = state.is_think_model;
+    return v;
+}
+
+json supported(bool yes) { return {{"supported", yes}}; }
+
+// Anthropic Models API identity fields, beside the OpenAI ones on the same object.
+json model_entry(const std::string& id, bool loaded) {
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    return {{"id", id},
+            {"object", "model"},
+            {"type", "model"},
+            {"display_name", id},
+            {"created", unix_timestamp()},
+            {"created_at", std::format("{:%FT%TZ}", now)},
+            {"owned_by", "imp"},
+            {"loaded", loaded}};
+}
+
+// Anthropic `capabilities` tree for what /v1/messages serves on THIS load: image_input follows the
+// loaded vision encoder, thinking the tokenizer's think tokens, effort the template's own list.
+json capabilities_json(const LoadedModelView& v) {
+    json caps = {{"image_input", supported(v.vision)},
+                 {"pdf_input", supported(false)},
+                 {"citations", supported(false)},
+                 {"batch", supported(false)},
+                 {"code_execution", supported(false)},
+                 {"structured_outputs", supported(false)},
+                 {"context_management", supported(false)},
+                 {"thinking",
+                  {{"supported", v.thinking},
+                   {"types", {{"enabled", supported(v.thinking)}, {"adaptive", supported(v.thinking)}}}}}};
+    if (v.effort_known) {
+        json effort = supported(!v.effort_values.empty());
+        for (const char* level : {"low", "medium", "high", "xhigh", "max"})
+            effort[level] = supported(std::ranges::find(v.effort_values, level) != v.effort_values.end());
+        for (const auto& level : v.effort_values)
+            effort[level] = supported(true);
+        caps["effort"] = std::move(effort);
+    }
+    return caps;
+}
+
+json loaded_model_json(const LoadedModelView& v) {
+    json model = model_entry(v.name, true);
+    if (v.max_seq_len > 0) {
+        model["max_model_len"] = v.max_seq_len;            // vLLM convention
+        model["meta"] = {{"n_ctx_train", v.max_seq_len}};  // llama.cpp convention
+        model["max_input_tokens"] = v.max_seq_len;         // Anthropic: the context window
+        model["max_tokens"] = v.max_seq_len;               // Anthropic: output cap, bounded by the window
+    }
+    if (!v.effort_values.empty())
+        model["meta"]["reasoning_effort"] = {{"values", v.effort_values}, {"default", v.effort_default}};
+    model["capabilities"] = capabilities_json(v);
+    return model;
+}
+
+}  // namespace
+
+void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
+    json data = json::array();
+    const LoadedModelView v = loaded_model_view(state);
 
     // Lists every model in the models dir (not just the loaded one) now that server.model_swap
     // makes swap-in-flight safe. Loaded model first with known context window; others report none.
-    if (loaded) {
-        json model = {{"id", model_name},
-                      {"object", "model"},
-                      {"created", unix_timestamp()},
-                      {"owned_by", "imp"},
-                      {"loaded", true}};
-        if (max_seq_len > 0) {
-            model["max_model_len"] = max_seq_len;               // vLLM convention
-            model["meta"] = {{"n_ctx_train", max_seq_len}};     // llama.cpp convention
-        }
-        if (!effort_values.empty())
-            model["meta"]["reasoning_effort"] = {{"values", effort_values}, {"default", effort_default}};
-        data.push_back(std::move(model));
-    }
+    if (v.loaded)
+        data.push_back(loaded_model_json(v));
 
     if (state.runtime_config.server.model_swap) {
         for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
             (void)fpath;
-            if (loaded && fname == model_name)
+            if (v.loaded && fname == v.name)
                 continue;
-            data.push_back({{"id", fname},
-                            {"object", "model"},
-                            {"created", unix_timestamp()},
-                            {"owned_by", "imp"},
-                            {"loaded", false}});
+            data.push_back(model_entry(fname, false));
         }
     }
 
-    json body = {{"object", "list"}, {"data", data}};
+    // has_more / first_id / last_id: Anthropic list envelope, one page.
+    json body = {{"object", "list"}, {"data", data}, {"has_more", false}};
+    body["first_id"] = data.empty() ? json(nullptr) : data.front()["id"];
+    body["last_id"] = data.empty() ? json(nullptr) : data.back()["id"];
     res.set_content(dump_safe(body), "application/json");
 }
 
 // GET /v1/models/{id}: client.models.retrieve(...) 404'd for lack of a path-param route (#1599).
 void handle_model_retrieve(const httplib::Request&, httplib::Response& res, ServerState& state,
                            const std::string& model_id) {
-    bool loaded = false;
-    std::string model_name;
-    int max_seq_len = 0;
-    std::vector<std::string> effort_values;
-    std::string effort_default;
-    {
-        std::unique_lock<std::timed_mutex> lock(state.mtx, kObservabilityLockTimeout);
-        if (lock.owns_lock()) {
-            loaded = state.model_loaded();
-            model_name = state.model_name;
-            max_seq_len = state.max_seq_len;
-            effort_values = state.chat_tpl.reasoning_effort_values();
-            effort_default = state.chat_tpl.reasoning_effort_default();
-        } else {
-            ServerState::ObsStatus snap = state.model_status_snapshot();
-            loaded = snap.loaded;
-            model_name = snap.model_name;
-            max_seq_len = state.max_seq_len;
-        }
-    }
+    const LoadedModelView v = loaded_model_view(state);
 
-    if (loaded && model_id == model_name) {
-        json model = {{"id", model_name},
-                      {"object", "model"},
-                      {"created", unix_timestamp()},
-                      {"owned_by", "imp"},
-                      {"loaded", true}};
-        if (max_seq_len > 0) {
-            model["max_model_len"] = max_seq_len;
-            model["meta"] = {{"n_ctx_train", max_seq_len}};
-        }
-        if (!effort_values.empty())
-            model["meta"]["reasoning_effort"] = {{"values", effort_values}, {"default", effort_default}};
-        res.set_content(dump_safe(model), "application/json");
+    if (v.loaded && model_id == v.name) {
+        res.set_content(dump_safe(loaded_model_json(v)), "application/json");
         return;
     }
 
@@ -303,12 +328,7 @@ void handle_model_retrieve(const httplib::Request&, httplib::Response& res, Serv
             (void)fpath;
             if (fname != model_id)
                 continue;
-            json model = {{"id", fname},
-                          {"object", "model"},
-                          {"created", unix_timestamp()},
-                          {"owned_by", "imp"},
-                          {"loaded", false}};
-            res.set_content(dump_safe(model), "application/json");
+            res.set_content(dump_safe(model_entry(fname, false)), "application/json");
             return;
         }
     }
@@ -720,6 +740,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     state.phrase_ban_ok.store(state.ctx && state.ctx->engine->phrase_ban_supported(),
                               std::memory_order_relaxed);
     state.cfg_ok.store(state.ctx && state.ctx->engine->cfg_supported(), std::memory_order_relaxed);
+    state.vision_ok.store(state.ctx && state.ctx->engine->has_vision(), std::memory_order_relaxed);
 
     // A trailing "/" still yields a non-empty id (#756); an HF cache snapshot dir is listed as
     // <org>/<name>, so a client sending the repo id matches instead of swapping (model_id_for_path).
