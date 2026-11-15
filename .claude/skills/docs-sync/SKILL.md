@@ -32,7 +32,7 @@ description: Keep docs and config examples coherent after a change - ARCHITECTUR
 | `tests/perf_baseline*.json` | perf + peak-VRAM gate | intentional perf/VRAM move (`scripts/gen_perf_baseline.sh`) |
 | `docs/MODELS.md`, `docs/DEPLOYMENT.md`, `docs/API.md`, `docs/QUICKSTART.md` | supported models; container/compose; HTTP contract (request tracing, priority); worked example (`kekzle/Qwen3.8-27B-NVFP4-vllm`) | new arch/model/quant; new flag or env; new endpoint field |
 | `docs/MISSION_JOURNAL.md`, `docs/scoreboard.tsv` | mission log, competitive scoreboard | competitive result changes |
-| `CHANGELOG.md` | 1-3 lines per entry, fact + number + (#PR), merged into the existing `### Added/Changed/Fixed` block (shipping-prs) | user-visible change |
+| `CHANGELOG.md` | written at the release cut from PR titles (`tools/changelog_release.py`, shipping-prs); a hand entry only for a breaking change | release cut |
 | `docs/audit/` | audit reports and ledgers (codebase-audit) | an audit pass |
 | `.claude/skills/*/SKILL.md`, `CLAUDE.md` tree | L3 agent routing; per-dir `CLAUDE.md` <= 800 tokens, no perf numbers | a workflow, gate or trap changes |
 

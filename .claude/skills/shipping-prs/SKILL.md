@@ -10,9 +10,9 @@ description: Open, merge, release a PR - branch off main, gh pr create, auto-mer
 | # | Rule | Detail |
 |---|---|---|
 | 1 | Branch off fresh `origin/main`, `gh pr create --base main`, NEVER stack | `git fetch origin && git switch -c <topic> origin/main`. Stacking on a squash repo caused recovery-PR cascades. Fewer, batched PRs. |
-| 2 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)`. |
+| 2 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)` = the CHANGELOG line at the release cut. |
 | 3 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
-| 4 | One PR in flight at a time | Every merged PR dirties every open PR through `CHANGELOG.md`. Resolve, `git commit` (hook: `make preflight`, ~20 s), land serially. |
+| 4 | PRs do not edit `CHANGELOG.md` | Until 2026-11-15 every merged PR dirtied every open PR through it (263 of 374 commits in 30 days). PRs that share no file may be in flight together; a conflict: resolve, `git commit` (hook: `make preflight`, ~20 s). |
 | 5 | Perf- or VRAM-moving change refreshes `tests/perf_baseline.json` IN THE SAME PR and says so | Gate 8% decode / 8% prefill / 10% `own_peak_mb`; `scripts/gen_perf_baseline.sh` (benchmark-cuda). |
 
 ## The auto-merge race
@@ -22,7 +22,7 @@ description: Open, merge, release a PR - branch off main, gh pr create, auto-mer
 - Push ALL commits before `gh pr create`. Draft PRs are not armed.
 - After the merge: `git log -1 --stat origin/main`; when a late commit changed a NUMBER, grep `main` for the corrected value (#1081 shipped disproved figures; #1082 fixed them). Lost commit precedent: `a5403bd5` in #718.
 - Late commit sequence: `gh pr merge --disable-auto <PR>` FIRST, edit, `make verify-fast`, `git push`, `gh pr merge --auto --squash --delete-branch`, verify the squash.
-- Do not branch a new topic while a previous auto-merge is in flight (#1516 born conflicted 29 min after #1515; #1519 repeated it against #1518 an hour later).
+- A new topic that touches a file of a PR whose auto-merge is in flight starts after that merge (#1516 born conflicted 29 min after #1515, through `CHANGELOG.md`, which PRs no longer edit).
 - Never fix a red advisory check by pushing into an armed PR: disable, fix, push, re-arm (a red `Mock API contract` on #1803).
 
 ## Ship sequence
@@ -57,12 +57,11 @@ Not in here:       one line: what a reviewer would look for and not find
 - Capture the gate output to a file, then paste. Never type gate numbers from memory (three wrong PR bodies in one day: #1664, #1666, #1689).
 - Cut: the sentence that sets a finding up, the retelling of how a bug was found, reading instructions for the numbers. #1531 went 162 -> 57 lines with no fact lost. Same for commit messages.
 
-## CHANGELOG entries
+## CHANGELOG
 
-- One to three lines and at most 360 characters (`tools/check_changelog_form.py`, gated): what changed for the reader, the number that makes it checkable, `(#NNNN)`. v0.31.0's cut went 389 -> 93 lines for 35 entries.
-- Write it short at PR time; before a release cut count lines per entry (>5 = journal).
-- New entries merge into the EXISTING `### Added` / `### Changed` / `### Fixed` block of `[Unreleased]`: a second `### Added` fails `check-release.sh` ("repeats a '###' heading").
-- Plain punctuation; no internal vocabulary without a greppable symbol; every number names model, quant, unit.
+- The PR title is the entry: `type(scope): what changed for the reader, the checkable number`. `feat` -> Added, `fix` -> Fixed, `perf` / `refactor` / `build` -> Changed, `docs` / `test` / `ci` / `chore` -> Internal, `type!:` -> **Breaking**. Plain punctuation; every number names model, quant, unit.
+- The release cut writes the section: `python3 tools/changelog_release.py --version X.Y.Z --since vPREV` (`--dry-run` prints it).
+- Hand entries under `[Unreleased]` only for what a title cannot carry (a breaking change's migration line): at most 3 lines and 360 characters (`tools/check_changelog_form.py`, gated), into the EXISTING `### ...` block (a second `### Added` fails `check-release.sh`). The generator moves them into the release, adds their PR number, skips that PR's generated line.
 
 ## Triage: a PR that will not merge
 
@@ -85,7 +84,7 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 Version SSoT: `CMakeLists.txt` `project(imp ... VERSION X.Y.Z)`. A release is its own PR.
 
 1. Bump `project(... VERSION X.Y.Z)`.
-2. `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`.
+2. `CHANGELOG.md`: `python3 tools/changelog_release.py --version X.Y.Z --since vPREV` (in `imp:toolchain`); read the section, fix a subject that reads wrong for a stranger.
 3. `docs/BENCHMARKS.md`: the `**Toolchain (current: \`vX.Y.Z\`):**` line (`check-release.sh` parses exactly that form).
 4. `bash scripts/check-release.sh; echo $?` and read the EXIT CODE (an aborted gate prints no FAIL line, #1394). Running containers: it lists them and asks `Stop them for the GPU stages? [y/N]`, restart offered at exit; without a terminal `IMP_RELEASE_STOP_CONTAINERS=yes|no` (default no). Known exit-1 cause: `test-spec-fidelity` "skipped, card not free enough" (needs ~26 GB free after the earlier stages); run `make test-spec-fidelity` separately, read exit 0. `check-release.sh` prints only `PASS make verify-fast`: run `make verify-fast` separately for the release-note figures; `bench-competitive` writes `/tmp/bench_competitive.tsv`.
 5. Merge (squash), then `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`.
