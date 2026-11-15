@@ -55,7 +55,7 @@ make verify                # full
 
 - English in the repo; chat in the user's language. No em dashes in the repo.
 - SafeTensors (NVFP4, FP8) first; GGUF is legacy (`docs/DESIGN_DECISIONS.md`): keep it loading, no new GGUF kernel or perf work, GPU gates and test models are SafeTensors only. Competitor reference: vLLM on the same SafeTensors checkpoint.
-- CHANGELOG: 1-3 lines, <= 360 characters per entry (gated), plus the checkable number. Investigation goes to `docs/`.
+- CHANGELOG: PRs do not edit it; the PR title (= squash subject) is the entry: fact + checkable number. The release cut writes the section (`tools/changelog_release.py`). Hand entries under `[Unreleased]` only for what a title cannot carry (breaking change), <= 360 characters (gated).
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.
 - Perf gate: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, stated in the PR.
 - Runtime config only via `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Seeded env vars: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.

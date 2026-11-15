@@ -170,6 +170,7 @@ if want docs; then
     run "that gate still sees a missing key and a drifted example value" python3 tools/check_config_keys.py --selftest
     run "CHANGELOG [Unreleased] entries <= 3 lines, 360 chars" python3 tools/check_changelog_form.py
     run "that gate still counts a long entry"      python3 tools/check_changelog_form.py --selftest
+    run "release-cut CHANGELOG generator selftest" python3 tools/changelog_release.py --selftest
 fi
 
 # A file:line citation in a living doc dies the moment a TU is split or shrinks (#1782
