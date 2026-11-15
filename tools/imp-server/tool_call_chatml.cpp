@@ -7,8 +7,24 @@
 
 // Parses Qwen3.6's XML-flavored tool-call body (<function=NAME><parameter=KEY>VALUE</parameter>...):
 // strings round-trip as strings, bare numerics coerce to JSON numbers.
+// Qwen3.8 opens a call with "<parameter=NAME>" in place of "<function=NAME>" (4 of 951 turns): a body
+// without <function= whose first <parameter=X> holds only whitespace up to the next <parameter=.
+bool qwen_xml_parameter_named_call(const std::string& body) {
+    constexpr size_t kTag = 11;  // "<parameter="
+    const size_t a = body.find_first_not_of("\n\r\t ");
+    if (a == std::string::npos || body.compare(a, kTag, "<parameter=") != 0 || body.contains("<function="))
+        return false;
+    const size_t gt = body.find('>', a + kTag);
+    if (gt == std::string::npos || gt == a + kTag)
+        return false;
+    const size_t next = body.find_first_not_of("\n\r\t ", gt + 1);
+    return next != std::string::npos && body.compare(next, kTag, "<parameter=") == 0;
+}
+
 bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     size_t fn = body.find("<function=");
+    if (fn == std::string::npos && qwen_xml_parameter_named_call(body))
+        fn = body.find("<parameter=") + 1;  // "<parameter=" is one byte longer than "<function="
     if (fn == std::string::npos)
         return false;
     fn += 10;

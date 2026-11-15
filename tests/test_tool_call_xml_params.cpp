@@ -161,3 +161,42 @@ TEST(ToolCallQwen36Xml, ReplayedCallKeepsTheEmittedParameterOrder) {
         << "edited arguments render canonically";
     EXPECT_NE(replay("toolu_123", same).find(sorted), std::string::npos) << "unknown id renders canonically";
 }
+
+// Qwen3.8 wrote this in 4 of 951 turns (familiar session 20261114-142819): the call came back as text.
+TEST(ToolCallQwen36Xml, ParameterTagNamingTheFunctionIsACall) {
+    const json tools = json::parse(R"([{"type":"function","function":{"name":"bash","parameters":{
+        "type":"object","required":["command"],"properties":{"command":{"type":"string"},
+        "timeout":{"type":"integer"}}}}}])");
+    const std::string body =
+        "<parameter=bash>\n<parameter=command>\ncd /x && sed -n '48,72p' main.js\n"
+        "</parameter>\n<parameter=timeout>\n30\n</parameter>\n</function>";
+    ASSERT_TRUE(qwen_xml_parameter_named_call(body));
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_stream_tool_body(body, false, "", tc));
+    EXPECT_EQ(tc.name, "bash");
+    validate_tool_call(tc, tools);
+    EXPECT_TRUE(tc.valid) << tc.error;
+    const json args = json::parse(tc.arguments);
+    EXPECT_EQ(args.size(), 2u) << "the name tag is not an argument";
+    EXPECT_EQ(args["command"], "cd /x && sed -n '48,72p' main.js");
+    EXPECT_EQ(args["timeout"], 30);
+    EXPECT_EQ(tool_call_fault(tc, tools, false), "");
+}
+
+TEST(ToolCallQwen36Xml, ParameterBodiesThatAreNotANamedCallStayText) {
+    ParsedToolCall tc;
+    // The first parameter has a value: nothing names a function.
+    const std::string valued = "<parameter=command>\nls\n</parameter>\n<parameter=timeout>\n3\n</parameter>";
+    EXPECT_FALSE(qwen_xml_parameter_named_call(valued));
+    EXPECT_FALSE(parse_stream_tool_body(valued, false, "", tc));
+    // A lone name tag, a cut tag and an empty name.
+    EXPECT_FALSE(parse_stream_tool_body("<parameter=bash>\n", false, "", tc));
+    EXPECT_FALSE(parse_stream_tool_body("<parameter=bash", false, "", tc));
+    EXPECT_FALSE(
+        parse_stream_tool_body("<parameter=>\n<parameter=command>\nls\n</parameter>", false, "", tc));
+    // A regular call whose first value is empty keeps its <function= name.
+    ASSERT_TRUE(parse_stream_tool_body(
+        "<function=bash>\n<parameter=note>\n<parameter=command>\nls\n</parameter>\n</function>", false, "",
+        tc));
+    EXPECT_EQ(tc.name, "bash");
+}
