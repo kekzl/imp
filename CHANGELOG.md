@@ -4,6 +4,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-11-16
+
+### Added
+- Flint (RecursiveSI/flint, 39.8 B parameters, about 2.5 B active per token) loads as NVFP4 SafeTensors, checkpoint `kekzle/Flint-NVFP4`: tg128 368.68-372.63 tok/s, pp512 23997-25368 tok/s, own peak 25007-25047 MiB on an RTX 5090 32 GB; reasoning split and tool calls work. PPL 13.841 on 4095 rows against 12.861 for the same weights with 16-bit activations: imp quantizes activations in prefill. (#3129)
+- `imp-server` gives Flint a 131072-token context without flags, 7625 before (2 sequences at up to 73552 tokens each on a 32 GB card): its 35 sliding-window layers keep a 513-token window and prefix caching runs on 256 MiB of window snapshots. A 125789-token prompt resends with 125744 tokens cached. (#3130)
+- `imp-quantize --format modelopt` also declares the checkpoint in `config.json` (`quantization_config`, `quant_method: modelopt`), and `--act a4|a16` picks the declared `quant_algo` (`NVFP4` / `W4A16_NVFP4`): vLLM 0.33.0 loads the result, with `--lm-head source`. (#3129)
+- `tools/analysis/flint_hessians.py` writes calibration statistics from a CPU forward for `imp-quantize --gptq` when the source checkpoint fits no card (Flint: KL to BF16 0.272 -> 0.216). (#3129)
+- `GET /v1/models` reports the Anthropic Models API fields beside the OpenAI ones; the loaded model adds `max_input_tokens`, `max_tokens` and `capabilities` (`image_input.supported` false on Flint and true on InternVL3.5-2B, `thinking`, `effort`), so a client skips image blocks a text-only model answers with 400. (#3131)
+
+### Changed
+- `max_seq_len` auto on a native-NVFP4 checkpoint reserves the weight shards on disk when they are smaller than the shape estimate: Gemma-4-26B-A4B NVFP4 plans 21596 tokens (19068 before); Qwen3-8B, Qwen3-14B, Qwen3.8-27B, Qwen3-30B-A3B, Qwen3-Coder-30B-A3B and Nemotron-3-Nano-30B-A3B plan as before. (#3130)
+
+### Fixed
+- A ModelOpt checkpoint that declares `quant_algo: W4A16_NVFP4` loads as NVFP4; NVFP4 tensors under a declaration imp does not know are refused at load instead of run as weights (perplexity 1.3e22). (#3129)
+
 ## [0.67.1] - 2026-11-15
 
 ### Changed
