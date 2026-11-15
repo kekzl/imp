@@ -5,7 +5,7 @@
 namespace imp {
 
 // Raw-MMA throughput microbench for INT8 TC candidates for a Q4_K_M direct GEMM kernel
-// (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// (docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md).
 // Ratio (INT8 IMMA / FP16 HMMA) is the gate: sm_120 theoretical ~2.0x; <1.5x means INT8 is
 // throttled to FP16-peak and the project should be DEFERRED.
 

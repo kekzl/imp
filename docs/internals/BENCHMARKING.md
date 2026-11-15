@@ -46,7 +46,7 @@ The script refuses to run on a busy GPU, alternates the arms so host drift hits 
 
 ### Long-context arms: four ways to measure something else
 
-Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confident numbers before it produced a true one (2026-08-29). Full ledger: [`plans/2026-08-29-qwen38-long-context-posture.md`](../plans/2026-08-29-qwen38-long-context-posture.md).
+Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confident numbers before it produced a true one (2026-08-29). Full ledger: [`archive/plans/2026-08-29-qwen38-long-context-posture.md`](../archive/plans/2026-08-29-qwen38-long-context-posture.md).
 
 | Pitfall | Rule | What it cost |
 |---|---|---|

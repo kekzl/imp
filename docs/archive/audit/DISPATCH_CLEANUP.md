@@ -60,7 +60,7 @@ Baseline tree `5a30cb5f` (origin/main), detached worktree `imp-baseline`, image 
 
 ### Tests
 
-Test list: [`BASELINE_TESTLIST_2026_10_15.txt`](BASELINE_TESTLIST_2026_10_15.txt), `<binary> <Suite.Test>` from `--gtest_list_tests`, 3696 entries (10 `DISABLED_`), plus 88 `SKIP` lines (runtime skips of `make test-gpu`).
+Test list: [`BASELINE_TESTLIST_2026_10_15.txt`](../../audit/BASELINE_TESTLIST_2026_10_15.txt), `<binary> <Suite.Test>` from `--gtest_list_tests`, 3696 entries (10 `DISABLED_`), plus 88 `SKIP` lines (runtime skips of `make test-gpu`).
 
 | binary | listed | ran | passed | skipped | failed | disabled |
 |---|---:|---:|---:|---:|---:|---:|

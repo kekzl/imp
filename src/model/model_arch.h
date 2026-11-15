@@ -61,7 +61,7 @@ const char* model_arch_name(ModelArch arch);
 // How many times the auto default's KV bytes/token an explicit dtype pin costs; 0 or 1 =
 // free. Only families whose auto default is NVFP4 can lose here. A pin can invert without
 // the config changing: e.g. IMP_KV_FP8=1 doubled bytes/token once the default flipped to
-// NVFP4 (docs/plans/2026-08-29-qwen38-long-context-posture.md, trap 1).
+// NVFP4 (docs/archive/plans/2026-08-29-qwen38-long-context-posture.md, trap 1).
 int kv_pin_context_cost_factor(ModelArch arch, QType pinned);
 
 // True when the KV dtype was CHOSEN rather than auto-resolved: a CLI flag sets the engine

@@ -39,6 +39,49 @@ you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
 finding-status coherence, and the gate fails if either leaves that directory —
 which is how this move discovered it had misclassified the file.
 
+## Plans and audit records moved 2026-11-15
+
+Closed plans from `docs/plans/` live in [`plans/`](plans/), closed dated audit records from
+`docs/audit/` in [`audit/`](audit/). Content unchanged, links rewritten.
+A plan whose state turns CLOSED moves here with its index row.
+
+| plan | state | standing record |
+|---|---|---|
+| [2026-05-28-q4k-mmq-kernel-design](plans/2026-05-28-q4k-mmq-kernel-design.md) | CLOSED 2026-05-28, REFUTED before implementation | roadmap "Closed competitive records" |
+| [2026-06-profiling-campaign](plans/2026-06-profiling-campaign.md) | record, moved out of `docs/internals/PROFILING.md` 2026-09-23 | `docs/internals/PROFILING.md` |
+| [2026-07-22-token-recycling-spec-tree](plans/2026-07-22-token-recycling-spec-tree.md) | CLOSED 2026-08-19, neutral to -7%, default off | roadmap Closed, "speculation tree" |
+| [2026-07-31-qwen3-vl-vision](plans/2026-07-31-qwen3-vl-vision.md) | CLOSED 2026-08-11, shipped #1163-#1180 | roadmap Closed, "vision beyond Gemma" |
+| [2026-08-24-qwen38-port](plans/2026-08-24-qwen38-port.md) | CLOSED 2026-08-27, all 8 items terminal | roadmap Closed, "Qwen3.8 port roadmap" |
+| [2026-08-27-prefill-decode-overlap](plans/2026-08-27-prefill-decode-overlap.md) | CLOSED 2026-08-27, NEUTRAL both shapes, default off | roadmap lever ledger |
+| [2026-08-28-sparse-decode-attention](plans/2026-08-28-sparse-decode-attention.md) | CLOSED 2026-08-30, SHIPPED opt-in (#1808, #1818, #1819) | roadmap Open 3 (closed 2026-10-01, archive) |
+| [2026-08-29-qwen38-long-context-posture](plans/2026-08-29-qwen38-long-context-posture.md) | CLOSED 2026-08-31, both open items answered | roadmap lever ledger |
+| [2026-08-31-fp8-ssm-prefill](plans/2026-08-31-fp8-ssm-prefill.md) | CLOSED 2026-08-31, REFUTED e2e, closed unmerged | roadmap prefill kernels |
+| [2026-08-31-mtp-multicandidate-hybrid](plans/2026-08-31-mtp-multicandidate-hybrid.md) | CLOSED 2026-08-31, built and measured, gate not met | roadmap Closed, "speculation tree" |
+| [2026-08-31-roadmap-ledger-detail](plans/2026-08-31-roadmap-ledger-detail.md) | record, moved out of the roadmap 2026-08-31 | - |
+| [2026-09-04-lever-ledger-detail](plans/2026-09-04-lever-ledger-detail.md) | record, moved out of the roadmap 2026-09-04 | - |
+| [2026-09-11-batched-mtp-verify](plans/2026-09-11-batched-mtp-verify.md) | CLOSED 2026-11-14: the bound form ships default on (`speculative.mtp_batch_verify`); the full mode is deleted (32 streams 1966 -> 1159 tok/s) | CHANGELOG `speculative.mtp_batch_verify` |
+| [2026-09-12-factored-verify-spare](plans/2026-09-12-factored-verify-spare.md) | CLOSED 2026-11-14: factor rows ship in the bound verify (#3088); the factored spare is deleted | CHANGELOG `speculative.mtp_batch_verify_k` |
+| [2026-09-16-open-rows-closed-detail](plans/2026-09-16-open-rows-closed-detail.md) | record, moved out of the roadmap 2026-09-16 (Open rows 1, 2, 4, 7, 13, 14, 15) | - |
+| [2026-09-19-qwen4exp-port](plans/2026-09-19-qwen4exp-port.md) | record, Qwen3.8-Flash-Next port shipped | CHANGELOG Qwen3.8-Flash-Next |
+| [2026-10-01-recurrent-state-paging-measured](plans/2026-10-01-recurrent-state-paging-measured.md) | CLOSED 2026-10-01, DO NOT BUILD | roadmap Open 5 (archive) |
+| [2026-11-01-kv-eviction](plans/2026-11-01-kv-eviction.md) | CLOSED 2026-11-01, REFUTED (continuation recall -11.2 % at keep 0.5), harness deleted 2026-11-14 | roadmap row 48 |
+| [2026-11-10-swebench-dev50-imp-vs-vllm](plans/2026-11-10-swebench-dev50-imp-vs-vllm.md) | CLOSED 2026-11-10, ANSWERED (vLLM 32/50 vs imp 31-33, imp ~3x faster wall) | roadmap row 124 |
+| [2026-10-04-allocator-headroom-measured](plans/2026-10-04-allocator-headroom-measured.md) | CLOSED 2026-10-04 (#2482) | roadmap row 91 (archive) |
+| [2026-10-04-awq-groups-nrep4](plans/2026-10-04-awq-groups-nrep4.md) | CLOSED 2026-10-04 (#2474) | roadmap row 109 (archive) |
+| [2026-10-04-awq-moe-experts](plans/2026-10-04-awq-moe-experts.md) | CLOSED 2026-10-05 (#2476) | roadmap row 99 (archive) |
+| [2026-10-17-gptq-nvfp4](plans/2026-10-17-gptq-nvfp4.md) | CLOSED 2026-11-02 | roadmap row 101 |
+| [2026-10-18-kv-cold-pages-decision](plans/2026-10-18-kv-cold-pages-decision.md) | CLOSED 2026-10-18, NO-GO | roadmap row 112 |
+| [2026-10-18-one-measured-vram-margin](plans/2026-10-18-one-measured-vram-margin.md) | DONE 2026-10-18 | backlog B-29f |
+
+| audit record | kind | last commit | read it when |
+|---|---|---|---|
+| [AUDIT_ARCH_2026.md](audit/AUDIT_ARCH_2026.md) | record, one-day read-only audit at `ef664dd8` (v0.37.0+1), no GPU job: 12 axis reports, P2 falsification (3 S0 and 9 S1 survive, 9 downgrades, 6 merges), P3 queue of 15 dispatches; campaign CLOSED 2026-09-08, P5 log 24 rows (#1909-#1927, #1939-#1946), 0 open findings | 2026-09-08 | structural history; the per-finding verdicts are `SETTLED.md` H; the P2 kill list before re-filing a downgraded finding; the "verify the brief" table before writing an audit brief |
+| [TEST_INVENTORY.md](audit/TEST_INVENTORY.md) · [ESCAPE_ANALYSIS.md](audit/ESCAPE_ANALYSIS.md) | records of the test-hardening campaign, baseline `ad067d76` (v0.23.0) | 2026-08-08/09 | asking why the suite missed a class of bug; the live counts come from `python3 tools/check_test_lanes.py --report` |
+| [LIBRARY_SHARE_2026_10_29.md](audit/LIBRARY_SHARE_2026_10_29.md) | record, nsys cuBLAS/cuBLASLt/CUTLASS share per phase, 13 models x 4 workloads, v0.59.2 | 2026-10-29 | picking the next call site for ROADMAP row 123 |
+| [DEBT_INVENTORY_2026_10_15.md](audit/DEBT_INVENTORY_2026_10_15.md) · [PTXAS_BASELINE_2026_10_15.md](audit/PTXAS_BASELINE_2026_10_15.md) · [DISPATCH_CLEANUP.md](audit/DISPATCH_CLEANUP.md) | record, DISPATCH_cleanup 2026-10-15/17 at v0.53.0: scout inventory, per-kernel `cuobjdump -res-usage` table, append-only log | 2026-10-17 | a backlog row cites `DISPATCH_CLEANUP.md:N` |
+| [DISPATCH_LAUNCH_2026_10_27.md](audit/DISPATCH_LAUNCH_2026_10_27.md) | record, launch prep log | 2026-10-27 | the launch checklist history |
+| [LIBRARY_SHARE_2026_10_30.md](audit/LIBRARY_SHARE_2026_10_30.md) | record, second library-share inventory, ROADMAP row 123 | 2026-11-01 | the step between the 10-29 and 11-01 inventories |
+
 ## Summaries of documents consolidated away on 2026-06-13
 
 This directory used to hold ~70 historical documents (~25k lines): closed design

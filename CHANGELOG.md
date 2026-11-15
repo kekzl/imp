@@ -639,7 +639,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
 - `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - InternVL3.5 vision (#2389, with #2375 #2382 #2384 #2387): InternVL3_5-2B-HF answers about images in `imp-cli --image` and the server; one 448 tile, 256 tokens per image. Real tower vs HF FP32: 6.35e-3 relL2 on test_cat; bus, cat, pizza named; `vision_sight_check` 8/8.
-- Sparse prefill attention (`attention.sparse_prefill_topk_tokens`, default off): a continuation chunk attends to its own rows plus the top past pages, one selection per chunk, no dense pass. Qwen3.8-27B pp77824 at 8192: 6835.55 -> 10529.05 tok/s (1.54x, 3/3), NIAH 10/10, PPL +0.26 %. Record: `docs/plans/2026-08-28-sparse-decode-attention.md`.
+- Sparse prefill attention (`attention.sparse_prefill_topk_tokens`, default off): a continuation chunk attends to its own rows plus the top past pages, one selection per chunk, no dense pass. Qwen3.8-27B pp77824 at 8192: 6835.55 -> 10529.05 tok/s (1.54x, 3/3), NIAH 10/10, PPL +0.26 %. Record: `docs/archive/plans/2026-08-28-sparse-decode-attention.md`.
 - Sparse decode attention on MLA models (#2372): only `attention.mla_absorb` stays refused. DeepSeek-V2-Lite NVFP4, after #2385, dense vs sparse budget 4096 at 32k: 111.22/112.38/111.35 vs 259.95/235.40/244.98 tok/s (2.21x), 16k 1.38x (#2386); NIAH 10/10 dense and sparse (V2-Lite-Chat). Harnesses `tools/analysis/sparse_mla_ab.sh`, `prefill_attn_share.sh`.
 - Qwen3-VL video input (#2370): `{"type":"video","video":[frame URLs],"fps"|"timestamps"}` on `/v1/chat/completions`, `imp-cli --video-frames`; 2..768 client-sampled frames, no mp4 decoding. 8 red-panda frames: encoder relL2 5.48e-3 vs HF FP32, CLI and server name the red panda.
 - Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Wired into server and CLI by #2370.
@@ -793,15 +793,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Prefill, bit-identical outputs: the Mamba2 scan keeps its state in registers (Nemotron-3-Nano NVFP4 pp4096 13149 -> 39605 tok/s, pp512 9711 -> 16097, Nemotron-3.5-Lightning pp4096 12692 -> 36524), and RoPE computes each angle once per token instead of per head (gpt-oss-20b MXFP4 pp4096 19976 -> 23521, Qwen3-14B-NVFP4 25611 -> 26380); tg128 +0.1..+1.4 %. Record: `tools/roofline/PERF_LOG.md`.
 - Measured sm_120a limits and a kernel inventory: `tools/roofline/peaks/` (DRAM read 1692-1698 GB/s, NVFP4 `mma.sync` 1899 TOPS, FP8 f32-accumulate 490 TOPS vs 940 via `kind::mxf8f6f4`, graph node 0.47-0.68 us vs 5.7 us per stream launch, at locked 2842/13801 MHz) and `tools/roofline/inventory/` (nsys with graphs on over 13 models x 4 workloads, kernels split by the new `bench:pp`/`bench:tg` NVTX ranges of `imp-cli --bench`, ncu harness).
 - Docs are reference tables: in-scope docs 7654 -> 4074 lines, README 329 -> 136, `usage.md` split into `docs/CONFIG.md` + `CONTRIBUTING.md`, `API_FEATURES.md` split off `API.md`; 39 facts corrected, fact log `docs/audit/docs-rewrite/DISPATCH_DOCS_V3.md`. `docs_lint.py` gates filler words, paragraphs > 2 sentences, docs pages > 300 lines and dead anchors.
-- QSA indexer (`attention.qsa`, still default `false`) wins decode above budget: Qwen3.8-Flash-Next, 13863-token prompt, tg512 55.99-57.10 dense vs 62.28-63.84 tok/s indexer (was 57.59-58.31), pp 197.65-203.65 vs 185.21-185.64 before. Select scores across the card (128.4 -> 9.1 us per layer-step); `paged_attention_decode` split-K counts the GQA kernel's `batch * n_kv_heads` CTAs, so the 16-row prefill pass leaves the 32-CTA path (9233 -> 1588 ms per prompt). The 0.44.0 "0.3 % of the step" note was wrong: dense decode attention is 81.6 us per layer (`docs/plans/2026-09-19-qwen4exp-port.md`).
+- QSA indexer (`attention.qsa`, still default `false`) wins decode above budget: Qwen3.8-Flash-Next, 13863-token prompt, tg512 55.99-57.10 dense vs 62.28-63.84 tok/s indexer (was 57.59-58.31), pp 197.65-203.65 vs 185.21-185.64 before. Select scores across the card (128.4 -> 9.1 us per layer-step); `paged_attention_decode` split-K counts the GQA kernel's `batch * n_kv_heads` CTAs, so the 16-row prefill pass leaves the 32-CTA path (9233 -> 1588 ms per prompt). The 0.44.0 "0.3 % of the step" note was wrong: dense decode attention is 81.6 us per layer (`docs/archive/plans/2026-09-19-qwen4exp-port.md`).
 
 ## [0.44.0] - 2026-09-22
 
 ### Added
 - LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
 - `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
-- Qwen4Exp QSA indexer (`attention.qsa`, default `false`; `src/compute/qsa_indexer.cu`, `src/exec/executor_qsa.cu`): the learned block top-k of Qwen3.8-Flash-Next's 12 attention layers. Per QSA layer a raw index-key cache and block keys (mean of 4, `k_layernorm`, RoPE at the block start); per query `sum_h relu(q_h . blk) / sqrt(128)`, the top 512 blocks plus the tail stay visible, the selected K/V rows are gathered into a scratch paged cache and attended with the paged decode kernel. Decode runs it on the device every step (captured graph replays it; below 2051 tokens the selection is every token in order, so the output is byte-identical to dense: `QsaIndexer.AllTrueSelectionMatchesDensePaged`); prefill recomputes the rows past 2050 after the dense FA2 chunk. Needle at 4503 tokens context retrieved with and without it; decode there 50.6 vs 54.1 tok/s dense, pp4503 650 vs 912 tok/s. PPL window 2048..4095 of `ppl_corpus_45k.txt`: llama.cpp (own QSA top-k, UD-Q4_K_XL) 4.5021, imp dense 4.6978, imp indexer 4.7558; `attention.qsa_force=true` on 1301 tokens (all-true selection through the paged kernel instead of FA2) moves PPL +0.44 %, the FA2-vs-paged numerics amplified by MoE routing. Not modelled: prefix-cache resume (no indexer keys for the resumed prefix, sequence stays dense) and batched decode (one sequence's key caches). `attention.qsa_rows` (16), `attention.qsa_debug` (in-situ FA2 vs paged-on-cache vs selected diffs). Default off: it loses on every axis measured here (`degen_suite.py` 48/50 on, 50/50 off). The "turn it on above ~8k context" advice was measured on 2026-09-22 and withdrawn: needle recall is intact at 4883 / 11283 / 23084 prompt tokens but slower in each (3.01 -> 2.35, 1.63 -> 0.96, 0.79 -> 0.50 tok/s), and 1024 generated tokens at 11283 context run 18.14 -> 15.88 tok/s (-12.5 %). 12 of 48 layers carry attention at 2 KiB of KV per token, so the dense read it replaces is ~0.19 ms of a 63 ms decode step (`docs/plans/2026-09-19-qwen4exp-port.md`).
-- Device-driven expert cache for host-resident NVFP4 MoE experts (`moe.device_expert_cache`, default `true`, needs `moe.pin_host_experts`): routing -> cache slots (per-layer LRU tables on the device) -> zero-copy gather of the misses from the mapped pinned slabs, no D2H and no host LRU per layer; the pool is handed back and forth with the host path through generations. With it the captured decode step replays correctly, so the `experts_on_host` graph demotion is lifted and the per-step graph pool captures (PLE models do their table gather in `prepare_decode_step_host` before each replay). Qwen3.8-Flash-Next-NVFP4 (56 GiB of experts on the host, 45 % cache budget), greedy, same text throughout: tg96 5.81 -> 53.0 tok/s, tg512 65.9 (hit rate 81.9 %) (`docs/plans/2026-09-19-qwen4exp-port.md`).
+- Qwen4Exp QSA indexer (`attention.qsa`, default `false`; `src/compute/qsa_indexer.cu`, `src/exec/executor_qsa.cu`): the learned block top-k of Qwen3.8-Flash-Next's 12 attention layers. Per QSA layer a raw index-key cache and block keys (mean of 4, `k_layernorm`, RoPE at the block start); per query `sum_h relu(q_h . blk) / sqrt(128)`, the top 512 blocks plus the tail stay visible, the selected K/V rows are gathered into a scratch paged cache and attended with the paged decode kernel. Decode runs it on the device every step (captured graph replays it; below 2051 tokens the selection is every token in order, so the output is byte-identical to dense: `QsaIndexer.AllTrueSelectionMatchesDensePaged`); prefill recomputes the rows past 2050 after the dense FA2 chunk. Needle at 4503 tokens context retrieved with and without it; decode there 50.6 vs 54.1 tok/s dense, pp4503 650 vs 912 tok/s. PPL window 2048..4095 of `ppl_corpus_45k.txt`: llama.cpp (own QSA top-k, UD-Q4_K_XL) 4.5021, imp dense 4.6978, imp indexer 4.7558; `attention.qsa_force=true` on 1301 tokens (all-true selection through the paged kernel instead of FA2) moves PPL +0.44 %, the FA2-vs-paged numerics amplified by MoE routing. Not modelled: prefix-cache resume (no indexer keys for the resumed prefix, sequence stays dense) and batched decode (one sequence's key caches). `attention.qsa_rows` (16), `attention.qsa_debug` (in-situ FA2 vs paged-on-cache vs selected diffs). Default off: it loses on every axis measured here (`degen_suite.py` 48/50 on, 50/50 off). The "turn it on above ~8k context" advice was measured on 2026-09-22 and withdrawn: needle recall is intact at 4883 / 11283 / 23084 prompt tokens but slower in each (3.01 -> 2.35, 1.63 -> 0.96, 0.79 -> 0.50 tok/s), and 1024 generated tokens at 11283 context run 18.14 -> 15.88 tok/s (-12.5 %). 12 of 48 layers carry attention at 2 KiB of KV per token, so the dense read it replaces is ~0.19 ms of a 63 ms decode step (`docs/archive/plans/2026-09-19-qwen4exp-port.md`).
+- Device-driven expert cache for host-resident NVFP4 MoE experts (`moe.device_expert_cache`, default `true`, needs `moe.pin_host_experts`): routing -> cache slots (per-layer LRU tables on the device) -> zero-copy gather of the misses from the mapped pinned slabs, no D2H and no host LRU per layer; the pool is handed back and forth with the host path through generations. With it the captured decode step replays correctly, so the `experts_on_host` graph demotion is lifted and the per-step graph pool captures (PLE models do their table gather in `prepare_decode_step_host` before each replay). Qwen3.8-Flash-Next-NVFP4 (56 GiB of experts on the host, 45 % cache budget), greedy, same text throughout: tg96 5.81 -> 53.0 tok/s, tg512 65.9 (hit rate 81.9 %) (`docs/archive/plans/2026-09-19-qwen4exp-port.md`).
 
 ### Changed
 - Device expert cache victim selection reduces in a tree instead of scanning all 256 per-thread
@@ -847,7 +847,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   single-sequence buffers into an illegal access. `max_batch_size` is clamped to 1 there.
 - PLE models (Qwen3.8-Flash-Next) under CUDA graphs: the prefill graph and the constrained decode pipeline captured a forward whose PLE step syncs the stream (host n-gram gather), aborting the capture with 800 CUDA errors per request and killing the server on the next; both capture sites now skip such models (the constrained pipeline also skips host-resident experts, whose device cache needs its per-step take-over). `degen_suite.py` 50/50 on the model, multi-turn clean to the 4k context limit.
 - The CUTLASS grouped NVFP4 prefill (device-args) refused or aborted above 256 experts: `compact_alpha_active`, `compute_sfa_offsets` (single-block scans, one expert per thread) and `build_grouped_3x_staging_kernel` (one block). Chunked scans and a multi-block launch, limit 4096; `QuantizeMoeNative.CompactAlphaAndSfaOffsetsWide512`. Qwen3.8-Flash-Next `moe.staged_cutlass_prefill=true` pp62 2.49 -> 1.68 s.
-- MoE top-k gating never selected an expert with index >= 256: each of the 256 threads owned one expert. Invisible on every shipped MoE (<= 256 experts); on the 512-expert Qwen3.8-Flash-Next it routed every token whose best experts sat above 255 wrong (PPL on unseen prose 14.25 -> 6.00, llama.cpp 5.54; `docs/plans/2026-09-19-qwen4exp-port.md`). Regression test `MoERoutingWideTest.ExpertsAbove256AreCandidates`.
+- MoE top-k gating never selected an expert with index >= 256: each of the 256 threads owned one expert. Invisible on every shipped MoE (<= 256 experts); on the 512-expert Qwen3.8-Flash-Next it routed every token whose best experts sat above 255 wrong (PPL on unseen prose 14.25 -> 6.00, llama.cpp 5.54; `docs/archive/plans/2026-09-19-qwen4exp-port.md`). Regression test `MoERoutingWideTest.ExpertsAbove256AreCandidates`.
 
 ## [0.43.0] - 2026-09-19
 
@@ -926,14 +926,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
 - `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - Activation calibration records the per-channel second moment `E[x^2]` alongside `mean|x|` (file magic `IMPCAL01` -> `IMPCAL02`; older files still load, with the second moment absent). `imp-quantize --calib-weight sq` weights the AWQ search's error by it instead of by `(mean|x|/s)^2`, which is what the layer's output error calls for. Measured on Qwen3-0.6B BF16 -> NVFP4: PPL 28.1125 (`abs`) against 27.8039 (`sq`), 1.10 % at identical search cost, RTN baseline 29.7342. Default stays `abs` because that model is narrow GQA and the open case in roadmap item 6 is wide GQA.
-- `speculative.factored_spare` (default off): the batched verify carries its drafted row as (g, k, delta) per head plus one conv tap instead of a second full recurrent slot, so the state pool stops carrying a duplicate. Qwen3.8-27B-NVFP4-vllm at `runtime.max_batch_size=32`, 32 streams: the slot-swapping form clamps to 18 slots with a 298-block KV pool and reads 1117/1105 tok/s, the factored form keeps 32 slots and 1429 blocks at 1761/1898 (with one draft per verify step, see Fixed). `degen_suite.py` 50/50. `docs/plans/2026-09-12-factored-verify-spare.md`.
-- `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/plans/2026-09-11-batched-mtp-verify.md`.
+- `speculative.factored_spare` (default off): the batched verify carries its drafted row as (g, k, delta) per head plus one conv tap instead of a second full recurrent slot, so the state pool stops carrying a duplicate. Qwen3.8-27B-NVFP4-vllm at `runtime.max_batch_size=32`, 32 streams: the slot-swapping form clamps to 18 slots with a 298-block KV pool and reads 1117/1105 tok/s, the factored form keeps 32 slots and 1429 blocks at 1761/1898 (with one draft per verify step, see Fixed). `degen_suite.py` 50/50. `docs/archive/plans/2026-09-12-factored-verify-spare.md`.
+- `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/archive/plans/2026-09-11-batched-mtp-verify.md`.
 ### Changed
-- Sparse decode attention scores a KV page by its key mean plus standard deviation instead of the Quest min/max corner bound (`attention.sparse_score_meanstd`, default on; `false` restores the bound). Same metadata layout, same arithmetic count. Qwen3.8-27B-NVFP4-vllm, NIAH at 5 depths x 81 908 / 126 908 tokens: 2/10 -> 10/10 at a 4096-token budget, 7/10 -> 10/10 at 8192, wall time neutral. `docs/plans/2026-08-28-sparse-decode-attention.md`.
+- Sparse decode attention scores a KV page by its key mean plus standard deviation instead of the Quest min/max corner bound (`attention.sparse_score_meanstd`, default on; `false` restores the bound). Same metadata layout, same arithmetic count. Qwen3.8-27B-NVFP4-vllm, NIAH at 5 depths x 81 908 / 126 908 tokens: 2/10 -> 10/10 at a 4096-token budget, 7/10 -> 10/10 at 8192, wall time neutral. `docs/archive/plans/2026-08-28-sparse-decode-attention.md`.
 - Docker image build compiles through `ccache` in a BuildKit cache mount: cold 348 s, warm 10 s (comment edit) to 37 s (header with 12 includers plus one `.cu`), 595/595 compile calls cacheable. The build dir itself is still never cached.
 
 ### Fixed
-- `speculative.factored_spare` no longer shrinks the MTP draft pool to one KV slot. The slot count keyed on the recurrent spare count, which the factored form sets to 0, so one request per batched verify step carried a draft. Qwen3.8-27B-NVFP4-vllm, 24 streams: 128 drafts over 127 verify steps -> 8030 over 410, 24.28 -> 33.85 tokens per step. The batched verify still loses to plain decode there (1455-1493 vs 1226-1265 tok/s); `docs/plans/2026-09-12-factored-verify-spare.md`.
+- `speculative.factored_spare` no longer shrinks the MTP draft pool to one KV slot. The slot count keyed on the recurrent spare count, which the factored form sets to 0, so one request per batched verify step carried a draft. Qwen3.8-27B-NVFP4-vllm, 24 streams: 128 drafts over 127 verify steps -> 8030 over 410, 24.28 -> 33.85 tokens per step. The batched verify still loses to plain decode there (1455-1493 vs 1226-1265 tok/s); `docs/archive/plans/2026-09-12-factored-verify-spare.md`.
 - SWA prefix-cache snapshots of a block-aligned prompt are saved one block short, so the restore can match them. The saver floored the full span while the restore caps at `(prompt - 1) / block_size` blocks and matches the stored length exactly, which made every aligned prompt save a snapshot it could never find again (the twin of the hybrid-path defect fixed in #1960). `GraphEligibility.EverySnapshotBoundaryFitsUnderTheRestoreCap`.
 - Stop tokens are masked before sampling wherever a stop would have been suppressed: inside the think block while a budget can force `</think>`, and after the close until answer content appears. A suppressed `<|endoftext|>` used to stay in the context, and Qwen3.8-27B-NVFP4 at a near-tie then continued as a new document (`Human: ...`, empty `content`, `finish_reason` stop; `docs/audit/AUDIT_QWEN38_NVFP4.md` P3). Eager, conditional-graph, constrained-pipeline and n-gram-verify samplers; `EndToEndModelTest.InThinkStopMaskKeepsStopTokensOutOfTheContext` (17 x `<|im_end|>` before, `</think>` plus answer after).
 - Non-streaming `reasoning_content` no longer carries `</think>` or `<think>` as text. After a budget-forced `</think>` the model may close once more on its own (`\n</think>\n9`, Qwen3.5-4B at `max_tokens` 48), and the last-close split kept the first marker inside the reasoning; `extract_reasoning` now drops markers inside the reasoning part, as the streaming splitter already did.
@@ -979,13 +979,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   cold prefill chunked at the same boundaries; two cold runs are bit-identical ([SETTLED.md](docs/audit/SETTLED.md))
 - `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
   else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
-  `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_ARCH_2026 B-5](docs/audit/AUDIT_ARCH_2026.md))
+  `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_ARCH_2026 B-5](docs/archive/audit/AUDIT_ARCH_2026.md))
 - KV pool residency probe at load: `KV cache: pool copy bandwidth N GB/s` (WARN below 500),
   `kv_pool_bandwidth_gbps` on `/health`, `imp_kv_pool_bandwidth_gbps` on `/metrics`; a 256 MiB resident
-  pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_ARCH_2026 B-6](docs/audit/AUDIT_ARCH_2026.md))
+  pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_ARCH_2026 B-6](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
-  `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_ARCH_2026 F2-4, F2-9](docs/audit/AUDIT_ARCH_2026.md))
+  `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_ARCH_2026 F2-4, F2-9](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `runtime.think_answer_reserve` (default 256, was the compile-time `kMaxAnswerReserve`): tokens of `max_tokens`
   the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`.
   The CUDA-graph loop used the fraction alone (at `max_tokens` 4096: 2048 against the host rule's 3072)
@@ -1042,7 +1042,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   W x waiting / decoding, so a burst no longer paces 30 waiters behind its first 2 finishers: Qwen3-14B-NVFP4 32 x ~1k-token
   burst +3.0..+4.2% aggregate at W=1, a further +1.9..+2.5% at W=4 (TTFT p50 -18..-23%, p90 -9%, ITL max 106 -> 139-147 ms); 31 streams + one 4.4k ingest unchanged ([roadmap](docs/ROADMAP.md), #1950, #1951)
 - AUDIT_ARCH_2026 campaign closed: 24 dispatch rows (#1909-#1927, #1939-#1946), 0 open findings, every ID with a
-  verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_ARCH_2026](docs/audit/AUDIT_ARCH_2026.md), #1949)
+  verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_ARCH_2026](docs/archive/audit/AUDIT_ARCH_2026.md), #1949)
 - Prompts under `server.snapshot_min_prompt_tokens` (256) take no prefix-cache snapshot and no prefill split at the
   block boundary: 35-token prompt on Qwen3.8-27B-NVFP4, client TTFT floor 48 -> 35 ms, medians 63/54 -> 36/48 over
   2 x 12 waves; log timestamps carry milliseconds, the `/v1/completions` log line `ttft=` and `queue=` ([roadmap](docs/ROADMAP.md))
@@ -1051,29 +1051,29 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   the burst-boundary gap measured closed: 57 rearm boundaries at max ITL 12-13 ms vs a 10.7 ms step ([roadmap](docs/ROADMAP.md))
 - `generation.lm_dequant_fp16` is `diagnostics.lm_dequant_fp16` (a bisect, never a serving knob); the
   `beta != 0` uncached GEMM fallback warns once when it starts dequantising a whole weight per token;
-  the refuted MXFP4 attention family has its ledger row ([AUDIT_ARCH_2026 A2-9, A2-8, A1-9](docs/audit/AUDIT_ARCH_2026.md))
+  the refuted MXFP4 attention family has its ledger row ([AUDIT_ARCH_2026 A2-9, A2-8, A1-9](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `IMP_DEVICE_LTO` CMake option, off: device link-time optimization measured neutral (paired decode 0.00 %,
-  prefill -0.41 % over 5 pairs on Qwen3-8B-Q8_0) ([AUDIT_ARCH_2026 H-10](docs/audit/AUDIT_ARCH_2026.md))
+  prefill -0.41 % over 5 pairs on Qwen3-8B-Q8_0) ([AUDIT_ARCH_2026 H-10](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `make verify-fast` runs the default-path FA2 prefill fixtures (~40 s more); `make test-quantize` round-trips
   Qwen3-0.6B through `imp-quantize`; DRY, mirostat and `logit_bias` have kernel tests; ten mutation anchors
-  outside the kernel slice; a nightly libFuzzer job ([AUDIT_ARCH_2026 I-2, I-4, I-5, I-6, F2-6](docs/audit/AUDIT_ARCH_2026.md))
+  outside the kernel slice; a nightly libFuzzer job ([AUDIT_ARCH_2026 I-2, I-4, I-5, I-6, F2-6](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `--max-concurrent` admits on an atomic in-flight counter (the queue-depth read raced its own
   submit) and httplib's job queue is bounded at one pool's worth, so connections past it are closed
-  at once instead of hanging without a timer ([AUDIT_ARCH_2026 E-2](docs/audit/AUDIT_ARCH_2026.md))
+  at once instead of hanging without a timer ([AUDIT_ARCH_2026 E-2](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `/metrics`: `imp_endpoint_*` request counter and latency ladders labelled `endpoint`, `imp_model_loaded{model}`;
   an Anthropic `thinking` block whose signature does not match its text is a 400; `server.agent_scan_limit`
-  (default 256) is the tool-request first-token hold ([AUDIT_ARCH_2026 E-4, E-7, E-8](docs/audit/AUDIT_ARCH_2026.md))
+  (default 256) is the tool-request first-token hold ([AUDIT_ARCH_2026 E-4, E-7, E-8](docs/archive/audit/AUDIT_ARCH_2026.md))
 - The KV-pressure graph demotion is no longer a latch: once a fifth of the pool is free again and
   StreamingLLM evicted nothing, graphs and the auto-arm come back (`imp_streaming_kv_auto_enables_total`
-  keeps counting the arms; an eviction still pins it) ([AUDIT_ARCH_2026 C-3](docs/audit/AUDIT_ARCH_2026.md))
+  keeps counting the arms; an eviction still pins it) ([AUDIT_ARCH_2026 C-3](docs/archive/audit/AUDIT_ARCH_2026.md))
 - An aged request that cannot get its KV blocks holds the admission queue for that round instead of
   being passed by shorter requests that fit; `runtime.prefill_graph` resolves to off on quantized KV
-  with one log line ([AUDIT_ARCH_2026 C-2, C-10](docs/audit/AUDIT_ARCH_2026.md))
+  with one log line ([AUDIT_ARCH_2026 C-2, C-10](docs/archive/audit/AUDIT_ARCH_2026.md))
 - KV block size auto = 16 for every model: the 2026-03-23 "32 when `n_kv_heads <= 4`" rule, measured for
   the first time, never won and lost 1.5-4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was
   meant for; Qwen3-8B-Q8_0 (8 heads) -0.0 to -1.8 % at 32 ([PERF_LOG](docs/audit/PERF_LOG.md))
 - The split-K attention partials and the executor workspace are sized from the resolved KV block size
-  instead of a replicated 16 ([AUDIT_ARCH_2026 B-7](docs/audit/AUDIT_ARCH_2026.md))
+  instead of a replicated 16 ([AUDIT_ARCH_2026 B-7](docs/archive/audit/AUDIT_ARCH_2026.md))
 - `kv_cache.growable` defaults to on, the pool grows before the prefix cache is reclaimed, and
   every growth is capped at free VRAM above the allocator headroom. Qwen3.8-27B-NVFP4, 8 sessions x
   3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/archive/ROADMAP_LEDGER_2026_09_28.md#lever-ledger))
@@ -1139,7 +1139,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`) (#1958)
 - Parsers, round two: the warm weight cache bounds-checks every record index (an out-of-table `data_alloc`
   became a device pointer), SentencePiece lengths no longer wrap a pointer sum, Jinja caps macro depth (256) and
-  loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_ARCH_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_ARCH_2026.md))
+  loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_ARCH_2026 F1-3, F1-8, F1-9, F1-10](docs/archive/audit/AUDIT_ARCH_2026.md))
 - Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device
   slab was held by an in-flight restore; it now lands in the host tier. Qwen3.8-27B, 8 sessions x 3
   turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/archive/ROADMAP_LEDGER_2026_09_28.md#lever-ledger))
@@ -1153,7 +1153,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `make verify-ab`: paired perf gate against `origin/main` (`scripts/verify_ab.sh`), red
   at a mean paired tg128 delta below -2 %; a planted -2.93 % regression read -1.05 % on the
   single-arm gate. Pre-push runs it on measured paths; pin-age warning at 90 days (#1918)
-- `docs/audit/AUDIT_ARCH_2026.md`: read-only architecture audit at `ef664dd8`, 113
+- `docs/archive/audit/AUDIT_ARCH_2026.md`: read-only architecture audit at `ef664dd8`, 113
   findings, 3 S0 + 9 S1 after the falsification pass, 15-item dispatch queue. No source change
 - `tools/check_function_size.py`: per-function body gate (warn >200, hard >500 code LOC),
   `[allow]` with a reason; 12 bodies over the line, all listed
@@ -1211,7 +1211,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - The file-size gate charges a textually `#include`d `.cu` to its includer: `executor_attention.cu`
   is 1279 code LOC as a TU, not 542; `[allow]`-pinned, `--selftest` covers the merge (#1905)
 - `docs/ROADMAP.md` is one `Open` and one `Closed` ledger, 91.5 -> 41.0 KB; the measurement
-  narrative moved verbatim to `docs/plans/2026-09-04-lever-ledger-detail.md`
+  narrative moved verbatim to `docs/archive/plans/2026-09-04-lever-ledger-detail.md`
 - `docs/plans/` and `docs/audit/` carry an index each; 9 of 12 plans close with a
   `## ROADMAP CLOSED` block, the docs-rewrite open questions are closed
 - Doc drift pack (AUDIT_ARCH_2026 dispatch #13, #1919): `imp.conf.example` lists all 223 keys,
@@ -1588,7 +1588,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   passed: top-2 covers +6..+10 points over top-1 at depth 1).
   `diagnostics.mtp_tree_probe` is now measurement-only (it used to be
   consumed by the verify and scored nothing). Design, gates and numbers:
-  `docs/plans/2026-08-31-mtp-multicandidate-hybrid.md`.
+  `docs/archive/plans/2026-08-31-mtp-multicandidate-hybrid.md`.
 - `speculative.mtp_tree_margin` (default 2.0, only with `mtp_tree_width` > 1):
   branch only when the MTP head's top-1/top-2 logit margin is below it; the
   serving top-W kernel returns the values. Think traffic W=2 goes from
@@ -1699,7 +1699,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   at 32k ctx (echo-heavy workload) Qwen3-8B-Q8_0 fp8-KV decodes 137.4 ->
   176.1 tok/s (+28.2% over the plain-decode-only form, +41% over dense),
   ms/verify 233 -> 133; NIAH 32k with speculation on 15/15 both arms.
-  Detail: docs/plans/2026-08-28-sparse-decode-attention.md.
+  Detail: docs/archive/plans/2026-08-28-sparse-decode-attention.md.
 - `imp-cli --prompt-file <path>`: read the prompt from a file (whole content,
   verbatim; mutually exclusive with `--prompt`). A bare argv caps at ~128 KiB
   (~32k tokens) per exec argument; the NIAH harness now uses it, which
@@ -1711,7 +1711,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   bit-identical dense. Qwen3-8B-Q8_0 fp8-KV decode at 32k ctx 160.3 -> 199.5
   tok/s (+24.5%), 16k +4.9%; short-ctx overhead -2.6..-2.9%. F16/FP8 KV,
   uniform-geometry non-MLA models. Design + gates:
-  docs/plans/2026-08-28-sparse-decode-attention.md.
+  docs/archive/plans/2026-08-28-sparse-decode-attention.md.
 - Request tracing, the id half: a client-sent `X-Request-Id` is echoed on
   every response (refusals included, sanitized, 128-char cap); generation
   endpoints answer with the server completion id when none was sent;
@@ -1842,7 +1842,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   against the HF reference (top-1/top-2 agree, text-only -0.17% PPL);
   tokenizer parity 32/32 encode+decode; logit/GDN-state dump diagnostics
   (0 non-finite states across a 46579-token prefill); measured inventory in
-  docs/plans/2026-08-24-qwen38-port.md.
+  docs/archive/plans/2026-08-24-qwen38-port.md.
 
 ## [0.30.1] - 2026-08-24
 

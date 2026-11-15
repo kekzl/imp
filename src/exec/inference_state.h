@@ -70,7 +70,7 @@ struct InferenceState {
     }
     // Batched verify sets it: a group of one (the solo bound verify) is still a grouped chunk.
     bool ssm_group_verify = false;
-    // Batched speculative verify (docs/plans/2026-09-11-batched-mtp-verify.md): a grouped
+    // Batched speculative verify (docs/archive/plans/2026-09-11-batched-mtp-verify.md): a grouped
     // chunk whose groups are DIFFERENT requests. Group g reads slot ssm_seq_slots[g], commits
     // state at d_chunk_len rows into ssm_out_slots[g] and at d_snap_n rows into
     // ssm_snap_slots[g]. nullptr = in-place commit, group-0 snapshot into spec_snap_slab.
@@ -79,7 +79,7 @@ struct InferenceState {
     // ssm_fac_out + ssm_tap_out need ssm_out_slots: the ssm_tap_levels rows from d_snap_n on also leave as
     // factor rows + taps, indexed [group * ssm_tap_levels + level] (d_chunk_len = d_snap_n + levels + 1).
     int ssm_tap_levels = 0;
-    // Factor rows (compute/gdn_factor.cuh, docs/plans/2026-09-12-factored-verify-spare.md):
+    // Factor rows (compute/gdn_factor.cuh, docs/archive/plans/2026-09-12-factored-verify-spare.md):
     // ssm_fac_out carries a drafted row as (g,k,delta) per head instead of a full state slot,
     // [n_ssm_layers][row][head][ssm_fac_stride] float, per-layer stride ssm_fac_layer_stride.
     float* ssm_fac_out = nullptr;

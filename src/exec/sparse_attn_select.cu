@@ -2,7 +2,7 @@
 // key mean/std maintenance, block scoring against the current queries, top-k selection
 // into a compacted block table the unmodified paged decode kernels consume. All
 // device-side from device inputs, so the whole path is CUDA-graph-safe while context
-// grows during replay. Design: docs/plans/2026-08-28-sparse-decode-attention.md.
+// grows during replay. Design: docs/archive/plans/2026-08-28-sparse-decode-attention.md.
 
 #include "exec/sparse_attn_select.h"
 #include "exec/executor_kernels_internal.cuh"

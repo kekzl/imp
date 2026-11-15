@@ -537,7 +537,7 @@ Axis: A2   Sev: S2   Confidence: med   (perf delta at n_seq=1: HYPOTHESIS)
 Evidence:
 - `tools/kernel_resource_baseline.txt` pins four SPLIT=1 instances at the register ceiling with a local frame:
   `gdn_scan_fused_kernel<128,128,__half,1,float>` REG 255 STACK 96, `<128,128,float,1,float>` 255/96, `<128,128,__half,1,__nv_bfloat16>` 255/88, `<128,128,float,1,__nv_bfloat16>` 255/88. `tools/kernel_resources.py:18-20` defines STACK as "per-thread local frame ... spilled registers, or an indexed local array"; at REG 255 it is a spill.
-- `src/compute/gdn.cu:396` `constexpr int SPLIT = 2;` with a 16-line measured table above it (`:380-395`) and `docs/plans/2026-08-24-qwen38-port.md:683-694`: SPLIT=1 = "255 + spill", 41.65 us at n_seq=16; **SPLIT=2 = 180 regs, 26.49 us** (-36 %); "SPLIT=1 would be perfectly coalesced and spills instead (128 B spill stores). SPLIT=2 is the one point where the spill is gone".
+- `src/compute/gdn.cu:396` `constexpr int SPLIT = 2;` with a 16-line measured table above it (`:380-395`) and `docs/archive/plans/2026-08-24-qwen38-port.md:683-694`: SPLIT=1 = "255 + spill", 41.65 us at n_seq=16; **SPLIT=2 = 180 regs, 26.49 us** (-36 %); "SPLIT=1 would be perfectly coalesced and spills instead (128 B spill stores). SPLIT=2 is the one point where the spill is gone".
 - That constant is used only in `gdn_scan_fused_f32_batched` (`:360`) and `gdn_scan_fused_bf16_batched` (`:421`). The four single-sequence entry points instantiate SPLIT=1 with no comment and no reason: `gdn_scan_fused_f32` `:462-463`, `gdn_scan_fused_bf16` `:504-505`, `gdn_scan_fused_fp32out` `:520-521`, `gdn_scan_fused_fp32out_bf16` `:567-568`.
 - Those four are the batch=1 / short-prefill route: `src/exec/executor_ssm_gdn.cu:813-820` selects them when `rows < 128` (chunk-parallel needs `rows >= 128`), and `:883-890` is the single-sequence branch. This is the GDN model family's decode hot path (Qwen3.5 / 3.6 / 3.8).
 Current: the same kernel template ships at 180 registers with no spill on the batched path and at 255 registers with an 88-96 B local frame on the single-sequence path.
@@ -582,11 +582,11 @@ Evidence:
   `fmha_sm120_fa2_kernel<64,256,true,true,32,true,false,false>` REG **246** STACK **0**
   `fmha_sm120_fa2_kernel_2cta<128,128,true,true,64,true,true,false>` REG 128 STACK **40**
 - Template order is `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, FP8SCALED>` (`attention_fmha_sm120.cu:1932`), and the dispatch at `:2067-2073` shows `<64,256,true,false,64,true>` is the **shipped default** HD=256 instance (`fa2_hd256_bkv = 64`, `src/core/config/attention.h:99`).
-- The record the lever was decided on says something else: `src/core/config/attention.h:95-99` "the 232 registers allow two", and `docs/plans/2026-09-04-lever-ledger-detail.md` "holds 232 regs x 128 threads = 29696 of 65536 (two CTAs fit) ... Bkv=32 halves the tile to 34816 B, **226 regs, 0 spills**". Neither mentions a spill on the default instance. For the 2-CTA wrapper, `attention.h:101-103` says "128 registers (137 unconstrained, **24 B of spill**)" against the baseline's STACK 40.
+- The record the lever was decided on says something else: `src/core/config/attention.h:95-99` "the 232 registers allow two", and `docs/archive/plans/2026-09-04-lever-ledger-detail.md` "holds 232 regs x 128 threads = 29696 of 65536 (two CTAs fit) ... Bkv=32 halves the tile to 34816 B, **226 regs, 0 spills**". Neither mentions a spill on the default instance. For the 2-CTA wrapper, `attention.h:101-103` says "128 registers (137 unconstrained, **24 B of spill**)" against the baseline's STACK 40.
 Current: two committed artifacts in the same tree disagree on the register count (232/226 vs 255/246) and on whether the shipped HD=256 instance has a local frame at all.
 Expectation: `tools/kernel_resources.py:12-15` is explicit that the baseline is the ptxas-derived artifact and exists precisely because "no committed artifact carried a per-kernel register or spill number". A lever record that quotes different numbers for the same instance defeats that.
 Delta: the ledger's conclusion ("smem is the binding limit, registers allow two CTAs") still survives at 255 regs x 128 threads = 32640 of 65536, so the verdict does not flip. What is lost is the *spill* on the default path: the record names Bkv=32's "0 spills" as an incidental detail rather than as a difference from the default. A next pass reading `attention.h` will not know the shipped kernel spills 96 B/thread.
-Cost: text only. Reconcile in `src/core/config/attention.h:95-107` and `docs/plans/2026-09-04-lever-ledger-detail.md`, ~6 lines. Risk: none.
+Cost: text only. Reconcile in `src/core/config/attention.h:95-107` and `docs/archive/plans/2026-09-04-lever-ledger-detail.md`, ~6 lines. Risk: none.
 Falsifier: the ncu numbers describe a different instantiation than the baseline's (e.g. the `pv_f16` twin, which is below the 240 pin and therefore absent from the baseline). Checked: partially - the ledger names "the hybrid FA2 instance (`fa2<64,256,...,TWOSLOT>`)" without the F16ACC/PVF16 bits, so the mapping is ambiguous; that ambiguity is itself the defect.
 
 ### [A2-7] `gemm_grouped_nvfp4_smallM.cu`: the kernel's own header comment names the wrong version and the wrong warp split
@@ -654,7 +654,7 @@ Falsifier: the knob is documented as a supported diagnostic. Checked: y - `grep 
 
 - No GPU CI lane (F-5, owner decision 2026-08-03). Every kernel-level test above, including all NVFP4 scale-layout tests, runs only under local `make verify-fast` / `make test-*`.
 - Green contexts unavailable on sm_120 (`docs/LIMITATIONS.md:79-82`).
-- FP8 prefill disabled on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `engine_init_resolver.cpp`); FP8 GDN-projection prefill re-measured 2026-09-01 and REFUTED (`docs/plans/2026-08-31-fp8-ssm-prefill.md`).
+- FP8 prefill disabled on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `engine_init_resolver.cpp`); FP8 GDN-projection prefill re-measured 2026-09-01 and REFUTED (`docs/archive/plans/2026-08-31-fp8-ssm-prefill.md`).
 - Closed kernel classes not re-opened here: M=1 NVFP4 decode GEMV ceiling; MoE grouped GEMM at ~60 % of the weight floor; FA2 occupancy at hd=128 (16 warps/SM shipped, #1843); NVFP4 decode-attention traffic sharing; FP4-precision attention.
 - `attention.fa2_hd256_bkv=32` is opt-in on a measured PPL trade (+0.53 %), not an oversight.
 - `cublasLtMatmulGrouped` returns zero grouped algos with NVFP4 on sm_120 as of cuBLAS 13.4 (`docs/internals/SM120.md`, "Open kernel work").
@@ -939,7 +939,7 @@ Falsifier: eviction having already destroyed context on every live sequence by t
 
 ### [C-4] The KV-pressure predicate that cost 40% of decode has no test; the only graph-eligibility test checks enum names
 Axis: C   Sev: S2   Confidence: high
-Evidence: the #1879 defect and its fix are three lines of arithmetic at `src/runtime/engine_scheduler.cpp:895-903` (`st.free_blocks + reclaimable < pool_total / 10`), sitting inside `Engine::step_decode` (222 code LOC, `tools/check_function_size.py`). `tests/test_graph_eligibility.cpp` has 4 tests (`EveryReasonHasAName`, `NamesAreDistinct`, `OnlyKvPressureIsMidRun`, `NoneIsNotMidRunAndNamesItself`) - all of them bind the enum to its string, none of them evaluates the predicate. `grep -rn "num_reclaimable_cached_blocks" tests/` hits only `test_kv_cache.cpp:936` and `test_kv_cache_gpu.cpp:298-308`, which test the counter, not its consumer. The regression it guards is measured: 2387 -> 1443-1485 tok/s over waves 1-3 (`docs/plans/2026-09-04-lever-ledger-detail.md:52`).
+Evidence: the #1879 defect and its fix are three lines of arithmetic at `src/runtime/engine_scheduler.cpp:895-903` (`st.free_blocks + reclaimable < pool_total / 10`), sitting inside `Engine::step_decode` (222 code LOC, `tools/check_function_size.py`). `tests/test_graph_eligibility.cpp` has 4 tests (`EveryReasonHasAName`, `NamesAreDistinct`, `OnlyKvPressureIsMidRun`, `NoneIsNotMidRunAndNamesItself`) - all of them bind the enum to its string, none of them evaluates the predicate. `grep -rn "num_reclaimable_cached_blocks" tests/` hits only `test_kv_cache.cpp:936` and `test_kv_cache_gpu.cpp:298-308`, which test the counter, not its consumer. The regression it guards is measured: 2387 -> 1443-1485 tok/s over waves 1-3 (`docs/archive/plans/2026-09-04-lever-ledger-detail.md:52`).
 Current: the fix is a comment plus a measurement. The next edit to that expression is unguarded, and the CI lane could not see it even if a test existed in the GPU battery (no GPU runner, per the common brief).
 Expectation: this repo's own convention - `tools/alloc_allowlist.txt` is a two-way ratchet, `graph_eligibility.h` was made "deliberately header-only and dependency-free (no CUDA, no RuntimeConfig) so the CPU test lane can cover the enum-name binding without a GPU". The same argument applies one level up: the predicate is pure integer arithmetic over four ints.
 Delta: the eligibility ENUM is CPU-testable and tested; the eligibility DECISION is neither.
@@ -1011,7 +1011,7 @@ Falsifier: F16 being the resolved KV dtype for most deployments, making the path
 - **Constrained decoding does NOT fall off the decode graph.** Only sampling is eager; `needs_constrained` gates the decode PIPELINE, not the capture (`engine_scheduler.cpp:1434`, `:1512`). The separate `step_constrained_pipeline` is a fast path, not a fallback.
 - **The `#1643` prefill-rescheduling hole is closed and commented**: `prefill_offset >= 0`, not `> 0`, keeps a promoted-but-unserved request in the batch (`scheduler.cpp:272-292`).
 - **The prefill rotor is id-based, not index-based**, because an index rotor systematically jumped a moving cohort - 5 of 32 burst requests starved to wave-end TTFT (`engine_prefill.cpp:96-107`).
-- **The ragged prefill charges real rows, not the full chunk** (`engine_prefill.cpp:139-166`); the priced consequence is in `docs/plans/2026-09-04-lever-ledger-detail.md:43` (1094-token prompts 943.7 -> 1058.0 tok/s, ITL p95 46.2 -> 19.9 ms).
+- **The ragged prefill charges real rows, not the full chunk** (`engine_prefill.cpp:139-166`); the priced consequence is in `docs/archive/plans/2026-09-04-lever-ledger-detail.md:43` (1094-token prompts 943.7 -> 1058.0 tok/s, ITL p95 46.2 -> 19.9 ms).
 - **Admission reserves prompt + generation, not the prompt alone** (`scheduler.cpp:96-110`, `:227-236`), tested by `AdmissionReservesGeneration` and `AdmissionClampsReserveToPoolSize` (`test_scheduler.cpp:142-265`).
 - **Decode-batch truncation cannot park rows in the default configuration**: admission is clamped to `min(EngineConfig::max_batch_size, runtime.max_batch_size)` with a log line (`src/runtime/engine.cpp:804-814`), the #1637 fix.
 - **`max_batch_size` above the graph pool is announced, not silently clamped** (`engine_init_resolver.cpp:531-537`, cites 2.4x slower eager decode).
@@ -1100,7 +1100,7 @@ Current: a request served at c>=2 has every linear layer's activation rounded to
 Expectation: vLLM and TensorRT-LLM serve an NVFP4A16 checkpoint with W4A16 kernels at every batch size and use W4A4 only for checkpoints quantized with calibrated input scales (NVFP4A4). A dynamic per-row activation quantization on the serving path is a numerics change that the CUTLASS prefill already makes at M>=33, but there it is priced by teacher-forced PPL; here it is not priced at all.
 Delta: the c=2..32 serving path has no quality number; the docs claim the solo/batched delta is rounding-sized on the strength of an FP16 harness.
 Cost: measurement first, 0 code LOC: server-JSON logprobs at c=1 vs c=8 on identical prompts (`server.prefix_cache=false`, `speculative.mtp_k=0`, `speculative.ngram=false`), compare top-1 agreement and mean |delta logprob|; or extend `DecodeLogitsInvariantToBatchComposition` to an NVFP4 `DenseTestModel` (~150 LOC, GPU-only). If material: `gemm.nvfp4_smallm=false` is the existing switch (routes 2..32 rows to the CUTLASS/dequant prefill GEMM, W4A16), measured -11 % aggregate at c=32 per the v2 header (`nvfp4_gemm_smallm_v2.cu:8-14`). Breaks if wrong: nothing; the finding asks for a number and a doc correction.
-Falsifier: a c=1 vs c>=2 NLL/logprob measurement exists. Checked: y. `docs/PERF.md` "Serving KPIs" holds throughput only; `docs/LIMITATIONS.md`, `docs/DETERMINISM.md`, `docs/plans/2026-08-24-qwen38-port.md` (grep `ppl|kl|nll` x `a4|smallm|batched`) and the PR body carry none.
+Falsifier: a c=1 vs c>=2 NLL/logprob measurement exists. Checked: y. `docs/PERF.md` "Serving KPIs" holds throughput only; `docs/LIMITATIONS.md`, `docs/DETERMINISM.md`, `docs/archive/plans/2026-08-24-qwen38-port.md` (grep `ppl|kl|nll` x `a4|smallm|batched`) and the PR body carry none.
 
 ### [D-3] The default-mode greedy-reproducibility gates run from no Makefile target
 Axis: D   Sev: S2   Confidence: high
@@ -2469,7 +2469,7 @@ Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEA
 ### Coverage
 
 **Read in full**
-- `docs/audit/SETTLED.md` (652 lines), `tests/CLAUDE.md`, `tests/README.md`, `docs/audit/TEST_INVENTORY.md`, `docs/audit/MUTATION_BASELINE.md`, `tools/check_test_lanes.py`, `tools/check_unit_skips.py`, `scripts/check_e2e_lane_split.sh`, `scripts/check_verify_filter.sh`, `scripts/check_det_suite_filter.sh`, `scripts/pre-push.hook`, `scripts/pre-commit.hook`, `tests/api/pytest.ini`, `tests/api/requirements.txt`.
+- `docs/audit/SETTLED.md` (652 lines), `tests/CLAUDE.md`, `tests/README.md`, `docs/archive/audit/TEST_INVENTORY.md`, `docs/audit/MUTATION_BASELINE.md`, `tools/check_test_lanes.py`, `tools/check_unit_skips.py`, `scripts/check_e2e_lane_split.sh`, `scripts/check_verify_filter.sh`, `scripts/check_det_suite_filter.sh`, `scripts/pre-push.hook`, `scripts/pre-commit.hook`, `tests/api/pytest.ini`, `tests/api/requirements.txt`.
 - `CMakeLists.txt:640-1232` (test modules, lane aggregates, ctest guards, fuzz targets).
 - `Makefile:1-395` (all `test-*`, `bench*`, `verify*` targets).
 
@@ -2480,7 +2480,7 @@ Repo `<repo>`, branch `perf/engine-h-fanin-cut-and-attention-split-verdict`, HEA
 - `tools/mutation/run.py` (`main`, `--verify-anchors`), `tools/mutation/catalogue.json` (aggregated).
 
 **Skipped**
-- Bodies of the ~200 remaining test files (counted, not read). `tools/mutation/run.py` execution paths beyond `--verify-anchors`. `loop/` (not committed, absent). `docs/audit/ESCAPE_ANALYSIS.md`, `docs/audit/DEBT_LEDGER_2026_08_21.md`.
+- Bodies of the ~200 remaining test files (counted, not read). `tools/mutation/run.py` execution paths beyond `--verify-anchors`. `loop/` (not committed, absent). `docs/archive/audit/ESCAPE_ANALYSIS.md`, `docs/audit/DEBT_LEDGER_2026_08_21.md`.
 
 **Commands whose output this report cites**
 ```
@@ -2502,7 +2502,7 @@ md5sum .git/hooks/pre-commit scripts/pre-commit.hook   # identical
 | "retries in `scripts/verify.sh`" | None. `rg -n 'retry\|attempt\|RETRY' scripts/*.sh` -> 0 hits. `--gtest_repeat` occurs once in the tree, inside a comment (`tests/test_e2e.cpp:411`). | grep |
 | "`tests/api/test_serving_kpi.py`" implied to be an E2E quality gate | It is a pure-arithmetic unit test of `tools/analysis/serving_kpi.py` (percentiles, histogram quantiles, `/metrics` parsing). Its own docstring: *"Lane-agnostic: no request is made."* 6 test functions, no server, no model. | `tests/api/test_serving_kpi.py:1-7` |
 | "`scripts/validate_safetensors.py`" implied to be a gate | Exists (42 KB) and has **zero invocation sites** in `Makefile`, `scripts/`, `.github/`. Only mention outside itself is `scripts/check-release.sh:126` naming its *output* file as "written ... not read". | grep |
-| `docs/audit/TEST_INVENTORY.md` (2026-08-08 prior) "2 125 gtest cases" | 2 701 `TEST/TEST_F/TEST_P` macros today. | `check_test_lanes.py --report` |
+| `docs/archive/audit/TEST_INVENTORY.md` (2026-08-08 prior) "2 125 gtest cases" | 2 701 `TEST/TEST_F/TEST_P` macros today. | `check_test_lanes.py --report` |
 | TEST_INVENTORY §2.3 "the Stage-1 GPU hook is not installed on this box" | Installed. `.git/hooks/pre-commit` is byte-identical to `scripts/pre-commit.hook` (md5 `204b2bc0…`), dated 2026-09-02. Same for `pre-push`. | `md5sum` |
 | TEST_INVENTORY §2.2 "61 test cases silently skip in CI" | Closed. `guard_unit_skips` (`CMakeLists.txt:1096-1098`, `tools/check_unit_skips.py`) fails the unit lane on any SKIPPED case; MUTATION_BASELINE records `unit-skips: 0 skipped of 1611`. | files |
 | TEST_INVENTORY §2.4 quotes the verify filter as `AttentionTest.*` | Now `*Attention*` (`scripts/verify.sh:309`), changed in #1586. The consequence changed too - see [I-2]. | file |
@@ -2689,7 +2689,7 @@ Delta: `make test-gpu`'s "full suite" claim is true for macros and false for mod
 Cost: move the `test-e2e` env block into a Make variable and add it to `test-gpu`'s `DOCKER_RUN` (~10 lines). Risk: `test-gpu` gets much slower and hits the one-process VRAM ceiling TEST_INVENTORY §5 documents (38 failures loading three large checkpoints in one process). That risk is the reason not to do it naively.
 Falsifier: `DOCKER_RUN` carrying env somewhere. Checked y - `Makefile:14` is its single definition.
 
-### [I-9] `docs/audit/TEST_INVENTORY.md` is a month-old baseline that reads as current state
+### [I-9] `docs/archive/audit/TEST_INVENTORY.md` is a month-old baseline that reads as current state
 Axis: I   Sev: S3   Confidence: high
 Evidence: it is linked as the entry point from `tests/CLAUDE.md:70` and [`docs/audit/TEST_HARDENING_LOG.md:4`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/TEST_HARDENING_LOG.md) with no staleness marker beyond its date line. Four of its headline claims are now false: "2 125 gtest cases" (2 701 macros today), "§2.3 the Stage-1 GPU hook is not installed" (installed, md5-identical, 2026-09-02), "§2.2 61 test cases silently skip in CI" (0, enforced by `guard_unit_skips`), "§2.4 `AttentionTest.*`" (`*Attention*` since #1586). Its §3 `DISABLED_` table lists 4; there are 6.
 Current: `SETTLED.md` §F exists precisely because the previous audit generated hypotheses from a brief with five wrong facts; this file is the same hazard one layer down, and it is the file the `tests/CLAUDE.md` router points at.
@@ -2736,7 +2736,7 @@ Falsifier: a staleness marker I missed. Checked y - the file's only date context
 - **Untested quant formats Q4_1/Q5_0/Q5_1/Q2_K/Q3_K/Q8_K, FP8 E5M2, Llama-4, Phi-4** - `docs/LIMITATIONS.md:31-35`.
 - **`make test-niah` exists, no workflow invokes it** - `docs/LIMITATIONS.md:57-63`.
 - **Two `DISABLED_` determinism tests are a documented known limit** (#554) - `tests/test_determinism_e2e.cpp:15-22`.
-- **`make test-gpu` sets no `IMP_TEST_MODEL*`** - partially recorded in `docs/audit/TEST_INVENTORY.md:§6` ("`make test-gpu` is not the right command"); [I-8] states what it costs today.
+- **`make test-gpu` sets no `IMP_TEST_MODEL*`** - partially recorded in `docs/archive/audit/TEST_INVENTORY.md:§6` ("`make test-gpu` is not the right command"); [I-8] states what it costs today.
 - **Property batteries are property + fault injection, not fuzzing** (#1620) - SETTLED S-28.
 
 ---
@@ -3089,7 +3089,7 @@ Already on the roadmap, in `docs/LIMITATIONS.md`, `docs/DESIGN_DECISIONS.md` or 
 | cuBLASLt algorithm selection unpinned by design: estimator fixed (#1228), persistence R-16 REJECTED with two refuted designs | SETTLED G F-9 | A2, H |
 | `runtime.prefill_overlap` default OFF is a measured verdict (neutral at 32 streams) | `docs/ROADMAP.md` lever ledger | C |
 | `attention.fa2_hd256_bkv=32` opt-in on a measured PPL trade (+0.53 %) | `docs/ROADMAP.md` lever ledger | A2 |
-| FP8 prefill unavailable on sm_120 (cuBLAS `NOT_SUPPORTED`); FP8 GDN-projection prefill REFUTED 2026-09-01 | `docs/plans/2026-08-31-fp8-ssm-prefill.md` | A2 |
+| FP8 prefill unavailable on sm_120 (cuBLAS `NOT_SUPPORTED`); FP8 GDN-projection prefill REFUTED 2026-09-01 | `docs/archive/plans/2026-08-31-fp8-ssm-prefill.md` | A2 |
 | Legacy cuBLAS attention tier is a deliberately retained tier for Gemma-4 hd=512 (S-8); MoE prefill ladder is a designed 4-tier ladder (S-11); `executor_forward_moe_legacy.cu` is a reachable floor | SETTLED A, C | A1 |
 | `run_attention` split refused on measurement (S-32); `engine.h` fan-in cut instead of pimpl (S-33, F-24); `DispatchPolicy` extraction done (F-10) | SETTLED C2, G | G |
 | DEBT_LEDGER item 3: `IMP_ALLOC_INTERPOSE` OFF everywhere, so `steady_state_allocations()` reads zero in every shipping build | `docs/audit/DEBT_LEDGER_2026_08_21.md` | B |

@@ -7,7 +7,7 @@ commit: 9cbb8004
 
 # Profiling commands
 
-`nsys`/`ncu` reference. Campaign mission, phase plan, findings template and deliverables: [`docs/plans/2026-06-profiling-campaign.md`](../plans/2026-06-profiling-campaign.md).
+`nsys`/`ncu` reference. Campaign mission, phase plan, findings template and deliverables: [`docs/archive/plans/2026-06-profiling-campaign.md`](../archive/plans/2026-06-profiling-campaign.md).
 
 ## Setup
 

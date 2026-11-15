@@ -83,7 +83,7 @@ No perf numbers in any `CLAUDE.md`; link `PERF.md`. L3 downgrades unprovenanced 
 
 ## Plan docs (`docs/plans/`)
 
-`YYYY-MM-DD-<topic>.md`, lint-exempt records, no header. Closure (#1786): `~~strikethrough~~` + `DONE <date> (#PR)` / `MEASURED` / `ANSWERED` / `REFUTED` / `CLOSED <date> (<reason>)`, acceptance cell rewritten to the standing evidence, terminal `## ROADMAP CLOSED (<date>)`. Items are closed, never deleted. Moving text out of `docs/ROADMAP.md` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks do not run `hygiene`, CI `Release hygiene` does.
+`YYYY-MM-DD-<topic>.md`, lint-exempt records, no header. Closure (#1786): `~~strikethrough~~` + `DONE <date> (#PR)` / `MEASURED` / `ANSWERED` / `REFUTED` / `CLOSED <date> (<reason>)`, acceptance cell rewritten to the standing evidence, terminal `## ROADMAP CLOSED (<date>)`. Items are closed, never deleted. A closed plan moves to `docs/archive/plans/` (closed dated audit reports to `docs/archive/audit/`) with its index row, in `docs/archive/README.md`. Moving text out of `docs/ROADMAP.md` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks do not run `hygiene`, CI `Release hygiene` does.
 
 ## Audit trail
 

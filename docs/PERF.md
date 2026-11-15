@@ -207,7 +207,7 @@ What the table settles:
   `gemm.nvfp4_lm_head_smallm=false gemm.nvfp4_lm_head_cutlass=false` for an
   NVFP4 LM head: on Qwen3.8-27B-NVFP4 the first-decode-step logit delta vs solo
   fell from 0.36-1.09 to 0.015-0.039 nats at -38 % at 32 streams
-  ([closed row 13](plans/2026-09-16-open-rows-closed-detail.md), #2026). On
+  ([closed row 13](archive/plans/2026-09-16-open-rows-closed-detail.md), #2026). On
   Qwen3-14B-NVFP4 it cuts the batch drift 0.235 -> 0.021 mean |delta logprob|
   (2026-10-31 table): the activation quantize, not the batch shape, is most
   of the gap.

@@ -10,6 +10,9 @@ so re-verify before acting on it. The running findings log is the root
 verifying one.** The 2026-07-29 architecture audit spent most of its budget
 refuting its own hypotheses; that file is the list nobody needs to re-chase.
 
+Closed dated reports move to [`../archive/audit/`](../archive/audit/)
+([index](../archive/README.md#plans-and-audit-records-moved-2026-11-15)).
+
 | file | kind | last commit | read it when |
 |---|---|---|---|
 | [SETTLED.md](SETTLED.md) | live index of settled questions | 2026-09-08 | before generating any audit hypothesis |
@@ -17,11 +20,8 @@ refuting its own hypotheses; that file is the list nobody needs to re-chase.
 | [MUTATION_BASELINE.md](MUTATION_BASELINE.md) | live baseline, harness `tools/mutation/run.py` | 2026-09-02 | judging whether a suite catches its own mutants |
 | [DEBT_LEDGER_2026_08_21.md](DEBT_LEDGER_2026_08_21.md) | dated ledger, items marked OPEN / CLOSED in place | 2026-08-21 | picking debt work. Every OPEN item carries a `path:line` verified on 2026-08-21 and a command that would prove it closed: run the command, do not trust the line number |
 | [AUDIT_QWEN38_NVFP4.md](AUDIT_QWEN38_NVFP4.md) | record, dispatch "harden Qwen3.8-27B-NVFP4-vllm" 2026-09-09: regression floor, per-phase reproductions and refutations (P1-P7), open gaps | 2026-09-09 | a Qwen3.8 / hybrid-restore / think-budget / determinism claim needs its source |
-| [AUDIT_ARCH_2026.md](AUDIT_ARCH_2026.md) | record, one-day read-only audit at `ef664dd8` (v0.37.0+1), no GPU job: 12 axis reports, P2 falsification (3 S0 and 9 S1 survive, 9 downgrades, 6 merges), P3 queue of 15 dispatches; campaign CLOSED 2026-09-08, P5 log 24 rows (#1909-#1927, #1939-#1946), 0 open findings | 2026-09-08 | structural history; the per-finding verdicts are `SETTLED.md` H; the P2 kill list before re-filing a downgraded finding; the "verify the brief" table before writing an audit brief |
 | [AUDIT_ARCH_2026_07_29.md](AUDIT_ARCH_2026_07_29.md) | record, one-day read-only audit at `5474b6c2` (v0.20.2), no GPU job | 2026-08-24 | structural history. The maintained structure docs are `docs/internals/ARCHITECTURE.md` and `docs/internals/MEMORY.md` |
 | [ARCHMAP.md](ARCHMAP.md) | record, code-derived ownership and hot-path map (2026-06-24) | 2026-08-02 | you want the ownership/lifetime slice rather than the narrative |
-| [TEST_INVENTORY.md](TEST_INVENTORY.md) · [ESCAPE_ANALYSIS.md](ESCAPE_ANALYSIS.md) | records of the test-hardening campaign, baseline `ad067d76` (v0.23.0) | 2026-08-08/09 | asking why the suite missed a class of bug; the live counts come from `python3 tools/check_test_lanes.py --report` |
-| [LIBRARY_SHARE_2026_10_29.md](LIBRARY_SHARE_2026_10_29.md) | record, nsys cuBLAS/cuBLASLt/CUTLASS share per phase, 13 models x 4 workloads, v0.59.2 | 2026-10-29 | picking the next call site for ROADMAP row 123 |
 | [VLLM_GAP_2026_11_02.md](VLLM_GAP_2026_11_02.md) | record, imp vs vLLM 0.31.0 on 7 SafeTensors heroes (tg128, TTFT, pp512-pp15000, conc 4/16, VRAM, n=3) + nsys decode-step classes at 16 streams | 2026-11-02 | picking the next perf lever against vLLM (MoE batched decode leads the list) |
 | [PPL_PARITY_VLLM_2026_11_03.md](PPL_PARITY_VLLM_2026_11_03.md) | record, release bar 1 vs vLLM 0.31.0: PPL on identical ids, 4 SafeTensors checkpoints, vLLM start-to-start band, per-row NLL | 2026-11-03 | judging a PPL change against vLLM, or why Gemma-4 reads below vLLM |
 | [qwen38_c32_serving_vram_2026_11_04/](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/qwen38_c32_serving_vram_2026_11_04) | record, Qwen3.8-27B-NVFP4 default server c32 VRAM growth per phase: `breakdown.txt` (slots, spares, KV, MTP workspace, WDDM step), nsys/CUPTI windows, interposer, nvidia-smi vs `cudaMemGetInfo`, `wddm_memgetinfo_probe.cu` output | 2026-11-04 | an `imp_vram_own_bytes` jump has no allocation behind it, or a peak-VRAM A/B crosses ~24.5 GB |

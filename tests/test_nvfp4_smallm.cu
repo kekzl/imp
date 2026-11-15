@@ -1,6 +1,6 @@
 // Small-M NVFP4 GEMM: correctness vs per-element dequant reference (W4A16 family, same as
 // M=1 decode GEMVs); bandwidth must beat CUTLASS's measured 41.4us/19% of weight floor at
-// M=32,N=5120,K=5120 (docs/plans/2026-08-24-qwen38-port.md), asserted above 40% of floor.
+// M=32,N=5120,K=5120 (docs/archive/plans/2026-08-24-qwen38-port.md), asserted above 40% of floor.
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>

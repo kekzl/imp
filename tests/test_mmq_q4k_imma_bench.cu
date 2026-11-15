@@ -1,4 +1,4 @@
-// Phase 1 INT8 IMMA throughput microbench (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// Phase 1 INT8 IMMA throughput microbench (docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md).
 // Asserts every IMMA variant launches without a ptxas/runtime error; TOPS ratio is
 // informational, not gated.
 

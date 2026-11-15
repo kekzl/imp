@@ -101,7 +101,7 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 | `--model <dir>` / `--out <dir>` | source checkpoint / destination |
 | `--calib <file>` | AWQ search using the calibration file; omit for round-to-nearest |
 | `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment, needs an `IMPCAL02` or newer file) is 1.10% better on Qwen3-0.6B, 0.15 PPL worse on Qwen3-14B `BD` |
-| `--calib-groups <letters>` | subset of `ABCDEGKQSXY` (A=q/k/v or MLA q or q_a + kv_a, B=gate/up, C=o_proj, D=down_proj, E/G=GDN or Mamba2 out_proj/in_proj, K=MLA kv_b_proj, Q=MLA q_lora q_b_proj, S=shared-expert down, X=MoE expert gate/up, Y=per-expert down, gated experts only); default `ABCDEG` at `n_rep < 4`, `BDEG` at `n_rep >= 4` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136); measured per-arch defaults `glm4_moe_lite` `ABCDEGKQS`, `nemotron_h` `G`; K/Q/S/X/Y opt-in elsewhere, `gemma4` needs an explicit selector ([record](plans/2026-10-04-awq-moe-experts.md)) |
+| `--calib-groups <letters>` | subset of `ABCDEGKQSXY` (A=q/k/v or MLA q or q_a + kv_a, B=gate/up, C=o_proj, D=down_proj, E/G=GDN or Mamba2 out_proj/in_proj, K=MLA kv_b_proj, Q=MLA q_lora q_b_proj, S=shared-expert down, X=MoE expert gate/up, Y=per-expert down, gated experts only); default `ABCDEG` at `n_rep < 4`, `BDEG` at `n_rep >= 4` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136); measured per-arch defaults `glm4_moe_lite` `ABCDEGKQS`, `nemotron_h` `G`; K/Q/S/X/Y opt-in elsewhere, `gemma4` needs an explicit selector ([record](archive/plans/2026-10-04-awq-moe-experts.md)) |
 | `--lm-head [fp8\|nvfp4\|source]` | how `lm_head` is written: `fp8` (default for `modelopt`) = the per-row FP8 head `auto` runs, served without load-time conversion; `nvfp4` (bare flag) = quantized like any Linear; `source` (default for `vllm`) = copied as is ([below](#what-stays-at-source-precision-qwen38-27b-bf16-source-5175-gib)) |
 | `--kv-hint auto\|fp8\|none` | `kv_cache_quant_algo` in `hf_quant_config.json` (`modelopt` only): `auto` (default) = `FP8` for `model_type` `qwen3` / `qwen3_moe`, the families with a measured FP8 KV PPL ([KV cache](#kv-cache-element-type)), else `null` |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
@@ -231,9 +231,9 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
        note=calibration stats from the RTN checkpoint (BF16 14B does not fit for --calibrate)]
 
 - `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15. On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
-- n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
+- n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](archive/plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
-- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/QUANTIZATION_AWQ_FINDINGS.md`](archive/QUANTIZATION_AWQ_FINDINGS.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %) and DeepSeek-V2 MLA sites (A, K): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
+- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/QUANTIZATION_AWQ_FINDINGS.md`](archive/QUANTIZATION_AWQ_FINDINGS.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %) and DeepSeek-V2 MLA sites (A, K): [`archive/plans/2026-10-04-awq-moe-experts.md`](archive/plans/2026-10-04-awq-moe-experts.md).
 
 ## MXFP4 (GGUF)
 
@@ -241,7 +241,7 @@ Same FP4 E2M1 nibble layout as NVFP4, UE8M0 micro-scales (per 32 elements), no s
 scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through the own block-scaled tile GEMM
 at full throughput; shipped inside GGUF under a proprietary tensor-type code (31).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
-wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 %; GPTAQ (removed 2026-11-14; inputs of the AWQ export paired with BF16 on the same tokens): Qwen3-1.7B +0.94 % to +34.11 % vs AWQ over 8 arms, no gain; sequential GPTAQ (groups of 4 layers): best arm Qwen3-1.7B -0.55 %, no gain; FP8 for the most sensitive projections (`--fp8-budget 15`): Qwen3-0.6B -9.24 %, Qwen3-1.7B -3.72 % vs AWQ at +15 % bytes ([record](plans/2026-10-17-gptq-nvfp4.md)).
+wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 %; GPTAQ (removed 2026-11-14; inputs of the AWQ export paired with BF16 on the same tokens): Qwen3-1.7B +0.94 % to +34.11 % vs AWQ over 8 arms, no gain; sequential GPTAQ (groups of 4 layers): best arm Qwen3-1.7B -0.55 %, no gain; FP8 for the most sensitive projections (`--fp8-budget 15`): Qwen3-0.6B -9.24 %, Qwen3-1.7B -3.72 % vs AWQ at +15 % bytes ([record](archive/plans/2026-10-17-gptq-nvfp4.md)).
 
 ## KV cache element type
 

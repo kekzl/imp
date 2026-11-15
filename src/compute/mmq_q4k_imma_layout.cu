@@ -1,5 +1,5 @@
 // Q4_K -> INT8 reorder (Phase 2A of the INT8 IMMA direct-GEMM experiment).
-// See docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
+// See docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md.
 // Decodes one Q4_K super-block per CTA. Per sub-block j in [0,8): sc[j]/m[j] 6-bit scale/min;
 // alpha[j]=d_super*sc[j]; beta[j]=8*d_super*sc[j]-dmin_super*m[j]; q_sym=q-8 in [-8,7];
 // fp16 = alpha[j]*q_sym + beta[j].

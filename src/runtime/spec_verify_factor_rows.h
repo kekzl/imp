@@ -1,7 +1,7 @@
 #pragma once
 
-// Factor rows of the bound batched verify (docs/plans/2026-09-12-factored-verify-spare.md): its drafts before
-// the last at 2+ drafts, buffers and the accept-time fold.
+// Factor rows of the bound batched verify (docs/archive/plans/2026-09-12-factored-verify-spare.md): its
+// drafts before the last at 2+ drafts, buffers and the accept-time fold.
 
 #include <cuda_runtime.h>
 

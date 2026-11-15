@@ -1,6 +1,6 @@
 # Escape analysis
 
-Date: 2026-08-08 · Commit `ad067d76` · Companion to `docs/audit/TEST_INVENTORY.md`
+Date: 2026-08-08 · Commit `ad067d76` · Companion to `docs/archive/audit/TEST_INVENTORY.md`
 and `docs/audit/MUTATION_BASELINE.md`
 
 For every confirmed bug and every surviving mutant: *why did the suite not catch

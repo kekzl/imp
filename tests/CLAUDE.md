@@ -45,4 +45,4 @@ make test-gpu        # GPU suite; started wrong it silently skips most
 
 ## See also
 
-[`docs/audit/TEST_INVENTORY.md`](../docs/audit/TEST_INVENTORY.md) (2026-08-08; live: `make check-test-lanes`), [`docs/audit/MUTATION_BASELINE.md`](../docs/audit/MUTATION_BASELINE.md). Skill `building-and-testing`.
+[`docs/archive/audit/TEST_INVENTORY.md`](../docs/archive/audit/TEST_INVENTORY.md) (2026-08-08; live: `make check-test-lanes`), [`docs/audit/MUTATION_BASELINE.md`](../docs/audit/MUTATION_BASELINE.md). Skill `building-and-testing`.

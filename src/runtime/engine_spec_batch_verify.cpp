@@ -7,7 +7,7 @@
 // state in place into L_g and the states between as factor rows (compute/gdn.h
 // out_slots / snap_slots). Accepting all D drafts swaps P_g with L_g on the host,
 // accepting k < D folds k factor rows into L_g. No state copies, no replay
-// (docs/plans/2026-09-11-batched-mtp-verify.md).
+// (docs/archive/plans/2026-09-11-batched-mtp-verify.md).
 // Attention rows take the decode-attention route with per-row block tables
 // and context lengths, the same shape as the multi-candidate chunk.
 

@@ -1,7 +1,7 @@
-// Bound verify at 2+ drafts (speculative.mtp_batch_verify_k, docs/plans/2026-09-11-batched-mtp-verify.md):
-// groups of D + 1 rows (last token + D drafts): 1 row in place into the live slot L_z, D + 1 rows into the
-// spare P_z, drafts 1 .. D - 1 as factor rows / conv taps by group, folded into the live slot on a partial
-// accept (D = 2 .. 8).
+// Bound verify at 2+ drafts (speculative.mtp_batch_verify_k,
+// docs/archive/plans/2026-09-11-batched-mtp-verify.md): groups of D + 1 rows (last token + D drafts): 1 row
+// in place into the live slot L_z, D + 1 rows into the spare P_z, drafts 1 .. D - 1 as factor rows / conv
+// taps by group, folded into the live slot on a partial accept (D = 2 .. 8).
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>

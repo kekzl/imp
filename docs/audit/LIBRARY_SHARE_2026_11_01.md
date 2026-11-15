@@ -1,6 +1,6 @@
 # cuBLASLt routes after CUTLASS and cuBLAS v2 left (ROADMAP row 123, inventory 3)
 
-Source: `build-dev/imp-cli` of `perf/lt-inventory-3` (base `main` 5a94512f + the route counter below), RTX 5090, 2026-11-01. Previous inventories: [`LIBRARY_SHARE_2026_10_29.md`](LIBRARY_SHARE_2026_10_29.md), [`LIBRARY_SHARE_2026_10_30.md`](LIBRARY_SHARE_2026_10_30.md).
+Source: `build-dev/imp-cli` of `perf/lt-inventory-3` (base `main` 5a94512f + the route counter below), RTX 5090, 2026-11-01. Previous inventories: [`LIBRARY_SHARE_2026_10_29.md`](../archive/audit/LIBRARY_SHARE_2026_10_29.md), [`LIBRARY_SHARE_2026_10_30.md`](../archive/audit/LIBRARY_SHARE_2026_10_30.md).
 Harness: `tools/roofline/inventory/inventory.sh` flags (nsys `--cuda-graph-trace=node`, `bench:*` NVTX phases, `inventory_extract.py`), 8 SafeTensors heroes of `matrix.tsv` (Qwen3.6-35B-A3B no longer on disk) x pp512 / pp4096 / tg128 / tgmtp (`speculative.mtp_k=-1`), plus Qwen3-8B-NVFP4 tgdspark (`speculative.dspark_model=dflash_qwen3_8b_block7`) = 33 cells.
 Share = cuBLASLt kernel ns (`nvjet_*`, `splitKreduce`, `gemvx`) / phase kernel ns. Library-share regex of `library_share.py`.
 
@@ -53,9 +53,9 @@ Per-kernel detail (pp phase, nsys):
 
 | # | route (call site) | models / workload | share | own kernel covering the shape | state |
 |---|---|---|---:|---|---|
-| a1 | FP8 x FP8 below M 2048 (`gemm_fp8x8_`) | Qwen3-8B-FP8 prompts < 2048 rows | 81 % of pp512 | F8 tile (`gemm_fp8_tile`) | refuted: pp512 GEMM sum Lt 127.9-130.6 vs own 136.5-138.5 ms, 2-CTA 167.7-179.5 ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#2026-11-01-two-ctas-per-sm-below-m-2048-refuted)); own from M 2048 |
-| a2 | fp16-tier tensors (`gemm_dispatch_uncached_fallback` -> `gemm()`) | Nemotron-3-Nano | 9.3-14.2 % (incl. a3) | `gemm_f16_tile` (K >= N, >= 0.8 wave) | refuted: 128x256 for every shape 50.04 vs 50.48 ms Lt, e2e 56278-56406 vs 56447-56584 tok/s ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#remaining-call-sites-ordered-by-share), row 3) |
-| a3 | MoE router (`router_logits_gemm` -> `gemm()`) | Qwen3-30B, Coder, Nemotron (fp16 accumulate), Gemma-4 n < 1024 | 1.1-1.6 % | `gemm_f16_splitk` | own for Gemma-4 n >= 1024; refuted for K 2048 (11.3 vs 10.5 us), n <= 1000 (5-7 vs 1.2-4.4 us), Nemotron fp16-acc (4.48 vs 5.83 ms) ([10-30 doc](LIBRARY_SHARE_2026_10_30.md#moe-router-gemm-f16-n--n_experts-own-split-k-for-the-gemma-4-shape-cublaslt-for-the-rest-2026-10-31)); Qwen3-30B n >= 1024 in situ refuted (close section) |
+| a1 | FP8 x FP8 below M 2048 (`gemm_fp8x8_`) | Qwen3-8B-FP8 prompts < 2048 rows | 81 % of pp512 | F8 tile (`gemm_fp8_tile`) | refuted: pp512 GEMM sum Lt 127.9-130.6 vs own 136.5-138.5 ms, 2-CTA 167.7-179.5 ([10-30 doc](../archive/audit/LIBRARY_SHARE_2026_10_30.md#2026-11-01-two-ctas-per-sm-below-m-2048-refuted)); own from M 2048 |
+| a2 | fp16-tier tensors (`gemm_dispatch_uncached_fallback` -> `gemm()`) | Nemotron-3-Nano | 9.3-14.2 % (incl. a3) | `gemm_f16_tile` (K >= N, >= 0.8 wave) | refuted: 128x256 for every shape 50.04 vs 50.48 ms Lt, e2e 56278-56406 vs 56447-56584 tok/s ([10-30 doc](../archive/audit/LIBRARY_SHARE_2026_10_30.md#remaining-call-sites-ordered-by-share), row 3) |
+| a3 | MoE router (`router_logits_gemm` -> `gemm()`) | Qwen3-30B, Coder, Nemotron (fp16 accumulate), Gemma-4 n < 1024 | 1.1-1.6 % | `gemm_f16_splitk` | own for Gemma-4 n >= 1024; refuted for K 2048 (11.3 vs 10.5 us), n <= 1000 (5-7 vs 1.2-4.4 us), Nemotron fp16-acc (4.48 vs 5.83 ms) ([10-30 doc](../archive/audit/LIBRARY_SHARE_2026_10_30.md#moe-router-gemm-f16-n--n_experts-own-split-k-for-the-gemma-4-shape-cublaslt-for-the-rest-2026-10-31)); Qwen3-30B n >= 1024 in situ refuted (close section) |
 | a4 | MTP head BF16 dense (`mtp_feed_dense_rows`) | Qwen3.8-27B with MTP | 0.59 % of the prompt phase, 0 in decode | `gemm_f16_tile` declines (40 / 8 tiles < 1 wave) | accepted, below 1 % |
 | a5 | DSpark FP16 k/v + fc (`DSparkDrafter` context projections) | Qwen3-8B-NVFP4 + drafter (opt-in) | 0.29 % decode, 5.4 % prompt | none for M 2-32 x N 1024 x K 4096 FP16 | accepted, opt-in, below 1 % of decode |
 

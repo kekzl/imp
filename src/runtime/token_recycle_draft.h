@@ -7,7 +7,7 @@
 namespace imp {
 
 // Token-Recycling adjacency drafter (Token Recycling, ACL 2025, arXiv
-// 2408.08696; plan: docs/plans/2026-07-22-token-recycling-spec-tree.md).
+// 2408.08696; plan: docs/archive/plans/2026-07-22-token-recycling-spec-tree.md).
 //
 // Engine-scoped, cross-request table token -> top-M successors (MRU/rank
 // ordered, -1 = empty), fed from emitted-token bigrams and the model's

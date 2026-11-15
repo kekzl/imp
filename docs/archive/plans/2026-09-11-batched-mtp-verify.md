@@ -713,7 +713,7 @@ Repeat across server starts, seed 1000, 3 chats x 30 turns in turn:
 | `runtime.deterministic=true` | | 3 starts: 13917 of 13917 trace steps equal |
 
 In default mode a token's logits depend on its row in the verify chunk (on and off arm give different texts there), so a draft that differs between two starts moves
-the text; [`DETERMINISM.md`](../DETERMINISM.md) carries the row.
+the text; [`DETERMINISM.md`](../../DETERMINISM.md) carries the row.
 
 Gates: `SampleVerifyRows.CoupledDraftFollowsTheTokenNotTheRank` (503 of 512 rows),
 `SampleVerifyRows.CoupledDraftMatchesTheVerifyDrawMoreOftenThanTheArgmax` (511 against 259 of 512 rows),

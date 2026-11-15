@@ -1,7 +1,7 @@
 // MXFP8 x MXFP8 prefill GEMM (gemm.mxfp8_gdn_proj_prefill, own tile kernel): the quantizer's SfAtom
 // scales and E4M3 bytes must reproduce an FP32 reference within the E4M3 budget, at the GDN
 // projection shapes, and stay finite on the case that broke the FP8 SSM_IN attempt (coherent
-// activation against 0.01-magnitude weight rows, docs/plans/2026-08-31-fp8-ssm-prefill.md).
+// activation against 0.01-magnitude weight rows, docs/archive/plans/2026-08-31-fp8-ssm-prefill.md).
 
 #include "quant/fp8_quant.h"
 #include "quant/mxfp8_sfatom.h"

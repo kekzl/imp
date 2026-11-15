@@ -7,7 +7,7 @@
 namespace imp {
 
 // Phase 2B INT8 IMMA tile-GEMM for Q4_K_M direct-GEMM.
-// See docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
+// See docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md.
 // X_s8[M,K] int8, x_scale[M,K/32] FP16, x_rowsum[M,K/32] float; W_s8[N,K] int8 (q_sym=q-8);
 // eff_alpha[N,K/32] FP16 = d_super*sc; eff_beta[N,K/32] FP16 = 8*d_super*sc - dmin_super*m.
 // out[m,n] = sum_sub x_scale[m,sub]*(alpha[n,sub]*sum(X_s8*W_s8) + beta[n,sub]*x_rowsum[m,sub]);
