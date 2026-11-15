@@ -760,3 +760,28 @@ TEST(LlmCompressorIgnoreList, RecipePatternsSurviveWhenConfigJsonCarriesNoList) 
     EXPECT_EQ(cfg.exclude_modules[2], "re:.*router");
     cleanup_temp_recipe(dir);
 }
+
+// ModelOpt's weight-only declaration is the NVFP4 tensor layout: read as plain NVFP4. Unknown, it loaded a
+// Flint checkpoint as raw bytes (PPL 1.3e22) instead of refusing.
+TEST(LlmCompressorFormatDetect, ModeloptW4A16IsTheNvfp4Layout) {
+    for (const char* algo : {"W4A16_NVFP4", "w4a16_nvfp4", "NVFP4"}) {
+        const std::string dir = tmpdir() + "/fmt_w4a16_" + std::to_string(::getpid());
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir + "/hf_quant_config.json")
+            << R"({"quantization":{"quant_algo":")" << algo
+            << R"(","group_size":16,"exclude_modules":["lm_head"]}})";
+        imp::HFConfigLoader::NvFP4Config cfg;
+        EXPECT_TRUE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg)) << algo;
+        EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::MODELOPT) << algo;
+        EXPECT_EQ(cfg.group_size, 16) << algo;
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+    const std::string dir = tmpdir() + "/fmt_w4a8_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/hf_quant_config.json") << R"({"quantization":{"quant_algo":"W4A8_AWQ"}})";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    EXPECT_FALSE(imp::HFConfigLoader::load_nvfp4_config(dir, cfg)) << "another algorithm is not NVFP4";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}

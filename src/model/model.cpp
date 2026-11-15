@@ -194,6 +194,7 @@ enum {
     kApiCohere2 = 21,
     kApiBailingHybrid = 22,
     kApiKimiLinear = 23,
+    kApiFlint = 24,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -248,6 +249,9 @@ static constexpr ArchEntry kArchRegistry[] = {
     // Kimi-Linear: MLA NoPE (rope flag unused), sigmoid router + e_score_correction_bias, moe_renormalize;
     // generation_config sets no sampling, so the GENERIC defaults.
     {ModelArch::KIMI_LINEAR, "kimi_linear", kApiKimiLinear, 0, 0, -1, -1, true, true, 0.6f, 0.95f, 0},
+    // Flint: HF rotate_half RoPE on the sliding layers, sigmoid router (+ selection-only expert_bias),
+    // norm_topk_prob from config (hf_config/flint.cpp); generation_config 1.0 / 0.95 / 20.
+    {ModelArch::FLINT, "flint", kApiFlint, -1, 0, -1, -1, true, false, 1.0f, 0.95f, 20},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

@@ -1309,11 +1309,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    if (awq_refuses(*model, cfg, tensor_map, model_dir))
-        return nullptr;
-
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
+    if (awq_refuses(*model, cfg, tensor_map, model_dir) || nvfp4_undeclared(tensor_map, is_nvfp4, model_dir))
+        return nullptr;
     if (is_nvfp4) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;

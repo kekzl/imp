@@ -261,7 +261,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // INT4 KV, so it keeps the fallback despite passing (1).
     const bool sink_dtype_ok = paged_attention_applies_sinks(config_.kv_cache_dtype) &&
                                config_.kv_cache_dtype != QType::INT4;
-    if (!sink_dtype_ok && mcfg.arch == ModelArch::GPT_OSS) {
+    if (!sink_dtype_ok && model_->profile().learned_attn_sinks) {
         IMP_LOG_WARN(
             "KV cache dtype: %s requested, but this architecture carries learned attention "
             "sinks and this dtype cannot serve them (#1345) — falling back to FP16 KV "

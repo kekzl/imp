@@ -36,6 +36,13 @@ std::optional<int> parse_args(int argc, char** argv, Options& opt) {
                 fprintf(stderr, "imp-quantize: --kv-hint '%s': expected auto | fp8 | none\n", v.c_str());
                 return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
             }
+        } else if (a == "--act") {
+            const std::string v = next();
+            if (v != "a4" && v != "a16") {
+                fprintf(stderr, "imp-quantize: --act '%s': expected a4 | a16\n", v.c_str());
+                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
+            }
+            opt.act_a16 = v == "a16";
         } else if (a == "--keep-attn-gate")
             opt.keep_attn_gate = true;
         else if (a == "--keep-gdn-proj") {

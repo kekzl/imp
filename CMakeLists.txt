@@ -1159,6 +1159,7 @@ if(IMP_BUILD_TESTS)
         tests/test_bailing_hybrid.cpp
         # Kimi-Linear: config parse, KDA tensor rename / fusion, NVFP4 q/k/v split, without the checkpoint.
         tests/test_kimi_linear.cpp
+        tests/test_flint.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         # Gemma-4 E-variants: PLE + KV-sharing config keys and tensor mapping (E4B config fixture).

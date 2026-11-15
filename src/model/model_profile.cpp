@@ -60,7 +60,7 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.unit_softmax_scale = is_gemma4;
     p.outlier_sensitive_logits = is_gemma4;
 
-    p.learned_attn_sinks = is_gpt_oss;
+    p.learned_attn_sinks = is_gpt_oss || cfg.arch == ModelArch::FLINT;
     p.moe_expert_bias_glu = is_gpt_oss;
     p.moe_router_logit_bias = is_gpt_oss;
     p.experts_convert_at_predequant = is_gpt_oss;
@@ -81,7 +81,8 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
         p.attn_variant = ModelProfile::AttnVariant::NOPE;
     else if (is_gemma4 && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GEMMA4_SWA;
-    else if ((is_gpt_oss || cfg.arch == ModelArch::COHERE2) && !cfg.swa_layers.empty())
+    else if ((is_gpt_oss || cfg.arch == ModelArch::COHERE2 || cfg.arch == ModelArch::FLINT) &&
+             !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GPTOSS_SWA;
     else
         p.attn_variant = ModelProfile::AttnVariant::STANDARD;

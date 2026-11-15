@@ -401,6 +401,14 @@ bool HFConfigLoader::probe_vision_tower(const std::string& model_dir) {
     return vision_tower_supported(vision_type);
 }
 
+// W4A16_NVFP4 (ModelOpt, vLLM): the NVFP4 weight layout, activations declared 16-bit.
+static bool modelopt_algo_is_plain_nvfp4(const std::string& algo) {
+    for (const char* a : {"NVFP4", "nvfp4", "W4A16_NVFP4", "w4a16_nvfp4"})
+        if (algo == a)
+            return true;
+    return false;
+}
+
 bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg) {
     bool has_modelopt = file_exists_at(model_dir + "/hf_quant_config.json");
     bool has_compressor = file_exists_at(model_dir + "/recipe.yaml");
@@ -423,7 +431,7 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         const JValue* algo = jobj_find(*quant, "quant_algo");
         if (!algo || algo->type != JType::STRING)
             return false;
-        const bool plain_nvfp4 = (algo->str_val == "NVFP4" || algo->str_val == "nvfp4");
+        const bool plain_nvfp4 = modelopt_algo_is_plain_nvfp4(algo->str_val);
         const bool mixed = (algo->str_val == "MIXED_PRECISION");
         if (!plain_nvfp4 && !mixed)
             return false;

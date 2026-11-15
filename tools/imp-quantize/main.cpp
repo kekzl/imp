@@ -903,14 +903,8 @@ int main(int argc, char** argv) {
                kv_fp8 ? "FP8" : "null", mt.c_str(), quantize::kv_hint_name(opt.kv_hint),
                quantize::format_name(opt.format));
         quantize::fill_recipe(recipe, opt, kv_fp8);
-        auto declared = opt.format == quantize::OutputFormat::Modelopt
-                            ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules, calibrated,
-                                                                    kv_fp8,
-                                                                    quantize::recipe_json(recipe, "    "),
-                                                                    fp8_keep.quantized_layers_json("    "))
-                            : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
-        if (declared && opt.format != quantize::OutputFormat::Modelopt)
-            declared = quantize::write_recipe_json(opt.out_dir, quantize::recipe_json(recipe, ""));
+        const auto declared = quantize::write_declarations(opt, recipe, excluded_modules, calibrated, kv_fp8,
+                                                           fp8_keep.quantized_layers_json("    "));
         if (!declared) {
             fprintf(stderr, "%s\n", declared.error().c_str());
             return 1;
