@@ -15,7 +15,7 @@
 #include "compute/embedding.h"      // embedding_lookup (handles quantized tables)
 #include "compute/gemm.h"
 #include "quant/nvfp4_gemm.h"       // gemv_nvfp4_kpar_fp32 (NVFP4 chain lm_head)
-#include "quant/fp8_quant.h"        // quantize_fp8_rows_async (the MTP body FP8 copy)
+#include "quant/nvfp4_quant.h"      // quantize_fp16_to_nvfp4_into (the MTP body NVFP4 copy)
 #include "compute/layernorm.h"
 #include "compute/moe_routing.h"
 // relu_sqr_inplace — activation for the non-gated (Nemotron) MTP experts.
@@ -385,46 +385,67 @@ static void mtp_body_weights(const MtpHead& mtp, const Tensor* (&w)[8]) {
     std::copy(std::begin(all), std::end(all), std::begin(w));
 }
 
-size_t mtp_body_fp8_bytes(const MtpHead& mtp) {
+constexpr size_t kNvBodyAlign = 256;
+constexpr int kNvBodySmallmK = 128;  // gemm_nvfp4_smallm K tile
+
+size_t mtp_body_nvfp4_bytes(const MtpHead& mtp) {
     const Tensor* w[8];
     mtp_body_weights(mtp, w);
     if (mtp.hc_count > 0 || mtp.router.ndim > 0)
         return 0;
-    size_t bytes = 0;
+    size_t bytes = kNvBodyAlign;  // the absmax scratch float
     for (const Tensor* t : w) {
-        // Shapes only: the plan prices this before the BF16 -> FP16 upload.
-        if (t->ndim != 2 || t->shape[0] <= 0 || t->shape[1] % 512 != 0)
+        if (t->ndim != 2 || t->shape[0] <= 0 || t->shape[1] <= 0 || t->shape[1] % kNvBodySmallmK != 0)
             return 0;
-        bytes += static_cast<size_t>(t->shape[0]) * (static_cast<size_t>(t->shape[1]) + sizeof(float));
-        bytes = (bytes + 255) / 256 * 256;
+        const size_t n = static_cast<size_t>(t->shape[0]);
+        const size_t k = static_cast<size_t>(t->shape[1]);
+        bytes += (n * (k / 2) + kNvBodyAlign - 1) / kNvBodyAlign * kNvBodyAlign;
+        bytes += (n * (k / 16) + kNvBodyAlign - 1) / kNvBodyAlign * kNvBodyAlign;
     }
     return bytes;
 }
 
-bool mtp_body_fp8_allocate(const MtpHead& mtp, MtpDraftWorkspace& ws, cudaStream_t stream) {
+size_t mtp_body_nvfp4_ws_bytes(const MtpHead& mtp) {
+    if (mtp_body_nvfp4_bytes(mtp) == 0)
+        return 0;
     const Tensor* w[8];
     mtp_body_weights(mtp, w);
-    const size_t bytes = mtp_body_fp8_bytes(mtp);
-    if (ws.d_fp8_body != nullptr || ws.hc_count > 0 || bytes == 0)
+    int64_t n_max = 0;
+    for (const Tensor* t : w)
+        n_max = std::max(n_max, t->shape[0]);
+    return gemm_nvfp4_smallm_workspace_bytes(static_cast<int>(n_max));
+}
+
+bool mtp_body_nvfp4_allocate(const MtpHead& mtp, MtpDraftWorkspace& ws, cudaStream_t stream) {
+    const Tensor* w[8];
+    mtp_body_weights(mtp, w);
+    const size_t bytes = mtp_body_nvfp4_bytes(mtp);
+    if (ws.d_nv_body != nullptr || ws.hc_count > 0 || bytes == 0)
         return false;
     for (const Tensor* t : w)
         if (!t->data || !t->on_device || t->qtype != QType::F16)
             return false;
-    if (!mtp_dev_alloc(ws, &ws.d_fp8_body, bytes)) {
-        ws.d_fp8_body = nullptr;
+    if (!mtp_dev_alloc(ws, &ws.d_nv_body, bytes)) {
+        ws.d_nv_body = nullptr;
         return false;
     }
-    char* p = static_cast<char*>(ws.d_fp8_body);
+    if (!mtp_dev_alloc(ws, &ws.d_nv_ws, mtp_body_nvfp4_ws_bytes(mtp)))
+        ws.d_nv_ws = nullptr;  // one-row reads only
+    auto* base = static_cast<uint8_t*>(ws.d_nv_body);
+    size_t off = kNvBodyAlign;
     for (int i = 0; i < 8; i++) {
-        const int rows = static_cast<int>(w[i]->shape[0]);
-        const int k = static_cast<int>(w[i]->shape[1]);
-        float* scales = reinterpret_cast<float*>(p + static_cast<size_t>(rows) * k);
-        quantize_fp8_rows_async(w[i]->data, p, rows, k, scales, stream);
-        ws.fp8_w[i] = p;
-        ws.fp8_s[i] = scales;
-        const size_t used = static_cast<size_t>(p - static_cast<char*>(ws.d_fp8_body)) +
-                            static_cast<size_t>(rows) * (k + sizeof(float));
-        p = static_cast<char*>(ws.d_fp8_body) + (used + 255) / 256 * 256;
+        const size_t n = static_cast<size_t>(w[i]->shape[0]);
+        const size_t k = static_cast<size_t>(w[i]->shape[1]);
+        uint8_t* packed = base + off;
+        off += (n * (k / 2) + kNvBodyAlign - 1) / kNvBodyAlign * kNvBodyAlign;
+        uint8_t* micro = base + off;
+        off += (n * (k / 16) + kNvBodyAlign - 1) / kNvBodyAlign * kNvBodyAlign;
+        const float ts = calibrate_nvfp4_scales(*w[i], stream, static_cast<float*>(ws.d_nv_body));
+        quantize_fp16_to_nvfp4_into(w[i]->data, static_cast<int>(n), static_cast<int>(k), packed, micro, ts,
+                                    stream);
+        ws.nv_p[i] = packed;
+        ws.nv_m[i] = micro;
+        ws.nv_ts[i] = ts;
     }
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
@@ -622,9 +643,10 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
     frfn(ws.d_prenorm_rows);
-    frfn(ws.d_fp8_body);
-    std::fill(std::begin(ws.fp8_w), std::end(ws.fp8_w), nullptr);
-    std::fill(std::begin(ws.fp8_s), std::end(ws.fp8_s), nullptr);
+    frfn(ws.d_nv_body);
+    frfn(ws.d_nv_ws);
+    std::fill(std::begin(ws.nv_p), std::end(ws.nv_p), nullptr);
+    std::fill(std::begin(ws.nv_m), std::end(ws.nv_m), nullptr);
     ws.prenorm_rows_cap = 0;
     frfn(ws.d_carry);
     ws.carry_rows_cap = 0;
@@ -691,15 +713,28 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.num_heads = ws.num_kv_heads = ws.head_dim = 0;
 }
 
-// Body weight w (mtp_body_fp8_allocate order) applied to `in`: the E4M3 copy at <= 32 rows, else FP16 gemm.
+// Body weight w (mtp_body_weights order) applied to `in`: the NVFP4 copy at <= 32 rows, else FP16 gemm.
 static void mtp_body_proj(const MtpDraftWorkspace& ws, int w, const Tensor& in, const Tensor& W, Tensor& out,
                           cudaStream_t stream) {
     const int rows = static_cast<int>(in.shape[0]);
-    if (ws.fp8_w[w] != nullptr && rows <= 32 &&
-        gemv_fp8_rowscale_f16(ws.fp8_w[w], ws.fp8_s[w], static_cast<const half*>(in.data),
-                              static_cast<half*>(out.data), static_cast<int>(W.shape[0]),
-                              static_cast<int>(W.shape[1]), rows, stream))
-        return;
+    if (ws.nv_p[w] != nullptr && (rows == 1 || (rows <= 32 && ws.d_nv_ws != nullptr))) {
+        NvFP4QuantResult nv;
+        nv.packed_data = const_cast<void*>(ws.nv_p[w]);
+        nv.micro_scales = const_cast<void*>(ws.nv_m[w]);
+        nv.tensor_scale = ws.nv_ts[w];
+        nv.N = W.shape[0];
+        nv.K = W.shape[1];
+        nv.owned = false;
+        const auto* x = static_cast<const half*>(in.data);
+        auto* y = static_cast<half*>(out.data);
+        if (rows == 1) {
+            gemv_nvfp4_kpar(nv, x, y, static_cast<int>(nv.N), static_cast<int>(nv.K), stream);
+            return;
+        }
+        if (gemm_nvfp4_smallm(nv, x, y, rows, static_cast<int>(nv.N), static_cast<int>(nv.K), ws.d_nv_ws,
+                              stream))
+            return;
+    }
     imp::gemm(in, W, out, 1.0f, 0.0f, stream);
 }
 

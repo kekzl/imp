@@ -81,7 +81,7 @@ No open row; closed rows are indexed below. A new row takes the next free number
 
 ## Backlog ledger
 
-Items below roadmap size (bugs, debts, kernel leads), one row per `B-nn` ID: a new item takes the next free ID (B-83), its commit names it (`[BACKLOG-B-nn]`), and its row closes here in place (status + number + PR). B-01 .. B-82 up to 2026-11-15, DONE / WONTFIX / REFUTED rows included: [`BACKLOG_2026_10_18.md`](archive/audit/BACKLOG_2026_10_18.md), its dispatch log [`DISPATCH_BACKLOG_2026_10_18.md`](archive/audit/DISPATCH_BACKLOG_2026_10_18.md) and report [`REPORT_BACKLOG_2026_10_18.md`](archive/audit/REPORT_BACKLOG_2026_10_18.md). Its R-nnn rows are the roadmap rows above, all closed.
+Items below roadmap size (bugs, debts, kernel leads), one row per `B-nn` ID: a new item takes the next free ID (B-85), its commit names it (`[BACKLOG-B-nn]`), and its row closes here in place (status + number + PR). B-01 .. B-82 up to 2026-11-15, DONE / WONTFIX / REFUTED rows included: [`BACKLOG_2026_10_18.md`](archive/audit/BACKLOG_2026_10_18.md), its dispatch log [`DISPATCH_BACKLOG_2026_10_18.md`](archive/audit/DISPATCH_BACKLOG_2026_10_18.md) and report [`REPORT_BACKLOG_2026_10_18.md`](archive/audit/REPORT_BACKLOG_2026_10_18.md). Its R-nnn rows are the roadmap rows above, all closed.
 
 | ID | item | state | ref |
 |---|---|---|---|
@@ -96,6 +96,8 @@ Items below roadmap size (bugs, debts, kernel leads), one row per `B-nn` ID: a n
 | B-60 | Qwen3.8-Flash-Next: the PCIe gather stays the largest per-token block; VRAM left for the expert cache: the server KV ceiling reserve, the vision arena (`runtime.no_vision`, 1079 MiB) | OPEN | dispatch log batch 43 |
 | B-61 | Qwen3.8-Flash-Next cold pp32 prefill: 81 % in `expert_stage_touched_range_kernel`, 14967 touched projections, 16.9 % resident, 10.9 GB over PCIe at ~50 GB/s | OPEN: below the PCIe floor only with fewer bytes (CPU computes missing experts, or pre-gate prefetch) | dispatch log batch 44 |
 | B-64 | next-layer expert predictor: the full L+1 mlp read reaches 78.8 % top-10 recall (hc input 71.4 % shipped) but costs 13 MB of hc down / up reads per layer | OPEN: needs a mix without those reads; B-63 open closed by batch 47 (FIFO REFUTED, 0 of 151606 keys still copying at N=2) | dispatch log batch 47 |
+| B-83 | Qwen3.8-27B MTP lane: the dense head body is read from an NVFP4 copy (one row `gemv_nvfp4_kpar`, 2-32 rows `gemm_nvfp4_smallm`) in place of the E4M3 copy: 1 chat 224.49-224.57 -> 229.03-229.39 tok/s, head 2.70 -> 2.27 ms per step, KV plan 13233 -> 13728 blocks, MTP workspace 772.70 -> 602.70 MiB | DONE 2026-11-15 | [`audit/PERF_LOG.md`](audit/PERF_LOG.md) 2026-11-15 |
+| B-84 | Qwen3.8-27B MTP lane: base verify depth above 4 (`speculative.mtp_batch_verify_k` 5 / 6) | REFUTED 2026-11-15: unpadded 0.2219-0.2249 / 0.2293-0.2303 vs 0.2348-0.2378 tok/ms at 4; the padded sweep (`diagnostics.mtp_verify_pin=7`) read +3.5 % because the pad charges depth 4 the 8-row forward | [`audit/PERF_LOG.md`](audit/PERF_LOG.md) 2026-11-15 |
 
 ## Not gaps
 

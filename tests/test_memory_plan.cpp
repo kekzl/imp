@@ -913,7 +913,7 @@ TEST(MemoryPlan, SparseMinmaxRuleCoversEveryDtypeTheGateAdmits) {
 // ── MTP draft workspace: the probe carries it into the plan and the report ──
 
 #include "compute/mtp_workspace_bytes.h"
-#include "compute/mtp_forward.h"  // mtp_body_fp8_bytes
+#include "compute/mtp_forward.h"  // mtp_body_nvfp4_bytes
 
 TEST(ShadowPlan, MtpWorkspaceReachesThePlanAndTheReport) {
     auto p = dense_probe();
@@ -963,9 +963,9 @@ TEST(MtpWorkspaceBytes, Qwen38HeadAtServerDefaults) {
     EXPECT_EQ(mtp_workspace_bytes(hc), mtp_workspace_bytes(s) - 10485760u);
 }
 
-// The MTP body FP8 copy: E4M3 rows + FP32 row scales of the dense body, priced with the head before the
-// FP16 upload (Qwen3.8-27B 406.0 MiB measured).
-TEST(MtpWorkspaceBytes, BodyFp8CopyIsPricedForADenseHead) {
+// The NVFP4 body copy (packed nibbles + E4M3 micro-scales) and its small-M scratch, priced with the head
+// before the weights are on the device.
+TEST(MtpWorkspaceBytes, BodyNvfp4CopyIsPricedForADenseHead) {
     auto w = [](int64_t rows, int64_t k) {
         const int64_t shape[2] = {rows, k};
         return Tensor(nullptr, QType::BF16, 2, shape, false);
@@ -979,15 +979,18 @@ TEST(MtpWorkspaceBytes, BodyFp8CopyIsPricedForADenseHead) {
     head.shared_expert_gate_proj = w(17408, 5120);
     head.shared_expert_up_proj = w(17408, 5120);
     head.shared_expert_down_proj = w(5120, 17408);
-    EXPECT_EQ(mtp_body_fp8_bytes(head), 424931328u);
+    EXPECT_EQ(mtp_body_nvfp4_bytes(head), 238878976u);
+    EXPECT_EQ(mtp_body_nvfp4_ws_bytes(head), 6684672u);
     const auto s = qwen38_27b_head();
-    auto fp8 = s;
-    fp8.body_fp8_bytes = mtp_body_fp8_bytes(head);
-    EXPECT_EQ(mtp_workspace_bytes(fp8) - mtp_workspace_bytes(s), 425721856u);
+    auto nv = s;
+    nv.body_nvfp4_bytes = mtp_body_nvfp4_bytes(head);
+    nv.body_nvfp4_ws_bytes = mtp_body_nvfp4_ws_bytes(head);
+    EXPECT_EQ(mtp_workspace_bytes(nv) - mtp_workspace_bytes(s), 247463936u);
     auto moe = head;
     moe.router = w(256, 5120);
-    EXPECT_EQ(mtp_body_fp8_bytes(moe), 0u) << "an MoE head keeps its FP16 body";
+    EXPECT_EQ(mtp_body_nvfp4_bytes(moe), 0u) << "an MoE head keeps its FP16 body";
+    EXPECT_EQ(mtp_body_nvfp4_ws_bytes(moe), 0u);
     auto odd = head;
     odd.o_proj = w(5120, 6000);
-    EXPECT_EQ(mtp_body_fp8_bytes(odd), 0u) << "K % 512 != 0 has no streamed FP8 GEMV";
+    EXPECT_EQ(mtp_body_nvfp4_bytes(odd), 0u) << "K % 128 != 0 has no small-M NVFP4 GEMM";
 }

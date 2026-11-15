@@ -4,6 +4,51 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-15 · Qwen3.8-27B MTP lane: NVFP4 body copy replaces the E4M3 copy (B-83), deeper base depth refuted (B-84)
+
+Protocol: Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, default `imp-server` (concurrent GDN hybrid, bound verify lane), fresh server per arm, `tools/analysis/agent_turn_replay.py --serial --seed 1000`, 3 recorded familiar dev50k sessions x 30 turns, step table from `diagnostics.spec_trace`. "Padded" = `diagnostics.mtp_verify_pin=7`, `speculative.mtp_k=7`, `runtime.deterministic=true` (texts md5-equal across arms). Control = the same branch with the E4M3 copy. Raw logs `/mnt/data/scratch/dec_2026_11_15/` (not in the repo).
+
+Profile, v0.67.0, `runtime.no_pdl=true`, 3 x 8 turns, 2485 steps (nsys graph-node trace):
+
+| per step | ms |
+|---|---|
+| step = verify forward + MTP head | 16.460 = 13.596 + 2.863 |
+| `gemm_nvfp4_smallm_v2_kernel` grids 272 / 80 / 160 / 96 / 192 | 4.285 / 3.209 / 1.037 / 0.658 / 0.444 |
+| draft LM head `gemv_nvfp4_kpar_mb_fp32_kernel` | 0.846 |
+| verify LM head `fp8_head_cpasync_kernel` | 0.844 |
+| MTP body `fp8_proj_cpasync_kernel` grids 2176 / 640 / 1536 / 128 | 0.569 / 0.562 / 0.201 / 0.057 |
+
+Body format, 1 chat:
+
+| arm | tok/s decode per chat | tok/step | head ms | tok/ms |
+|---|---|---|---|---|
+| E4M3, default mode, 2 runs | 224.49 / 224.57 | 3.466 | 2.698 / 2.699 | 0.2253 / 0.2254 |
+| NVFP4, default mode, 2 runs | 229.03 / 229.39 | 3.456 | 2.269 / 2.266 | 0.2300 / 0.2303 |
+| E4M3, padded | 219.94 | 3.560 | 2.847 | 0.2208 |
+| NVFP4, padded (3 of 3 session md5 equal) | 224.08 | 3.520 | 2.361 | 0.2250 |
+
+| | E4M3 | NVFP4 | both copies |
+|---|---|---|---|
+| KV plan, blocks | 13233 | 13728 | 12570 |
+| MTP workspace, MiB | 772.70 | 602.70 | - |
+
+- Both copies (NVFP4 at one row, E4M3 at 2-32 rows), padded depth 4: tok/step 3.640 vs 3.657 E4M3, head 2.407 vs 2.890 ms. Not shipped: 663 KV blocks below today for 0.6 % tok/step over NVFP4 alone at padded depth 6 (3.878 vs 3.854).
+- 2 overlapping chats, padded, 2 runs each: `n=2 T=8` head 3.928 / 3.982 -> 3.912 / 3.883 ms, tok/step 8.064 / 8.254 -> 8.028 / 8.028.
+- 4 overlapping chats x 15 turns, unpaired (texts differ), 2 runs each: `n=4 T=4` head 2.597 / 2.595 -> 2.534 / 2.532 ms; 164.61 / 162.68 -> 171.49 / 171.13 tok/s decode per chat.
+
+Base depth (`speculative.mtp_batch_verify_k`), 1 chat:
+
+| depth | padded, E4M3, v0.67.0, tok/ms | unpadded, NVFP4, tok/ms (2 runs) | unpadded tok/s per chat |
+|---|---|---|---|
+| 4 | 0.2193 (repeats 0.2243, 0.2208) | 0.2348 / 0.2378 | 234.03 / 236.95 |
+| 5 | 0.2270 | 0.2249 / 0.2219 | 224.08 / 221.13 |
+| 6 | 0.2273 | 0.2293 / 0.2303 | 228.46 / 229.45 |
+| 7 | 0.2280 | - | - |
+
+Verdict: the pad stages 8 rows in every arm, so depth 4 pays the 8-row forward (13.4-13.7 ms) it does not pay unpadded (12.90-13.08 ms vs 13.23-13.28 at depth 6). Depth stays 4. A padded run compares draft policies at equal rows, not depths.
+
+---
+
 ## 2026-11-04 · Nemotron-3-Nano-30B-A3B-NVFP4 pp512 v0.62.0 -> v0.63.0 -1.01 %: does not reproduce
 
 Protocol: `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --temperature 0 --set speculative.ngram=false`, one `--rm` process per run, arms alternating, `CUBLAS_WORKSPACE_CONFIG=:4096:8`; old = `ghcr.io/kekzl/imp:0.62.0` (1cc8e453), new = `ghcr.io/kekzl/imp:0.63.0` (ed26f253). Both images resolve cuBLASLt 13.8.0.4 and cudart 13.4.92 (#3035 moved no library). KV FP8_E4M3 (checkpoint `kv_cache_quant_algo`). Logs `/mnt/data/scratch/nemobisect_2026_11_04`.

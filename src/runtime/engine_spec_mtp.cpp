@@ -602,10 +602,12 @@ bool Engine::mtp_workspace_shape_(MtpWorkspaceShape& s) const {
     // widest feed a prefill chunk can hand mtp_feed_pairs_.
     if (head.hc_count == 0)
         s.prenorm_rows = std::max(1, executor_ ? executor_->max_tokens() : s.max_seq_len);
-    // E4M3 body copy for the bound verify lane only: the mtp_k=2 chain measured neutral (imp-cli 125.85 ->
-    // 128.64 greedy, 123.47 -> 120.75 tok/s sampled).
-    if (mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0)
-        s.body_fp8_bytes = imp::mtp_body_fp8_bytes(head);
+    // NVFP4 body copy for the bound verify lane only (Qwen3.8-27B 1 chat 226.88 -> 234.03 tok/s; the
+    // mtp_k=2 chain measured neutral with a quantized body).
+    if (mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size) > 0) {
+        s.body_nvfp4_bytes = imp::mtp_body_nvfp4_bytes(head);
+        s.body_nvfp4_ws_bytes = imp::mtp_body_nvfp4_ws_bytes(head);
+    }
     return true;
 }
 
@@ -677,13 +679,13 @@ bool Engine::enable_mtp_spec_decode(int k) {
     (void)imp::mtp_carry_allocate(*ws, shape.carry_rows);
     // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
     prewarm_spec_state_scratch_();
-    if (shape.body_fp8_bytes > 0) {
+    if (shape.body_nvfp4_bytes > 0) {
         const size_t before = ws->device_bytes;
-        if (imp::mtp_body_fp8_allocate(*model_->mtp_, *ws, decode_stream()))
-            IMP_LOG_INFO("mtp: E4M3 copy of the dense MTP body, %.1f MiB",
+        if (imp::mtp_body_nvfp4_allocate(*model_->mtp_, *ws, decode_stream()))
+            IMP_LOG_INFO("mtp: NVFP4 copy of the dense MTP body, %.1f MiB",
                          static_cast<double>(ws->device_bytes - before) / 1048576.0);
         else
-            IMP_LOG_WARN("mtp: no E4M3 body copy (not a plain FP16 head or no VRAM)");
+            IMP_LOG_WARN("mtp: no NVFP4 body copy (not a plain FP16 head or no VRAM)");
     }
     if (shape.prenorm_rows > 0 && !imp::mtp_prenorm_allocate(*ws, shape.prenorm_rows))
         IMP_LOG_WARN(
