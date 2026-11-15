@@ -1,5 +1,5 @@
 // Host-side Token-Recycling adjacency drafter (token_recycle_draft.cpp), speculative
-// decoding. Design: docs/plans/2026-07-22-token-recycling-spec-tree.md (ACL 2025, arXiv
+// decoding. Design: docs/archive/plans/2026-07-22-token-recycling-spec-tree.md (ACL 2025, arXiv
 // 2408.08696).
 
 #include "runtime/token_recycle_draft.h"

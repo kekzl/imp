@@ -1160,7 +1160,7 @@ private:
     void prewarm_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
     // ── Batched speculative verify (speculative.batch_verify) ──
-    // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
+    // docs/archive/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
     // state types in spec_batch_verify_state.h.
     BatchVerifyState bv_;
     [[nodiscard]] bool ensure_batch_verify_bufs_(

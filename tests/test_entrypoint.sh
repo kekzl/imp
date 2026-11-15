@@ -4,7 +4,7 @@
 # required Build check.
 # The container env surface is hand-written and untested until 2026-08-31; IMP_KV_FP8 had
 # already inverted its meaning unnoticed
-# (docs/plans/2026-08-29-qwen38-long-context-posture.md, trap 1).
+# (docs/archive/plans/2026-08-29-qwen38-long-context-posture.md, trap 1).
 set -uo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.."

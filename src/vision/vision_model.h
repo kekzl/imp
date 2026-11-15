@@ -27,7 +27,7 @@ struct VisionConfig {
 
     // Qwen3-VL: dynamic resolution (no fixed image_size — num_patches varies per
     // image), fused QKV, plain (non-gated) MLP, and a two-layer patch merger
-    // instead of a single projection. See docs/plans/2026-07-31-qwen3-vl-vision.md.
+    // instead of a single projection. See docs/archive/plans/2026-07-31-qwen3-vl-vision.md.
     bool is_qwen3vl = false;
     int merge_size = 1;           // spatial merge factor (2 => 2x2 patches per token)
     int temporal_patch_size = 1;  // still images repeat along this axis

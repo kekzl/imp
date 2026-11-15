@@ -137,7 +137,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream);
 void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 
 // Factored conv window for the batched speculative verify
-// (compute/ssm_conv_tap.cu, docs/plans/2026-09-12-factored-verify-spare.md).
+// (compute/ssm_conv_tap.cu, docs/archive/plans/2026-09-12-factored-verify-spare.md).
 // The drafted row shifts the window by one, so only the single new tap (channels halfs)
 // need survive the step, not the whole window (channels*kernel_size floats).
 // Mid rows of the bound verify, by batch group: rows d_snap_n .. d_snap_n + n_levels - 1 of group g leave as

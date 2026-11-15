@@ -6,7 +6,7 @@ run_encoder.sh runs this in a container. Writes into argv[1]:
                            layer_0 / layer_1 [17,64], shuffled [4,256], projected [4,32]
 Weights and pixels are FP16-representable (imp stores FP16). Magnitudes are set by hand (HF init uses initializer_range 1e-10 and lambda 0.1): LN gain ~1,
 Linear ~1/sqrt(fan_in), lambda 0.5..1.5, so attention, layer scale and the shuffle order all move
-the output (docs/plans/2026-07-31-qwen3-vl-vision.md, realistic-magnitude trap).
+the output (docs/archive/plans/2026-07-31-qwen3-vl-vision.md, realistic-magnitude trap).
 """
 
 import sys

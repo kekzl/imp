@@ -73,7 +73,7 @@ hash lifecycle, and anything whose only symptom is performance.
 ## Survivors
 
 Each is a confirmed test gap. Escape classes and the named test that should
-have caught each are in `docs/audit/ESCAPE_ANALYSIS.md`.
+have caught each are in `docs/archive/audit/ESCAPE_ANALYSIS.md`.
 
 | ID | Category | Fault injected | Why nothing saw it |
 |---|---|---|---|

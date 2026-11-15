@@ -123,7 +123,7 @@ since arrives through `IMP_SET`.
 **A pin can invert without being edited.** `IMP_KV_FP8=1` saves KV memory on
 most families and costs it on one, because `auto` resolves NVFP4 where that
 has been measured safe and FP8 is the wider type there - the engine says so at
-startup ([`plans/2026-08-29-qwen38-long-context-posture.md`](plans/2026-08-29-qwen38-long-context-posture.md)).
+startup ([`archive/plans/2026-08-29-qwen38-long-context-posture.md`](archive/plans/2026-08-29-qwen38-long-context-posture.md)).
 The legacy KV names also outrank a `kv_cache.dtype` from `IMP_SET` in either
 order - `--kv-fp8` sets the dtype directly - so the entrypoint warns when both are set.
 

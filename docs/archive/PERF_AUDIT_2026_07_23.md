@@ -68,7 +68,7 @@ ready and the drafter is the sole gap:
 
 ## Ranked levers
 
-### #1 Token-Recycling adjacency drafter + multi-candidate verify (BUILD — plan docs/plans/2026-07-22-token-recycling-spec-tree.md)
+### #1 Token-Recycling adjacency drafter + multi-candidate verify (BUILD — plan docs/archive/plans/2026-07-22-token-recycling-spec-tree.md)
 
 - **Measured now:** 0% spec engagement on reasoning (dense), 19% engagement
   (MoE). Verify economics measured: chunk-4 ≈ 2.2× decode step ⇒ break-even

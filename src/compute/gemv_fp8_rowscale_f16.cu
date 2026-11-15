@@ -132,7 +132,8 @@ __global__ void __launch_bounds__(kThreads) fp8_proj_cpasync_kernel(const uint8_
 
 // Rows per block by pass size: <= 8 rows 8 (Flash-Next GDN out 2560 rows = 320 blocks), 9..16 rows 16,
 // 17..32 rows 32: more rows per block cut the activation re-reads per weight byte. 2 stages each, chosen by
-// FP8ProjStreamTest.Sweep over 8 shapes x 6 row counts (docs/audit/fp8_proj_stream_2026_11_04/).
+// FP8ProjStreamTest.Sweep over 8 shapes x 6 row counts
+// (https://github.com/kekzl/imp/tree/d53d594b/docs/audit/fp8_proj_stream_2026_11_04).
 constexpr int kStages = 2;
 
 template <int MT, int kNT>

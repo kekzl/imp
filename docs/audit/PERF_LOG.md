@@ -106,7 +106,7 @@ Protocol: Qwen3-14B-NVFP4 server, `max_batch_size 32`, `max_seq_len 4096`, `kv_c
 
 ## 2026-10-27 · Qwen3.8-Flash-Next server decode: three rate definitions on one run (v0.59.0 notes corrected)
 
-Protocol: `ghcr.io/kekzl/imp:latest` v0.59.0, README `docker run`, `tools/analysis/decode_rate_methods.py`: the 6 prompts of `seq_stream_client.py`, 400 greedy tokens, `ignore_eos`, thinking at the model default (~200 reasoning deltas, ~197 content deltas per request). Raw: `docs/audit/launch_2026_10_27/decode_rate_methods_flashnext.txt`.
+Protocol: `ghcr.io/kekzl/imp:latest` v0.59.0, README `docker run`, `tools/analysis/decode_rate_methods.py`: the 6 prompts of `seq_stream_client.py`, 400 greedy tokens, `ignore_eos`, thinking at the model default (~200 reasoning deltas, ~197 content deltas per request). Raw: [`docs/audit/launch_2026_10_27/decode_rate_methods_flashnext.txt`](https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_27/decode_rate_methods_flashnext.txt).
 
 | definition | median tok/s | per prompt |
 |---|---:|---|
@@ -121,7 +121,7 @@ Protocol: `ghcr.io/kekzl/imp:latest` v0.59.0, README `docker run`, `tools/analys
 
 ## 2026-10-27 · MTP one stream, imp vs vLLM 0.31.0: the "vLLM leads with MTP" row is refuted
 
-Protocol: `tools/analysis/mtp_vs_vllm.sh`, Qwen3.8-27B-NVFP4-vllm, fresh server per arm, one warm request, then `seq_stream_client.py`: 6 real chat prompts x 400 greedy tokens x 2 rounds, identical text for both engines (`conc_client.py` puts the arm tag into every prompt), decode tok/s = median per request; spec counters from `/metrics` around the timed rounds. imp `--max-concurrent 1 --set runtime.max_batch_size=1 --set speculative.mtp_k=K`, vLLM `--max-num-seqs 1 --speculative-config {"method":"mtp","num_speculative_tokens":K}`. Raw: `docs/audit/launch_2026_10_27/mtp_vs_vllm_*.txt`.
+Protocol: `tools/analysis/mtp_vs_vllm.sh`, Qwen3.8-27B-NVFP4-vllm, fresh server per arm, one warm request, then `seq_stream_client.py`: 6 real chat prompts x 400 greedy tokens x 2 rounds, identical text for both engines (`conc_client.py` puts the arm tag into every prompt), decode tok/s = median per request; spec counters from `/metrics` around the timed rounds. imp `--max-concurrent 1 --set runtime.max_batch_size=1 --set speculative.mtp_k=K`, vLLM `--max-num-seqs 1 --speculative-config {"method":"mtp","num_speculative_tokens":K}`. Raw: [`docs/audit/launch_2026_10_27/mtp_vs_vllm_*.txt`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/launch_2026_10_27).
 
 | k=2, real prompts | start 1 | start 2 | start 3 | median | tokens / verify | ms / verify |
 |---|---:|---:|---:|---:|---:|---:|
@@ -137,7 +137,7 @@ Protocol: `tools/analysis/mtp_vs_vllm.sh`, Qwen3.8-27B-NVFP4-vllm, fresh server 
 
 ## 2026-10-27 · Launch re-measure: README commands, Qwen3.8-Flash-Next and Qwen3.8-27B (launch dispatch Phase 2)
 
-Protocol: `tools/analysis/launch_server_bench.sh` = the README `docker run` of `ghcr.io/kekzl/imp:latest` v0.59.0 (`sha256:7a52810d`), one fresh container per trial, `seq_stream_client.py`: 6 different real chat prompts one after another, 400 tokens each, greedy, `ignore_eos`, thinking at the model default; decode = (completion tokens - 1) / (last delta - first delta). Host 78 GiB RAM, RTX 5090 PCIe 5.0 x16, WSL2. Raw: `docs/audit/launch_2026_10_27/`.
+Protocol: `tools/analysis/launch_server_bench.sh` = the README `docker run` of `ghcr.io/kekzl/imp:latest` v0.59.0 (`sha256:7a52810d`), one fresh container per trial, `seq_stream_client.py`: 6 different real chat prompts one after another, 400 tokens each, greedy, `ignore_eos`, thinking at the model default; decode = (completion tokens - 1) / (last delta - first delta). Host 78 GiB RAM, RTX 5090 PCIe 5.0 x16, WSL2. Raw: [`docs/audit/launch_2026_10_27/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/launch_2026_10_27).
 
 | Qwen3.8-Flash-Next-NVFP4 (123.6 GiB, experts 56.25 GiB host-resident) | start 1 | start 2 | start 3 | start 4 |
 |---|---:|---:|---:|---:|
@@ -165,7 +165,7 @@ Protocol: `tools/analysis/launch_server_bench.sh` = the README `docker run` of `
 
 ## 2026-10-27 · Launch re-measure: Qwen3.8-27B, imp vs vLLM vs llama.cpp (launch dispatch Phase 2)
 
-Protocol: `tools/analysis/engine3_conc.sh`, fresh server per arm, `conc_client.py` 300-token greedy answers, `ignore_eos`, 3 waves per arm (value = wave median), 3 trials with alternating arm order, each engine on its defaults. Images: imp `ghcr.io/kekzl/imp:latest` = v0.59.0 (`sha256:7a52810d`), vLLM `v0.31.0` (`sha256:c1c9f6fd`), llama.cpp `server-cuda` (`sha256:9d835c2f`). NVFP4 = `Qwen3.8-27B-NVFP4-vllm` (imp, vLLM), GGUF = ggml-org `Qwen3.8-27B-Q4_K_M.gguf` (imp, llama.cpp). Raw logs: `docs/audit/launch_2026_10_27/`.
+Protocol: `tools/analysis/engine3_conc.sh`, fresh server per arm, `conc_client.py` 300-token greedy answers, `ignore_eos`, 3 waves per arm (value = wave median), 3 trials with alternating arm order, each engine on its defaults. Images: imp `ghcr.io/kekzl/imp:latest` = v0.59.0 (`sha256:7a52810d`), vLLM `v0.31.0` (`sha256:c1c9f6fd`), llama.cpp `server-cuda` (`sha256:9d835c2f`). NVFP4 = `Qwen3.8-27B-NVFP4-vllm` (imp, vLLM), GGUF = ggml-org `Qwen3.8-27B-Q4_K_M.gguf` (imp, llama.cpp). Raw logs: [`docs/audit/launch_2026_10_27/`](https://github.com/kekzl/imp/tree/d53d594b/docs/audit/launch_2026_10_27).
 
 | arm | 1 stream: trials | median | 32 streams: trials | median |
 |---|---|---:|---|---:|

@@ -7,7 +7,7 @@
 namespace imp {
 
 // Q4_K_M -> symmetric-s8 reorder (Phase 2A of the INT8 IMMA direct-GEMM experiment).
-// See docs/plans/2026-05-28-q4k-mmq-kernel-design.md.
+// See docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md.
 // w_sym_s8[N,K] int8 (q_sym=q-8 in [-8,7], K-major); eff_alpha[N,K/32] FP16 = d_super*sc[j];
 // eff_beta[N,K/32] FP16 = 8*d_super*sc[j] - dmin_super*m[j] (folds q_sym+8 into the GEMM
 // epilogue; beta couples to the activation rowsum).

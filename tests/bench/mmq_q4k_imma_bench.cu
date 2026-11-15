@@ -1,4 +1,4 @@
-// Phase 1 INT8 IMMA throughput microbench (docs/plans/2026-05-28-q4k-mmq-kernel-design.md).
+// Phase 1 INT8 IMMA throughput microbench (docs/archive/plans/2026-05-28-q4k-mmq-kernel-design.md).
 // Ops/MMA: IMMA m16n8k32=8192, HMMA m16n8k16=4096; sm_120a theoretical ratio ~2.0x.
 // Gate: ratio >=1.8x proceeds to Phase 2 production kernel; <1.5x defers (FP16-throttled).
 // Measures raw MMA-pipe throughput only, not a realistic tiled kernel's achievable rate.

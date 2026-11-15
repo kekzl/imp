@@ -2,7 +2,7 @@
 # Sparse decode A/B on any model (roadmap row 3, MLA): NIAH hits and decode slope, dense vs
 # sparse budgets, one fresh imp-server per arm, speculation and prefix cache off.
 # Decode slope: same prompt at two generation lengths (ignore_eos), tok/s = (n2-n1)/(t2-t1),
-# so prefill cancels (docs/plans/2026-08-28-sparse-decode-attention.md, budget section).
+# so prefill cancels (docs/archive/plans/2026-08-28-sparse-decode-attention.md, budget section).
 # A sparse arm without a `sparse decode attention ACTIVE` line aborts.
 # NIAH_ARMS=none skips NIAH. Usage: MODEL=DeepSeek-V2-Lite-NVFP4-imp IMG=imp:test tools/analysis/sparse_mla_ab.sh <outdir>
 set -u

@@ -23,7 +23,7 @@ Mixture-of-experts models use a few experts per token.
 | host RAM taken at load | ~67 GiB (`MemAvailable` 74.7-75.9 -> 8.4-8.7 GiB on a 78 GiB host) |
 | card memory in use, start to ready | 25.6 GiB of 32; 45-50 s (76 s on the first start, which records the memory plan) |
 
-<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts note=v0.60.0 tree 0937bac4, harness_md5=7ade1eb1, docs/audit/launch_2026_10_31/fn.txt; rows one user, host RAM, card memory] -->
+<!-- [PROV: commit=ed4422b7 date=2026-10-31 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts note=v0.60.0 tree 0937bac4, harness_md5=7ade1eb1, https://github.com/kekzl/imp/blob/d53d594b/docs/audit/launch_2026_10_31/fn.txt; rows one user, host RAM, card memory] -->
 <!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=
        `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --bench-prompt-file novel_prose_2026.txt` n=3 server starts, 3 bench processes note=40 GiB row: CHANGELOG [0.50.0] #2621] -->
 

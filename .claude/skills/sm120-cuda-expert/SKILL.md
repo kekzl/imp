@@ -67,7 +67,7 @@ Traps: `gdn_scan_chunkpar.cu` sat at exactly 600 code LOC (kernel hard threshold
 | Chunk-parallel GDN prefill | `gdn.chunkpar_scan` |
 | INT8-IMMA prefill for GGUF MoE | dense Q4_K IMMA loses to cuBLAS and is off by design |
 
-FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `src/runtime/engine_init_resolver.cpp`); FP8 GDN-projection prefill re-measured 2026-09-01: class is 12-13% of the steady-state sum, ceiling +5%, inside the cuBLAS band, REFUTED (record `docs/plans/2026-08-31-fp8-ssm-prefill.md`). Prefill levers here: FA2 family, ragged prefill batching (`runtime.prefill_batch`, #1780), chunk-parallel scan.
+FP8 prefill stays DISABLED on sm_120 (cuBLAS `NOT_SUPPORTED` at non-aligned M, `src/runtime/engine_init_resolver.cpp`); FP8 GDN-projection prefill re-measured 2026-09-01: class is 12-13% of the steady-state sum, ceiling +5%, inside the cuBLAS band, REFUTED (record `docs/archive/plans/2026-08-31-fp8-ssm-prefill.md`). Prefill levers here: FA2 family, ragged prefill batching (`runtime.prefill_batch`, #1780), chunk-parallel scan.
 
 ## Closed classes (do not reopen without a new mechanism)
 

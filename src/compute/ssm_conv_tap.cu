@@ -1,7 +1,7 @@
 // Factored conv window for the batched speculative verify. Companion to
 // compute/gdn_factor.cuh (does the same for the recurrent state); a slot holds every GDN
 // layer's conv window AND h_state (memory/ssm_state_size.h), so dropping the verify's
-// spare slot needs both halves carried compactly (docs/plans/2026-09-12-factored-verify-spare.md).
+// spare slot needs both halves carried compactly (docs/archive/plans/2026-09-12-factored-verify-spare.md).
 // Conv half is cheaper: the drafted row shifts the kernel_size window by one, so the
 // carried form is the single new tap (channels halfs) vs the whole window
 // (channels*kernel_size floats) - 20 KiB vs 160 per layer at 10240 channels.

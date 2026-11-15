@@ -2,7 +2,7 @@
 
 // State of the batched speculative verify (engine_spec_batch_verify.cpp) and
 // of the per-request MTP bindings (engine_spec_mtp.cpp), kept out of
-// engine.h: docs/plans/2026-09-11-batched-mtp-verify.md.
+// engine.h: docs/archive/plans/2026-09-11-batched-mtp-verify.md.
 
 #include "memory/host_pinned.h"
 #include "runtime/suffix_shadow.h"
@@ -48,8 +48,8 @@ struct BatchVerifyState {
     bool factor_row = false;
     int fac_levels = 0;  // depth - 1 with factor_row: the levels allocated per group
     std::vector<int> free;
-    // Factor rows (docs/plans/2026-09-12-factored-verify-spare.md): a drafted row as (g, k, delta) per
-    // (layer, group x level, head) plus one conv tap per (layer, group x level), instead of a second full
+    // Factor rows (docs/archive/plans/2026-09-12-factored-verify-spare.md): a drafted row as (g, k, delta)
+    // per (layer, group x level, head) plus one conv tap per (layer, group x level), instead of a second full
     // recurrent slot (3.22 MiB vs 79.5 MiB per row on Qwen3.8-27B).
     float* d_fac = nullptr;
     void* d_tap = nullptr;  // half
@@ -78,7 +78,7 @@ struct MtpBind {
     int slot = 0;
     std::vector<int32_t> history, pending;
     int draft_ctx = -1;
-    // Economics guard (docs/plans/2026-08-31-mtp-multicandidate-hybrid.md):
+    // Economics guard (docs/archive/plans/2026-08-31-mtp-multicandidate-hybrid.md):
     // emitted per MTP verify vs the k that ran; adaptive chain depth
     // (AIMD, 0 = not bound yet).
     int econ_verifies = 0;
