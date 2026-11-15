@@ -66,6 +66,11 @@ struct ModelProfile {
     //   MLA        - DeepSeek-V2/V3, compressed KV projection, no standard RoPE on the latent path
     enum class AttnVariant { STANDARD, GEMMA4_SWA, GPTOSS_SWA, NOPE, MLA };
     AttnVariant attn_variant = AttnVariant::STANDARD;
+
+    // kv_cache.swa_snapshot_mb when unset: > 0 lets SWA sizing and prefix caching run together by default.
+    // Flint 256 (6 snapshots of 42.7 MiB): 35 of 49 layers keep a 513-token window, full KV caps a 32 GB
+    // card at 2 x 7625 tokens; with it an 81381-token chat resends with 81344 tokens cached.
+    int swa_snapshot_default_mb = 0;
 };
 
 // Log name of an attention variant.

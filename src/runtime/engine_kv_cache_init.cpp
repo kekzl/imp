@@ -410,14 +410,15 @@ void warn_host_expert_batch(const EngineConfig& ec, const GraphExecutor& executo
 // the pool relative to the budget's projection, never grow it, so it cannot
 // overcommit, and keeps the allocator headroom free for later allocations.
 int size_kv_from_residual(VRAMBudget& vb, const EngineConfig& ec, const KvShape& kv,
-                          size_t per_block_total_bytes, int max_blocks, int kv_blocks_planned,
-                          bool max_seq_len_explicit, bool& pool_floored) {
+                          size_t per_block_total_bytes, size_t swa_fixed_bytes, int max_blocks,
+                          int kv_blocks_planned, bool max_seq_len_explicit, bool& pool_floored) {
     if (per_block_total_bytes == 0)
         return max_blocks;
     const int kv_bs = kv.kv_bs;
     size_t free_now = 0, total_now = 0;
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_now, &total_now);
+    free_now = free_now > swa_fixed_bytes ? free_now - swa_fixed_bytes : 0;  // the windowed layers' group
     // IMMA prefill planes are still OUTSTANDING here (taken on each Q8_0
     // weight's first prefill, during warmup). Charging them here keeps the
     // residual pass from handing the pool bytes the next forward claims (#1899).
@@ -977,7 +978,11 @@ bool Engine::init_kv_cache() {
         demote_graphs_(GraphDemotionReason::ExpertsOnHost);
     warn_host_expert_batch(config_, *executor_, experts_on_host_);
 
-    const size_t per_block_total_bytes = static_cast<size_t>(n_kv_layers) * kv.layer_block_bytes;
+    const size_t per_block_total_bytes = cfg::kv_pool_block_bytes(n_kv_layers, kv.n_swa_layers, kv.swa_active,
+                                                                  kv.layer_block_bytes);
+    const size_t swa_fixed_bytes = cfg::kv_pool_swa_fixed_bytes(kv.n_swa_layers, kv.swa_active,
+                                                                vram_budget.swa_max_blocks,
+                                                                kv.layer_block_bytes);
     // Ceiling for a growable pool: starts at the plan's commit (may be less than
     // the live-derived kv_max_blocks due to conservative reserves) and grows
     // toward the live figure under admission pressure - without this max() growable
@@ -987,8 +992,9 @@ bool Engine::init_kv_cache() {
     const int kv_blocks_planned = config_.kv_cache_max_blocks > 0
                                       ? max_blocks
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
-    max_blocks = size_kv_from_residual(vram_budget, config_, kv, per_block_total_bytes, max_blocks,
-                                       kv_blocks_planned, max_seq_len_explicit_, kv_pool_floored_);
+    max_blocks = size_kv_from_residual(vram_budget, config_, kv, per_block_total_bytes, swa_fixed_bytes,
+                                       max_blocks, kv_blocks_planned, max_seq_len_explicit_,
+                                       kv_pool_floored_);
     if (!kv_pool_fits_vram_budget(config_, kv_bs, per_block_total_bytes, max_blocks, max_seq_len_explicit_))
         return false;
 
