@@ -270,13 +270,30 @@ class MockHandler(BaseHTTPRequestHandler):
             # binary's, exercised by the model-less Real API lane.
             self._send_json(200, {"ready": True, "model_loaded": True, "suspended": False})
         elif path == "/v1/models":
+            sup = lambda yes: {"supported": yes}
             self._send_json(200, {
                 "object": "list",
+                "has_more": False, "first_id": MOCK_MODEL_ID, "last_id": MOCK_MODEL_ID,
                 "data": [{
                     "id": MOCK_MODEL_ID,
                     "object": "model",
+                    "type": "model",                          # Anthropic Models API fields
+                    "display_name": MOCK_MODEL_ID,
                     "created": int(time.time()),
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "owned_by": "imp",
+                    "loaded": True,
+                    "max_input_tokens": MOCK_MAX_SEQ_LEN,
+                    "max_tokens": MOCK_MAX_SEQ_LEN,
+                    "capabilities": {
+                        "image_input": sup(False), "pdf_input": sup(False), "citations": sup(False),
+                        "batch": sup(False), "code_execution": sup(False),
+                        "structured_outputs": sup(False), "context_management": sup(False),
+                        "thinking": {"supported": True,
+                                     "types": {"enabled": sup(True), "adaptive": sup(True)}},
+                        "effort": {"supported": True, "low": sup(True), "medium": sup(True),
+                                   "high": sup(False), "xhigh": sup(True), "max": sup(False)},
+                    },
                     "max_model_len": MOCK_MAX_SEQ_LEN,        # vLLM convention
                     "meta": {"n_ctx_train": MOCK_MAX_SEQ_LEN,   # llama.cpp convention
                              # the loaded template's reasoning_effort list (imp; absent without one)
