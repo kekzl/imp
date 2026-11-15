@@ -59,6 +59,7 @@ constexpr ProfileRow kRows[] = {
     {ModelArch::COHERE2,          false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked},
     {ModelArch::BAILING_HYBRID,   false, false, false,  false, false,   Variant::STANDARD,   kAll},
     {ModelArch::KIMI_LINEAR,      false, false, false,  false, false,   Variant::STANDARD,   kAll},
+    {ModelArch::FLINT,            false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked},
     {ModelArch::GENERIC,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
 };
 // clang-format on
@@ -107,9 +108,11 @@ TEST(ModelProfileTable, ArchKeyedFieldsAndSwaWindows) {
               p.router_bias_is_expert_scale, p.expert_out_scale, p.per_layer_head_shapes, p.k_as_v_without_wv,
               p.v_rmsnorm, p.rope_full_head_dim, p.unit_softmax_scale, p.outlier_sensitive_logits})
             EXPECT_EQ(t, r->gemma4);
-        for (bool t : {p.learned_attn_sinks, p.moe_expert_bias_glu, p.moe_router_logit_bias,
-                       p.experts_convert_at_predequant, p.residual_rescale_in_scales})
+        for (bool t : {p.moe_expert_bias_glu, p.moe_router_logit_bias, p.experts_convert_at_predequant,
+                       p.residual_rescale_in_scales})
             EXPECT_EQ(t, r->gpt_oss);
+        // Learned attention sinks: gpt-oss (self_attn.sinks) and Flint (self_attn.softmax_offset).
+        EXPECT_EQ(p.learned_attn_sinks, r->gpt_oss || arch == ModelArch::FLINT);
         // FP16 attention projections decode from the FP8 sidecar: gpt-oss and Flash-Next.
         EXPECT_EQ(p.fp8_attn_proj_full, r->gpt_oss || arch == ModelArch::QWEN4_EXP);
         EXPECT_EQ(p.deny_cublas_fp16_acc, r->gemma3 || r->gemma4 || r->gpt_oss);

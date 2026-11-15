@@ -70,4 +70,20 @@ std::string recipe_json(const Recipe& r, const std::string& indent) {
     return j;
 }
 
+std::expected<void, std::string> write_declarations(const Options& opt, const Recipe& recipe,
+                                                    const std::vector<std::string>& excluded, bool calibrated,
+                                                    bool kv_fp8, const std::string& quantized_layers) {
+    const bool modelopt = opt.format == OutputFormat::Modelopt;
+    auto declared = modelopt ? write_modelopt_quant_config(opt.out_dir, excluded, calibrated, kv_fp8,
+                                                           recipe_json(recipe, "    "), quantized_layers,
+                                                           opt.act_a16)
+                             : write_recipe_yaml(opt.out_dir, excluded);
+    if (declared)
+        declared = declare_modelopt_in_config_json(opt.out_dir, excluded, kv_fp8, opt.act_a16, modelopt,
+                                                   !quantized_layers.empty());
+    if (declared && !modelopt)
+        declared = write_recipe_json(opt.out_dir, recipe_json(recipe, ""));
+    return declared;
+}
+
 }  // namespace imp::quantize

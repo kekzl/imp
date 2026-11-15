@@ -135,7 +135,16 @@ bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type
 // (Fp8Keep) declares quant_algo MIXED_PRECISION with that per-module table.
 [[nodiscard]] std::expected<void, std::string> write_modelopt_quant_config(
     const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated, bool kv_fp8,
-    const std::string& recipe, const std::string& quantized_layers = "");
+    const std::string& recipe, const std::string& quantized_layers = "", bool act_a16 = false);
+// The quantization_config object ModelOpt >= 0.31 writes into config.json, which vLLM keys on
+// (quant_method modelopt); a checkpoint with hf_quant_config.json alone loads there as unquantized.
+std::string modelopt_config_json_block(const std::vector<std::string>& excluded, bool kv_fp8, bool act_a16);
+// Declares a single-algorithm Modelopt checkpoint in out_dir/config.json (copy_aux_files copied it). No-op
+// for another format or a mixed checkpoint (FP8 row-scale lm_head: imp's own layout); --act a16 on either
+// is an error.
+[[nodiscard]] std::expected<void, std::string> declare_modelopt_in_config_json(
+    const std::string& out_dir, const std::vector<std::string>& excluded, bool kv_fp8, bool act_a16,
+    bool modelopt, bool mixed);
 
 // imp_recipe.json: the recipe of a compressed-tensors export, which has no hf_quant_config.json.
 [[nodiscard]] std::expected<void, std::string> write_recipe_json(const std::string& out_dir,

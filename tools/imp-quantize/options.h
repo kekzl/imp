@@ -26,6 +26,9 @@ struct Options {
     LmHeadExport lm_head = LmHeadExport::Source;
     bool lm_head_set = false;
     KvHint kv_hint = KvHint::Auto;  // --kv-hint (#2480)
+    // --act a16: a Modelopt checkpoint declares quant_algo W4A16_NVFP4 (weights only; vLLM then takes its
+    // FP4 Marlin GEMM instead of quantizing activations). The tensors are the same either way.
+    bool act_a16 = false;
     // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half carries the #1273
     // divergence, but excluding it measured ~1.5% WORSE perplexity end to end. Opt-in since the
     // trade may still favor models with a higher gate share than the one checkpoint measured.

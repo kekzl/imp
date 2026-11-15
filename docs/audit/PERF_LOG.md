@@ -4,6 +4,55 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-15 · Flint (RecursiveSI/flint): port check against a CPU reference, quantization and calibration (B-85, B-86)
+
+Protocol: CPU FP32 reference `tools/analysis/flint_reference.py` (written from Recursive's SGLang model code
+0.1.4; BF16 SafeTensors or a ModelOpt NVFP4 checkpoint dequantized per tensor), rows of
+`tools/analysis/ppl_corpus_45k.txt` without BOS; imp `imp-cli --perplexity` on the decoded text of the same ids,
+`runtime.deterministic=true`, `speculative.mtp_k=0`; RTX 5090 32 GB. Calibration corpus `calib_corpus.txt`, 16384
+tokens, disjoint from the scored text. Raw logs `/mnt/data/scratch/flint_ref/` (not in the repo).
+
+Port check, 1023 rows:
+
+| weights | runtime | PPL |
+|---|---|---|
+| BF16 | reference | 10.5095 |
+| `imp-quantize` round-to-nearest NVFP4 | reference, W4A16 | 11.6228 |
+| same | reference, W4A4 emulation (`--a4`) | 12.3226 |
+| same | imp | 12.8507 |
+
+- Layer 0 output, imp vs reference variants on the same NVFP4 weights (relative error, mean over 1024 rows):
+  reference 0.285, without sinks 0.516, sink logit x sqrt(128) 0.899, with RoPE on a NoPE layer 0.378, without
+  QK norm 0.892, attention skipped 0.934. The reference's own W4A16 vs W4A4 outputs differ by 0.303: the residual
+  after layer 0 (rms 0.022) is a difference of terms of rms 0.090 and 0.054.
+- 109612 tensors assigned, 0 skipped; tokenizer ids equal HF `tokenizers` on the 1024- and 4096-token texts
+  (same count and PPL rows; ids not compared one by one).
+
+Where round-to-nearest hurts, 1023 rows, only the named group quantized (min/max block scales), KL to BF16:
+attention 0.143, shared experts 0.139, routed experts 0.099, attention + dense + shared (5 % of the parameters)
+0.207, everything 0.215. Data-free MSE search of the block scale: 0.228 (no gain). GPTQ on attention + dense +
+shared with BF16 Hessians: 0.166 / 0.129 / 0.134 at damp 0.01 / 0.1 / 1; the same tensors in FP8: 0.071, with
+routed experts in NVFP4 0.123. Standard errors 0.02-0.03: 1023 rows resolve a factor, not 10 %.
+
+Checkpoints, 4095 rows, reference W4A16 unless noted, BF16 PPL 12.7174:
+
+| checkpoint | PPL | NLL - BF16 | KL to BF16 | argmax agrees |
+|---|---|---|---|---|
+| `imp-quantize` round-to-nearest | 13.7794 | +0.0802 +- 0.0171 | 0.2721 +- 0.0135 | 79.22 % |
+| `imp-quantize --gptq` damp 0.1 (196 Hessians, 24407 tensors, output loss 50.2 % of round-to-nearest) | 13.9732 | +0.0942 +- 0.0160 | 0.2202 +- 0.0139 | 82.61 % |
+| `imp-quantize --gptq` damp 10 | 13.3926 | +0.0517 +- 0.0155 | 0.2158 +- 0.0144 | 82.15 % |
+| Recursive's NVFP4 GGUF, repacked | 12.8613 | +0.0113 +- 0.0162 | 0.2214 +- 0.0135 | 82.15 % |
+| the repack in imp (W4A4 prefill) | 13.8409 | | | |
+
+imp on the repack: pp512 25311.22 / 23997.42 / 25367.52, tg128 371.77 / 368.68 / 372.63 tok/s (3 process
+starts, `--bench-reps 5`, `speculative.ngram=false`), own peak 25007-25047 MiB; server smoke: chat, reasoning
+split, OpenAI and Anthropic tool calls; `degen_suite.py` 49 checks, 1 FAIL (turn-2 prefix-snapshot resend), 2
+skipped, 0 stderr hits. vLLM 0.33.0 on the same card: loads with `quantization_config` in `config.json`
+(31125 MiB at `--gpu-memory-utilization 0.90`), fails with `hf_quant_config.json` alone ("Unquantized MoE
+backend", CUDA out of memory).
+
+---
+
 ## 2026-11-15 · Qwen3.8-27B MTP lane: NVFP4 body copy replaces the E4M3 copy (B-83), deeper base depth refuted (B-84)
 
 Protocol: Qwen3.8-27B-NVFP4-vllm, RTX 5090 32 GB, default `imp-server` (concurrent GDN hybrid, bound verify lane), fresh server per arm, `tools/analysis/agent_turn_replay.py --serial --seed 1000`, 3 recorded familiar dev50k sessions x 30 turns, step table from `diagnostics.spec_trace`. "Padded" = `diagnostics.mtp_verify_pin=7`, `speculative.mtp_k=7`, `runtime.deterministic=true` (texts md5-equal across arms). Control = the same branch with the E4M3 copy. Raw logs `/mnt/data/scratch/dec_2026_11_15/` (not in the repo).

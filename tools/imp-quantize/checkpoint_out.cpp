@@ -455,11 +455,9 @@ bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type
     return fmt == OutputFormat::Modelopt && kv_fp8_hint_on(h, model_type);
 }
 
-std::expected<void, std::string> write_modelopt_quant_config(const std::string& out_dir,
-                                                             const std::vector<std::string>& excluded,
-                                                             bool calibrated, bool kv_fp8,
-                                                             const std::string& recipe,
-                                                             const std::string& quantized_layers) {
+std::expected<void, std::string> write_modelopt_quant_config(
+    const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated, bool kv_fp8,
+    const std::string& recipe, const std::string& quantized_layers, bool act_a16) {
     std::ofstream f(fs::path(out_dir) / "hf_quant_config.json");
     if (!f)
         return std::unexpected("cannot write hf_quant_config.json");
@@ -469,7 +467,11 @@ std::expected<void, std::string> write_modelopt_quant_config(const std::string& 
       << (calibrated ? "awq" : "none") << "\",\n"
       << "    \"recipe\": " << recipe << " },\n"
       << "  \"quantization\": {\n"
-      << "    \"quant_algo\": \"" << (mixed ? "MIXED_PRECISION" : "NVFP4") << "\",\n"
+      << "    \"quant_algo\": \""
+      << (mixed     ? "MIXED_PRECISION"
+          : act_a16 ? "W4A16_NVFP4"
+                    : "NVFP4")
+      << "\",\n"
       << "    \"kv_cache_quant_algo\": " << (kv_fp8 ? "\"FP8\"" : "null") << ",\n"
       << "    \"group_size\": 16,\n";
     if (mixed)
@@ -482,6 +484,52 @@ std::expected<void, std::string> write_modelopt_quant_config(const std::string& 
     // the caller printed an empty line and exited 1.
     if (!f)
         return std::unexpected("write failed for hf_quant_config.json");
+    return {};
+}
+
+std::string modelopt_config_json_block(const std::vector<std::string>& excluded, bool kv_fp8, bool act_a16) {
+    const char* tensor = "{\"dynamic\": false, \"num_bits\": 4, \"type\": \"float\", \"group_size\": 16}";
+    std::string s = "{\n    \"config_groups\": {\n      \"group_0\": {\n";
+    if (!act_a16)
+        s += std::string("        \"input_activations\": ") + tensor + ",\n";
+    s += std::string("        \"weights\": ") + tensor +
+         ",\n        \"targets\": [\"Linear\"]\n      }\n    },\n";
+    s += "    \"ignore\": [";
+    for (size_t i = 0; i < excluded.size(); i++)
+        s += std::string(i ? ", " : "") + '"' + json_escape(excluded[i]) + '"';
+    s += "],\n";
+    s += std::string("    \"quant_algo\": \"") + (act_a16 ? "W4A16_NVFP4" : "NVFP4") + "\",\n";
+    s += "    \"group_size\": 16,\n";
+    if (kv_fp8)
+        s += "    \"kv_cache_scheme\": {\"dynamic\": false, \"num_bits\": 8, \"type\": \"float\"},\n";
+    s += "    \"producer\": {\"name\": \"imp-quantize\", \"version\": \"2\"},\n";
+    s += "    \"quant_method\": \"modelopt\"\n  }";
+    return s;
+}
+
+std::expected<void, std::string> declare_modelopt_in_config_json(const std::string& out_dir,
+                                                                 const std::vector<std::string>& excluded,
+                                                                 bool kv_fp8, bool act_a16, bool modelopt,
+                                                                 bool mixed) {
+    if (act_a16 && (!modelopt || mixed))
+        return std::unexpected(
+            "--act a16 declares one algorithm for a modelopt checkpoint: use --format "
+            "modelopt with --lm-head source or nvfp4");
+    if (!modelopt || mixed)
+        return {};
+    const fs::path path = fs::path(out_dir) / "config.json";
+    if (!fs::exists(path))
+        return {};  // nothing to declare in; hf_quant_config.json stands alone
+    const std::string text = read_file(path.string());
+    if (text.empty())
+        return std::unexpected("cannot read " + path.string());
+    const auto patched = patch_config_json(text, modelopt_config_json_block(excluded, kv_fp8, act_a16));
+    if (!patched)
+        return std::unexpected(patched.error());
+    std::ofstream f(path);
+    f << *patched;
+    if (!f)
+        return std::unexpected("cannot write config.json");
     return {};
 }
 

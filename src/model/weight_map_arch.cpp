@@ -31,6 +31,16 @@ bool arch_canonical_name(ModelArch arch, int declared_layers, std::string& name)
         name = lfm2_canonical_name(name);
         return true;
     }
+    if (arch == ModelArch::FLINT) {
+        // The per-head sink logit and the selection-only router bias under the names the map knows.
+        constexpr std::string_view kSink = ".self_attn.softmax_offset";
+        constexpr std::string_view kBias = ".mlp.gate.expert_bias";
+        if (name.ends_with(kSink))
+            name.replace(name.size() - kSink.size(), kSink.size(), ".self_attn.sinks");
+        else if (name.ends_with(kBias))
+            name.replace(name.size() - kBias.size(), kBias.size(), ".mlp.gate.bias");
+        return true;
+    }
     constexpr std::string_view kLayers = "model.layers.";
     if (arch != ModelArch::DEEPSEEK || declared_layers <= 0 || !name.starts_with(kLayers))
         return true;

@@ -85,6 +85,8 @@ static void refuse_safetensors_only_arch(ModelArch arch) {
         throw std::runtime_error("bailing_hybrid GGUF is not supported; load the SafeTensors checkpoint");
     if (arch == ModelArch::KIMI_LINEAR)
         throw std::runtime_error("kimi_linear GGUF is not supported; load the SafeTensors checkpoint");
+    if (arch == ModelArch::FLINT)
+        throw std::runtime_error("flint GGUF is not supported; load the SafeTensors checkpoint");
 }
 
 // ---- Main GGUF loader ----

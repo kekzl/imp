@@ -32,7 +32,8 @@ enum class ModelArch {
     BAILING_HYBRID,  // BailingMoeV3ForCausalLM (Ling-3.0): 3:1 KDA (gdn_kda) / MLA layers, grouped sigmoid
                      // MoE
     KIMI_LINEAR,  // KimiLinearForCausalLM: 3:1 KDA (softplus gate, LoRA f/g) / MLA NoPE layers, sigmoid MoE
-    GENERIC,      // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
+    FLINT,  // FlintForCausalLM: Qwen3-MoE block + learned sinks, SWA (RoPE) / full (NoPE) layers, sigmoid MoE
+    GENERIC,  // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 
 const char* model_arch_name(ModelArch arch);

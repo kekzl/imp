@@ -5,7 +5,9 @@
 // paths: either would make two identical runs differ.
 
 #include <cstdint>
+#include <expected>
 #include <string>
+#include <vector>
 
 namespace imp::quantize {
 
@@ -46,5 +48,13 @@ const char* build_tree_id();
 // The recipe as a JSON object, keys in fixed order, each line prefixed with `indent`
 // (the opening brace is not).
 std::string recipe_json(const Recipe& r, const std::string& indent);
+
+// The checkpoint's quantization declaration. modelopt: hf_quant_config.json, plus quantization_config in
+// config.json when one algorithm covers the checkpoint (quantized_layers empty). compressed-tensors:
+// recipe.yaml and recipe.json (config.json was patched by copy_aux_files).
+[[nodiscard]] std::expected<void, std::string> write_declarations(const Options& opt, const Recipe& recipe,
+                                                                  const std::vector<std::string>& excluded,
+                                                                  bool calibrated, bool kv_fp8,
+                                                                  const std::string& quantized_layers);
 
 }  // namespace imp::quantize

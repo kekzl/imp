@@ -7,6 +7,7 @@
 // was indistinguishable from one the author deliberately left in BF16. Pure and header-only:
 // the loader drives it with a real tensor map, the CPU lane with synthetic names.
 
+#include "model/nvfp4_undeclared.h"  // nvfp4_undeclared, same loader call site
 #include <cstdint>
 #include <regex>
 #include <string>

@@ -160,6 +160,11 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "kimi_linear", ModelArch::KIMI_LINEAR},  // refused at load (gguf_loader.cpp)
     {HF_CLASS, "KimiLinearForCausalLM", ModelArch::KIMI_LINEAR},
     {HF_MODEL_TYPE, "kimi_linear", ModelArch::KIMI_LINEAR},
+
+    // FLINT: softmax_offset / expert_bias renamed in weight_map_arch.cpp
+    {GGUF, "flint", ModelArch::FLINT},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "FlintForCausalLM", ModelArch::FLINT},
+    {HF_MODEL_TYPE, "flint", ModelArch::FLINT},
 };
 
 struct HfConfigHookRow {
@@ -186,6 +191,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::COHERE2, parse_cohere2_config},
     {ModelArch::BAILING_HYBRID, parse_bailing_hybrid_config},
     {ModelArch::KIMI_LINEAR, parse_kimi_linear_config},
+    {ModelArch::FLINT, parse_flint_config},
 };
 // clang-format on
 

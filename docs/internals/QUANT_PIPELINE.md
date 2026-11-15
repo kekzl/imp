@@ -80,6 +80,40 @@ divisor (`1 / weight_global_scale`), Modelopt as the multiplier directly. PR #88
 CUTLASS NVFP4 x NVFP4 prefill cache for Modelopt exports (Qwen3-Coder-30B, Mistral-3.2,
 Qwen3.6, Gemma-4); the own tile GEMM (`src/quant/nvfp4_gemm_tile.cu`) reads that cache today, CUTLASS left the build in #2938.
 
+## A checkpoint vLLM also loads
+
+| Fact | Detail |
+|---|---|
+| Recipe | `imp-quantize --format modelopt --lm-head source` |
+| What vLLM keys on | `quantization_config` in `config.json` with `quant_method: modelopt`; `imp-quantize` writes it beside `hf_quant_config.json` when one algorithm covers the checkpoint |
+| Without it | vLLM 0.33.0 loaded an NVFP4 Flint as unquantized ("Unquantized MoE backend") and ran out of memory on 32 GB |
+| `--act a16` | declares `quant_algo: W4A16_NVFP4` (weights only, vLLM takes its FP4 Marlin GEMM); `--act a4` (default) declares `NVFP4`; the tensors are the same |
+| imp | reads both declarations; NVFP4 tensors with no declaration it knows are refused (`src/model/nvfp4_undeclared.h`) |
+
+## Calibrating a checkpoint that fits no card
+
+`imp-cli --calibrate` needs the source on the GPU; Flint's BF16 source is 74.1 GiB. Its statistics come from a
+CPU forward instead:
+
+```bash
+python3 tools/analysis/flint_hessians.py --model ./flint --text calib_corpus.txt --max-tokens 16384 \
+    --out ./hess --imphes ./flint.hess            # python:3.13-slim + torch (CPU), safetensors, tokenizers
+imp-quantize --model ./flint --out ./flint-nvfp4 --format modelopt --lm-head source --act a16 \
+    --gptq ./flint.hess --gptq-damp 10
+```
+
+Flint, 4095 rows, W4A16 CPU reference, against BF16 (PPL 12.717), `tools/analysis/flint_quant_eval.py`:
+
+| Checkpoint | PPL | NLL vs BF16 | KL vs BF16 | argmax agrees |
+|---|---|---|---|---|
+| `imp-quantize`, round-to-nearest | 13.779 | +0.080 +- 0.017 | 0.272 +- 0.013 | 79.2 % |
+| `imp-quantize --gptq`, damp 0.1 | 13.973 | +0.094 +- 0.016 | 0.220 +- 0.014 | 82.6 % |
+| `imp-quantize --gptq`, damp 10 | 13.393 | +0.052 +- 0.016 | 0.216 +- 0.014 | 82.2 % |
+| Recursive's NVFP4 (GGUF repacked, `flint_gguf_to_modelopt.py`) | 12.861 | +0.011 +- 0.016 | 0.221 +- 0.014 | 82.2 % |
+
+- GPTQ moves the distribution 19-21 % closer to BF16 and recovers a third of the loss at damp 10.
+- Recursive's quantization keeps the loss at BF16's, so `kekzle/Flint-NVFP4` is the repack, not an imp quant.
+
 ## GEMM dispatch: the registry pattern
 
 `src/exec/gemm_kernel_registry.{cpp,h}` is a (strategy key -> function pointer) table that

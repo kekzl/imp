@@ -586,3 +586,37 @@ TEST(QuantizeKvHint, LoaderReadsTheHintTheWriterDeclares) {
         EXPECT_EQ(cfg.exclude_modules[0], "lm_head");
     }
 }
+
+// What vLLM keys a ModelOpt checkpoint on (config.json quantization_config, quant_method modelopt): without
+// it vLLM 0.33.0 loaded an NVFP4 Flint as unquantized and ran out of memory.
+TEST(QuantizeCheckpointOut, ModeloptConfigJsonBlockDeclaresTheAlgorithm) {
+    const std::vector<std::string> excluded = {"lm_head", "model.layers.0.mlp.gate"};
+    const std::string a4 = modelopt_config_json_block(excluded, /*kv_fp8=*/true, /*act_a16=*/false);
+    EXPECT_NE(a4.find("\"quant_method\": \"modelopt\""), std::string::npos);
+    EXPECT_NE(a4.find("\"quant_algo\": \"NVFP4\""), std::string::npos);
+    EXPECT_NE(a4.find("\"input_activations\""), std::string::npos) << "W4A4 declares the activation side";
+    EXPECT_NE(a4.find("\"kv_cache_scheme\""), std::string::npos);
+    EXPECT_NE(a4.find("\"ignore\": [\"lm_head\", \"model.layers.0.mlp.gate\"]"), std::string::npos);
+    const std::string a16 = modelopt_config_json_block(excluded, false, true);
+    EXPECT_NE(a16.find("\"quant_algo\": \"W4A16_NVFP4\""), std::string::npos);
+    EXPECT_EQ(a16.find("\"input_activations\""), std::string::npos) << "weights only";
+    EXPECT_EQ(a16.find("\"kv_cache_scheme\""), std::string::npos);
+    const auto patched = patch_config_json("{\"model_type\": \"flint\", \"hidden_size\": 2048}", a16);
+    ASSERT_TRUE(patched.has_value()) << patched.error();
+    EXPECT_NE(patched->find("\"quantization_config\""), std::string::npos);
+    EXPECT_NE(patched->find("\"hidden_size\": 2048"), std::string::npos);
+}
+
+TEST(QuantizeCheckpointOut, ModeloptDeclarationOnlyForOneAlgorithm) {
+    const std::string none = "/nonexistent-imp-quantize-out";
+    EXPECT_TRUE(declare_modelopt_in_config_json(none, {}, false, false, /*modelopt=*/false, /*mixed=*/false));
+    EXPECT_TRUE(declare_modelopt_in_config_json(none, {}, false, false, true, /*mixed=*/true))
+        << "a mixed checkpoint keeps hf_quant_config.json alone";
+    EXPECT_FALSE(
+        declare_modelopt_in_config_json(none, {}, false, /*act_a16=*/true, /*modelopt=*/false, false))
+        << "--act a16 with the compressed-tensors format";
+    EXPECT_FALSE(declare_modelopt_in_config_json(none, {}, false, true, true, /*mixed=*/true))
+        << "--act a16 with an FP8 lm_head";
+    EXPECT_TRUE(declare_modelopt_in_config_json(none, {}, false, true, true, false))
+        << "no config.json to declare in is not an error";
+}
