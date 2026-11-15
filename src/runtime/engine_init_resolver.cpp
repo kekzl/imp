@@ -4,6 +4,7 @@
 // Engine::* with declarations in engine.h.
 
 #include "runtime/engine.h"
+#include "runtime/model_source_bytes.h"
 #include "runtime/rope_override.h"
 
 #include <algorithm>
@@ -841,6 +842,14 @@ void Engine::init_resolve_sparse_attention_() {
 
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
+    if (const int mb = cfg::swa_snapshot_auto_mb(runtime_config_.was_set("kv_cache.swa_snapshot_mb"),
+                                                 config_.use_prefix_caching,
+                                                 model_->profile().swa_snapshot_default_mb);
+        mb > 0) {
+        runtime_config_.kv_cache.swa_snapshot_mb = mb;
+        IMP_LOG_INFO("kv_cache.swa_snapshot_mb: unset -> %d (arch=%s: SWA sizing with prefix caching)", mb,
+                     model_arch_name(mcfg.arch));
+    }
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
         // config.h: a CLI value wins over the file. --max-seq-len / a C-API
         // value is already in config_.max_seq_len; the key fills only an
@@ -915,8 +924,10 @@ void Engine::init_compute_max_seq_len_() {
         if (mcfg.is_nvfp4_prequant) {
             const int host_layers =
                 estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram);
-            size_t reserved =
-                approx_weight_footprint_bytes(mcfg, host_layers) + native_cache_demand().total();
+            size_t reserved = nvfp4_weight_reserve_bytes(approx_weight_footprint_bytes(mcfg, host_layers),
+                                                         host_layers,
+                                                         model_source_bytes(model_->source_path())) +
+                              native_cache_demand().total();
             free_for_kv = (free_vram > reserved) ? (free_vram - reserved) : 0;
             // The expert LRU cache is sized from free VRAM at its own init, which runs
             // before the KV plan, and takes moe.expert_cache_budget_pct of it. KV only

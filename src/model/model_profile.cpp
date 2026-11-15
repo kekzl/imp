@@ -61,6 +61,7 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.outlier_sensitive_logits = is_gemma4;
 
     p.learned_attn_sinks = is_gpt_oss || cfg.arch == ModelArch::FLINT;
+    p.swa_snapshot_default_mb = cfg.arch == ModelArch::FLINT ? 256 : 0;
     p.moe_expert_bias_glu = is_gpt_oss;
     p.moe_router_logit_bias = is_gpt_oss;
     p.experts_convert_at_predequant = is_gpt_oss;

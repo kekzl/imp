@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "runtime/config.h"
+#include "runtime/model_source_bytes.h"
 #include "core/process_diag.h"
 #include "model/model_arch.h"
 #include "runtime/process_diag_install.h"
@@ -84,6 +85,46 @@ TEST(RuntimeConfigTest, SwaSizingTriState) {
     EXPECT_EQ(RuntimeConfig{}.kv_cache.swa_snapshot_mb, 0);
     set_(cfg, {"kv_cache.swa_snapshot_mb=512"});
     EXPECT_EQ(cfg.kv_cache.swa_snapshot_mb, 512);
+}
+
+// An unset kv_cache.swa_snapshot_mb takes the arch default only where it matters: prefix caching on.
+TEST(RuntimeConfigTest, SwaSnapshotAutoFollowsTheArchDefault) {
+    using imp::cfg::swa_snapshot_auto_mb;
+    EXPECT_EQ(swa_snapshot_auto_mb(/*key_set=*/false, /*prefix_caching=*/true, 256), 256);
+    EXPECT_EQ(swa_snapshot_auto_mb(true, true, 256), 0) << "an operator value, 0 included, stands";
+    EXPECT_EQ(swa_snapshot_auto_mb(false, false, 256), 0)
+        << "no prefix caching: SWA sizing needs no snapshots";
+    EXPECT_EQ(swa_snapshot_auto_mb(false, true, 0), 0) << "an arch without a default keeps the key at 0";
+    RuntimeConfig cfg;
+    EXPECT_FALSE(cfg.was_set("kv_cache.swa_snapshot_mb"));
+    set_(cfg, {"kv_cache.swa_snapshot_mb=0"});
+    EXPECT_TRUE(cfg.was_set("kv_cache.swa_snapshot_mb"));
+}
+
+// max_seq_len auto on a native-NVFP4 checkpoint holds back the shards on disk, not a larger shape estimate.
+TEST(RuntimeConfigTest, Nvfp4WeightReserveTakesTheSmallerOfDiskAndEstimate) {
+    constexpr size_t kGb = 1000ULL * 1000 * 1000;
+    EXPECT_EQ(imp::nvfp4_weight_reserve_bytes(268 * kGb / 10, 0, 233 * kGb / 10), 233 * kGb / 10) << "Flint";
+    EXPECT_EQ(imp::nvfp4_weight_reserve_bytes(20 * kGb, 0, 21 * kGb), 20 * kGb)
+        << "a checkpoint with a tower that does not load keeps the estimate";
+    EXPECT_EQ(imp::nvfp4_weight_reserve_bytes(20 * kGb, 0, 0), 20 * kGb) << "size unknown";
+    EXPECT_EQ(imp::nvfp4_weight_reserve_bytes(9 * kGb, 12, 80 * kGb), 9 * kGb);
+    EXPECT_EQ(imp::nvfp4_weight_reserve_bytes(90 * kGb, 12, 80 * kGb), 90 * kGb)
+        << "host experts: the estimate already left them out, the disk size does not";
+}
+
+// A block of context costs only the layers that grow: Flint 49 KV layers, 35 windowed.
+TEST(RuntimeConfigTest, KvPoolBlockCostCountsOnlyGrowingLayers) {
+    using imp::cfg::kv_pool_block_bytes;
+    using imp::cfg::kv_pool_swa_fixed_bytes;
+    constexpr size_t kLayerBlock = 32768;  // 16 tokens x 4 KV heads x 128 x (K + V) x 2 bytes
+    EXPECT_EQ(kv_pool_block_bytes(49, 35, /*swa_active=*/false, kLayerBlock), 49u * kLayerBlock);
+    EXPECT_EQ(kv_pool_block_bytes(49, 35, true, kLayerBlock), 14u * kLayerBlock);
+    EXPECT_EQ(kv_pool_block_bytes(49, 49, true, kLayerBlock), 0u) << "every layer windowed: nothing grows";
+    EXPECT_EQ(kv_pool_block_bytes(49, 0, true, kLayerBlock), 49u * kLayerBlock);
+    EXPECT_EQ(kv_pool_swa_fixed_bytes(35, true, 168, kLayerBlock), 35u * 168u * kLayerBlock);  // 183.8 MiB
+    EXPECT_EQ(kv_pool_swa_fixed_bytes(35, false, 168, kLayerBlock), 0u);
+    EXPECT_EQ(kv_pool_swa_fixed_bytes(35, true, 0, kLayerBlock), 0u);
 }
 
 // One gate for the max_seq_len resolver and init_kv_cache: auto + prefix caching + a snapshot

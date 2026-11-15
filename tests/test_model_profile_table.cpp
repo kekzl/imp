@@ -113,6 +113,8 @@ TEST(ModelProfileTable, ArchKeyedFieldsAndSwaWindows) {
             EXPECT_EQ(t, r->gpt_oss);
         // Learned attention sinks: gpt-oss (self_attn.sinks) and Flint (self_attn.softmax_offset).
         EXPECT_EQ(p.learned_attn_sinks, r->gpt_oss || arch == ModelArch::FLINT);
+        // Unset kv_cache.swa_snapshot_mb: only Flint takes a budget (SWA sizing beside prefix caching).
+        EXPECT_EQ(p.swa_snapshot_default_mb, arch == ModelArch::FLINT ? 256 : 0);
         // FP16 attention projections decode from the FP8 sidecar: gpt-oss and Flash-Next.
         EXPECT_EQ(p.fp8_attn_proj_full, r->gpt_oss || arch == ModelArch::QWEN4_EXP);
         EXPECT_EQ(p.deny_cublas_fp16_acc, r->gemma3 || r->gemma4 || r->gpt_oss);

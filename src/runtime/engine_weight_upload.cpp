@@ -3,6 +3,7 @@
 // reserves L2 cache, tunes cudaMallocAsync, sizes the expert-upload VRAM reserve, wires StreamingLLM / host-offload guards, and hashes the model identity for the persisted prefix cache.
 
 #include "runtime/engine.h"
+#include "runtime/model_source_bytes.h"
 #include "exec/executor.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
@@ -70,7 +71,6 @@ uint64_t Engine::model_fingerprint_() const {
     return h;
 }
 
-namespace {
 // Bytes of model on disk, the one comparison that can tell a weight upload
 // from a card someone else is on. A checkpoint directory sums its weight
 // shards (config/tokenizer JSON is noise); 0 = could not tell.
@@ -95,6 +95,8 @@ size_t model_source_bytes(const std::string& path) {
     }
     return ec ? 0 : total;
 }
+
+namespace {
 
 // cudaLimitPersistingL2CacheSize is a per-primary-context device limit that
 // survives Engine teardown, so a previous model's reservation persists.

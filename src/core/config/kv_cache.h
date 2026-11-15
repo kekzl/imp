@@ -4,6 +4,7 @@
 // isolates a TU that touches only this section from the other eight's churn.
 // Pure move, byte-identical; dispatch_policy.h still includes all nine.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -46,7 +47,8 @@ struct KVCache {
 
     // SWA window snapshots: device budget (MiB) for packed windowed-layer KV
     // snapshots, what makes prefix caching valid under SWA sizing (freed window
-    // blocks can't back reuse otherwise). One snapshot per prefill end, LRU. 0 = off.
+    // blocks can't back reuse otherwise). One snapshot per prefill end, LRU. 0 = off. Unset with prefix
+    // caching on, Flint takes 256 (ModelProfile::swa_snapshot_default_mb): context 2 x 7625 -> 131072 tokens.
     int swa_snapshot_mb = 0;
 
     // Host spill tier (#2203): pinned host RAM (MiB) for prefix-cache blocks reclaimed under pool
@@ -83,6 +85,25 @@ struct KVCache {
                (m == SwaSizingMode::Auto && (!prefix_caching || swa_snapshot_mb > 0));
     }
 };
+
+// The snapshot budget an unset kv_cache.swa_snapshot_mb resolves to: the arch default while prefix caching
+// is on (without it SWA sizing needs no snapshots), 0 = leave the key alone.
+[[nodiscard]] constexpr int swa_snapshot_auto_mb(bool key_set, bool prefix_caching, int arch_default_mb) {
+    return !key_set && prefix_caching && arch_default_mb > 0 ? arch_default_mb : 0;
+}
+// Bytes one more block of context costs the KV pool: under SWA sizing only the global layers grow, the
+// windowed layers hold a fixed group (kv_pool_swa_fixed_bytes).
+[[nodiscard]] constexpr size_t kv_pool_block_bytes(int n_kv_layers, int n_swa_layers, bool swa_active,
+                                                   size_t layer_block_bytes) {
+    const int grow = swa_active ? n_kv_layers - n_swa_layers : n_kv_layers;
+    return static_cast<size_t>(grow > 0 ? grow : 0) * layer_block_bytes;
+}
+[[nodiscard]] constexpr size_t kv_pool_swa_fixed_bytes(int n_swa_layers, bool swa_active,
+                                                       int swa_group_blocks, size_t layer_block_bytes) {
+    return swa_active && swa_group_blocks > 0
+               ? static_cast<size_t>(n_swa_layers) * static_cast<size_t>(swa_group_blocks) * layer_block_bytes
+               : 0;
+}
 
 // fp8_scale = "calibrate": margin over the calibration amax before E4M3 saturates (448), never swept.
 inline constexpr float kKvFp8ScaleHeadroom = 2.0f;
