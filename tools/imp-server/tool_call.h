@@ -103,6 +103,9 @@ std::vector<std::string> tool_names_from_request(const json& tools);
 // </parameter>...); exported so the streaming paths can fall back to it when
 // json::parse fails on a <tool_call> body. Fills tc.name/tc.arguments only.
 bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc);
+// True for the Qwen3.8 slip parse_qwen36_xml_call also takes: "<parameter=NAME>" opens the call and
+// the next tag is its first real <parameter=.
+bool qwen_xml_parameter_named_call(const std::string& body);
 // GLM-4.x NAME<arg_key>K</arg_key><arg_value>V</arg_value> body (GLM-4.7-Flash template).
 bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc);
 // Cohere2 <|START_ACTION|> body (a JSON array of {tool_name, parameters}); appends every call.

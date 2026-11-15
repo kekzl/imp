@@ -307,6 +307,20 @@ TEST(ToolStreamFilterChatML, Qwen36XmlFallback) {
     EXPECT_EQ(r.content, "");
 }
 
+TEST(ToolStreamFilterChatML, ParameterTagNamingTheFunctionStreamsAsACall) {
+    std::string input =
+        "On it.\n\n<tool_call>\n"
+        "<parameter=bash>\n"
+        "<parameter=command>\nls -la\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>";
+    auto r = feed_char_by_char(ChatTemplateFamily::CHATML, input);
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_EQ(r.calls[0].name, "bash");
+    EXPECT_EQ(json::parse(r.calls[0].arguments)["command"], "ls -la");
+    EXPECT_EQ(r.content, "On it.\n\n");
+}
+
 // EOS before </tool_call>: the buffered body still parses as a call (stream_driver emits it on a
 // "stop" finish); finish() keeps the raw text for the length/unparseable fallback.
 TEST(ToolStreamFilterChatML, UnclosedCallParsesAtStreamEnd) {
