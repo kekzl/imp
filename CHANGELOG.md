@@ -4,8 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.67.1] - 2026-11-15
+
+### Changed
+- MTP on a concurrent GDN-hybrid server reads the draft head body from an NVFP4 copy in place of the E4M3 copy: Qwen3.8-27B-NVFP4 agent replay, 1 chat, 224.5 -> 229.2 tok/s decode, KV plan 13233 -> 13728 blocks, MTP workspace 772.70 -> 602.70 MiB on a 32 GB card. (#3127)
+
 ### Fixed
-- Dense NVFP4 prefix-cache resend answers like the first send: prompt rows skip the tile's stream-K on every model (`gemm.nvfp4_prompt_streamk` auto = off, was on for dense). `degen_suite.py` turn-2 resend on Qwen3-8B-NVFP4 0/3 -> 3/3. pp512: Qwen3-8B-NVFP4 -2.7 %, Qwen3-14B +0.5 %, Qwen3.8-27B +0.8 %.
+- Dense NVFP4 prefix-cache resend answers like the first send: prompt rows skip the tile's stream-K on every model (`gemm.nvfp4_prompt_streamk` auto = off, was on for dense). `degen_suite.py` turn-2 resend on Qwen3-8B-NVFP4 0/3 -> 3/3. pp512: Qwen3-8B-NVFP4 -2.7 %, Qwen3-14B +0.5 %, Qwen3.8-27B +0.8 %. (#3122)
+- A Qwen XML tool call the model opens with `<parameter=NAME>` in place of `<function=NAME>` is returned as a tool call, not as text ending the turn (4 of 951 Qwen3.8-27B agent turns). (#3126)
+
+### Internal
+- gpu: two red GPU tests assert the routing and snapshot rule main has had since #2560 and #2900 (#3123)
+- process: PRs stop editing CHANGELOG.md, the release cut writes it from PR titles (#3124)
+- tree: raw audit logs out, closed plans and reports archived, the backlogs fold into ROADMAP (#3125)
 
 ## [0.67.0] - 2026-11-14
 
