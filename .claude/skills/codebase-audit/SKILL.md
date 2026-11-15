@@ -29,7 +29,7 @@ description: Structural debt, dead code, god files, duplication, flag sprawl, wh
 0. Ledger first: `docs/audit/SETTLED.md`; memory axis: root `AUDIT.md`; structural: `docs/audit/DEBT_LEDGER_2026_08_21.md` (stale `[allow]` reasons, the "every gate is advisory" prehistory of the blocking gates). Re-derive every brief fact (SETTLED section F lists the five that were wrong, each with a counter-check).
 1. Fan out (Explore agents, grep) AGAINST the ledger.
 2. Verify each with the recipes; demote refuted ones immediately.
-3. Write up: dated ledger in `docs/audit/` (`DEBT_LEDGER_2026_08_21.md`, `AUDIT_ARCH_2026_07_29.md`; older `structural_debt_*` in `docs/archive/`), append refutations with anchors to `SETTLED.md` ("Refuted (do not re-chase)"); memory findings go to root `AUDIT.md` (CONFIRMED / REFUTED / OPEN). Counts are evidence, not estimates.
+3. Write up: dated ledger in `docs/audit/` (`DEBT_LEDGER_2026_08_21.md`, `AUDIT_ARCH_2026_07_29.md`; older `structural_debt_*` in `docs/archive/`), append refutations with anchors to `SETTLED.md` ("Refuted (do not re-chase)"); memory findings go to root `AUDIT.md` (CONFIRMED / REFUTED / OPEN); an actionable item becomes a `B-nn` row in `docs/ROADMAP.md` "Backlog ledger", closed there in place (no new BACKLOG file). Counts are evidence, not estimates.
 4. Ship as small PRs off `origin/main`, `make build` + `make test-unit` + hooks (skill **building-and-testing**, **shipping-prs**); behavior-sensitive removals also run **check-degeneration**.
 
 ## Gates that shape audit findings (`scripts/ci_static_gates.sh`; all block inside `Build` since #1527; hooks run them in ~2 s)

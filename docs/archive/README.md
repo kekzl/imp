@@ -41,8 +41,8 @@ which is how this move discovered it had misclassified the file.
 
 ## Plans and audit records moved 2026-11-15
 
-Closed plans from `docs/plans/` live in [`plans/`](plans/), closed dated audit records from
-`docs/audit/` in [`audit/`](audit/). Content unchanged, links rewritten.
+Closed plans from `docs/plans/` live in [`plans/`](plans/), closed dated audit records and the
+2026-10-18 backlog logs from `docs/audit/` in [`audit/`](audit/). Content unchanged, links rewritten.
 A plan whose state turns CLOSED moves here with its index row.
 
 | plan | state | standing record |
@@ -81,6 +81,7 @@ A plan whose state turns CLOSED moves here with its index row.
 | [DEBT_INVENTORY_2026_10_15.md](audit/DEBT_INVENTORY_2026_10_15.md) · [PTXAS_BASELINE_2026_10_15.md](audit/PTXAS_BASELINE_2026_10_15.md) · [DISPATCH_CLEANUP.md](audit/DISPATCH_CLEANUP.md) | record, DISPATCH_cleanup 2026-10-15/17 at v0.53.0: scout inventory, per-kernel `cuobjdump -res-usage` table, append-only log | 2026-10-17 | a backlog row cites `DISPATCH_CLEANUP.md:N` |
 | [DISPATCH_LAUNCH_2026_10_27.md](audit/DISPATCH_LAUNCH_2026_10_27.md) | record, launch prep log | 2026-10-27 | the launch checklist history |
 | [LIBRARY_SHARE_2026_10_30.md](audit/LIBRARY_SHARE_2026_10_30.md) | record, second library-share inventory, ROADMAP row 123 | 2026-11-01 | the step between the 10-29 and 11-01 inventories |
+| [BACKLOG_2026_10_18.md](audit/BACKLOG_2026_10_18.md) · [DISPATCH_BACKLOG_2026_10_18.md](audit/DISPATCH_BACKLOG_2026_10_18.md) · [REPORT_BACKLOG_2026_10_18.md](audit/REPORT_BACKLOG_2026_10_18.md) | record, B-nn backlog, its dispatch log and report; open rows live on in [ROADMAP "Backlog ledger"](../ROADMAP.md#backlog-ledger) | 2026-11-12 | a commit or note names a closed B-nn row |
 
 ## Summaries of documents consolidated away on 2026-06-13
 

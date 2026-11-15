@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-24
-commit: 28185525
+verified: 2026-11-15
+commit: 880648d4
 -->
 
 # tests - lanes, and which one gates
