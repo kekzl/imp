@@ -27,7 +27,7 @@ description: Keep docs and config examples coherent after a change - ARCHITECTUR
 | `docs/GOAL.md` | north star (Qwen3-14B Q6_K @ctx2048 -> 175 tok/s) + hardware scope | goal or scope changes |
 | `docs/BENCHMARKS.md` | reproducible SHA-anchored table; `**Toolchain (current: \`vX.Y.Z\`):**` line parsed by `check-release.sh` | a publishable number; a release |
 | `docs/FEATURES.md`, `docs/LIMITATIONS.md`, `docs/DESIGN_DECISIONS.md` | what exists / what does not / why | feature ships, limitation opens or closes, decision made or reversed |
-| `docs/ROADMAP.md` | verdict ledgers (fact + number + decision per row), citations drift-gated by `check_doc_citations.py` (#1772) | a lever is measured, shipped, refuted or closed; investigation goes to `docs/plans/YYYY-MM-DD-<topic>.md` |
+| `docs/ROADMAP.md` | verdict ledgers (fact + number + decision per row) and the `B-nn` backlog ledger, citations drift-gated by `check_doc_citations.py` (#1772) | a lever is measured, shipped, refuted or closed; a backlog item opens or closes; investigation goes to `docs/plans/YYYY-MM-DD-<topic>.md`, a closed plan to `docs/archive/plans/` |
 | `docs/plans/` | records with closure marks (docs-layers) | an item closes |
 | `tests/perf_baseline*.json` | perf + peak-VRAM gate | intentional perf/VRAM move (`scripts/gen_perf_baseline.sh`) |
 | `docs/MODELS.md`, `docs/DEPLOYMENT.md`, `docs/API.md`, `docs/QUICKSTART.md` | supported models; container/compose; HTTP contract (request tracing, priority); worked example (`kekzle/Qwen3.8-27B-NVFP4-vllm`) | new arch/model/quant; new flag or env; new endpoint field |
