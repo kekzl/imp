@@ -250,9 +250,10 @@ struct RuntimeConfig {
     } warm_cache;
 
     struct Suspend {
-        // Suspend-to-RAM (/admin/suspend): after teardown, also
+        // Suspend-to-RAM (/admin/suspend) and server.model_swap: after teardown, also
         // cudaDeviceReset() so the CUDA primary context (~300-600 MiB) is
-        // released and the GPU reads ~0 MiB for this process. False if a
+        // released and the GPU reads ~0 MiB for this process. Without it every in-process swap on
+        // WSL2 left VRAM behind (Flint after 8 swaps: 7088 -> 4857 MiB available). False if a
         // foreign library holds CUDA state the reset would orphan (imp
         // re-arms everything at the next init).
         bool device_reset = true;

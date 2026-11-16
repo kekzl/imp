@@ -654,6 +654,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     }
 
     // Free existing model/context
+    const bool swapping = state.ctx != nullptr || state.model != nullptr;
     if (state.ctx) {
         imp_context_free(state.ctx);
         state.ctx = nullptr;
@@ -662,6 +663,10 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         imp_model_free(state.model);
         state.model = nullptr;
     }
+    // A swap returns the old model's VRAM before the new one plans: without the reset WDDM kept it and
+    // every swap shrank the next plan (suspend.device_reset, same as /admin/suspend).
+    if (swapping)
+        imp_gpu_release(state.runtime_config.suspend.device_reset ? 1 : 0);
     state.tok = nullptr;
     state.have_template = false;
     state.model_name.clear();
