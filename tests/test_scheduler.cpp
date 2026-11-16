@@ -296,6 +296,31 @@ TEST(SchedulerGpuTest, GrowsPoolUnderAggregatePressure) {
 
 // 10c. A pool too small to ever hold prompt + max_tokens degrades to
 // prompt-only admission instead of queueing the request forever (#1635).
+// A prompt the pool ceiling holds but free VRAM does not yet (familiar on Flint two seconds after a model
+// swap: 5229 blocks needed, 5096 grown of 11724) waits kKvGrowWaitMs; past the ceiling or the window it
+// cancels as before.
+TEST(SchedulerTest, KvShortWaitOnlyUnderTheCeilingAndInsideTheWindow) {
+    EXPECT_TRUE(Scheduler::kv_short_wait(5229, 5096, 11724, 0));
+    EXPECT_TRUE(Scheduler::kv_short_wait(5229, 5096, 11724, Scheduler::kKvGrowWaitMs - 1));
+    EXPECT_FALSE(Scheduler::kv_short_wait(5229, 5096, 11724, Scheduler::kKvGrowWaitMs));
+    EXPECT_FALSE(Scheduler::kv_short_wait(12000, 5096, 11724, 0));  // never fits: cancel now
+    EXPECT_FALSE(Scheduler::kv_short_wait(5000, 5096, 11724, 0));   // fits: nothing to wait for
+    // A pool that cannot grow (ceiling == total) keeps the immediate cancel.
+    auto cache = KVCache::for_accounting(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,
+                                         /*max_blocks=*/4);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+    auto req = std::make_shared<Request>();
+    req->id = 0;
+    req->input_tokens.resize(16 * 8, 3);  // 8 blocks into a 4-block pool
+    sched.add_request(req);
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(req->status, RequestStatus::CANCELLED);
+    EXPECT_EQ(req->cancel_reason, CancelReason::KvCapacity);
+}
+
 TEST(SchedulerTest, AdmissionClampsReserveToPoolSize) {
     // 4 blocks = 64 tokens, against a 32-token prompt + max_tokens=256.
     // The full reserve (2 + 17) never fits, so the clamp is what keeps this
