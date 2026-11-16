@@ -4,6 +4,24 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-16 · Flint decode: shared expert on the side stream, one-launch sigmoid router (#3135)
+
+Protocol: `tools/analysis/flint_ctx_decode.sh` (`imp-cli --bench`, tg128, `--bench-reps 5`,
+`speculative.ngram=false`, one process per point), 3 alternating pairs v0.68.0 vs the PR image; 64k arm with
+`kv_cache.swa_sizing=on kv_cache.max_blocks=8192`; RTX 5090 32 GB.
+
+| tg128 tok/s | v0.68.0 | #3135 |
+|---|---|---|
+| Flint NVFP4, context 512 | 372.58 / 371.97 / 372.42 | 417.77 / 417.17 / 417.06 |
+| Flint NVFP4, context 65536 | 245.54 / 245.54 / 245.56 | 264.68 / 264.92 / 264.71 |
+| Nemotron-3-Nano-30B-A3B NVFP4, context 512 | 414.47 / 413.73 / 413.89 | 435.69 / 435.62 / 437.98 |
+
+Greedy output byte-identical to v0.68.0 (`tools/analysis/flint_greedy_parity.sh`, 3 x 399 tokens Flint, 3 x 400
+Nemotron). Flint at 64k: global attention ~90 us per layer against an 82 us floor for 134 MB FP16 KV (nsys
+exclusive time), bandwidth-bound; `--kv-fp8` reads 275.47 tok/s there, quality unmeasured.
+
+---
+
 ## 2026-11-15 · Flint (RecursiveSI/flint): port check against a CPU reference, quantization and calibration (B-85, B-86)
 
 Protocol: CPU FP32 reference `tools/analysis/flint_reference.py` (written from Recursive's SGLang model code
