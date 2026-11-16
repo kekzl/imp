@@ -948,6 +948,27 @@ TEST(ToolCallGlm, NoArgumentsAndMalformedPairs) {
     EXPECT_EQ(json::parse(ok.arguments)["dir"], "/tmp");
 }
 
+// Schema typing as vLLM's glm47 parser (coerce_to_schema_type): a string param keeps the emitted
+// text ("42", "true"), an integer param parses, a string|null param maps "null" to null.
+TEST(ToolCallGlm, StringSchemaKeepsTheEmittedText) {
+    const json tools = json::parse(R"([{"type":"function","function":{"name":"run","parameters":{
+        "type":"object","properties":{"cmd":{"type":"string"},"flag":{"type":"string"},
+        "n":{"type":"integer"},"tag":{"type":["string","null"]}}}}}])");
+    ParsedToolCall tc;
+    ASSERT_TRUE(
+        parse_glm_arg_key_call("run<arg_key>cmd</arg_key><arg_value>42</arg_value><arg_key>flag</arg_key>"
+                               "<arg_value>true</arg_value><arg_key>n</arg_key><arg_value>7</arg_value>"
+                               "<arg_key>tag</arg_key><arg_value>null</arg_value>",
+                               tc));
+    validate_tool_call(tc, tools);
+    EXPECT_TRUE(tc.valid) << tc.error;
+    const json args = json::parse(tc.arguments);
+    EXPECT_EQ(args["cmd"], "42");
+    EXPECT_EQ(args["flag"], "true");
+    EXPECT_EQ(args["n"], 7);
+    EXPECT_TRUE(args["tag"].is_null());
+}
+
 // Cohere2 action body: a JSON array of {tool_call_id, tool_name, parameters}; every element is a call.
 TEST(ToolCallCohere, ActionArrayParsesThroughTheChatmlParser) {
     std::atomic<int> next_id{0};
