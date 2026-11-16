@@ -824,6 +824,7 @@ if(IMP_BUILD_SERVER)
 
     # Tool-call dialect registry and one file per dialect (#2464); shared by imp-server and test-core.
     set(IMP_TOOL_CALL_SOURCES
+        tools/imp-server/tool_arg_coerce.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/tool_call_dialect.cpp
         tools/imp-server/tool_call_chatml.cpp

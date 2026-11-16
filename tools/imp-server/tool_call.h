@@ -20,6 +20,9 @@ struct ParsedToolCall {
     // XML layout only: each <parameter> value as emitted, so a string-typed param keeps "0600" (#2103).
     std::vector<std::pair<std::string, std::string>> raw_params;
     std::string raw_body;  // XML layout only: the whole call as emitted (tool_call_fault)
+    // GLM arg_key layout: arguments hold every value as emitted; restore_raw_string_params types them
+    // from the tool schema as vLLM 0.33 glm47 does (tool_arg_coerce.h).
+    bool glm_args = false;
 };
 
 // validate_tool_call: checks parsed arguments are a JSON object, all `required` properties are
@@ -35,7 +38,8 @@ std::string tool_call_fault(const ParsedToolCall& tc, const json& tools, bool wi
 // A raw_params value coerced to a type its schema does not allow, where the schema allows
 // "string", goes back to the emitted text: "0600" for {"type":"string"}, not 600 (#2103). A value
 // left as text where the schema allows array or object, not "string", parses as JSON.
-// A Qwen XML call with an id is remembered as emitted: reconstruct_tool_call_output replays it.
+// A GLM arg_key call (glm_args) is typed from the emitted text by its property schema instead, as
+// vLLM 0.33 glm47 does (tool_arg_coerce.h). A Qwen XML call with an id is remembered as emitted.
 void restore_raw_string_params(ParsedToolCall& tc, const json& tools);
 
 std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice);

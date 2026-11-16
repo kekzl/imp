@@ -1,4 +1,5 @@
 #include "tool_call.h"
+#include "tool_arg_coerce.h"
 #include "tool_call_dialect.h"
 #include "utils.h"
 
@@ -432,8 +433,29 @@ static void restore_string_params(ParsedToolCall& tc, const json& tools) {
         tc.arguments = dump_safe(args);
 }
 
+// GLM arg_key calls: the emitted text of each value, typed by its property schema as vLLM 0.33
+// _fix_arg_types; no tools, tool or property schema leaves the text. Rebuilt from raw_params: idempotent.
+static void coerce_glm_args(ParsedToolCall& tc, const json& tools) {
+    json args = json::parse(tc.arguments, nullptr, false);
+    if (!args.is_object())
+        return;
+    const json schema = find_tool_schema(tools, tc.name);
+    const json* props = schema.is_object() && schema.contains("properties") &&
+                                schema["properties"].is_object()
+                            ? &schema["properties"]
+                            : nullptr;
+    for (const auto& [key, raw] : tc.raw_params) {
+        const bool typed = props != nullptr && props->contains(key) && (*props)[key].is_object();
+        args[key] = typed ? imp::coerce_arg_text(raw, imp::schema_arg_types((*props)[key])) : json(raw);
+    }
+    tc.arguments = dump_safe(args);
+}
+
 void restore_raw_string_params(ParsedToolCall& tc, const json& tools) {
-    restore_string_params(tc, tools);
+    if (tc.glm_args)
+        coerce_glm_args(tc, tools);
+    else
+        restore_string_params(tc, tools);
     xml_call_memory().remember(tc);  // every emitted call passes here (validate_tool_call, stream driver)
 }
 
