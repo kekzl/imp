@@ -273,6 +273,7 @@ static bool parse_chatml_json_call(const std::string& body, ParsedToolCall& tc) 
             args.erase("name");
             tc.arguments = dump_safe(args);
         }
+        tc.raw_body = body;
         return !tc.name.empty();
     } catch (...) {
         return false;

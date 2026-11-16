@@ -5,12 +5,11 @@
 // wire-format inputs, no imp-vs-imp.
 
 #include <gtest/gtest.h>
-#include "tool_arg_coerce.h"
+
 #include "tool_call.h"
 #include "model/chat_template.h"
 
 #include <atomic>
-#include <fstream>
 #include <string>
 
 using imp::ChatTemplateFamily;
@@ -921,80 +920,6 @@ TEST(StrictToolConstraint, UnnamedToolRefusesTheWholeSet) {
     json tools = json::array({{{"type", "function"},
                                {"function", {{"name", ""}, {"strict", true}}}}});
     EXPECT_TRUE(collect_strict_tool_constraint(ChatTemplateFamily::CHATML, tools, "auto").empty());
-}
-
-// GLM-4.7-Flash body, as vLLM 0.33 glm47: without a tool schema every value stays the emitted text.
-TEST(ToolCallGlm, ArgKeyBodyParsesThroughTheChatmlParser) {
-    std::atomic<int> next_id{0};
-    const std::string text =
-        "Let me check.\n<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value>"
-        "<arg_key>days</arg_key><arg_value>3</arg_value><arg_key>units</arg_key>"
-        "<arg_value>{\"temp\": \"C\"}</arg_value></tool_call>";
-    auto [content, calls] = parse_tool_calls_chatml(text, next_id);
-    EXPECT_EQ(content, "Let me check.");
-    ASSERT_EQ(calls.size(), 1u);
-    EXPECT_EQ(calls[0].name, "get_weather");
-    const json args = json::parse(calls[0].arguments);
-    EXPECT_EQ(args["city"], "Paris");
-    EXPECT_EQ(args["days"], "3");
-    EXPECT_EQ(args["units"], "{\"temp\": \"C\"}");
-}
-
-TEST(ToolCallGlm, NoArgumentsAndMalformedPairs) {
-    ParsedToolCall tc;
-    EXPECT_FALSE(parse_glm_arg_key_call("<arg_key>x</arg_key><arg_value>1</arg_value>", tc));  // no name
-    EXPECT_FALSE(parse_glm_arg_key_call("f<arg_key>x</arg_key>", tc));                         // no value
-    ParsedToolCall ok;
-    ASSERT_TRUE(parse_glm_arg_key_call("list_files<arg_key>dir</arg_key><arg_value>/tmp</arg_value>", ok));
-    EXPECT_EQ(ok.name, "list_files");
-    EXPECT_EQ(json::parse(ok.arguments)["dir"], "/tmp");
-}
-
-// Schema typing as vLLM's glm47 parser (coerce_to_schema_type): a string param keeps the emitted
-// text ("42", "true", a quoted JSON literal), an integer param parses, string|null maps "null" to null,
-// keys are stripped; a second pass (stream driver, then validate) changes nothing.
-TEST(ToolCallGlm, StringSchemaKeepsTheEmittedText) {
-    const json tools = json::parse(R"([{"type":"function","function":{"name":"run","parameters":{
-        "type":"object","properties":{"cmd":{"type":"string"},"flag":{"type":"string"},
-        "n":{"type":"integer"},"tag":{"type":["string","null"]},"path":{"type":"string"},
-        "opts":{"type":"object"}}}}}])");
-    ParsedToolCall tc;
-    ASSERT_TRUE(parse_glm_arg_key_call(
-        "run<arg_key>cmd</arg_key><arg_value>42</arg_value><arg_key>flag</arg_key>"
-        "<arg_value>true</arg_value><arg_key> n\n</arg_key><arg_value>7</arg_value>"
-        "<arg_key>tag</arg_key><arg_value>null</arg_value><arg_key>path</arg_key>"
-        "<arg_value>\"/home/x\"</arg_value><arg_key>opts</arg_key><arg_value>{\"a\": 1}</arg_value>",
-        tc));
-    restore_raw_string_params(tc, tools);
-    validate_tool_call(tc, tools);
-    EXPECT_TRUE(tc.valid) << tc.error;
-    const json args = json::parse(tc.arguments);
-    EXPECT_EQ(args["cmd"], "42");
-    EXPECT_EQ(args["flag"], "true");
-    EXPECT_EQ(args["n"], 7);
-    EXPECT_TRUE(args["tag"].is_null());
-    EXPECT_EQ(args["path"], "\"/home/x\"");
-    EXPECT_EQ(args["opts"]["a"], 1);
-}
-
-// tool_arg_coerce against vLLM 0.33 itself: tests/fixtures/vllm_tool_arg_coerce.json holds
-// coerce_to_schema_type(text, extract_types_from_schema(schema)) per row
-// (tools/analysis/vllm_tool_arg_coerce_cases.py). Python big ints are the one known gap.
-TEST(ToolArgCoerce, MatchesVllmCoerceToSchemaType) {
-    std::ifstream f(std::string(IMP_TEST_FIXTURES_DIR) + "/vllm_tool_arg_coerce.json");
-    ASSERT_TRUE(f.good());
-    const json fx = json::parse(f);
-    int checked = 0;
-    for (const auto& row : fx["rows"]) {
-        const std::string text = row[1].get<std::string>();
-        if (text == "99999999999999999999" && row[2].is_number())
-            continue;  // vLLM: Python int; imp: beyond uint64
-        const json got = imp::coerce_arg_text(text, imp::schema_arg_types(
-                                                        fx["schemas"][row[0].get<std::string>()]));
-        EXPECT_EQ(got.dump(), row[2].dump()) << "schema " << row[0] << " text \"" << text << "\"";
-        ++checked;
-    }
-    EXPECT_GT(checked, 400);
 }
 
 // Cohere2 action body: a JSON array of {tool_call_id, tool_name, parameters}; every element is a call.

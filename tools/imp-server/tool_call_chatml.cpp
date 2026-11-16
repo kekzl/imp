@@ -156,6 +156,7 @@ bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
         pos = body.find("<arg_key>", v1 + 12);
     }
     tc.glm_args = true;
+    tc.raw_body = body;
     tc.arguments = dump_safe(args);
     return true;
 }

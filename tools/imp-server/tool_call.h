@@ -19,7 +19,7 @@ struct ParsedToolCall {
     std::string error;      // human-readable reason when !valid
     // XML layout only: each <parameter> value as emitted, so a string-typed param keeps "0600" (#2103).
     std::vector<std::pair<std::string, std::string>> raw_params;
-    std::string raw_body;  // XML layout only: the whole call as emitted (tool_call_fault)
+    std::string raw_body;  // XML, GLM and JSON ChatML bodies: the whole call as emitted (tool_call_fault)
     // GLM arg_key layout: arguments hold every value as emitted; restore_raw_string_params types them
     // from the tool schema as vLLM 0.33 glm47 does (tool_arg_coerce.h).
     bool glm_args = false;
