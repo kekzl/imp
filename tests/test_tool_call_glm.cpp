@@ -48,11 +48,31 @@ TEST(ToolCallGlm, FaultLineCarriesTheRawBody) {
 TEST(ToolCallGlm, NoArgumentsAndMalformedPairs) {
     ParsedToolCall tc;
     EXPECT_FALSE(parse_glm_arg_key_call("<arg_key>x</arg_key><arg_value>1</arg_value>", tc));  // no name
-    EXPECT_FALSE(parse_glm_arg_key_call("f<arg_key>x</arg_key>", tc));                         // no value
     ParsedToolCall ok;
     ASSERT_TRUE(parse_glm_arg_key_call("list_files<arg_key>dir</arg_key><arg_value>/tmp</arg_value>", ok));
     EXPECT_EQ(ok.name, "list_files");
     EXPECT_EQ(json::parse(ok.arguments)["dir"], "/tmp");
+}
+
+// Pairs as vLLM 0.33 glm47 extracts them (re.finditer, non-greedy, \s* between the tags), each row checked
+// against vLLM's _glm47_arg_converter: complete pairs only, a broken tail is ignored.
+TEST(ToolCallGlm, PairsMatchVllmFinditer) {
+    const auto args = [](const std::string& body) {
+        ParsedToolCall tc;
+        EXPECT_TRUE(parse_glm_arg_key_call(body, tc)) << body;
+        return json::parse(tc.arguments);
+    };
+    // familiar run 4 on Flint: a complete pair, then another format's closing tags.
+    EXPECT_EQ(args("bash<arg_key>command</arg_key><arg_value>echo ok</arg_value><arg_key>parameter>\n"
+                   "</parameter>\n</function>\n"),
+              json({{"command", "echo ok"}}));
+    EXPECT_EQ(args("f<arg_key>x</arg_key>"), json::object());  // key without value: no pair, still a call
+    EXPECT_EQ(args("f<arg_key> k </arg_key>\n <arg_value>v</arg_value>"), json({{"k", "v"}}));
+    EXPECT_EQ(
+        args("f<arg_key>a</arg_key>junk<arg_value>1</arg_value><arg_key>b</arg_key><arg_value>2</arg_value>"),
+        json({{"a</arg_key>junk<arg_value>1</arg_value><arg_key>b", "2"}}));
+    EXPECT_EQ(args("f<arg_key>a</arg_key><arg_value>1</arg_value>tail<arg_key>b</arg_key><arg_value>2"),
+              json({{"a", "1"}}));
 }
 
 // Schema typing as vLLM's glm47 parser (coerce_to_schema_type): a string param keeps the emitted
