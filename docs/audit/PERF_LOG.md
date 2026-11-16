@@ -18,7 +18,7 @@ Protocol: `tools/analysis/flint_ctx_decode.sh` (`imp-cli --bench`, tg128, `--ben
 
 Greedy output byte-identical to v0.68.0 (`tools/analysis/flint_greedy_parity.sh`, 3 x 399 tokens Flint, 3 x 400
 Nemotron). Flint at 64k: global attention ~90 us per layer against an 82 us floor for 134 MB FP16 KV (nsys
-exclusive time), bandwidth-bound; `--kv-fp8` reads 275.47 tok/s there, quality unmeasured.
+exclusive time), bandwidth-bound; `--kv-fp8` reads 275.47 tok/s there, quality unmeasured: a needle test on real agent text (`tools/analysis/kv_dtype_longctx_ab.py`, `runtime.deterministic`) cannot judge it, Flint copies the 6-digit code wrong at FP16 too (16k 0/3, 32k 1/3; FP8 0/3, 2/3, 64k 1/3), so `--kv-fp8` stays opt-in.
 
 ---
 
