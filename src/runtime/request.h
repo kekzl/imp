@@ -170,6 +170,9 @@ struct Request {
     // it; it exists so admission can tell "short" from "short AND recent"
     // (#1634).
     uint64_t enqueued_round = 0;
+    // First time admission found the KV pool unable to grow far enough (steady clock, 0 = never): a
+    // request under the pool ceiling waits Scheduler::kKvGrowWaitMs for free VRAM before it is cancelled.
+    std::chrono::steady_clock::time_point kv_short_since{};
     // OpenAI Predicted Outputs: client-supplied predicted completion tokens, never forwarded
     // through the model. They only extend the n-gram draft search corpus (input + prediction +
     // output); verify semantics are unchanged, output stays a faithful greedy decode.

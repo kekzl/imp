@@ -23,6 +23,15 @@ public:
     // Rounds a request may be passed over before it sorts ahead of shorter
     // ones. See the sort in schedule() for why this exists (#1634).
     static constexpr int kAgingRounds = 32;
+    // A prompt the pool ceiling holds but free VRAM does not (warmup scratch, a model swap's lazy reserves):
+    // admission retries the growth this long before cancelling (familiar on Flint after a swap: 5096 of 8000
+    // blocks two seconds after load, 7985 a minute later).
+    static constexpr int kKvGrowWaitMs = 10000;
+    // The rule behind it: wait while the prompt is over the grown pool, under its ceiling, inside the window.
+    [[nodiscard]] static constexpr bool kv_short_wait(int blocks_needed, int cap, int ceiling,
+                                                      long long waited_ms) {
+        return blocks_needed > cap && blocks_needed <= ceiling && waited_ms < kKvGrowWaitMs;
+    }
 
     // Schedule next batch: returns requests for prefill and decode
     void schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
@@ -66,6 +75,7 @@ public:
     [[nodiscard]] int swapped_count() const;
 
 private:
+    [[nodiscard]] bool kv_cancel_now_(Request& req, int blocks_needed, int cap) const;
     // Swap SWAPPED requests back in, oldest first; true while one still waits.
     [[nodiscard]] bool swap_in_waiting_();
     // Feeds FINISHED output lengths into decode_estimate_ (before schedule() erases them).

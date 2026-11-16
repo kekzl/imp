@@ -156,7 +156,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                         // and cancels anyway, one block short, after paying for the growth.
                         cap = kv_manager_->kv_cache()->try_grow_to_now(blocks_needed + decode_blocks);
                     }
-                    if (blocks_needed > cap) {
+                    if (kv_cancel_now_(*req, blocks_needed, cap)) {
                         IMP_LOG_ERROR(
                             "Scheduler: request %d needs %d KV blocks but cache capacity is %d "
                             "(ctx_len=%d, block_size=%d) — cancelling (KV cache too small for prompt)",
@@ -296,6 +296,28 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 5. grow-ahead
     kv_grow_ahead_tick(kv_manager_);
+}
+
+// True = the prompt cannot be held: over the grown pool and over its ceiling, or still short after
+// kKvGrowWaitMs. Under the ceiling free VRAM is short now, not for good: the request stays pending (the
+// growth is retried every round); logged once per request.
+bool Scheduler::kv_cancel_now_(Request& req, int blocks_needed, int cap) const {
+    if (blocks_needed <= cap)
+        return false;
+    const int ceiling = kv_manager_->kv_cache()->ceiling_blocks();
+    if (!kv_short_wait(blocks_needed, cap, ceiling, 0))
+        return true;
+    const auto now = std::chrono::steady_clock::now();
+    if (req.kv_short_since == std::chrono::steady_clock::time_point{}) {
+        req.kv_short_since = now;
+        IMP_LOG_INFO(
+            "Scheduler: request %d needs %d KV blocks, %d grown of a %d-block ceiling: waiting up to %d ms "
+            "for free VRAM",
+            req.id, blocks_needed, cap, ceiling, kKvGrowWaitMs);
+    }
+    const auto waited =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - req.kv_short_since).count();
+    return !kv_short_wait(blocks_needed, cap, ceiling, waited);
 }
 
 bool Scheduler::has_pending() const { return !pending_.empty(); }
