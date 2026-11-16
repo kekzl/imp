@@ -680,6 +680,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                   RouterFusedGate{grp.active(), model_->profile().moe_router_logit_bias,
                                                   ly.router_bias.data},
                                   moe_.routing_buffers, moe_.router_fused_ws, moe_.router_fused_ws_bytes,
+                                  RouterDecodeScratch{static_cast<float*>(moe_.gate_logits.data),
+                                                      moe_.router_ticket},
                                   stream)) {
         moe_topk_finish(n, ne, top_k, moe_.routing_buffers, routing, stream, will_decode_fast);
     } else if (ne <= grp.fused_expert_cap(kMaxFusedExperts) && n == 1 && compute_dtype_ == QType::F16 &&

@@ -298,6 +298,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_f16_narrow_smallm.cu
     src/compute/gemm_f16_narrow_prefill.cu
     src/compute/moe_router_fused.cu
+    src/compute/moe_router_decode.cu
     src/compute/gemm_f16_tile.cu
     src/compute/gemm_q6k_f16_tile.cu
     src/compute/gemm_mxfp4_f16_tile.cu
@@ -1346,6 +1347,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_f16_narrow_smallm.cu
         tests/test_gemm_f16_narrow_prefill.cu
         tests/test_moe_router_fused.cu
+        tests/test_moe_router_decode.cu
         tests/test_gemm_f16_tile.cu
         tests/test_gemm_q6k_f16_tile.cu
         tests/test_gemm_mxfp4_f16_tile.cu

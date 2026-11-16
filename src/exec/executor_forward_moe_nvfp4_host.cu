@@ -111,8 +111,10 @@ void GraphExecutor::verify_host_expert_placement() const {
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
 bool GraphExecutor::init_device_expert_cache() {
-    if (!expert_cache_.pool_)  // no pool: no host experts
+    if (!expert_cache_.pool_) {  // no pool: no host experts
+        init_shexp_overlap_();   // resident NVFP4 experts fork the shared expert too
         return device_expert_cache_covers_host_layers();
+    }
     const int top_k = std::max(1, model_->config().n_experts_active);
     dev_expert_cache_.set_host_pool_mib(dispatch_policy().moe.host_expert_pool_mib);
     if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
