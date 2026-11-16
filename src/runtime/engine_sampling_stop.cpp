@@ -50,6 +50,14 @@ void Engine::track_think_state(Request& req, int32_t token) const {
         return;
     }
     if (token == think_end_id_) {
+        // A closer the engine forced (client end_thinking, think budget) ends reasoning for the request:
+        // the opener is banned, else the post-think grace masked the stop, the model re-opened and the
+        // forcing looped to max_tokens (Flint: 16k reasoning tokens after the ack). Keeps it eager.
+        const bool banned = std::any_of(req.logit_bias.begin(), req.logit_bias.end(), [&](const auto& b) {
+            return b.first == think_start_id_ && b.second <= -1e29f;
+        });
+        if (think_start_id_ >= 0 && req.in_think_block && think_end_due_(req) && !banned)
+            req.logit_bias.emplace_back(think_start_id_, -1e30f);
         req.in_think_block = false;
         req.think_exit_idx = static_cast<int>(req.output_tokens.size());
         req.content_after_think = false;  // fresh post-think grace window
