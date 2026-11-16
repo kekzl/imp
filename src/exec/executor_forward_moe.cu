@@ -307,6 +307,10 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
                                            nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_,
                                                                    cfg.n_experts_active),
                                            prof.moe_expert_bias_glu, qscratch_);
+    // Resident NVFP4 experts: the shared expert reads only ctx.no, so it runs on the side stream beside
+    // routing and the routed GEMVs; phase 8 joins and adds in the serial order (bit-identical output).
+    if (ctx.will_decode_fast && ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr)
+        (void)fork_shared_expert_(layer, stream, ctx.d, ctx.no);
     compute_moe_routing(layer, stream, ctx.n, ctx.d, ctx.ne, ctx.top_k, router_in,
                         ctx.fp32_gate_logits_ready, ctx.will_decode_fast, router_bias_ptr,
                         use_sigmoid, norm_weights, ctx.routing);

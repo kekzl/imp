@@ -43,6 +43,7 @@ struct MoEWorkspace {
     size_t router_ws_bytes = 0;
     void* router_fused_ws = nullptr;  // moe_router_fused: split-K tickets (zeroed once) + fp32 partials
     size_t router_fused_ws_bytes = 0;
+    void* router_ticket = nullptr;  // unsigned int, moe_router_decode: last-CTA ticket (zeroed once)
 
     // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
     void* dequant_buf = nullptr;

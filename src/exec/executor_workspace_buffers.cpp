@@ -1035,6 +1035,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         else
             moe_.router_fused_ws_bytes = 0;
     }
+    if (has_moe_ && cfg.n_experts > 128) {  // moe_router_decode, the routers moe_router_fused refuses
+        moe_.router_ticket = vram_alloc(vram_alloc_, sizeof(unsigned int), "moe_router_ticket");
+        if (moe_.router_ticket)
+            IMP_CUDA_CHECK_LOG(cudaMemset(moe_.router_ticket, 0, sizeof(unsigned int)));
+    }
 
     // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
     if (fp8_act_scratch_needed(*model_, wcache_.use_fp8)) {
@@ -1407,6 +1412,8 @@ void GraphExecutor::free_buffers() {
     moe_.router_ws_bytes = 0;
     vfree(moe_.router_fused_ws);
     moe_.router_fused_ws_bytes = 0;
+    vfree(moe_.router_ticket);
+    moe_.router_ticket = nullptr;
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {

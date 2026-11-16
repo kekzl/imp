@@ -26,7 +26,8 @@ void GraphExecutor::init_shexp_overlap_() {
     int eff = 0;
     for (int i = 0; i < cfg.n_layers; ++i) {
         const auto& ly = model_->layer(i);
-        if (dev_expert_cache_.layer_ready(i) && ly.w_up_shared.data != nullptr)
+        const bool resident_nvfp4 = ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr;
+        if ((dev_expert_cache_.layer_ready(i) || resident_nvfp4) && ly.w_up_shared.data != nullptr)
             eff = std::max(eff, static_cast<int>(ly.w_up_shared.shape[0]));
     }
     if (eff == 0)
@@ -41,8 +42,10 @@ void GraphExecutor::init_shexp_overlap_() {
     }
     o.eff = eff;
     o.d = cfg.d_model;
-    IMP_LOG_INFO("shared_expert_overlap: decode shared expert (eff %d) runs beside the expert miss gather",
-                 eff);
+    IMP_LOG_INFO(
+        "shared_expert_overlap: decode shared expert (eff %d) runs on a side stream beside routing and the "
+        "routed experts",
+        eff);
 }
 
 void GraphExecutor::free_shexp_overlap_() {
