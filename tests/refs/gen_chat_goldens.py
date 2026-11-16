@@ -55,7 +55,8 @@ LOCAL_MODELS = "/models"
 SOURCES = [
     ("chatml", "local:Qwen3-0.6B", "CHATML"),
     ("chatml_nemotron_nano", "local:Nemotron-3-Nano-30B-A3B-NVFP4", "CHATML"),
-    ("gemma", "local:Gemma-4-12B-NVFP4", "GEMMA"),
+    ("chatml_qwen38", "local:Qwen3.8-27B-NVFP4-vllm", "CHATML"),
+    ("gemma", "google/gemma-4-12b-it", "GEMMA"),
     ("llama3", "NousResearch/Meta-Llama-3-8B-Instruct", "LLAMA3"),
     ("llama2", "unsloth/mistral-7b-instruct-v0.2", "LLAMA2"),
     ("mistral_v3", "unsloth/mistral-7b-instruct-v0.3", "MISTRAL_V3"),
@@ -79,6 +80,17 @@ CONVERSATIONS = [
                     {"role": "assistant", "content": "Hello! How can I help?"},
                     {"role": "user", "content": "What is 2+2?"}]),
 ]
+
+# Agent turns: two consecutive tool results. ChatML agent templates group them into one user
+# turn via loop.previtem / loop.nextitem (Qwen3.8, Nemotron-3-Nano), or messages[i-1] (Qwen3).
+# Only for the sources that render a tool role; the rest refuse or ignore it.
+TOOL_CONVERSATIONS = [
+    ("tool_turns", [{"role": "user", "content": "List the files, then count them."},
+                    {"role": "assistant", "content": "Running both."},
+                    {"role": "tool", "content": "a.txt\nb.txt"},
+                    {"role": "tool", "content": "2"}]),
+]
+TOOL_SLUGS = {"chatml", "chatml_nemotron_nano", "chatml_qwen38"}
 
 
 def fetch(url):
@@ -229,7 +241,7 @@ def main():
     args = ap.parse_args()
 
     env = make_env()
-    parts = ["".join(emit_conv(n, m) for n, m in CONVERSATIONS) + "\n"]
+    parts = ["".join(emit_conv(n, m) for n, m in CONVERSATIONS + TOOL_CONVERSATIONS) + "\n"]
     problems = []
     verified = 0
     for slug, repo, family in SOURCES:
@@ -238,7 +250,7 @@ def main():
         parts.append(emit("k_%s_template" % slug, tpl))
         parts.append(emit("k_%s_bos" % slug, bos))
         parts.append(emit("k_%s_eos" % slug, eos))
-        for cname, msgs in CONVERSATIONS:
+        for cname, msgs in CONVERSATIONS + (TOOL_CONVERSATIONS if slug in TOOL_SLUGS else []):
             try:
                 out = render(env, tpl, msgs, bos, eos)
             except Exception as e:
@@ -265,10 +277,10 @@ def main():
         "// the Jinja configuration transformers uses (#1572). Regenerate with\n"
         "//   python3 tests/refs/gen_chat_goldens.py --verify\n"
         "#pragma once\n\n#include <string>\n#include <utility>\n#include <vector>\n\n"
-        "namespace chat_goldens {\n\n"
+        "// clang-format off\nnamespace chat_goldens {\n\n"
     )
     with open(OUT, "w") as fh:
-        fh.write(header + "".join(parts) + "}  // namespace chat_goldens\n")
+        fh.write(header + "".join(parts) + "}  // namespace chat_goldens\n// clang-format on\n")
 
     if problems:
         sys.stderr.write("\n" + "\n".join(problems) + "\n")
