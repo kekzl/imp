@@ -127,6 +127,35 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     return true;
 }
 
+// re.finditer(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", DOTALL) of vLLM 0.33 glm47, keys
+// stripped: complete pairs only, an unclosed or malformed tail is ignored (Flint closed a call with another
+// format's tags after a complete pair, and the whole call fell back to text).
+static std::vector<std::pair<std::string, std::string>> glm_arg_pairs(const std::string& body, size_t from) {
+    constexpr const char* kWs = " \t\n\r\f\v";
+    std::vector<std::pair<std::string, std::string>> out;
+    for (size_t s = body.find("<arg_key>", from); s != std::string::npos;) {
+        const size_t k0 = s + 9;
+        size_t next = body.find("<arg_key>", s + 1);  // no match at s: the regex retries further on
+        for (size_t e = body.find("</arg_key>", k0); e != std::string::npos;
+             e = body.find("</arg_key>", e + 1)) {
+            const size_t v = body.find_first_not_of(kWs, e + 10);
+            if (v == std::string::npos || body.compare(v, 11, "<arg_value>") != 0)
+                continue;  // .*? extends the key to the next </arg_key>
+            const size_t v1 = body.find("</arg_value>", v + 11);
+            if (v1 == std::string::npos)
+                return out;  // no value closes after here: no later pair can match either
+            const size_t ka = body.find_first_not_of(kWs, k0);
+            const size_t kb = body.find_last_not_of(kWs, e - 1);
+            out.emplace_back(ka >= e || kb < ka ? std::string() : body.substr(ka, kb - ka + 1),
+                             body.substr(v + 11, v1 - v - 11));
+            next = body.find("<arg_key>", v1 + 12);
+            break;
+        }
+        s = next;
+    }
+    return out;
+}
+
 // GLM-4.x body: NAME<arg_key>K</arg_key><arg_value>V</arg_value>... As vLLM 0.33 glm47: the key is stripped,
 // every value stays the emitted text; restore_raw_string_params types it from the tool schema (glm_args).
 bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
@@ -138,22 +167,9 @@ bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
         return false;
     tc.name = body.substr(a, b - a + 1);
     json args = json::object();
-    size_t pos = first;
-    while (pos != std::string::npos) {
-        const size_t k0 = pos + 9;  // "<arg_key>"
-        const size_t k1 = body.find("</arg_key>", k0);
-        const size_t v0 = body.find("<arg_value>", k1 == std::string::npos ? k0 : k1);
-        const size_t v1 = v0 == std::string::npos ? v0 : body.find("</arg_value>", v0 + 11);
-        if (k1 == std::string::npos || v1 == std::string::npos)
-            return false;
-        const size_t ka = body.find_first_not_of(" \t\n\r\f\v", k0);  // Python str.strip()
-        const size_t kb = body.find_last_not_of(" \t\n\r\f\v", k1 - 1);
-        const std::string key = ka == std::string::npos || ka >= k1 || kb < ka ? std::string()
-                                                                               : body.substr(ka, kb - ka + 1);
-        const std::string val = body.substr(v0 + 11, v1 - v0 - 11);
+    for (const auto& [key, val] : glm_arg_pairs(body, first)) {
         tc.raw_params.emplace_back(key, val);
         args[key] = val;
-        pos = body.find("<arg_key>", v1 + 12);
     }
     tc.glm_args = true;
     tc.raw_body = body;
