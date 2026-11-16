@@ -10,6 +10,7 @@ LENGTHS: comma list of approximate prompt tokens (default 32000,64000).
 """
 import json
 import sys
+import urllib.error
 import urllib.request
 
 url, model, session, out_path = sys.argv[1:5]
@@ -44,8 +45,11 @@ def chat(content, max_tokens):
             "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
                                  {"content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=1800) as r:
-        d = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return "", {"error": f"{e.code} {e.read().decode()[:160]}"}
     return d["choices"][0]["message"].get("content") or "", d.get("usage", {})
 
 
@@ -60,11 +64,14 @@ for n in lengths:
         ans, usage = chat(doc + "\n\nWhat is the exact verification code mentioned in the text above? "
                           "Reply with the code only.", 64)
         row["needles"].append({"depth": depth, "hit": code in ans, "answer": ans[:80],
-                               "prompt_tokens": usage.get("prompt_tokens")})
+                               "prompt_tokens": usage.get("prompt_tokens"), "error": usage.get("error", "")})
     ans, usage = chat(hay + "\n\nSummarize what the assistant in the text above was building and which "
                       "problems it ran into, in about 200 words.", 400)
     row["summary"] = ans
     row["summary_prompt_tokens"] = usage.get("prompt_tokens")
     result[str(n)] = row
-    print(n, [x["hit"] for x in row["needles"]], usage.get("prompt_tokens"), flush=True)
+    print(n, [x["hit"] for x in row["needles"]], usage.get("prompt_tokens"), usage.get("error", ""), flush=True)
+    for x in row["needles"]:
+        print("   ", x["depth"], repr(x["answer"][:60]), flush=True)
+    json.dump(result, open(out_path, "w"), indent=1, ensure_ascii=False)
 json.dump(result, open(out_path, "w"), indent=1, ensure_ascii=False)
