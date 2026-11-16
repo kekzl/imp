@@ -1246,6 +1246,7 @@ if(IMP_BUILD_TESTS)
             tests/test_token_extras.cpp
             tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
+            tests/test_tool_call_glm.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_tool_call_dialect_golden.cpp
