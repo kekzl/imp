@@ -127,8 +127,8 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     return true;
 }
 
-// GLM-4.x body: NAME<arg_key>K</arg_key><arg_value>V</arg_value>... The template writes strings raw
-// and everything else as JSON (`tojson if v is not string`), so a value that parses as JSON is JSON.
+// GLM-4.x body: NAME<arg_key>K</arg_key><arg_value>V</arg_value>... As vLLM 0.33 glm47: the key is stripped,
+// every value stays the emitted text; restore_raw_string_params types it from the tool schema (glm_args).
 bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
     const size_t first = body.find("<arg_key>");
     const size_t name_end = first == std::string::npos ? body.size() : first;
@@ -146,13 +146,16 @@ bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
         const size_t v1 = v0 == std::string::npos ? v0 : body.find("</arg_value>", v0 + 11);
         if (k1 == std::string::npos || v1 == std::string::npos)
             return false;
-        const std::string key = body.substr(k0, k1 - k0);
+        const size_t ka = body.find_first_not_of(" \t\n\r\f\v", k0);  // Python str.strip()
+        const size_t kb = body.find_last_not_of(" \t\n\r\f\v", k1 - 1);
+        const std::string key = ka == std::string::npos || ka >= k1 || kb < ka ? std::string()
+                                                                               : body.substr(ka, kb - ka + 1);
         const std::string val = body.substr(v0 + 11, v1 - v0 - 11);
-        json jv = json::parse(val, nullptr, false);
         tc.raw_params.emplace_back(key, val);
-        args[key] = jv.is_discarded() ? json(val) : std::move(jv);
+        args[key] = val;
         pos = body.find("<arg_key>", v1 + 12);
     }
+    tc.glm_args = true;
     tc.arguments = dump_safe(args);
     return true;
 }
