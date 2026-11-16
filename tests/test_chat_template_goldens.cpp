@@ -93,12 +93,15 @@ std::vector<ChatMessage> to_msgs(const std::vector<std::pair<std::string, std::s
 }
 
 std::vector<GoldenCase> cases(const std::string& user_only, const std::string& system_user,
-                              const std::string& multi_turn) {
-    return {
+                              const std::string& multi_turn, const std::string* tool_turns = nullptr) {
+    std::vector<GoldenCase> cs = {
         {"user_only", &user_only, to_msgs(chat_goldens::k_conv_user_only)},
         {"system_user", &system_user, to_msgs(chat_goldens::k_conv_system_user)},
         {"multi_turn", &multi_turn, to_msgs(chat_goldens::k_conv_multi_turn)},
     };
+    if (tool_turns)
+        cs.push_back({"tool_turns", tool_turns, to_msgs(chat_goldens::k_conv_tool_turns)});
+    return cs;
 }
 
 // Family comes from imp's own detect_family(), not a hand-picked label, pinned against a
@@ -128,7 +131,7 @@ TEST(ChatTemplateGolden, ChatML) {
     check_family(ChatTemplateFamily::CHATML, chat_goldens::k_chatml_template, chat_goldens::k_chatml_bos,
                  chat_goldens::k_chatml_eos,
                  cases(chat_goldens::k_chatml_user_only, chat_goldens::k_chatml_system_user,
-                       chat_goldens::k_chatml_multi_turn));
+                       chat_goldens::k_chatml_multi_turn, &chat_goldens::k_chatml_tool_turns));
 }
 
 TEST(ChatTemplateGolden, ChatMLNemotronNano) {
@@ -136,7 +139,16 @@ TEST(ChatTemplateGolden, ChatMLNemotronNano) {
                  chat_goldens::k_chatml_nemotron_nano_bos, chat_goldens::k_chatml_nemotron_nano_eos,
                  cases(chat_goldens::k_chatml_nemotron_nano_user_only,
                        chat_goldens::k_chatml_nemotron_nano_system_user,
-                       chat_goldens::k_chatml_nemotron_nano_multi_turn));
+                       chat_goldens::k_chatml_nemotron_nano_multi_turn,
+                       &chat_goldens::k_chatml_nemotron_nano_tool_turns));
+}
+
+// Consecutive tool results share one user turn via loop.previtem / loop.nextitem.
+TEST(ChatTemplateGolden, ChatMLQwen38) {
+    check_family(ChatTemplateFamily::CHATML, chat_goldens::k_chatml_qwen38_template,
+                 chat_goldens::k_chatml_qwen38_bos, chat_goldens::k_chatml_qwen38_eos,
+                 cases(chat_goldens::k_chatml_qwen38_user_only, chat_goldens::k_chatml_qwen38_system_user,
+                       chat_goldens::k_chatml_qwen38_multi_turn, &chat_goldens::k_chatml_qwen38_tool_turns));
 }
 
 TEST(ChatTemplateGolden, Gemma) {

@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+// clang-format off
 namespace chat_goldens {
 
 inline const std::vector<std::pair<std::string, std::string>> k_conv_user_only = {
@@ -23,6 +24,12 @@ inline const std::vector<std::pair<std::string, std::string>> k_conv_multi_turn 
         {"user", "Hi"},
         {"assistant", "Hello! How can I help?"},
         {"user", "What is 2+2?"},
+    };
+inline const std::vector<std::pair<std::string, std::string>> k_conv_tool_turns = {
+        {"user", "List the files, then count them."},
+        {"assistant", "Running both."},
+        {"tool", "a.txt\nb.txt"},
+        {"tool", "2"},
     };
 
 // chatml  <-  local:Qwen3-0.6B  (detected family: CHATML)
@@ -92,6 +99,11 @@ inline const std::string k_chatml_system_user =
 inline const std::string k_chatml_multi_turn =
     "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello! How can I help?<|im_end|>\n<|i"
     "m_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+    ;
+inline const std::string k_chatml_tool_turns =
+    "<|im_start|>user\nList the files, then count them.<|im_end|>\n<|im_start|>assistant\nRunning"
+    " both.<|im_end|>\n<|im_start|>user\n<tool_response>\na.txt\nb.txt\n</tool_response>\n<tool_r"
+    "esponse>\n2\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
     ;
 
 // chatml_nemotron_nano  <-  local:Nemotron-3-Nano-30B-A3B-NVFP4  (detected family: CHATML)
@@ -234,8 +246,152 @@ inline const std::string k_chatml_nemotron_nano_multi_turn =
     "k></think>Hello! How can I help?<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_s"
     "tart|>assistant\n<think>\n"
     ;
+inline const std::string k_chatml_nemotron_nano_tool_turns =
+    "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nList the files, then count them.<|im_end|>"
+    "\n<|im_start|>assistant\n<think></think>Running both.<|im_end|>\n<|im_start|>user\n<tool_res"
+    "ponse>\na.txt\nb.txt\n</tool_response>\n<tool_response>\n2\n</tool_response>\n<|im_end|>\n<|"
+    "im_start|>assistant\n<think>\n"
+    ;
 
-// gemma  <-  local:Gemma-4-12B-NVFP4  (detected family: GEMMA)
+// chatml_qwen38  <-  local:Qwen3.8-27B-NVFP4-vllm  (detected family: CHATML)
+inline const std::string k_chatml_qwen38_template =
+    "{%- set image_count = namespace(value=0) %}\n{%- set video_count = namespace(value=0) %}\n{%"
+    "- macro render_content(content, do_vision_count, is_system_content=false) %}\n    {%- if con"
+    "tent is string %}\n        {{- content }}\n    {%- elif content is iterable and content is n"
+    "ot mapping %}\n        {%- for item in content %}\n            {%- if 'image' in item or 'im"
+    "age_url' in item or item.type == 'image' %}\n                {%- if is_system_content %}\n  "
+    "                  {{- raise_exception('System message cannot contain images.') }}\n         "
+    "       {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set "
+    "image_count.value = image_count.value + 1 %}\n                {%- endif %}\n                "
+    "{%- if add_vision_id %}\n                    {{- 'Picture ' ~ image_count.value ~ ': ' }}\n "
+    "               {%- endif %}\n                {{- '<|vision_start|><|image_pad|><|vision_end|"
+    ">' }}\n            {%- elif 'video' in item or item.type == 'video' %}\n                {%- "
+    "if is_system_content %}\n                    {{- raise_exception('System message cannot cont"
+    "ain videos.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n "
+    "                   {%- set video_count.value = video_count.value + 1 %}\n                {%-"
+    " endif %}\n                {%- if add_vision_id %}\n                    {{- 'Video ' ~ video"
+    "_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><"
+    "|video_pad|><|vision_end|>' }}\n            {%- elif 'text' in item %}\n                {{- "
+    "item.text }}\n            {%- else %}\n                {{- raise_exception('Unexpected item "
+    "type in content.') }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif content"
+    " is none or content is undefined %}\n        {{- '' }}\n    {%- else %}\n        {{- raise_e"
+    "xception('Unexpected content type.') }}\n    {%- endif %}\n{%- endmacro %}\n{%- if not messa"
+    "ges %}\n    {{- raise_exception('No messages provided.') }}\n{%- endif %}\n{%- set reasoning"
+    "_instructions = '' %}\n{%- if enable_thinking is undefined or enable_thinking is true %}\n  "
+    "  {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}\n    {%- if resol"
+    "ved_reasoning_effort not in ('xhigh', 'medium', 'low') %}\n        {{- raise_exception('Unex"
+    "pected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), mediu"
+    "m, and low.') }}\n    {%- endif %}\n    {%- if resolved_reasoning_effort == 'xhigh' %}\n    "
+    "    {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think careful"
+    "ly through the task, validate key assumptions, consider plausible alternatives, and prioriti"
+    "ze correctness, consistency, and clarity in the final answer.' %}\n    {%- elif resolved_rea"
+    "soning_effort == 'low' %}\n        {%- set reasoning_instructions = 'Reasoning effort is set"
+    " to low. Keep your thinking brief and focused, moving directly to the conclusion without unn"
+    "ecessary elaboration.' %}\n    {%- endif %}\n{%- endif %}\n{%- if tools and tools is iterabl"
+    "e and tools is not mapping %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if reasoning_inst"
+    "ructions %}\n        {{- reasoning_instructions + '\\n\\n' }}\n    {%- endif %}\n    {{- \"#"
+    " Tools\\n\\nYou have access to the following functions:\\n\\n<tools>\" }}\n    {%- for tool "
+    "in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{"
+    "- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the foll"
+    "owing format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<paramete"
+    "r=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is "
+    "the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</funct"
+    "ion>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specifie"
+    "d format: an inner <function=...></function> block must be nested within <tool_call></tool_c"
+    "all> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoni"
+    "ng for your function call in natural language BEFORE the function call, but NOT after\\n- If"
+    " there is no function call available, answer the question like normal with your current know"
+    "ledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n    {%- if messages["
+    "0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false,"
+    " true)|trim %}\n        {%- if content %}\n            {{- '\\n\\n' + content }}\n        {%"
+    "- endif %}\n    {%- endif %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if messages[0"
+    "].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, "
+    "true)|trim %}\n        {%- if content %}\n            {{- '<|im_start|>system\\n' + (reasoni"
+    "ng_instructions + '\\n\\n' if reasoning_instructions else '')  + content + '<|im_end|>\\n' }"
+    "}\n        {%- elif reasoning_instructions %}\n            {{- '<|im_start|>system\\n' + rea"
+    "soning_instructions + '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- elif reasoning_instr"
+    "uctions %}\n        {{- '<|im_start|>system\\n' + reasoning_instructions + '<|im_end|>\\n' }"
+    "}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_i"
+    "ndex=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (mes"
+    "sages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user"
+    "\" %}\n        {%- set content = render_content(message.content, false)|trim %}\n        {%-"
+    " if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n"
+    "            {%- set ns.multi_step_tool = false %}\n            {%- set ns.last_query_index ="
+    " index %}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if ns.multi_step_tool "
+    "%}\n    {{- raise_exception('No user query found in messages.') }}\n{%- endif %}\n{%- for me"
+    "ssage in messages %}\n    {%- set content = render_content(message.content, true)|trim %}\n "
+    "   {%- if message.role == \"system\" %}\n        {%- if not loop.first %}\n            {{- r"
+    "aise_exception('System message must be at the beginning.') }}\n        {%- endif %}\n    {%-"
+    " elif message.role == \"user\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + conte"
+    "nt + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set"
+    " reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n         "
+    "   {%- set reasoning_content = message.reasoning_content %}\n        {%- endif %}\n        {"
+    "%- set reasoning_content = reasoning_content|trim %}\n        {%- if preserve_thinking is un"
+    "defined or preserve_thinking is true or loop.index0 > ns.last_query_index %}\n            {{"
+    "- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' "
+    "+ content }}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + c"
+    "ontent }}\n        {%- endif %}\n        {%- if message.tool_calls and message.tool_calls is"
+    " iterable and message.tool_calls is not mapping %}\n            {%- for tool_call in message"
+    ".tool_calls %}\n                {%- if tool_call.function is defined %}\n                   "
+    " {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {%"
+    "- if loop.first %}\n                    {%- if content|trim %}\n                        {{- "
+    "'\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- else "
+    "%}\n                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n   "
+    "                 {%- endif %}\n                {%- else %}\n                    {{- '\\n<too"
+    "l_call>\\n<function=' + tool_call.name + '>\\n' }}\n                {%- endif %}\n          "
+    "      {%- if tool_call.arguments is defined and tool_call.arguments != '' %}\n              "
+    "      {%- for args_name, args_value in tool_call.arguments|items %}\n                       "
+    " {{- '<parameter=' + args_name + '>\\n' }}\n                        {%- set args_value = arg"
+    "s_value | string if args_value is string else args_value | tojson | safe %}\n               "
+    "         {{- args_value }}\n                        {{- '\\n</parameter>\\n' }}\n           "
+    "         {%- endfor %}\n                {%- endif %}\n                {{- '</function>\\n</t"
+    "ool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' "
+    "}}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem"
+    ".role != \"tool\" %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {"
+    "{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}"
+    "\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_"
+    "end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%-"
+    " endif %}\n    {%- else %}\n        {{- raise_exception('Unexpected message role.') }}\n    "
+    "{%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant"
+    "\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- "
+    "'<think>\\n\\n</think>\\n\\n' }}\n    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endi"
+    "f %}\n{%- endif %}"
+    ;
+inline const std::string k_chatml_qwen38_bos =
+    ""
+    ;
+inline const std::string k_chatml_qwen38_eos =
+    "<|im_end|>"
+    ;
+inline const std::string k_chatml_qwen38_user_only =
+    "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the tas"
+    "k, validate key assumptions, consider plausible alternatives, and prioritize correctness, co"
+    "nsistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nWhat is the capital"
+    " of France?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    ;
+inline const std::string k_chatml_qwen38_system_user =
+    "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the tas"
+    "k, validate key assumptions, consider plausible alternatives, and prioritize correctness, co"
+    "nsistency, and clarity in the final answer.\n\nYou are a terse assistant.<|im_end|>\n<|im_st"
+    "art|>user\nHello there.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    ;
+inline const std::string k_chatml_qwen38_multi_turn =
+    "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the tas"
+    "k, validate key assumptions, consider plausible alternatives, and prioritize correctness, co"
+    "nsistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_"
+    "start|>assistant\n<think>\n\n</think>\n\nHello! How can I help?<|im_end|>\n<|im_start|>user"
+    "\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    ;
+inline const std::string k_chatml_qwen38_tool_turns =
+    "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the tas"
+    "k, validate key assumptions, consider plausible alternatives, and prioritize correctness, co"
+    "nsistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nList the files, the"
+    "n count them.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nRunning both.<|im_end"
+    "|>\n<|im_start|>user\n<tool_response>\na.txt\nb.txt\n</tool_response>\n<tool_response>\n2\n<"
+    "/tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+    ;
+
+// gemma  <-  google/gemma-4-12b-it  (detected family: GEMMA)
 inline const std::string k_gemma_template =
     "{#\n  Template: Google Gemma 4 Canonical Chat Template\n  Author: Google Gemma Engineering T"
     "eam\n  Published: 2026-07-09\n  Context: Fixed tool-calling loops, turn closures, and thinki"
@@ -707,3 +863,4 @@ inline const std::string k_phi_multi_turn =
     ;
 
 }  // namespace chat_goldens
+// clang-format on

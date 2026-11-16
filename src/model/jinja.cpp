@@ -1920,6 +1920,12 @@ private:
             loop.set("first", Value(i == 0));
             loop.set("last", Value(i == len - 1));
             loop.set("length", Value(len));
+            // Unset at the edges, as Jinja2's undefined: Qwen3.8 / Nemotron templates open the
+            // user turn before the first of consecutive tool messages via loop.previtem.
+            if (i > 0)
+                loop.set("previtem", arr[static_cast<size_t>(i - 1)]);
+            if (i + 1 < len)
+                loop.set("nextitem", arr[static_cast<size_t>(i + 1)]);
             set_var("loop", loop);
 
             if (!node.var_name2.empty()) {

@@ -175,6 +175,15 @@ TEST(JinjaTest, ForLoopFirst) {
     EXPECT_EQ(tpl.render({{"items", items}}), "[ab]");
 }
 
+TEST(JinjaTest, ForLoopPrevAndNextItem) {
+    Template tpl;
+    ASSERT_TRUE(
+        tpl.parse("{% for x in items %}{% if loop.previtem %}<{{ loop.previtem }}{% endif %}{{ x }}"
+                  "{% if not loop.last %}>{{ loop.nextitem }}{% endif %};{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "a>b;<ab>c;<bc;");
+}
+
 // ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------
