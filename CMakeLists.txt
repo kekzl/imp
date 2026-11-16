@@ -254,6 +254,8 @@ set(IMP_MODEL_SOURCES
     src/model/transcript_ids.cpp
     src/model/chat_template_families.cpp
     src/model/jinja.cpp
+    src/model/jinja_parse.cpp
+    src/model/jinja_value.cpp
 )
 # Per-arch config.json hooks (#2537): a new arch adds a file here and a row in arch_registry.cpp.
 file(GLOB IMP_HF_CONFIG_HOOK_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/model/hf_config/*.cpp)
