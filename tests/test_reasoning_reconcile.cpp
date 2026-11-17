@@ -5,7 +5,8 @@
 #include <gtest/gtest.h>
 
 #include "reasoning_split.h"
-#include "utils.h"  // extract_reasoning, strip_think_block
+#include "handlers_internal.h"  // think_opener_kept_
+#include "utils.h"              // extract_reasoning, strip_think_block
 
 using imp::server::reconcile_thinking_with_prompt_tail;
 
@@ -131,4 +132,25 @@ TEST(StructuredOutputThinking, HarmonyConstraintSkipsTheAnalysisChannel) {
     EXPECT_FALSE(harmony_skip_analysis(true, false, false, false, false, false));
     // Not Harmony: the <think> families go through should_stamp_thinking_off.
     EXPECT_FALSE(harmony_skip_analysis(false, true, false, false, false, false));
+}
+
+// Thinking off keeps <think> as a provisional stop id; Flint opens with it anyway. The non-stream reply
+// keeps the opener as the stream driver does, so a reply cut before </think> is reasoning, not content.
+TEST(ThinkingReconcile, NonStreamKeepsTheThinkOpenerOfAModelThatReasonsAnyway) {
+    static ServerState& state = *new ServerState();
+    state.default_args.reasoning_format = "deepseek";
+    ChatRequestContext ctx;
+    ctx.snap.think_start_id = 150006;
+    ctx.snap.is_think_model = true;
+    ctx.snap.enable_thinking = false;
+    EXPECT_TRUE(think_opener_kept_(state, ctx, 150006));
+    EXPECT_FALSE(think_opener_kept_(state, ctx, 150007));
+    const auto [reasoning, content] = extract_reasoning("<think>The user wants me to create");
+    EXPECT_EQ(reasoning, "The user wants me to create");
+    EXPECT_EQ(content, "");
+    // reasoning_format none: no extraction, the opener stays a dropped stop id (stream does the same).
+    state.default_args.reasoning_format = "none";
+    EXPECT_FALSE(think_opener_kept_(state, ctx, 150006));
+    ctx.snap.enable_thinking = true;
+    EXPECT_TRUE(think_opener_kept_(state, ctx, 150006));
 }
