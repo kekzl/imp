@@ -629,12 +629,13 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     if (!pending_text.empty() && !text_stop_matched)
         flush_text(pending_text.size());
 
-    // A buffered call the model ended at EOS without its close marker is still a call; a length
-    // cut-off is not (its body may be truncated) and restores as text below.
+    // A buffered call the model ended at EOS without its close marker is still a call; one cut by
+    // max_tokens ships with its closed parameters and finish "length" (tool_use + max_tokens, as
+    // vLLM streams it). Anything else restores as text below.
     ParsedToolCall eos_call;
-    if (has_tools && tool_filter.mid_tool() && !text_stop_matched && finish &&
-        std::strcmp(finish, "stop") == 0 && (ctx.params.parallel_tool_calls || out.tool_calls.empty()) &&
-        tool_filter.finish_as_call(eos_call)) {
+    if (has_tools && tool_filter.mid_tool() && !text_stop_matched &&
+        (ctx.params.parallel_tool_calls || out.tool_calls.empty()) &&
+        tool_filter.finish_unclosed_call(finish, eos_call)) {
         eos_call.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
         restore_raw_string_params(eos_call, ctx.params.tools);
         flush_buffered_content();

@@ -13,6 +13,7 @@
 #include "utils.h"
 #include "tool_call.h"
 #include "tool_call_dialect.h"
+#include "tool_stream_filter.h"  // parse_tool_calls_at_finish
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -926,23 +927,21 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
                                                                           : nullptr);
         }
 
-        // Tool-call parsing runs even on finish=length: the model may emit a complete tool_call then
-        // keep generating until the budget runs out. Parser tolerates trailing garbage after the closing
-        // marker.
+        // Tool-call parsing runs even on finish=length: a complete tool_call then budget exhaustion, or a
+        // call cut by max_tokens (closed parameters, finish stays "length", as on the stream).
         std::vector<ParsedToolCall> tool_calls;
         std::string tool_validation_error;
         if (ctx.params.has_tools) {
-            auto [pre_content, parsed_calls] = parse_tool_calls(ctx.snap.tpl_family,
-                                                                harmony_raw.empty() ? content : harmony_raw,
-                                                                state.next_tool_call_id,
-                                                                tool_names_from_request(ctx.params.tools));
+            auto [pre_content, parsed_calls, call_finish] = imp::server::parse_tool_calls_at_finish(
+                ctx.snap.tpl_family, harmony_raw.empty() ? content : harmony_raw, finish,
+                !harmony_raw.empty(), state.next_tool_call_id, tool_names_from_request(ctx.params.tools));
             if (!parsed_calls.empty()) {
                 tool_calls = std::move(parsed_calls);
                 // OpenAI parallel_tool_calls=false: emit at most one call.
                 if (!ctx.params.parallel_tool_calls && tool_calls.size() > 1)
                     tool_calls.resize(1);
                 content = pre_content;
-                finish = "tool_calls";
+                finish = call_finish;
                 // Validate parsed arguments against each tool's input schema.
                 // A failure means the model hallucinated/garbled the call —
                 // surface it rather than silently shipping bad arguments.

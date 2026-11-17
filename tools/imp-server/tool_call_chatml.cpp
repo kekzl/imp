@@ -121,6 +121,7 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         if (!raw.empty()) {
             tc.raw_params.emplace_back("input", raw);
             args["input"] = raw;
+            tc.freeform = true;
         }
     }
     tc.arguments = dump_safe(args);

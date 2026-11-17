@@ -17,6 +17,7 @@
 
 using imp::ChatTemplateFamily;
 using imp::server::StreamToolCallFilter;
+using imp::server::truncated_tool_call;
 
 namespace {
 
@@ -322,7 +323,7 @@ TEST(ToolStreamFilterChatML, ParameterTagNamingTheFunctionStreamsAsACall) {
 }
 
 // EOS before </tool_call>: the buffered body still parses as a call (stream_driver emits it on a
-// "stop" finish); finish() keeps the raw text for the length/unparseable fallback.
+// "stop" finish); finish() keeps the raw text for the unparseable fallback.
 TEST(ToolStreamFilterChatML, UnclosedCallParsesAtStreamEnd) {
     StreamToolCallFilter f(ChatTemplateFamily::CHATML);
     std::string content;
@@ -344,6 +345,115 @@ TEST(ToolStreamFilterChatML, UnclosedGarbageDoesNotParseAtStreamEnd) {
     (void)f.feed("x <tool_call>{\"name\": \"f\", \"argu");
     ParsedToolCall tc;
     EXPECT_FALSE(f.finish_as_call(tc));
+}
+
+// max_tokens cut a write_file mid-content: the call ships with its closed parameters only (the
+// stream driver keeps finish "length" = Anthropic max_tokens); EOS parses the cut value too.
+TEST(ToolStreamFilterChatML, CallCutByMaxTokensKeepsClosedParameters) {
+    StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+    (void)f.feed(
+        "<tool_call>\n<function=write_file>\n<parameter=path>\na.py\n</parameter>\n"
+        "<parameter=content>\ndef f():\n    ret");
+    ParsedToolCall tc;
+    ASSERT_TRUE(f.finish_unclosed_call("length", tc));
+    EXPECT_EQ(tc.name, "write_file");
+    EXPECT_EQ(json::parse(tc.arguments), json({{"path", "a.py"}}));
+    ParsedToolCall eos;
+    ASSERT_TRUE(f.finish_unclosed_call("stop", eos));
+    EXPECT_EQ(json::parse(eos.arguments), json({{"path", "a.py"}}));
+    ParsedToolCall other;
+    EXPECT_FALSE(f.finish_unclosed_call("cancelled", other));
+    EXPECT_FALSE(f.finish_unclosed_call(nullptr, other));
+}
+
+// A cut freeform body (apply_patch) is not a patch: the call ships with {}, not half a patch.
+TEST(ToolStreamFilterChatML, FreeformCallCutByMaxTokensHasNoInput) {
+    StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+    (void)f.feed("<tool_call>\n<function=apply_patch>\n*** Begin Patch\n*** Upd");
+    ParsedToolCall tc;
+    ASSERT_TRUE(f.finish_unclosed_call("length", tc));
+    EXPECT_EQ(tc.name, "apply_patch");
+    EXPECT_EQ(tc.arguments, "{}");
+    EXPECT_TRUE(tc.raw_params.empty());
+}
+
+// No closed name, no call: these restore as text.
+TEST(ToolStreamFilterChatML, CallCutBeforeItsNameStaysText) {
+    for (const char* cut : {"<tool_call>\n<function=write_fi", "<tool_call>\nwrite_file", "<tool_ca"}) {
+        StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+        (void)f.feed(std::string("Writing.\n\n") + cut);
+        ParsedToolCall tc;
+        EXPECT_FALSE(f.finish_unclosed_call("length", tc)) << cut;
+        EXPECT_NE(f.finish().find(cut), std::string::npos) << cut;
+    }
+}
+
+// GLM arg_key layout (Flint): the closed pair stays, the cut value goes.
+TEST(ToolStreamFilterChatML, GlmCallCutByMaxTokensKeepsClosedPairs) {
+    StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+    (void)f.feed(
+        "<tool_call>write_file<arg_key>path</arg_key><arg_value>a.py</arg_value>"
+        "<arg_key>content</arg_key><arg_value>def f");
+    ParsedToolCall tc;
+    ASSERT_TRUE(f.finish_unclosed_call("length", tc));
+    EXPECT_EQ(tc.name, "write_file");
+    EXPECT_EQ(json::parse(tc.arguments), json({{"path", "a.py"}}));
+}
+
+// Non-streaming twin: the text before the cut call becomes content; a closed call is
+// parse_tool_calls' job, so the helper declines it.
+TEST(ToolStreamFilterChatML, NonStreamingCutCallSplitsContent) {
+    std::string pre;
+    ParsedToolCall tc;
+    ASSERT_TRUE(truncated_tool_call(ChatTemplateFamily::CHATML,
+                                    "I'll write it.\n\n<tool_call>\n<function=write_file>\n"
+                                    "<parameter=path>\na.py\n</parameter>\n<parameter=content>\nx",
+                                    pre, tc));
+    EXPECT_EQ(pre, "I'll write it.");
+    EXPECT_EQ(tc.name, "write_file");
+    EXPECT_EQ(json::parse(tc.arguments), json({{"path", "a.py"}}));
+    ParsedToolCall js;
+    ASSERT_TRUE(truncated_tool_call(
+        ChatTemplateFamily::CHATML,
+        "Ok.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.py\", "
+        "\"content\": \"de",
+        pre, js));
+    EXPECT_EQ(pre, "Ok.");
+    EXPECT_EQ(js.name, "write_file");
+    // As the stream sent it: the close-tag holdback keeps the last bytes back on both paths.
+    EXPECT_TRUE(js.arguments.starts_with("{\"path\": \"a.py\"")) << js.arguments;
+    EXPECT_TRUE(std::string("{\"path\": \"a.py\", \"content\": \"de").starts_with(js.arguments))
+        << js.arguments;
+    EXPECT_FALSE(truncated_tool_call(ChatTemplateFamily::CHATML,
+                                     "<tool_call>\n<function=f>\n</function>\n</tool_call>", pre, tc));
+    EXPECT_FALSE(truncated_tool_call(ChatTemplateFamily::CHATML,
+                                     "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>", pre,
+                                     tc));
+    EXPECT_FALSE(truncated_tool_call(ChatTemplateFamily::CHATML, "plain text", pre, tc));
+}
+
+// Non-streaming finish: a cut call keeps "length" (= max_tokens), a closed one is "tool_calls", an
+// unclosed one at EOS ("stop") stays text there as before.
+TEST(ToolStreamFilterChatML, NonStreamingFinishOfCutCall) {
+    std::atomic<int> id{7};
+    const std::string cut = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\nx";
+    auto r = imp::server::parse_tool_calls_at_finish(ChatTemplateFamily::CHATML, cut, "length", false, id,
+                                                     {});
+    ASSERT_EQ(r.calls.size(), 1u);
+    EXPECT_STREQ(r.finish, "length");
+    EXPECT_EQ(r.calls[0].id, "call_imp_7");
+    EXPECT_EQ(json::parse(r.calls[0].arguments), json({{"a", 1}}));
+    EXPECT_TRUE(
+        imp::server::parse_tool_calls_at_finish(ChatTemplateFamily::CHATML, cut, "stop", false, id, {})
+            .calls.empty());
+    EXPECT_TRUE(
+        imp::server::parse_tool_calls_at_finish(ChatTemplateFamily::CHATML, cut, "length", true, id, {})
+            .calls.empty());
+    auto closed = imp::server::parse_tool_calls_at_finish(ChatTemplateFamily::CHATML,
+                                                          cut + "\n</parameter>\n</function>\n</tool_call>",
+                                                          "length", false, id, {});
+    ASSERT_EQ(closed.calls.size(), 1u);
+    EXPECT_STREQ(closed.finish, "tool_calls");
 }
 
 TEST(ToolStreamFilterChatML, UnparseableBodyRestoredVerbatim) {

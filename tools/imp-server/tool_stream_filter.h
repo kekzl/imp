@@ -15,7 +15,9 @@
 #include "stream_pipeline.h"  // imp::stream::utf8_complete_len (#1554)
 
 #include <algorithm>
+#include <atomic>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -177,6 +179,15 @@ public:
         return tag_buf_ + open_text_ + body_buf_;
     }
 
+    // finish_unclosed_call(): the call a stream left open at its end. "stop" (EOS) parses it whole,
+    // "length" (max_tokens) as finish_as_truncated_call; any other finish restores text.
+    bool finish_unclosed_call(const char* finish, ParsedToolCall& tc) const {
+        const std::string_view f = finish ? finish : "";
+        if (f == "stop")
+            return finish_as_call(tc);
+        return f == "length" && finish_as_truncated_call(tc);
+    }
+
     // finish_as_call(): a buffered call whose stream ended at EOS before its close marker, parsed
     // like a closed one. False (nothing consumed) when no buffered body exists or it does not parse;
     // the caller then restores finish() as text. Qwen3.8-Flash-Next ends apply_patch calls this way.
@@ -190,6 +201,20 @@ public:
         const std::string body = body_buf_.substr(bs, be - bs + 1);
         return parse_body_ ? parse_body_(body, fn_name_, tc)
                            : parse_stream_tool_body(body, false, fn_name_, tc);
+    }
+
+    // finish_as_truncated_call(): a buffered call cut off by max_tokens, with its name closed. Only
+    // parameters whose close tag arrived are kept; a cut freeform body becomes {}. The caller keeps
+    // finish "length", so the client sees tool_use + max_tokens as from vLLM's streaming parser.
+    bool finish_as_truncated_call(ParsedToolCall& tc) const {
+        if (parse_body_ || !finish_as_call(tc))
+            return false;
+        if (tc.freeform) {
+            tc.arguments = "{}";
+            tc.raw_params.clear();
+            tc.freeform = false;
+        }
+        return true;
     }
 
     // True while text is being held as a potential/partial tool call.
@@ -443,5 +468,52 @@ private:
     std::string streamed_name_;
     std::string streamed_args_;
 };
+
+// Non-streaming twin of the stream driver's max_tokens cut-off: true when `text` ends inside a call
+// with a closed name (JSON: the arguments so far, as streamed); `pre` = the text before it, trimmed.
+inline bool truncated_tool_call(imp::ChatTemplateFamily family, const std::string& text, std::string& pre,
+                                ParsedToolCall& tc) {
+    using Kind = StreamToolCallFilter::Segment::Kind;
+    StreamToolCallFilter f(family);
+    std::string before;
+    for (auto& s : f.feed(text)) {
+        if (s.kind == Kind::CALL_BEGIN)
+            tc.name = s.call.name;
+        else if (s.kind == Kind::TEXT)
+            before += s.text;
+        else if (s.kind != Kind::CALL_ARGS_DELTA)
+            return false;
+    }
+    if (f.call_open())
+        tc.arguments = f.streamed_arguments();
+    else if (!f.finish_as_truncated_call(tc))
+        return false;
+    before.erase(before.find_last_not_of("\n\r\t ") + 1);
+    pre = std::move(before);
+    return true;
+}
+
+struct TurnToolCalls {
+    std::string pre_content;
+    std::vector<ParsedToolCall> calls;
+    const char* finish;  // "tool_calls" for closed calls; a max_tokens cut keeps "length"
+};
+
+// Non-streaming parse_tool_calls plus the stream driver's max_tokens rule (truncated_tool_call), so
+// /v1/messages answers tool_use + max_tokens on both paths. harmony: gpt-oss channels, no cut rule.
+inline TurnToolCalls parse_tool_calls_at_finish(imp::ChatTemplateFamily family, const std::string& text,
+                                                const char* finish, bool harmony, std::atomic<int>& next_id,
+                                                const std::vector<std::string>& tool_names) {
+    auto [pre, calls] = parse_tool_calls(family, text, next_id, tool_names);
+    if (!calls.empty())
+        return {std::move(pre), std::move(calls), "tool_calls"};
+    ParsedToolCall tc;
+    if (!harmony && std::string_view(finish ? finish : "") == "length" &&
+        truncated_tool_call(family, text, pre, tc)) {
+        tc.id = "call_imp_" + std::to_string(next_id.fetch_add(1));
+        calls.push_back(std::move(tc));
+    }
+    return {std::move(pre), std::move(calls), finish};
+}
 
 }  // namespace imp::server

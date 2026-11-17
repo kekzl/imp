@@ -91,8 +91,8 @@ Measurement on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"` (10 requests each):
 | `/v1/chat/completions` | 0 / 10 | **10 / 10** |
 | the same, streaming | 0 / 10 | **10 / 10** |
 
-`tool_choice: "required"` on `harmony` and `gemma` is still a 400: the name sits in the
-envelope header and the FSM has no name enum there. A named function is forced (#2279).
+`tool_choice: "required"` on `harmony` and `gemma` is still a 400 (the name sits in the envelope header and the FSM has no name enum there); a named function is forced (#2279).
+A call cut off by `max_tokens` still arrives as `tool_calls` / `tool_use` with `finish_reason: "length"` / `stop_reason: "max_tokens"`, as vLLM streams it: a JSON body carries the arguments sent so far, an XML `<parameter=` or GLM `<arg_key>` body its closed parameters (a cut freeform body is `{}`); a call cut before its name closes stays text.
 
 Reasoning models separate their chain of thought into `reasoning_content` (Anthropic: `thinking`) rather than emitting it as the answer.
 
