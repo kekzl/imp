@@ -22,6 +22,33 @@ exclusive time), bandwidth-bound; `--kv-fp8` reads 275.47 tok/s there, quality u
 
 ---
 
+## 2026-11-15 · Flash-Next expert cache: pre-mixer prediction, eviction policy, miss-drop refuted in simulation (B-64)
+
+Protocol: `diagnostics.moe_expert_trace` with route probes (local experiment d9aea8bf, not shipped: tags 2000 + L
+pre-mixer norm-sum, 3000 + L pre-mixer full hc read, 4000 + L control at the routing point; a trace run issues no
+prefetch), Qwen3.8-Flash-Next-NVFP4, 4 prompts x 600 decode tokens, 424 slots = 141 experts per layer; CPU
+simulation over the trace. Raw data and scripts `/mnt/data/scratch/fn67/` (not in the repo). No tok/s measured.
+
+| predictor of layer L's routing | top-10 ids | routing mass |
+|---|---|---|
+| control at the routing point | 100.00 % | 100.00 % |
+| shipped (L-1 MoE, norm-sum) | 70.08 % | 77.65 % |
+| pre-mixer norm-sum | 71.30 % | 78.29 % |
+| pre-mixer full hc read | 79.87 % | 85.49 % |
+
+| cache lever (LRU baseline 57.49 missed experts per token, 11.98 %; Belady bound 29.84) | misses |
+|---|---|
+| decayed frequency, best half-life 32 tokens | -2.2 % / -3.8 % held-out |
+| LFU | +82 % |
+| slots redistributed across layers, same total | -6.1 % / -8.1 % held-out, -8.5 % in-sample |
+| drop low-weight misses | not viable: misses carry 10.19 % of the routing mass, 8.5 % of their layer-step each |
+| cache +0.87 / +1.73 / +2.60 / +3.59 GiB | -5.8 % / -11.2 % / -16.2 % / -21.4 % |
+
+- Predicting one mixer later buys 1.22 points; the gap to 79.87 % is the hc mix (B-64), not the prediction point.
+- Cache bytes are the lever; the gather is 3.96 ms of ~9.7 ms per token (B-59).
+
+---
+
 ## 2026-11-15 · Flint (RecursiveSI/flint): port check against a CPU reference, quantization and calibration (B-85, B-86)
 
 Protocol: CPU FP32 reference `tools/analysis/flint_reference.py` (written from Recursive's SGLang model code
