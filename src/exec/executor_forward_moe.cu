@@ -217,6 +217,10 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
             rmsnorm(ctx.h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
         }
     }
+    // A stale producer tag on `no` (the attention norm's small-M quantize, unconsumed when q/k/v took
+    // the NVFP4 tile in a 2..32-row verify chunk) let the shared expert read attention-normed rows.
+    if (!prenormed)
+        smallm_xq_forget_(ctx.no.data);
 }
 
 // Gemma-4 router input, FP16: rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d), from the FP32 residual
@@ -729,6 +733,7 @@ void GraphExecutor::moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeF
     if (prof.sandwich_norms && ly.ffn_pre_norm_2.data != nullptr && ly.w_up_shared.data != nullptr &&
         ly.ffn_norm.data != nullptr) {
         rmsnorm(ctx.r, ly.ffn_norm, ctx.no, ctx.eps, stream, norm_w_off_);
+        smallm_xq_forget_(ctx.no.data);  // same stale-tag rule as phase 2
     }
 
     run_shared_expert_ffn(layer, stream, ctx.n, ctx.d, ctx.eps, ctx.no, ctx.h);
