@@ -1,0 +1,333 @@
+{
+ "source": "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+ "template": "{% macro render_content(msg) -%}\n    {%- set c = msg.get('content') -%}\n    {%- if c is string -%}\n      {{ c }}\n    {%- elif c is not none -%}\n      {% for content in c -%}\n        {% if content['type'] == 'image' or 'image' in content or 'image_url' in content -%}\n          <|media_start|>image<|media_content|><|media_pad|><|media_end|>\n        {% else -%}\n          {{ content['text'] }}\n        {%- endif -%}\n      {%- endfor -%}\n    {%- endif -%}\n{%- endmacro %}\n\n\n{%- if tools -%}\n  <|im_system|>tool_declare<|im_middle|>{{ tools | tojson(separators=(',', ':')) }}<|im_end|>\n{%- endif -%}\n{% for message in messages %}  \n  {%- set role_name =  message.get('name') or  message['role'] -%}\n  {%- if message['role'] == 'user' -%}\n    <|im_user|>{{role_name}}<|im_middle|>\n  {%- elif message['role'] == 'assistant' -%}\n    <|im_assistant|>{{role_name}}<|im_middle|>\n  {%- else -%}\n    <|im_system|>{{role_name}}<|im_middle|>\n  {%- endif -%}\n\n  {%- if message['role'] == 'assistant' and message.get('tool_calls') -%}\n    {{render_content(message)}}<|tool_calls_section_begin|>\n    {%- for tool_call in message['tool_calls'] -%}\n        {%- set formatted_id = tool_call['id'] -%}\n      <|tool_call_begin|>{{ formatted_id }}<|tool_call_argument_begin|>{% if tool_call['function']['arguments'] is string %}{{ tool_call['function']['arguments'] }}{% else %}{{ tool_call['function']['arguments'] | tojson }}{% endif %}<|tool_call_end|>\n    {%- endfor -%}\n    <|tool_calls_section_end|>\n  {%- elif message['role'] == 'tool' -%}\n    {%- set tool_call_id = message.tool_call_id -%}\n    ## Return of {{ tool_call_id }}\n{{render_content(message)}}\n  {%- elif message['content'] is not none -%}\n    {{render_content(message)}}\n  {%- endif -%}\n  <|im_end|>\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n  <|im_assistant|>assistant<|im_middle|>\n{%- endif -%}",
+ "cases": [
+  {
+   "name": "basic",
+   "context": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 2+2?"
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "[BOS]",
+    "eos_token": "[EOS]"
+   },
+   "expected": "<|im_user|>user<|im_middle|>What is 2+2?<|im_end|><|im_assistant|>assistant<|im_middle|>"
+  },
+  {
+   "name": "multi",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Be terse."
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Hello."
+     },
+     {
+      "role": "user",
+      "content": "Bye"
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "[BOS]",
+    "eos_token": "[EOS]"
+   },
+   "expected": "<|im_system|>system<|im_middle|>Be terse.<|im_end|><|im_user|>user<|im_middle|>Hi<|im_end|><|im_assistant|>assistant<|im_middle|>Hello.<|im_end|><|im_user|>user<|im_middle|>Bye<|im_end|><|im_assistant|>assistant<|im_middle|>"
+  },
+  {
+   "name": "agent",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "List the files and fix a.txt."
+     },
+     {
+      "role": "assistant",
+      "content": "Looking first.",
+      "reasoning_content": "Need the listing.",
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": {
+          "command": "ls -la",
+          "timeout": 30
+         }
+        }
+       },
+       {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+         "name": "edit_file",
+         "arguments": {
+          "path": "a.txt",
+          "mode": "append",
+          "lines": [
+           1,
+           2
+          ],
+          "opts": {
+           "dry": true
+          }
+         }
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "bash",
+      "content": "a.txt\nb.txt"
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_2",
+      "name": "edit_file",
+      "content": "ok"
+     },
+     {
+      "role": "assistant",
+      "content": "Done: a.txt fixed.",
+      "reasoning_content": "Both calls ok."
+     },
+     {
+      "role": "user",
+      "content": "Thanks. Now count lines."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command."
+         },
+         "timeout": {
+          "type": "integer",
+          "description": "Seconds.",
+          "default": 60
+         }
+        },
+        "required": [
+         "command"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "edit_file",
+       "description": "Edit a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string",
+          "enum": [
+           "replace",
+           "append"
+          ]
+         },
+         "lines": {
+          "type": "array",
+          "items": {
+           "type": "integer"
+          }
+         },
+         "opts": {
+          "type": "object",
+          "properties": {
+           "dry": {
+            "type": "boolean"
+           }
+          }
+         }
+        },
+        "required": [
+         "path",
+         "mode"
+        ]
+       }
+      }
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "[BOS]",
+    "eos_token": "[EOS]"
+   },
+   "expected": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The command.\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds.\",\"default\":60}},\"required\":[\"command\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Edit a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"replace\",\"append\"]},\"lines\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},\"opts\":{\"type\":\"object\",\"properties\":{\"dry\":{\"type\":\"boolean\"}}}},\"required\":[\"path\",\"mode\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are a coding agent.<|im_end|><|im_user|>user<|im_middle|>List the files and fix a.txt.<|im_end|><|im_assistant|>assistant<|im_middle|>Looking first.<|tool_calls_section_begin|><|tool_call_begin|>call_1<|tool_call_argument_begin|>{\"command\": \"ls -la\", \"timeout\": 30}<|tool_call_end|><|tool_call_begin|>call_2<|tool_call_argument_begin|>{\"path\": \"a.txt\", \"mode\": \"append\", \"lines\": [1, 2], \"opts\": {\"dry\": true}}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>bash<|im_middle|>## Return of call_1\na.txt\nb.txt<|im_end|><|im_system|>edit_file<|im_middle|>## Return of call_2\nok<|im_end|><|im_assistant|>assistant<|im_middle|>Done: a.txt fixed.<|im_end|><|im_user|>user<|im_middle|>Thanks. Now count lines.<|im_end|><|im_assistant|>assistant<|im_middle|>"
+  },
+  {
+   "name": "agent_nothink",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "List the files and fix a.txt."
+     },
+     {
+      "role": "assistant",
+      "content": "Looking first.",
+      "reasoning_content": "Need the listing.",
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": {
+          "command": "ls -la",
+          "timeout": 30
+         }
+        }
+       },
+       {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+         "name": "edit_file",
+         "arguments": {
+          "path": "a.txt",
+          "mode": "append",
+          "lines": [
+           1,
+           2
+          ],
+          "opts": {
+           "dry": true
+          }
+         }
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "bash",
+      "content": "a.txt\nb.txt"
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_2",
+      "name": "edit_file",
+      "content": "ok"
+     },
+     {
+      "role": "assistant",
+      "content": "Done: a.txt fixed.",
+      "reasoning_content": "Both calls ok."
+     },
+     {
+      "role": "user",
+      "content": "Thanks. Now count lines."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command."
+         },
+         "timeout": {
+          "type": "integer",
+          "description": "Seconds.",
+          "default": 60
+         }
+        },
+        "required": [
+         "command"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "edit_file",
+       "description": "Edit a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string",
+          "enum": [
+           "replace",
+           "append"
+          ]
+         },
+         "lines": {
+          "type": "array",
+          "items": {
+           "type": "integer"
+          }
+         },
+         "opts": {
+          "type": "object",
+          "properties": {
+           "dry": {
+            "type": "boolean"
+           }
+          }
+         }
+        },
+        "required": [
+         "path",
+         "mode"
+        ]
+       }
+      }
+     }
+    ],
+    "enable_thinking": false,
+    "add_generation_prompt": true,
+    "bos_token": "[BOS]",
+    "eos_token": "[EOS]"
+   },
+   "expected": "<|im_system|>tool_declare<|im_middle|>[{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The command.\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds.\",\"default\":60}},\"required\":[\"command\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Edit a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"replace\",\"append\"]},\"lines\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}},\"opts\":{\"type\":\"object\",\"properties\":{\"dry\":{\"type\":\"boolean\"}}}},\"required\":[\"path\",\"mode\"]}}}]<|im_end|><|im_system|>system<|im_middle|>You are a coding agent.<|im_end|><|im_user|>user<|im_middle|>List the files and fix a.txt.<|im_end|><|im_assistant|>assistant<|im_middle|>Looking first.<|tool_calls_section_begin|><|tool_call_begin|>call_1<|tool_call_argument_begin|>{\"command\": \"ls -la\", \"timeout\": 30}<|tool_call_end|><|tool_call_begin|>call_2<|tool_call_argument_begin|>{\"path\": \"a.txt\", \"mode\": \"append\", \"lines\": [1, 2], \"opts\": {\"dry\": true}}<|tool_call_end|><|tool_calls_section_end|><|im_end|><|im_system|>bash<|im_middle|>## Return of call_1\na.txt\nb.txt<|im_end|><|im_system|>edit_file<|im_middle|>## Return of call_2\nok<|im_end|><|im_assistant|>assistant<|im_middle|>Done: a.txt fixed.<|im_end|><|im_user|>user<|im_middle|>Thanks. Now count lines.<|im_end|><|im_assistant|>assistant<|im_middle|>"
+  }
+ ]
+}
