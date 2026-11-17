@@ -65,3 +65,19 @@ void settle_thinking_from_prompt_(ChatRequestContext& ctx) {
         }
     }
 }
+
+bool structural_stop_(const ChatRequestContext& ctx, int32_t token) {
+    if (ctx.snap.tok->is_eos(token))
+        return true;
+    const auto& ids = ctx.snap.stop_token_ids;
+    return ctx.snap.have_template && std::find(ids.begin(), ids.end(), token) != ids.end();
+}
+
+// Thinking off keeps <think> as a provisional stop id, yet a model that reasons anyway opens with it.
+// Dropped, a reply cut before </think> lost its only marker and the reasoning went to content (Flint
+// via /v1/messages without `thinking`); the stream driver kept it.
+bool think_opener_kept_(const ServerState& state, const ChatRequestContext& ctx, int32_t token) {
+    const bool think_active = ctx.snap.enable_thinking ||
+                              (state.default_args.reasoning_format == "deepseek" && ctx.snap.is_think_model);
+    return think_active && token == ctx.snap.think_start_id;
+}

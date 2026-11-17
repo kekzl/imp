@@ -422,6 +422,10 @@ void cfg_render_negative(ChatRequestContext& ctx, bool force_thinking);
 // Reply thinking state from the rendered prompt tail; appends <think>\n when it opens
 // (handlers_chat_thinking.cpp).
 void settle_thinking_from_prompt_(ChatRequestContext& ctx);
+// EOS, or a template stop id: the reply carries no text for it (handlers_chat_thinking.cpp).
+bool structural_stop_(const ChatRequestContext& ctx, int32_t token);
+// stream_driver.cpp's think_opener rule for the non-stream reply: <think> stays when reasoning is split.
+bool think_opener_kept_(const ServerState& state, const ChatRequestContext& ctx, int32_t token);
 // build_imp_request_: single params->request mapping for all four ctx-based submission sites
 // (chat stream/non-stream, /v1/messages stream, /v1/responses stream) - was hand-copied per
 // site and drifted (#941). completion_idx offsets the seed for n>1; stream forces per-step decode (#754).
