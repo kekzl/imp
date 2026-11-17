@@ -177,6 +177,7 @@ struct ChatStateSnapshot {
     // Prompt layout of the loaded tower (imp::vision_prompt_layout).
     imp::VisionFamily vision_family = imp::VisionFamily::None;
     size_t vision_content_hash = 0;
+    std::vector<size_t> vision_part_hashes;  // per picture/clip, prompt order (Request::vision_part_hashes)
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;
     std::vector<imp::ToolFunction> tool_defs;

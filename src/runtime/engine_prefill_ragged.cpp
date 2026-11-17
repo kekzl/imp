@@ -145,7 +145,7 @@ void Engine::ragged_finish_row_(std::shared_ptr<Request>& req, const Tensor& row
     } else {
         req->status = RequestStatus::DECODING;
         if (kv_manager_->prefix_caching_enabled())
-            kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
+            kv_manager_->register_block_hashes(req->id, req->key_tokens(), req->prefix_salt);
     }
 }
 
@@ -460,7 +460,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                       static_cast<int>(req->input_tokens.size()));
         if (g.snap_end > 0 && req->prefill_offset == g.snap_end) {
             maybe_save_recurrent_snapshot_(*req, g.snap_end, stream);
-            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, stream, /*hard_sync=*/false,
+            maybe_save_swa_snapshot_span_(req->id, req->key_tokens(), stream, /*hard_sync=*/false,
                                           kMinPromptChunkRows);
         }
         if (g.is_last)

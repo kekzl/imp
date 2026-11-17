@@ -204,7 +204,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
         const int max_reuse = (recurrent_snapshots_ && ssm_state_)
                                   ? hybrid_prefix_reuse_limit_(*req)
                                   : prompt_reuse_cap_blocks(total_input, kv_bs);
-        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse,
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->key_tokens(), max_reuse,
                                                                  req->prefix_salt,
                                                                  restore_chain_of(req->recurrent_restore));
         if (prefix_reused < 0) {
@@ -735,7 +735,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // recurrent state / SWA window now, before the next chunk advances it.
         if (snap_end > 0 && req->prefill_offset == snap_end) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
-            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false,
+            maybe_save_swa_snapshot_span_(req->id, req->key_tokens(), pf_stream, /*hard_sync=*/false,
                                           kMinPromptChunkRows);
         }
     } else if (!req->score_token_ids.empty()) {
@@ -899,7 +899,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // they can only ever be offered to a prompt with the same picture.
             const bool had_image = req->n_vision_tokens > 0 || !req->images.empty() || req->vision_emb;
             if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
-                kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
+                kv_manager_->register_block_hashes(req->id, req->key_tokens(), req->prefix_salt);
             }
         }
     }

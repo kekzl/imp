@@ -470,6 +470,7 @@ private:
     std::vector<std::shared_ptr<Request>> cfg_held_, cfg_shadows_;
     VramOwned<float> cfg_scratch_;  // [vocab] the shadow's first-token logits
     size_t prefix_salt_(const Request& req) const;
+    void bind_cache_key_tokens_(Request& req) const;  // Request::cache_key_tokens at admission
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture: the
     // decode-attention launch topology (split-K num_splits, GQA vs split

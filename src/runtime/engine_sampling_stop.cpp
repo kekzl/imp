@@ -455,15 +455,15 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     // Restoring means starting prefill at offset > 0: a chunked continuation.
     if (!supports_chunked_prefill_())
         return 0;
-    // Vision prompts: image content is not represented in the token ids the
-    // hash covers, so never match snapshots across them.
-    if (req.vision_emb || !req.images.empty() || vision_.has_input())
+    // Pictures join only through Request::cache_key_tokens (their content in the keys);
+    // unkeyed ones and the engine-global C-API image never match snapshots.
+    if (req.vision_unkeyed() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
     int cached = 0;  // through host-tier blocks too: a snapshot chain may restore them (#2203)
-    const int on_device = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes, 0, &cached);
+    const int on_device = kv_manager_->longest_cached_prefix_blocks(req.key_tokens(), hashes, 0, &cached);
     // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2560).
     const int cap = prompt_reuse_cap_blocks(total, bs);
     int max_b = std::min(cached, cap);
@@ -484,7 +484,7 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
         // b == max_b can carry one.
         if (b == max_b && transcript_snapshot_active_()) {
             const int base = b * bs;
-            const auto toks = std::span<const int32_t>(req.input_tokens);
+            const auto toks = req.key_tokens();
             for (int m = std::min(bs - 1, total - kMinPromptChunkRows - base); m >= 1; --m) {
                 const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
                 auto entry = recurrent_snapshots_->find(key);
@@ -538,7 +538,7 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
         return;
     if (req.recurrent_slab_ahead)  // slab holds rows past the transcript (spec_hybrid_slab_at_row)
         return;
-    if (req.vision_emb || !req.images.empty() || req.n_vision_tokens > 0 || vision_.has_input())
+    if (req.vision_unkeyed() || vision_.has_input())
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int n = static_cast<int>(forwarded.size());
@@ -578,8 +578,8 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     size_t key = 0;
     for (int b = 0; b < snap_end / bs; ++b) {
-        key = KVCacheManager::compute_block_hash(
-            std::span<const int32_t>(req.input_tokens).subspan(static_cast<size_t>(b) * bs, bs), key);
+        key = KVCacheManager::compute_block_hash(req.key_tokens().subspan(static_cast<size_t>(b) * bs, bs),
+                                                 key);
     }
     if (snapshot_still_paired(*recurrent_snapshots_, *kv_manager_, key, snap_end)) {
         recurrent_snapshots_->protect(req.id, key);
@@ -590,7 +590,7 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
         return;
     // Bind this sequence's blocks to their hashes: the resend then reuses exactly the KV
     // this state was computed against, not an earlier forward's copy (#2174).
-    auto chain = kv_manager_->adopt_chain(req.id, req.input_tokens, snap_end / bs, req.prefix_salt, 0);
+    auto chain = kv_manager_->adopt_chain(req.id, req.key_tokens(), snap_end / bs, req.prefix_salt, 0);
     if (chain.empty())
         return;
     recurrent_snapshots_->erase(key);
@@ -625,12 +625,12 @@ int Engine::swa_prefix_reuse_limit_(Request& req) {
     // Restoring means starting prefill at offset > 0: a chunked continuation.
     if (!supports_chunked_prefill_())
         return 0;
-    if (req.vision_emb || !req.images.empty() || vision_.has_input())
+    if (req.vision_unkeyed() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
-    int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
+    int cached = kv_manager_->longest_cached_prefix_blocks(req.key_tokens(), hashes);
     // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2562).
     int max_b = std::min(cached, prompt_reuse_cap_blocks(total, bs));
     for (int b = max_b; b >= 1; --b) {
@@ -650,7 +650,7 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
         return 0;
     if (!supports_chunked_prefill_())
         return 0;
-    if (req.vision_emb || !req.images.empty() || vision_.has_input())
+    if (req.vision_unkeyed() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.

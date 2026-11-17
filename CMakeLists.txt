@@ -1021,6 +1021,7 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_vision_load.cpp
         tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
+        tests/test_vision_cache_keys.cpp
         tests/test_config.cpp
         tests/test_config_bindings.cpp
         tests/test_mtp_auto.cpp

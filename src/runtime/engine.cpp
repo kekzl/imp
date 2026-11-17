@@ -34,6 +34,7 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
+#include "runtime/vision_cache_keys.h"
 #include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
 #include "compute/gemm.h"
@@ -336,7 +337,7 @@ bool Engine::lora_unload(int id) {
 // adapter must never share KV (AUDIT_ARCH_2026 E-1). 0 for plain text/base model.
 // Computed once at admission; five call sites read it and must agree.
 size_t Engine::prefix_salt_(const Request& req) const {
-    size_t salt = req.vision_content_hash;
+    size_t salt = req.cache_key_tokens.empty() ? req.vision_content_hash : 0;
     if (active_lora_ != 0)
         salt ^= (static_cast<size_t>(active_lora_) + 1) * 0x9E3779B97F4A7C15ULL;
     salt ^= control_vector_salt_();  // steered KV must not serve an unsteered prompt
@@ -344,6 +345,25 @@ size_t Engine::prefix_salt_(const Request& req) const {
         salt = (salt ^ (static_cast<size_t>(id) * 0x9E3779B97F4A7C15ULL) ^ std::bit_cast<uint32_t>(v)) *
                0xBF58476D1CE4E5B9ULL;
     return salt;
+}
+
+// Placeholder id of the request's pictures: Qwen pad (video folded into it), mmproj soft token,
+// audio token. Needs a content hash; otherwise the request stays out of the cache (salt path).
+void Engine::bind_cache_key_tokens_(Request& req) const {
+    req.cache_key_tokens.clear();
+    if (req.vision_content_hash == 0)
+        return;
+    int32_t pad = -1;
+    if (!req.qwen_patches.empty())
+        pad = qwen_image_pad_id_;
+    else if (!req.images.empty())
+        pad = vision_.soft_token_id();
+    else if (!req.audios.empty())
+        pad = audio_.audio_token_id();
+    if (pad < 0)
+        return;
+    req.cache_key_tokens = vision_cache_key_tokens(req.input_tokens, pad, req.vision_part_hashes,
+                                                   req.vision_content_hash);
 }
 
 size_t Engine::effective_free_vram() const {
@@ -379,9 +399,11 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // Pipelined rows (drain): the chained step forwarded the final token
             // too, so its KV row and state are there and the span includes it.
             const size_t keep = bd_pipe_.draining_release ? 0 : 1;
+            // Cache keys of the forwarded span (pictures keyed by content, Request::key_tokens).
+            const auto keys = req->key_tokens();
             std::vector<int32_t> forwarded;
-            forwarded.reserve(req->input_tokens.size() + req->output_tokens.size() - keep);
-            forwarded.insert(forwarded.end(), req->input_tokens.begin(), req->input_tokens.end());
+            forwarded.reserve(keys.size() + req->output_tokens.size() - keep);
+            forwarded.insert(forwarded.end(), keys.begin(), keys.end());
             forwarded.insert(forwarded.end(), req->output_tokens.begin(), req->output_tokens.end() - keep);
             kv_manager_->register_block_hashes(req->id, forwarded, req->prefix_salt);
             // SWA window snapshot over the SAME span: without it the hashed
@@ -393,7 +415,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // turn restores at the end of this reply instead of at the prompt boundary.
             maybe_save_transcript_snapshot_(*req, forwarded, stream_);
         } else {
-            kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
+            kv_manager_->register_block_hashes(req->id, req->key_tokens(), req->prefix_salt);
         }
         // cache_control / cache_prompt: protect the prompt's full blocks from
         // eviction (must run before free_sequence, pinning needs the live block
@@ -955,6 +977,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
             req->qwen_token_types = fold_video_pads(req->input_tokens, qwen_image_pad_id_,
                                                     qwen_video_pad_id_);
         phrase_ban_init_(*req);  // banned phrases: think seed and own logit_bias, after the seeding above
+        bind_cache_key_tokens_(*req);  // after the fold: keys see the GPU-path pad ids
         req->prefix_salt = prefix_salt_(*req);
         cfg_admit_(std::move(req));  // the scheduler, or held until its guidance shadow prefilled
     }
