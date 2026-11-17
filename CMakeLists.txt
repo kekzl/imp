@@ -797,6 +797,18 @@ if(IMP_BUILD_SERVER OR IMP_BUILD_TESTS)
         tools/imp-server/candidate_tokens.cpp)
 endif()
 
+# nlohmann/json: the server, and test-text's Jinja parity fixtures even with IMP_BUILD_SERVER=OFF
+# (Sanitizers lane, make asan).
+if(IMP_BUILD_SERVER OR IMP_BUILD_TESTS)
+    FetchContent_Declare(nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG ${IMP_DEP_NLOHMANN_JSON_SHA}  # commit pin, cmake/imp-deps.cmake
+        GIT_SHALLOW TRUE
+    )
+    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
 # --- Server ---
 if(IMP_BUILD_SERVER)
     FetchContent_Declare(httplib
@@ -808,14 +820,6 @@ if(IMP_BUILD_SERVER)
     # the build, not compile the SSLClient out.
     set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(httplib)
-
-    FetchContent_Declare(nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG ${IMP_DEP_NLOHMANN_JSON_SHA}  # commit pin, cmake/imp-deps.cmake
-        GIT_SHALLOW TRUE
-    )
-    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(nlohmann_json)
 
     # Web UI: generated header, regenerated whenever the page changes.
     set(IMP_WEBUI_PAGE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server/webui/index.html)
@@ -1331,10 +1335,8 @@ if(IMP_BUILD_TESTS)
         tests/test_jinja_parity.cpp
         tests/test_chat_template_goldens.cpp
     )
-    if(TARGET nlohmann_json::nlohmann_json)
-        # test_jinja_parity.cpp reads its fixtures with ordered_json (dict key order is under test).
-        target_link_libraries(test-text PRIVATE nlohmann_json::nlohmann_json)
-    endif()
+    # test_jinja_parity.cpp reads its fixtures with ordered_json (dict key order is under test).
+    target_link_libraries(test-text PRIVATE nlohmann_json::nlohmann_json)
 
     imp_add_test_module(test-compute GPU SOURCES
         tests/test_gemm_lt_ex.cu
