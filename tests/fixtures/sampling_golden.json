@@ -19,6 +19,7 @@
     "mirostat_tau": 5.0,
     "mirostat_eta": 0.10000000149011612,
     "think_budget": 0.5,
+    "thinking_token_budget": 0,
     "max_tokens": 0,
     "seed": -1,
     "priority": 0,
@@ -1391,6 +1392,61 @@
   "best_of=false": {
    "params": {}
   },
+  "thinking_token_budget=0": {
+   "params": {}
+  },
+  "thinking_token_budget=1": {
+   "params": {
+    "thinking_token_budget": 1
+   }
+  },
+  "thinking_token_budget=-1": {
+   "params": {
+    "thinking_token_budget": -1
+   }
+  },
+  "thinking_token_budget=3": {
+   "params": {
+    "thinking_token_budget": 3
+   }
+  },
+  "thinking_token_budget=7": {
+   "params": {
+    "thinking_token_budget": 7
+   }
+  },
+  "thinking_token_budget=2.7": {
+   "params": {
+    "thinking_token_budget": 2
+   }
+  },
+  "thinking_token_budget=65": {
+   "params": {
+    "thinking_token_budget": 65
+   }
+  },
+  "thinking_token_budget=2147483647": {
+   "params": {
+    "thinking_token_budget": 2147483647
+   }
+  },
+  "thinking_token_budget=-2147483648": {
+   "params": {
+    "thinking_token_budget": -2147483648
+   }
+  },
+  "thinking_token_budget=4294967297": {
+   "params": {
+    "thinking_token_budget": 1
+   }
+  },
+  "thinking_token_budget=\"x\"": {
+   "status": 400,
+   "error": "[json.exception.type_error.302] type must be number, but is string"
+  },
+  "thinking_token_budget=false": {
+   "params": {}
+  },
   "stream=true": {
    "params": {
     "stream": true
@@ -1558,6 +1614,11 @@
   "{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":32}}": {
    "params": {}
   },
+  "{\"max_tokens\":32768,\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":16384}}": {
+   "params": {
+    "max_tokens": 32768
+   }
+  },
   "{\"thinking\":{\"type\":\"disabled\"}}": {
    "params": {}
   },
@@ -1684,6 +1745,7 @@
     "mirostat_tau": 5.0,
     "mirostat_eta": 0.10000000149011612,
     "think_budget": 0.0,
+    "thinking_token_budget": 0,
     "max_tokens": 64,
     "seed": -1,
     "priority": 0,
@@ -2749,6 +2811,42 @@
   "best_of=false": {
    "params": {}
   },
+  "thinking_token_budget=0": {
+   "params": {}
+  },
+  "thinking_token_budget=1": {
+   "params": {}
+  },
+  "thinking_token_budget=-1": {
+   "params": {}
+  },
+  "thinking_token_budget=3": {
+   "params": {}
+  },
+  "thinking_token_budget=7": {
+   "params": {}
+  },
+  "thinking_token_budget=2.7": {
+   "params": {}
+  },
+  "thinking_token_budget=65": {
+   "params": {}
+  },
+  "thinking_token_budget=2147483647": {
+   "params": {}
+  },
+  "thinking_token_budget=-2147483648": {
+   "params": {}
+  },
+  "thinking_token_budget=4294967297": {
+   "params": {}
+  },
+  "thinking_token_budget=\"x\"": {
+   "params": {}
+  },
+  "thinking_token_budget=false": {
+   "params": {}
+  },
   "stream=true": {
    "params": {
     "stream": true
@@ -2885,6 +2983,15 @@
   "{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":32}}": {
    "params": {
     "think_budget": 0.5,
+    "thinking_token_budget": 32,
+    "enable_thinking_requested": true
+   }
+  },
+  "{\"max_tokens\":32768,\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":16384}}": {
+   "params": {
+    "think_budget": 0.5,
+    "thinking_token_budget": 16384,
+    "max_tokens": 32768,
     "enable_thinking_requested": true
    }
   },
@@ -2986,6 +3093,7 @@
     "mirostat_tau": 5.0,
     "mirostat_eta": 0.10000000149011612,
     "think_budget": 0.5,
+    "thinking_token_budget": 0,
     "max_tokens": 0,
     "seed": -1,
     "priority": 0,
@@ -3996,6 +4104,42 @@
   "best_of=false": {
    "params": {}
   },
+  "thinking_token_budget=0": {
+   "params": {}
+  },
+  "thinking_token_budget=1": {
+   "params": {}
+  },
+  "thinking_token_budget=-1": {
+   "params": {}
+  },
+  "thinking_token_budget=3": {
+   "params": {}
+  },
+  "thinking_token_budget=7": {
+   "params": {}
+  },
+  "thinking_token_budget=2.7": {
+   "params": {}
+  },
+  "thinking_token_budget=65": {
+   "params": {}
+  },
+  "thinking_token_budget=2147483647": {
+   "params": {}
+  },
+  "thinking_token_budget=-2147483648": {
+   "params": {}
+  },
+  "thinking_token_budget=4294967297": {
+   "params": {}
+  },
+  "thinking_token_budget=\"x\"": {
+   "params": {}
+  },
+  "thinking_token_budget=false": {
+   "params": {}
+  },
   "stream=true": {
    "params": {
     "stream": true
@@ -4126,6 +4270,9 @@
   "{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":32}}": {
    "params": {}
   },
+  "{\"max_tokens\":32768,\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":16384}}": {
+   "params": {}
+  },
   "{\"thinking\":{\"type\":\"disabled\"}}": {
    "params": {}
   },
@@ -4221,6 +4368,7 @@
     "mirostat_tau": 5.0,
     "mirostat_eta": 0.10000000149011612,
     "think_budget": 0.5,
+    "thinking_token_budget": 0,
     "max_tokens": 0,
     "seed": -1,
     "priority": 0,
@@ -5547,6 +5695,61 @@
    "status": 400,
    "error": "\"best_of\" must be an integer"
   },
+  "thinking_token_budget=0": {
+   "params": {}
+  },
+  "thinking_token_budget=1": {
+   "params": {
+    "thinking_token_budget": 1
+   }
+  },
+  "thinking_token_budget=-1": {
+   "params": {
+    "thinking_token_budget": -1
+   }
+  },
+  "thinking_token_budget=3": {
+   "params": {
+    "thinking_token_budget": 3
+   }
+  },
+  "thinking_token_budget=7": {
+   "params": {
+    "thinking_token_budget": 7
+   }
+  },
+  "thinking_token_budget=2.7": {
+   "params": {
+    "thinking_token_budget": 2
+   }
+  },
+  "thinking_token_budget=65": {
+   "params": {
+    "thinking_token_budget": 65
+   }
+  },
+  "thinking_token_budget=2147483647": {
+   "params": {
+    "thinking_token_budget": 2147483647
+   }
+  },
+  "thinking_token_budget=-2147483648": {
+   "params": {
+    "thinking_token_budget": -2147483648
+   }
+  },
+  "thinking_token_budget=4294967297": {
+   "params": {
+    "thinking_token_budget": 1
+   }
+  },
+  "thinking_token_budget=\"x\"": {
+   "status": 400,
+   "error": "[json.exception.type_error.302] type must be number, but is string"
+  },
+  "thinking_token_budget=false": {
+   "params": {}
+  },
   "stream=true": {
    "params": {
     "stream": true
@@ -5719,6 +5922,11 @@
   },
   "{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":32}}": {
    "params": {}
+  },
+  "{\"max_tokens\":32768,\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":16384}}": {
+   "params": {
+    "max_tokens": 32768
+   }
   },
   "{\"thinking\":{\"type\":\"disabled\"}}": {
    "params": {}

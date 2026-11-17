@@ -59,6 +59,7 @@ json chat_params_json(const ChatRequestParams& p) {
             {"mirostat_tau", p.mirostat_tau},
             {"mirostat_eta", p.mirostat_eta},
             {"think_budget", p.think_budget},
+            {"thinking_token_budget", p.thinking_token_budget},
             {"max_tokens", p.max_tokens},
             {"seed", p.seed},
             {"priority", p.priority},
@@ -173,6 +174,7 @@ json run_completions(const json& body) {
               {"mirostat_tau", p.mirostat_tau},
               {"mirostat_eta", p.mirostat_eta},
               {"think_budget", p.think_budget},
+              {"thinking_token_budget", p.thinking_token_budget},
               {"max_tokens", p.max_tokens},
               {"seed", p.seed},
               {"priority", p.priority},
@@ -231,10 +233,20 @@ std::vector<std::pair<std::string, json>> cases() {
                                 "mirostat_tau",
                                 "mirostat_eta",
                                 "think_budget"};
-    const char* kIntKeys[] = {
-        "top_k",    "seed", "priority",     "repeat_last_n", "dry_allowed_length",    "dry_penalty_last_n",
-        "mirostat", "n",    "top_logprobs", "max_tokens",    "max_completion_tokens", "max_output_tokens",
-        "best_of"};
+    const char* kIntKeys[] = {"top_k",
+                              "seed",
+                              "priority",
+                              "repeat_last_n",
+                              "dry_allowed_length",
+                              "dry_penalty_last_n",
+                              "mirostat",
+                              "n",
+                              "top_logprobs",
+                              "max_tokens",
+                              "max_completion_tokens",
+                              "max_output_tokens",
+                              "best_of",
+                              "thinking_token_budget"};
     const char* kBoolKeys[] = {"stream", "ignore_eos", "cache_prompt", "echo", "logprobs"};
     std::vector<std::pair<std::string, json>> out;
     out.emplace_back("<base>", json::object());
@@ -266,6 +278,7 @@ std::vector<std::pair<std::string, json>> cases() {
         {{"temperature", nullptr}},
         {{"top_p", nullptr}, {"top_k", nullptr}},
         {{"thinking", {{"type", "enabled"}, {"budget_tokens", 32}}}},
+        {{"max_tokens", 32768}, {"thinking", {{"type", "enabled"}, {"budget_tokens", 16384}}}},
         {{"thinking", {{"type", "disabled"}}}},
         {{"reasoning", {{"effort", "low"}}}},
         {{"reasoning", {{"effort", "high"}}}},

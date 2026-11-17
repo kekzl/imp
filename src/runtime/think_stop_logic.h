@@ -84,11 +84,14 @@ constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve
 // fractional budget and max_tokens minus the answer reserve.
 // think_cap > 0 bounds the result (runtime.think_max_tokens): max_tokens defaults to the remaining
 // context, where 3/4 of it would be ~90k reasoning tokens on a 131072-token context.
+// budget_tokens > 0 (client's thinking_token_budget / budget_tokens) is the limit itself, no reserve floor,
+// as vLLM.
 constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve,
-                          int think_cap = 0) {
+                          int think_cap = 0, int budget_tokens = 0) {
     const int frac_limit = static_cast<int>(max_tokens * think_budget);
     const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
-    const int limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
+    const int limit = budget_tokens > 0 ? budget_tokens
+                                        : (frac_limit > reserve_limit ? frac_limit : reserve_limit);
     return think_cap > 0 && limit > think_cap ? think_cap : limit;
 }
 
@@ -97,11 +100,11 @@ constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve
 inline constexpr int kThinkUnbounded = std::numeric_limits<int>::max();
 inline int think_tokens_left(float think_budget, int32_t think_end_id, int max_tokens,
                              const std::vector<int32_t>& output_tokens, int32_t think_start_id,
-                             bool started_in_think, int answer_reserve = kMaxAnswerReserve,
-                             int think_cap = 0) {
+                             bool started_in_think, int answer_reserve = kMaxAnswerReserve, int think_cap = 0,
+                             int budget_tokens = 0) {
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return kThinkUnbounded;
-    const int limit = think_limit(max_tokens, think_budget, answer_reserve, think_cap);
+    const int limit = think_limit(max_tokens, think_budget, answer_reserve, think_cap, budget_tokens);
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
                                              currently_thinking);
@@ -116,9 +119,9 @@ inline int think_tokens_left(float think_budget, int32_t think_end_id, int max_t
 inline bool should_force_think_end(float think_budget, int32_t think_end_id, int max_tokens,
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
                                    bool started_in_think, int answer_reserve = kMaxAnswerReserve,
-                                   int think_cap = 0) {
+                                   int think_cap = 0, int budget_tokens = 0) {
     return think_tokens_left(think_budget, think_end_id, max_tokens, output_tokens, think_start_id,
-                             started_in_think, answer_reserve, think_cap) == 0;
+                             started_in_think, answer_reserve, think_cap, budget_tokens) == 0;
 }
 
 // Client end-of-think (#2420, POST /v1/requests/{id}/end_thinking): forces the closer while the

@@ -147,7 +147,7 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 | `stop` | OpenAI | matched against the answer only, never the reasoning, on both transports |
 | `thinking: {type: "disabled"}` | Anthropic | same, and zeroes the budget |
 | `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. **Required to get it at all on this dialect** (#1541); `adaptive` is what current SDKs send |
-| `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
+| `thinking: {budget_tokens: N}` | Anthropic | reasoning stops at N tokens. `0` disables thinking outright |
 | `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
 | `POST /v1/requests/{id}/end_thinking` | all | ends a running request's think block, the answer continues: [`API_CONTROL.md`](API_CONTROL.md) |
 
@@ -158,10 +158,10 @@ Three knobs, and only one of them caps tokens:
 | knob | dialect | what it does |
 |---|---|---|
 | `think_budget` / `--think-budget` | OpenAI | FRACTION of `max_tokens` (default 0.5) the model may spend reasoning |
-| `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
+| `thinking_token_budget` / `thinking.budget_tokens` | OpenAI (vLLM field) / Anthropic | a token count: reasoning is force-closed at N, no answer-reserve floor, capped at `runtime.think_max_tokens`; `budget_tokens: 0` disables thinking |
 | `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8). The loaded model's values: `/v1/models` `meta.reasoning_effort` |
 
-Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction, whichever is later, capped at `runtime.think_max_tokens` (32768).
+Without a token count the engine enforces an answer reserve: reasoning force-closed (injected `</think>`) when it reaches `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction, whichever is later, capped at `runtime.think_max_tokens` (32768).
 
 - `runtime.think_answer_reserve` default 256.
 - Example: `max_tokens: 260` + 0.5 default = `max(130, 4) = 130` reasoning tokens max.

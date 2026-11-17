@@ -95,14 +95,15 @@ bool Engine::think_end_due_(const Request& req) const {
            think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
                                                req.output_tokens, think_start_id_, req.started_in_think,
                                                runtime_config_.runtime.think_answer_reserve,
-                                               runtime_config_.runtime.think_max_tokens);
+                                               runtime_config_.runtime.think_max_tokens,
+                                               req.think_budget_tokens);
 }
 
 int Engine::think_tokens_left_(const Request& req) const {
     return think_logic::think_tokens_left(req.think_budget, think_end_id_, req.max_tokens, req.output_tokens,
                                           think_start_id_, req.started_in_think,
                                           runtime_config_.runtime.think_answer_reserve,
-                                          runtime_config_.runtime.think_max_tokens);
+                                          runtime_config_.runtime.think_max_tokens, req.think_budget_tokens);
 }
 
 bool Engine::think_closer_pending_(const Request& req) const {
