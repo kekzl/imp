@@ -10,6 +10,10 @@
 
 namespace imp {
 
+// Auto max_seq_len ceiling (#1004: agent transcripts run 50-150K tokens); also what /v1/models
+// advertises for a model not loaded yet.
+inline constexpr int kAutoMaxSeqLenCap = 131072;
+
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
     int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)

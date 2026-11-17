@@ -2,6 +2,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "model_name_policy.h"
+#include "model_context.h"
 #include "model_scan.h"
 #include "request_field_types.h"
 #include "utils.h"
@@ -270,14 +271,28 @@ json capabilities_json(const LoadedModelView& v) {
     return caps;
 }
 
+void set_context_fields(json& model, int tokens) {
+    if (tokens <= 0)
+        return;
+    model["max_model_len"] = tokens;            // vLLM convention
+    model["meta"] = {{"n_ctx_train", tokens}};  // llama.cpp convention
+    model["max_input_tokens"] = tokens;         // Anthropic: the context window
+    model["max_tokens"] = tokens;               // Anthropic: output cap, bounded by the window
+}
+
+// A model on disk this server would swap in: its context ceiling (model_context.h), without a
+// null max_model_len that left clients sending prompts no load could take.
+json unloaded_model_json(const std::string& id, const std::string& path, const ServerState& state) {
+    json model = model_entry(id, false);
+    set_context_fields(model,
+                       imp_server::advertised_context_tokens(imp_server::declared_context_tokens(path),
+                                                             state.runtime_config.runtime.max_seq_len));
+    return model;
+}
+
 json loaded_model_json(const LoadedModelView& v) {
     json model = model_entry(v.name, true);
-    if (v.max_seq_len > 0) {
-        model["max_model_len"] = v.max_seq_len;            // vLLM convention
-        model["meta"] = {{"n_ctx_train", v.max_seq_len}};  // llama.cpp convention
-        model["max_input_tokens"] = v.max_seq_len;         // Anthropic: the context window
-        model["max_tokens"] = v.max_seq_len;               // Anthropic: output cap, bounded by the window
-    }
+    set_context_fields(model, v.max_seq_len);
     if (!v.effort_values.empty())
         model["meta"]["reasoning_effort"] = {{"values", v.effort_values}, {"default", v.effort_default}};
     model["capabilities"] = capabilities_json(v);
@@ -291,16 +306,15 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res, Serv
     const LoadedModelView v = loaded_model_view(state);
 
     // Lists every model in the models dir (not just the loaded one) now that server.model_swap
-    // makes swap-in-flight safe. Loaded model first with known context window; others report none.
+    // makes swap-in-flight safe. Loaded model first with its servable window; others their ceiling.
     if (v.loaded)
         data.push_back(loaded_model_json(v));
 
     if (state.runtime_config.server.model_swap) {
         for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
-            (void)fpath;
             if (v.loaded && fname == v.name)
                 continue;
-            data.push_back(model_entry(fname, false));
+            data.push_back(unloaded_model_json(fname, fpath, state));
         }
     }
 
@@ -325,10 +339,9 @@ void handle_model_retrieve(const httplib::Request&, httplib::Response& res, Serv
     // endpoint gives for it, so the two cannot disagree.
     if (state.runtime_config.server.model_swap) {
         for (const auto& [fname, fpath] : scan_model_files(state.models_dir)) {
-            (void)fpath;
             if (fname != model_id)
                 continue;
-            res.set_content(dump_safe(model_entry(fname, false)), "application/json");
+            res.set_content(dump_safe(unloaded_model_json(fname, fpath, state)), "application/json");
             return;
         }
     }

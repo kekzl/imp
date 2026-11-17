@@ -857,6 +857,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/responses.cpp
         tools/imp-server/responses_store.cpp
         tools/imp-server/handlers.cpp
+        tools/imp-server/model_context.cpp
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_completions_params.cpp
@@ -1269,6 +1270,7 @@ if(IMP_BUILD_TESTS)
             # The request `model` field is a name, never a path (AUDIT_ARCH_2026
             # F2-1): the two pure policy functions behind find_model_path().
             tests/test_model_name_policy.cpp
+            tests/test_model_context.cpp
             tests/test_tracing.cpp
             tests/test_server_request_limits.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The

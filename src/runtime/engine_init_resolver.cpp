@@ -947,7 +947,6 @@ void Engine::init_compute_max_seq_len_() {
         // transcripts run 50-150K tokens). max_by_vram and model_ctx still
         // bound it, so this only raises the ceiling for models that declare
         // (and can hold) more than 64K.
-        constexpr int kAutoMaxSeqLenCap = 131072;
         config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
             "max_seq_len: auto → %d (model=%d, vram_cap=%d, auto_cap=%d, kv=%zu B/tok, attn_layers=%d/%d)",
