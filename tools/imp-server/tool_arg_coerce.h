@@ -12,10 +12,10 @@ namespace imp {
 
 // Types a property schema allows: "type" (string or list), enum value kinds, anyOf / oneOf / allOf
 // recursively; lowercased, aliases folded ("int" -> "integer", "list" -> "array"). None: {"string"}.
-std::vector<std::string> schema_arg_types(const nlohmann::json& schema);
+std::vector<std::string> schema_arg_types(const nlohmann::ordered_json& schema);
 
 // First type in null > integer > number > boolean > object > array > string that the text converts
 // to, else the text as JSON, else the text. Non-finite numbers never leave as numbers.
-nlohmann::json coerce_arg_text(const std::string& text, const std::vector<std::string>& types);
+nlohmann::ordered_json coerce_arg_text(const std::string& text, const std::vector<std::string>& types);
 
 }  // namespace imp

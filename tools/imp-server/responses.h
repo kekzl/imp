@@ -14,7 +14,7 @@
 
 namespace imp_server::responses {
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // responses_to_openai_body: throws std::invalid_argument with a client-facing message on
 // unsupported fields (unresolved previous_response_id, non-text input parts).

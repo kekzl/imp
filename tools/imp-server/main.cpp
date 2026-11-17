@@ -26,7 +26,7 @@
 #include <thread>
 #include <utility>
 
-using nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // is_inference_endpoint: routes gated by --max-concurrent admission control. /v1/messages and
 // /v1/embeddings were once omitted, silently bypassing it (non-stream /v1/messages calls
@@ -504,7 +504,7 @@ static int run_server(int argc, char** argv) {
     svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
         try {
             std::rethrow_exception(std::move(ep));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const nlohmann::ordered_json::exception& e) {
             const std::string field = wrong_field_type_message(req.body);
             send_dialect_error(res, req.path, 400, "invalid_request_error", "invalid_request_error",
                                field.empty() ? std::string(e.what()) : field);

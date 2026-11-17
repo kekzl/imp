@@ -7,11 +7,11 @@
 #include <charconv>
 #include <cmath>
 
-std::string parse_logit_bias(const nlohmann::json& body, int cap,
+std::string parse_logit_bias(const nlohmann::ordered_json& body, int cap,
                              std::vector<std::pair<int32_t, float>>& out) {
     if (!body.contains("logit_bias") || body["logit_bias"].is_null())
         return "";
-    const nlohmann::json& lb = body["logit_bias"];
+    const nlohmann::ordered_json& lb = body["logit_bias"];
     if (!lb.is_object())
         return "\"logit_bias\" must be an object mapping token ids to biases";
     // Every entry costs a blocking device-to-host copy per decode step (#1617): refuse, not truncate.
@@ -42,7 +42,7 @@ std::string logit_bias_vocab_error(const std::vector<std::pair<int32_t, float>>&
     return "";
 }
 
-std::string parse_banned_strings(const nlohmann::json& v, std::vector<std::string>& out) {
+std::string parse_banned_strings(const nlohmann::ordered_json& v, std::vector<std::string>& out) {
     out.clear();
     if (!v.is_array() || v.empty() || v.size() > static_cast<size_t>(imp::kMaxBannedPhrases))
         return "\"banned_strings\" must be an array of 1.." + std::to_string(imp::kMaxBannedPhrases) +
@@ -57,7 +57,7 @@ std::string parse_banned_strings(const nlohmann::json& v, std::vector<std::strin
     return "";
 }
 
-std::string parse_banned_regex(const nlohmann::json& v,
+std::string parse_banned_regex(const nlohmann::ordered_json& v,
                                std::vector<std::shared_ptr<const imp::PhraseRegex>>& out) {
     out.clear();
     if (!v.is_array() || v.empty() || v.size() > static_cast<size_t>(imp::kMaxBannedRegex))

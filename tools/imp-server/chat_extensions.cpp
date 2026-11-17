@@ -9,7 +9,7 @@
 #include <charconv>
 #include <cmath>
 
-std::string parse_cfg_fields(const nlohmann::json& body, ChatRequestParams& p) {
+std::string parse_cfg_fields(const nlohmann::ordered_json& body, ChatRequestParams& p) {
     if (const auto s = body.find("cfg_scale"); s != body.end() && !s->is_null()) {
         if (!s->is_number() || s->get<double>() < 1.0 || s->get<double>() > imp::kMaxCfgScale)
             return "\"cfg_scale\" must be a number in [1, " +
@@ -24,7 +24,7 @@ std::string parse_cfg_fields(const nlohmann::json& body, ChatRequestParams& p) {
     return "";
 }
 
-std::string parse_sae_fields(const nlohmann::json& body, ChatRequestParams& p, const char** field) {
+std::string parse_sae_fields(const nlohmann::ordered_json& body, ChatRequestParams& p, const char** field) {
     if (const auto f = body.find("sae_features"); f != body.end() && !f->is_null()) {
         *field = "sae_features";
         if (!f->is_number_integer() || f->get<int64_t>() < 0 || f->get<int64_t>() > imp::kSaeMaxTopN)

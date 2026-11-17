@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-using nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 

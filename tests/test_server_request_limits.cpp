@@ -122,10 +122,10 @@ TEST(SanitizeForEcho, TruncatesWithAMarker) {
 TEST(SanitizeForEcho, TheResultSerialisesWhereTheRawPathThrows) {
     const std::string bad_path = "/v1/\x80\xff";
 
-    nlohmann::json raw = {{"error", {{"message", "Unknown endpoint: GET " + bad_path}}}};
-    EXPECT_THROW((void)raw.dump(), nlohmann::json::type_error);
+    nlohmann::ordered_json raw = {{"error", {{"message", "Unknown endpoint: GET " + bad_path}}}};
+    EXPECT_THROW((void)raw.dump(), nlohmann::ordered_json::type_error);
 
-    nlohmann::json clean = {
+    nlohmann::ordered_json clean = {
         {"error", {{"message", "Unknown endpoint: GET " + sanitize_for_echo(bad_path, 128)}}}};
     EXPECT_NO_THROW((void)clean.dump());
     EXPECT_NO_THROW((void)dump_safe(raw));  // the other half of the fix
@@ -472,7 +472,7 @@ TEST(QueuedTokenGate, RefusalIs429OverloadedWithRetryAfterInEachDialect) {
         EXPECT_EQ(admit_queued_tokens(path, res, g, 100, 1000), nullptr) << path;
         EXPECT_EQ(res.status, 429) << path;
         EXPECT_EQ(res.get_header_value("Retry-After"), "1") << path;
-        const auto j = nlohmann::json::parse(res.body);
+        const auto j = nlohmann::ordered_json::parse(res.body);
         EXPECT_EQ(j["error"]["type"], "rate_limit_error") << path;
         EXPECT_FALSE(j.contains("type")) << path << ": OpenAI envelope has no top-level type";
     }
@@ -480,7 +480,7 @@ TEST(QueuedTokenGate, RefusalIs429OverloadedWithRetryAfterInEachDialect) {
     EXPECT_EQ(admit_queued_tokens("/v1/messages", res, g, 100, 1000), nullptr);
     EXPECT_EQ(res.status, 429);
     EXPECT_EQ(res.get_header_value("Retry-After"), "1");
-    const auto j = nlohmann::json::parse(res.body);
+    const auto j = nlohmann::ordered_json::parse(res.body);
     EXPECT_EQ(j["type"], "error");
     EXPECT_EQ(j["error"]["type"], "overloaded_error");
     EXPECT_EQ(g.queued(), 950) << "refusals count nothing";

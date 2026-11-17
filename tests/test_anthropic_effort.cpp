@@ -8,7 +8,7 @@
 
 using imp_server::anthropic::anthropic_to_openai_body;
 using imp_server::anthropic::nearest_reasoning_effort;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 json base_request() {

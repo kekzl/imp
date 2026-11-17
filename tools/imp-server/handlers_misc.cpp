@@ -830,11 +830,11 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             }
             std::vector<float> emb;
             if (!engine->encoder_embed(framed, emb)) {
-                nlohmann::json error = {
-                    {"error",
-                     {{"message", "encoder forward failed (input too long for the encoder "
-                                  "workspace?)"},
-                      {"type", "server_error"}}}};
+                nlohmann::ordered_json error = {{"error",
+                                                 {{"message",
+                                                   "encoder forward failed (input too long for the encoder "
+                                                   "workspace?)"},
+                                                  {"type", "server_error"}}}};
                 res.status = 500;
                 res.set_content(dump_safe(error), "application/json");
                 return;

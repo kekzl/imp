@@ -13,7 +13,7 @@
 #include <string_view>
 #include <unordered_map>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace imp {
 

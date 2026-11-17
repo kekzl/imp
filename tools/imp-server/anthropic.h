@@ -11,7 +11,7 @@
 
 namespace imp_server::anthropic {
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // Transforms an Anthropic /v1/messages request body into an equivalent OpenAI
 // /v1/chat/completions body, feedable back into handle_chat_completions unchanged. Throws

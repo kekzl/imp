@@ -93,8 +93,8 @@ struct ChatRequestParams : SamplingFields {
     // "grammar", or vLLM's guided_grammar.
     std::string grammar;
     // Tools
-    nlohmann::json tools;
-    nlohmann::json tool_choice;
+    nlohmann::ordered_json tools;
+    nlohmann::ordered_json tool_choice;
     bool has_tools = false;
     bool parallel_tool_calls = true;  // OpenAI: false → emit at most one tool call
     // Enforced tool calling (#1002): filled for tool_choice=required / forced
@@ -247,7 +247,7 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
 // generation (roadmap gap 6), else only a WARN the caller never sees. Null when nothing to report.
 // add_spec_usage_ (AUDIT_ARCH_2026 C-6): per-request speculation counters, vendor-prefixed keys
 // in completion_tokens_details, present only when a verify ran or mtp_k=auto declined the head.
-inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Request>& req) {
+inline void add_spec_usage_(nlohmann::ordered_json& usage, const std::shared_ptr<imp::Request>& req) {
     if (!req)
         return;
     const bool declined = imp::spec_decline_is_reportable(req->spec_decline);
@@ -303,7 +303,7 @@ inline void apply_spec_contract_(imp::Request& req, int spec_override, int spec_
     req.spec_decline = imp::mtp_resolve_request(ms).reason;
 }
 
-inline SpecFieldParse parse_spec_field_(const nlohmann::json& body, int armed_mtp_k) {
+inline SpecFieldParse parse_spec_field_(const nlohmann::ordered_json& body, int armed_mtp_k) {
     SpecFieldParse out;
     if (!body.contains("speculative"))
         return out;
@@ -339,12 +339,13 @@ inline SpecFieldParse parse_spec_field_(const nlohmann::json& body, int armed_mt
     return out;
 }
 
-inline nlohmann::json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req, int n_prompt_tokens) {
+inline nlohmann::ordered_json prompt_tokens_details_(const std::shared_ptr<imp::Request>& req,
+                                                     int n_prompt_tokens) {
     if (!req)
-        return nlohmann::json();
+        return nlohmann::ordered_json();
     // cached_tokens is always present, 0 on a miss: OpenAI sends the field with
     // 0 and a client probing once at startup reads "absent" as "unsupported" (#1980).
-    nlohmann::json details = {{"cached_tokens", std::max(0, req->cached_tokens)}};
+    nlohmann::ordered_json details = {{"cached_tokens", std::max(0, req->cached_tokens)}};
     if (req->cached_tokens > 0 || req->pin_kv_prefix) {
         const int creation = cache_creation_tokens_(req, n_prompt_tokens);
         if (creation > 0)
@@ -408,9 +409,9 @@ struct ExtensionError {
 };
 ExtensionError extension_error(const ChatRequestContext& ctx);
 // Classifier-free guidance (row 117): "cfg_scale" in [1, 10], "cfg_negative_prompt"; "" or the 400 message.
-std::string parse_cfg_fields(const nlohmann::json& body, ChatRequestParams& p);
+std::string parse_cfg_fields(const nlohmann::ordered_json& body, ChatRequestParams& p);
 // SAE (row 116): "sae_features" 0..kSaeMaxTopN, "sae_clamp" {"id": value}; "" or the 400 message for *field.
-std::string parse_sae_fields(const nlohmann::json& body, ChatRequestParams& p, const char** field);
+std::string parse_sae_fields(const nlohmann::ordered_json& body, ChatRequestParams& p, const char** field);
 // Copies the rewind (banned_strings, banned_regex) and SAE fields of p onto req.
 void apply_rewind_and_sae(imp::Request& req, const ChatRequestParams& p);
 // The shadow prompt into ctx.snap.cfg_tokens: the messages with the system message replaced by

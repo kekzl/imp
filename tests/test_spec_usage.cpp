@@ -12,7 +12,7 @@ namespace {
 
 TEST(SpecUsage, AbsentWithoutAVerifyStep) {
     auto req = std::make_shared<imp::Request>();
-    nlohmann::json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
+    nlohmann::ordered_json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
     add_spec_usage_(usage, req);
     EXPECT_FALSE(usage.contains("completion_tokens_details"));
     add_spec_usage_(usage, nullptr);
@@ -25,9 +25,9 @@ TEST(SpecUsage, CountersNextToTheExistingDetails) {
     req->spec_drafted = 21;
     req->spec_accepted = 13;
     req->spec_emitted = 19;
-    nlohmann::json usage = {{"prompt_tokens", 3},
-                            {"completion_tokens", 2},
-                            {"completion_tokens_details", {{"reasoning_tokens", 5}}}};
+    nlohmann::ordered_json usage = {{"prompt_tokens", 3},
+                                    {"completion_tokens", 2},
+                                    {"completion_tokens_details", {{"reasoning_tokens", 5}}}};
     add_spec_usage_(usage, req);
     const auto& d = usage["completion_tokens_details"];
     EXPECT_EQ(d["reasoning_tokens"], 5);
@@ -46,7 +46,7 @@ TEST(SpecUsage, CountersNextToTheExistingDetails) {
 TEST(SpecUsage, DeclineIsReportedWithoutAnyVerifyStep) {
     auto req = std::make_shared<imp::Request>();
     req->spec_decline = imp::SpecDecline::kHeadNotLoaded;
-    nlohmann::json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
+    nlohmann::ordered_json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
     add_spec_usage_(usage, req);
     ASSERT_TRUE(usage.contains("completion_tokens_details"));
     const auto& d = usage["completion_tokens_details"];
@@ -59,7 +59,7 @@ TEST(SpecUsage, DeclineIsReportedWithoutAnyVerifyStep) {
 TEST(SpecUsage, TheCallersOwnOptOutIsNotReported) {
     auto req = std::make_shared<imp::Request>();
     req->spec_decline = imp::SpecDecline::kRequestOff;
-    nlohmann::json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
+    nlohmann::ordered_json usage = {{"prompt_tokens", 3}, {"completion_tokens", 2}};
     add_spec_usage_(usage, req);
     EXPECT_FALSE(usage.contains("completion_tokens_details"));
 }
@@ -67,7 +67,7 @@ TEST(SpecUsage, TheCallersOwnOptOutIsNotReported) {
 // ------------------------------------------------------ the request field
 
 TEST(SpecField, AbsentLeavesBothTriStatesUnset) {
-    const auto p = parse_spec_field_(nlohmann::json::object(), /*armed_mtp_k=*/2);
+    const auto p = parse_spec_field_(nlohmann::ordered_json::object(), /*armed_mtp_k=*/2);
     EXPECT_TRUE(p.ok);
     EXPECT_EQ(p.spec_override, -1);
     EXPECT_EQ(p.mtp_k, -1);
@@ -132,7 +132,7 @@ TEST(SpecUsageKeys, TableIsExactlyWhatTheChatShapeWrites) {
     req->spec_accepted = 4;
     req->spec_emitted = 7;
     req->spec_decline = imp::SpecDecline::kDepthClamped;  // the widest shape
-    nlohmann::json usage = nlohmann::json::object();
+    nlohmann::ordered_json usage = nlohmann::ordered_json::object();
     add_spec_usage_(usage, req);
 
     std::set<std::string> written;
@@ -149,10 +149,10 @@ TEST(SpecUsageKeys, TableIsExactlyWhatTheChatShapeWrites) {
 // The copy helper is what both shims call. It must move every key the chat
 // shape produced and invent none.
 TEST(SpecUsageKeys, CopyMovesEveryPresentKeyAndNothingElse) {
-    nlohmann::json from = {{"imp_spec_drafted", 6},
-                           {"imp_spec_declined", "mtp_head_not_loaded"},
-                           {"reasoning_tokens", 5}};
-    nlohmann::json to = nlohmann::json::object();
+    nlohmann::ordered_json from = {{"imp_spec_drafted", 6},
+                                   {"imp_spec_declined", "mtp_head_not_loaded"},
+                                   {"reasoning_tokens", 5}};
+    nlohmann::ordered_json to = nlohmann::ordered_json::object();
     imp_server::copy_spec_usage_keys(from, to);
     EXPECT_EQ(to["imp_spec_drafted"], 6);
     EXPECT_EQ(to["imp_spec_declined"], "mtp_head_not_loaded");

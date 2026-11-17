@@ -40,14 +40,14 @@ struct Mapped {
     const uint8_t* base = nullptr;
     size_t size = 0;
     size_t data_off = 0;
-    nlohmann::json hdr;
+    nlohmann::ordered_json hdr;
 };
 
 class Checkpoint {
 public:
     explicit Checkpoint(const std::string& dir) : dir_(dir) {
         std::ifstream f(dir + "/model.safetensors.index.json");
-        where_ = nlohmann::json::parse(f)["weight_map"];
+        where_ = nlohmann::ordered_json::parse(f)["weight_map"];
     }
     ~Checkpoint() {
         for (auto& [k, m] : files_)
@@ -90,12 +90,12 @@ private:
         close(fd);
         uint64_t n = 0;
         std::memcpy(&n, m.base, 8);
-        m.hdr = nlohmann::json::parse(m.base + 8, m.base + 8 + n);
+        m.hdr = nlohmann::ordered_json::parse(m.base + 8, m.base + 8 + n);
         m.data_off = 8 + n;
         return files_.emplace(shard, std::move(m)).first->second;
     }
     std::string dir_;
-    nlohmann::json where_;
+    nlohmann::ordered_json where_;
     std::map<std::string, Mapped> files_;
 };
 

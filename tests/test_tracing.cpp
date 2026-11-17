@@ -9,7 +9,7 @@
 
 #include "tracing.h"
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 

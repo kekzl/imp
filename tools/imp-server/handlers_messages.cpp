@@ -353,7 +353,7 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     // strict Anthropic SDK clients fail to parse (#891).
     try {
         handle_messages_impl(req, res, state, request_id);
-    } catch (const nlohmann::json::exception& e) {
+    } catch (const nlohmann::ordered_json::exception& e) {
         // A field of the wrong type is the caller's error: 400 naming it, not 500 api_error.
         const std::string field = wrong_field_type_message(req.body);
         send_anthropic_error(res, 400, "invalid_request_error", field.empty() ? std::string(e.what()) : field,

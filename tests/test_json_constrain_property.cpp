@@ -118,7 +118,7 @@ TEST(JsonConstrainPropertyTest, AcceptsEveryValidDocument) {
     std::mt19937 rng(kSeed);
     for (int i = 0; i < 2000; i++) {
         const std::string doc = gen_document(rng);
-        ASSERT_TRUE(nlohmann::json::accept(doc)) << "generator produced invalid JSON: " << doc;
+        ASSERT_TRUE(nlohmann::ordered_json::accept(doc)) << "generator produced invalid JSON: " << doc;
         JsonConstrainer c;
         EXPECT_TRUE(c.sim_token_valid(doc)) << "FSM rejected valid document: " << doc;
     }
@@ -170,7 +170,7 @@ TEST(JsonConstrainPropertyTest, RejectsSwappedFinalCloser) {
         std::string doc = gen_document(rng);
         const char last = doc.back();
         doc.back() = (last == '}') ? ']' : '}';
-        ASSERT_FALSE(nlohmann::json::accept(doc)) << "oracle thinks swapped closer is valid: " << doc;
+        ASSERT_FALSE(nlohmann::ordered_json::accept(doc)) << "oracle thinks swapped closer is valid: " << doc;
         JsonConstrainer c;
         EXPECT_FALSE(c.sim_token_valid(doc)) << "FSM accepted mismatched closer: " << doc;
         checked++;
@@ -189,7 +189,7 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingCommas) {
         "{\"a\":1,}", "{\"a\":1, \"b\":2,}", "{\"a\":[1],}",
     };
     for (const char* d : kDocs) {
-        ASSERT_FALSE(nlohmann::json::accept(d)) << "oracle thinks it is valid: " << d;
+        ASSERT_FALSE(nlohmann::ordered_json::accept(d)) << "oracle thinks it is valid: " << d;
         JsonConstrainer c;
         EXPECT_FALSE(c.sim_token_valid(d)) << "FSM accepted a trailing comma: " << d;
     }
@@ -202,7 +202,7 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingContentAfterRoot) {
         const std::string doc = gen_document(rng);
         for (const char* t : kTrailers) {
             const std::string mutated = doc + t;
-            ASSERT_FALSE(nlohmann::json::accept(mutated)) << "oracle accepts trailing: " << mutated;
+            ASSERT_FALSE(nlohmann::ordered_json::accept(mutated)) << "oracle accepts trailing: " << mutated;
             JsonConstrainer c;
             EXPECT_FALSE(c.sim_token_valid(mutated)) << "FSM accepted trailing content: " << mutated;
         }
@@ -227,7 +227,7 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingCommaBeforeAnyCloser) {
             if (p == 0 || doc[p - 1] == '[' || doc[p - 1] == '{')
                 continue;
             const std::string bad = doc.substr(0, p) + "," + doc.substr(p);
-            ASSERT_FALSE(nlohmann::json::accept(bad)) << "oracle accepts trailing comma: " << bad;
+            ASSERT_FALSE(nlohmann::ordered_json::accept(bad)) << "oracle accepts trailing comma: " << bad;
             JsonConstrainer c;
             EXPECT_FALSE(c.sim_token_valid(bad)) << "FSM accepted a trailing comma: " << bad;
             mutated_docs++;
@@ -241,13 +241,13 @@ TEST(JsonConstrainPropertyTest, RejectsTrailingCommaBeforeAnyCloser) {
 TEST(JsonConstrainPropertyTest, RejectsMinimalTrailingComma) {
     for (const char* bad : {"[1,]", "{\"a\":1,}", "[[1,],2]", "{\"a\":[1,2,]}", "[\"x\",]", "[true,]",
                             "[null,]", "[{},]", "{\"a\":{},}"}) {
-        ASSERT_FALSE(nlohmann::json::accept(bad)) << bad;
+        ASSERT_FALSE(nlohmann::ordered_json::accept(bad)) << bad;
         JsonConstrainer c;
         EXPECT_FALSE(c.sim_token_valid(bad)) << "FSM accepted: " << bad;
     }
     // The empty forms stay legal — the fix must not ban `[]` / `{}`.
     for (const char* good : {"[]", "{}", "[[],{}]", "{\"a\":[],\"b\":{}}"}) {
-        ASSERT_TRUE(nlohmann::json::accept(good)) << good;
+        ASSERT_TRUE(nlohmann::ordered_json::accept(good)) << good;
         JsonConstrainer c;
         EXPECT_TRUE(c.sim_token_valid(good)) << "FSM rejected valid: " << good;
     }

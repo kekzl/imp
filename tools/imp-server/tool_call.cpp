@@ -42,7 +42,7 @@ public:
         const std::string key = call_id_key(tc.id);
         if (!calls_.contains(key))
             order_.push_back(key);
-        calls_[key] = {tc.name, std::move(args), std::move(text)};
+        calls_[key] = {tc.name, nlohmann::json(args), std::move(text)};
         while (order_.size() > kMaxCalls) {
             calls_.erase(order_.front());
             order_.pop_front();
@@ -51,7 +51,8 @@ public:
     bool recall(const std::string& id, const std::string& name, const json& args, std::string& out) const {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = calls_.find(call_id_key(id));
-        if (it == calls_.end() || it->second.name != name || it->second.args != args)
+        // Same arguments in any key order (a client may resend them sorted).
+        if (it == calls_.end() || it->second.name != name || it->second.args != nlohmann::json(args))
             return false;
         out += it->second.text;
         return true;
@@ -61,7 +62,7 @@ private:
     static constexpr size_t kMaxCalls = 2048;
     struct Call {
         std::string name;
-        json args;
+        nlohmann::json args;  // unordered: compared as a set of keys
         std::string text;
     };
     mutable std::mutex mu_;

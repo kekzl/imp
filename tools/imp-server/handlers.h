@@ -30,7 +30,7 @@
 #include <unordered_map>
 #include <vector>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // /health, /metrics, /v1/models take state.mtx with this bounded timeout, never unbounded: a
 // long /v1/embeddings call holds the lock for its whole computation (#889).

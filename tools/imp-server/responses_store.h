@@ -17,7 +17,7 @@
 
 namespace imp_server::responses {
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 struct StoredResponse {
     json input_items;   // full conversation input as the model saw it (chained turns flattened)

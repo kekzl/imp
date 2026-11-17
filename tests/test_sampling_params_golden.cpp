@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 
@@ -93,7 +93,7 @@ json chat_params_json(const ChatRequestParams& p) {
 
 // The server's global exception handler (main.cpp) and the /v1/messages wrapper map a
 // json::exception to 400 + wrong_field_type_message, else e.what().
-json json_exception_error(const std::string& raw, const nlohmann::json::exception& e) {
+json json_exception_error(const std::string& raw, const nlohmann::ordered_json::exception& e) {
     const std::string field = wrong_field_type_message(raw);
     return {{"status", 400}, {"error", field.empty() ? std::string(e.what()) : field}};
 }
@@ -106,7 +106,7 @@ json run_chat_parse(const json& oai_body, const std::string& raw) {
     try {
         if (!parse_chat_request_params(req, res, test_state(), ctx))
             return error_of(res);
-    } catch (const nlohmann::json::exception& e) {
+    } catch (const nlohmann::ordered_json::exception& e) {
         return json_exception_error(raw, e);
     }
     return {{"params", chat_params_json(ctx.params)}};
@@ -120,7 +120,7 @@ json run_messages(const json& body) {
     json oai;
     try {
         oai = imp_server::anthropic::anthropic_to_openai_body(anth);
-    } catch (const nlohmann::json::exception& e) {
+    } catch (const nlohmann::ordered_json::exception& e) {
         return json_exception_error(body.dump(), e);
     } catch (const std::exception& e) {
         const std::string field = wrong_field_type_message(body.dump());
@@ -152,7 +152,7 @@ json run_completions(const json& body) {
     try {
         if (!parse_completions_request_params(req, res, test_state(), /*infill=*/false, p))
             return error_of(res);
-    } catch (const nlohmann::json::exception& e) {
+    } catch (const nlohmann::ordered_json::exception& e) {
         return json_exception_error(req.body, e);
     }
     return {{"params",
