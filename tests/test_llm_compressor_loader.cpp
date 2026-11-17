@@ -682,7 +682,7 @@ TEST(LlmCompressorUnused, DropOnlyWhenNeitherConsumerTakesIt) {
 
 namespace {
 
-// A directory with both files, the shapes Gemma-4-26B-A4B-it-NVFP4 ships.
+// A directory with both files, the shapes Gemma-4-26B-A4B-it-NVFP4-llmc ships.
 std::string write_temp_checkpoint(const std::string& recipe, const std::string& config_json) {
     std::string dir = tmpdir() + "/ckpt_" + std::to_string(::getpid()) + ".d";
     std::filesystem::create_directories(dir);

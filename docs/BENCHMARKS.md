@@ -42,7 +42,7 @@ greedy answers that fall into a loop let the n-gram drafter accept everything (Q
 | Qwen3-14B NVFP4 | 170.2 | **169.2** | 128.8 | +31.4 % |
 | Qwen3-Coder-30B-A3B NVFP4 | 392.6 | **357.6** | 220.6 | +62.1 % |
 | Qwen3.6-35B-A3B NVFP4 | 329.4 | **334.1** | 183.9 | +81.7 % |
-| Gemma-4-26B-A4B NVFP4 | 428.0 | **274.4** | 222.6 | +23.3 % |
+| Gemma-4-26B-A4B NVFP4 | 411.1 | **211.3** | 154.3 | +36.9 % |
 | Nemotron-3-Nano-30B-A3B NVFP4 | 617.6 | **414.5** | engine init fails | - |
 | Qwen3.8-27B NVFP4 (vllm export) | 99.4 | **96.4** | 70.7 | +36.4 % |
 
@@ -50,7 +50,7 @@ greedy answers that fall into a loop let the n-gram drafter accept everything (Q
        path=server-api cmd=`RELEASE_BAR=1 bash scripts/bench_competitive.sh` n=3 waves x 1 run per arm
        harness_md5=b531179dfc496b75ccdb2a7f5fbda93b note=vllm/vllm-openai v0.31.0 sha256 c1c9f6fd;
        that run gated the default column, the lead column is recomputed from its TSV on spec-off;
-       gpt-oss-20b not contested (SafeTensors not staged)]
+       gpt-oss-20b not contested (SafeTensors not staged); Gemma row 2026-11-17 imp:m3147 9d86b19a, Modelopt 2026-11 revision, was 428.0 / 274.4 / 222.6]
 
 ## Feature validations (decode)
 
@@ -81,7 +81,7 @@ process, 10 reps), command `imp-cli --model <dir>/ --bench --bench-pp 16 --bench
 | Qwen3-30B-A3B-Modelopt | 30B (3B) | 305 |
 | Qwen3-Coder-30B-A3B | 30B (3B) | 338 |
 | Qwen3.6-35B-A3B | 35B (3B) | 257 -> **320** (2026-07-10, `80864b06`, `gemm.fp8_ssm_proj` (key removed 2026-11-14) sidecar, +19.2% spec-off) |
-| Gemma-4-26B-A4B | 26B (4B) | 266 |
+| Gemma-4-26B-A4B | 26B (4B) | 266 -> **210** (2026-11-17, `9d86b19a`, 2026-11 Modelopt revision: attention + dense MLP BF16, PPL see MODELS.md) |
 | Nemotron-3-Nano-30B | 30B (3B) | 148 -> **386** (2026-08-12, PR #1389: CUDA graphs were wrongly demoted for pure-SSM layers, not an arch limit) |
 | gpt-oss-20b | 21B (3.6B) | 325 -> **391** (2026-07-13, `63df2d30`, `gemm.fp8_attn_proj` sidecar, +12%, teacher-forced PPL unaffected by construction) |
 
