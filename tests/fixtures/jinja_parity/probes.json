@@ -1,0 +1,124 @@
+{
+ "context": {
+  "items": [
+   1,
+   2,
+   3,
+   1
+  ],
+  "vals": [
+   "s",
+   3,
+   true,
+   null,
+   {
+    "k": "v"
+   },
+   [
+    1
+   ]
+  ],
+  "obj": {
+   "zeta": 1,
+   "alpha": "x",
+   "mid": [
+    1,
+    2
+   ]
+  },
+  "msgs": [
+   {
+    "role": "user",
+    "content": "u1",
+    "n": 1
+   },
+   {
+    "role": "assistant",
+    "content": "a1",
+    "n": 2
+   },
+   {
+    "role": "user",
+    "content": "u2",
+    "n": 3
+   }
+  ]
+ },
+ "probes": [
+  {
+   "name": "loop_filter",
+   "template": "{% for x in items if x != 2 %}{{ x }}{{ loop.index }}/{{ loop.length }};{% endfor %}",
+   "expected": "11/3;32/3;13/3;"
+  },
+  {
+   "name": "loop_vars",
+   "template": "{% for x in items %}{{ loop.revindex }}{{ loop.revindex0 }}{{ loop.depth }}{{ loop.cycle('a', 'b') }}{% endfor %}",
+   "expected": "431a321b211a101b"
+  },
+  {
+   "name": "prev_next",
+   "template": "{% for x in items %}{{ loop.previtem }}<{{ x }}>{{ loop.nextitem }};{% endfor %}",
+   "expected": "<1>2;1<2>3;2<3>1;3<1>;"
+  },
+  {
+   "name": "filter_kwargs_ternary",
+   "template": "{% for v in vals %}[{{ v | tojson(ensure_ascii=False) if v is not string else v }}]{% endfor %}",
+   "expected": "[s][3][true][null][{\"k\": \"v\"}][[1]]"
+  },
+  {
+   "name": "nested_ternary",
+   "template": "{{ 'a' if false else 'b' if true else 'c' }}",
+   "expected": "b"
+  },
+  {
+   "name": "tojson_opts",
+   "template": "{{ obj | tojson(separators=(',', ':')) }}|{{ obj | tojson(indent=2) }}|{{ obj | tojson(sort_keys=true) }}|{{ 'ä' | tojson(ensure_ascii=true) }}",
+   "expected": "{\"zeta\":1,\"alpha\":\"x\",\"mid\":[1,2]}|{\n  \"zeta\": 1,\n  \"alpha\": \"x\",\n  \"mid\": [\n    1,\n    2\n  ]\n}|{\"alpha\": \"x\", \"mid\": [1, 2], \"zeta\": 1}|\"\\u00e4\""
+  },
+  {
+   "name": "dict_order",
+   "template": "{% for k, v in obj.items() %}{{ k }}={{ v }};{% endfor %}{{ obj.keys() | list }}{{ {'b': 1, 'a': 2} | tojson }}{{ msgs[0] | tojson }}",
+   "expected": "zeta=1;alpha=x;mid=[1, 2];['zeta', 'alpha', 'mid']{\"b\": 1, \"a\": 2}{\"role\": \"user\", \"content\": \"u1\", \"n\": 1}"
+  },
+  {
+   "name": "floats",
+   "template": "{{ 3.0 }}|{{ 1e3 }}|{{ 0.1 + 0.2 }}|{{ [1.0, 2.5, 1e20] | tojson }}|{{ 3.7 | round }}",
+   "expected": "3.0|1000.0|0.30000000000000004|[1.0, 2.5, 1e+20]|4.0"
+  },
+  {
+   "name": "arith",
+   "template": "{{ 7 // 2 }}|{{ -7 // 2 }}|{{ 2 ** 10 }}|{{ -7 % 3 }}|{{ '-' * 3 }}|{{ [1] * 2 }}|{{ 0 == false }}",
+   "expected": "3|-4|1024|2|---|[1, 1]|True"
+  },
+  {
+   "name": "tests",
+   "template": "{{ 4 is even }}{{ 3 is odd }}{{ 9 is divisibleby 3 }}{{ 9 is divisibleby(4) }}{{ none is none }}{{ 'ab' is lower }}{{ 3 is number }}{{ obj is mapping }}{{ strftime_now is defined }}{{ raise_exception is defined }}",
+   "expected": "TrueTrueTrueFalseTrueTrueTrueTrueTrueTrue"
+  },
+  {
+   "name": "map_select",
+   "template": "{{ msgs | map(attribute='role') | join(',') }}|{{ items | map('string') | join('-') }}|{{ msgs | selectattr('role', 'equalto', 'user') | list | length }}|{{ msgs | sum(attribute='n') }}|{{ items | max }}{{ items | min }}{{ items | sum }}",
+   "expected": "user,assistant,user|1-2-3-1|2|6|317"
+  },
+  {
+   "name": "collections",
+   "template": "{{ items | unique | list }}|{{ items | batch(3) | list }}|{{ [3, 1, 2] | sort }}|{{ msgs | sort(attribute='role') | map(attribute='content') | list }}|{% for g in msgs | groupby('role') %}{{ g.grouper }}:{{ g.list | length }};{% endfor %}|{% for k, v in obj | dictsort %}{{ k }};{% endfor %}",
+   "expected": "[1, 2, 3]|[[1, 2, 3], [1]]|[1, 2, 3]|['a1', 'u1', 'u2']|assistant:1;user:2;|alpha;mid;zeta;"
+  },
+  {
+   "name": "string_filters",
+   "template": "{{ 'xxaxx' | trim('x') }}|{{ 'aaa' | replace('a', 'b', 2) }}|{{ '' | default('d', true) }}|{{ 'a\nb' | indent(2) }}|{{ 'a\nb' | indent(2, true) }}|{{ 'a b c' | wordcount }}|[{{ 'ab' | center(6) }}]|{{ '%s-%d' | format('a', 3) }}|{{ '<a>' | e }}|{{ '42' | int }}|{{ 'hello world' | title }}|{{ 'hELLO' | capitalize }}",
+   "expected": "a|bba|d|a\n  b|  a\n  b|3|[  ab  ]|a-3|&lt;a&gt;|42|Hello World|Hello"
+  },
+  {
+   "name": "string_methods",
+   "template": "{{ ' Ab '.strip() }}|{{ 'a,b,c'.split(',', 1) }}|{{ 'a,b,c'.rsplit(',', 1) }}|{{ 'ab'.startswith(('x', 'a')) }}|{{ 'a b'.title() }}|{{ 'abcb'.rfind('b') }}|{{ ', '.join(['x', 'y']) }}|{{ '{}-{}'.format('a', 3) }}|{{ '{0}{name}'.format(1, name=2) }}|{{ '12'.isdigit() }}{{ 'Ab'.isupper() }}|{{ 'hello world'.capitalize() }}",
+   "expected": "Ab|['a', 'b,c']|['a,b', 'c']|True|A B|3|x, y|a-3|12|TrueFalse|Hello world"
+  },
+  {
+   "name": "list_methods",
+   "template": "{{ items.index(2) }}|{{ items.count(1) }}|{{ obj.get('nope', 'dflt') }}|{{ obj.values() | list }}",
+   "expected": "1|2|dflt|[1, 'x', [1, 2]]"
+  }
+ ]
+}

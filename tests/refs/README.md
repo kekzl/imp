@@ -59,6 +59,7 @@ Generators:
 | `gen_harmony_golden.py` | `harmony_golden.h` | `tests/test_gpt_oss_harmony_golden.cpp` |
 | `gen_gemma4_audio_golden.py` | `gemma4_audio_features_golden.h` | `tests/test_audio_features.cpp` (HF `Gemma4AudioFeatureExtractor`, transformers 5.22.1, 1e-4) |
 | `gen_chat_goldens.py` | `chat_template_goldens.h` | `tests/test_chat_template_goldens.cpp` |
+| `gen_jinja_parity.py` | `tests/fixtures/jinja_parity/*.json` | `tests/test_jinja_parity.cpp` |
 | `gen_tokenizer_golden.py` | `tokenizer_golden_qwen3.h` | `tests/test_tokenizer_compat.cpp` |
 | `gen_qwen3_embedding_ref.py` | `qwen3_embedding_ref.json` | `tools/analysis/embed_check.py` (`make test-embed`) |
 | `tests/test_vision_golden.cu` (dump mode = its own generator) | `vision_encoder_golden.h` | `tests/test_vision_golden.cu` |
