@@ -23,6 +23,8 @@ struct ParsedToolCall {
     // GLM arg_key layout: arguments hold every value as emitted; restore_raw_string_params types them
     // from the tool schema as vLLM 0.33 glm47 does (tool_arg_coerce.h).
     bool glm_args = false;
+    // XML layout without <parameter=: the raw body became {"input": raw} (Codex apply_patch).
+    bool freeform = false;
 };
 
 // validate_tool_call: checks parsed arguments are a JSON object, all `required` properties are
