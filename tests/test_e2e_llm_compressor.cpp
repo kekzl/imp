@@ -18,7 +18,9 @@ bool dir_exists(const std::string& p) {
 
 class LlmCompressorE2E : public ::testing::Test {
 protected:
-    static constexpr const char* kGemma4Dir = "/models/Gemma-4-26B-A4B-it-NVFP4";
+    // The llm-compressor revision of nvidia/Gemma-4-26B-A4B-NVFP4 (before 2026-11); the default
+    // Gemma-4-26B-A4B-it-NVFP4 dir now holds NVIDIA's Modelopt revision.
+    static constexpr const char* kGemma4Dir = "/models/Gemma-4-26B-A4B-it-NVFP4-llmc";
     // Overridable, because a hardcoded default that does not exist on the host
     // reads as "this export is untested" when it means "the path is wrong".
     static std::string mistral_dir() {
