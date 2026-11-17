@@ -402,7 +402,8 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
                 think_logic::should_force_think_end(r->think_budget, think_end_id_, r->max_tokens,
                                                     r->output_tokens, think_start_id_, r->started_in_think,
                                                     runtime_config_.runtime.think_answer_reserve,
-                                                    runtime_config_.runtime.think_max_tokens))
+                                                    runtime_config_.runtime.think_max_tokens,
+                                                    r->think_budget_tokens))
                 return "think_forcing_due";
         }
         return nullptr;

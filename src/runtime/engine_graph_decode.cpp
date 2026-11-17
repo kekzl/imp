@@ -142,7 +142,8 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
             // over-count). Same think_logic::think_limit the eager sampler enforces.
             const int full = think_logic::think_limit(req.max_tokens, req.think_budget,
                                                       runtime_config_.runtime.think_answer_reserve,
-                                                      runtime_config_.runtime.think_max_tokens);
+                                                      runtime_config_.runtime.think_max_tokens,
+                                                      req.think_budget_tokens);
             bool thinking_now = false;
             const int used = think_logic::count_reasoning_tokens(
                 req.output_tokens, think_start_id_, think_end_id_, req.started_in_think,
@@ -213,7 +214,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                 think_limit = std::max(1,
                                        think_logic::think_limit(req->max_tokens, req->think_budget,
                                                                 runtime_config_.runtime.think_answer_reserve,
-                                                                runtime_config_.runtime.think_max_tokens) -
+                                                                runtime_config_.runtime.think_max_tokens,
+                                                                req->think_budget_tokens) -
                                            used);
             }
             if (runtime_config_.diagnostics.spec_trace)

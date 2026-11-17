@@ -201,6 +201,9 @@ struct Request {
     // its own <|im_end|> instead of being padded or repeated. Reset false at every think exit.
     bool content_after_think = false;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
+    // Client's absolute reasoning limit (thinking_token_budget, Anthropic budget_tokens); > 0 replaces the
+    // fraction and its answer-reserve floor (think_logic::think_limit). Enforced only while think_budget > 0.
+    int think_budget_tokens = 0;
     // Client asked to end the think block (#2420); set by the server worker between steps,
     // the next eager step forces the closer (think_logic::end_think_due).
     bool end_thinking = false;

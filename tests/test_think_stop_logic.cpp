@@ -339,6 +339,19 @@ TEST(ThinkLimit, CapBoundsTheRemainingContextDefault) {
     EXPECT_FALSE(should_force_think_end(0.5f, 9, 131072, out, 8, true, 256, 32768));
 }
 
+// A client's absolute budget (thinking_token_budget, Anthropic budget_tokens) is the limit, as vLLM:
+// familiar's 16384 of max_tokens 32768 ran to 24576 under the 3/4 reserve floor.
+TEST(ThinkLimit, ClientTokenBudgetIsTheLimitItself) {
+    EXPECT_EQ(think_limit(32768, 0.5f, 256, 32768), 24576) << "without it: the reserve floor";
+    EXPECT_EQ(think_limit(32768, 0.5f, 256, 32768, 16384), 16384);
+    EXPECT_EQ(think_limit(4096, 0.5f, 256, 0, 4000), 4000) << "no answer reserve under an explicit budget";
+    EXPECT_EQ(think_limit(131072, 0.5f, 256, 32768, 65536), 32768) << "the server cap still bounds it";
+    std::vector<int32_t> out(16384, 7);
+    EXPECT_TRUE(should_force_think_end(0.5f, /*end=*/9, 32768, out, /*start=*/8, true, 256, 32768, 16384));
+    out.pop_back();
+    EXPECT_FALSE(should_force_think_end(0.5f, 9, 32768, out, 8, true, 256, 32768, 16384));
+}
+
 // ---------------------------------------------------------------------------
 // Text-tail </think> detection across token boundaries (bug (c))
 // ---------------------------------------------------------------------------

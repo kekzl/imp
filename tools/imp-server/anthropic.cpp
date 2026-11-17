@@ -424,6 +424,11 @@ json anthropic_to_openai_body(const json& anth) {
                 double max_tokens = anth.value("max_tokens", 0.0);
                 if (max_tokens <= 0.0)
                     max_tokens = anth.value("max_completion_tokens", 0.0);
+                // The fraction alone was floored at 3/4 of max_tokens (think_limit): 16384 of 32768 ran to
+                // 24576.
+                if (budget > 0.0)
+                    oai["thinking_token_budget"] = budget < 2147483647.0 ? static_cast<int>(budget)
+                                                                         : 2147483647;
                 if (budget > 0.0 && max_tokens > 0.0) {
                     double frac = budget / max_tokens;
                     oai["think_budget"] = frac > 1.0 ? 1.0 : frac;

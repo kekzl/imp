@@ -22,6 +22,7 @@ struct SamplingFields {
     float repetition_penalty = 1.0f, frequency_penalty = 0.0f, presence_penalty = 0.0f;
     float dry_multiplier = 0.0f, dry_base = 1.75f, mirostat_tau = 5.0f, mirostat_eta = 0.1f;
     float think_budget = 0.0f;  // parsed default: --think-budget
+    int thinking_token_budget = 0;  // vLLM field: absolute reasoning-token limit, <= 0 = none
     int top_k = 40, seed = -1, repeat_last_n = 0;
     int dry_allowed_length = 2, dry_penalty_last_n = 0, mirostat = 0;
     int priority = 0;  // vLLM-compatible admission priority, lower = earlier
@@ -74,6 +75,7 @@ struct SamplingFields {
         r.mirostat_eta = mirostat_eta;
         r.ignore_eos = ignore_eos;
         r.think_budget = think_budget;
+        r.think_budget_tokens = thinking_token_budget > 0 ? thinking_token_budget : 0;
         r.pin_kv_prefix = cache_prompt;
         r.session_id = session_id;
     }
@@ -113,6 +115,7 @@ inline constexpr SamplingKey kSamplingKeys[] = {
     {"mirostat_tau", &SamplingFields::mirostat_tau, 0},
     {"mirostat_eta", &SamplingFields::mirostat_eta, 0},
     {"think_budget", &SamplingFields::think_budget, 0},
+    {"thinking_token_budget", &SamplingFields::thinking_token_budget, 0},
     {"ignore_eos", &SamplingFields::ignore_eos, 0},
     {"cache_prompt", &SamplingFields::cache_prompt, 0},
     {"session_id", &SamplingFields::session_id, kViaMessages | kViaResponses},
