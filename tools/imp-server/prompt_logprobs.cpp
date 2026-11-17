@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <string>
 
-using nlohmann::json;
+using json = nlohmann::ordered_json;
 
 std::string parse_prompt_logprobs(const json& body, bool stream, bool echo, bool req_logprobs,
                                   int top_logprobs, PromptLogprobsRequest& out) {

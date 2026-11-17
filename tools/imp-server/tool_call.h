@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 struct ParsedToolCall {
     std::string id;         // "call_imp_0", "call_imp_1", ...

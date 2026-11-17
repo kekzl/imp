@@ -23,12 +23,12 @@ struct FimRequest {
 
 // /infill: input_prefix, input_suffix (string, default ""), input_extra [{filename, text}],
 // prompt (string), n_predict (> 0 maps to max_tokens). Returns "" or the 400 message.
-std::string parse_infill_fields(nlohmann::json& body, FimRequest& out);
+std::string parse_infill_fields(nlohmann::ordered_json& body, FimRequest& out);
 
 // /v1/completions `suffix`: a non-empty string turns on FIM with `prompt` as the prefix;
 // "" or absent = plain completion. FIM needs a text prompt. Returns "" or the 400 message.
-std::string parse_completion_suffix(const nlohmann::json& body, const std::string& prompt, bool token_prompt,
-                                    FimRequest& out);
+std::string parse_completion_suffix(const nlohmann::ordered_json& body, const std::string& prompt,
+                                    bool token_prompt, FimRequest& out);
 
 // Tokens for an active FIM request plus the FIM marker texts appended to `stops`.
 // Returns "" or the 400 message when the tokenizer has no FIM tokens (code fim_not_supported).

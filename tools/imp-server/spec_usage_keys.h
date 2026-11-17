@@ -16,7 +16,7 @@ inline constexpr const char* kSpecUsageKeys[] = {
 
 // Copy whichever of the keys `from` carries into `to`. Absent keys stay absent:
 // the block only appears when speculation had something to say.
-inline void copy_spec_usage_keys(const nlohmann::json& from, nlohmann::json& to) {
+inline void copy_spec_usage_keys(const nlohmann::ordered_json& from, nlohmann::ordered_json& to) {
     if (!from.is_object())
         return;
     for (const char* k : kSpecUsageKeys)

@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 // dump_safe: serializes without throwing on invalid UTF-8 (nlohmann's dump() throws
 // type_error.316 on ill-formed bytes, which client/model text routinely contains). Invalid bytes

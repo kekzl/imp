@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <random>
 
-using nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 

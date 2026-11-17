@@ -121,7 +121,7 @@ inline constexpr SamplingKey kSamplingKeys[] = {
 
 // Same contract as body.value(key, default): absent keeps the default, a wrong JSON type throws
 // json::type_error (the route's handler maps it to a 400).
-inline void parse_sampling_fields(const nlohmann::json& body, float default_think_budget,
+inline void parse_sampling_fields(const nlohmann::ordered_json& body, float default_think_budget,
                                   SamplingFields& out) {
     out = SamplingFields{};
     out.think_budget = default_think_budget;
@@ -143,7 +143,7 @@ inline void parse_sampling_fields(const nlohmann::json& body, float default_thin
 }
 
 // Copies the keys a dialect carries (`via` bit) from its body into the OpenAI body.
-inline void pass_sampling_keys(const nlohmann::json& from, uint8_t via, nlohmann::json& to) {
+inline void pass_sampling_keys(const nlohmann::ordered_json& from, uint8_t via, nlohmann::ordered_json& to) {
     for (const auto& k : kSamplingKeys)
         if ((k.via & via) != 0 && from.contains(k.key))
             to[k.key] = from[k.key];
@@ -160,6 +160,6 @@ inline bool session_id_valid(const std::string& s) {
     return ok;
 }
 // After parse_sampling_fields (type already checked). Empty when valid or absent.
-inline std::string session_id_error(const SamplingFields& f, const nlohmann::json& body) {
+inline std::string session_id_error(const SamplingFields& f, const nlohmann::ordered_json& body) {
     return !body.contains("session_id") || session_id_valid(f.session_id) ? std::string() : kSessionIdRule;
 }

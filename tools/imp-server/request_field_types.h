@@ -11,7 +11,8 @@
 // (15 of 26 fuzzed fields across chat, completions, responses, embeddings, tokenize; /v1/messages
 // answered 500). Returns "" or the 400 message naming the first known field with the wrong type.
 inline std::string wrong_field_type_message(const std::string& raw_body) {
-    const nlohmann::json body = nlohmann::json::parse(raw_body, nullptr, /*allow_exceptions=*/false);
+    const nlohmann::ordered_json body = nlohmann::ordered_json::parse(raw_body, nullptr,
+                                                                      /*allow_exceptions=*/false);
     if (!body.is_object())
         return "";
     struct Field {
@@ -93,7 +94,7 @@ inline std::string wrong_field_type_message(const std::string& raw_body) {
 // repetition_penalty (sampling_penalties.cu), so 0 gives inf and < 0 flips the penalty into a boost.
 // Penalty bounds follow OpenAI (-2..2). Returns "" or the 400 message. Non-numbers are left to the
 // type check above.
-inline std::string out_of_range_message(const nlohmann::json& body) {
+inline std::string out_of_range_message(const nlohmann::ordered_json& body) {
     struct Range {
         const char* key;
         double lo, hi;

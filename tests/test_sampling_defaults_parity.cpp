@@ -16,7 +16,7 @@ using imp::ModelArch;
 // Server path: parse an empty body, then apply the loaded model's defaults (handlers_chat_core.cpp,
 // handlers_completions.cpp).
 SamplingFields server_defaults(ModelArch arch, const HFConfigLoader::GenerationConfig& gen,
-                               const nlohmann::json& body = nlohmann::json::object()) {
+                               const nlohmann::ordered_json& body = nlohmann::ordered_json::object()) {
     SamplingFields f;
     parse_sampling_fields(body, 0.5f, f);
     f.apply_model_defaults(imp::resolve_sampling_defaults(arch, gen));
@@ -58,12 +58,12 @@ TEST(SamplingDefaultsParity, RepetitionPenaltyFollowsGenerationConfig) {
     HFConfigLoader::GenerationConfig gen;
     gen.repetition_penalty = 1.1f;
     EXPECT_FLOAT_EQ(server_defaults(ModelArch::QWEN3, gen).repetition_penalty, 1.1f);
-    const nlohmann::json body = {{"repetition_penalty", 1.2}};
+    const nlohmann::ordered_json body = {{"repetition_penalty", 1.2}};
     EXPECT_FLOAT_EQ(server_defaults(ModelArch::QWEN3, gen, body).repetition_penalty, 1.2f);
 }
 
 TEST(SamplingDefaultsParity, ExplicitRequestFieldsWin) {
-    const nlohmann::json body = {{"temperature", 0.0}, {"top_p", 1.0}, {"top_k", 3}};
+    const nlohmann::ordered_json body = {{"temperature", 0.0}, {"top_p", 1.0}, {"top_k", 3}};
     const SamplingFields f = server_defaults(ModelArch::QWEN3, {}, body);
     EXPECT_FLOAT_EQ(f.temperature, 0.0f);
     EXPECT_FLOAT_EQ(f.top_p, 1.0f);

@@ -14,7 +14,7 @@ namespace {
 
 using imp_server::anthropic::anthropic_to_openai_body;
 using imp_server::anthropic::openai_to_anthropic_response;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 json base_request() {
     return json{

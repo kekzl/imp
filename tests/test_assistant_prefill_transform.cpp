@@ -10,7 +10,7 @@ namespace {
 
 using imp_server::anthropic::anthropic_to_openai_body;
 using imp_server::responses::responses_to_openai_body;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 json messages_request() {
     return json{

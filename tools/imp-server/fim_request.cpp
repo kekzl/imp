@@ -4,7 +4,7 @@
 
 #include <utility>
 
-using nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 
