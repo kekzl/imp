@@ -397,12 +397,16 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // (0.6) reserves for those plus workspaces, and the downstream
             // KV clamp is the hard backstop.
             size_t upload_bytes = approx_weight_bytes;
-            // Native-NVFP4 models: the mandatory decode caches (CUTLASS SfAtom
-            // slab + nvfp4_moe) are built before the KV pool and are charged
-            // in the budget; subtract them here too so the auto batch does
-            // not size workspaces into bytes the cache build will take.
+            // Native-NVFP4 models: the shards on disk when smaller (as the max_seq_len resolver; Flint 26.8
+            // GB estimated vs 21.2 GiB uploaded left 1.0 GB and 2 slots), plus the mandatory decode caches
+            // (CUTLASS SfAtom slab + nvfp4_moe) built before the KV pool.
             if (mcfg.is_nvfp4_prequant)
-                upload_bytes += native_cache_demand().total();
+                upload_bytes = nvfp4_weight_reserve_bytes(
+                                   approx_weight_bytes,
+                                   estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts,
+                                                                free_vram_now),
+                                   model_source_bytes(model_->source_path())) +
+                               native_cache_demand().total();
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
             int hd = mcfg.head_dim > 0 ? mcfg.head_dim
@@ -423,8 +427,24 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // The KV dtype is final here (init_resolve_kv_dtype_ runs before
             // this), so size with its real per-element cost instead of the
             // old FP16 guess: the NVFP4-KV default on QWEN35 is 4x smaller.
-            size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * kv_layers;
+            // Sliding-window layers hold a fixed live span per slot (window + slack + burst: 721 tokens at
+            // window 513 on Flint), priced here at 2x the window instead of kRefCtxTokens.
+            int swa_layers = 0, swa_window = 0;
+            if (runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching))
+                for (int l = 0; l < mcfg.n_layers; ++l)
+                    if (const int w = layer_swa_window(mcfg, model_->profile(), l);
+                        w > 0 && !mcfg.layer_kv_shared(l)) {
+                        ++swa_layers;
+                        swa_window = std::max(swa_window, w);
+                    }
+            if (swa_layers <= 0 || swa_layers >= kv_layers)
+                swa_layers = 0;
+            const int swa_slot_tokens = std::min(kRefCtxTokens, 2 * swa_window);
+            size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * (kv_layers - swa_layers);
             size_t per_tok_kv = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
+            const size_t swa_slot_bytes = kv_data_bytes(config_.kv_cache_dtype,
+                                                        static_cast<size_t>(nkv) * hd * 2 * swa_layers) *
+                                          static_cast<size_t>(swa_slot_tokens);
             // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
             // does NOT clamp downstream. SSMState allocates max_batch_size x
             // per_seq up front, so it must be in the per-slot price or auto
@@ -448,7 +468,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
                                             model_->ple_state_bytes()};
                 per_slot_state = ssm_bytes_per_slot(geom);
             }
-            size_t per_slot = (per_tok_kv * static_cast<size_t>(kRefCtxTokens)) + per_slot_state;
+            size_t per_slot = (per_tok_kv * static_cast<size_t>(kRefCtxTokens)) + swa_slot_bytes +
+                              per_slot_state;
             if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
                                            static_cast<double>(per_slot));
@@ -959,11 +980,14 @@ void Engine::init_compute_max_seq_len_() {
 // charged it, so serving max_batch_size slots could oversubscribe the
 // device (bandwidth reads spilled, not resident). Clamps the batch to what
 // the plan fits instead: capacity is planned, not discovered (MEMORY.md I4,
-// D14). Mutates probe/plan (re-planned at the clamped batch), config_, the
-// runtime config, and the scheduler's admission cap.
-void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
-                                      int live_kv_blocks) {
-    if (probe.ssm_state_bytes == 0 || probe.max_batch_size <= 1)
+// D14). An auto batch also yields to one max_seq_len sequence (Flint: 32 slots cut 131072 -> 107104,
+// 16 hold it). Mutates probe/plan (re-planned at the clamped batch), config_, the runtime config,
+// the scheduler's admission cap, the spare slots and the SWA group.
+void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int& ssm_reserved_slots,
+                                      VRAMBudget& vram_budget) {
+    const bool hold_one_sequence = runtime_config_.runtime.max_batch_size <= 0 && !max_seq_len_explicit_;
+    if ((plan.ok && !hold_one_sequence) || (probe.ssm_state_bytes == 0 && !hold_one_sequence) ||
+        probe.max_batch_size <= 1)
         return;
     const size_t per_slot = probe.ssm_state_bytes /
                             static_cast<size_t>(probe.max_batch_size + std::max(0, ssm_reserved_slots));
@@ -973,15 +997,22 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
     // the batch then.
     if (config_.kv_cache_max_blocks > 0)
         fit_in.limits.min_kv_tokens = 0;
-    const int fit = plan_fitting_batch(fit_in, per_batch_slot);
+    const int fit = plan_fitting_batch(fit_in, per_batch_slot,
+                                       hold_one_sequence && config_.kv_cache_max_blocks <= 0);
     if (fit < 1 || fit >= probe.max_batch_size)
         return;
-    IMP_LOG_WARN(
-        "max_batch_size clamped %d -> %d: the memory plan cannot fit the SSM/GDN state "
-        "for %d slots (%.0f MiB, over by %.0f MiB). Set runtime.max_batch_size=%d to "
-        "silence this, or free VRAM to raise it.",
-        probe.max_batch_size, fit, probe.max_batch_size, probe.ssm_state_bytes / (1024.0 * 1024.0),
-        plan.failure.over_by / (1024.0 * 1024.0), fit);
+    if (plan.ok)
+        IMP_LOG_INFO(
+            "max_batch_size: auto %d -> %d so the KV pool holds one max_seq_len=%d sequence "
+            "(set runtime.max_batch_size for more slots at a shorter context)",
+            probe.max_batch_size, fit, config_.max_seq_len);
+    else
+        IMP_LOG_WARN(
+            "max_batch_size clamped %d -> %d: the memory plan cannot fit the SSM/GDN state "
+            "for %d slots (%.0f MiB, over by %.0f MiB). Set runtime.max_batch_size=%d to "
+            "silence this, or free VRAM to raise it.",
+            probe.max_batch_size, fit, probe.max_batch_size, probe.ssm_state_bytes / (1024.0 * 1024.0),
+            plan.failure.over_by / (1024.0 * 1024.0), fit);
     probe.ssm_state_bytes -= per_batch_slot * static_cast<size_t>(probe.max_batch_size - fit);
     probe.max_batch_size = fit;
     config_.max_batch_size = fit;
@@ -989,7 +1020,10 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
     if (scheduler_)
         scheduler_->clamp_max_batch_size(fit);
     plan = plan_memory(shadow_plan_input(probe));
-    IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, live_kv_blocks).c_str());
+    IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
+    ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    if (vram_budget.swa_max_blocks > 0 && plan.plan.kv.swa_blocks > 0)
+        vram_budget.swa_max_blocks = plan.plan.kv.swa_blocks;  // the SWA group follows the clamped batch
 }
 
 }  // namespace imp

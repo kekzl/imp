@@ -281,6 +281,39 @@ TEST(MemoryPlan, FittingBatchIsTheLargestThePlanAccepts) {
     EXPECT_EQ(plan_fitting_batch(none, per_slot), 0);
 }
 
+// Flint geometry (35 of 49 layers SWA, 721 live tokens): 32 auto slots leave the global pool short of one
+// 131072-token sequence; hold_one_sequence picks the largest batch that still holds it.
+TEST(MemoryPlan, AutoBatchYieldsToOneFullSequence) {
+    PlanInput in;
+    in.model.n_layers = 49;
+    in.model.n_kv_layers = 49;
+    in.model.n_kv_heads = 4;
+    in.model.head_dim = 128;
+    in.model.weight_bytes = 21 * kGiB;
+    in.limits.max_batch_size = 32;
+    in.limits.max_seq_len = 131072;
+    in.limits.kv_block_size = 16;
+    in.limits.kv_block_bytes_per_layer = 16ull * 4 * 128 * 2 * 2;
+    in.features.n_swa_layers = 35;
+    in.features.swa_live_tokens = 721;
+    const size_t one_seq = 8192ull * in.limits.kv_block_bytes_per_layer * 14;
+    const size_t swa_slot = 47ull * in.limits.kv_block_bytes_per_layer * 35;
+    in.budget_bytes = in.model.weight_bytes + one_seq + 20 * swa_slot;
+    ASSERT_TRUE(plan_memory(in).ok);
+    EXPECT_EQ(plan_fitting_batch(in, 0), 32) << "without the hold the plan takes every slot";
+    auto holds = [&](int b) {
+        PlanInput t = in;
+        t.limits.max_batch_size = b;
+        const PlanResult r = plan_memory(t);
+        return r.ok && r.plan.kv.blocks >= r.plan.kv.blocks_per_seq;
+    };
+    EXPECT_FALSE(holds(32));
+    const int fit = plan_fitting_batch(in, 0, /*hold_one_sequence=*/true);
+    EXPECT_EQ(fit, 20);
+    EXPECT_TRUE(holds(fit));
+    EXPECT_FALSE(holds(fit + 1));
+}
+
 TEST(MemoryPlan, RefusesToServeAPoolBelowTheAdmissionFloor) {
     // Qwen3.6-35B-A3B-NVFP4 at --max-batch 64: KV collapsed to 16 blocks (512 tokens), every
     // longer prompt cancelled with no hint while /v1/models still advertised max_seq_len.

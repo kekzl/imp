@@ -1205,8 +1205,8 @@ private:
     [[nodiscard]] bool init_kv_cache();
     // Plan rejected: lower max_batch_size to the largest batch the plan fits
     // when the batch-shaped SSM/GDN state is the overrun (MEMORY.md D14).
-    void clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
-                                  int live_kv_blocks);
+    void clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int& ssm_reserved_slots,
+                                  VRAMBudget& vram_budget);
     [[nodiscard]] bool init_features();
     // init(family), else an unrecognised checkpoint template (GLM-4.7) renders as its own Jinja.
     [[nodiscard]] bool init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok);

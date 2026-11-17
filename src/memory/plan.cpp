@@ -251,7 +251,7 @@ PlanResult plan_memory(const PlanInput& in) {
     return res;
 }
 
-int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot) {
+int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot, bool hold_one_sequence) {
     const int batch = std::max(1, in.limits.max_batch_size);
     for (int b = batch; b >= 1; --b) {
         PlanInput trial = in;
@@ -260,7 +260,8 @@ int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot) {
         trial.features.ssm_state_bytes = in.features.ssm_state_bytes > dropped
                                              ? in.features.ssm_state_bytes - dropped
                                              : 0;
-        if (plan_memory(trial).ok)
+        const PlanResult r = plan_memory(trial);
+        if (r.ok && (!hold_one_sequence || r.plan.kv.blocks >= r.plan.kv.blocks_per_seq))
             return b;
     }
     return 0;

@@ -175,6 +175,8 @@ PlanResult plan_memory(const PlanInput& in);
 // The largest max_batch_size in [1, in.limits.max_batch_size] the plan accepts,
 // shrinking the batch-shaped part of features.ssm_state_bytes by ssm_bytes_per_slot per
 // dropped slot (any fixed remainder stays). 0 when not even one slot fits. Pure.
-int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot);
+// hold_one_sequence: the global KV pool must also hold one max_seq_len sequence (the auto batch yields to
+// context, as vLLM keeps max_model_len; Flint at 32 slots cut 131072 -> 107104).
+int plan_fitting_batch(const PlanInput& in, size_t ssm_bytes_per_slot, bool hold_one_sequence = false);
 
 }  // namespace imp

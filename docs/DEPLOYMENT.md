@@ -133,7 +133,7 @@ The settings that most often need changing in a deployment:
 |---|---|
 | `runtime.max_seq_len` | context ceiling. Auto-caps at 128K, VRAM- and model-bounded |
 | `kv_cache.dtype` | `auto` takes the widest saving measured safe for the family - the model author's FP8 hint, or NVFP4. An explicit `fp8` is not always a saving: where the default is NVFP4, FP8 is the wider type |
-| `runtime.max_batch_size` | 0 = auto from post-load headroom. Pin it for any A/B measurement |
+| `runtime.max_batch_size` | 0 = auto from post-load headroom, lowered until the KV pool holds one `max_seq_len` sequence. Pin it for any A/B measurement |
 | `server.model_swap` | default on: a request naming another model in the directory swaps to it |
 | `moe.expert_cache_budget_pct` | only relevant when MoE experts do not fit; see [`PERF.md`](PERF.md) |
 

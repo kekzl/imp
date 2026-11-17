@@ -75,8 +75,10 @@ struct RuntimeConfig {
         // per length, F16 KV): a first request of that length replays instead of running eager
         // (Gemma-4 12.4 -> 6.6 ms TTFT; +150 MiB, +0.9 s at 32). Longer prompts share one runner.
         int prefill_graph_prewarm = 32;
-        // 0 = auto: engine sizes the decode batch from the model's weight
-        // footprint (a >20 GiB MoE auto-picks 1). Positive value forces it.
+        // 0 = auto: engine sizes the decode batch from post-load headroom
+        // (NVFP4 weights from disk, sliding-window layers at their window),
+        // then lowers it until the KV pool holds one max_seq_len sequence.
+        // Positive value forces it.
         int max_batch_size = 0;
         // Cap the prefill chunk (tokens) while other sequences are DECODING:
         // prefill and decode share one stream, so a chunk forward blocks
