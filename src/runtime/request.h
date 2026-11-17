@@ -5,6 +5,7 @@
 #include <chrono>
 #include <string>
 #include <memory>
+#include <span>
 #include "model/chat_template.h"
 #include "runtime/tool_call_gate.h"
 #include "runtime/spec_request.h"
@@ -386,6 +387,16 @@ struct Request {
     // picture. Zero is refused the cache entirely, so a missed plumbing site degrades to "no
     // reuse" rather than "wrong picture".
     size_t vision_content_hash = 0;
+    // One content hash per picture/clip in prompt order (server-filled); maps each placeholder run
+    // to its picture in cache_key_tokens. Empty or a count mismatch: every run keys on the whole hash.
+    std::vector<size_t> vision_part_hashes;
+    // input_tokens with each placeholder replaced by a key of its picture (vision_cache_keys.h),
+    // built at admission; empty = key on input_tokens. Hashed only, never forwarded.
+    std::vector<int32_t> cache_key_tokens;
+    [[nodiscard]] std::span<const int32_t> key_tokens() const {
+        return cache_key_tokens.empty() ? std::span<const int32_t>(input_tokens)
+                                        : std::span<const int32_t>(cache_key_tokens);
+    }
     // The LoRA adapter this request asks for (engine id, 0 = base). The
     // adapter is engine-global, so the batching worker switches to it before
     // admission and only once nothing else is in flight (AUDIT_ARCH_2026 E-1).
@@ -393,9 +404,9 @@ struct Request {
     // Control vector (roadmap row 114): engine id (0 = none) and its scale; switched like lora_id.
     int cvec_id = 0;
     float cvec_scale = 0.0f;
-    // Seed of the prefix-cache hash chain (image hash + active adapter), computed once by
-    // Engine::add_request. Every lookup and publish site reads this field, so a prompt can only
-    // reuse KV computed under the same picture and adapter.
+    // Seed of the prefix-cache hash chain (active adapter; the image hash only when the pictures
+    // are not in cache_key_tokens), computed once by Engine::add_request. Every lookup and publish
+    // site reads this field, so a prompt can only reuse KV computed under the same picture and adapter.
     size_t prefix_salt = 0;
     // `deepstack_emb` holds one buffer per vision tap, each the same
     // shape as `vision_emb`; they are ADDED at the LM's first layers.
@@ -421,6 +432,13 @@ struct Request {
                                n_vision_tokens > 0;
         return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request &&
                prompt_logprobs < 0;
+    }
+
+    // Pictures the cache keys cannot see (no cache_key_tokens): snapshot stores stay out.
+    [[nodiscard]] bool vision_unkeyed() const {
+        const bool has_vision = !images.empty() || !audios.empty() || !qwen_patches.empty() || vision_emb ||
+                                n_vision_tokens > 0;
+        return has_vision && cache_key_tokens.empty();
     }
 
     // May this request be a row of the cross-sequence ragged prefill? Score rows yes: the

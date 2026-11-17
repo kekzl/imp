@@ -20,23 +20,32 @@ double default_pruning_rate(const imp::Engine* engine) {
 
 }  // namespace
 
-size_t vision_parts_hash(ChatRequestParams& params, const imp::Engine* engine) {
+size_t vision_parts_hash(ChatRequestParams& params, const imp::Engine* engine, std::vector<size_t>* parts) {
     const double default_rate = default_pruning_rate(engine);
     if (params.vision_order.size() != params.images.size() + params.videos.size())
         params.vision_order = std::string(params.images.size(), 'i') + std::string(params.videos.size(), 'v');
     size_t hash = 0;
     size_t ni = 0, nv = 0;
+    if (parts)
+        parts->clear();
     for (const char kind : params.vision_order) {
         if (kind == 'i') {
-            hash = imp::combine_image_hash(hash, imp::image_content_hash(params.images[ni++]));
+            const size_t h = imp::image_content_hash(params.images[ni++]);
+            hash = imp::combine_image_hash(hash, h);
+            if (parts)
+                parts->push_back(h);
             continue;
         }
         const ChatVideoInput& v = params.videos[nv++];
+        size_t vh = 0;
         for (const auto& frame : v.frames)
-            hash = imp::combine_image_hash(hash, imp::image_content_hash(frame));
+            vh = imp::combine_image_hash(vh, imp::image_content_hash(frame));
         // Same frames at another rate splice other rows; rate 0 leaves the salt as it was.
         if (const double rate = video_pruning_rate(v, default_rate); rate > 0.0)
-            hash = imp::combine_image_hash(hash, static_cast<size_t>(std::bit_cast<uint64_t>(rate)));
+            vh = imp::combine_image_hash(vh, static_cast<size_t>(std::bit_cast<uint64_t>(rate)));
+        hash = imp::combine_image_hash(hash, vh);
+        if (parts)
+            parts->push_back(vh);
     }
     return hash;
 }
@@ -47,6 +56,7 @@ void bind_vision_parts(imp::Request& req, const ChatStateSnapshot& snap) {
     req.qwen_patches = snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req.qwen_video_evs = snap.qwen_video_evs;
     req.vision_content_hash = snap.vision_content_hash;
+    req.vision_part_hashes = snap.vision_part_hashes;
 }
 
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
@@ -129,11 +139,13 @@ namespace {
 std::string preprocess_audio_parts(const imp::AudioPipeline& audio, const ChatRequestParams& params,
                                    ChatStateSnapshot& snap) {
     size_t hash = 0;
+    snap.vision_part_hashes.clear();
     for (size_t i = 0; i < params.audios.size(); ++i) {
         auto f = audio.preprocess(params.audios[i]);
         if (!f)
             return "input_audio " + std::to_string(i + 1) + ": " + f.error();
         hash = imp::combine_image_hash(hash, f->content_hash);
+        snap.vision_part_hashes.push_back(f->content_hash);
         snap.audio_inputs.push_back(std::make_shared<imp::AudioFeatures>(std::move(*f)));
     }
     // Every audio token shares one id: the prefix cache may only reuse KV built from these clips.

@@ -310,7 +310,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             return fail(ctx.params.image_error);
         // Salts the prefix cache so a hit needs the same pictures and frames, not just the same
         // token ids (every image token shares one id). Folded in content order.
-        ctx.snap.vision_content_hash = vision_parts_hash(ctx.params, state.ctx->engine.get());
+        ctx.snap.vision_content_hash = vision_parts_hash(ctx.params, state.ctx->engine.get(),
+                                                         &ctx.snap.vision_part_hashes);
         if (state.ctx->engine->has_qwen_vision()) {
             // Dynamic resolution: patchify now (CPU only) so each placeholder expands to its own
             // picture's (or frame pair's) token count before the prompt is tokenized.

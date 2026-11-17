@@ -147,9 +147,9 @@ nothing else in `/metrics`.
 pinned region, rather than pinning the whole prompt. `input_tokens`, `cache_read_input_tokens`
 and `cache_creation_input_tokens` are disjoint and sum to the prompt, as on the Anthropic API.
 
-The cache is keyed on the picture as well as the token ids for image requests,
-and it is model-fingerprint-gated on disk, so a cache file from another model is
-never replayed.
+Image placeholders are keyed on their own picture (as vLLM): text and earlier pictures still hit
+when a later one changes, hybrid (GDN) and SWA models included. The cache is
+model-fingerprint-gated on disk, so a cache file from another model is never replayed.
 
 ## Request tracing
 

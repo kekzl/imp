@@ -190,7 +190,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     // blocks past the cap are allocated fresh, never rewritten shared.
                     if (!snapshot_cap)
                         max_reuse = prompt_reuse_cap_blocks(static_cast<int>(req->input_tokens.size()), bs);
-                    int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens,
+                    int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->key_tokens(),
                                                                           max_reuse, req->prefix_salt,
                                                                           restore_chain_of(
                                                                               req->recurrent_restore));
