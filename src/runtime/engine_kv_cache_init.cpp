@@ -942,10 +942,7 @@ bool Engine::init_kv_cache() {
                                                ssm_reserved_slots);
     PlanResult plan = plan_memory(shadow_plan_input(probe));
     IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
-    if (!plan.ok) {
-        clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget.kv_max_blocks);
-        ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
-    }
+    clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget);
     // Mode-2 weight caches stop at the plan's grant and leave its KV pool free (vram_budget.h).
     apply_plan_to_weight_caches(vram_budget, plan, probe.distributable_bytes, mcfg.is_nvfp4_prequant);
     int max_blocks = kv_blocks_from_plan(config_, plan, vram_budget);
