@@ -1,0 +1,333 @@
+{
+ "source": "kekzle/Flint-NVFP4",
+ "template": "{%- macro flint_text(t) -%}\n{%- if t is string -%}\n{{- t | replace(\"\\x00\", \"\") | replace(\"<think>\", \"\") | replace(\"</think>\", \"\") | replace(\"<|begin_of_text|>\", \"&lt;|begin_of_text|&gt;\") | replace(\"<|end_of_text|>\", \"&lt;|end_of_text|&gt;\") | replace(\"<|system|>\", \"&lt;|system|&gt;\") | replace(\"<|developer|>\", \"&lt;|developer|&gt;\") | replace(\"<|user|>\", \"&lt;|user|&gt;\") | replace(\"<|assistant|>\", \"&lt;|assistant|&gt;\") | replace(\"<|observation|>\", \"&lt;|observation|&gt;\") -}}\n{%- else -%}\n{{- t -}}\n{%- endif -%}\n{%- endmacro -%}\n{%- set tool_preamble -%}\n{%- if tools %}<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{%- for tool in tools %}\n{%- set fn = tool.function if tool.function is defined else tool %}\n{{ fn | tojson(ensure_ascii=False) }}\n{%- endfor %}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n{% endif -%}\n{%- endset -%}\n{%- set ns = namespace(tools_pending=true) -%}\n{%- for m in messages -%}\n{%- if ns.tools_pending and m.role != 'system' -%}\n{{ tool_preamble }}\n{%- set ns.tools_pending = false -%}\n{%- endif -%}\n{%- if m.role == 'system' -%}\n<|system|>{{ flint_text(m.content) }}\n{%- elif m.role == 'developer' -%}\n<|developer|>{{ flint_text(m.content) }}\n{%- elif m.role == 'user' -%}\n<|user|>{{ flint_text(m.content) }}\n{%- elif m.role == 'assistant' -%}\n<|assistant|>\n{%- if m.reasoning_content %}<think>{{ m.reasoning_content }}</think>{% endif -%}\n{%- if m.content %}{{ m.content }}{% endif -%}\n{%- if m.tool_calls -%}\n{%- for tc in m.tool_calls -%}\n{%- set fn = tc.function if tc.function is defined else tc -%}\n<tool_call>{{ fn.name }}\n{%- for k, v in fn.arguments.items() -%}\n<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>\n{%- endfor -%}\n</tool_call>\n{%- endfor -%}\n{%- endif -%}\n{%- elif m.role == 'tool' -%}\n<|observation|><tool_response>{{ flint_text(m.content) }}</tool_response>\n{%- endif -%}\n{%- endfor -%}\n{%- if ns.tools_pending -%}\n{{ tool_preamble }}\n{%- endif -%}\n{%- if add_generation_prompt -%}\n<|assistant|>\n{%- endif -%}\n",
+ "cases": [
+  {
+   "name": "basic",
+   "context": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 2+2?"
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "<|begin_of_text|>",
+    "eos_token": "<|end_of_text|>"
+   },
+   "expected": "<|user|>What is 2+2?<|assistant|>"
+  },
+  {
+   "name": "multi",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Be terse."
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Hello."
+     },
+     {
+      "role": "user",
+      "content": "Bye"
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "<|begin_of_text|>",
+    "eos_token": "<|end_of_text|>"
+   },
+   "expected": "<|system|>Be terse.<|user|>Hi<|assistant|>Hello.<|user|>Bye<|assistant|>"
+  },
+  {
+   "name": "agent",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "List the files and fix a.txt."
+     },
+     {
+      "role": "assistant",
+      "content": "Looking first.",
+      "reasoning_content": "Need the listing.",
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": {
+          "command": "ls -la",
+          "timeout": 30
+         }
+        }
+       },
+       {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+         "name": "edit_file",
+         "arguments": {
+          "path": "a.txt",
+          "mode": "append",
+          "lines": [
+           1,
+           2
+          ],
+          "opts": {
+           "dry": true
+          }
+         }
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "bash",
+      "content": "a.txt\nb.txt"
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_2",
+      "name": "edit_file",
+      "content": "ok"
+     },
+     {
+      "role": "assistant",
+      "content": "Done: a.txt fixed.",
+      "reasoning_content": "Both calls ok."
+     },
+     {
+      "role": "user",
+      "content": "Thanks. Now count lines."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command."
+         },
+         "timeout": {
+          "type": "integer",
+          "description": "Seconds.",
+          "default": 60
+         }
+        },
+        "required": [
+         "command"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "edit_file",
+       "description": "Edit a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string",
+          "enum": [
+           "replace",
+           "append"
+          ]
+         },
+         "lines": {
+          "type": "array",
+          "items": {
+           "type": "integer"
+          }
+         },
+         "opts": {
+          "type": "object",
+          "properties": {
+           "dry": {
+            "type": "boolean"
+           }
+          }
+         }
+        },
+        "required": [
+         "path",
+         "mode"
+        ]
+       }
+      }
+     }
+    ],
+    "add_generation_prompt": true,
+    "bos_token": "<|begin_of_text|>",
+    "eos_token": "<|end_of_text|>"
+   },
+   "expected": "<|system|>You are a coding agent.<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"bash\", \"description\": \"Run a shell command.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command.\"}, \"timeout\": {\"type\": \"integer\", \"description\": \"Seconds.\", \"default\": 60}}, \"required\": [\"command\"]}}{\"name\": \"edit_file\", \"description\": \"Edit a file.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"mode\": {\"type\": \"string\", \"enum\": [\"replace\", \"append\"]}, \"lines\": {\"type\": \"array\", \"items\": {\"type\": \"integer\"}}, \"opts\": {\"type\": \"object\", \"properties\": {\"dry\": {\"type\": \"boolean\"}}}}, \"required\": [\"path\", \"mode\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>List the files and fix a.txt.<|assistant|><think>Need the listing.</think>Looking first.<tool_call>bash<arg_key>command</arg_key><arg_value>ls -la</arg_value><arg_key>timeout</arg_key><arg_value>30</arg_value></tool_call><tool_call>edit_file<arg_key>path</arg_key><arg_value>a.txt</arg_value><arg_key>mode</arg_key><arg_value>append</arg_value><arg_key>lines</arg_key><arg_value>[1, 2]</arg_value><arg_key>opts</arg_key><arg_value>{\"dry\": true}</arg_value></tool_call><|observation|><tool_response>a.txt\nb.txt</tool_response><|observation|><tool_response>ok</tool_response><|assistant|><think>Both calls ok.</think>Done: a.txt fixed.<|user|>Thanks. Now count lines.<|assistant|>"
+  },
+  {
+   "name": "agent_nothink",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "List the files and fix a.txt."
+     },
+     {
+      "role": "assistant",
+      "content": "Looking first.",
+      "reasoning_content": "Need the listing.",
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": {
+          "command": "ls -la",
+          "timeout": 30
+         }
+        }
+       },
+       {
+        "id": "call_2",
+        "type": "function",
+        "function": {
+         "name": "edit_file",
+         "arguments": {
+          "path": "a.txt",
+          "mode": "append",
+          "lines": [
+           1,
+           2
+          ],
+          "opts": {
+           "dry": true
+          }
+         }
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "bash",
+      "content": "a.txt\nb.txt"
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_2",
+      "name": "edit_file",
+      "content": "ok"
+     },
+     {
+      "role": "assistant",
+      "content": "Done: a.txt fixed.",
+      "reasoning_content": "Both calls ok."
+     },
+     {
+      "role": "user",
+      "content": "Thanks. Now count lines."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command."
+         },
+         "timeout": {
+          "type": "integer",
+          "description": "Seconds.",
+          "default": 60
+         }
+        },
+        "required": [
+         "command"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "edit_file",
+       "description": "Edit a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string",
+          "enum": [
+           "replace",
+           "append"
+          ]
+         },
+         "lines": {
+          "type": "array",
+          "items": {
+           "type": "integer"
+          }
+         },
+         "opts": {
+          "type": "object",
+          "properties": {
+           "dry": {
+            "type": "boolean"
+           }
+          }
+         }
+        },
+        "required": [
+         "path",
+         "mode"
+        ]
+       }
+      }
+     }
+    ],
+    "enable_thinking": false,
+    "add_generation_prompt": true,
+    "bos_token": "<|begin_of_text|>",
+    "eos_token": "<|end_of_text|>"
+   },
+   "expected": "<|system|>You are a coding agent.<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"bash\", \"description\": \"Run a shell command.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command.\"}, \"timeout\": {\"type\": \"integer\", \"description\": \"Seconds.\", \"default\": 60}}, \"required\": [\"command\"]}}{\"name\": \"edit_file\", \"description\": \"Edit a file.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"mode\": {\"type\": \"string\", \"enum\": [\"replace\", \"append\"]}, \"lines\": {\"type\": \"array\", \"items\": {\"type\": \"integer\"}}, \"opts\": {\"type\": \"object\", \"properties\": {\"dry\": {\"type\": \"boolean\"}}}}, \"required\": [\"path\", \"mode\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>List the files and fix a.txt.<|assistant|><think>Need the listing.</think>Looking first.<tool_call>bash<arg_key>command</arg_key><arg_value>ls -la</arg_value><arg_key>timeout</arg_key><arg_value>30</arg_value></tool_call><tool_call>edit_file<arg_key>path</arg_key><arg_value>a.txt</arg_value><arg_key>mode</arg_key><arg_value>append</arg_value><arg_key>lines</arg_key><arg_value>[1, 2]</arg_value><arg_key>opts</arg_key><arg_value>{\"dry\": true}</arg_value></tool_call><|observation|><tool_response>a.txt\nb.txt</tool_response><|observation|><tool_response>ok</tool_response><|assistant|><think>Both calls ok.</think>Done: a.txt fixed.<|user|>Thanks. Now count lines.<|assistant|>"
+  }
+ ]
+}

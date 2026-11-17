@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -708,6 +708,14 @@ chat-goldens:
 	  -v $(PWD):/src -v $(HOME)/models:/models:ro -w /src python:3.12-slim bash -c \
 	  'pip install -q --target /tmp/pylibs jinja2 transformers >/dev/null 2>&1; \
 	   python3 tests/refs/gen_chat_goldens.py --verify'
+
+# tests/fixtures/jinja_parity/: upstream templates + probes rendered by transformers' Jinja env.
+jinja-parity:
+	@docker run --rm --network host --user $$(id -u):$$(id -g) \
+	  -e HOME=/tmp -e PYTHONPATH=/tmp/pylibs \
+	  -v $(PWD):/src -w /src python:3.12-slim bash -c \
+	  'pip install -q --target /tmp/pylibs jinja2 >/dev/null 2>&1; \
+	   python3 tests/refs/gen_jinja_parity.py'
 
 # Every pair the checker resolved, matched or not. Never fails.
 alloc-pairs-list:

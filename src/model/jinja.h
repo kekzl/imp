@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -10,11 +11,13 @@
 
 namespace imp::jinja {
 
-// Forward declarations for AST nodes (defined in jinja.cpp)
+// Forward declarations for AST nodes (defined in jinja_ast.h)
 namespace detail {
 struct Node;
 struct Expr;
 }  // namespace detail
+
+class ObjectMap;
 
 // ---------------------------------------------------------------------------
 // Value — dynamically typed value used in template contexts
@@ -23,7 +26,8 @@ struct Expr;
 class Value {
 public:
     using Array = std::vector<Value>;
-    using Object = std::shared_ptr<std::map<std::string, Value>>;
+    // Insertion-ordered like a Python dict: tool schemas render in the client's key order.
+    using Object = std::shared_ptr<ObjectMap>;
 
     // Underlying storage
     using Storage = std::variant<std::monostate,  // none
@@ -119,18 +123,72 @@ public:
     static Value array(std::initializer_list<Value> items) { return Value(Array(items)); }
 
     // Convenience: create object from initializer list
-    static Value object(std::initializer_list<std::pair<std::string, Value>> items) {
-        auto obj = std::make_shared<std::map<std::string, Value>>();
-        for (auto& [k, v] : items)
-            obj->emplace(k, v);
-        return Value(obj);
-    }
+    static Value object(std::initializer_list<std::pair<std::string, Value>> items);
 
     const Storage& storage() const { return data_; }
 
 private:
     Storage data_;
 };
+
+// Python-dict semantics: insertion order kept, assigning an existing key keeps its slot.
+// Linear lookup: template objects (messages, tool schemas, namespaces) hold < 100 keys.
+class ObjectMap {
+public:
+    using value_type = std::pair<std::string, Value>;
+    using iterator = std::vector<value_type>::iterator;
+    using const_iterator = std::vector<value_type>::const_iterator;
+
+    iterator begin() { return items_.begin(); }
+    iterator end() { return items_.end(); }
+    const_iterator begin() const { return items_.begin(); }
+    const_iterator end() const { return items_.end(); }
+    size_t size() const { return items_.size(); }
+    bool empty() const { return items_.empty(); }
+
+    iterator find(std::string_view key) {
+        for (auto it = items_.begin(); it != items_.end(); ++it)
+            if (it->first == key)
+                return it;
+        return items_.end();
+    }
+    const_iterator find(std::string_view key) const { return const_cast<ObjectMap*>(this)->find(key); }
+    [[nodiscard]] bool contains(std::string_view key) const {
+        return std::ranges::any_of(items_, [&](const value_type& kv) { return kv.first == key; });
+    }
+    size_t count(std::string_view key) const { return contains(key) ? 1 : 0; }
+
+    Value& operator[](const std::string& key) {
+        auto it = find(key);
+        if (it != end())
+            return it->second;
+        return items_.emplace_back(key, Value()).second;
+    }
+    std::pair<iterator, bool> emplace(std::string key, Value val) {
+        auto it = find(key);
+        if (it != end())
+            return {it, false};
+        items_.emplace_back(std::move(key), std::move(val));
+        return {items_.end() - 1, true};
+    }
+    size_t erase(std::string_view key) {
+        auto it = find(key);
+        if (it == end())
+            return 0;
+        items_.erase(it);
+        return 1;
+    }
+
+private:
+    std::vector<value_type> items_;
+};
+
+inline Value Value::object(std::initializer_list<std::pair<std::string, Value>> items) {
+    auto obj = std::make_shared<ObjectMap>();
+    for (const auto& [k, v] : items)
+        obj->emplace(k, v);
+    return Value(obj);
+}
 
 // ---------------------------------------------------------------------------
 // Context — variable lookup with scoping

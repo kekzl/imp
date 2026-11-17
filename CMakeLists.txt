@@ -254,6 +254,10 @@ set(IMP_MODEL_SOURCES
     src/model/transcript_ids.cpp
     src/model/chat_template_families.cpp
     src/model/jinja.cpp
+    src/model/jinja_builtins.cpp
+    src/model/jinja_json.cpp
+    src/model/jinja_methods.cpp
+    src/model/jinja_lex.cpp
     src/model/jinja_parse.cpp
     src/model/jinja_value.cpp
 )
@@ -1323,8 +1327,13 @@ if(IMP_BUILD_TESTS)
         tests/test_kimi_chat_template.cpp
         tests/test_jinja.cpp
         tests/test_jinja_undefined.cpp
+        tests/test_jinja_parity.cpp
         tests/test_chat_template_goldens.cpp
     )
+    if(TARGET nlohmann_json::nlohmann_json)
+        # test_jinja_parity.cpp reads its fixtures with ordered_json (dict key order is under test).
+        target_link_libraries(test-text PRIVATE nlohmann_json::nlohmann_json)
+    endif()
 
     imp_add_test_module(test-compute GPU SOURCES
         tests/test_gemm_lt_ex.cu

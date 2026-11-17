@@ -1,6 +1,7 @@
 // Jinja2 Value: truthiness, printing, item access.
 
 #include "model/jinja.h"
+#include "model/jinja_builtins.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -44,12 +45,9 @@ std::string Value::to_string() const {
                 return v ? "True" : "False";
             else if constexpr (std::is_same_v<T, int64_t>)
                 return std::to_string(v);
-            else if constexpr (std::is_same_v<T, double>) {
-                // Format like Python: no trailing zeros, but keep .0 for integers
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "%g", v);
-                return buf;
-            } else if constexpr (std::is_same_v<T, std::string>)
+            else if constexpr (std::is_same_v<T, double>)
+                return detail::py_float_repr(v);  // 3.0, 0.1, 1e+20 as Python prints them
+            else if constexpr (std::is_same_v<T, std::string>)
                 return v;
             else if constexpr (std::is_same_v<T, Array>) {
                 std::string r = "[";
@@ -102,30 +100,41 @@ double Value::to_number() const {
     return 0.0;
 }
 
+namespace {
+
+// Python dict equality: same keys, equal values, order ignored.
+bool objects_equal(const Value::Object& a, const Value::Object& b) {
+    if (!a || !b)
+        return a == b;
+    if (a->size() != b->size())
+        return false;
+    for (const auto& [k, v] : *a) {
+        auto it = b->find(k);
+        if (it == b->end() || it->second != v)
+            return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool Value::operator==(const Value& o) const {
     if (is_none() && o.is_none())
         return true;
     if (is_bool() && o.is_bool())
         return as_bool() == o.as_bool();
-    if (is_number() && o.is_number())
+    // bool is an int in Python: 0 == false, 1 == true
+    if ((is_number() || is_bool()) && (o.is_number() || o.is_bool()))
         return to_number() == o.to_number();
     if (is_string() && o.is_string())
         return as_string() == o.as_string();
-    if (is_array() && o.is_array()) {
-        auto& a = as_array();
-        auto& b = o.as_array();
-        if (a.size() != b.size())
-            return false;
-        for (size_t i = 0; i < a.size(); i++)
-            if (a[i] != b[i])
-                return false;
-        return true;
-    }
-    // none == false, 0 == false, etc.
-    if (is_none() && o.is_bool())
-        return !o.as_bool();
-    if (is_bool() && o.is_none())
-        return !as_bool();
+    if (is_array() && o.is_array())
+        return std::ranges::equal(as_array(), o.as_array());
+    if (is_object() && o.is_object())
+        return objects_equal(as_object(), o.as_object());
+    // none == false (kept: `is undefined` paths rely on it)
+    if ((is_none() && o.is_bool()) || (is_bool() && o.is_none()))
+        return !(is_bool() ? as_bool() : o.as_bool());
     return false;
 }
 
@@ -227,6 +236,6 @@ bool Value::contains(const Value& item) const {
     return false;
 }
 
-Value Value::make_object() { return Value(std::make_shared<std::map<std::string, Value>>()); }
+Value Value::make_object() { return Value(std::make_shared<ObjectMap>()); }
 
 }  // namespace imp::jinja

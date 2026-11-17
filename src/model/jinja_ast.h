@@ -14,7 +14,6 @@ struct Expr {
     virtual ~Expr() = default;
 };
 
-
 struct LiteralExpr : Expr {
     Value value;
     explicit LiteralExpr(Value v) : value(std::move(v)) {}
@@ -56,6 +55,7 @@ struct FilterExpr : Expr {
     std::unique_ptr<Expr> value;
     std::string name;
     std::vector<std::unique_ptr<Expr>> args;
+    std::vector<std::pair<std::string, std::unique_ptr<Expr>>> kwargs;  // tojson(ensure_ascii=False)
 };
 
 struct CallExpr : Expr {
@@ -69,6 +69,7 @@ struct MethodExpr : Expr {
     std::unique_ptr<Expr> object;
     std::string method;
     std::vector<std::unique_ptr<Expr>> args;
+    std::vector<std::pair<std::string, std::unique_ptr<Expr>>> kwargs;
 };
 
 struct TernaryExpr : Expr {
@@ -104,6 +105,7 @@ struct ForNode : Node {
     std::string var_name;
     std::string var_name2;  // for "key, value in dict"
     std::unique_ptr<Expr> iterable;
+    std::unique_ptr<Expr> filter;  // for x in xs if cond: loop.* counts the kept items only
     std::vector<std::unique_ptr<Node>> body;
     std::vector<std::unique_ptr<Node>> else_body;
     bool recursive = false;
@@ -144,9 +146,9 @@ struct MacroNode : Node {
     std::vector<std::unique_ptr<Node>> body;
 };
 
-
 // Lexes and parses `source` (trailing newline already stripped). false on a parse error;
 // `unknown_tag` names an unsupported or unbalanced tag when that was the cause.
-bool parse_template(const std::string& source, std::vector<std::unique_ptr<Node>>& out, std::string& unknown_tag);
+[[nodiscard]] bool parse_template(const std::string& source, std::vector<std::unique_ptr<Node>>& out,
+                                  std::string& unknown_tag);
 
 }  // namespace imp::jinja::detail
