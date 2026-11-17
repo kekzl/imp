@@ -237,7 +237,7 @@ that never finish a body - cap connections per peer at the proxy.
 - `docker-compose.yml` sets `stop_grace_period: 75s` to cover that; a bare `docker stop` (10 s default) kills a draining server.
 - While a swap or `/admin/suspend` holds the engine lock, inference answers 503 (`overloaded_error`) within 250 ms rather than parking a worker thread.
 
-**Context-window reporting.** `/v1/models` carries vLLM's `max_model_len` and llama.cpp's `meta.n_ctx_train`; `GET /props` returns llama.cpp's `n_ctx` (top-level and under `default_generation_settings`); `GET /info` TGI's `max_total_tokens`/`max_input_tokens`.
+**Context-window reporting.** `/v1/models` carries vLLM's `max_model_len` and llama.cpp's `meta.n_ctx_train` (loaded model: the servable window; a model not loaded: `runtime.max_seq_len` when set, else its `max_position_embeddings` capped at 131072, which a load may lower to fit VRAM); `GET /props` returns llama.cpp's `n_ctx` (top-level and under `default_generation_settings`); `GET /info` TGI's `max_total_tokens`/`max_input_tokens`.
 
 - All three report the smaller of the resolver's plan and the pool's clamp since #1542 (97204 vs 52256 measured on a tight Qwen3.8-27B-NVFP4 card).
 - A growable pool (`kv_cache.growable`, default on) counts by its ceiling: starts at `kv_cache.growable_initial_pct` (25%) of the plan, grows at admission (measured: 875 of 13264 blocks committed, 131072 advertised).
