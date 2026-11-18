@@ -9,6 +9,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_grouped_nvfp4_decode.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
+#include "compute/gemm_grouped_nvfp4_f16_tile.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
@@ -170,6 +171,107 @@ static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t st
     return true;
 }
 
+// gemm.nvfp4_prompt_a16_moe (B-85): routed experts on FP16 activations. Gather the expert-sorted FP16 rows,
+// gate and up through the grouped W4A16 tile (the decode cache's plain NVFP4 bytes), SwiGLU in place into
+// the gate buffer, down from it. false before any launch = the W4A4 path runs instead.
+struct MoePromptA16In {
+    const Tensor& no;
+    const MoeRoutingResult& routing;
+    Tensor& gathered;
+    const NvFP4MoEQuantResult* gate;
+    const NvFP4MoEQuantResult* up;
+    const NvFP4MoEQuantResult* down;
+    void* gate_out;
+    void* up_out;
+    void* down_out;
+    int ne, d, eff, expanded;
+};
+
+static bool moe_a16_weight_ok(const NvFP4MoEQuantResult* w, int ne, int N, int K) {
+    return w != nullptr && w->packed_data != nullptr && w->micro_scales != nullptr &&
+           w->tensor_scales != nullptr && w->n_experts >= ne && w->N == N && w->K == K;
+}
+
+static bool run_moe_prompt_a16(const MoePromptA16In& in, bool& gather_done, cudaStream_t stream) {
+    if (!moe_a16_weight_ok(in.gate, in.ne, in.eff, in.d) || !moe_a16_weight_ok(in.up, in.ne, in.eff, in.d) ||
+        !moe_a16_weight_ok(in.down, in.ne, in.d, in.eff) || in.gathered.qtype != QType::F16 ||
+        in.d % 64 != 0 || in.eff % 64 != 0)
+        return false;
+    if (!gather_done) {
+        int64_t gs[2] = {static_cast<int64_t>(in.expanded), static_cast<int64_t>(in.d)};
+        Tensor g(in.gathered.data, QType::F16, 2, gs, true);
+        moe_gather(in.no, in.routing, g, stream);
+        gather_done = true;
+    }
+    const auto* offs = static_cast<const int32_t*>(in.routing.expert_offsets.data);
+    auto grouped = [&](const NvFP4MoEQuantResult& w, const void* a, void* out, int N, int K) {
+        imp::GroupedNvfp4F16Args g;
+        g.a = a;
+        g.rows = in.expanded;
+        g.N = N;
+        g.K = K;
+        g.ne = in.ne;
+        g.d_offsets = offs;
+        g.w = w.packed_data;
+        g.w_stride = w.expert_stride_packed;
+        g.sc = w.micro_scales;
+        g.sc_stride = w.expert_stride_ms;
+        g.d_tensor_scales = w.tensor_scales;
+        g.d = out;
+        return imp::gemm_grouped_nvfp4_f16_tile(g, stream);
+    };
+    if (!grouped(*in.gate, in.gathered.data, in.gate_out, in.eff, in.d) ||
+        !grouped(*in.up, in.gathered.data, in.up_out, in.eff, in.d))
+        IMP_CHECK(false, "nvfp4_prompt_a16_moe: grouped W4A16 refused after the gather (expanded=%d)",
+                  in.expanded);
+    int64_t ms[2] = {static_cast<int64_t>(in.expanded), static_cast<int64_t>(in.eff)};
+    Tensor gate_t(in.gate_out, QType::F16, 2, ms, true);
+    Tensor up_t(in.up_out, QType::F16, 2, ms, true);
+    swiglu(gate_t, up_t, gate_t, stream);
+    IMP_CHECK(grouped(*in.down, in.gate_out, in.down_out, in.d, in.eff),
+              "nvfp4_prompt_a16_moe: grouped W4A16 down refused (expanded=%d)", in.expanded);
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("nvfp4_prompt_a16_moe: W4A16 grouped expert GEMMs ACTIVE (expanded=%d ne=%d)",
+                     in.expanded, in.ne);
+    }
+    return true;
+}
+
+// The route's preconditions: prompt chunks past the decode-rows launch, unstaged SwiGLU experts without
+// bias, no calibration pass.
+struct MoePromptA16Gate {
+    bool on;
+    bool staged;
+    int n;
+    bool non_gated;
+    FFNActivation act;
+    bool bias_glu;
+    bool calibrating;
+};
+
+static bool try_moe_prompt_a16(const MoePromptA16Gate& g, const MoePromptA16In& in, bool& gather_done,
+                               cudaStream_t stream) {
+    if (!g.on || g.staged || g.n <= imp::cfg::kMoeNvfp4DecodeRows || g.non_gated ||
+        g.act != FFNActivation::SWIGLU || g.bias_glu || g.calibrating)
+        return false;
+    return run_moe_prompt_a16(in, gather_done, stream);
+}
+
+// gpt-oss (#547, #2466): the down bias rides the fused scatter when phase 7 takes it, else it is added to
+// the expert-sorted rows here.
+static void add_expert_down_bias(bool run, MoeFfnContext& ctx, QType compute_dtype, const void* bias,
+                                 void* down, const int32_t* offs, int ne, int expanded, int d,
+                                 cudaStream_t s) {
+    if (!run)
+        return;
+    if (moe_scatter_can_add_down_bias(ctx, compute_dtype))
+        ctx.scatter_down_bias = bias;
+    else
+        moe_add_expert_bias_sorted(down, bias, offs, ne, expanded, d, s);
+}
+
 bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream,
                                                           MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
@@ -322,13 +424,28 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             // Gate/Up share input quantization (K_in=d): fused gather+quantize reads
             // ctx.no in token order via sorted_token_ids and writes packed FP4+SFA in
             // expert-sorted layout in one kernel pass, saving the gathered_base HBM read.
-            prep_sfa(d);
-            imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
-                ctx.no.data, static_cast<const int32_t*>(routing.sorted_token_ids.data),
-                moe_.cutlass3x_packed, reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-                static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream, las.gu);
+            auto quantize_gate_up_input = [&] {
+                prep_sfa(d);
+                imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
+                    ctx.no.data, static_cast<const int32_t*>(routing.sorted_token_ids.data),
+                    moe_.cutlass3x_packed, reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                    static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream, las.gu);
+            };
+            // gemm.nvfp4_prompt_a16_moe takes prompt rows past the decode-rows launch, so it runs first; it
+            // reads FP16, the NVFP4 gather-quantize feeds only the paths below.
+            const bool a16_done = try_moe_prompt_a16(
+                {dispatch_policy().gemm.nvfp4_prompt_a16_moe, ctx.staged_blocks, n, non_gated_experts,
+                 cfg.ffn_activation, model_->profile().moe_expert_bias_glu, calib_ != nullptr},
+                {ctx.no, routing, moe_.gathered, ly.nvfp4_moe_gate_ptr, ly.nvfp4_moe_up_ptr,
+                 ly.nvfp4_moe_down_ptr, expert_gate_base, expert_up_base, expert_down_base, ne, d, eff,
+                 expanded},
+                ctx.moe_gather_done, stream);
+            if (!a16_done)
+                quantize_gate_up_input();
             bool ok = true;
-            if (ctx.staged_blocks) {
+            if (a16_done) {
+                // Routed experts done on FP16 activations (gemm_grouped_nvfp4_f16_tile.h).
+            } else if (ctx.staged_blocks) {
                 const auto& da = da_cache;
                 ok = run_staged_blocks_(
                     layer, stream, ctx,
@@ -378,13 +495,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                               ly.expert_gate_bias.data, ly.expert_up_bias.data);
                     ok = dispatch_device(ly.expert_down_ids, da_cache.d_down_B_ptrs, da_cache.d_down_SFB_ptrs,
                                          da_cache.d_down_alpha, expert_down_base, eff, d);
-                    if (ok && gpt_oss) {
-                        if (moe_scatter_can_add_down_bias(ctx, compute_dtype_))
-                            ctx.scatter_down_bias = ly.expert_down_bias.data;
-                        else
-                            moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne,
-                                                       expanded, d, stream);
-                    }
+                    add_expert_down_bias(ok && gpt_oss, ctx, compute_dtype_, ly.expert_down_bias.data,
+                                         expert_down_base, d_offs, ne, expanded, d, stream);
                 }
             }
             if (ok) {

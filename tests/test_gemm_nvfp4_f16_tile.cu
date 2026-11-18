@@ -4,6 +4,7 @@
 // (3) a timing table against the NVFP4 tile GEMM shapes of Flint attention (informational).
 
 #include "compute/gemm_f16_tile.h"
+#include "compute/gemm_grouped_nvfp4_f16_tile.h"
 #include "compute/gemm_nvfp4_f16_tile.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
@@ -188,6 +189,84 @@ TEST(GemmNvfp4TileQuant, MatchesDequantizeNvfp4) {
     cudaFree(a);
     cudaFree(ref);
     cudaFree(own);
+    cudaStreamDestroy(s);
+}
+
+// Grouped over expert-sorted rows: each expert's rows bit-equal to gemm_nvfp4_f16_tile on that expert alone
+// (counts 0, 1, 127, 128, 129 and multi-tile; Flint gate/up 512x2048 and down 2048x512 shapes).
+TEST(GemmGroupedNvfp4Tile, BitEqualPerExpert) {
+    cudaStream_t s;
+    cudaStreamCreate(&s);
+    const int counts[] = {0, 1, 127, 128, 129, 300, 0, 517, 64, 2};
+    const int ne = static_cast<int>(sizeof(counts) / sizeof(counts[0]));
+    std::vector<int32_t> off(ne + 1, 0);
+    for (int e = 0; e < ne; ++e)
+        off[e + 1] = off[e] + counts[e];
+    const int rows = off[ne];
+    for (const auto& nk : {std::pair<int, int>{512, 2048}, std::pair<int, int>{2048, 512}}) {
+        const int N = nk.first, K = nk.second;
+        std::mt19937 rng(0x5u + N);
+        const size_t wst = size_t(N) * (K / 2), sst = size_t(N) * (K / 16);
+        std::vector<uint8_t> hw(wst * ne), hs(sst * ne);
+        for (auto& b : hw)
+            b = static_cast<uint8_t>(rng());
+        for (auto& b : hs)
+            b = static_cast<uint8_t>(0x01 + (rng() % 0x7E));
+        std::vector<float> ts(ne);
+        for (auto& t : ts)
+            t = 1e-4f * static_cast<float>(1 + (rng() % 50));
+        uint8_t *w = nullptr, *sc = nullptr;
+        float* dts = nullptr;
+        int32_t* doff = nullptr;
+        half *a = nullptr, *ref = nullptr, *own = nullptr;
+        cudaMalloc(&w, hw.size());
+        cudaMalloc(&sc, hs.size());
+        cudaMalloc(&dts, ts.size() * 4);
+        cudaMalloc(&doff, off.size() * 4);
+        cudaMalloc(&a, size_t(rows) * K * 2);
+        cudaMalloc(&ref, size_t(rows) * N * 2);
+        cudaMalloc(&own, size_t(rows) * N * 2);
+        cudaMemcpy(w, hw.data(), hw.size(), cudaMemcpyHostToDevice);
+        cudaMemcpy(sc, hs.data(), hs.size(), cudaMemcpyHostToDevice);
+        cudaMemcpy(dts, ts.data(), ts.size() * 4, cudaMemcpyHostToDevice);
+        cudaMemcpy(doff, off.data(), off.size() * 4, cudaMemcpyHostToDevice);
+        fill_act_kernel<<<1024, 256, 0, s>>>(a, size_t(rows) * K, 0x77u);
+        cudaMemsetAsync(ref, 0, size_t(rows) * N * 2, s);
+        cudaMemsetAsync(own, 0xFF, size_t(rows) * N * 2, s);
+        for (int e = 0; e < ne; ++e)
+            if (counts[e] > 0)
+                ASSERT_TRUE(gemm_nvfp4_f16_tile(a + size_t(off[e]) * K, w + e * wst, sc + e * sst,
+                                                ref + size_t(off[e]) * N, counts[e], N, K, ts[e] * 256.0f,
+                                                0.0f, false, s, -1));
+        GroupedNvfp4F16Args g;
+        g.a = a;
+        g.rows = rows;
+        g.N = N;
+        g.K = K;
+        g.ne = ne;
+        g.d_offsets = doff;
+        g.w = w;
+        g.w_stride = wst;
+        g.sc = sc;
+        g.sc_stride = sst;
+        g.d_tensor_scales = dts;
+        g.d = own;
+        ASSERT_TRUE(gemm_grouped_nvfp4_f16_tile(g, s));
+        ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+        size_t nonzero = 0;
+        const size_t diff = count_diff(ref, own, size_t(rows) * N, &nonzero);
+        std::fprintf(stderr, "[grouped nvfp4 tile] ne=%d rows=%d N=%d K=%d: %zu differ, %zu nonzero\n", ne,
+                     rows, N, K, diff, nonzero);
+        EXPECT_EQ(diff, 0u);
+        EXPECT_GT(nonzero, size_t(rows) * N / 2);
+        cudaFree(w);
+        cudaFree(sc);
+        cudaFree(dts);
+        cudaFree(doff);
+        cudaFree(a);
+        cudaFree(ref);
+        cudaFree(own);
+    }
     cudaStreamDestroy(s);
 }
 

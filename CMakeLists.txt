@@ -309,6 +309,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_q6k_f16_tile.cu
     src/compute/gemm_mxfp4_f16_tile.cu
     src/compute/gemm_nvfp4_f16_tile.cu
+    src/compute/gemm_grouped_nvfp4_f16_tile.cu
     src/compute/gemm_q45k_f16_tile.cu
     src/compute/gemv_dp4a_multi.cu
     src/compute/gemm_grouped_nvfp4_tile.cu

@@ -257,6 +257,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.fp8_static_act_scale", cfg.gemm.fp8_static_act_scale);
     B("gemm.nvfp4_smallm_a4", cfg.gemm.nvfp4_smallm_a4);
     B("gemm.nvfp4_prompt_a16_attn", cfg.gemm.nvfp4_prompt_a16_attn);
+    B("gemm.nvfp4_prompt_a16_moe", cfg.gemm.nvfp4_prompt_a16_moe);
     S("gemm.nvfp4_gdn_proj_prefill", cfg.gemm.nvfp4_gdn_proj_prefill);
     S("gemm.mxfp8_gdn_proj_prefill", cfg.gemm.mxfp8_gdn_proj_prefill);
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);

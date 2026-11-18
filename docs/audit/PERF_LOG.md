@@ -53,6 +53,21 @@ same image both arms, default arm's NLL dump byte-identical to 990d5301:
 - fp16 accumulate (the tile's 256x128 / 128x128 acc16 configs) REFUTED: PPL 13.9146, NLL vs decode path
   +0.07488 (0.01332), worse than the W4A4 default, for pp512 19897.37 / pp4096 38950.66 tok/s (1 run).
 
+Routed experts, `gemm.nvfp4_prompt_a16_moe=true` (`gemm_grouped_nvfp4_f16_tile`: 64-row tiles of one expert per
+CTA over the gathered FP16 rows, per expert bit-equal to `gemm_nvfp4_f16_tile`; gate, up, SwiGLU in FP16, down;
+the NVFP4 gather-quantize is skipped; route log `W4A16 grouped expert GEMMs ACTIVE`; prompt chunks past the
+64 decode rows only):
+
+| arm | PPL | NLL vs decode path (se) | pp512 tok/s | pp4096 tok/s |
+|---|---|---|---|---|
+| default | 13.8409 | +0.06956 (0.01452) | 25413.72 / 25295.83 | 49959.77 / 49759.61 |
+| routed experts W4A16 | 13.4125 | +0.03813 (0.01195) | 14155.12 / 14196.43 | 30556.18 / 30387.51 |
+| routed + attention W4A16 | 12.8211 | -0.00697 (0.00991) | 10963.24 / 11079.52 | 23667.12 / 23637.85 |
+
+- Both routes put prefill at the decode path (12.9108) and the reference W4A16 (12.8613): the W4A4 loss is gone
+  for -56 % pp512 / -53 % pp4096. 128-row tiles first: pp512 9592.28 / 9596.27, pp4096 24190.60 / 24323.08
+  (Flint pp512 averages 12 rows per expert); 64-row tiles produce the same NLL bytes.
+
 ---
 
 ## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode
