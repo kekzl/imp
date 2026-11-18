@@ -105,6 +105,24 @@ Cheaper activation formats, CPU reference, every Linear input (`flint_quant_eval
   every 16. Two-term NVFP4 keeps the block-scaled FP4 MMA (2 per product, weights read once): the candidate
   for a default-on route.
 
+Two-term NVFP4 in imp, REFUTED as a cheaper route (unfused: q1 into the shared activation staging, q2 into its
+own, every NVFP4 prompt GEMM run twice and the second output added; dense and grouped-expert halves; local
+commits 8c18c0a0 + 7e5835e0, not merged). Quantizer test: q1 bytes equal the one-term quantizer, q1 + q2 cuts
+the reconstruction error 10.3x. Flint, 4096 tokens, same image both arms, default NLL byte-identical to main:
+
+| arm | PPL | NLL vs decode path (se) | pp512 tok/s | pp4096 tok/s |
+|---|---|---|---|---|
+| default (W4A4) | 13.8409 | +0.06956 (0.01452) | 25366.60-25566.84 | 50383.00-50503.25 |
+| two-term dense, experts on W4A16 | 12.9125 | +0.00013 (0.00713) | | |
+| two-term dense and experts | 13.1835 | +0.02090 (0.00820) | 11367.96-11387.77 | 20507.85-20536.09 |
+| W4A16 routes (#3162 + #3163) | 12.8211 | -0.00697 (0.00991) | 10963.24-11079.52 | 23637.85-23667.12 |
+
+- Two-term recovers 70 % of the prefill gap at the same pp512 and -13 % pp4096 against the W4A16 routes, which
+  recover all of it: worse on both axes. The cost is not the second MMA but the extra passes (second GEMM, add,
+  unfused SwiGLU) and the fusions it loses (SwiGLU + down-quantize epilogue).
+- First attempt with q1 in its own buffer gave NaN: the dense up GEMM's SwiGLU epilogue reads the gate's quantized
+  input from the shared staging under the act-quant hint.
+
 ---
 
 ## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode
