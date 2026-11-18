@@ -508,6 +508,9 @@ moe_imma_prefill     = true
 # Small-M activations packed to NVFP4 (A4). false keeps them FP16 (dequant+HMMA
 # kernel, the M=1 GEMV numerics at 2..32 rows); no pair launch, no fused quantize.
 nvfp4_smallm_a4      = true
+# Prompt rows (M>32) of NVFP4 attention projections keep FP16 activations (W4A16 decode tile)
+# instead of the NVFP4 act-quant GEMM. Flint: PPL 13.8409 -> 13.3597 (4096 tokens), pp512 -34 %.
+nvfp4_prompt_a16_attn = false
 
 [server]
 # Prefix caching: reuse KV blocks for shared prompt prefixes (system

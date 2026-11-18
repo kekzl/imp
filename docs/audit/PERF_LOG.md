@@ -38,6 +38,19 @@ imp (`imp:rtx` = 990d5301, `tools/analysis/flint_ppl_arms.sh`, `runtime.determin
   A16 routed experts ~51 %. PPL on 4095 rows does not rank the groups (shared: 12.52, below W4A16); KL does.
 - `nvfp4_smallm_a4=false` leaves chunk-16 prefill at A4: the MoE small-M path quantizes regardless.
 
+Attention route, `gemm.nvfp4_prompt_a16_attn=true` (`gemm_nvfp4_f16_tile`: the W4A16 decode tile reading the
+plain NVFP4 bytes, bit-equal to `gemm_f16_tile` on the exact fp16 weight; route log `W4A16 prompt GEMM ACTIVE`),
+same image both arms, default arm's NLL dump byte-identical to 990d5301:
+
+| arm | PPL | NLL vs decode path (se) | pp512 tok/s | pp4096 tok/s |
+|---|---|---|---|---|
+| default | 13.8409 | +0.06956 (0.01452) | 24904.24 / 25323.01 | 49188.32 / 49454.72 |
+| attention W4A16 | 13.3597 | +0.03418 (0.01317) | 16382.92 / 16564.66 | 33189.48 / 33255.73 |
+
+- Half the prefill gap for -33 % prefill (2 process starts each, ABAB, `--bench-reps 3`); decode is untouched.
+  Opt-in. The tile runs fp32 accumulate at FP16 MMA rate (2048x4096x2048: 202.9 us vs 207.0 for
+  `gemm_f16_tile` on an FP16 W); the cost is FP16 MMA against FP4 MMA.
+
 ---
 
 ## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode
