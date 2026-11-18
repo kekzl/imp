@@ -16,7 +16,10 @@ size_t layer_host_expert_bytes(const TransformerLayer& L);
 size_t layer_nvfp4_expert_sf_bytes(const TransformerLayer& L);
 // Sum over the model's layers.
 size_t model_host_expert_bytes(const Model& model);
-// Host RAM holds `bytes` pinned with the headroom kept (true when the host figure is unknown).
+// Host RAM kept free when the experts are pinned: 6 GiB flat. 10 % of RAM (7.85 GiB on 78 GiB) left
+// Flash-Next 0.4-3.1 GiB short and unpinned at 63.6 tok/s instead of 103 (PERF_LOG 2026-11-18).
+inline constexpr size_t kHostExpertPinHeadroomBytes = 6ull << 30;
+// Host RAM holds `bytes` pinned with that headroom kept (true when the host figure is unknown).
 [[nodiscard]] bool host_ram_holds(size_t bytes);
 // moe.host_expert_pool_mib caps the host expert tier below `bytes`.
 [[nodiscard]] bool host_expert_pool_caps(size_t bytes, int pool_mib);

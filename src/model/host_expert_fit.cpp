@@ -46,7 +46,7 @@ size_t model_host_expert_bytes(const Model& model) {
 // driver and the request path still need room.
 bool host_ram_holds(size_t bytes) {
     const size_t avail = host_mem_available_bytes();
-    return avail == 0 || avail > bytes + host_ram_headroom_bytes();
+    return avail == 0 || avail > bytes + kHostExpertPinHeadroomBytes;
 }
 
 bool host_expert_pool_caps(size_t bytes, int pool_mib) {

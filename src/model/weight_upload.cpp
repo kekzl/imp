@@ -90,7 +90,7 @@ static bool host_experts_pinnable(const std::vector<size_t>& layer_expert_bytes,
         "memory limit.",
         host_expert_bytes / (1024.0 * 1024.0 * 1024.0),
         host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0),
-        host_ram_headroom_bytes() / (1024.0 * 1024.0 * 1024.0));
+        kHostExpertPinHeadroomBytes / (1024.0 * 1024.0 * 1024.0));
     return false;
 }
 
