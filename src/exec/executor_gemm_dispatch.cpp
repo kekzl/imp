@@ -22,6 +22,7 @@
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_mxfp4_f16_tile.h"
+#include "compute/gemm_nvfp4_f16_tile.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/hadamard.h"
@@ -312,6 +313,23 @@ static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, co
     }
 }
 
+// gemm.nvfp4_prompt_a16_attn: prompt rows (M>32) of a CUTLASS_NVFP4 attention projection read the plain
+// NVFP4 bytes (source_data + linear E4M3 source_scales, as smallm_weight_) with FP16 activations.
+static bool prompt_a16_view(const WeightHandle& h, int M, bool on, NvFP4QuantResult& nv) {
+    const bool attn = h.kind == TensorKind::WQ || h.kind == TensorKind::WK || h.kind == TensorKind::WV ||
+                      h.kind == TensorKind::WO || h.kind == TensorKind::QKV_FUSED;
+    if (!on || !attn || M <= 32 || h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_released ||
+        h.source_data == nullptr || h.source_scales == nullptr || ((h.shape[1] * 2) % 64) != 0 ||
+        (h.shape[0] % 8) != 0)
+        return false;
+    nv.packed_data = const_cast<void*>(h.source_data);
+    nv.micro_scales = h.source_scales;
+    nv.tensor_scale = h.source_tensor_scale;
+    nv.N = h.shape[0];
+    nv.K = h.shape[1] * 2;
+    return true;
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the NVFP4 tile prefill block
 // (which quantizes input into the shared activation scratch). Every
@@ -323,6 +341,8 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     if (nvfp4_prefill_copy_routes(h, M, cur_spec_verify_, wcache_, qscratch_))
         return true;
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4)
+        return false;
+    if (NvFP4QuantResult nv; prompt_a16_view(h, M, dispatch_policy().gemm.nvfp4_prompt_a16_attn, nv))
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
     // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
@@ -744,6 +764,23 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (imma_source_prefill(h, input, output, ctx, M, cur_decode_rows_))
             return;
         gguf_source_fallback(h, input, output, ctx, cur_decode_rows_);
+        return;
+    }
+
+    // gemm.nvfp4_prompt_a16_attn (B-85): FP16 activations on the W4A16 decode tile; alpha folds the
+    // tensor scale and the decoder's 2^-8 (gemm_nvfp4_f16_tile.h). Declines fall through to W4A4.
+    if (NvFP4QuantResult nv; input.qtype == QType::F16 && output.qtype == QType::F16 &&
+                             prompt_a16_view(h, M, dispatch_policy().gemm.nvfp4_prompt_a16_attn, nv) &&
+                             input.shape[1] == nv.K && output.shape[1] == nv.N &&
+                             gemm_nvfp4_f16_tile(input.data, nv.packed_data, nv.micro_scales, output.data, M,
+                                                 static_cast<int>(nv.N), static_cast<int>(nv.K),
+                                                 nv.tensor_scale * 256.0f, ctx.beta, false, ctx.stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("nvfp4_prompt_a16_attn: W4A16 prompt GEMM ACTIVE (M=%d N=%lld K=%lld)", M,
+                         static_cast<long long>(nv.N), static_cast<long long>(nv.K));
+        }
         return;
     }
 

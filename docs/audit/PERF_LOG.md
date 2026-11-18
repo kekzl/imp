@@ -4,6 +4,57 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-18 · Flint W4A4 (B-85): only prefill quantizes activations; routed experts and attention carry the loss
+
+Text: the first 4096 tokens of `tools/analysis/ppl_corpus_45k.txt` (no BOS, `flint_tokenize.py`), 4095 rows,
+the same ids in the CPU reference and in imp. Weights: the NVFP4 repack (`flint-nvfp4-official`) throughout.
+
+CPU reference (`tools/analysis/flint_a4_sites.sh`: `flint_quant_eval.py --ckpt NAME:DIR:A4REGEX`), NVFP4
+activations only at the named sites, against the BF16 forward (PPL 12.7174):
+
+| A4 at | KL to BF16 (se) | KL - W4A16 | PPL | argmax agrees |
+|---|---|---|---|---|
+| none (W4A16) | 0.22143 (0.01350) | | 12.8613 | 82.15 % |
+| every Linear input | 0.34740 (0.01555) | +0.12597 | 13.8320 | 77.70 % |
+| routed experts (gate/up + down) | 0.28616 (0.01457) | +0.06473 | 14.0715 | 80.44 % |
+| routed down_proj only | 0.25265 (0.01319) | +0.03122 | 13.6527 | 80.98 % |
+| attention (qkv + o) | 0.27442 (0.01599) | +0.05299 | 13.2682 | 80.22 % |
+| shared expert | 0.24512 (0.01331) | +0.02369 | 12.5249 | 80.61 % |
+| dense layers 0-1 | 0.23268 (0.01403) | +0.01125 | 13.1873 | 82.12 % |
+| attention + dense + shared | 0.30660 (0.01506) | +0.08517 | 13.1499 | 78.71 % |
+
+imp (`imp:rtx` = 990d5301, `tools/analysis/flint_ppl_arms.sh`, `runtime.deterministic`), per-token NLL paired:
+
+| `imp-cli --perplexity` | PPL | NLL vs decode path (se) |
+|---|---|---|
+| `--prefill-chunk-size 1` (every row through decode: `gemv_nvfp4_moe`, FP16 activations) | 12.9108 | |
+| `--prefill-chunk-size 2048` (prefill) | 13.8409 | +0.06956 (0.01452) |
+| chunk 16 | 13.7792 | |
+| chunk 16, `gemm.nvfp4_smallm_a4=false` | 13.7775 | +0.06497 (0.01179) |
+
+- Decode is W4A16 already (12.9108 vs the reference's 12.8613); prefill matches the reference's all-A4 arm
+  (13.8409 vs 13.8320). B-85 is a prompt-processing loss: prompt K/V and the first token come from A4.
+- The groups add up (0.065 + 0.085 = 0.150 vs 0.126 together). A16 attention alone takes back ~42 %,
+  A16 routed experts ~51 %. PPL on 4095 rows does not rank the groups (shared: 12.52, below W4A16); KL does.
+- `nvfp4_smallm_a4=false` leaves chunk-16 prefill at A4: the MoE small-M path quantizes regardless.
+
+Attention route, `gemm.nvfp4_prompt_a16_attn=true` (`gemm_nvfp4_f16_tile`: the W4A16 decode tile reading the
+plain NVFP4 bytes, bit-equal to `gemm_f16_tile` on the exact fp16 weight; route log `W4A16 prompt GEMM ACTIVE`),
+same image both arms, default arm's NLL dump byte-identical to 990d5301:
+
+| arm | PPL | NLL vs decode path (se) | pp512 tok/s | pp4096 tok/s |
+|---|---|---|---|---|
+| default | 13.8409 | +0.06956 (0.01452) | 24904.24 / 25323.01 | 49188.32 / 49454.72 |
+| attention W4A16 | 13.3597 | +0.03418 (0.01317) | 16382.92 / 16564.66 | 33189.48 / 33255.73 |
+
+- Half the prefill gap for -33 % prefill (2 process starts each, ABAB, `--bench-reps 3`); decode is untouched.
+  Opt-in. The tile runs fp32 accumulate at FP16 MMA rate (2048x4096x2048: 202.9 us vs 207.0 for
+  `gemm_f16_tile` on an FP16 W); the cost is FP16 MMA against FP4 MMA.
+- fp16 accumulate (the tile's 256x128 / 128x128 acc16 configs) REFUTED: PPL 13.9146, NLL vs decode path
+  +0.07488 (0.01332), worse than the W4A4 default, for pp512 19897.37 / pp4096 38950.66 tok/s (1 run).
+
+---
+
 ## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode
 
 Build 990d5301 (`imp:rtx`), Flint NVFP4 (`flint-nvfp4-official`), RTX 5090 32 GB. Text: the first 245000

@@ -195,7 +195,9 @@ def main():
     ap.add_argument("--ids", required=True)
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--arm", action="append", default=[])
-    ap.add_argument("--ckpt", action="append", default=[], help="NAME:DIR of a Modelopt NVFP4 checkpoint to score")
+    ap.add_argument("--ckpt", action="append", default=[],
+                    help="NAME:DIR[:A4REGEX] Modelopt NVFP4 checkpoint to score, activations at A4REGEX sites as NVFP4")
+    ap.add_argument("--ref-cache", default="", help="file for the BF16 logits: loaded if present, else written")
     a = ap.parse_args()
     cfg = json.loads((pathlib.Path(a.model) / "config.json").read_text())
     ids = [int(x) for x in pathlib.Path(a.ids).read_text().split()][: a.max_tokens]
@@ -203,8 +205,14 @@ def main():
     tgt = torch.tensor(ids[1:])
     import contextlib
     import io
-    with contextlib.redirect_stdout(io.StringIO()):
-        ref_logits, _ = fr.forward(cfg, base, torch.tensor(ids))
+    cache = pathlib.Path(a.ref_cache) if a.ref_cache else None
+    if cache and cache.exists():
+        ref_logits = torch.load(cache)
+    else:
+        with contextlib.redirect_stdout(io.StringIO()):
+            ref_logits, _ = fr.forward(cfg, base, torch.tensor(ids))
+        if cache:
+            torch.save(ref_logits.to(torch.float32), cache)
     ref_lp = torch.log_softmax(ref_logits[:-1].to(torch.float64), -1)
     ref_nll = -ref_lp.gather(1, tgt[:, None])[:, 0]
     print(f'BF16 rows {len(tgt)} mean NLL {ref_nll.mean():.6f} PPL {math.exp(ref_nll.mean()):.4f}', flush=True)
@@ -222,8 +230,10 @@ def main():
 
     from flint_raw_weights import RawWeights
     for c in a.ckpt:
-        cname, cdir = c.split(':', 1)
-        score(cname, RawWeights(cdir), 'checkpoint ' + cdir, time.time())
+        cname, cdir, *a4 = c.split(':', 2)
+        fr.A4 = re.compile(a4[0]) if a4 else None
+        score(cname, RawWeights(cdir), f'checkpoint {cdir} A4 {a4[0] if a4 else "-"}', time.time())
+        fr.A4 = None
     for arm in a.arm:
         parts = arm.split(":")
         name, regex, mode = parts[0], parts[1], parts[2]

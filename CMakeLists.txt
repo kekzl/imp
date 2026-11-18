@@ -308,6 +308,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_f16_tile.cu
     src/compute/gemm_q6k_f16_tile.cu
     src/compute/gemm_mxfp4_f16_tile.cu
+    src/compute/gemm_nvfp4_f16_tile.cu
     src/compute/gemm_q45k_f16_tile.cu
     src/compute/gemv_dp4a_multi.cu
     src/compute/gemm_grouped_nvfp4_tile.cu
@@ -1370,6 +1371,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_f16_tile.cu
         tests/test_gemm_q6k_f16_tile.cu
         tests/test_gemm_mxfp4_f16_tile.cu
+        tests/test_gemm_nvfp4_f16_tile.cu
         tests/test_gemm_q45k_f16_tile.cu
         tests/test_gemv_dp4a_multi.cu
         tests/test_gemm_dp4a.cu

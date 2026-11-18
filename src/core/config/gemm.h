@@ -63,6 +63,10 @@ struct GEMM {
     // FP16 (gemm_nvfp4_smallm, dequant+HMMA): the M=1 GEMV numerics at 2..32 rows,
     // no sibling-pair launch, no producer-fused quantize. Quality instrument (#2019).
     bool nvfp4_smallm_a4 = true;
+    // Prompt rows (M>32) of NVFP4 attention projections keep FP16 activations: W4A16 decode tile
+    // (gemm_nvfp4_f16_tile) instead of the NVFP4 act-quant GEMM. Flint: attention A4 adds 0.053 of the
+    // 0.126 KL prefill loses to W4A16 (B-85, PERF_LOG 2026-11-18).
+    bool nvfp4_prompt_a16_attn = false;
     // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the own NVFP4
     // tile GEMM (W4A4) instead of the FP16 GEMM (~320 TFLOPS on sm_120, 35-40% of peak).
     // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.

@@ -7,7 +7,8 @@ ungated shared expert. FP32 math, weights read lazily: BF16 SafeTensors, or a Mo
 32 GB card, so this is the reference imp's Flint port is checked against (1024 tokens in about 30 s on 16 cores).
 
 Usage: flint_reference.py --model DIR (--text FILE | --ids FILE) [--max-tokens N] [--out DIR] [--dump-layers]
-                          [--a4]   (--a4 rounds the input of every quantized Linear to NVFP4: W4A4 emulation)
+                          [--a4 | --a4-sites REGEX]   (--a4 rounds the input of every quantized Linear to
+                          NVFP4: W4A4 emulation; --a4-sites only at sites matching REGEX, names in aq())
 Prints PPL over rows [0, n-2] (row i predicts token i+1) and writes nll.txt, ids.txt, top1.txt to --out.
 Runs in python:3.13-slim + torch (CPU), safetensors, tokenizers, numpy.
 """
@@ -15,6 +16,7 @@ import argparse
 import json
 import math
 import pathlib
+import re
 import time
 
 import torch
@@ -56,15 +58,16 @@ def rope(x, pos, theta):
     return x * cos + torch.cat([-x2, x1], -1) * sin
 
 
-A4 = False  # --a4: emulate W4A4 (activations of every quantized Linear rounded to NVFP4)
+A4 = None  # --a4 / --a4-sites: regex over activation sites rounded to NVFP4 (W4A4 emulation); None = W4A16
 _E2M1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6.0])
 _E4M3_POS = None
 
 
-def aq(x):
-    """Activation as NVFP4: 16-wide blocks, block scale absmax / 6 rounded up to E4M3, E2M1 values."""
+def aq(x, site):
+    """Activation as NVFP4 if A4 matches site (L.attn.qkv, L.attn.o, L.{dense,shared,routed}.{gu,down}): 16-wide
+    blocks, block scale absmax / 6 rounded up to E4M3, E2M1 values."""
     global _E4M3_POS
-    if not A4:
+    if A4 is None or not A4.search(site):
         return x
     if _E4M3_POS is None:
         from flint_raw_weights import E4M3
@@ -96,11 +99,11 @@ def rec(site, x):
     acc[1] += x.shape[0]
 
 
-def swiglu(x, wg, wu, wd, site=None):
-    x = aq(x)
+def swiglu(x, wg, wu, wd, site=None, a4_site=""):
+    x = aq(x, a4_site + ".gu")
     mid = torch.nn.functional.silu(x @ wg.T) * (x @ wu.T)
     rec(site, mid)
-    return aq(mid) @ wd.T
+    return aq(mid, a4_site + ".down") @ wd.T
 
 
 def attention(cfg, W, l, x, pos):
@@ -108,7 +111,7 @@ def attention(cfg, W, l, x, pos):
     nh, nkv, hd = cfg["num_attention_heads"], cfg["num_key_value_heads"], cfg["head_dim"]
     t = x.shape[0]
     rec(f"{l}.attn_in", x)
-    x = aq(x)
+    x = aq(x, f"{l}.attn.qkv")
     q = (x @ W.get(p + "q_proj.weight").T).view(t, nh, hd)
     k = (x @ W.get(p + "k_proj.weight").T).view(t, nkv, hd)
     v = (x @ W.get(p + "v_proj.weight").T).view(t, nkv, hd)
@@ -133,7 +136,7 @@ def attention(cfg, W, l, x, pos):
     probs = torch.softmax(full, -1)[..., :-1]
     out = torch.einsum("hqk,khd->qhd", probs, v).reshape(t, nh * hd)
     rec(f"{l}.o_in", out)
-    return aq(out) @ W.get(p + "o_proj.weight").T
+    return aq(out, f"{l}.attn.o") @ W.get(p + "o_proj.weight").T
 
 
 def moe(cfg, W, l, x, stats):
@@ -150,11 +153,13 @@ def moe(cfg, W, l, x, stats):
     for e in top.unique().tolist():
         rows, slot = (top == e).nonzero(as_tuple=True)
         y = swiglu(x[rows], W.get(f"{p}experts.{e}.gate_proj.weight"), W.get(f"{p}experts.{e}.up_proj.weight"),
-                   W.get(f"{p}experts.{e}.down_proj.weight"), site=f"{l}.mlp.experts.{e}.down_proj")
+                   W.get(f"{p}experts.{e}.down_proj.weight"), site=f"{l}.mlp.experts.{e}.down_proj",
+                   a4_site=f"{l}.routed")
         out.index_add_(0, rows, y * w[rows, slot][:, None])
     stats.append(top)
     return out + swiglu(x, W.get(p + "shared_expert.gate_proj.weight"), W.get(p + "shared_expert.up_proj.weight"),
-                        W.get(p + "shared_expert.down_proj.weight"), site=f"{l}.mlp.shared_expert.down_proj")
+                        W.get(p + "shared_expert.down_proj.weight"), site=f"{l}.mlp.shared_expert.down_proj",
+                        a4_site=f"{l}.shared")
 
 
 def forward(cfg, W, ids, dump=None):
@@ -170,7 +175,7 @@ def forward(cfg, W, ids, dump=None):
         if l in cfg["mlp_only_layers"]:
             p = f"model.layers.{l}.mlp."
             h = h + swiglu(x, W.get(p + "gate_proj.weight"), W.get(p + "up_proj.weight"), W.get(p + "down_proj.weight"),
-                           site=f"{l}.mlp.down_proj")
+                           site=f"{l}.mlp.down_proj", a4_site=f"{l}.dense")
         else:
             h = h + moe(cfg, W, l, x, routes)
         if dump is not None:
@@ -190,9 +195,10 @@ def main():
     ap.add_argument("--dump-layers", action="store_true")
     ap.add_argument("--bos", action="store_true")
     ap.add_argument("--a4", action="store_true")
+    ap.add_argument("--a4-sites", default=None)
     a = ap.parse_args()
     global A4
-    A4 = a.a4
+    A4 = re.compile(a.a4_sites if a.a4_sites is not None else ".") if (a.a4 or a.a4_sites is not None) else None
     cfg = json.loads((pathlib.Path(a.model) / "config.json").read_text())
     if a.ids:
         ids = [int(x) for x in pathlib.Path(a.ids).read_text().split()]
