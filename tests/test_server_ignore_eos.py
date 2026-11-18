@@ -70,5 +70,42 @@ with urllib.request.urlopen(req, timeout=300) as r:
 check("streaming completions ignore_eos usage", usage.get("completion_tokens") == N,
       f"usage.completion_tokens={usage.get('completion_tokens')} chunks={chunks}")
 
+
+def stream_chat(extra):
+    """Streams a chat request; returns (reasoning deltas, content deltas)."""
+    b = {"model": M, "messages": [{"role": "user", "content": "Name three rivers."}], "max_tokens": N,
+         "temperature": 0, "stream": True, **extra}
+    rq = urllib.request.Request(BASE + "/v1/chat/completions", data=json.dumps(b).encode(),
+                                headers={"Content-Type": "application/json"})
+    n_r = n_c = 0
+    with urllib.request.urlopen(rq, timeout=300) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "ignore").strip()
+            if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                continue
+            d = json.loads(line[5:].strip())
+            delta = (d.get("choices") or [{}])[0].get("delta") or {}
+            n_r += bool(delta.get("reasoning_content") or delta.get("reasoning"))
+            n_c += bool(delta.get("content"))
+    return n_r, n_c
+
+
+def last_ttft_ms():
+    with urllib.request.urlopen(BASE + "/metrics", timeout=30) as r:
+        for line in r.read().decode().splitlines():
+            if line.startswith("imp_last_ttft_ms "):
+                return float(line.split()[1])
+    return -1.0
+
+
+# Streaming chat: the <think> opener is a stop id the ignore_eos branch swallowed, so the whole chain of
+# thought streamed as content (Flint: 0 reasoning deltas vs 33 without the flag) and ttft read 0.0.
+ctl_r, _ = stream_chat({})
+ie_r, ie_c = stream_chat({"ignore_eos": True})
+check("streaming chat ignore_eos keeps reasoning split", ctl_r == 0 or ie_r > 0,
+      f"reasoning deltas {ie_r} (without the flag {ctl_r}), content deltas {ie_c}")
+t = last_ttft_ms()
+check("streaming chat ignore_eos sets ttft", t > 0.0, f"imp_last_ttft_ms={t}")
+
 print(f"{len(fails)} failure(s)")
 sys.exit(1 if fails else 0)

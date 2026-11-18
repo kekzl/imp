@@ -212,6 +212,24 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         return true;
     };
 
+    // Counts one output token and takes its timing: the first sets ttft and the queue wait (#1580), every
+    // later one is an ITL observation (#1577). Also for text-less ignore_eos stop tokens (ttft read 0.0).
+    auto count_output_token = [&] {
+        out.n_output_tokens++;
+        auto t_tok = std::chrono::high_resolution_clock::now();
+        if (out.n_output_tokens == 1) {
+            out.ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
+            const double q = server_req->queue_ms.load(std::memory_order_relaxed);
+            ctx.trace.queue_ms = q;  // the span's `queue` child
+            if (q >= 0.0)
+                state.metrics.record_queue_wait(ctx.log_endpoint, q / 1000.0);
+        } else {
+            state.metrics.record_inter_token(ctx.log_endpoint,
+                                             std::chrono::duration<double>(t_tok - t_prev_token).count());
+        }
+        t_prev_token = t_tok;
+    };
+
     auto request_start = std::chrono::steady_clock::now();
     auto last_keepalive = request_start;
     for (;;) {
@@ -297,20 +315,20 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                 }
             }
         }
+        // Thinking off keeps <think> as a provisional stop id, yet a model that always reasons
+        // (Phi-4-reasoning) opens with it anyway: dropped here, the splitter never saw the opener and
+        // streamed the whole chain of thought as content while non-stream split it at </think>.
+        const bool think_opener = think_active && token == ctx.snap.think_start_id;
         // ignore_eos (vLLM semantics): EOS and stop tokens count as output
         // tokens and carry no text; only max_tokens ends the request.
-        if (ctx.params.ignore_eos && is_structural_stop) {
-            out.n_output_tokens++;
+        if (ctx.params.ignore_eos && is_structural_stop && !think_opener) {
+            count_output_token();
             if (evt.is_last) {
                 finish = evt.finish_reason ? evt.finish_reason : "length";
                 break;
             }
             continue;
         }
-        // Thinking off keeps <think> as a provisional stop id, yet a model that always reasons
-        // (Phi-4-reasoning) opens with it anyway: dropped here, the splitter never saw the opener and
-        // streamed the whole chain of thought as content while non-stream split it at </think>.
-        const bool think_opener = think_active && token == ctx.snap.think_start_id;
         if (!evt.is_last && is_structural_stop && !think_opener)
             continue;
 
@@ -339,26 +357,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             finish = evt.finish_reason ? evt.finish_reason : "length";
         }
 
-        out.n_output_tokens++;
-        {
-            // One ITL observation per token, taken here rather than as a
-            // per-request mean after the fact (#1577): a mean cannot show the
-            // variance, and variance is the whole reason to keep a histogram.
-            auto t_tok = std::chrono::high_resolution_clock::now();
-            if (out.n_output_tokens == 1) {
-                out.ttft_ms = std::chrono::duration<double, std::milli>(t_tok - t_start).count();
-                // Queue time is known once the worker has admitted the request,
-                // which is guaranteed by the time a token comes back (#1580).
-                const double q = server_req->queue_ms.load(std::memory_order_relaxed);
-                ctx.trace.queue_ms = q;  // the span's `queue` child
-                if (q >= 0.0)
-                    state.metrics.record_queue_wait(ctx.log_endpoint, q / 1000.0);
-            } else {
-                state.metrics.record_inter_token(ctx.log_endpoint,
-                                                 std::chrono::duration<double>(t_tok - t_prev_token).count());
-            }
-            t_prev_token = t_tok;
-        }
+        count_output_token();
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
         const std::string raw_piece = decode_chat_piece(*snap_tok, ctx.snap.output_aliases, token);
