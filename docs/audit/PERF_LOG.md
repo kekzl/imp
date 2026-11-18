@@ -4,6 +4,47 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode
+
+Build 990d5301 (`imp:rtx`), Flint NVFP4 (`flint-nvfp4-official`), RTX 5090 32 GB. Text: the first 245000
+bytes of `docs/*.md` + `docs/internals/*.md` (74079 tokens). Raw logs `/mnt/data/scratch/flint_kv/`,
+`/mnt/data/scratch/flint_cache/` (not in the repo).
+
+FP8 KV quality, `tools/analysis/flint_kv_dtype_ppl.sh` + `flint_kv_dtype_cmp.sh`: one `--perplexity` pass,
+prefill chunk 2048 (every chunk after the first reads cached K/V in the arm's dtype), `kv_cache.swa_sizing=on`,
+`speculative.mtp_k=0`, per-token NLL dumped. Not `runtime.deterministic` (it ignores SWA sizing, the FP16 pool
+then holds 43376 tokens); the repeated FP16 run is byte-identical (all 74078 rows, delta 0).
+
+| positions | tokens | NLL FP16 | NLL FP8 | FP8 - FP16 | se |
+|---|---|---|---|---|---|
+| 0-4096 | 4096 | 3.07774 | 3.10413 | +0.02640 | 0.01899 |
+| 4096-16384 | 12288 | 3.18107 | 3.19282 | +0.01175 | 0.01492 |
+| 16384-32768 | 16384 | 3.54259 | 3.54253 | -0.00006 | 0.01784 |
+| 32768-49152 | 16384 | 3.18946 | 3.21723 | +0.02777 | 0.01349 |
+| 49152-65536 | 16384 | 3.18758 | 3.23451 | +0.04693 | 0.01434 |
+| 65536-74078 | 8542 | 3.06263 | 3.08262 | +0.01999 | 0.01621 |
+| all | 74078 | 3.24496 | 3.26718 | +0.02222 | 0.00673 |
+
+- PPL 25.6606 -> 26.2372 (+2.25 %), against +4.1 % decode at 64k (264.68 -> 275.47 tok/s, entry below): FP8 KV
+  stays opt-in on Flint. No growth with position beyond the standard errors.
+
+Server caches vs decode, `tools/analysis/flint_cache_decode_ab.sh`: imp-server per arm, the 74078-token prompt 3x
+(cold, then cached), streamed, `ignore_eos`, 512 tokens, speculation off; tok/s from client-side SSE delta
+timestamps; arms ABAB, 2 server starts each.
+
+| arm | decode tok/s (6 requests) | ttft cold | ttft resend |
+|---|---|---|---|
+| default (prefix cache, SWA snapshots 256 MiB) | 252.45-254.36 | 4258-4272 ms | 135-137 ms (74032 cached) |
+| `server.prefix_cache=false` | 251.70-252.54 | 4155-4227 ms | 4169-4190 ms |
+
+- Decode with the caches is not slower (+0.5 %, inside the spread); hashes and snapshots cost 31-117 ms of cold
+  prefill (0.7-2.8 %); a resend is 30x faster to first token.
+- `kv_cache.swa_snapshot_mb=0` is no arm at this length: prefix caching then turns SWA sizing off, context 47216
+  tokens, HTTP 400.
+- These runs found #3160: streamed `ignore_eos` logged `ttft=0.0` and sent Flint's reasoning as content.
+
+---
+
 ## 2026-11-16 · Flint decode: shared expert on the side stream, one-launch sigmoid router (#3135)
 
 Protocol: `tools/analysis/flint_ctx_decode.sh` (`imp-cli --bench`, tg128, `--bench-reps 5`,
