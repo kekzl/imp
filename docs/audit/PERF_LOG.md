@@ -50,6 +50,8 @@ same image both arms, default arm's NLL dump byte-identical to 990d5301:
 - Half the prefill gap for -33 % prefill (2 process starts each, ABAB, `--bench-reps 3`); decode is untouched.
   Opt-in. The tile runs fp32 accumulate at FP16 MMA rate (2048x4096x2048: 202.9 us vs 207.0 for
   `gemm_f16_tile` on an FP16 W); the cost is FP16 MMA against FP4 MMA.
+- fp16 accumulate (the tile's 256x128 / 128x128 acc16 configs) REFUTED: PPL 13.9146, NLL vs decode path
+  +0.07488 (0.01332), worse than the W4A4 default, for pp512 19897.37 / pp4096 38950.66 tok/s (1 run).
 
 ---
 
