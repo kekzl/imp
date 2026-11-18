@@ -67,6 +67,10 @@ struct GEMM {
     // (gemm_nvfp4_f16_tile) instead of the NVFP4 act-quant GEMM. Flint: attention A4 adds 0.053 of the
     // 0.126 KL prefill loses to W4A16 (B-85, PERF_LOG 2026-11-18).
     bool nvfp4_prompt_a16_attn = false;
+    // Prompt rows of routed NVFP4 SwiGLU experts keep FP16 activations: gather, grouped W4A16 gate/up/down
+    // (gemm_grouped_nvfp4_f16_tile) instead of the grouped NVFP4 act-quant GEMM. Flint: routed A4 adds 0.065
+    // of the 0.126 KL (B-85).
+    bool nvfp4_prompt_a16_moe = false;
     // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the own NVFP4
     // tile GEMM (W4A4) instead of the FP16 GEMM (~320 TFLOPS on sm_120, 35-40% of peak).
     // "false"/"off" none, "true"/"all" in+gate+out, or a comma list of in|gate|out.
