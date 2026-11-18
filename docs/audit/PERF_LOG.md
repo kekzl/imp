@@ -4,6 +4,23 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-18 · Flash-Next: host experts pin with 6 GiB RAM headroom, 63.6 -> 102.6 tok/s at 69.7 GiB available (B-60)
+
+`host_ram_holds` (pin decision, also asked by the auto max_batch_size resolver) keeps a flat 6 GiB instead of
+max(6 GiB, 10 % RAM); the host expert tier budget and the weight snapshot keep 10 %. Qwen3.8-Flash-Next-NVFP4,
+`flashnext_prefetch_ab.sh` 6 x 400 tokens, container `--memory=71.5g --memory-swap=71.5g` (69.71-69.80 GiB
+available inside: between the new need 63.28 + 6 = 69.28 and the old 63.28 + 7.15 = 70.43), A/B/A/B.
+
+| image | host experts | median decode tok/s | hit rate | prefetched |
+|---|---|---|---|---|
+| `ghcr.io/kekzl/imp:0.69.0` (2 runs) | not pinned, 7.15 GiB headroom | 63.84 / 63.55 | 87.1 % | 0 |
+| this change (2 runs) | pinned | 102.10 / 102.62 | 92.5 % | 350620 |
+
+- No OOM kill, every run complete inside the 71.5 GiB limit. At a 70 GiB limit (68.15-68.24 GiB available) both
+  stay unpinned (63.07 / 64.07 tok/s).
+
+---
+
 ## 2026-11-18 · Flash-Next decode: unpinned host experts cost 38 %, tier layers get no prefetch (B-60)
 
 `ghcr.io/kekzl/imp:0.69.0`, Qwen3.8-Flash-Next-NVFP4, `tools/analysis/flashnext_prefetch_ab.sh` (6 real prompts x 400
