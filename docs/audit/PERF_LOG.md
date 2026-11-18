@@ -68,6 +68,19 @@ the NVFP4 gather-quantize is skipped; route log `W4A16 grouped expert GEMMs ACTI
   for -56 % pp512 / -53 % pp4096. 128-row tiles first: pp512 9592.28 / 9596.27, pp4096 24190.60 / 24323.08
   (Flint pp512 averages 12 rows per expert); 64-row tiles produce the same NLL bytes.
 
+Cheaper activation formats, CPU reference, every Linear input (`flint_quant_eval.py --ckpt NAME:DIR:.:FMT`):
+
+| activations | KL to BF16 (se) | share of the W4A4 loss recovered | PPL |
+|---|---|---|---|
+| FP16 (W4A16) | 0.22143 (0.01350) | 100 % | 12.8613 |
+| per-token FP8 E4M3 (`fp8`) | 0.22624 (0.01342) | 96 % | 13.0847 |
+| two-term NVFP4, q(x) + q(x - q(x)) (`nvfp4x2`) | 0.23612 (0.01477) | 88 % | 13.0523 |
+| NVFP4 (W4A4, shipped default) | 0.34740 (0.01555) | 0 % | 13.8320 |
+
+- FP8 has no exact sm_120 MMA with NVFP4 weights: f8f6f4 takes k = 32 per MMA, the weight's E4M3 scale changes
+  every 16. Two-term NVFP4 keeps the block-scaled FP4 MMA (2 per product, weights read once): the candidate
+  for a default-on route.
+
 ---
 
 ## 2026-11-18 · Flint at 74k tokens: FP8 KV costs 2.2 % PPL, the server caches cost no decode

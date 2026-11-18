@@ -61,6 +61,7 @@ def rope(x, pos, theta):
 A4 = None  # --a4 / --a4-sites: regex over activation sites rounded to NVFP4 (W4A4 emulation); None = W4A16
 _E2M1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6.0])
 _E4M3_POS = None
+A_FMT = "nvfp4"  # format of the A4-matched activations: "nvfp4" (W4A4) or "fp8" (per-token E4M3, W4A8)
 
 
 def aq(x, site):
@@ -72,6 +73,22 @@ def aq(x, site):
     if _E4M3_POS is None:
         from flint_raw_weights import E4M3
         _E4M3_POS = torch.tensor(sorted({float(v) for v in E4M3 if v > 0}))
+    if A_FMT == "fp8":  # per-token dynamic FP8: row scale absmax / 448, E4M3 values (round to nearest)
+        r = x.reshape(-1, x.shape[-1])
+        s = (r.abs().amax(-1, keepdim=True) / 448.0).clamp(min=1e-12)
+        y = (r / s).clamp(-448, 448)
+        grid = torch.cat([torch.zeros(1), _E4M3_POS])
+        i = torch.searchsorted(grid, y.abs().contiguous()).clamp(1, len(grid) - 1)
+        lo, hi = grid[i - 1], grid[i]
+        q = torch.where((y.abs() - lo) <= (hi - y.abs()), lo, hi) * y.sign()
+        return (q * s).reshape(x.shape)
+    if A_FMT == "nvfp4x2":  # two-term NVFP4: x ~ q(x) + q(x - q(x)), two FP4 MMAs per product
+        q1 = _nvfp4(x)
+        return q1 + _nvfp4(x - q1)
+    return _nvfp4(x)
+
+
+def _nvfp4(x):
     b = x.reshape(-1, 16)
     s = (b.abs().amax(-1) / 6.0).clamp(min=float(_E4M3_POS[0]))
     s = _E4M3_POS[torch.searchsorted(_E4M3_POS, s).clamp(max=len(_E4M3_POS) - 1)][:, None]

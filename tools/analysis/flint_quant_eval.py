@@ -196,7 +196,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--arm", action="append", default=[])
     ap.add_argument("--ckpt", action="append", default=[],
-                    help="NAME:DIR[:A4REGEX] Modelopt NVFP4 checkpoint to score, activations at A4REGEX sites as NVFP4")
+                    help="NAME:DIR[:A4REGEX[:fp8]] Modelopt NVFP4 checkpoint to score, activations at A4REGEX sites as NVFP4 (fp8: per-token E4M3)")
     ap.add_argument("--ref-cache", default="", help="file for the BF16 logits: loaded if present, else written")
     a = ap.parse_args()
     cfg = json.loads((pathlib.Path(a.model) / "config.json").read_text())
@@ -230,8 +230,9 @@ def main():
 
     from flint_raw_weights import RawWeights
     for c in a.ckpt:
-        cname, cdir, *a4 = c.split(':', 2)
+        cname, cdir, *a4 = c.split(':', 3)
         fr.A4 = re.compile(a4[0]) if a4 else None
+        fr.A_FMT = a4[1] if len(a4) > 1 else "nvfp4"
         score(cname, RawWeights(cdir), f'checkpoint {cdir} A4 {a4[0] if a4 else "-"}', time.time())
         fr.A4 = None
     for arm in a.arm:
