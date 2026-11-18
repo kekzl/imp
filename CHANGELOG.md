@@ -4,6 +4,48 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.69.0] - 2026-11-18
+
+### Added
+- server: /v1/models reports max_model_len for models not loaded (runtime.max_seq_len, else max_position_embeddings capped at 131072), 0 -> 26 of 35 local models (#3153)
+- gemm: Flint W4A4 loss sits in prefill (decode-path PPL 12.9108 vs 13.8409); opt-in gemm.nvfp4_prompt_a16_attn halves it (13.3597) for pp512 -34 % (B-85) (#3162)
+- moe: opt-in gemm.nvfp4_prompt_a16_moe runs routed NVFP4 experts on FP16 activations; with the attention route Flint prefill PPL 13.8409 -> 12.8211 (decode path 12.9108) for pp512 -56 % (B-85) (#3163)
+
+### Changed
+- moe: Flint decode 372.3 -> 417.3 tok/s (+12.1 %), shared expert beside routing and a one-launch sigmoid router; Nemotron-3-Nano +5.4 % (#3135)
+- cpp-httplib v0.62.0 -> v0.66.0 (#3146)
+
+### Fixed
+- server: GLM arg_key tool arguments are typed as vLLM 0.33 glm47 does, 423 of 423 vLLM coercion cases equal (#3137)
+- server: end_thinking ends the reasoning for good, a forced </think> bans the opener (Flint looped <think> to max_tokens) (#3138)
+- server: a model swap resets the CUDA context, Flint keeps 6896 MiB for its plan after 4 swaps (6259 before) (#3139)
+- runtime: KV admission waits up to 10 s for free VRAM under the pool ceiling, an 82k prompt right after a model swap 3/3 served (3/3 cancelled before) (#3141)
+- server: diagnostics.tool_fault_raw logs the emitted text of GLM and JSON ChatML tool calls too (was Qwen XML only) (#3144)
+- server: GLM arg_key tool calls keep their complete pairs when the tail is broken, as vLLM 0.33 glm47 does (#3145)
+- chat: Jinja loops set loop.previtem / loop.nextitem, tool results open their user turn as in HF (Qwen3.8, Qwen3-Coder, Nemotron) (#3147)
+- chat: Jinja engine renders 145/145 HF renders of 39 upstream chat templates byte-equal (key order, loop filters, filter kwargs, tojson options) (#3148)
+- server: request JSON keeps the client's key order (nlohmann::ordered_json), tool schemas reach the template as sent, as vLLM (#3150)
+- ci: Sanitizers lane builds test-text again, nlohmann/json is fetched whenever tests build (IMP_BUILD_SERVER=OFF) (#3151)
+- cache: image requests reuse the prefix cache on hybrid and SWA models, placeholders keyed per picture as vLLM (Qwen3.8 identical image request: cached 0 -> 6352 tokens) (#3152)
+- reasoning: Anthropic budget_tokens and vLLM's thinking_token_budget cap reasoning at the stated token count (16384 of max_tokens 32768 ran to 24576) (#3154)
+- runtime: auto max_batch_size prices NVFP4 weights from disk and SWA layers at their window, then yields to one max_seq_len sequence (Flint 2 -> 18 slots, 32 concurrent 474 -> 1975 tok/s, context stays 131072) (#3155)
+- server: a tool call cut off by max_tokens arrives as tool_use with its closed parameters and stop_reason max_tokens, as vLLM streams it (was plain text on XML/GLM layouts) (#3156)
+- exec: the MoE shared expert read the attention norm's stale small-M activations in 2..32-row verify chunks (Flint n-gram speculation ended tool calls early in 2/7 runs -> 0/7, 2.53 -> 2.90-3.82 tok/verify) (#3157)
+- server: a non-streamed reply cut before </think> no longer puts the reasoning in content when thinking is off and the model opens <think> anyway (Flint /v1/messages without `thinking`: text block of reasoning -> no block, as the stream) (#3158)
+- server: streamed ignore_eos keeps the <think> opener, so reasoning arrives as reasoning_content and ttft is taken (Flint: 0 -> 25 reasoning deltas, imp_last_ttft_ms 0.0 -> 5.0) (#3160)
+
+### Internal
+- server: GLM arg_key tool calls keep "42" / "true" as text for string params, as vLLM's glm47 parser does (#3136)
+- Flint decode tg128 417.06-417.77 tok/s in MODELS.md and PERF_LOG (#3135; 368.68-372.63 before) (#3140)
+- Flint prefix resend stays non-bit-equal (row-invariant routers cost 11-15 % pp4096), FP8 KV not judgeable by needle tests (#3142)
+- tools: kv_dtype_longctx_ab.py records HTTP errors per request and writes after every length (#3143)
+- deps: Bump the docker group across 3 directories with 2 updates (#3132)
+- deps: Bump the docker-compose group with 2 updates (#3133)
+- Gemma-4-26B hero is NVIDIA's 2026-11 Modelopt revision, PPL 385.82 -> 234.30, decode 304 -> 210 tok/s, lead over vLLM +23.3 -> +36.9 % (#3149)
+- audit: Flash-Next pre-mixer expert prediction, eviction policies and miss-drop recorded as refuted in simulation (71.30 % vs 70.08 % top-10, cache bytes the lever: +1.73 GiB = -11.2 % misses) (#3159)
+- audit: Flint at 74k tokens: FP8 KV costs 2.2 % PPL (+0.0222 +- 0.0067 nats/token), the prefix and SWA-snapshot caches cost no decode (252.45-254.36 vs 251.70-252.54 tok/s) (#3161)
+- audit: Flint prefill activations: per-token FP8 recovers 96 % of the W4A4 KL loss, two-term NVFP4 88 %, in the CPU reference (B-85) (#3164)
+
 ## [0.68.0] - 2026-11-16
 
 ### Added
