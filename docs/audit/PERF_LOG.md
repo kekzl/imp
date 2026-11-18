@@ -4,6 +4,30 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-18 · Flash-Next decode: unpinned host experts cost 38 %, tier layers get no prefetch (B-60)
+
+`ghcr.io/kekzl/imp:0.69.0`, Qwen3.8-Flash-Next-NVFP4, `tools/analysis/flashnext_prefetch_ab.sh` (6 real prompts x 400
+greedy tokens, decode tok/s median), 2 rounds of 3 arms; RTX 5090 32 GB, host 78 GiB. Raw logs
+`/mnt/data/scratch/fn_vram_ab/` (not in the repo).
+
+| run | host experts | expert cache slots | median tok/s | hit rate | prefetched |
+|---|---|---|---|---|---|
+| base, round 1 / 2 | not pinned (68.00 / 70.59 GiB available) | 10704 | 63.62 / 63.70 | 87.1 % | 0 |
+| `runtime.no_vision=true`, round 1 | not pinned (70.43 GiB) | 11472 | 65.19 | 87.7 % | 0 |
+| `runtime.no_vision=true`, round 2 | pinned | 11472 | 102.90 | 92.9 % | 338094 |
+| `kv_cache.dtype=fp8`, round 1 | not pinned (70.69 GiB) | 10704 | 66.29 | 88.0 % | 0 |
+| `kv_cache.dtype=fp8`, round 2 | pinned | 10704 | 103.94 | 92.7 % | 335997 |
+
+- Pinning needs experts + max(6 GiB, 10 % of RAM): 63.28 + 7.85 = 71.13 GiB; this host sat 0.4-3.1 GiB below and
+  flipped between runs. Unpinned, the host expert tier serves the experts, max_batch_size drops 8 -> 1 and
+  `predict_next_experts_` skips tiered layers (`src/exec/executor_moe_decode_overlap.cpp`, `layer_tiered`): no
+  prefetch, 63.6 tok/s against 102.9-103.9 pinned. October's tier gap was ~10 % (78-83 vs 87-98 tok/s), before
+  the N=6 prefetch (#3085) that only pinned layers take.
+- `runtime.no_vision=true` frees 768 slots (+7 %) for +2.5 % decode unpinned; `kv_cache.dtype=fp8` leaves the
+  cache size unchanged (10704 slots). Neither is near the pinned/unpinned step.
+
+---
+
 ## 2026-11-18 · Flint W4A4 (B-85): only prefill quantizes activations; routed experts and attention carry the loss
 
 Text: the first 4096 tokens of `tools/analysis/ppl_corpus_45k.txt` (no BOS, `flint_tokenize.py`), 4095 rows,
