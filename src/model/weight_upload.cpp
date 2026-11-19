@@ -1357,23 +1357,24 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     if (!L.gdn_input_packed.data && c.data && c.on_device && d.data && d.on_device && c.ndim == 2 &&
         d.ndim == 2 && c.qtype == d.qtype && (c.qtype == QType::F16 || c.qtype == QType::BF16) &&
         c.shape[0] == d.shape[0] && c.shape[1] == d.shape[1]) {
-        int64_t d_model = c.shape[0];
-        int64_t n_heads = c.shape[1];
+        // Weights are [out, in] = [n_heads, d_model]: the pack is the row concat [2 * n_heads,
+        // d_model], alpha rows first. A column interleave ([n_heads, 2 * d_model]) leaves beta unwritten.
+        int64_t n_heads = c.shape[0];
+        int64_t d_model = c.shape[1];
         size_t es = 2;
-        size_t row_bytes = static_cast<size_t>(n_heads) * es;
-        size_t total_bytes = static_cast<size_t>(d_model) * 2 * row_bytes;
+        size_t half_bytes = static_cast<size_t>(n_heads) * static_cast<size_t>(d_model) * es;
+        size_t total_bytes = 2 * half_bytes;
         void* d_packed = nullptr;
         if (cudaMallocAsync(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(d_packed, 2 * row_bytes, c.data, row_bytes, row_bytes,
-                                                 d_model, cudaMemcpyDeviceToDevice, ctx.stream));
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(static_cast<char*>(d_packed) + row_bytes, 2 * row_bytes,
-                                                 d.data, row_bytes, row_bytes, d_model,
-                                                 cudaMemcpyDeviceToDevice, ctx.stream));
-            int64_t packed_shape[2] = {d_model, 2 * n_heads};
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(d_packed, c.data, half_bytes, cudaMemcpyDeviceToDevice, ctx.stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(d_packed) + half_bytes, d.data, half_bytes,
+                                               cudaMemcpyDeviceToDevice, ctx.stream));
+            int64_t packed_shape[2] = {2 * n_heads, d_model};
             L.gdn_alpha_beta_packed = Tensor(d_packed, c.qtype, 2, packed_shape, true);
             IMP_LOG_DEBUG("  layer %d: gdn_alpha_beta_packed [%lld, %lld] %.2f KiB (Step-1 fallback)", i,
-                          (long long)d_model, (long long)(2 * n_heads), total_bytes / 1024.0);
+                          (long long)(2 * n_heads), (long long)d_model, total_bytes / 1024.0);
         }
     }
 
