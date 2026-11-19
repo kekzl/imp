@@ -110,7 +110,7 @@ Pick the first probe whose family matches the change; two probes after shared-co
 - `--set runtime.deterministic=true` both arms (0.35% run-to-run otherwise); `--set speculative.mtp_k=0` (auto loads the head, +0.79 GiB); `gdn.state_bf16` pinned equal (+0.21% by design).
 - Qwen3.6-35B PPL moves +-0.2..0.5% between fp32-equivalent kernels (routing flips): >1% = broken, below that no verdict. Judge on Qwen3.8-27B-NVFP4-vllm.
 - PPL runs prefill; it cannot see decode-only paths or a degenerate low-PPL model. Pair it with the suite in section 0.
-- Decode-only defect: `tools/analysis/decode_path_parity.sh IMAGE MODEL...` (prefill PPL vs `--prefill-chunk-size 1`, FAIL above +3 %). #3172: Ornith-1.5 +38.04 % before, +0.64 % after; prefill PPL was clean.
+- Decode-only defect: `tools/analysis/decode_path_parity.sh IMAGE MODEL...` (prefill PPL vs `--prefill-chunk-size 1`, FAIL above +3 %). #3172: Ornith-1.5 +38.04 % before, +0.64 % after; prefill PPL was clean. Read a FAIL before debugging: Gemma-4 needs its chat-turn corpus (`TEXT=`, plain text +14.95 %, turn corpus +1.05 %); LFM2.5-24B-A2B-NVFP4-imp is +5.39 % by calibration (every FP16-activation path 16.32-16.76, 4-bit prefill 15.74); Kimi-Linear needs `EXTRA="--vram-budget 28000 --set runtime.max_batch_size=1"`.
 - Quant-file caveat: the local Qwen3-4B (unsloth) and Llama-3.2-3B (bartowski) GGUFs are re-downloads; greedy tie prompts differ; use NLL not byte equality (ChunkedPrefill tests do, #553).
 
 ## When the battery fails
