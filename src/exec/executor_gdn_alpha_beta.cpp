@@ -133,6 +133,27 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
     return false;
 }
 
+// FP16 alpha/beta rows [N, K] for the fused M=1 input GEMV. Mixed checkpoints (NVFP4 in/gate beside
+// unquantized alpha/beta, Qwen3.8-27B-NVFP4-QAD) carry the alpha|beta pack [2 * N, K], alpha rows first:
+// its halves are the rows. Without a pack: the two handles' FP16 weights.
+template <class Caches, class Registry>
+static bool gdn_ab_rows(const TransformerLayer& ly, const Caches& wc, const Registry& reg, int64_t N,
+                        int64_t K, const half*& wa, const half*& wb) {
+    const Tensor& ab = ly.gdn_alpha_beta_packed;
+    if (ab.data) {
+        if (ab.qtype != QType::F16 || ab.shape[0] != 2 * N || ab.shape[1] != K)
+            return false;
+        wa = static_cast<const half*>(ab.data);
+        wb = wa + (N * K);
+        return true;
+    }
+    if (ly.gdn_alpha_id == kInvalidTensorID || ly.gdn_beta_id == kInvalidTensorID)
+        return false;
+    wa = fp16_weight_ptr(wc, reg.handle(ly.gdn_alpha_id), N, K);
+    wb = fp16_weight_ptr(wc, reg.handle(ly.gdn_beta_id), N, K);
+    return wa && wb;
+}
+
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                             Tensor& gate_out, int n_heads, cudaStream_t stream,
                                             const NvFP4NormFoldIn& fold) {
@@ -141,10 +162,6 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
         return false;
-    // The packed alpha|beta weight (F16 checkpoints) owns that layout.
-    if (ly.gdn_alpha_id == kInvalidTensorID || ly.gdn_beta_id == kInvalidTensorID ||
-        ly.gdn_alpha_beta_packed.data != nullptr)
-        return false;
     const int64_t K = input.shape[1];
     NvFP4QuantResult w_in, w_gate;
     if (!nvfp4_decode_weight_(ly.ssm_in_id, w_in) || !nvfp4_decode_weight_(ly.gdn_gate_id, w_gate))
@@ -152,9 +169,9 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
     if (w_in.K != K || w_gate.K != K || w_in.N != proj.shape[1] || w_gate.N != gate_out.shape[1])
         return false;
     const int64_t N = n_heads;
-    const half* wa = fp16_weight_ptr(wcache_, registry_.handle(ly.gdn_alpha_id), N, K);
-    const half* wb = fp16_weight_ptr(wcache_, registry_.handle(ly.gdn_beta_id), N, K);
-    if (!wa || !wb)
+    const half* wa = nullptr;
+    const half* wb = nullptr;
+    if (!gdn_ab_rows(ly, wcache_, registry_, N, K, wa, wb))
         return false;
     half* alpha_out = static_cast<half*>(ssm_dt_buf_.data);
     half* beta_out = reinterpret_cast<half*>(static_cast<char*>(ssm_dt_buf_.data) +

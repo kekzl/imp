@@ -299,6 +299,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 // delta-rule scan and separate gating. Pipeline: ssm_in(attn_qkv) ->
 // conv1d -> SiLU -> split(x/B/C) -> delta_rule_scan -> gate(SiLU) -> group_norm -> ssm_out -> residual.
 
+// The alpha|beta pack GEMV serves M=1 unless the fused input GEMV already wrote both projections.
+static bool gdn_ab_pack_m1(const TransformerLayer& ly, int n, bool m1_fused_input) {
+    return n == 1 && ly.gdn_alpha_beta_packed.data && !m1_fused_input;
+}
+
 void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream) {
     configure_ssm_workspace(ws_.shared_max_tokens());
 
@@ -570,7 +575,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 char* beta_ptr = alpha_ptr + (static_cast<size_t>(packed_n_heads) * es);
                 alpha_proj_out = Tensor(alpha_ptr, compute_dtype_, 2, ab_shape, true);
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
-            } else if (n == 1 && ly.gdn_alpha_beta_packed.data) {
+            } else if (gdn_ab_pack_m1(ly, n, m1_fused_input)) {
                 // Step 1: alpha+beta-only fusion. One GEMV against [2*n_heads,
                 // d_model] produces [α | β] contiguous in ssm_dt_buf_.
                 int64_t ab2_shape[2] = {1, static_cast<int64_t>(2 * n_heads)};
