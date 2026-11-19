@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""/v1/embeddings against an HF golden (tests/refs/qwen3_embedding_ref.json): cos >= MIN_COS per text.
+"""/v1/embeddings against an HF golden (tests/refs/qwen3_{embedding,meanpool}_ref.json): cos >= MIN_COS per text.
 
 Usage: embed_check.py <server-url> <golden.json> [min_cos=0.9999]. Exit 1 on any text below the bar.
 Stdlib only. Mean pooling on Qwen3-Embedding measured cos 0.23-0.57 here; last-token 0.999993+.

@@ -437,20 +437,24 @@ test-rerank: build check-gpu
 	docker run --rm --network host -v $(PWD)/tools/analysis:/t:ro imp:toolchain \
 		python3 /t/rerank_check.py --url http://localhost:8080 $(if $(COMPARE_URL),--compare $(COMPARE_URL),)
 
-# Embedding gate: Qwen3-Embedding-0.6B (SafeTensors, last-token pooling from 1_Pooling/config.json)
-# against the HF golden tests/refs/qwen3_embedding_ref.json, cos >= 0.9999 per text. Mean pooling
-# on this model measured cos 0.23-0.57, so a pooling regression cannot pass.
+# Embedding gate, cos >= 0.9999 per text against HF goldens in tests/refs/, one server per model:
+# Qwen3-Embedding-0.6B (last-token pooling from 1_Pooling/config.json, qwen3_embedding_ref.json) and
+# Qwen3-0.6B (mean pooling over last_hidden_state, qwen3_meanpool_ref.json). The wrong pooling on
+# either model measured cos 0.23-0.57, pooling before the final norm 0.38-0.51.
 EMBED_MODEL ?= Qwen3-Embedding-0.6B
+EMBED_MEAN_MODEL ?= Qwen3-0.6B
 test-embed: build check-gpu
-	@docker rm -f imp-embed >/dev/null 2>&1 || true
-	@docker run -d --name imp-embed --gpus all -p 8080:8080 \
-		-v $(HOME)/models:/models $(DOCKER_IMG) \
-		imp-server --host 0.0.0.0 --model /models/$(EMBED_MODEL) >/dev/null
-	@echo "waiting for server..."; \
-	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
-	trap 'docker rm -f imp-embed >/dev/null 2>&1' EXIT; \
-	docker run --rm --network host -v $(PWD)/tools/analysis:/t:ro -v $(PWD)/tests/refs:/r:ro imp:toolchain \
-		python3 /t/embed_check.py http://localhost:8080 /r/qwen3_embedding_ref.json
+	@set -e; trap 'docker rm -f imp-embed >/dev/null 2>&1' EXIT; \
+	for pair in $(EMBED_MODEL):qwen3_embedding_ref.json $(EMBED_MEAN_MODEL):qwen3_meanpool_ref.json; do \
+		docker rm -f imp-embed >/dev/null 2>&1 || true; \
+		docker run -d --name imp-embed --gpus all -p 8080:8080 \
+			-v $(HOME)/models:/models $(DOCKER_IMG) \
+			imp-server --host 0.0.0.0 --model /models/$${pair%%:*} >/dev/null; \
+		echo "waiting for server ($${pair%%:*})..."; \
+		for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+		docker run --rm --network host -v $(PWD)/tools/analysis:/t:ro -v $(PWD)/tests/refs:/r:ro imp:toolchain \
+			python3 /t/embed_check.py http://localhost:8080 /r/$${pair##*:}; \
+	done
 
 NIAH_MODEL ?= Qwen3-14B-NVFP4
 test-niah: build check-gpu

@@ -153,9 +153,9 @@ public:
     [[nodiscard]] bool sae_readout(SaeReadout& out, cudaStream_t stream);
     [[nodiscard]] bool sae_armed() const { return !sae_rows_.empty(); }
 
-    // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
-    // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
-    // holds it; engine accumulates chunk sums host-side for full-input pooling.
+    // Embedding pooling (#1005): column-wise sum of the final RMSNorm of hidden_[0..n_tokens)
+    // (HF last_hidden_state) into d_out[d_model] fp32. Runs after a chunk's forward while hidden_
+    // still holds it; engine accumulates chunk sums host-side for full-input pooling.
     void pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream);
     // Last-token pooling (ModelConfig::embed_last_token_pool): final RMSNorm of hidden_[n_tokens-1]
     // into d_out[d_model] fp32, the HF last_hidden_state row sentence-transformers pools.

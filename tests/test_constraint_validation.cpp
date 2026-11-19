@@ -139,6 +139,34 @@ TEST(ConstraintValidation, NonLocalRefIsRejected) {
     EXPECT_FALSE(accepts(schema_body(json::parse(R"({"$ref":"https://example.com/x.json"})"))));
 }
 
+// The 400 names what fired, not "see the server log".
+TEST(ConstraintValidation, SchemaRejectionNamesTheReason) {
+    std::string msg = rejection_message(schema_body(json::parse(R"({"$ref":"#/definitions/missing"})")));
+    EXPECT_NE(msg.find("missing"), std::string::npos) << "got: " << msg;
+    msg = rejection_message(schema_body(
+        json::parse(R"({"type":"object","properties":{"a":{"type":"array","uniqueItems":true}}})")));
+    EXPECT_NE(msg.find("uniqueItems"), std::string::npos) << "got: " << msg;
+}
+
+// A pattern the regex engine cannot compile left the string free and answered 200.
+TEST(ConstraintValidation, UncompilableSchemaPatternIsRejectedWithItsPattern) {
+    const auto with_pattern = [](const std::string& pat) {
+        json s = json::parse(R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"]})");
+        s["properties"]["a"]["pattern"] = pat;
+        return schema_body(s);
+    };
+    EXPECT_TRUE(accepts(with_pattern("^[0-9]{3}$")));
+    const std::string msg = rejection_message(with_pattern("(?=x)abc"));
+    EXPECT_NE(msg.find("(?=x)abc"), std::string::npos) << "got: " << msg;
+    // Empty language: decode would dead-end on the string's first byte.
+    EXPECT_FALSE(accepts(with_pattern("x[^\\s\\S]")));
+    // 64 repeats: past the top-level regex's 64-step search bound, still accepted here.
+    EXPECT_TRUE(accepts(with_pattern("^[a-f0-9]{128}$")));
+    // Nested under $defs and items: the walk covers the whole tree.
+    EXPECT_FALSE(accepts(schema_body(json::parse(
+        R"({"$defs":{"S":{"type":"string","pattern":"a\\bz"}},"type":"array","items":{"$ref":"#/$defs/S"}})"))));
+}
+
 // Tolerances, not failures — turning these into 400s would break working
 // clients, so they are pinned as accepted on purpose.
 TEST(ConstraintValidation, SchemaTolerancesStayAccepted) {

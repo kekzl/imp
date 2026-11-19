@@ -494,6 +494,71 @@ bool RegexNfa::parse_alt(Frag& out) {
     return true;
 }
 
+bool RegexNfa::language_empty() const {
+    if (!compiled_ || start_ < 0)
+        return true;
+    std::vector<uint8_t> seen(states_.size(), 0);
+    std::vector<int> stack{start_};
+    seen[start_] = 1;
+    while (!stack.empty()) {
+        const int s = stack.back();
+        stack.pop_back();
+        if (states_[s].accepting)
+            return false;
+        for (const NfaEdge& e : states_[s].edges) {
+            if (e.to < 0 || seen[e.to])
+                continue;
+            if (!e.is_epsilon && std::find(e.char_class.begin(), e.char_class.end(), 1) == e.char_class.end())
+                continue;
+            seen[e.to] = 1;
+            stack.push_back(e.to);
+        }
+    }
+    return true;
+}
+
+// RegexNfa is permissive about syntax it cannot honor: `(?=x)` parses as an ordinary group,
+// `\b` and `\1` as literals, so the compiled language is not the one asked for. Names the
+// construct, nullptr when the pattern is clean. anchors_ok: JSON-Schema `pattern` (^/$ no-ops).
+const char* regex_unsupported_construct(const std::string& p, bool anchors_ok) {
+    bool in_class = false;  // inside [...] the metacharacters are literals
+    for (size_t i = 0; i < p.size(); i++) {
+        if (in_class) {
+            if (p[i] == '\\')
+                i++;  // an escaped ] does not close the class
+            else if (p[i] == ']')
+                in_class = false;
+            continue;
+        }
+        if (p[i] == '[') {
+            in_class = true;
+            // A leading ^ negates the class; a leading ] is a literal.
+            if (i + 1 < p.size() && p[i + 1] == '^')
+                i++;
+            if (i + 1 < p.size() && p[i + 1] == ']')
+                i++;
+            continue;
+        }
+        if (p[i] == '\\') {
+            if (i + 1 < p.size() && (p[i + 1] == 'b' || p[i + 1] == 'B'))
+                return "word boundaries (\\b)";
+            if (i + 1 < p.size() && p[i + 1] >= '1' && p[i + 1] <= '9')
+                return "backreferences";
+            i++;  // skip the escaped char
+            continue;
+        }
+        if (!anchors_ok && (p[i] == '^' || p[i] == '$'))
+            return "anchors (the whole output must match, so they are implicit)";
+        if (p[i] == '(' && i + 1 < p.size() && p[i + 1] == '?') {
+            // (?: ... ) is a plain non-capturing group and is fine.
+            if (i + 2 < p.size() && p[i + 2] == ':')
+                continue;
+            return "lookaround / named groups";
+        }
+    }
+    return nullptr;
+}
+
 bool RegexNfa::compile(const std::string& pattern) {
     states_.clear();
     compiled_ = false;

@@ -19,6 +19,10 @@ namespace imp {
 // escapes, \b. compile() returns false for patterns it can't represent; callers then skip
 // pattern enforcement.
 
+// Construct in `p` that RegexNfa would compile into a different language (lookaround, named
+// groups, \b, backreferences; anchors unless anchors_ok), nullptr when clean. Call before compile().
+const char* regex_unsupported_construct(const std::string& p, bool anchors_ok);
+
 // A single NFA transition: an edge that consumes one input char if `is_epsilon`
 // is false (matching when char_class[ch]==true), or a free epsilon move.
 struct NfaEdge {
@@ -50,6 +54,10 @@ public:
 
     // True if any state in `states` is accepting.
     [[nodiscard]] bool accepts(const std::vector<int>& states) const;
+
+    // True when no string matches (`[^\s\S]`): no accepting state is reachable over epsilon
+    // edges and edges with a non-empty class. Exact, O(states + edges).
+    [[nodiscard]] bool language_empty() const;
 
     // Bounds on what one pattern may cost: request-supplied text on an unauthenticated endpoint,
     // both limits below were unbounded (#1608, #1609). kMaxRepeat mirrors the GBNF parser's own
@@ -174,11 +182,36 @@ struct SchemaNode {
     std::unique_ptr<SchemaNode> clone() const;
 };
 
+// Calls fn on every child schema of `node` (properties, items, prefixItems, anyOf,
+// additionalProperties, defs) until fn returns false; returns false then.
+template <typename Node, typename Fn>
+[[nodiscard]] bool for_each_schema_child(Node* node, Fn&& fn) {
+    for (auto& [name, prop] : node->properties)
+        if (!fn(prop.get()))
+            return false;
+    for (SchemaNode* single : {node->items.get(), node->additional_schema.get()})
+        if (single && !fn(single))
+            return false;
+    for (auto* list : {&node->prefix_items, &node->any_of})
+        for (auto& sub : *list)
+            if (!fn(sub.get()))
+                return false;
+    for (auto& [name, def] : node->defs)
+        if (!fn(def.get()))
+            return false;
+    return true;
+}
+
 // Parses a JSON Schema string into a SchemaNode tree. Supports $defs/definitions +
 // "$ref": "#/$defs/<name>" | "#/definitions/<name>" | "#", including recursive and
 // mutually-recursive definitions (pydantic/zod emit $defs+$ref for nested models). Returns
-// nullptr on parse failure or an unresolved $ref (callers then decline constrained decoding).
-std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json);
+// nullptr on parse failure or an unresolved $ref (callers then decline constrained decoding);
+// `error` then names the keyword, member or $ref that fired.
+std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json, std::string* error = nullptr);
+
+// First `pattern` in the tree the regex engine could not compile (the node stays unconstrained),
+// nullptr when every pattern is enforced. Admission refuses on it; tool schemas stay tolerant.
+const std::string* first_unenforced_pattern(const SchemaNode* root);
 
 // Resolves a (possibly REF) node against the root's defs table. Returns the node itself when
 // not a REF; nullptr on a missing target or a pure ref->ref cycle (parse_json_schema validates

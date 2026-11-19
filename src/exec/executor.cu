@@ -103,12 +103,15 @@ int32_t pinned_token_or_throw(bool enqueued, const int32_t* h_pinned, cudaStream
 }  // namespace
 
 void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t stream) {
-    Tensor hidden = view_hidden(n_tokens);
-    const int d_model = static_cast<int>(hidden.shape[hidden.ndim - 1]);
+    // HF mean pooling reads last_hidden_state, the rows after the final norm.
+    Tensor no = view_tokens(norm_out_, n_tokens);  // scratch: the forward that filled hidden_ is done
+    rmsnorm(view_hidden(n_tokens), model_->output_norm(), no, model_->config().rms_norm_eps, stream,
+            norm_w_off_);
+    const int d_model = static_cast<int>(no.shape[no.ndim - 1]);
     const int threads = 256;
     const int blocks = (d_model + threads - 1) / threads;
-    hidden_pool_sum_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const __half*>(hidden.data), n_tokens, d_model, d_out);
+    hidden_pool_sum_kernel<<<blocks, threads, 0, stream>>>(static_cast<const __half*>(no.data), n_tokens,
+                                                           d_model, d_out);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

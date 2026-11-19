@@ -24,49 +24,6 @@ __global__ void regex_mask_kernel(float* __restrict__ logits, const uint8_t* __r
 
 RegexConstrainer::~RegexConstrainer() = default;
 
-// The shared engine is permissive about syntax it can't honor: `(?=x)` parses as an
-// ordinary group, `^`/`$`/`\b` as literals - enforcing something the caller never asked
-// for. Refuse those here instead. (Not fixed in RegexNfa: it also backs JSON-Schema
-// `pattern`, a separate testable change.)
-static const char* unsupported_construct(const std::string& p) {
-    bool in_class = false;  // inside [...] the metacharacters are literals
-    for (size_t i = 0; i < p.size(); i++) {
-        if (in_class) {
-            if (p[i] == '\\')
-                i++;  // an escaped ] does not close the class
-            else if (p[i] == ']')
-                in_class = false;
-            continue;
-        }
-        if (p[i] == '[') {
-            in_class = true;
-            // A leading ^ negates the class; a leading ] is a literal.
-            if (i + 1 < p.size() && p[i + 1] == '^')
-                i++;
-            if (i + 1 < p.size() && p[i + 1] == ']')
-                i++;
-            continue;
-        }
-        if (p[i] == '\\') {
-            if (i + 1 < p.size() && (p[i + 1] == 'b' || p[i + 1] == 'B'))
-                return "word boundaries (\\b)";
-            if (i + 1 < p.size() && p[i + 1] >= '1' && p[i + 1] <= '9')
-                return "backreferences";
-            i++;  // skip the escaped char
-            continue;
-        }
-        if (p[i] == '^' || p[i] == '$')
-            return "anchors (the whole output must match, so they are implicit)";
-        if (p[i] == '(' && i + 1 < p.size() && p[i + 1] == '?') {
-            // (?: ... ) is a plain non-capturing group and is fine.
-            if (i + 2 < p.size() && p[i + 2] == ':')
-                continue;
-            return "lookaround / named groups";
-        }
-    }
-    return nullptr;
-}
-
 // A constrained reply matches as a WHOLE; leading `^`/trailing `$` are redundant with
 // that and are stripped (RegexNfa would otherwise read them as literals and silently
 // refuse the pattern, e.g. a client's `^[0-9]{3}$` got free-form text with HTTP 200).
@@ -104,7 +61,7 @@ bool RegexConstrainer::init_pattern_only(const std::string& pattern) {
     // Keep `pattern_` as the caller wrote it — diagnostics should quote what was
     // sent, not the rewritten form the engine compiles.
     const std::string effective = strip_redundant_anchors(pattern);
-    if (const char* bad = unsupported_construct(effective)) {
+    if (const char* bad = regex_unsupported_construct(effective, /*anchors_ok=*/false)) {
         IMP_LOG_WARN("RegexConstrainer: pattern '%s' uses %s — not enforcing it", pattern.c_str(), bad);
         return false;
     }
