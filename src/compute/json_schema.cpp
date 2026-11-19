@@ -831,26 +831,6 @@ private:
 };
 }  // namespace
 
-// Calls fn on every child schema of `node` (properties, items, prefixItems, anyOf,
-// additionalProperties, defs) until fn returns false; returns false then.
-template <typename Node, typename Fn>
-static bool for_each_child(Node* node, Fn&& fn) {
-    for (auto& [name, prop] : node->properties)
-        if (!fn(prop.get()))
-            return false;
-    for (SchemaNode* single : {node->items.get(), node->additional_schema.get()})
-        if (single && !fn(single))
-            return false;
-    for (auto* list : {&node->prefix_items, &node->any_of})
-        for (auto& sub : *list)
-            if (!fn(sub.get()))
-                return false;
-    for (auto& [name, def] : node->defs)
-        if (!fn(def.get()))
-            return false;
-    return true;
-}
-
 // Recursively compile any `pattern` fields into NFAs. Unsupported patterns
 // leave pattern_nfa null (enforcement is then skipped for that node).
 static void compile_patterns(SchemaNode* node) {
@@ -858,14 +838,18 @@ static void compile_patterns(SchemaNode* node) {
         return;
     if (!node->pattern.empty() && !node->pattern_nfa) {
         auto nfa = std::make_shared<RegexNfa>();
-        if (nfa->compile(node->pattern)) {
+        const char* bad = regex_unsupported_construct(node->pattern, /*anchors_ok=*/true);
+        if (!bad && !nfa->compile(node->pattern))
+            bad = "unsupported or malformed";
+        // An empty language dead-ends decode on the string's first byte (empty reply, no reason).
+        if (!bad && nfa->language_empty())
+            bad = "matches nothing";
+        if (!bad)
             node->pattern_nfa = std::move(nfa);
-        } else {
-            IMP_LOG_WARN("JSON schema: unsupported regex pattern '%s' — pattern not enforced",
-                         node->pattern.c_str());
-        }
+        else
+            IMP_LOG_WARN("JSON schema: regex pattern '%s' not enforced (%s)", node->pattern.c_str(), bad);
     }
-    for_each_child(node, [](SchemaNode* child) {
+    (void)for_each_schema_child(node, [](SchemaNode* child) {
         compile_patterns(child);
         return true;
     });
@@ -897,39 +881,54 @@ const SchemaNode* resolve_schema_ref(const SchemaNode* root, const SchemaNode* n
 // Validate every $ref in the tree: the target must exist and a chain of pure
 // refs must terminate in a non-REF node. Returns false (with a log) on the
 // first unresolvable ref so the caller declines constrained decoding.
-static bool validate_refs(const SchemaNode* root, const SchemaNode* node) {
+static bool validate_refs(const SchemaNode* root, const SchemaNode* node, std::string* bad_ref) {
     if (!node)
         return true;
     if (node->type == SchemaType::REF && resolve_schema_ref(root, node) == nullptr) {
-        IMP_LOG_WARN("JSON schema: unresolvable $ref '%s'", node->ref_name.c_str());
+        *bad_ref = node->ref_name;
         return false;
     }
-    return for_each_child(node, [root](const SchemaNode* child) { return validate_refs(root, child); });
+    return for_each_schema_child(node, [root, bad_ref](const SchemaNode* child) {
+        return validate_refs(root, child, bad_ref);
+    });
 }
 
-std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
+const std::string* first_unenforced_pattern(const SchemaNode* node) {
+    if (!node)
+        return nullptr;
+    if (!node->pattern.empty() && !node->pattern_nfa)
+        return &node->pattern;
+    const std::string* hit = nullptr;
+    (void)for_each_schema_child(node, [&hit](const SchemaNode* child) {
+        hit = first_unenforced_pattern(child);
+        return hit == nullptr;
+    });
+    return hit;
+}
+
+std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json, std::string* error) {
+    auto refuse = [error](const std::string& why) -> std::unique_ptr<SchemaNode> {
+        IMP_LOG_ERROR("Failed to parse JSON schema: %s", why.c_str());
+        if (error)
+            *error = why;
+        return nullptr;
+    };
     SchemaParser parser(json.c_str(), json.size());
     auto root = parser.parse();
-    if (!root) {
-        IMP_LOG_ERROR("Failed to parse JSON schema");
-        return nullptr;
-    }
-    if (parser.ref_error()) {
-        IMP_LOG_ERROR("Failed to parse JSON schema: unsupported $ref form");
-        return nullptr;
-    }
-    if (parser.parse_error()) {
-        IMP_LOG_ERROR("Failed to parse JSON schema: %s", parser.error_reason().c_str());
-        return nullptr;
-    }
+    // A recorded reason is more specific than the null root it usually comes with.
+    if (parser.parse_error())
+        return refuse(parser.error_reason());
+    if (parser.ref_error())
+        return refuse("unsupported $ref form (only \"#\", \"#/$defs/<name>\" and \"#/definitions/<name>\")");
+    if (!root)
+        return refuse("not a JSON object");
     // Attach definitions collected anywhere in the document to the root —
     // resolve_schema_ref() searches only the root table.
     for (auto& [name, def] : parser.collected_defs_)
         root->defs.emplace_back(std::move(name), std::move(def));
-    if (!validate_refs(root.get(), root.get())) {
-        IMP_LOG_ERROR("Failed to parse JSON schema: unresolvable $ref");
-        return nullptr;
-    }
+    std::string bad_ref;
+    if (!validate_refs(root.get(), root.get(), &bad_ref))
+        return refuse("unresolvable $ref '" + bad_ref + "'");
     compile_patterns(root.get());
     return root;
 }
@@ -977,7 +976,7 @@ static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::stri
         if (it != rename.end())
             node->ref_name = it->second;
     }
-    for_each_child(node, [&rename](SchemaNode* child) {
+    (void)for_each_schema_child(node, [&rename](SchemaNode* child) {
         rewrite_refs(child, rename);
         return true;
     });

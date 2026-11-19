@@ -83,15 +83,20 @@ bool validate_constraints(const json& body, httplib::Response& res) {
     // Deliberately NOT rejected: a schema the parser accepts but can't extract structure from
     // ({"type":"object"} with no properties, documented as meaning json_object) and an unknown
     // `type` (falls back to string) - those are tolerances, not failures.
-    if (!schema.empty() && !imp::parse_json_schema(schema))
-        return reject(
-            "the JSON schema cannot be enforced as a constraint: it could not be "
-            "parsed. Usual causes: a keyword this build cannot enforce "
-            "(minimum/maximum/multipleOf/allOf/not/uniqueItems and the rest listed "
-            "in docs/LIMITATIONS.md), a non-string \"enum\" or \"const\" member, "
-            "or an unresolvable \"$ref\" (only local \"#/$defs/...\" and "
-            "\"#/definitions/...\" are supported). The server log names the one "
-            "that fired.");
+    if (!schema.empty()) {
+        std::string why;
+        const auto root = imp::parse_json_schema(schema, &why);
+        if (!root)
+            return reject("the JSON schema cannot be enforced as a constraint: " + why +
+                          ". Keywords this build cannot enforce are listed in docs/LIMITATIONS.md; "
+                          "\"$ref\" resolves only local \"#/$defs/...\" and \"#/definitions/...\".");
+        // A `pattern` the regex engine cannot compile left its string unconstrained and the
+        // request answered 200: same contract as the top-level regex above.
+        if (const std::string* bad = imp::first_unenforced_pattern(root.get()))
+            return reject("the JSON schema cannot be enforced as a constraint: \"pattern\" \"" + *bad +
+                          "\" is an unsupported or malformed regex, or matches nothing. Lookaround, named "
+                          "groups, word boundaries and backreferences are not supported.");
+    }
 
     return true;
 }

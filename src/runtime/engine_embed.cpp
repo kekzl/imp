@@ -1,6 +1,7 @@
 // /v1/embeddings on the decoder path (#1005): request preparation, per-chunk pooling, finish.
-// Mean pooling sums every chunk; last-token embedders (ModelConfig::embed_last_token_pool,
-// Qwen3-Embedding) pool the final-norm state of the appended end token on the last chunk only.
+// Mean pooling sums the final-norm state of every chunk; last-token embedders
+// (ModelConfig::embed_last_token_pool, Qwen3-Embedding) pool the final-norm state of the appended end token
+// on the last chunk only.
 
 #include "runtime/engine.h"
 #include "runtime/request.h"

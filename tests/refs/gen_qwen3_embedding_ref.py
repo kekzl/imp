@@ -28,16 +28,21 @@ TEXTS = [
 ]
 
 model_dir, out_path = sys.argv[1], sys.argv[2]
+# Third argument "mean": mean over last_hidden_state, the pooling of a decoder checkpoint without
+# 1_Pooling/config.json (golden: qwen3_meanpool_ref.json, generated from Qwen/Qwen3-0.6B).
+mean_pool = len(sys.argv) > 3 and sys.argv[3] == "mean"
+model_name = sys.argv[4] if len(sys.argv) > 4 else "Qwen/Qwen3-Embedding-0.6B"
 tok = AutoTokenizer.from_pretrained(model_dir)
 model = AutoModel.from_pretrained(model_dir, dtype=torch.float32).eval()
 rows = []
 with torch.no_grad():
     for t in TEXTS:
         b = tok([t], return_tensors="pt")
-        e = F.normalize(model(**b).last_hidden_state[:, -1], p=2, dim=1)[0]
+        h = model(**b).last_hidden_state
+        e = F.normalize(h.mean(dim=1) if mean_pool else h[:, -1], p=2, dim=1)[0]
         rows.append({"text": t, "n_tokens": int(b["input_ids"].shape[1]),
                      "embedding": [round(float(v), 6) for v in e]})
-out = {"model": "Qwen/Qwen3-Embedding-0.6B", "torch": torch.__version__,
+out = {"model": model_name, "pooling": "mean" if mean_pool else "last_token", "torch": torch.__version__,
        "transformers": transformers.__version__, "rows": rows}
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
