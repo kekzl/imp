@@ -4,6 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.69.1] - 2026-11-19
+
+### Changed
+- moe: host experts pin with a flat 6 GiB RAM headroom instead of max(6 GiB, 10 %) (Flash-Next at 69.7 GiB available: unpinned 63.8 -> pinned 102.6 tok/s) (#3170)
+
+### Fixed
+- api: mean-pooled embeddings pool after the final RMSNorm, unenforceable json_schema patterns are a 400 (#3171)
+- gdn: decode on checkpoints with FP16/BF16 alpha/beta beside quantized in/gate projections computed no beta (Ornith-1.5-35B-A3B-NVFP4 decode-path NLL 1.4010 -> 0.5199, vLLM 0.4815) (#3172)
+
+### Internal
+- audit: CCN ratchet re-pinned to the tree, 173 -> 143 pinned functions over 25 (105 pins had shrunk or gone) (#3166)
+- audit: Flash-Next decode with unpinned host experts runs at 63.6 tok/s against 102.9-103.9 pinned, tier-served layers take no next-layer prefetch (B-60) (#3167)
+- audit: two-term NVFP4 prefill activations refuted as a cheaper route (Flint PPL 13.1835, pp512 11368 / pp4096 20508 tok/s, worse than the W4A16 routes on both axes) (B-85) (#3168)
+- audit: file-size allowlist re-pinned to the tree, 24 ceilings lowered and 2 entries dropped that no longer exceed hard-review (#3169)
+- tools: decode_path_parity.sh scores the M=1 decode path against prefill per model (Ornith-1.5 +38.04 % on 0.69.0, +0.64 % after #3172; 16 local models swept) (#3173)
+- limits: decode-path parity rows read: Kimi-Linear -0.41 %, Gemma-4-26B +1.05 % on its turn corpus, LFM2.5 +5.39 % is 4-bit vs FP16 activations (16.32-16.76 on three FP16 paths) (#3174)
+
 ## [0.69.0] - 2026-11-18
 
 ### Added
