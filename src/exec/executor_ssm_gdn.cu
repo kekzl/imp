@@ -571,8 +571,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 alpha_proj_out = Tensor(alpha_ptr, compute_dtype_, 2, ab_shape, true);
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
             } else if (n == 1 && ly.gdn_alpha_beta_packed.data) {
-                // Step 1: alpha+beta-only fusion. One GEMV against [d_model,
-                // 2*n_heads] produces [α | β] contiguous in ssm_dt_buf_.
+                // Step 1: alpha+beta-only fusion. One GEMV against [2*n_heads,
+                // d_model] produces [α | β] contiguous in ssm_dt_buf_.
                 int64_t ab2_shape[2] = {1, static_cast<int64_t>(2 * n_heads)};
                 Tensor ab_packed_out(ssm_dt_buf_.data, compute_dtype_, 2, ab2_shape, true);
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
