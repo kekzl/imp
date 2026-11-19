@@ -213,8 +213,10 @@ void QuantPipeline::pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cuda
     std::vector<FP8CacheEntry*> entries;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
-        for (const Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in,
-                                &L.ssm_out, &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
+        // gdn_gate too: unregistered, the M=1 gate dequantized the whole weight per token.
+        for (const Tensor* t :
+             {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in, &L.ssm_out, &L.gdn_gate,
+              &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
             if (!t->data || !t->on_device || t->qtype != QType::FP8_E4M3 || wcache_->fp8.contains(t->data))
                 continue;
             FP8CacheEntry fe;
