@@ -14,6 +14,32 @@ namespace imp {
 // (Qwen3.6-35B): router + packed experts + gated shared expert. Dense (Qwen3.6-27B embedded
 // head): plain SwiGLU gate/up/down mapped onto the shared_expert fields (router/experts stay
 // empty, forward runs it as residual + shared path, no sigmoid gate).
+// Required Qwen-layout names absent from `tm`, comma-joined, for the incomplete-head WARN.
+static std::string qwen_mtp_missing(const std::unordered_map<std::string, Tensor>& tm) {
+    static constexpr const char* kRequired[] = {
+        "mtp.pre_fc_norm_embedding.weight",
+        "mtp.pre_fc_norm_hidden.weight",
+        kMtpHeadKeyFc,
+        "mtp.layers.0.input_layernorm.weight",
+        "mtp.layers.0.post_attention_layernorm.weight",
+        "mtp.layers.0.self_attn.q_proj.weight",
+        "mtp.layers.0.self_attn.k_proj.weight",
+        "mtp.layers.0.self_attn.v_proj.weight",
+        "mtp.layers.0.self_attn.o_proj.weight",
+        "mtp.layers.0.self_attn.q_norm.weight",
+        "mtp.layers.0.self_attn.k_norm.weight",
+        "mtp.norm.weight",
+    };
+    std::string out;
+    for (const char* key : kRequired) {
+        if (tm.contains(key))
+            continue;
+        out += out.empty() ? "" : ", ";
+        out += key;
+    }
+    return out.empty() ? "mtp.layers.0.mlp.* (dense or MoE)" : out;
+}
+
 MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, const std::string& src,
                           size_t bytes) {
     MtpHead head;
@@ -201,10 +227,11 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
         IMP_LOG_INFO("MTP head loaded: %s (%d tensors, %s MLP, BF16)", src.c_str(), head.info.n_tensors,
                      moe ? "MoE" : "dense");
     } else {
+        // nvidia/Qwen3.8-27B-NVFP4-QAD ships 11 of 15 mtp.* tensors (no fc, norm, pre_fc_norm_*).
         IMP_LOG_WARN(
-            "MTP head detected at %s but some expected tensors were missing; "
-            "spec-decode disabled for this model",
-            src.c_str());
+            "MTP head at %s is incomplete, spec-decode disabled; missing: %s. A complete head of the "
+            "same base model loads with speculative.mtp_head=<file.safetensors>",
+            src.c_str(), qwen_mtp_missing(tm).c_str());
     }
     return head;
 }
