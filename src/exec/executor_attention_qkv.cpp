@@ -202,18 +202,6 @@
             // Gemma-4 FP32 accum path: read the FP32 residual directly to avoid the
             // FP16 round-trip that drops ~1-2% precision per layer and drifts the
             // last-token hidden state (sign-flip at L29).
-            // Norm fold: only try_attn_qkv_fused_m1_ below reads a folded `no` (n == 1).
-            NvFP4NormFoldIn m1_fold{};
-            if (using_fp32_accum && prof.fp32_residual_norms) {
-                fp32_attn_norm_(layer, no, n, eps, stream);
-            } else {
-                // Producer fusion: quantize into the small-M scratch inside
-                // the norm kernel when Q will take that route (batched
-                // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
-                m1_fold = norm_fold_or_norm_(n == 1 && !qsa_layer_(layer) && ly.wv.data != nullptr, h, ly.attn_norm,
-                                             no, ly.wq_id, n, eps, stream);
-            }
-
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
             // Use handle tier checks instead of wcache_ probes.
             const WeightHandle* fp8_hwq = (ly.wq_id != kInvalidTensorID) ? &registry_.handle(ly.wq_id)
@@ -225,11 +213,26 @@
             bool fp8_qkv_available = (fp8_hwq && fp8_hwq->primary_tier == StorageTier::FP8 && fp8_hwk &&
                                       fp8_hwk->primary_tier == StorageTier::FP8 && fp8_hwv &&
                                       fp8_hwv->primary_tier == StorageTier::FP8);
+            // The FP8 x FP8 rows quantize `no` themselves and know no fold: with a pending one (NVFP4
+            // producer, n == 1) they read an unnormalised row. Declined here, the norm runs instead.
+            const bool fp8_qkv_rows = fp8_qkv_rows_take(n, fp8x8_min_rows_, state.force_fp16_gemm,
+                                                        fp8_qkv_available);
+            // Norm fold: only try_attn_qkv_fused_m1_ below reads a folded `no` (n == 1).
+            NvFP4NormFoldIn m1_fold{};
+            if (using_fp32_accum && prof.fp32_residual_norms) {
+                fp32_attn_norm_(layer, no, n, eps, stream);
+            } else {
+                // Producer fusion: quantize into the small-M scratch inside
+                // the norm kernel when Q will take that route (batched
+                // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+                m1_fold = norm_fold_or_norm_(attn_norm_fold_rows(n, fp8_qkv_rows) && !qsa_layer_(layer) &&
+                                                 ly.wv.data != nullptr,
+                                             h, ly.attn_norm, no, ly.wq_id, n, eps, stream);
+            }
+
             // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
-            const Fp8ActScale fp8_a_scale = (n >= fp8x8_min_rows_ && !state.force_fp16_gemm &&
-                                             fp8_qkv_available)
-                                                ? quantize_act_fp8_(*fp8_hwq, no, stream)
-                                                : Fp8ActScale{};
+            const Fp8ActScale fp8_a_scale = fp8_qkv_rows ? quantize_act_fp8_(*fp8_hwq, no, stream)
+                                                         : Fp8ActScale{};
             if (fp8_a_scale) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 // Reconstruct FP8 weight tensors from handle payloads.

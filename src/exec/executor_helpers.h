@@ -101,6 +101,14 @@ static inline void clear_l2_policy(cudaStream_t stream) {
 
 // Rows of an FP8 x FP8 beta=1 projection (o, down): n > 1, or one decode row on an FP8 weight under
 // gemm.fp8_smallm_m1 (fp8_min_rows 1, GraphExecutor::fp8x8_min_rows_).
+// q/k/v rows on the FP8 x FP8 route: they quantize the normed input themselves.
+[[nodiscard]] inline bool fp8_qkv_rows_take(int n, int fp8_min_rows, bool force_fp16, bool available) {
+    return n >= fp8_min_rows && !force_fp16 && available;
+}
+
+// A pending norm fold is read by the NVFP4 one-row q|k|v GEMV only: FP8 rows would see an unnormalised row.
+[[nodiscard]] inline bool attn_norm_fold_rows(int n, bool fp8_rows) { return n == 1 && !fp8_rows; }
+
 [[nodiscard]] inline bool fp8_beta1_rows(int n, int fp8_min_rows, StorageTier tier) {
     return n > 1 || (n >= fp8_min_rows && tier == StorageTier::FP8);
 }

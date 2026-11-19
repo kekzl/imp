@@ -46,6 +46,8 @@ python3 tools/analysis/degen_suite.py --url http://localhost:8080            # e
 python3 tools/analysis/degen_suite.py --skip-deterministic                   # Qwen3.6-35B (non-deterministic at temp=0)
 python3 tools/analysis/degen_suite.py --only think-leak,adherence --quick --json /tmp/degen.json
 python3 tools/analysis/degen_suite.py --corpus                               # ~250-prompt adversarial battery
+# Checkpoint with an MTP head: second run on a server started with `--set speculative.mtp_k=0`. Verify rows hide one-row decode
+# defects (#3004 route on Qwen3.8-27B-NVFP4-QAD: 0 FAIL with the head, 10 FAIL without, 2026-11-19).
 ```
 
 Categories: repetition, think-leak, special-tokens, adherence, long-context, kv-growth, multi-turn, stream, constrained (json_object/json_schema under greedy, temp=1.3, min_p; forced tool_choice), anthropic-thinking (default arm asserts NO thinking block since #1560/#1743). ~50 checks and growing. `make test-server` (`scripts/test_server.sh`) runs it (#1573).
