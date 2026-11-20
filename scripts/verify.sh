@@ -697,10 +697,10 @@ section "smoke prompts (degeneration check)"
 
 # Greedy decode on a known-deterministic prompt. Quality gate: output must contain the
 # expected substring AND the last 32 tokens must have >=8 distinct tokens (catches "own own own"
-# stuck-token failures). $5 (optional): minimum generated tokens, default 10 with an exception
+# stuck-token failures). $6 (optional): extra imp-cli arguments. $5 (optional): minimum generated tokens, default 10 with an exception
 # for single-word-factual prompts (this gate's own prompt answers in 11 tokens on the 4B model).
 smoke_prompt() {
-    local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}"
+    local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}" extra="${6:-}"
     if [ ! -e "$MODELS/$model" ]; then
         skip "$label ($model not present)"
         return
@@ -711,8 +711,9 @@ smoke_prompt() {
     # ten decode steps (mode_oneshot.cpp), so this gate would read eleven tokens of a 64-token run
     # and call them "the last 32", missing any repetition loop starting at step 11. Also failed the
     # distinct-token count on a correct short answer.
+    # shellcheck disable=SC2086 # extra is a list of arguments, split on purpose
     OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" --token-trace \
-          --max-tokens 64 --temperature 0 --chat-template none 2>"$ERR")
+          --max-tokens 64 --temperature 0 --chat-template none $extra 2>"$ERR")
     # Token markers '[tok=NNNN ' word']' land on stderr.
     ALL_TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR")
     WORDS=$(grep -oP "\[tok=[0-9]+ '\K[^']*" "$ERR" | tr '\n' ' ')
@@ -762,6 +763,14 @@ if [ "$MODE" = "full" ]; then
         "The capital of France is" \
         "Paris" \
         5
+    # One-row decode on a mixed checkpoint (FP8 attention, NVFP4 MLPs). With the MTP head most
+    # steps are verify rows (n > 1): v0.69.1 repeated one token 8 times here, 0 FAIL with the head (#3179).
+    smoke_prompt "Qwen3.8-27B NVFP4+FP8 QAD (one-row decode, no MTP)" \
+        "Qwen3.8-27B-NVFP4-QAD" \
+        "The capital of France is" \
+        "Paris" \
+        5 \
+        "--set speculative.mtp_k=0 --set speculative.ngram=false"
 fi
 
 # A run in which every model-backed gate skipped measured nothing on the GPU, so it is not a
