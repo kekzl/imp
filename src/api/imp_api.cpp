@@ -44,7 +44,7 @@ const char* imp_error_string(ImpError err) {
         case IMP_ERROR_FILE_NOT_FOUND:
             return "file not found";
         case IMP_ERROR_INVALID_MODEL:
-            return "invalid or corrupt model file";
+            return "invalid, corrupt or unsupported model (the log names the cause)";
         case IMP_ERROR_UNSUPPORTED:
             return "unsupported operation";
         case IMP_ERROR_INTERNAL:

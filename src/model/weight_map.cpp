@@ -1,4 +1,5 @@
 #include "model/weight_map.h"
+#include "model/weight_map_report.h"
 #include "model/weight_map_arch.h"
 #include "model/gdn_fused_split.h"
 #include "model/multimodal_wrapper.h"
@@ -555,7 +556,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             continue;
         }
         if (parts.size() < 4 || parts[0] != "model" || parts[1] != "layers") {
-            IMP_LOG_WARN("WeightMap: unrecognised weight name: %s", name.c_str());
+            weight_map_report::name("unrecognised weight name", name, stats.unrecognised);
             ++skipped;
             ++stats.unrecognised;
             continue;
@@ -1375,7 +1376,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             IMP_LOG_DEBUG("  assigned: %s -> layer %d", name.c_str(), layer_idx);
             ++assigned;
         } else {
-            IMP_LOG_WARN("WeightMap: unrecognised layer weight: %s", name.c_str());
+            weight_map_report::name("unrecognised layer weight", name, stats.unrecognised);
             ++skipped;
             ++stats.unrecognised;
         }
@@ -1413,6 +1414,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     if (skipped > 0)
         IMP_LOG_INFO("  skipped: %d vision, %d audio, %d KV-shared k/v, %d MTP head, %d unrecognised",
                      stats.vision, stats.audio, stats.kv_shared, stats.mtp, stats.unrecognised);
+    weight_map_report::total(stats.unrecognised);
 
     // Audio tensors without a loaded tower (Gemma-4-12B ships the embedder alone) are a whole
     // lost modality, said out loud once.
@@ -1464,7 +1466,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     }
 
     if (assigned == 0) {
-        IMP_LOG_ERROR("WeightMap: no tensors were assigned -- check weight names");
+        weight_map_report::nothing_assigned(arch_, skipped);
         return false;
     }
 
