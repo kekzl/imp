@@ -370,6 +370,25 @@ TEST(MtpAuto, NonBenchRunKeepsAuto) {
     EXPECT_EQ(cfg.speculative.mtp_k, -1) << "only --bench pins the sentinel away";
 }
 
+// --perplexity is one request of a known length: its KV pool is committed up front, not grown.
+TEST(CliConfigPins, PerplexityCommitsItsKvPoolUpFront) {
+    RuntimeConfig plain;
+    apply_config_pins(plain, CliArgs{});
+    EXPECT_EQ(plain.kv_cache.growable_initial_pct, 25) << "only --perplexity pins the commit";
+
+    RuntimeConfig cfg;
+    CliArgs args;
+    args.perplexity_file = "corpus.txt";
+    apply_config_pins(cfg, args);
+    EXPECT_EQ(cfg.kv_cache.growable_initial_pct, 100);
+
+    RuntimeConfig set;
+    args.config_overrides = {"kv_cache.growable_initial_pct=10"};
+    ASSERT_TRUE(set.apply_overrides(args.config_overrides).empty());
+    apply_config_pins(set, args);
+    EXPECT_EQ(set.kv_cache.growable_initial_pct, 10) << "an explicit --set outranks the pin";
+}
+
 TEST(ConfigExplicitKeys, RecordsWhatTheOperatorSet) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.was_set("speculative.ngram"));
