@@ -278,8 +278,9 @@ TEST_F(GDNModelTest, MultiTurnGDNState) {
 }
 
 // Gemma-4 (26B-A4B MoE hybrid: per-layer SWA/global, 128 experts top-8, shared dense FFN,
-// custom router, GEGLU) primary regression test: locks in correct output on the Q4_K_M
-// model. Forward pass has historically been fragile (memory/gemma4_working_2026_04_14.md).
+// custom router, GEGLU) primary regression test: locks in correct output on the checkpoint
+// IMP_TEST_MODEL_GEMMA4 names (make test-e2e: the NVFP4 SafeTensors one; 6 tests skipped until
+// 2026-11-20, no target set the variable).
 
 class Gemma4ModelTest : public ::testing::Test {
 protected:

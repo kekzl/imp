@@ -30,12 +30,24 @@ docker run --rm -v "$VOL:/out" --entrypoint ls "$IMG" -la /out/q | head -20
 echo "== load the result and answer greedily =="
 # Raw completion (no chat template: Qwen3 would spend the budget on a think
 # block) and the JSON document on stdout, so the answer is one grep.
-ANSWER=$(docker run --rm --gpus all -v "$VOL:/out" "$IMG" \
-    imp-cli --model /out/q --prompt "The capital of France is" --max-tokens 8 --temperature 0 \
-            --chat-template none --json 2>/dev/null)
-echo "$ANSWER" | cut -c1-400
-if ! grep -q "Paris" <<< "$ANSWER"; then
-    echo "test-quantize: FAIL, the quantized $MODEL did not answer Paris" >&2
+# 2 of 3: one prompt alone flips on the uncalibrated 0.6B with the FP8 KV hint (" Paris" -0.24 at
+# FP16 KV, -2.09 behind " the" -1.77 at FP8 KV; PPL 37.0220 vs 37.0325 on 1663 tokens, 2026-11-20).
+PROMPTS=("The capital of France is" "Water is made of hydrogen and" "The opposite of hot is")
+EXPECT=("Paris" "oxygen" "cold")
+HITS=0
+for i in "${!PROMPTS[@]}"; do
+    ANSWER=$(docker run --rm --gpus all -v "$VOL:/out" "$IMG" \
+        imp-cli --model /out/q --prompt "${PROMPTS[$i]}" --max-tokens 8 --temperature 0 \
+                --chat-template none --json 2>/dev/null)
+    echo "$ANSWER" | cut -c1-400
+    if grep -q "${EXPECT[$i]}" <<< "$ANSWER"; then
+        HITS=$((HITS + 1))
+    else
+        echo "  miss: '${PROMPTS[$i]}' did not answer ${EXPECT[$i]}"
+    fi
+done
+if [ "$HITS" -lt 2 ]; then
+    echo "test-quantize: FAIL, the quantized $MODEL answered $HITS of ${#PROMPTS[@]} prompts (need 2)" >&2
     exit 1
 fi
-echo "test-quantize: PASS ($MODEL -> NVFP4 $FORMAT round trip answers Paris)"
+echo "test-quantize: PASS ($MODEL -> NVFP4 $FORMAT round trip answers $HITS of ${#PROMPTS[@]} prompts)"

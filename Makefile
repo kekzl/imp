@@ -251,6 +251,7 @@ test-e2e: build
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GEMMA4_NVFP4=/models/Gemma-4-26B-A4B-it-NVFP4 \
+		-e IMP_TEST_MODEL_GEMMA4=/models/Gemma-4-26B-A4B-it-NVFP4 \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
 		-e IMP_TEST_MODEL_SSM=/models/Nemotron-3-Nano-30B-A3B-NVFP4 \
