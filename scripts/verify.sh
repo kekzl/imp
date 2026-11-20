@@ -6,7 +6,7 @@
 # gate measured anything fails rather than reporting OK.
 # Modes: verify.sh fast (unit tests + perf + 1 smoke, ~90s), verify.sh full (full ctest + perf +
 # 2 smoke, ~5min).
-# Env: IMP_VERIFY_BIN, IMP_VERIFY_TESTS, IMP_VERIFY_MODELS, IMP_VERIFY_BASELINE,
+# Env: IMP_VERIFY_BIN, IMP_VERIFY_TESTS, IMP_VERIFY_MODELS, IMP_VERIFY_MODEL_STORE, IMP_VERIFY_BASELINE,
 # IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_PERF=1
 # (stale baseline; refresh via gen_perf_baseline.sh), IMP_VERIFY_TRIALS=3 (processes the perf
 # gate medians over), IMP_VERIFY_IN_DOCKER=1 (internal re-exec sentinel, do not set manually).
@@ -37,6 +37,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
         -e IMP_VERIFY_SKIP_BUILD=1 \
         -e IMP_VERIFY_MODELS="${IMP_VERIFY_MODELS:-models}" \
+        -e IMP_VERIFY_MODEL_STORE="${IMP_VERIFY_MODEL_STORE:-$HOME/models}" \
         -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         -e IMP_VERIFY_SKIP_VRAM="${IMP_VERIFY_SKIP_VRAM:-0}" \
         -e IMP_VERIFY_SKIP_GRAPHS="${IMP_VERIFY_SKIP_GRAPHS:-0}" \
@@ -61,6 +62,16 @@ echo "verify: started $VERIFY_T_START ($MODE)"
 BIN="${IMP_VERIFY_BIN:-build/imp-cli}"
 TESTS_BIN="${IMP_VERIFY_TESTS:-build/imp-tests}"
 MODELS="${IMP_VERIFY_MODELS:-models}"
+# models/ is a per-checkout symlink farm: a smoke or parity checkpoint missing there still runs from
+# the store (2026-11-20: 3 Qwen3.8-27B gates of verify full skipped, both checkpoints in the store).
+MODEL_STORE="${IMP_VERIFY_MODEL_STORE:-$HOME/models}"
+model_dir() {
+    if [ -e "$MODELS/$1" ]; then
+        echo "$MODELS/$1"
+    elif [ -e "$MODEL_STORE/$1" ]; then
+        echo "$MODEL_STORE/$1"
+    fi
+}
 BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}"
 # IMP_VERIFY_CHUNK_SIZE: prefill chunk size to use for the perf bench.
 # Empty/unset = use whatever the baseline JSON specifies, or 0 (single-chunk) by default.
@@ -704,14 +715,15 @@ section "smoke prompts (degeneration check)"
 # Sweep over more models: tools/analysis/decode_path_parity.sh.
 decode_route_parity() {
     local model="$1" label="decode-route PPL parity ($1)"
-    if [ ! -e "$MODELS/$model" ] || [ ! -f "$DRIFT_CORPUS" ]; then
+    local dir; dir=$(model_dir "$model")
+    if [ -z "$dir" ] || [ ! -f "$DRIFT_CORPUS" ]; then
         skip "$label (model or $DRIFT_CORPUS not present)"
         return
     fi
     model_gate_ran
     local text; text=$(mktemp)
     head -c 6000 "$DRIFT_CORPUS" > "$text"
-    local common=(--model "$MODELS/$model" --perplexity "$text" --set runtime.deterministic=true
+    local common=(--model "$dir" --perplexity "$text" --set runtime.deterministic=true
                   --set speculative.mtp_k=0)
     local p s
     p=$("$BIN" "${common[@]}" --set diagnostics.ppl_first=64 2>&1 | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
@@ -731,7 +743,8 @@ decode_route_parity() {
 
 smoke_prompt() {
     local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}" extra="${6:-}"
-    if [ ! -e "$MODELS/$model" ]; then
+    local dir; dir=$(model_dir "$model")
+    if [ -z "$dir" ]; then
         skip "$label ($model not present)"
         return
     fi
@@ -742,7 +755,7 @@ smoke_prompt() {
     # and call them "the last 32", missing any repetition loop starting at step 11. Also failed the
     # distinct-token count on a correct short answer.
     # shellcheck disable=SC2086 # extra is a list of arguments, split on purpose
-    OUT=$("$BIN" --model "$MODELS/$model" --prompt "$prompt" --token-trace \
+    OUT=$("$BIN" --model "$dir" --prompt "$prompt" --token-trace \
           --max-tokens 64 --temperature 0 --chat-template none $extra 2>"$ERR")
     # Token markers '[tok=NNNN ' word']' land on stderr.
     ALL_TOKS=$(grep -oP '\[tok=\K[0-9]+' "$ERR")
