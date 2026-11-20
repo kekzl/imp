@@ -96,6 +96,17 @@ class Server:
         )
         return urllib.request.urlopen(req, timeout=self.timeout)
 
+    def max_model_len(self):
+        """Context limit of the served model from /v1/models, 0 when the server does not report one."""
+        try:
+            with urllib.request.urlopen(self.url + "/v1/models", timeout=10) as r:
+                for m in json.loads(r.read()).get("data", []):
+                    if m.get("id") == self.model:
+                        return int(m.get("max_model_len") or 0)
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+        return 0
+
     def chat(self, messages, max_tokens=256, temperature=0.0, seed=42, **kw):
         body = {
             "model": self.model,
@@ -606,14 +617,24 @@ class Suite:
         # 1.5x the pool, not 1.0x: at parity the prompt lands inside the pool
         # and nothing grows, and the check then passes without ever having
         # established the state it is about to assert over.
-        need_chars = int(blocks * health.get("kv_block_size", 16) * 4.5 * 1.5)
-        big = unit * (need_chars // len(unit) + 1) + "\n\nAnswer in one word: fine?"
-        try:
-            self.srv.chat([{"role": "user", "content": big}], max_tokens=16)
-        except urllib.error.HTTPError as e:
-            self.skip("kv-growth", "same answer across a growth event",
-                      f"server rejected the growth prompt: {e}")
-            return
+        need_tokens = int(blocks * health.get("kv_block_size", 16) * 1.5)
+        # A pool larger than the context (Qwen3-8B defaults: 39600 pool tokens, max_model_len 40960)
+        # answered 400 to the single 1.5x prompt and the check skipped on every run. Then: distinct
+        # prompts of 60 % of the context, which the prefix cache keeps, until the pool has grown.
+        ctx = self.srv.max_model_len()
+        per_tokens = min(need_tokens, int(ctx * 0.6)) if ctx else need_tokens
+        for i in range(min(8, -(-need_tokens // per_tokens) + 1)):
+            big = (f"Document {i}. " + unit * (int(per_tokens * 4.5) // len(unit) + 1)
+                   + "\n\nAnswer in one word: fine?")
+            try:
+                self.srv.chat([{"role": "user", "content": big}], max_tokens=16)
+            except urllib.error.HTTPError as e:
+                self.skip("kv-growth", "same answer across a growth event",
+                          f"server rejected growth prompt {i} (~{per_tokens} tokens): {e}")
+                return
+            with urllib.request.urlopen(self.srv.url + "/health", timeout=30) as h:
+                if json.loads(h.read()).get("kv_blocks_total", blocks) > blocks:
+                    break
 
         with urllib.request.urlopen(self.srv.url + "/health", timeout=30) as h:
             grown = json.loads(h.read()).get("kv_blocks_total", blocks)
