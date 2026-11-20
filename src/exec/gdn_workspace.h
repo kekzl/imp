@@ -1,8 +1,18 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace imp {
+
+// FP8 bytes gemm_via_handle_ hands gemv_fp8 at M=1 (GraphExecutor::fp8_decode_weight_).
+struct Fp8M1Weight {
+    const void* data = nullptr;
+    float scale = 1.0f;
+    const float* row_scales = nullptr;
+    int64_t N = 0;
+    int64_t K = 0;
+};
 
 // GDN layer workspaces of GraphExecutor (allocated in executor_workspace_buffers.cpp for has_gdn_ models) and
 // the one-shot activity log flags of the GDN fast paths. Moved verbatim out of executor.h.
@@ -24,6 +34,7 @@ struct GdnWorkspace {
     bool ab_prefill_logged = false;
     bool m1_input_logged = false;
     bool m1_out_logged = false;
+    bool m1_fp8_input_logged = false;
 };
 
 }  // namespace imp

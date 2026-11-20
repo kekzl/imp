@@ -17,6 +17,7 @@
 #include "exec/executor.h"
 #include "exec/gemm_context.h"
 #include "exec/workspace_sizes.h"
+#include "quant/fp8_gemv_fold.h"
 #include "quant/nvfp4_gemm.h"
 #include <stdexcept>
 
@@ -202,6 +203,9 @@ int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor&
     // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
     if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
         return kGdnM1Fused | kGdnGateDone;
+    // FP8 in/gate (mixed NVFP4 + FP8 checkpoints): the same four projections on the folded row.
+    if (in_fold.ssq && try_gdn_input_fp8_fold_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+        return kGdnM1Fused | kGdnGateDone;
     if (in_fold.ssq)
         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
     // M=1 GGUF: the dp4a-routed projections of mixed qtypes in one launch.
@@ -322,12 +326,98 @@ bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, c
     if (cur_spec_verify_ || calib_ || lora_ != nullptr)
         return false;
     NvFP4QuantResult w;
-    return nvfp4_decode_weight_(ly.ssm_out_id, w) && w.N == h.shape[1];
+    if (nvfp4_decode_weight_(ly.ssm_out_id, w))
+        return w.N == h.shape[1];
+    Fp8M1Weight w8;
+    return fp8_decode_weight_(ly.ssm_out_id, w8) && w8.N == h.shape[1];
+}
+
+// Mirrors the M=1 FP8 case of gemm_via_handle_ (executor_gemm_dispatch.cpp).
+bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
+    if (id == kInvalidTensorID)
+        return false;
+    const WeightHandle& h = registry_.handle(id);
+    const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
+    if (decode != StorageTier::FP8)
+        return false;
+    const auto it = wcache_.fp8.find(h.source_data);
+    if (it == wcache_.fp8.end() || it->second.weight.data == nullptr)
+        return false;
+    out.data = it->second.weight.data;
+    out.scale = it->second.host_scale;
+    out.row_scales = it->second.d_row_scales;
+    out.N = h.shape[0];
+    out.K = (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1];
+    return true;
+}
+
+bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
+                                               Tensor& gate_out, int n_heads, cudaStream_t stream,
+                                               const NvFP4NormFoldIn& fold) {
+    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0)
+        return false;
+    if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
+        gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
+        return false;
+    const int64_t K = input.shape[1];
+    Fp8M1Weight w_in, w_gate;
+    if (!fp8_decode_weight_(ly.ssm_in_id, w_in) || !fp8_decode_weight_(ly.gdn_gate_id, w_gate))
+        return false;
+    if (w_in.K != K || w_gate.K != K || w_in.N != proj.shape[1] || w_gate.N != gate_out.shape[1])
+        return false;
+    const int64_t N = n_heads;
+    const half* wa = nullptr;
+    const half* wb = nullptr;
+    if (!gdn_ab_rows(ly, wcache_, registry_, N, K, wa, wb))
+        return false;
+    Fp8GdnInputArgs a;
+    a.w_in = static_cast<const uint8_t*>(w_in.data);
+    a.w_gate = static_cast<const uint8_t*>(w_gate.data);
+    a.w_alpha = wa;
+    a.w_beta = wb;
+    a.rs_in = w_in.row_scales;
+    a.rs_gate = w_gate.row_scales;
+    a.s_in = w_in.scale;
+    a.s_gate = w_gate.scale;
+    a.x = static_cast<const half*>(input.data);
+    a.y_in = static_cast<half*>(proj.data);
+    a.y_gate = static_cast<half*>(gate_out.data);
+    a.y_alpha = static_cast<half*>(ssm_dt_buf_.data);
+    a.y_beta = reinterpret_cast<half*>(static_cast<char*>(ssm_dt_buf_.data) +
+                                       exec_gdn_beta_offset(1, static_cast<int>(N), sizeof(half)));
+    a.n_in = static_cast<int>(w_in.N);
+    a.n_gate = static_cast<int>(w_gate.N);
+    a.n_ab = static_cast<int>(N);
+    a.K = static_cast<int>(K);
+    a.fold = fold;
+    gemv_fp8_gdn_input(a, stream);
+    if (!gdn_ws_.m1_fp8_input_logged) {
+        gdn_ws_.m1_fp8_input_logged = true;
+        IMP_LOG_INFO(
+            "gdn M=1 FP8 fused input GEMV on the folded norm row ACTIVE (K=%lld, rows %lld + %lld + 2 x "
+            "%lld)",
+            (long long)K, (long long)w_in.N, (long long)w_gate.N, (long long)N);
+    }
+    return true;
 }
 
 void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h,
                                          cudaStream_t stream) {
     NvFP4QuantResult w;
+    Fp8M1Weight w8;
+    if (!nvfp4_decode_weight_(ly.ssm_out_id, w) && fp8_decode_weight_(ly.ssm_out_id, w8)) {
+        if (w8.K != y.shape[1] || w8.N != h.shape[1] || y.qtype != QType::F16)
+            throw std::runtime_error("gdn_out_residual_m1_: FP8 out-projection shape changed after the gate");
+        gemv_fp8_residual(w8.data, w8.scale, w8.row_scales, static_cast<const half*>(y.data),
+                          static_cast<half*>(h.data), static_cast<int>(w8.N), static_cast<int>(w8.K),
+                          norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)), stream);
+        if (!gdn_ws_.m1_out_logged) {
+            gdn_ws_.m1_out_logged = true;
+            IMP_LOG_INFO("gdn M=1 FP8 out-projection with residual epilogue ACTIVE (N=%lld, K=%lld)",
+                         (long long)w8.N, (long long)w8.K);
+        }
+        return;
+    }
     if (!nvfp4_decode_weight_(ly.ssm_out_id, w) || w.K != y.shape[1] || w.N != h.shape[1] ||
         y.qtype != QType::F16)
         throw std::runtime_error("gdn_out_residual_m1_: out-projection shape/tier changed after the gate");
