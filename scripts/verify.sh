@@ -699,6 +699,36 @@ section "smoke prompts (degeneration check)"
 # expected substring AND the last 32 tokens must have >=8 distinct tokens (catches "own own own"
 # stuck-token failures). $6 (optional): extra imp-cli arguments. $5 (optional): minimum generated tokens, default 10 with an exception
 # for single-word-factual prompts (this gate's own prompt answers in 11 tokens on the 4B model).
+# decode_route_parity MODEL: `--perplexity-decode 64` (per-step decode route, is_prefill off) against
+# `--perplexity` (prefill) on rows 64.. of the first 6000 corpus bytes. FAIL above +3 %.
+# Sweep over more models: tools/analysis/decode_path_parity.sh.
+decode_route_parity() {
+    local model="$1" label="decode-route PPL parity ($1)"
+    if [ ! -e "$MODELS/$model" ] || [ ! -f "$DRIFT_CORPUS" ]; then
+        skip "$label (model or $DRIFT_CORPUS not present)"
+        return
+    fi
+    model_gate_ran
+    local text; text=$(mktemp)
+    head -c 6000 "$DRIFT_CORPUS" > "$text"
+    local common=(--model "$MODELS/$model" --perplexity "$text" --set runtime.deterministic=true
+                  --set speculative.mtp_k=0)
+    local p s
+    p=$("$BIN" "${common[@]}" --set diagnostics.ppl_first=64 2>&1 | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
+    s=$("$BIN" "${common[@]}" --perplexity-decode 64 2>&1 | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
+    rm -f "$text"
+    if [ -z "$p" ] || [ -z "$s" ]; then
+        fail "$label: no perplexity line (prefill '${p:-}', step '${s:-}')"
+        return
+    fi
+    local delta; delta=$(awk -v p="$p" -v s="$s" 'BEGIN { printf "%.2f", (s / p - 1) * 100 }')
+    if awk -v d="$delta" 'BEGIN { exit !(d > 3) }'; then
+        fail "$label: prefill $p, step $s (${delta}%, limit +3 %)"
+    else
+        pass "$label: prefill $p, step $s (${delta}%)"
+    fi
+}
+
 smoke_prompt() {
     local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}" extra="${6:-}"
     if [ ! -e "$MODELS/$model" ]; then
@@ -771,6 +801,9 @@ if [ "$MODE" = "full" ]; then
         "Paris" \
         5 \
         "--set speculative.mtp_k=0 --set speculative.ngram=false"
+    # Teacher-forced PPL of the per-step decode route against prefill, same rows. With the #3179 fix
+    # reverted the step arm read 10.0269 against 5.4632 (+83.5 %); fixed 5.3812 (-1.50 %).
+    decode_route_parity "Qwen3.8-27B-NVFP4-QAD"
 fi
 
 # A run in which every model-backed gate skipped measured nothing on the GPU, so it is not a

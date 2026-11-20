@@ -99,6 +99,8 @@ void print_usage(const char* prog) {
         "  --bench-teacher-force With --bench-prompt-file: tg decode inputs are the file tokens after\n"
         "                        the prompt, so every build decodes the same sequence\n"
         "  --perplexity <file>   Compute teacher-forced perplexity over a text file and exit\n"
+        "  --perplexity-decode <n>  With --perplexity: prefill the first n tokens, then score\n"
+        "                        every later token on the per-step decode route (teacher-forced)\n"
         "  --calibrate <out>     With --perplexity: also write activation-calibration\n"
         "                        statistics to <out> (input for imp-quantize --calib)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for Gemma-3/4;\n"
@@ -128,6 +130,8 @@ CliArgs parse_args(int argc, char** argv) {
             std::exit(0);
         } else if (std::strcmp(arg, "--perplexity") == 0 && i + 1 < argc) {
             args.perplexity_file = argv[++i];
+        } else if (std::strcmp(arg, "--perplexity-decode") == 0 && i + 1 < argc) {
+            args.perplexity_decode = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--calibrate") == 0 && i + 1 < argc) {
             args.calibrate_out = argv[++i];
         } else if (std::strcmp(arg, "--prompt") == 0 && i + 1 < argc) {

@@ -1,8 +1,9 @@
-// Token-level entry points of the C API (tokenize, detokenize, the prefill-sampled token), split out
-// of imp_api.cpp (file-size gate).
+// Token-level entry points of the C API (tokenize, detokenize, the prefill-sampled token, forced decode),
+// split out of imp_api.cpp (file-size gate).
 
 #include "api/imp_internal.h"
 #include "model/tokenizer.h"
+#include "runtime/request.h"
 
 #include <algorithm>
 #include <cstring>
@@ -78,6 +79,40 @@ ImpError imp_prefill_token(ImpContext ctx, int32_t* out_token) {
         if (!ctx || !out_token || ctx->prefill_token < 0)
             return IMP_ERROR_INVALID_ARG;
         *out_token = ctx->prefill_token;
+        return IMP_SUCCESS;
+    });
+}
+
+ImpError imp_set_forced_decode(ImpContext ctx, const int32_t* tokens, int n_tokens) {
+    if (!ctx || !tokens || n_tokens <= 0)
+        return IMP_ERROR_INVALID_ARG;
+    return imp::api_guard("imp_set_forced_decode", [&]() -> ImpError {
+        auto& req = ctx->active_request;
+        // Only between imp_prefill and the first imp_decode_step (prefill emitted exactly one token).
+        if (!req || req->output_tokens.size() != 1 || ctx->consumed_output != 1)
+            return IMP_ERROR_INVALID_ARG;
+        req->forced_decode.assign(tokens, tokens + n_tokens);
+        req->output_tokens.back() = req->forced_decode[0];
+        ctx->prefill_token = req->forced_decode[0];
+        req->forced_pos = 1;
+        return IMP_SUCCESS;
+    });
+}
+
+int imp_forced_decode_count(ImpContext ctx) {
+    if (!ctx || !ctx->active_request)
+        return -1;
+    return static_cast<int>(ctx->active_request->forced_pos);
+}
+
+ImpError imp_forced_decode_nll(ImpContext ctx, double* out_nll_sum, int* out_n) {
+    if (!ctx || !out_nll_sum || !out_n)
+        return IMP_ERROR_INVALID_ARG;
+    return imp::api_guard("imp_forced_decode_nll", [&]() -> ImpError {
+        if (!ctx->active_request)
+            return IMP_ERROR_INVALID_ARG;
+        *out_nll_sum = ctx->active_request->forced_nll_sum;
+        *out_n = ctx->active_request->forced_nll_n;
         return IMP_SUCCESS;
     });
 }

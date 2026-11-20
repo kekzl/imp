@@ -95,6 +95,16 @@ struct Request {
     [[nodiscard]] int32_t take_forced(int32_t sampled) {
         return forcing() ? forced_decode[forced_pos++] : sampled;
     }
+    // With logprobs on, a forcing step scores the token it is about to emit: sum of -log p and count.
+    double forced_nll_sum = 0.0;
+    int forced_nll_n = 0;
+    [[nodiscard]] int32_t scored_token(int32_t sampled) const {
+        return forcing() ? forced_decode[forced_pos] : sampled;
+    }
+    void note_scored(float logprob) {
+        forced_nll_sum -= forcing() ? static_cast<double>(logprob) : 0.0;
+        forced_nll_n += static_cast<int>(forcing());
+    }
 
     int max_tokens = 256;
     // > 0 when max_tokens is the remaining context (imp-server default): KV admission, pool growth

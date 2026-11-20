@@ -239,4 +239,44 @@ TEST_F(GreedyLockTest, TeacherForcedDecodeFeedsForcedTokens) {
               IMP_ERROR_INVALID_ARG);  // only right after prefill
 }
 
+// imp_forced_decode_nll: with logprobs on every forced step scores the token it emits, not the
+// sampled one. " Paris" after "The capital of France is" scores below 2 nats, " Tokyo" above it.
+TEST_F(GreedyLockTest, TeacherForcedDecodeScoresTheForcedToken) {
+    auto tok = [&](const char* s) {
+        std::vector<int32_t> v(256);
+        int n = 0;
+        EXPECT_EQ(imp_tokenize(model_, s, v.data(), &n, 256), IMP_SUCCESS);
+        v.resize(n);
+        return v;
+    };
+    // The prompt ends one token early: " is" is forced[0], the scored step predicts the city.
+    const auto p = tok("The capital of France");
+    auto nll_of = [&](const char* full, int* n_scored) {
+        const auto f = tok(full);
+        EXPECT_EQ(f.size(), p.size() + 2) << full;
+        const std::vector<int32_t> forced(f.begin() + static_cast<std::ptrdiff_t>(p.size()), f.end());
+        ImpGenerateParams params = imp_generate_params_default();
+        params.temperature = 0.0f;
+        params.logprobs = 1;
+        params.max_tokens = static_cast<int>(forced.size()) + 8;
+        EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+        EXPECT_EQ(imp_prefill_with_params(ctx_, p.data(), static_cast<int>(p.size()), &params), IMP_SUCCESS);
+        EXPECT_EQ(imp_set_forced_decode(ctx_, forced.data(), static_cast<int>(forced.size())), IMP_SUCCESS);
+        int32_t t = -1;
+        EXPECT_EQ(imp_decode_step(ctx_, &params, &t), IMP_SUCCESS);
+        EXPECT_EQ(t, forced[1]);
+        double sum = -1.0;
+        EXPECT_EQ(imp_forced_decode_nll(ctx_, &sum, n_scored), IMP_SUCCESS);
+        return sum;
+    };
+    int n_paris = 0, n_tokyo = 0;
+    const double paris = nll_of("The capital of France is Paris", &n_paris);
+    const double tokyo = nll_of("The capital of France is Tokyo", &n_tokyo);
+    EXPECT_EQ(n_paris, 1);
+    EXPECT_EQ(n_tokyo, 1);
+    EXPECT_GE(paris, 0.0);
+    EXPECT_LT(paris, 2.0);
+    EXPECT_GT(tokyo, paris + 2.0);
+}
+
 }  // namespace

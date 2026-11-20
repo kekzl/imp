@@ -1751,8 +1751,11 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 continue;
 
             float* h_logits = h_base + (static_cast<size_t>(slot) * vocab_size);
-            req->output_logprobs.push_back(
-                build_logprob_info(h_logits, vocab_size, tokens[i], req->top_logprobs, tok));
+            // A forcing step emits forced_decode[forced_pos] below, so that token is the scored one.
+            req->output_logprobs.push_back(build_logprob_info(h_logits, vocab_size,
+                                                              req->scored_token(tokens[i]), req->top_logprobs,
+                                                              tok));
+            req->note_scored(req->output_logprobs.back().logprob);
             slot++;
         }
     }
