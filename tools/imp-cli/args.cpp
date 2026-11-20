@@ -286,6 +286,18 @@ CliArgs parse_args(int argc, char** argv) {
 // ceiling). Pure move: only an explicit --set wins over a pin, so a stray imp.conf can't
 // quietly redefine what tests/perf_baseline.json measures.
 void apply_config_pins(imp::RuntimeConfig& runtime_cfg, const CliArgs& args) {
+    // --perplexity is one request of a known length: commit its pool up front. At the default 25 % a
+    // 1701-token corpus on a 430-block pool started at 100 blocks, needed 107, and the growth was refused
+    // on a VRAM-saturated host-expert model (Qwen3.8-Flash-Next, 1297 MiB free against 1303 MiB kept).
+    // An explicit --set kv_cache.growable_initial_pct=... still wins.
+    if (!args.perplexity_file.empty()) {
+        bool pct_set = false;
+        for (const auto& ov : args.config_overrides)
+            if (ov.starts_with("kv_cache.growable_initial_pct"))
+                pct_set = true;
+        if (!pct_set)
+            runtime_cfg.kv_cache.growable_initial_pct = 100;
+    }
 // Benchmark mode measures raw engine decode: MoE speculation would fold draft-acceptance
 // luck + grouped-GEMM restart variance into the gated tg signal (dense spec stays as-is,
 // measured neutral). An explicit --set speculative.moe=... still wins.
