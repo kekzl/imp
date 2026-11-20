@@ -124,7 +124,12 @@ bool Engine::ensure_spec_state_scratch_() {
     // allowlist only ever shrinks (a raw pair here broke the Alloc-sites
     // gate, #1459).
     if (spec_state_snap_ == nullptr) {
-        spec_state_snap_ = vram_alloc_.allocate(bytes, "spec_state_snapshot");
+        // Two rows where the kernels write both (spec_snap_rows_): state after row 0 and after row 1.
+        spec_state_snap_ = vram_alloc_.allocate(bytes * static_cast<size_t>(spec_snap_rows_()),
+                                                "spec_state_snapshot");
+        spec_state_snap2_off_ = (spec_state_snap_ != nullptr && spec_snap_rows_() == 2)
+                                    ? static_cast<int64_t>(bytes)
+                                    : 0;
         if (spec_state_snap_ == nullptr)
             IMP_LOG_WARN(
                 "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
@@ -134,21 +139,32 @@ bool Engine::ensure_spec_state_scratch_() {
     return true;
 }
 
+// GDN conv + fused scan write a second snapshot row; Mamba2, KDA and the PLE conv (n-gram table) do not.
+int Engine::spec_snap_rows_() const {
+    if (!model_)
+        return 1;
+    const auto& mcfg = model_->config();
+    return (model_->profile().is_gdn && mcfg.ssm_state_size > 0 && !mcfg.gdn_kda &&
+            model_->ngram_table() == nullptr)
+               ? 2
+               : 1;
+}
+
 bool Engine::spec_state_scratch_wanted_() const {
     const auto& scfg = runtime_config_.speculative;
     const bool mtp = scfg.mtp_k != 0 && model_ && model_->mtp_ && model_->mtp_->loaded;
     return scfg.ngram || scfg.suffix || scfg.capture || mtp || mtp_spec_decode_enabled();
 }
 
-// KV plan charge for the scratch: 2 x (pool footprint / pool slots), 0 without recurrent state. Plus the
-// bound verify's factor rows, one per verify group and draft before the last
+// KV plan charge for the scratch: (1 + snapshot rows) x (pool footprint / pool slots), 0 without recurrent
+// state. Plus the bound verify's factor rows, one per verify group and draft before the last
 // (speculative.mtp_batch_verify_factor_row).
 size_t Engine::spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const {
     const size_t slots = static_cast<size_t>(std::max(0, config_.max_batch_size)) +
                          static_cast<size_t>(std::max(0, reserved_slots));
     if (ssm_footprint_bytes == 0 || slots == 0 || !spec_state_scratch_wanted_())
         return 0;
-    return (2 * (ssm_footprint_bytes / slots)) +
+    return ((1 + static_cast<size_t>(spec_snap_rows_())) * (ssm_footprint_bytes / slots)) +
            mtp_bound_verify_factor_row_plan_bytes(runtime_config_, model_.get(), config_.max_batch_size);
 }
 
@@ -158,9 +174,9 @@ void Engine::prewarm_spec_state_scratch_() {
         return;
     if (!ensure_spec_state_scratch_())
         return;
-    IMP_LOG_INFO("[spec] hybrid state scratch prewarmed: %.1f MiB (2 x %.1f MiB recurrent slot%s)",
-                 (spec_state_scratch_bytes_ + (spec_state_snap_ ? spec_state_scratch_bytes_ : 0)) /
-                     (1024.0 * 1024.0),
+    const int slabs = 1 + (spec_state_snap_ ? spec_snap_rows_() : 0);
+    IMP_LOG_INFO("[spec] hybrid state scratch prewarmed: %.1f MiB (%d x %.1f MiB recurrent slot%s)",
+                 (spec_state_scratch_bytes_ * static_cast<size_t>(slabs)) / (1024.0 * 1024.0), slabs,
                  spec_state_scratch_bytes_ / (1024.0 * 1024.0),
                  spec_state_snap_ ? "" : ", snapshot slab failed");
 }

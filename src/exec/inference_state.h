@@ -277,6 +277,9 @@ struct InferenceState {
     // nullptr disables it; nothing else changes.
     void* spec_snap_slab = nullptr;
     const int* d_snap_n = nullptr;
+    // Bytes from spec_snap_slab to a second slab written with the state as of d_snap_n + 1 rows (GDN
+    // conv + scan, single chunk): one of two drafts accepted adopts it. 0 = none.
+    int64_t spec_snap2_off = 0;
     // The state as it was BEFORE this chunk. The conv snapshot's leading values
     // come from there; reading them from the live buffer races the commit that
     // another block writes into it.

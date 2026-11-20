@@ -29,6 +29,18 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // CSPLIT: CTAs per head along HD (blockIdx.z), each owning HD/CSPLIT state columns. The delta rule
 // is column-independent; K/Q normalisation is recomputed per CTA. fac_out has one writer per
 // element (delta[d] its column, k and g the d == 0 lanes).
+// Snapshot slab for the state after `rows` rows, nullptr = none: h_snap at snap_n rows, and for a single
+// sequence (no slot table) the slab snap2_off bytes behind it at snap_n + 1 rows.
+template <typename StateT>
+__device__ __forceinline__ StateT* gdn_snap_slab(StateT* h_snap, int rows, int snap_n, const int* seq_slots,
+                                                 int64_t snap2_off) {
+    if (rows == snap_n)
+        return h_snap;
+    if (seq_slots == nullptr && snap2_off != 0 && snap_n > 0 && rows == snap_n + 1)
+        return reinterpret_cast<StateT*>(reinterpret_cast<char*>(h_snap) + snap2_off);
+    return nullptr;
+}
+
 template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float, int CSPLIT = 1>
 // clang-format off: it reads HD * SPLIT inside __launch_bounds__ as a pointer type
 __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
@@ -48,6 +60,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     // state slot id, nullptr for single-sequence (h_state is then the caller's slot pointer,
     // gridDim.y=1). Sequences are INDEPENDENT and parallelise across blockIdx.y like heads do across
     // blockIdx.x; tokens within one sequence stay sequential (cannot batch).
+    // Without seq_slots (single sequence, h_snap contract) h_state_seq_stride is the byte distance from
+    // h_snap to a second slab that takes the state at snap_n + 1 rows; 0 = none (gdn_snap_slab).
     const int* __restrict__ seq_slots = nullptr, int64_t h_state_seq_stride = 0,
     // Ragged batch (cross-sequence prefill batching, roadmap 0(d)): seq_row_offsets is a prefix sum
     // [n_seq+1] into concatenated row arrays; sequence `seq` owns rows [off[seq],off[seq+1]),
@@ -280,8 +294,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         }
         float* const fac_mid = gdn_factor_mid(fac_out, fac_mid_t, t, real_n, seq, n_heads, h, fac_stride);
         gdn_factor_store<SS_PER>(fac_mid, s_k, SS, s_base, d, part, g_t, delta_d);
-        if (t + 1 == snap_n) {
-            StateT* S_col = h_snap_dst + static_cast<size_t>(h) * SS * HD + d;
+        if (StateT* const slab = gdn_snap_slab(h_snap_dst, t + 1, snap_n, seq_slots, h_state_seq_stride)) {
+            StateT* S_col = slab + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
             for (int s = 0; s < SS_PER; s++)
                 S_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
@@ -408,7 +422,8 @@ void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                        int grouped_layout, const int* d_real_n, float* h_snap, const int* d_snap_n) {
+                        int grouped_layout, const int* d_real_n, float* h_snap, const int* d_snap_n,
+                        int64_t snap2_off) {
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
     size_t smem = ((2 * state_size) + head_dim_ssm) * sizeof(float);
 
@@ -416,7 +431,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
     if (head_dim_ssm == 128 && state_size == 128) {
         launch_scan128<half, float>(n_heads, 1, stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y,
                                     n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                    h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
+                                    h_snap, d_snap_n, static_cast<const int*>(nullptr), snap2_off,
                                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
                                     static_cast<const int*>(nullptr), static_cast<float*>(nullptr), 0);
     } else if (head_dim_ssm == 64 && state_size == 64) {
@@ -424,7 +439,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(n_heads), dim3(64), size_t(smem), stream,
                     conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, n_groups,
                     conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n,
-                    static_cast<const int*>(nullptr), int64_t(0), static_cast<const int*>(nullptr),
+                    static_cast<const int*>(nullptr), snap2_off, static_cast<const int*>(nullptr),
                     static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
                     static_cast<float*>(nullptr), 0);
         IMP_CUDA_CHECK_LAUNCH();
@@ -457,13 +472,13 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                          cudaStream_t stream, int grouped_layout, const int* d_real_n, __nv_bfloat16* h_snap,
-                         const int* d_snap_n) {
+                         const int* d_snap_n, int64_t snap2_off) {
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));
     launch_scan128<half, __nv_bfloat16>(n_heads, 1, stream, conv_f32, alpha, beta, A_log, dt_bias, h_state, y,
                                         n_tokens, n_heads, n_groups, conv_channels, grouped_layout, d_real_n,
-                                        h_snap, d_snap_n, static_cast<const int*>(nullptr), int64_t(0),
+                                        h_snap, d_snap_n, static_cast<const int*>(nullptr), snap2_off,
                                         static_cast<const int*>(nullptr), static_cast<const int*>(nullptr),
                                         static_cast<const int*>(nullptr), static_cast<float*>(nullptr), 0);
 }

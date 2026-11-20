@@ -436,16 +436,16 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
 }
 
 void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int chunk_size, int grouped_layout, const int* d_real_n,
-                            float* h_snap, const int* d_snap_n) {
+                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
+                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                            int chunk_size, int grouped_layout, const int* d_real_n, float* h_snap,
+                            const int* d_snap_n, int64_t snap2_off) {
     // Snapshot row d_snap_n is in whole-range coordinates and the chunkwise kernel has no snapshot
     // write: a snapshot request runs the whole range as one fused scan (#2214).
     if (h_snap) {
         gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
                            n_heads, head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n,
-                           h_snap, d_snap_n);
+                           h_snap, d_snap_n, snap2_off);
         return;
     }
     gdn_scan_chunkwise_dispatch<half>(

@@ -411,8 +411,9 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
     const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
     const int* __restrict__ d_real_n, float* __restrict__ conv_snap, const int* __restrict__ d_snap_n,
-    const float* __restrict__ conv_prev, const int* __restrict__ seq_slots = nullptr,
-    int64_t slot_stride = 0) {
+    const float* __restrict__ conv_prev, const int* __restrict__ seq_slots = nullptr, int64_t slot_stride = 0,
+    // Bytes from conv_snap to a second slab taking the window at snap_n + 1 rows; 0 = none.
+    int64_t snap2_off = 0) {
     int token = blockIdx.x;
     if (token >= n_tokens)
         return;
@@ -466,11 +467,15 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // conv_state from a different block and nothing orders the two. Reading the live buffer
         // here silently picks up whichever block ran first, dropping draft acceptance with no
         // error anywhere.
-        if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
+        const bool second = snap2_off != 0 && snap_n > 0 && token == snap_n;
+        if (conv_snap && conv_prev && ((token == snap_n - 1 && snap_n != real_n) || second)) {
+            const int rows = token + 1;  // window as of this many rows
             const float* src_state = conv_prev + (static_cast<int64_t>(ch) * kernel_size);
-            float* snap = conv_snap + (static_cast<int64_t>(ch) * kernel_size);
+            float* snap = reinterpret_cast<float*>(reinterpret_cast<char*>(conv_snap) +
+                                                   (second ? snap2_off : int64_t(0))) +
+                          (static_cast<int64_t>(ch) * kernel_size);
             for (int k = 0; k < kernel_size; k++) {
-                int src_t = snap_n - kernel_size + k;
+                int src_t = rows - kernel_size + k;
                 snap[k] = (src_t >= 0) ? __half2float(x_in[(src_t * channels) + ch])
                                        : src_state[src_t + kernel_size];
             }
@@ -481,7 +486,7 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                  const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
                                  const int* d_real_n, void* conv_snap, const int* d_snap_n,
-                                 const void* conv_prev) {
+                                 const void* conv_prev, int64_t snap2_off) {
     int n_tokens = static_cast<int>(x_in.shape[0]);
     int channels = static_cast<int>(x_in.shape[1]);
     // Grid over (tokens, channel tiles). A 2-row verify chunk used to occupy
@@ -493,7 +498,7 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Ten
         static_cast<float*>(conv_state), static_cast<const half*>(x_in.data),
         static_cast<const half*>(weight.data), bias.data ? static_cast<const half*>(bias.data) : nullptr,
         x_out_f32, n_tokens, channels, conv_kernel, d_real_n, static_cast<float*>(conv_snap), d_snap_n,
-        static_cast<const float*>(conv_prev));
+        static_cast<const float*>(conv_prev), nullptr, int64_t(0), snap2_off);
     IMP_CUDA_CHECK_LAUNCH();
     launch_conv1d_commit(conv_state, static_cast<const half*>(x_in.data), n_tokens, channels, conv_kernel,
                          d_real_n, nullptr, 0, 1, stream);

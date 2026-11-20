@@ -155,7 +155,7 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         emit("  recurrent snapshots      %8.0f MiB  (server.recurrent_snapshot_mb)",
              probe.recurrent_snapshot_bytes / kMiB);
     if (probe.spec_decode_bytes)
-        emit("  speculative staging      %8.0f MiB  (hybrid verify state scratch, 2 x 1 slot)",
+        emit("  speculative staging      %8.0f MiB  (hybrid verify state scratch, 2-3 x 1 slot)",
              probe.spec_decode_bytes / kMiB);
     if (probe.mtp_workspace_bytes)
         emit("  MTP draft workspace      %8.0f MiB  (head KV slots + feed scratch, taken before serving)",

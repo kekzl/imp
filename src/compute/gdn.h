@@ -37,7 +37,9 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                         int grouped_layout = 0, const int* d_real_n = nullptr, float* h_snap = nullptr,
-                        const int* d_snap_n = nullptr);
+                        const int* d_snap_n = nullptr,
+                        // Bytes from h_snap to a second slab: state at d_snap_n + 1 rows. 0 = none.
+                        int64_t snap2_off = 0);
 
 // BF16-state twins (gdn.state_bf16): h_state as __nv_bfloat16, all arithmetic FP32 in
 // registers, halves the state traffic dominating batched decode. HD=SS=128 only; init
@@ -56,17 +58,17 @@ void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* a
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                          cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
-                         __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr);
+                         __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr,
+                         int64_t snap2_off = 0);
 
 // EXPERIMENTAL scaffolding for chunkwise SSD scan (Mamba2 SSD adapted to GDN's rank-1
 // (I - beta k k^T) update, unlike standard scalar-decay SSD; cf. Yang et al. 2024 delta rule).
 // Same signature as gdn_scan_fused_f32, functionally identical; validated by ChunkBoundaryHandoff.
 void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                            int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int chunk_size = 64, int grouped_layout = 0,
-                            const int* d_real_n = nullptr, float* h_snap = nullptr,
-                            const int* d_snap_n = nullptr);
+                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                            int chunk_size = 64, int grouped_layout = 0, const int* d_real_n = nullptr,
+                            float* h_snap = nullptr, const int* d_snap_n = nullptr, int64_t snap2_off = 0);
 
 // Phase 2a WY-rep parallel delta-rule scan: numerically equivalent to the sequential delta
 // rule, factors the chunk-internal dependency into a triangular solve + matmuls (naive

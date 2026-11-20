@@ -4,6 +4,29 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-20 · Hybrid verify: second state snapshot, one of two MTP drafts accepted no longer re-forwards
+
+nsys exclusive time on the 3-row MTP verify (Qwen3.8-27B-NVFP4-vllm, 175 steps): 145.6 gate/up GEMV launches per
+step against 128 per forward = 1.14 forwards per verify; the surplus is the replay after a partial accept (26 of
+190 verifies), a full forward each. The GDN conv and the fused scan now write a second snapshot (state after the
+chunk's second row) beside the first; `matched == 1` of 2 drafts adopts it with one device copy. Cost: one more
+recurrent slot of VRAM (79.5 MiB on this model, staging 159.0 -> 238.5 MiB; KV pool on the RTX 5090 32 GB unchanged
+at 2025 blocks). GDN models only (not Mamba2, KDA, the PLE conv); multi-candidate chunks keep one snapshot.
+`imp-cli --prompt`, 400 tokens, temperature 0, `--mtp-spec-decode 2`, `speculative.ngram=false`.
+
+| prompt | main tok/s (2 runs) | this tok/s (2 runs) | main ms/verify | this ms/verify | drafted / accepted |
+|---|---|---|---|---|---|
+| TCP congestion control prose | 111.17 / 113.38 | 123.78 / 124.91 | 18.75 / 18.42 | 16.86 / 16.71 | 308 / 207 both |
+| JSON array of 25 cities | 112.52 / 115.15 | 126.58 / 125.81 | 19.26 / 18.83 | 17.12 / 17.22 | 300 / 213 both |
+
+- `MtpGreedyIdentityTest` 6 of 6, per-token regret unchanged (mtp max 0.096 nats); mutant (adopt the first slab
+  at `matched == 1`): 4 / 2 / 3 tokens above 3.272 nats, max 17.128, both MTP tests FAILED.
+- Kernel tests: second slab equals a 2-row scan (max abs diff 0, f32 / bf16 / chunkwise) and a 2-row conv window.
+- Final tree (scan change without a kernel signature change): 124.55 / 128.14 tok/s, 16.76 / 16.91 ms/verify.
+- `make verify-fast` OK: tg128 286.76 tok/s (baseline 283.59, dense model, path untouched), PPL 11.2352.
+
+---
+
 ## 2026-11-20 · Spec verify: captured chunks <= 4 rows read FP16 activations, MTP greedy matches plain decode (narrows #2802)
 
 Graph-captured verify chunks up to `kSpecVerifyA16MaxRows` (4) rows moved from the small-M block (4-bit
