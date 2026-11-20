@@ -710,19 +710,19 @@ section "smoke prompts (degeneration check)"
 # expected substring AND the last 32 tokens must have >=8 distinct tokens (catches "own own own"
 # stuck-token failures). $6 (optional): extra imp-cli arguments. $5 (optional): minimum generated tokens, default 10 with an exception
 # for single-word-factual prompts (this gate's own prompt answers in 11 tokens on the 4B model).
-# decode_route_parity MODEL: `--perplexity-decode 64` (per-step decode route, is_prefill off) against
-# `--perplexity` (prefill) on rows 64.. of the first 6000 corpus bytes. FAIL above +3 %.
+# decode_route_parity MODEL [CORPUS]: `--perplexity-decode 64` (per-step decode route, is_prefill off)
+# against `--perplexity` (prefill) on rows 64.. of the first 6000 corpus bytes. FAIL above +3 %.
 # Sweep over more models: tools/analysis/decode_path_parity.sh.
 decode_route_parity() {
-    local model="$1" label="decode-route PPL parity ($1)"
+    local model="$1" corpus="${2:-$DRIFT_CORPUS}" label="decode-route PPL parity ($1)"
     local dir; dir=$(model_dir "$model")
-    if [ -z "$dir" ] || [ ! -f "$DRIFT_CORPUS" ]; then
-        skip "$label (model or $DRIFT_CORPUS not present)"
+    if [ -z "$dir" ] || [ ! -f "$corpus" ]; then
+        skip "$label (model or $corpus not present)"
         return
     fi
     model_gate_ran
     local text; text=$(mktemp)
-    head -c 6000 "$DRIFT_CORPUS" > "$text"
+    head -c 6000 "$corpus" > "$text"
     local common=(--model "$dir" --perplexity "$text" --set runtime.deterministic=true
                   --set speculative.mtp_k=0)
     local p s
@@ -799,6 +799,8 @@ smoke_prompt "Qwen3-8B NVFP4 (dense)" \
     "The capital of France is" \
     "Paris" \
     5
+# One row per model class, 12 checkpoints swept on main 2026-11-20: step arm -5.07 .. +1.13 %.
+decode_route_parity "Qwen3-8B-NVFP4-cortecs"  # dense NVFP4: -3.57 %
 
 if [ "$MODE" = "full" ]; then
     smoke_prompt "Qwen3.8-27B NVFP4 (GDN)" \
@@ -817,6 +819,12 @@ if [ "$MODE" = "full" ]; then
     # Teacher-forced PPL of the per-step decode route against prefill, same rows. With the #3179 fix
     # reverted the step arm read 10.0269 against 5.4632 (+83.5 %); fixed 5.3812 (-1.50 %).
     decode_route_parity "Qwen3.8-27B-NVFP4-QAD"
+    decode_route_parity "Qwen3-8B-FP8"                   # dense FP8: -0.14 %
+    decode_route_parity "Qwen3.8-27B-NVFP4-vllm"         # GDN hybrid, all NVFP4: -1.09 %
+    decode_route_parity "Qwen3-30B-A3B-NVFP4-Modelopt"   # MoE: -2.29 %
+    decode_route_parity "Nemotron-3-Nano-30B-A3B-NVFP4"  # Mamba2 + MoE: -0.44 %
+    # Gemma scores plain text out of distribution (+14.95 %, #3174): its turn corpus, +1.13 %.
+    decode_route_parity "Gemma-4-26B-A4B-it-NVFP4" "tools/analysis/ppl_corpus_gemma4_turn.txt"
 fi
 
 # A run in which every model-backed gate skipped measured nothing on the GPU, so it is not a
