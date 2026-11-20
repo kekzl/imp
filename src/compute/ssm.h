@@ -70,7 +70,9 @@ void ssm_conv1d_commit(void* conv_state, const half* x_in, int64_t pitch, int n_
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                  const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
                                  const int* d_real_n = nullptr, void* conv_snap = nullptr,
-                                 const int* d_snap_n = nullptr, const void* conv_prev = nullptr);
+                                 const int* d_snap_n = nullptr, const void* conv_prev = nullptr,
+                                 // Bytes from conv_snap to a second slab: window at d_snap_n + 1 rows.
+                                 int64_t snap2_off = 0);
 
 // Grouped form (multi-candidate verify chunk on a hybrid): x_in holds n_seq groups of
 // n_tokens rows; group z reads/commits the conv window of pool slot seq_slots[z]

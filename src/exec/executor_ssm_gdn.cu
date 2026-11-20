@@ -477,7 +477,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32,
                                         conv_kernel, stream, state.d_chunk_len,
                                         conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr,
-                                        conv_prev);
+                                        conv_prev, state.spec_snap2_off);
         } else {
             // Decode: FP32 fused conv+SiLU (matches llama.cpp precision). Copies FP16
             // input to xBC_out first to avoid aliasing (conv_f32 writes FP32 back into
@@ -742,14 +742,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                           imp::cfg::kGdnChunkparStrip);
                 }
             } else if (use_chunkwise) {
-                gdn_scan_chunkwise_f32(conv_f32, conv_channels,
-                                       static_cast<const half*>(alpha_proj_out.data),
+                gdn_scan_chunkwise_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                        static_cast<const half*>(beta_proj_out.data),
                                        static_cast<const float*>(ly.ssm_a.data),
                                        static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                        static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
                                        n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len,
-                                       static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr);
+                                       static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr,
+                                       state.spec_snap2_off);
             } else if (state_bf16) {
                 gdn_scan_fused_bf16(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
                                     static_cast<const half*>(beta_proj_out.data),
@@ -757,7 +757,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                     static_cast<const float*>(ly.ssm_dt_b.data),
                                     static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data), n,
                                     n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len,
-                                    static_cast<__nv_bfloat16*>(h_snap), h_snap ? state.d_snap_n : nullptr);
+                                    static_cast<__nv_bfloat16*>(h_snap), h_snap ? state.d_snap_n : nullptr,
+                                    state.spec_snap2_off);
             } else {
                 // The verify snapshot (h_snap) goes to every default-path scan: without it a
                 // matched==0 verify adopted an unwritten slab.
@@ -767,7 +768,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                                    static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
                                    static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
                                    stream, gl, state.d_chunk_len, static_cast<float*>(h_snap),
-                                   h_snap ? state.d_snap_n : nullptr);
+                                   h_snap ? state.d_snap_n : nullptr, state.spec_snap2_off);
             }
         }
     }

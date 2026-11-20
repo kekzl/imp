@@ -1147,7 +1147,9 @@ private:
     // advances state through rejected draft positions; on partial acceptance
     // the slab is restored and the accepted prefix re-forwarded).
     void* spec_state_scratch_ = nullptr;
-    void* spec_state_snap_ = nullptr;  // mid-chunk recurrent snapshot (row 0)
+    void* spec_state_snap_ = nullptr;   // mid-chunk recurrent snapshot (row 0, then row 1 where written)
+    int64_t spec_state_snap2_off_ = 0;  // bytes to the row-1 snapshot, 0 = one row only
+    [[nodiscard]] int spec_snap_rows_() const;  // 2 = GDN conv + fused scan write both rows
     // diagnostics.spec_capture_fidelity tallies (see the flag in dispatch_policy.h).
     long long spec_fidelity_checked_ = 0;
     long long spec_fidelity_differing_ = 0;

@@ -622,8 +622,10 @@ void seed_mc_private_blocks(KVCache* kv, const std::vector<int>& block_table, co
 
 // Snapshot the state as of the chunk's FIRST row: that row is the last
 // real token, so it is the state a fully rejected draft needs.
+// snap2_off: bytes to a second slab for the state after the SECOND row (one of two drafts accepted);
+// grouped (multi-candidate) chunks take the grouped conv/scan launches, which write the first row only.
 void arm_first_row_snapshot(InferenceState& state, void* snap, int* d_snap_n, void* prev_slab,
-                            cudaStream_t stream) {
+                            const VerifyChunk& ch, int64_t snap2_off, cudaStream_t stream) {
     if (snap != nullptr && d_snap_n != nullptr) {
         const int snap_rows = 1;
         if (cuda_ok(cudaMemcpyAsync(d_snap_n, &snap_rows, sizeof(int), cudaMemcpyHostToDevice, stream),
@@ -631,6 +633,7 @@ void arm_first_row_snapshot(InferenceState& state, void* snap, int* d_snap_n, vo
             state.spec_snap_slab = snap;
             state.d_snap_n = d_snap_n;
             state.spec_prev_slab = prev_slab;  // the pre-chunk copy
+            state.spec_snap2_off = ch.mc_on ? 0 : snap2_off;
         }
     }
 }
@@ -793,6 +796,13 @@ void restore_hybrid_after_accept(bool hybrid, SSMState* ssm, int rec_slot, void*
         // forward. Everything below is the general path for a partial
         // acceptance that landed further along.
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm->seq_base(rec_slot), state.spec_snap_slab,
+                                           ssm->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+    } else if (hybrid && matched == 1 && matched < ch.K && state.spec_snap_slab != nullptr &&
+               state.spec_snap2_off != 0 && req.status != RequestStatus::FINISHED) {
+        // One draft accepted: the state after the chunk's second row sits in the second snapshot
+        // slab (the replay it replaces ran in 26 of 190 MTP k=2 verifies, a full forward each).
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm->seq_base(rec_slot),
+                                           static_cast<char*>(state.spec_snap_slab) + state.spec_snap2_off,
                                            ssm->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
     } else if (hybrid && matched < ch.K && req.status != RequestStatus::FINISHED) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm->seq_base(rec_slot), scratch, ssm->per_seq_bytes(),
@@ -1110,7 +1120,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                      "state snapshot D2D"))
             return decline();
         (void)fill_recurrent_state(*req, state, /*reset=*/false, stream);  // reset=false cannot fail
-        arm_first_row_snapshot(state, spec_state_snap_, d_spec_snap_n_, spec_state_scratch_, stream);
+        arm_first_row_snapshot(state, spec_state_snap_, d_spec_snap_n_, spec_state_scratch_, ch,
+                               spec_state_snap2_off_, stream);
     }
 
     state.ple_host_ready = !ch.mc_on &&
