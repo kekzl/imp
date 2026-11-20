@@ -601,7 +601,7 @@ static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, in
     if (pick >= 0) {
         entry.algo = results[pick].algo;
         log_algo_pick(in_capture ? "host-checked, first seen inside a stream capture"
-                                 : "host-checked, FP8 row pin for every M",
+                                 : "host-checked, row pin for every M",
                       M, K, N, pick, nresults, entry.algo);
     } else
         IMP_LOG_INFO("[gemm-algo] pick M=%ld K=%ld N=%ld host-checked: none of %d candidates, default algo",
@@ -694,6 +694,23 @@ static bool fp16_acc_route(const Tensor& A, const Tensor& B, const Tensor& C) {
            B.qtype == QType::F16 && C.qtype == QType::F16;
 }
 
+// Row pin of the generic route: FP16 x FP16 prompt rows (M > 32; smaller M are decode batches) keep one
+// algo per (N, K), the heuristic pick at kF16RowPinRefM. Bucketed picks changed split-K with M (5 at 16,
+// 6 at 32, 1 at 1096 rows): a prefix-cache resend moved the logprobs on FP16 attention weights (#2152
+// class, Gemma-4-26B Modelopt). Ref 128 vs 512: pp64 6647 vs 4662 tok/s, pp512 22337 vs 25100.
+static constexpr int64_t kF16RowPinRefM = 128;
+static int64_t generic_key_m(const Tensor& A, const Tensor& B, const Tensor& C) {
+    const bool pin = A.shape[0] > 32 && A.qtype == QType::F16 && B.qtype == QType::F16 &&
+                     C.qtype == QType::F16;
+    return pin ? kFp8RowPinKeyM : bucket_m(A.shape[0]);
+}
+static bool first_row_pin_build(const GemmCacheKey& key) {
+    return key.M == kFp8RowPinKeyM && !key.exact_m && !s_gemm_cache.contains(key);
+}
+static cudaDataType_t scale_type_of(cublasComputeType_t ct) {
+    return ct == CUBLAS_COMPUTE_32I ? CUDA_R_32I : (ct == CUBLAS_COMPUTE_16F ? CUDA_R_16F : CUDA_R_32F);
+}
+
 // gemm()'s caller while gemm_cublaslt_generic runs (lt_route_note site).
 static thread_local const std::source_location* t_gemm_caller = nullptr;
 
@@ -759,20 +776,25 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                   (int)M, (int)N, (int)K, 1, gemm_caller());
     cublasLtHandle_t lt = get_cublaslt_handle();
 
-    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, bucket_m(M), K, N, false};
+    GemmCacheKey cache_key{
+        cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, generic_key_m(A, B, C), K, N, false};
 
     GemmCacheEntry* entry = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
         entry = entry_for_m(lt, cache_key, M, cuda_dtype_A, cuda_dtype_C, K, N, [&] {
+            // First build of the pin key: algo at the ref M. An exact-M fallback (pin fails at M): at M.
+            const bool pin_build = first_row_pin_build(cache_key);
+            const int64_t m = pin_build ? kF16RowPinRefM : M;
             GemmCacheEntry new_entry{};
-            new_entry.desc_M = M;
-            cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)   ? CUDA_R_32I
-                                        : (compute_type == CUBLAS_COMPUTE_16F) ? CUDA_R_16F
-                                                                                : CUDA_R_32F;
-
-            create_gemm_descriptors(new_entry, compute_type, scale_type, cuda_dtype_A, cuda_dtype_B,
-                                    cuda_dtype_C, (int)K, (int)M, (int)N);
+            new_entry.desc_M = m;
+            create_gemm_descriptors(new_entry, compute_type, scale_type_of(compute_type), cuda_dtype_A,
+                                    cuda_dtype_B, cuda_dtype_C, (int)K, (int)m, (int)N);
+            if (pin_build) {
+                select_algo_host_only(lt, new_entry, m, K, N, /*in_capture=*/false);
+                new_entry.workspace_size = s_workspace_size;  // serves every M: the shared workspace caps it
+                return new_entry;
+            }
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
