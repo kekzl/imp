@@ -137,6 +137,8 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K % k_align) != 0)
         return nullptr;
+    if (cur_spec_verify_ && !verify_smallm_rows_(M))
+        return nullptr;  // the verify consumer reads FP16 rows, nobody reads the scratch
     if (consumer_id == kInvalidTensorID)
         return nullptr;
     NvFP4QuantResult nv;
