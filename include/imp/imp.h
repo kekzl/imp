@@ -179,6 +179,9 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
 // while forcing. imp_forced_decode_count: tokens forced so far, tokens[0] included (-1 = no request).
 ImpError imp_set_forced_decode(ImpContext ctx, const int32_t* tokens, int n_tokens);
 int imp_forced_decode_count(ImpContext ctx);
+// With params.logprobs = 1 every forced step scores the token it emits on the per-step decode route:
+// out_nll_sum = sum of -log p, out_n = scored steps (tokens[1..], tokens[0] is prefill's prediction).
+ImpError imp_forced_decode_nll(ImpContext ctx, double* out_nll_sum, int* out_n);
 
 // Teacher-forced perplexity over tokens[0..n_tokens-1]: resets context, runs a SINGLE-CHUNK
 // prefill (all-position hidden survives), applies the LM head to every position.

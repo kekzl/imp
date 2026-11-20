@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Decode-path PPL against prefill PPL, one row per model. `--perplexity` runs prefill only; the arm
-# `--prefill-chunk-size 1` sends every row through the M=1 decode path. A decode-only defect shows as
-# decode PPL far above prefill PPL (#3172: Ornith-1.5 +38.04 % before the fix, +0.64 % after).
+# Decode-path PPL against prefill PPL, one row per model, the same scored rows ($PREFILL .. n-2) per arm.
+# `--perplexity` runs prefill only. Arm chunk1 (`--prefill-chunk-size 1`) sends every row through the M=1
+# kernels but forwards with is_prefill; arm step (`--perplexity-decode`) is the per-step decode route a
+# chat takes (is_prefill off). #3172 showed in chunk1 (Ornith-1.5 +38.04 %), #3179 only in step
+# (Qwen3.8-27B-NVFP4-QAD, fix reverted: chunk1 5.3669 unchanged, step 5.3812 -> 10.0269).
 # Usage: tools/analysis/decode_path_parity.sh IMAGE MODEL_DIR_NAME...   (names under $MODELS_DIR)
 #   TEXT=<file>      corpus, default the first $BYTES bytes of tools/analysis/ppl_corpus_45k.txt
-#   THRESHOLD=3      FAIL when decode PPL exceeds prefill PPL by more than this many percent
-#   EXTRA="..."      extra imp-cli args for both arms (e.g. "--set runtime.max_batch_size=1")
+#   PREFILL=64       rows the step arm prefills; every arm scores the rows after them
+#   THRESHOLD=3      FAIL when chunk1 or step PPL exceeds prefill PPL by more than this many percent
+#   EXTRA="..."      extra imp-cli args for every arm (e.g. "--set runtime.max_batch_size=1")
 # GPU job: take the lock first (scripts/gpu_lock.sh). Exit 1 on any FAIL or missing PPL line.
 set -uo pipefail
 IMG=$1; shift
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 OUT_DIR=${OUT_DIR:-/mnt/data/scratch/decode_path_parity}
 BYTES=${BYTES:-6000}
+PREFILL=${PREFILL:-64}
 THRESHOLD=${THRESHOLD:-3}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$OUT_DIR"
@@ -25,22 +29,27 @@ ppl() {  # model tag extra args...
     grep -oP '^perplexity: \K[0-9.]+' "$OUT_DIR/$model.$tag.log" | tail -1
 }
 
+pct() { awk -v p="$1" -v d="$2" 'BEGIN { printf "%.2f", (d / p - 1) * 100 }'; }
+
 rc=0
-printf '%-44s %10s %10s %9s  %s\n' model prefill decode delta_pct verdict
+printf '%-44s %9s %9s %9s %9s %9s  %s\n' model prefill chunk1 step chunk1_pct step_pct verdict
 for m in "$@"; do
-    p=$(ppl "$m" prefill)
-    d=$(ppl "$m" decode --prefill-chunk-size 1)
-    if [ -z "$p" ] || [ -z "$d" ]; then
-        printf '%-44s %10s %10s %9s  %s\n' "$m" "${p:--}" "${d:--}" - "FAIL (no perplexity line, $OUT_DIR/$m.*.log)"
+    p=$(ppl "$m" prefill --set "diagnostics.ppl_first=$PREFILL")
+    c=$(ppl "$m" chunk1 --set "diagnostics.ppl_first=$PREFILL" --prefill-chunk-size 1)
+    s=$(ppl "$m" step --perplexity-decode "$PREFILL")
+    if [ -z "$p" ] || [ -z "$c" ] || [ -z "$s" ]; then
+        printf '%-44s %9s %9s %9s %9s %9s  %s\n' "$m" "${p:--}" "${c:--}" "${s:--}" - - \
+            "FAIL (no perplexity line, $OUT_DIR/$m.*.log)"
         rc=1
         continue
     fi
-    delta=$(awk -v p="$p" -v d="$d" 'BEGIN { printf "%.2f", (d / p - 1) * 100 }')
+    dc=$(pct "$p" "$c")
+    ds=$(pct "$p" "$s")
     verdict=ok
-    if awk -v x="$delta" -v t="$THRESHOLD" 'BEGIN { exit !(x > t) }'; then
+    if awk -v a="$dc" -v b="$ds" -v t="$THRESHOLD" 'BEGIN { exit !(a > t || b > t) }'; then
         verdict=FAIL
         rc=1
     fi
-    printf '%-44s %10s %10s %9s  %s\n' "$m" "$p" "$d" "$delta" "$verdict"
+    printf '%-44s %9s %9s %9s %9s %9s  %s\n' "$m" "$p" "$c" "$s" "$dc" "$ds" "$verdict"
 done
 exit $rc
