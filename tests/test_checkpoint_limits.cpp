@@ -500,5 +500,32 @@ TEST(CheckpointLimits, AConfigDeclaringAGiantHeadDimIsRefused) {
     fs::remove_all(root);
 }
 
+// A checkpoint of a class without a loader: 200 unclaimed names give 16 WARN lines, one count line
+// and an error that says "unsupported architecture" (Nemotron-3.5-Bolt logged 28 884 WARN lines and
+// "no tensors were assigned").
+TEST(CheckpointLimits, AnUnknownArchitectureIsRefusedInAFewLines) {
+    const LogLevel saved = log_get_level();
+    log_set_level(LogLevel::WARN);
+    std::unordered_map<std::string, Tensor> tensors;
+    for (int i = 0; i < 200; ++i)
+        tensors["vision_model.radio_model.model.blocks." + std::to_string(i) + ".norm1.weight"] = Tensor{};
+    Model model;
+    WeightMap wm(ModelArch::GENERIC);
+    testing::internal::CaptureStderr();
+    const bool ok = wm.apply_weights(model, tensors);
+    const std::string log = testing::internal::GetCapturedStderr();
+    log_set_level(saved);
+
+    EXPECT_FALSE(ok);
+    size_t per_name = 0;
+    for (size_t at = log.find("unrecognised weight name:"); at != std::string::npos;
+         at = log.find("unrecognised weight name:", at + 1))
+        ++per_name;
+    EXPECT_EQ(per_name, 16u) << log;
+    EXPECT_NE(log.find("200 unrecognised weight names in total"), std::string::npos) << log;
+    EXPECT_NE(log.find("unsupported architecture"), std::string::npos) << log;
+    EXPECT_EQ(wm.skip_stats().unrecognised, 200);
+}
+
 }  // namespace
 }  // namespace imp
