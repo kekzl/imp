@@ -1205,6 +1205,13 @@ private:
     // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
     // its source bytes). false = that dispatch would not take the GEMV.
     [[nodiscard]] bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
+    // FP8 bytes gemm_via_handle_ would hand gemv_fp8 at M=1 (decode tier FP8 in wcache_.fp8).
+    [[nodiscard]] bool fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const;
+    // M=1 GDN input on FP8 in/gate + FP16 alpha/beta reading a folded norm row (one launch,
+    // no rmsnorm). Same decline contract and output layout as try_gdn_input_fused_m1_.
+    [[nodiscard]] bool try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input,
+                                                  Tensor& proj, Tensor& gate_out, int n_heads,
+                                                  cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // M=1 GDN launch fusion : in_proj+gate+alpha+beta in one
     // GEMV; out-proj adds the residual in its epilogue. False and no-op when a
     // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,

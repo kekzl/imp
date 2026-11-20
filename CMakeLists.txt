@@ -287,6 +287,7 @@ set(IMP_QUANT_SOURCES
     src/quant/mxfp8_sfatom.cu
     src/quant/nvfp4_gemv_fused.cu
     src/quant/nvfp4_gemv_gdn_input.cu
+    src/quant/fp8_gemv_fold.cu
     src/quant/nvfp4_gemv_moe.cu
     src/quant/mxfp4_gemm.cu
     # src/quant/turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
@@ -1429,6 +1430,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemv_gemma3_dims.cu
         tests/test_nvfp4_norm_fold.cu
         tests/test_nvfp4_gemv_gdn_input.cu
+        tests/test_fp8_gemv_fold.cu
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_grouped_nvfp4_args.cu
