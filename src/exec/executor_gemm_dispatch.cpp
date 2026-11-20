@@ -549,9 +549,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         StorageTier prefill = h.prefill_tier;
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
-        // Graph-captured verify steps take the small-M block; eager verify keeps the batched GEMV
-        // (smallm there: 10.93 -> 15.02 ms per verify).
-        const bool verify_smallm = ctx.spec_verify_small_m && cur_spec_verify_smallm_;
+        // Graph-captured verify steps above kSpecVerifyA16MaxRows rows take the small-M block; eager
+        // verify keeps the batched GEMV (smallm there: 10.93 -> 15.02 ms per verify).
+        const bool verify_smallm = ctx.spec_verify_small_m && verify_smallm_rows_(M);
 
         // Spec-verify chunk (#998): reads the NVFP4 decode overlay in one weight
         // pass per MR<=4 tile instead of dequantizing the source (GGUF K-quants
@@ -583,8 +583,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // micro-scales as the M=1 decode GEMV, but NOT the same kernel (decode
         // uses gemv_nvfp4_kpar, verify uses gemm_nvfp4_batched); no argmax parity
         // with non-speculative greedy output either way (docs/LIMITATIONS.md).
-        if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
-            input.qtype == QType::F16 && output.qtype == QType::F16 &&
+        if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) &&
+            M <= kSpecVerifyA16MaxRows && input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
             h.source_scales != nullptr && !dequant_gpu_supported(h.source_qtype)) {
             NvFP4QuantResult nv;

@@ -781,6 +781,10 @@ private:
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
     bool cur_spec_verify_smallm_ = false;  // InferenceState::spec_verify_smallm
+    // Captured verify rows on the small-M block: only above kSpecVerifyA16MaxRows.
+    [[nodiscard]] bool verify_smallm_rows_(int M) const {
+        return cur_spec_verify_smallm_ && M > kSpecVerifyA16MaxRows;
+    }
     // Set by forward_logits: the forward's rows are generated tokens (batched
     // decode or a spec-verify chunk), not prompt rows. Gates the GGUF NVFP4
     // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode

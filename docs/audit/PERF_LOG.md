@@ -4,6 +4,26 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-20 · Spec verify: captured chunks <= 4 rows read FP16 activations, MTP greedy matches plain decode (narrows #2802)
+
+Graph-captured verify chunks up to `kSpecVerifyA16MaxRows` (4) rows moved from the small-M block (4-bit
+activations, every captured verify chunk since #2802, key `speculative.verify_smallm_captured` hardcoded since
+#3109) to the batched GEMV (FP16 activations), as on eager verify steps. #2802 now covers chunks above 4 rows only
+(n-gram, DSpark 8 rows, DFlash 16 rows). Qwen3.8-27B-NVFP4-vllm, RTX 5090, `imp-cli --prompt`, 400 tokens,
+temperature 0, `--mtp-spec-decode 2`, `speculative.ngram=false`.
+
+| prompt | main tok/s (2 runs) | fix tok/s (2 runs) | main ms/verify | fix ms/verify | plain decode (mtp_k=0) |
+|---|---|---|---|---|---|
+| TCP congestion control prose | 128.38 / 132.56 | 114.93 / 114.95 | 16.70 | 18.17 | 97.17 |
+| JSON array of 25 cities | 122.52 / 123.39 | 116.92 / 116.53 | 16.36 | 18.55 / 18.61 | 97.16 |
+
+- Cost accepted: the 4-bit rows parted from the M=1 decode, `MtpGreedyIdentityTest` JSON arm gap at the first
+  differing token 3.870 / 12.180 nats (main) -> 0.002 nats, 2 of 3 JSON prompts identical (44 / 127 tokens).
+- DSpark / DFlash: tokens unchanged, 4.83 / 5.36 ms per verify (main 4.80 / 5.46).
+- `make verify-fast`: tg128 290.99 tok/s (baseline 283.59), pp512 48001.07 (baseline 48138.68), PPL 11.2352.
+
+---
+
 ## 2026-11-18 · Flash-Next: host experts pin with 6 GiB RAM headroom, 63.6 -> 102.6 tok/s at 69.7 GiB available (B-60)
 
 `host_ram_holds` (pin decision, also asked by the auto max_batch_size resolver) keeps a flat 6 GiB instead of

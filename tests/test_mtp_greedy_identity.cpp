@@ -73,7 +73,24 @@ struct GreedyRun {
     // top-1 minus top-2 logp at each step, as this arm saw it. +inf when the
     // engine returned fewer than two alternatives for a step.
     std::vector<float> margin;
+    // Logprob of the sampled token and the top-20 alternatives per step (logprobs run only).
+    std::vector<float> lp;
+    std::vector<std::vector<std::pair<int32_t, float>>> top;
+    int32_t prefill_token = -1;
+    std::string text;  // prefill token + tokens, detokenized
 };
+
+std::string detok(ImpModel model, const GreedyRun& run) {
+    std::vector<int32_t> ids;
+    if (run.prefill_token >= 0)
+        ids.push_back(run.prefill_token);
+    ids.insert(ids.end(), run.tokens.begin(), run.tokens.end());
+    std::vector<char> buf(16384, '\0');
+    if (imp_detokenize(model, ids.data(), static_cast<int>(ids.size()), buf.data(), buf.size()) !=
+        IMP_SUCCESS)
+        return "<detokenize failed>";
+    return buf.data();
+}
 
 bool chat_mode() {
     const char* v = getenv("IMP_TEST_MTP_CHAT");
@@ -92,7 +109,7 @@ GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_g
     params.seed = 42;
     params.max_tokens = n_gen;
     params.logprobs = want_margins ? 1 : 0;
-    params.top_logprobs = want_margins ? 2 : 0;
+    params.top_logprobs = want_margins ? 20 : 0;
     params.json_mode = json ? 1 : 0;
 
     GreedyRun run;
@@ -117,6 +134,9 @@ GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_g
     // output_logprobs lives on the request.
     std::shared_ptr<imp::Request> req = ctx->active_request;
 
+    // Output token 0 is sampled by the prefill: not in tokens (imp_decode_step starts at token 1,
+    // output_logprobs has no row for it either), but the text needs it.
+    run.prefill_token = ctx->prefill_token;
     run.tokens.reserve(n_gen);
     for (int i = 0; i < n_gen; i++) {
         int32_t tok = -1;
@@ -132,6 +152,11 @@ GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_g
             if (info.top.size() >= 2)
                 m = info.top[0].logprob - info.top[1].logprob;
             run.margin.push_back(m);
+            run.lp.push_back(info.logprob);
+            std::vector<std::pair<int32_t, float>> top;
+            for (const auto& t : info.top)
+                top.emplace_back(t.token, t.logprob);
+            run.top.push_back(std::move(top));
         }
     }
     return run;
@@ -156,7 +181,19 @@ constexpr const char* kChatPrompts[] = {
     "Compose a polite email to a colleague asking them to review a draft document by end of week. Keep it "
     "under 80 words.",
 };
-std::vector<const char*> prompts() {
+// json arm: a prompt that does not ask for JSON closes after "[1]" (16 tokens on
+// Qwen3.8-27B-NVFP4-vllm), below the 32-token floor.
+constexpr const char* kJsonPrompts[] = {
+    "A JSON array of twelve programming languages, each an object with the keys name, year, paradigm and "
+    "a one-sentence description:\n",
+    "A JSON object describing the eight planets of the solar system: for each planet its diameter in km, "
+    "its number of moons and one sentence about its atmosphere:\n",
+    "A JSON array with the first twenty prime numbers, each as an object with the keys index, value and "
+    "is_twin_prime:\n",
+};
+std::vector<const char*> prompts(bool json = false) {
+    if (json)
+        return {std::begin(kJsonPrompts), std::end(kJsonPrompts)};
     if (chat_mode())
         return {std::begin(kChatPrompts), std::end(kChatPrompts)};
     return {std::begin(kPrompts), std::end(kPrompts)};
@@ -173,7 +210,7 @@ void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline, bo
     cfg.max_batch_size = 1;
     ImpContext ctx = nullptr;
     ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
-    for (const char* p : prompts()) {
+    for (const char* p : prompts(json)) {
         const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json);
         GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json);
         const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true, json);
@@ -208,6 +245,10 @@ void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline, bo
         plain.margin.assign(with_lp.margin.begin(),
                             with_lp.margin.begin() +
                                 static_cast<std::ptrdiff_t>(std::min(lp_split, with_lp.margin.size())));
+        const size_t keep = std::min(lp_split, with_lp.margin.size());
+        plain.lp.assign(with_lp.lp.begin(), with_lp.lp.begin() + static_cast<std::ptrdiff_t>(keep));
+        plain.top.assign(with_lp.top.begin(), with_lp.top.begin() + static_cast<std::ptrdiff_t>(keep));
+        plain.text = detok(model, plain);
         baseline->push_back(std::move(plain));
     }
     imp_context_free(ctx);
@@ -215,7 +256,7 @@ void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline, bo
     for (size_t i = 0; i < baseline->size(); ++i) {
         ASSERT_GE((*baseline)[i].tokens.size(), 32u)
             << "prompt " << i << " produced " << (*baseline)[i].tokens.size()
-            << " tokens; too few for the comparison to mean anything";
+            << " tokens; too few for the comparison to mean anything: \"" << (*baseline)[i].text << "\"";
         ASSERT_GT((*baseline)[i].margin.size(), 0u)
             << "prompt " << i << ": the logprobs run returned no margins, the oracle has nothing to read";
     }
@@ -223,7 +264,7 @@ void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline, bo
 
 // First diverging token per prompt; its arm-A margin must lie inside the batch-shape envelope.
 void expect_near_tie_only(const std::vector<GreedyRun>& baseline, const std::vector<GreedyRun>& speculated,
-                          const char* arm) {
+                          const char* arm, bool json = false) {
     for (size_t i = 0; i < baseline.size(); ++i) {
         const auto& a = baseline[i].tokens;
         const auto& b = speculated[i].tokens;
@@ -246,16 +287,28 @@ void expect_near_tie_only(const std::vector<GreedyRun>& baseline, const std::vec
                 arm, i, first, a[first], b[first], baseline[i].margin.size());
             continue;
         }
-        const float margin = baseline[i].margin[first];
+        // Gap between the two choices as the plain arm scored them: lp(plain) - lp(spec). The spec
+        // token outside the plain top-20 gives a lower bound (lp(plain) - lp(rank 20)).
+        const auto& top = baseline[i].top[first];
+        float lp_spec = top.empty() ? baseline[i].lp[first] : top.back().second;
+        bool ranked = false;
+        for (const auto& t : top) {
+            if (t.first == b[first]) {
+                lp_spec = t.second;
+                ranked = true;
+            }
+        }
+        const float gap = baseline[i].lp[first] - lp_spec;
         std::printf(
-            "[spec-identity] %s prompt %zu: parts at token %zu (plain %d, spec %d), margin %.3f nats\n", arm,
-            i, first, a[first], b[first], margin);
-        EXPECT_LE(margin, kBatchShapeMarginNats)
-            << "prompt " << i << " (" << prompts()[i] << "): greedy output parted at token " << first
-            << " (plain chose " << a[first] << ", " << arm << " chose " << b[first] << ") where the "
-            << "plain arm's top-1/top-2 margin was " << margin << " nats.\n"
+            "[spec-identity] %s prompt %zu: parts at token %zu (plain %d, spec %d), gap %s%.3f nats, "
+            "plain top-1/top-2 margin %.3f\n",
+            arm, i, first, a[first], b[first], ranked ? "" : ">= ", gap, baseline[i].margin[first]);
+        EXPECT_LE(gap, kBatchShapeMarginNats)
+            << "prompt " << i << " (" << prompts(json)[i] << "): greedy output parted at token " << first
+            << " (plain chose " << a[first] << ", " << arm << " chose " << b[first] << "), which the plain "
+            << "arm scored " << gap << " nats apart" << (ranked ? "" : " or more") << ".\n"
             << "The batch shape of the verify chunk can only flip a near-tie (SETTLED D-2, #1924: "
-            << "max 1.636 nats per token). A flip at this margin is a verify/accept defect: an "
+            << "max 1.636 nats per token). A flip at this gap is a verify/accept defect: an "
             << "accepted draft the model would not have sampled.";
     }
 }
@@ -298,17 +351,13 @@ void mtp_identity(bool json) {
     }
 
     std::vector<GreedyRun> speculated;
-    for (const char* p : prompts())
+    for (const char* p : prompts(json))
         speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json));
 
     // The margin oracle cannot see a mask violation (an unmasked first token passed it at 3.151
     // nats): every character the json arm emitted must advance the JSON grammar.
     for (size_t i = 0; json && i < speculated.size(); ++i) {
-        std::vector<char> buf(16384, '\0');
-        ASSERT_EQ(imp_detokenize(model, speculated[i].tokens.data(),
-                                 static_cast<int>(speculated[i].tokens.size()), buf.data(), buf.size()),
-                  IMP_SUCCESS);
-        const std::string text(buf.data());
+        const std::string text = detok(model, speculated[i]);
         imp::JsonGrammar g;
         g.reset();
         size_t bad = 0;
@@ -327,13 +376,15 @@ void mtp_identity(bool json) {
     // A green test proves nothing if the head never drafted (arms would be the non-speculative
     // path vs itself, #1321, why SpecStats exists) or if verify accepts nothing (plain path with
     // extra work, invisible to any token comparison).
+    std::printf("[spec-identity] %s drafted=%lld accepted=%lld\n", json ? "mtp-json" : "mtp",
+                static_cast<long long>(stats.mtp.drafted), static_cast<long long>(stats.mtp.accepted));
     ASSERT_GT(stats.mtp.drafted, 0)
         << "the MTP head drafted nothing over " << (kGenTokens * 3)
         << " greedy tokens, so this test compared the plain decode path against itself";
     ASSERT_GT(stats.mtp.accepted, 0)
         << "the MTP head drafted " << stats.mtp.drafted << " tokens and the verify accepted none";
 
-    expect_near_tie_only(baseline, speculated, json ? "mtp-json" : "mtp");
+    expect_near_tie_only(baseline, speculated, json ? "mtp-json" : "mtp", json);
 }
 
 TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) { mtp_identity(false); }

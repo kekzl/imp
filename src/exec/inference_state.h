@@ -11,6 +11,10 @@
 
 namespace imp {
 
+// Verify chunks up to this many rows read FP16 activations (batched GEMV) on every step, captured or
+// eager: 4-bit activation rows part from the M=1 decode by up to 8.7 nats (Qwen3.8-27B-NVFP4 json).
+inline constexpr int kSpecVerifyA16MaxRows = 4;
+
 // Constrained-decoding hooks referenced only by pointer here; full definitions live in
 // compute/json_constrain.h / schema_constrain.h / regex_constrain.h, included by the TUs
 // that dereference them (executor.cu).
@@ -106,7 +110,7 @@ struct InferenceState {
     // Verify reads its argmax from greedy_argmax_all over every chunk row: forward_logits skips its own LM
     // head (a second full head pass per verify step, 0.94 ms on the Qwen3.8-27B FP8 head). logits_out empty.
     bool skip_lm_head = false;
-    // Verify step that runs graph-captured: under speculative.verify_smallm_captured its GEMMs take the
+    // Verify step that runs graph-captured: chunks above kSpecVerifyA16MaxRows rows take the
     // small-M block, the step's eager warmup and fidelity forwards too, so graph and eager match.
     bool spec_verify_smallm = false;
     const int* seq_offsets =
