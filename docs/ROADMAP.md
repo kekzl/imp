@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-11-15
+Last reviewed: 2026-11-21
 
 Single-author, single-GPU experiment: "roadmap" means current focus, not
 schedule. Shipped work is in [`CHANGELOG.md`](../CHANGELOG.md), competitive
@@ -38,12 +38,17 @@ Method: both engines on one client (`tools/analysis/vllm_conc_ab.sh`), 3 alterna
 
 ## Now
 
-No open row; closed rows are indexed below. A new row takes the next free number (125), ranked by what an agent workload notices first.
+No open row; closed rows are indexed below. A new row takes the next free number (130), ranked by what an agent workload notices first. Rows 125-129 under Next are proposals of 2026-11-21, none measured.
 
 ## Next
 
 | # | outcome | now -> target | size | ref |
 |---|---|---|---|---|
+| 125 | sampled constrained turns and budgeted think blocks get speculation | OPEN, proposed 2026-11-21, unmeasured: greedy constrained rows speculate since row 46 (mask-checked argmax); refused today: a sampled request with `json_schema` / `grammar` / `regex_pattern` / tool constraint, and every token inside the think block at the default `think_budget=0.5`. Size of the prize on one stream: Qwen3.8-27B-NVFP4-QAD 70.1 / 76.9 tok/s without MTP vs 222.3 / 232.1 with (800 tokens, greedy, unconstrained). First step: share of tokens of a real agent session decoded under either refusal | M | `src/runtime/engine_spec_ngram.cpp:182 spec_constrained_refused_`, `src/runtime/engine_spec_ngram.cpp:193 think_budget_in_block`, row 46, no issue |
+| 126 | a restart, swap or idle unload keeps the prefix cache | OPEN, proposed 2026-11-21, unmeasured: KV blocks plus recurrent (GDN) snapshots of cached prefixes written to NVMe and restored on the next load of the same checkpoint; today both live in the process (host spill tier is pinned RAM). Acceptance: a 20k-token turn resent after a restart reports `cached_tokens` > 0 and answers like the unrestarted server | L | `src/runtime/engine.cpp:119 not persisted`, `src/memory/kv_cache_manager_spill.cpp:1 Host spill tier`, no issue |
+| 127 | checkpoints that ship KV scales serve FP8 KV by default | OPEN, proposed 2026-11-21, unmeasured: `k_scale` / `v_scale` tensors have no consumer (96 on Qwen3-Coder-30B-A3B-FP4, 12 on Nemotron-3.5-Lightning-30B). Acceptance: PPL with the checkpoint's scales within the FP8-KV quality gate against FP16 KV, then the dtype default for those checkpoints; the gain is KV blocks (QAD today: 2 of 32 slots at 131072 tokens) | M | `docs/LIMITATIONS.md:65 Calibrated KV-cache scales`, no issue |
+| 128 | an MTP verify accepts more tokens through candidate paths | OPEN, proposed 2026-11-21, unmeasured: top-k candidates per draft position, the verify keeps the longest accepted path (row 49 names it as the next prose lever). Today Qwen3.8-27B-NVFP4-QAD accepts 55.4 % of drafts, 3.61 tok/verify. Risk: every extra row is bandwidth, 16-row verifies cost 1.65x a decode step (row 49) | L | `src/core/config/speculative.h:103 mtp_batch_verify_k_streak`, row 49, no issue |
+| 129 | requests with different LoRA adapters share one batch | OPEN, proposed 2026-11-21, unmeasured: the adapter is engine-global today, a request naming another one waits for in-flight requests and is never batched with them. Acceptance: two adapters at 8 streams each within 10 % of one adapter at 16 | L | `docs/CONFIG.md:228 LoRA adapters (hot-swap)`, no issue |
 | 100 | `--calib` covers the shipped MoE and hybrid families | CLOSED 2026-10-17: glm4_moe_lite (MLA q_lora: groups Q, S) default `ABCDEGKQS` PPL 10.4179 / 13.5082 vs RTN 10.4301 / 13.7470; nemotron_h (Mamba2 G/E, A/C, relu^2 S) default `G` 10.1743 / 12.4981 vs RTN 10.2391 / 12.5052, E +12 % / +16 % stays opt-in; 14 model_types. Out: gpt_oss (owner 2026-10-11: no exact fold, `clamp(up, -7, 7)`), mistral4 (no imp arch, row 35). Table: `docs/archive/plans/2026-10-04-awq-moe-experts.md` | M | `tools/imp-quantize/awq_sites.cpp:140 kPlain[]`, `tools/imp-quantize/awq_plan.cpp:398 --calib does not support`, `src/compute/gpt_oss_glu.cuh:8 gpt_oss_glu_elem`, #2477, #2670 |
 
 ## Later
