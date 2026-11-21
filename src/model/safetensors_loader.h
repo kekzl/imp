@@ -26,6 +26,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 // Qwen MTP head, or fc not [d_model, 2 d_model]: nothing attached, mapping released.
 [[nodiscard]] bool attach_mtp_head_file(Model& model, const std::string& path);
 
+// An incomplete embedded Qwen head (nvidia/Qwen3.8-27B-NVFP4-QAD: 11 of 15 tensors): the head file of a
+// directory next to model_path that is complete and equals every embedded tensor byte for byte, first
+// in name order of at most 256 directories. Empty = none; the caller attaches with attach_mtp_head_file.
+[[nodiscard]] std::string find_sibling_mtp_head(const MtpHead& partial, const std::string& model_path);
+
 // True when a model.safetensors.index.json shard name is a bare filename next to the
 // index. Names are file content; a separator escapes the model directory into an
 // arbitrary open()/mmap() (#1612). Exposed for the test; the loader calls it first.

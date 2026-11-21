@@ -145,9 +145,21 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
 }
 
 void mtp_attach_external_head(Model& model, const RuntimeConfig& cfg, int requested_k) {
-    if (requested_k <= 0 || cfg.speculative.mtp_head.empty() || (model.mtp_ && model.mtp_->loaded))
+    if (requested_k <= 0 || (model.mtp_ && model.mtp_->loaded))
         return;
-    (void)attach_mtp_head_file(model, cfg.speculative.mtp_head);
+    if (!cfg.speculative.mtp_head.empty()) {
+        (void)attach_mtp_head_file(model, cfg.speculative.mtp_head);
+        return;
+    }
+    if (!model.mtp_)
+        return;
+    // Incomplete embedded head: a neighbouring checkpoint whose head equals it byte for byte completes it.
+    const std::string sibling = find_sibling_mtp_head(*model.mtp_, model.source_path());
+    if (!sibling.empty() && attach_mtp_head_file(model, sibling))
+        IMP_LOG_INFO(
+            "MTP head completed from %s (equals the embedded mtp.* tensors byte for byte); "
+            "speculative.mtp_k=0 opts out",
+            sibling.c_str());
 }
 
 }  // namespace imp::tools

@@ -103,7 +103,8 @@ struct Speculative {
     int mtp_batch_verify_k_streak = 7;
     // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
     // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
-    // Read only when MTP is requested and the model brings no head; empty = off.
+    // Read only when MTP is requested and the model brings no head. Empty: an incomplete embedded head is
+    // completed from a directory next to the model whose head equals its tensors byte for byte.
     std::string mtp_head;
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3): the chain re-reads the LM
