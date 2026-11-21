@@ -215,7 +215,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 | Qwen3-0.6B | 24.08 | 29.42 | **27.60** | +22.2% -> **+14.6%** |
 | Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | +18.4% -> **+8.7%** |
 | Qwen3-14B | 9.1961 (HF, CPU) | 9.9849 | **9.9068** (`BD`) | +8.6% -> **+7.7%** (Modelopt NVFP4 9.8183, +6.8%) |
-| Qwen3.8-27B | 4.4247 (HF, CPU) | 4.5882 (`--keep-gdn-proj in`), 4.5907 (all NVFP4) | **4.5413** (calibrated on the RTN export, all NVFP4; [record](audit/AUDIT_QWEN38_NVFP4.md#calibrated-export-2026-11-21)) | +3.7% -> **+2.6%** (Modelopt 4.5572, +3.0%; uncalibrated vllm export 4.6018, +4.0%) |
+| Qwen3.8-27B | 4.4247 (HF, CPU) | 4.5882 (`--keep-gdn-proj in`), 4.5907 (all NVFP4) | **4.5413** (calibrated on the RTN export, all NVFP4; [record](audit/AUDIT_QWEN38_NVFP4.md#calibrated-export-2026-11-21)) | +3.7% -> **+2.6%** (Modelopt 4.5572, +3.0%; the `-vllm` export is calibrated since 2026-11-21 and reads 4.5392, the one before 4.6018, +4.0%) |
 | DeepSeek-V2-Lite (MLA + MoE, 14 955 tok) | 9.0616 | 9.6015 | **9.5250** (default `ABCDEG`; `ABCDK` 9.5092) | +6.0% -> **+5.1%** |
 
 - 14B / 27B BF16: transformers on the CPU (`tools/analysis/hf_ppl_cpu.py`, neither fits the card), the token counts imp reads (13 537 / 13 811); on Qwen3-1.7B it reads 16.9035 vs imp 16.8827. Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
