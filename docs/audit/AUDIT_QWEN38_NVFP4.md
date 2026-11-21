@@ -140,4 +140,20 @@ Open after the campaign: P7 (b) (resolved 2026-09-10 as the conv1d commit race, 
 - Calibration: -1.36 % prefill, -0.75 % decode route, speed equal.
 - The first 6000 bytes alone read the other way on the decode route (5.4590 vs 5.4403): judge on the whole corpus.
 - `degen_suite.py` on the `--format vllm` export: 52 checks, 0 FAIL with the MTP head (auto) and with `mtp_k=0`; 15 MTP tensors and 333 vision tensors carried over.
-- Not checked: loading in vLLM.
+- Adopted 2026-11-21: the `--calib --format vllm` export is `Qwen3.8-27B-NVFP4-vllm` locally (previous export kept as `Qwen3.8-27B-NVFP4-vllm.pre-2026-11-21`) and on `kekzle/Qwen3.8-27B-NVFP4-vllm` (revision `ec3397ca`).
+- The calibration text shares no 200-byte window with `ppl_corpus_45k.txt` (30 windows probed).
+
+| check before the switch | previous export | calibrated export |
+|---|---:|---:|
+| imp-server defaults (MTP auto, k 7), 30 chat prompts x 300 tokens, end to end tok/s | 207.66 | 207.81 |
+| MTP accepted / drafted on those prompts | 5863 / 13071 (44.9 %) | 5863 / 12999 (45.1 %) |
+| imp-server defaults, 6 prompts x 400 tokens `ignore_eos`, mean decode tok/s | 207.77 | 201.89 |
+| vLLM 0.31.0, 6 prompts x 400 tokens, median decode tok/s | 70.58 | 71.29 |
+| `degen_suite.py`, MTP auto | 52 checks, 0 FAIL | 52 checks, 0 FAIL |
+
+[PROV: commit=e4791627 date=2026-11-21 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.5
+       path=imp-server+vllm-0.31.0 n=1-per-cell, 6-prompt rows 2 rounds x 2 server starts
+       cmd=`tools/analysis/seq_stream_client.py` (ROUNDS=2), 30 greedy chat requests with `/metrics` deltas, `tools/analysis/degen_suite.py`
+       note=the 6-prompt set reads 5 prompts slower (-2.8 .. -7.6 %) and 1 faster (+10.3 %) on the calibrated export, the 30-prompt set reads equal]
+
+- On the calibrated export `make verify` passes (decode-route parity 5.5095 / 5.4590, -0.92 %), `make test-hybrid-restore` 15 of 15, `make test-spec-fidelity` 1 of 1.

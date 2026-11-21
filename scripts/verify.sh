@@ -820,7 +820,7 @@ if [ "$MODE" = "full" ]; then
     # reverted the step arm read 10.0269 against 5.4632 (+83.5 %); fixed 5.3812 (-1.50 %).
     decode_route_parity "Qwen3.8-27B-NVFP4-QAD"
     decode_route_parity "Qwen3-8B-FP8"                   # dense FP8: -0.14 %
-    decode_route_parity "Qwen3.8-27B-NVFP4-vllm"         # GDN hybrid, all NVFP4: -1.09 %
+    decode_route_parity "Qwen3.8-27B-NVFP4-vllm"         # GDN hybrid, all NVFP4: -0.92 %
     decode_route_parity "Qwen3-30B-A3B-NVFP4-Modelopt"   # MoE: -2.29 %
     decode_route_parity "Nemotron-3-Nano-30B-A3B-NVFP4"  # Mamba2 + MoE: -0.44 %
     # Gemma scores plain text out of distribution (+14.95 %, #3174): its turn corpus, +1.13 %.
