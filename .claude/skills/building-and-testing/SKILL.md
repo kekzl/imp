@@ -35,7 +35,7 @@ description: Build, test suite, CI status, build/test failures - make build, tes
 | NIAH retrieval gate, spec fidelity | `make test-niah`, `make test-spec-fidelity` | spec-fidelity needs ~26 GB free |
 | Vision goldens | `make test-vision` (`IMP_VISION_GOLDEN_DUMP=1` regenerates) | |
 | Chat-template goldens | `make chat-goldens` (network, writes `tests/refs/chat_template_goldens.h`) | |
-| Pre-push gate | `make verify-fast` | 18 s without perf gate, 36 s with |
+| Pre-push gate | `make verify-fast` | 103 s without perf gate (`IMP_VERIFY_SKIP_PERF=1`), 115 s with (2026-11-20, image built) |
 | Full / chunked / north-star gates | `make verify`, `make verify-chunked`, `make verify-north-star` | ~5 min full |
 | Kernel register/spill ratchet (CI `kernels` gate) | `make kernel-resources`, re-pin `make kernel-resources-update` | needs `libimp.a` |
 | clang-format | `make format-check`; never bare `make format` | repo is not format-clean |
