@@ -4,6 +4,46 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.70.0] - 2026-11-21
+
+### Added
+- models: nvidia/Qwen3.8-27B-NVFP4-QAD is a supported row (PPL 4.5326 against 4.6018, decode 89.51 tok/s), an incomplete MTP head names its missing tensors (#3178)
+- vision: Qwen3.8-27B-NVFP4-QAD takes image input, vision model_type qwen3_5_vision joins the Qwen3-VL tower family (333 tensors assigned, 878.8 MiB, vision_sight_check 8/8 against 2/8 constant; before: text-only, image_input false) (#3196)
+- spec: an incomplete embedded MTP head is completed from a neighbouring checkpoint whose head equals it byte for byte (Qwen3.8-27B-NVFP4-QAD, 11 of 15 tensors: server 70.1 / 76.9 -> 222.3 / 232.1 tok/s over 800 tokens without speculative.mtp_head, 1.3 s at load) (#3197)
+
+### Changed
+- gdn: native FP8 gate projections are served from the checkpoint bytes (10 of 94 FP8 weights on Qwen3.8-27B-NVFP4-QAD were dequantized per token) (#3176)
+- gdn: M=1 fused input GEMV also on checkpoints with an alpha|beta pack (Qwen3.8-27B-NVFP4-QAD tg128 87.75 -> 89.18 tok/s without MTP) (#3177)
+- gdn: FP8 GDN projections join the M=1 norm fold on mixed NVFP4+FP8 checkpoints (DaisyRose-27B-NVFP4 tg256 81.43 -> 83.59 tok/s, Qwen3.8-27B-NVFP4-QAD 92.54 -> 93.11) (#3182)
+- spec: hybrid verify writes a second state snapshot, one of two MTP drafts accepted adopts it instead of re-forwarding (Qwen3.8-27B-NVFP4 MTP k=2: 111.2-115.2 -> 123.8-128.1 tok/s, 18.4-19.3 -> 16.7-17.2 ms/verify, +79.5 MiB) (#3194)
+
+### Fixed
+- attention: one-row decode on FP8 q/k/v after an NVFP4 producer read an unnormalised row (Qwen3.8-27B-NVFP4-QAD without MTP: degen_suite 10 FAIL -> 0) (#3179)
+- cli: --perplexity commits its KV pool up front (Qwen3.8-Flash-Next --prefill-chunk-size 1: 'insufficient KV capacity' -> PPL 5.3168, pool 100 -> 430 blocks at init) (#3185)
+- loader: a checkpoint of an unknown architecture is refused as 'unsupported architecture' in 220 log lines (Nemotron-3.5-Bolt: 29087 lines, 'invalid or corrupt model file') (#3187)
+- gemm: FP16 prompt GEMMs keep one cuBLASLt algo per shape, prefix-cache resend bit-equal on Gemma-4-26B Modelopt (make test-e2e rc 2 -> 0; pp512 25100 -> 22337 tok/s, pp2048 33960 -> 33076) (#3188)
+- spec: graph-captured verify chunks up to 4 rows read FP16 activations, MTP no longer parts from plain greedy at 3.9-12.2 nats on JSON (Qwen3.8-27B-NVFP4: first differing token gap 12.180 -> 0.002 nats, make test-gpu rc 2 -> 0; MTP 122.5-132.6 -> 114.9-116.9 tok/s, plain 97.2) (#3190)
+- gates: make verify runs a smoke or parity checkpoint from the model store when models/ lacks its link (verify full on this box: 3 Qwen3.8-27B gates SKIP -> PASS, decode-route parity -1.83 %) (#3191)
+
+### Internal
+- verify: full verify smoke-tests one-row decode on Qwen3.8-27B-NVFP4-QAD without MTP (v0.69.1: one token 8 times in a row, main: PASS) (#3180)
+- verify: `imp-cli --perplexity-decode` scores the per-step decode route, full verify gates it on Qwen3.8-27B-NVFP4-QAD (#3179 reverted: 5.3812 -> 10.0269, chunk-size-1 arm blind at 5.3669) (#3181)
+- models: Qwen3.8-27B-NVFP4-QAD decode row 89.51 -> 93.11 tok/s after #3182 (3 process starts: 93.14 / 93.09 / 93.10) (#3183)
+- models: RadixArk/DaisyRose-27B-NVFP4 is a supported row (PPL 4.5762 against 4.6018, decode 83.59 tok/s, degen_suite 0 FAIL with and without the MTP head) (#3184)
+- skills: decode_path_parity on LFM2.5-24B reads the prefix rows (A4 prefix 13.8799, A16 prefix 15.3408 / 15.6544 on the same 1667 decode rows) (#3186)
+- gates: degen_suite kv-growth runs on a pool larger than the context (SKIP -> PASS, 2475 -> 3712 blocks), make test-e2e runs all 4 groups after a red one (#3189)
+- gates: make test-e2e runs the 6 Gemma4ModelTest/Gemma4GraphsTest tests (SKIPPED -> OK on the NVFP4 checkpoint), make test-quantize judges 2 of 3 prompts (rc 2 -> 0) (#3192)
+- spec: identity tests price every speculated token on the plain decode route and gain two n-gram arms (17-row chunks: max 0.019 nats; DSpark/DFlash max 2.459; #3190 mutant 3 and 2 tokens above 3.272 vs 1) (#3193)
+- gates: decode-route PPL parity gates one checkpoint per model class, verify-fast gains the dense NVFP4 row (1 -> 7 rows, step arm -3.57 .. +1.13 % against a +3 % limit, +22.7 s on verify-fast) (#3195)
+- deps: cpp-httplib v0.66.0 -> v0.67.0 (7800c3dc; upstream: SSLServer drains before close, Headers::erase with an aliased key, client keep-alive fixes) (#3198)
+- skills: make verify-fast takes 103 s without the perf gate and 115 s with it (skill said 18 s / 36 s) (#3199)
+- roadmap: rows 125-129 record five proposals (speculation on sampled constrained turns and budgeted think blocks, prefix cache on NVMe, FP8 KV from checkpoint scales, candidate-path MTP verify, per-request LoRA in one batch), none measured (#3200)
+- roadmap: row 127 closed as wrong (checkpoint KV scales are read since 2026-11-02, bit-equal to legacy on local exports), rows 130-132 record three imp-quantize proposals, LIMITATIONS drops "no consumer in the tree" (#3201)
+- roadmap: row 133 records imp-quantize --act-scale as refuted on Qwen3-0.6B (prefill PPL 28.1764 vs 28.1488 / 28.7306 / 28.5281 at headroom 1 / 2 / 4, not monotonic) (#3202)
+- roadmap: row 133 adds the Qwen3.8-27B arm of imp-quantize --act-scale (prefill PPL 4.5413 vs 4.5484 / 4.5463 at headroom 1 / 2, decode route 5.4658 vs 5.4631 / 5.4623: no gain, not shipped) (#3203)
+- quant: Qwen3.8-27B calibrated on its RTN export reads PPL 4.5413 against 4.6018 for the uncalibrated -vllm export (decode route 4.4712 vs 4.5044, tg 96.99 vs 96.87 tok/s, degen_suite 0 FAIL) (#3204)
+- quant: Qwen3.8-27B-NVFP4-vllm is the AWQ-calibrated export since 2026-11-21 (PPL 4.6018 -> 4.5392, MTP serving 207.66 vs 207.81 tok/s on 30 prompts, vLLM 0.31.0 loads it at 71.29 tok/s, make verify green) (#3205)
+
 ## [0.69.1] - 2026-11-19
 
 ### Changed
