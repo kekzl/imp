@@ -211,6 +211,7 @@ set(IMP_MODEL_SOURCES
     src/model/gguf_tensor_assign.cpp
     src/model/safetensors_loader.cpp
     src/model/mtp_head.cpp
+    src/model/mtp_head_sibling.cpp
     src/model/safetensors_writer.cpp
     src/model/safetensors_raw.cpp
     src/model/llm_compressor_loader.cpp

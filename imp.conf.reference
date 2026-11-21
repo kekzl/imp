@@ -712,7 +712,8 @@ mtp_batch_verify_k_streak = 7
 # External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
 # same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
 # mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.
-# e.g. "/models/Qwen3.8-27B-NVFP4-vllm/mtp.safetensors"; empty = off.
+# e.g. "/models/Qwen3.8-27B-NVFP4-vllm/mtp.safetensors". Empty: an incomplete embedded head is completed
+# from a directory next to the model whose head equals its tensors byte for byte.
 mtp_head             = ""
 # Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head decode
 # cache when one exists (~4x less HBM traffic per drafted token; the chain

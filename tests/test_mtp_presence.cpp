@@ -4,8 +4,12 @@
 #include "model/model.h"
 #include "model/mtp_head.h"
 #include "model/safetensors_loader.h"
+#include <sys/mman.h>
+
+#include <algorithm>
 #include <filesystem>
 #include <cstdlib>
+#include <unordered_map>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -126,7 +130,8 @@ TEST(MtpProbe, StaysQuietWithoutAHead) {
 
 // speculative.mtp_head: a valid Qwen-layout mtp.* file (d_model 8, F16 zeros) attaches to a model of the
 // same d_model and is refused for another d_model or for a file without a head.
-static void write_qwen_mtp_file(const fs::path& file, int d) {
+static void write_qwen_mtp_file(const fs::path& file, int d, char fill = 0,
+                                const std::vector<std::string>& skip = {}) {
     const int hd = 4, heads = 2, ff = 16;
     const std::vector<std::pair<std::string, std::vector<int>>> t = {
         {"mtp.pre_fc_norm_embedding.weight", {d}},
@@ -148,6 +153,8 @@ static void write_qwen_mtp_file(const fs::path& file, int d) {
     std::string h = "{";
     size_t off = 0;
     for (const auto& [name, shape] : t) {
+        if (std::find(skip.begin(), skip.end(), name) != skip.end())
+            continue;
         size_t n = 1;
         std::string s;
         for (int x : shape) {
@@ -163,7 +170,7 @@ static void write_qwen_mtp_file(const fs::path& file, int d) {
     const uint64_t hn = h.size();
     f.write(reinterpret_cast<const char*>(&hn), sizeof(hn));
     f.write(h.data(), static_cast<std::streamsize>(hn));
-    const std::vector<char> body(off, 0);
+    const std::vector<char> body(off, fill);
     f.write(body.data(), static_cast<std::streamsize>(body.size()));
 }
 
@@ -183,4 +190,47 @@ TEST(MtpExternalHead, AttachesAMatchingQwenHeadOnly) {
     write_single_file(d.p / "x.safetensors", R"({"model.embed_tokens.weight":{"dtype":"BF16"}})");
     EXPECT_FALSE(imp::attach_mtp_head_file(match, (d.p / "missing.safetensors").string()));
     EXPECT_FALSE(imp::attach_mtp_head_file(other, (d.p / "x.safetensors").string()));
+}
+
+// An incomplete embedded head (nvidia/Qwen3.8-27B-NVFP4-QAD: no fc, norm, pre_fc_norm_*) is completed
+// from the neighbour whose head equals its tensors byte for byte, not from the first complete one.
+TEST(MtpSiblingHead, CompletesFromTheByteEqualNeighbourOnly) {
+    TempDir root("sibling");
+    const std::vector<std::string> qad_missing = {"mtp.pre_fc_norm_embedding.weight",
+                                                  "mtp.pre_fc_norm_hidden.weight", "mtp.fc.weight",
+                                                  "mtp.norm.weight"};
+    for (const char* sub : {"a_other", "b_base", "qad", "c_text_only"})
+        fs::create_directories(root.p / sub);
+    write_qwen_mtp_file(root.p / "a_other" / "mtp.safetensors", 8, /*fill=*/1);  // first in name order
+    write_qwen_mtp_file(root.p / "b_base" / "model-00002-of-00002.safetensors", 8);
+    std::ofstream(root.p / "b_base" / "model.safetensors.index.json")
+        << R"({"weight_map":{"mtp.fc.weight":"model-00002-of-00002.safetensors"}})";
+    std::ofstream(root.p / "c_text_only" / "model.safetensors.index.json")
+        << R"({"weight_map":{"mtp.fc.weight":"../b_base/model-00002-of-00002.safetensors"}})";
+    const fs::path own = root.p / "qad" / "model-00001-of-00001.safetensors";
+    write_qwen_mtp_file(own, 8, 0, qad_missing);
+
+    std::unordered_map<std::string, imp::Tensor> tensors;
+    void* base = nullptr;
+    size_t size = 0;
+    ASSERT_TRUE(imp::load_raw_safetensors_file(own.string(), tensors, base, size));
+    const imp::MtpHead partial = imp::dispatch_mtp_head(tensors, own.string(), size);
+    ASSERT_FALSE(partial.loaded);
+    ASSERT_EQ(partial.info.n_mapped, 11);
+
+    const std::string want = (root.p / "b_base" / "model-00002-of-00002.safetensors").string();
+    EXPECT_EQ(imp::find_sibling_mtp_head(partial, (root.p / "qad").string()), want);
+    EXPECT_EQ(imp::find_sibling_mtp_head(partial, own.string()), want) << "a file path names its directory";
+
+    // Without the byte-equal neighbour nothing is taken: a_other is complete and shaped alike.
+    fs::remove_all(root.p / "b_base");
+    EXPECT_EQ(imp::find_sibling_mtp_head(partial, (root.p / "qad").string()), "");
+    // A complete head and a head without any tensor ask for nothing.
+    imp::MtpHead complete = partial;
+    complete.loaded = true;
+    EXPECT_EQ(imp::find_sibling_mtp_head(complete, (root.p / "qad").string()), "");
+    imp::MtpHead empty;
+    empty.layout = imp::MtpLayout::Qwen;
+    EXPECT_EQ(imp::find_sibling_mtp_head(empty, (root.p / "qad").string()), "");
+    munmap(base, size);
 }
