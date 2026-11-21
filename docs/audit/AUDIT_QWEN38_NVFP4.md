@@ -119,3 +119,25 @@ relationship over every length up to 2100 at both block sizes, and is red under 
 Only aligned lengths change, and for those the old value was unusable.
 
 Open after the campaign: P7 (b) (resolved 2026-09-10 as the conv1d commit race, see above), speculation gates refuse logprobs requests (a speculated request cannot report logprobs, documented nowhere). The think stop-token mask (P3 follow-up) landed 2026-09-11, see the P3 reading above.
+
+## Calibrated export (2026-11-21)
+
+- BF16 (51.75 GiB) does not fit 32 GB: `imp-cli --calibrate` runs on the RTN export (`calib_corpus.txt`, 496 entries), then `imp-quantize --calib` on the BF16 source with the default groups.
+- Compared with the uncalibrated `-vllm` export, same image, deterministic, `mtp_k=0`, `ppl_corpus_45k.txt` (13811 tokens, 13746 rows scored after 64).
+
+| export | prefill PPL | prefill, rows 64.. | decode route, rows 64.. | pp512 tok/s | tg tok/s |
+|---|---:|---:|---:|---:|---:|
+| RTN, modelopt | 4.5907 | - | - | - | - |
+| `-vllm`, uncalibrated | 4.6018 | 4.5854 | 4.5044 | 11446 | 96.87 |
+| `--calib --format vllm` | 4.5392 | 4.5228 | 4.4705 | 11474 | 96.91 |
+| `--calib` (modelopt) | 4.5413 | 4.5262 | 4.4712 | 11506 | 96.99 |
+
+[PROV: commit=3fe11610 date=2026-11-21 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 cuda=13.5
+       path=imp-quantize+imp-cli n=1-per-cell-deterministic, bench 3 reps x 8192 tokens
+       cmd=`imp-cli --perplexity ppl_corpus_45k.txt [--perplexity-decode 64 | --set diagnostics.ppl_first=64]`, `imp-cli --bench --bench-pp 512 --bench-reps 3`
+       note=the -vllm row read 4.6018 prefill and 96.86-96.87 tok/s twice in the session]
+
+- Calibration: -1.36 % prefill, -0.75 % decode route, speed equal.
+- The first 6000 bytes alone read the other way on the decode route (5.4590 vs 5.4403): judge on the whole corpus.
+- `degen_suite.py` on the `--format vllm` export: 52 checks, 0 FAIL with the MTP head (auto) and with `mtp_k=0`; 15 MTP tensors and 333 vision tensors carried over.
+- Not checked: loading in vLLM.
