@@ -19,6 +19,7 @@ namespace {
 TEST(VisionFamily, RegistryMapsExactNames) {
     EXPECT_EQ(vision_family_of("qwen3_vl"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen3_5"), VisionFamily::Qwen3VL);
+    EXPECT_EQ(vision_family_of("qwen3_5_vision"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen3_5_moe"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen4_exp_vision"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("internvl_vision"), VisionFamily::InternVL);

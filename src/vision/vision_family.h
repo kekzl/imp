@@ -19,7 +19,7 @@ struct VideoPlaceholderLayout;
 
 enum class VisionFamily {
     None,      // not listed: text-only, WARN at load
-    Qwen3VL,   // qwen3_vl, qwen3_5_moe (Qwen3.6), qwen3_5 (Qwen3.8), qwen4_exp_vision (Flash-Next)
+    Qwen3VL,   // qwen3_vl, qwen3_5_moe (Qwen3.6), qwen3_5 / qwen3_5_vision (Qwen3.8), qwen4_exp_vision
     InternVL,  // internvl_vision (InternVL3.5)
 };
 
