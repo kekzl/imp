@@ -11,6 +11,7 @@
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "image_fetch.h"
+#include "tool_result_images.h"
 #include "vision_inline.h"
 #include "reasoning_split.h"
 
@@ -142,7 +143,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         return false;
 
     // Extract parameters
-    auto messages = body.value("messages", json::array());
+    // Pictures in tool messages move to the user turn behind them (tool_result_images.h).
+    auto messages = imp::server::rehome_tool_images(body.value("messages", json::array()));
     if (messages.empty()) {
         res.status = 400;
         json err = {{"error",

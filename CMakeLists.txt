@@ -1291,6 +1291,7 @@ if(IMP_BUILD_TESTS)
             tests/test_constraint_validation.cpp
             tests/test_server_json_key_order.cpp
             tests/test_server_vision_inline.cpp
+            tests/test_tool_result_images.cpp
             tests/test_server_args.cpp
             # SSRF destination classifier (#1610). Pure address arithmetic plus
             # getaddrinfo on literals, so it belongs in the CPU lane, which is
