@@ -8,10 +8,31 @@
 #include "exec/inkling_forward.h"
 #include "model/inkling_weights.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <tuple>
 
 namespace imp {
+
+namespace {
+
+// out = [pos[n]; ids[n]; first block of n_blk tables]: one device-to-host copy per call instead of three.
+__global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, const int* blk, int stride, int n,
+                                    int n_blk, int32_t* out) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        out[i] = pos[i];
+        out[n + i] = ids[i];
+        if (i < n_blk)
+            out[2 * n + i] = blk[(size_t)i * stride];
+    }
+}
+
+}  // namespace
+
+InklingRuntime::~InklingRuntime() {
+    if (d_rows && va)
+        va->free(d_rows);
+}
 
 int InklingRuntime::slot_of_req(int req) const {
     for (size_t i = 0; i < slot_req.size(); ++i)
@@ -71,6 +92,10 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
     rt->max_ctx = max_ctx;
+    rt->va = va;
+    rt->rows_cap = max_tokens;
+    rt->d_rows = static_cast<int32_t*>(
+        va->allocate(3 * static_cast<size_t>(max_tokens) * sizeof(int32_t), "inkling_state"));
     rt->cap = std::min(max_tokens, InklingForward::kGrid);
     rt->slot_req.assign(rt->slots.size(), -1);
     rt->slot_block.assign(rt->slots.size(), -1);
@@ -91,16 +116,22 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     rt.ids.resize(N);
     rt.pos.resize(N);
     rt.blk.assign(N, -1);
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    bool ok = h.qtype == QType::F16 &&
-              cudaMemcpy(rt.pos.data(), state.positions, N * sizeof(int), cudaMemcpyDeviceToHost) ==
-                  cudaSuccess &&
-              cudaMemcpy(rt.ids.data(), state.token_ids, N * sizeof(int32_t), cudaMemcpyDeviceToHost) ==
-                  cudaSuccess &&
-              (n_blk == 0 ||
-               cudaMemcpy2D(rt.blk.data(), sizeof(int), state.block_tables,
-                            static_cast<size_t>(std::max(state.max_blocks_per_seq, 1)) * sizeof(int),
-                            sizeof(int), static_cast<size_t>(n_blk), cudaMemcpyDeviceToHost) == cudaSuccess);
+    rt.rows.resize(3 * N);
+    bool ok = h.qtype == QType::F16 && rt.d_rows && n <= rt.rows_cap;
+    if (ok) {
+        inkling_pack_rows_k<<<1, 256, 0, stream>>>(state.positions, state.token_ids, state.block_tables,
+                                                   std::max(state.max_blocks_per_seq, 1), n, n_blk,
+                                                   rt.d_rows);
+        IMP_CUDA_CHECK_LAUNCH();
+        // The copy waits for the stream's work.
+        ok = cudaMemcpyAsync(rt.rows.data(), rt.d_rows, 3 * N * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                             stream) == cudaSuccess &&
+             cudaStreamSynchronize(stream) == cudaSuccess;
+        std::copy_n(rt.rows.begin(), N, rt.pos.begin());
+        std::copy_n(rt.rows.begin() + static_cast<std::ptrdiff_t>(N), N, rt.ids.begin());
+        std::copy_n(rt.rows.begin() + static_cast<std::ptrdiff_t>(2 * N), static_cast<size_t>(n_blk),
+                    rt.blk.begin());
+    }
     half* hd = static_cast<half*>(h.data);
     if (ok && !decode) {
         // One sequence: the slot its request was bound to (a forward outside a request takes slot 0).
