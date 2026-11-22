@@ -47,12 +47,12 @@ Write the wide form first and prove it against the oracle; a "reference-grade" k
 
 ## 3. Classify the binding before any rework (5 minutes)
 
-Time the kernel alone twice: on the weights it just read (hot, L2) and rotating over more than the L2 holds (cold). No harness in the tree: temporary gtest in `test-compute`, N launches on one stream, fixed vs rotating layer/expert set, print us per call and GB/s; `make dev`, then `docker run --rm --gpus all -v $PWD:/src -w /src -v $HOME/models:/models:ro imp:toolchain build-dev/test-compute --gtest_filter=...`.
+Time the kernel alone twice: on the weights it just read (hot, L2) and rotating over more than the L2 holds (cold). Template: `GemvFp16HotCold.DISABLED_Bench` (`tests/test_gemv_hot_cold_bench.cu`): kernel variants as template instances, memcmp against the shipped kernel, 400 launches per arm, ring above 400 MB, 7 rounds, min / median / max. Run: `make dev`, then `docker run --rm --gpus all -v $PWD:/src -w /src imp:toolchain build-dev/test-compute --gtest_also_run_disabled_tests --gtest_filter='*GemvFp16HotCold*'` (10 s). Read the MINIMUM: the hot side is bistable (8.37 to 22.36 us on one kernel), and back-to-back launches from the host have a floor of 6.4-6.9 us (0.44 MB shape).
 
 | Reading | Binding | Levers | Dead on arrival |
 |---|---|---|---|
 | hot much faster than cold, cold near 1628 GB/s (MoE experts 64 slots: hot = cold 119.6 us at 1600 GB/s; 32 slots 31.6 / 62.2; 8 slots 11.9 / 19.2) | memory | fewer bytes: narrower dtype, fewer distinct weights per step, higher draft acceptance, prefetch while DRAM idles | grouping, decode-once, input reuse, more loader threads |
-| hot = cold, well under bandwidth (dense fp16 4096 x 2304: 15.4 us both, 1.22 TB/s) | compute / instructions | MMA instead of scalar, load width, smem staging, fewer instructions per byte | bytes levers alone |
+| hot minimum = cold minimum, well under bandwidth, both above the launch floor (no case measured yet: the dense fp16 GEMV read "15.4 us both" once and re-measured hot 8.37 / cold 15.08) | compute / instructions | MMA instead of scalar, load width, smem staging, fewer instructions per byte | bytes levers alone |
 | tens of us on a few blocks, bytes tiny | grid or latency chain | more blocks, lane overlap, two-phase reduce | occupancy pins |
 | kernel sum well under the step wall | launch gaps, host | graph, side streams, host copies; fusion only after section 4 | PDL edges on a serial graph |
 
@@ -80,6 +80,7 @@ Throughput verdict: 10 prompts x 700 tokens, temp 0, stream, tok/s = (n-1) / (to
 | Group expert slots by expert | 6.19 -> 6.42 ms | L2 dedups already |
 | int8 activations + dp4a on experts | 15.22 -> 15.45 ms per 8-row call | memory-bound: same bytes |
 | FP8 dense projections | 6.635 -> 6.267 ms, logits error 1.4 -> 3.2 %, parity red | precision spent on a path that is not memory-bound |
+| Load order, hoisted x, PDL weight prefetch, block size on the M=1 FP16 GEMV (B-87) | 8 variants cold 14.86-15.34 us vs 15.08 | memory-bound plus 3-4 us per launch |
 | 512 load threads in `attn_part_k` | 149.63 vs 149.72 tok/s | overlap was already sufficient |
 | More CTAs / K-stripes on small-M GEMMs at the floor | neutral | SM coverage was not the limiter |
 | Min-blocks `__launch_bounds__` | 14.5 -> 26.8 us | spills (sm120-cuda-expert law 2) |
