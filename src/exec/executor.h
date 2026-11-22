@@ -27,6 +27,7 @@
 #include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
+#include "exec/inkling_forward.h"
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
@@ -1444,6 +1445,9 @@ private:
     void run_ssm_layer_(int layer, const InferenceState& state, cudaStream_t stream);
     // LFM2 short-conv layer.
     void run_shortconv(int layer, const InferenceState& state, cudaStream_t stream);
+    // executor_inkling.cu: Inkling2-Loop runs all its layers there and returns 0, else n_layers.
+    int run_inkling_(const InferenceState& state, Tensor& h, int n, cudaStream_t stream);
+    std::unique_ptr<InklingRuntime> inkling_;
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
     void run_recurrent_mixer_(int layer, const InferenceState& state, cudaStream_t stream);

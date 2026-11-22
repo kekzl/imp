@@ -100,7 +100,11 @@ std::vector<int> map_kv_layers(const Model& model, int& n_attn_layers) {
         const int src = mcfg.kv_source(i);
         kv_layer_map[i] = (src >= 0 && src < i) ? kv_layer_map[src] : n_attn_layers++;
     }
-    if (n_attn_layers == 0) {
+    if (mcfg.arch == ModelArch::INKLING2) {
+        // K/V live in exec/inkling_forward.h; the paged cache only carries the block bookkeeping.
+        n_attn_layers = 1;
+        std::fill(kv_layer_map.begin(), kv_layer_map.end(), 0);
+    } else if (n_attn_layers == 0) {
         n_attn_layers = mcfg.n_layers;
         for (int i = 0; i < mcfg.n_layers; i++)
             kv_layer_map[i] = i;

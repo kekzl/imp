@@ -2,6 +2,7 @@
 #include "model/model_limits.h"
 #include "model/model_arch.h"
 #include "model/mxfp8_widen.h"
+#include "model/inkling_loader_hooks.h"
 #include "model/weight_map.h"
 #include "model/weight_map_arch.h"
 #include "model/hf_config_loader.h"
@@ -1200,10 +1201,12 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     }
 
     ModelConfig& cfg = model->config_;
-    widen_mxfp8_pairs(tensor_map, model->host_owned_buffers_);
-
     // 1. Try config.json (authoritative for all hyperparams)
     bool has_config = HFConfigLoader::load_config(model_dir, cfg, &model->vision_tower);
+    model->inkling_dir = inkling_take_vocab(cfg, model_dir, tensor_map, model->tok_emb_, model->out_norm_,
+                                            model->out_proj_);
+    const bool inkling = !model->inkling_dir.empty();
+    widen_mxfp8_pairs(tensor_map, model->host_owned_buffers_);
 
     // 2. Detect architecture from weights if config.json didn't provide it
     if (!has_config || cfg.arch == ModelArch::GENERIC) {
@@ -1266,7 +1269,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // 6. Assign tensors via WeightMap (after the arch whole-map rewrite, model/weight_map_arch.h)
     arch_prepare_tensor_map(cfg, tensor_map, model->host_owned_buffers_);
     WeightMap wmap(cfg.arch);
-    if (!wmap.apply_weights(*model, tensor_map))
+    if (!apply_weights_unless(inkling, wmap, *model, tensor_map))
         return nullptr;  // logged by apply_weights
     install_gemma4_rope_freqs(*model, cfg);
     // 6a. Qwen4Exp PLE: the layer's projections came through the weight map, its n-gram table
@@ -1310,7 +1313,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     }
 
     HFConfigLoader::NvFP4Config nvfp4_cfg;
-    bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
+    bool is_nvfp4 = load_nvfp4_config_unless(inkling, model_dir, nvfp4_cfg);
     if (awq_refuses(*model, cfg, tensor_map, model_dir) || nvfp4_undeclared(tensor_map, is_nvfp4, model_dir))
         return nullptr;
     if (is_nvfp4) {

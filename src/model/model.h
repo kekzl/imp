@@ -181,6 +181,8 @@ public:
     // parties that own each half: the config loader fills `->config` from
     // config.json, weight_map fills the tensors from the shard map.
     std::unique_ptr<VisionModel> vision_tower;
+    // Inkling2-Loop: checkpoint directory; the engine uploads it through model/inkling_weights.h.
+    std::string inkling_dir;
     // Gemma-4 audio tower + embedder (model.audio_tower.*, model.embed_audio.*); null without one.
     std::unique_ptr<Gemma4AudioModel> audio_tower;
     std::unique_ptr<NGramTable> ngram_table_;  // Qwen4Exp PLE table (model/ngram_table.h)

@@ -238,10 +238,12 @@ void Engine::build_banned_token_list() {
         // Harmony (gpt-oss, #547): the model is TRAINED to emit its own structure tokens
         // (<|channel|>analysis<|message|>...<|end|><|start|>assistant<|channel|>final<|message|>...).
         // Banning them traps generation in an endless analysis channel.
-        for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>",
-                                  "<|channel>", "<channel|>",
-                                  "<|channel|>", "<|message|>", "<|start|>", "<|end|>",
-                                  "<|constrain|>"}) {
+        for (const char* name :
+             {"<think>", "</think>", "<|think|>", "<|/think|>", "<|channel>", "<channel|>", "<|channel|>",
+              "<|message|>", "<|start|>", "<|end|>", "<|constrain|>",
+              // Inkling2: every reply is <|message_model|> + a content marker + <|end_message|>.
+              "<|message_model|>", "<|content_thinking|>", "<|content_text|>", "<|end_message|>",
+              "<|content_invoke_tool_json|>", "<|content_model_end_sampling|>"}) {
             int32_t tid = tok->find_token(name);
             if (tid >= 0) keep_ids.push_back(tid);
         }

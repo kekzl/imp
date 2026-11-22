@@ -16,8 +16,9 @@ void settle_thinking_from_prompt_(ChatRequestContext& ctx) {
     auto prompt_tail_text = [&](int max_tail_tokens) {
         const int n = static_cast<int>(ctx.snap.tokens.size());
         std::string tail_text;
+        OutputMarkerState st;
         for (int i = std::max(0, n - max_tail_tokens); i < n; ++i)
-            tail_text += decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, ctx.snap.tokens[i]);
+            tail_text += decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, ctx.snap.tokens[i], &st);
         return tail_text;
     };
     auto prompt_tail_contains = [&](const char* needle, int max_tail_tokens) -> bool {

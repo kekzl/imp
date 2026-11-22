@@ -229,6 +229,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/lfm2_names.cpp
+    src/model/inkling_weights.cu
     src/model/weight_map_arch.cpp
     src/model/bailing_hybrid_tensors.cpp
     src/model/kimi_linear_tensors.cpp
@@ -400,6 +401,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_token_permute.cu
     src/compute/ssm.cu
     src/compute/shortconv.cu
+    src/compute/inkling_ops.cu
     src/compute/ssm_scan_reg.cu
     src/compute/ssm_scan_ssd.cu
     src/compute/ssm_conv_split.cu
@@ -466,6 +468,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/dspark_drafter.cu
     src/compute/dspark_attention.cu
     src/runtime/engine_dspark.cpp
+    src/runtime/engine_inkling.cpp
+    src/exec/executor_inkling.cu
     src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_mtp_batched.cpp
@@ -557,6 +561,7 @@ set(IMP_EXEC_SOURCES
     src/exec/gdn_ragged.cu
     src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
+    src/exec/inkling_forward.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp
     src/exec/executor_ple.cpp
@@ -1268,6 +1273,7 @@ if(IMP_BUILD_TESTS)
             tests/test_tool_call_dialect_golden.cpp
             tests/test_tool_call_dialect_registry.cpp
             tests/test_tool_call_xml_params.cpp
+            tests/test_output_markers.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
@@ -1350,6 +1356,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_lt_ex.cu
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
+        tests/test_inkling_parity.cu
         tests/test_swiglu_quantize_cutlass.cu
         tests/test_nvfp4_tile_swiglu_quant.cu
         tests/test_ffn_graph_cache_gpu.cu

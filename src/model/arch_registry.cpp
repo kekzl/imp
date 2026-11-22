@@ -165,6 +165,11 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "flint", ModelArch::FLINT},  // refused at load (gguf_loader.cpp)
     {HF_CLASS, "FlintForCausalLM", ModelArch::FLINT},
     {HF_MODEL_TYPE, "flint", ModelArch::FLINT},
+    {GGUF, "inkling2_loop", ModelArch::INKLING2},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "Inkling2LoopForConditionalGeneration", ModelArch::INKLING2},
+    {HF_CLASS, "Inkling2LoopForCausalLM", ModelArch::INKLING2},
+    {HF_MODEL_TYPE, "inkling2_loop", ModelArch::INKLING2},
+    {HF_MODEL_TYPE, "inkling2_loop_text", ModelArch::INKLING2},
 };
 
 struct HfConfigHookRow {
@@ -192,6 +197,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::BAILING_HYBRID, parse_bailing_hybrid_config},
     {ModelArch::KIMI_LINEAR, parse_kimi_linear_config},
     {ModelArch::FLINT, parse_flint_config},
+    {ModelArch::INKLING2, parse_inkling2_config},
 };
 // clang-format on
 
