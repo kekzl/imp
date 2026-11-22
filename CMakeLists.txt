@@ -1367,6 +1367,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_inkling_parity.cu
+        tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu
         tests/test_nvfp4_tile_swiglu_quant.cu
         tests/test_ffn_graph_cache_gpu.cu
