@@ -11,10 +11,10 @@ namespace imp {
 
 bool GraphExecutor::init_inkling(const std::string& dir, int max_ctx) {
     inkling_weights_ = std::make_unique<InklingWeights>();
-    if (!load_inkling_weights(dir, *inkling_weights_, /*with_vocab=*/false))
+    if (!load_inkling_weights(dir, *inkling_weights_, /*with_vocab=*/false, vram_alloc_))
         return false;
     inkling_ = std::make_unique<InklingForward>();
-    return inkling_->init(*inkling_weights_, max_tokens_, max_ctx);
+    return inkling_->init(*inkling_weights_, max_tokens_, max_ctx, vram_alloc_);
 }
 
 void GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, cudaStream_t stream) {

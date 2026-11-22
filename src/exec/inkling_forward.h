@@ -18,7 +18,8 @@ public:
     ~InklingForward();
 
     // max_tokens: rows of one forward call; max_ctx: positions a sequence may reach.
-    [[nodiscard]] bool init(const InklingWeights& w, int max_tokens, int max_ctx);
+    // va: tracked allocator (tag inkling_state); null = cudaMalloc.
+    [[nodiscard]] bool init(const InklingWeights& w, int max_tokens, int max_ctx, VRAMAllocator* va = nullptr);
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -48,6 +49,7 @@ private:
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 
     const InklingWeights* w_ = nullptr;
+    VRAMAllocator* va_ = nullptr;
     int max_tokens_ = 0, max_ctx_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;

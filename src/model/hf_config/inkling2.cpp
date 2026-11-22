@@ -22,6 +22,9 @@ bool parse_inkling2_config(const JValue& /*root*/, const JValue& eff, ModelConfi
     jobj_opt_float(eff, "rms_norm_eps", cfg.rms_norm_eps);
     jobj_opt_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
     cfg.tie_word_embeddings = 0;
+    // The standard executor sees an embedding and an lm_head only: no MoE or attention sizing there.
+    cfg.n_experts = 0;
+    cfg.n_experts_active = 0;
     return true;
 }
 

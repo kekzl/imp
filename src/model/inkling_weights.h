@@ -5,6 +5,10 @@
 
 #include <cuda_fp16.h>
 
+namespace imp {
+class VRAMAllocator;
+}
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -70,6 +74,7 @@ struct InklingWeights {
     float *embed_norm = nullptr, *norm = nullptr, *out_query = nullptr;
     float* msg_query = nullptr;  // [loop layers, 4 (q, k, v, mlp), hidden]
     std::vector<void*> owned;    // every device allocation above
+    VRAMAllocator* va = nullptr; // owner of `owned`; null = cudaMalloc
     size_t device_bytes = 0;
 
     InklingWeights() = default;
@@ -81,6 +86,8 @@ struct InklingWeights {
 [[nodiscard]] bool parse_inkling_config(const std::string& dir, InklingConfig& cfg);
 // Uploads the text model from <dir>/model-*.safetensors. False = a tensor is missing or mis-shaped.
 // with_vocab false: embedding and unembedding stay with the caller (the engine's standard path).
-[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab = true);
+// va: the engine's tracked allocator (tag inkling_weights); null = cudaMalloc.
+[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab = true,
+                                        VRAMAllocator* va = nullptr);
 
 }  // namespace imp

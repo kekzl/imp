@@ -4,6 +4,7 @@
 
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
+#include "memory/vram_allocator.h"
 #include "model/json_util.h"
 #include "model/safetensors_loader.h"
 
@@ -49,8 +50,8 @@ struct Loader {
         return &x;
     }
     void* dev(size_t bytes) {
-        void* p = nullptr;
-        if (cudaMalloc(&p, bytes) != cudaSuccess) {
+        void* p = w.va ? w.va->allocate(bytes, "inkling_weights") : nullptr;
+        if (!p && (w.va || cudaMalloc(&p, bytes) != cudaSuccess)) {
             IMP_LOG_ERROR("inkling: device allocation of %.1f MiB failed", bytes / 1048576.0);
             ok = false;
             return nullptr;
@@ -135,7 +136,7 @@ struct Loader {
 
 InklingWeights::~InklingWeights() {
     for (void* p : owned)
-        cudaFree(p);
+        va ? va->free(p) : static_cast<void>(cudaFree(p));
 }
 
 bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {
@@ -194,7 +195,8 @@ bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {
     return sane;
 }
 
-bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab) {
+bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab, VRAMAllocator* va) {
+    w.va = va;
     if (!parse_inkling_config(dir, w.cfg))
         return false;
     const InklingConfig& c = w.cfg;

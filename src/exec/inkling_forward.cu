@@ -7,6 +7,7 @@
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "memory/vram_allocator.h"
 #include "quant/nvfp4_gemm.h"
 
 #include <algorithm>
@@ -17,12 +18,12 @@ using namespace inkling;
 
 InklingForward::~InklingForward() {
     for (void* p : owned_)
-        cudaFree(p);
+        va_ ? va_->free(p) : static_cast<void>(cudaFree(p));
 }
 
 void* InklingForward::alloc_(size_t bytes) {
-    void* p = nullptr;
-    if (cudaMalloc(&p, bytes) != cudaSuccess) {
+    void* p = va_ ? va_->allocate(bytes, "inkling_state") : nullptr;
+    if (!p && (va_ || cudaMalloc(&p, bytes) != cudaSuccess)) {
         IMP_LOG_ERROR("inkling: workspace allocation of %.1f MiB failed", bytes / 1048576.0);
         ok_ = false;
         return nullptr;
@@ -31,8 +32,9 @@ void* InklingForward::alloc_(size_t bytes) {
     return p;
 }
 
-bool InklingForward::init(const InklingWeights& w, int max_tokens, int max_ctx) {
+bool InklingForward::init(const InklingWeights& w, int max_tokens, int max_ctx, VRAMAllocator* va) {
     w_ = &w;
+    va_ = va;
     const InklingConfig& c = w.cfg;
     max_tokens_ = max_tokens;
     max_ctx_ = max_ctx;
