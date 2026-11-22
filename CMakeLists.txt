@@ -402,6 +402,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm.cu
     src/compute/shortconv.cu
     src/compute/inkling_ops.cu
+    src/compute/inkling_fused.cu
     src/compute/ssm_scan_reg.cu
     src/compute/ssm_scan_ssd.cu
     src/compute/ssm_conv_split.cu

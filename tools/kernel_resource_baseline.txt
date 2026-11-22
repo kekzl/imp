@@ -91,7 +91,6 @@ void imp::gemv_dp4a_moe_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6> >	sm_1
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<192>	sm_120a	56	16	0
-imp::inkling::(anonymous namespace)::attention_k	sm_120a	54	512	0
 void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	53	16	0
 void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	48	16	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	48	16	0
@@ -106,15 +105,19 @@ void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120a	48	8	0
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
+imp::inkling::(anonymous namespace)::attention_k	sm_120a	46	512	0
 imp::topk_gating_kernel	sm_120a	46	256	0
+imp::inkling::(anonymous namespace)::attn_part_k	sm_120a	44	16	0
 imp::paged_attention_decode_kernel_generic	sm_120a	43	128	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
 imp::topk_finalize_rows_kernel	sm_120a	40	1056	0
 imp::topk_partial_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	40	1056	0
+imp::inkling::(anonymous namespace)::mix_partial_k	sm_120a	40	384	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
-imp::inkling::(anonymous namespace)::block_mix_k	sm_120a	40	120	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
+imp::inkling::(anonymous namespace)::gate_mix_k	sm_120a	40	24	0
+imp::inkling::(anonymous namespace)::mix_out_k	sm_120a	40	24	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
@@ -132,6 +135,7 @@ imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	38	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	37	64	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::bench_separate	sm_120a	29	8	0
+imp::inkling::(anonymous namespace)::gate_rms_k	sm_120a	26	24	0
 imp::bench_tma_v_load	sm_120a	26	8	0
 imp::bench_fused	sm_120a	25	8	0
 imp::dequant_q3k_kernel	sm_120a	24	16	0
