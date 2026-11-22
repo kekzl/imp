@@ -37,10 +37,12 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     w_ = &w;
     va_ = &va;
     const InklingConfig& c = w.cfg;
+    // Calls are cut into segments that end on the checkpoint grid: the workspace holds one segment.
     max_tokens_ = max_tokens;
     max_ctx_ = max_ctx;
-    ring_ = c.window + max_tokens;
-    const size_t Tm = static_cast<size_t>(max_tokens), H = static_cast<size_t>(c.hidden);
+    seg_ = std::min(max_tokens, kGrid);
+    ring_ = c.window + seg_ + kSlack;
+    const size_t Tm = static_cast<size_t>(seg_), H = static_cast<size_t>(c.hidden);
     const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim,
                  KD = static_cast<size_t>(c.n_kv_heads) * c.head_dim;
     const size_t slots = Tm * c.top_k;
@@ -67,6 +69,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     idx_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
+    conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
         // Application index -> weight layer.
         const int layer = a < c.n_layers ? a : c.loop_start + (a - c.n_layers) % (c.loop_end - c.loop_start);
@@ -74,7 +77,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
                                                                  : static_cast<size_t>(ring_);
         k_.push_back(Hf_(rows * KD));
         v_.push_back(Hf_(rows * KD));
-        conv_state_.push_back(F_(conv_state_floats_));
+        conv_state_.push_back(conv_all_ + conv_state_floats_ * static_cast<size_t>(a));
     }
     if (ok_)
         reset(nullptr);
@@ -82,9 +85,49 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
 }
 
 void InklingForward::reset(cudaStream_t s) {
-    pos_ = 0;
-    for (float* p : conv_state_)
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(p, 0, conv_state_floats_ * sizeof(float), s));
+    pos_ = hw_ = ckpt_valid_ = 0;
+    if (!armed_)
+        hist_.clear();
+    armed_ = false;
+    if (conv_all_)
+        IMP_CUDA_CHECK_LOG(
+            cudaMemsetAsync(conv_all_, 0, conv_state_floats_ * conv_state_.size() * sizeof(float), s));
+}
+
+void InklingForward::checkpoint_(cudaStream_t s) {
+    const size_t g = static_cast<size_t>(pos_ / kGrid), n = conv_state_floats_ * conv_state_.size();
+    if (ckpt_.size() < g)
+        ckpt_.resize(g);
+    ckpt_[g - 1].resize(n);
+    const bool ok = cudaMemcpyAsync(ckpt_[g - 1].data(), conv_all_, n * sizeof(float), cudaMemcpyDeviceToHost,
+                                    s) == cudaSuccess &&
+                    cudaStreamSynchronize(s) == cudaSuccess;
+    ckpt_valid_ = ok ? static_cast<int>(g) : std::min(ckpt_valid_, static_cast<int>(g) - 1);
+}
+
+int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
+    // The last row is always computed: its logits start the reply.
+    const size_t lim = std::min(
+        {hist_.size(), static_cast<size_t>(pos_), tokens.empty() ? 0 : tokens.size() - 1});
+    size_t d = 0;
+    while (d < lim && hist_[d] == tokens[d])
+        ++d;
+    int g = std::min(static_cast<int>(d) / kGrid, ckpt_valid_);
+    // Sliding K/V of [R - window, R) must not have been overwritten by positions up to hw_.
+    if (hw_ - g * kGrid > ring_ - w_->cfg.window)
+        g = 0;
+    const size_t n = conv_state_floats_ * conv_state_.size();
+    if (g > 0 && cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
+                                 cudaMemcpyHostToDevice, s) != cudaSuccess)
+        g = 0;
+    hist_.assign(tokens.begin(), tokens.end());
+    armed_ = true;
+    if (g == 0)
+        return 0;  // run() at position 0 resets
+    armed_ = false;
+    pos_ = g * kGrid;
+    ckpt_valid_ = g;
+    return pos_;
 }
 
 void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s) {
@@ -275,18 +318,22 @@ void InklingForward::layers_(int T, cudaStream_t s) {
     mix(fin, T, H, s);
 }
 
-bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
+bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids) {
     if (pos0 == 0)
         reset(s);
+    armed_ = false;
     if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
         IMP_LOG_ERROR(
             "inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)", T,
             pos0, pos_, max_tokens_, max_ctx_);
         return false;
     }
-    const size_t n = static_cast<size_t>(T) * w_->cfg.hidden;
+    // Tokens past the prompt rewind() recorded (the decode steps) join the history.
+    for (int i = 0; i < T; ++i)
+        if (static_cast<size_t>(pos0) + static_cast<size_t>(i) >= hist_.size())
+            hist_.push_back(ids ? ids[i] : -1);
+    const int Hd = w_->cfg.hidden;
     // The kernels read the position from the device: one captured graph serves every decode step.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
     const bool graph = T == 1 && s != nullptr && !tap && decode_graph_ok_;
     if (graph && (!decode_exec_.get() || decode_h_ != h)) {
         // Capture the one-token step once: about 2000 kernel and cuBLAS launches become one replay.
@@ -294,9 +341,9 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
         if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
             decode_graph_ok_ = false;
         } else {
-            f16_to_f32(h, h_, n, s);
+            f16_to_f32(h, h_, static_cast<size_t>(Hd), s);
             layers_(1, s);
-            f32_to_f16(mix_[0], h, n, s);
+            f32_to_f16(mix_[0], h, static_cast<size_t>(Hd), s);
             cudaGraphExec_t ex = nullptr;
             if (cudaStreamEndCapture(s, &g) != cudaSuccess ||
                 cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
@@ -308,23 +355,33 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
             decode_h_ = h;
         }
     }
-    if (graph && decode_graph_ok_ && decode_exec_.get()) {
-        if (cudaGraphLaunch(decode_exec_.get(), s) != cudaSuccess)
-            return false;
-    } else {
-        f16_to_f32(h, h_, n, s);
-        layers_(T, s);
-        f32_to_f16(mix_[0], h, n, s);
+    for (int done = 0; done < T;) {
+        const int seg = std::min(T - done, kGrid - pos_ % kGrid);
+        half* hs = h + static_cast<size_t>(done) * Hd;
+        const size_t n = static_cast<size_t>(seg) * Hd;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
+        if (graph && decode_graph_ok_ && decode_exec_.get()) {
+            if (cudaGraphLaunch(decode_exec_.get(), s) != cudaSuccess)
+                return false;
+        } else {
+            f16_to_f32(hs, h_, n, s);
+            layers_(seg, s);
+            f32_to_f16(mix_[0], hs, n, s);
+        }
+        pos_ += seg;
+        done += seg;
+        hw_ = std::max(hw_, pos_);
+        if (pos_ % kGrid == 0)
+            checkpoint_(s);
     }
-    pos_ += T;
     return ok_;
 }
 
 bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
-    if (T < 1 || T > max_tokens_ || pos_ + T > max_ctx_ || !w_->embed) {
+    if (T < 1 || T > seg_ || pos_ + T > max_ctx_ || !w_->embed) {
         IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T,
-                      pos_, max_tokens_, max_ctx_);
+                      pos_, seg_, max_ctx_);
         return false;
     }
     const int H = c.hidden;
@@ -341,6 +398,7 @@ bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaS
         softcap_f32(logits_h_, d_logits, static_cast<size_t>(c.vocab), c.logit_cap, s);
     }
     pos_ += T;
+    hw_ = std::max(hw_, pos_);
     return ok_;
 }
 

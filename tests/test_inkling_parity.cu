@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
@@ -215,5 +216,98 @@ TEST_P(InklingParity, GreedyContinuationMatchesTheReference) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Prompts, InklingParity, ::testing::Values("sky", "paris"));
+
+// Final state of every row after run() over ids[from..) at position from.
+std::vector<float> run_rows(InklingForward& fwd, const InklingWeights& w, const std::vector<int32_t>& ids,
+                            int from, const std::vector<int>& cuts) {
+    const int T = static_cast<int>(ids.size()) - from, H = w.cfg.hidden;
+    const size_t n = static_cast<size_t>(T) * H;
+    int32_t* d_ids = nullptr;
+    float* d_f = nullptr;
+    half* d_h = nullptr;
+    std::vector<float> last(n);
+    if (cudaMalloc(&d_ids, static_cast<size_t>(T) * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc(&d_f, n * sizeof(float)) != cudaSuccess ||
+        cudaMalloc(&d_h, n * sizeof(half)) != cudaSuccess)
+        return {};
+    cudaMemcpy(d_ids, ids.data() + from, static_cast<size_t>(T) * sizeof(int32_t), cudaMemcpyHostToDevice);
+    bool ok = true;
+    // One call per stretch between the cuts (absolute positions).
+    for (int at = 0, m = 0; at < T && ok; at += m) {
+        m = T - at;
+        for (int c : cuts)
+            if (c > from + at && c - from - at < m)
+                m = c - from - at;
+        const size_t o = static_cast<size_t>(at) * H, mn = static_cast<size_t>(m) * H;
+        inkling::embed_rows(w.embed, d_ids + at, d_f + o, m, H, nullptr);
+        inkling::f32_to_f16(d_f + o, d_h + o, mn, nullptr);
+        ok = fwd.run(d_h + o, m, from + at, nullptr, ids.data() + from + at);
+    }
+    inkling::f16_to_f32(d_h, d_f, n, nullptr);
+    cudaMemcpy(last.data(), d_f, last.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_ids);
+    cudaFree(d_f);
+    cudaFree(d_h);
+    return ok ? last : std::vector<float>();
+}
+
+// A prompt that shares 280 tokens with the kept sequence resumes at the checkpoint at 256 and ends in
+// the state a fresh run of it reaches.
+TEST(InklingRewind, ResumedPrefixMatchesAFreshRun) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> sky = read_ids(std::string(oracle) + "/sky_prompt.json");
+    const std::vector<int32_t> paris = read_ids(std::string(oracle) + "/paris_prompt.json");
+    ASSERT_FALSE(sky.empty());
+    ASSERT_FALSE(paris.empty());
+    std::vector<int32_t> a, b;
+    for (size_t i = 0; i < 300; ++i)
+        a.push_back(sky[i % sky.size()]);
+    b.assign(a.begin(), a.begin() + 280);
+    for (size_t i = 0; i < 30; ++i)
+        b.push_back(paris[i % paris.size()]);
+    InklingForward kept, fresh, kept100, fresh100;
+    ASSERT_TRUE(fresh100.init(fx.w, fx.va, 512, 4096));
+    ASSERT_TRUE(kept100.init(fx.w, fx.va, 512, 4096));
+    // Calls of 100 rows: the checkpoint at 256 falls inside the call [200, 300).
+    ASSERT_FALSE(run_rows(kept100, fx.w, a, 0, {100, 200}).empty());
+    ASSERT_EQ(kept100.rewind(b, nullptr), 256);
+    const std::vector<float> got100 = run_rows(kept100, fx.w, b, 256, {});
+    const std::vector<float> want100 = run_rows(fresh100, fx.w, b, 0, {100, 200, 256});
+    ASSERT_TRUE(kept.init(fx.w, fx.va, 512, 4096));
+    ASSERT_TRUE(fresh.init(fx.w, fx.va, 512, 4096));
+    ASSERT_EQ(kept.rewind(a, nullptr), 0);
+    ASSERT_FALSE(run_rows(kept, fx.w, a, 0, {}).empty());
+    ASSERT_EQ(kept.rewind(b, nullptr), 256);
+    // Both runs compute the same segments ([0, 256), [256, 310)): equal row counts, equal GEMM picks.
+    const std::vector<float> got = run_rows(kept, fx.w, b, 256, {});
+    const std::vector<float> want = run_rows(fresh, fx.w, b, 0, {});
+    ASSERT_FALSE(got.empty());
+    ASSERT_FALSE(want.empty());
+    Err e;
+    ASSERT_LT(got.size(), want.size());
+    const float* tail = want.data() + (want.size() - got.size());
+    e.add(got.data(), tail, got.size());
+    std::printf("rewind: resumed rows rel. error %.3g against a fresh run\n", e.rel());
+    EXPECT_LT(e.rel(), 2e-3);
+    Err e100;
+    ASSERT_EQ(got100.size(), got.size());
+    ASSERT_EQ(want100.size(), want.size());
+    e100.add(got100.data(), want100.data() + (want.size() - got.size()), got.size());
+    std::printf("rewind: %.3g with the checkpoint inside a call\n", e100.rel());
+    EXPECT_LT(e100.rel(), 2e-3);
+    // The same prompt again: everything but the open segment is reused.
+    EXPECT_EQ(kept.rewind(b, nullptr), 256);
+    ASSERT_FALSE(run_rows(kept, fx.w, b, 256, {}).empty());
+    // A prompt that differs in its first token starts over.
+    std::vector<int32_t> c = b;
+    c[0] = paris[1];
+    EXPECT_EQ(kept.rewind(c, nullptr), 0);
+}
 
 }  // namespace

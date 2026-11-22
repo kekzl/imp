@@ -1218,6 +1218,8 @@ private:
     // init_weights / init_kv_cache / init_features. Order matters: see the
     // call sequence in init() for which flag each one resolves.
     void init_inkling_limits_();
+    // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop, else offset.
+    int inkling_resume_(Request& req, int offset, cudaStream_t stream);
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has

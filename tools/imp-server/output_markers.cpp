@@ -58,6 +58,21 @@ OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& t
     return inkling_alias_table(ids);
 }
 
+bool silence_marker_thinking(OutputMarkerAliases& aliases, bool explicit_off) {
+    bool protocol = false, changed = false;
+    for (const auto& a : aliases)
+        protocol = protocol || a.closes;
+    if (!explicit_off || !protocol)
+        return false;
+    for (auto& a : aliases)
+        if (a.text == "<think>") {
+            a.text.clear();
+            a.close.clear();
+            a.silent = changed = true;
+        }
+    return changed;
+}
+
 const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id) {
     for (const auto& a : aliases)
         if (a.id == id)
@@ -80,6 +95,8 @@ std::string feed_plain(OutputMarkerState& st, std::string piece) {
         st.held += piece;
         return {};
     }
+    if (st.open && st.open->silent)
+        return {};
     if (!st.rewrite_pending)
         return piece;
     st.buf += piece;
