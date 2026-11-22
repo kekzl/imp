@@ -241,7 +241,10 @@ void Engine::build_banned_token_list() {
         for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>",
                                   "<|channel>", "<channel|>",
                                   "<|channel|>", "<|message|>", "<|start|>", "<|end|>",
-                                  "<|constrain|>"}) {
+                                  "<|constrain|>",
+                                  // Inkling2: every reply is <|message_model|> + a content marker + <|end_message|>.
+                                  "<|message_model|>", "<|content_thinking|>", "<|content_text|>", "<|end_message|>",
+                                  "<|content_invoke_tool_json|>", "<|content_model_end_sampling|>"}) {
             int32_t tid = tok->find_token(name);
             if (tid >= 0) keep_ids.push_back(tid);
         }

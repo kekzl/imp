@@ -194,7 +194,7 @@ bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {
     return sane;
 }
 
-bool load_inkling_weights(const std::string& dir, InklingWeights& w) {
+bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab) {
     if (!parse_inkling_config(dir, w.cfg))
         return false;
     const InklingConfig& c = w.cfg;
@@ -214,8 +214,10 @@ bool load_inkling_weights(const std::string& dir, InklingWeights& w) {
     const int64_t H = c.hidden, QD = static_cast<int64_t>(c.n_heads) * c.head_dim;
     const int64_t KD = static_cast<int64_t>(c.n_kv_heads) * c.head_dim, I = c.inter;
     const std::string llm = "model.llm.";
-    w.embed = L.f16(llm + "embed.weight", static_cast<int64_t>(c.vocab_padded) * H);
-    w.unembed = L.f16(llm + "unembed.weight", static_cast<int64_t>(c.vocab_padded) * H);
+    if (with_vocab) {
+        w.embed = L.f16(llm + "embed.weight", static_cast<int64_t>(c.vocab_padded) * H);
+        w.unembed = L.f16(llm + "unembed.weight", static_cast<int64_t>(c.vocab_padded) * H);
+    }
     w.embed_norm = L.f32(llm + "embed_norm.weight", H);
     w.norm = L.f32(llm + "norm.weight", H);
     w.out_query = L.f32(llm + "attn_res.output_query", H);

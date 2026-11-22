@@ -421,7 +421,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_emb, stream));
 
     // ---- Step 2: Transformer/Hybrid layers ----
-    const int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
+    if (inkling_)
+        run_inkling_(state, h, n, stream);
+    const int max_layer = inkling_ ? 0 : (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
     const int skip_start = state.skip_layer_start;
     const int skip_end = state.skip_layer_end;
     for (int i = 0; i < max_layer; ++i) {

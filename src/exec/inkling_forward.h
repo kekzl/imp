@@ -27,12 +27,18 @@ public:
     // for the last token; may be null.
     [[nodiscard]] bool forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s);
 
+    // Engine path: h [T, hidden] fp16 holds the token embeddings and receives the state the final norm
+    // reads. pos0 = position of row 0; 0 starts a new sequence, anything else must continue this one.
+    [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s);
+
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
     std::function<void(int, const float*, int)> tap;
 
 private:
     void apply_(int layer, int pass, int T, cudaStream_t s);
+    // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
+    void layers_(int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     const float* gate_(const float* h, const float* msg, const InklingGate& g, float* out, int T, cudaStream_t s);
     void conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site, bool is_key, int T,

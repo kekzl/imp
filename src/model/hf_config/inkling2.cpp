@@ -20,6 +20,8 @@ bool parse_inkling2_config(const JValue& /*root*/, const JValue& eff, ModelConfi
     if (ctx > 0)
         cfg.max_seq_len = ctx;
     jobj_opt_float(eff, "rms_norm_eps", cfg.rms_norm_eps);
+    jobj_opt_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
+    cfg.tie_word_embeddings = 0;
     return true;
 }
 

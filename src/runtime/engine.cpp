@@ -652,6 +652,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // currently re-derive GDN/SSM/MoE classification inline. The layers are
     // loaded by now (the resolvers read layer().gdn_gate.data directly).
     model_->build_profile();
+    init_inkling_limits_();
     {
         const auto& mp = model_->profile();
         IMP_LOG_INFO("ModelProfile: moe=%d gdn=%d ssm=%d hybrid=%d dense=%d attn=%s", mp.is_moe, mp.is_gdn,

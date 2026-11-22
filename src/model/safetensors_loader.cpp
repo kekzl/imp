@@ -1206,7 +1206,22 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // nothing below maps, widens or checks its tensors.
     const bool inkling = cfg.arch == ModelArch::INKLING2;
     if (inkling) {
+        // Embedding, final norm and lm_head (the unpadded rows) take the standard path.
+        auto take = [&](const char* suffix) {
+            for (const auto& [name, t] : tensor_map)
+                if (name.ends_with(suffix))
+                    return t;
+            return Tensor{};
+        };
         model->inkling_dir = model_dir;
+        model->tok_emb_ = take("llm.embed.weight");
+        model->out_norm_ = take("llm.norm.weight");
+        model->out_proj_ = take("llm.unembed.weight");
+        if (!model->tok_emb_.data || !model->out_norm_.data || model->out_proj_.shape[0] < cfg.vocab_size) {
+            IMP_LOG_ERROR("SafeTensors: Inkling2-Loop embedding, final norm or unembedding missing");
+            return nullptr;
+        }
+        model->out_proj_.shape[0] = cfg.vocab_size;
         tensor_map.clear();
     } else {
         widen_mxfp8_pairs(tensor_map, model->host_owned_buffers_);

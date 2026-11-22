@@ -237,16 +237,10 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     ++app_seq_;
 }
 
-bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
+void InklingForward::layers_(int T, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
-    if (T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
-        IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T, pos_,
-                      max_tokens_, max_ctx_);
-        return false;
-    }
     const int H = c.hidden;
     const size_t n = static_cast<size_t>(T) * H;
-    embed_rows(w_->embed, d_ids, h_, T, H, s);
     rms_norm(h_, w_->embed_norm, h_, nullptr, T, H, c.eps, s);
     nb_ = 0;
     app_seq_ = 0;
@@ -272,14 +266,42 @@ bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaS
     }
     for (int i = c.loop_end; i < c.n_layers; ++i)
         apply_(i, 0, T, s);
+    MixStates st;
+    for (int j = 0; j < nb_; ++j)
+        st.s[st.n++] = bs_[j];
+    st.s[st.n++] = h_;
+    MixOut out;
+    out.o[0] = mix_[0];
+    block_mix(st, w_->out_query, 1, out, T, H, s);
+}
+
+bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
+    if (pos0 == 0)
+        reset(s);
+    if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
+        IMP_LOG_ERROR("inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)",
+                      T, pos0, pos_, max_tokens_, max_ctx_);
+        return false;
+    }
+    const size_t n = static_cast<size_t>(T) * w_->cfg.hidden;
+    f16_to_f32(h, h_, n, s);
+    layers_(T, s);
+    f32_to_f16(mix_[0], h, n, s);
+    pos_ += T;
+    return ok_;
+}
+
+bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
+    const InklingConfig& c = w_->cfg;
+    if (T < 1 || T > max_tokens_ || pos_ + T > max_ctx_ || !w_->embed) {
+        IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T, pos_,
+                      max_tokens_, max_ctx_);
+        return false;
+    }
+    const int H = c.hidden;
+    embed_rows(w_->embed, d_ids, h_, T, H, s);
+    layers_(T, s);
     if (d_logits) {
-        MixStates st;
-        for (int j = 0; j < nb_; ++j)
-            st.s[st.n++] = bs_[j];
-        st.s[st.n++] = h_;
-        MixOut out;
-        out.o[0] = mix_[0];
-        block_mix(st, w_->out_query, 1, out, T, H, s);
         rms_norm(mix_[0], w_->norm, tap ? mix_[1] : nullptr, xq_, T, H, c.eps, s);
         if (tap) {
             cudaStreamSynchronize(s);

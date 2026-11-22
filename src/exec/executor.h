@@ -27,6 +27,7 @@
 #include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
+#include "exec/inkling_forward.h"
 #include "exec/moe_ffn_context.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
@@ -530,6 +531,8 @@ public:
         return ws_.resize_workspace(new_max_tokens, stream);
     }
     int max_tokens() const { return max_tokens_; }
+    // Uploads the Inkling2-Loop layers of <dir> and builds their forward for one sequence of max_ctx tokens.
+    [[nodiscard]] bool init_inkling(const std::string& dir, int max_ctx);
 
     // Takes the small-M NVFP4 workspace + activation scratch for the largest
     // eligible weight from the T2 arena before the first captured decode step:
@@ -1444,6 +1447,10 @@ private:
     void run_ssm_layer_(int layer, const InferenceState& state, cudaStream_t stream);
     // LFM2 short-conv layer.
     void run_shortconv(int layer, const InferenceState& state, cudaStream_t stream);
+    // Inkling2-Loop (executor_inkling.cu): every layer application between the embedding and the final norm.
+    void run_inkling_(const InferenceState& state, Tensor& h, int n, cudaStream_t stream);
+    std::unique_ptr<InklingWeights> inkling_weights_;
+    std::unique_ptr<InklingForward> inkling_;
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
     void run_recurrent_mixer_(int layer, const InferenceState& state, cudaStream_t stream);

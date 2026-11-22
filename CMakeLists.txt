@@ -468,6 +468,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/dspark_drafter.cu
     src/compute/dspark_attention.cu
     src/runtime/engine_dspark.cpp
+    src/runtime/engine_inkling.cpp
+    src/exec/executor_inkling.cu
     src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_mtp_batched.cpp

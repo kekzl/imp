@@ -80,6 +80,7 @@ struct InklingWeights {
 
 [[nodiscard]] bool parse_inkling_config(const std::string& dir, InklingConfig& cfg);
 // Uploads the text model from <dir>/model-*.safetensors. False = a tensor is missing or mis-shaped.
-[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w);
+// with_vocab false: embedding and unembedding stay with the caller (the engine's standard path).
+[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab = true);
 
 }  // namespace imp

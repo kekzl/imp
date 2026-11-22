@@ -1217,6 +1217,7 @@ private:
     // mutates config_ / RuntimeConfig in place, then init() executes
     // init_weights / init_kv_cache / init_features. Order matters: see the
     // call sequence in init() for which flag each one resolves.
+    void init_inkling_limits_();
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has
