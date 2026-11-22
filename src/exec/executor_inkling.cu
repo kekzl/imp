@@ -4,6 +4,7 @@
 #include "exec/executor.h"
 
 #include "core/logging.h"
+#include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
 #include "model/inkling_weights.h"
 
@@ -66,6 +67,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     }
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
+    rt->max_ctx = max_ctx;
+    rt->cap = std::min(max_tokens, InklingForward::kGrid);
     rt->slot_req.assign(rt->slots.size(), -1);
     rt->slot_block.assign(rt->slots.size(), -1);
     rt->slot_used.assign(rt->slots.size(), 0);
@@ -76,6 +79,8 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     if (!inkling_)
         return model_->config().n_layers;
     InklingRuntime& rt = *inkling_;
+    if (!rt.draft_tried)
+        inkling_attach_draft_(stream);
     const size_t N = static_cast<size_t>(n);
     // Host reads of the rows' positions, tokens and first KV blocks: this path is eager.
     const bool decode = !state.is_prefill;
@@ -130,6 +135,38 @@ int GraphExecutor::inkling_resume(int req, std::span<const int32_t> tokens, cons
         s = inkling_->bind(req, tokens, {});
     }
     return inkling_->slots[static_cast<size_t>(s)]->rewind(tokens, stream);
+}
+
+// The checkpoint's draft model behind every slot's decode lookahead; without it (no mtp.safetensors,
+// no FP8 view of the LM head, speculative.mtp_k = 0, no VRAM) the slots decode one row per step.
+void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
+    InklingRuntime& rt = *inkling_;
+    rt.draft_tried = true;
+    const Tensor& emb = model_->token_embedding();
+    InklingHeadView head;
+    head.vocab = model_->config().vocab_size;
+    if (!inkling_lookahead_ || emb.qtype != QType::F16 || !emb.data ||
+        !lm_head_fp8_view(head.w8, head.row_scales)) {
+        IMP_LOG_INFO("inkling2_loop: decode lookahead off (%s)",
+                     inkling_lookahead_ ? "needs an fp16 embedding table and the FP8 LM head"
+                                        : "speculative.mtp_k = 0");
+        return;
+    }
+    auto w = std::make_shared<InklingDraftWeights>();
+    if (!w->load(model_->inkling_dir, *vram_alloc_, rt.w.embed_norm, head, stream))
+        return;
+    rt.draft_w = w;
+    int on = 0;
+    for (auto& slot : rt.slots) {
+        auto d = std::make_shared<InklingDraft>();
+        if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap) ||
+            !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
+            break;
+        rt.drafts.push_back(std::move(d));
+        ++on;
+    }
+    IMP_LOG_INFO("inkling2_loop: decode lookahead on %d of %zu slots, %d drafts per step", on,
+                 rt.slots.size(), w->cfg.block - 1);
 }
 
 std::vector<int> GraphExecutor::inkling_slot_requests() const {

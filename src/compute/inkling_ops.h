@@ -78,6 +78,7 @@ struct KvSiteArgs {
     const float* static_w = nullptr;
     const half* dyn = nullptr;  // [T, stride] sub-block, n_heads * 4 taps
     float* state = nullptr;
+    float* log = nullptr;  // optional [T, n_heads * hd]: the conv inputs of this call (up to 8 rows)
     half* cache = nullptr;
     const int* d_pos = nullptr;  // device: position of row 0
     int T = 0, stride = 0, n_heads = 0, hd = 0, ring = 0;
@@ -116,12 +117,18 @@ size_t attention_part_floats(int n_heads, int hd, int window, int max_ctx);
 
 // a = (conv(x) + x) / sqrt(5) with the state [3, C] advanced; out = add ? resid + a : a.
 // copy (optional) receives resid.
+// log (optional, calls of up to 8 rows): [T, C], the conv inputs of this call.
 void conv_residual(const half* x, const float* w, float* state, const float* resid, bool add, float* out,
-                   float* copy, int T, int C, cudaStream_t s);
+                   float* copy, int T, int C, cudaStream_t s, float* log = nullptr);
+// Conv state after row j of a call that logged its inputs: dst = the last three of [pre (the state before
+// the call), log rows 0..j], for every site of n_apps applications (k, v: KD channels; attn, mlp: H).
+// State layout per application [3, KD] [3, KD] [3, H] [3, H]; log layout the same with rows rows each.
+void conv_state_at(const float* pre, const float* log, float* dst, int j, int n_apps, int KD, int H, int rows,
+                   cudaStream_t s);
 // y = sum_k weights[t, k] * ey[t * top_k + k]; a = (conv(y) + y) / sqrt(5), state advanced; out = resid + a.
 // scratch: fp32 [T, C], used above 8 rows.
 void moe_tail(const half* ey, const float* weights, const float* w, float* state, const float* resid,
-              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s);
+              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log = nullptr);
 
 // Router: scores = sigmoid(W x); top_k of scores + bias; weights = score / sum * route_scale.
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,

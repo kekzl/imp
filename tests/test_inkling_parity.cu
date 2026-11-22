@@ -11,13 +11,16 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "compute/inkling_ops.h"
+#include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
+#include "quant/fp8_quant.h"
 #include "vision/inkling_vision.h"
 
 using namespace imp;
@@ -400,6 +403,227 @@ TEST(InklingVisionParity, MergedFeaturesMatchTheReference) {
             cudaFree(d_f);
         }
     }
+}
+
+// One decode step through run(): the token's embedding in, the final state of the row out.
+struct Stepper {
+    const InklingWeights& w;
+    cudaStream_t s = nullptr;
+    int32_t* d_id = nullptr;
+    float* d_f = nullptr;
+    half* d_h = nullptr;
+    explicit Stepper(const InklingWeights& w_) : w(w_) {
+        const size_t H = static_cast<size_t>(w.cfg.hidden);
+        cudaStreamCreate(&s);
+        cudaMalloc(&d_id, sizeof(int32_t));
+        cudaMalloc(&d_f, H * sizeof(float));
+        cudaMalloc(&d_h, H * sizeof(half));
+    }
+    ~Stepper() {
+        cudaFree(d_id);
+        cudaFree(d_f);
+        cudaFree(d_h);
+        cudaStreamDestroy(s);
+    }
+    std::vector<float> step(InklingForward& f, int32_t tok, int pos) {
+        const int H = w.cfg.hidden;
+        std::vector<float> out(static_cast<size_t>(H));
+        cudaMemcpyAsync(d_id, &tok, sizeof tok, cudaMemcpyHostToDevice, s);
+        inkling::embed_rows(w.embed, d_id, d_f, 1, H, s);
+        inkling::f32_to_f16(d_f, d_h, out.size(), s);
+        if (!f.run(d_h, 1, pos, s, &tok))
+            return {};
+        inkling::f16_to_f32(d_h, d_f, out.size(), s);
+        cudaMemcpyAsync(out.data(), d_f, out.size() * sizeof(float), cudaMemcpyDeviceToHost, s);
+        cudaStreamSynchronize(s);
+        return out;
+    }
+};
+
+// Lookahead forward whose drafts come from a plan: position of the anchor -> tokens proposed after it.
+InklingSpecHooks planned(const std::map<int, std::vector<int32_t>>& plan) {
+    InklingSpecHooks h;
+    h.on_rows = [](const float*, int, int, int, cudaStream_t) {};
+    h.propose = [&plan](int32_t, const half*, int pos, int32_t* out, cudaStream_t) {
+        const auto it = plan.find(pos);
+        if (it == plan.end())
+            return 0;
+        std::copy(it->second.begin(), it->second.end(), out);
+        return static_cast<int>(it->second.size());
+    };
+    return h;
+}
+
+// Drafts that turn out wrong after two rows leave the forward where a call of only the right rows
+// leaves it: same states for every later token.
+TEST(InklingLookahead, RejectedRowsLeaveNoTrace) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    std::vector<int32_t> t = read_ids(std::string(oracle) + "/paris_prompt.json");
+    const std::vector<int32_t> g = read_ids(std::string(oracle) + "/paris_greedy.json");
+    ASSERT_FALSE(t.empty());
+    const int P = static_cast<int>(t.size());
+    t.insert(t.end(), g.begin(), g.end());
+    const std::vector<int32_t> prompt(t.begin(), t.begin() + P);
+    const auto next = [&](int pos, int n) {
+        return std::vector<int32_t>(t.begin() + pos + 1, t.begin() + pos + 1 + n);
+    };
+    // A: at P the drafts are right for two rows, then wrong. B: only the two right rows are drafted.
+    std::map<int, std::vector<int32_t>> plan_a, plan_b;
+    plan_a[P] = next(P, 7);
+    for (size_t i = 2; i < 7; ++i)
+        plan_a[P][i] = t[0];
+    plan_b[P] = next(P, 2);
+    for (int pos = P + 3; pos + 8 < static_cast<int>(t.size()); pos += 8)
+        plan_a[pos] = plan_b[pos] = next(pos, 7);
+    const std::vector<int> taps = {5, 23, 41, 48};
+    {
+        Stepper st(fx.w);
+        InklingForward a, b, plain;
+        ASSERT_TRUE(a.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(b.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(plain.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(a.enable_lookahead(planned(plan_a), taps, fx.w.embed));
+        ASSERT_TRUE(b.enable_lookahead(planned(plan_b), taps, fx.w.embed));
+        for (InklingForward* f : {&a, &b, &plain})
+            ASSERT_FALSE(run_rows(*f, fx.w, prompt, 0, {}).empty());
+        Err ab, ap;
+        for (int pos = P; pos < static_cast<int>(t.size()); ++pos) {
+            const std::vector<float> ra = st.step(a, t[static_cast<size_t>(pos)], pos);
+            const std::vector<float> rb = st.step(b, t[static_cast<size_t>(pos)], pos);
+            const std::vector<float> rp = st.step(plain, t[static_cast<size_t>(pos)], pos);
+            ASSERT_FALSE(ra.empty());
+            ASSERT_FALSE(rb.empty());
+            ASSERT_FALSE(rp.empty());
+            ab.add(ra.data(), rb.data(), ra.size());
+            ap.add(ra.data(), rp.data(), ra.size());
+        }
+        const InklingForward::SpecStats sa = a.spec_stats(), sb = b.spec_stats();
+        std::printf(
+            "lookahead: rejected-rows run vs right-rows run rel. error %.3g, vs one-row decode %.3g; "
+            "A %ld steps %ld drafted %ld confirmed, B %ld / %ld / %ld\n",
+            ab.rel(), ap.rel(), sa.steps, sa.drafted, sa.accepted, sb.steps, sb.drafted, sb.accepted);
+        EXPECT_LT(ab.rel(), 2e-3);
+        // Rows of an eight-row call against one-row calls: other GEMM row counts, the forward's own
+        // shape noise (the transformers reference sits 4 % from both).
+        EXPECT_LT(ap.rel(), 0.15);
+        EXPECT_EQ(sa.accepted, sb.accepted);
+        EXPECT_GT(sa.accepted, static_cast<long>(g.size()) / 2);
+        EXPECT_EQ(sa.drafted - sa.accepted, 5);
+    }
+}
+
+// A checkpoint that falls inside a lookahead call holds the conv state of its row, not of the call's
+// last row: a prompt resumed there ends where it ends when the call stopped at that row.
+TEST(InklingLookahead, CheckpointInsideACallIsTheRowsState) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> sky = read_ids(std::string(oracle) + "/sky_prompt.json");
+    const std::vector<int32_t> paris = read_ids(std::string(oracle) + "/paris_prompt.json");
+    ASSERT_FALSE(sky.empty());
+    std::vector<int32_t> t;
+    for (size_t i = 0; i < 268; ++i)
+        t.push_back(sky[i % sky.size()]);
+    const int P = 249;  // anchor of a call that covers 249..256: position 256 is its last row
+    const std::vector<int32_t> prompt(t.begin(), t.begin() + P);
+    // look: seven drafts, position 255 is row 6 of 8. edge: six drafts, 255 is the call's last row.
+    std::map<int, std::vector<int32_t>> plan, edge;
+    plan[P] = std::vector<int32_t>(t.begin() + P + 1, t.begin() + P + 8);
+    edge[P] = std::vector<int32_t>(t.begin() + P + 1, t.begin() + P + 7);
+    std::vector<int32_t> b(t.begin(), t.begin() + 262);
+    for (size_t i = 0; i < 20; ++i)
+        b.push_back(paris[i % paris.size()]);
+    const std::vector<int> taps = {5, 23, 41, 48};
+    {
+        Stepper st(fx.w);
+        InklingForward look, last;
+        std::vector<float> got[2];
+        int k = 0;
+        for (InklingForward* f : {&look, &last}) {
+            ASSERT_TRUE(f->init(fx.w, fx.va, 512, 4096));
+            ASSERT_TRUE(f->enable_lookahead(planned(f == &look ? plan : edge), taps, fx.w.embed));
+            ASSERT_FALSE(run_rows(*f, fx.w, prompt, 0, {}).empty());
+            for (int pos = P; pos < 262; ++pos)
+                ASSERT_FALSE(st.step(*f, t[static_cast<size_t>(pos)], pos).empty());
+            ASSERT_EQ(f->rewind(b, nullptr), 256);
+            got[k++] = run_rows(*f, fx.w, b, 256, {});
+            ASSERT_FALSE(got[k - 1].empty());
+        }
+        EXPECT_EQ(look.spec_stats().accepted, 7);
+        Err e;
+        e.add(got[0].data(), got[1].data(), got[0].size());
+        std::printf(
+            "lookahead: rows resumed at a checkpoint inside a call, rel. error %.3g against the "
+            "checkpoint at a call's end\n",
+            e.rel());
+        EXPECT_LT(e.rel(), 2e-3);
+        EXPECT_EQ(last.spec_stats().accepted, 6);
+    }
+}
+
+// The checkpoint's draft on the reference continuation: fed the tokens the transformers reference
+// generated, the lookahead confirms draft rows only where the draft named exactly those tokens.
+TEST(InklingDraftModel, DraftsFollowTheReferenceContinuation) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const int V = fx.w.cfg.vocab, H = fx.w.cfg.hidden;
+    // The LM head as the engine holds it: per-row E4M3 with row scales.
+    void* d_w8 = nullptr;
+    float* d_sc = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w8, static_cast<size_t>(V) * H), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sc, static_cast<size_t>(V) * sizeof(float)), cudaSuccess);
+    quantize_fp8_rows_async(fx.w.unembed, d_w8, V, H, d_sc, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    long steps = 0, drafted = 0, accepted = 0, tokens = 0;
+    {
+        Stepper st(fx.w);
+        InklingDraftWeights dw;
+        ASSERT_TRUE(dw.load(model, fx.va, fx.w.embed_norm, InklingHeadView{d_w8, d_sc, V}, st.s));
+        for (const char* name : {"paris", "sky"}) {
+            std::vector<int32_t> t = read_ids(std::string(oracle) + "/" + name + "_prompt.json");
+            const std::vector<int32_t> g = read_ids(std::string(oracle) + "/" + name + "_greedy.json");
+            ASSERT_FALSE(t.empty());
+            const int P = static_cast<int>(t.size());
+            t.insert(t.end(), g.begin(), g.end());
+            InklingDraft draft;
+            InklingForward f;
+            ASSERT_TRUE(f.init(fx.w, fx.va, 512, 4096));
+            ASSERT_TRUE(draft.init(dw, fx.va, 4096, InklingForward::kGrid));
+            ASSERT_TRUE(f.enable_lookahead(draft.hooks(), dw.cfg.taps, fx.w.embed));
+            ASSERT_FALSE(run_rows(f, fx.w, std::vector<int32_t>(t.begin(), t.begin() + P), 0, {}).empty());
+            for (int pos = P; pos < static_cast<int>(t.size()); ++pos)
+                ASSERT_FALSE(st.step(f, t[static_cast<size_t>(pos)], pos).empty());
+            const InklingForward::SpecStats s = f.spec_stats();
+            std::printf("draft %s: %ld steps for %zu tokens, %ld draft rows run, %ld confirmed\n", name,
+                        s.steps, g.size(), s.drafted, s.accepted);
+            steps += s.steps, drafted += s.drafted, accepted += s.accepted,
+                tokens += static_cast<long>(g.size());
+            EXPECT_EQ(s.steps + s.accepted, static_cast<long>(g.size()));
+        }
+    }
+    std::printf("draft: %.2f tokens per step, %.0f %% of the run draft rows confirmed\n",
+                static_cast<double>(tokens) / static_cast<double>(steps),
+                100.0 * static_cast<double>(accepted) / static_cast<double>(std::max(drafted, 1L)));
+    // Measured: 64 of the 96 tokens come out of confirmed draft rows (37 + 27); 50 without the Markov
+    // head's correction.
+    EXPECT_GE(accepted, 58);
+    cudaFree(d_w8);
+    cudaFree(d_sc);
 }
 
 }  // namespace

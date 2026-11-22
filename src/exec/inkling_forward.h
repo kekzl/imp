@@ -13,6 +13,17 @@
 
 namespace imp {
 
+// Draft model of the decode lookahead (exec/inkling_draft.h in the engine, a stub in tests).
+struct InklingSpecHooks {
+    // Feature rows of the positions [pos0, pos0 + n): fp32 planes [n_features][cap][hidden], the
+    // residual stream at the tapped applications and the normed final state. Rows of a lookahead
+    // call arrive before they are confirmed; a later call at the same position replaces them.
+    std::function<void(const float* feat, int cap, int n, int pos0, cudaStream_t s)> on_rows;
+    // Up to kGraphRows - 1 tokens expected after anchor (the token at pos, d_emb its embedding row,
+    // device fp16 [hidden]); returns their count, 0 = no lookahead for this step.
+    std::function<int(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s)> propose;
+};
+
 class InklingForward {
 public:
     InklingForward() = default;
@@ -34,7 +45,8 @@ public:
     [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
-    static constexpr int kGrid = 256;    // rows per forward segment = checkpoint distance
+    static constexpr int kGraphRows = 8;  // rows of the largest captured call = anchor + drafts
+    static constexpr int kGrid = 256;     // rows per forward segment = checkpoint distance
     static constexpr int kSlack = 5888;  // sliding K/V kept behind the window: how far rewind may go back
 
     // Runs T tokens at positions [position(), position() + T). logits: device fp32 [vocab], softcapped,
@@ -48,6 +60,20 @@ public:
     [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids = nullptr,
                            int32_t image_token = -1);
 
+    // Decode lookahead: a one-row call drafts the next tokens, runs anchor + drafts as one call and
+    // serves the following one-row calls from it while their tokens equal the drafts; the first other
+    // token puts the conv state back to the last confirmed row. taps: visit indices whose input
+    // stream is a feature plane (the last entry stands for the normed final state); embed: the token
+    // embedding table [vocab, hidden] the draft rows are read from.
+    [[nodiscard]] bool enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed);
+    // Lookahead steps, draft rows run, draft rows confirmed since init.
+    struct SpecStats {
+        long steps = 0, drafted = 0, accepted = 0;
+        long confirmed[kGraphRows] = {};  // steps that ended with this many draft rows confirmed
+        long paused = 0;                  // one-row steps taken while the draft was paused
+    };
+    SpecStats spec_stats() const { return stats_; }
+
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
     std::function<void(int, const float*, int)> tap;
@@ -59,8 +85,19 @@ private:
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
     // Host copy of the conv state when the sequence stands on the grid.
-    void checkpoint_(cudaStream_t s);
-    void capture_decode_(cudaStream_t s);
+    void checkpoint_(cudaStream_t s, const float* state);
+    // run() for one row with the lookahead on; settle_ makes the conv state the confirmed one.
+    [[nodiscard]] bool step_spec_(half* h, int32_t tok, cudaStream_t s);
+    void settle_(cudaStream_t s);
+    void conv_at_(int row, float* dst, cudaStream_t s);
+    [[nodiscard]] bool draft_due_();
+    [[nodiscard]] bool segment_(half* hs, int seg, cudaStream_t s, const int32_t* ids, int32_t image_token);
+    struct ConvLog {
+        float *k = nullptr, *v = nullptr, *attn = nullptr, *mlp = nullptr;
+    };
+    ConvLog conv_log_at_(size_t app, int T) const;
+    void tap_features_(int T, cudaStream_t s);
+    void capture_decode_(int T, cudaStream_t s);
     float* F_(size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); }
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 
@@ -92,16 +129,41 @@ private:
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call
-    // Captured one-token step over the own row buffer dec_h_ (run(), T == 1): any caller row replays it.
-    CudaGraph decode_graph_;
-    CudaGraphExec decode_exec_;
+    // Captured steps of 1..kGraphRows rows over the own row buffer dec_h_ (run()): any caller rows
+    // replay them. One row is the decode step; more are verify chunks and paced prefill.
+    CudaGraph decode_graph_[kGraphRows];
+    CudaGraphExec decode_exec_[kGraphRows];
     half* dec_h_ = nullptr;
     bool decode_graph_ok_ = true;
+    // Lookahead (enable_lookahead): feature planes of the running call, the conv state before the
+    // stored call and that call's conv inputs, its final rows and tokens.
+    InklingSpecHooks spec_;
+    std::vector<int> taps_;
+    const half* embed_ = nullptr;
+    float *feat_ = nullptr, *conv_pre_ = nullptr, *conv_log_ = nullptr, *conv_tmp_ = nullptr;
+    half* look_h_ = nullptr;
+    int32_t* d_look_ids_ = nullptr;
+    int look_pos0_ = -1, look_n_ = 0, look_hits_ = 0;
+    // Pay-off of the draft: running means of confirmed and drafted rows per drafting step, steps since
+    // the draft was (re)started, and the plain steps left while it is paused.
+    float mean_hits_ = 0.0f, mean_rows_ = 0.0f;
+    int tried_ = 0, pause_ = 0;
+    bool drafted_ = false;  // the last step asked the draft
+    int32_t look_tok_[kGraphRows] = {};
+    SpecStats stats_;
 };
 
 // Weights and the forwards that point into them (destroyed first): one kept sequence per slot.
+class InklingDraft;
+struct InklingDraftWeights;
 struct InklingRuntime {
     InklingWeights w;
+    // Decode lookahead (exec/inkling_draft.h): shared draft weights, one context per slot; a slot
+    // whose context did not fit decodes without. Declared before the slots that hold hooks into them.
+    std::shared_ptr<InklingDraftWeights> draft_w;
+    std::vector<std::shared_ptr<InklingDraft>> drafts;
+    bool draft_tried = false;
+    int max_ctx = 0, cap = 0;
     std::vector<std::unique_ptr<InklingForward>> slots;
     std::vector<int> slot_req;        // request bound to the slot, -1 = never bound
     std::vector<int> slot_block;      // first KV block of that request's table: the key of a decode row

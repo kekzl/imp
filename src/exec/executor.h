@@ -568,6 +568,7 @@ public:
     int inkling_resume(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy,
                        cudaStream_t stream);
     std::vector<int> inkling_slot_requests() const;
+    void set_inkling_lookahead(bool on) { inkling_lookahead_ = on; }
 
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
@@ -1452,6 +1453,8 @@ private:
     // executor_inkling.cu: Inkling2-Loop runs all its layers there and returns 0, else n_layers.
     int run_inkling_(const InferenceState& state, Tensor& h, int n, cudaStream_t stream);
     std::unique_ptr<InklingRuntime> inkling_;
+    bool inkling_lookahead_ = true;
+    void inkling_attach_draft_(cudaStream_t stream);  // once, at the first forward: the FP8 head exists then
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
     void run_recurrent_mixer_(int layer, const InferenceState& state, cudaStream_t stream);

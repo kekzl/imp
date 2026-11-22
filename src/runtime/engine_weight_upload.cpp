@@ -393,6 +393,7 @@ bool Engine::init_weights() {
 
     // Phase 2: allocate GPU workspace
     inkling_load_vision_();
+    executor_->set_inkling_lookahead(inkling_lookahead_);
     (void)executor_->allocate_workspaces(experts_on_host_);
     inkling_fit_slots_();
 

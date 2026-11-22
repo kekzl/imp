@@ -9,6 +9,7 @@
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "memory/vram_allocator.h"
+#include "model/bf16_loader.h"
 #include "model/json_util.h"
 #include "model/safetensors_loader.h"
 
@@ -25,13 +26,6 @@ namespace imp {
 namespace {
 
 constexpr int kT = 256;
-
-float bf16_host(uint16_t b) {
-    const uint32_t u = static_cast<uint32_t>(b) << 16;
-    float f;
-    std::memcpy(&f, &u, sizeof f);
-    return f;
-}
 
 __device__ float block_sum(float v, float* sh) {
     for (int off = 16; off > 0; off >>= 1)
@@ -156,66 +150,6 @@ __global__ void vis_gelu_k(half* y, const float* bias, size_t n, int C) {
 
 unsigned blocks(size_t n) { return static_cast<unsigned>((n + kT - 1) / kT); }
 
-struct VisLoader {
-    std::unordered_map<std::string, Tensor> t;
-    VRAMAllocator& va;
-    std::vector<void*>& owned;
-    bool ok = true;
-
-    const uint16_t* find(const std::string& name, int64_t numel) {
-        const auto it = t.find(name);
-        if (it == t.end() || it->second.qtype != QType::BF16 || it->second.numel() != numel) {
-            IMP_LOG_ERROR("inkling vision: tensor %s missing or not BF16 with %lld elements", name.c_str(),
-                          static_cast<long long>(numel));
-            ok = false;
-            return nullptr;
-        }
-        return static_cast<const uint16_t*>(it->second.data);
-    }
-    void* dev(size_t bytes, const char* tag = "inkling_vision") {
-        void* p = va.allocate(bytes, tag);
-        if (!p) {
-            IMP_LOG_ERROR("inkling vision: device allocation of %.1f MiB failed", bytes / 1048576.0);
-            ok = false;
-            return nullptr;
-        }
-        owned.push_back(p);
-        return p;
-    }
-    std::vector<float> host(const std::string& name, int64_t numel) {
-        std::vector<float> h(static_cast<size_t>(numel), 0.0f);
-        if (const uint16_t* b = find(name, numel))
-            for (size_t i = 0; i < h.size(); ++i)
-                h[i] = bf16_host(b[i]);
-        return h;
-    }
-    float* upload(const std::vector<float>& h) {
-        auto* p = static_cast<float*>(dev(h.size() * sizeof(float)));
-        // Pageable source: the copy is staged before the call returns.
-        if (p && cudaMemcpyAsync(p, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice, nullptr) !=
-                     cudaSuccess)
-            ok = false;
-        return p;
-    }
-    float* f32(const std::string& name, int64_t numel) { return upload(host(name, numel)); }
-    // BF16 tensor converted into dst (a slice of a larger allocation).
-    void f16_into(const std::string& name, int64_t numel, half* dst) {
-        const uint16_t* b = find(name, numel);
-        if (!b || !dst)
-            return;
-        if (cudaMemcpyAsync(dst, b, static_cast<size_t>(numel) * 2, cudaMemcpyHostToDevice, nullptr) !=
-            cudaSuccess)
-            ok = false;
-        inkling::bf16_to_f16(reinterpret_cast<const uint16_t*>(dst), dst, static_cast<size_t>(numel),
-                             nullptr);
-    }
-    half* f16(const std::string& name, int64_t numel) {
-        auto* p = static_cast<half*>(dev(static_cast<size_t>(numel) * sizeof(half)));
-        f16_into(name, numel, p);
-        return p;
-    }
-};
-
 // Source index and weight of bilinear resampling without aligned corners (F.interpolate).
 void axis_tap(int i, int size, int side, int& i0, int& i1, float& w1) {
     const float src = std::max(
@@ -292,7 +226,7 @@ std::string model_file(const std::string& dir) {
 
 // One encoder layer under prefix p; q, k, v weights and biases stacked in that order.
 template <class LayerT>
-void load_layer(VisLoader& L, LayerT& ly, const std::string& p, int H) {
+void load_layer(Bf16Loader& L, LayerT& ly, const std::string& p, int H) {
     const int64_t HH = static_cast<int64_t>(H) * H, I = 4 * static_cast<int64_t>(H);
     ly.qkv = static_cast<half*>(L.dev(static_cast<size_t>(3 * HH) * sizeof(half)));
     std::vector<float> qb;
@@ -349,7 +283,7 @@ bool InklingVision::load(const std::string& dir, VRAMAllocator& va) {
     if (!parse_vision_config(dir, c))
         return false;
     const int H = c.hidden;
-    VisLoader L{{}, va, owned_};
+    Bf16Loader L{{}, va, owned_, "inkling_vision"};
     void* base = nullptr;
     size_t size = 0;
     const std::string file = model_file(dir);
