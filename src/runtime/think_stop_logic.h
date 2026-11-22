@@ -208,6 +208,12 @@ IMP_THINK_HD inline bool grace_blocks_stop(int think_exit_idx, int output_size, 
     return tokens_since_exit < kMinAnswerAfterThink;
 }
 
+// A closer id opens the post-think grace window only when it ends an open block. A protocol whose
+// closer also ends every other message (Inkling2 <|end_message|>, Harmony <|end|>) re-opened the
+// window behind each tool call and answer: the stop right after it was masked and the model had to
+// write something else (a second call, the answer again, a stray token).
+IMP_THINK_HD inline bool closer_exits_block(bool in_think) { return in_think; }
+
 // Masks a stop token before sampling wherever should_stop would suppress it
 // (fill_sampling_params, post_decode_step_kernel): a suppressed stop left in
 // context can pick <|endoftext|> on a near-tie (AUDIT_QWEN38_NVFP4 P3). Bounded: in-think only while

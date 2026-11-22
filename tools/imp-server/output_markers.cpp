@@ -136,6 +136,12 @@ std::string feed_marker(OutputMarkerState& st, const OutputMarkerAlias& a) {
 
 }  // namespace
 
+void open_thinking(OutputMarkerState& st, const OutputMarkerAliases& aliases) {
+    for (const auto& a : aliases)
+        if (a.close == "</think>")
+            st.open = &a;
+}
+
 std::string output_marker_step(OutputMarkerState& st, const OutputMarkerAlias* a, std::string plain) {
     return a ? feed_marker(st, *a) : feed_plain(st, std::move(plain));
 }
@@ -149,12 +155,14 @@ std::string decode_chat_piece(const imp::Tokenizer& tok, const OutputMarkerAlias
 }
 
 std::string decode_chat_output(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases,
-                               const std::vector<int32_t>& ids) {
+                               const std::vector<int32_t>& ids, bool in_thinking) {
     if (aliases.empty())
         return tok.decode(ids);
     // Runs between aliased ids decode as one span (byte-level merges stay intact).
     std::string out;
     OutputMarkerState st;
+    if (in_thinking)
+        open_thinking(st, aliases);
     auto run = ids.begin();
     for (auto it = ids.begin(); it != ids.end(); ++it) {
         const OutputMarkerAlias* a = find_alias(aliases, *it);

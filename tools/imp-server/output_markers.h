@@ -48,6 +48,9 @@ OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& t
 // The Inkling2 table over the ids of <|message_model|>, <|content_thinking|>, <|content_text|>,
 // <|content_invoke_tool_json|>, <|end_message|> (in that order).
 OutputMarkerAliases inkling_alias_table(const std::array<int32_t, 5>& ids);
+// A reply whose prompt already ended on the thinking opener starts inside that block: without this
+// the first closer closed nothing, no </think> came out and the whole reply read as reasoning.
+void open_thinking(OutputMarkerState& st, const OutputMarkerAliases& aliases);
 // One decode step: marker a (non-null) or plain text between markers.
 std::string output_marker_step(OutputMarkerState& st, const OutputMarkerAlias* a, std::string plain);
 
@@ -62,5 +65,6 @@ const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id);
 // decodes every alias as its text.
 std::string decode_chat_piece(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases, int32_t id,
                               OutputMarkerState* st = nullptr);
+// in_thinking: the prompt ended on the thinking opener (open_thinking).
 std::string decode_chat_output(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases,
-                               const std::vector<int32_t>& ids);
+                               const std::vector<int32_t>& ids, bool in_thinking = false);

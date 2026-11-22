@@ -11,9 +11,11 @@ namespace {
 enum : int32_t { kModel = 1, kThinking, kText, kTool, kEnd };
 
 // "@N" = marker N, anything else = plain text.
-std::string run(const std::vector<std::string>& pieces) {
+std::string run(const std::vector<std::string>& pieces, bool in_thinking = false) {
     const OutputMarkerAliases table = inkling_alias_table({kModel, kThinking, kText, kTool, kEnd});
     OutputMarkerState st;
+    if (in_thinking)
+        open_thinking(st, table);
     std::string out;
     for (const std::string& p : pieces) {
         const OutputMarkerAlias* a = nullptr;
@@ -31,6 +33,14 @@ std::string run(const std::vector<std::string>& pieces) {
 TEST(OutputMarkersInkling, ThinkingThenTextKeepsOnlyTheThinkTags) {
     EXPECT_EQ(run({"@1", "@2", "The user", " asks.", "@5", "@1", "@3", "Paris", "@5"}),
               "<think>The user asks.</think>Paris");
+}
+
+// Thinking on: the prompt ends on the thinking opener, the reply starts inside the block.
+TEST(OutputMarkersInkling, AReplyThatStartsInsideThinkingClosesItAtTheFirstCloser) {
+    EXPECT_EQ(run({"reason", "@5", "@1", "f", "@4", "{\"name\":\"f\",\"args\":{}}", "@5"},
+                  /*in_thinking=*/true),
+              "reason</think><tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>");
+    EXPECT_EQ(run({"reason", "@5", "@1", "@3", "Paris", "@5"}, /*in_thinking=*/true), "reason</think>Paris");
 }
 
 TEST(OutputMarkersInkling, TextWithoutThinkingHasNoTags) {

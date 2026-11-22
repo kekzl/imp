@@ -497,6 +497,45 @@ TEST(StopMask, IgnoreEosNeverMasks) {
     EXPECT_FALSE(stop_mask_active(false, true, 10, 11, false, /*ignore_eos=*/true));
 }
 
+// Think state as Engine::track_think_state / should_stop and track_think_token keep it, for a protocol
+// whose closer ends every message (Inkling2: <|end_message|> closes thinking, tool calls and text).
+namespace {
+struct SharedCloserSim {
+    static constexpr int32_t kClose = 7, kText = 300;
+    bool in_think = true;
+    int exit_idx = -1, n = 0;
+    bool content = false;
+    void emit(int32_t t) {
+        if (t == kClose) {
+            if (closer_exits_block(in_think)) {
+                in_think = false;
+                exit_idx = n;
+                content = false;
+            }
+        } else if (exit_idx >= 0) {
+            content = true;
+        }
+        ++n;
+    }
+    [[nodiscard]] bool stop_masked() const {
+        return stop_mask_active(in_think, /*budget_can_close=*/false, exit_idx, n, content,
+                                /*ignore_eos=*/false);
+    }
+};
+}  // namespace
+
+TEST(ThinkCloser, AMessageEndAfterTheAnswerDoesNotMaskTheStop) {
+    SharedCloserSim s;
+    s.emit(SharedCloserSim::kText);  // reasoning
+    s.emit(SharedCloserSim::kClose);
+    EXPECT_TRUE(s.stop_masked()) << "no answer yet: the grace holds the stop back";
+    s.emit(SharedCloserSim::kText);  // a tool call or the answer
+    EXPECT_FALSE(s.stop_masked());
+    s.emit(SharedCloserSim::kClose);  // the end of that message
+    EXPECT_FALSE(s.stop_masked()) << "the stop that ends the turn follows this closer";
+    EXPECT_EQ(s.exit_idx, 1);
+}
+
 // Client end-of-think (#2420). EndThinkSim mirrors Engine::fill_sampling_params (force decision,
 // no budget) and track_think_state (single-id path); the model stub emits its own token unless forced.
 namespace {

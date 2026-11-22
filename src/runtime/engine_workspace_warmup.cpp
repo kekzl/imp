@@ -48,6 +48,35 @@ bool cohere_think_pair(const Tokenizer& tok, int32_t& ts, int32_t& te) {
     te = e;
     return true;
 }
+
+// Inkling2: <|content_thinking|> opens the block, <|end_message|> ends it and every other message.
+// Without the pair the engine never saw a block end: a request the server started inside thinking
+// stayed there, and the first stop token was taken for the implicit close and passed over.
+bool inkling_think_pair(const Tokenizer& tok, int32_t& ts, int32_t& te) {
+    const int32_t s = tok.find_token("<|content_thinking|>");
+    const int32_t e = tok.find_token("<|end_message|>");
+    if (s < 0 || e < 0 || !tok.is_added_token(s) || !tok.is_added_token(e))
+        return false;
+    ts = s;
+    te = e;
+    return true;
+}
+
+// The thinking pair of a family without <think> tokens. markers: a marker protocol, which closes its
+// block without a newline before the closer.
+bool think_marker_pair(const Tokenizer& tok, int32_t& ts, int32_t& te, bool& markers) {
+    if (cohere_think_pair(tok, ts, te))
+        return true;
+    markers = inkling_think_pair(tok, ts, te);
+    return markers;
+}
+
+// The newline the model puts before its own </think> (and the template renders before it in a prior
+// turn): a forced think end emits it first. -1 = none.
+int32_t think_newline(const Tokenizer& tok, bool markers) {
+    const auto nl = tok.encode("\n", /*no_prefix=*/true);
+    return nl.size() == 1 && !markers ? nl[0] : -1;
+}
 }  // namespace
 
 bool Engine::init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok) {
@@ -105,14 +134,12 @@ bool Engine::init_features() {
             bool accept = think_logic::accept_think_token(
                 ts, ptok->has_token_types(), ptok->has_token_types() && ptok->is_special_token(ts),
                 ptok->is_added_token(ts), vocab);
-            accept = accept || cohere_think_pair(*ptok, ts, te);
+            bool markers = false;
+            accept = accept || think_marker_pair(*ptok, ts, te, markers);
             if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;
-                // The newline the model puts before its own </think> (and the template renders
-                // before it in a prior turn): a forced think end emits it first.
-                const auto nl = ptok->encode("\n", /*no_prefix=*/true);
-                think_newline_id_ = nl.size() == 1 ? nl[0] : -1;
+                think_newline_id_ = think_newline(*ptok, markers);
             } else if (chat_template_.family() == ChatTemplateFamily::HARMONY) {
                 // gpt-oss Harmony: reasoning lives in the analysis channel and closes with <|end|>;
                 // the model emits <|channel|>analysis<|message|> itself (no <think> opener, so

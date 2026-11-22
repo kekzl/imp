@@ -50,6 +50,8 @@ void Engine::track_think_state(Request& req, int32_t token) const {
         return;
     }
     if (token == think_end_id_) {
+        if (!think_logic::closer_exits_block(req.in_think_block))
+            return;
         // A closer the engine forced (client end_thinking, think budget) ends reasoning for the request:
         // the opener is banned, else the post-think grace masked the stop, the model re-opened and the
         // forcing looped to max_tokens (Flint: 16k reasoning tokens after the ack). Keeps it eager.
