@@ -388,7 +388,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
 void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t pf_stream) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     int total_input = static_cast<int>(req->input_tokens.size());
-    int offset = req->prefill_offset;
+    int offset = inkling_resume_(*req, req->prefill_offset, pf_stream);
 
     // Out-of-scope archs (Gemma-3/4 SWA, Llama-4, sub-byte KV) lack a paged
     // chunked-prefill path: executor_attention.cu aborts on chunk 2+. Reject

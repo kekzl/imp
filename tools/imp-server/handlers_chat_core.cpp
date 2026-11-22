@@ -389,6 +389,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         if (ctx.snap.hide_reasoning && ctx.params.reasoning_effort.empty())
             ctx.params.reasoning_effort = "low";
     }
+    // Marker-protocol thinkers (Inkling2) open the thinking block themselves, at effort "none" too (42
+    // vs 43 reasoning tokens), and with the marker banned they wrote the answer twice: an explicit
+    // off drops the block from the reply, as Harmony does above.
+    (void)silence_marker_thinking(ctx.snap.output_aliases,
+                                  (ctx.params.enable_thinking_set && !ctx.params.enable_thinking_requested) ||
+                                      budget_disables_thinking);
     ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
 
     // If thinking IS enabled, remove the provisional <think> stop token.

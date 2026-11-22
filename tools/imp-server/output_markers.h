@@ -22,6 +22,8 @@ struct OutputMarkerAlias {
     bool closes = false;
     bool header = false;
     bool drops_header = false;
+    // The marker, its body and its closer decode as nothing (thinking off on a marker protocol).
+    bool silent = false;
     // First occurrence of rewrite_from after this marker becomes rewrite_to (tool JSON key).
     std::string rewrite_from, rewrite_to;
 };
@@ -48,6 +50,10 @@ OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& t
 OutputMarkerAliases inkling_alias_table(const std::array<int32_t, 5>& ids);
 // One decode step: marker a (non-null) or plain text between markers.
 std::string output_marker_step(OutputMarkerState& st, const OutputMarkerAlias* a, std::string plain);
+
+// Thinking off on a marker protocol (one closer shared by every content kind): the model opens the
+// thinking block itself, so the block is decoded as nothing. True when the table was changed.
+bool silence_marker_thinking(OutputMarkerAliases& aliases, bool explicit_off);
 
 // Alias text of `id`, nullptr when `id` has none.
 const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id);

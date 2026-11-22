@@ -1,14 +1,17 @@
 // Inkling2-Loop in the engine: what the first serving path of the arch runs without.
 
 #include "core/logging.h"
+#include "exec/executor.h"
 #include "runtime/engine.h"
+#include "runtime/request.h"
 
 #include <algorithm>
 
 namespace imp {
 
-// One sequence, eager, no prefix reuse: exec/inkling_forward.h keeps one sequence's K/V and conv
-// state outside the paged KV cache. Context is capped at 32768 (8 KiB of global K/V per token).
+// One sequence, eager: exec/inkling_forward.h keeps one sequence's K/V and conv state outside the
+// paged KV cache and reuses a prefix itself (inkling_resume_), so the engine's prefix cache is off.
+// Context is capped at 32768 (8 KiB of global K/V per token).
 void Engine::init_inkling_limits_() {
     if (model_->config().arch != ModelArch::INKLING2)
         return;
@@ -29,8 +32,22 @@ void Engine::init_inkling_limits_() {
                                   ? std::min(runtime_config_.runtime.max_seq_len, kInklingMaxCtx)
                                   : kInklingMaxCtx;
     runtime_config_.runtime.max_seq_len = config_.max_seq_len;
-    IMP_LOG_INFO("inkling2_loop: one sequence, eager decode, no prefix cache, no speculation, context %d",
+    IMP_LOG_INFO("inkling2_loop: one sequence, prefix reuse in the forward, no speculation, context %d",
                  config_.max_seq_len);
+}
+
+int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
+    if (offset != 0 || model_->config().arch != ModelArch::INKLING2 || !executor_)
+        return offset;
+    // Always called at offset 0: an empty span forgets the kept sequence.
+    const bool reuse = req.prefix_reuse_allowed() && !ppl_capture_.active;
+    const int r = executor_->inkling_resume(reuse ? req.key_tokens() : std::span<const int32_t>(), stream);
+    if (r > 0) {
+        IMP_LOG_INFO("inkling2_loop: seq %d resumes at %d of %zu prompt tokens", req.id, r,
+                     req.input_tokens.size());
+        req.prefill_offset = req.cached_tokens = r;
+    }
+    return r;
 }
 
 }  // namespace imp

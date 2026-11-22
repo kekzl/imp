@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace imp {
@@ -26,13 +27,20 @@ public:
     void reset(cudaStream_t s);
     int position() const { return pos_; }
 
+    // Prefix reuse: moves the sequence to the last conv-state checkpoint (kGrid positions apart) that
+    // tokens shares with it and returns that position, 0 = from scratch. The next run() starts there.
+    [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s);
+    static constexpr int kGrid = 256;    // rows per forward segment = checkpoint distance
+    static constexpr int kSlack = 5888;  // sliding K/V kept behind the window: how far rewind may go back
+
     // Runs T tokens at positions [position(), position() + T). logits: device fp32 [vocab], softcapped,
     // for the last token; may be null.
     [[nodiscard]] bool forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s);
 
     // Engine path: h [T, hidden] fp16 holds the token embeddings and receives the state the final norm
     // reads. pos0 = position of row 0; 0 starts a new sequence, anything else must continue this one.
-    [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s);
+    // ids (host, may be null): the rows' tokens, recorded for rewind() past the prompt it was given.
+    [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids = nullptr);
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -44,17 +52,25 @@ private:
     void layers_(int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
+    // Host copy of the conv state when the sequence stands on the grid.
+    void checkpoint_(cudaStream_t s);
     float* F_(size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); }
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 
     const InklingWeights* w_ = nullptr;
     VRAMAllocator* va_ = nullptr;
-    int max_tokens_ = 0, max_ctx_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
+    int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;
     std::vector<half*> k_, v_;        // per application
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
+    float* conv_all_ = nullptr;             // the n_apps conv states, contiguous
+    std::vector<std::vector<float>> ckpt_;  // [g - 1] = conv state at position g * kGrid
+    int ckpt_valid_ = 0;                    // checkpoints 1..ckpt_valid_ belong to this sequence
+    int hw_ = 0;                            // highest position written since the last start at 0
+    std::vector<int32_t> hist_;             // tokens of the sequence; rows [0, pos_) are computed
+    bool armed_ = false;                    // rewind() set hist_ for the run that follows
     // fp32 [max_tokens, hidden]
     float *h_ = nullptr, *bs_[4] = {}, *pre_h_ = nullptr, *msrc_[4] = {}, *mix_[3] = {};
     float *msg_[4] = {}, *g_[3] = {}, *gd_ = nullptr, *res2_ = nullptr,
@@ -80,6 +96,7 @@ private:
 struct InklingRuntime {
     InklingWeights w;
     InklingForward f;
+    std::vector<int32_t> ids;  // host copy of one call's token ids
 };
 
 class Model;

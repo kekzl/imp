@@ -30,11 +30,20 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
         return model_->config().n_layers;
     // Host read of row 0's position: this path is eager and serves one sequence.
     int pos0 = 0;
+    inkling_->ids.resize(static_cast<size_t>(n));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     if (cudaMemcpy(&pos0, state.positions, sizeof pos0, cudaMemcpyDeviceToHost) != cudaSuccess ||
-        h.qtype != QType::F16 || !inkling_->f.run(static_cast<half*>(h.data), n, pos0, stream))
+        cudaMemcpy(inkling_->ids.data(), state.token_ids, static_cast<size_t>(n) * sizeof(int32_t),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        h.qtype != QType::F16 ||
+        !inkling_->f.run(static_cast<half*>(h.data), n, pos0, stream, inkling_->ids.data()))
         throw std::runtime_error("inkling2_loop: forward failed at position " + std::to_string(pos0));
     return 0;
+}
+
+// Prefix reuse: the position the next prefill resumes at (0 for every other arch).
+int GraphExecutor::inkling_resume(std::span<const int32_t> tokens, cudaStream_t stream) {
+    return inkling_ ? inkling_->f.rewind(tokens, stream) : 0;
 }
 
 }  // namespace imp
