@@ -223,7 +223,7 @@ INSTANTIATE_TEST_SUITE_P(Prompts, InklingParity, ::testing::Values("sky", "paris
 
 // Final state of every row after run() over ids[from..) at position from.
 std::vector<float> run_rows(InklingForward& fwd, const InklingWeights& w, const std::vector<int32_t>& ids,
-                            int from, const std::vector<int>& cuts) {
+                            int from, const std::vector<int>& cuts, cudaStream_t rs = nullptr) {
     const int T = static_cast<int>(ids.size()) - from, H = w.cfg.hidden;
     const size_t n = static_cast<size_t>(T) * H;
     int32_t* d_ids = nullptr;
@@ -245,7 +245,9 @@ std::vector<float> run_rows(InklingForward& fwd, const InklingWeights& w, const 
         const size_t o = static_cast<size_t>(at) * H, mn = static_cast<size_t>(m) * H;
         inkling::embed_rows(w.embed, d_ids + at, d_f + o, m, H, nullptr);
         inkling::f32_to_f16(d_f + o, d_h + o, mn, nullptr);
-        ok = fwd.run(d_h + o, m, from + at, nullptr, ids.data() + from + at);
+        ok = fwd.run(d_h + o, m, from + at, rs, ids.data() + from + at);
+        if (rs)
+            cudaStreamSynchronize(rs);
     }
     inkling::f16_to_f32(d_h, d_f, n, nullptr);
     cudaMemcpy(last.data(), d_f, last.size() * sizeof(float), cudaMemcpyDeviceToHost);
@@ -624,6 +626,42 @@ TEST(InklingDraftModel, DraftsFollowTheReferenceContinuation) {
     EXPECT_GE(accepted, 58);
     cudaFree(d_w8);
     cudaFree(d_sc);
+}
+
+// A real stream turns the side streams on (k / v chains, message mix): rows of every call size must
+// come out as on the default stream, where everything runs in order. Three cuBLAS projections at
+// once shared a workspace and passed every other test.
+TEST(InklingRewind, SideStreamsDoNotChangeTheRows) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    std::vector<int32_t> t = read_ids(std::string(oracle) + "/paris_prompt.json");
+    const std::vector<int32_t> g = read_ids(std::string(oracle) + "/paris_greedy.json");
+    ASSERT_FALSE(t.empty());
+    t.insert(t.end(), g.begin(), g.end());
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    // Calls of 21 (cuBLAS), 8, 3 and 1 rows.
+    const std::vector<int> cuts = {21, 29, 32, 33, 41, 44, 45, 53, 56, 57, 65, 68};
+    {
+        InklingForward plain, streamed;
+        ASSERT_TRUE(plain.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(streamed.init(fx.w, fx.va, 512, 4096));
+        const std::vector<float> want = run_rows(plain, fx.w, t, 0, cuts);
+        const std::vector<float> got = run_rows(streamed, fx.w, t, 0, cuts, s);
+        ASSERT_FALSE(want.empty());
+        ASSERT_FALSE(got.empty());
+        Err e;
+        e.add(got.data(), want.data(), want.size());
+        std::printf("side streams: rows rel. error %.3g against the default stream\n", e.rel());
+        // Graph replay against eager calls of the same kernels: equal up to the GEMM picks.
+        EXPECT_LT(e.rel(), 2e-3);
+    }
+    cudaStreamDestroy(s);
 }
 
 }  // namespace

@@ -111,9 +111,9 @@ __global__ void mix_out_k(MixArgs a, int H, int slices) {
     }
 }
 
-// Gate, step 1. One 32-thread block per (token, gate, row): rows 0..rank-1 are the raw dots of a
-// down row with h and with msg, row `rank` is the pair of unit-RMS factors. Many small blocks: one
-// block reads only a few GB/s, and a gate's weights are 1.2 MB.
+// Gate, step 1. One block per (token, gate, row): rows 0..rank-1 are the raw dots of a down row with h
+// and with msg, row `rank` is the pair of unit-RMS factors. kThreads threads per row: a thread's loads
+// come one after the other (about 0.3 us each), 32 threads took 72 of them (22.8 us), 256 take 9.
 // gd per (token, gate): [rank] dots with h, [rank] dots with msg, rh, rm.
 __global__ void gate_down_k(GateNormArgs a, float* gd, int H) {
     const int rows = a.rank + 1;
@@ -122,13 +122,14 @@ __global__ void gate_down_k(GateNormArgs a, float* gd, int H) {
     const float* h = a.h[g] + (size_t)t * H;
     const float* msg = a.msg[g] + (size_t)t * H;
     float* o = gd + (size_t)tg * (2 * a.rank + 2);
+    __shared__ float red[kThreads / 32];
     float sh = 0.0f, sm = 0.0f;
     if (r == a.rank) {
-        for (int i = threadIdx.x; i < H; i += 32) {
+        for (int i = threadIdx.x; i < H; i += blockDim.x) {
             sh += h[i] * h[i];
             sm += msg[i] * msg[i];
         }
-        sh = warp_sum(sh), sm = warp_sum(sm);
+        sh = block_sum(sh, red), sm = block_sum(sm, red);
         if (threadIdx.x == 0) {
             o[(size_t)2 * a.rank] = rsqrtf(sh / H + a.eps);
             o[(size_t)2 * a.rank + 1] = rsqrtf(sm / H + a.eps);
@@ -136,11 +137,11 @@ __global__ void gate_down_k(GateNormArgs a, float* gd, int H) {
         return;
     }
     const half* d = a.down[g] + (size_t)r * 2 * H;
-    for (int i = threadIdx.x; i < H; i += 32) {
+    for (int i = threadIdx.x; i < H; i += blockDim.x) {
         sh += __half2float(d[i]) * h[i];
         sm += __half2float(d[H + i]) * msg[i];
     }
-    sh = warp_sum(sh), sm = warp_sum(sm);
+    sh = block_sum(sh, red), sm = block_sum(sm, red);
     if (threadIdx.x == 0) {
         o[r] = sh;
         o[a.rank + r] = sm;
@@ -215,83 +216,6 @@ __global__ void kv_site_k(KvSiteArgs a) {
         s0 = s1, s1 = s2, s2 = x;
     }
     a.state[c] = s0, a.state[(size_t)C + c] = s1, a.state[(size_t)2 * C + c] = s2;
-}
-
-constexpr int kAttnThreads = 64;
-constexpr int kAttnMaxHd = 128;
-
-// One block per (token, head): each thread runs an online softmax over its strided keys.
-__global__ void attention_k(AttnArgs a) {
-    __shared__ float sq[kAttnMaxHd];
-    __shared__ float sr[32];
-    __shared__ float sh[kAttnThreads / 32];
-    __shared__ float sacc[kAttnThreads * kAttnMaxHd];
-    const int t = blockIdx.x / a.n_heads, head = blockIdx.x % a.n_heads;
-    const int kvh = head / (a.n_heads / a.n_kv);
-    const int pos = *a.d_pos + t;
-    const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
-    const size_t row = (size_t)t * a.stride;
-    const float tau = a.log_alpha > 0.0f
-                          ? 1.0f + a.log_alpha * logf(fmaxf(static_cast<float>(pos + 1) / a.log_floor, 1.0f))
-                          : 1.0f;
-    // q = clip(q * scale) * tau
-    float ss = 0.0f;
-    for (int i = threadIdx.x; i < a.hd; i += blockDim.x) {
-        sq[i] = __half2float(a.q[row + (size_t)head * a.hd + i]) * a.q_scale[head * a.hd + i];
-        ss += sq[i] * sq[i];
-    }
-    if ((int)threadIdx.x < a.d_rel)
-        sr[threadIdx.x] = __half2float(a.rel[row + (size_t)head * a.d_rel + threadIdx.x]) *
-                          a.rel_scale[head * a.d_rel + threadIdx.x];
-    const float qf = fminf(a.q_thr / (sqrtf(block_sum(ss, sh)) + 1e-6f), 1.0f) * tau * a.scale;
-    float rss = 0.0f;
-    for (int i = 0; i < a.d_rel; ++i)
-        rss += sr[i] * sr[i];
-    const float rf = fminf(a.rel_thr / (sqrtf(rss) + 1e-6f), 1.0f) * tau;
-
-    float acc[kAttnMaxHd];
-    for (int i = 0; i < a.hd; ++i)
-        acc[i] = 0.0f;
-    float m = -FLT_MAX, l = 0.0f;
-    for (int k = lo + threadIdx.x; k <= pos; k += blockDim.x) {
-        const int slot = a.ring > 0 ? k % a.ring : k;
-        const half* kp = a.k + ((size_t)slot * a.n_kv + kvh) * a.hd;
-        const half* vp = a.v + ((size_t)slot * a.n_kv + kvh) * a.hd;
-        float dot = 0.0f;
-        for (int i = 0; i < a.hd; ++i)
-            dot += sq[i] * __half2float(kp[i]);
-        const int d = pos - k;
-        float bias = 0.0f;
-        if (d < a.rel_extent)
-            for (int i = 0; i < a.d_rel; ++i)
-                bias += sr[i] * a.proj[(size_t)d * a.d_rel + i];
-        const float sc = dot * qf + bias * rf;
-        if (sc > m) {
-            const float f = expf(m - sc);
-            l *= f;
-            for (int i = 0; i < a.hd; ++i)
-                acc[i] *= f;
-            m = sc;
-        }
-        const float p = expf(sc - m);
-        l += p;
-        for (int i = 0; i < a.hd; ++i)
-            acc[i] += p * __half2float(vp[i]);
-    }
-    const float sink = __half2float(a.sink[row + head]);
-    const float gm = fmaxf(block_max(m, sh), sink);
-    const float f = l > 0.0f ? expf(m - gm) : 0.0f;
-    const float total = block_sum(l * f, sh) + expf(sink - gm);
-    for (int i = 0; i < a.hd; ++i)
-        sacc[threadIdx.x * kAttnMaxHd + i] = acc[i] * f;
-    __syncthreads();
-    for (int i = threadIdx.x; i < a.hd; i += blockDim.x) {
-        float v = 0.0f;
-        for (int th = 0; th < (int)blockDim.x; ++th)
-            v += sacc[th * kAttnMaxHd + i];
-        const float g = __half2float(a.gate[row + (size_t)head * a.hd + i]);
-        a.out[((size_t)t * a.n_heads + head) * a.hd + i] = __float2half(v / total / (1.0f + expf(-g)));
-    }
 }
 
 // ---- prefill forms: one thread per (row, channel); the per-channel row loops above are for a few rows ----
@@ -398,123 +322,6 @@ __global__ void conv_tail_rows_k(const float* y, const float* w, const float* st
 
 constexpr int kRowLoopMaxT = 8;  // up to here the per-channel row loops run; above, the per-row forms
 
-constexpr int kSplitMaxT = 8;
-
-// Decode attention, step 1. One warp per (token, head, key chunk). Keys go 32 at a time, one per lane
-// (their loads overlap; one key after the other cost about 1 us each): scores, then the value sums by
-// one warp reduction per dim, kept by the lane that owns the dim.
-// part per (token, head, chunk): running max, sum, then hd weighted value sums.
-__global__ void attn_part_k(AttnArgs a, int S, int CK) {
-    __shared__ float sq[kAttnMaxHd];
-    __shared__ float sr[32];
-    __shared__ float sp[32];
-    const int c = blockIdx.x % S, th = blockIdx.x / S;
-    const int t = th / a.n_heads, head = th % a.n_heads;
-    const int kvh = head / (a.n_heads / a.n_kv);
-    const int lane = threadIdx.x, per = a.hd / 32;
-    float* o = a.part + ((size_t)th * S + c) * (a.hd + 2);
-    const int pos = *a.d_pos + t;
-    const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
-    const int k0 = lo + c * CK, k1 = min(pos, k0 + CK - 1);
-    float m = -FLT_MAX, l = 0.0f;
-    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    if (k0 <= pos) {
-        const size_t row = (size_t)t * a.stride;
-        const float tau = a.log_alpha > 0.0f
-                              ? 1.0f +
-                                    a.log_alpha * logf(fmaxf(static_cast<float>(pos + 1) / a.log_floor, 1.0f))
-                              : 1.0f;
-        float ss = 0.0f;
-        for (int j = 0; j < per; ++j) {
-            const int i = lane * per + j;
-            const float q = __half2float(a.q[row + (size_t)head * a.hd + i]) * a.q_scale[head * a.hd + i];
-            sq[i] = q;
-            ss += q * q;
-        }
-        const float qf = fminf(a.q_thr / (sqrtf(warp_sum(ss)) + 1e-6f), 1.0f) * tau * a.scale;
-        const float r = lane < a.d_rel ? __half2float(a.rel[row + (size_t)head * a.d_rel + lane]) *
-                                             a.rel_scale[head * a.d_rel + lane]
-                                       : 0.0f;
-        sr[lane] = r;
-        const float rf = fminf(a.rel_thr / (sqrtf(warp_sum(r * r)) + 1e-6f), 1.0f) * tau;
-        __syncwarp();
-        for (int g0 = k0; g0 <= k1; g0 += 32) {
-            const int k = g0 + lane;
-            const bool valid = k <= k1;
-            const int slot = a.ring > 0 ? k % a.ring : k;
-            const size_t at = ((size_t)slot * a.n_kv + kvh) * a.hd;
-            float sc = -FLT_MAX;
-            if (valid) {
-                float dot = 0.0f;
-                for (int i = 0; i < a.hd; ++i)
-                    dot += sq[i] * __half2float(a.k[at + i]);
-                float bias = 0.0f;
-                const int d = pos - k;
-                if (d < a.rel_extent)
-                    for (int i = 0; i < a.d_rel; ++i)
-                        bias += sr[i] * a.proj[(size_t)d * a.d_rel + i];
-                sc = dot * qf + bias * rf;
-            }
-            float gm = sc;
-            for (int off = 16; off > 0; off >>= 1)
-                gm = fmaxf(gm, __shfl_xor_sync(0xffffffffu, gm, off));
-            if (gm > m) {
-                const float f = expf(m - gm);
-                l *= f;
-                for (int j = 0; j < per; ++j)
-                    acc[j] *= f;
-                m = gm;
-            }
-            const float p = valid ? expf(sc - m) : 0.0f;
-            l += warp_sum(p);
-            // Values: each lane owns `per` dims and walks the group's keys (one coalesced row per key).
-            sp[lane] = p;
-            __syncwarp();
-            const int n_g = min(32, k1 - g0 + 1);
-            for (int kk = 0; kk < n_g; ++kk) {
-                const int vs = a.ring > 0 ? (g0 + kk) % a.ring : g0 + kk;
-                const half* vp = a.v + ((size_t)vs * a.n_kv + kvh) * a.hd + (size_t)lane * per;
-                for (int j = 0; j < per; ++j)
-                    acc[j] += sp[kk] * __half2float(vp[j]);
-            }
-            __syncwarp();
-        }
-    }
-    for (int j = 0; j < per; ++j)
-        o[2 + lane * per + j] = acc[j];
-    if (lane == 0) {
-        o[0] = m;
-        o[1] = l;
-    }
-}
-
-// Decode attention, step 2. One block per (token, head), one thread per dim: joins the chunks that
-// hold keys, adds the sink to the denominator, applies the output gate.
-__global__ void attn_reduce_k(AttnArgs a, int S, int CK) {
-    const int t = blockIdx.x / a.n_heads, head = blockIdx.x % a.n_heads;
-    const int i = threadIdx.x;
-    const int pos = *a.d_pos + t;
-    const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
-    const int n_c = min(S, (pos - lo) / CK + 1);
-    const float* p0 = a.part + (size_t)blockIdx.x * S * (a.hd + 2);
-    const size_t row = (size_t)t * a.stride;
-    const float sink = __half2float(a.sink[row + head]);
-    float gm = sink;
-    for (int c = 0; c < n_c; ++c)
-        gm = fmaxf(gm, p0[(size_t)c * (a.hd + 2)]);
-    float total = expf(sink - gm), v = 0.0f;
-    for (int c = 0; c < n_c; ++c) {
-        const float* pc = p0 + (size_t)c * (a.hd + 2);
-        if (pc[1] <= 0.0f)
-            continue;
-        const float w = expf(pc[0] - gm);
-        total += pc[1] * w;
-        v += pc[2 + i] * w;
-    }
-    const float g = __half2float(a.gate[row + (size_t)head * a.hd + i]);
-    a.out[((size_t)t * a.n_heads + head) * a.hd + i] = __float2half(v / total / (1.0f + expf(-g)));
-}
-
 // One thread per channel, rows in order.
 __global__ void conv_residual_k(const half* x, const float* w, float* state, const float* resid, bool add,
                                 float* out, float* copy, int T, int C, float* log) {
@@ -582,7 +389,7 @@ void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H,
         return;
     }
     const int col_blocks = (H + 31) / 32;
-    gate_down_k<<<T * a.n*(a.rank + 1), 32, 0, s>>>(a, gd, H);
+    gate_down_k<<<T * a.n*(a.rank + 1), kThreads, 0, s>>>(a, gd, H);
     IMP_CUDA_CHECK_LAUNCH();
     gate_mix_k<<<T * a.n * col_blocks, 32, 0, s>>>(a, gd, o, H, col_blocks);
     IMP_CUDA_CHECK_LAUNCH();
@@ -605,30 +412,6 @@ void kv_site(const KvSiteArgs& a, cudaStream_t s) {
     }
     kv_site_k<<<a.n_heads, a.hd, 0, s>>>(a);
     IMP_CUDA_CHECK_LAUNCH();
-}
-
-void attention(const AttnArgs& a, cudaStream_t s) {
-    if (a.hd > kAttnMaxHd || a.d_rel > 32) {
-        IMP_LOG_ERROR("inkling attention: head_dim %d or d_rel %d out of range", a.hd, a.d_rel);
-        return;
-    }
-    // Few rows (decode, verify): chunked over the keys. Prefill has rows x heads blocks already.
-    if (a.part && a.T <= kSplitMaxT && a.hd % 32 == 0 && a.hd <= 128 && a.d_rel <= 32) {
-        const int CK = a.window > 0 ? 32 : 64;
-        const int S = ((a.window > 0 ? a.window : a.max_ctx) + CK - 1) / CK;
-        attn_part_k<<<a.T * a.n_heads * S, 32, 0, s>>>(a, S, CK);
-        IMP_CUDA_CHECK_LAUNCH();
-        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, CK);
-        IMP_CUDA_CHECK_LAUNCH();
-        return;
-    }
-    attention_k<<<a.T * a.n_heads, kAttnThreads, 0, s>>>(a);
-    IMP_CUDA_CHECK_LAUNCH();
-}
-
-size_t attention_part_floats(int n_heads, int hd, int window, int max_ctx) {
-    const size_t chunks = static_cast<size_t>(std::max((window + 31) / 32, (max_ctx + 63) / 64));
-    return static_cast<size_t>(kSplitMaxT) * n_heads * chunks * (hd + 2);
 }
 
 void conv_residual(const half* x, const float* w, float* state, const float* resid, bool add, float* out,

@@ -402,6 +402,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm.cu
     src/compute/shortconv.cu
     src/compute/inkling_ops.cu
+    src/compute/inkling_attn.cu
     src/compute/inkling_fused.cu
     src/compute/ssm_scan_reg.cu
     src/compute/ssm_scan_ssd.cu
@@ -564,6 +565,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_shortconv.cpp
     src/compute/inkling_conv_state.cu
     src/exec/inkling_draft.cu
+    src/exec/inkling_draft_head.cu
     src/exec/inkling_forward.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp
