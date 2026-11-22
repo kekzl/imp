@@ -396,6 +396,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                   (ctx.params.enable_thinking_set && !ctx.params.enable_thinking_requested) ||
                                       budget_disables_thinking);
     ctx.snap.reasoning_effort = ctx.params.reasoning_effort;
+    // A level-map template (Inkling2) raises on an unknown level and would render an empty effort line.
+    if (const std::string why = ctx.snap.chat_tpl.reasoning_effort_error(ctx.snap.reasoning_effort);
+        ctx.snap.have_template && !why.empty()) {
+        send_json_error(res, 400, "invalid_request_error", why, "reasoning_effort");
+        return false;
+    }
 
     // If thinking IS enabled, remove the provisional <think> stop token.
     if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {

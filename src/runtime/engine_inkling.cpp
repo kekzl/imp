@@ -17,12 +17,16 @@ namespace imp {
 
 // Eager, one kept sequence per slot: exec/inkling_forward.h keeps K/V and conv state outside the
 // paged KV cache and reuses a prefix itself (inkling_resume_), so the engine's prefix cache is off.
-// Context is capped at 32768 (8 KiB of global K/V per token); a slot costs 2288 MiB, so 2 by
-// default and 4 at most (inkling_fit_slots_ lowers it to what the card took).
+// Context: 32768 unless the operator sets max_seq_len, then up to the checkpoint's model_max_length
+// (1048576). A position costs 32 KiB of global K/V per slot (8 full-attention applications) and
+// 12 KiB of draft context; a slot costs 2288 MiB at 32768, so 2 by default and 4 at most
+// (inkling_fit_slots_ lowers it to what the card took).
 void Engine::init_inkling_limits_() {
     if (model_->config().arch != ModelArch::INKLING2)
         return;
-    constexpr int kInklingMaxCtx = 32768, kInklingMaxSlots = 4;
+    constexpr int kInklingDefaultCtx = 32768, kInklingMaxSlots = 4;
+    const int model_ctx = model_->config().max_seq_len > 0 ? model_->config().max_seq_len
+                                                           : kInklingDefaultCtx;
     const int slots = config_.max_batch_size > 0 ? std::min(config_.max_batch_size, kInklingMaxSlots) : 2;
     config_.max_batch_size = slots;
     runtime_config_.runtime.max_batch_size = slots;
@@ -43,10 +47,8 @@ void Engine::init_inkling_limits_() {
     // waiter (x4 fairness = 32 for one ingest beside one stream) instead of 1024.
     runtime_config_.runtime.prefill_chunk_decode_cap =
         std::min(std::max(runtime_config_.runtime.prefill_chunk_decode_cap, 1), 8);
-    if (config_.max_seq_len <= 0 || config_.max_seq_len > kInklingMaxCtx)
-        config_.max_seq_len = runtime_config_.runtime.max_seq_len > 0
-                                  ? std::min(runtime_config_.runtime.max_seq_len, kInklingMaxCtx)
-                                  : kInklingMaxCtx;
+    const int asked = config_.max_seq_len > 0 ? config_.max_seq_len : runtime_config_.runtime.max_seq_len;
+    config_.max_seq_len = std::min(asked > 0 ? asked : kInklingDefaultCtx, model_ctx);
     runtime_config_.runtime.max_seq_len = config_.max_seq_len;
     IMP_LOG_INFO("inkling2_loop: up to %d sequences, prefix reuse in the forward, no speculation, context %d",
                  slots, config_.max_seq_len);

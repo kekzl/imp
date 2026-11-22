@@ -103,6 +103,9 @@ public:
     // default(...). Empty when the template names no list (gpt-oss: default "medium" only).
     const std::vector<std::string>& reasoning_effort_values() const { return reasoning_effort_values_; }
     const std::string& reasoning_effort_default() const { return reasoning_effort_default_; }
+    // "" when the template can render the value: a name -> number map (Inkling2) takes its names and
+    // numbers in its range, every other template takes anything.
+    [[nodiscard]] std::string reasoning_effort_error(const std::string& value) const;
     // True when the Jinja template teaches the Qwen-Coder/Qwen3.6 XML tool-call body
     // (<function=NAME><parameter=KEY>, raw-text values) instead of the ChatML JSON body.
     [[nodiscard]] bool tool_xml_dialect() const { return tool_xml_dialect_; }
@@ -206,6 +209,9 @@ private:
     bool own_think_switch_ = false;
     std::vector<std::string> reasoning_effort_values_;
     std::string reasoning_effort_default_;
+    std::vector<double> reasoning_effort_levels_;  // numbers of a name -> number map, else empty
+    void parse_effort_spec_(const std::string& jinja_src);
+    [[nodiscard]] jinja::Value effort_value_(const std::string& effort) const;
 
     // Jinja2-based apply: render template, split on control tokens, encode
     [[nodiscard]] bool probe_render_mentions_think(const Tokenizer& tok) const;
