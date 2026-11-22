@@ -1,5 +1,8 @@
 #include "vision_parts.h"
 
+#include "vision_inline.h"
+#include "vision/vision_family.h"
+
 #include "model/image_placeholders.h"
 #include "model/tokenizer.h"
 #include "utils.h"
@@ -120,6 +123,29 @@ std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestP
         snap.qwen_patches.push_back(std::move(patches));
     }
     return {};
+}
+
+void place_qwen_vision_blocks(const ChatRequestParams& params, const ChatStateSnapshot& snap,
+                              std::vector<imp::ChatMessage>& msgs) {
+    std::vector<std::string> part_blocks;
+    size_t nv = 0;
+    for (const char kind : params.vision_order) {
+        const std::span<const int> frames = kind == 'v' && nv < snap.video_frame_counts.size()
+                                                ? std::span<const int>(snap.video_frame_counts).subspan(nv, 1)
+                                                : std::span<const int>();
+        nv += kind == 'v' ? 1 : 0;
+        part_blocks.push_back(
+            imp::vision_prompt_blocks(snap.vision_family, std::string_view(&kind, 1), frames));
+    }
+    if (imp::server::place_vision_blocks(msgs, part_blocks))
+        return;
+    const std::string blocks = imp::vision_prompt_blocks(snap.vision_family, params.vision_order,
+                                                         snap.video_frame_counts);
+    for (auto& m : msgs)
+        if (m.role == "user") {
+            m.content = blocks + m.content;
+            return;
+        }
 }
 
 std::string mmproj_preprocess_images(imp::Engine& engine, const ChatRequestParams& params,

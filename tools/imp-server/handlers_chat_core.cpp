@@ -6,6 +6,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "vision_parts.h"
+#include "vision_inline.h"
 
 #include <algorithm>
 #include <tuple>
@@ -151,6 +152,24 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
             ctx.params.tool_envelope_close = std::move(env.close);
         }
     }
+}
+
+// Text-form tool definitions onto the system turn of `msgs`. True: it had none and got one.
+static bool append_tool_prompt_(const ChatRequestContext& ctx, std::vector<imp::ChatMessage>& msgs) {
+    const std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
+                                                      ctx.params.tool_choice);
+    if (tool_prompt.empty())
+        return false;
+    for (auto& m : msgs)
+        if (m.role == "system") {
+            m.content += tool_prompt;
+            return false;
+        }
+    std::string sys = ctx.snap.chat_tpl.default_system_message();
+    if (sys.empty())
+        sys = "You are a helpful assistant.";
+    msgs.insert(msgs.begin(), {"system", sys + tool_prompt});
+    return true;
 }
 
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx) {
@@ -402,20 +421,32 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // Tokenize with chat template (with image tokens if vision is active)
     ctx.snap.chat_tpl.set_continue_final(ctx.params.continue_final);
-    if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
-        // Chat template renders one image pad per image before sizes are known (smart_resize runs
-        // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
-        // then each placeholder expands to its real token count.
-        const std::string blocks = imp::vision_prompt_blocks(ctx.snap.vision_family, ctx.params.vision_order,
-                                                             ctx.snap.video_frame_counts);
-        auto msgs = ctx.params.chat_msgs;
-        for (auto& m : msgs)
-            if (m.role == "user") {
-                m.content = blocks + m.content;
-                break;
-            }
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
-                                                  force_thinking, ctx.snap.reasoning_effort);
+    const bool qwen_vision_prompt = ctx.snap.have_template && !ctx.snap.qwen_patches.empty();
+    std::vector<imp::ChatMessage> vision_msgs;  // the marked copy; every other render sees none
+    if (qwen_vision_prompt)
+        vision_msgs = ctx.params.chat_msgs;
+    if (!ctx.params.vision_order.empty())
+        imp::server::strip_vision_marks(ctx.params.chat_msgs);
+    if (qwen_vision_prompt) {
+        // One image pad per picture at its part's place (sizes come after smart_resize);
+        // expand_vision_prompt then gives every placeholder its real token count.
+        auto& msgs = vision_msgs;
+        place_qwen_vision_blocks(ctx.params, ctx.snap, msgs);
+        // Tools render as in a text request: a screenshot turn dropped all 25 definitions of an
+        // agent's prompt (17325 tokens with and without tools, 22575 for the same turns as text).
+        if (ctx.snap.tools_via_jinja)
+            ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_tools(
+                *ctx.snap.tok, msgs, ctx.snap.tool_defs,
+                ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>() : "auto",
+                ctx.snap.suppress_thinking, force_thinking, ctx.snap.reasoning_effort);
+        else
+            ctx.snap.tokens.clear();
+        if (ctx.snap.tokens.empty()) {
+            if (ctx.params.has_tools)
+                append_tool_prompt_(ctx, msgs);
+            ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
+                                                      force_thinking, ctx.snap.reasoning_effort);
+        }
         const auto expanded = imp::expand_vision_prompt(ctx.snap.vision_family, ctx.snap.tokens,
                                                         *ctx.snap.tok, ctx.snap.qwen_image_tokens,
                                                         ctx.snap.qwen_video_layouts);
@@ -450,27 +481,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                 ctx.params.tool_envelope_close.clear();
                 ctx.params.tool_constraint_optional = false;
             }
-            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
-                                                        ctx.params.tool_choice);
-            if (!tool_prompt.empty()) {
-                bool found_system = false;
-                for (auto& m : ctx.params.chat_msgs) {
-                    if (m.role == "system") {
-                        m.content += tool_prompt;
-                        found_system = true;
-                        break;
-                    }
-                }
-                if (!found_system) {
-                    std::string sys = ctx.snap.chat_tpl.default_system_message();
-                    if (sys.empty())
-                        sys = "You are a helpful assistant.";
-                    sys += tool_prompt;
-                    ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
-                    if (ctx.params.cache_prefix_messages >= 0)
-                        ctx.params.cache_prefix_messages++;  // boundary shifts with the insert
-                }
-            }
+            if (append_tool_prompt_(ctx, ctx.params.chat_msgs) && ctx.params.cache_prefix_messages >= 0)
+                ctx.params.cache_prefix_messages++;  // boundary shifts with the inserted system turn
             ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
                                                       ctx.snap.suppress_thinking, force_thinking,
                                                       ctx.snap.reasoning_effort);
@@ -478,27 +490,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     } else if (ctx.snap.have_template) {
         // No tools, or no Jinja2 support — inject text-based tool prompt if tools present
         if (ctx.params.has_tools) {
-            std::string tool_prompt = build_tool_prompt(ctx.snap.tpl_family, ctx.params.tools,
-                                                        ctx.params.tool_choice);
-            if (!tool_prompt.empty()) {
-                bool found_system = false;
-                for (auto& m : ctx.params.chat_msgs) {
-                    if (m.role == "system") {
-                        m.content += tool_prompt;
-                        found_system = true;
-                        break;
-                    }
-                }
-                if (!found_system) {
-                    std::string sys = ctx.snap.chat_tpl.default_system_message();
-                    if (sys.empty())
-                        sys = "You are a helpful assistant.";
-                    sys += tool_prompt;
-                    ctx.params.chat_msgs.insert(ctx.params.chat_msgs.begin(), {"system", sys});
-                    if (ctx.params.cache_prefix_messages >= 0)
-                        ctx.params.cache_prefix_messages++;  // boundary shifts with the insert
-                }
-            }
+            if (append_tool_prompt_(ctx, ctx.params.chat_msgs) && ctx.params.cache_prefix_messages >= 0)
+                ctx.params.cache_prefix_messages++;  // boundary shifts with the inserted system turn
         }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, ctx.params.chat_msgs,
                                                   ctx.snap.suppress_thinking, force_thinking,

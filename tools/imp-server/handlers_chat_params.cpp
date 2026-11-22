@@ -11,6 +11,7 @@
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "image_fetch.h"
+#include "vision_inline.h"
 #include "reasoning_split.h"
 
 #include "api/imp_internal.h"
@@ -446,10 +447,12 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts
             std::string text_parts;
+            bool after_text = false;  // "\n" joins two text parts, never a picture and its text
             for (const auto& part : msg["content"]) {
                 std::string type = part.value("type", "");
+                const bool was_text = std::exchange(after_text, type == "text");
                 if (type == "text") {
-                    if (!text_parts.empty())
+                    if (was_text)
                         text_parts += "\n";
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
@@ -470,6 +473,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     // list never reaches the prompt builder.
                     ctx.params.images.emplace_back();
                     ctx.params.vision_order.push_back('i');
+                    text_parts += imp::server::kVisionPartMark;  // the picture's place in this turn
                     read_vision_url(state, url, "image_url", ctx.params.images.back(),
                                     ctx.params.image_error);
                 } else if (type == "input_audio") {
@@ -550,6 +554,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     }
                     ctx.params.videos.push_back(std::move(v));
                     ctx.params.vision_order.push_back('v');
+                    text_parts += imp::server::kVisionPartMark;
                 }
             }
             ctx.params.chat_msgs.push_back({role, text_parts});
