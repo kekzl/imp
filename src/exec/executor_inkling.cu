@@ -9,6 +9,7 @@
 #include "model/inkling_weights.h"
 
 #include <stdexcept>
+#include <tuple>
 
 namespace imp {
 
@@ -28,8 +29,10 @@ int InklingRuntime::slot_of_block(int block) const {
 
 int InklingRuntime::bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy) {
     int best = -1, best_match = -1;
-    // Recycling order on a tie: (holds a checkpoint, bind tick), smallest first.
-    const auto cost = [&](size_t i) { return std::pair(slots[i]->reusable(), slot_used[i]); };
+    // Recycling order on a tie: (holds a checkpoint, decodes without lookahead, bind tick), smallest first.
+    const auto cost = [&](size_t i) {
+        return std::tuple(slots[i]->reusable(), !slots[i]->has_lookahead(), slot_used[i]);
+    };
     for (size_t i = 0; i < slots.size(); ++i) {
         if (i < busy.size() && busy[i])
             continue;
@@ -156,8 +159,13 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
     if (!w->load(model_->inkling_dir, *vram_alloc_, rt.w.embed_norm, head, stream))
         return;
     rt.draft_w = w;
+    // A draft context holds 397 MiB at 32768 positions: two slots get one (4 slots with a context each
+    // reached 31983 MiB on the 32 GB card).
+    constexpr size_t kLookaheadSlots = 2;
     int on = 0;
     for (auto& slot : rt.slots) {
+        if (rt.drafts.size() >= kLookaheadSlots)
+            break;
         auto d = std::make_shared<InklingDraft>();
         if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap) ||
             !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))

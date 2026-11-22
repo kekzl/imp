@@ -43,6 +43,7 @@ public:
     [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s);
     // True when a checkpoint exists: recycling the slot would lose a prefix another prompt could reuse.
     [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
+    [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGraphRows = 8;  // rows of the largest captured call = anchor + drafts
@@ -175,7 +176,8 @@ struct InklingRuntime {
     [[nodiscard]] int slot_of_req(int req) const;
     [[nodiscard]] int slot_of_block(int block) const;
     // Binds req to the free slot (busy[i] false) that shares the longest prefix with tokens; on a tie a
-    // slot without a checkpoint goes first, then the oldest binding. Returns the slot, -1 = all busy.
+    // slot without a checkpoint goes first, then one with the decode lookahead, then the oldest binding.
+    // Returns the slot, -1 = all busy.
     [[nodiscard]] int bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy);
 };
 
