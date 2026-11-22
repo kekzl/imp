@@ -202,14 +202,166 @@ __global__ void attn_part_k(AttnArgs a, int S) {
         o[0] = m, o[1] = l;
 }
 
+// Decode attention for 1..kSplitMaxT rows of a model with three heads per KV head, step 1. The rows of a
+// call read the same keys, and so do the heads of one KV head: one block per (KV head, key chunk) loads
+// the chunk once and serves every (row, head) pair. Chunks start at row 0's first key, a row masks what
+// lies outside its own window. attn_part_k per (row, head, chunk) took 4.17 ms of a 19.4 ms eight-row call.
+constexpr int kRowsHeads = 3;                        // heads per KV head
+constexpr int kRowsPairs = kSplitMaxT * kRowsHeads;  // (row, head) pairs of a block
+constexpr int kRowsRel = 16;
+struct RowsSmem {
+    half sk[kPartKeys][kAttnMaxHd];
+    half sv[kPartKeys][kAttnMaxHd];
+    float proj[kPartKeys + kSplitMaxT][kRowsRel];  // bias rows of the distances the chunk can have
+    float q[kRowsPairs][kAttnMaxHd];
+    float r[kRowsPairs][kRowsRel];
+    float sc[kRowsPairs][kPartKeys];  // scores, then softmax terms
+    float qf[kRowsPairs], rf[kRowsPairs];
+};
+
+struct RowsAt {
+    int c, kvh, hpk, pairs, pos0, k0, n, dlo;
+};
+
+// Key, value and bias tiles of the chunk, every pair's query and distance vector.
+__device__ __forceinline__ void rows_load(const AttnArgs& a, RowsSmem& m, const RowsAt& x) {
+    const int tid = threadIdx.x, per = a.hd / 8;
+    for (int i = tid; i < x.n * per; i += blockDim.x) {
+        const int key = i / per, cc = (i % per) * 8;
+        const int slot = a.ring > 0 ? (x.k0 + key) % a.ring : x.k0 + key;
+        const size_t at = ((size_t)slot * a.n_kv + x.kvh) * a.hd + cc;
+        *reinterpret_cast<uint4*>(&m.sk[key][cc]) = *reinterpret_cast<const uint4*>(a.k + at);
+        *reinterpret_cast<uint4*>(&m.sv[key][cc]) = *reinterpret_cast<const uint4*>(a.v + at);
+    }
+    for (int i = tid; i < (kPartKeys + a.T) * a.d_rel; i += blockDim.x) {
+        const int d = x.dlo + i / a.d_rel, j = i % a.d_rel;
+        m.proj[i / a.d_rel][j] = d >= 0 && d < a.rel_extent ? a.proj[(size_t)d * a.d_rel + j] : 0.0f;
+    }
+    for (int i = tid; i < x.pairs * per; i += blockDim.x) {
+        const int p = i / per, cc = (i % per) * 8;
+        const int head = x.kvh * x.hpk + p % x.hpk;
+        half2 qh[4];
+        *reinterpret_cast<uint4*>(qh) = *reinterpret_cast<const uint4*>(a.q + (size_t)(p / x.hpk) * a.stride +
+                                                                        (size_t)head * a.hd + cc);
+        for (int j = 0; j < 4; ++j) {
+            const float2 f = __half22float2(qh[j]);
+            m.q[p][cc + 2 * j] = f.x * a.q_scale[head * a.hd + cc + 2 * j];
+            m.q[p][cc + 2 * j + 1] = f.y * a.q_scale[head * a.hd + cc + 2 * j + 1];
+        }
+    }
+    for (int i = tid; i < x.pairs * a.d_rel; i += blockDim.x) {
+        const int p = i / a.d_rel, j = i % a.d_rel;
+        const int head = x.kvh * x.hpk + p % x.hpk;
+        m.r[p][j] = __half2float(a.rel[(size_t)(p / x.hpk) * a.stride + (size_t)head * a.d_rel + j]) *
+                    a.rel_scale[head * a.d_rel + j];
+    }
+}
+
+// Clip factors: a warp per pair.
+__device__ __forceinline__ void rows_clip(const AttnArgs& a, RowsSmem& m, const RowsAt& x) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int p = warp; p < x.pairs; p += blockDim.x / 32) {
+        float ss = 0.0f;
+        for (int i = lane; i < a.hd; i += 32)
+            ss += m.q[p][i] * m.q[p][i];
+        const float rv = lane < a.d_rel ? m.r[p][lane] : 0.0f;
+        ss = warp_sum(ss);
+        const float rss = warp_sum(rv * rv);
+        if (lane != 0)
+            continue;
+        const int row = p / x.hpk;
+        const float at = static_cast<float>(x.pos0 + row + 1);
+        const float tau = a.log_alpha > 0.0f ? 1.0f + a.log_alpha * logf(fmaxf(at / a.log_floor, 1.0f))
+                                             : 1.0f;
+        m.qf[p] = fminf(a.q_thr / (sqrtf(ss) + 1e-6f), 1.0f) * tau * a.scale;
+        m.rf[p] = fminf(a.rel_thr / (sqrtf(rss) + 1e-6f), 1.0f) * tau;
+    }
+}
+
+// Scores: a thread per (pair, key); a key outside the pair's row window scores -FLT_MAX.
+__device__ __forceinline__ void rows_scores(const AttnArgs& a, RowsSmem& m, const RowsAt& x) {
+    for (int i = threadIdx.x; i < x.pairs * kPartKeys; i += blockDim.x) {
+        const int p = i / kPartKeys, key = i % kPartKeys;
+        const int pos = x.pos0 + p / x.hpk, k = x.k0 + key;
+        const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
+        float sc = -FLT_MAX;
+        if (key < x.n && k >= lo && k <= pos) {
+            float dot = 0.0f;
+            for (int j = 0; j < a.hd; j += 2) {
+                const float2 kf = __half22float2(*reinterpret_cast<const half2*>(&m.sk[key][j]));
+                dot += m.q[p][j] * kf.x + m.q[p][j + 1] * kf.y;
+            }
+            const float* pr = m.proj[pos - k - x.dlo];
+            float bias = 0.0f;
+            for (int j = 0; j < a.d_rel; ++j)
+                bias += m.r[p][j] * pr[j];
+            sc = dot * m.qf[p] + bias * m.rf[p];
+        }
+        m.sc[p][key] = sc;
+    }
+}
+
+// Chunk maximum and softmax terms: a warp per pair, two keys per lane. o: the pair's part row.
+__device__ __forceinline__ void rows_softmax(const AttnArgs& a, RowsSmem& m, const RowsAt& x, int S) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int p = warp; p < x.pairs; p += blockDim.x / 32) {
+        const float s0 = m.sc[p][lane], s1 = m.sc[p][lane + 32];
+        float mx = fmaxf(s0, s1);
+        for (int off = 16; off > 0; off >>= 1)
+            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, off));
+        const float p0 = s0 > -FLT_MAX ? expf(s0 - mx) : 0.0f, p1 = s1 > -FLT_MAX ? expf(s1 - mx) : 0.0f;
+        m.sc[p][lane] = p0, m.sc[p][lane + 32] = p1;
+        const float l = warp_sum(p0 + p1);
+        if (lane == 0) {
+            const int th = (p / x.hpk) * a.n_heads + x.kvh * x.hpk + p % x.hpk;
+            float* o = a.part + ((size_t)th * S + x.c) * (a.hd + 2);
+            o[0] = mx, o[1] = l;
+        }
+    }
+}
+
+__global__ void attn_part_rows_k(AttnArgs a, int S) {
+    extern __shared__ __align__(16) unsigned char raw[];
+    RowsSmem& m = *reinterpret_cast<RowsSmem*>(raw);
+    RowsAt x{};
+    x.c = blockIdx.x % S, x.kvh = blockIdx.x / S;
+    x.hpk = a.n_heads / a.n_kv, x.pairs = a.T * x.hpk;
+    x.pos0 = *a.d_pos;
+    const int base = a.window > 0 ? max(0, x.pos0 - a.window + 1) : 0;
+    x.k0 = base + x.c * kPartKeys;
+    x.n = min(x.pos0 + a.T - 1, x.k0 + kPartKeys - 1) - x.k0 + 1;
+    if (x.n <= 0)
+        return;  // past the last row's keys: attn_reduce_k stops before this chunk
+    x.dlo = x.pos0 - (x.k0 + kPartKeys - 1);  // smallest distance a key of the chunk can have
+    rows_load(a, m, x);
+    __syncthreads();
+    rows_clip(a, m, x);
+    __syncthreads();
+    rows_scores(a, m, x);
+    __syncthreads();
+    rows_softmax(a, m, x, S);
+    __syncthreads();
+    // Value sums: a thread per (pair, dim).
+    for (int i = threadIdx.x; i < x.pairs * a.hd; i += blockDim.x) {
+        const int p = i / a.hd, dim = i % a.hd;
+        float acc = 0.0f;
+        for (int key = 0; key < x.n; ++key)
+            acc += m.sc[p][key] * __half2float(m.sv[key][dim]);
+        const int th = (p / x.hpk) * a.n_heads + x.kvh * x.hpk + p % x.hpk;
+        a.part[((size_t)th * S + x.c) * (a.hd + 2) + 2 + dim] = acc;
+    }
+}
+
 // Decode attention, step 2. One block per (token, head), one thread per dim: joins the chunks that
 // hold keys, adds the sink to the denominator, applies the output gate.
-__global__ void attn_reduce_k(AttnArgs a, int S, int CK) {
+// rows: the chunks start at row 0's first key (attn_part_rows_k).
+__global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows) {
     const int t = blockIdx.x / a.n_heads, head = blockIdx.x % a.n_heads;
     const int i = threadIdx.x;
     const int pos = *a.d_pos + t;
     const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
-    const int n_c = min(S, (pos - lo) / CK + 1);
+    const int pos0 = *a.d_pos, base = a.window > 0 ? max(0, pos0 - a.window + 1) : 0;
+    const int n_c = rows ? min(S, (pos0 + a.T - 1 - base) / CK + 1) : min(S, (pos - lo) / CK + 1);
     const float* p0 = a.part + (size_t)blockIdx.x * S * (a.hd + 2);
     const size_t row = (size_t)t * a.stride;
     const float sink = __half2float(a.sink[row + head]);
@@ -236,13 +388,26 @@ void attention(const AttnArgs& a, cudaStream_t s) {
         IMP_LOG_ERROR("inkling attention: head_dim %d or d_rel %d out of range", a.hd, a.d_rel);
         return;
     }
-    // Few rows (decode, verify): chunked over the keys. Prefill has rows x heads blocks already.
+    // Few rows (decode, lookahead, paced prefill): the rows and the heads of a KV head share the key loads.
+    static const bool rows_smem = cudaFuncSetAttribute(attn_part_rows_k,
+                                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       static_cast<int>(sizeof(RowsSmem))) == cudaSuccess;
+    if (rows_smem && a.part && a.T >= 1 && a.T <= kSplitMaxT && a.hd == kAttnMaxHd && a.d_rel <= kRowsRel &&
+        a.n_heads == kRowsHeads * a.n_kv && a.stride % 8 == 0) {
+        const int S = ((a.window > 0 ? a.window + a.T - 1 : a.max_ctx) + kPartKeys - 1) / kPartKeys;
+        attn_part_rows_k<<<a.n_kv * S, kPartThreads, sizeof(RowsSmem), s>>>(a, S);
+        IMP_CUDA_CHECK_LAUNCH();
+        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, kPartKeys, true);
+        IMP_CUDA_CHECK_LAUNCH();
+        return;
+    }
+    // Other head layouts: one block per (row, head, chunk). Prefill has rows x heads blocks already.
     if (a.part && a.T <= kSplitMaxT && 2 * a.hd == kPartThreads && a.d_rel <= 32) {
         const int CK = kPartKeys;
         const int S = ((a.window > 0 ? a.window : a.max_ctx) + CK - 1) / CK;
         attn_part_k<<<a.T * a.n_heads * S, kPartThreads, 0, s>>>(a, S);
         IMP_CUDA_CHECK_LAUNCH();
-        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, CK);
+        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, CK, false);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
