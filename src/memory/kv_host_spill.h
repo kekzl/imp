@@ -28,22 +28,30 @@ size_t kv_host_block_bytes(KVCache& cache);
 
 // Host-RAM tier for evicted prefix-cache KV blocks (#2203): a reclaimed block's KV is copied into
 // a pinned slot keyed by its binding (slot_key); a later prefix hit on that hash copies it back instead of
-// re-prefilling. Fixed slot count, LRU replacement. Host logic only: the byte copies are the
-// caller's (KVCache::copy_block_to_host / copy_block_from_host).
+// re-prefilling. Slot ceiling from the budget, LRU replacement; the arena is pinned in chunks as slots
+// are first used (16 GiB in one cudaHostAlloc held a WSL2 server start for 68 s). Host logic only: the
+// byte copies are the caller's (KVCache::copy_block_to_host / copy_block_from_host).
 class KVHostSpill {
 public:
     using Alloc = std::function<void*(size_t)>;
     using Free = std::function<void(void*)>;
 
-    // slot_bytes: one block across all layers (KVCache::host_spill_block_bytes()). Slot count =
+    static constexpr size_t kChunkBytes = size_t{64} << 20;
+
+    // slot_bytes: one block across all layers (KVCache::host_spill_block_bytes()). Slot ceiling =
     // budget_bytes / slot_bytes; 0 slots = disabled. alloc/free default to cudaHostAlloc/cudaFreeHost.
-    KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc = {}, Free free = {});
+    // The first chunk is taken here (a refused pin disables the tier), the others by reserve(); a chunk
+    // alloc refuses, the tier stays at the slots it has.
+    KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc = {}, Free free = {},
+                size_t chunk_bytes = kChunkBytes);
     ~KVHostSpill();
     KVHostSpill(const KVHostSpill&) = delete;
     KVHostSpill& operator=(const KVHostSpill&) = delete;
 
-    bool enabled() const { return slots_ > 0 && arena_ != nullptr; }
+    bool enabled() const { return slots_ > 0 && !chunks_.empty(); }
+    // Slot ceiling, and the slots whose chunk is pinned so far.
     int slots() const { return slots_; }
+    int pinned_slots() const { return pinned_slots_; }
     size_t slot_bytes() const { return slot_bytes_; }
 
     // A slot is keyed by the binding its KV came from: two forwards of one hash (a primary and a
@@ -95,13 +103,21 @@ private:
         std::list<size_t>::iterator lru;
         KvChainLink origin{};
     };
-    char* slot_ptr(int slot) const { return arena_ + (static_cast<size_t>(slot) * slot_bytes_); }
+    char* slot_ptr(int slot) const {
+        return chunks_[static_cast<size_t>(slot / chunk_slots_)] +
+               (static_cast<size_t>(slot % chunk_slots_) * slot_bytes_);
+    }
+    // Pins the next chunk and frees its slots; false = refused, the ceiling drops to the pinned slots.
+    [[nodiscard]] bool grow_();
     // Drops the hash -> newest-slot alias when it names key.
     void drop_alias_(size_t key, const Entry& e);
 
     size_t slot_bytes_ = 0;
     int slots_ = 0;
-    char* arena_ = nullptr;
+    int pinned_slots_ = 0;
+    int chunk_slots_ = 1;
+    std::vector<char*> chunks_;
+    Alloc alloc_;
     Free free_;
     std::vector<int> free_slots_;
     std::list<size_t> lru_;  // front = least recently used

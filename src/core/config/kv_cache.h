@@ -55,7 +55,9 @@ struct KVCache {
     // pressure; a later prefix hit restores them by H2D copy instead of re-prefill. 0 = off.
     // Needs prefix caching; refused on SWA layers. A spilled block carries its sparse key min/max pages;
     // a GDN hybrid restores it through recurrent snapshot chains (8 chats x 31k, 8000 blocks: TTFT -90 %).
-    int host_spill_mb = 0;
+    // -1 = auto: two thirds of the host RAM above the pin headroom (max(6 GiB, 10 %)), whole GiB, at
+    // most 16384; pinned in 64 MiB steps as blocks spill, never past that headroom.
+    int host_spill_mb = -1;
 
     // Pin the KV pool to exactly this many blocks; 0 = size from the VRAM
     // budget. Lets an operator sharing a card declare pool size explicitly and

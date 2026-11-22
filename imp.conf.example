@@ -42,8 +42,8 @@
 # dtype                       = "auto"
 # Pin the KV pool to this many blocks; 0 = size it from the VRAM budget.
 # max_blocks                  = 0
-# Pinned host RAM (MiB) the prefix cache spills reclaimed blocks to. 0 = off.
-# host_spill_mb               = 0
+# Pinned host RAM (MiB) the prefix cache spills reclaimed blocks to. -1 = auto from free host RAM, 0 = off.
+# host_spill_mb               = -1
 
 [attention]
 # Sparse decode attention budget in tokens: -1 = auto (4096 on measured archs), 0 = off.

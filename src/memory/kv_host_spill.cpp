@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace imp {
@@ -149,33 +150,48 @@ bool kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStrea
     return copy_block(cache, block_id, const_cast<char*>(static_cast<const char*>(src)), false, stream);
 }
 
-KVHostSpill::KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc, Free free)
-    : slot_bytes_(slot_bytes), free_(std::move(free)) {
+KVHostSpill::KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc, Free free, size_t chunk_bytes)
+    : slot_bytes_(slot_bytes), alloc_(std::move(alloc)), free_(std::move(free)) {
     if (slot_bytes == 0 || budget_bytes < slot_bytes)
         return;
     const size_t n = budget_bytes / slot_bytes;
-    if (!alloc)
-        alloc = [](size_t bytes) -> void* {
+    if (!alloc_)
+        alloc_ = [](size_t bytes) -> void* {
             void* p = nullptr;
             return cudaHostAlloc(&p, bytes, cudaHostAllocDefault) == cudaSuccess ? p : nullptr;
         };
     if (!free_)
         free_ = [](void* p) { cudaFreeHost(p); };
-    arena_ = static_cast<char*>(alloc(n * slot_bytes));
-    if (!arena_) {
-        IMP_LOG_WARN("KV host spill: pinned alloc of %.1f MiB failed; tier disabled",
-                     (n * slot_bytes) / (1024.0 * 1024.0));
-        return;
-    }
     slots_ = static_cast<int>(n);
-    free_slots_.reserve(n);
-    for (int s = slots_ - 1; s >= 0; --s)
-        free_slots_.push_back(s);
+    chunk_slots_ = static_cast<int>(std::clamp(chunk_bytes / slot_bytes, size_t{1}, n));
+    if (!grow_())
+        IMP_LOG_WARN("KV host spill: pinned alloc of %.1f MiB failed; tier disabled",
+                     (static_cast<size_t>(chunk_slots_) * slot_bytes) / (1024.0 * 1024.0));
 }
 
 KVHostSpill::~KVHostSpill() {
-    if (arena_ && free_)
-        free_(arena_);
+    for (char* c : chunks_)
+        free_(c);
+}
+
+bool KVHostSpill::grow_() {
+    const int n = std::min(chunk_slots_, slots_ - pinned_slots_);
+    char* c = n > 0 ? static_cast<char*>(alloc_(static_cast<size_t>(n) * slot_bytes_)) : nullptr;
+    if (!c) {
+        if (pinned_slots_ > 0 && pinned_slots_ < slots_)
+            IMP_LOG_INFO(
+                "KV host spill: the host refused the next chunk, tier stays at %d of %d blocks "
+                "(%.1f MiB)",
+                pinned_slots_, slots_,
+                (static_cast<size_t>(pinned_slots_) * slot_bytes_) / (1024.0 * 1024.0));
+        slots_ = pinned_slots_;
+        return false;
+    }
+    chunks_.push_back(c);
+    for (int s = pinned_slots_ + n - 1; s >= pinned_slots_; --s)
+        free_slots_.push_back(s);
+    pinned_slots_ += n;
+    return true;
 }
 
 void KVHostSpill::drop_alias_(size_t key, const Entry& e) {
@@ -196,6 +212,8 @@ void* KVHostSpill::reserve(size_t key) {
         return slot_ptr(it->second.slot);
     }
     int slot;
+    if (free_slots_.empty() && pinned_slots_ < slots_)
+        (void)grow_();
     if (!free_slots_.empty()) {
         slot = free_slots_.back();
         free_slots_.pop_back();
