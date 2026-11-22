@@ -6,6 +6,7 @@
 #include "compute/gemm.h"
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
+#include "core/cuda_raii.h"
 #include "core/tensor.h"
 #include "memory/vram_allocator.h"
 #include "quant/nvfp4_gemm.h"
@@ -43,33 +44,28 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim,
                  KD = static_cast<size_t>(c.n_kv_heads) * c.head_dim;
     const size_t slots = Tm * c.top_k;
-    for (float** p : {&h_,       &resid_,   &bs_[0],   &bs_[1],   &bs_[2],  &bs_[3],  &pre_h_,
-                      &msrc_[0], &msrc_[1], &msrc_[2], &msrc_[3], &mix_[0], &mix_[1], &mix_[2],
-                      &msg_[0],  &msg_[1],  &msg_[2],  &msg_[3],  &g_[0],   &g_[1],   &g_[2],
-                      &a_,       &res2_,    &mm_,      &xmf_,     &mo_,     &co_,     &of_})
+    for (float** p : {&h_,       &bs_[0],   &bs_[1],  &bs_[2],  &bs_[3],  &pre_h_,  &msrc_[0], &msrc_[1],
+                      &msrc_[2], &msrc_[3], &mix_[0], &mix_[1], &mix_[2], &msg_[0], &msg_[1],  &msg_[2],
+                      &msg_[3],  &g_[0],    &g_[1],   &g_[2],   &res2_,   &mm_})
         *p = F_(Tm * H);
-    qf_ = F_(Tm * QD);
-    attn_ = F_(Tm * QD);
-    rf_ = F_(Tm * c.n_heads * c.d_rel);
-    kf_ = F_(Tm * KD);
-    kc_ = F_(Tm * KD);
     wts_ = F_(slots);
-    for (half** p : {&xq_, &xk_, &xv_, &o_h_, &gf_, &gg_, &xm_})
+    rlog_ = F_(Tm * c.n_experts);
+    gd_ = F_(Tm * 3 * (2 * static_cast<size_t>(c.gate_rank) + 2));
+    mixp_ = F_(mix_partial_floats(max_tokens, c.hidden));
+    part_ = F_(attention_part_floats(c.n_heads, c.head_dim, c.window, max_ctx));
+    for (half** p : {&xq_, &xk_, &xv_, &o_h_, &xm_})
         *p = Hf_(Tm * H);
-    q_h_ = Hf_(Tm * QD);
-    gate_h_ = Hf_(Tm * QD);
+    const size_t taps = static_cast<size_t>(c.n_kv_heads) * 4;
+    proj_h_ = Hf_(Tm * (2 * QD + static_cast<size_t>(c.n_heads) * c.d_rel + c.n_heads + 2 * (KD + taps)));
+    pk_ = Hf_(Tm * (KD + taps));
+    pv_ = Hf_(Tm * (KD + taps));
     ao_h_ = Hf_(Tm * QD);
-    r_h_ = Hf_(Tm * c.n_heads * c.d_rel);
-    sink_h_ = Hf_(Tm * c.n_heads);
-    k_h_ = Hf_(Tm * KD);
-    dyn_ = Hf_(Tm * c.n_kv_heads * 4);
-    cat_ = Hf_(Tm * 2 * H);
-    gd_ = Hf_(Tm * c.gate_rank);
     gu_ = Hf_(slots * 2 * c.inter);
     act_ = Hf_(slots * c.inter);
     ey_ = Hf_(slots * H);
     logits_h_ = Hf_(static_cast<size_t>(c.vocab));
     idx_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
+    d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
         // Application index -> weight layer.
@@ -99,127 +95,130 @@ void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, hal
     gemm(A, B, C, 1.0f, 0.0f, s);
 }
 
-const float* InklingForward::gate_(const float* h, const float* msg, const InklingGate& g, float* out, int T,
-                                   cudaStream_t s) {
-    const InklingConfig& c = w_->cfg;
-    gate_cat(h, msg, cat_, T, c.hidden, c.eps, s);
-    lin_(cat_, T, 2 * c.hidden, g.down, c.gate_rank, gd_, s);
-    lin_(gd_, T, c.gate_rank, g.forget, c.hidden, gf_, s);
-    lin_(gd_, T, c.gate_rank, g.gain, c.hidden, gg_, s);
-    gate_apply(h, msg, gf_, gg_, out, static_cast<size_t>(T) * c.hidden, s);
-    return out;
-}
-
-// Key or value: conv over the projection x_h [T, KD], clip or norm, write into the application's cache.
-void InklingForward::conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site,
-                           bool is_key, int T, cudaStream_t s) {
-    const InklingConfig& c = w_->cfg;
-    const int KD = c.n_kv_heads * c.head_dim;
-    float* st = conv_state_[static_cast<size_t>(app)] + static_cast<size_t>(site) * 3 * KD;
-    f16_to_f32(x_h, kf_, static_cast<size_t>(T) * KD, s);
-    if (cv.static_w) {
-        lin_(xin, T, c.hidden, cv.proj, c.n_kv_heads * 4, dyn_, s);
-        conv_dynamic(kf_, cv.static_w, dyn_, st, kc_, T, KD, c.n_kv_heads, s);
-    } else {
-        conv_static(kf_, cv.w, st, kc_, T, KD, s);
-    }
-    conv_state_update(kf_, st, T, KD, s);
-    const int layer_global = cv.static_w != nullptr;
-    kv_store(kc_, (is_key ? k_ : v_)[static_cast<size_t>(app)], T, c.n_kv_heads, c.head_dim, is_key,
-             c.qk_clip, c.eps, pos_, layer_global ? 0 : ring_, s);
-}
-
 void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
     const InklingLayer& ly = w_->layers[static_cast<size_t>(layer)];
-    const int app = c.app_index(layer, pass);
+    const size_t app = static_cast<size_t>(c.app_index(layer, pass));
     const bool global = c.global[static_cast<size_t>(layer)];
     const int H = c.hidden, QD = c.n_heads * c.head_dim, KD = c.n_kv_heads * c.head_dim;
-    const size_t n = static_cast<size_t>(T) * H;
-    add_f32(h_, nullptr, resid_, n, s);
+    const int RD = c.n_heads * c.d_rel, TD = global ? c.n_kv_heads * 4 : 0;
 
     MixStates st;
     for (int j = 0; j < nb_; ++j)
         st.s[st.n++] = bs_[j];
-    const float *hq = h_, *hk = h_, *hv = h_;
-    if (layer > 0) {
-        MixStates in = st;
-        in.s[in.n++] = h_;
-        MixOut out;
-        out.o[0] = mix_[0], out.o[1] = mix_[1], out.o[2] = mix_[2];
-        block_mix(in, ly.attn_query, global ? 3 : 1, out, T, H, s);
-        hq = mix_[0];
-        hk = global ? mix_[1] : mix_[0];
-        hv = global ? mix_[2] : mix_[0];
-    }
-    if (pass > 0) {
-        MixStates ms;
+    // The q, k and v inputs: one normed state on a sliding layer's first pass, three otherwise.
+    const bool split = global || pass > 0;
+    if (pass == 0) {
+        MixArgs m;
+        m.st = st;
+        m.st.s[m.st.n++] = h_;
+        m.mix = layer > 0;
+        m.query = ly.attn_query;
+        m.nq = global ? 3 : 1;
+        m.eps = c.eps, m.partial = mixp_;
+        m.norm_w[0] = ly.norm_q, m.norm_w[1] = ly.norm_k, m.norm_w[2] = ly.norm_v;
+        m.out_h[0] = xq_, m.out_h[1] = xk_, m.out_h[2] = xv_;
+        mix(m, T, H, s);
+    } else {
+        MixArgs in;
+        in.st = st;
+        in.st.s[in.st.n++] = h_;
+        in.query = ly.attn_query, in.nq = global ? 3 : 1, in.partial = mixp_;
+        in.out_f[0] = mix_[0], in.out_f[1] = mix_[1], in.out_f[2] = mix_[2];
+        mix(in, T, H, s);
+        MixArgs ms;
         for (int j = 0; j < n_msrc_; ++j)
-            ms.s[ms.n++] = msrc_[j];
-        MixOut out;
+            ms.st.s[ms.st.n++] = msrc_[j];
+        ms.query = w_->msg_query + static_cast<size_t>(layer - c.loop_start) * 4 * H, ms.nq = 4,
+        ms.partial = mixp_;
         for (int j = 0; j < 4; ++j)
-            out.o[j] = msg_[j];
-        block_mix(ms, w_->msg_query + static_cast<size_t>(layer - c.loop_start) * 4 * H, 4, out, T, H, s);
-        const float *q0 = hq, *k0 = hk, *v0 = hv;
-        hq = gate_(q0, msg_[0], ly.gates[0], g_[0], T, s);
-        hk = gate_(k0, msg_[1], ly.gates[1], g_[1], T, s);
-        hv = gate_(v0, msg_[2], ly.gates[2], g_[2], T, s);
-    }
-    rms_norm(hq, ly.norm_q, nullptr, xq_, T, H, c.eps, s);
-    const half *xk = xq_, *xv = xq_;
-    if (hk != hq || ly.norm_k != ly.norm_q) {
-        rms_norm(hk, ly.norm_k, nullptr, xk_, T, H, c.eps, s);
-        xk = xk_;
-    }
-    if (hv != hq || ly.norm_v != ly.norm_q) {
-        rms_norm(hv, ly.norm_v, nullptr, xv_, T, H, c.eps, s);
-        xv = xv_;
+            ms.out_f[j] = msg_[j];
+        mix(ms, T, H, s);
+        GateNormArgs gn;
+        gn.n = 3, gn.rank = c.gate_rank, gn.eps = c.eps;
+        gn.h[0] = mix_[0], gn.h[1] = global ? mix_[1] : mix_[0], gn.h[2] = global ? mix_[2] : mix_[0];
+        gn.norm_w[0] = ly.norm_q, gn.norm_w[1] = ly.norm_k, gn.norm_w[2] = ly.norm_v;
+        gn.out_h[0] = xq_, gn.out_h[1] = xk_, gn.out_h[2] = xv_;
+        for (int j = 0; j < 3; ++j) {
+            gn.msg[j] = msg_[j];
+            gn.down[j] = ly.gates[j].down, gn.forget[j] = ly.gates[j].forget, gn.gain[j] = ly.gates[j].gain;
+        }
+        GateOut go;
+        go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
+        gate_norm(gn, go, gd_, T, H, s);
     }
 
-    const float alpha = global ? c.log_alpha : 0.0f;
-    lin_(xq_, T, H, ly.wq, QD, q_h_, s);
-    scaled_l2_clip(q_h_, ly.q_scale, qf_, T, c.n_heads, c.head_dim, c.qk_clip, pos_, alpha, c.log_floor, s);
-    lin_(xq_, T, H, ly.wr, c.n_heads * c.d_rel, r_h_, s);
-    scaled_l2_clip(r_h_, ly.rel_scale, rf_, T, c.n_heads, c.d_rel, c.rel_clip, pos_, alpha, c.log_floor, s);
-    lin_(xq_, T, H, ly.sink, c.n_heads, sink_h_, s);
-    lin_(xk, T, H, ly.wk, KD, k_h_, s);
-    conv_(k_h_, ly.k_conv, xk, app, 0, true, T, s);
-    lin_(xv, T, H, ly.wv, KD, k_h_, s);
-    conv_(k_h_, ly.v_conv, xv, app, 1, false, T, s);
+    // Projections: rows [wq; wr; sink; gate; wk; k taps; wv; v taps] of one block.
+    const int q_rows = 2 * QD + RD + c.n_heads, kv_rows = KD + TD;
+    const half *kx = pk_, *vx = pv_;
+    int q_stride = q_rows, kv_stride = kv_rows;
+    if (split) {
+        lin_(xq_, T, H, ly.wq, q_rows, proj_h_, s);
+        lin_(xk_, T, H, ly.wk, kv_rows, pk_, s);
+        lin_(xv_, T, H, ly.wv, kv_rows, pv_, s);
+    } else {
+        lin_(xq_, T, H, ly.wq, ly.proj_rows, proj_h_, s);
+        q_stride = kv_stride = ly.proj_rows;
+        kx = proj_h_ + q_rows;
+        vx = kx + kv_rows;
+    }
+    float* cs = conv_state_[app];
+    KvSiteArgs ka;
+    ka.x = kx, ka.w = ly.k_conv.w, ka.static_w = ly.k_conv.static_w, ka.dyn = kx + KD;
+    ka.state = cs, ka.cache = k_[app], ka.d_pos = d_pos_;
+    ka.T = T, ka.stride = kv_stride, ka.n_heads = c.n_kv_heads, ka.hd = c.head_dim,
+    ka.ring = global ? 0 : ring_;
+    ka.is_key = true, ka.thr = c.qk_clip, ka.eps = c.eps;
+    kv_site(ka, s);
+    KvSiteArgs va = ka;
+    va.x = vx, va.w = ly.v_conv.w, va.static_w = ly.v_conv.static_w, va.dyn = vx + KD;
+    va.state = cs + static_cast<size_t>(3) * KD, va.cache = v_[app], va.is_key = false;
+    kv_site(va, s);
 
     AttnArgs a;
-    a.q = qf_, a.k = k_[static_cast<size_t>(app)], a.v = v_[static_cast<size_t>(app)];
-    a.rel = rf_, a.proj = ly.rel_proj, a.sink = sink_h_, a.out = attn_;
-    a.T = T, a.n_heads = c.n_heads, a.n_kv = c.n_kv_heads, a.hd = c.head_dim;
+    a.q = proj_h_, a.rel = proj_h_ + QD, a.sink = proj_h_ + QD + RD, a.gate = proj_h_ + QD + RD + c.n_heads;
+    a.q_scale = ly.q_scale, a.rel_scale = ly.rel_scale, a.proj = ly.rel_proj;
+    a.k = k_[app], a.v = v_[app], a.out = ao_h_, a.d_pos = d_pos_;
+    a.part = part_, a.max_ctx = max_ctx_;
+    a.T = T, a.stride = q_stride, a.n_heads = c.n_heads, a.n_kv = c.n_kv_heads, a.hd = c.head_dim;
     a.d_rel = c.d_rel, a.rel_extent = global ? c.rel_extent : c.window;
-    a.pos0 = pos_, a.window = global ? 0 : c.window, a.ring = global ? 0 : ring_;
-    a.scale = 1.0f / sqrtf(static_cast<float>(c.head_dim));
+    a.window = global ? 0 : c.window, a.ring = global ? 0 : ring_;
+    a.scale = 1.0f / sqrtf(static_cast<float>(c.head_dim)), a.q_thr = c.qk_clip, a.rel_thr = c.rel_clip;
+    a.log_alpha = global ? c.log_alpha : 0.0f, a.log_floor = c.log_floor;
     attention(a, s);
-    lin_(xq_, T, H, ly.gate_attn, QD, gate_h_, s);
-    gate_mul(attn_, gate_h_, ao_h_, static_cast<size_t>(T) * QD, s);
     lin_(ao_h_, T, QD, ly.wo, H, o_h_, s);
-    f16_to_f32(o_h_, of_, n, s);
-    float* cs = conv_state_[static_cast<size_t>(app)] + static_cast<size_t>(6) * KD;
-    conv_static(of_, ly.attn_conv, cs, a_, T, H, s);
-    conv_state_update(of_, cs, T, H, s);
 
-    if (layer % c.block_layers == 0) {
-        add_f32(resid_, nullptr, bs_[nb_], n, s);
+    // Block boundary: the layer input joins the block states and the residual restarts at the conv output.
+    float* as = cs + static_cast<size_t>(6) * KD;
+    const bool boundary = layer % c.block_layers == 0;
+    conv_residual(o_h_, ly.attn_conv, as, h_, !boundary, res2_, boundary ? bs_[nb_] : nullptr, T, H, s);
+    if (boundary)
         st.s[st.n++] = bs_[nb_++];
-        add_f32(a_, nullptr, res2_, n, s);
-    } else {
-        add_f32(resid_, a_, res2_, n, s);
-    }
     st.s[st.n++] = res2_;
-    MixOut mo;
-    mo.o[0] = mm_;
-    block_mix(st, ly.mlp_query, 1, mo, T, H, s);
-    const float* m = mm_;
-    if (pass > 0)
-        m = gate_(mm_, msg_[3], ly.gates[3], g_[0], T, s);
-    rms_norm(m, ly.mlp_norm, nullptr, xm_, T, H, c.eps, s);
-    f16_to_f32(xm_, xmf_, n, s);
-    route_topk(xmf_, ly.router_w, ly.router_b, idx_, wts_, T, H, c.n_experts, c.top_k, c.route_scale, s);
+    if (pass == 0) {
+        MixArgs m;
+        m.st = st;
+        m.query = ly.mlp_query;
+        m.eps = c.eps, m.partial = mixp_;
+        m.norm_w[0] = ly.mlp_norm;
+        m.out_h[0] = xm_;
+        mix(m, T, H, s);
+    } else {
+        MixArgs mo;
+        mo.st = st;
+        mo.query = ly.mlp_query, mo.partial = mixp_;
+        mo.out_f[0] = mm_;
+        mix(mo, T, H, s);
+        GateNormArgs gn;
+        gn.n = 1, gn.rank = c.gate_rank, gn.eps = c.eps;
+        gn.h[0] = mm_, gn.msg[0] = msg_[3], gn.norm_w[0] = ly.mlp_norm, gn.out_h[0] = xm_;
+        gn.down[0] = ly.gates[3].down, gn.forget[0] = ly.gates[3].forget, gn.gain[0] = ly.gates[3].gain;
+        GateOut go;
+        go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
+        gate_norm(gn, go, gd_, T, H, s);
+    }
+    route_topk(xm_, ly.router_w, ly.router_b, rlog_, idx_, wts_, T, H, c.n_experts, c.top_k, c.route_scale,
+               s);
     const int slots = T * c.top_k;
     if (ly.ex.fp8) {
         gemv_mxfp8_slots(ly.ex.w13_q, ly.ex.w13_s, idx_, xm_, gu_, slots, 2 * c.inter, H, c.top_k, s);
@@ -230,11 +229,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
         gemv_nvfp4_moe_decode(ly.ex.w2, idx_, act_, ey_, H, c.inter, c.inter, slots, s, 1);
     }
-    expert_combine(ey_, wts_, mo_, T, c.top_k, H, s);
-    float* ms2 = cs + static_cast<size_t>(3) * H;
-    conv_static(mo_, ly.mlp_conv, ms2, co_, T, H, s);
-    conv_state_update(mo_, ms2, T, H, s);
-    add_f32(res2_, co_, h_, n, s);
+    moe_tail(ey_, wts_, ly.mlp_conv, as + static_cast<size_t>(3) * H, res2_, h_, mm_, T, c.top_k, H, s);
     if (tap) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
         tap(app_seq_, h_, T);
@@ -271,13 +266,13 @@ void InklingForward::layers_(int T, cudaStream_t s) {
     }
     for (int i = c.loop_end; i < c.n_layers; ++i)
         apply_(i, 0, T, s);
-    MixStates st;
+    MixArgs fin;
     for (int j = 0; j < nb_; ++j)
-        st.s[st.n++] = bs_[j];
-    st.s[st.n++] = h_;
-    MixOut out;
-    out.o[0] = mix_[0];
-    block_mix(st, w_->out_query, 1, out, T, H, s);
+        fin.st.s[fin.st.n++] = bs_[j];
+    fin.st.s[fin.st.n++] = h_;
+    fin.query = w_->out_query, fin.partial = mixp_;
+    fin.out_f[0] = mix_[0];
+    mix(fin, T, H, s);
 }
 
 bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
@@ -290,9 +285,37 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
         return false;
     }
     const size_t n = static_cast<size_t>(T) * w_->cfg.hidden;
-    f16_to_f32(h, h_, n, s);
-    layers_(T, s);
-    f32_to_f16(mix_[0], h, n, s);
+    // The kernels read the position from the device: one captured graph serves every decode step.
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
+    const bool graph = T == 1 && s != nullptr && !tap && decode_graph_ok_;
+    if (graph && (!decode_exec_.get() || decode_h_ != h)) {
+        // Capture the one-token step once: about 2000 kernel and cuBLAS launches become one replay.
+        cudaGraph_t g = nullptr;
+        if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
+            decode_graph_ok_ = false;
+        } else {
+            f16_to_f32(h, h_, n, s);
+            layers_(1, s);
+            f32_to_f16(mix_[0], h, n, s);
+            cudaGraphExec_t ex = nullptr;
+            if (cudaStreamEndCapture(s, &g) != cudaSuccess ||
+                cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
+                IMP_LOG_WARN("inkling: decode graph capture failed, decode stays eager");
+                decode_graph_ok_ = false;
+            }
+            decode_graph_.reset(g);
+            decode_exec_.reset(ex);
+            decode_h_ = h;
+        }
+    }
+    if (graph && decode_graph_ok_ && decode_exec_.get()) {
+        if (cudaGraphLaunch(decode_exec_.get(), s) != cudaSuccess)
+            return false;
+    } else {
+        f16_to_f32(h, h_, n, s);
+        layers_(T, s);
+        f32_to_f16(mix_[0], h, n, s);
+    }
     pos_ += T;
     return ok_;
 }
@@ -305,6 +328,7 @@ bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaS
         return false;
     }
     const int H = c.hidden;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
     embed_rows(w_->embed, d_ids, h_, T, H, s);
     layers_(T, s);
     if (d_logits) {

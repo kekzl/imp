@@ -68,6 +68,17 @@ struct Loader {
             ok = false;
         return p;
     }
+    // BF16 tensor converted into dst (a slice of a larger allocation).
+    half* f16_into(const std::string& name, int64_t numel, half* dst) {
+        const Tensor* x = find(name, QType::BF16, numel);
+        if (!x || !dst)
+            return nullptr;
+        if (cudaMemcpyAsync(dst, x->data, x->nbytes(), cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
+            ok = false;
+        inkling::bf16_to_f16(reinterpret_cast<const uint16_t*>(dst), dst, static_cast<size_t>(numel),
+                             nullptr);
+        return dst;
+    }
     half* f16(const std::string& name, int64_t numel) {
         auto* p = static_cast<half*>(raw(name, QType::BF16, numel));
         if (p)
@@ -92,6 +103,18 @@ struct Loader {
             ok = false;
             return nullptr;
         }
+        return upload(h);
+    }
+    // [rows, cols] on disk (BF16) -> [cols, rows] fp32: one distance's d_rel factors share a cache line.
+    float* f32_transposed(const std::string& name, int rows, int cols) {
+        const Tensor* x = find(name, QType::BF16, static_cast<int64_t>(rows) * cols);
+        if (!x)
+            return nullptr;
+        const auto* b = static_cast<const uint16_t*>(x->data);
+        std::vector<float> h(static_cast<size_t>(rows) * cols);
+        for (int r = 0; r < rows; ++r)
+            for (int cidx = 0; cidx < cols; ++cidx)
+                h[static_cast<size_t>(cidx) * rows + r] = bf16_host(b[static_cast<size_t>(r) * cols + cidx]);
         return upload(h);
     }
     float* upload(const std::vector<float>& h) {
@@ -246,26 +269,36 @@ bool load_inkling_weights(const std::string& dir, InklingWeights& w, VRAMAllocat
         InklingLayer& ly = w.layers[static_cast<size_t>(i)];
         const bool g = c.global[static_cast<size_t>(i)];
         const std::string p = llm + "layers." + std::to_string(i) + ".";
-        ly.wq = L.f16(p + "attn.wq_du.weight", QD * H);
-        ly.wk = L.f16(p + "attn.wk_dv.weight", KD * H);
-        ly.wv = L.f16(p + "attn.wv_dv.weight", KD * H);
+        // One row-stacked block [wq; wr; sink; gate_attn; wk; k taps; wv; v taps]: a projection of
+        // several of them from one input is a single GEMM over consecutive rows.
+        const int64_t RD = static_cast<int64_t>(c.n_heads) * c.d_rel, TD = g ? c.n_kv_heads * 4 : 0;
+        ly.proj_rows = static_cast<int>(2 * QD + RD + c.n_heads + 2 * KD + 2 * TD);
+        half* blk = static_cast<half*>(L.dev(static_cast<size_t>(ly.proj_rows) * H * sizeof(half)));
+        auto put = [&](const char* name, int64_t rows) {
+            half* at = blk;
+            blk = blk ? blk + rows * H : nullptr;
+            return L.f16_into(p + name, rows * H, at);
+        };
+        ly.wq = put("attn.wq_du.weight", QD);
+        ly.wr = put("attn.wr_du.weight", RD);
+        ly.sink = put("attn.attn_sink_proj.weight", c.n_heads);
+        ly.gate_attn = put("attn.gate_attn.weight", QD);
+        ly.wk = put("attn.wk_dv.weight", KD);
+        if (g)
+            ly.k_conv.proj = put("attn.k_sconv.weight_proj", TD);
+        ly.wv = put("attn.wv_dv.weight", KD);
+        if (g)
+            ly.v_conv.proj = put("attn.v_sconv.weight_proj", TD);
         ly.wo = L.f16(p + "attn.wo_ud.weight", H * QD);
-        ly.gate_attn = L.f16(p + "attn.gate_attn.weight", QD * H);
-        ly.wr = L.f16(p + "attn.wr_du.weight", static_cast<int64_t>(c.n_heads) * c.d_rel * H);
-        ly.sink = L.f16(p + "attn.attn_sink_proj.weight", c.n_heads * H);
         ly.q_scale = L.f32(p + "attn.q_l2_clip.scale", QD);
         ly.rel_scale = L.f32(p + "attn.rel_l2_clip.scale", static_cast<int64_t>(c.n_heads) * c.d_rel);
-        ly.rel_proj = L.f32(p + "attn.rel_logits_proj.proj", static_cast<int64_t>(c.d_rel) * c.rel_extent);
+        ly.rel_proj = L.f32_transposed(p + "attn.rel_logits_proj.proj", c.d_rel, c.rel_extent);
         if (g) {
             ly.norm_q = L.f32(p + "q_input_norm.weight", H);
             ly.norm_k = L.f32(p + "k_input_norm.weight", H);
             ly.norm_v = L.f32(p + "v_input_norm.weight", H);
             ly.k_conv.static_w = L.f32(p + "attn.k_sconv.static_w", 4 * KD);
             ly.v_conv.static_w = L.f32(p + "attn.v_sconv.static_w", 4 * KD);
-            ly.k_conv.proj = L.f16(p + "attn.k_sconv.weight_proj",
-                                   static_cast<int64_t>(c.n_kv_heads) * 4 * H);
-            ly.v_conv.proj = L.f16(p + "attn.v_sconv.weight_proj",
-                                   static_cast<int64_t>(c.n_kv_heads) * 4 * H);
         } else {
             ly.norm_q = ly.norm_k = ly.norm_v = L.f32(p + "attn_norm.weight", H);
             ly.k_conv.w = L.f32(p + "attn.k_sconv.weight", KD * 4);

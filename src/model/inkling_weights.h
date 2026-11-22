@@ -54,7 +54,9 @@ struct InklingExperts {
 struct InklingLayer {
     half *wq = nullptr, *wk = nullptr, *wv = nullptr, *wo = nullptr, *gate_attn = nullptr, *wr = nullptr;
     half* sink = nullptr;
-    float *q_scale = nullptr, *rel_scale = nullptr, *rel_proj = nullptr;
+    int proj_rows = 0;  // wq .. v taps are consecutive rows of one block starting at wq
+    float *q_scale = nullptr, *rel_scale = nullptr;
+    float* rel_proj = nullptr;  // [rel_extent, d_rel] (transposed from the checkpoint)
     float *norm_q = nullptr, *norm_k = nullptr, *norm_v = nullptr, *mlp_norm = nullptr;
     InklingConv k_conv, v_conv;
     float *attn_conv = nullptr, *mlp_conv = nullptr;

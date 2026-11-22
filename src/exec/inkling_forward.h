@@ -1,6 +1,7 @@
 #pragma once
 // Inkling2-Loop text forward for one sequence: 48 layer applications per token, own K/V and conv state.
 
+#include "core/cuda_raii.h"
 #include "model/inkling_weights.h"
 
 #include <cuda_runtime.h>
@@ -42,10 +43,6 @@ private:
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
-    const float* gate_(const float* h, const float* msg, const InklingGate& g, float* out, int T,
-                       cudaStream_t s);
-    void conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site, bool is_key, int T,
-               cudaStream_t s);
     void* alloc_(size_t bytes);
     float* F_(size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); }
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
@@ -59,16 +56,24 @@ private:
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
     // fp32 [max_tokens, hidden]
-    float *h_ = nullptr, *resid_ = nullptr, *bs_[4] = {}, *pre_h_ = nullptr, *msrc_[4] = {}, *mix_[3] = {};
-    float *msg_[4] = {}, *g_[3] = {}, *a_ = nullptr, *res2_ = nullptr, *mm_ = nullptr, *xmf_ = nullptr;
-    float *mo_ = nullptr, *co_ = nullptr, *of_ = nullptr;
+    float *h_ = nullptr, *bs_[4] = {}, *pre_h_ = nullptr, *msrc_[4] = {}, *mix_[3] = {};
+    float *msg_[4] = {}, *g_[3] = {}, *gd_ = nullptr, *res2_ = nullptr,
+          *mm_ = nullptr;  // g_, gd_: gate scratch
     int n_msrc_ = 0;
-    float *qf_ = nullptr, *rf_ = nullptr, *kf_ = nullptr, *kc_ = nullptr, *attn_ = nullptr, *wts_ = nullptr;
-    half *xq_ = nullptr, *xk_ = nullptr, *xv_ = nullptr, *q_h_ = nullptr, *r_h_ = nullptr, *sink_h_ = nullptr;
-    half *k_h_ = nullptr, *dyn_ = nullptr, *gate_h_ = nullptr, *ao_h_ = nullptr, *o_h_ = nullptr;
-    half *cat_ = nullptr, *gd_ = nullptr, *gf_ = nullptr, *gg_ = nullptr, *xm_ = nullptr;
+    float* part_ = nullptr;                   // decode attention partials (attention_part_floats)
+    float* mixp_ = nullptr;                   // block-mix partial sums (mix_partial_floats)
+    float *wts_ = nullptr, *rlog_ = nullptr;  // routing weights [rows * top_k], router logits [rows, experts]
+    half *xq_ = nullptr, *xk_ = nullptr, *xv_ = nullptr, *o_h_ = nullptr, *ao_h_ = nullptr;
+    half *proj_h_ = nullptr, *pk_ = nullptr, *pv_ = nullptr;  // stacked projection outputs
+    half* xm_ = nullptr;
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
+    int* d_pos_ = nullptr;  // device: position of row 0 of the running call
+    // Captured one-token step over the hidden buffer decode_h_ (run(), T == 1).
+    CudaGraph decode_graph_;
+    CudaGraphExec decode_exec_;
+    half* decode_h_ = nullptr;
+    bool decode_graph_ok_ = true;
 };
 
 // Weights and the forward that points into them (destroyed first).
