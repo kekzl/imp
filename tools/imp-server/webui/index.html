@@ -606,6 +606,70 @@
   .meter.warm > span { background: var(--accent); }
   .meter.fire > span { background: linear-gradient(90deg, var(--fire2), var(--fire)); }
 
+  /* ---- dashboard ----------------------------------------------------- */
+
+  .stage.dash-on .log, .stage.dash-on .compose { display: none; }
+  .dash { overflow-y: auto; padding: 24px 28px 34px; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+  .dash > * { max-width: 1120px; }
+  .dash-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+  .dash-head h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  .dash-head .aside { font-size: 12px; color: var(--text3); }
+  .dash h2 { margin: 0 0 4px; font-size: 13px; font-weight: 650; }
+  .chart { margin: 0; min-width: 0; }
+  .chart figcaption { display: flex; align-items: baseline; gap: 10px; }
+  .chart .t { font-size: 12.5px; color: var(--text2); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .chart .v { margin-left: auto; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
+  .chart .v small { margin-left: 4px; font-size: 11.5px; font-weight: 500; color: var(--text3); }
+  .chart.hero .t { font-size: 13.5px; color: var(--text); font-weight: 600; }
+  .chart.hero .v { font-size: 34px; line-height: 1; letter-spacing: -0.02em; }
+  .chart.hero .v small { font-size: 13px; letter-spacing: 0; }
+  .plot { position: relative; height: 84px; margin-top: 8px; touch-action: pan-y; }
+  .chart.hero .plot { height: 190px; }
+  .plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .plot .ln { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .plot .ar { fill: color-mix(in srgb, var(--accent) 11%, transparent); stroke: none; }
+  .plot .dot { fill: var(--accent); stroke: var(--bg); stroke-width: 2; }
+  .chart.fire .ln { stroke: var(--fire); }
+  .chart.fire .ar { fill: color-mix(in srgb, var(--fire) 11%, transparent); }
+  .chart.fire .dot { fill: var(--fire); }
+  .plot .base { stroke: var(--line2); stroke-width: 1; }
+  .plot .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+  .plot .tick { font-size: 10.5px; fill: var(--text3); font-variant-numeric: tabular-nums; }
+  .plot .cross { stroke: var(--text3); stroke-width: 1; }
+  .plot .tip {
+    position: absolute; top: -4px; transform: translate(-50%, -100%); padding: 3px 8px; border-radius: 6px;
+    background: var(--surface); border: 1px solid var(--line2); box-shadow: var(--shadow);
+    font-size: 11.5px; white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; color: var(--text); z-index: 2;
+  }
+  .plot .none { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--text3); }
+  .axis { display: flex; justify-content: space-between; margin-top: 4px; font-size: 10.5px; color: var(--text3); }
+  .dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 26px 30px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .dash-two { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 26px 44px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .dash-totals { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .dash-totals .readout { grid-template-columns: repeat(4, max-content minmax(0, 1fr)); gap: 9px 14px; margin-top: 10px; }
+  .dash-totals .readout dd { text-align: left; padding-right: 22px; }
+  .hbars { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; gap: 7px 12px; align-items: center; margin-top: 12px; font-size: 12px; }
+  .hbars .k { color: var(--text2); }
+  .hbars .bar { height: 10px; border-radius: 0 4px 4px 0; background: var(--surface2); }
+  .hbars .bar > span { display: block; height: 100%; min-width: 2px; border-radius: 0 4px 4px 0; background: var(--accent); }
+  .hbars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+  .vbars { display: flex; align-items: flex-end; gap: 2px; height: 112px; margin-top: 12px; border-bottom: 1px solid var(--line2); }
+  .vbars > div { flex: 0 1 56px; min-width: 0; border-radius: 4px 4px 0 0; background: var(--accent); }
+  .vbars > div:hover, .hbars .bar:hover > span { filter: brightness(1.25); }
+  .vlabels { display: flex; gap: 2px; margin-top: 4px; font-size: 10.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .vlabels span { flex: 0 1 56px; min-width: 0; text-align: center; overflow: hidden; white-space: nowrap; }
+  .icon-btn[aria-pressed="true"] { color: var(--text); background: var(--surface); border-color: var(--line2); }
+  @media (max-width: 1180px) {
+    .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dash-totals .readout { grid-template-columns: repeat(2, max-content minmax(0, 1fr)); }
+  }
+  @media (max-width: 720px) {
+    .dash { padding: 18px 14px 26px; }
+    .dash-grid, .dash-two { grid-template-columns: minmax(0, 1fr); }
+    .dash-totals .readout { grid-template-columns: max-content minmax(0, 1fr); }
+    .chart.hero .plot { height: 150px; }
+  }
+
   .spark-chart { display: block; width: 100%; height: 64px; margin-top: 4px; overflow: visible; }
   .spark-chart .ln { fill: none; stroke: var(--fire); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
   .spark-chart .ar { fill: color-mix(in srgb, var(--fire) 12%, transparent); stroke: none; }
@@ -842,6 +906,9 @@
         </div>
       </div>
       <div class="top-acts">
+        <button type="button" class="icon-btn" id="dash-btn" aria-label="Server metrics dashboard" aria-pressed="false" aria-controls="dash" title="server metrics dashboard">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16.5h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4 13l3.5-4 3 2.5L16 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <button type="button" class="icon-btn" id="theme" aria-label="Switch theme"></button>
         <button type="button" class="icon-btn" id="help-btn" aria-label="Keyboard shortcuts" title="keyboard shortcuts (?)">?</button>
         <button type="button" class="icon-btn only-narrow-panel" id="open-panel" aria-label="Show run, settings and server panel" aria-controls="panel" aria-expanded="false">
@@ -851,6 +918,33 @@
     </header>
 
     <main class="log" id="log" role="log" aria-label="Conversation"></main>
+
+    <section class="dash" id="dash" aria-label="Server metrics dashboard" hidden>
+      <div class="dash-head"><h1>Server metrics</h1><span class="aside" id="d-age">not read yet</span></div>
+      <div id="d-hero"></div>
+      <div class="dash-grid" id="d-grid"></div>
+      <div class="dash-two">
+        <div><h2>VRAM by owner</h2><div class="hbars" id="d-vram"></div></div>
+        <div><h2>Request durations</h2><div class="vbars" id="d-dur" role="img" aria-label="Finished requests by duration"></div><div class="vlabels" id="d-dur-x"></div><p class="hint" id="d-dur-note"></p></div>
+      </div>
+      <div class="dash-totals">
+        <h2>Since start</h2>
+        <dl class="readout">
+          <dt>requests</dt>            <dd id="d-req">-</dd>
+          <dt>failed</dt>              <dd id="d-fail" class="dim">-</dd>
+          <dt>generated tokens</dt>    <dd id="d-gen-total">-</dd>
+          <dt>prompt tokens</dt>       <dd id="d-prompt-total" class="dim">-</dd>
+          <dt>served from cache</dt>   <dd id="d-cache" class="dim">-</dd>
+          <dt>mean request</dt>        <dd id="d-mean" class="dim">-</dd>
+          <dt>last time to first token</dt> <dd id="d-ttft" class="dim">-</dd>
+          <dt>GPU energy</dt>          <dd id="d-energy" class="dim">-</dd>
+          <dt>VRAM peak</dt>           <dd id="d-vpeak" class="dim">-</dd>
+          <dt>uptime</dt>              <dd id="d-up" class="dim">-</dd>
+        </dl>
+      </div>
+      <p class="srv-err" id="d-err" hidden></p>
+      <p class="hint">Read from GET /metrics every 2 s while this view is open; the charts keep the last 10 minutes. Tokens per second counts decode steps as they run. Open it directly with #dashboard in the address.</p>
+    </section>
 
     <form class="compose" id="composer">
       <div class="box">
@@ -3150,6 +3244,198 @@ async function fetchModelInfo() {
     renderCtx();
   }
 }
+
+/* ---------- dashboard ------------------------------------------------ */
+
+// One sample per poll; counters become rates over the time between two polls.
+const DASH_MS = 2000, DASH_KEEP = 300;
+const DASH_CHARTS = [
+  { id: "gen", title: "Tokens generated per second", unit: "tok/s", hero: true, fmt: (v) => v.toFixed(v < 100 ? 1 : 0) },
+  { id: "flight", title: "Requests in flight", unit: "", fmt: (v) => String(Math.round(v)), floor: 1 },
+  { id: "rows", title: "Sequences decoding", unit: "", fmt: (v) => String(Math.round(v)), floor: 1 },
+  { id: "power", title: "GPU power", unit: "W", fmt: (v) => String(Math.round(v)), cls: "fire" },
+  { id: "kv", title: "KV blocks used", unit: "", fmt: (v) => fmtK(Math.round(v)), cap: "kvTotal" },
+];
+let dashOn = false, dashTimer = 0, dashHist = [], dashPrev = null;
+
+function buildDash() {
+  for (const c of DASH_CHARTS) {
+    const fig = document.createElement("figure");
+    fig.className = "chart" + (c.hero ? " hero" : "") + (c.cls ? " " + c.cls : "");
+    fig.innerHTML = '<figcaption><span class="t"></span><span class="v">-</span></figcaption>' +
+      '<div class="plot"><svg role="img"></svg><div class="tip" hidden></div><div class="none" hidden></div></div>' +
+      '<div class="axis"><span>1 min ago</span><span>now</span></div>';
+    fig.querySelector(".t").textContent = c.title;
+    c.fig = fig;
+    (c.hero ? el("d-hero") : el("d-grid")).append(fig);
+    const plot = fig.querySelector(".plot");
+    plot.addEventListener("pointermove", (e) => { c.hoverX = e.clientX - plot.getBoundingClientRect().left; drawChart(c); });
+    plot.addEventListener("pointerleave", () => { c.hoverX = null; drawChart(c); });
+  }
+}
+
+function dashSample(m) {
+  const g = (n) => msum(m, n);
+  // imp_decode_batch_rows_total moves with every decode step; imp_tokens_completion_total only when a
+  // request ends, which would draw one spike per answer.
+  const now = Date.now(), cur = { t: now, gen: g("imp_decode_batch_rows_total") ?? g("imp_tokens_completion_total"), up: g("imp_uptime_seconds") };
+  // A restarted server starts its counters over: the kept samples are another process's.
+  if (dashPrev && cur.up !== null && dashPrev.up !== null && cur.up < dashPrev.up) dashHist = [], dashPrev = null;
+  const dt = dashPrev ? (now - dashPrev.t) / 1000 : 0;
+  const rate = (k) => (dt > 0 && cur[k] !== null && dashPrev[k] !== null ? Math.max(0, cur[k] - dashPrev[k]) / dt : null);
+  dashHist.push({ t: now, gen: rate("gen"), flight: g("imp_queue_depth"), rows: g("imp_decode_batch_last_rows"),
+                  power: g("imp_gpu_power_watts"), kv: g("imp_kv_blocks_used"), kvTotal: g("imp_kv_blocks_total") });
+  if (dashHist.length > DASH_KEEP) dashHist.shift();
+  dashPrev = cur;
+}
+
+const niceMax = (v) => { const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 2.5, 5, 10].map((k) => k * p).find((k) => k >= v); };
+
+function drawChart(c) {
+  const svg = c.fig.querySelector("svg"), tip = c.fig.querySelector(".tip"), none = c.fig.querySelector(".none");
+  const W = svg.clientWidth, H = svg.clientHeight;
+  svg.replaceChildren();
+  tip.hidden = true;
+  const pts = dashHist.filter((s) => s[c.id] !== null && s[c.id] !== undefined);
+  const last = pts[pts.length - 1];
+  c.fig.querySelector(".v").innerHTML = last ? `${esc(c.fmt(last[c.id]))}${c.unit ? "<small>" + c.unit + "</small>" : ""}` : "-";
+  none.hidden = pts.length > 0;
+  none.textContent = dashHist.length ? "not exported by this server" : "waiting for the first reading";
+  if (!W || !pts.length) return;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("aria-label", `${c.title}: ${c.fmt(last[c.id])} ${c.unit} now`);
+  const mk = (tag, attrs, text) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; return e; };
+  const cap = c.cap && last[c.cap] ? last[c.cap] : 0;
+  const top = cap || niceMax(Math.max(c.floor || 1e-9, ...pts.map((s) => s[c.id])));
+  // The window grows with the kept samples, from one minute to ten.
+  const now = dashHist[dashHist.length - 1].t, padT = 14, padR = 5;
+  const span = Math.min(DASH_KEEP * DASH_MS, Math.max(60000, now - dashHist[0].t));
+  c.fig.querySelector(".axis span").textContent = span < 90000 ? "1 min ago" : Math.round(span / 60000) + " min ago";
+  const x = (t) => (W - padR) - ((now - t) / span) * (W - padR);
+  const y = (v) => H - 1 - (Math.min(v, top) / top) * (H - 1 - padT);
+  svg.append(mk("line", { class: "grid", x1: 0, x2: W, y1: y(top), y2: y(top) }));
+  svg.append(mk("text", { class: "tick", x: 0, y: y(top) - 4 }, c.fmt(top) + (c.unit ? " " + c.unit : "") + (cap ? " in the pool" : "")));
+  svg.append(mk("line", { class: "base", x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5 }));
+  // Samples more than two polls apart are separate runs of the line.
+  const runs = [];
+  for (const s of pts) {
+    const r = runs[runs.length - 1];
+    if (r && s.t - r[r.length - 1].t < 2.5 * DASH_MS) r.push(s); else runs.push([s]);
+  }
+  for (const r of runs) {
+    const d = r.map((s) => `${x(s.t).toFixed(1)},${y(s[c.id]).toFixed(1)}`);
+    if (r.length > 1) {
+      svg.append(mk("path", { class: "ar", d: `M${x(r[0].t).toFixed(1)},${H - 1} L${d.join(" L")} L${x(r[r.length - 1].t).toFixed(1)},${H - 1} Z` }));
+      svg.append(mk("polyline", { class: "ln", points: d.join(" ") }));
+    }
+  }
+  let mark = last;
+  if (c.hoverX !== null && c.hoverX !== undefined) {
+    mark = pts.reduce((a, s) => (Math.abs(x(s.t) - c.hoverX) < Math.abs(x(a.t) - c.hoverX) ? s : a), last);
+    svg.append(mk("line", { class: "cross", x1: x(mark.t), x2: x(mark.t), y1: padT, y2: H - 1 }));
+    const age = Math.round((now - mark.t) / 1000);
+    tip.textContent = `${c.fmt(mark[c.id])}${c.unit ? " " + c.unit : ""}, ${age ? age + " s ago" : "now"}`;
+    tip.style.left = Math.max(60, Math.min(W - 60, x(mark.t))) + "px";
+    tip.hidden = false;
+  }
+  svg.append(mk("circle", { class: "dot", cx: x(mark.t), cy: y(mark[c.id]), r: 4 }));
+}
+
+function drawVram(m) {
+  const rows = (m.get("imp_vram_allocator_bytes") || []).map((r) => ({ k: r.labels.tag || "?", v: r.v }));
+  const un = msum(m, "imp_vram_untracked_bytes");
+  if (un) rows.push({ k: "outside the allocator", v: un });
+  rows.sort((a, b) => b.v - a.v);
+  const shown = rows.slice(0, 8), rest = rows.slice(8).reduce((a, r) => a + r.v, 0);
+  if (rest > 0) shown.push({ k: `${rows.length - 8} smaller owners`, v: rest });
+  const box = el("d-vram");
+  box.replaceChildren();
+  if (!shown.length) { box.textContent = "not exported by this server"; return; }
+  const max = shown[0].v, own = msum(m, "imp_vram_own_bytes");
+  for (const r of shown) {
+    const k = document.createElement("span"), bar = document.createElement("span"), n = document.createElement("span");
+    k.className = "k"; k.textContent = r.k.replaceAll("_", " ");
+    bar.className = "bar"; bar.title = `${r.k}: ${fmtB(r.v)}${own ? ", " + Math.round(100 * r.v / own) + " % of what imp holds" : ""}`;
+    bar.append(document.createElement("span")); bar.firstChild.style.width = (100 * r.v / max).toFixed(1) + "%";
+    n.className = "n"; n.textContent = fmtB(r.v);
+    box.append(k, bar, n);
+  }
+}
+
+function drawDurations(m) {
+  const cum = (m.get("imp_request_duration_seconds_bucket") || []).map((r) => ({ le: r.labels.le, v: r.v }));
+  const box = el("d-dur"), xs = el("d-dur-x");
+  box.replaceChildren(); xs.replaceChildren();
+  const b = cum.map((r, i) => ({ le: r.le, n: r.v - (i ? cum[i - 1].v : 0), lo: i ? cum[i - 1].le : "0" }));
+  const first = b.findIndex((r) => r.n > 0), lastI = b.length - 1 - [...b].reverse().findIndex((r) => r.n > 0);
+  if (first < 0) { el("d-dur-note").textContent = "No finished requests yet."; return; }
+  const part = b.slice(Math.max(0, first - 1), Math.min(b.length, lastI + 2)), max = Math.max(...part.map((r) => r.n));
+  for (const r of part) {
+    const bar = document.createElement("div"), lab = document.createElement("span");
+    bar.style.height = r.n ? Math.max(3, 100 * r.n / max) + "%" : "0";
+    const range = r.le === "+Inf" ? `over ${r.lo} s` : `${r.lo} to ${r.le} s`;
+    bar.title = `${r.n} request${r.n === 1 ? "" : "s"} took ${range}`;
+    lab.textContent = r.le === "+Inf" ? "more" : r.le;
+    box.append(bar); xs.append(lab);
+  }
+  el("d-dur-note").textContent = `Upper edge of each bar in seconds; the tallest holds ${max} request${max === 1 ? "" : "s"}.`;
+}
+
+function renderDash(m) {
+  for (const c of DASH_CHARTS) drawChart(c);
+  drawVram(m);
+  drawDurations(m);
+  const g = (n) => msum(m, n);
+  const k = (n) => (g(n) === null ? null : fmtK(g(n)));
+  setText("d-req", g("imp_requests_total"));
+  setText("d-fail", g("imp_requests_failed_total"));
+  setText("d-gen-total", k("imp_tokens_completion_total"));
+  setText("d-prompt-total", k("imp_tokens_prompt_total"));
+  const pt = g("imp_tokens_prompt_total"), ct = g("imp_tokens_cached_total");
+  setText("d-cache", ct === null ? null : `${fmtK(ct)}${pt ? " (" + Math.round(100 * ct / pt) + " % of prompt tokens)" : ""}`);
+  const ds = g("imp_request_duration_seconds_sum"), dc = g("imp_request_duration_seconds_count");
+  setText("d-mean", dc ? fmtS(1000 * ds / dc) : null);
+  setText("d-ttft", g("imp_last_ttft_ms") ? fmtS(g("imp_last_ttft_ms")) : null);
+  const j = g("imp_gpu_energy_joules_total");
+  setText("d-energy", j === null ? null : j >= 3.6e6 ? (j / 3.6e6).toFixed(2) + " kWh" : (j / 3600).toFixed(1) + " Wh");
+  setText("d-vpeak", g("imp_vram_own_peak_bytes") === null ? null : fmtB(g("imp_vram_own_peak_bytes")));
+  const up = g("imp_uptime_seconds");
+  setText("d-up", up === null ? null : up >= 86400 ? `${Math.floor(up / 86400)} d ${Math.floor((up % 86400) / 3600)} h`
+                                     : up >= 3600 ? `${Math.floor(up / 3600)} h ${Math.floor((up % 3600) / 60)} min`
+                                     : `${Math.floor(up / 60)} min`);
+}
+
+async function pollDash() {
+  clearTimeout(dashTimer);
+  if (!dashOn || document.hidden) return;
+  try {
+    const m = await fetchMetrics();
+    dashSample(m);
+    renderDash(m);
+    el("d-err").hidden = true;
+    el("d-age").textContent = (modelName ? modelName + ", " : "") + "read every 2 s";
+  } catch (e) {
+    el("d-err").hidden = false;
+    el("d-err").textContent = "GET /metrics failed: " + e.message + ". The charts continue when the server answers again.";
+    el("d-age").textContent = "no answer";
+  }
+  dashTimer = setTimeout(pollDash, DASH_MS);
+}
+
+function setDash(on) {
+  dashOn = on;
+  el("stage").classList.toggle("dash-on", on);
+  el("dash").hidden = !on;
+  el("dash-btn").setAttribute("aria-pressed", String(on));
+  if ((location.hash === "#dashboard") !== on) history.replaceState(null, "", on ? "#dashboard" : location.pathname + location.search);
+  if (on) pollDash(); else clearTimeout(dashTimer);
+}
+buildDash();
+el("dash-btn").addEventListener("click", () => setDash(!dashOn));
+addEventListener("hashchange", () => setDash(location.hash === "#dashboard"));
+addEventListener("resize", () => { if (dashOn) for (const c of DASH_CHARTS) drawChart(c); });
+document.addEventListener("visibilitychange", () => { if (dashOn) pollDash(); });
+if (location.hash === "#dashboard") setDash(true);
 
 /* ---------- tabs and drawers ---------------------------------------- */
 

@@ -32,6 +32,7 @@ commit: 216a779c
 | structured output | `response_format` `json_object` or a pasted `json_schema`, parsed before sending |
 | prompt size | draft tokens from `POST /tokenize` (skipped while `/health` reports `idle_suspended`), context bar |
 | server tab | `GET /metrics` every 3 s while open: queue, KV blocks, VRAM, `imp_gpu_power_watts` when exported |
+| metrics dashboard | header button or `http://localhost:8080/#dashboard`: `GET /metrics` every 2 s while open, the last 10 minutes as charts (tokens per second from `imp_decode_batch_rows_total`, requests in flight, sequences decoding, GPU power, KV blocks), VRAM by allocator tag, the request duration histogram, totals since start |
 | energy per answer | `imp_gpu_energy_joules_total` read before and after: J and W avg per turn; card-wide, so concurrent work counts; the server tab shows the total since server start |
 | speed history | tok/s of every answer in the chat as a sparkline |
 | keys, themes, mobile | `Enter`, `Shift+Enter`, `Esc`, `/`, `?`; dark and light; drawers below 1180 and 900 px |
@@ -39,6 +40,8 @@ commit: 216a779c
 <img src="webui.png" width="800" alt="the built-in web UI: Qwen3.8-Flash-Next answering with a table and code">
 
 <img src="webui-light.png" width="392" alt="light theme"> <img src="webui-server.png" width="392" alt="server tab: queue, KV blocks, VRAM, GPU power and energy"> <img src="webui-mobile.png" width="180" alt="390 px phone layout">
+
+<img src="webui-dashboard.png" width="800" alt="metrics dashboard: tokens per second, requests in flight, GPU power, KV blocks, VRAM by owner and request durations of an Inkling-2-Mini server under load">
 
 [PROV: commit=2f7574d5 date=2026-10-18 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 path=server-api
        cmd=`tools/imp-server/webui/dev/live_shots.py` n=1 note=one chat (sort table + quicksort), 81.3 tok/s, TTFT 550 ms]
