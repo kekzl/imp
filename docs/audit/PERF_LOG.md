@@ -4,6 +4,30 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-11-23 · M=1 FP16 GEMV: load order and PDL prefetch REFUTED, hot/cold bench in the tree (B-87)
+
+`GemvFp16HotCold.DISABLED_Bench` (`tests/test_gemv_hot_cold_bench.cu`, test-compute): 400 back-to-back launches per
+arm on one stream, hot = the same weight copy, cold = a ring of copies above 400 MB, 7 rounds, min / median / max.
+RTX 5090 32 GB, dev build in `imp:toolchain`, card free (1296 MiB, 2 % before the run). Every variant is bit-equal
+to the shipped kernel on all four shapes (memcmp of y).
+
+| shape (bytes) | shipped hot min / med | shipped cold min / med | variants cold min |
+|---|---|---|---|
+| 4096 x 2304 (18.9 MB) | 8.37 / 9.18 us | 15.08 / 15.87 us | 14.86-15.34 us |
+| 2304 x 3072 (14.2 MB) | 8.41 / 10.02 us | 12.78 / 14.07 us | 12.52-13.09 us |
+| 5120 x 5120 (52.4 MB) | 13.12 / 20.98 us | 35.39 / 35.72 us | 35.20-36.16 us |
+| 96 x 2312 (0.44 MB) | 6.63 / 7.40 us | 6.89 / 9.46 us | 6.55-6.97 us |
+
+- Variants: shipped loop as a plain launch (U1), 8 lane iterations of weight loads before the first use (U8), 4
+  with the x loads (U4+x), PDL wait first, PDL trigger + wait first, PDL trigger with 2 / 4 / 8 iterations of weight
+  loads before the wait. An earlier run also had 128 / 512 / 1024 threads per block: cold minimum 14.76-14.94 us.
+- Reading: memory-bound (hot 8.37 vs cold 15.08 us). The 0.44 MB shape puts the back-to-back launch floor of this
+  harness at 6.4-6.9 us, so hot readings near 8 us are the floor, not the kernel.
+- The hot side is bistable (4096 x 2304 shipped: 8.37 to 22.36 us across rounds); the 2026-11-22 reading
+  "hot = cold 15.4 us" that classed this kernel as compute-bound was that spread.
+
+---
+
 ## 2026-11-20 · Hybrid verify: second state snapshot, one of two MTP drafts accepted no longer re-forwards
 
 nsys exclusive time on the 3-row MTP verify (Qwen3.8-27B-NVFP4-vllm, 175 steps): 145.6 gate/up GEMV launches per
