@@ -21,6 +21,7 @@ enum class VisionFamily {
     None,      // not listed: text-only, WARN at load
     Qwen3VL,   // qwen3_vl, qwen3_5_moe (Qwen3.6), qwen3_5 / qwen3_5_vision (Qwen3.8), qwen4_exp_vision
     InternVL,  // internvl_vision (InternVL3.5)
+    Inkling2,  // inkling2_vision: own encoder (vision/inkling_vision.h), not the Qwen3-VL pipeline
 };
 
 VisionFamily vision_family_of(std::string_view vision_model_type);
@@ -65,5 +66,15 @@ using VisionTokenLookup = std::function<int32_t(std::string_view)>;
 [[nodiscard]] std::expected<void, std::string> expand_vision_prompt(
     VisionFamily f, std::vector<int32_t>& tokens, const Tokenizer& tok, const std::vector<int>& image_tokens,
     const std::vector<VideoPlaceholderLayout>& videos);
+
+// Inkling2: an image is its own message part, <role><|content_image|> pads <|end_message|>. The
+// server splices the pads inside a text part; this cuts that part in two around every pad run (the
+// role header repeated, an empty text half dropped), which is what the template renders for a
+// content list. roles: the message role tokens; ids < 0 leave tokens untouched.
+struct InklingPartIds {
+    int32_t pad = -1, text = -1, image = -1, end = -1;
+    std::vector<int32_t> roles;
+};
+void inkling_split_image_parts(std::vector<int32_t>& tokens, const InklingPartIds& ids);
 
 }  // namespace imp

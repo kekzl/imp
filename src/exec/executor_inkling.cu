@@ -102,7 +102,8 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
         ok = s >= 0;
         if (ok) {
             rt.slot_block[static_cast<size_t>(s)] = rt.blk[0];
-            ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data());
+            ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data(),
+                                                       state.vision_embeddings ? state.vision_token_id : -1);
         }
     }
     // Decode: one row per sequence, each on the slot that holds its sequence.

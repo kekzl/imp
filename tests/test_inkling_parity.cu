@@ -18,6 +18,7 @@
 #include "exec/inkling_forward.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
+#include "vision/inkling_vision.h"
 
 using namespace imp;
 
@@ -351,6 +352,53 @@ TEST(InklingRewind, ARequestBindsToTheFreeSlotWithTheLongestPrefix) {
         // Again: slot 0 holds the oldest binding but also the only checkpoint, so slot 2 goes.
         EXPECT_EQ(rt.bind(16, other, {false, false, false}), 2);
         EXPECT_EQ(rt.bind(15, a, {true, true, true}), -1);
+    }
+}
+
+// Vision tower against the transformers reference (fp32): merged features of two synthetic images,
+// one of them not a multiple of the 40-pixel token cell.
+TEST(InklingVisionParity, MergedFeaturesMatchTheReference) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    {
+        InklingVision vis;
+        ASSERT_TRUE(vis.load(model, fx.va));
+        for (const char* name : {"a", "b"}) {
+            const std::string base = std::string(oracle) + "/vis_" + name;
+            std::vector<int64_t> rs, fs;
+            const std::vector<float> rgbf = read_npy(base + "_rgb.npy", rs);
+            const std::vector<float> want = read_npy(base + "_features.npy", fs);
+            ASSERT_EQ(rs.size(), 3u);
+            ASSERT_EQ(fs.size(), 2u);
+            const int h = static_cast<int>(rs[0]), w = static_cast<int>(rs[1]);
+            int rows = 0, cols = 0;
+            vis.grid(h, w, rows, cols);
+            ASSERT_EQ(static_cast<int64_t>(rows) * cols, fs[0]);
+            ASSERT_EQ(fs[1], vis.config().out);
+            std::vector<uint8_t> rgb(rgbf.size());
+            for (size_t i = 0; i < rgb.size(); ++i)
+                rgb[i] = static_cast<uint8_t>(rgbf[i]);
+            half* d_out = nullptr;
+            float* d_f = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_out, want.size() * sizeof(half)), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&d_f, want.size() * sizeof(float)), cudaSuccess);
+            ASSERT_TRUE(vis.encode(rgb.data(), h, w, d_out, nullptr));
+            inkling::f16_to_f32(d_out, d_f, want.size(), nullptr);
+            std::vector<float> got(want.size());
+            cudaMemcpy(got.data(), d_f, got.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            Err e;
+            e.add(got.data(), want.data(), want.size());
+            std::printf("vision %s: %d x %d px, %d x %d tokens, features rel. error %.4f\n", name, w, h, cols,
+                        rows, e.rel());
+            EXPECT_LT(e.rel(), 0.01);
+            cudaFree(d_out);
+            cudaFree(d_f);
+        }
     }
 }
 

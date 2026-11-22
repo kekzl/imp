@@ -597,6 +597,7 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_grid.cpp
     src/vision/qwen3vl_vision_upload.cpp
     src/vision/qwen3vl_encoder_kernels.cu
+    src/vision/inkling_vision.cu
     src/vision/qwen3vl_encoder.cpp
     src/vision/internvl_vision.cpp
     src/vision/internvl_encoder_kernels.cu

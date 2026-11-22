@@ -392,6 +392,7 @@ bool Engine::init_weights() {
     // (mandatory_sf_bytes / mandatory_moe_bytes), per invariant I4.
 
     // Phase 2: allocate GPU workspace
+    inkling_load_vision_();
     (void)executor_->allocate_workspaces(experts_on_host_);
     inkling_fit_slots_();
 

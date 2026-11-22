@@ -254,6 +254,8 @@ void Engine::clear_image() {
 }
 
 bool Engine::preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const {
+    if (inkling_vision_)
+        return inkling_preprocess_image_(data, out);
     return qwen_vision_.is_ready() && qwen_vision_.preprocess(data, out);
 }
 
@@ -275,6 +277,8 @@ void Engine::add_pending_qwen_video(std::vector<QwenPatches> groups, size_t cont
 }
 
 int Engine::image_tokens_of(const QwenPatches& patches) const {
+    if (inkling_vision_)
+        return patches.tokens;
     return qwen_vision_.merged_tokens_of(patches);
 }
 
