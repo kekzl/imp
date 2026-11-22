@@ -33,6 +33,12 @@ inline double video_pruning_rate(const ChatVideoInput& v, double default_rate) {
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
                                          ChatStateSnapshot& snap);
 
+// Qwen-family prompt: the parser's mark k in `msgs` (vision_inline.h) becomes the template block
+// of part k, where the part sat in its turn. Marks that do not pair with the parts: every block
+// ahead of the first user turn's text.
+void place_qwen_vision_blocks(const ChatRequestParams& params, const ChatStateSnapshot& snap,
+                              std::vector<imp::ChatMessage>& msgs);
+
 // mmproj tower: a fixed token count per picture, one block each, encoded back to back. Decodes every
 // image into snap.vision_images (CPU). Returns "" or the 400 message.
 std::string mmproj_preprocess_images(imp::Engine& engine, const ChatRequestParams& params,

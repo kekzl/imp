@@ -513,8 +513,15 @@ std::string tool_call_fault(const ParsedToolCall& tc, const json& tools, bool wi
     std::string line;
     if (!tc.valid)
         line = tc.name + ": " + tc.error;
-    else if (!offered.empty() && std::find(offered.begin(), offered.end(), tc.name) == offered.end())
-        line = dump_safe(json(tc.name)) + ": tool not offered";
+    else if (!offered.empty() && std::find(offered.begin(), offered.end(), tc.name) == offered.end()) {
+        // The first names too: a client whose list differs only in case or prefix shows here.
+        constexpr size_t kShown = 6;
+        line = dump_safe(json(tc.name)) + ": tool not offered (" + std::to_string(offered.size()) +
+               " offered:";
+        for (size_t i = 0; i < std::min(offered.size(), kShown); ++i)
+            line += (i ? ", " : " ") + offered[i].substr(0, 48);
+        line += offered.size() > kShown ? ", ...)" : ")";
+    }
     if (!line.empty() && with_raw && !tc.raw_body.empty())
         line += " raw=" + dump_safe(json(tc.raw_body.substr(0, kMaxRawBytes)));
     return line;

@@ -279,11 +279,73 @@ def test_video_is_used_or_refused(m):
     check("a one-frame video is a 400", status == 400, f"got {status}")
 
 
+_TOOL = {"type": "function", "function": {
+    "name": "check_page", "description": "Load a page and return a screenshot of it. " * 20,
+    "parameters": {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]}}}
+
+
+def _image_part():
+    return {"type": "image_url", "image_url": {"url": PNG_1X1}}
+
+
+def test_image_request_keeps_its_tools(m):
+    """A picture in the request must not drop the tool definitions from the prompt.
+
+    Qwen3.8-27B: 17325 prompt tokens with and without 25 tools, 22575 for the same turns as text.
+    """
+    print("\ntools + image: the definitions reach the prompt")
+    base = {"model": m, "max_tokens": 1, "temperature": 0,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Look."}, _image_part()]}]}
+    status, bare = post("/v1/chat/completions", base)
+    if status == 400:
+        print("       (model cannot see; covered by the refusal case)")
+        return
+    status2, tooled = post("/v1/chat/completions", dict(base, tools=[_TOOL]))
+    check("image requests answered with 200", status == 200 and status2 == 200, f"got {status}, {status2}")
+    if status != 200 or status2 != 200:
+        return
+    n_bare = bare.get("usage", {}).get("prompt_tokens", 0)
+    n_tool = tooled.get("usage", {}).get("prompt_tokens", 0)
+    check("the tool definition is in the image prompt", n_tool > n_bare + 100,
+          f"prompt_tokens {n_tool} with a tool vs {n_bare} without")
+
+
+def test_appended_image_keeps_the_prefix_cache(m):
+    """A later screenshot leaves the earlier turns where they were, so their KV is reused.
+
+    Every picture on the first user turn moved the whole transcript: Qwen3.8-27B reused 0 of
+    17312 shared prompt tokens when a second screenshot turn was appended (TTFT 2040 ms vs 168 ms).
+    """
+    print("\nappended image: the shared prefix stays cached")
+    filler = " ".join(f"line {i}: the quick brown fox jumps over the lazy dog." for i in range(260))
+    first = [{"role": "user", "content": "Reference:\n" + filler},
+             {"role": "assistant", "content": "Noted."},
+             {"role": "user", "content": [{"type": "text", "text": "First screenshot:"}, _image_part()]}]
+    base = {"model": m, "max_tokens": 8, "temperature": 0, "cache_prompt": True}
+    status, one = post("/v1/chat/completions", dict(base, messages=first))
+    if status == 400:
+        print("       (model cannot see; covered by the refusal case)")
+        return
+    second = first + [{"role": "assistant", "content": "A blank image."},
+                      {"role": "user", "content": [{"type": "text", "text": "Second screenshot:"}, _image_part()]}]
+    status2, two = post("/v1/chat/completions", dict(base, messages=second))
+    check("both turns answered with 200", status == 200 and status2 == 200, f"got {status}, {status2}")
+    if status != 200 or status2 != 200:
+        return
+    n_one = one.get("usage", {}).get("prompt_tokens", 0)
+    cached = (two.get("usage", {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+    check("the first turn's prompt is long enough to cache", n_one > 2000, f"prompt_tokens {n_one}")
+    check("the appended turn reuses the earlier prompt", cached >= n_one - 600,
+          f"cached_tokens {cached} of a {n_one}-token shared prefix")
+
+
 def main():
     m = model_name()
     print(f"server: {BASE}   model: {m}")
     test_image_is_used_or_refused(m)
     test_video_is_used_or_refused(m)
+    test_image_request_keeps_its_tools(m)
+    test_appended_image_keeps_the_prefix_cache(m)
     test_non_ascii_survives_json_schema(m)
     test_eos_is_masked_while_the_document_is_open(m)
     print()
