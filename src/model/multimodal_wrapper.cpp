@@ -64,6 +64,8 @@ void load_vision_tower_config(const JValue& root, std::unique_ptr<VisionModel>* 
     std::string vision_type;
     jobj_opt_string(*vc, "model_type", vision_type);
     const VisionFamily family = vision_family_of(vision_type);
+    if (family == VisionFamily::Inkling2)
+        return;  // the engine loads this tower itself (vision/inkling_vision.h)
     if (family != VisionFamily::None && !vision_family_loadable(family))
         IMP_LOG_WARN(
             "%s vision tower recognised (model_type='%s'); this build has no encoder for it, text-only",

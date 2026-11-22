@@ -284,11 +284,19 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     ++app_seq_;
 }
 
-void InklingForward::layers_(int T, cudaStream_t s) {
+void InklingForward::layers_(int T, cudaStream_t s, const int32_t* ids, int32_t image_token) {
     const InklingConfig& c = w_->cfg;
     const int H = c.hidden;
     const size_t n = static_cast<size_t>(T) * H;
-    rms_norm(h_, w_->embed_norm, h_, nullptr, T, H, c.eps, s);
+    // The embedding norm belongs to the token embedding: image rows arrive as tower features.
+    for (int a = 0, b = 0; a < T; a = b) {
+        const bool img = ids && image_token >= 0 && ids[a] == image_token;
+        for (b = a + 1; b < T && ids && image_token >= 0 && (ids[b] == image_token) == img; ++b) {}
+        b = (ids && image_token >= 0) ? b : T;
+        if (!img)
+            rms_norm(h_ + static_cast<size_t>(a) * H, w_->embed_norm, h_ + static_cast<size_t>(a) * H,
+                     nullptr, b - a, H, c.eps, s);
+    }
     nb_ = 0;
     app_seq_ = 0;
     if (tap) {
@@ -322,7 +330,27 @@ void InklingForward::layers_(int T, cudaStream_t s) {
     mix(fin, T, H, s);
 }
 
-bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids) {
+// Captures the one-token step once: about 2000 kernel and cuBLAS launches become one replay.
+void InklingForward::capture_decode_(cudaStream_t s) {
+    const size_t Hd = static_cast<size_t>(w_->cfg.hidden);
+    cudaGraph_t g = nullptr;
+    if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
+        decode_graph_ok_ = false;
+        return;
+    }
+    f16_to_f32(dec_h_, h_, Hd, s);
+    layers_(1, s);
+    f32_to_f16(mix_[0], dec_h_, Hd, s);
+    cudaGraphExec_t ex = nullptr;
+    if (cudaStreamEndCapture(s, &g) != cudaSuccess || cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
+        IMP_LOG_WARN("inkling: decode graph capture failed, decode stays eager");
+        decode_graph_ok_ = false;
+    }
+    decode_graph_.reset(g);
+    decode_exec_.reset(ex);
+}
+
+bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids, int32_t image_token) {
     if (pos0 == 0)
         reset(s);
     armed_ = false;
@@ -339,25 +367,8 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
     const int Hd = w_->cfg.hidden;
     // The kernels read the position from the device: one captured graph serves every decode step.
     const bool graph = T == 1 && s != nullptr && !tap && decode_graph_ok_;
-    if (graph && !decode_exec_.get()) {
-        // Capture the one-token step once: about 2000 kernel and cuBLAS launches become one replay.
-        cudaGraph_t g = nullptr;
-        if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
-            decode_graph_ok_ = false;
-        } else {
-            f16_to_f32(dec_h_, h_, static_cast<size_t>(Hd), s);
-            layers_(1, s);
-            f32_to_f16(mix_[0], dec_h_, static_cast<size_t>(Hd), s);
-            cudaGraphExec_t ex = nullptr;
-            if (cudaStreamEndCapture(s, &g) != cudaSuccess ||
-                cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
-                IMP_LOG_WARN("inkling: decode graph capture failed, decode stays eager");
-                decode_graph_ok_ = false;
-            }
-            decode_graph_.reset(g);
-            decode_exec_.reset(ex);
-        }
-    }
+    if (graph && !decode_exec_.get())
+        capture_decode_(s);
     for (int done = 0; done < T;) {
         const int seg = std::min(T - done, kGrid - pos_ % kGrid);
         half* hs = h + static_cast<size_t>(done) * Hd;
@@ -371,7 +382,7 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
                 return false;
         } else {
             f16_to_f32(hs, h_, n, s);
-            layers_(seg, s);
+            layers_(seg, s, ids ? ids + done : nullptr, image_token);
             f32_to_f16(mix_[0], hs, n, s);
         }
         pos_ += seg;

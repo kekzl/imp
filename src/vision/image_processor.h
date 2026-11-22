@@ -46,6 +46,10 @@ struct QwenPatches {
     int grid_w = 0;
     int tokens = 0;
     int features = 0;  // channels * temporal * patch * patch
+    // Inkling2 (vision/inkling_vision.h) carries the decoded picture instead: [px_h, px_w, 3] bytes,
+    // data empty, grid_h x grid_w = tokens.
+    std::vector<uint8_t> rgb;
+    int px_h = 0, px_w = 0;
 };
 
 struct QwenPatchifyConfig {

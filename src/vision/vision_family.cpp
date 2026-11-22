@@ -3,6 +3,8 @@
 #include "model/image_placeholders.h"
 #include "model/tokenizer.h"
 
+#include <algorithm>
+
 namespace imp {
 
 namespace {
@@ -24,6 +26,7 @@ constexpr Entry kRegistry[] = {
     {"qwen3_5_vision", VisionFamily::Qwen3VL},
     {"qwen4_exp_vision", VisionFamily::Qwen3VL},
     {"internvl_vision", VisionFamily::InternVL},
+    {"inkling2_vision", VisionFamily::Inkling2},
 };
 // clang-format on
 
@@ -42,6 +45,8 @@ const char* vision_family_name(VisionFamily f) {
             return "Qwen3-VL";
         case VisionFamily::InternVL:
             return "InternVL";
+        case VisionFamily::Inkling2:
+            return "Inkling2";
         case VisionFamily::None:
             break;
     }
@@ -78,10 +83,82 @@ constexpr VisionPromptLayout kInternVLLayout = {
     .frame_label = "Frame",
 };
 
+// Inkling2 processor_config.json: one <|unused_200054|> per 40 x 40 pixel cell, no markers of its own;
+// the part markers around it come from inkling_split_image_parts.
+constexpr VisionPromptLayout kInkling2Layout = {
+    .image_block = "<|unused_200054|>",
+    .video_block = "",
+    .image_pad = "<|unused_200054|>",
+    .video_pad = "",
+    .start = "",
+    .end = "",
+    .wrap_each_image = false,
+};
+
 }  // namespace
 
 const VisionPromptLayout& vision_prompt_layout(VisionFamily f) {
+    if (f == VisionFamily::Inkling2)
+        return kInkling2Layout;
     return f == VisionFamily::InternVL ? kInternVLLayout : kQwen3VLLayout;
+}
+
+void inkling_split_image_parts(std::vector<int32_t>& tokens, const InklingPartIds& ids) {
+    if (ids.pad < 0 || ids.text < 0 || ids.image < 0 || ids.end < 0)
+        return;
+    const auto is_role = [&](int32_t t) {
+        return std::find(ids.roles.begin(), ids.roles.end(), t) != ids.roles.end();
+    };
+    std::vector<int32_t> out, hdr;
+    out.reserve(tokens.size() + 16);
+    bool collecting = false, in_text = false;
+    size_t part_start = 0, text_len = 0;  // out index of the open text part's header, its tokens so far
+    for (size_t i = 0; i < tokens.size();) {
+        const int32_t t = tokens[i];
+        if (in_text && t == ids.pad) {
+            size_t n = 0;
+            while (i + n < tokens.size() && tokens[i + n] == ids.pad)
+                ++n;
+            if (text_len == 0)
+                out.resize(part_start);  // nothing before the picture: no empty text part
+            else
+                out.push_back(ids.end);
+            out.insert(out.end(), hdr.begin(), hdr.end());
+            out.push_back(ids.image);
+            out.insert(out.end(), n, ids.pad);
+            out.push_back(ids.end);
+            i += n;
+            if (i < tokens.size() && tokens[i] == ids.end) {
+                ++i;  // nothing after it either
+                in_text = false;
+            } else {
+                part_start = out.size();
+                out.insert(out.end(), hdr.begin(), hdr.end());
+                out.push_back(ids.text);
+                text_len = 0;
+            }
+            continue;
+        }
+        if (is_role(t)) {
+            hdr.assign(1, t);
+            collecting = true;
+            in_text = false;
+        } else if (collecting && t == ids.text) {
+            collecting = false;
+            in_text = true;
+            text_len = 0;
+            part_start = out.size() - hdr.size();
+        } else if (t == ids.end) {
+            collecting = in_text = false;
+        } else if (collecting) {
+            hdr.push_back(t);  // a name behind the role token
+        } else if (in_text) {
+            ++text_len;
+        }
+        out.push_back(t);
+        ++i;
+    }
+    tokens = std::move(out);
 }
 
 std::string vision_prompt_blocks(VisionFamily f, std::string_view order, std::span<const int> video_frames) {
@@ -117,6 +194,14 @@ std::expected<void, std::string> expand_vision_prompt(VisionFamily f, std::vecto
     if (pad_id < 0)
         return std::unexpected("tokenizer has no " + std::string(l.image_pad));
     auto expanded = expand_image_placeholders(tokens, pad_id, image_tokens);
+    if (expanded && f == VisionFamily::Inkling2) {
+        InklingPartIds ids{
+            pad_id, find("<|content_text|>"), find("<|content_image|>"), find("<|end_message|>"), {}};
+        for (const char* r :
+             {"<|message_user|>", "<|message_model|>", "<|message_system|>", "<|message_tool|>"})
+            ids.roles.push_back(find(r));
+        inkling_split_image_parts(tokens, ids);
+    }
     if (expanded && !videos.empty())
         expanded = expand_video_placeholders(tokens, find(l.video_pad), find(l.start), find(l.end), videos);
     return expanded;

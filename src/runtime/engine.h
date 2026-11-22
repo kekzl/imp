@@ -26,6 +26,7 @@
 #include "memory/ssm_state.h"
 #include <span>
 #include "memory/vram_allocator.h"
+#include "vision/inkling_vision.h"
 #include "memory/vram_owned.h"
 #include "runtime/stop_mask.h"
 #include "exec/executor_fwd.h"
@@ -149,8 +150,11 @@ public:
     [[nodiscard]] bool preprocess_video_qwen(std::span<const std::span<const uint8_t>> frames,
                                              std::vector<QwenPatches>& groups) const;
     void add_pending_qwen_video(std::vector<QwenPatches> groups, size_t content_hash);  // CLI, after images
-    bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
-    [[nodiscard]] VisionFamily vision_family() const noexcept { return qwen_vision_.family(); }
+    // Dynamic-resolution in-checkpoint tower: the Qwen3-VL pipeline or the Inkling2 encoder.
+    bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready() || inkling_vision_ != nullptr; }
+    [[nodiscard]] VisionFamily vision_family() const noexcept {
+        return inkling_vision_ ? VisionFamily::Inkling2 : qwen_vision_.family();
+    }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     // `set_` replaces whatever was pending; `add_` appends, which only the
     // Qwen3-VL tower supports (the mmproj tower holds exactly one image).
@@ -159,7 +163,7 @@ public:
     [[nodiscard]] bool add_image(const std::string& path);
     [[nodiscard]] bool add_image_from_memory(std::span<const uint8_t> data);
     void clear_image();
-    bool has_vision() const noexcept { return vision_.is_available() || qwen_vision_.is_ready(); }
+    bool has_vision() const noexcept { return vision_.is_available() || has_qwen_vision(); }
     bool has_vision_input() const noexcept { return vision_.has_input(); }
     // Per-request vision (server batched path). preprocess_image is CPU-only
     // (safe off the worker). encode_image_for runs the GPU encode into
@@ -1219,6 +1223,13 @@ private:
     // call sequence in init() for which flag each one resolves.
     void init_inkling_limits_();
     void inkling_fit_slots_();  // after the executor allocated its workspaces
+    // Vision tower of an Inkling2 checkpoint (before the sequence slots take their VRAM), the CPU
+    // half of an image request, and the encode of a request's pictures at its first prefill chunk
+    // (pictures that end before the resumed position stay unencoded).
+    void inkling_load_vision_();
+    [[nodiscard]] bool inkling_preprocess_image_(std::span<const uint8_t> data, QwenPatches& out) const;
+    void inkling_encode_images_(Request& req, int resume, cudaStream_t stream);
+    std::unique_ptr<InklingVision> inkling_vision_;
     // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop, else offset.
     int inkling_resume_(Request& req, int offset, cudaStream_t stream);
     void init_apply_rope_override_();

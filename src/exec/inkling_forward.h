@@ -44,7 +44,9 @@ public:
     // Engine path: h [T, hidden] fp16 holds the token embeddings and receives the state the final norm
     // reads. pos0 = position of row 0; 0 starts a new sequence, anything else must continue this one.
     // ids (host, may be null): the rows' tokens, recorded for rewind() past the prompt it was given.
-    [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids = nullptr);
+    // image_token >= 0: rows with that id hold spliced image features, which skip the embedding norm.
+    [[nodiscard]] bool run(half* h, int T, int pos0, cudaStream_t s, const int32_t* ids = nullptr,
+                           int32_t image_token = -1);
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -53,11 +55,12 @@ public:
 private:
     void apply_(int layer, int pass, int T, cudaStream_t s);
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
-    void layers_(int T, cudaStream_t s);
+    void layers_(int T, cudaStream_t s, const int32_t* ids = nullptr, int32_t image_token = -1);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
     // Host copy of the conv state when the sequence stands on the grid.
     void checkpoint_(cudaStream_t s);
+    void capture_decode_(cudaStream_t s);
     float* F_(size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); }
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 

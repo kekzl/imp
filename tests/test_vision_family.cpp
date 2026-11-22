@@ -9,6 +9,7 @@
 #include <string>
 
 #include "model/hf_config_loader.h"
+#include "model/image_placeholders.h"
 #include "vision/qwen3vl_vision_config.h"
 #include "vision/vision_family.h"
 #include "vision/vision_model.h"
@@ -23,6 +24,7 @@ TEST(VisionFamily, RegistryMapsExactNames) {
     EXPECT_EQ(vision_family_of("qwen3_5_moe"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen4_exp_vision"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("internvl_vision"), VisionFamily::InternVL);
+    EXPECT_EQ(vision_family_of("inkling2_vision"), VisionFamily::Inkling2);
 
     for (const char* unknown : {"", "qwen2_vl", "siglip_vision_model", "pixtral", "gemma3", "intern_vit_6b",
                                 "internvl", "Qwen3_VL", "qwen3_vl "})
@@ -33,6 +35,8 @@ TEST(VisionFamily, LoadableOnlyWithAnEncoder) {
     EXPECT_TRUE(vision_family_loadable(VisionFamily::Qwen3VL));
     EXPECT_FALSE(vision_family_loadable(VisionFamily::None));
     EXPECT_TRUE(vision_family_loadable(VisionFamily::InternVL));
+    // Inkling2 has its own encoder outside the Qwen3-VL pipeline this predicate gates.
+    EXPECT_FALSE(vision_family_loadable(VisionFamily::Inkling2));
     EXPECT_STREQ(vision_family_name(VisionFamily::InternVL), "InternVL");
     EXPECT_STREQ(vision_family_name(VisionFamily::None), "none");
 }
@@ -86,6 +90,63 @@ TEST(VisionFamily, LoadConfigTextOnlyPathsWarn) {
                      err))
         << err;
     std::filesystem::remove_all(dir);
+}
+
+// Inkling2 image parts: toy ids, pad 9, text 1, image 2, end 3, roles 10 (user) and 11 (tool).
+std::vector<int32_t> split_parts(std::vector<int32_t> t, bool with_ids = true) {
+    InklingPartIds ids{9, 1, with_ids ? 2 : -1, 3, {10, 11}};
+    inkling_split_image_parts(t, ids);
+    return t;
+}
+using Ids = std::vector<int32_t>;
+
+TEST(InklingImageParts, APictureInsideATextPartBecomesItsOwnPart) {
+    // Picture first, then text: no empty text part ahead of it.
+    EXPECT_EQ(split_parts({10, 1, 9, 9, 9, 50, 51, 3}), (Ids{10, 2, 9, 9, 9, 3, 10, 1, 50, 51, 3}));
+    // Text first, picture last: no empty text part behind it.
+    EXPECT_EQ(split_parts({10, 1, 50, 9, 9, 3}), (Ids{10, 1, 50, 3, 10, 2, 9, 9, 3}));
+    // Text, picture, text, picture, text: every part repeats the role header.
+    EXPECT_EQ(split_parts({10, 1, 50, 9, 51, 9, 9, 52, 3}),
+              (Ids{10, 1, 50, 3, 10, 2, 9, 3, 10, 1, 51, 3, 10, 2, 9, 9, 3, 10, 1, 52, 3}));
+    // Two pictures back to back are two parts only when text separates them: one run, one part.
+    EXPECT_EQ(split_parts({10, 1, 9, 9, 3}), (Ids{10, 2, 9, 9, 3}));
+}
+
+TEST(InklingImageParts, TheHeaderKeepsANameBehindTheRole) {
+    EXPECT_EQ(split_parts({11, 60, 61, 1, 70, 9, 3}), (Ids{11, 60, 61, 1, 70, 3, 11, 60, 61, 2, 9, 3}));
+}
+
+TEST(InklingImageParts, EverythingElseStaysAsItIs) {
+    // A part the template already rendered as an image, a pad outside any text part, other messages.
+    const Ids native = {10, 1, 50, 3, 10, 2, 9, 9, 3, 11, 60, 4, 9, 3, 10, 1, 51, 3};
+    EXPECT_EQ(split_parts(native), native);
+    // A tokenizer without the part markers: untouched.
+    const Ids spliced = {10, 1, 9, 9, 50, 3};
+    EXPECT_EQ(split_parts(spliced, false), spliced);
+}
+
+TEST(InklingImageParts, ExpandGivesEveryPictureItsCountAndItsPart) {
+    const auto find = [](std::string_view s) -> int32_t {
+        if (s == "<|unused_200054|>")
+            return 9;
+        if (s == "<|content_text|>")
+            return 1;
+        if (s == "<|content_image|>")
+            return 2;
+        if (s == "<|end_message|>")
+            return 3;
+        if (s == "<|message_user|>")
+            return 10;
+        if (s == "<|message_tool|>")
+            return 11;
+        return -1;
+    };
+    Ids t = {10, 1, 50, 9, 51, 9, 3};
+    ASSERT_TRUE(expand_vision_prompt(VisionFamily::Inkling2, t, find, {3, 2}, {}));
+    EXPECT_EQ(t, (Ids{10, 1, 50, 3, 10, 2, 9, 9, 9, 3, 10, 1, 51, 3, 10, 2, 9, 9, 3}));
+    Ids bad = {10, 1, 9, 3};
+    EXPECT_FALSE(expand_vision_prompt(VisionFamily::Inkling2, bad, find, {3, 2}, {}));
+    EXPECT_EQ(vision_prompt_blocks(VisionFamily::Inkling2, "ii"), "<|unused_200054|><|unused_200054|>");
 }
 
 }  // namespace
