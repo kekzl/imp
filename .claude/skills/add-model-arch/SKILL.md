@@ -1,6 +1,6 @@
 ---
 name: add-model-arch
-description: New model architecture, porting a model family, or a model that loads but outputs wrong - "add support for <model>", loader detection, chat template, tokenizer parity, RoPE variant, "outputs garbage", "prompt-blind", "NaN logits", "does it fit in VRAM". Not kernel perf (sm120-cuda-expert), not quant formats (quant-formats).
+description: New model architecture, porting a model family, or a model that loads but outputs wrong - "add support for <model>", loader detection, chat template, tokenizer parity, RoPE variant, "outputs garbage", "prompt-blind", "NaN logits", "does it fit in VRAM". Not kernel perf (kernel-tuning, sm120-cuda-expert), not quant formats (quant-formats).
 ---
 
 # Adding a Model Architecture - imp
@@ -59,5 +59,7 @@ A new checkpoint is UNTRUSTED INPUT: SafeTensors/`tokenizer.json` parsers are ha
 - Getting a checkpoint onto the NVFP4 path: `scripts/stage-model.sh` (download + `imp-quantize` in one command; imp fetches nothing itself).
 
 ## After it works
+
+New kernels for the arch: skill `kernel-tuning` sections 1-2 BEFORE writing them. Inkling-2-Mini v1 shipped reference-grade kernels at 26.36-27.94 tok/s (#3209) and needed #3210-#3222 to reach 152.3.
 
 `make verify-fast`; a `DegenerationTest`-compatible probe prompt; think-channel archs through `tools/analysis/degen_suite.py` (think-leak); vision through `vision_sight_check.py` and `make test-vision`.
