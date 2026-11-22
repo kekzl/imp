@@ -11,6 +11,28 @@
 
 namespace imp {
 
+// kv_cache.host_spill_mb=auto: the spill tier takes two thirds of the host RAM above the pin headroom
+// and the snapshot tier (spill / 2) the rest; whole GiB, 0 below 1 GiB or when the host figure is unknown.
+inline constexpr int kHostSpillAutoMaxMb = 16384;
+[[nodiscard]] constexpr int host_spill_auto_mb(size_t avail_bytes, size_t headroom_bytes) {
+    if (avail_bytes <= headroom_bytes)
+        return 0;
+    const size_t spill_gib = ((avail_bytes - headroom_bytes) >> 30) * 2 / 3;
+    return static_cast<int>(std::min(spill_gib << 10, static_cast<size_t>(kHostSpillAutoMaxMb)));
+}
+
+// Resolves kv_cache.host_spill_mb < 0 in place; true when it was auto.
+[[nodiscard]] inline bool apply_host_spill_auto(RuntimeConfig& rc, bool prefix_caching, size_t avail_bytes,
+                                                size_t headroom_bytes) {
+    if (rc.kv_cache.host_spill_mb >= 0)
+        return false;
+    rc.kv_cache.host_spill_mb = prefix_caching ? host_spill_auto_mb(avail_bytes, headroom_bytes) : 0;
+    IMP_LOG_INFO("kv_cache.host_spill_mb: auto -> %d (host RAM available %.1f GiB, %.1f GiB kept free%s)",
+                 rc.kv_cache.host_spill_mb, avail_bytes / (1024.0 * 1024.0 * 1024.0),
+                 headroom_bytes / (1024.0 * 1024.0 * 1024.0), prefix_caching ? "" : ", prefix caching off");
+    return true;
+}
+
 // Snapshot host MiB per KV host spill MiB: 16384 spill -> 8192 (103 slabs on Qwen3.8-27B).
 inline constexpr int kSnapshotHostPerSpillDivisor = 2;
 

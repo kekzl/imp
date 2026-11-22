@@ -85,6 +85,10 @@ if (state.ctx && state.ctx->engine) {
         out += "# HELP imp_kv_host_spill_replacements_total Host-tier entries dropped to make room\n";
         out += "# TYPE imp_kv_host_spill_replacements_total counter\n";
         out += "imp_kv_host_spill_replacements_total " + std::to_string(spill->replacements()) + "\n";
+        out += "# HELP imp_kv_host_spill_pinned_bytes Host RAM the tier has pinned so far\n";
+        out += "# TYPE imp_kv_host_spill_pinned_bytes gauge\n";
+        out += "imp_kv_host_spill_pinned_bytes " +
+               std::to_string(static_cast<uint64_t>(spill->pinned_slots()) * spill->slot_bytes()) + "\n";
     }
     // Hybrid prefix reuse: a cached KV prefix restores only with the recurrent state at its end.
     if (const imp::RecurrentSnapshotStore* snaps = state.ctx->engine->recurrent_snapshots()) {

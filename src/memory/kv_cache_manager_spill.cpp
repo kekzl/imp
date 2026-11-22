@@ -3,10 +3,13 @@
 #include "memory/kv_cache_manager.h"
 
 #include "core/logging.h"
+#include "memory/weight_snapshot.h"
+
+#include <cuda_runtime.h>
 
 namespace imp {
 
-bool KVCacheManager::enable_host_spill(size_t budget_bytes) {
+bool KVCacheManager::enable_host_spill(size_t budget_bytes, bool auto_sized) {
     if (budget_bytes == 0)
         return false;
     const char* why = !prefix_caching_enabled_                       ? "prefix caching is off"
@@ -14,16 +17,29 @@ bool KVCacheManager::enable_host_spill(size_t budget_bytes) {
                                                                      : nullptr;
     std::unique_ptr<KVHostSpill> spill;
     if (!why) {
-        spill = std::make_unique<KVHostSpill>(budget_bytes, kv_host_block_bytes(*cache_));
+        // Every chunk is pinned only while the host keeps its headroom.
+        spill = std::make_unique<KVHostSpill>(budget_bytes, kv_host_block_bytes(*cache_), [](size_t bytes) {
+            void* p = nullptr;
+            return host_ram_spares(bytes) && cudaHostAlloc(&p, bytes, cudaHostAllocDefault) == cudaSuccess
+                       ? p
+                       : nullptr;
+        });
         if (!spill->enabled() || !spill_stream_.create())
             why = "pinned alloc or stream create failed";
     }
     if (why) {
-        IMP_LOG_WARN("kv_cache.host_spill_mb=%zu: host spill tier off (%s)", budget_bytes >> 20, why);
+        // An auto-sized tier that cannot run is not a misconfiguration.
+        if (auto_sized)
+            IMP_LOG_INFO("kv_cache.host_spill_mb: auto -> off (%s)", why);
+        else
+            IMP_LOG_WARN("kv_cache.host_spill_mb=%zu: host spill tier off (%s)", budget_bytes >> 20, why);
         return false;
     }
-    IMP_LOG_INFO("KV host spill: %d blocks x %.1f KiB pinned (%.1f MiB)", spill->slots(),
-                 spill->slot_bytes() / 1024.0, (spill->slots() * spill->slot_bytes()) / (1024.0 * 1024.0));
+    IMP_LOG_INFO(
+        "KV host spill: up to %d blocks x %.1f KiB (%.1f MiB%s), pinned in %.0f MiB steps on first use",
+        spill->slots(), spill->slot_bytes() / 1024.0,
+        (spill->slots() * spill->slot_bytes()) / (1024.0 * 1024.0), auto_sized ? ", auto" : "",
+        (spill->pinned_slots() * spill->slot_bytes()) / (1024.0 * 1024.0));
     host_spill_ = std::move(spill);
     return true;
 }

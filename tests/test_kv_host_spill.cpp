@@ -87,5 +87,65 @@ TEST(KVHostSpillTest, SlotHoldsOnlyItsOriginBinding) {
     EXPECT_TRUE(s.holds(a));
 }
 
+// The arena is pinned a chunk at a time, as slots are first used.
+TEST(KVHostSpillTest, ChunksArePinnedOnFirstUse) {
+    static int allocs;
+    allocs = 0;
+    KVHostSpill s(
+        5 * 64, 64,
+        [](size_t n) {
+            ++allocs;
+            return std::malloc(n);
+        },
+        [](void* p) { std::free(p); }, /*chunk_bytes=*/2 * 64);
+    ASSERT_TRUE(s.enabled());
+    EXPECT_EQ(s.slots(), 5);
+    EXPECT_EQ(s.pinned_slots(), 2);
+    EXPECT_EQ(allocs, 1);
+    for (size_t k = 1; k <= 5; ++k) {
+        void* p = s.reserve(k);
+        ASSERT_NE(p, nullptr);
+        std::memset(p, static_cast<int>(k), 64);
+        s.commit(k);
+    }
+    EXPECT_EQ(allocs, 3) << "2 + 2 + 1 slots";
+    EXPECT_EQ(s.pinned_slots(), 5);
+    EXPECT_EQ(s.replacements(), 0u);
+    for (size_t k = 1; k <= 5; ++k) {
+        const auto* got = static_cast<const unsigned char*>(s.find(k));
+        ASSERT_NE(got, nullptr);
+        EXPECT_EQ(got[0], k) << "slots of different chunks do not overlap";
+        EXPECT_EQ(got[63], k);
+    }
+    s.reserve(6), s.commit(6);
+    EXPECT_EQ(allocs, 3);
+    EXPECT_EQ(s.replacements(), 1u) << "at the ceiling the LRU slot is replaced";
+}
+
+// A refused chunk leaves the tier at what it has: it replaces among the pinned slots.
+TEST(KVHostSpillTest, RefusedChunkCapsTheTier) {
+    static int allocs;
+    allocs = 0;
+    KVHostSpill s(
+        6 * 64, 64, [](size_t n) { return ++allocs <= 1 ? std::malloc(n) : nullptr; },
+        [](void* p) { std::free(p); }, /*chunk_bytes=*/2 * 64);
+    ASSERT_TRUE(s.enabled());
+    s.reserve(1), s.commit(1);
+    s.reserve(2), s.commit(2);
+    ASSERT_NE(s.reserve(3), nullptr);
+    s.commit(3);
+    EXPECT_EQ(s.slots(), 2);
+    EXPECT_EQ(s.replacements(), 1u);
+    EXPECT_EQ(s.find(1), nullptr);
+    s.reserve(4), s.commit(4);
+    EXPECT_EQ(allocs, 2) << "no second try after a refusal";
+}
+
+TEST(KVHostSpillTest, RefusedFirstChunkIsOff) {
+    KVHostSpill s(4 * 64, 64, [](size_t) -> void* { return nullptr; }, [](void* p) { std::free(p); });
+    EXPECT_FALSE(s.enabled());
+    EXPECT_EQ(s.reserve(1), nullptr);
+}
+
 }  // namespace
 }  // namespace imp

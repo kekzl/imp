@@ -59,7 +59,8 @@ public:
 
     // entry_bytes: size of one snapshot (the SSM per-seq slab).
     // budget_bytes: total device memory cap; capacity = budget / entry_bytes.
-    // host_budget_bytes: pinned host memory cap for evicted entries (0 = off).
+    // host_budget_bytes: pinned host memory cap for evicted entries (0 = off), pinned slab by slab on
+    // first use while the host keeps its headroom (host_ram_spares).
     // sidecar_bytes: per-entry tail after the slab for state outside it (PLE conv rows), 0 = none.
     void init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes = 0, size_t sidecar_bytes = 0);
 
@@ -147,7 +148,8 @@ private:
     size_t sidecar_bytes_ = 0;
     size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_
     int capacity_ = 0;
-    int host_capacity_ = 0;
+    int host_capacity_ = 0;   // slab ceiling of the host tier
+    int host_allocated_ = 0;  // slabs pinned so far
     int allocated_bufs_ = 0;  // pre-allocated at init (== capacity_)
 
     std::unordered_map<size_t, std::shared_ptr<RecurrentSnapshotEntry>> entries_;

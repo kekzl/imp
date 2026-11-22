@@ -199,8 +199,9 @@ public:
     // ── Host spill tier (#2203) ──────────────────────────────────────
     // Reclaimed prefix blocks go to pinned host RAM (budget_bytes); a later prefix hit restores
     // them by H2D copy instead of re-prefill. False (tier off) without prefix caching, on SWA
-    // layers or the key min/max pool, or when the pinned alloc fails.
-    [[nodiscard]] bool enable_host_spill(size_t budget_bytes);
+    // layers or the key min/max pool, or when the pinned alloc fails. auto_sized: the budget came from
+    // kv_cache.host_spill_mb=auto, a tier that cannot run logs INFO instead of WARN.
+    [[nodiscard]] bool enable_host_spill(size_t budget_bytes, bool auto_sized = false);
     const KVHostSpill* host_spill() const { return host_spill_.get(); }
 
     // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers read/write a small
