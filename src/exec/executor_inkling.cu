@@ -4,10 +4,12 @@
 #include "exec/executor.h"
 
 #include "core/logging.h"
+#include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
 #include "model/inkling_weights.h"
 
 #include <stdexcept>
+#include <tuple>
 
 namespace imp {
 
@@ -27,8 +29,10 @@ int InklingRuntime::slot_of_block(int block) const {
 
 int InklingRuntime::bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy) {
     int best = -1, best_match = -1;
-    // Recycling order on a tie: (holds a checkpoint, bind tick), smallest first.
-    const auto cost = [&](size_t i) { return std::pair(slots[i]->reusable(), slot_used[i]); };
+    // Recycling order on a tie: (holds a checkpoint, decodes without lookahead, bind tick), smallest first.
+    const auto cost = [&](size_t i) {
+        return std::tuple(slots[i]->reusable(), !slots[i]->has_lookahead(), slot_used[i]);
+    };
     for (size_t i = 0; i < slots.size(); ++i) {
         if (i < busy.size() && busy[i])
             continue;
@@ -66,6 +70,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     }
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
+    rt->max_ctx = max_ctx;
+    rt->cap = std::min(max_tokens, InklingForward::kGrid);
     rt->slot_req.assign(rt->slots.size(), -1);
     rt->slot_block.assign(rt->slots.size(), -1);
     rt->slot_used.assign(rt->slots.size(), 0);
@@ -76,6 +82,8 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     if (!inkling_)
         return model_->config().n_layers;
     InklingRuntime& rt = *inkling_;
+    if (!rt.draft_tried)
+        inkling_attach_draft_(stream);
     const size_t N = static_cast<size_t>(n);
     // Host reads of the rows' positions, tokens and first KV blocks: this path is eager.
     const bool decode = !state.is_prefill;
@@ -130,6 +138,43 @@ int GraphExecutor::inkling_resume(int req, std::span<const int32_t> tokens, cons
         s = inkling_->bind(req, tokens, {});
     }
     return inkling_->slots[static_cast<size_t>(s)]->rewind(tokens, stream);
+}
+
+// The checkpoint's draft model behind every slot's decode lookahead; without it (no mtp.safetensors,
+// no FP8 view of the LM head, speculative.mtp_k = 0, no VRAM) the slots decode one row per step.
+void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
+    InklingRuntime& rt = *inkling_;
+    rt.draft_tried = true;
+    const Tensor& emb = model_->token_embedding();
+    InklingHeadView head;
+    head.vocab = model_->config().vocab_size;
+    if (!inkling_lookahead_ || emb.qtype != QType::F16 || !emb.data ||
+        !lm_head_fp8_view(head.w8, head.row_scales)) {
+        IMP_LOG_INFO("inkling2_loop: decode lookahead off (%s)",
+                     inkling_lookahead_ ? "needs an fp16 embedding table and the FP8 LM head"
+                                        : "speculative.mtp_k = 0");
+        return;
+    }
+    auto w = std::make_shared<InklingDraftWeights>();
+    if (!w->load(model_->inkling_dir, *vram_alloc_, rt.w.embed_norm, head, stream))
+        return;
+    rt.draft_w = w;
+    // A draft context holds 397 MiB at 32768 positions: two slots get one (4 slots with a context each
+    // reached 31983 MiB on the 32 GB card).
+    constexpr size_t kLookaheadSlots = 2;
+    int on = 0;
+    for (auto& slot : rt.slots) {
+        if (rt.drafts.size() >= kLookaheadSlots)
+            break;
+        auto d = std::make_shared<InklingDraft>();
+        if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap) ||
+            !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
+            break;
+        rt.drafts.push_back(std::move(d));
+        ++on;
+    }
+    IMP_LOG_INFO("inkling2_loop: decode lookahead on %d of %zu slots, %d drafts per step", on,
+                 rt.slots.size(), w->cfg.block - 1);
 }
 
 std::vector<int> GraphExecutor::inkling_slot_requests() const {

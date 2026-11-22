@@ -30,6 +30,10 @@ void Engine::init_inkling_limits_() {
         scheduler_->clamp_max_batch_size(slots);
     config_.use_cuda_graphs = false;
     config_.use_prefix_caching = false;
+    // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
+    // an explicit speculative.mtp_k = 0 turns it off.
+    inkling_lookahead_ = !(runtime_config_.was_set("speculative.mtp_k") &&
+                           runtime_config_.speculative.mtp_k == 0);
     runtime_config_.speculative.mtp_k = 0;
     runtime_config_.speculative.ngram = false;
     runtime_config_.speculative.capture = false;

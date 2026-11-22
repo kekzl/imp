@@ -562,6 +562,8 @@ set(IMP_EXEC_SOURCES
     src/exec/gdn_ragged.cu
     src/exec/executor_kda.cu
     src/exec/executor_shortconv.cpp
+    src/compute/inkling_conv_state.cu
+    src/exec/inkling_draft.cu
     src/exec/inkling_forward.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp

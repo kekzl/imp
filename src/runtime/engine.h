@@ -1230,6 +1230,7 @@ private:
     [[nodiscard]] bool inkling_preprocess_image_(std::span<const uint8_t> data, QwenPatches& out) const;
     void inkling_encode_images_(Request& req, int resume, cudaStream_t stream);
     std::unique_ptr<InklingVision> inkling_vision_;
+    bool inkling_lookahead_ = true;
     // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop, else offset.
     int inkling_resume_(Request& req, int offset, cudaStream_t stream);
     void init_apply_rope_override_();

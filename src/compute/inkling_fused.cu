@@ -210,6 +210,8 @@ __global__ void kv_site_k(KvSiteArgs a) {
         const float f = a.is_key ? fminf(a.thr / (sqrtf(ss) + 1e-6f), 1.0f) : rsqrtf(ss / a.hd + a.eps);
         const int slot = a.ring > 0 ? (pos0 + t) % a.ring : pos0 + t;
         a.cache[((size_t)slot * a.n_heads + head) * a.hd + threadIdx.x] = __float2half(y * f);
+        if (a.log)
+            a.log[(size_t)t * C + c] = x;
         s0 = s1, s1 = s2, s2 = x;
     }
     a.state[c] = s0, a.state[(size_t)C + c] = s1, a.state[(size_t)2 * C + c] = s2;
@@ -515,7 +517,7 @@ __global__ void attn_reduce_k(AttnArgs a, int S, int CK) {
 
 // One thread per channel, rows in order.
 __global__ void conv_residual_k(const half* x, const float* w, float* state, const float* resid, bool add,
-                                float* out, float* copy, int T, int C) {
+                                float* out, float* copy, int T, int C, float* log) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C)
         return;
@@ -529,13 +531,15 @@ __global__ void conv_residual_k(const half* x, const float* w, float* state, con
         if (copy)
             copy[i] = r;
         out[i] = add ? r + a : a;
+        if (log)
+            log[i] = v;
         s0 = s1, s1 = s2, s2 = v;
     }
     state[c] = s0, state[(size_t)C + c] = s1, state[(size_t)2 * C + c] = s2;
 }
 
 __global__ void moe_tail_k(const half* ey, const float* weights, const float* w, float* state,
-                           const float* resid, float* out, int T, int top_k, int C) {
+                           const float* resid, float* out, int T, int top_k, int C, float* log) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C)
         return;
@@ -547,6 +551,8 @@ __global__ void moe_tail_k(const half* ey, const float* weights, const float* w,
             v += weights[(size_t)t * top_k + k] * __half2float(ey[((size_t)t * top_k + k) * C + c]);
         const float a = (wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v) * 0.4472135954999579f;
         out[(size_t)t * C + c] = resid[(size_t)t * C + c] + a;
+        if (log)
+            log[(size_t)t * C + c] = v;
         s0 = s1, s1 = s2, s2 = v;
     }
     state[c] = s0, state[(size_t)C + c] = s1, state[(size_t)2 * C + c] = s2;
@@ -626,7 +632,7 @@ size_t attention_part_floats(int n_heads, int hd, int window, int max_ctx) {
 }
 
 void conv_residual(const half* x, const float* w, float* state, const float* resid, bool add, float* out,
-                   float* copy, int T, int C, cudaStream_t s) {
+                   float* copy, int T, int C, cudaStream_t s, float* log) {
     if (T > kRowLoopMaxT) {
         const size_t n = static_cast<size_t>(T) * C;
         conv_residual_rows_k<<<static_cast<unsigned>((n + kThreads - 1) / kThreads), kThreads, 0, s>>>(
@@ -637,12 +643,12 @@ void conv_residual(const half* x, const float* w, float* state, const float* res
         return;
     }
     conv_residual_k<<<(C + kThreads - 1) / kThreads, kThreads, 0, s>>>(x, w, state, resid, add, out, copy, T,
-                                                                       C);
+                                                                       C, log);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 void moe_tail(const half* ey, const float* weights, const float* w, float* state, const float* resid,
-              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s) {
+              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log) {
     if (T > kRowLoopMaxT) {
         const size_t n = static_cast<size_t>(T) * C;
         const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
@@ -655,7 +661,7 @@ void moe_tail(const half* ey, const float* weights, const float* w, float* state
         return;
     }
     moe_tail_k<<<(C + kThreads - 1) / kThreads, kThreads, 0, s>>>(ey, weights, w, state, resid, out, T, top_k,
-                                                                  C);
+                                                                  C, log);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
