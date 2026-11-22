@@ -664,4 +664,44 @@ TEST(InklingRewind, SideStreamsDoNotChangeTheRows) {
     cudaStreamDestroy(s);
 }
 
+// One-row calls run two conv sites per layer application inside the block mix: the rows must be the
+// bits of the same calls with every site launched on its own.
+TEST(InklingRewind, FusedConvSitesAreBitEqual) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    std::vector<int32_t> t = read_ids(std::string(oracle) + "/paris_prompt.json");
+    const std::vector<int32_t> g = read_ids(std::string(oracle) + "/paris_greedy.json");
+    ASSERT_FALSE(t.empty());
+    t.insert(t.end(), g.begin(), g.end());
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    // One call for the prompt's first rows, then one row per call.
+    const int head = static_cast<int>(t.size()) - 40;
+    std::vector<int> cuts;
+    for (int c = head; c < static_cast<int>(t.size()); ++c)
+        cuts.push_back(c);
+    {
+        InklingForward split, fused;
+        ASSERT_TRUE(split.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(fused.init(fx.w, fx.va, 512, 4096));
+        split.set_fused_sites(false);
+        const std::vector<float> want = run_rows(split, fx.w, t, 0, cuts, s);
+        const std::vector<float> got = run_rows(fused, fx.w, t, 0, cuts, s);
+        ASSERT_FALSE(want.empty());
+        ASSERT_EQ(got.size(), want.size());
+        size_t differ = 0;
+        for (size_t i = 0; i < want.size(); ++i)
+            differ += std::memcmp(&got[i], &want[i], sizeof(float)) != 0;
+        std::printf("fused conv sites: %zu of %zu values differ over 40 one-row calls\n", differ,
+                    want.size());
+        EXPECT_EQ(differ, 0u);
+    }
+    cudaStreamDestroy(s);
+}
+
 }  // namespace

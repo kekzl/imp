@@ -164,6 +164,19 @@ void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, hal
     gemm(A, B, C, 1.0f, 0.0f, s);
 }
 
+inkling::MixPre InklingForward::take_tail_() {
+    const MixPre p = tail_;
+    tail_ = MixPre();
+    return p;
+}
+
+void InklingForward::flush_tail_(cudaStream_t s) {
+    if (tail_.kind == 0)
+        return;
+    const MixPre p = take_tail_();
+    moe_tail(p.x, p.weights, p.w, p.state, p.resid, p.out, mm_, 1, p.top_k, w_->cfg.hidden, s, p.log);
+}
+
 // A looped layer's later passes: the block mix and the message mix side by side, then the gated norms
 // of the q, k and v inputs.
 void InklingForward::mix_looped_(int layer, int T, cudaStream_t s) {
@@ -179,6 +192,7 @@ void InklingForward::mix_looped_(int layer, int T, cudaStream_t s) {
     in.st.s[in.st.n++] = h_;
     in.query = ly.attn_query, in.nq = global ? 3 : 1, in.partial = mixp_;
     in.out_f[0] = mix_[0], in.out_f[1] = mix_[1], in.out_f[2] = mix_[2];
+    in.pre = take_tail_();
     cudaStream_t sm = fork_(s, 0);
     mix(in, T, H, s);
     MixArgs ms;
@@ -227,6 +241,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         m.eps = c.eps, m.partial = mixp_;
         m.norm_w[0] = ly.norm_q, m.norm_w[1] = ly.norm_k, m.norm_w[2] = ly.norm_v;
         m.out_h[0] = xq_, m.out_h[1] = xk_, m.out_h[2] = xv_;
+        m.pre = take_tail_();
         mix(m, T, H, s);
     } else {
         mix_looped_(layer, T, s);
@@ -289,8 +304,13 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     // Block boundary: the layer input joins the block states and the residual restarts at the conv output.
     float* as = cs + static_cast<size_t>(6) * KD;
     const bool boundary = layer % c.block_layers == 0;
-    conv_residual(o_h_, ly.attn_conv, as, h_, !boundary, res2_, boundary ? bs_[nb_] : nullptr, T, H, s,
-                  lg.attn);
+    // One row: the attention conv site runs inside the MLP mix, the MoE one inside the next mix over h_.
+    const bool fused = fuse_ && T == 1;
+    MixPre ap;
+    ap.kind = 1, ap.x = o_h_, ap.w = ly.attn_conv, ap.state = as, ap.resid = h_, ap.add = !boundary;
+    ap.out = res2_, ap.copy = boundary ? bs_[nb_] : nullptr, ap.log = lg.attn;
+    if (!fused)
+        conv_residual(o_h_, ly.attn_conv, as, h_, !boundary, res2_, ap.copy, T, H, s, lg.attn);
     if (boundary)
         st.s[st.n++] = bs_[nb_++];
     st.s[st.n++] = res2_;
@@ -301,12 +321,16 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         m.eps = c.eps, m.partial = mixp_;
         m.norm_w[0] = ly.mlp_norm;
         m.out_h[0] = xm_;
+        if (fused)
+            m.pre = ap;
         mix(m, T, H, s);
     } else {
         MixArgs mo;
         mo.st = st;
         mo.query = ly.mlp_query, mo.partial = mixp_;
         mo.out_f[0] = mm_;
+        if (fused)
+            mo.pre = ap;
         mix(mo, T, H, s);
         GateNormArgs gn;
         gn.n = 1, gn.rank = c.gate_rank, gn.eps = c.eps;
@@ -328,9 +352,17 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
         gemv_nvfp4_moe_decode(ly.ex.w2, idx_, act_, ey_, H, c.inter, c.inter, slots, s, 1);
     }
-    moe_tail(ey_, wts_, ly.mlp_conv, as + static_cast<size_t>(3) * H, res2_, h_, mm_, T, c.top_k, H, s,
-             lg.mlp);
+    if (fused) {
+        tail_.kind = 2, tail_.x = ey_, tail_.weights = wts_, tail_.w = ly.mlp_conv;
+        tail_.state = as + static_cast<size_t>(3) * H, tail_.resid = res2_, tail_.out = h_,
+        tail_.log = lg.mlp;
+        tail_.top_k = c.top_k;
+    } else {
+        moe_tail(ey_, wts_, ly.mlp_conv, as + static_cast<size_t>(3) * H, res2_, h_, mm_, T, c.top_k, H, s,
+                 lg.mlp);
+    }
     if (tap) {
+        flush_tail_(s);
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
         tap(app_seq_, h_, T);
     }
@@ -359,10 +391,12 @@ void InklingForward::layers_(int T, cudaStream_t s, const int32_t* ids, int32_t 
     }
     for (int i = 0; i < c.loop_start; ++i)
         apply_(i, 0, T, s);
+    flush_tail_(s);
     add_f32(h_, nullptr, pre_h_, n, s);
     const int pre_nb = nb_;
     for (int pass = 0; pass < c.passes; ++pass) {
         if (pass > 0) {
+            flush_tail_(s);
             n_msrc_ = 0;
             for (int j = pre_nb + 1; j < nb_ && n_msrc_ < 3; ++j)
                 add_f32(bs_[j], nullptr, msrc_[n_msrc_++], n, s);
@@ -381,6 +415,7 @@ void InklingForward::layers_(int T, cudaStream_t s, const int32_t* ids, int32_t 
     fin.st.s[fin.st.n++] = h_;
     fin.query = w_->out_query, fin.partial = mixp_;
     fin.out_f[0] = mix_[0];
+    fin.pre = take_tail_();
     mix(fin, T, H, s);
     if (feat_)
         rms_norm(mix_[0], w_->norm, feat_ + (taps_.size() - 1) * static_cast<size_t>(seg_) * H, nullptr, T, H,
@@ -480,151 +515,10 @@ InklingForward::ConvLog InklingForward::conv_log_at_(size_t app, int T) const {
 void InklingForward::tap_features_(int T, cudaStream_t s) {
     const size_t H = static_cast<size_t>(w_->cfg.hidden);
     for (size_t k = 0; feat_ && k + 1 < taps_.size(); ++k)
-        if (taps_[k] == app_seq_)
+        if (taps_[k] == app_seq_) {
+            flush_tail_(s);
             add_f32(h_, nullptr, feat_ + k * static_cast<size_t>(seg_) * H, static_cast<size_t>(T) * H, s);
-}
-
-// Pay-off of the draft, called at every step that is not served from a stored row; true = ask it.
-// The draft call costs 0.39 one-row steps (3.3 of 8.4 ms), a draft row 0.16 (1.35 ms): a step pays
-// while its confirmed rows exceed that. Judged over a running mean after kProbe steps; a draft that
-// does not pay rests for kRest tokens (prose runs near 1 confirmed row, lists and code above 1.5).
-bool InklingForward::draft_due_() {
-    constexpr float kDraftCost = 0.24f, kRowCost = 0.26f, kMix = 0.1f;
-    constexpr int kProbe = 24, kRest = 96;
-    if (drafted_) {
-        const float rows = look_pos0_ >= 0 ? static_cast<float>(look_n_ - 1) : 0.0f;
-        mean_hits_ += kMix * (static_cast<float>(look_hits_) - mean_hits_);
-        mean_rows_ += kMix * (rows - mean_rows_);
-        if (++tried_ >= kProbe && mean_hits_ < kDraftCost + kRowCost * mean_rows_) {
-            pause_ = kRest;
-            tried_ = 0;
         }
-    }
-    if (look_pos0_ >= 0)
-        ++stats_.confirmed[look_hits_];
-    look_hits_ = 0;
-    const bool due = pause_ == 0 && pos_ + kGraphRows <= max_ctx_;
-    if (pause_ > 0) {
-        ++stats_.paused;
-        if (--pause_ == 0)
-            mean_hits_ = 1.0f, mean_rows_ = 2.0f;  // a fresh probe starts from a paying guess
-    }
-    return due;
-}
-
-bool InklingForward::enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed) {
-    const InklingConfig& c = w_->cfg;
-    const size_t H = static_cast<size_t>(c.hidden), n = conv_state_floats_ * conv_state_.size();
-    if (taps.size() < 2 || !embed || !ok_)
-        return false;
-    feat_ = F_(taps.size() * static_cast<size_t>(seg_) * H);
-    conv_pre_ = F_(n);
-    conv_tmp_ = F_(n);
-    conv_log_ = F_(n / 3 * kGraphRows);
-    look_h_ = Hf_(H * kGraphRows);
-    d_look_ids_ = static_cast<int32_t*>(alloc_(kGraphRows * sizeof(int32_t)));
-    if (!ok_)
-        return false;
-    taps_ = std::move(taps);
-    embed_ = embed;
-    spec_ = std::move(hooks);
-    // The small-call graphs were captured without the feature planes and the conv log.
-    for (int i = 0; i < kGraphRows; ++i) {
-        decode_exec_[i].reset(nullptr);
-        decode_graph_[i].reset(nullptr);
-    }
-    return true;
-}
-
-void InklingForward::conv_at_(int row, float* dst, cudaStream_t s) {
-    const InklingConfig& c = w_->cfg;
-    conv_state_at(conv_pre_, conv_log_, dst, row, static_cast<int>(conv_state_.size()),
-                  c.n_kv_heads * c.head_dim, c.hidden, kGraphRows, s);
-}
-
-// The conv state holds every row of the stored lookahead call; put back the last confirmed one.
-void InklingForward::settle_(cudaStream_t s) {
-    if (look_pos0_ < 0)
-        return;
-    const int last = pos_ - 1 - look_pos0_;
-    if (last < look_n_ - 1)
-        conv_at_(last, conv_all_, s);
-    look_pos0_ = -1;
-}
-
-bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
-    const size_t Hd = static_cast<size_t>(w_->cfg.hidden), hb = Hd * sizeof(half);
-    const int pos = pos_;
-    // A stored row for this position whose token is the one fed: serve it.
-    const int j = look_pos0_ >= 0 ? pos - look_pos0_ : 0;
-    if (j >= 1 && j < look_n_ && tok == look_tok_[j]) {
-        IMP_CUDA_CHECK_LOG(
-            cudaMemcpyAsync(h, look_h_ + static_cast<size_t>(j) * Hd, hb, cudaMemcpyDeviceToDevice, s));
-        ++pos_;
-        ++stats_.accepted;
-        ++look_hits_;
-        if (pos_ % kGrid == 0) {
-            conv_at_(j, conv_tmp_, s);
-            checkpoint_(s, conv_tmp_);
-        }
-        return ok_;
-    }
-    drafted_ = draft_due_();
-    settle_(s);
-    int32_t drafts[kGraphRows] = {};
-    int n = drafted_ ? spec_.propose(tok, h, pos, drafts, s) : 0;
-    n = std::clamp(n, 0, kGraphRows - 1);
-    const int rows = n + 1;
-    if (decode_graph_ok_ && !decode_exec_[rows - 1].get())
-        capture_decode_(rows, s);
-    if (!decode_graph_ok_ || !decode_exec_[rows - 1].get()) {
-        IMP_LOG_ERROR("inkling: lookahead needs the %d-row graph", rows);
-        return false;
-    }
-    // Rows: the anchor's embedding as given, then the drafts' from the table.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dec_h_, h, hb, cudaMemcpyDeviceToDevice, s));
-    if (n > 0) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_look_ids_, drafts, static_cast<size_t>(n) * sizeof(int32_t),
-                                           cudaMemcpyHostToDevice, s));
-        embed_rows(embed_, d_look_ids_, mix_[1], n, static_cast<int>(Hd), s);
-        f32_to_f16(mix_[1], dec_h_ + Hd, static_cast<size_t>(n) * Hd, s);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(conv_pre_, conv_all_,
-                                           conv_state_floats_ * conv_state_.size() * sizeof(float),
-                                           cudaMemcpyDeviceToDevice, s));
-    }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos, sizeof(int), cudaMemcpyHostToDevice, s));
-    if (cudaGraphLaunch(decode_exec_[rows - 1].get(), s) != cudaSuccess)
-        return false;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h, dec_h_, hb, cudaMemcpyDeviceToDevice, s));
-    look_pos0_ = -1;
-    if (n > 0) {
-        IMP_CUDA_CHECK_LOG(
-            cudaMemcpyAsync(look_h_, dec_h_, hb * static_cast<size_t>(rows), cudaMemcpyDeviceToDevice, s));
-        look_pos0_ = pos;
-        look_n_ = rows;
-        look_tok_[0] = tok;
-        std::copy(drafts, drafts + n, look_tok_ + 1);
-    }
-    ++stats_.steps;
-    stats_.drafted += n;
-    if (stats_.steps % 512 == 0)
-        IMP_LOG_INFO(
-            "inkling: lookahead %ld steps (%ld paused), %ld of %ld draft rows confirmed (%.2f tokens "
-            "per step), steps by confirmed rows 0..7: %ld %ld %ld %ld %ld %ld %ld %ld",
-            stats_.steps, stats_.paused, stats_.accepted, stats_.drafted,
-            1.0 + static_cast<double>(stats_.accepted) / static_cast<double>(stats_.steps),
-            stats_.confirmed[0], stats_.confirmed[1], stats_.confirmed[2], stats_.confirmed[3],
-            stats_.confirmed[4], stats_.confirmed[5], stats_.confirmed[6], stats_.confirmed[7]);
-    pos_ = pos + 1;
-    hw_ = std::max(hw_, pos + rows);
-    if (pos_ % kGrid == 0) {
-        // After row 0 of a logged call, or simply the state of a one-row call.
-        if (n > 0)
-            conv_at_(0, conv_tmp_, s);
-        checkpoint_(s, n > 0 ? conv_tmp_ : conv_all_);
-    }
-    spec_.on_rows(feat_, seg_, rows, pos, s);
-    return ok_;
 }
 
 bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
