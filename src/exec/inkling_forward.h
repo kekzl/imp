@@ -81,10 +81,13 @@ public:
 
 private:
     void apply_(int layer, int pass, int T, cudaStream_t s);
+    void mix_looped_(int layer, int T, cudaStream_t s);
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s, const int32_t* ids = nullptr, int32_t image_token = -1);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
+    cudaStream_t fork_(cudaStream_t s, int i);
+    void join_(cudaStream_t side, cudaStream_t s, int i);
     // Host copy of the conv state when the sequence stands on the grid.
     void checkpoint_(cudaStream_t s, const float* state);
     // run() for one row with the lookahead on; settle_ makes the conv state the confirmed one.
@@ -122,7 +125,10 @@ private:
           *mm_ = nullptr;  // g_, gd_: gate scratch
     int n_msrc_ = 0;
     float* part_ = nullptr;                   // decode attention partials (attention_part_floats)
-    float* mixp_ = nullptr;                   // block-mix partial sums (mix_partial_floats)
+    float *mixp_ = nullptr, *mixp2_ = nullptr;  // block-mix partial sums (mix_partial_floats), one per stream
+    // Two side streams for chains that do not depend on each other (fork_ / join_).
+    CudaStream side_[2];
+    CudaEvent fork_ev_[2], join_ev_[2];
     float *wts_ = nullptr, *rlog_ = nullptr;  // routing weights [rows * top_k], router logits [rows, experts]
     half *xq_ = nullptr, *xk_ = nullptr, *xv_ = nullptr, *o_h_ = nullptr, *ao_h_ = nullptr;
     half *proj_h_ = nullptr, *pk_ = nullptr, *pv_ = nullptr;  // stacked projection outputs

@@ -76,21 +76,27 @@ public:
 private:
     void* alloc_(size_t bytes);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
+    void convert_(const float* feat, size_t plane, int row0, int n, int pos0, cudaStream_t s);
+    void flush_(cudaStream_t s);
 
     const InklingDraftWeights* w_ = nullptr;
     VRAMAllocator* va_ = nullptr;
     std::vector<void*> owned_;
     bool ok_ = true;
     int max_ctx_ = 0, cap_ = 0;
-    int ctx_end_ = 0;                 // context rows exist for the positions below
-    int last_pos0_ = 0, last_n_ = 0;  // positions whose feature rows last_feat_ holds
+    // Feature rows kept in pend_ ([taps][cap][hidden]): positions [kept_pos0_, kept_pos0_ + kept_), the
+    // first done_ of them already have context K/V. The Markov head reads the row before the anchor.
+    int kept_pos0_ = 0, kept_ = 0, done_ = 0;
     std::vector<half*> k_, v_;        // per layer [max_ctx + block][kv_heads * head_dim]
-    float *last_feat_ = nullptr, *h_ = nullptr, *state_ = nullptr, *work_ = nullptr;
+    float *pend_ = nullptr, *h_ = nullptr, *state_ = nullptr, *work_ = nullptr;
     half *xc_ = nullptr, *kvc_ = nullptr, *xn_ = nullptr, *qkv_ = nullptr, *q_ = nullptr, *o_ = nullptr;
     half *y_ = nullptr, *gu_ = nullptr, *act_ = nullptr, *hid_ = nullptr, *logits_ = nullptr, *x2_ = nullptr;
     half *rc_ = nullptr, *latent_ = nullptr, *bias_ = nullptr, *frnn_ = nullptr;
     int32_t* d_tok_ = nullptr;  // [0] the anchor, [1..] the drafted tokens
     float* d_conf_ = nullptr;   // softmax probability of every drafted token
+    float *raw_ = nullptr, *latent_f_ = nullptr, *val_ = nullptr;  // recurrent step scratch
+    float *cand0_ = nullptr, *mass_ = nullptr;  // candidates' unscored logits, vocabulary mass per span
+    int32_t* d_cand_ = nullptr;                 // per draft row: candidate token ids, -1 = none
 };
 
 }  // namespace imp

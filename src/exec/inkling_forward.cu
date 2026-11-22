@@ -22,6 +22,22 @@ InklingForward::~InklingForward() {
         va_->free(p);
 }
 
+// Side stream i, started behind everything queued on s so far; s itself for the default stream (tests).
+cudaStream_t InklingForward::fork_(cudaStream_t s, int i) {
+    if (s == nullptr || cudaEventRecord(fork_ev_[i].get(), s) != cudaSuccess ||
+        cudaStreamWaitEvent(side_[i].get(), fork_ev_[i].get(), 0) != cudaSuccess)
+        return s;
+    return side_[i].get();
+}
+
+// s goes on only after the side stream's work.
+void InklingForward::join_(cudaStream_t side, cudaStream_t s, int i) {
+    if (side == s)
+        return;
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(join_ev_[i].get(), side));
+    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(s, join_ev_[i].get(), 0));
+}
+
 void* InklingForward::alloc_(size_t bytes) {
     void* p = va_->allocate(bytes, "inkling_state");
     if (!p) {
@@ -54,6 +70,9 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     rlog_ = F_(Tm * c.n_experts);
     gd_ = F_(Tm * 3 * (2 * static_cast<size_t>(c.gate_rank) + 2));
     mixp_ = F_(mix_partial_floats(max_tokens, c.hidden));
+    mixp2_ = F_(mix_partial_floats(max_tokens, c.hidden));
+    for (int i = 0; i < 2 && ok_; ++i)
+        ok_ = side_[i].create() && fork_ev_[i].create() && join_ev_[i].create();
     part_ = F_(attention_part_floats(c.n_heads, c.head_dim, c.window, max_ctx));
     for (half** p : {&xq_, &xk_, &xv_, &o_h_, &xm_})
         *p = Hf_(Tm * H);
@@ -145,6 +164,46 @@ void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, hal
     gemm(A, B, C, 1.0f, 0.0f, s);
 }
 
+// A looped layer's later passes: the block mix and the message mix side by side, then the gated norms
+// of the q, k and v inputs.
+void InklingForward::mix_looped_(int layer, int T, cudaStream_t s) {
+    const InklingConfig& c = w_->cfg;
+    const InklingLayer& ly = w_->layers[static_cast<size_t>(layer)];
+    const bool global = c.global[static_cast<size_t>(layer)];
+    const int H = c.hidden;
+    MixStates st;
+    for (int j = 0; j < nb_; ++j)
+        st.s[st.n++] = bs_[j];
+    MixArgs in;
+    in.st = st;
+    in.st.s[in.st.n++] = h_;
+    in.query = ly.attn_query, in.nq = global ? 3 : 1, in.partial = mixp_;
+    in.out_f[0] = mix_[0], in.out_f[1] = mix_[1], in.out_f[2] = mix_[2];
+    cudaStream_t sm = fork_(s, 0);
+    mix(in, T, H, s);
+    MixArgs ms;
+    for (int j = 0; j < n_msrc_; ++j)
+        ms.st.s[ms.st.n++] = msrc_[j];
+    ms.query = w_->msg_query + static_cast<size_t>(layer - c.loop_start) * 4 * H, ms.nq = 4,
+    ms.partial = sm == s ? mixp_ : mixp2_;
+    for (int j = 0; j < 4; ++j)
+        ms.out_f[j] = msg_[j];
+    mix(ms, T, H, sm);
+    join_(sm, s, 0);
+    GateNormArgs gn;
+    gn.n = 3, gn.rank = c.gate_rank, gn.eps = c.eps;
+    gn.h[0] = mix_[0], gn.h[1] = global ? mix_[1] : mix_[0], gn.h[2] = global ? mix_[2] : mix_[0];
+    gn.norm_w[0] = ly.norm_q, gn.norm_w[1] = ly.norm_k, gn.norm_w[2] = ly.norm_v;
+    gn.out_h[0] = xq_, gn.out_h[1] = xk_, gn.out_h[2] = xv_;
+    for (int j = 0; j < 3; ++j) {
+        gn.msg[j] = msg_[j];
+        gn.down[j] = ly.gates[j].down, gn.forget[j] = ly.gates[j].forget, gn.gain[j] = ly.gates[j].gain;
+    }
+    GateOut go;
+    go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
+    gate_norm(gn, go, gd_, T, H, s);
+}
+
 void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
     const InklingLayer& ly = w_->layers[static_cast<size_t>(layer)];
@@ -170,47 +229,31 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         m.out_h[0] = xq_, m.out_h[1] = xk_, m.out_h[2] = xv_;
         mix(m, T, H, s);
     } else {
-        MixArgs in;
-        in.st = st;
-        in.st.s[in.st.n++] = h_;
-        in.query = ly.attn_query, in.nq = global ? 3 : 1, in.partial = mixp_;
-        in.out_f[0] = mix_[0], in.out_f[1] = mix_[1], in.out_f[2] = mix_[2];
-        mix(in, T, H, s);
-        MixArgs ms;
-        for (int j = 0; j < n_msrc_; ++j)
-            ms.st.s[ms.st.n++] = msrc_[j];
-        ms.query = w_->msg_query + static_cast<size_t>(layer - c.loop_start) * 4 * H, ms.nq = 4,
-        ms.partial = mixp_;
-        for (int j = 0; j < 4; ++j)
-            ms.out_f[j] = msg_[j];
-        mix(ms, T, H, s);
-        GateNormArgs gn;
-        gn.n = 3, gn.rank = c.gate_rank, gn.eps = c.eps;
-        gn.h[0] = mix_[0], gn.h[1] = global ? mix_[1] : mix_[0], gn.h[2] = global ? mix_[2] : mix_[0];
-        gn.norm_w[0] = ly.norm_q, gn.norm_w[1] = ly.norm_k, gn.norm_w[2] = ly.norm_v;
-        gn.out_h[0] = xq_, gn.out_h[1] = xk_, gn.out_h[2] = xv_;
-        for (int j = 0; j < 3; ++j) {
-            gn.msg[j] = msg_[j];
-            gn.down[j] = ly.gates[j].down, gn.forget[j] = ly.gates[j].forget, gn.gain[j] = ly.gates[j].gain;
-        }
-        GateOut go;
-        go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
-        gate_norm(gn, go, gd_, T, H, s);
+        mix_looped_(layer, T, s);
     }
 
     // Projections: rows [wq; wr; sink; gate; wk; k taps; wv; v taps] of one block.
     const int q_rows = 2 * QD + RD + c.n_heads, kv_rows = KD + TD;
     const half *kx = pk_, *vx = pv_;
     int q_stride = q_rows, kv_stride = kv_rows;
+    // The k and v chains (projection, conv site) run beside the q projection on the side streams.
+    // One row only: more rows project through cuBLAS, whose workspace three GEMMs at once would share
+    // (lookahead text fell apart); there the side streams start behind the projections.
+    cudaStream_t sk = s, sv = s;
     if (split) {
+        if (T == 1)
+            sk = fork_(s, 0), sv = fork_(s, 1);
         lin_(xq_, T, H, ly.wq, q_rows, proj_h_, s);
-        lin_(xk_, T, H, ly.wk, kv_rows, pk_, s);
-        lin_(xv_, T, H, ly.wv, kv_rows, pv_, s);
+        lin_(xk_, T, H, ly.wk, kv_rows, pk_, sk);
+        lin_(xv_, T, H, ly.wv, kv_rows, pv_, sv);
+        if (T > 1)
+            sk = fork_(s, 0), sv = fork_(s, 1);
     } else {
         lin_(xq_, T, H, ly.wq, ly.proj_rows, proj_h_, s);
         q_stride = kv_stride = ly.proj_rows;
         kx = proj_h_ + q_rows;
         vx = kx + kv_rows;
+        sv = fork_(s, 1);
     }
     float* cs = conv_state_[app];
     KvSiteArgs ka;
@@ -221,12 +264,14 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     ka.is_key = true, ka.thr = c.qk_clip, ka.eps = c.eps;
     const ConvLog lg = conv_log_at_(app, T);
     ka.log = lg.k;
-    kv_site(ka, s);
+    kv_site(ka, sk);
     KvSiteArgs va = ka;
     va.x = vx, va.w = ly.v_conv.w, va.static_w = ly.v_conv.static_w, va.dyn = vx + KD;
     va.state = cs + static_cast<size_t>(3) * KD, va.cache = v_[app], va.is_key = false;
     va.log = lg.v;
-    kv_site(va, s);
+    kv_site(va, sv);
+    join_(sk, s, 0);
+    join_(sv, s, 1);
 
     AttnArgs a;
     a.q = proj_h_, a.rel = proj_h_ + QD, a.sink = proj_h_ + QD + RD, a.gate = proj_h_ + QD + RD + c.n_heads;
@@ -444,7 +489,7 @@ void InklingForward::tap_features_(int T, cudaStream_t s) {
 // while its confirmed rows exceed that. Judged over a running mean after kProbe steps; a draft that
 // does not pay rests for kRest tokens (prose runs near 1 confirmed row, lists and code above 1.5).
 bool InklingForward::draft_due_() {
-    constexpr float kDraftCost = 0.39f, kRowCost = 0.16f, kMix = 0.1f;
+    constexpr float kDraftCost = 0.24f, kRowCost = 0.26f, kMix = 0.1f;
     constexpr int kProbe = 24, kRest = 96;
     if (drafted_) {
         const float rows = look_pos0_ >= 0 ? static_cast<float>(look_n_ - 1) : 0.0f;
