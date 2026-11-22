@@ -819,6 +819,16 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
             state.think_end_id = state.output_aliases[1].id;
             state.is_think_model = true;
         }
+        // Inkling2: <|content_thinking|> ... <|end_message|>, the closer shared with every content kind.
+        if (state.output_aliases.empty()) {
+            int32_t its = -1, ite = -1;
+            state.output_aliases = inkling_output_aliases(*state.tok, its, ite);
+            if (!state.output_aliases.empty()) {
+                state.think_start_id = its;
+                state.think_end_id = ite;
+                state.is_think_model = true;
+            }
+        }
         if (state.is_think_model) {
             printf("Reasoning model: <think>=%d, </think>=%d\n", state.think_start_id, state.think_end_id);
         }

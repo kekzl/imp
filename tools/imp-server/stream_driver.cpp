@@ -116,6 +116,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
     // consumer sees the piece — the think splitter and tool filter match on raw
     // bytes, so half a character must never reach them either.
     Utf8Stitch utf8_stitch;
+    OutputMarkerState marker_state;
 
     // Gemma-4 channel filter state: when we see <|channel> or <channel|>,
     // skip tokens until the next newline (the channel header).
@@ -360,7 +361,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         count_output_token();
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
-        const std::string raw_piece = decode_chat_piece(*snap_tok, ctx.snap.output_aliases, token);
+        const std::string raw_piece = decode_chat_piece(*snap_tok, ctx.snap.output_aliases, token, &marker_state);
         const bool hm_marker = harmony && (raw_piece == "<|channel|>" || raw_piece == "<|message|>" ||
                                            raw_piece == "<|end|>" || raw_piece == "<|return|>" ||
                                            raw_piece == "<|start|>" || raw_piece == "<|call|>");

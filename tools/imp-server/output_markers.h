@@ -14,16 +14,39 @@ class Tokenizer;
 struct OutputMarkerAlias {
     int32_t id = -1;
     std::string text;
+    // Inkling2: one closing token (closes) ends whatever content marker opened last and decodes as that
+    // marker's `close`. header: plain text up to the next marker is held, and dropped when that marker
+    // sets drops_header (a tool name before its call marker).
+    std::string close;
+    bool closes = false;
+    bool header = false;
+    bool drops_header = false;
+    // First occurrence of rewrite_from after this marker becomes rewrite_to (tool JSON key).
+    std::string rewrite_from, rewrite_to;
 };
 using OutputMarkerAliases = std::vector<OutputMarkerAlias>;
 
+// Decode state of one output stream; only tables with closes / header entries use it.
+struct OutputMarkerState {
+    const OutputMarkerAlias* open = nullptr;
+    bool holding = false;
+    std::string held;
+    bool rewrite_pending = false;
+    std::string buf;
+};
+
 // Cohere2 table when all six markers are single added tokens; empty otherwise.
 OutputMarkerAliases cohere_output_aliases(const imp::Tokenizer& tok);
+// Inkling2 table (<|message_model|> NAME? <|content_*|> body <|end_message|>); empty when a marker is missing.
+// think_start / think_end receive the ids of <|content_thinking|> and <|end_message|>.
+OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& think_start, int32_t& think_end);
 
 // Alias text of `id`, nullptr when `id` has none.
 const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id);
 
-// decode_token / decode with the aliases applied.
-std::string decode_chat_piece(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases, int32_t id);
+// decode_token / decode with the aliases applied. st carries the open marker across calls; null
+// decodes every alias as its text.
+std::string decode_chat_piece(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases, int32_t id,
+                              OutputMarkerState* st = nullptr);
 std::string decode_chat_output(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases,
                                const std::vector<int32_t>& ids);

@@ -693,6 +693,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         int n_eos_counted = 0;  // EOS / stop tokens counted under ignore_eos
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
+        OutputMarkerState marker_state;
         std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
         // Stop sequences match the answer only, as on the streaming path (same splitter): matched on raw
         // output they ended Qwen3.8 inside its reasoning with empty content. Cut after extraction below.
@@ -784,7 +785,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Check text-level stop sequences
             if (!ctx.params.stop_sequences.empty()) {
-                const std::string piece = decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, token);
+                const std::string piece =
+                    decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, token, &marker_state);
                 output_text += piece;
                 if (stops_skip_reasoning && ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY)
                     stop_content = split_harmony_channels(output_text, ctx.snap.suppress_thinking).content;
