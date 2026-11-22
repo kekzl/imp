@@ -120,18 +120,17 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
     // The thinking text as it goes out, so the block can be signed at its close
     // (#1555): Anthropic emits signature_delta immediately before
     // content_block_stop on a thinking block, and its SDKs round-trip the pair.
-    std::string thinking_so_far;
+    anth::ThinkingBlockText thinking_block;
 
     auto stop_block = [&]() -> bool {
         if (open_block == AnthBlock::NONE)
             return true;
-        if (open_block == AnthBlock::THINKING && !thinking_so_far.empty()) {
+        if (open_block == AnthBlock::THINKING && !thinking_block.empty()) {
             if (!out.emit("content_block_delta",
                           json{{"type", "content_block_delta"},
                                {"index", block_index},
                                {"delta",
-                                {{"type", "signature_delta"},
-                                 {"signature", anth::thinking_signature(thinking_so_far)}}}}))
+                                {{"type", "signature_delta"}, {"signature", thinking_block.close()}}}}))
                 return false;
         }
         bool ok = out.emit("content_block_stop",
@@ -182,7 +181,7 @@ bool run_anthropic_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, Ser
             return true;
         if (!start_thinking_block())
             return false;
-        thinking_so_far += text;
+        thinking_block.add(text);
         return out.emit_delta(thinking_delta_prefix, kDeltaSuffix, text);
     };
     // Open a tool_use block (content_block_start). Arguments follow as

@@ -53,6 +53,23 @@ inline PromptUsage split_prompt_usage(int prompt_tokens, int cached, int creatio
 // proving only that it came back unedited.
 std::string thinking_signature(const std::string& thinking);
 
+// The text of one streamed thinking block. A response can hold several (the model thinks again after
+// its tool calls): each is signed over its own text, so close() hands the next block an empty one.
+class ThinkingBlockText {
+public:
+    void add(const std::string& text) { text_ += text; }
+    [[nodiscard]] bool empty() const { return text_.empty(); }
+    // The block's signature; the text starts over.
+    [[nodiscard]] std::string close() {
+        std::string sig = thinking_signature(text_);
+        text_.clear();
+        return sig;
+    }
+
+private:
+    std::string text_;
+};
+
 // True when the request asked for `thinking.display: "omitted"` or did not opt into thinking
 // (enabled/adaptive). Display is not a generation setting, so it is read off the request on the
 // way out rather than transformed into the OpenAI body.
