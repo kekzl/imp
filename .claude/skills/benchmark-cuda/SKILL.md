@@ -1,11 +1,11 @@
 ---
 name: benchmark-cuda
-description: Benchmark, profile or A/B kernels and end-to-end perf, refresh tests/perf_baseline.json, publish numbers to docs/BENCHMARKS.md / README - ncu, nsys, kernel timing, occupancy, roofline, "is this regression real", "decode dropped", aggregate throughput, two-image A/B. Not kernel code (sm120-cuda-expert), not output quality (check-degeneration).
+description: Benchmark, profile or A/B kernels and end-to-end perf, refresh tests/perf_baseline.json, publish numbers to docs/BENCHMARKS.md / README - ncu, nsys, kernel timing, occupancy, roofline, "is this regression real", "decode dropped", aggregate throughput, two-image A/B. Not kernel code (sm120-cuda-expert), not which lever to pull (kernel-tuning), not output quality (check-degeneration).
 ---
 
 # CUDA Benchmarking - imp / sm_120 / RTX 5090
 
-Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (measurement contract).
+Pair with `kernel-tuning` (which lever, first-version checklist), `sm120-cuda-expert` (mechanics) and `docs/internals/BENCHMARKING.md` (measurement contract).
 
 ## STOP: what is a real signal on this box
 
@@ -61,6 +61,8 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 | Cold start: container start, load start, ready, first token (ms, N repeats) | `scripts/bench_cold_start.sh` |
 | Per-config sweep MBU/MFU/TTFT/TBT | `tools/bench/bench.py` |
 | Single kernel wall-clock | `cudaEvent` in the launcher (below) |
+| Memory-bound vs compute-bound, before a kernel rework | hot/cold timing (skill kernel-tuning section 3) |
+| True share of one kernel in a real run | `if (false)` launch ablation or empty-kernel mutant (skill kernel-tuning section 4) |
 | Per-kernel metrics, stalls | `ncu` (below); wrapper `tools/bench/profile.sh` |
 | Timeline, launch gaps, graphs | `nsys` (below) |
 | Full roofline sweep | `make roofline-measure` (`tools/roofline/`, README there); pin `make roofline-pin`, `roofline-regress`; history `tools/roofline/history/` |

@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-04
-commit: a4070e6a
+verified: 2026-11-23
+commit: b763f1d1
 -->
 
 # imp - Project Instructions
@@ -16,6 +16,7 @@ Router: rules for every task here, playbooks in skills. A rule a skill also cove
 | Task | Start here |
 |---|---|
 | Build, tests, CI red, dep bump | skill **building-and-testing** |
+| New hot path, slow kernel, which lever | skill **kernel-tuning** |
 | Write/optimize a CUDA kernel | skill **sm120-cuda-expert** |
 | Benchmark, profile, perf baseline | skill **benchmark-cuda** |
 | Touched forward pass, MoE routing, KV cache, GDN state, graph capture | skill **check-degeneration** |
