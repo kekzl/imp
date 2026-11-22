@@ -310,4 +310,48 @@ TEST(InklingRewind, ResumedPrefixMatchesAFreshRun) {
     EXPECT_EQ(kept.rewind(c, nullptr), 0);
 }
 
+// Slot choice: a busy slot is never taken, the longest shared prefix wins; on a tie a slot without a
+// checkpoint goes before one with, then the oldest binding.
+TEST(InklingRewind, ARequestBindsToTheFreeSlotWithTheLongestPrefix) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> sky = read_ids(std::string(oracle) + "/sky_prompt.json");
+    ASSERT_FALSE(sky.empty());
+    std::vector<int32_t> a, other;
+    for (size_t i = 0; i < 300; ++i)
+        a.push_back(sky[i % sky.size()]);
+    other.assign(a.rbegin(), a.rend());
+    {
+        InklingRuntime rt;
+        for (int i = 0; i < 3; ++i) {
+            rt.slots.push_back(std::make_unique<InklingForward>());
+            ASSERT_TRUE(rt.slots.back()->init(fx.w, fx.va, 512, 4096));
+        }
+        rt.slot_req.assign(3, -1);
+        rt.slot_block.assign(3, -1);
+        rt.slot_used.assign(3, 0);
+        // Three empty slots: bound in order.
+        ASSERT_EQ(rt.bind(10, a, {false, false, false}), 0);
+        ASSERT_EQ(rt.slots[0]->rewind(a, nullptr), 0);
+        ASSERT_FALSE(run_rows(*rt.slots[0], fx.w, a, 0, {}).empty());
+        EXPECT_EQ(rt.bind(11, other, {true, false, false}), 1);
+        EXPECT_EQ(rt.slot_of_req(11), 1);
+        // The kept prompt again: slot 0 shares 256 positions, slots 1 and 2 none.
+        EXPECT_EQ(rt.bind(12, a, {false, false, false}), 0);
+        EXPECT_EQ(rt.slot_of_req(10), -1);
+        // Slot 0 busy: the never-bound slot 2 is older than slot 1.
+        EXPECT_EQ(rt.bind(13, a, {true, false, false}), 2);
+        // No match anywhere, all free: slot 1 holds the oldest binding now.
+        EXPECT_EQ(rt.bind(14, other, {false, false, false}), 1);
+        // Again: slot 0 holds the oldest binding but also the only checkpoint, so slot 2 goes.
+        EXPECT_EQ(rt.bind(16, other, {false, false, false}), 2);
+        EXPECT_EQ(rt.bind(15, a, {true, true, true}), -1);
+    }
+}
+
 }  // namespace
