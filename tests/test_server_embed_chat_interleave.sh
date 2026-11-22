@@ -7,7 +7,7 @@
 # chat completion comes back empty or cancelled.
 set -u
 
-BASE="http://localhost:8080"
+BASE="${IMP_BASE:-http://localhost:8080}"
 MODEL="${IMP_TEST_MODEL:-Qwen3-8B-NVFP4-cortecs}"
 DURATION="${1:-30}"
 
