@@ -1,4 +1,5 @@
 #include "model/chat_template.h"
+#include "model/reasoning_effort_spec.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
@@ -472,6 +473,24 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
     tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
 
     return tokens;
+}
+
+// reasoning_effort (model/reasoning_effort_spec.h): what the template source names; an empty source clears.
+void ChatTemplate::parse_effort_spec_(const std::string& jinja_src) {
+    parse_reasoning_effort_spec(jinja_src, reasoning_effort_values_, reasoning_effort_default_,
+                                &reasoning_effort_levels_);
+}
+
+// A template with a name -> number map gets a number as a number, as the HF kwarg would be.
+jinja::Value ChatTemplate::effort_value_(const std::string& effort) const {
+    double v = 0.0;
+    if (!reasoning_effort_levels_.empty() && reasoning_effort_number(effort, v))
+        return jinja::Value(v);
+    return jinja::Value(effort);
+}
+
+std::string ChatTemplate::reasoning_effort_error(const std::string& value) const {
+    return reasoning_effort_map_error(value, reasoning_effort_values_, reasoning_effort_levels_);
 }
 
 }  // namespace imp

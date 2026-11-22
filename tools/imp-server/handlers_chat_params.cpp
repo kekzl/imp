@@ -632,11 +632,13 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     ctx.params.enable_thinking_set = think_src != nullptr;
     ctx.params.enable_thinking_requested = think_src != nullptr && think_src->get<bool>();
 
-    // reasoning_effort: handed to the chat template verbatim. A non-string is ignored rather than
-    // rejected, matching the other optional scalars; a template that dislikes the value raises its
-    // own exception (imp logs it and renders without the branch).
+    // reasoning_effort: handed to the chat template verbatim, a number as its text (Inkling2 takes
+    // 0.0 to 0.99). Any other type is ignored rather than rejected, matching the other optional
+    // scalars; a template with a level map refuses what it cannot render (snapshot_state_and_tokenize_).
     if (body.contains("reasoning_effort") && body["reasoning_effort"].is_string())
         ctx.params.reasoning_effort = body["reasoning_effort"].get<std::string>();
+    else if (body.contains("reasoning_effort") && body["reasoning_effort"].is_number())
+        ctx.params.reasoning_effort = body["reasoning_effort"].dump();
 
     // Per-request LoRA adapter selection ("lora": "<name>"; absent/"" = base).
     ctx.params.lora_name = body.value("lora", std::string());

@@ -18,11 +18,11 @@ namespace imp {
 using namespace inkling;
 
 // Pay-off of the draft, called at every step that is not served from a stored row; true = ask it.
-// The draft call costs 0.39 one-row steps (3.3 of 8.4 ms), a draft row 0.16 (1.35 ms): a step pays
-// while its confirmed rows exceed that. Judged over a running mean after kProbe steps; a draft that
-// does not pay rests for kRest tokens (prose runs near 1 confirmed row, lists and code above 1.5).
+// Against a served one-row step of 6.56 ms the draft call and its bookkeeping cost 0.37 (2.4 ms), a draft
+// row 0.20 (1.29 ms): a step pays while its confirmed rows exceed that. Judged over a running mean after
+// kProbe steps; a draft that does not pay rests for kRest tokens.
 bool InklingForward::draft_due_() {
-    constexpr float kDraftCost = 0.24f, kRowCost = 0.26f, kMix = 0.1f;
+    constexpr float kDraftCost = 0.37f, kRowCost = 0.20f, kMix = 0.1f;
     constexpr int kProbe = 24, kRest = 96;
     if (drafted_) {
         const float rows = look_pos0_ >= 0 ? static_cast<float>(look_n_ - 1) : 0.0f;

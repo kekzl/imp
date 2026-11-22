@@ -705,3 +705,99 @@ TEST(InklingRewind, FusedConvSitesAreBitEqual) {
 }
 
 }  // namespace
+
+// Calls of 1..8 rows share the key loads between the rows and the heads of a KV head (attn_part_rows_k;
+// two heads per KV head take attn_part_k). Same inputs through the row form (one block per row and head,
+// no part buffer): a sliding layer past its ring's wrap, a full-attention layer with the position scale
+// on, and a sequence's first rows.
+TEST(InklingAttention, FewRowsFormMatchesTheRowForm) {
+    using inkling::AttnArgs;
+    const int NKV = 8, HD = 128, DR = 16, EXT = 1024, T = 8;
+    struct Case {
+        const char* name;
+        int heads, window, ring, ctx, pos0;
+        float alpha;
+    };
+    const Case cases[] = {{"sliding", 24, 1024, 2048, 4096, 3001, 0.0f},
+                          {"full", 24, 0, 0, 4096, 2500, 0.1f},
+                          {"start", 24, 1024, 2048, 4096, 5, 0.0f},
+                          {"full start", 24, 0, 0, 4096, 0, 0.1f},
+                          {"two heads per KV head", 16, 1024, 2048, 4096, 3001, 0.0f}};
+    uint32_t seed = 12345u;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f - 0.5f;
+    };
+    for (const Case& cs : cases) {
+        const int NH = cs.heads, QD = NH * HD, RD = NH * DR, stride = 2 * QD + RD + NH;
+        ASSERT_EQ(stride % 8, 0);
+        const size_t cache_rows = static_cast<size_t>(cs.ring > 0 ? cs.ring : cs.ctx);
+        std::vector<half> x(static_cast<size_t>(T) * stride), kv(2 * cache_rows * NKV * HD);
+        std::vector<float> qs(static_cast<size_t>(NH) * HD), rs(static_cast<size_t>(NH) * DR),
+            proj(static_cast<size_t>(EXT) * DR);
+        for (auto& v : x)
+            v = __float2half_rn(4.0f * rnd());
+        for (auto& v : kv)
+            v = __float2half_rn(2.0f * rnd());
+        for (auto& v : qs)
+            v = 1.0f + rnd();
+        for (auto& v : rs)
+            v = 1.0f + rnd();
+        for (auto& v : proj)
+            v = rnd();
+        const size_t part_n = inkling::attention_part_floats(NH, HD, cs.window, cs.ctx);
+        half *d_x = nullptr, *d_kv = nullptr, *d_out = nullptr;
+        float *d_qs = nullptr, *d_rs = nullptr, *d_proj = nullptr, *d_part = nullptr;
+        int* d_pos = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_kv, kv.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(T) * QD * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_qs, qs.size() * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_rs, rs.size() * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_proj, proj.size() * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_part, part_n * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_pos, sizeof(int)), cudaSuccess);
+        cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_kv, kv.data(), kv.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_qs, qs.data(), qs.size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_rs, rs.data(), rs.size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_proj, proj.data(), proj.size() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_pos, &cs.pos0, sizeof(int), cudaMemcpyHostToDevice);
+        AttnArgs a;
+        a.q = d_x, a.rel = d_x + QD, a.sink = d_x + QD + RD, a.gate = d_x + QD + RD + NH;
+        a.q_scale = d_qs, a.rel_scale = d_rs, a.proj = d_proj;
+        a.k = d_kv, a.v = d_kv + cache_rows * NKV * HD, a.out = d_out, a.d_pos = d_pos;
+        a.max_ctx = cs.ctx;
+        a.stride = stride, a.n_heads = NH, a.n_kv = NKV, a.hd = HD, a.d_rel = DR, a.rel_extent = EXT;
+        a.window = cs.window, a.ring = cs.ring;
+        a.scale = 1.0f / std::sqrt(static_cast<float>(HD)), a.q_thr = 22.6f, a.rel_thr = 8.0f;
+        a.log_alpha = cs.alpha, a.log_floor = 1024.0f;
+        for (int rows : {1, 2, 3, 5, 8}) {
+            const size_t n = static_cast<size_t>(rows) * QD;
+            std::vector<half> want(n), got(n);
+            a.T = rows;
+            a.part = nullptr;
+            inkling::attention(a, nullptr);
+            cudaMemcpy(want.data(), d_out, n * sizeof(half), cudaMemcpyDeviceToHost);
+            cudaMemset(d_out, 0, n * sizeof(half));
+            a.part = d_part;
+            inkling::attention(a, nullptr);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            cudaMemcpy(got.data(), d_out, n * sizeof(half), cudaMemcpyDeviceToHost);
+            double num = 0.0, den = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                const double w = __half2float(want[i]), gv = __half2float(got[i]);
+                num += (gv - w) * (gv - w);
+                den += w * w;
+            }
+            EXPECT_GT(den, 1.0) << cs.name << " rows " << rows;
+            EXPECT_LT(std::sqrt(num / den), 1e-4) << cs.name << " rows " << rows;
+            std::printf("attention %s, %d rows: rel. error %.3g against the row form\n", cs.name, rows,
+                        std::sqrt(num / den));
+        }
+        for (void* p : {static_cast<void*>(d_x), static_cast<void*>(d_kv), static_cast<void*>(d_out),
+                        static_cast<void*>(d_qs), static_cast<void*>(d_rs), static_cast<void*>(d_proj),
+                        static_cast<void*>(d_part), static_cast<void*>(d_pos)})
+            cudaFree(p);
+    }
+}

@@ -1,5 +1,4 @@
 #include "model/chat_template.h"
-#include "model/reasoning_effort_spec.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
@@ -180,8 +179,7 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
     mentions_thinking_ = false;  // resolved below once the Jinja engine is up
     tool_xml_dialect_ = false;
     own_think_switch_ = bailing_think_switch(jinja_str);
-    reasoning_effort_values_.clear();
-    reasoning_effort_default_.clear();
+    parse_effort_spec_("");
 
     // Try Jinja2 rendering if template string provided
     if (!jinja_str.empty()) {
@@ -204,7 +202,7 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             tool_xml_dialect_ = jinja_str.contains("<parameter=") && jinja_str.contains("<function=") &&
                                 probe_render_teaches_xml_tools(tokenizer);
             // Served as /v1/models meta.reasoning_effort (model/reasoning_effort_spec.h).
-            parse_reasoning_effort_spec(jinja_str, reasoning_effort_values_, reasoning_effort_default_);
+            parse_effort_spec_(jinja_str);
         } else {
             IMP_LOG_WARN("Jinja2 parse failed (%s), falling back to hardcoded template",
                          tpl->error().c_str());
@@ -755,7 +753,7 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
     // authors pick their own default for the undefined case. Qwen3.8 defaults to 'xhigh' and
     // varies its system preamble by value.
     if (!reasoning_effort.empty())
-        ctx["reasoning_effort"] = jinja::Value(reasoning_effort);
+        ctx["reasoning_effort"] = effort_value_(reasoning_effort);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
@@ -897,7 +895,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     }
     // Same rule as the messages-only path: stamp only when the caller asked.
     if (!reasoning_effort.empty())
-        ctx["reasoning_effort"] = jinja::Value(reasoning_effort);
+        ctx["reasoning_effort"] = effort_value_(reasoning_effort);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
