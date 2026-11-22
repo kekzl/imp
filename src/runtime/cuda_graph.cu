@@ -499,7 +499,7 @@ __device__ __forceinline__ void track_think_token(const ThinkTrack& t, int32_t t
                                                   const int32_t* d_stop_ids, int n_stop_ids) {
     if (token == t.start_id) {
         *t.in_think = 1;
-    } else if (token == t.end_id) {
+    } else if (token == t.end_id && imp::think_logic::closer_exits_block(*t.in_think != 0)) {
         *t.in_think = 0;
         *t.exit_step = step;  // open the post-think grace window
         if (t.content_after)

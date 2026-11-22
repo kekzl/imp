@@ -699,7 +699,11 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         int n_eos_counted = 0;  // EOS / stop tokens counted under ignore_eos
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
+        // The prompt ends on the thinking opener when thinking is on (settle_thinking_from_prompt_).
+        const bool starts_thinking = ctx.snap.enable_thinking && !ctx.params.continue_final;
         OutputMarkerState marker_state;
+        if (starts_thinking)
+            open_thinking(marker_state, ctx.snap.output_aliases);
         std::string matched_stop;  // which stop sequence ended it, for the Anthropic shim (#1550)
         // Stop sequences match the answer only, as on the streaming path (same splitter): matched on raw
         // output they ended Qwen3.8 inside its reasoning with empty content. Cut after extraction below.
@@ -845,7 +849,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         total_output_tokens += n_output_tokens;
         std::string content = !ctx.params.stop_sequences.empty()
                                   ? output_text
-                                  : decode_chat_output(*ctx.snap.tok, ctx.snap.output_aliases, output_ids);
+                                  : decode_chat_output(*ctx.snap.tok, ctx.snap.output_aliases, output_ids,
+                                                       starts_thinking);
         // max_tokens can stop mid-codepoint; the streaming path holds those
         // bytes back, so this one must drop them or the two transports return
         // different text for the same request (#1310).
