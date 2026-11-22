@@ -393,6 +393,7 @@ bool Engine::init_weights() {
 
     // Phase 2: allocate GPU workspace
     (void)executor_->allocate_workspaces(experts_on_host_);
+    inkling_fit_slots_();
 
     // Layer offloading: one forward at a time owns the two staging slots, none captured.
     if (layer_offload_blocks_graphs(config_.gpu_layers)) {

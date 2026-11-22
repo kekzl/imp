@@ -30,6 +30,10 @@ public:
     // Prefix reuse: moves the sequence to the last conv-state checkpoint (kGrid positions apart) that
     // tokens shares with it and returns that position, 0 = from scratch. The next run() starts there.
     [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s);
+    // True when a checkpoint exists: recycling the slot would lose a prefix another prompt could reuse.
+    [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
+    // The position rewind(tokens) would return; changes nothing.
+    [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGrid = 256;    // rows per forward segment = checkpoint distance
     static constexpr int kSlack = 5888;  // sliding K/V kept behind the window: how far rewind may go back
 
@@ -85,24 +89,36 @@ private:
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call
-    // Captured one-token step over the hidden buffer decode_h_ (run(), T == 1).
+    // Captured one-token step over the own row buffer dec_h_ (run(), T == 1): any caller row replays it.
     CudaGraph decode_graph_;
     CudaGraphExec decode_exec_;
-    half* decode_h_ = nullptr;
+    half* dec_h_ = nullptr;
     bool decode_graph_ok_ = true;
 };
 
-// Weights and the forward that points into them (destroyed first).
+// Weights and the forwards that point into them (destroyed first): one kept sequence per slot.
 struct InklingRuntime {
     InklingWeights w;
-    InklingForward f;
-    std::vector<int32_t> ids;  // host copy of one call's token ids
+    std::vector<std::unique_ptr<InklingForward>> slots;
+    std::vector<int> slot_req;        // request bound to the slot, -1 = never bound
+    std::vector<int> slot_block;      // first KV block of that request's table: the key of a decode row
+    std::vector<uint64_t> slot_used;  // bind order, the oldest free slot is recycled first
+    uint64_t tick = 0;
+    std::vector<int32_t> ids;  // host copies of one call's token ids, positions, first blocks
+    std::vector<int> pos, blk;
+    // Slot of a request / of a decode row's first block, -1 when unknown.
+    [[nodiscard]] int slot_of_req(int req) const;
+    [[nodiscard]] int slot_of_block(int block) const;
+    // Binds req to the free slot (busy[i] false) that shares the longest prefix with tokens; on a tie a
+    // slot without a checkpoint goes first, then the oldest binding. Returns the slot, -1 = all busy.
+    [[nodiscard]] int bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy);
 };
 
 class Model;
 // Null for every other arch; throws when an Inkling2-Loop checkpoint cannot be loaded.
-// One sequence of max_ctx positions, max_tokens rows per call.
+// Up to slots (<= 0: two) sequences of max_ctx positions, max_tokens rows per call; fewer when the
+// card does not take them all, at least one.
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx);
+                                                     int max_ctx, int slots);
 
 }  // namespace imp

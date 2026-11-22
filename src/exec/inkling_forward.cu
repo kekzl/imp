@@ -68,6 +68,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     logits_h_ = Hf_(static_cast<size_t>(c.vocab));
     idx_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
+    dec_h_ = Hf_(H);
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
     conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
@@ -105,17 +106,20 @@ void InklingForward::checkpoint_(cudaStream_t s) {
     ckpt_valid_ = ok ? static_cast<int>(g) : std::min(ckpt_valid_, static_cast<int>(g) - 1);
 }
 
-int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
+int InklingForward::match(std::span<const int32_t> tokens) const {
     // The last row is always computed: its logits start the reply.
     const size_t lim = std::min(
         {hist_.size(), static_cast<size_t>(pos_), tokens.empty() ? 0 : tokens.size() - 1});
     size_t d = 0;
     while (d < lim && hist_[d] == tokens[d])
         ++d;
-    int g = std::min(static_cast<int>(d) / kGrid, ckpt_valid_);
+    const int g = std::min(static_cast<int>(d) / kGrid, ckpt_valid_);
     // Sliding K/V of [R - window, R) must not have been overwritten by positions up to hw_.
-    if (hw_ - g * kGrid > ring_ - w_->cfg.window)
-        g = 0;
+    return hw_ - (g * kGrid) > ring_ - w_->cfg.window ? 0 : g * kGrid;
+}
+
+int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
+    int g = match(tokens) / kGrid;
     const size_t n = conv_state_floats_ * conv_state_.size();
     if (g > 0 && cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
                                  cudaMemcpyHostToDevice, s) != cudaSuccess)
@@ -335,15 +339,15 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
     const int Hd = w_->cfg.hidden;
     // The kernels read the position from the device: one captured graph serves every decode step.
     const bool graph = T == 1 && s != nullptr && !tap && decode_graph_ok_;
-    if (graph && (!decode_exec_.get() || decode_h_ != h)) {
+    if (graph && !decode_exec_.get()) {
         // Capture the one-token step once: about 2000 kernel and cuBLAS launches become one replay.
         cudaGraph_t g = nullptr;
         if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
             decode_graph_ok_ = false;
         } else {
-            f16_to_f32(h, h_, static_cast<size_t>(Hd), s);
+            f16_to_f32(dec_h_, h_, static_cast<size_t>(Hd), s);
             layers_(1, s);
-            f32_to_f16(mix_[0], h, static_cast<size_t>(Hd), s);
+            f32_to_f16(mix_[0], dec_h_, static_cast<size_t>(Hd), s);
             cudaGraphExec_t ex = nullptr;
             if (cudaStreamEndCapture(s, &g) != cudaSuccess ||
                 cudaGraphInstantiate(&ex, g, 0) != cudaSuccess) {
@@ -352,7 +356,6 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
             }
             decode_graph_.reset(g);
             decode_exec_.reset(ex);
-            decode_h_ = h;
         }
     }
     for (int done = 0; done < T;) {
@@ -361,7 +364,10 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
         const size_t n = static_cast<size_t>(seg) * Hd;
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
         if (graph && decode_graph_ok_ && decode_exec_.get()) {
-            if (cudaGraphLaunch(decode_exec_.get(), s) != cudaSuccess)
+            const size_t hb = static_cast<size_t>(Hd) * sizeof(half);
+            if (cudaMemcpyAsync(dec_h_, hs, hb, cudaMemcpyDeviceToDevice, s) != cudaSuccess ||
+                cudaGraphLaunch(decode_exec_.get(), s) != cudaSuccess ||
+                cudaMemcpyAsync(hs, dec_h_, hb, cudaMemcpyDeviceToDevice, s) != cudaSuccess)
                 return false;
         } else {
             f16_to_f32(hs, h_, n, s);
