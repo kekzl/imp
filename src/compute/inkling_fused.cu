@@ -19,6 +19,34 @@ constexpr int kGateMaxRank = 128;
 constexpr int kMixSlice = 128;  // elements per block
 constexpr int kMixVals = 45;    // 5 x 5 Gram matrix of the states, then 4 x 5 query dots
 
+// The conv site of channel c (MixPre, row 0): conv_residual_k / moe_tail_k for one row, expression for
+// expression. Returns out; r = the residual it read.
+__device__ __forceinline__ float mix_pre(const MixPre& p, int c, int C, float& r) {
+    const float* wc = p.w + (size_t)c * 4;
+    const float s0 = p.state[c], s1 = p.state[(size_t)C + c], s2 = p.state[(size_t)2 * C + c];
+    float v = 0.0f;
+    if (p.kind == 1)
+        v = __half2float(p.x[c]);
+    else
+        for (int k = 0; k < p.top_k; ++k)
+            v += p.weights[k] * __half2float(p.x[(size_t)k * C + c]);
+    const float sum = wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v;
+    r = p.resid[c];
+    if (p.copy)
+        p.copy[c] = r;
+    // moe_tail_k adds its residual in the multiply's FMA, conv_residual_k in a rounded step of its own.
+    float o = __fmaf_rn(sum, 0.4472135954999579f, r);
+    if (p.kind == 1) {
+        const float a = __fmul_rn(sum, 0.4472135954999579f);
+        o = p.add ? __fadd_rn(r, a) : a;
+    }
+    p.out[c] = o;
+    if (p.log)
+        p.log[c] = v;
+    p.state[c] = s1, p.state[(size_t)C + c] = s2, p.state[(size_t)2 * C + c] = v;
+    return o;
+}
+
 // Mix, step 1. One block per (token, 128-element slice), one thread per element: this slice's share
 // of the Gram matrix and of the query dots. Many small blocks: one block reads only a few GB/s.
 __global__ void mix_partial_k(MixArgs a, int H, int slices) {
@@ -30,7 +58,15 @@ __global__ void mix_partial_k(MixArgs a, int H, int slices) {
         acc[k] = 0.0f;
     if (i < H) {
         float x[5];
-        for (int j = 0; j < a.st.n; ++j)
+        int own = a.st.n;  // states read from memory
+        if (a.pre.kind != 0) {
+            float r = 0.0f;
+            x[a.st.n - 1] = mix_pre(a.pre, i, H, r);
+            own = a.st.n - 1;
+            if (a.pre.copy)
+                x[--own] = r;
+        }
+        for (int j = 0; j < own; ++j)
             x[j] = a.st.s[j][(size_t)t * H + i];
         for (int j = 0; j < a.st.n; ++j)
             for (int k = j; k < a.st.n; ++k)
@@ -345,11 +381,12 @@ __global__ void conv_residual_k(const half* x, const float* w, float* state, con
     for (int t = 0; t < T; ++t) {
         const size_t i = (size_t)t * C + c;
         const float v = __half2float(x[i]);
-        const float a = (wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v) * 0.4472135954999579f;
+        // Multiply and add stay two rounded steps; mix_pre mirrors it.
+        const float a = __fmul_rn(wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v, 0.4472135954999579f);
         const float r = resid[i];
         if (copy)
             copy[i] = r;
-        out[i] = add ? r + a : a;
+        out[i] = add ? __fadd_rn(r, a) : a;
         if (log)
             log[i] = v;
         s0 = s1, s1 = s2, s2 = v;
@@ -368,8 +405,9 @@ __global__ void moe_tail_k(const half* ey, const float* weights, const float* w,
         float v = 0.0f;
         for (int k = 0; k < top_k; ++k)
             v += weights[(size_t)t * top_k + k] * __half2float(ey[((size_t)t * top_k + k) * C + c]);
-        const float a = (wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v) * 0.4472135954999579f;
-        out[(size_t)t * C + c] = resid[(size_t)t * C + c] + a;
+        // The residual joins in the multiply's FMA; mix_pre mirrors it.
+        const float sum = wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v;
+        out[(size_t)t * C + c] = __fmaf_rn(sum, 0.4472135954999579f, resid[(size_t)t * C + c]);
         if (log)
             log[(size_t)t * C + c] = v;
         s0 = s1, s1 = s2, s2 = v;
@@ -384,8 +422,12 @@ size_t mix_partial_floats(int T, int H) {
 }
 
 void mix(const MixArgs& a, int T, int H, cudaStream_t s) {
-    if (a.st.n < 1 || a.st.n > 5 || a.nq < 1 || a.nq > 4 || !a.partial) {
-        IMP_LOG_ERROR("inkling mix: %d states or %d queries out of range", a.st.n, a.nq);
+    const MixPre& p = a.pre;
+    const bool pre_ok = p.kind == 0 || (T == 1 && a.st.n >= (p.copy ? 2 : 1) && p.out == a.st.s[a.st.n - 1] &&
+                                        (!p.copy || p.copy == a.st.s[a.st.n - 2]));
+    if (a.st.n < 1 || a.st.n > 5 || a.nq < 1 || a.nq > 4 || !a.partial || !pre_ok) {
+        IMP_LOG_ERROR("inkling mix: %d states or %d queries out of range, or a conv site that does not fit",
+                      a.st.n, a.nq);
         return;
     }
     const int slices = (H + kMixSlice - 1) / kMixSlice;

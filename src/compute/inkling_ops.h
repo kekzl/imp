@@ -36,7 +36,23 @@ struct MixStates {
 // queries (scale H^-0.5), v_q = sum_j p[q][j] * normed_state_j; the last state is the partial block
 // state. mix = false: v = the last state as is. Per query: out_f[q] (optional) = v_q, out_h[q]
 // (optional) = fp16(rms_norm(v_q) * norm_w[q]). partial: scratch of mix_partial_floats(T, H) floats.
+// One-row calls only: the conv site whose output is the mix's last state runs inside the mix instead
+// of as a launch of its own (conv_residual: kind 1, moe_tail: kind 2; same arguments, same bits).
+// out must be st.s[n - 1] and copy, when set, st.s[n - 2].
+struct MixPre {
+    int kind = 0;
+    const half* x = nullptr;         // conv input, or the top_k expert outputs [top_k, C]
+    const float* weights = nullptr;  // kind 2: routing weights [top_k]
+    const float* w = nullptr;        // conv weights [C, 4]
+    float* state = nullptr;          // [3, C]
+    const float* resid = nullptr;
+    float *out = nullptr, *copy = nullptr, *log = nullptr;
+    bool add = true;
+    int top_k = 0;
+};
+
 struct MixArgs {
+    MixPre pre;
     MixStates st;
     const float* query = nullptr;  // [nq, H]
     const float* norm_w[4] = {};

@@ -1,6 +1,7 @@
 #pragma once
 // Inkling2-Loop text forward for one sequence: 48 layer applications per token, own K/V and conv state.
 
+#include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
 #include "model/inkling_weights.h"
 
@@ -74,6 +75,8 @@ public:
         long paused = 0;                  // one-row steps taken while the draft was paused
     };
     SpecStats spec_stats() const { return stats_; }
+    // Tests: off = one-row calls launch every conv site on its own, as calls of more rows do.
+    void set_fused_sites(bool on) { fuse_ = on; }
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -82,6 +85,10 @@ public:
 private:
     void apply_(int layer, int pass, int T, cudaStream_t s);
     void mix_looped_(int layer, int T, cudaStream_t s);
+    // The MoE conv site of the last application, not launched yet: the next mix over h_ takes it
+    // (take_tail_), anything else that reads h_ launches it first (flush_tail_).
+    inkling::MixPre take_tail_();
+    void flush_tail_(cudaStream_t s);
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s, const int32_t* ids = nullptr, int32_t image_token = -1);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
@@ -142,6 +149,8 @@ private:
     CudaGraphExec decode_exec_[kGraphRows];
     half* dec_h_ = nullptr;
     bool decode_graph_ok_ = true;
+    bool fuse_ = true;
+    inkling::MixPre tail_;
     // Lookahead (enable_lookahead): feature planes of the running call, the conv state before the
     // stored call and that call's conv inputs, its final rows and tokens.
     InklingSpecHooks spec_;
