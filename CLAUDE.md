@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-04
-commit: a4070e6a
+verified: 2026-11-23
+commit: b763f1d1
 -->
 
 # imp - Project Instructions
