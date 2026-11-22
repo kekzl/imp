@@ -17,6 +17,8 @@
 #include "core/process_diag.h"
 #include "runtime/process_diag_install.h"
 #include "runtime/vram_budget.h"
+#include "runtime/snapshot_host_default.h"
+#include "memory/weight_snapshot.h"
 #include "runtime/batch.h"
 #include "runtime/spec_corpus.h"
 #include "compute/mtp_forward.h"
@@ -837,12 +839,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
     MemAccount::instance().checkpoint("02_weights+decode_cache");
+    // Before the KV init: the recurrent snapshot host tier follows the spill budget.
+    const bool spill_auto = apply_host_spill_auto(runtime_config_, config_.use_prefix_caching,
+                                                  host_mem_available_bytes(), host_ram_headroom_bytes());
     if (!init_kv_cache()) {
         return false;
     }
-    // Optional tier: false = off (budget 0, or WARN logged with the reason); serving runs without it.
-    (void)kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
-                                   << 20);
+    // Optional tier: false = off (budget 0, or logged with the reason); serving runs without it.
+    (void)kv_manager_->enable_host_spill(
+        static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb)) << 20, spill_auto);
     wire_kv_swap_();
     executor_->set_ffn_graphs_enabled(config_.use_cuda_graphs);
     prefill_graphs_.set_short_max(runtime_config_.runtime.prefill_graph_prewarm);

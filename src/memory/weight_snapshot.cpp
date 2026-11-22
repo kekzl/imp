@@ -260,6 +260,11 @@ size_t host_mem_total_bytes() {
 
 size_t host_ram_headroom_bytes() { return host_ram_headroom_bytes(host_mem_total_bytes()); }
 
+bool host_ram_spares(size_t bytes) {
+    const size_t avail = host_mem_available_bytes();
+    return avail == 0 || avail > bytes + host_ram_headroom_bytes();
+}
+
 // ---------------------------------------------------------------------------
 // WeightSnapshot
 // ---------------------------------------------------------------------------

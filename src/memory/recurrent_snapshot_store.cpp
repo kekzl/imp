@@ -1,6 +1,7 @@
 #include "memory/recurrent_snapshot_store.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"
+#include "memory/weight_snapshot.h"
 
 namespace imp {
 
@@ -80,26 +81,14 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     }
     IMP_LOG_INFO("RecurrentSnapshotStore: %d/%d slots x %.1f MiB pre-allocated (budget %.0f MiB)",
                  capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
-    // Host tier: pinned, so the eviction D2H and the restore H2D run as
-    // stream-ordered async copies. Same eager policy, a failed pin caps it.
-    const int want_host = static_cast<int>(host_budget_bytes / buf_bytes_);
-    for (int i = 0; i < want_host; ++i) {
-        void* p = nullptr;
-        if (cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) != cudaSuccess)
-            break;
-        pool_->free_host_bufs.push_back(p);
-        host_capacity_++;
-    }
-    if (want_host > 0) {
-        IMP_LOG_INFO("RecurrentSnapshotStore: host tier %d/%d slots x %.1f MiB pinned (budget %.0f MiB)",
-                     host_capacity_, want_host, entry_bytes / (1024.0 * 1024.0),
-                     host_budget_bytes / (1024.0 * 1024.0));
-        if (host_capacity_ < want_host)
-            IMP_LOG_WARN(
-                "RecurrentSnapshotStore: host tier short by %d of %d slots (cudaHostAlloc refused) - "
-                "evicted snapshots are dropped instead of demoted",
-                want_host - host_capacity_, want_host);
-    }
+    // Host tier: pinned, so the eviction D2H and the restore H2D run as stream-ordered async copies.
+    // A slab is pinned when a demotion first needs it (103 slabs up front held a start for 10 s).
+    host_capacity_ = static_cast<int>(host_budget_bytes / buf_bytes_);
+    if (host_capacity_ > 0)
+        IMP_LOG_INFO(
+            "RecurrentSnapshotStore: host tier up to %d slots x %.1f MiB, pinned on first use "
+            "(budget %.0f MiB)",
+            host_capacity_, entry_bytes / (1024.0 * 1024.0), host_budget_bytes / (1024.0 * 1024.0));
 }
 
 std::shared_ptr<const RecurrentSnapshotEntry> RecurrentSnapshotStore::find(size_t key) {
@@ -155,6 +144,20 @@ void* RecurrentSnapshotStore::acquire_host_buffer_() {
             pool_->free_host_bufs.pop_back();
             return p;
         }
+    }
+    if (host_allocated_ < host_capacity_) {
+        void* p = nullptr;
+        if (host_ram_spares(buf_bytes_) &&
+            cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) == cudaSuccess) {
+            ++host_allocated_;
+            return p;
+        }
+        (void)cudaGetLastError();
+        IMP_LOG_WARN(
+            "RecurrentSnapshotStore: the host refused slab %d of %d (%.1f MiB each), the host tier "
+            "stays at %d; fewer snapshots means more full re-prefills",
+            host_allocated_ + 1, host_capacity_, buf_bytes_ / (1024.0 * 1024.0), host_allocated_);
+        host_capacity_ = host_allocated_;
     }
     // Protected keys rotate to the tail; one pass over the list bounds the walk.
     for (size_t n = host_lru_.size(); n > 0 && !host_lru_.empty(); --n) {

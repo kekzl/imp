@@ -44,4 +44,32 @@ TEST(SnapshotHostDefault, OperatorValueWins) {
 }
 
 }  // namespace
+TEST(HostSpillAuto, TwoThirdsOfTheSpareRamInWholeGib) {
+    const size_t gib = size_t{1} << 30;
+    EXPECT_EQ(host_spill_auto_mb(59 * gib, 8 * gib), 16384) << "51 GiB spare: the cap";
+    EXPECT_EQ(host_spill_auto_mb(20 * gib, 6 * gib), 9 * 1024) << "14 GiB spare";
+    EXPECT_EQ(host_spill_auto_mb(8 * gib, 6 * gib), 1024) << "2 GiB spare";
+    EXPECT_EQ(host_spill_auto_mb(7 * gib, 6 * gib), 0) << "1 GiB spare is no tier";
+    EXPECT_EQ(host_spill_auto_mb(4 * gib, 6 * gib), 0);
+    EXPECT_EQ(host_spill_auto_mb(0, 6 * gib), 0) << "unknown host figure";
+}
+
+TEST(HostSpillAuto, ResolvesOnlyAnUnsetKeyAndFeedsTheSnapshotTier) {
+    const size_t gib = size_t{1} << 30;
+    RuntimeConfig rc;
+    ASSERT_LT(rc.kv_cache.host_spill_mb, 0) << "the default is auto";
+    EXPECT_TRUE(apply_host_spill_auto(rc, /*prefix_caching=*/true, 59 * gib, 8 * gib));
+    EXPECT_EQ(rc.kv_cache.host_spill_mb, 16384);
+    EXPECT_EQ(snapshot_host_budget_bytes(rc), size_t{8192} << 20);
+
+    RuntimeConfig off;
+    off.kv_cache.host_spill_mb = 0;
+    EXPECT_FALSE(apply_host_spill_auto(off, true, 59 * gib, 8 * gib));
+    EXPECT_EQ(off.kv_cache.host_spill_mb, 0);
+
+    RuntimeConfig no_cache;
+    EXPECT_TRUE(apply_host_spill_auto(no_cache, /*prefix_caching=*/false, 59 * gib, 8 * gib));
+    EXPECT_EQ(no_cache.kv_cache.host_spill_mb, 0);
+}
+
 }  // namespace imp

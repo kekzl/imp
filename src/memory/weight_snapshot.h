@@ -235,6 +235,8 @@ size_t host_mem_total_bytes();
 // Host RAM kept free when pinning: max(6 GiB, 10 % of the total). 0 = total unknown -> 6 GiB.
 size_t host_ram_headroom_bytes(size_t total_bytes);
 size_t host_ram_headroom_bytes();
+// True when pinning bytes more leaves that headroom (or the host figure is unknown).
+[[nodiscard]] bool host_ram_spares(size_t bytes);
 size_t parse_meminfo_available(std::string_view meminfo_text);
 size_t parse_meminfo_total(std::string_view meminfo_text);
 // cgroup memory.max / memory.limit_in_bytes in bytes; 0 for "max" or the v1 no-limit value.
