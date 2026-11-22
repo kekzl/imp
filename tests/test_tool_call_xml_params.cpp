@@ -34,7 +34,7 @@ TEST(ToolCallFault, NameTheRequestDidNotOfferIsAFault) {
     validate_tool_call(tc, read_file_tools());
     EXPECT_TRUE(tc.valid);
     EXPECT_EQ(tool_call_fault(tc, read_file_tools(), false),
-              "\"run_tests.py\\n</parameter\": tool not offered");
+              "\"run_tests.py\\n</parameter\": tool not offered (1 offered: read_file)");
     EXPECT_EQ(tool_call_fault(tc, json::array(), false), "") << "no tools in the request: nothing to compare";
 }
 
