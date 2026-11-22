@@ -178,6 +178,15 @@ struct InklingRuntime {
     uint64_t tick = 0;
     std::vector<int32_t> ids;  // host copies of one call's token ids, positions, first blocks
     std::vector<int> pos, blk;
+    // The three row arrays of a call packed on the device ([3][rows_cap]) and their host copy.
+    int32_t* d_rows = nullptr;
+    int rows_cap = 0;
+    std::vector<int32_t> rows;
+    VRAMAllocator* va = nullptr;
+    InklingRuntime() = default;
+    InklingRuntime(const InklingRuntime&) = delete;
+    InklingRuntime& operator=(const InklingRuntime&) = delete;
+    ~InklingRuntime();
     // Slot of a request / of a decode row's first block, -1 when unknown.
     [[nodiscard]] int slot_of_req(int req) const;
     [[nodiscard]] int slot_of_block(int block) const;

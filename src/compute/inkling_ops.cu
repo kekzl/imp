@@ -74,20 +74,40 @@ __global__ void rms_norm_k(const float* x, const float* w, float* of, half* oh, 
     }
 }
 
-// Router logits: one warp per expert, 8 experts per block.
+constexpr int kRouteMaxH = 2304, kRouteWarps = 4;
+
+// Router logits: one warp per expert, kRouteWarps experts per block. The row and each warp's weight row
+// go through shared memory (8 halves / 4 floats per load: 18 loads per lane instead of 144); a lane
+// then sums its strided elements in the order it always did, so the logits are bit-equal.
 __global__ void route_scores_k(const half* x, const float* w, float* logits, int H, int n_experts,
                                int blocks_per_tok) {
-    const int t = blockIdx.x / blocks_per_tok;
-    const int e = (blockIdx.x % blocks_per_tok) * 8 + (threadIdx.x >> 5);
-    if (e >= n_experts)
-        return;
+    __shared__ float xs[kRouteMaxH];
+    __shared__ float ws[kRouteWarps][kRouteMaxH];
+    const int t = blockIdx.x / blocks_per_tok, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int e = (blockIdx.x % blocks_per_tok) * kRouteWarps + warp;
+    const bool live = e < n_experts;
     const half* xr = x + (size_t)t * H;
-    const float* wr = w + (size_t)e * H;
+    const float* wr = w + (size_t)(live ? e : 0) * H;
+    const bool tiled = H <= kRouteMaxH && (H & 7) == 0;
+    if (tiled) {
+        for (int i = threadIdx.x * 8; i < H; i += blockDim.x * 8) {
+            const uint4 p = *reinterpret_cast<const uint4*>(xr + i);
+            for (int k = 0; k < 8; ++k)
+                xs[i + k] = __half2float(reinterpret_cast<const half*>(&p)[k]);
+        }
+        for (int i = lane * 4; live && i < H; i += 128)
+            *reinterpret_cast<float4*>(&ws[warp][i]) = *reinterpret_cast<const float4*>(wr + i);
+    }
+    __syncthreads();
     float acc = 0.0f;
-    for (int i = threadIdx.x & 31; i < H; i += 32)
-        acc += __half2float(xr[i]) * wr[i];
+    if (live && tiled)
+        for (int i = lane; i < H; i += 32)
+            acc += xs[i] * ws[warp][i];
+    else if (live)
+        for (int i = lane; i < H; i += 32)
+            acc += __half2float(xr[i]) * wr[i];
     acc = warp_sum(acc);
-    if ((threadIdx.x & 31) == 0)
+    if (live && lane == 0)
         logits[(size_t)t * n_experts + e] = acc;
 }
 
@@ -190,8 +210,8 @@ void route_topk(const half* x, const float* w, const float* bias, float* logits,
         IMP_LOG_ERROR("inkling router: %d experts / top %d out of range", n_experts, top_k);
         return;
     }
-    const int bpt = (n_experts + 7) / 8;
-    route_scores_k<<<T * bpt, kThreads, 0, s>>>(x, w, logits, H, n_experts, bpt);
+    const int bpt = (n_experts + kRouteWarps - 1) / kRouteWarps;
+    route_scores_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, H, n_experts, bpt);
     IMP_CUDA_CHECK_LAUNCH();
     route_pick_k<<<T, 128, 0, s>>>(logits, bias, idx, weights, n_experts, top_k, route_scale);
     IMP_CUDA_CHECK_LAUNCH();

@@ -165,9 +165,21 @@ __global__ void gate_mix_k(GateNormArgs a, const float* gd, GateOut out, int H, 
     const half* fw = a.forget[g] + (size_t)i * a.rank;
     const half* gw = a.gain[g] + (size_t)i * a.rank;
     float f = 0.0f, gn = 0.0f;
-    for (int r = 0; r < a.rank; ++r) {
-        f += __half2float(fw[r]) * gs[r];
-        gn += __half2float(gw[r]) * gs[r];
+    if ((a.rank & 7) == 0) {
+        // 8 halves per load.
+        for (int r = 0; r < a.rank; r += 8) {
+            const uint4 pf = *reinterpret_cast<const uint4*>(fw + r);
+            const uint4 pg = *reinterpret_cast<const uint4*>(gw + r);
+            for (int k = 0; k < 8; ++k) {
+                f += __half2float(reinterpret_cast<const half*>(&pf)[k]) * gs[r + k];
+                gn += __half2float(reinterpret_cast<const half*>(&pg)[k]) * gs[r + k];
+            }
+        }
+    } else {
+        for (int r = 0; r < a.rank; ++r) {
+            f += __half2float(fw[r]) * gs[r];
+            gn += __half2float(gw[r]) * gs[r];
+        }
     }
     const size_t at = (size_t)t * H + i;
     out.o[g][at] = (1.0f - tanhf(f)) * a.h[g][at] + tanhf(gn) * a.msg[g][at];

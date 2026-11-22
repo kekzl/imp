@@ -92,6 +92,7 @@ void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	56
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<192>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	53	16	0
+imp::inkling::(anonymous namespace)::gate_mix_k	sm_120a	48	24	0
 void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	48	16	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	48	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	48	16	0
@@ -116,7 +117,6 @@ imp::topk_partial_rows_kernel	sm_120a	40	1056	0
 imp::inkling::(anonymous namespace)::mix_partial_k	sm_120a	40	384	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
-imp::inkling::(anonymous namespace)::gate_mix_k	sm_120a	40	24	0
 imp::inkling::(anonymous namespace)::mix_out_k	sm_120a	40	24	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
