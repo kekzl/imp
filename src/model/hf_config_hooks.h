@@ -37,5 +37,6 @@ void parse_hf_tristate_flags(const JValue& root, const JValue& eff, ModelConfig&
 [[nodiscard]] bool parse_bailing_hybrid_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 [[nodiscard]] bool parse_kimi_linear_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 [[nodiscard]] bool parse_flint_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
+[[nodiscard]] bool parse_inkling2_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 
 }  // namespace imp

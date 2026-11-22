@@ -33,6 +33,8 @@ enum class ModelArch {
                      // MoE
     KIMI_LINEAR,  // KimiLinearForCausalLM: 3:1 KDA (softplus gate, LoRA f/g) / MLA NoPE layers, sigmoid MoE
     FLINT,  // FlintForCausalLM: Qwen3-MoE block + learned sinks, SWA (RoPE) / full (NoPE) layers, sigmoid MoE
+    INKLING2,  // Inkling2LoopForConditionalGeneration: loop core (3 passes), distance-bias attention with
+               // per-token sinks, short convs, 128-expert MoE; own forward (exec/inkling_forward.h)
     GENERIC,  // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 

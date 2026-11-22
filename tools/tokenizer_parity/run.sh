@@ -66,6 +66,7 @@ for spec in "$@"; do
     grep '^@@ ' "$WORK/imp.raw" | cut -c4- > "$WORK/imp.txt" || true
     extra=""
     [ "$DIFF" = 1 ] && extra="$ref/tokenizer.json"
-    ms="$(grep -oE '^@@T [0-9.]+' "$WORK/imp.raw" | cut -d' ' -f2)"
+    [ -s "$WORK/imp.txt" ] || { printf '%-44s ERROR imp: no records: %s\n' "$name" "$(grep -v '^@@' "$WORK/imp.raw" | tail -3 | tr '\n' ' ')"; continue; }
+    ms="$(grep -oE '^@@T [0-9.]+' "$WORK/imp.raw" | cut -d' ' -f2 || true)"
     printf '%-44s %s  encode %s ms\n' "$name" "$(py compare imp.txt hf.txt $extra)" "${ms:--}"
 done

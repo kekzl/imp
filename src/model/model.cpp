@@ -195,6 +195,7 @@ enum {
     kApiBailingHybrid = 22,
     kApiKimiLinear = 23,
     kApiFlint = 24,
+    kApiInkling2 = 25,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -252,6 +253,8 @@ static constexpr ArchEntry kArchRegistry[] = {
     // Flint: HF rotate_half RoPE on the sliding layers, sigmoid router (+ selection-only expert_bias),
     // norm_topk_prob from config (hf_config/flint.cpp); generation_config 1.0 / 0.95 / 20.
     {ModelArch::FLINT, "flint", kApiFlint, -1, 0, -1, -1, true, false, 1.0f, 0.95f, 20},
+    // Inkling2-Loop: no RoPE (distance bias), sigmoid router; the forward is exec/inkling_forward.cu.
+    {ModelArch::INKLING2, "inkling2_loop", kApiInkling2, -1, 0, -1, -1, true, true, 1.0f, 0.95f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

@@ -48,6 +48,7 @@ typedef enum {
     IMP_ARCH_BAILING_HYBRID = 22,
     IMP_ARCH_KIMI_LINEAR = 23,
     IMP_ARCH_FLINT = 24,
+    IMP_ARCH_INKLING2 = 25,
 } ImpModelArch;
 
 typedef enum {
