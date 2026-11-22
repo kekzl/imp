@@ -11,7 +11,7 @@ image carries the browsers; the package itself is pip-installed in the container
         bash -c 'pip install -q playwright==1.55.0 && python drive.py chat http://localhost:9099/'
 
 scenarios: chat, length, errors, stop, live (mid-stream captures), narrow,
-swap, system, reload, actions, boot (needs a mock started with --boot-delay),
+swap, system, reload, actions, dashboard, boot (needs a mock started with --boot-delay),
 features (every redesign feature, results in "checks"), shots (review captures).
 usage: python drive.py <scenario> [url]
 Exit code 0 = scenario finished, 1 = driver failure (timeout, missing element).
@@ -279,6 +279,8 @@ def run(pw):
     if SCENARIO == "features":
         features(page, out, bodies, step, answer_and_settle)
 
+    if SCENARIO == "dashboard":
+        dashboard(page, out)
     if SCENARIO == "shots":
         shots(page, out)
 
@@ -565,6 +567,52 @@ def features(page, out, bodies, step, answer_and_settle):
 
     step("15-light", s15)
     checks["theme"] = q("() => document.documentElement.dataset.theme")
+
+
+def dashboard(page, out):
+    """The metrics dashboard while two answers stream: dark, light, hover, narrow, direct link."""
+    page.emulate_media(color_scheme="dark")
+    page.click("#dash-btn")
+    sleep(3000)
+    for text in ("nothink warm up", "fast nothink and again", "slow nothink one more"):
+        page.click("#dash-btn")
+        send(page, text)
+        page.click("#dash-btn")
+        wait_idle(page)
+        sleep(2500)
+    page.click("#dash-btn")
+    send(page, "long Explain streaming, with code.")
+    page.click("#dash-btn")
+    sleep(7000)
+    out["hash"] = page.evaluate("() => location.hash")
+    out["charts"] = page.evaluate("""() => [...document.querySelectorAll("#dash .chart")].map((f) => ({
+        title: f.querySelector(".t").textContent, value: f.querySelector(".v").textContent,
+        lines: f.querySelectorAll("polyline").length, empty: !f.querySelector(".none").hidden }))""")
+    out["vram_rows"] = page.evaluate('() => document.querySelectorAll("#d-vram .bar").length')
+    out["duration_bars"] = page.evaluate('() => document.querySelectorAll("#d-dur > div").length')
+    out["totals"] = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll("#dash .readout dt")].map((dt) =>
+        [dt.textContent.trim(), dt.nextElementSibling.textContent.trim()]))""")
+    page.screenshot(path=f"{SHOTS}/dashboard-dark.png")
+    box = page.locator("#d-hero .plot").bounding_box()
+    page.mouse.move(box["x"] + box["width"] * 0.93, box["y"] + box["height"] * 0.5)
+    sleep(200)
+    out["tip"] = page.evaluate('() => document.querySelector("#d-hero .tip").textContent')
+    page.screenshot(path=f"{SHOTS}/dashboard-hover.png")
+    page.mouse.move(5, 5)
+    page.emulate_media(color_scheme="light")
+    sleep(2300)
+    page.screenshot(path=f"{SHOTS}/dashboard-light.png")
+    page.emulate_media(color_scheme="dark")
+    page.set_viewport_size({"width": 390, "height": 844})
+    sleep(2300)
+    page.screenshot(path=f"{SHOTS}/dashboard-mobile.png", full_page=False)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.click("#dash-btn")
+    out["closed"] = page.evaluate('() => document.getElementById("dash").hidden && location.hash === ""')
+    page.goto(page.url.split("#")[0] + "#dashboard")
+    page.reload()
+    sleep(2600)
+    out["direct_link_opens"] = page.evaluate('() => !document.getElementById("dash").hidden')
 
 
 def shots(page, out):

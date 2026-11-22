@@ -34,7 +34,7 @@ MOCK_LAYERS = 24  # logit lens rows
 STATE = {"loaded": None, "boot_until": 0.0, "lock": threading.Lock(), "started": time.time()}
 # /metrics counters; energy integrates power (idle vs streaming) between reads.
 METRICS = {"requests": 0, "failed": 0, "prompt": 0, "completion": 0, "cached": 0, "active": 0,
-           "energy": 0.0, "energy_t": time.monotonic(), "last_ttft_ms": 0}
+           "energy": 0.0, "energy_t": time.monotonic(), "last_ttft_ms": 0, "decoded": 0, "durations": []}
 ACTIVE = {}  # request id -> threading.Event set by end_thinking
 
 
@@ -140,6 +140,18 @@ class H(BaseHTTPRequestHandler):
             ("imp_vram_own_bytes", 27_412_000_000 + active * 180_000_000),
             ("imp_vram_own_peak_bytes", 28_190_000_000),
         ]
+        for tag, mb in (("weights", 16263), ("kv_pool", 5120), ("decode_cache", 2210), ("vision", 606),
+                        ("fp8_lm_head", 440), ("shared_workspace", 41), ("persistent_workspace", 33),
+                        ("prefill_pool", 1), ("penalty_hist", 1), ("stop_mask_tokens", 1)):
+            lines.append(('imp_vram_allocator_bytes{tag="%s"}' % tag, mb * 1024 * 1024))
+        lines.append(("imp_vram_untracked_bytes", 1_710_000_000))
+        # Finished requests spread over the duration buckets, cumulative as Prometheus writes them.
+        durs = METRICS["durations"]
+        for le in ("0.5", "1", "2.5", "5", "10", "30", "60", "+Inf"):
+            n = len(durs) if le == "+Inf" else sum(1 for d in durs if d <= float(le))
+            lines.append(('imp_request_duration_seconds_bucket{le="%s"}' % le, n))
+        lines += [("imp_request_duration_seconds_sum", round(sum(durs), 3)), ("imp_request_duration_seconds_count", len(durs)),
+                  ("imp_decode_batch_rows_total", METRICS["decoded"])]
         if not ARGS.no_power:
             lines += [("imp_gpu_power_watts", round(power_now(), 1)),
                       ("imp_gpu_energy_joules_total", round(METRICS["energy"], 1))]
@@ -351,6 +363,7 @@ class H(BaseHTTPRequestHandler):
                 obj["usage"] = usage
             data = ("data: " + json.dumps(obj) + "\n\n").encode()
             self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")
+            METRICS["decoded"] += 1  # one write per token: the live counter, as imp_decode_batch_rows_total
             self.wfile.flush()
 
         def lp_for(tok):
@@ -429,6 +442,7 @@ class H(BaseHTTPRequestHandler):
             with STATE["lock"]:
                 METRICS["prompt"] += prompt_tokens
                 METRICS["completion"] += n_emitted
+                METRICS["durations"].append(time.monotonic() - t0)
                 METRICS["cached"] += cached
         except (BrokenPipeError, ConnectionResetError):
             sys.stderr.write("client went away\n")
