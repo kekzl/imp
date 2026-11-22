@@ -37,10 +37,11 @@ void block_mix(const MixStates& st, const float* query, int nq, const MixOut& ou
 // Message gate, part 1: cat = [unit_rms(h), unit_rms(msg)] as fp16 [T, 2H].
 void gate_cat(const float* h, const float* msg, half* cat, int T, int H, float eps, cudaStream_t s);
 // Part 2: out = (1 - tanh(forget)) * h + tanh(gain) * msg.
-void gate_apply(const float* h, const float* msg, const half* forget, const half* gain, float* out,
-                size_t n, cudaStream_t s);
+void gate_apply(const float* h, const float* msg, const half* forget, const half* gain, float* out, size_t n,
+                cudaStream_t s);
 
-// Per head: v = x * scale; v *= min(thr / (|v| + 1e-6), 1); log_alpha > 0: v *= 1 + alpha * ln(max((pos + 1) / floor, 1)).
+// Per head: v = x * scale; v *= min(thr / (|v| + 1e-6), 1); log_alpha > 0: v *= 1 + alpha * ln(max((pos + 1)
+// / floor, 1)).
 void scaled_l2_clip(const half* x, const float* scale, float* out, int T, int n_heads, int head_dim,
                     float thr, int pos0, float log_alpha, float log_floor, cudaStream_t s);
 
@@ -59,8 +60,8 @@ void kv_store(const float* x, half* cache, int T, int n_heads, int head_dim, boo
               float eps, int pos0, int ring, cudaStream_t s);
 
 struct AttnArgs {
-    const float* q = nullptr;     // [T, n_heads, hd]
-    const half* k = nullptr;      // [ring or ctx, n_kv, hd]
+    const float* q = nullptr;  // [T, n_heads, hd]
+    const half* k = nullptr;   // [ring or ctx, n_kv, hd]
     const half* v = nullptr;
     const float* rel = nullptr;   // [T, n_heads, d_rel]
     const float* proj = nullptr;  // [d_rel, rel_extent]
@@ -77,14 +78,14 @@ void attention(const AttnArgs& a, cudaStream_t s);
 void gate_mul(const float* attn, const half* gate, half* out, size_t n, cudaStream_t s);
 
 // Router: scores = sigmoid(W x); top_k of scores + bias; weights = score / sum * route_scale.
-void route_topk(const float* x, const float* w, const float* bias, int32_t* idx, float* weights, int T,
-                int H, int n_experts, int top_k, float route_scale, cudaStream_t s);
+void route_topk(const float* x, const float* w, const float* bias, int32_t* idx, float* weights, int T, int H,
+                int n_experts, int top_k, float route_scale, cudaStream_t s);
 // gu [slots, 2 * I] with gate / up rows interleaved -> softcap(g, gc) * sigmoid(g) * softcap(u, uc).
 void expert_act(const half* gu, half* out, int slots, int I, float gate_cap, float up_cap, cudaStream_t s);
 // out[t] = sum_k weights[t, k] * y[t * top_k + k].
-void expert_combine(const half* y, const float* weights, float* out, int T, int top_k, int H,
-                    cudaStream_t s);
-// MXFP8 expert rows: y[slot, row] = sum_k e4m3(w[e, row, k]) * 2^(sc[e, row, k / 32] - 127) * x[slot / x_group, k].
+void expert_combine(const half* y, const float* weights, float* out, int T, int top_k, int H, cudaStream_t s);
+// MXFP8 expert rows: y[slot, row] = sum_k e4m3(w[e, row, k]) * 2^(sc[e, row, k / 32] - 127) * x[slot /
+// x_group, k].
 void gemv_mxfp8_slots(const uint8_t* w, const uint8_t* sc, const int32_t* idx, const half* x, half* y,
                       int slots, int rows, int K, int x_group, cudaStream_t s);
 // out = cap * tanh(x / cap).

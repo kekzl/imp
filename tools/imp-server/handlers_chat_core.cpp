@@ -785,8 +785,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Check text-level stop sequences
             if (!ctx.params.stop_sequences.empty()) {
-                const std::string piece =
-                    decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, token, &marker_state);
+                const std::string piece = decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, token,
+                                                            &marker_state);
                 output_text += piece;
                 if (stops_skip_reasoning && ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY)
                     stop_content = split_harmony_channels(output_text, ctx.snap.suppress_thinking).content;

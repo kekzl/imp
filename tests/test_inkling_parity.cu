@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "exec/inkling_forward.h"
+#include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 
 using namespace imp;
@@ -75,8 +76,10 @@ struct Err {
 };
 
 struct Fixture {
+    VRAMAllocator va;  // declared first: the weights free into it
     InklingWeights w;
     bool loaded = false;
+    bool load(const char* dir) { return loaded = va.init() && load_inkling_weights(dir, w, va); }
 };
 Fixture& fixture() {
     static Fixture f;
@@ -92,7 +95,7 @@ TEST_P(InklingParity, ResidualStreamAndLogitsMatchTheReference) {
         GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
     Fixture& fx = fixture();
     if (!fx.loaded)
-        ASSERT_TRUE(fx.loaded = load_inkling_weights(model, fx.w));
+        ASSERT_TRUE(fx.load(model));
     const std::string base = std::string(oracle) + "/" + GetParam();
     const std::vector<int32_t> ids = read_ids(base + "_prompt.json");
     std::vector<int64_t> hs, ls;
@@ -108,7 +111,7 @@ TEST_P(InklingParity, ResidualStreamAndLogitsMatchTheReference) {
 
     const bool split = std::getenv("IMP_TEST_INKLING_SPLIT") != nullptr;
     InklingForward fwd;
-    ASSERT_TRUE(fwd.init(fx.w, T, 4096));
+    ASSERT_TRUE(fwd.init(fx.w, fx.va, T, 4096));
     int32_t* d_ids = nullptr;
     float* d_logits = nullptr;
     ASSERT_EQ(cudaMalloc(&d_ids, ids.size() * sizeof(int32_t)), cudaSuccess);
@@ -158,8 +161,8 @@ TEST_P(InklingParity, ResidualStreamAndLogitsMatchTheReference) {
         }
         Err le;
         le.add(logits.data(), ref_logits.data(), logits.size());
-        std::printf("mode %d top-1 %zu (%.3f), reference %zu (%.3f), logits rel_err %.5f\n", mode, am, logits[am],
-                    ar, ref_logits[ar], le.rel());
+        std::printf("mode %d top-1 %zu (%.3f), reference %zu (%.3f), logits rel_err %.5f\n", mode, am,
+                    logits[am], ar, ref_logits[ar], le.rel());
         EXPECT_LT(le.rel(), 0.03) << "mode " << mode;
         EXPECT_EQ(am, ar) << "mode " << mode;
     }
@@ -175,7 +178,7 @@ TEST_P(InklingParity, GreedyContinuationMatchesTheReference) {
         GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
     Fixture& fx = fixture();
     if (!fx.loaded)
-        ASSERT_TRUE(fx.loaded = load_inkling_weights(model, fx.w));
+        ASSERT_TRUE(fx.load(model));
     const std::string base = std::string(oracle) + "/" + GetParam();
     std::vector<int32_t> ids = read_ids(base + "_prompt.json");
     const std::vector<int32_t> want = read_ids(base + "_greedy.json");
@@ -183,7 +186,7 @@ TEST_P(InklingParity, GreedyContinuationMatchesTheReference) {
     ASSERT_FALSE(want.empty());
     const int T = static_cast<int>(ids.size()), V = fx.w.cfg.vocab;
     InklingForward fwd;
-    ASSERT_TRUE(fwd.init(fx.w, T, 4096));
+    ASSERT_TRUE(fwd.init(fx.w, fx.va, T, 4096));
     int32_t* d_ids = nullptr;
     float* d_logits = nullptr;
     ASSERT_EQ(cudaMalloc(&d_ids, ids.size() * sizeof(int32_t)), cudaSuccess);

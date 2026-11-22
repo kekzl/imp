@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -37,9 +38,16 @@ struct OutputMarkerState {
 
 // Cohere2 table when all six markers are single added tokens; empty otherwise.
 OutputMarkerAliases cohere_output_aliases(const imp::Tokenizer& tok);
-// Inkling2 table (<|message_model|> NAME? <|content_*|> body <|end_message|>); empty when a marker is missing.
-// think_start / think_end receive the ids of <|content_thinking|> and <|end_message|>.
-OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& think_start, int32_t& think_end);
+// Inkling2 table (<|message_model|> NAME? <|content_*|> body <|end_message|>); empty when a marker is
+// missing. think_start / think_end receive the ids of <|content_thinking|> and <|end_message|>.
+OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& think_start,
+                                           int32_t& think_end);
+
+// The Inkling2 table over the ids of <|message_model|>, <|content_thinking|>, <|content_text|>,
+// <|content_invoke_tool_json|>, <|end_message|> (in that order).
+OutputMarkerAliases inkling_alias_table(const std::array<int32_t, 5>& ids);
+// One decode step: marker a (non-null) or plain text between markers.
+std::string output_marker_step(OutputMarkerState& st, const OutputMarkerAlias* a, std::string plain);
 
 // Alias text of `id`, nullptr when `id` has none.
 const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id);

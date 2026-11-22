@@ -5,15 +5,13 @@
 
 #include <cuda_fp16.h>
 
-namespace imp {
-class VRAMAllocator;
-}
-
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace imp {
+
+class VRAMAllocator;
 
 struct InklingConfig {
     int n_layers = 24, hidden = 2304, n_heads = 24, n_kv_heads = 8, head_dim = 128;
@@ -48,8 +46,8 @@ struct InklingGate {
 
 struct InklingExperts {
     bool fp8 = false;
-    NvFP4MoEQuantResult w13, w2;                  // NVFP4: [E, 2I, H] gate/up rows interleaved, [E, H, I]
-    uint8_t *w13_q = nullptr, *w13_s = nullptr;   // MXFP8 values and per-32 exponents
+    NvFP4MoEQuantResult w13, w2;                 // NVFP4: [E, 2I, H] gate/up rows interleaved, [E, H, I]
+    uint8_t *w13_q = nullptr, *w13_s = nullptr;  // MXFP8 values and per-32 exponents
     uint8_t *w2_q = nullptr, *w2_s = nullptr;
 };
 
@@ -61,9 +59,9 @@ struct InklingLayer {
     InklingConv k_conv, v_conv;
     float *attn_conv = nullptr, *mlp_conv = nullptr;
     float *router_w = nullptr, *router_b = nullptr;
-    InklingGate gates[4];          // q, k, v, mlp (loop layers)
-    float* attn_query = nullptr;   // [1 or 3, hidden]; null on layer 0
-    float* mlp_query = nullptr;    // [hidden]
+    InklingGate gates[4];         // q, k, v, mlp (loop layers)
+    float* attn_query = nullptr;  // [1 or 3, hidden]; null on layer 0
+    float* mlp_query = nullptr;   // [hidden]
     InklingExperts ex;
 };
 
@@ -72,9 +70,9 @@ struct InklingWeights {
     std::vector<InklingLayer> layers;
     half *embed = nullptr, *unembed = nullptr;
     float *embed_norm = nullptr, *norm = nullptr, *out_query = nullptr;
-    float* msg_query = nullptr;  // [loop layers, 4 (q, k, v, mlp), hidden]
-    std::vector<void*> owned;    // every device allocation above
-    VRAMAllocator* va = nullptr; // owner of `owned`; null = cudaMalloc
+    float* msg_query = nullptr;   // [loop layers, 4 (q, k, v, mlp), hidden]
+    std::vector<void*> owned;     // every device allocation above
+    VRAMAllocator* va = nullptr;  // owner of `owned`
     size_t device_bytes = 0;
 
     InklingWeights() = default;
@@ -86,8 +84,8 @@ struct InklingWeights {
 [[nodiscard]] bool parse_inkling_config(const std::string& dir, InklingConfig& cfg);
 // Uploads the text model from <dir>/model-*.safetensors. False = a tensor is missing or mis-shaped.
 // with_vocab false: embedding and unembedding stay with the caller (the engine's standard path).
-// va: the engine's tracked allocator (tag inkling_weights); null = cudaMalloc.
-[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab = true,
-                                        VRAMAllocator* va = nullptr);
+// Allocates from va under the tag inkling_weights.
+[[nodiscard]] bool load_inkling_weights(const std::string& dir, InklingWeights& w, VRAMAllocator& va,
+                                        bool with_vocab = true);
 
 }  // namespace imp

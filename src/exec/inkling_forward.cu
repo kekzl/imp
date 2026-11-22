@@ -18,12 +18,12 @@ using namespace inkling;
 
 InklingForward::~InklingForward() {
     for (void* p : owned_)
-        va_ ? va_->free(p) : static_cast<void>(cudaFree(p));
+        va_->free(p);
 }
 
 void* InklingForward::alloc_(size_t bytes) {
-    void* p = va_ ? va_->allocate(bytes, "inkling_state") : nullptr;
-    if (!p && (va_ || cudaMalloc(&p, bytes) != cudaSuccess)) {
+    void* p = va_->allocate(bytes, "inkling_state");
+    if (!p) {
         IMP_LOG_ERROR("inkling: workspace allocation of %.1f MiB failed", bytes / 1048576.0);
         ok_ = false;
         return nullptr;
@@ -32,19 +32,21 @@ void* InklingForward::alloc_(size_t bytes) {
     return p;
 }
 
-bool InklingForward::init(const InklingWeights& w, int max_tokens, int max_ctx, VRAMAllocator* va) {
+bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx) {
     w_ = &w;
-    va_ = va;
+    va_ = &va;
     const InklingConfig& c = w.cfg;
     max_tokens_ = max_tokens;
     max_ctx_ = max_ctx;
     ring_ = c.window + max_tokens;
     const size_t Tm = static_cast<size_t>(max_tokens), H = static_cast<size_t>(c.hidden);
-    const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim, KD = static_cast<size_t>(c.n_kv_heads) * c.head_dim;
+    const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim,
+                 KD = static_cast<size_t>(c.n_kv_heads) * c.head_dim;
     const size_t slots = Tm * c.top_k;
-    for (float** p : {&h_, &resid_, &bs_[0], &bs_[1], &bs_[2], &bs_[3], &pre_h_, &msrc_[0], &msrc_[1], &msrc_[2],
-                      &msrc_[3], &mix_[0], &mix_[1], &mix_[2], &msg_[0], &msg_[1], &msg_[2], &msg_[3], &g_[0],
-                      &g_[1], &g_[2], &a_, &res2_, &mm_, &xmf_, &mo_, &co_, &of_})
+    for (float** p : {&h_,       &resid_,   &bs_[0],   &bs_[1],   &bs_[2],  &bs_[3],  &pre_h_,
+                      &msrc_[0], &msrc_[1], &msrc_[2], &msrc_[3], &mix_[0], &mix_[1], &mix_[2],
+                      &msg_[0],  &msg_[1],  &msg_[2],  &msg_[3],  &g_[0],   &g_[1],   &g_[2],
+                      &a_,       &res2_,    &mm_,      &xmf_,     &mo_,     &co_,     &of_})
         *p = F_(Tm * H);
     qf_ = F_(Tm * QD);
     attn_ = F_(Tm * QD);
@@ -72,7 +74,8 @@ bool InklingForward::init(const InklingWeights& w, int max_tokens, int max_ctx, 
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
         // Application index -> weight layer.
         const int layer = a < c.n_layers ? a : c.loop_start + (a - c.n_layers) % (c.loop_end - c.loop_start);
-        const size_t rows = c.global[static_cast<size_t>(layer)] ? static_cast<size_t>(max_ctx) : static_cast<size_t>(ring_);
+        const size_t rows = c.global[static_cast<size_t>(layer)] ? static_cast<size_t>(max_ctx)
+                                                                 : static_cast<size_t>(ring_);
         k_.push_back(Hf_(rows * KD));
         v_.push_back(Hf_(rows * KD));
         conv_state_.push_back(F_(conv_state_floats_));
@@ -85,7 +88,7 @@ bool InklingForward::init(const InklingWeights& w, int max_tokens, int max_ctx, 
 void InklingForward::reset(cudaStream_t s) {
     pos_ = 0;
     for (float* p : conv_state_)
-        cudaMemsetAsync(p, 0, conv_state_floats_ * sizeof(float), s);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(p, 0, conv_state_floats_ * sizeof(float), s));
 }
 
 void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s) {
@@ -108,8 +111,8 @@ const float* InklingForward::gate_(const float* h, const float* msg, const Inkli
 }
 
 // Key or value: conv over the projection x_h [T, KD], clip or norm, write into the application's cache.
-void InklingForward::conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site, bool is_key,
-                           int T, cudaStream_t s) {
+void InklingForward::conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site,
+                           bool is_key, int T, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
     const int KD = c.n_kv_heads * c.head_dim;
     float* st = conv_state_[static_cast<size_t>(app)] + static_cast<size_t>(site) * 3 * KD;
@@ -122,8 +125,8 @@ void InklingForward::conv_(const half* x_h, const InklingConv& cv, const half* x
     }
     conv_state_update(kf_, st, T, KD, s);
     const int layer_global = cv.static_w != nullptr;
-    kv_store(kc_, (is_key ? k_ : v_)[static_cast<size_t>(app)], T, c.n_kv_heads, c.head_dim, is_key, c.qk_clip,
-             c.eps, pos_, layer_global ? 0 : ring_, s);
+    kv_store(kc_, (is_key ? k_ : v_)[static_cast<size_t>(app)], T, c.n_kv_heads, c.head_dim, is_key,
+             c.qk_clip, c.eps, pos_, layer_global ? 0 : ring_, s);
 }
 
 void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
@@ -233,7 +236,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     conv_state_update(mo_, ms2, T, H, s);
     add_f32(res2_, co_, h_, n, s);
     if (tap) {
-        cudaStreamSynchronize(s);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
         tap(app_seq_, h_, T);
     }
     ++app_seq_;
@@ -247,7 +250,7 @@ void InklingForward::layers_(int T, cudaStream_t s) {
     nb_ = 0;
     app_seq_ = 0;
     if (tap) {
-        cudaStreamSynchronize(s);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
         tap(-1, h_, T);
     }
     for (int i = 0; i < c.loop_start; ++i)
@@ -281,8 +284,9 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
     if (pos0 == 0)
         reset(s);
     if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
-        IMP_LOG_ERROR("inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)",
-                      T, pos0, pos_, max_tokens_, max_ctx_);
+        IMP_LOG_ERROR(
+            "inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)", T,
+            pos0, pos_, max_tokens_, max_ctx_);
         return false;
     }
     const size_t n = static_cast<size_t>(T) * w_->cfg.hidden;
@@ -296,8 +300,8 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s) {
 bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
     if (T < 1 || T > max_tokens_ || pos_ + T > max_ctx_ || !w_->embed) {
-        IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T, pos_,
-                      max_tokens_, max_ctx_);
+        IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T,
+                      pos_, max_tokens_, max_ctx_);
         return false;
     }
     const int H = c.hidden;
@@ -306,7 +310,7 @@ bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaS
     if (d_logits) {
         rms_norm(mix_[0], w_->norm, tap ? mix_[1] : nullptr, xq_, T, H, c.eps, s);
         if (tap) {
-            cudaStreamSynchronize(s);
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
             tap(c.n_apps(), mix_[1], T);
         }
         lin_(xq_ + static_cast<size_t>(T - 1) * H, 1, H, w_->unembed, c.vocab, logits_h_, s);

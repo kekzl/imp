@@ -45,19 +45,16 @@ __device__ inline float block_max(float v, float* sh) {
     return t;
 }
 
-__device__ inline float bf16_bits(uint16_t b) {
-    return __uint_as_float(static_cast<uint32_t>(b) << 16);
-}
+__device__ inline float bf16_bits(uint16_t b) { return __uint_as_float(static_cast<uint32_t>(b) << 16); }
 
 __device__ inline float e4m3(uint8_t b) {
     const int e = (b >> 3) & 0xF, m = b & 7;
-    const float mag = e == 0 ? scalbnf(static_cast<float>(m), -9) : scalbnf(static_cast<float>(8 + m), e - 10);
+    const float mag = e == 0 ? scalbnf(static_cast<float>(m), -9)
+                             : scalbnf(static_cast<float>(8 + m), e - 10);
     return (b & 0x80) ? -mag : mag;
 }
 
-inline unsigned grid_for(size_t n) {
-    return static_cast<unsigned>((n + kThreads - 1) / kThreads);
-}
+inline unsigned grid_for(size_t n) { return static_cast<unsigned>((n + kThreads - 1) / kThreads); }
 
 __global__ void bf16_to_f16_k(const uint16_t* in, half* out, size_t n) {
     const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -190,7 +187,8 @@ __device__ inline float conv_in(const float* x, const float* state, int u, int c
     return u >= 0 ? x[(size_t)u * C + c] : state[(size_t)(3 + u) * C + c];
 }
 
-__global__ void conv_static_k(const float* x, const float* w, const float* state, float* out, size_t n, int C) {
+__global__ void conv_static_k(const float* x, const float* w, const float* state, float* out, size_t n,
+                              int C) {
     const size_t id = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= n)
         return;
@@ -201,8 +199,8 @@ __global__ void conv_static_k(const float* x, const float* w, const float* state
     out[id] = (acc + x[id]) * 0.4472135954999579f;
 }
 
-__global__ void conv_dynamic_k(const float* x, const float* sw, const half* dyn, const float* state, float* out,
-                               size_t n, int C, int n_heads) {
+__global__ void conv_dynamic_k(const float* x, const float* sw, const half* dyn, const float* state,
+                               float* out, size_t n, int C, int n_heads) {
     const size_t id = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= n)
         return;
@@ -226,8 +224,8 @@ __global__ void conv_state_update_k(const float* x, float* state, int T, int C) 
         state[(size_t)i * C + c] = v[i];
 }
 
-__global__ void kv_store_k(const float* x, half* cache, int total, int n_heads, int hd, bool is_key, float thr,
-                           float eps, int pos0, int ring) {
+__global__ void kv_store_k(const float* x, half* cache, int total, int n_heads, int hd, bool is_key,
+                           float thr, float eps, int pos0, int ring) {
     const int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= total)
         return;
@@ -352,7 +350,8 @@ __global__ void expert_act_k(const half* gu, half* out, size_t n, float gate_cap
     out[i] = __float2half(gate_cap * tanhf(g / gate_cap) / (1.0f + expf(-g)) * up_cap * tanhf(u / up_cap));
 }
 
-__global__ void expert_combine_k(const half* y, const float* weights, float* out, size_t n, int top_k, int H) {
+__global__ void expert_combine_k(const half* y, const float* weights, float* out, size_t n, int top_k,
+                                 int H) {
     const size_t id = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= n)
         return;
@@ -432,8 +431,8 @@ void gate_cat(const float* h, const float* msg, half* cat, int T, int H, float e
     gate_cat_k<<<T, kThreads, 0, s>>>(h, msg, cat, H, eps);
     IMP_CUDA_CHECK_LAUNCH();
 }
-void gate_apply(const float* h, const float* msg, const half* forget, const half* gain, float* out,
-                size_t n, cudaStream_t s) {
+void gate_apply(const float* h, const float* msg, const half* forget, const half* gain, float* out, size_t n,
+                cudaStream_t s) {
     gate_apply_k<<<grid_for(n), kThreads, 0, s>>>(h, msg, forget, gain, out, n);
     IMP_CUDA_CHECK_LAUNCH();
 }
@@ -463,8 +462,8 @@ void conv_state_update(const float* x, float* state, int T, int C, cudaStream_t 
 void kv_store(const float* x, half* cache, int T, int n_heads, int head_dim, bool is_key, float thr,
               float eps, int pos0, int ring, cudaStream_t s) {
     const int total = T * n_heads;
-    kv_store_k<<<grid_for(total), kThreads, 0, s>>>(x, cache, total, n_heads, head_dim, is_key, thr, eps, pos0,
-                                                    ring);
+    kv_store_k<<<grid_for(total), kThreads, 0, s>>>(x, cache, total, n_heads, head_dim, is_key, thr, eps,
+                                                    pos0, ring);
     IMP_CUDA_CHECK_LAUNCH();
 }
 void attention(const AttnArgs& a, cudaStream_t s) {
@@ -479,8 +478,8 @@ void gate_mul(const float* attn, const half* gate, half* out, size_t n, cudaStre
     gate_mul_k<<<grid_for(n), kThreads, 0, s>>>(attn, gate, out, n);
     IMP_CUDA_CHECK_LAUNCH();
 }
-void route_topk(const float* x, const float* w, const float* bias, int32_t* idx, float* weights, int T,
-                int H, int n_experts, int top_k, float route_scale, cudaStream_t s) {
+void route_topk(const float* x, const float* w, const float* bias, int32_t* idx, float* weights, int T, int H,
+                int n_experts, int top_k, float route_scale, cudaStream_t s) {
     if (n_experts > 128 || top_k > 16) {
         IMP_LOG_ERROR("inkling router: %d experts / top %d out of range", n_experts, top_k);
         return;

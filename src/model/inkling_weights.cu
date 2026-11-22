@@ -50,8 +50,8 @@ struct Loader {
         return &x;
     }
     void* dev(size_t bytes) {
-        void* p = w.va ? w.va->allocate(bytes, "inkling_weights") : nullptr;
-        if (!p && (w.va || cudaMalloc(&p, bytes) != cudaSuccess)) {
+        void* p = w.va->allocate(bytes, "inkling_weights");
+        if (!p) {
             IMP_LOG_ERROR("inkling: device allocation of %.1f MiB failed", bytes / 1048576.0);
             ok = false;
             return nullptr;
@@ -63,14 +63,16 @@ struct Loader {
     void* raw(const std::string& name, QType qt, int64_t numel) {
         const Tensor* x = find(name, qt, numel);
         void* p = x ? dev(x->nbytes()) : nullptr;
-        if (p && cudaMemcpy(p, x->data, x->nbytes(), cudaMemcpyHostToDevice) != cudaSuccess)
+        // Pageable source: the copy is staged before the call returns.
+        if (p && cudaMemcpyAsync(p, x->data, x->nbytes(), cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
             ok = false;
         return p;
     }
     half* f16(const std::string& name, int64_t numel) {
         auto* p = static_cast<half*>(raw(name, QType::BF16, numel));
         if (p)
-            inkling::bf16_to_f16(reinterpret_cast<const uint16_t*>(p), p, static_cast<size_t>(numel), nullptr);
+            inkling::bf16_to_f16(reinterpret_cast<const uint16_t*>(p), p, static_cast<size_t>(numel),
+                                 nullptr);
         return p;
     }
     // BF16 or F32 on disk -> fp32 on the device.
@@ -94,7 +96,8 @@ struct Loader {
     }
     float* upload(const std::vector<float>& h) {
         auto* p = static_cast<float*>(dev(h.size() * sizeof(float)));
-        if (p && cudaMemcpy(p, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        if (p && cudaMemcpyAsync(p, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice, nullptr) !=
+                     cudaSuccess)
             ok = false;
         return p;
     }
@@ -136,7 +139,7 @@ struct Loader {
 
 InklingWeights::~InklingWeights() {
     for (void* p : owned)
-        va ? va->free(p) : static_cast<void>(cudaFree(p));
+        va->free(p);
 }
 
 bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {
@@ -187,16 +190,17 @@ bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {
     for (const auto& v : local->arr)
         if (v.type == JType::NUMBER && v.as_int() >= 0 && v.as_int() < cfg.n_layers)
             cfg.global[static_cast<size_t>(v.as_int())] = false;
-    const bool sane = cfg.sconv_kernel == 4 && cfg.n_experts <= 128 && cfg.top_k <= 16 && cfg.head_dim <= 128 &&
-                      cfg.d_rel <= 32 && cfg.passes >= 1 && cfg.loop_start % cfg.block_layers == 0 &&
-                      cfg.loop_end > cfg.loop_start && cfg.loop_end <= cfg.n_layers;
+    const bool sane = cfg.sconv_kernel == 4 && cfg.n_experts <= 128 && cfg.top_k <= 16 &&
+                      cfg.head_dim <= 128 && cfg.d_rel <= 32 && cfg.passes >= 1 &&
+                      cfg.loop_start % cfg.block_layers == 0 && cfg.loop_end > cfg.loop_start &&
+                      cfg.loop_end <= cfg.n_layers;
     if (!sane)
         IMP_LOG_ERROR("inkling: config outside what this build runs (sconv kernel, experts, head_dim, loop)");
     return sane;
 }
 
-bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_vocab, VRAMAllocator* va) {
-    w.va = va;
+bool load_inkling_weights(const std::string& dir, InklingWeights& w, VRAMAllocator& va, bool with_vocab) {
+    w.va = &va;
     if (!parse_inkling_config(dir, w.cfg))
         return false;
     const InklingConfig& c = w.cfg;
@@ -258,8 +262,10 @@ bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_v
             ly.norm_v = L.f32(p + "v_input_norm.weight", H);
             ly.k_conv.static_w = L.f32(p + "attn.k_sconv.static_w", 4 * KD);
             ly.v_conv.static_w = L.f32(p + "attn.v_sconv.static_w", 4 * KD);
-            ly.k_conv.proj = L.f16(p + "attn.k_sconv.weight_proj", static_cast<int64_t>(c.n_kv_heads) * 4 * H);
-            ly.v_conv.proj = L.f16(p + "attn.v_sconv.weight_proj", static_cast<int64_t>(c.n_kv_heads) * 4 * H);
+            ly.k_conv.proj = L.f16(p + "attn.k_sconv.weight_proj",
+                                   static_cast<int64_t>(c.n_kv_heads) * 4 * H);
+            ly.v_conv.proj = L.f16(p + "attn.v_sconv.weight_proj",
+                                   static_cast<int64_t>(c.n_kv_heads) * 4 * H);
         } else {
             ly.norm_q = ly.norm_k = ly.norm_v = L.f32(p + "attn_norm.weight", H);
             ly.k_conv.w = L.f32(p + "attn.k_sconv.weight", KD * 4);
@@ -287,7 +293,8 @@ bool load_inkling_weights(const std::string& dir, InklingWeights& w, bool with_v
         L.experts(p + "mlp.experts.w13_weight", 2 * I, H, ly.ex.fp8, ly.ex.w13, ly.ex.w13_q, ly.ex.w13_s);
         L.experts(p + "mlp.experts.w2_weight", H, I, ly.ex.fp8, ly.ex.w2, ly.ex.w2_q, ly.ex.w2_s);
     }
-    cudaDeviceSynchronize();
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        L.ok = false;
     munmap(base, size);
     if (L.ok)
         IMP_LOG_INFO("inkling: %d layers (%d applications), %.2f GiB on the device", c.n_layers, c.n_apps(),

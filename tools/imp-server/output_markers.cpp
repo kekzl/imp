@@ -2,6 +2,7 @@
 
 #include "model/tokenizer.h"
 
+#include <array>
 #include <iterator>
 #include <utility>
 
@@ -24,29 +25,37 @@ OutputMarkerAliases cohere_output_aliases(const imp::Tokenizer& tok) {
     return out;
 }
 
-OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& think_start, int32_t& think_end) {
-    OutputMarkerAliases out;
-    auto add = [&](const char* marker, OutputMarkerAlias a) {
-        a.id = tok.find_token(marker);
-        out.push_back(std::move(a));
-        return out.back().id;
-    };
-    add("<|message_model|>", {.header = true});
-    const int32_t ts = add("<|content_thinking|>", {.text = "<think>", .close = "</think>"});
-    add("<|content_text|>", {});
-    // The body is {"name":NAME,"args":{...}}; the shared parser reads "arguments".
-    add("<|content_invoke_tool_json|>", {.text = "<tool_call>",
-                                         .close = "</tool_call>",
-                                         .drops_header = true,
-                                         .rewrite_from = "\"args\":",
-                                         .rewrite_to = "\"arguments\":"});
-    const int32_t te = add("<|end_message|>", {.closes = true});
-    for (const auto& a : out)
-        if (a.id < 0 || !tok.is_added_token(a.id))
-            return {};
-    think_start = ts;
-    think_end = te;
+OutputMarkerAliases inkling_alias_table(const std::array<int32_t, 5>& ids) {
+    OutputMarkerAliases out(5);
+    out[0].header = true;
+    out[1].text = "<think>";
+    out[1].close = "</think>";
+    // The call body is {"name":NAME,"args":{...}}; the shared parser reads "arguments".
+    out[3].text = "<tool_call>";
+    out[3].close = "</tool_call>";
+    out[3].drops_header = true;
+    out[3].rewrite_from = "\"args\":";
+    out[3].rewrite_to = "\"arguments\":";
+    out[4].closes = true;
+    for (size_t i = 0; i < out.size(); ++i)
+        out[i].id = ids[i];
     return out;
+}
+
+OutputMarkerAliases inkling_output_aliases(const imp::Tokenizer& tok, int32_t& think_start,
+                                           int32_t& think_end) {
+    static constexpr const char* kMarkers[5] = {"<|message_model|>", "<|content_thinking|>",
+                                                "<|content_text|>", "<|content_invoke_tool_json|>",
+                                                "<|end_message|>"};
+    std::array<int32_t, 5> ids{};
+    for (size_t i = 0; i < ids.size(); ++i) {
+        ids[i] = tok.find_token(kMarkers[i]);
+        if (ids[i] < 0 || !tok.is_added_token(ids[i]))
+            return {};
+    }
+    think_start = ids[1];
+    think_end = ids[4];
+    return inkling_alias_table(ids);
 }
 
 const std::string* output_alias(const OutputMarkerAliases& aliases, int32_t id) {
@@ -109,6 +118,10 @@ std::string feed_marker(OutputMarkerState& st, const OutputMarkerAlias& a) {
 }
 
 }  // namespace
+
+std::string output_marker_step(OutputMarkerState& st, const OutputMarkerAlias* a, std::string plain) {
+    return a ? feed_marker(st, *a) : feed_plain(st, std::move(plain));
+}
 
 std::string decode_chat_piece(const imp::Tokenizer& tok, const OutputMarkerAliases& aliases, int32_t id,
                               OutputMarkerState* st) {

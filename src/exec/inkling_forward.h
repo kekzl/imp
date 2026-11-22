@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace imp {
@@ -18,8 +19,8 @@ public:
     ~InklingForward();
 
     // max_tokens: rows of one forward call; max_ctx: positions a sequence may reach.
-    // va: tracked allocator (tag inkling_state); null = cudaMalloc.
-    [[nodiscard]] bool init(const InklingWeights& w, int max_tokens, int max_ctx, VRAMAllocator* va = nullptr);
+    // Allocates from va under the tag inkling_state.
+    [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx);
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -41,7 +42,8 @@ private:
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
-    const float* gate_(const float* h, const float* msg, const InklingGate& g, float* out, int T, cudaStream_t s);
+    const float* gate_(const float* h, const float* msg, const InklingGate& g, float* out, int T,
+                       cudaStream_t s);
     void conv_(const half* x_h, const InklingConv& cv, const half* xin, int app, int site, bool is_key, int T,
                cudaStream_t s);
     void* alloc_(size_t bytes);
@@ -53,8 +55,8 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;
-    std::vector<half*> k_, v_;          // per application
-    std::vector<float*> conv_state_;    // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
+    std::vector<half*> k_, v_;        // per application
+    std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
     // fp32 [max_tokens, hidden]
     float *h_ = nullptr, *resid_ = nullptr, *bs_[4] = {}, *pre_h_ = nullptr, *msrc_[4] = {}, *mix_[3] = {};
@@ -68,5 +70,17 @@ private:
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
 };
+
+// Weights and the forward that points into them (destroyed first).
+struct InklingRuntime {
+    InklingWeights w;
+    InklingForward f;
+};
+
+class Model;
+// Null for every other arch; throws when an Inkling2-Loop checkpoint cannot be loaded.
+// One sequence of max_ctx positions, max_tokens rows per call.
+std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
+                                                     int max_ctx);
 
 }  // namespace imp
