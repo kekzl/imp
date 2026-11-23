@@ -346,6 +346,7 @@ static bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
     const size_t footprint = mtp_alloc_footprint(bytes);
     ws.device_bytes += footprint;
     MemAccount::instance().note("mtp_workspace", static_cast<std::ptrdiff_t>(footprint));
+    MemAccount::instance().note_range("mtp_workspace", *p, bytes);
     return true;
 }
 
@@ -706,6 +707,7 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_b_act);
     ws.feed_rows_cap = 0;
     MemAccount::instance().note("mtp_workspace", -static_cast<std::ptrdiff_t>(ws.device_bytes));
+    MemAccount::instance().drop_ranges("mtp_workspace");
     ws.device_bytes = 0;
     ws.mtp_pos = 0;
     ws.max_seq_len = 0;

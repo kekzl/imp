@@ -52,7 +52,11 @@ public:
     void note_alloc(const char* pool, const void* ptr, size_t bytes);
     void note_free(const void* ptr);
     int64_t pool_current(const char* pool) const;
-    // Every note_alloc() row still charged (diagnostics: memory/touch_audit.h).
+    // A device range of a pool that charges through note(): no accounting, only where it lies, for the
+    // touch audit. drop_ranges() forgets every range of the pool (call it where the pool is freed).
+    void note_range(const char* pool, const void* ptr, size_t bytes);
+    void drop_ranges(const char* pool);
+    // Every note_alloc() row still charged and every note_range() (diagnostics: memory/touch_audit.h).
     struct Charged {
         const void* ptr = nullptr;
         size_t bytes = 0;
@@ -124,6 +128,7 @@ private:
         size_t bytes;
     };
     std::unordered_map<const void*, Charge> charges_;  // note_alloc rows still charged
+    std::unordered_map<const void*, Charge> ranges_;   // note_range rows
     std::vector<Checkpoint> checkpoints_;
     std::string dump_path_;
     size_t named_context_ = 0;

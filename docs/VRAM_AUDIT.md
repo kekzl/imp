@@ -383,3 +383,7 @@ Read:
 - Inkling-2-Mini grows 0.45 GiB over the workload, Qwen3.8-27B 1.15 GiB (0.94 GiB of it pinned).
 - Flash-Next holds its expert weights on the host by design; the process had 0.32 GiB in swap and the server logged 8.6 GiB of host RAM available.
 - Not broken down per pool: there is no host counterpart of the touch audit yet.
+
+### MTP head workspace in the touch audit (Qwen3.8-27B-NVFP4-vllm, main 847041e1 + `MemAccount::note_range`)
+
+`mtp_workspace` charged through `note()` without pointers and was missing from the audit. With its 47 buffers registered: 583.9 MiB held, 112.7 MiB written (19.3 %) by the gate workload (`make vram-touch-audit`, at most 4 parallel sequences). The head's K/V caches are sized for every sequence slot (`max_batch_size` 32 x head rows per slot) and committed at init. Open: commit a slot's K/V on its first use, as the recurrent state slab does.
