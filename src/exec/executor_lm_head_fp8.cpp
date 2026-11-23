@@ -17,6 +17,8 @@ bool GraphExecutor::lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t strea
     const FP8CacheEntry& e = wcache_.lm_head_fp8;
     if (e.weight.data == nullptr)
         return false;
+    if (inkling_take_logits_(lg, stream))  // a row of an Inkling2 lookahead call: its logits exist
+        return true;
     // Phase 4b may have freed the source head: no fallback exists past this point.
     IMP_CHECK(h.qtype == QType::F16 && lg.qtype == QType::F32,
               "FP8 LM head: hidden %s / logits %s, need F16 / F32", qtype_name(h.qtype),

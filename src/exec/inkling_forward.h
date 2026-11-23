@@ -82,6 +82,13 @@ public:
         double propose_ms = 0.0;          // their wall time (each ends in a stream synchronize)
     };
     SpecStats spec_stats() const { return stats_; }
+    // The last run(): its row in the stored lookahead call (0 = the call itself ran), -1 = no stored call.
+    [[nodiscard]] int look_row() const { return look_row_; }
+    // That call's states [rows][hidden] (what the final norm reads) and its row count.
+    [[nodiscard]] const half* look_states(int& rows) const {
+        rows = look_n_;
+        return look_h_;
+    }
     // Tests: off = one-row calls launch every conv site on its own, as calls of more rows do.
     void set_fused_sites(bool on) { fuse_ = on; }
     // Calls of up to 8 rows read the dense projections as I8B32 from d (set before the first run();
@@ -200,7 +207,7 @@ private:
     float *feat_ = nullptr, *conv_pre_ = nullptr, *conv_log_ = nullptr, *conv_tmp_ = nullptr;
     half* look_h_ = nullptr;
     int32_t* d_look_ids_ = nullptr;
-    int look_pos0_ = -1, look_n_ = 0, look_hits_ = 0;
+    int look_pos0_ = -1, look_n_ = 0, look_hits_ = 0, look_row_ = -1;
     // Pay-off of the draft: running means of confirmed and drafted rows per drafting step, steps since
     // the draft was (re)started, and the plain steps left while it is paused.
     float mean_hits_ = 0.0f, mean_rows_ = 0.0f;
@@ -235,6 +242,11 @@ struct InklingRuntime {
     int32_t* d_rows = nullptr;
     int rows_cap = 0;
     std::vector<int32_t> rows;
+    // Lookahead slots: logits of every row of the slot's stored call ([kGraphRows][vocab], one LM-head
+    // pass for all of them), and the row the running decode step takes instead of its own head pass.
+    std::vector<float*> look_logits;
+    std::vector<long> look_serial;  // the stored call (its lookahead step count) the slot's logits belong to
+    const float* logit_src = nullptr;
     VRAMAllocator* va = nullptr;
     InklingRuntime() = default;
     InklingRuntime(const InklingRuntime&) = delete;

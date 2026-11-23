@@ -19,13 +19,13 @@ namespace imp {
 using namespace inkling;
 
 // Pay-off of the draft, called at every step that is not served from a stored row; true = ask it.
-// Against a served one-row step of 5.6 ms (5.03 ms call + head and sampling) the draft call and its
-// bookkeeping cost 0.23 (1.19 ms call), a draft row 0.16 (0.9 ms): a step pays while its confirmed rows
-// exceed that (0.37 / 0.20 before the I8B32 projections and the captured draft: 199.3 -> 202.9 tok/s). Judged
-// over a running mean after kProbe steps; a draft that does not pay rests for kRest tokens.
+// In confirmed rows (each saves about 4 ms): the draft call costs 0.33 (1.3 ms), a draft row 0.22 (0.89 ms).
+// A step pays while its confirmed rows exceed that, judged over a running mean after kProbe steps; a draft
+// that does not pay rests for kRest tokens (24 / 96 at mix 0.1 rested 1721 of 3584 steps, 48 / 48 at 0.03
+// with the calibrated row choice 1128 of 6656: 197.8 -> 222.7 tok/s).
 bool InklingForward::draft_due_() {
-    constexpr float kDraftCost = 0.23f, kRowCost = 0.16f, kMix = 0.1f;
-    constexpr int kProbe = 24, kRest = 96;
+    constexpr float kDraftCost = 0.33f, kRowCost = 0.22f, kMix = 0.03f;
+    constexpr int kProbe = 48, kRest = 48;
     if (drafted_) {
         const float rows = look_pos0_ >= 0 ? static_cast<float>(look_n_ - 1) : 0.0f;
         mean_hits_ += kMix * (static_cast<float>(look_hits_) - mean_hits_);
@@ -96,6 +96,7 @@ bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
         IMP_CUDA_CHECK_LOG(
             cudaMemcpyAsync(h, look_h_ + static_cast<size_t>(j) * Hd, hb, cudaMemcpyDeviceToDevice, s));
         ++pos_;
+        look_row_ = j;
         ++stats_.accepted;
         ++look_hits_;
         if (pos_ % kGrid == 0) {
@@ -143,6 +144,7 @@ bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
         IMP_CUDA_CHECK_LOG(
             cudaMemcpyAsync(look_h_, dec_h_, hb * static_cast<size_t>(rows), cudaMemcpyDeviceToDevice, s));
         look_pos0_ = pos;
+        look_row_ = 0;
         look_n_ = rows;
         look_tok_[0] = tok;
         std::copy(drafts, drafts + n, look_tok_ + 1);
