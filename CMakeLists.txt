@@ -1360,6 +1360,7 @@ if(IMP_BUILD_TESTS)
         tests/test_ling3_chat_template.cpp
         tests/test_kimi_chat_template.cpp
         tests/test_inkling_chat_template.cpp
+        tests/test_inkling_draft_policy.cpp
         tests/test_jinja.cpp
         tests/test_jinja_undefined.cpp
         tests/test_jinja_parity.cpp

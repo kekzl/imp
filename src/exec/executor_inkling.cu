@@ -32,6 +32,9 @@ __global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, const in
 InklingRuntime::~InklingRuntime() {
     if (d_rows && va)
         va->free(d_rows);
+    for (float* p : look_logits)
+        if (p && va)
+            va->free(p);
 }
 
 int InklingRuntime::slot_of_req(int req) const {
@@ -135,6 +138,7 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     if (!rt.draft_tried)
         inkling_attach_draft_(stream);
     const size_t N = static_cast<size_t>(n);
+    rt.logit_src = nullptr;
     // Host reads of the rows' positions, tokens and first KV blocks: this path is eager.
     const bool decode = !state.is_prefill;
     const int n_blk = state.block_tables ? (decode ? n : 1) : 0;
@@ -175,10 +179,50 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
         const int s = rt.slots.size() == 1 ? 0 : rt.slot_of_block(rt.blk[i]);
         ok = s >= 0 && rt.slots[static_cast<size_t>(s)]->run(hd + i * static_cast<size_t>(h.shape[1]), 1,
                                                              rt.pos[i], stream, &rt.ids[i]);
+        if (ok && N == 1)
+            inkling_look_logits_(s, stream);
     }
     if (!ok)
         throw std::runtime_error("inkling2_loop: forward failed at position " + std::to_string(rt.pos[0]));
     return 0;
+}
+
+// A lookahead call's rows go through the LM head in one pass (0.30 ms of head weights per pass, whatever
+// the rows): the step and the steps served from the call then copy their row instead.
+void GraphExecutor::inkling_look_logits_(int slot, cudaStream_t stream) {
+    InklingRuntime& rt = *inkling_;
+    const InklingForward& f = *rt.slots[static_cast<size_t>(slot)];
+    float* stash = static_cast<size_t>(slot) < rt.look_logits.size()
+                       ? rt.look_logits[static_cast<size_t>(slot)]
+                       : nullptr;
+    const int row = f.look_row();
+    if (!stash || row < 0)
+        return;
+    const int64_t V = model_->config().vocab_size;
+    if (row == 0) {
+        int rows = 0;
+        const half* hs = f.look_states(rows);
+        const int64_t hshape[2] = {rows, model_->config().d_model}, lshape[2] = {rows, V};
+        Tensor ht(const_cast<half*>(hs), QType::F16, 2, hshape, true);
+        Tensor lt(stash, QType::F32, 2, lshape, true);
+        rt.look_serial[static_cast<size_t>(slot)] = -1;
+        if (!lm_head_fp8_(ht, lt, stream))
+            return;
+        rt.look_serial[static_cast<size_t>(slot)] = f.spec_stats().steps;
+    }
+    // A call that ran while two sequences decoded has no logits here: its rows take the head themselves.
+    if (rt.look_serial[static_cast<size_t>(slot)] != f.spec_stats().steps)
+        return;
+    rt.logit_src = stash + static_cast<size_t>(row) * static_cast<size_t>(V);
+}
+
+bool GraphExecutor::inkling_take_logits_(Tensor& lg, cudaStream_t stream) {
+    if (!inkling_ || !inkling_->logit_src || lg.shape[0] != 1)
+        return false;
+    const float* src = inkling_->logit_src;
+    inkling_->logit_src = nullptr;
+    return cudaMemcpyAsync(lg.data, src, static_cast<size_t>(lg.shape[1]) * sizeof(float),
+                           cudaMemcpyDeviceToDevice, stream) == cudaSuccess;
 }
 
 // Prefix reuse: binds the request to a slot and returns the position its prefill resumes at.
@@ -227,6 +271,9 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
             !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
             break;
         rt.drafts.push_back(std::move(d));
+        rt.look_logits.push_back(static_cast<float*>(vram_alloc_->allocate(
+            InklingForward::kGraphRows * static_cast<size_t>(head.vocab) * sizeof(float), "inkling_state")));
+        rt.look_serial.push_back(-1);
         ++on;
     }
     IMP_LOG_INFO("inkling2_loop: decode lookahead on %d of %zu slots, %d drafts per step", on,

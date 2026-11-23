@@ -503,6 +503,7 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
     if (pos0 == 0)
         reset(s);
     armed_ = false;
+    look_row_ = -1;
     if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
         IMP_LOG_ERROR(
             "inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)", T,

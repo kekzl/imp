@@ -1452,6 +1452,9 @@ private:
     void run_shortconv(int layer, const InferenceState& state, cudaStream_t stream);
     // executor_inkling.cu: Inkling2-Loop runs all its layers there and returns 0, else n_layers.
     int run_inkling_(const InferenceState& state, Tensor& h, int n, cudaStream_t stream);
+    // Lookahead: one head pass for a stored call's rows; a decode step copies its row (true = copied).
+    void inkling_look_logits_(int slot, cudaStream_t stream);
+    [[nodiscard]] bool inkling_take_logits_(Tensor& lg, cudaStream_t stream);
     std::unique_ptr<InklingRuntime> inkling_;
     bool inkling_lookahead_ = true;
     void inkling_attach_draft_(cudaStream_t stream);  // once, at the first forward: the FP8 head exists then

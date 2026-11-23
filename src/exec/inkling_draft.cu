@@ -5,6 +5,7 @@
 #include "compute/gemv_i8b32.h"
 
 #include "exec/inkling_draft_head.h"
+#include "exec/inkling_draft_policy.h"
 
 #include "compute/dspark_attention.h"
 #include "compute/gemm.h"
@@ -31,9 +32,6 @@ namespace {
 constexpr int kT = 256;
 constexpr int kHd = 128;
 constexpr float kLogitCap = 30.0f;  // the target's final_logit_softcapping
-// A draft row costs about 1.5 ms in the verify call (16.76 ms for 8 rows, 6.21 ms for 1) at 0.16 tokens
-// per ms: rows below a chance of 0.24 lose time. 0.3 leaves room for an overconfident head.
-constexpr float kKeep = 0.3f;
 
 unsigned blocks(size_t n) { return static_cast<unsigned>((n + kT - 1) / kT); }
 
@@ -633,13 +631,7 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
                         s) != cudaSuccess ||
         cudaStreamSynchronize(s) != cudaSuccess)
         return 0;
-    // Rows are worth their place in the verify call while the chance that the whole draft up to them
-    // holds stays above kKeep; a token outside the head's rows (non-finite logits) ends it too.
-    int n = 0;
-    float chance = 1.0f;
-    while (n < n_out && out[n] >= 0 && out[n] < V && (chance *= conf[n]) >= kKeep)
-        ++n;
-    return n;
+    return inkling_draft_rows(out, conf, n_out, V);
 }
 
 }  // namespace imp
