@@ -4,7 +4,6 @@
 #include "exec/inkling_forward.h"
 
 #include "compute/gemm.h"
-#include "compute/gemm_grouped_nvfp4_f16_tile.h"
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/cuda_raii.h"
@@ -109,6 +108,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     gate_work_.forget = Hf_(3 * Tm * H);
     gate_work_.gain = Hf_(3 * Tm * H);
     perm_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
+    grp_ = static_cast<int32_t*>(alloc_(kMoeSmallGroupInts * sizeof(int32_t)));
     off_ = static_cast<int32_t*>(alloc_((static_cast<size_t>(c.n_experts) + 1) * sizeof(int32_t)));
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
     ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
@@ -133,7 +133,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
 void InklingForward::reset(cudaStream_t s) {
     pos_ = hw_ = ckpt_valid_ = 0;
     look_pos0_ = -1;
-    drafted_ = false;
+    reset_draft_policy_();
     if (!armed_)
         hist_.clear();
     armed_ = false;
@@ -189,6 +189,7 @@ int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
     hist_.assign(tokens.begin(), tokens.end());
     armed_ = true;
     look_pos0_ = -1;  // the restored (or reset) conv state replaces a lookahead call's
+    reset_draft_policy_();
     if (g == 0)
         return 0;  // run() at position 0 resets
     armed_ = false;
@@ -203,63 +204,6 @@ void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, hal
     const Tensor B(const_cast<half*>(w), QType::F16, 2, bs, true);
     Tensor C(y, QType::F16, 2, cs, true);
     gemm(A, B, C, 1.0f, 0.0f, s);
-}
-
-bool InklingForward::moe_rows_(const InklingLayer& ly, int T, cudaStream_t s) {
-    const InklingConfig& c = w_->cfg;
-    const InklingExperts& ex = ly.ex;
-    const int slots = T * c.top_k, H = c.hidden;
-    if (H % 8 != 0 || (ex.fp8 && (!ex.w13_bias || !ex.w2_bias)) ||
-        !moe_sort(idx_, slots, c.n_experts, perm_, off_, s))
-        return false;
-    moe_rows_copy(xm_, perm_, xs_, slots, H, c.top_k, true, s);
-    const size_t n13 = static_cast<size_t>(2) * c.inter * H, n2 = static_cast<size_t>(H) * c.inter;
-    GroupedNvfp4F16Args g;
-    g.a = xs_, g.rows = slots, g.N = 2 * c.inter, g.K = H, g.ne = c.n_experts, g.d_offsets = off_;
-    g.d = gu_;
-    if (ex.fp8) {
-        g.w = ex.w13_q, g.w_stride = n13, g.sc = ex.w13_s, g.sc_stride = n13 / 32;
-        g.d_tensor_scales = ex.w13_ts;
-    } else {
-        g.w = ex.w13.packed_data, g.w_stride = ex.w13.expert_stride_packed;
-        g.sc = ex.w13.micro_scales, g.sc_stride = ex.w13.expert_stride_ms;
-        g.d_tensor_scales = ex.w13.tensor_scales;
-    }
-    if (!(ex.fp8 ? gemm_grouped_mxfp8_f16_tile(g, ex.w13_bias, s) : gemm_grouped_nvfp4_f16_tile(g, s)))
-        return false;
-    expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
-    g.a = act_, g.N = H, g.K = c.inter, g.d = xs_;
-    if (ex.fp8) {
-        g.w = ex.w2_q, g.w_stride = n2, g.sc = ex.w2_s, g.sc_stride = n2 / 32;
-        g.d_tensor_scales = ex.w2_ts;
-    } else {
-        g.w = ex.w2.packed_data, g.w_stride = ex.w2.expert_stride_packed;
-        g.sc = ex.w2.micro_scales, g.sc_stride = ex.w2.expert_stride_ms;
-        g.d_tensor_scales = ex.w2.tensor_scales;
-    }
-    if (!(ex.fp8 ? gemm_grouped_mxfp8_f16_tile(g, ex.w2_bias, s) : gemm_grouped_nvfp4_f16_tile(g, s))) {
-        IMP_LOG_ERROR("inkling: grouped expert GEMM refused the down projection (%d x %d)", H, c.inter);
-        ok_ = false;
-    }
-    moe_rows_copy(xs_, perm_, ey_, slots, H, 1, false, s);
-    return true;
-}
-
-// xm_ -> ey_ for the slots idx_.
-void InklingForward::experts_(const InklingLayer& ly, int T, cudaStream_t s) {
-    const InklingConfig& c = w_->cfg;
-    const int slots = T * c.top_k, H = c.hidden;
-    if (T > kGraphRows && grouped_ && moe_rows_(ly, T, s))
-        return;
-    if (ly.ex.fp8) {
-        gemv_mxfp8_slots(ly.ex.w13_q, ly.ex.w13_s, idx_, xm_, gu_, slots, 2 * c.inter, H, c.top_k, s);
-        expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
-        gemv_mxfp8_slots(ly.ex.w2_q, ly.ex.w2_s, idx_, act_, ey_, slots, H, c.inter, 1, s);
-        return;
-    }
-    gemv_nvfp4_moe_decode(ly.ex.w13, idx_, xm_, gu_, 2 * c.inter, H, H, slots, s, c.top_k);
-    expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
-    gemv_nvfp4_moe_decode(ly.ex.w2, idx_, act_, ey_, H, c.inter, c.inter, slots, s, 1);
 }
 
 inkling::MixPre InklingForward::take_tail_() {

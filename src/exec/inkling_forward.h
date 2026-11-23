@@ -104,6 +104,8 @@ private:
     // false = not served, nothing written.
     [[nodiscard]] bool moe_rows_(const InklingLayer& ly, int T, cudaStream_t s);
     void experts_(const InklingLayer& ly, int T, cudaStream_t s);
+    // 2..8 rows, MXFP8 layers: one tensor-core tile per chosen expert. false = not served.
+    [[nodiscard]] bool moe_small_(const InklingLayer& ly, int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
     cudaStream_t fork_(cudaStream_t s, int i);
@@ -118,6 +120,9 @@ private:
     void settle_(cudaStream_t s);
     void conv_at_(int row, float* dst, cudaStream_t s);
     [[nodiscard]] bool draft_due_();
+    // A request starts from the same draft policy state whatever the slot served before: the same prompt
+    // then drafts at the same steps (a resend at temperature 0 gave two texts otherwise).
+    void reset_draft_policy_() { mean_hits_ = mean_rows_ = 0.0f, tried_ = pause_ = 0, drafted_ = false; }
     [[nodiscard]] bool segment_(half* hs, int seg, cudaStream_t s, const int32_t* ids, int32_t image_token);
     struct ConvLog {
         float *k = nullptr, *v = nullptr, *attn = nullptr, *mlp = nullptr;
@@ -169,7 +174,7 @@ private:
     int32_t* idx_ = nullptr;
     half* xs_ = nullptr;  // expert-sorted slot rows [slots, hidden]
     inkling::GateWork gate_work_;
-    int32_t *perm_ = nullptr, *off_ = nullptr;
+    int32_t *perm_ = nullptr, *off_ = nullptr, *grp_ = nullptr;
     bool grouped_ = true;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call
     // Captured steps of 1..kGraphRows rows over the own row buffer dec_h_ (run()): any caller rows
