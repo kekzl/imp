@@ -60,7 +60,7 @@ A new checkpoint is UNTRUSTED INPUT: SafeTensors/`tokenizer.json` parsers are ha
 
 ## After it works
 
-VRAM is an acceptance criterion, like parity and speed: `make vram-touch-audit MODEL=/models/<dir>` (per pool MiB held against MiB written, `docs/VRAM_AUDIT.md`). Every row of its review list that is not read-only weights gets a reason or a fix before the PR: per-sequence state through `GrowRows` / a growable `Region` (`src/memory/grow_rows.h`), reserved rows on the ledger of `vram_query.h`, no executor tenant the arch never runs. Inkling-2-Mini shipped holding 30967 MiB at 2 x 90112 tokens and needed #3233-#3242 to start at 24333.
+VRAM is an acceptance criterion, like parity and speed: `make vram-touch-audit MODEL=/models/<dir>` (per pool MiB held against MiB written, `docs/VRAM_AUDIT.md`). It fails on a pool that holds 64 MiB or more mostly unwritten without a row in `tests/vram_touch_baseline/<dir>.txt` (`UPDATE=1` writes the rows, each needs its reason). Every row that is not read-only weights gets a fix or a stated reason before the PR: per-sequence state through `GrowRows` / a growable `Region` (`src/memory/grow_rows.h`), reserved rows on the ledger of `vram_query.h`, no executor tenant the arch never runs. Inkling-2-Mini shipped holding 30967 MiB at 2 x 90112 tokens and needed #3233-#3242 to start at 24333.
 
 New kernels for the arch: skill `kernel-tuning` sections 1-2 BEFORE writing them. Inkling-2-Mini v1 shipped reference-grade kernels at 26.36-27.94 tok/s (#3209) and needed #3210-#3222 to reach 152.3.
 
