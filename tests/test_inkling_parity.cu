@@ -628,6 +628,78 @@ TEST(InklingDraftModel, DraftsFollowTheReferenceContinuation) {
     cudaFree(d_sc);
 }
 
+// A drafted call's rows get their context K/V at once (on_rows after propose). Rows a later call brings
+// for the same positions must replace them: the draft after 8 replaced rows names the tokens of a draft
+// that never saw the first 8.
+TEST(InklingDraftModel, ReplacedRowsLeaveNoTraceInTheDraft) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    if (!model)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const int V = fx.w.cfg.vocab, H = fx.w.cfg.hidden, cap = InklingForward::kGrid, P = 40, R = 8;
+    void* d_w8 = nullptr;
+    float *d_sc = nullptr, *d_feat = nullptr;
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w8, static_cast<size_t>(V) * H), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sc, static_cast<size_t>(V) * sizeof(float)), cudaSuccess);
+    quantize_fp8_rows_async(fx.w.unembed, d_w8, V, H, d_sc, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    {
+        InklingDraftWeights dw;
+        ASSERT_TRUE(dw.load(model, fx.va, fx.w.embed_norm, InklingHeadView{d_w8, d_sc, V}, s));
+        const size_t taps = dw.cfg.taps.size(), plane = static_cast<size_t>(cap) * H;
+        ASSERT_EQ(cudaMalloc(&d_feat, taps * plane * sizeof(float)), cudaSuccess);
+        std::vector<float> host(taps * plane);
+        // n feature rows from seed at positions pos0...
+        const auto feed = [&](InklingDraft& d, uint32_t seed, int n, int pos0) {
+            for (size_t t = 0; t < taps; ++t)
+                for (size_t i = 0; i < static_cast<size_t>(n) * H; ++i) {
+                    seed = seed * 1664525u + 1013904223u;
+                    host[t * plane + i] = static_cast<float>(seed >> 8) / 8388608.0f - 1.0f;
+                }
+            cudaMemcpy(d_feat, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice);
+            d.on_rows(d_feat, cap, n, pos0, s);
+            cudaStreamSynchronize(s);
+        };
+        const int32_t anchor = 1000;
+        const half* emb = fx.w.embed + static_cast<size_t>(anchor) * H;
+        int32_t got[InklingForward::kGraphRows] = {}, want[InklingForward::kGraphRows] = {};
+        int32_t skip[InklingForward::kGraphRows] = {};
+        {
+            InklingDraft d;
+            ASSERT_TRUE(d.init(dw, fx.va, 4096, cap));
+            feed(d, 1u, P, 0);
+            (void)d.propose(anchor, emb, P, skip, s);
+            feed(d, 2u, R, P);  // the drafted call's rows
+            feed(d, 3u, R, P);  // the rows that replace them
+            (void)d.propose(anchor, emb, P + R, got, s);
+        }
+        {
+            InklingDraft d;
+            ASSERT_TRUE(d.init(dw, fx.va, 4096, cap));
+            feed(d, 1u, P, 0);
+            (void)d.propose(anchor, emb, P, skip, s);
+            feed(d, 3u, R, P);
+            (void)d.propose(anchor, emb, P + R, want, s);
+        }
+        int same = 0, in_vocab = 0;
+        for (int i = 0; i < InklingForward::kGraphRows - 1; ++i) {
+            same += got[i] == want[i];
+            in_vocab += want[i] >= 0 && want[i] < V;
+        }
+        std::printf("draft after 8 replaced rows: %d of 7 tokens equal a draft that never saw them\n", same);
+        EXPECT_EQ(in_vocab, InklingForward::kGraphRows - 1);
+        EXPECT_EQ(same, InklingForward::kGraphRows - 1);
+    }
+    cudaFree(d_feat);
+    cudaFree(d_w8);
+    cudaFree(d_sc);
+    cudaStreamDestroy(s);
+}
+
 // A real stream turns the side streams on (k / v chains, message mix): rows of every call size must
 // come out as on the default stream, where everything runs in order. Three cuBLAS projections at
 // once shared a workspace and passed every other test.
