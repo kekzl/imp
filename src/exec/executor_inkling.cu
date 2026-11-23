@@ -32,6 +32,8 @@ __global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, const in
 InklingRuntime::~InklingRuntime() {
     if (d_rows && va)
         va->free(d_rows);
+    if (attn_work && va)
+        va->free(attn_work);
 }
 
 int InklingRuntime::slot_of_req(int req) const {
@@ -80,8 +82,18 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     bool ok = va && model.token_embedding().data && model.output_proj().data && model.output_norm().data &&
               load_inkling_weights(dir, rt->w, *va, /*with_vocab=*/false);
     const int want = slots > 0 ? slots : 2;
+    rt->va = va;
+    size_t work_bytes = 0;
+    if (ok) {
+        const InklingConfig& c = rt->w.cfg;
+        work_bytes = inkling::attention_rows_bytes(c.n_heads, c.head_dim, c.d_rel, c.window, max_ctx,
+                                                   std::min(max_tokens, InklingForward::kGrid));
+        rt->attn_work = va->allocate(work_bytes, "inkling_state");
+        ok = rt->attn_work != nullptr;
+    }
     for (int i = 0; ok && i < want; ++i) {
         auto f = std::make_unique<InklingForward>();
+        f->set_attn_work(rt->attn_work, work_bytes);
         if (!f->init(rt->w, *va, max_tokens, max_ctx)) {
             ok = i > 0;  // fewer slots than asked for: the engine lowers its batch size
             IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);

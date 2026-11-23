@@ -135,11 +135,16 @@ struct Loader {
     // One fused expert tensor [E, rows, K]: NVFP4 (U8 nibbles + FP8 block scales + amax / denominator
     // per expert) or MXFP8 (FP8 values + one exponent byte per 32).
     void experts(const std::string& base, int64_t rows, int64_t K, bool fp8, NvFP4MoEQuantResult& nv,
-                 uint8_t*& q, uint8_t*& s) {
+                 uint8_t*& q, uint8_t*& s, int32_t*& bias, float*& ts) {
         const int64_t E = w.cfg.n_experts;
         if (fp8) {
             q = static_cast<uint8_t*>(raw(base, QType::FP8_E4M3, E * rows * K));
             s = static_cast<uint8_t*>(raw(base + "_scale", QType::NONE, E * rows * (K / 32)));
+            bias = static_cast<int32_t*>(dev(static_cast<size_t>(E) * sizeof(int32_t)));
+            ts = static_cast<float*>(dev(static_cast<size_t>(E) * sizeof(float)));
+            if (q && s && bias && ts)
+                inkling::mxfp8_expert_bias(s, static_cast<int>(E), static_cast<size_t>(rows * (K / 32)), bias,
+                                           ts, nullptr);
             return;
         }
         nv.packed_data = raw(base, QType::INT8, E * rows * (K / 2));
@@ -323,8 +328,10 @@ bool load_inkling_weights(const std::string& dir, InklingWeights& w, VRAMAllocat
         }
         const auto it = L.t.find(p + "mlp.experts.w13_weight");
         ly.ex.fp8 = it != L.t.end() && it->second.qtype == QType::FP8_E4M3;
-        L.experts(p + "mlp.experts.w13_weight", 2 * I, H, ly.ex.fp8, ly.ex.w13, ly.ex.w13_q, ly.ex.w13_s);
-        L.experts(p + "mlp.experts.w2_weight", H, I, ly.ex.fp8, ly.ex.w2, ly.ex.w2_q, ly.ex.w2_s);
+        L.experts(p + "mlp.experts.w13_weight", 2 * I, H, ly.ex.fp8, ly.ex.w13, ly.ex.w13_q, ly.ex.w13_s,
+                  ly.ex.w13_bias, ly.ex.w13_ts);
+        L.experts(p + "mlp.experts.w2_weight", H, I, ly.ex.fp8, ly.ex.w2, ly.ex.w2_q, ly.ex.w2_s,
+                  ly.ex.w2_bias, ly.ex.w2_ts);
     }
     if (cudaDeviceSynchronize() != cudaSuccess)
         L.ok = false;

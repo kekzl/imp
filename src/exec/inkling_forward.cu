@@ -4,6 +4,7 @@
 #include "exec/inkling_forward.h"
 
 #include "compute/gemm.h"
+#include "compute/gemm_grouped_nvfp4_f16_tile.h"
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/cuda_raii.h"
@@ -74,6 +75,10 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     for (int i = 0; i < 2 && ok_; ++i)
         ok_ = side_[i].create() && fork_ev_[i].create() && join_ev_[i].create();
     part_ = F_(attention_part_floats(c.n_heads, c.head_dim, c.window, max_ctx));
+    if (!attn_work_) {
+        attn_work_bytes_ = attention_rows_bytes(c.n_heads, c.head_dim, c.d_rel, c.window, max_ctx, seg_);
+        attn_work_ = alloc_(attn_work_bytes_);
+    }
     for (half** p : {&xq_, &xk_, &xv_, &o_h_, &xm_})
         *p = Hf_(Tm * H);
     const size_t taps = static_cast<size_t>(c.n_kv_heads) * 4;
@@ -86,6 +91,9 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     ey_ = Hf_(slots * H);
     logits_h_ = Hf_(static_cast<size_t>(c.vocab));
     idx_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
+    xs_ = Hf_(slots * H);
+    perm_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
+    off_ = static_cast<int32_t*>(alloc_((static_cast<size_t>(c.n_experts) + 1) * sizeof(int32_t)));
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     dec_h_ = Hf_(H * kGraphRows);
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
@@ -162,6 +170,63 @@ void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, hal
     const Tensor B(const_cast<half*>(w), QType::F16, 2, bs, true);
     Tensor C(y, QType::F16, 2, cs, true);
     gemm(A, B, C, 1.0f, 0.0f, s);
+}
+
+bool InklingForward::moe_rows_(const InklingLayer& ly, int T, cudaStream_t s) {
+    const InklingConfig& c = w_->cfg;
+    const InklingExperts& ex = ly.ex;
+    const int slots = T * c.top_k, H = c.hidden;
+    if (H % 8 != 0 || (ex.fp8 && (!ex.w13_bias || !ex.w2_bias)) ||
+        !moe_sort(idx_, slots, c.n_experts, perm_, off_, s))
+        return false;
+    moe_rows_copy(xm_, perm_, xs_, slots, H, c.top_k, true, s);
+    const size_t n13 = static_cast<size_t>(2) * c.inter * H, n2 = static_cast<size_t>(H) * c.inter;
+    GroupedNvfp4F16Args g;
+    g.a = xs_, g.rows = slots, g.N = 2 * c.inter, g.K = H, g.ne = c.n_experts, g.d_offsets = off_;
+    g.d = gu_;
+    if (ex.fp8) {
+        g.w = ex.w13_q, g.w_stride = n13, g.sc = ex.w13_s, g.sc_stride = n13 / 32;
+        g.d_tensor_scales = ex.w13_ts;
+    } else {
+        g.w = ex.w13.packed_data, g.w_stride = ex.w13.expert_stride_packed;
+        g.sc = ex.w13.micro_scales, g.sc_stride = ex.w13.expert_stride_ms;
+        g.d_tensor_scales = ex.w13.tensor_scales;
+    }
+    if (!(ex.fp8 ? gemm_grouped_mxfp8_f16_tile(g, ex.w13_bias, s) : gemm_grouped_nvfp4_f16_tile(g, s)))
+        return false;
+    expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
+    g.a = act_, g.N = H, g.K = c.inter, g.d = xs_;
+    if (ex.fp8) {
+        g.w = ex.w2_q, g.w_stride = n2, g.sc = ex.w2_s, g.sc_stride = n2 / 32;
+        g.d_tensor_scales = ex.w2_ts;
+    } else {
+        g.w = ex.w2.packed_data, g.w_stride = ex.w2.expert_stride_packed;
+        g.sc = ex.w2.micro_scales, g.sc_stride = ex.w2.expert_stride_ms;
+        g.d_tensor_scales = ex.w2.tensor_scales;
+    }
+    if (!(ex.fp8 ? gemm_grouped_mxfp8_f16_tile(g, ex.w2_bias, s) : gemm_grouped_nvfp4_f16_tile(g, s))) {
+        IMP_LOG_ERROR("inkling: grouped expert GEMM refused the down projection (%d x %d)", H, c.inter);
+        ok_ = false;
+    }
+    moe_rows_copy(xs_, perm_, ey_, slots, H, 1, false, s);
+    return true;
+}
+
+// xm_ -> ey_ for the slots idx_.
+void InklingForward::experts_(const InklingLayer& ly, int T, cudaStream_t s) {
+    const InklingConfig& c = w_->cfg;
+    const int slots = T * c.top_k, H = c.hidden;
+    if (T > kGraphRows && grouped_ && moe_rows_(ly, T, s))
+        return;
+    if (ly.ex.fp8) {
+        gemv_mxfp8_slots(ly.ex.w13_q, ly.ex.w13_s, idx_, xm_, gu_, slots, 2 * c.inter, H, c.top_k, s);
+        expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
+        gemv_mxfp8_slots(ly.ex.w2_q, ly.ex.w2_s, idx_, act_, ey_, slots, H, c.inter, 1, s);
+        return;
+    }
+    gemv_nvfp4_moe_decode(ly.ex.w13, idx_, xm_, gu_, 2 * c.inter, H, H, slots, s, c.top_k);
+    expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
+    gemv_nvfp4_moe_decode(ly.ex.w2, idx_, act_, ey_, H, c.inter, c.inter, slots, s, 1);
 }
 
 inkling::MixPre InklingForward::take_tail_() {
@@ -293,6 +358,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     a.q_scale = ly.q_scale, a.rel_scale = ly.rel_scale, a.proj = ly.rel_proj;
     a.k = k_[app], a.v = v_[app], a.out = ao_h_, a.d_pos = d_pos_;
     a.part = part_, a.max_ctx = max_ctx_;
+    a.work = attn_work_, a.work_bytes = attn_work_bytes_, a.pos0 = T > kGraphRows ? pos_ : -1;
     a.T = T, a.stride = q_stride, a.n_heads = c.n_heads, a.n_kv = c.n_kv_heads, a.hd = c.head_dim;
     a.d_rel = c.d_rel, a.rel_extent = global ? c.rel_extent : c.window;
     a.window = global ? 0 : c.window, a.ring = global ? 0 : ring_;
@@ -342,16 +408,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     }
     route_topk(xm_, ly.router_w, ly.router_b, rlog_, idx_, wts_, T, H, c.n_experts, c.top_k, c.route_scale,
                s);
-    const int slots = T * c.top_k;
-    if (ly.ex.fp8) {
-        gemv_mxfp8_slots(ly.ex.w13_q, ly.ex.w13_s, idx_, xm_, gu_, slots, 2 * c.inter, H, c.top_k, s);
-        expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
-        gemv_mxfp8_slots(ly.ex.w2_q, ly.ex.w2_s, idx_, act_, ey_, slots, H, c.inter, 1, s);
-    } else {
-        gemv_nvfp4_moe_decode(ly.ex.w13, idx_, xm_, gu_, 2 * c.inter, H, H, slots, s, c.top_k);
-        expert_act(gu_, act_, slots, c.inter, c.gate_cap, c.up_cap, s);
-        gemv_nvfp4_moe_decode(ly.ex.w2, idx_, act_, ey_, H, c.inter, c.inter, slots, s, 1);
-    }
+    experts_(ly, T, s);
     if (fused) {
         tail_.kind = 2, tail_.x = ey_, tail_.weights = wts_, tail_.w = ly.mlp_conv;
         tail_.state = as + static_cast<size_t>(3) * H, tail_.resid = res2_, tail_.out = h_,

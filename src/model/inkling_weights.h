@@ -49,6 +49,9 @@ struct InklingExperts {
     NvFP4MoEQuantResult w13, w2;                 // NVFP4: [E, 2I, H] gate/up rows interleaved, [E, H, I]
     uint8_t *w13_q = nullptr, *w13_s = nullptr;  // MXFP8 values and per-32 exponents
     uint8_t *w2_q = nullptr, *w2_s = nullptr;
+    // MXFP8, per expert: exponent bias and 2^(bias - 127) (inkling::mxfp8_expert_bias).
+    int32_t *w13_bias = nullptr, *w2_bias = nullptr;
+    float *w13_ts = nullptr, *w2_ts = nullptr;
 };
 
 struct InklingLayer {

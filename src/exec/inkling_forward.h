@@ -77,6 +77,11 @@ public:
     SpecStats spec_stats() const { return stats_; }
     // Tests: off = one-row calls launch every conv site on its own, as calls of more rows do.
     void set_fused_sites(bool on) { fuse_ = on; }
+    // Tests: off = many-row calls run the experts slot by slot.
+    void set_grouped_experts(bool on) { grouped_ = on; }
+    // Scratch of the many-row attention (attention_rows_bytes), shared by the slots of a runtime;
+    // without one the forward allocates its own at init. nullptr + 0 = the row kernel (tests).
+    void set_attn_work(void* p, size_t bytes) { attn_work_ = p, attn_work_bytes_ = bytes; }
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -91,6 +96,10 @@ private:
     void flush_tail_(cudaStream_t s);
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s, const int32_t* ids = nullptr, int32_t image_token = -1);
+    // Expert projections of a many-row call over expert-sorted slots (NVFP4 layers): xm_ -> ey_.
+    // false = not served, nothing written.
+    [[nodiscard]] bool moe_rows_(const InklingLayer& ly, int T, cudaStream_t s);
+    void experts_(const InklingLayer& ly, int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
     cudaStream_t fork_(cudaStream_t s, int i);
@@ -131,6 +140,8 @@ private:
     float *msg_[4] = {}, *g_[3] = {}, *gd_ = nullptr, *res2_ = nullptr,
           *mm_ = nullptr;  // g_, gd_: gate scratch
     int n_msrc_ = 0;
+    void* attn_work_ = nullptr;
+    size_t attn_work_bytes_ = 0;
     float* part_ = nullptr;                   // decode attention partials (attention_part_floats)
     float *mixp_ = nullptr, *mixp2_ = nullptr;  // block-mix partial sums (mix_partial_floats), one per stream
     // Two side streams for chains that do not depend on each other (fork_ / join_).
@@ -142,6 +153,9 @@ private:
     half* xm_ = nullptr;
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
+    half* xs_ = nullptr;  // expert-sorted slot rows [slots, hidden]
+    int32_t *perm_ = nullptr, *off_ = nullptr;
+    bool grouped_ = true;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call
     // Captured steps of 1..kGraphRows rows over the own row buffer dec_h_ (run()): any caller rows
     // replay them. One row is the decode step; more are verify chunks and paced prefill.
@@ -192,6 +206,7 @@ struct InklingRuntime {
     int rows_cap = 0;
     std::vector<int32_t> rows;
     VRAMAllocator* va = nullptr;
+    void* attn_work = nullptr;  // many-row attention scratch, one for all slots
     InklingRuntime() = default;
     InklingRuntime(const InklingRuntime&) = delete;
     InklingRuntime& operator=(const InklingRuntime&) = delete;

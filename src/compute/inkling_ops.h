@@ -119,6 +119,11 @@ struct AttnArgs {
     // part holds attention_part_floats(...) floats.
     float* part = nullptr;
     int max_ctx = 0;
+    // T > 8 with work set and pos0 >= 0 (the host's copy of *d_pos): GEMM form, attention_rows_bytes(...)
+    // bytes of scratch.
+    void* work = nullptr;
+    size_t work_bytes = 0;
+    int pos0 = -1;
     int T = 0, stride = 0, n_heads = 0, n_kv = 0, hd = 0, d_rel = 0, rel_extent = 0;
     int window = 0, ring = 0;  // window 0 = all earlier keys; ring 0 = slot is the position
     float scale = 1.0f, q_thr = 0.0f, rel_thr = 0.0f;
@@ -128,6 +133,10 @@ struct AttnArgs {
 // q = clip(q * q_scale), rel = clip(rel * rel_scale); softmax over [q.k * scale + rel . proj[distance],
 // sink].
 void attention(const AttnArgs& a, cudaStream_t s);
+// Bytes of AttnArgs::work: a sliding call of max_rows rows at once, a full-context one in sub-batches.
+size_t attention_rows_bytes(int n_heads, int hd, int d_rel, int window, int max_ctx, int max_rows);
+// The GEMM form behind attention(); false = not served (no scratch, a row does not fit).
+[[nodiscard]] bool attention_rows(const AttnArgs& a, cudaStream_t s);
 // Floats of AttnArgs::part for a model with this window and context.
 size_t attention_part_floats(int n_heads, int hd, int window, int max_ctx);
 
@@ -149,6 +158,18 @@ void moe_tail(const half* ey, const float* weights, const float* w, float* state
 // Router: scores = sigmoid(W x); top_k of scores + bias; weights = score / sum * route_scale.
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,
                 int T, int H, int n_experts, int top_k, float route_scale, cudaStream_t s);
+// Slots sorted by expert, stable: perm[slot] = sorted row, offsets [n_experts + 1] = prefix sums of the
+// expert counts. false above 4096 slots or 512 experts.
+[[nodiscard]] bool moe_sort(const int32_t* idx, int slots, int n_experts, int32_t* perm, int32_t* offsets,
+                            cudaStream_t s);
+// Rows of C halves (C % 8 == 0, 16-byte aligned). to_sorted: dst[perm[slot]] = src[slot / group];
+// otherwise dst[slot] = src[perm[slot]].
+void moe_rows_copy(const half* src, const int32_t* perm, half* dst, int slots, int C, int group,
+                   bool to_sorted, cudaStream_t s);
+// Per MXFP8 expert (exponent bytes sc [n_experts, bytes_per_expert]): bias = largest exponent - 6,
+// ts = 2^(bias - 127), the arguments of gemm_grouped_mxfp8_f16_tile.
+void mxfp8_expert_bias(const uint8_t* sc, int n_experts, size_t bytes_per_expert, int32_t* bias, float* ts,
+                       cudaStream_t s);
 // gu [slots, 2 * I] with gate / up rows interleaved -> softcap(g, gc) * sigmoid(g) * softcap(u, uc).
 void expert_act(const half* gu, half* out, int slots, int I, float gate_cap, float up_cap, cudaStream_t s);
 // MXFP8 expert rows: y[slot, row] = sum_k e4m3(w[e, row, k]) * 2^(sc[e, row, k / 32] - 127) * x[slot /

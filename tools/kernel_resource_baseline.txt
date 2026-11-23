@@ -116,6 +116,7 @@ imp::topk_partial_kernel	sm_120a	40	1056	0
 imp::topk_partial_rows_kernel	sm_120a	40	1056	0
 imp::inkling::(anonymous namespace)::mix_partial_k	sm_120a	40	384	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
+imp::inkling::(anonymous namespace)::rows_softmax_k	sm_120a	40	128	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::inkling::(anonymous namespace)::mix_out_k	sm_120a	40	24	0
 imp::(anonymous namespace)::gemv_dp4a_multi_kernel	sm_120a	40	16	0
