@@ -301,3 +301,42 @@ fit rather than reclaiming idle VRAM.
 
 - Lever B is superseded for FA2-served configs: since #687/#932 FA2 is the primary prefill path, and #2716 skips the S-matrix for hd 64 + learned sinks too (gpt-oss -378 MiB, pp512 34282 -> 34633, pp2048 57005 -> 56214 tok/s). Gemma-4 hd 512 and MLA still read it.
 - Weight forms and workspaces closed by #2711-#2717: table in `docs/internals/MEMORY.md` A5.6, refuted and open rows in `AUDIT.md`.
+
+---
+
+## 2026-11-23: touch audit (written pages per pool, 5 models)
+
+`diagnostics.vram_touch_audit` (`src/memory/touch_audit.{h,cu}`) hashes every known device range in 64 KiB pages after warmup and again at teardown: `VRAMAllocator` allocations, `Backend` regions (the committed chunks of a growable one) and `MemAccount::note_alloc` rows. A page whose hash did not change was not written while serving. For weights that is the expected 0 %; for state, KV and workspaces it is capacity the workload did not use.
+
+```bash
+imp-server --model <m> --set diagnostics.vram_touch_audit=true   # table at shutdown (SIGTERM)
+```
+
+Workload per model, default server flags (imp:touch = main eed7968b + the audit): 10 prompts x 700 tokens, one 18126-token prompt sent twice, 4 parallel requests of 300 tokens. No image, no request near the context limit. Not covered: pools noted without a pointer (`mtp_workspace`, `WEIGHT_CACHE_CUTLASS_SF`, `kv_cache_minmax`, `kv_cache_scales`, `recurrent_snapshots`), library memory, the CUDA context.
+
+| Model | Device used at start / end | Hashed | Written |
+|---|---|---|---|
+| Inkling-2-Mini | 27494 / 27556 MiB | 25119 MiB | 3050 MiB (12.1 %) |
+| Qwen3.8-27B-NVFP4-vllm | 22922 / 23564 MiB | 17811 MiB | 1151 MiB (6.5 %) |
+| Flint NVFP4 | 28986 / 29474 MiB | 23857 MiB | 1054 MiB (4.4 %) |
+| Qwen3.8-Flash-Next-NVFP4 | 27758 / 28418 MiB | 25134 MiB | 19469 MiB (77.5 %) |
+| Qwen3-8B-NVFP4-cortecs | 14002 / 17072 MiB | 11244 MiB | 4403 MiB (39.2 %) |
+
+Pools that are not read-only weights, MiB held since warmup / MiB written (+ MiB committed after warmup):
+
+| Pool | Inkling-2-Mini | Qwen3.8-27B | Flint | Flash-Next | Qwen3-8B |
+|---|---|---|---|---|---|
+| KV block pool | none (own state) | 1304 / 645 | 1976 / 862 (+472) | 768 / 657 (+480) | 6118 / 4167 (+3054) |
+| Engine arena | 219 / 39 | 522 / 17 | 302 / 10 | 198 / 74 | 542 / 79 |
+| `shared_workspace` | 41 / 0 | 301 / 234 | 150 / 122 | 299 / 279 | 160 / 89 |
+| `persistent_workspace` | 33 / 11 | 90 / 69 | 34 / 34 | 38 / 34 | 67 / 64 |
+| `inkling_state` | 5224 / 2700 | | | | |
+| `inkling_draft_ctx` | 622 / 300 | | | | |
+| `inkling_vision` + `_ws` | 1133 / 0 | | | | |
+| `spec_state_snapshot` | | 159 / 0 | | 60 / 0 | |
+| `expert_cache` | | | | 17888 / 17880 | |
+
+Read:
+- The engine arena is 63 to 97 % unwritten on every model (124 to 506 MiB).
+- The KV pool commits ahead of use: Qwen3-8B held 9172 MiB of KV after this workload and wrote 4167.
+- Inkling-2-Mini is the only model whose per-sequence state is committed in full at start: 2524 of 5224 MiB unwritten with an 18126-token prompt in a 32768-token slot, and 1133 MiB of vision memory without an image.

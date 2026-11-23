@@ -146,6 +146,15 @@ std::vector<std::pair<std::string, size_t>> VRAMAllocator::bytes_by_tag() const 
     return {by_tag.begin(), by_tag.end()};
 }
 
+std::vector<VRAMAllocator::Live> VRAMAllocator::live() const {
+    std::vector<Live> out;
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    out.reserve(alloc_map_.size());
+    for (const auto& [ptr, alloc] : alloc_map_)
+        out.push_back({ptr, alloc.bytes, alloc.tag});
+    return out;
+}
+
 void VRAMAllocator::report() const {
     std::lock_guard<std::mutex> lock(map_mutex_);
 

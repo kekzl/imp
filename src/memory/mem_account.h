@@ -52,6 +52,13 @@ public:
     void note_alloc(const char* pool, const void* ptr, size_t bytes);
     void note_free(const void* ptr);
     int64_t pool_current(const char* pool) const;
+    // Every note_alloc() row still charged (diagnostics: memory/touch_audit.h).
+    struct Charged {
+        const void* ptr = nullptr;
+        size_t bytes = 0;
+        const char* pool = nullptr;
+    };
+    [[nodiscard]] std::vector<Charged> charged() const;
 
     // Record a labeled device snapshot (cudaMemGetInfo). The delta vs the
     // previous checkpoint is the measured cost of the phase just completed.

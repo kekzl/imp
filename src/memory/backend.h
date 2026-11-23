@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace imp {
 
@@ -183,6 +184,14 @@ public:
     virtual MemError decommit_range(Region& region, size_t offset, size_t bytes);
 
     virtual BackendStats stats() const = 0;
+
+    // Every committed device range this backend holds right now (diagnostics: memory/touch_audit.h).
+    struct LiveRange {
+        const void* ptr = nullptr;
+        size_t bytes = 0;
+        RegionTag tag = RegionTag::Other;
+    };
+    virtual void live_ranges(std::vector<LiveRange>& /*out*/) const {}
 
     // Installed hard cap in bytes (--vram-budget); 0 = uncapped.
     virtual size_t capacity() const = 0;

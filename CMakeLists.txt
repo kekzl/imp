@@ -183,6 +183,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/block_pool.cpp
     src/memory/plan.cpp
     src/memory/vram_allocator.cpp
+    src/memory/touch_audit.cu
     src/memory/mem_account.cpp
     src/memory/kv_cache.cu
     src/memory/kv_cache_grow.cpp
@@ -1541,6 +1542,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_block_copy.cu
         tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
+        tests/test_touch_audit.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_kv_cache_gpu.cpp

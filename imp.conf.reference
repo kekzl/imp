@@ -787,6 +787,9 @@ audit_nvfp4_scales   = false
 # VRAM accounting audit: allocation checkpoints + per-pool notes + device-used
 # peak sampler. Default off (zero overhead). See src/memory/mem_account.h.
 vram_audit           = false
+# Hashes every known device range in 64 KiB pages after warmup and at teardown and
+# logs per pool how many MiB were written in between (src/memory/touch_audit.h).
+vram_touch_audit     = false
 # Optional append-only file the VRAM audit table is mirrored into ("" = off).
 vram_audit_dump      = ""
 # Directory for the FINAL LM logits of every forward pass (one .npy per pass,

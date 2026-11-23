@@ -131,6 +131,15 @@ void MemAccount::note_free(const void* ptr) {
     note(c.pool, -static_cast<std::ptrdiff_t>(c.bytes));
 }
 
+std::vector<MemAccount::Charged> MemAccount::charged() const {
+    std::vector<Charged> out;
+    std::lock_guard<std::mutex> lock(mu_);
+    out.reserve(charges_.size());
+    for (const auto& [ptr, c] : charges_)
+        out.push_back({ptr, c.bytes, c.pool});
+    return out;
+}
+
 int64_t MemAccount::pool_current(const char* pool) const {
     std::lock_guard<std::mutex> lock(mu_);
     for (const auto& p : pools_)

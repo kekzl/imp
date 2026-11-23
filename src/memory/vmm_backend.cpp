@@ -94,6 +94,7 @@ struct Reservation {
     CUdeviceptr va = 0;
     size_t reserved = 0;
     size_t committed = 0;
+    RegionTag tag = RegionTag::Other;
     // Keyed by offset, because what gets committed is a set of interior ranges
     // rather than one growing prefix. Ordered, so a gap is found by looking at
     // one neighbour instead of scanning.
@@ -192,8 +193,8 @@ protected:
         return MemError::Ok;
     }
 
-    MemError do_acquire_growable(size_t reserve_bytes, size_t initial_commit, size_t alignment,
-                                 RegionTag /*tag*/, void** out_base) override {
+    MemError do_acquire_growable(size_t reserve_bytes, size_t initial_commit, size_t alignment, RegionTag tag,
+                                 void** out_base) override {
         if (!supported())
             return MemError::NotGrowable;
         if (reserve_bytes == 0)
@@ -218,6 +219,7 @@ protected:
         Reservation r;
         r.va = va;
         r.reserved = reserved;
+        r.tag = tag;
         if (want > 0) {
             const MemError e = grow_(r, want);
             if (e != MemError::Ok) {
@@ -233,6 +235,15 @@ protected:
         return MemError::Ok;
     }
 
+public:
+    void live_ranges(std::vector<LiveRange>& out) const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& [base, r] : regions_)
+            for (const auto& [off, c] : r.chunks)
+                out.push_back({reinterpret_cast<const void*>(r.va + c.offset), c.size, r.tag});
+    }
+
+protected:
     void do_release(void* base, size_t /*committed*/, size_t /*reserved*/, RegionTag) override {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = regions_.find(base);
