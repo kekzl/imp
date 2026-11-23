@@ -513,10 +513,19 @@ TEST(SSMStateLazy, EnsureSlotCommitsThatSlotOnly) {
 
 TEST(SSMStateLazy, ReservedSlotsCommitAtInit) {
     FakeBackend be;
-    LazySsm s(be, /*max_seqs=*/3, /*n_reserved=*/1);
-    ASSERT_TRUE(s.ok);
-    EXPECT_EQ(s.st.reserved_slot(0), 3);
-    EXPECT_TRUE(s.st.slot_committed(3));
-    EXPECT_EQ(s.st.committed_slots(), 1);
-    EXPECT_FALSE(s.st.slot_committed(0));
+    // A charge of its own, so a ledger that ends below its start shows (the reading floors at 0).
+    const std::ptrdiff_t guard = 1 << 20;
+    vram_reserved_uncommitted_add(guard);
+    const size_t ledger0 = vram_reserved_uncommitted_bytes();
+    {
+        LazySsm s(be, /*max_seqs=*/3, /*n_reserved=*/1);
+        ASSERT_TRUE(s.ok);
+        EXPECT_EQ(s.st.reserved_slot(0), 3);
+        EXPECT_TRUE(s.st.slot_committed(3));
+        EXPECT_EQ(s.st.committed_slots(), 1);
+        EXPECT_FALSE(s.st.slot_committed(0));
+    }
+    // The fake backend commits a prefix, 4 slots for the one asked: release books what was mapped.
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0);
+    vram_reserved_uncommitted_add(-guard);
 }
