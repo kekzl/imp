@@ -17,8 +17,9 @@ size_t dspark_attention_work_floats(int rows, int n_heads, int max_kv_len);
 cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* o, float* work, int rows,
                              int n_heads, int n_kv_heads, int kv_len, float scale, cudaStream_t stream);
 // Graph-replayable: kv_len = *d_ctx + rows read on the device, <= max_kv_len (sizes the grid).
+// d_first (optional): the launch's key 0 is row *d_first of K / V (a window that moves with the position).
 cudaError_t dspark_attention_dev(const half* q, const half* k, const half* v, half* o, float* work, int rows,
                                  int n_heads, int n_kv_heads, const int* d_ctx, int max_kv_len, float scale,
-                                 cudaStream_t stream);
+                                 cudaStream_t stream, const int* d_first = nullptr);
 
 }  // namespace imp

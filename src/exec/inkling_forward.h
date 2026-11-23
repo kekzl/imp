@@ -78,10 +78,15 @@ public:
         long steps = 0, drafted = 0, accepted = 0;
         long confirmed[kGraphRows] = {};  // steps that ended with this many draft rows confirmed
         long paused = 0;                  // one-row steps taken while the draft was paused
+        long proposals = 0;               // draft calls
+        double propose_ms = 0.0;          // their wall time (each ends in a stream synchronize)
     };
     SpecStats spec_stats() const { return stats_; }
     // Tests: off = one-row calls launch every conv site on its own, as calls of more rows do.
     void set_fused_sites(bool on) { fuse_ = on; }
+    // Calls of up to 8 rows read the dense projections as I8B32 from d (set before the first run();
+    // null = fp16). d must outlive this forward.
+    void set_dense8(const InklingDense8* d) { dense8_ = d; }
     // Tests: off = many-row calls run the experts slot by slot.
     void set_grouped_experts(bool on) { grouped_ = on; }
     // Tests: off = many-row calls run the row attention kernel.
@@ -107,6 +112,7 @@ private:
     // 2..8 rows, MXFP8 layers: one tensor-core tile per chosen expert. false = not served.
     [[nodiscard]] bool moe_small_(const InklingLayer& ly, int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
+    [[nodiscard]] bool own_projections_(const InklingLayer& ly, int T) const;
     void* alloc_(size_t bytes);
     cudaStream_t fork_(cudaStream_t s, int i);
     void join_(cudaStream_t side, cudaStream_t s, int i);
@@ -134,6 +140,7 @@ private:
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 
     const InklingWeights* w_ = nullptr;
+    const InklingDense8* dense8_ = nullptr;
     VRAMAllocator* va_ = nullptr;
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
@@ -214,6 +221,9 @@ struct InklingRuntime {
     std::vector<std::shared_ptr<InklingDraft>> drafts;
     bool draft_tried = false;
     int max_ctx = 0, cap = 0;
+    // I8B32 dense projections of the decode steps (before the slots that point at them); null when
+    // the card has no room.
+    std::unique_ptr<InklingDense8> dense8;
     std::vector<std::unique_ptr<InklingForward>> slots;
     std::vector<int> slot_req;        // request bound to the slot, -1 = never bound
     std::vector<int> slot_block;      // first KV block of that request's table: the key of a decode row

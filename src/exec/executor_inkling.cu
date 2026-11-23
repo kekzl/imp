@@ -93,6 +93,29 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     }
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
+    // I8B32 copies of the dense projections for the decode steps, when the card keeps kDense8Spare free
+    // behind them (draft contexts, library reserve, KV pool come later): 2 slots at 32768 take them, 4
+    // slots or a 131072 context decode on fp16.
+    constexpr size_t kDense8Spare = static_cast<size_t>(3) << 30;
+    size_t need = 0, free_b = 0, total_b = 0;
+    for (const InklingLayer& ly : rt->w.layers)
+        need += (static_cast<size_t>(ly.proj_rows) * rt->w.cfg.hidden +
+                 static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
+                17 / 16;
+    auto d8 = std::make_unique<InklingDense8>();
+    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && free_b >= need + kDense8Spare &&
+        build_inkling_dense8(rt->w, *va, *d8)) {
+        for (auto& f : rt->slots)
+            f->set_dense8(d8.get());
+        rt->dense8 = std::move(d8);
+        IMP_LOG_INFO("inkling2_loop: dense projections of the decode steps as I8B32, %.0f MiB",
+                     need / 1048576.0);
+    } else {
+        IMP_LOG_INFO(
+            "inkling2_loop: decode steps read the fp16 dense projections (%.0f MiB free, I8B32 copies "
+            "need %.0f MiB + %.0f MiB spare)",
+            free_b / 1048576.0, need / 1048576.0, kDense8Spare / 1048576.0);
+    }
     rt->max_ctx = max_ctx;
     rt->va = va;
     rt->rows_cap = max_tokens;

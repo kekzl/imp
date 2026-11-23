@@ -4,6 +4,7 @@
 #include "exec/inkling_forward.h"
 
 #include "compute/gemm.h"
+#include "compute/gemv_i8b32.h"
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/cuda_raii.h"
@@ -198,7 +199,22 @@ int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
     return pos_;
 }
 
+// True when lin_ serves the q, k and v projections of a T-row call without cuBLAS.
+bool InklingForward::own_projections_(const InklingLayer& ly, int T) const {
+    if (T == 1)
+        return true;
+    size_t row = 0;
+    const int H = w_->cfg.hidden;
+    return dense8_ && T <= kGraphRows && dense8_->find(ly.wq, H, row) && dense8_->find(ly.wk, H, row) &&
+           dense8_->find(ly.wv, H, row);
+}
+
 void InklingForward::lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s) {
+    size_t row = 0;
+    if (const InklingDense8::Matrix* d = dense8_ && T <= kGraphRows ? dense8_->find(w, K, row) : nullptr)
+        if (gemv_i8b32_f16(d->q + (row * static_cast<size_t>(K)),
+                           d->scales + (row * static_cast<size_t>(K / 32)), x, y, N, K, T, s))
+            return;
     const int64_t as[2] = {T, K}, bs[2] = {N, K}, cs[2] = {T, N};
     const Tensor A(const_cast<half*>(x), QType::F16, 2, as, true);
     const Tensor B(const_cast<half*>(w), QType::F16, 2, bs, true);
@@ -294,16 +310,18 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     const half *kx = pk_, *vx = pv_;
     int q_stride = q_rows, kv_stride = kv_rows;
     // The k and v chains (projection, conv site) run beside the q projection on the side streams.
-    // One row only: more rows project through cuBLAS, whose workspace three GEMMs at once would share
-    // (lookahead text fell apart); there the side streams start behind the projections.
+    // Not through cuBLAS, whose workspace three GEMMs at once would share (lookahead text fell apart):
+    // one row (GEMV) or up to 8 rows on the I8B32 kernel; otherwise the side streams start behind the
+    // projections.
     cudaStream_t sk = s, sv = s;
     if (split) {
-        if (T == 1)
+        const bool own = own_projections_(ly, T);
+        if (own)
             sk = fork_(s, 0), sv = fork_(s, 1);
         lin_(xq_, T, H, ly.wq, q_rows, proj_h_, s);
         lin_(xk_, T, H, ly.wk, kv_rows, pk_, sk);
         lin_(xv_, T, H, ly.wv, kv_rows, pv_, sv);
-        if (T > 1)
+        if (!own)
             sk = fork_(s, 0), sv = fork_(s, 1);
     } else {
         lin_(xq_, T, H, ly.wq, ly.proj_rows, proj_h_, s);

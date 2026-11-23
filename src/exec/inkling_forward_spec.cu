@@ -12,17 +12,19 @@
 #include "quant/nvfp4_gemm.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace imp {
 
 using namespace inkling;
 
 // Pay-off of the draft, called at every step that is not served from a stored row; true = ask it.
-// Against a served one-row step of 6.56 ms the draft call and its bookkeeping cost 0.37 (2.4 ms), a draft
-// row 0.20 (1.29 ms): a step pays while its confirmed rows exceed that. Judged over a running mean after
-// kProbe steps; a draft that does not pay rests for kRest tokens.
+// Against a served one-row step of 5.6 ms (5.03 ms call + head and sampling) the draft call and its
+// bookkeeping cost 0.23 (1.19 ms call), a draft row 0.16 (0.9 ms): a step pays while its confirmed rows
+// exceed that (0.37 / 0.20 before the I8B32 projections and the captured draft: 199.3 -> 202.9 tok/s). Judged
+// over a running mean after kProbe steps; a draft that does not pay rests for kRest tokens.
 bool InklingForward::draft_due_() {
-    constexpr float kDraftCost = 0.37f, kRowCost = 0.20f, kMix = 0.1f;
+    constexpr float kDraftCost = 0.23f, kRowCost = 0.16f, kMix = 0.1f;
     constexpr int kProbe = 24, kRest = 96;
     if (drafted_) {
         const float rows = look_pos0_ >= 0 ? static_cast<float>(look_n_ - 1) : 0.0f;
@@ -105,7 +107,14 @@ bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
     drafted_ = draft_due_();
     settle_(s);
     int32_t drafts[kGraphRows] = {};
-    int n = drafted_ ? spec_.propose(tok, h, pos, drafts, s) : 0;
+    int n = 0;
+    if (drafted_) {
+        const auto t0 = std::chrono::steady_clock::now();
+        n = spec_.propose(tok, h, pos, drafts, s);
+        stats_.propose_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ++stats_.proposals;
+    }
     n = std::clamp(n, 0, kGraphRows - 1);
     const int rows = n + 1;
     if (decode_graph_ok_ && !decode_exec_[rows - 1].get())
@@ -143,11 +152,12 @@ bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
     if (stats_.steps % 512 == 0)
         IMP_LOG_INFO(
             "inkling: lookahead %ld steps (%ld paused), %ld of %ld draft rows confirmed (%.2f tokens "
-            "per step), steps by confirmed rows 0..7: %ld %ld %ld %ld %ld %ld %ld %ld",
+            "per step), draft call %.2f ms, steps by confirmed rows 0..7: %ld %ld %ld %ld %ld %ld %ld %ld",
             stats_.steps, stats_.paused, stats_.accepted, stats_.drafted,
             1.0 + static_cast<double>(stats_.accepted) / static_cast<double>(stats_.steps),
-            stats_.confirmed[0], stats_.confirmed[1], stats_.confirmed[2], stats_.confirmed[3],
-            stats_.confirmed[4], stats_.confirmed[5], stats_.confirmed[6], stats_.confirmed[7]);
+            stats_.propose_ms / static_cast<double>(std::max(stats_.proposals, 1L)), stats_.confirmed[0],
+            stats_.confirmed[1], stats_.confirmed[2], stats_.confirmed[3], stats_.confirmed[4],
+            stats_.confirmed[5], stats_.confirmed[6], stats_.confirmed[7]);
     pos_ = pos + 1;
     hw_ = std::max(hw_, pos + rows);
     if (pos_ % kGrid == 0) {

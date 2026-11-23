@@ -5,6 +5,7 @@
 
 #include <cuda_fp16.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -69,6 +70,30 @@ struct InklingLayer {
     float* mlp_query = nullptr;   // [hidden]
     InklingExperts ex;
 };
+
+struct InklingWeights;
+// The dense projections (per layer the q / k / v block and the output projection) as I8B32
+// (compute/gemv_i8b32.h) for calls of up to 8 rows: half the bytes per decode step.
+struct InklingDense8 {
+    struct Matrix {
+        const half* base = nullptr;  // the fp16 rows this stands for
+        size_t rows = 0;
+        int K = 0;
+        int8_t* q = nullptr;
+        half* scales = nullptr;
+    };
+    std::vector<Matrix> m;
+    VRAMAllocator* va = nullptr;
+    std::vector<void*> owned;
+    InklingDense8() = default;
+    InklingDense8(const InklingDense8&) = delete;
+    InklingDense8& operator=(const InklingDense8&) = delete;
+    ~InklingDense8();
+    // The matrix that holds the rows starting at w, and w's first row in it; null when there is none.
+    [[nodiscard]] const Matrix* find(const half* w, int K, size_t& row) const;
+};
+// Quantizes w's dense projections; false (out left empty) when an allocation fails.
+[[nodiscard]] bool build_inkling_dense8(const InklingWeights& w, VRAMAllocator& va, InklingDense8& out);
 
 struct InklingWeights {
     InklingConfig cfg;

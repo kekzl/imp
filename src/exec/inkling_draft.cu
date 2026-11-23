@@ -2,6 +2,8 @@
 
 #include "exec/inkling_draft.h"
 
+#include "compute/gemv_i8b32.h"
+
 #include "exec/inkling_draft_head.h"
 
 #include "compute/dspark_attention.h"
@@ -36,10 +38,11 @@ constexpr float kKeep = 0.3f;
 unsigned blocks(size_t n) { return static_cast<unsigned>((n + kT - 1) / kT); }
 
 // One block per row: out = rms_norm(sum_t alpha[t] * feat[t][row0 + row]) * w.
+// d_row (optional, device): added to row0, so a captured launch follows the sequence.
 __global__ void draft_mix_k(const float* feat, size_t plane, int row0, const float* alpha, int taps,
-                            const float* w, half* out, int H, float eps) {
+                            const float* w, half* out, int H, float eps, const int* d_row) {
     __shared__ float sh[kT / 32];
-    const size_t r = (size_t)(row0 + blockIdx.x) * H;
+    const size_t r = (size_t)(row0 + (d_row ? *d_row : 0) + blockIdx.x) * H;
     float ss = 0.0f;
     for (int c = threadIdx.x; c < H; c += blockDim.x) {
         float m = 0.0f;
@@ -58,8 +61,9 @@ __global__ void draft_mix_k(const float* feat, size_t plane, int row0, const flo
 
 // Per (row, head) of the sub-block starting at column col0: RMSNorm over the head (w, or none) and
 // NeoX RoPE at position pos0 + row, in place. 64 threads: thread i owns the pair (i, i + 64).
+// d_pos (optional, device): added to pos0.
 __global__ void draft_norm_rope_k(half* x, int stride, int col0, int heads, const float* w, int pos0,
-                                  float log2_theta, float eps) {
+                                  float log2_theta, float eps, const int* d_pos) {
     __shared__ float part[2];
     const int row = blockIdx.x / heads, head = blockIdx.x % heads;
     half* v = x + (size_t)row * stride + col0 + (size_t)head * kHd;
@@ -78,17 +82,19 @@ __global__ void draft_norm_rope_k(half* x, int stride, int col0, int heads, cons
     }
     const float freq = exp2f(-log2_theta * (2.0f * i) / kHd);
     float sn = 0.0f, cs = 0.0f;
-    sincosf(static_cast<float>(pos0 + row) * freq, &sn, &cs);
+    sincosf(static_cast<float>(pos0 + (d_pos ? *d_pos : 0) + row) * freq, &sn, &cs);
     v[i] = __float2half(a * cs - b * sn);
     v[i + kHd / 2] = __float2half(b * cs + a * sn);
 }
 
-// dst[row][c] = src[row][col0 + c] for n rows of width columns.
-__global__ void draft_cols_k(const half* src, int stride, int col0, int width, half* dst, size_t n) {
+// dst[row][c] = src[row][col0 + c] for n rows of width columns; d_row (optional, device): dst row 0 is
+// row *d_row of the array.
+__global__ void draft_cols_k(const half* src, int stride, int col0, int width, half* dst, size_t n,
+                             const int* d_row) {
     const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n)
         return;
-    dst[i] = src[(i / width) * stride + col0 + i % width];
+    dst[(d_row ? static_cast<size_t>(*d_row) * width : 0) + i] = src[(i / width) * stride + col0 + i % width];
 }
 
 // Row 0 = rms_norm(anchor embedding) * w, rows 1.. = the mask embedding.
@@ -240,6 +246,45 @@ std::vector<float> fuse_alpha(std::vector<float> fw, size_t taps) {
 
 }  // namespace
 
+// The block projections as I8B32; an fp16 one is returned once its copy exists (no room: it stays).
+bool InklingDraftWeights::quantize_blocks_(cudaStream_t s) {
+    const InklingDraftConfig& c = cfg;
+    const int64_t H = c.hidden, QD = static_cast<int64_t>(c.heads) * kHd,
+                  KD = static_cast<int64_t>(c.kv_heads) * kHd;
+    const auto to8 = [&](half*& w, int64_t rows, int64_t K, Q8& o) {
+        const size_t n = static_cast<size_t>(rows * K);
+        if (!w || K % 256 != 0)
+            return;
+        auto* q = static_cast<int8_t*>(va->allocate(n, "inkling_draft"));
+        auto* sc = static_cast<half*>(va->allocate(n / 32 * sizeof(half), "inkling_draft"));
+        bool done = q != nullptr && sc != nullptr;
+        if (done) {
+            quantize_i8b32(w, q, sc, static_cast<size_t>(rows), static_cast<int>(K), s);
+            done = cudaStreamSynchronize(s) == cudaSuccess;
+        }
+        if (!done) {
+            if (q)
+                va->free(q);
+            if (sc)
+                va->free(sc);
+            return;
+        }
+        owned.push_back(q);
+        owned.push_back(sc);
+        o.q = q, o.scales = sc;
+        owned.erase(std::remove(owned.begin(), owned.end(), static_cast<void*>(w)), owned.end());
+        va->free(w);
+        w = nullptr;
+    };
+    for (Layer& ly : layers) {
+        to8(ly.qkv, QD + (2 * KD), H, ly.qkv8);
+        to8(ly.wo, H, QD, ly.wo8);
+        to8(ly.gate_up, 2 * static_cast<int64_t>(c.inter), H, ly.gate_up8);
+        to8(ly.down, H, c.inter, ly.down8);
+    }
+    return cudaDeviceSynchronize() == cudaSuccess;
+}
+
 InklingDraftWeights::~InklingDraftWeights() {
     for (void* p : owned)
         va->free(p);
@@ -324,7 +369,7 @@ bool InklingDraftWeights::load(const std::string& dir, VRAMAllocator& va_in, con
         if (d_t)
             va_in.free(d_t);
     }
-    ok = ok && cudaDeviceSynchronize() == cudaSuccess;
+    ok = ok && quantize_blocks_(s);
     munmap(base, size);
     if (ok)
         IMP_LOG_INFO("inkling draft: %d layers, block %d, %zu feature planes, Markov rank %d", c.layers,
@@ -335,6 +380,16 @@ bool InklingDraftWeights::load(const std::string& dir, VRAMAllocator& va_in, con
 InklingDraft::~InklingDraft() {
     for (void* p : owned_)
         va_->free(p);
+}
+
+void InklingDraft::lin8_(const half* x, int T, int K, const InklingDraftWeights::Q8& w8, const half* w, int N,
+                         half* y, cudaStream_t s) {
+    if (w8.q && gemv_i8b32_f16(w8.q, w8.scales, x, y, N, K, T, s))
+        return;
+    if (w)
+        lin_(x, T, K, w, N, y, s);
+    else
+        ok_ = false;
 }
 
 void* InklingDraft::alloc_(size_t bytes) {
@@ -379,6 +434,8 @@ bool InklingDraft::init(const InklingDraftWeights& w, VRAMAllocator& va, int max
     logits_ = Hf(B * V), x2_ = Hf(B * 2 * H), rc_ = Hf(B * 3 * static_cast<size_t>(c.rank));
     latent_ = Hf(static_cast<size_t>(c.rank)), bias_ = Hf(V), frnn_ = Hf(H);
     d_tok_ = static_cast<int32_t*>(alloc_((B + 1) * sizeof(int32_t)));
+    d_par_ = static_cast<int*>(alloc_(sizeof(par_)));
+    emb_ = Hf(H);
     d_conf_ = F(B);
     raw_ = F(3 * static_cast<size_t>(c.rank)), latent_f_ = F(static_cast<size_t>(c.rank));
     const size_t n_cand = draft_head_cands(V);
@@ -406,16 +463,18 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
     for (int i = 0; i < c.layers; ++i) {
         const InklingDraftWeights::Layer& ly = w_->layers[static_cast<size_t>(i)];
         draft_mix_k<<<n, kT, 0, s>>>(feat, plane, row0, w_->alpha + static_cast<size_t>(i) * taps, taps,
-                                     ly.dflare, xc_, H, c.eps);
+                                     ly.dflare, xc_, H, c.eps, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
         lin_(xc_, n, H, ly.kv_ctx, 2 * KD, kvc_, s);
         draft_norm_rope_k<<<n * c.kv_heads, kHd / 2, 0, s>>>(kvc_, 2 * KD, 0, c.kv_heads, ly.k_norm_ctx, pos0,
-                                                             log2_theta, c.eps);
+                                                             log2_theta, c.eps, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
         const size_t nk = static_cast<size_t>(n) * KD, at = static_cast<size_t>(pos0) * KD;
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)] + at, nk);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)] + at, nk,
+                                               nullptr);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, KD, KD, v_[static_cast<size_t>(i)] + at, nk);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, KD, KD, v_[static_cast<size_t>(i)] + at, nk,
+                                               nullptr);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }
@@ -452,74 +511,67 @@ void InklingDraft::on_rows(const float* feat, int cap, int n, int pos0, cudaStre
     kept_ += n;
 }
 
-int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s) {
+// The draft block and the Markov head for the anchor at d_par_[0]: every launch reads the position, the
+// local window and the feature row from d_par_, so one captured graph serves every call.
+bool InklingDraft::block_(cudaStream_t s) {
     const InklingDraftConfig& c = w_->cfg;
     const int B = c.block, H = c.hidden, QD = c.heads * kHd, KD = c.kv_heads * kHd, I = c.inter, r = c.rank;
     const int V = w_->head.vocab, taps = static_cast<int>(c.taps.size()), n_out = B - 1;
-    // Context for every position below pos: the kept rows end there, everything before them is flushed.
-    // Kept rows from pos on belong to drafts that were not confirmed: the call that follows replaces them.
-    const int frow = pos - 1 - kept_pos0_;
-    if (!ok_ || pos < 1 || anchor < 0 || anchor >= c.vocab_padded || frow < 0 || frow >= kept_ ||
-        pos + B > max_ctx_)
-        return 0;
-    kept_ = frow + 1;
-    done_ = std::min(done_, kept_);
-    flush_(s);
     const float log2_theta = std::log2(c.theta), scale = 1.0f / std::sqrt(static_cast<float>(kHd));
     const size_t bH = static_cast<size_t>(B) * H;
-    draft_block_k<<<1, kT, 0, s>>>(d_emb, w_->embed_norm, w_->mask, h_, B, H, c.eps);
+    const int *d_pos = d_par_, *d_ctx_local = d_par_ + 1, *d_first_local = d_par_ + 2, *d_frow = d_par_ + 3;
+    draft_block_k<<<1, kT, 0, s>>>(emb_, w_->embed_norm, w_->mask, h_, B, H, c.eps);
     IMP_CUDA_CHECK_LAUNCH();
     for (int i = 0; i < c.layers; ++i) {
         const InklingDraftWeights::Layer& ly = w_->layers[static_cast<size_t>(i)];
         half *kc = k_[static_cast<size_t>(i)], *vc = v_[static_cast<size_t>(i)];
         rms_norm(h_, ly.in_norm, nullptr, xn_, B, H, c.eps, s);
-        lin_(xn_, B, H, ly.qkv, QD + 2 * KD, qkv_, s);
-        draft_norm_rope_k<<<B * c.heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, 0, c.heads, ly.q_norm, pos,
-                                                          log2_theta, c.eps);
+        lin8_(xn_, B, H, ly.qkv8, ly.qkv, QD + 2 * KD, qkv_, s);
+        draft_norm_rope_k<<<B * c.heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, 0, c.heads, ly.q_norm, 0,
+                                                          log2_theta, c.eps, d_pos);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_norm_rope_k<<<B * c.kv_heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, QD, c.kv_heads, ly.k_norm,
-                                                             pos, log2_theta, c.eps);
+        draft_norm_rope_k<<<B * c.kv_heads, kHd / 2, 0, s>>>(qkv_, QD + 2 * KD, QD, c.kv_heads, ly.k_norm, 0,
+                                                             log2_theta, c.eps, d_pos);
         IMP_CUDA_CHECK_LAUNCH();
         // The block's own K/V rows go behind the context rows, at its positions.
-        const size_t nq = static_cast<size_t>(B) * QD, nk = static_cast<size_t>(B) * KD,
-                     at = static_cast<size_t>(pos) * KD;
-        draft_cols_k<<<blocks(nq), kT, 0, s>>>(qkv_, QD + 2 * KD, 0, QD, q_, nq);
+        const size_t nq = static_cast<size_t>(B) * QD, nk = static_cast<size_t>(B) * KD;
+        draft_cols_k<<<blocks(nq), kT, 0, s>>>(qkv_, QD + 2 * KD, 0, QD, q_, nq, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD, KD, kc + at, nk);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD, KD, kc, nk, d_pos);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD + KD, KD, vc + at, nk);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD + KD, KD, vc, nk, d_pos);
         IMP_CUDA_CHECK_LAUNCH();
-        const int start = c.local[static_cast<size_t>(i)] ? std::max(0, pos - c.window) : 0;
-        const size_t so = static_cast<size_t>(start) * KD;
-        if (dspark_attention(q_, kc + so, vc + so, o_, work_, B, c.heads, c.kv_heads, pos - start + B, scale,
-                             s) != cudaSuccess)
-            return 0;
-        lin_(o_, B, QD, ly.wo, H, y_, s);
+        // A local layer attends the last window positions before the block and the block.
+        const bool local = c.local[static_cast<size_t>(i)];
+        if (dspark_attention_dev(q_, kc, vc, o_, work_, B, c.heads, c.kv_heads, local ? d_ctx_local : d_pos,
+                                 (local ? std::min(c.window, max_ctx_) : max_ctx_) + B, scale, s,
+                                 local ? d_first_local : nullptr) != cudaSuccess)
+            return false;
+        lin8_(o_, B, QD, ly.wo8, ly.wo, H, y_, s);
         draft_add_k<<<blocks(bH), kT, 0, s>>>(h_, y_, bH);
         IMP_CUDA_CHECK_LAUNCH();
         rms_norm(h_, ly.post_norm, nullptr, xn_, B, H, c.eps, s);
-        lin_(xn_, B, H, ly.gate_up, 2 * I, gu_, s);
+        lin8_(xn_, B, H, ly.gate_up8, ly.gate_up, 2 * I, gu_, s);
         const size_t na = static_cast<size_t>(B) * I;
         draft_silu_k<<<blocks(na), kT, 0, s>>>(gu_, act_, na, I);
         IMP_CUDA_CHECK_LAUNCH();
-        lin_(act_, B, I, ly.down, H, y_, s);
+        lin8_(act_, B, I, ly.down8, ly.down, H, y_, s);
         draft_add_k<<<blocks(bH), kT, 0, s>>>(h_, y_, bH);
         IMP_CUDA_CHECK_LAUNCH();
     }
     rms_norm(h_, w_->norm, nullptr, hid_, B, H, c.eps, s);
     // Rows 1.. draft: base logits through the target's head, then the recurrent head row by row.
     if (!gemv_fp8_rowscale_f16(w_->head.w8, w_->head.row_scales, hid_ + H, logits_, V, H, n_out, s))
-        return 0;
-    draft_mix_k<<<1, kT, 0, s>>>(pend_, static_cast<size_t>(cap_) * H, frow,
+        return false;
+    draft_mix_k<<<1, kT, 0, s>>>(pend_, static_cast<size_t>(cap_) * H, 0,
                                  w_->alpha + static_cast<size_t>(c.layers) * taps, taps, w_->markov_dflare,
-                                 frnn_, H, c.eps);
+                                 frnn_, H, c.eps, d_frow);
     IMP_CUDA_CHECK_LAUNCH();
     const size_t nx = static_cast<size_t>(n_out) * 2 * H;
     draft_cat_k<<<blocks(nx), kT, 0, s>>>(hid_, frnn_, x2_, nx, H);
     IMP_CUDA_CHECK_LAUNCH();
     lin_(x2_, n_out, 2 * H, w_->rnn_ctx_w, 3 * r, rc_, s);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(state_, 0, static_cast<size_t>(r) * sizeof(float), s));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tok_, &anchor, sizeof anchor, cudaMemcpyHostToDevice, s));
     DraftHeadArgs ha;
     ha.logits = logits_, ha.rc = rc_, ha.rnn_state_w = w_->rnn_state_w, ha.w1 = w_->w1,
     ha.fold_w = w_->fold_w;
@@ -529,6 +581,51 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
     ha.conf = d_conf_, ha.cand = d_cand_, ha.tok = d_tok_;
     ha.V = V, ha.rank = r, ha.rows = n_out, ha.cap = kLogitCap;
     draft_head_pick(ha, s);
+    return ok_;
+}
+
+// The block is 84 launches for 0.73 ms of kernel time (1.83 ms per call launched one by one): captured
+// once, replayed as one graph (1.19 ms).
+void InklingDraft::capture_(cudaStream_t s) {
+    cudaGraph_t g = nullptr;
+    cudaGraphExec_t ex = nullptr;
+    graph_ok_ = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) == cudaSuccess;
+    if (graph_ok_) {
+        const bool body = block_(s);
+        graph_ok_ = cudaStreamEndCapture(s, &g) == cudaSuccess && body &&
+                    cudaGraphInstantiate(&ex, g, 0) == cudaSuccess;
+    }
+    graph_.reset(g);
+    exec_.reset(graph_ok_ ? ex : nullptr);
+    if (!graph_ok_)
+        IMP_LOG_WARN("inkling draft: graph capture of the block failed, it runs launch by launch");
+}
+
+int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s) {
+    const InklingDraftConfig& c = w_->cfg;
+    const int B = c.block, V = w_->head.vocab, n_out = B - 1;
+    // Context for every position below pos: the kept rows end there, everything before them is flushed.
+    // Kept rows from pos on belong to drafts that were not confirmed: the call that follows replaces them.
+    const int frow = pos - 1 - kept_pos0_;
+    if (!ok_ || pos < 1 || anchor < 0 || anchor >= c.vocab_padded || frow < 0 || frow >= kept_ ||
+        pos + B > max_ctx_)
+        return 0;
+    kept_ = frow + 1;
+    done_ = std::min(done_, kept_);
+    flush_(s);
+    // What the block reads from the device: position, local context length and first key, feature row.
+    const int first = std::max(0, pos - c.window);
+    par_[0] = pos, par_[1] = pos - first, par_[2] = first, par_[3] = frow;
+    tok_ = anchor;
+    if (cudaMemcpyAsync(d_par_, par_, sizeof(par_), cudaMemcpyHostToDevice, s) != cudaSuccess ||
+        cudaMemcpyAsync(d_tok_, &tok_, sizeof(tok_), cudaMemcpyHostToDevice, s) != cudaSuccess ||
+        cudaMemcpyAsync(emb_, d_emb, static_cast<size_t>(c.hidden) * sizeof(half), cudaMemcpyDeviceToDevice,
+                        s) != cudaSuccess)
+        return 0;
+    if (graph_ok_ && !exec_.get() && s != nullptr)
+        capture_(s);
+    if (exec_.get() ? cudaGraphLaunch(exec_.get(), s) != cudaSuccess : !block_(s))
+        return 0;
     float conf[InklingForward::kGraphRows] = {};
     if (cudaMemcpyAsync(out, d_tok_ + 1, static_cast<size_t>(n_out) * sizeof(int32_t), cudaMemcpyDeviceToHost,
                         s) != cudaSuccess ||

@@ -12,7 +12,10 @@
 #include <cstdio>
 #include <vector>
 
+#include "compute/gemm.h"
 #include "compute/gemm_grouped_nvfp4_f16_tile.h"
+#include "compute/gemv_i8b32.h"
+#include "core/tensor.h"
 #include "compute/inkling_ops.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
@@ -490,6 +493,79 @@ TEST(InklingAttention, FewRowsFormMatchesTheRowForm) {
         for (void* p : {static_cast<void*>(d_x), static_cast<void*>(d_kv), static_cast<void*>(d_out),
                         static_cast<void*>(d_qs), static_cast<void*>(d_rs), static_cast<void*>(d_proj),
                         static_cast<void*>(d_part), static_cast<void*>(d_pos)})
+            cudaFree(p);
+    }
+}
+
+// The I8B32 projection against an fp16 GEMM over the dequantized weights (q * scale, exact in fp32, rounded
+// to fp16 for the reference): both K shapes of the Inkling dense projections, 1..16 rows.
+TEST(InklingDecode, I8B32ProjectionMatchesTheDequantizedGemm) {
+    uint32_t seed = 99u;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f - 0.5f;
+    };
+    struct Shape {
+        int M, K;
+    };
+    for (const Shape& sh : {Shape{520, 2304}, Shape{301, 3072}}) {
+        const size_t n = static_cast<size_t>(sh.M) * sh.K;
+        std::vector<half> w(n), x(static_cast<size_t>(16) * sh.K);
+        for (size_t i = 0; i < n; ++i)
+            w[i] = __float2half_rn(rnd() * (0.02f + 0.3f * static_cast<float>((i / 32) % 7)));
+        for (auto& v : x)
+            v = __float2half_rn(4.0f * rnd());
+        half *d_w = nullptr, *d_sc = nullptr, *d_x = nullptr, *d_y = nullptr, *d_wd = nullptr;
+        int8_t* d_q = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_w, n * 2), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_wd, n * 2), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_q, n), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_sc, n / 32 * 2), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * 2), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(16) * sh.M * 2), cudaSuccess);
+        cudaMemcpy(d_w, w.data(), n * 2, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
+        quantize_i8b32(d_w, d_q, d_sc, static_cast<size_t>(sh.M), sh.K);
+        std::vector<int8_t> q(n);
+        std::vector<half> sc(n / 32), wd(n);
+        cudaMemcpy(q.data(), d_q, n, cudaMemcpyDeviceToHost);
+        cudaMemcpy(sc.data(), d_sc, n / 32 * 2, cudaMemcpyDeviceToHost);
+        double qnum = 0.0, qden = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            const float v = static_cast<float>(q[i]) * __half2float(sc[i / 32]);
+            wd[i] = __float2half_rn(v);
+            qnum += (v - __half2float(w[i])) * (v - __half2float(w[i]));
+            qden += __half2float(w[i]) * __half2float(w[i]);
+        }
+        std::printf("I8B32 %d x %d: quantisation rel. error %.3g\n", sh.M, sh.K, std::sqrt(qnum / qden));
+        EXPECT_LT(std::sqrt(qnum / qden), 0.02);
+        cudaMemcpy(d_wd, wd.data(), n * 2, cudaMemcpyHostToDevice);
+        for (const int rows : {1, 3, 8, 13, 16}) {
+            const size_t yn = static_cast<size_t>(rows) * sh.M;
+            std::vector<half> want(yn), got(yn);
+            const int64_t as[2] = {rows, sh.K}, bs[2] = {sh.M, sh.K}, cs[2] = {rows, sh.M};
+            const Tensor A(d_x, QType::F16, 2, as, true);
+            const Tensor B(d_wd, QType::F16, 2, bs, true);
+            Tensor C(d_y, QType::F16, 2, cs, true);
+            gemm(A, B, C, 1.0f, 0.0f, nullptr);
+            cudaMemcpy(want.data(), d_y, yn * 2, cudaMemcpyDeviceToHost);
+            cudaMemset(d_y, 0, yn * 2);
+            ASSERT_TRUE(gemv_i8b32_f16(d_q, d_sc, d_x, d_y, sh.M, sh.K, rows));
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            cudaMemcpy(got.data(), d_y, yn * 2, cudaMemcpyDeviceToHost);
+            double num = 0.0, den = 0.0;
+            for (size_t i = 0; i < yn; ++i) {
+                const double a = __half2float(want[i]), b = __half2float(got[i]);
+                num += (a - b) * (a - b);
+                den += a * a;
+            }
+            std::printf("I8B32 %d x %d, %d rows: rel. error %.3g against the fp16 GEMM\n", sh.M, sh.K, rows,
+                        std::sqrt(num / den));
+            EXPECT_GT(den, 0.0);
+            EXPECT_LT(std::sqrt(num / den), 2e-3);
+        }
+        for (void* p : {static_cast<void*>(d_w), static_cast<void*>(d_wd), static_cast<void*>(d_q),
+                        static_cast<void*>(d_sc), static_cast<void*>(d_x), static_cast<void*>(d_y)})
             cudaFree(p);
     }
 }
