@@ -58,8 +58,18 @@ void* InklingForward::alloc_(size_t bytes) {
     return p;
 }
 
+bool InklingForward::grow_ctx_(int rows, cudaStream_t s) {
+    const size_t want = std::min(static_cast<size_t>(rows), static_cast<size_t>(max_ctx_));
+    if (want <= ctx_.rows())
+        return true;
+    // Queued launches hold pointers into the regions: let them end before the mapping changes.
+    if (cudaStreamSynchronize(s) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess)
+        return false;
+    return ctx_.ensure(want);
+}
+
 bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                          const InklingForward* scratch) {
+                          const InklingForward* scratch, Backend* growable) {
     w_ = &w;
     va_ = &va;
     share_ = scratch && scratch->max_tokens_ == max_tokens && scratch->max_ctx_ == max_ctx ? scratch
@@ -117,13 +127,21 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     dec_h_ = Hf_(H * kGraphRows);
     conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
+    ctx_.init(va, growable, "inkling_state", KD * sizeof(half), static_cast<size_t>(max_ctx), kCtxStep);
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
         // Application index -> weight layer.
         const int layer = a < c.n_layers ? a : c.loop_start + (a - c.n_layers) % (c.loop_end - c.loop_start);
-        const size_t rows = c.global[static_cast<size_t>(layer)] ? static_cast<size_t>(max_ctx)
-                                                                 : static_cast<size_t>(ring_);
-        k_.push_back(Hf_(rows * KD));
-        v_.push_back(Hf_(rows * KD));
+        if (c.global[static_cast<size_t>(layer)]) {
+            k_.push_back(static_cast<half*>(ctx_.add()));
+            v_.push_back(static_cast<half*>(ctx_.add()));
+            if (!k_.back() || !v_.back()) {
+                IMP_LOG_ERROR("inkling: no room for the context K/V of %d positions", max_ctx);
+                ok_ = false;
+            }
+        } else {
+            k_.push_back(Hf_(static_cast<size_t>(ring_) * KD));
+            v_.push_back(Hf_(static_cast<size_t>(ring_) * KD));
+        }
         conv_state_.push_back(conv_all_ + conv_state_floats_ * static_cast<size_t>(a));
     }
     if (ok_)
@@ -510,6 +528,8 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
             pos0, pos_, max_tokens_, max_ctx_);
         return false;
     }
+    if (!grow_ctx_(pos_ + T + kGraphRows, s))
+        return false;
     // Tokens past the prompt rewind() recorded (the decode steps) join the history.
     for (int i = 0; i < T; ++i)
         if (static_cast<size_t>(pos0) + static_cast<size_t>(i) >= hist_.size())
@@ -597,6 +617,8 @@ bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaS
                       pos_, seg_, max_ctx_);
         return false;
     }
+    if (!grow_ctx_(pos_ + T, s))
+        return false;
     const int H = c.hidden;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
     embed_rows(w_->embed, d_ids, h_, T, H, s);

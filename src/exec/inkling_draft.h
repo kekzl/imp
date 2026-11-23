@@ -82,8 +82,10 @@ public:
     // max_ctx positions; cap = most rows one on_rows call brings; back = how far before the highest
     // position seen a later on_rows may start again (InklingForward keeps kSeg + kSlack), < 0 = every
     // layer keeps one K/V row per position.
+    // growable: K/V kept per position commit their rows as the sequence grows (InklingForward::init).
     [[nodiscard]] bool init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap,
-                            int back = InklingForward::kSeg + InklingForward::kSlack);
+                            int back = InklingForward::kSeg + InklingForward::kSlack,
+                            Backend* growable = nullptr);
     // The two halves of InklingSpecHooks, see there.
     void on_rows(const float* feat, int cap, int n, int pos0, cudaStream_t s);
     int propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s);
@@ -103,6 +105,8 @@ private:
     const InklingDraftWeights* w_ = nullptr;
     VRAMAllocator* va_ = nullptr;
     std::vector<void*> owned_;
+    GrowRows ctx_;  // K/V of the layers that keep one row per position
+    [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
     bool ok_ = true;
     int max_ctx_ = 0, cap_ = 0;
     int ring_ = 0;  // rows of a local layer's K/V ring (kept twice), 0 = one row per position

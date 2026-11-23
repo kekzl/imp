@@ -477,6 +477,55 @@ TEST(InklingLookahead, CheckpointInsideACallIsTheRowsState) {
     }
 }
 
+// Context K/V that commit their rows as the sequence grows (growable backend): 5000 positions in calls
+// of 512 and one-row steps cross two commit steps and give the rows of a forward that holds all 8192.
+TEST(InklingRewind, GrowableContextIsBitEqual) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Backend* vmm = vmm_backend();
+    if (!vmm)
+        GTEST_SKIP() << "no growable backend on this device";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> p = read_ids(std::string(oracle) + "/sky_prompt.json");
+    ASSERT_FALSE(p.empty());
+    std::vector<int32_t> ids;
+    while (ids.size() < 5000)
+        ids.insert(ids.end(), p.begin(), p.end());
+    ids.resize(5000);
+    const int P = 4990;
+    std::vector<int> cuts;
+    for (int c = 512; c < P; c += 512)
+        cuts.push_back(c);
+    std::vector<float> rows[2], steps[2];
+    size_t held[2] = {};
+    for (int g = 0; g < 2; ++g) {
+        InklingForward f;
+        ASSERT_TRUE(f.init(fx.w, fx.va, 512, 8192, nullptr, g ? vmm : nullptr));
+        held[g] = f.context_rows();
+        rows[g] = run_rows(f, fx.w, std::vector<int32_t>(ids.begin(), ids.begin() + P), 0, cuts);
+        ASSERT_FALSE(rows[g].empty());
+        Stepper st(fx.w);
+        for (int pos = P; pos < 5000; ++pos) {
+            const std::vector<float> r = st.step(f, ids[static_cast<size_t>(pos)], pos);
+            ASSERT_FALSE(r.empty());
+            steps[g].insert(steps[g].end(), r.begin(), r.end());
+        }
+        if (g) {
+            EXPECT_EQ(held[g], static_cast<size_t>(InklingForward::kCtxStep));
+            EXPECT_EQ(f.context_rows(), static_cast<size_t>(3 * InklingForward::kCtxStep));
+        } else {
+            EXPECT_EQ(f.context_rows(), 8192u);
+        }
+    }
+    EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
+    EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
+    EXPECT_EQ(fx.va.planned(), 0u);
+}
+
 // A real stream turns the side streams on (k / v chains, message mix): rows of every call size must
 // come out as on the default stream, where everything runs in order. Three cuBLAS projections at
 // once shared a workspace and passed every other test.
