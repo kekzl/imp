@@ -6,6 +6,7 @@
 #include "memory/arena.h"
 #include "memory/block_pool.h"
 #include "memory/fake_backend.h"
+#include "memory/mem_account.h"
 #include "memory/ssm_state.h"
 #include "memory/vram_query.h"
 
@@ -68,6 +69,36 @@ TEST(Arena, RecordsEveryTakeWithItsSite) {
     EXPECT_NE(std::string(t[1].file).find("test_memory_allocators.cpp"), std::string::npos);
     arena.reset();
     EXPECT_TRUE(arena.takes().empty());
+}
+
+// note_range() tells the touch audit where a pool that charges through note() lies; drop_ranges()
+// forgets one pool's ranges and leaves the others.
+TEST(MemAccountRanges, ListedUntilTheirPoolDropsThem) {
+    MemAccount& acc = MemAccount::instance();
+    static int a = 0, b = 0, c = 0;
+    const auto count = [&](const char* pool) {
+        int n = 0;
+        for (const MemAccount::Charged& r : acc.charged())
+            n += std::string(r.pool) == pool;
+        return n;
+    };
+    acc.note_range("range_test_a", &a, 64);
+    acc.note_range("range_test_a", &b, 128);
+    acc.note_range("range_test_b", &c, 256);
+    acc.note_range("range_test_b", nullptr, 256);  // ignored
+    acc.note_range("range_test_b", &a + 4, 0);     // ignored
+    EXPECT_EQ(count("range_test_a"), 2);
+    EXPECT_EQ(count("range_test_b"), 1);
+    for (const MemAccount::Charged& r : acc.charged())
+        if (r.ptr == &b) {
+            EXPECT_EQ(r.bytes, 128u);
+            EXPECT_STREQ(r.pool, "range_test_a");
+        }
+    acc.drop_ranges("range_test_a");
+    EXPECT_EQ(count("range_test_a"), 0);
+    EXPECT_EQ(count("range_test_b"), 1);
+    acc.drop_ranges("range_test_b");
+    EXPECT_EQ(count("range_test_b"), 0);
 }
 
 // AUDIT B13: arena-grow scratch pointers in compute/ are kernel PARAMETERS baked into

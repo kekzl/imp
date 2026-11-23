@@ -131,11 +131,25 @@ void MemAccount::note_free(const void* ptr) {
     note(c.pool, -static_cast<std::ptrdiff_t>(c.bytes));
 }
 
+void MemAccount::note_range(const char* pool, const void* ptr, size_t bytes) {
+    if (!ptr || bytes == 0)
+        return;
+    std::lock_guard<std::mutex> lock(mu_);
+    ranges_[ptr] = Charge{pool, bytes};
+}
+
+void MemAccount::drop_ranges(const char* pool) {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::erase_if(ranges_, [&](const auto& kv) { return std::string_view(kv.second.pool) == pool; });
+}
+
 std::vector<MemAccount::Charged> MemAccount::charged() const {
     std::vector<Charged> out;
     std::lock_guard<std::mutex> lock(mu_);
-    out.reserve(charges_.size());
+    out.reserve(charges_.size() + ranges_.size());
     for (const auto& [ptr, c] : charges_)
+        out.push_back({ptr, c.bytes, c.pool});
+    for (const auto& [ptr, c] : ranges_)
         out.push_back({ptr, c.bytes, c.pool});
     return out;
 }
