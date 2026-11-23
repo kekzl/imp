@@ -1375,6 +1375,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_inkling_parity.cu
+        tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu

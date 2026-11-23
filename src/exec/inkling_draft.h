@@ -79,8 +79,11 @@ public:
     InklingDraft& operator=(const InklingDraft&) = delete;
     ~InklingDraft();
 
-    // max_ctx positions; cap = most rows one on_rows call brings.
-    [[nodiscard]] bool init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap);
+    // max_ctx positions; cap = most rows one on_rows call brings; back = how far before the highest
+    // position seen a later on_rows may start again (InklingForward keeps kSeg + kSlack), < 0 = every
+    // layer keeps one K/V row per position.
+    [[nodiscard]] bool init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap,
+                            int back = InklingForward::kSeg + InklingForward::kSlack);
     // The two halves of InklingSpecHooks, see there.
     void on_rows(const float* feat, int cap, int n, int pos0, cudaStream_t s);
     int propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s);
@@ -102,20 +105,22 @@ private:
     std::vector<void*> owned_;
     bool ok_ = true;
     int max_ctx_ = 0, cap_ = 0;
+    int ring_ = 0;  // rows of a local layer's K/V ring (kept twice), 0 = one row per position
     // Feature rows kept in pend_ ([taps][cap][hidden]): positions [kept_pos0_, kept_pos0_ + kept_), the
     // first done_ of them already have context K/V. The Markov head reads the row before the anchor.
     int kept_pos0_ = 0, kept_ = 0, done_ = 0;
     int drafted_pos_ = -1;  // position of the last propose(): its call's rows get their K/V in on_rows
-    std::vector<half*> k_, v_;        // per layer [max_ctx + block][kv_heads * head_dim]
+    std::vector<half*> k_, v_;  // per layer [max_ctx + block or 2 * ring_][kv_heads * head_dim]
     float *pend_ = nullptr, *h_ = nullptr, *state_ = nullptr, *work_ = nullptr;
     half *xc_ = nullptr, *kvc_ = nullptr, *xn_ = nullptr, *qkv_ = nullptr, *q_ = nullptr, *o_ = nullptr;
     half *y_ = nullptr, *gu_ = nullptr, *act_ = nullptr, *hid_ = nullptr, *logits_ = nullptr, *x2_ = nullptr;
     half *rc_ = nullptr, *latent_ = nullptr, *bias_ = nullptr, *frnn_ = nullptr;
     int32_t* d_tok_ = nullptr;  // [0] the anchor, [1..] the drafted tokens
     // What the captured block reads per call: [0] position, [1] local context length, [2] its first
-    // key, [3] the feature row before the anchor; the anchor's embedding row.
+    // key, [3] the feature row before the anchor, [4] the block's row in a local layer's K/V; the
+    // anchor's embedding row.
     int* d_par_ = nullptr;
-    int par_[4] = {};
+    int par_[5] = {};
     int32_t tok_ = 0;
     half* emb_ = nullptr;
     CudaGraph graph_;
