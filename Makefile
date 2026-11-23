@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -514,6 +514,12 @@ verify: build check-gpu
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast: build check-gpu
 	@$(GPU_LOCKED) scripts/verify.sh fast
+
+# vram-touch-audit: MiB held against MiB written per pool for one model (docs/VRAM_AUDIT.md). The
+# acceptance step of a model port and of any change to what a model allocates.
+#   make vram-touch-audit MODEL=/models/<dir> [EXTRA="--set runtime.max_seq_len=..."]
+vram-touch-audit: build check-gpu
+	@$(GPU_LOCKED) env MODEL="$(MODEL)" IMG="$(DOCKER_IMG)" EXTRA="$(EXTRA)" tools/analysis/vram_touch_run.sh
 
 # verify-chunked: gates chunked-prefill path (chunk=512) against tests/perf_baseline_chunked.json.
 # Looser thresholds (5%/8%) cover the gather + rect-attn per-chunk overhead.
