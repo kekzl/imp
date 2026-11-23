@@ -97,15 +97,66 @@ __global__ void mix_partial_k(MixArgs a, int H, int slices) {
         a.partial[((size_t)t * slices + b) * kMixVals + threadIdx.x] = acc[threadIdx.x];
 }
 
+// Mix, step 1 for calls of many rows. One block per row, kThreads threads striding the row: the row's
+// Gram matrix and query dots in one pass (the slice form reduces 45 values per 128 elements: 289 us per
+// call of 778 rows). Totals at partial[t * kMixVals].
+__global__ void mix_rows_partial_k(MixArgs a, int H) {
+    __shared__ float red[kMixVals * (kThreads / 32)];
+    const int t = blockIdx.x, n = a.st.n;
+    float g[15], d[20];
+#pragma unroll
+    for (int k = 0; k < 15; ++k)
+        g[k] = 0.0f;
+#pragma unroll
+    for (int k = 0; k < 20; ++k)
+        d[k] = 0.0f;
+    for (int i = threadIdx.x; i < H; i += blockDim.x) {
+        float x[5];
+#pragma unroll
+        for (int j = 0; j < 5; ++j)
+            x[j] = j < n ? a.st.s[j][(size_t)t * H + i] : 0.0f;
+        int K = 0;
+#pragma unroll
+        for (int j = 0; j < 5; ++j)
+#pragma unroll
+            for (int k = j; k < 5; ++k)
+                g[K++] += x[j] * x[k];
+        if (a.mix) {
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                const float qv = q < a.nq ? a.query[(size_t)q * H + i] : 0.0f;
+#pragma unroll
+                for (int j = 0; j < 5; ++j)
+                    d[q * 5 + j] += qv * x[j];
+            }
+        }
+    }
+    // The layout mix_out_k reads: Gram entry (j, k) at j * 5 + k, query dots at 25 + q * 5 + j.
+    float acc[kMixVals];
+    int K = 0;
+#pragma unroll
+    for (int j = 0; j < 5; ++j)
+#pragma unroll
+        for (int k = 0; k < 5; ++k)
+            acc[j * 5 + k] = k >= j ? g[K++] : 0.0f;
+#pragma unroll
+    for (int k = 0; k < 20; ++k)
+        acc[25 + k] = d[k];
+    block_sum_many(acc, kMixVals, red);
+    if (threadIdx.x < kMixVals)
+        a.partial[(size_t)t * kMixVals + threadIdx.x] = acc[threadIdx.x];
+}
+
 // Mix, step 2. Same grid: sum the slices' partials, softmax per query, write this slice. The RMS of
 // v_q comes from the Gram matrix (|v|^2 = c^T G c), so no pass over v is needed.
-__global__ void mix_out_k(MixArgs a, int H, int slices) {
+// ps: partial rows per token (slices, or 1 after mix_rows_partial_k).
+__global__ void mix_out_k(MixArgs a, int H, int slices, int ps) {
     __shared__ float tot[kMixVals];
     const int t = blockIdx.x / slices, b = blockIdx.x % slices;
     if (threadIdx.x < kMixVals) {
         float v = 0.0f;
-        for (int k = 0; k < slices; ++k)
-            v += a.partial[((size_t)t * slices + k) * kMixVals + threadIdx.x];
+        for (int k = 0; k < ps; ++k)
+            v += a.partial[((size_t)t * ps + k) * kMixVals + threadIdx.x];
         tot[threadIdx.x] = v;
     }
     __syncthreads();
@@ -431,24 +482,35 @@ void mix(const MixArgs& a, int T, int H, cudaStream_t s) {
         return;
     }
     const int slices = (H + kMixSlice - 1) / kMixSlice;
-    mix_partial_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices);
+    const bool rows = T > kRowLoopMaxT && p.kind == 0;
+    if (rows)
+        mix_rows_partial_k<<<T, kThreads, 0, s>>>(a, H);
+    else
+        mix_partial_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices);
     IMP_CUDA_CHECK_LAUNCH();
-    mix_out_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices);
+    mix_out_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices, rows ? 1 : slices);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H, cudaStream_t s) {
+void gate_rms(const GateNormArgs& a, const GateOut& o, int T, int H, cudaStream_t s) {
+    gate_rms_k<<<T * a.n, kThreads, 0, s>>>(a, o, H);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H, cudaStream_t s,
+               const GateWork* w) {
     if (a.rank > kGateMaxRank || a.n < 1 || a.n > 3) {
         IMP_LOG_ERROR("inkling gate_norm: rank %d or %d gates out of range", a.rank, a.n);
         return;
     }
+    if (w && T > kRowLoopMaxT && gate_norm_rows(a, o, *w, T, H, s))
+        return;
     const int col_blocks = (H + 31) / 32;
     gate_down_k<<<T * a.n*(a.rank + 1), kThreads, 0, s>>>(a, gd, H);
     IMP_CUDA_CHECK_LAUNCH();
     gate_mix_k<<<T * a.n * col_blocks, 32, 0, s>>>(a, gd, o, H, col_blocks);
     IMP_CUDA_CHECK_LAUNCH();
-    gate_rms_k<<<T * a.n, kThreads, 0, s>>>(a, o, H);
-    IMP_CUDA_CHECK_LAUNCH();
+    gate_rms(a, o, T, H, s);
 }
 
 void kv_site(const KvSiteArgs& a, cudaStream_t s) {

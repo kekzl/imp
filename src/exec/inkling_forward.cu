@@ -104,6 +104,10 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     logits_h_ = Hf_(static_cast<size_t>(c.vocab));
     idx_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     xs_ = Hf_(slots * H);
+    gate_work_.x = Hf_(3 * Tm * 2 * H);
+    gate_work_.g = Hf_(3 * Tm * static_cast<size_t>(c.gate_rank));
+    gate_work_.forget = Hf_(3 * Tm * H);
+    gate_work_.gain = Hf_(3 * Tm * H);
     perm_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     off_ = static_cast<int32_t*>(alloc_((static_cast<size_t>(c.n_experts) + 1) * sizeof(int32_t)));
     conv_state_floats_ = 3 * (2 * KD + 2 * H);
@@ -309,7 +313,7 @@ void InklingForward::mix_looped_(int layer, int T, cudaStream_t s) {
     }
     GateOut go;
     go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
-    gate_norm(gn, go, gd_, T, H, s);
+    gate_norm(gn, go, gd_, T, H, s, &gate_work_);
 }
 
 void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
@@ -437,7 +441,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         gn.down[0] = ly.gates[3].down, gn.forget[0] = ly.gates[3].forget, gn.gain[0] = ly.gates[3].gain;
         GateOut go;
         go.o[0] = g_[0], go.o[1] = g_[1], go.o[2] = g_[2];
-        gate_norm(gn, go, gd_, T, H, s);
+        gate_norm(gn, go, gd_, T, H, s, &gate_work_);
     }
     route_topk(xm_, ly.router_w, ly.router_b, rlog_, idx_, wts_, T, H, c.n_experts, c.top_k, c.route_scale,
                s);

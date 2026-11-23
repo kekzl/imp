@@ -75,6 +75,7 @@ void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, true, 1>	sm_120a	72	16	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)5>, false, 4>	sm_120a	72	8	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)5>, true, 4>	sm_120a	72	8	0
+imp::inkling::(anonymous namespace)::mix_rows_partial_k	sm_120a	64	184	0
 void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	64	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::paged_attention_splitk_pipeline_kernel<256>	sm_120a	64	16	0

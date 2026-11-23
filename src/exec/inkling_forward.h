@@ -168,6 +168,7 @@ private:
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
     half* xs_ = nullptr;  // expert-sorted slot rows [slots, hidden]
+    inkling::GateWork gate_work_;
     int32_t *perm_ = nullptr, *off_ = nullptr;
     bool grouped_ = true;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call

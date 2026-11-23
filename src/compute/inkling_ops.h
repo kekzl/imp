@@ -83,7 +83,17 @@ struct GateNormArgs {
 struct GateOut {
     float* o[3] = {};
 };
-void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H, cudaStream_t s);
+// Scratch of the many-row form, fp16: x [n, T, 2H], g [n, T, rank], forget and gain [n, T, H].
+struct GateWork {
+    half *x = nullptr, *g = nullptr, *forget = nullptr, *gain = nullptr;
+};
+// w set and more than 8 rows: the projections run as GEMMs (gate_norm_rows).
+void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H, cudaStream_t s,
+               const GateWork* w = nullptr);
+[[nodiscard]] bool gate_norm_rows(const GateNormArgs& a, const GateOut& o, const GateWork& w, int T, int H,
+                                  cudaStream_t s);
+// The gates' last step: out_h = fp16(rms_norm(o) * norm_w).
+void gate_rms(const GateNormArgs& a, const GateOut& o, int T, int H, cudaStream_t s);
 
 // Key or value site: short conv over the projection x (static w [C, 4], or static_w [4, C] + per-head
 // taps dyn), L2 clip (key) or unit RMS (value) per head, fp16 write at slot (*d_pos + t) % ring, and
