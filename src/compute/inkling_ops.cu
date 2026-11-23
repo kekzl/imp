@@ -4,6 +4,7 @@
 #include "compute/inkling_ops.h"
 
 #include "compute/inkling_detail.cuh"
+#include "compute/inkling_fused.cuh"
 #include "core/logging.h"
 
 #include <cfloat>
@@ -111,6 +112,45 @@ __global__ void route_scores_k(const half* x, const float* w, float* logits, int
         logits[(size_t)t * n_experts + e] = acc;
 }
 
+// route_scores_k for hidden 2304: a lane's 18 weight loads and the thread's row loads are issued before
+// the first store. Same sums in the same order: bit-equal (FixedShapeKernelsAreBitEqual).
+constexpr int kRouteFixH = 2304;
+__global__ void route_scores_fixed_k(const half* x, const float* w, float* logits, int n_experts,
+                                     int blocks_per_tok) {
+    constexpr int H = kRouteFixH, kXl = (H / 8 + kRouteWarps * 32 - 1) / (kRouteWarps * 32), kWl = H / 128;
+    __shared__ float xs[H];
+    __shared__ float ws[kRouteWarps][H];
+    const int t = blockIdx.x / blocks_per_tok, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int e = (blockIdx.x % blocks_per_tok) * kRouteWarps + warp;
+    const bool live = e < n_experts;
+    const half* xr = x + (size_t)t * H;
+    const float* wr = w + (size_t)(live ? e : 0) * H;
+    uint4 xp[kXl];
+    float4 wp[kWl];
+    for (int j = 0; j < kXl; ++j)
+        xp[j] = *reinterpret_cast<const uint4*>(xr +
+                                                min((int)threadIdx.x * 8 + j * kRouteWarps * 256, H - 8));
+    for (int j = 0; j < kWl; ++j)
+        wp[j] = *reinterpret_cast<const float4*>(wr + (size_t)(lane * 4 + j * 128));
+    for (int j = 0; j < kXl; ++j) {
+        const int i = threadIdx.x * 8 + j * kRouteWarps * 256;
+        if (i >= H)
+            continue;
+        for (int k = 0; k < 8; ++k)
+            xs[i + k] = __half2float(reinterpret_cast<const half*>(&xp[j])[k]);
+    }
+    for (int j = 0; live && j < kWl; ++j)
+        *reinterpret_cast<float4*>(&ws[warp][lane * 4 + j * 128]) = wp[j];
+    __syncthreads();
+    float acc = 0.0f;
+    if (live)
+        for (int i = lane; i < H; i += 32)
+            acc += xs[i] * ws[warp][i];
+    acc = warp_sum(acc);
+    if (live && lane == 0)
+        logits[(size_t)t * n_experts + e] = acc;
+}
+
 // One block per token, one thread per expert (n_experts <= 128).
 __global__ void route_pick_k(const float* logits, const float* bias, int32_t* idx, float* weights,
                              int n_experts, int top_k, float route_scale) {
@@ -211,8 +251,13 @@ void route_topk(const half* x, const float* w, const float* bias, float* logits,
         return;
     }
     const int bpt = (n_experts + kRouteWarps - 1) / kRouteWarps;
-    route_scores_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, H, n_experts, bpt);
-    IMP_CUDA_CHECK_LAUNCH();
+    if (H == kRouteFixH && detail::fixed_shape_kernels()) {
+        route_scores_fixed_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, n_experts, bpt);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        route_scores_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, H, n_experts, bpt);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
     route_pick_k<<<T, 128, 0, s>>>(logits, bias, idx, weights, n_experts, top_k, route_scale);
     IMP_CUDA_CHECK_LAUNCH();
 }

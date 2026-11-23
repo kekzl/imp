@@ -44,6 +44,7 @@ __device__ __forceinline__ float mix_pre(const MixPre& p, int c, int C, float& r
 
 // The launches of inkling_fixed.cu; false = this shape (or set_fixed_shape_kernels(false)) takes the
 // runtime-bounded kernel. Same bits either way.
+[[nodiscard]] bool fixed_shape_kernels();
 [[nodiscard]] bool mix_partial_fixed(const MixArgs& a, int T, int H, int slices, cudaStream_t s);
 [[nodiscard]] bool mix_out_fixed(const MixArgs& a, int T, int H, int slices, cudaStream_t s);
 [[nodiscard]] bool gate_down_fixed(const GateNormArgs& a, float* gd, int T, int H, cudaStream_t s);

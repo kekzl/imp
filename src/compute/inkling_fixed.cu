@@ -305,6 +305,8 @@ void set_fixed_shape_kernels(bool on) { g_fixed = on; }
 
 namespace detail {
 
+bool fixed_shape_kernels() { return g_fixed; }
+
 bool mix_partial_fixed(const MixArgs& a, int T, int H, int slices, cudaStream_t s) {
     if (!g_fixed)
         return false;
