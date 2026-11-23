@@ -19,6 +19,9 @@ CLANG_CUDA = ["clang++", "-x", "cuda", "--cuda-host-only", "--cuda-gpu-arch=sm_1
               "-D_NV_RSQRT_SPECIFIER=noexcept(true)"]
 # clang's CUDA wrapper still includes texture_fetch_functions.h, which CUDA 13 dropped.
 TEXTURE_STUB = "// Empty: CUDA 13 dropped this header, clang's CUDA wrapper still includes it.\n"
+# clang's CUDA wrapper includes this cuRAND header; the slim CI image (.github/ci-image) carries no
+# cuRAND, imp uses none. Written only where the toolkit lacks it.
+CURAND_STUB = "// Empty: clang's CUDA wrapper includes this header, the toolkit here has no cuRAND.\n"
 # Overloads nvcc provides and clang's wrapper lacks; without them 20 of 174 TUs error out.
 COMPAT = """#pragma once
 // Lint-only (tools/tidy_cu_db.py): nvcc overloads missing from clang's CUDA wrapper.
@@ -97,7 +100,10 @@ def main():
         sys.stderr.write(f"{len(bare)} .cu entries without an -I path, e.g. {bare[0]}\n")
         return 1
     os.makedirs(stub_dir, exist_ok=True)
-    for name, text in (("texture_fetch_functions.h", TEXTURE_STUB), ("tidy_nvcc_compat.h", COMPAT)):
+    stubs = [("texture_fetch_functions.h", TEXTURE_STUB), ("tidy_nvcc_compat.h", COMPAT)]
+    if not os.path.exists(os.path.join(CUDA_PATH, "include", "curand_mtgp32_kernel.h")):
+        stubs.append(("curand_mtgp32_kernel.h", CURAND_STUB))
+    for name, text in stubs:
         with open(os.path.join(stub_dir, name), "w", encoding="utf-8") as f:
             f.write(text)
     with open(os.path.join(sys.argv[2], "compile_commands.json"), "w", encoding="utf-8") as f:
