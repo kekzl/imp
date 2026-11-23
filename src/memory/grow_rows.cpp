@@ -3,6 +3,7 @@
 #include "core/logging.h"
 #include "memory/mem_account.h"
 #include "memory/vram_allocator.h"
+#include "memory/vram_query.h"
 
 #include <algorithm>
 
@@ -13,7 +14,7 @@ GrowRows::~GrowRows() {
         va_->free(p);
     for (Region& r : regions_) {
         MemAccount::instance().note(pool_, -static_cast<std::ptrdiff_t>(r.committed()));
-        va_->plan(-static_cast<std::ptrdiff_t>(r.reserved() - r.committed()));
+        vram_reserved_uncommitted_add(-static_cast<std::ptrdiff_t>(r.reserved() - r.committed()));
     }
 }
 
@@ -31,7 +32,8 @@ void* GrowRows::add() {
         if (r) {
             void* base = r.region.base();
             MemAccount::instance().note(pool_, static_cast<std::ptrdiff_t>(r.region.committed()));
-            va_->plan(static_cast<std::ptrdiff_t>(r.region.reserved() - r.region.committed()));
+            vram_reserved_uncommitted_add(
+                static_cast<std::ptrdiff_t>(r.region.reserved() - r.region.committed()));
             regions_.push_back(std::move(r.region));
             return base;
         }
@@ -59,7 +61,7 @@ bool GrowRows::ensure(size_t rows) {
         const std::ptrdiff_t added = static_cast<std::ptrdiff_t>(r.committed()) -
                                      static_cast<std::ptrdiff_t>(before);
         MemAccount::instance().note(pool_, added);
-        va_->plan(-added);
+        vram_reserved_uncommitted_add(-added);
         if (e != MemError::Ok) {
             IMP_LOG_ERROR("%s: commit to %zu rows failed (%s)", pool_, want, mem_error_name(e));
             return false;

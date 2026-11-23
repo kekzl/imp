@@ -1,7 +1,7 @@
 #pragma once
 // Row arrays that commit their memory as the row count grows (a sequence's context K/V): one growable
 // Region per array, all grown together in steps. Without a growable backend the arrays are allocated
-// in full. What is reserved but not committed is booked with VRAMAllocator::plan().
+// in full. What is reserved but not committed goes to the reserved-uncommitted ledger (vram_query.h).
 
 #include "memory/backend.h"
 
