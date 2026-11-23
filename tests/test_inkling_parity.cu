@@ -277,22 +277,22 @@ TEST(InklingRewind, ResumedPrefixMatchesAFreshRun) {
     b.assign(a.begin(), a.begin() + 280);
     for (size_t i = 0; i < 30; ++i)
         b.push_back(paris[i % paris.size()]);
-    InklingForward kept, fresh, kept100, fresh100;
-    ASSERT_TRUE(fresh100.init(fx.w, fx.va, 512, 4096));
+    InklingForward kept, fresh, kept100;
     ASSERT_TRUE(kept100.init(fx.w, fx.va, 512, 4096));
-    // Calls of 100 rows: the checkpoint at 256 falls inside the call [200, 300).
-    ASSERT_FALSE(run_rows(kept100, fx.w, a, 0, {100, 200}).empty());
+    // One call of 310 rows: the checkpoint at 256 is taken inside it. Resuming there must give the
+    // rows the call itself computed (a call's rows move by percents with the shapes of the calls before
+    // it: a router near-tie flips an expert, so only equal call shapes compare).
+    const std::vector<float> want100 = run_rows(kept100, fx.w, b, 0, {});
     ASSERT_EQ(kept100.rewind(b, nullptr), 256);
     const std::vector<float> got100 = run_rows(kept100, fx.w, b, 256, {});
-    const std::vector<float> want100 = run_rows(fresh100, fx.w, b, 0, {100, 200, 256});
     ASSERT_TRUE(kept.init(fx.w, fx.va, 512, 4096));
     ASSERT_TRUE(fresh.init(fx.w, fx.va, 512, 4096));
     ASSERT_EQ(kept.rewind(a, nullptr), 0);
-    ASSERT_FALSE(run_rows(kept, fx.w, a, 0, {}).empty());
+    ASSERT_FALSE(run_rows(kept, fx.w, a, 0, {256}).empty());
     ASSERT_EQ(kept.rewind(b, nullptr), 256);
-    // Both runs compute the same segments ([0, 256), [256, 310)): equal row counts, equal GEMM picks.
+    // Both runs compute the same calls ([0, 256), [256, 310)): equal row counts, equal GEMM picks.
     const std::vector<float> got = run_rows(kept, fx.w, b, 256, {});
-    const std::vector<float> want = run_rows(fresh, fx.w, b, 0, {});
+    const std::vector<float> want = run_rows(fresh, fx.w, b, 0, {256});
     ASSERT_FALSE(got.empty());
     ASSERT_FALSE(want.empty());
     Err e;
@@ -710,8 +710,8 @@ TEST(InklingRewind, FusedConvSitesAreBitEqual) {
 // two heads per KV head take attn_part_k). Same inputs through the row form (one block per row and head,
 // no part buffer): a sliding layer past its ring's wrap, a full-attention layer with the position scale
 // on, and a sequence's first rows.
-// Calls of many rows sort the expert slots and run grouped GEMMs (NVFP4 and MXFP8 layers): the rows
-// against the same call with one GEMV per slot.
+// Calls of many rows sort the expert slots and run grouped GEMMs (NVFP4 and MXFP8 layers) and compute
+// the attention as GEMMs: the rows against the same call with one GEMV per slot / the row kernel.
 TEST(InklingPrefill, GroupedExpertsMatchTheSlotForm) {
     const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
     const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
@@ -724,15 +724,17 @@ TEST(InklingPrefill, GroupedExpertsMatchTheSlotForm) {
     const std::vector<int32_t> g = read_ids(std::string(oracle) + "/paris_greedy.json");
     ASSERT_FALSE(t.empty());
     t.insert(t.end(), g.begin(), g.end());
-    InklingForward slot, grouped;
+    InklingForward slot, grouped, row_attn;
+    ASSERT_TRUE(row_attn.init(fx.w, fx.va, 512, 4096));
+    row_attn.set_gemm_attention(false);
     ASSERT_TRUE(slot.init(fx.w, fx.va, 512, 4096));
     ASSERT_TRUE(grouped.init(fx.w, fx.va, 512, 4096));
     slot.set_grouped_experts(false);
     // The stream after the first application (an NVFP4 layer) and after the last (an MXFP8 one).
     const size_t n0 = t.size() * static_cast<size_t>(fx.w.cfg.hidden);
-    std::vector<float> first[2];
+    std::vector<float> first[3];
     int i = 0;
-    for (InklingForward* f : {&slot, &grouped}) {
+    for (InklingForward* f : {&slot, &grouped, &row_attn}) {
         std::vector<float>& dst = first[i++];
         dst.resize(n0);
         f->tap = [&dst, n0](int app, const float* h, int) {
@@ -742,6 +744,12 @@ TEST(InklingPrefill, GroupedExpertsMatchTheSlotForm) {
     }
     const std::vector<float> want = run_rows(slot, fx.w, t, 0, {});
     const std::vector<float> got = run_rows(grouped, fx.w, t, 0, {});
+    ASSERT_FALSE(run_rows(row_attn, fx.w, t, 0, {}).empty());
+    Err ea;
+    ea.add(first[1].data(), first[2].data(), n0);
+    std::printf("GEMM attention: first application rel. error %.3g against the row kernel\n", ea.rel());
+    EXPECT_GT(ea.rel(), 0.0);
+    EXPECT_LT(ea.rel(), 1e-3);
     Err e0;
     e0.add(first[1].data(), first[0].data(), n0);
     std::printf("grouped experts: first application rel. error %.3g\n", e0.rel());

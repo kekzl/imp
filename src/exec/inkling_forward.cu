@@ -40,6 +40,12 @@ void InklingForward::join_(cudaStream_t side, cudaStream_t s, int i) {
 }
 
 void* InklingForward::alloc_(size_t bytes) {
+    if (scratch_on_ && share_) {
+        if (scratch_i_ < share_->scratch_.size())
+            return share_->scratch_[scratch_i_++];
+        ok_ = false;
+        return nullptr;
+    }
     void* p = va_->allocate(bytes, "inkling_state");
     if (!p) {
         IMP_LOG_ERROR("inkling: workspace allocation of %.1f MiB failed", bytes / 1048576.0);
@@ -47,17 +53,23 @@ void* InklingForward::alloc_(size_t bytes) {
         return nullptr;
     }
     owned_.push_back(p);
+    if (scratch_on_)
+        scratch_.push_back(p);
     return p;
 }
 
-bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx) {
+bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
+                          const InklingForward* scratch) {
     w_ = &w;
     va_ = &va;
+    share_ = scratch && scratch->max_tokens_ == max_tokens && scratch->max_ctx_ == max_ctx ? scratch
+                                                                                           : nullptr;
+    scratch_on_ = true;
     const InklingConfig& c = w.cfg;
     // Calls are cut into segments that end on the checkpoint grid: the workspace holds one segment.
     max_tokens_ = max_tokens;
     max_ctx_ = max_ctx;
-    seg_ = std::min(max_tokens, kGrid);
+    seg_ = std::min(max_tokens, kSeg);
     ring_ = c.window + seg_ + kSlack;
     const size_t Tm = static_cast<size_t>(seg_), H = static_cast<size_t>(c.hidden);
     const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim,
@@ -94,9 +106,11 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     xs_ = Hf_(slots * H);
     perm_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     off_ = static_cast<int32_t*>(alloc_((static_cast<size_t>(c.n_experts) + 1) * sizeof(int32_t)));
+    conv_state_floats_ = 3 * (2 * KD + 2 * H);
+    ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
+    scratch_on_ = false;
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     dec_h_ = Hf_(H * kGraphRows);
-    conv_state_floats_ = 3 * (2 * KD + 2 * H);
     conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
         // Application index -> weight layer.
@@ -125,7 +139,22 @@ void InklingForward::reset(cudaStream_t s) {
 }
 
 void InklingForward::checkpoint_(cudaStream_t s, const float* state) {
-    const size_t g = static_cast<size_t>(pos_ / kGrid), n = conv_state_floats_ * conv_state_.size();
+    checkpoint_at_(pos_ / kGrid, s, state);
+}
+
+inkling::ConvMarks InklingForward::marks_(size_t app, size_t off) const {
+    ConvMarks m;
+    m.n = marks_n_;
+    for (int i = 0; i < marks_n_; ++i) {
+        m.row[i] = marks_row_[i];
+        m.dst[i] = ckpt_stage_ + (static_cast<size_t>(i) * conv_state_.size() + app) * conv_state_floats_ +
+                   off;
+    }
+    return m;
+}
+
+void InklingForward::checkpoint_at_(int grid, cudaStream_t s, const float* state) {
+    const size_t g = static_cast<size_t>(grid), n = conv_state_floats_ * conv_state_.size();
     if (ckpt_.size() < g)
         ckpt_.resize(g);
     ckpt_[g - 1].resize(n);
@@ -344,11 +373,13 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     ka.is_key = true, ka.thr = c.qk_clip, ka.eps = c.eps;
     const ConvLog lg = conv_log_at_(app, T);
     ka.log = lg.k;
+    ka.marks = marks_(app, 0);
     kv_site(ka, sk);
     KvSiteArgs va = ka;
     va.x = vx, va.w = ly.v_conv.w, va.static_w = ly.v_conv.static_w, va.dyn = vx + KD;
     va.state = cs + static_cast<size_t>(3) * KD, va.cache = v_[app], va.is_key = false;
     va.log = lg.v;
+    va.marks = marks_(app, static_cast<size_t>(3) * KD);
     kv_site(va, sv);
     join_(sk, s, 0);
     join_(sv, s, 1);
@@ -358,7 +389,8 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     a.q_scale = ly.q_scale, a.rel_scale = ly.rel_scale, a.proj = ly.rel_proj;
     a.k = k_[app], a.v = v_[app], a.out = ao_h_, a.d_pos = d_pos_;
     a.part = part_, a.max_ctx = max_ctx_;
-    a.work = attn_work_, a.work_bytes = attn_work_bytes_, a.pos0 = T > kGraphRows ? pos_ : -1;
+    a.work = attn_gemm_ ? attn_work_ : nullptr, a.work_bytes = attn_work_bytes_;
+    a.pos0 = T > kGraphRows ? pos_ : -1;
     a.T = T, a.stride = q_stride, a.n_heads = c.n_heads, a.n_kv = c.n_kv_heads, a.hd = c.head_dim;
     a.d_rel = c.d_rel, a.rel_extent = global ? c.rel_extent : c.window;
     a.window = global ? 0 : c.window, a.ring = global ? 0 : ring_;
@@ -375,8 +407,9 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     MixPre ap;
     ap.kind = 1, ap.x = o_h_, ap.w = ly.attn_conv, ap.state = as, ap.resid = h_, ap.add = !boundary;
     ap.out = res2_, ap.copy = boundary ? bs_[nb_] : nullptr, ap.log = lg.attn;
+    const ConvMarks attn_marks = marks_(app, static_cast<size_t>(6) * KD);
     if (!fused)
-        conv_residual(o_h_, ly.attn_conv, as, h_, !boundary, res2_, ap.copy, T, H, s, lg.attn);
+        conv_residual(o_h_, ly.attn_conv, as, h_, !boundary, res2_, ap.copy, T, H, s, lg.attn, &attn_marks);
     if (boundary)
         st.s[st.n++] = bs_[nb_++];
     st.s[st.n++] = res2_;
@@ -415,8 +448,9 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         tail_.log = lg.mlp;
         tail_.top_k = c.top_k;
     } else {
+        const ConvMarks mlp_marks = marks_(app, static_cast<size_t>(6) * KD + static_cast<size_t>(3) * H);
         moe_tail(ey_, wts_, ly.mlp_conv, as + static_cast<size_t>(3) * H, res2_, h_, mm_, T, c.top_k, H, s,
-                 lg.mlp);
+                 lg.mlp, &mlp_marks);
     }
     if (tap) {
         flush_tail_(s);
@@ -518,7 +552,10 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
         return step_spec_(h, ids[0], s);
     settle_(s);
     for (int done = 0; done < T;) {
-        const int seg = std::min(T - done, kGrid - pos_ % kGrid);
+        // Calls of a few rows end on the checkpoint grid; larger ones run up to a segment end and mark
+        // the grid rows inside (the few-row kernels keep no marks).
+        const int lim = T - done > kGraphRows ? kSeg : kGrid;
+        const int seg = std::min(T - done, lim - pos_ % lim);
         if (!segment_(h + static_cast<size_t>(done) * Hd, seg, s, ids ? ids + done : nullptr, image_token))
             return false;
         done += seg;
@@ -537,6 +574,10 @@ bool InklingForward::segment_(half* hs, int seg, cudaStream_t s, const int32_t* 
     if (graph && !decode_exec_[seg - 1].get())
         capture_decode_(seg, s);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
+    const int g0 = pos_ / kGrid + 1;
+    marks_n_ = 0;
+    for (int g = g0; seg > kGraphRows && g * kGrid < pos_ + seg && marks_n_ < 3; ++g)
+        marks_row_[marks_n_++] = g * kGrid - pos_;
     if (graph && decode_graph_ok_ && decode_exec_[seg - 1].get()) {
         const size_t hb = n * sizeof(half);
         if (cudaMemcpyAsync(dec_h_, hs, hb, cudaMemcpyDeviceToDevice, s) != cudaSuccess ||
@@ -548,6 +589,10 @@ bool InklingForward::segment_(half* hs, int seg, cudaStream_t s, const int32_t* 
         layers_(seg, s, ids, image_token);
         f32_to_f16(mix_[0], hs, n, s);
     }
+    const size_t total = conv_state_floats_ * conv_state_.size();
+    for (int i = 0; i < marks_n_; ++i)
+        checkpoint_at_(g0 + i, s, ckpt_stage_ + static_cast<size_t>(i) * total);
+    marks_n_ = 0;
     pos_ += seg;
     hw_ = std::max(hw_, pos_);
     if (pos_ % kGrid == 0)

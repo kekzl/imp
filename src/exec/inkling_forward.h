@@ -34,7 +34,10 @@ public:
 
     // max_tokens: rows of one forward call; max_ctx: positions a sequence may reach.
     // Allocates from va under the tag inkling_state.
-    [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx);
+    // scratch: a forward of the same sizes whose per-call buffers this one uses too (the slots of a
+    // runtime run one after the other on one stream); it must outlive this one.
+    [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
+                            const InklingForward* scratch = nullptr);
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -48,8 +51,10 @@ public:
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGraphRows = 8;  // rows of the largest captured call = anchor + drafts
-    static constexpr int kGrid = 256;     // rows per forward segment = checkpoint distance
-    static constexpr int kSlack = 5888;  // sliding K/V kept behind the window: how far rewind may go back
+    static constexpr int kGrid = 256;     // checkpoint distance
+    // Rows per forward segment: a 3111-token prefill ran 2590 tok/s at 256 and 3688 at 1024.
+    static constexpr int kSeg = 1024;
+    static constexpr int kSlack = 5120;  // sliding K/V kept behind the window: how far rewind may go back
 
     // Runs T tokens at positions [position(), position() + T). logits: device fp32 [vocab], softcapped,
     // for the last token; may be null.
@@ -79,9 +84,8 @@ public:
     void set_fused_sites(bool on) { fuse_ = on; }
     // Tests: off = many-row calls run the experts slot by slot.
     void set_grouped_experts(bool on) { grouped_ = on; }
-    // Scratch of the many-row attention (attention_rows_bytes), shared by the slots of a runtime;
-    // without one the forward allocates its own at init. nullptr + 0 = the row kernel (tests).
-    void set_attn_work(void* p, size_t bytes) { attn_work_ = p, attn_work_bytes_ = bytes; }
+    // Tests: off = many-row calls run the row attention kernel.
+    void set_gemm_attention(bool on) { attn_gemm_ = on; }
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -106,6 +110,9 @@ private:
     void join_(cudaStream_t side, cudaStream_t s, int i);
     // Host copy of the conv state when the sequence stands on the grid.
     void checkpoint_(cudaStream_t s, const float* state);
+    void checkpoint_at_(int grid, cudaStream_t s, const float* state);
+    // Grid rows inside the running many-row segment, for the conv site at off floats into app's state.
+    [[nodiscard]] inkling::ConvMarks marks_(size_t app, size_t off) const;
     // run() for one row with the lookahead on; settle_ makes the conv state the confirmed one.
     [[nodiscard]] bool step_spec_(half* h, int32_t tok, cudaStream_t s);
     void settle_(cudaStream_t s);
@@ -126,6 +133,13 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;
+    // Per-call buffers in allocation order: a forward given as scratch hands them out again.
+    std::vector<void*> scratch_;
+    const InklingForward* share_ = nullptr;
+    size_t scratch_i_ = 0;
+    bool scratch_on_ = false, attn_gemm_ = true;
+    float* ckpt_stage_ = nullptr;  // conv states at up to 3 grid rows inside a segment
+    int marks_n_ = 0, marks_row_[3] = {};
     std::vector<half*> k_, v_;        // per application
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
@@ -206,7 +220,6 @@ struct InklingRuntime {
     int rows_cap = 0;
     std::vector<int32_t> rows;
     VRAMAllocator* va = nullptr;
-    void* attn_work = nullptr;  // many-row attention scratch, one for all slots
     InklingRuntime() = default;
     InklingRuntime(const InklingRuntime&) = delete;
     InklingRuntime& operator=(const InklingRuntime&) = delete;

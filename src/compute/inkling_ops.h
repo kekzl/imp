@@ -88,6 +88,14 @@ void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H,
 // Key or value site: short conv over the projection x (static w [C, 4], or static_w [4, C] + per-head
 // taps dyn), L2 clip (key) or unit RMS (value) per head, fp16 write at slot (*d_pos + t) % ring, and
 // the conv state [3, C] advanced past the call.
+// Rows of a call of more than 8 rows whose conv state (the three inputs before the row) is wanted as
+// well: dst[i] [3, C] receives the state at row[i].
+struct ConvMarks {
+    int n = 0;
+    int row[3] = {};
+    float* dst[3] = {};
+};
+
 struct KvSiteArgs {
     const half* x = nullptr;
     const float* w = nullptr;
@@ -100,6 +108,7 @@ struct KvSiteArgs {
     int T = 0, stride = 0, n_heads = 0, hd = 0, ring = 0;
     bool is_key = true;
     float thr = 0.0f, eps = 1e-6f;
+    ConvMarks marks;
 };
 void kv_site(const KvSiteArgs& a, cudaStream_t s);
 
@@ -144,7 +153,8 @@ size_t attention_part_floats(int n_heads, int hd, int window, int max_ctx);
 // copy (optional) receives resid.
 // log (optional, calls of up to 8 rows): [T, C], the conv inputs of this call.
 void conv_residual(const half* x, const float* w, float* state, const float* resid, bool add, float* out,
-                   float* copy, int T, int C, cudaStream_t s, float* log = nullptr);
+                   float* copy, int T, int C, cudaStream_t s, float* log = nullptr,
+                   const ConvMarks* marks = nullptr);
 // Conv state after row j of a call that logged its inputs: dst = the last three of [pre (the state before
 // the call), log rows 0..j], for every site of n_apps applications (k, v: KD channels; attn, mlp: H).
 // State layout per application [3, KD] [3, KD] [3, H] [3, H]; log layout the same with rows rows each.
@@ -153,13 +163,14 @@ void conv_state_at(const float* pre, const float* log, float* dst, int j, int n_
 // y = sum_k weights[t, k] * ey[t * top_k + k]; a = (conv(y) + y) / sqrt(5), state advanced; out = resid + a.
 // scratch: fp32 [T, C], used above 8 rows.
 void moe_tail(const half* ey, const float* weights, const float* w, float* state, const float* resid,
-              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log = nullptr);
+              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log = nullptr,
+              const ConvMarks* marks = nullptr);
 
 // Router: scores = sigmoid(W x); top_k of scores + bias; weights = score / sum * route_scale.
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,
                 int T, int H, int n_experts, int top_k, float route_scale, cudaStream_t s);
 // Slots sorted by expert, stable: perm[slot] = sorted row, offsets [n_experts + 1] = prefix sums of the
-// expert counts. false above 4096 slots or 512 experts.
+// expert counts. false above 512 experts.
 [[nodiscard]] bool moe_sort(const int32_t* idx, int slots, int n_experts, int32_t* perm, int32_t* offsets,
                             cudaStream_t s);
 // Rows of C halves (C % 8 == 0, 16-byte aligned). to_sorted: dst[perm[slot]] = src[slot / group];

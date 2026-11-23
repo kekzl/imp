@@ -9,43 +9,47 @@ namespace imp::inkling {
 
 namespace {
 
-constexpr int kSortThreads = 1024;
-constexpr int kSortMaxSlots = 4096;
+constexpr int kSortThreads = 256;
 constexpr int kSortMaxExperts = 512;
 
-// One block: counting sort of the slots by expert, stable (a slot's rank among its expert's slots is
-// the number of earlier slots with that expert). perm[slot] = sorted row, off [ne + 1] = prefix sums.
-__global__ void moe_sort_k(const int32_t* idx, int slots, int ne, int32_t* perm, int32_t* off) {
-    __shared__ int sidx[kSortMaxSlots];
-    __shared__ int cnt[kSortMaxExperts + 1];
-    const int tid = threadIdx.x, nt = blockDim.x;
-    for (int i = tid; i < slots; i += nt)
-        sidx[i] = idx[i];
-    for (int e = tid; e <= ne; e += nt)
-        cnt[e] = 0;
+// Sort, step 1. One block per expert, a thread per contiguous stretch of slots: rank[slot] = number of
+// earlier slots with this expert (a stable counting sort), cnt[e] = its slots.
+__global__ void moe_rank_k(const int32_t* idx, int slots, int32_t* rank, int32_t* cnt) {
+    __shared__ int part[kSortThreads];
+    const int e = blockIdx.x, tid = threadIdx.x;
+    const int per = (slots + kSortThreads - 1) / kSortThreads;
+    const int lo = min(slots, tid * per), hi = min(slots, lo + per);
+    int n = 0;
+    for (int i = lo; i < hi; ++i)
+        n += idx[i] == e ? 1 : 0;
+    part[tid] = n;
     __syncthreads();
-    for (int i = tid; i < slots; i += nt)
-        atomicAdd(&cnt[sidx[i]], 1);
-    __syncthreads();
-    if (tid == 0) {
+    int base = 0;
+    for (int t = 0; t < tid; ++t)
+        base += part[t];
+    for (int i = lo; i < hi; ++i)
+        if (idx[i] == e)
+            rank[i] = base++;
+    if (tid == kSortThreads - 1)
+        cnt[e] = base;
+}
+
+// Sort, step 2. One block: off = prefix sums of cnt (in place, [ne + 1]), perm = off[expert] + rank.
+__global__ void moe_perm_k(const int32_t* idx, int slots, int ne, int32_t* perm, int32_t* off) {
+    __shared__ int so[kSortMaxExperts + 1];
+    if (threadIdx.x == 0) {
         int a = 0;
         for (int e = 0; e < ne; ++e) {
-            const int c = cnt[e];
-            cnt[e] = a;
-            a += c;
+            so[e] = a;
+            a += off[e];
         }
-        cnt[ne] = a;
+        so[ne] = a;
     }
     __syncthreads();
-    for (int e = tid; e <= ne; e += nt)
-        off[e] = cnt[e];
-    for (int i = tid; i < slots; i += nt) {
-        const int e = sidx[i];
-        int r = 0;
-        for (int j = 0; j < i; ++j)
-            r += sidx[j] == e ? 1 : 0;
-        perm[i] = cnt[e] + r;
-    }
+    for (int e = threadIdx.x; e <= ne; e += blockDim.x)
+        off[e] = so[e];
+    for (int i = threadIdx.x; i < slots; i += blockDim.x)
+        perm[i] += so[idx[i]];
 }
 
 // 16-byte pieces: to_sorted: dst[perm[slot]] = src[slot / group]; else dst[slot] = src[perm[slot]].
@@ -89,9 +93,11 @@ void mxfp8_expert_bias(const uint8_t* sc, int n_experts, size_t bytes_per_expert
 }
 
 bool moe_sort(const int32_t* idx, int slots, int n_experts, int32_t* perm, int32_t* offsets, cudaStream_t s) {
-    if (slots > kSortMaxSlots || n_experts > kSortMaxExperts)
+    if (n_experts > kSortMaxExperts)
         return false;
-    moe_sort_k<<<1, kSortThreads, 0, s>>>(idx, slots, n_experts, perm, offsets);
+    moe_rank_k<<<n_experts, kSortThreads, 0, s>>>(idx, slots, perm, offsets);
+    IMP_CUDA_CHECK_LAUNCH();
+    moe_perm_k<<<1, 1024, 0, s>>>(idx, slots, n_experts, perm, offsets);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

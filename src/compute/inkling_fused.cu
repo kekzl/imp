@@ -304,8 +304,8 @@ __global__ void kv_site_rows_k(KvSiteArgs a) {
     a.cache[((size_t)slot * a.n_heads + head) * a.hd + threadIdx.x] = __float2half(y * f);
 }
 
-// state <- the last three inputs after T rows.
-__global__ void state_from_h_k(const half* x, float* state, int T, int C, int stride) {
+// dst <- the last three inputs after T rows (dst = state: the call's state update).
+__global__ void state_from_h_k(const half* x, const float* state, float* dst, int T, int C, int stride) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C)
         return;
@@ -313,9 +313,9 @@ __global__ void state_from_h_k(const half* x, float* state, int T, int C, int st
     for (int i = 0; i < 3; ++i)
         v[i] = tap_h(x, state, T - 3 + i, c, C, stride);
     for (int i = 0; i < 3; ++i)
-        state[(size_t)i * C + c] = v[i];
+        dst[(size_t)i * C + c] = v[i];
 }
-__global__ void state_from_f_k(const float* x, float* state, int T, int C) {
+__global__ void state_from_f_k(const float* x, const float* state, float* dst, int T, int C) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C)
         return;
@@ -323,7 +323,7 @@ __global__ void state_from_f_k(const float* x, float* state, int T, int C) {
     for (int i = 0; i < 3; ++i)
         v[i] = tap_f(x, state, T - 3 + i, c, C);
     for (int i = 0; i < 3; ++i)
-        state[(size_t)i * C + c] = v[i];
+        dst[(size_t)i * C + c] = v[i];
 }
 
 __global__ void conv_residual_rows_k(const half* x, const float* w, const float* state, const float* resid,
@@ -460,7 +460,13 @@ void kv_site(const KvSiteArgs& a, cudaStream_t s) {
         kv_site_rows_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a);
         IMP_CUDA_CHECK_LAUNCH();
         const int C = a.n_heads * a.hd;
-        state_from_h_k<<<(C + kThreads - 1) / kThreads, kThreads, 0, s>>>(a.x, a.state, a.T, C, a.stride);
+        const unsigned grid = (C + kThreads - 1) / kThreads;
+        for (int i = 0; i < a.marks.n; ++i) {
+            state_from_h_k<<<grid, kThreads, 0, s>>>(a.x, a.state, a.marks.dst[i], a.marks.row[i], C,
+                                                     a.stride);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        state_from_h_k<<<grid, kThreads, 0, s>>>(a.x, a.state, a.state, a.T, C, a.stride);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
@@ -469,13 +475,18 @@ void kv_site(const KvSiteArgs& a, cudaStream_t s) {
 }
 
 void conv_residual(const half* x, const float* w, float* state, const float* resid, bool add, float* out,
-                   float* copy, int T, int C, cudaStream_t s, float* log) {
+                   float* copy, int T, int C, cudaStream_t s, float* log, const ConvMarks* marks) {
     if (T > kRowLoopMaxT) {
         const size_t n = static_cast<size_t>(T) * C;
         conv_residual_rows_k<<<static_cast<unsigned>((n + kThreads - 1) / kThreads), kThreads, 0, s>>>(
             x, w, state, resid, add, out, copy, n, C);
         IMP_CUDA_CHECK_LAUNCH();
-        state_from_h_k<<<(C + kThreads - 1) / kThreads, kThreads, 0, s>>>(x, state, T, C, C);
+        const unsigned sg = (C + kThreads - 1) / kThreads;
+        for (int i = 0; marks && i < marks->n; ++i) {
+            state_from_h_k<<<sg, kThreads, 0, s>>>(x, state, marks->dst[i], marks->row[i], C, C);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        state_from_h_k<<<sg, kThreads, 0, s>>>(x, state, state, T, C, C);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
@@ -485,7 +496,8 @@ void conv_residual(const half* x, const float* w, float* state, const float* res
 }
 
 void moe_tail(const half* ey, const float* weights, const float* w, float* state, const float* resid,
-              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log) {
+              float* out, float* scratch, int T, int top_k, int C, cudaStream_t s, float* log,
+              const ConvMarks* marks) {
     if (T > kRowLoopMaxT) {
         const size_t n = static_cast<size_t>(T) * C;
         const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
@@ -493,7 +505,12 @@ void moe_tail(const half* ey, const float* weights, const float* w, float* state
         IMP_CUDA_CHECK_LAUNCH();
         conv_tail_rows_k<<<grid, kThreads, 0, s>>>(scratch, w, state, resid, out, n, C);
         IMP_CUDA_CHECK_LAUNCH();
-        state_from_f_k<<<(C + kThreads - 1) / kThreads, kThreads, 0, s>>>(scratch, state, T, C);
+        const unsigned sg = (C + kThreads - 1) / kThreads;
+        for (int i = 0; marks && i < marks->n; ++i) {
+            state_from_f_k<<<sg, kThreads, 0, s>>>(scratch, state, marks->dst[i], marks->row[i], C);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        state_from_f_k<<<sg, kThreads, 0, s>>>(scratch, state, state, T, C);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
