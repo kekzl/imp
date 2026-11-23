@@ -45,6 +45,10 @@ __device__ __forceinline__ __half2 nv4_scale(uint32_t e) {
 struct Nv4Dec {
     static constexpr int kWideCost = 0;  // 128x128 only, as MXFP4
     using Args = Nv4Args;
+    static constexpr float kAlpha = 256.0f;  // the decoded weights carry 2^-8
+    static __device__ __forceinline__ Args make(const F16Args& o, const uint8_t* w, const uint8_t* sc, int) {
+        return {o, w, sc};
+    }
     template <class C>
     static __device__ __forceinline__ void decode(const Nv4Args& p, uint32_t bars, uint8_t* smem, int n0,
                                                   int KT) {

@@ -34,7 +34,10 @@ public:
 
     // max_tokens: rows of one forward call; max_ctx: positions a sequence may reach.
     // Allocates from va under the tag inkling_state.
-    [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx);
+    // scratch: a forward of the same sizes whose per-call buffers this one uses too (the slots of a
+    // runtime run one after the other on one stream); it must outlive this one.
+    [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
+                            const InklingForward* scratch = nullptr);
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -48,8 +51,10 @@ public:
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGraphRows = 8;  // rows of the largest captured call = anchor + drafts
-    static constexpr int kGrid = 256;     // rows per forward segment = checkpoint distance
-    static constexpr int kSlack = 5888;  // sliding K/V kept behind the window: how far rewind may go back
+    static constexpr int kGrid = 256;     // checkpoint distance
+    // Rows per forward segment: a 3111-token prefill ran 2590 tok/s at 256 and 3688 at 1024.
+    static constexpr int kSeg = 1024;
+    static constexpr int kSlack = 5120;  // sliding K/V kept behind the window: how far rewind may go back
 
     // Runs T tokens at positions [position(), position() + T). logits: device fp32 [vocab], softcapped,
     // for the last token; may be null.
@@ -77,6 +82,10 @@ public:
     SpecStats spec_stats() const { return stats_; }
     // Tests: off = one-row calls launch every conv site on its own, as calls of more rows do.
     void set_fused_sites(bool on) { fuse_ = on; }
+    // Tests: off = many-row calls run the experts slot by slot.
+    void set_grouped_experts(bool on) { grouped_ = on; }
+    // Tests: off = many-row calls run the row attention kernel.
+    void set_gemm_attention(bool on) { attn_gemm_ = on; }
 
     // After every layer application: (application index, residual stream [T, hidden]); -1 = embedding,
     // n_apps = the normed final state (only when logits are asked for).
@@ -91,12 +100,19 @@ private:
     void flush_tail_(cudaStream_t s);
     // Embedding norm, every layer application and the final block mix: h_ -> mix_[0].
     void layers_(int T, cudaStream_t s, const int32_t* ids = nullptr, int32_t image_token = -1);
+    // Expert projections of a many-row call over expert-sorted slots (NVFP4 layers): xm_ -> ey_.
+    // false = not served, nothing written.
+    [[nodiscard]] bool moe_rows_(const InklingLayer& ly, int T, cudaStream_t s);
+    void experts_(const InklingLayer& ly, int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     void* alloc_(size_t bytes);
     cudaStream_t fork_(cudaStream_t s, int i);
     void join_(cudaStream_t side, cudaStream_t s, int i);
     // Host copy of the conv state when the sequence stands on the grid.
     void checkpoint_(cudaStream_t s, const float* state);
+    void checkpoint_at_(int grid, cudaStream_t s, const float* state);
+    // Grid rows inside the running many-row segment, for the conv site at off floats into app's state.
+    [[nodiscard]] inkling::ConvMarks marks_(size_t app, size_t off) const;
     // run() for one row with the lookahead on; settle_ makes the conv state the confirmed one.
     [[nodiscard]] bool step_spec_(half* h, int32_t tok, cudaStream_t s);
     void settle_(cudaStream_t s);
@@ -117,6 +133,13 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;
+    // Per-call buffers in allocation order: a forward given as scratch hands them out again.
+    std::vector<void*> scratch_;
+    const InklingForward* share_ = nullptr;
+    size_t scratch_i_ = 0;
+    bool scratch_on_ = false, attn_gemm_ = true;
+    float* ckpt_stage_ = nullptr;  // conv states at up to 3 grid rows inside a segment
+    int marks_n_ = 0, marks_row_[3] = {};
     std::vector<half*> k_, v_;        // per application
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
@@ -131,6 +154,8 @@ private:
     float *msg_[4] = {}, *g_[3] = {}, *gd_ = nullptr, *res2_ = nullptr,
           *mm_ = nullptr;  // g_, gd_: gate scratch
     int n_msrc_ = 0;
+    void* attn_work_ = nullptr;
+    size_t attn_work_bytes_ = 0;
     float* part_ = nullptr;                   // decode attention partials (attention_part_floats)
     float *mixp_ = nullptr, *mixp2_ = nullptr;  // block-mix partial sums (mix_partial_floats), one per stream
     // Two side streams for chains that do not depend on each other (fork_ / join_).
@@ -142,6 +167,10 @@ private:
     half* xm_ = nullptr;
     half *gu_ = nullptr, *act_ = nullptr, *ey_ = nullptr, *logits_h_ = nullptr;
     int32_t* idx_ = nullptr;
+    half* xs_ = nullptr;  // expert-sorted slot rows [slots, hidden]
+    inkling::GateWork gate_work_;
+    int32_t *perm_ = nullptr, *off_ = nullptr;
+    bool grouped_ = true;
     int* d_pos_ = nullptr;  // device: position of row 0 of the running call
     // Captured steps of 1..kGraphRows rows over the own row buffer dec_h_ (run()): any caller rows
     // replay them. One row is the decode step; more are verify chunks and paced prefill.

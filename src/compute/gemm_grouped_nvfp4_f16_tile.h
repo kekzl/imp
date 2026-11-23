@@ -29,4 +29,10 @@ struct GroupedNvfp4F16Args {
 
 [[nodiscard]] bool gemm_grouped_nvfp4_f16_tile(const GroupedNvfp4F16Args& g, cudaStream_t stream);
 
+// The same GEMM over MXFP8 experts: w = E4M3 [N, K], sc = one exponent byte per 32 values [N, K/32],
+// value = e4m3 * 2^(exp - 127). d_exp_bias [ne] = (largest exponent byte of the expert) - 6 and
+// d_tensor_scales[e] = 2^(d_exp_bias[e] - 127): the tile holds e4m3 * 2^(exp - bias) as fp16.
+[[nodiscard]] bool gemm_grouped_mxfp8_f16_tile(const GroupedNvfp4F16Args& g, const int32_t* d_exp_bias,
+                                               cudaStream_t stream);
+
 }  // namespace imp

@@ -6,6 +6,7 @@
 
 #include "compute/gemm_grouped_nvfp4_f16_tile.h"
 
+#include "compute/gemm_mxfp8_wdq_dec.cuh"
 #include "compute/gemm_nvfp4_wdq_dec.cuh"
 
 #include <cuda.h>
@@ -27,12 +28,12 @@ struct GroupedNv4 {
     const uint8_t* sc;
     size_t sc_stride;
     const float* ts;
+    const int32_t* aux;  // per-expert decoder argument (MXFP8: exponent bias), null = 0
 };
 
-template <class C>
+template <class C, class D>
 __global__ void __launch_bounds__(kThreads<C>, 1) gemm_grouped_nv4_kernel(
     GroupedNv4 g, const __grid_constant__ CUtensorMap map_a) {
-    using D = Nv4Dec;
     extern __shared__ __align__(128) uint8_t smem_raw[];
     __shared__ int s_e;
     __shared__ int s_mt;
@@ -75,9 +76,11 @@ __global__ void __launch_bounds__(kThreads<C>, 1) gemm_grouped_nv4_kernel(
         return;  // surplus CTA: the whole block leaves before any barrier exists
     const int row0 = __ldg(g.off + e);
     const int m0 = row0 + (s_mt * C::kBM);
-    const D::Args p{{g.d, __ldg(g.ts + e) * 256.0f, 0.0f, __ldg(g.off + e + 1), g.N, g.K},
-                    g.w + (static_cast<size_t>(e) * g.w_stride),
-                    g.sc + (static_cast<size_t>(e) * g.sc_stride)};
+    const typename D::Args p = D::make(F16Args{g.d, __ldg(g.ts + e) * D::kAlpha, 0.0f, __ldg(g.off + e + 1),
+                                               g.N, g.K},
+                                       g.w + (static_cast<size_t>(e) * g.w_stride),
+                                       g.sc + (static_cast<size_t>(e) * g.sc_stride),
+                                       g.aux != nullptr ? __ldg(g.aux + e) : 0);
 
     const uint32_t raw = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
     const uint32_t pad = ((raw + kAlign - 1) & ~uint32_t(kAlign - 1)) - raw;
@@ -127,7 +130,10 @@ __global__ void __launch_bounds__(kThreads<C>, 1) gemm_grouped_nv4_kernel(
 }  // namespace
 }  // namespace wdq_tile
 
-bool gemm_grouped_nvfp4_f16_tile(const GroupedNvfp4F16Args& g, cudaStream_t stream) {
+namespace {
+
+template <class D>
+bool grouped_launch(const GroupedNvfp4F16Args& g, const int32_t* aux, cudaStream_t stream) {
     using namespace wdq_tile;  // NOLINT(google-build-using-namespace): the shared decode-tile skeleton
     using C = GCfg;
     if (g.rows <= 0 || g.ne <= 0 || g.N <= 0 || g.K <= 0 || g.K % 64 != 0 || g.N % 8 != 0 || g.a == nullptr ||
@@ -140,7 +146,7 @@ bool gemm_grouped_nvfp4_f16_tile(const GroupedNvfp4F16Args& g, cudaStream_t stre
     CUtensorMap map_a{};
     if (!encode_2d(&map_a, g.a, g.rows, g.K * 2, C::kRS, C::kBM))
         return false;
-    static const bool smem_ok = cudaFuncSetAttribute(gemm_grouped_nv4_kernel<C>,
+    static const bool smem_ok = cudaFuncSetAttribute(gemm_grouped_nv4_kernel<C, D>,
                                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                      C::kSmemBytes) == cudaSuccess;
     if (!smem_ok)
@@ -154,11 +160,23 @@ bool gemm_grouped_nvfp4_f16_tile(const GroupedNvfp4F16Args& g, cudaStream_t stre
                        g.w_stride,
                        static_cast<const uint8_t*>(g.sc),
                        g.sc_stride,
-                       g.d_tensor_scales};
+                       g.d_tensor_scales,
+                       aux};
     const dim3 grid((g.N + C::kBN - 1) / C::kBN, ((g.rows + C::kBM - 1) / C::kBM) + g.ne);
-    gemm_grouped_nv4_kernel<C><<<grid, kThreads<C>, C::kSmemBytes, stream>>>(k, map_a);
+    gemm_grouped_nv4_kernel<C, D><<<grid, kThreads<C>, C::kSmemBytes, stream>>>(k, map_a);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
+}
+
+}  // namespace
+
+bool gemm_grouped_nvfp4_f16_tile(const GroupedNvfp4F16Args& g, cudaStream_t stream) {
+    return grouped_launch<wdq_tile::Nv4Dec>(g, nullptr, stream);
+}
+
+bool gemm_grouped_mxfp8_f16_tile(const GroupedNvfp4F16Args& g, const int32_t* d_exp_bias,
+                                 cudaStream_t stream) {
+    return d_exp_bias != nullptr && grouped_launch<wdq_tile::Mx8Dec>(g, d_exp_bias, stream);
 }
 
 }  // namespace imp

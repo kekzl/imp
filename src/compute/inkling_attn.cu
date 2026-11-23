@@ -411,6 +411,8 @@ void attention(const AttnArgs& a, cudaStream_t s) {
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
+    if (a.T > kSplitMaxT && attention_rows(a, s))
+        return;
     attention_k<<<a.T * a.n_heads, kAttnThreads, 0, s>>>(a);
     IMP_CUDA_CHECK_LAUNCH();
 }
