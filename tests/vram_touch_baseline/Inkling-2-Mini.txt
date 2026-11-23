@@ -1,0 +1,7 @@
+# VRAM touch audit baseline: <pool> <max MiB held> <reason>. make vram-touch-audit MODEL=/models/Inkling-2-Mini
+fp8_lm_head 441 read-only FP8 copy of the LM head
+inkling_dense8 656 read-only int8 copies of the dense projections for decode (prefill reads the fp16 originals)
+inkling_draft 483 read-only draft weights
+inkling_vision 607 read-only vision tower, off with runtime.no_vision
+inkling_vision_ws 528 vision workspace, written by an image request only, off with runtime.no_vision
+inkling_weights 16264 read-only weights

@@ -517,9 +517,11 @@ verify-fast: build check-gpu
 
 # vram-touch-audit: MiB held against MiB written per pool for one model (docs/VRAM_AUDIT.md). The
 # acceptance step of a model port and of any change to what a model allocates.
-#   make vram-touch-audit MODEL=/models/<dir> [EXTRA="--set runtime.max_seq_len=..."]
+#   make vram-touch-audit MODEL=/models/<dir> [EXTRA="--set runtime.max_seq_len=..."] [UPDATE=1]
+# Fails on a pool that holds 64 MiB or more mostly unwritten and is not in
+# tests/vram_touch_baseline/<dir>.txt, or holds over 5 % more than its row there.
 vram-touch-audit: build check-gpu
-	@$(GPU_LOCKED) env MODEL="$(MODEL)" IMG="$(DOCKER_IMG)" EXTRA="$(EXTRA)" tools/analysis/vram_touch_run.sh
+	@$(GPU_LOCKED) env MODEL="$(MODEL)" IMG="$(DOCKER_IMG)" EXTRA="$(EXTRA)" UPDATE="$(UPDATE)" tools/analysis/vram_touch_run.sh
 
 # verify-chunked: gates chunked-prefill path (chunk=512) against tests/perf_baseline_chunked.json.
 # Looser thresholds (5%/8%) cover the gather + rect-attn per-chunk overhead.
