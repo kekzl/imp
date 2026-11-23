@@ -13,6 +13,7 @@ The card: 170 SMs, 1628 GB/s resident, 96 MB L2. A correct but narrow kernel lea
 | decode graph + wide kernels (#3210) | 109.98-110.69 |
 | #3216-#3222, 10 prompts x 700 tokens, no lookahead | 152.3 |
 | B-91: 5 small mix / gate kernels with compile-time counts (no stack arrays, loads issued before the first use), bit-equal, no lookahead | 177.4 -> 211.3 |
+| B-92: the same for the attention part / reduce and router score kernels, grid no longer sized by the configured context, bit-equal, no lookahead | 212.1 -> 224.0 |
 
 Every step from 27 to 152 is a row of section 2; each one is cheaper at first write than as a rework.
 
@@ -22,7 +23,7 @@ Every step from 27 to 152 is a row of section 2; each one is cheaper at first wr
 |---|---|
 | Step budget | target tok/s -> ms per step; list every kernel class x applications per token |
 | Floor per kernel | bytes it must read / 1628 GB/s; cold weights above the L2 cannot beat it |
-| Grid | one CUDA block reads ~4 GB/s: blocks = what the bytes need, not what the math suggests |
+| Grid | one CUDA block reads ~4 GB/s: blocks = what the bytes need, not what the math suggests; never the configured maximum (blocks that exit after reading the position: 16384 per launch cost 0.15 ms per token) |
 | Nodes | count graph nodes per token: ~2450 nodes spread ~11 ms beside ~6.7 ms of kernel time; at 918 nodes the wall was 16.4 ms for 10.6 ms of kernel time |
 | Host | 0 round trips per token; position and lengths live in device memory |
 

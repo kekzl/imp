@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -390,6 +391,8 @@ TEST(InklingAttention, FewRowsFormMatchesTheRowForm) {
                           {"start", 24, 1024, 2048, 4096, 5, 0.0f},
                           {"sliding across the ring end", 24, 1024, 2048, 4096, 2040, 0.0f},
                           {"full start", 24, 0, 0, 4096, 0, 0.1f},
+                          // Past 64 x 128 keys: a block of the fixed-shape kernel takes a second chunk.
+                          {"full past 8192", 24, 0, 0, 12288, 9000, 0.1f},
                           {"two heads per KV head", 16, 1024, 2048, 4096, 3001, 0.0f}};
     uint32_t seed = 12345u;
     const auto rnd = [&]() {
@@ -460,6 +463,17 @@ TEST(InklingAttention, FewRowsFormMatchesTheRowForm) {
             }
             EXPECT_GT(den, 1.0) << cs.name << " rows " << rows;
             EXPECT_LT(std::sqrt(num / den), 1e-4) << cs.name << " rows " << rows;
+            // The fixed-shape kernels (compile-time counts, loads issued up front) keep the bits.
+            std::vector<half> loose(n);
+            inkling::set_fixed_shape_kernels(false);
+            inkling::attention(a, nullptr);
+            inkling::set_fixed_shape_kernels(true);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            cudaMemcpy(loose.data(), d_out, n * sizeof(half), cudaMemcpyDeviceToHost);
+            size_t differ = 0;
+            for (size_t i = 0; i < n; ++i)
+                differ += std::memcmp(&got[i], &loose[i], sizeof(half)) != 0;
+            EXPECT_EQ(differ, 0u) << cs.name << " rows " << rows << ": fixed-shape kernels differ";
             std::printf("attention %s, %d rows: rel. error %.3g against the row form\n", cs.name, rows,
                         std::sqrt(num / den));
         }

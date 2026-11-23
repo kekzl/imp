@@ -4,6 +4,7 @@
 #include "compute/inkling_ops.h"
 
 #include "compute/inkling_detail.cuh"
+#include "compute/inkling_fused.cuh"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -352,10 +353,208 @@ __global__ void attn_part_rows_k(AttnArgs a, int S) {
     }
 }
 
+// attn_part_rows_k for the model's shape (head_dim 128, d_rel 16, 3 heads per KV head) with the row count
+// at compile time: a thread issues its 8 key / value loads, 5 bias loads and its query loads before the
+// first store (a runtime-bounded loop sent them one after the other). Same expressions in the same
+// order: bit-equal (FixedShapeKernelsAreBitEqual).
+constexpr int kFixHd = 128, kFixPer = kFixHd / 8;
+// Chunk columns of the grid: a block takes every kFixGrid-th chunk, so a context above 64 x kFixGrid
+// positions costs no blocks that only read the position (131072 context: 16384 blocks per launch, 4.258 ms
+// per step against 4.104 at 4096).
+constexpr int kFixGrid = 128;
+template <int T>
+__device__ __forceinline__ void rows_load_t(const AttnArgs& a, RowsSmem& m, const RowsAt& x) {
+    constexpr int kPairs = T * kRowsHeads;
+    constexpr int kKv = kPartKeys * kFixPer / kPartThreads;                              // 4
+    constexpr int kPr = ((kPartKeys + T) * kRowsRel + kPartThreads - 1) / kPartThreads;  // 5
+    constexpr int kQ = (kPairs * kFixPer + kPartThreads - 1) / kPartThreads;             // 1..2
+    constexpr int kR = (kPairs * kRowsRel + kPartThreads - 1) / kPartThreads;            // 1..2
+    const int tid = threadIdx.x;
+    uint4 kk[kKv], vv[kKv];
+    float pr[kPr];
+    uint4 qh[kQ];
+    float qs[kQ][8];
+    half rh[kR];
+    float rs[kR];
+    for (int j = 0; j < kKv; ++j) {
+        const int i = tid + j * kPartThreads;
+        const int key = min(i / kFixPer, x.n - 1), cc = (i % kFixPer) * 8;
+        const int slot = a.ring > 0 ? (x.k0 + key) % a.ring : x.k0 + key;
+        const size_t at = ((size_t)slot * a.n_kv + x.kvh) * kFixHd + cc;
+        kk[j] = *reinterpret_cast<const uint4*>(a.k + at);
+        vv[j] = *reinterpret_cast<const uint4*>(a.v + at);
+    }
+    for (int j = 0; j < kPr; ++j) {
+        const int i = tid + j * kPartThreads;
+        const int d = x.dlo + i / kRowsRel;
+        const bool ok = i < (kPartKeys + T) * kRowsRel && d >= 0 && d < a.rel_extent;
+        const float v = a.proj[ok ? (size_t)d * kRowsRel + i % kRowsRel : 0];
+        pr[j] = ok ? v : 0.0f;
+    }
+    for (int j = 0; j < kQ; ++j) {
+        const int i = min(tid + j * kPartThreads, kPairs * kFixPer - 1);
+        const int p = i / kFixPer, cc = (i % kFixPer) * 8;
+        const int head = x.kvh * kRowsHeads + p % kRowsHeads;
+        qh[j] = *reinterpret_cast<const uint4*>(a.q + (size_t)(p / kRowsHeads) * a.stride +
+                                                (size_t)head * kFixHd + cc);
+        for (int e = 0; e < 8; ++e)
+            qs[j][e] = a.q_scale[head * kFixHd + cc + e];
+    }
+    for (int j = 0; j < kR; ++j) {
+        const int i = min(tid + j * kPartThreads, kPairs * kRowsRel - 1);
+        const int p = i / kRowsRel, e = i % kRowsRel;
+        const int head = x.kvh * kRowsHeads + p % kRowsHeads;
+        rh[j] = a.rel[(size_t)(p / kRowsHeads) * a.stride + (size_t)head * kRowsRel + e];
+        rs[j] = a.rel_scale[head * kRowsRel + e];
+    }
+    for (int j = 0; j < kKv; ++j) {
+        const int i = tid + j * kPartThreads;
+        const int key = i / kFixPer, cc = (i % kFixPer) * 8;
+        if (key < x.n) {
+            *reinterpret_cast<uint4*>(&m.sk[key][cc]) = kk[j];
+            *reinterpret_cast<uint4*>(&m.sv[key][cc]) = vv[j];
+        }
+    }
+    for (int j = 0; j < kPr; ++j) {
+        const int i = tid + j * kPartThreads;
+        if (i < (kPartKeys + T) * kRowsRel)
+            m.proj[i / kRowsRel][i % kRowsRel] = pr[j];
+    }
+    for (int j = 0; j < kQ; ++j) {
+        const int i = tid + j * kPartThreads;
+        if (i >= kPairs * kFixPer)
+            continue;
+        const int p = i / kFixPer, cc = (i % kFixPer) * 8;
+        const half2* h2 = reinterpret_cast<const half2*>(&qh[j]);
+        for (int e = 0; e < 4; ++e) {
+            const float2 f = __half22float2(h2[e]);
+            m.q[p][cc + 2 * e] = f.x * qs[j][2 * e];
+            m.q[p][cc + 2 * e + 1] = f.y * qs[j][2 * e + 1];
+        }
+    }
+    for (int j = 0; j < kR; ++j) {
+        const int i = tid + j * kPartThreads;
+        if (i < kPairs * kRowsRel)
+            m.r[i / kRowsRel][i % kRowsRel] = __half2float(rh[j]) * rs[j];
+    }
+}
+
+template <int T>
+__global__ void attn_part_rows_t(AttnArgs a, int S) {
+    constexpr int kPairs = T * kRowsHeads;
+    extern __shared__ __align__(16) unsigned char raw[];
+    RowsSmem& m = *reinterpret_cast<RowsSmem*>(raw);
+    RowsAt x{};
+    const int G = min(S, kFixGrid);
+    x.kvh = blockIdx.x / G;
+    x.hpk = kRowsHeads, x.pairs = kPairs;
+    x.pos0 = *a.d_pos;
+    const int base = a.window > 0 ? max(0, x.pos0 - a.window + 1) : 0;
+    for (x.c = blockIdx.x % G; x.c < S; x.c += G) {
+        x.k0 = base + x.c * kPartKeys;
+        x.n = min(x.pos0 + T - 1, x.k0 + kPartKeys - 1) - x.k0 + 1;
+        if (x.n <= 0)
+            return;
+        x.dlo = x.pos0 - (x.k0 + kPartKeys - 1);
+        rows_load_t<T>(a, m, x);
+        __syncthreads();
+        const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+        // Clip factors: a warp per pair.
+        for (int p = warp; p < kPairs; p += kPartThreads / 32) {
+            float ss = 0.0f;
+            for (int i = lane; i < kFixHd; i += 32)
+                ss += m.q[p][i] * m.q[p][i];
+            const float rv = lane < kRowsRel ? m.r[p][lane] : 0.0f;
+            ss = warp_sum(ss);
+            const float rss = warp_sum(rv * rv);
+            if (lane != 0)
+                continue;
+            const int row = p / kRowsHeads;
+            const float at = static_cast<float>(x.pos0 + row + 1);
+            const float tau = a.log_alpha > 0.0f ? 1.0f + a.log_alpha * logf(fmaxf(at / a.log_floor, 1.0f))
+                                                 : 1.0f;
+            m.qf[p] = fminf(a.q_thr / (sqrtf(ss) + 1e-6f), 1.0f) * tau * a.scale;
+            m.rf[p] = fminf(a.rel_thr / (sqrtf(rss) + 1e-6f), 1.0f) * tau;
+        }
+        __syncthreads();
+        // Scores: a thread per (pair, key).
+        for (int i = threadIdx.x; i < kPairs * kPartKeys; i += kPartThreads) {
+            const int p = i / kPartKeys, key = i % kPartKeys;
+            const int pos = x.pos0 + p / kRowsHeads, k = x.k0 + key;
+            const int lo = a.window > 0 ? max(0, pos - a.window + 1) : 0;
+            float sc = -FLT_MAX;
+            if (key < x.n && k >= lo && k <= pos) {
+                float dot = 0.0f;
+                for (int j = 0; j < kFixHd; j += 2) {
+                    const float2 kf = __half22float2(*reinterpret_cast<const half2*>(&m.sk[key][j]));
+                    dot += m.q[p][j] * kf.x + m.q[p][j + 1] * kf.y;
+                }
+                const float* pr = m.proj[pos - k - x.dlo];
+                float bias = 0.0f;
+                for (int j = 0; j < kRowsRel; ++j)
+                    bias += m.r[p][j] * pr[j];
+                sc = dot * m.qf[p] + bias * m.rf[p];
+            }
+            m.sc[p][key] = sc;
+        }
+        __syncthreads();
+        rows_softmax(a, m, x, S);
+        __syncthreads();
+        // Value sums: a thread per (pair, dim).
+        for (int i = threadIdx.x; i < kPairs * kFixHd; i += kPartThreads) {
+            const int p = i / kFixHd, dim = i % kFixHd;
+            float acc = 0.0f;
+            for (int key = 0; key < x.n; ++key)
+                acc += m.sc[p][key] * __half2float(m.sv[key][dim]);
+            const int th = (p / kRowsHeads) * a.n_heads + x.kvh * kRowsHeads + p % kRowsHeads;
+            a.part[((size_t)th * S + x.c) * (kFixHd + 2) + 2 + dim] = acc;
+        }
+        __syncthreads();
+    }
+}
+
+template <int T>
+bool part_rows_launch(const AttnArgs& a, int S, cudaStream_t s) {
+    static const bool smem = cudaFuncSetAttribute(attn_part_rows_t<T>,
+                                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                  static_cast<int>(sizeof(RowsSmem))) == cudaSuccess;
+    if (!smem)
+        return false;
+    attn_part_rows_t<T><<<a.n_kv * std::min(S, kFixGrid), kPartThreads, sizeof(RowsSmem), s>>>(a, S);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+// false = this shape (or set_fixed_shape_kernels(false)) takes attn_part_rows_k.
+bool part_rows_fixed(const AttnArgs& a, int S, cudaStream_t s) {
+    if (!fixed_shape_kernels() || a.hd != kFixHd || a.d_rel != kRowsRel)
+        return false;
+    switch (a.T) {
+        case 1:
+            return part_rows_launch<1>(a, S, s);
+        case 2:
+            return part_rows_launch<2>(a, S, s);
+        case 3:
+            return part_rows_launch<3>(a, S, s);
+        case 4:
+            return part_rows_launch<4>(a, S, s);
+        case 5:
+            return part_rows_launch<5>(a, S, s);
+        case 6:
+            return part_rows_launch<6>(a, S, s);
+        case 7:
+            return part_rows_launch<7>(a, S, s);
+        case 8:
+            return part_rows_launch<8>(a, S, s);
+        default:
+            return false;
+    }
+}
+
 // Decode attention, step 2. One block per (token, head), one thread per dim: joins the chunks that
 // hold keys, adds the sink to the denominator, applies the output gate.
 // rows: the chunks start at row 0's first key (attn_part_rows_k).
-__global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows) {
+__global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows, bool batched) {
     const int t = blockIdx.x / a.n_heads, head = blockIdx.x % a.n_heads;
     const int i = threadIdx.x;
     const int pos = *a.d_pos + t;
@@ -366,16 +565,43 @@ __global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows) {
     const size_t row = (size_t)t * a.stride;
     const float sink = __half2float(a.sink[row + head]);
     float gm = sink;
-    for (int c = 0; c < n_c; ++c)
-        gm = fmaxf(gm, p0[(size_t)c * (a.hd + 2)]);
-    float total = expf(sink - gm), v = 0.0f;
-    for (int c = 0; c < n_c; ++c) {
-        const float* pc = p0 + (size_t)c * (a.hd + 2);
-        if (pc[1] <= 0.0f)
-            continue;
-        const float w = expf(pc[0] - gm);
-        total += pc[1] * w;
-        v += pc[2 + i] * w;
+    float total = 0.0f, v = 0.0f;
+    if (batched) {
+        // Four chunks' loads issued before the first use; the sums keep the chunk order.
+        for (int c0 = 0; c0 < n_c; c0 += 4) {
+            float h[4];
+            for (int j = 0; j < 4; ++j)
+                h[j] = p0[(size_t)min(c0 + j, n_c - 1) * (a.hd + 2)];
+            for (int j = 0; j < 4; ++j)
+                gm = fmaxf(gm, h[j]);
+        }
+        total = expf(sink - gm);
+        for (int c0 = 0; c0 < n_c; c0 += 4) {
+            float h[4], l[4], x[4];
+            for (int j = 0; j < 4; ++j) {
+                const float* pc = p0 + (size_t)min(c0 + j, n_c - 1) * (a.hd + 2);
+                h[j] = pc[0], l[j] = pc[1], x[j] = pc[2 + i];
+            }
+            for (int j = 0; j < 4; ++j) {
+                if (c0 + j >= n_c || l[j] <= 0.0f)
+                    continue;
+                const float w = expf(h[j] - gm);
+                total += l[j] * w;
+                v += x[j] * w;
+            }
+        }
+    } else {
+        for (int c = 0; c < n_c; ++c)
+            gm = fmaxf(gm, p0[(size_t)c * (a.hd + 2)]);
+        total = expf(sink - gm);
+        for (int c = 0; c < n_c; ++c) {
+            const float* pc = p0 + (size_t)c * (a.hd + 2);
+            if (pc[1] <= 0.0f)
+                continue;
+            const float w = expf(pc[0] - gm);
+            total += pc[1] * w;
+            v += pc[2 + i] * w;
+        }
     }
     const float g = __half2float(a.gate[row + (size_t)head * a.hd + i]);
     a.out[((size_t)t * a.n_heads + head) * a.hd + i] = __float2half(v / total / (1.0f + expf(-g)));
@@ -395,9 +621,11 @@ void attention(const AttnArgs& a, cudaStream_t s) {
     if (rows_smem && a.part && a.T >= 1 && a.T <= kSplitMaxT && a.hd == kAttnMaxHd && a.d_rel <= kRowsRel &&
         a.n_heads == kRowsHeads * a.n_kv && a.stride % 8 == 0) {
         const int S = ((a.window > 0 ? a.window + a.T - 1 : a.max_ctx) + kPartKeys - 1) / kPartKeys;
-        attn_part_rows_k<<<a.n_kv * S, kPartThreads, sizeof(RowsSmem), s>>>(a, S);
-        IMP_CUDA_CHECK_LAUNCH();
-        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, kPartKeys, true);
+        if (!part_rows_fixed(a, S, s)) {
+            attn_part_rows_k<<<a.n_kv * S, kPartThreads, sizeof(RowsSmem), s>>>(a, S);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, kPartKeys, true, fixed_shape_kernels());
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
@@ -407,7 +635,7 @@ void attention(const AttnArgs& a, cudaStream_t s) {
         const int S = ((a.window > 0 ? a.window : a.max_ctx) + CK - 1) / CK;
         attn_part_k<<<a.T * a.n_heads * S, kPartThreads, 0, s>>>(a, S);
         IMP_CUDA_CHECK_LAUNCH();
-        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, CK, false);
+        attn_reduce_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a, S, CK, false, fixed_shape_kernels());
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }
