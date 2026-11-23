@@ -507,6 +507,10 @@ void InklingDraft::on_rows(const float* feat, int cap, int n, int pos0, cudaStre
                             feat + t * plane, static_cast<size_t>(n) * H * sizeof(float),
                             cudaMemcpyDeviceToDevice, s));
     kept_ += n;
+    // The rows of a drafted step: the next step most likely drafts again, and queuing their projections
+    // takes the host 0.19 to 0.31 ms. Here that time passes under the call that just went to the GPU.
+    if (pos0 == drafted_pos_)
+        flush_(s);
 }
 
 // The draft block and the Markov head for the anchor at d_par_[0]: every launch reads the position, the
@@ -624,6 +628,7 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
         capture_(s);
     if (exec_.get() ? cudaGraphLaunch(exec_.get(), s) != cudaSuccess : !block_(s))
         return 0;
+    drafted_pos_ = pos;
     float conf[InklingForward::kGraphRows] = {};
     if (cudaMemcpyAsync(out, d_tok_ + 1, static_cast<size_t>(n_out) * sizeof(int32_t), cudaMemcpyDeviceToHost,
                         s) != cudaSuccess ||

@@ -105,6 +105,7 @@ private:
     // Feature rows kept in pend_ ([taps][cap][hidden]): positions [kept_pos0_, kept_pos0_ + kept_), the
     // first done_ of them already have context K/V. The Markov head reads the row before the anchor.
     int kept_pos0_ = 0, kept_ = 0, done_ = 0;
+    int drafted_pos_ = -1;  // position of the last propose(): its call's rows get their K/V in on_rows
     std::vector<half*> k_, v_;        // per layer [max_ctx + block][kv_heads * head_dim]
     float *pend_ = nullptr, *h_ = nullptr, *state_ = nullptr, *work_ = nullptr;
     half *xc_ = nullptr, *kvc_ = nullptr, *xn_ = nullptr, *qkv_ = nullptr, *q_ = nullptr, *o_ = nullptr;
