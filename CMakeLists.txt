@@ -184,6 +184,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/plan.cpp
     src/memory/vram_allocator.cpp
     src/memory/touch_audit.cu
+    src/memory/grow_rows.cpp
     src/memory/mem_account.cpp
     src/memory/kv_cache.cu
     src/memory/kv_cache_grow.cpp
@@ -572,6 +573,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_shortconv.cpp
     src/compute/inkling_conv_state.cu
     src/exec/inkling_draft.cu
+    src/exec/inkling_draft_weights.cu
     src/exec/inkling_draft_head.cu
     src/exec/inkling_forward.cu
     src/exec/inkling_forward_spec.cu
@@ -1121,6 +1123,7 @@ if(IMP_BUILD_TESTS)
         # substitution seam keeping the allocator stack testable in the CPU lane; not shipped in imp.
         src/memory/fake_backend.cpp
         tests/test_memory_backend.cpp
+        tests/test_grow_rows.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
         # Weight-upload reserve and the batch it fits (#2393, header-only memory/upload_reserve.h).

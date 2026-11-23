@@ -3,6 +3,7 @@
 
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
+#include "memory/grow_rows.h"
 #include "model/inkling_weights.h"
 
 #include <cuda_runtime.h>
@@ -36,8 +37,13 @@ public:
     // Allocates from va under the tag inkling_state.
     // scratch: a forward of the same sizes whose per-call buffers this one uses too (the slots of a
     // runtime run one after the other on one stream); it must outlive this one.
+    // growable: the K/V of the full-attention applications commit their rows as the sequence grows
+    // (kCtxStep rows at a time) instead of max_ctx rows here; null = all rows here.
     [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                            const InklingForward* scratch = nullptr);
+                            const InklingForward* scratch = nullptr, Backend* growable = nullptr);
+    static constexpr int kCtxStep = 2048;
+    // Context rows that hold memory right now.
+    [[nodiscard]] size_t context_rows() const { return ctx_.rows(); }
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -121,6 +127,8 @@ private:
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     [[nodiscard]] bool own_projections_(const InklingLayer& ly, int T) const;
     void* alloc_(size_t bytes);
+    // Memory for context rows [0, rows): false = the device refused, the call must not run.
+    [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
     cudaStream_t fork_(cudaStream_t s, int i);
     void join_(cudaStream_t side, cudaStream_t s, int i);
     // Host copy of the conv state when the sequence stands on the grid.
@@ -152,6 +160,7 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<void*> owned_;
+    GrowRows ctx_;  // K/V of the full-attention applications
     // Per-call buffers in allocation order: a forward given as scratch hands them out again.
     std::vector<void*> scratch_;
     const InklingForward* share_ = nullptr;
@@ -228,6 +237,7 @@ struct InklingRuntime {
     std::vector<std::shared_ptr<InklingDraft>> drafts;
     bool draft_tried = false;
     int max_ctx = 0, cap = 0;
+    Backend* growable = nullptr;
     // I8B32 dense projections of the decode steps (before the slots that point at them); null when
     // the card has no room.
     std::unique_ptr<InklingDense8> dense8;
@@ -265,7 +275,8 @@ class Model;
 // Null for every other arch; throws when an Inkling2-Loop checkpoint cannot be loaded.
 // Up to slots (<= 0: two) sequences of max_ctx positions, max_tokens rows per call; fewer when the
 // card does not take them all, at least one.
+// growable: see InklingForward::init.
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots);
+                                                     int max_ctx, int slots, Backend* growable = nullptr);
 
 }  // namespace imp

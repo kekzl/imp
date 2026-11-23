@@ -340,3 +340,12 @@ Read:
 - The engine arena is 63 to 97 % unwritten on every model (124 to 506 MiB).
 - The KV pool commits ahead of use: Qwen3-8B held 9172 MiB of KV after this workload and wrote 4167.
 - Inkling-2-Mini is the only model whose per-sequence state is committed in full at start: 2524 of 5224 MiB unwritten with an 18126-token prompt in a 32768-token slot, and 1133 MiB of vision memory without an image.
+
+### Inkling-2-Mini after B-95 (context K/V committed as the sequence grows), 2 slots x 90112 tokens
+
+| Point | Before (imp:inkling9) | After |
+|---|---|---|
+| Device used after init | 30967 MiB | 24333 MiB |
+| Device used at shutdown (32 requests, one 18126-token prompt twice) | 31120 MiB | 25834 MiB |
+| `inkling_state` after init / at shutdown | 8893.5 / 8893.5 MiB | 3389.5 / 3965.5 MiB |
+| `inkling_draft_ctx` after init / at shutdown | 1070.1 / 1070.1 MiB | 382.1 / 454.1 MiB |

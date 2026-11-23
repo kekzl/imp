@@ -122,7 +122,17 @@ bool VRAMAllocator::can_allocate(size_t bytes) const {
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_mem, &total);
 
-    return free_mem >= bytes + headroom_;
+    return free_mem >= bytes + headroom_ + planned();
+}
+
+void VRAMAllocator::plan(std::ptrdiff_t delta) {
+    if (delta >= 0) {
+        planned_.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
+        return;
+    }
+    const size_t d = static_cast<size_t>(-delta);
+    size_t cur = planned_.load(std::memory_order_relaxed);
+    while (!planned_.compare_exchange_weak(cur, cur > d ? cur - d : 0, std::memory_order_relaxed)) {}
 }
 
 size_t VRAMAllocator::available() const {
@@ -133,7 +143,8 @@ size_t VRAMAllocator::available() const {
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_mem, &total);
 
-    return (free_mem > headroom_) ? (free_mem - headroom_) : 0;
+    const size_t taken = headroom_ + planned();
+    return (free_mem > taken) ? (free_mem - taken) : 0;
 }
 
 std::vector<std::pair<std::string, size_t>> VRAMAllocator::bytes_by_tag() const {

@@ -51,6 +51,11 @@ public:
     // 'external' = VRAM used by other processes / driver overhead.
     size_t available() const;
 
+    // Bytes reserved in growable regions and not committed yet (memory/grow_rows.h): can_allocate()
+    // and available() treat them as taken. A negative delta books a commit or a release.
+    void plan(std::ptrdiff_t delta);
+    size_t planned() const { return planned_.load(std::memory_order_relaxed); }
+
     // Reserved headroom bytes (not available for allocation).
     size_t headroom() const { return headroom_; }
 
@@ -71,6 +76,7 @@ private:
     size_t total_ = 0;
     size_t headroom_ = 0;
     std::atomic<size_t> allocated_{0};
+    std::atomic<size_t> planned_{0};
 
     struct Allocation {
         size_t bytes = 0;

@@ -75,7 +75,7 @@ int InklingRuntime::bind(int req, std::span<const int32_t> tokens, const std::ve
 }
 
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots) {
+                                                     int max_ctx, int slots, Backend* growable) {
     const std::string& dir = model.inkling_dir;
     if (dir.empty())
         return nullptr;
@@ -87,7 +87,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     for (int i = 0; ok && i < want; ++i) {
         auto f = std::make_unique<InklingForward>();
         // The first slot's per-call buffers serve every slot: they run one after the other.
-        if (!f->init(rt->w, *va, max_tokens, max_ctx, rt->slots.empty() ? nullptr : rt->slots[0].get())) {
+        if (!f->init(rt->w, *va, max_tokens, max_ctx, rt->slots.empty() ? nullptr : rt->slots[0].get(),
+                     growable)) {
             ok = i > 0;  // fewer slots than asked for: the engine lowers its batch size
             IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
             break;
@@ -106,7 +107,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
                  static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
                 17 / 16;
     auto d8 = std::make_unique<InklingDense8>();
-    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && free_b >= need + kDense8Spare &&
+    // Context rows reserved and not committed yet count as taken.
+    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && free_b >= need + kDense8Spare + va->planned() &&
         build_inkling_dense8(rt->w, *va, *d8)) {
         for (auto& f : rt->slots)
             f->set_dense8(d8.get());
@@ -120,6 +122,7 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
             free_b / 1048576.0, need / 1048576.0, kDense8Spare / 1048576.0);
     }
     rt->max_ctx = max_ctx;
+    rt->growable = growable;
     rt->va = va;
     rt->rows_cap = max_tokens;
     rt->d_rows = static_cast<int32_t*>(
@@ -267,7 +270,8 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
         if (rt.drafts.size() >= kLookaheadSlots)
             break;
         auto d = std::make_shared<InklingDraft>();
-        if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap) ||
+        if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap, InklingForward::kSeg + InklingForward::kSlack,
+                     rt.growable) ||
             !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
             break;
         rt.drafts.push_back(std::move(d));
