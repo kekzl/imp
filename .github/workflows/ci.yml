@@ -56,11 +56,10 @@ jobs:
       cpp: ${{ steps.changes.outputs.cpp }}
 
     container:
-      # Native CUDA devel image: nvcc $CUDA_VERSION is on PATH at /usr/local/cuda
-      # out of the box (matches the Dockerfile builder). No apt toolkit install.
-      # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
-      # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.5.0-devel-ubuntu26.04@sha256:cafb2ca8fcffb6669cd80b929830de884bd12bb6eb364b474e8fe99108249d1e
+      # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
+      # nvcc, cuBLAS, git, python3, cmake, ninja, ccache preinstalled, so no job runs apt for its toolchain.
+      # Ubuntu 26.04, GCC 15.2: same libstdc++ 15 as the release image (#903).
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -71,52 +70,8 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: "1"
       CCACHE_COMPRESSLEVEL: "6"
-      APT_DEBS: /github/home/apt-debs
 
     steps:
-      # Minimal git up front so checkout below pulls real history and the
-      # docs-only detection can diff against the PR/push base. (The rest of the
-      # build tooling installs later, gated on the detection result.)
-      #
-      # python3 comes with it because the static gates below are python and this
-      # container has neither: `nvidia/cuda:13.5.0-devel-ubuntu26.04` ships no
-      # python3 and no git. Without this the gate step fails "python3: not
-      # found" on every PR, which is a false red on the one required check.
-      # Every container job points apt at azure.archive.ubuntu.com: the runners
-      # sit in Azure, and archive.ubuntu.com:80 was unreachable for 13 min on
-      # 2026-09-11 (run 34574274779: Build red, PTX fallback stalled in apt).
-      #
-      # .deb cache (APT_DEBS): the mirror served the 47 MB of debs at 58-197 kB/s
-      # in 4 of 38 green PR Builds (58-576 s per apt step); 2 first attempts died on deb fetch errors.
-      # `apt-get update` stays live; only debs whose version is cached skip the mirror.
-      - name: apt cache week
-        id: aptweek
-        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-      - name: Restore apt debs
-        id: aptdebs
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /github/home/apt-debs
-          key: apt-debs-build-cuda${{ env.CUDA_VERSION }}-${{ steps.aptweek.outputs.week }}
-          restore-keys: |
-            apt-debs-build-cuda${{ env.CUDA_VERSION }}-
-      # Mirror fallback in every apt step: azure first, archive.ubuntu.com and kernel.org when it
-      # fails (azure.archive.ubuntu.com:80 timed out on 2026-10-07, Build red in "Install build deps").
-      - name: Install git and python3
-        run: |
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          mkdir -p "$APT_DEBS/partial"
-          ok=0
-          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
-            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends git python3 \
-              && { ok=1; break; }
-            echo "::warning::apt via $m failed, trying the next mirror"
-          done
-          [ "$ok" = 1 ]
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # full history so the base SHA is present for `git diff`
@@ -220,32 +175,6 @@ jobs:
           # `|| rc=$?`: under `sh -e` a bare failing gate would end the subshell before the rc write.
           ( rc=0; bash scripts/ci_static_gates.sh > "$RUNNER_TEMP/gates.log" 2>&1 || rc=$?; echo "$rc" > "$RUNNER_TEMP/gates.rc" ) \
             < /dev/null > /dev/null 2>&1 &
-
-      - name: Install build deps
-        if: steps.changes.outputs.code == 'true'
-        # The native CUDA devel image already provides nvcc on PATH at
-        # /usr/local/cuda; only the non-CUDA build tooling needs installing.
-        # Starts on the mirror "Install git and python3" settled on, falls back like it.
-        run: |
-          ok=0
-          for m in "" azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
-            if [ -n "$m" ]; then
-              sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
-              apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || continue
-            fi
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends cmake g++ git python3 ccache libcurl4-openssl-dev libjpeg-turbo8-dev \
-              && { ok=1; break; }
-            echo "::warning::apt via ${m:-the current mirror} failed, trying the next mirror"
-          done
-          [ "$ok" = 1 ]
-
-      # One ~46 MB entry per week and scope, written only on a key miss.
-      - name: Save apt debs
-        if: steps.changes.outputs.code == 'true' && steps.aptdebs.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /github/home/apt-debs
-          key: apt-debs-build-cuda${{ env.CUDA_VERSION }}-${{ steps.aptweek.outputs.week }}
 
       - name: Verify nvcc version
         if: steps.changes.outputs.code == 'true'
@@ -454,7 +383,7 @@ jobs:
     if: needs.build.outputs.cpp == 'true'
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.5.0-devel-ubuntu26.04@sha256:cafb2ca8fcffb6669cd80b929830de884bd12bb6eb364b474e8fe99108249d1e
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
     env:
       CUDA_VERSION: "13.5"
     # Default is `sh -e` (dash): `mapfile` and `< <(...)` fail there (#2187).
@@ -462,22 +391,9 @@ jobs:
       run:
         shell: bash
     steps:
-      # Deps BEFORE checkout: without git, checkout falls back to a tarball (no .git),
-      # every `git` call exits 128 (#2187).
-      - name: Install deps
-        shell: sh
-        run: |
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          ok=0
-          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
-            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 libcurl4-openssl-dev libjpeg-turbo8-dev \
-              && { ok=1; break; }
-            echo "::warning::apt via $m failed, trying the next mirror"
-          done
-          [ "$ok" = 1 ]
+      # Its index shipped malformed on 2026-09-16; scripts/install_llvm.sh runs apt-get update.
+      - name: Drop the CUDA apt source
+        run: rm -f /etc/apt/sources.list.d/cuda*.list
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
@@ -833,7 +749,7 @@ jobs:
     name: PTX fallback
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.5.0-devel-ubuntu26.04@sha256:cafb2ca8fcffb6669cd80b929830de884bd12bb6eb364b474e8fe99108249d1e
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
     defaults:
       run:
         shell: bash
@@ -844,21 +760,6 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: "1"
     steps:
-      - name: Install toolchain
-        shell: sh
-        run: |
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          ok=0
-          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
-            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev \
-              && { ok=1; break; }
-            echo "::warning::apt via $m failed, trying the next mirror"
-          done
-          [ "$ok" = 1 ]
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -944,7 +845,7 @@ jobs:
     name: Sanitizers
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.5.0-devel-ubuntu26.04@sha256:cafb2ca8fcffb6669cd80b929830de884bd12bb6eb364b474e8fe99108249d1e
+      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
@@ -953,29 +854,12 @@ jobs:
       CCACHE_MAXSIZE: 2G
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: "1"
-    # This image ships no bash, so GitHub picks `sh -e {0}` and any bashism is a
-    # syntax error at step start. The first version used a here-string and the
-    # job died in 1m15s before building anything - with `Build` the only
-    # required check, that merged. Declared explicitly, and bash installed below.
+    # Without this GitHub picks `sh -e {0}` and any bashism is a syntax error at step start
+    # (the first version died on a here-string in 1m15s and merged: `Build` is the only required check).
     defaults:
       run:
         shell: bash
     steps:
-      - name: Install toolchain
-        shell: sh
-        run: |
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          ok=0
-          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
-            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
-            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
-              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev \
-              && { ok=1; break; }
-            echo "::warning::apt via $m failed, trying the next mirror"
-          done
-          [ "$ok" = 1 ]
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
