@@ -12,6 +12,7 @@ The card: 170 SMs, 1628 GB/s resident, 96 MB L2. A correct but narrow kernel lea
 | v1, reference-grade kernels, eager (#3209) | 26.36-27.94 |
 | decode graph + wide kernels (#3210) | 109.98-110.69 |
 | #3216-#3222, 10 prompts x 700 tokens, no lookahead | 152.3 |
+| B-91: 5 small mix / gate kernels with compile-time counts (no stack arrays, loads issued before the first use), bit-equal, no lookahead | 177.4 -> 211.3 |
 
 Every step from 27 to 152 is a row of section 2; each one is cheaper at first write than as a rework.
 
@@ -41,7 +42,7 @@ Every step from 27 to 152 is a row of section 2; each one is cheaper at first wr
 | One host copy per forward call | 3 blocking `cudaMemcpy` = 0.18 ms per token | #3217 |
 | Independent chains on side streams inside the graph | serial k / v / q chains | 2 side streams, part of 108 -> 143 tok/s (#3216) |
 | Multi-row form shares blocks across rows | 1 row 8.37 ms, 8 rows 17.82 ms; per-row attention blocks 19.4 ms per 8-row call | one block per KV head x chunk for all rows: 15.2 ms |
-| Trip counts are template parameters; no runtime-bounded register arrays, no local arrays | `half2 w[64]` reloaded after the PDL wait; cleared register slots in local memory: STACK 128, 170 STL/LDL, 4.4 us; frame 24 -> 544 B | `make kernel-resources` clean |
+| Trip counts are template parameters; no runtime-bounded register arrays, no local arrays; a thread issues its strided loads into registers before the first use (9 loads in a runtime loop: `gate_rms_k` 0.26 ms per token, unrolled 0.06) | `half2 w[64]` reloaded after the PDL wait; cleared register slots in local memory: STACK 128, 170 STL/LDL, 4.4 us; frame 24 -> 544 B | `make kernel-resources` clean |
 
 Write the wide form first and prove it against the oracle; a "reference-grade" kernel that ships becomes the baseline of four more PRs.
 

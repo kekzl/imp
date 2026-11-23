@@ -409,6 +409,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/inkling_moe_small.cu
     src/compute/gemv_i8b32.cu
     src/compute/inkling_fused.cu
+    src/compute/inkling_fixed.cu
     src/compute/ssm_scan_reg.cu
     src/compute/ssm_scan_ssd.cu
     src/compute/ssm_conv_split.cu

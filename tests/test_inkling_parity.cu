@@ -704,6 +704,48 @@ TEST(InklingRewind, FusedConvSitesAreBitEqual) {
     cudaStreamDestroy(s);
 }
 
+// Calls of up to 8 rows run the mix and gate kernels of inkling_fixed.cu (counts fixed at compile time,
+// loads issued up front). Same rows through the runtime-bounded kernels: 20 one-row and 5 four-row calls.
+TEST(InklingRewind, FixedShapeKernelsAreBitEqual) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    std::vector<int32_t> t = read_ids(std::string(oracle) + "/paris_prompt.json");
+    const std::vector<int32_t> g = read_ids(std::string(oracle) + "/paris_greedy.json");
+    ASSERT_FALSE(t.empty());
+    t.insert(t.end(), g.begin(), g.end());
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    const int n = static_cast<int>(t.size()), head = n - 40;
+    std::vector<int> cuts;
+    for (int c = head; c < head + 20; ++c)
+        cuts.push_back(c);
+    for (int c = head + 20; c < n; c += 4)
+        cuts.push_back(c);
+    {
+        InklingForward loose, fixed;
+        ASSERT_TRUE(loose.init(fx.w, fx.va, 512, 4096));
+        ASSERT_TRUE(fixed.init(fx.w, fx.va, 512, 4096));
+        inkling::set_fixed_shape_kernels(false);
+        const std::vector<float> want = run_rows(loose, fx.w, t, 0, cuts, s);
+        inkling::set_fixed_shape_kernels(true);
+        const std::vector<float> got = run_rows(fixed, fx.w, t, 0, cuts, s);
+        ASSERT_FALSE(want.empty());
+        ASSERT_EQ(got.size(), want.size());
+        size_t differ = 0;
+        for (size_t i = 0; i < want.size(); ++i)
+            differ += std::memcmp(&got[i], &want[i], sizeof(float)) != 0;
+        std::printf("fixed-shape kernels: %zu of %zu values differ over 20 one-row and 5 four-row calls\n",
+                    differ, want.size());
+        EXPECT_EQ(differ, 0u);
+    }
+    cudaStreamDestroy(s);
+}
+
 }  // namespace
 
 // Calls of 1..8 rows share the key loads between the rows and the heads of a KV head (attn_part_rows_k;
