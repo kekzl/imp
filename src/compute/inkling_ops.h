@@ -64,6 +64,8 @@ struct MixArgs {
     float eps = 1e-6f;
 };
 void mix(const MixArgs& a, int T, int H, cudaStream_t s);
+// Tests: false sends the calls of up to 8 rows through the runtime-bounded mix and gate kernels.
+void set_fixed_shape_kernels(bool on);
 size_t mix_partial_floats(int T, int H);
 
 // Message gates of one layer application, n <= 3 of them: g = down . [unit_rms(h), unit_rms(msg)],

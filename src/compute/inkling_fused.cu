@@ -4,6 +4,7 @@
 #include "compute/inkling_ops.h"
 
 #include "compute/inkling_detail.cuh"
+#include "compute/inkling_fused.cuh"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -13,39 +14,6 @@ namespace imp::inkling {
 namespace {
 
 using namespace detail;
-
-constexpr int kGateMaxRank = 128;
-
-constexpr int kMixSlice = 128;  // elements per block
-constexpr int kMixVals = 45;    // 5 x 5 Gram matrix of the states, then 4 x 5 query dots
-
-// The conv site of channel c (MixPre, row 0): conv_residual_k / moe_tail_k for one row, expression for
-// expression. Returns out; r = the residual it read.
-__device__ __forceinline__ float mix_pre(const MixPre& p, int c, int C, float& r) {
-    const float* wc = p.w + (size_t)c * 4;
-    const float s0 = p.state[c], s1 = p.state[(size_t)C + c], s2 = p.state[(size_t)2 * C + c];
-    float v = 0.0f;
-    if (p.kind == 1)
-        v = __half2float(p.x[c]);
-    else
-        for (int k = 0; k < p.top_k; ++k)
-            v += p.weights[k] * __half2float(p.x[(size_t)k * C + c]);
-    const float sum = wc[0] * s0 + wc[1] * s1 + wc[2] * s2 + wc[3] * v + v;
-    r = p.resid[c];
-    if (p.copy)
-        p.copy[c] = r;
-    // moe_tail_k adds its residual in the multiply's FMA, conv_residual_k in a rounded step of its own.
-    float o = __fmaf_rn(sum, 0.4472135954999579f, r);
-    if (p.kind == 1) {
-        const float a = __fmul_rn(sum, 0.4472135954999579f);
-        o = p.add ? __fadd_rn(r, a) : a;
-    }
-    p.out[c] = o;
-    if (p.log)
-        p.log[c] = v;
-    p.state[c] = s1, p.state[(size_t)C + c] = s2, p.state[(size_t)2 * C + c] = v;
-    return o;
-}
 
 // Mix, step 1. One block per (token, 128-element slice), one thread per element: this slice's share
 // of the Gram matrix and of the query dots. Many small blocks: one block reads only a few GB/s.
@@ -485,14 +453,17 @@ void mix(const MixArgs& a, int T, int H, cudaStream_t s) {
     const bool rows = T > kRowLoopMaxT && p.kind == 0;
     if (rows)
         mix_rows_partial_k<<<T, kThreads, 0, s>>>(a, H);
-    else
+    else if (!mix_partial_fixed(a, T, H, slices, s))
         mix_partial_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices);
     IMP_CUDA_CHECK_LAUNCH();
-    mix_out_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices, rows ? 1 : slices);
+    if (rows || !mix_out_fixed(a, T, H, slices, s))
+        mix_out_k<<<T * slices, kMixSlice, 0, s>>>(a, H, slices, rows ? 1 : slices);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 void gate_rms(const GateNormArgs& a, const GateOut& o, int T, int H, cudaStream_t s) {
+    if (gate_rms_fixed(a, o, T, H, s))
+        return;
     gate_rms_k<<<T * a.n, kThreads, 0, s>>>(a, o, H);
     IMP_CUDA_CHECK_LAUNCH();
 }
@@ -506,9 +477,11 @@ void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H,
     if (w && T > kRowLoopMaxT && gate_norm_rows(a, o, *w, T, H, s))
         return;
     const int col_blocks = (H + 31) / 32;
-    gate_down_k<<<T * a.n*(a.rank + 1), kThreads, 0, s>>>(a, gd, H);
+    if (!gate_down_fixed(a, gd, T, H, s))
+        gate_down_k<<<T * a.n*(a.rank + 1), kThreads, 0, s>>>(a, gd, H);
     IMP_CUDA_CHECK_LAUNCH();
-    gate_mix_k<<<T * a.n * col_blocks, 32, 0, s>>>(a, gd, o, H, col_blocks);
+    if (!gate_mix_fixed(a, gd, o, T, H, s))
+        gate_mix_k<<<T * a.n * col_blocks, 32, 0, s>>>(a, gd, o, H, col_blocks);
     IMP_CUDA_CHECK_LAUNCH();
     gate_rms(a, o, T, H, s);
 }

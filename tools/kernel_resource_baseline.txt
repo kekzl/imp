@@ -109,6 +109,7 @@ void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120
 void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
 imp::inkling::(anonymous namespace)::attention_k	sm_120a	46	512	0
 imp::topk_gating_kernel	sm_120a	46	256	0
+void imp::inkling::(anonymous namespace)::gate_mix_t<64>	sm_120a	44	24	0
 imp::paged_attention_decode_kernel_generic	sm_120a	43	128	0
 imp::(anonymous namespace)::draft_cands_k	sm_120a	43	16	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
@@ -134,6 +135,7 @@ void imp::gemv_dp4a_moe_decode_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
 imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	38	128	0
+void imp::inkling::(anonymous namespace)::gate_rms_t<9>	sm_120a	38	24	0
 imp::rowwise_topm_reduce_kernel	sm_120a	37	64	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::bench_separate	sm_120a	29	8	0
