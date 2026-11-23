@@ -366,3 +366,20 @@ The touch audit lists the engine arena per taking site (`arena:<file>`, with the
 | penalty history (`sampling_penalties_history.cu`) | 15.2 / 0.0 | 9.3 / 0.0 | 4.3 / 0.0 | |
 
 Flint and Inkling-2-Mini ran before the per-line tags, their rows are per file.
+
+## 2026-11-23: host RAM per model (first measurement)
+
+`/proc/<pid>/status` of `imp-server` (imp:test at main 258647ab, default flags) after `/health` and after 10 prompts x 300 tokens plus an 18126-token prompt. `VmHWM` is the peak since start, so it is the load peak. Host: 78 GiB.
+
+| Model (weight files) | Peak during load (VmHWM) | RSS after start | RSS after the workload | of it shared / pinned (RssShmem) |
+|---|---|---|---|---|
+| Inkling-2-Mini (18.19 GiB) | 37.5 GiB | 1.58 GiB | 2.04 GiB | 0.08 GiB |
+| Qwen3-8B-NVFP4-cortecs (5.96 GiB) | 8.7 GiB | 2.29 GiB | 2.36 GiB | 0.40 GiB |
+| Qwen3.8-27B-NVFP4-vllm (19.15 GiB) | 24.3 GiB | 5.85 GiB | 7.00 GiB | 2.72 -> 3.65 GiB |
+| Qwen3.8-Flash-Next-NVFP4 (123.57 GiB) | 71.0 GiB | 65.4 GiB | 65.4 GiB | 7.49 GiB |
+
+Read:
+- Inkling-2-Mini peaks at 2.06 x its weight files while loading (its own loader); the generic loader peaks at 1.27 x (Qwen3.8-27B) and 1.46 x (Qwen3-8B).
+- Inkling-2-Mini grows 0.45 GiB over the workload, Qwen3.8-27B 1.15 GiB (0.94 GiB of it pinned).
+- Flash-Next holds its expert weights on the host by design; the process had 0.32 GiB in swap and the server logged 8.6 GiB of host RAM available.
+- Not broken down per pool: there is no host counterpart of the touch audit yet.
