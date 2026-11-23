@@ -560,6 +560,11 @@ std::unique_ptr<KVCache> make_kv_cache(const KvInitCtx& c, const KvShape& kv, VR
                                        int swa_max_blocks, int blocks, int ceiling) {
     const auto& mcfg = c.mcfg;
     const int n_kv_layers = kv.n_kv_layers;
+    // Inkling's K/V live in its own forward (exec/inkling_forward.h): the block ids and ref counts are
+    // all the engine needs, a pool would be 4096 bytes per context token that nothing reads.
+    if (mcfg.arch == ModelArch::INKLING2)
+        return KVCache::for_accounting(n_kv_layers, mcfg.n_kv_heads, kv.head_dim, c.ec.kv_cache_dtype,
+                                       std::max(blocks, ceiling), kv.kv_bs);
     if ((!mcfg.head_dim_per_layer.empty() || kv.swa_active) && c.ec.kv_cache_dtype != QType::INT8 &&
         c.ec.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
