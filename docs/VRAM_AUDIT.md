@@ -349,3 +349,19 @@ Read:
 | Device used at shutdown (32 requests, one 18126-token prompt twice) | 31120 MiB | 25834 MiB |
 | `inkling_state` after init / at shutdown | 8893.5 / 8893.5 MiB | 3389.5 / 3965.5 MiB |
 | `inkling_draft_ctx` after init / at shutdown | 1070.1 / 1070.1 MiB | 382.1 / 454.1 MiB |
+
+### Engine arena by taking site (same workload, main 5aa85156 + the take records)
+
+The touch audit lists the engine arena per taking site (`arena:<file>`, with the line for a take of 8 MiB or more; `ArenaAllocator::takes()`). MiB held / MiB written:
+
+| Take | Qwen3.8-27B | Qwen3-8B | Flint | Inkling-2-Mini |
+|---|---|---|---|---|
+| NVFP4 dequant fallback workspace (`nvfp4_dequant_ws_buf_`) | 170.0 / 0.0 | 96.0 / 0.0 | in 62.9 / 0.9 | none |
+| chunk-capture K/V scratch (`ensure_chunk_capture_scratch`) | 128.0 / 0.0 | 128.0 / 0.0 | | none |
+| split-K attention scratch | 96.8 / 4.3 | 65.0 / 0.7 | | in 13.2 / 0.1 |
+| APA scratch (`attention_apa.cu`) | none | 136.7 / 75.0 | 130.7 / 0.0 | 105.2 / 0.0 |
+| cuBLASLt workspace (`gemm.cpp`) | 64.0 / 10.0 | 64.0 / 0.0 | 96.0 / 8.0 with the benchmark scratch | 96.0 / 38.9 with the benchmark scratch |
+| GEMM benchmark scratch (`gemm.cpp`) | 32.0 / 0.0 | 32.0 / 0.0 | | |
+| penalty history (`sampling_penalties_history.cu`) | 15.2 / 0.0 | 9.3 / 0.0 | 4.3 / 0.0 | |
+
+Flint and Inkling-2-Mini ran before the per-line tags, their rows are per file.

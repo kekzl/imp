@@ -2,6 +2,7 @@
 
 #include "core/logging.h"
 #include "memory/backend.h"
+#include "memory/engine_arena.h"
 #include "memory/mem_account.h"
 #include "memory/vram_allocator.h"
 
@@ -50,8 +51,21 @@ std::vector<Range> live_ranges(const VRAMAllocator& va) {
     cuda_malloc_backend().live_ranges(regions);
     if (Backend* vmm = vmm_backend())
         vmm->live_ranges(regions);
-    for (const Backend::LiveRange& r : regions)
+    // The engine arena by taking site instead of by committed chunk: arena:<file>, with the line for a
+    // take of 8 MiB or more.
+    const std::vector<ArenaAllocator::Take> takes = engine_arena().takes();
+    for (const ArenaAllocator::Take& t : takes) {
+        const std::string file = t.file ? t.file : "?";
+        std::string tag = "arena:" + file.substr(file.find_last_of('/') + 1);
+        if (t.bytes >= (size_t{8} << 20))
+            tag += ":" + std::to_string(t.line);
+        all.push_back({t.ptr, t.bytes, std::move(tag)});
+    }
+    for (const Backend::LiveRange& r : regions) {
+        if (!takes.empty() && r.tag == RegionTag::EnginePersistent)
+            continue;
         all.push_back({r.ptr, r.bytes, std::string("region:") + region_tag_name(r.tag)});
+    }
     for (const MemAccount::Charged& c : MemAccount::instance().charged())
         all.push_back({c.ptr, c.bytes, c.pool ? c.pool : "unknown"});
     std::sort(all.begin(), all.end(), [](const Range& a, const Range& b) {
