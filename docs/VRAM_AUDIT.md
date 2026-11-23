@@ -310,6 +310,7 @@ fit rather than reclaiming idle VRAM.
 
 ```bash
 imp-server --model <m> --set diagnostics.vram_touch_audit=true   # table at shutdown (SIGTERM)
+make vram-touch-audit MODEL=/models/<dir>                        # server, fixed workload, table and review list
 ```
 
 Workload per model, default server flags (imp:touch = main eed7968b + the audit): 10 prompts x 700 tokens, one 18126-token prompt sent twice, 4 parallel requests of 300 tokens. No image, no request near the context limit. Not covered: pools noted without a pointer (`mtp_workspace`, `WEIGHT_CACHE_CUTLASS_SF`, `kv_cache_minmax`, `kv_cache_scales`, `recurrent_snapshots`), library memory, the CUDA context.
