@@ -151,8 +151,15 @@ TEST(InklingQuality, KldAgainstTheReference) {
     const int step[3] = {0, 1, 8};
     Score sc[3];
     {
+        // The forms a default server runs: calls of up to 8 rows read the dense projections as I8B32
+        // (IMP_TEST_INKLING_FP16_DENSE=1: the fp16 ones, as a server without room for the copies).
+        InklingDense8 d8;
         InklingForward fwd;
         ASSERT_TRUE(fwd.init(w, va, 512, 4096));
+        if (!std::getenv("IMP_TEST_INKLING_FP16_DENSE")) {
+            ASSERT_TRUE(build_inkling_dense8(w, va, d8));
+            fwd.set_dense8(&d8);
+        }
         for (size_t ci = 0; ci < chunks.size(); ++ci) {
             const std::vector<int32_t>& ids = chunks[ci];
             ASSERT_EQ(static_cast<int>(ids.size()), T);

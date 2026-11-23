@@ -179,6 +179,28 @@ void moe_tail(const half* ey, const float* weights, const float* w, float* state
 // Router: scores = sigmoid(W x); top_k of scores + bias; weights = score / sum * route_scale.
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,
                 int T, int H, int n_experts, int top_k, float route_scale, cudaStream_t s);
+// Expert projections of a call of 2..8 rows (inkling_moe_small.cu). moe_group: the slots (up to
+// kMoeSmallSlots, an expert at most 8 times) grouped by expert into groups, kMoeSmallGroupInts ints.
+// moe_small: y[slot, N] = x[slot / x_group, K] . W_expert^T for every slot, one tensor-core tile per group;
+// W as NVFP4 (E2M1 [N, K/2] + E4M3 [N, K/16], ts = tensor scales) or MXFP8 (E4M3 [N, K] + exponent bytes
+// [N, K/32], bias and ts from mxfp8_expert_bias). N % 64 == 0, K % 64 == 0; false = refused.
+inline constexpr int kMoeSmallSlots = 64;
+inline constexpr int kMoeSmallGroupInts = kMoeSmallSlots * 10;
+struct MoeSmallArgs {
+    const half* x = nullptr;
+    half* y = nullptr;
+    const int32_t* groups = nullptr;
+    const void* w = nullptr;
+    size_t w_stride = 0;
+    const void* sc = nullptr;
+    size_t sc_stride = 0;
+    const float* ts = nullptr;
+    const int32_t* bias = nullptr;
+    int slots = 0, N = 0, K = 0, x_group = 1;
+    bool fp8 = false;
+};
+[[nodiscard]] bool moe_group(const int32_t* idx, int slots, int32_t* groups, cudaStream_t s);
+[[nodiscard]] bool moe_small(const MoeSmallArgs& a, cudaStream_t s);
 // Slots sorted by expert, stable: perm[slot] = sorted row, offsets [n_experts + 1] = prefix sums of the
 // expert counts. false above 512 experts.
 [[nodiscard]] bool moe_sort(const int32_t* idx, int slots, int n_experts, int32_t* perm, int32_t* offsets,

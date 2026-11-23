@@ -2,6 +2,7 @@
 
 #include "model/inkling_weights.h"
 
+#include "compute/gemv_i8b32.h"
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
@@ -168,6 +169,56 @@ struct Loader {
 InklingWeights::~InklingWeights() {
     for (void* p : owned)
         va->free(p);
+}
+
+InklingDense8::~InklingDense8() {
+    for (void* p : owned)
+        va->free(p);
+}
+
+const InklingDense8::Matrix* InklingDense8::find(const half* w, int K, size_t& row) const {
+    for (const Matrix& x : m)
+        if (x.K == K && w >= x.base && w < x.base + (x.rows * static_cast<size_t>(K))) {
+            row = static_cast<size_t>(w - x.base) / static_cast<size_t>(K);
+            return &x;
+        }
+    return nullptr;
+}
+
+bool build_inkling_dense8(const InklingWeights& w, VRAMAllocator& va, InklingDense8& out) {
+    const InklingConfig& c = w.cfg;
+    const size_t H = static_cast<size_t>(c.hidden), QD = static_cast<size_t>(c.n_heads) * c.head_dim;
+    out.va = &va;
+    bool ok = c.hidden % 256 == 0 && QD % 256 == 0;
+    for (size_t i = 0; ok && i < w.layers.size(); ++i) {
+        const InklingLayer& ly = w.layers[i];
+        for (int which = 0; ok && which < 2; ++which) {
+            InklingDense8::Matrix x;
+            x.base = which == 0 ? ly.wq : ly.wo;
+            x.rows = which == 0 ? static_cast<size_t>(ly.proj_rows) : H;
+            x.K = static_cast<int>(which == 0 ? H : QD);
+            const size_t n = x.rows * static_cast<size_t>(x.K);
+            x.q = static_cast<int8_t*>(va.allocate(n, "inkling_dense8"));
+            if (x.q)
+                out.owned.push_back(x.q);
+            x.scales = static_cast<half*>(va.allocate(n / 32 * sizeof(half), "inkling_dense8"));
+            if (x.scales)
+                out.owned.push_back(x.scales);
+            ok = x.base && x.q && x.scales;
+            if (ok) {
+                quantize_i8b32(x.base, x.q, x.scales, x.rows, x.K, nullptr);
+                out.m.push_back(x);
+            }
+        }
+    }
+    ok = ok && cudaDeviceSynchronize() == cudaSuccess;
+    if (!ok) {
+        for (void* p : out.owned)
+            va.free(p);
+        out.owned.clear();
+        out.m.clear();
+    }
+    return ok;
 }
 
 bool parse_inkling_config(const std::string& dir, InklingConfig& cfg) {

@@ -406,6 +406,8 @@ set(IMP_COMPUTE_SOURCES
     src/compute/inkling_attn_gemm.cu
     src/compute/inkling_moe_rows.cu
     src/compute/inkling_gate_rows.cu
+    src/compute/inkling_moe_small.cu
+    src/compute/gemv_i8b32.cu
     src/compute/inkling_fused.cu
     src/compute/ssm_scan_reg.cu
     src/compute/ssm_scan_ssd.cu
@@ -571,6 +573,7 @@ set(IMP_EXEC_SOURCES
     src/exec/inkling_draft_head.cu
     src/exec/inkling_forward.cu
     src/exec/inkling_forward_spec.cu
+    src/exec/inkling_forward_moe.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp
     src/exec/executor_ple.cpp
