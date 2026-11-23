@@ -129,6 +129,12 @@ inline void drop_vision_tower_if_disabled(Model& model, bool no_vision) {
     }
 }
 
+// attention.apa_eps as this model can use it: Inkling runs its own forward, never the executor's
+// attention, so it gets 0 (no APA scratch in the arena plan, no APA warmup).
+inline float apa_eps_for(const Model& model, float apa_eps) {
+    return model.config().arch == ModelArch::INKLING2 ? 0.0f : apa_eps;
+}
+
 // Arena bytes the Gemma-4 audio tower + clip scratch take (0 without a tower); uploaded at warmup.
 inline size_t audio_arena_bytes(Model& model) {
     return model.audio_tower ? AudioPipeline::demand_bytes(*model.audio_tower) : 0;

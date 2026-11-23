@@ -648,7 +648,7 @@ void Engine::warmup() {
     prewarm_prefill_graphs_(warmup_id);  // after the reset: the key carries the calibration generation
     const ModelConfig& mc = model_->config();
     attention_apa_warmup(mc.n_heads, mc.n_kv_heads, mc.head_dim, mc.d_model,
-                         runtime_config_.attention.apa_eps, stream_);
+                         engine_internal::apa_eps_for(*model_, runtime_config_.attention.apa_eps), stream_);
     // The prewarm above ran a slot per batch row; the lazy slab hands the pages back so
     // serving starts at zero committed slots.
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());

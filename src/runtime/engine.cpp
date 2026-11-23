@@ -718,7 +718,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                       fp8_act_scratch_needed(*model_, config_.use_fp8_prefill),
                                       runtime_config_.attention.mla_absorb, capture_cap,
                                       config_.kv_block_size, runtime_config_.attention.ra2_prefill,
-                                      runtime_config_.attention.apa_eps > 0.0f,
+                                      engine_internal::apa_eps_for(*model_,
+                                                                   runtime_config_.attention.apa_eps) > 0.0f,
                                       runtime_config_.attention.apa_tile_cache);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant but uploads
         // during warmup, so its demand must be read off the model's shapes here.
