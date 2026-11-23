@@ -299,7 +299,9 @@ void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols,
 }
 
 void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
-    if (slot < 0 || slot >= ws.n_kv_slots || slot == ws.cur_slot || ws.d_k_cache_base == nullptr) return;
+    if (slot < 0 || slot >= ws.n_kv_slots || slot == ws.cur_slot || ws.d_k_cache_base == nullptr ||
+        !mtp_commit_slot(ws, slot))
+        return;
     ws.slot_pos[static_cast<size_t>(ws.cur_slot)] = ws.mtp_pos;
     ws.cur_slot = slot;
     ws.mtp_pos = ws.slot_pos[static_cast<size_t>(slot)];
@@ -340,7 +342,7 @@ static_assert(sizeof(block_q8_1) == kMtpQ8_1BlockBytes, "mtp_workspace_bytes pri
 
 // Every device buffer of the head goes through here: ws.device_bytes is checked against the plan's
 // mtp_workspace_bytes, and the VRAM audit shows the pool as mtp_workspace.
-static bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
+bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
     if (cudaMalloc(p, bytes) != cudaSuccess)
         return false;
     const size_t footprint = mtp_alloc_footprint(bytes);
@@ -512,8 +514,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         // slot 0 (mtp_select_slot moves it).
         ws.kv_slot_elems = static_cast<size_t>(max_seq_len) * num_kv_heads * head_dim;
         const size_t kv_bytes = ws.kv_slot_elems * static_cast<size_t>(n_kv_slots) * sizeof(__half);
-        ok &= alloc(&ws.d_k_cache_base, kv_bytes);
-        ok &= alloc(&ws.d_v_cache_base, kv_bytes);
+        ok &= mtp_kv_allocate(ws, kv_bytes, n_kv_slots, ws.kv_growable);
         ws.d_k_cache = ws.d_k_cache_base;
         ws.d_v_cache = ws.d_v_cache_base;
         ws.n_kv_slots = n_kv_slots;
@@ -675,7 +676,7 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_attn_residual);
     if (ws.d_mtp_position) { cudaFree(ws.d_mtp_position); ws.d_mtp_position = nullptr; }
     ws.d_scan_part = nullptr;  // alias into the d_mtp_position allocation
-    // d_k_cache / d_v_cache are views into the slot allocation.
+    mtp_kv_release(ws);        // d_k_cache / d_v_cache are views into the slot allocation
     frfn(ws.d_k_cache_base);
     frfn(ws.d_v_cache_base);
     ws.d_slot_hi = nullptr;  // alias into the d_mtp_position allocation
@@ -1647,7 +1648,8 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     int max_pos = 0;
     if (h_tokens == nullptr || h_src_rows == nullptr || h_slots == nullptr || h_pos == nullptr ||
         !mtp_feed_multislot_ready(mtp, ws, n_rows, d_hidden_all, main_tok_emb) ||
-        !mtp_feed_tables_valid(ws, h_slots, h_pos, n_rows, &max_pos))
+        !mtp_feed_tables_valid(ws, h_slots, h_pos, n_rows, &max_pos) ||
+        !mtp_commit_slots(ws, h_slots, n_rows))
         return false;
     const size_t bytes = static_cast<size_t>(n_rows) * sizeof(int);
     if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens, bytes, cudaMemcpyDefault, stream) != cudaSuccess ||

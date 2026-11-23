@@ -8,6 +8,7 @@
 
 #include "compute/moe_routing.h"  // MoeRoutingBuffers
 #include "compute/mtp_workspace_bytes.h"  // kMtp* sizes, mtp_workspace_bytes (the plan's mirror)
+#include "memory/backend.h"
 #include "memory/host_pinned.h"
 #include "core/cuda_raii.h"  // CudaEvent
 #include "core/tensor.h"
@@ -104,6 +105,13 @@ struct MtpDraftWorkspace {
     // slot_pos holds the other slots' positions.
     void* d_k_cache_base  = nullptr;
     void* d_v_cache_base  = nullptr;
+    // Growable backend: the two caches are regions and a slot's rows are committed at its first use
+    // (mtp_commit_slot). kv_pending: bytes in device_bytes that no commit has backed yet.
+    Region k_region, v_region;
+    Backend* kv_growable = nullptr;  // set before mtp_workspace_allocate: the backend to take them from
+    Backend* kv_backend = nullptr;
+    std::vector<char> slot_ready;
+    size_t kv_pending = 0;
     int   n_kv_slots      = 1;
     int   cur_slot        = 0;
     size_t kv_slot_elems  = 0;        // max_seq_len * num_kv_heads * head_dim
@@ -349,6 +357,10 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
                             int expert_d_ff = 0, int shared_d_ff = 0,
                             int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
                             int max_seq_len = 0, int n_kv_slots = 1, int hc_count = 0, int hc_lowrank = 0);
+// Memory behind slot's head KV rows (no-op for fixed caches and committed slots). False: the device
+// refused the commit, the slot must not be written.
+[[nodiscard]] bool mtp_commit_slot(MtpDraftWorkspace& ws, int slot);
+[[nodiscard]] bool mtp_commit_slots(MtpDraftWorkspace& ws, const int* h_slots, int n);
 // the MTP carry scratch after mtp_workspace_allocate: `rows` per KV slot, needs the batched feed
 // (rows <= feed_rows_cap) and a plain head. false = none (rows <= 0 too); mtp_workspace_free releases it.
 [[nodiscard]] bool mtp_carry_allocate(MtpDraftWorkspace& ws, int rows);

@@ -387,3 +387,5 @@ Read:
 ### MTP head workspace in the touch audit (Qwen3.8-27B-NVFP4-vllm, main 847041e1 + `MemAccount::note_range`)
 
 `mtp_workspace` charged through `note()` without pointers and was missing from the audit. With its 47 buffers registered: 583.9 MiB held, 112.7 MiB written (19.3 %) by the gate workload (`make vram-touch-audit`, at most 4 parallel sequences). The head's K/V caches are sized for every sequence slot (`max_batch_size` 32 x head rows per slot) and committed at init. Open: commit a slot's K/V on its first use, as the recurrent state slab does.
+
+After the head KV moved to per-slot commits (8 slots x 16 MiB per cache on this model; slot 0 at init, a slot's rows at its first use): `mtp_workspace` 583.9 -> 327.9 MiB held after warmup, the two KV regions start at 64 MiB instead of 256 MiB and reach 256 MiB once 8 sequences ran in parallel.

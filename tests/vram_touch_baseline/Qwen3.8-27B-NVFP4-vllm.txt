@@ -6,4 +6,4 @@ gdn_chunkpar_ws 124 GDN chunk-parallel prefill workspace sized for the largest c
 region:kv_block_pool 1305 KV pool commits 25 % of its ceiling up front (kv_cache.growable_initial_pct): open policy question
 spec_state_snapshot 160 recurrent state snapshot of the speculative verify, written when a draft is rejected
 WEIGHTS 13879 read-only weights
-mtp_workspace 585 K/V of the MTP head for every sequence slot (max_batch_size 32 x head rows) committed at init, 112.7 MiB written by 4 parallel sequences: open, commit per slot on first use
+mtp_workspace 330 read-only NVFP4 copy of the MTP body (236 MiB) and the feed scratch of the batched head pass
