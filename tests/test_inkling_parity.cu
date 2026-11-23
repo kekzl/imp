@@ -18,6 +18,7 @@
 #include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
 #include "inkling_fixture.h"
+#include "memory/vram_query.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 #include "vision/inkling_vision.h"
@@ -497,6 +498,7 @@ TEST(InklingRewind, GrowableContextIsBitEqual) {
         ids.insert(ids.end(), p.begin(), p.end());
     ids.resize(5000);
     const int P = 4990;
+    const size_t pending0 = vram_reserved_uncommitted_bytes();
     std::vector<int> cuts;
     for (int c = 512; c < P; c += 512)
         cuts.push_back(c);
@@ -523,7 +525,7 @@ TEST(InklingRewind, GrowableContextIsBitEqual) {
     }
     EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
     EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
-    EXPECT_EQ(fx.va.planned(), 0u);
+    EXPECT_EQ(vram_reserved_uncommitted_bytes(), pending0);
 }
 
 // A real stream turns the side streams on (k / v chains, message mix): rows of every call size must

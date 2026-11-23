@@ -2,6 +2,7 @@
 // applications run in exec/inkling_forward.h, one kept sequence per slot.
 
 #include "exec/executor.h"
+#include "memory/vram_query.h"
 
 #include "core/logging.h"
 #include "exec/inkling_draft.h"
@@ -107,8 +108,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
                  static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
                 17 / 16;
     auto d8 = std::make_unique<InklingDense8>();
-    // Context rows reserved and not committed yet count as taken.
-    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && free_b >= need + kDense8Spare + va->planned() &&
+    // The budget view: context rows reserved and not committed yet are not free.
+    if (vram_budget_mem_get_info(&free_b, &total_b) && free_b >= need + kDense8Spare &&
         build_inkling_dense8(rt->w, *va, *d8)) {
         for (auto& f : rt->slots)
             f->set_dense8(d8.get());
