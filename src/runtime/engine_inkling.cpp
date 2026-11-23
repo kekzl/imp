@@ -95,6 +95,10 @@ int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
 void Engine::inkling_load_vision_() {
     if (model_->config().arch != ModelArch::INKLING2 || model_->inkling_dir.empty() || !model_->tokenizer())
         return;
+    if (runtime_config_.runtime.no_vision) {
+        IMP_LOG_INFO("runtime.no_vision: inkling vision tower not loaded (1133 MiB), text only");
+        return;
+    }
     auto v = std::make_unique<InklingVision>();
     const int32_t pad = model_->tokenizer()->find_token(
         std::string(vision_prompt_layout(VisionFamily::Inkling2).image_pad));
