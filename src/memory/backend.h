@@ -240,5 +240,7 @@ Backend& cuda_malloc_backend();
 // rather than a reference because "no virtual memory management" is a real answer
 // callers must fall back from, not a startup failure.
 Backend* vmm_backend();
+// vmm_backend() when lazy (vram.lazy_commit), else null: what a pool that can also run fixed takes.
+inline Backend* growable_backend(bool lazy) { return lazy ? vmm_backend() : nullptr; }
 
 }  // namespace imp

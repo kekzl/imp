@@ -669,6 +669,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // enabling later lands after set_alloc_phase(Serving): init traffic on the wrong side of the
     // boundary, labelled (not exempted) via AllocPhaseScope so `make check-alloc-interpose` sees it.
     AllocPhaseScope mtp_alloc_phase(AllocPhase::Planning, "mtp workspace");
+    ws->kv_growable = growable_backend(runtime_config_.vram.lazy_commit);  // head KV per slot at first use
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max,
                                      shape.n_kv_slots, shape.hc_count, shape.hc_lowrank)) {

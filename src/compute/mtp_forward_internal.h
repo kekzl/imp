@@ -6,6 +6,15 @@
 
 namespace imp {
 
+// One device buffer of the head, counted in ws.device_bytes and the mtp_workspace pool.
+[[nodiscard]] bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes);
+// The two head KV caches of kv_bytes each: regions with slot 0 committed when growable serves several
+// slots, else two buffers. mtp_kv_release returns the regions (fixed buffers are freed by the caller).
+[[nodiscard]] bool mtp_kv_allocate(MtpDraftWorkspace& ws, size_t kv_bytes, int n_kv_slots, Backend* growable);
+void mtp_kv_release(MtpDraftWorkspace& ws);
+// mtp_commit_slot without the device synchronize before it (the caller has no launch queued).
+[[nodiscard]] bool mtp_commit_slot_now(MtpDraftWorkspace& ws, int slot);
+
 // Gated one-row attention over the MTP KV cache: ws.d_input_norm -> ws.d_attn_residual, appends
 // this row's K/V at ws.mtp_pos and advances it.
 [[nodiscard]] bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim,

@@ -14,8 +14,10 @@ SSMState::~SSMState() {
     if (lazy_) {
         // What was never committed leaves the ledger with the reservation;
         // what was committed leaves the audit table with the region.
-        vram_reserved_uncommitted_add(-static_cast<std::ptrdiff_t>(region_.reserved() - committed_bytes()));
-        MemAccount::instance().note("ssm_state", -static_cast<std::ptrdiff_t>(committed_bytes()));
+        // The region's own numbers: a commit books what the backend mapped, which is more than the
+        // slot when ranges round out to a granule.
+        vram_reserved_uncommitted_add(-static_cast<std::ptrdiff_t>(region_.reserved() - region_.committed()));
+        MemAccount::instance().note("ssm_state", -static_cast<std::ptrdiff_t>(region_.committed()));
         region_.reset();
         pool_ = nullptr;
         return;
@@ -107,14 +109,15 @@ bool SSMState::init_lazy_(Backend& be, int n_slots) {
     committed_.assign(static_cast<size_t>(n_slots), false);
     n_committed_ = 0;
     // The whole reservation is charged by the plan and not yet backed.
-    vram_reserved_uncommitted_add(static_cast<std::ptrdiff_t>(reserve));
+    vram_reserved_uncommitted_add(static_cast<std::ptrdiff_t>(region_.reserved()));
 
     for (int i = 0; i < n_reserved_ - n_reserved_lazy_; ++i) {
         if (!ensure_slot(reserved_slot(i))) {
             IMP_LOG_WARN("SSM state: could not commit reserved slot %d of %d — allocating every slot", i,
                          n_reserved_);
-            vram_reserved_uncommitted_add(-static_cast<std::ptrdiff_t>(reserve - committed_bytes()));
-            MemAccount::instance().note("ssm_state", -static_cast<std::ptrdiff_t>(committed_bytes()));
+            vram_reserved_uncommitted_add(
+                -static_cast<std::ptrdiff_t>(region_.reserved() - region_.committed()));
+            MemAccount::instance().note("ssm_state", -static_cast<std::ptrdiff_t>(region_.committed()));
             region_.reset();
             pool_ = nullptr;
             lazy_ = false;
