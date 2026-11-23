@@ -97,6 +97,8 @@ Engine::~Engine() {
             cudaGetErrorString(leaked));
     }
 
+    if (touch_audit_)
+        touch_audit_->report(vram_alloc_, "shutdown");
     // Phase-0 VRAM audit: stop the peak sampler and emit the final table.
     // Teardown allocates nothing but frees plenty; leaving the process in
     // Serving would make the next engine's init look like an I2 violation.
@@ -896,6 +898,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                              engine_arena().high_water());
     MemAccount::instance().sampler_start(2000);
     MemAccount::instance().report("init_complete");
+    touch_audit_ = TouchAudit::start(runtime_config_.diagnostics.vram_touch_audit, vram_alloc_);
 
     // Model + profile + ssm_state_ are final here and none of the inputs can
     // change afterwards, so the answer is taken once, off the per-step path.

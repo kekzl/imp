@@ -54,6 +54,14 @@ public:
     // Reserved headroom bytes (not available for allocation).
     size_t headroom() const { return headroom_; }
 
+    // Every live allocation (diagnostics: memory/touch_audit.h).
+    struct Live {
+        const void* ptr = nullptr;
+        size_t bytes = 0;
+        std::string tag;
+    };
+    [[nodiscard]] std::vector<Live> live() const;
+
     // Log a summary of all allocations grouped by tag.
     void report() const;
     // Bytes held per allocation tag, sorted by tag (/metrics imp_vram_allocator_bytes, roadmap row 97).

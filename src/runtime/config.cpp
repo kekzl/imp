@@ -309,6 +309,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.tool_fault_raw", cfg.diagnostics.tool_fault_raw);
     B("diagnostics.audit_nvfp4_scales", cfg.diagnostics.audit_nvfp4_scales);
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
+    B("diagnostics.vram_touch_audit", cfg.diagnostics.vram_touch_audit);
     B("diagnostics.lm_dequant_fp16", cfg.diagnostics.lm_dequant_fp16);
     S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 

@@ -25,6 +25,7 @@
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
 #include <span>
+#include "memory/touch_audit.h"
 #include "memory/vram_allocator.h"
 #include "vision/inkling_vision.h"
 #include "memory/vram_owned.h"
@@ -355,6 +356,7 @@ public:
 private:
     // ── Core components ──────────────────────────────────────────────
     VRAMAllocator vram_alloc_;
+    std::unique_ptr<TouchAudit> touch_audit_;  // diagnostics.vram_touch_audit
     // Per-Engine runtime configuration (replaces the RuntimeConfig::current()
     // process-wide singleton). Initialized from take_pending_runtime_config()
     // at the start of Engine::init(); tool mains stash the loaded config via

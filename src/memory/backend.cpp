@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <unordered_map>
 
 namespace imp {
 
@@ -282,7 +283,7 @@ public:
 protected:
     MemError do_commit(Region&, size_t) override { return MemError::NotGrowable; }
 
-    MemError do_acquire(size_t bytes, size_t alignment, RegionTag, void** out_base,
+    MemError do_acquire(size_t bytes, size_t alignment, RegionTag tag, void** out_base,
                         size_t* out_reserved) override {
         // cudaMalloc's own alignment is 256 B and in practice much larger;
         // anything stricter than that has to be handled by over-allocating,
@@ -310,6 +311,7 @@ protected:
             stats_.reserved_bytes += bytes;
             stats_.peak_bytes = std::max(stats_.peak_bytes, stats_.live_bytes);
             stats_.acquire_count++;
+            live_[p] = {p, bytes, tag};
         }
         return MemError::Ok;
     }
@@ -317,14 +319,23 @@ protected:
     void do_release(void* base, size_t committed, size_t reserved, RegionTag) override {
         IMP_CUDA_CHECK_LOG(cudaFree(base));
         std::lock_guard<std::mutex> lock(mu_);
+        live_.erase(base);
         stats_.live_bytes -= std::min(stats_.live_bytes, committed);
         stats_.reserved_bytes -= std::min(stats_.reserved_bytes, reserved);
         stats_.release_count++;
     }
 
+public:
+    void live_ranges(std::vector<LiveRange>& out) const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& [p, r] : live_)
+            out.push_back(r);
+    }
+
 private:
     mutable std::mutex mu_;
     BackendStats stats_;
+    std::unordered_map<const void*, LiveRange> live_;
 };
 
 }  // namespace

@@ -78,6 +78,10 @@ struct Diagnostics {
     // checkpoints + per-pool notes + device-used peak sampler. Default off
     // (zero overhead). See src/memory/mem_account.h.
     bool vram_audit = false;
+    // Hashes every VRAMAllocator allocation in 64 KiB pages after warmup and again at teardown, and logs
+    // per tag how many MiB were written in between (memory/touch_audit.h). Adds a pass over the
+    // device memory at both points. Default off.
+    bool vram_touch_audit = false;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;
     // Finished bisect kept as a diagnostic (AUDIT_ARCH_2026 A2-9): LM head runs
