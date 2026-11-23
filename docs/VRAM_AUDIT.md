@@ -379,7 +379,7 @@ Flint and Inkling-2-Mini ran before the per-line tags, their rows are per file.
 | Qwen3.8-Flash-Next-NVFP4 (123.57 GiB) | 71.0 GiB | 65.4 GiB | 65.4 GiB | 7.49 GiB |
 
 Read:
-- Inkling-2-Mini peaks at 2.06 x its weight files while loading (its own loader); the generic loader peaks at 1.27 x (Qwen3.8-27B) and 1.46 x (Qwen3-8B).
+- Inkling-2-Mini peaks at 2.06 x its weight files while loading; the other three stay at 1.27 x (Qwen3.8-27B) and 1.46 x (Qwen3-8B) or below. Cause not isolated: the checkpoint is mapped by the generic loader and again by `load_inkling_weights` (unmapped at its end), and `VmHWM` does not split file-backed pages, which the kernel can reclaim, from anonymous ones.
 - Inkling-2-Mini grows 0.45 GiB over the workload, Qwen3.8-27B 1.15 GiB (0.94 GiB of it pinned).
 - Flash-Next holds its expert weights on the host by design; the process had 0.32 GiB in swap and the server logged 8.6 GiB of host RAM available.
 - Not broken down per pool: there is no host counterpart of the touch audit yet.
