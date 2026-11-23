@@ -18,6 +18,7 @@ updates:
   - package-ecosystem: "docker"
     directories:
       - "/"
+      - "/.github/ci-image"
       - "/tools"
       - "/tools/analysis"
       - "/tools/roofline"
