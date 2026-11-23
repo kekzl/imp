@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <mutex>
+#include <vector>
 
 namespace imp {
 
@@ -53,11 +54,14 @@ public:
 
     // Bump-allocate `bytes`, aligned. Returns an empty span when the arena is
     // exhausted; the caller decides (I6 — exhaustion is a value, not a crash).
-    StableSpan<std::byte> take_bytes(size_t bytes, size_t alignment = 256);
+    // file / line: the taking site, recorded for the touch audit (takes()).
+    StableSpan<std::byte> take_bytes(size_t bytes, size_t alignment = 256,
+                                     const char* file = __builtin_FILE(), int line = __builtin_LINE());
 
     template <class T>
-    StableSpan<T> take(size_t count, size_t alignment = alignof(T) < 256 ? 256 : alignof(T)) {
-        auto raw = take_bytes(count * sizeof(T), alignment);
+    StableSpan<T> take(size_t count, size_t alignment = alignof(T) < 256 ? 256 : alignof(T),
+                       const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
+        auto raw = take_bytes(count * sizeof(T), alignment, file, line);
         if (raw.empty())
             return StableSpan<T>();
         return raw.as<T>();
@@ -66,6 +70,15 @@ public:
     // Rewind to empty WITHOUT releasing the region. Only legal at a phase
     // boundary; every outstanding span is invalidated.
     void reset();
+
+    // Every take since open() / reset(), in order (diagnostics: memory/touch_audit.h).
+    struct Take {
+        const void* ptr = nullptr;
+        size_t bytes = 0;
+        const char* file = nullptr;
+        int line = 0;
+    };
+    [[nodiscard]] std::vector<Take> takes() const;
 
     size_t capacity() const;
     size_t used() const;
@@ -89,6 +102,7 @@ private:
     RegionTag tag_ = RegionTag::Other;
     bool lazy_ = false;
     Backend* backend_ = nullptr;
+    std::vector<Take> takes_;
 };
 
 }  // namespace imp

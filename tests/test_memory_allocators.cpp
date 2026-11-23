@@ -43,6 +43,33 @@ TEST(Arena, TakesAlignedAndTracksUsage) {
     EXPECT_EQ(arena.used() + arena.remaining(), arena.capacity());
 }
 
+// The touch audit reads who took what: every take is recorded with its site, a failed take is not, and
+// reset() starts the list again.
+TEST(Arena, RecordsEveryTakeWithItsSite) {
+    FakeBackend be;
+    ArenaAllocator arena;
+    ASSERT_EQ(arena.open(be, 1 * kMiB, RegionTag::EnginePersistent), MemError::Ok);
+    EXPECT_TRUE(arena.takes().empty());
+    const int line = __LINE__ + 1;
+    auto a = arena.take_bytes(3000);
+    auto b = arena.take<float>(100);
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    EXPECT_FALSE(arena.take_bytes(2 * kMiB));  // does not fit
+    const std::vector<ArenaAllocator::Take> t = arena.takes();
+    ASSERT_EQ(t.size(), 2u);
+    EXPECT_EQ(t[0].ptr, static_cast<const void*>(a.data()));
+    EXPECT_EQ(t[0].bytes, 3000u);
+    EXPECT_EQ(t[0].line, line);
+    EXPECT_NE(std::string(t[0].file).find("test_memory_allocators.cpp"), std::string::npos);
+    EXPECT_EQ(t[1].ptr, static_cast<const void*>(b.data()));
+    EXPECT_EQ(t[1].bytes, 100 * sizeof(float));
+    EXPECT_EQ(t[1].line, line + 1);
+    EXPECT_NE(std::string(t[1].file).find("test_memory_allocators.cpp"), std::string::npos);
+    arena.reset();
+    EXPECT_TRUE(arena.takes().empty());
+}
+
 // AUDIT B13: arena-grow scratch pointers in compute/ are kernel PARAMETERS baked into
 // captured CUDA graphs; the old cudaFree+cudaMalloc grow left a replayed graph reading a
 // freed address. A grow must leave the previous slice valid and untouched.

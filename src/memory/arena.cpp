@@ -61,16 +61,23 @@ void ArenaAllocator::close() {
     backend_ = nullptr;
     offset_ = 0;
     high_water_ = 0;
+    takes_.clear();
     ++generation_;
+}
+
+std::vector<ArenaAllocator::Take> ArenaAllocator::takes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return takes_;
 }
 
 void ArenaAllocator::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     offset_ = 0;
+    takes_.clear();
     ++generation_;
 }
 
-StableSpan<std::byte> ArenaAllocator::take_bytes(size_t bytes, size_t alignment) {
+StableSpan<std::byte> ArenaAllocator::take_bytes(size_t bytes, size_t alignment, const char* file, int line) {
     if (bytes == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0)
         return StableSpan<std::byte>();
 
@@ -104,6 +111,7 @@ StableSpan<std::byte> ArenaAllocator::take_bytes(size_t bytes, size_t alignment)
     auto* base = static_cast<std::byte*>(region_.base()) + start;
     offset_ = start + bytes;
     high_water_ = std::max(high_water_, offset_);
+    takes_.push_back({base, bytes, file, line});
     return StableSpan<std::byte>(detail::StableKey{}, base, bytes);
 }
 
