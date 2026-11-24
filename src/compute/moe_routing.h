@@ -8,6 +8,8 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 struct MoeRoutingResult {
     Tensor expert_indices;                 // [n_tokens, top_k] int32
     Tensor expert_weights;                 // [n_tokens, top_k] float
@@ -35,8 +37,10 @@ struct MoeRoutingBuffers {
     int max_experts = 0;
     int top_k = 0;
 
-    // false (pool null, ERROR logged) when cudaMalloc fails.
-    [[nodiscard]] bool allocate(int max_tokens, int max_experts, int top_k);
+    // false (pool null, ERROR logged) when the allocation fails. va: the allocator the pool comes from
+    // and returns to (tag moe_routing); null takes it from the driver.
+    [[nodiscard]] bool allocate(int max_tokens, int max_experts, int top_k, VRAMAllocator* va = nullptr);
+    VRAMAllocator* va_ = nullptr;
     void free();
     MoeRoutingBuffers() = default;
     // Owns pool: no copies (a copy double-frees, H-018); a move takes the pool and empties the source.

@@ -5,6 +5,8 @@
 #include "core/logging.h"
 #include "core/pdl_device.cuh"
 #include "core/pdl_launch.cuh"
+#include "memory/device_alloc_all.h"
+#include "memory/vram_allocator.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -461,41 +463,23 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
         return true;
     };
 
-    // expert_indices: [n_tokens, top_k] int32
+    // expert_indices and expert_weights [n_tokens, top_k]; sorted_token_ids [total_assignments] with a
+    // parallel sorted_flat_idx array behind it; expert_offsets [n_experts + 1], then the permute's tile
+    // histograms (freed with it). All four or none.
     int32_t* d_expert_indices = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_indices, static_cast<size_t>(total_assignments) * sizeof(int32_t)),
-                     "expert_indices"))
-        return;
-
-    // expert_weights: [n_tokens, top_k] float
     float* d_expert_weights = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_weights, static_cast<size_t>(total_assignments) * sizeof(float)),
-                     "expert_weights")) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
-        return;
-    }
-
-    // sorted_token_ids: [total_assignments] int32
-    // We allocate 2x to hold a parallel sorted_flat_idx array right after.
     int32_t* d_sorted_token_ids = nullptr;
-    if (!check_alloc(cudaMalloc(&d_sorted_token_ids,
-                                static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)),
-                     "sorted_token_ids")) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
-        return;
-    }
-    int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
-
-    // expert_offsets: [n_experts + 1] int32, then the permute's tile histograms (freed with it).
     int32_t* d_expert_offsets = nullptr;
     const size_t offsets_ints = static_cast<size_t>(n_experts) + 1 + moe_permute_scratch_ints(n_experts);
-    if (!check_alloc(cudaMalloc(&d_expert_offsets, offsets_ints * sizeof(int32_t)), "expert_offsets")) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_sorted_token_ids));
+    if (!check_alloc(device_alloc_all(
+                         dev_req(d_expert_indices, static_cast<size_t>(total_assignments) * sizeof(int32_t)),
+                         dev_req(d_expert_weights, static_cast<size_t>(total_assignments) * sizeof(float)),
+                         dev_req(d_sorted_token_ids,
+                                 static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)),
+                         dev_req(d_expert_offsets, offsets_ints * sizeof(int32_t))),
+                     "routing result"))
         return;
-    }
+    int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
 
     // ---- Kernel 1: Softmax + top-k selection per token ----
     int probs_arrays = score_bias ? 2 : 1;
@@ -530,8 +514,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 
 MoeRoutingBuffers::~MoeRoutingBuffers() { free(); }
 
-bool MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
+bool MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val, VRAMAllocator* va) {
     free();
+    va_ = va;
     max_tokens = max_tok;
     max_experts = max_exp;
     top_k = top_k_val;
@@ -547,8 +532,12 @@ bool MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     size_t t2e_sz = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
 
     pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + scratch_sz + t2e_sz;
-    cudaError_t err = cudaMalloc(&pool, pool_size);
-    if (err != cudaSuccess) {
+    cudaError_t err = cudaSuccess;
+    if (va_)
+        pool = va_->allocate(pool_size, "moe_routing");
+    else
+        err = device_alloc_all(dev_req(pool, pool_size));
+    if (pool == nullptr) {
         IMP_LOG_ERROR("MoE routing pool: cudaMalloc of %zu bytes failed (%d tokens x top-%d, %d experts): %s",
                       pool_size, max_tokens, top_k, max_experts, cudaGetErrorString(err));
         pool = nullptr;
@@ -577,6 +566,7 @@ MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept 
         return *this;
     free();
     pool = std::exchange(o.pool, nullptr);
+    va_ = std::exchange(o.va_, nullptr);
     pool_size = std::exchange(o.pool_size, 0);
     expert_indices = std::exchange(o.expert_indices, nullptr);
     expert_weights = std::exchange(o.expert_weights, nullptr);
@@ -591,10 +581,11 @@ MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept 
 }
 
 void MoeRoutingBuffers::free() {
-    if (pool) {
+    if (pool && va_)
+        va_->free(pool);
+    else if (pool)
         IMP_CUDA_CHECK_LOG(cudaFree(pool));
-        pool = nullptr;
-    }
+    pool = nullptr;
     pool_size = 0;
     expert_indices = nullptr;
     expert_weights = nullptr;
