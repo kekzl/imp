@@ -177,5 +177,9 @@ struct HostPinnedSite {
     int count = 0;
 };
 [[nodiscard]] std::vector<HostPinnedSite> host_pinned_sites();
+// For the pinned tiers that page-lock through the driver themselves (KV host spill, recurrent
+// snapshots): the same list, by a site name. Forget before the memory is freed.
+void host_pinned_note(const void* ptr, size_t bytes, const char* site);
+void host_pinned_forget(const void* ptr);
 
 }  // namespace imp

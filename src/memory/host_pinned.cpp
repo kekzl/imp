@@ -103,6 +103,12 @@ HostPinnedAllocator& cuda_host_pinned_allocator() {
     return a;
 }
 
+void host_pinned_note(const void* ptr, size_t bytes, const char* site) {
+    if (ptr && bytes > 0)
+        note_pinned(ptr, bytes, site, "");
+}
+void host_pinned_forget(const void* ptr) { forget_pinned(ptr); }
+
 std::vector<HostPinnedSite> host_pinned_sites() {
     std::map<std::string, HostPinnedSite> by_site;
     {

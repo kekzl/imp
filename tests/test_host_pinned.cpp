@@ -406,6 +406,19 @@ TEST(HostPinnedSites, FollowAcquireMoveAndReset) {
     }
     EXPECT_EQ(mine().bytes, before.bytes);
     EXPECT_EQ(mine().count, before.count);
+    // A tier that page-locks through the driver itself names its site.
+    static char tier_mem[4096];
+    host_pinned_note(tier_mem, sizeof tier_mem, "tier_test");
+    host_pinned_note(nullptr, 64, "tier_test");
+    const auto tier = [] {
+        size_t b = 0;
+        for (const HostPinnedSite& x : host_pinned_sites())
+            b += x.site == "tier_test" ? x.bytes : 0;
+        return b;
+    };
+    EXPECT_EQ(tier(), sizeof tier_mem);
+    host_pinned_forget(tier_mem);
+    EXPECT_EQ(tier(), 0u);
     EXPECT_NE(host_audit_text().find("pinned TOTAL"), std::string::npos);
     EXPECT_NE(host_audit_text().find("process: RSS"), std::string::npos);
 }

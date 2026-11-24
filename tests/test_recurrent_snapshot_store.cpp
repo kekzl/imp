@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 
+#include "memory/host_pinned.h"
 #include "memory/recurrent_snapshot_store.h"
 
 #include <cstdint>
@@ -88,6 +89,50 @@ TEST(RecurrentSnapshotStoreTest, EvictedEntriesMoveToHostTierAndRestore) {
     store.clear();
     EXPECT_EQ(store.size(), 0);
     EXPECT_EQ(store.host_size(), 0);
+}
+
+// After warmup the engine hands the host tier back: the entries go, the free pinned slabs are released
+// (a slab an entry holder still has is not), and the tier pins again on the next eviction.
+TEST(RecurrentSnapshotStoreTest, ReleaseHostTierFreesItsPinnedSlabs) {
+    SKIP_IF_NO_CUDA();
+    const auto pinned = [] {
+        size_t b = 0;
+        for (const HostPinnedSite& s : host_pinned_sites())
+            b += s.site == "recurrent_snapshots" ? s.bytes : 0;
+        return b;
+    };
+    const size_t before = pinned();
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/3 * kEntryBytes);
+    DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44);
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));
+    ASSERT_TRUE(store.save(3, 96, c.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    ASSERT_EQ(store.host_size(), 2);
+    EXPECT_EQ(pinned() - before, 2 * kEntryBytes);
+    auto held = store.find(1);  // a request still holds this host entry
+    ASSERT_NE(held, nullptr);
+    ASSERT_TRUE(held->on_host);
+    EXPECT_EQ(store.release_host_tier(), 1);
+    EXPECT_EQ(store.size(), 0);
+    EXPECT_EQ(store.host_size(), 0);
+    EXPECT_EQ(pinned() - before, 1 * kEntryBytes);
+    EXPECT_EQ(ReadEntry(*held), std::vector<uint8_t>(kEntryBytes, 0x11));
+    held.reset();  // its slab returns to the pool
+    // The tier works again: an eviction lands on the host and restores byte-exact.
+    // The tier pins up to its 3 slabs again: the released one is no longer counted as held.
+    ASSERT_TRUE(store.save(4, 128, d.d, nullptr));
+    ASSERT_TRUE(store.save(5, 160, a.d, nullptr));
+    ASSERT_TRUE(store.save(6, 192, b.d, nullptr));
+    ASSERT_TRUE(store.save(7, 224, c.d, nullptr));
+    cudaStreamSynchronize(nullptr);
+    ASSERT_EQ(store.host_size(), 3);
+    EXPECT_EQ(pinned() - before, 3 * kEntryBytes);
+    auto e4 = store.find(4);
+    ASSERT_NE(e4, nullptr);
+    EXPECT_TRUE(e4->on_host);
+    EXPECT_EQ(ReadEntry(*e4), std::vector<uint8_t>(kEntryBytes, 0x44));
 }
 
 TEST(RecurrentSnapshotStoreTest, SaveFindRoundTrip) {

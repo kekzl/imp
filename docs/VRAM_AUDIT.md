@@ -426,3 +426,16 @@ The first large prompt after a start pays the mapping once (48.7 and 51.0 ms log
 ### Inkling-2-Mini conv-state checkpoints (2026-11-24)
 
 The 480 MiB of anonymous growth above are the forward's conv-state checkpoints: 3.8 MB per 256 positions and slot, kept for the whole sequence, while a resume only reaches `kSeg + kSlack` positions behind the high-water mark. Freed past that window: after a 54348-token prompt, its resend and an 18126-token prompt on the second slot (2 slots x 81920) the process holds 1753 MiB of anonymous memory instead of 2579; the resend reuses 54272 tokens in both builds, texts equal.
+
+### Pinned tiers in the host table, and what they showed (2026-11-24)
+
+The KV host spill and the recurrent snapshot store page-lock through the driver themselves; they now appear in the pinned list (`host_pinned_note`). Qwen3.8-27B-NVFP4-vllm, default flags:
+
+| MiB | before | after |
+|---|---|---|
+| pinned `recurrent_snapshots` after init | 2544.0 (32 slabs) | 0 |
+| RSS after init | 5961 | 3390 |
+| RSS at shutdown (10 prompts x 300 tokens, an 18126-token prompt) | 7156 | 4346 |
+| pinned `recurrent_snapshots` at shutdown | 3498.0 (44 slabs) | 715.5 (9 slabs) |
+
+The 32 slabs held the snapshots of the warmup's synthetic prewarm prompts. The engine now releases the host tier after warmup (`RecurrentSnapshotStore::release_host_tier`). A 20093-token prompt sent again reuses 20048 tokens in both builds.
