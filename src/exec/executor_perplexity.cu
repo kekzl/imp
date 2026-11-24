@@ -668,8 +668,7 @@ double GraphExecutor::perplexity_nll(std::span<const int32_t> tokens, cudaStream
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_nll_pos.data(), d_nll, static_cast<size_t>(n) * sizeof(double),
                                        cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tokens));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_nll));
+    device_free_all(d_tokens, d_nll);
     double h_nll = 0.0;
     for (int i = 0; i < n - 1; ++i)
         h_nll += h_nll_pos[i];

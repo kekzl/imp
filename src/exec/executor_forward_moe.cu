@@ -5,6 +5,7 @@
 // NVFP4 GEMM, large batches); 5 shared expert (parallel dense FFN when present).
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
@@ -699,10 +700,8 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     // 10. Free routing result tensors only if allocated by moe_topk_gating.
     //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
     if (ctx.routing.owns_memory) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_indices.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_weights.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.sorted_token_ids.data));
-        IMP_CUDA_CHECK_LOG(cudaFree(ctx.routing.expert_offsets.data));
+        device_free_all(ctx.routing.expert_indices.data, ctx.routing.expert_weights.data,
+                        ctx.routing.sorted_token_ids.data, ctx.routing.expert_offsets.data);
     }
 }
 

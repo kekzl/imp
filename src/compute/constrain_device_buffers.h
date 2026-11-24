@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 
 namespace imp {
 
@@ -37,7 +38,7 @@ public:
 
     // Per-token allow list, one byte per vocabulary entry.
     [[nodiscard]] bool alloc_token_allow(const char* owner, int vocab_size) {
-        cudaError_t err = cudaMalloc(&d_token_allow_, static_cast<size_t>(vocab_size));
+        cudaError_t err = device_alloc_all(dev_req(d_token_allow_, static_cast<size_t>(vocab_size)));
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate the %d-token allow list: %s", owner, vocab_size,
                           cudaGetErrorString(err));
@@ -50,7 +51,7 @@ public:
     // Per-token category bitmask, uploaded once and never mutated.
     [[nodiscard]] bool alloc_categories(const char* owner, const uint16_t* host, int vocab_size) {
         const size_t bytes = static_cast<size_t>(vocab_size) * sizeof(uint16_t);
-        cudaError_t err = cudaMalloc(&d_token_categories_, bytes);
+        cudaError_t err = device_alloc_all(dev_req(d_token_categories_, bytes));
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate device categories: %s", owner, cudaGetErrorString(err));
             d_token_categories_ = nullptr;
@@ -69,7 +70,7 @@ public:
 
     // Single-word "which categories are allowed right now", rewritten per step.
     [[nodiscard]] bool alloc_allowed_mask(const char* owner) {
-        cudaError_t err = cudaMalloc(&d_allowed_mask_, sizeof(uint16_t));
+        cudaError_t err = device_alloc_all(dev_req(d_allowed_mask_, sizeof(uint16_t)));
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate mask buffer: %s", owner, cudaGetErrorString(err));
             d_allowed_mask_ = nullptr;
@@ -79,18 +80,10 @@ public:
     }
 
     void free() {
-        if (d_token_categories_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
-            d_token_categories_ = nullptr;
-        }
-        if (d_token_allow_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-            d_token_allow_ = nullptr;
-        }
-        if (d_allowed_mask_) {
-            IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
-            d_allowed_mask_ = nullptr;
-        }
+        device_free_all(d_token_categories_, d_token_allow_, d_allowed_mask_);
+        d_token_categories_ = nullptr;
+        d_token_allow_ = nullptr;
+        d_allowed_mask_ = nullptr;
     }
 
     uint8_t* token_allow() const { return d_token_allow_; }

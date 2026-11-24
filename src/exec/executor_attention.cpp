@@ -1,4 +1,5 @@
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/executor.h"
 #include <stdexcept>
 #include "lora/lora_adapter.h"

@@ -1,4 +1,5 @@
 #include "compute/sampling.h"
+#include "memory/device_alloc_all.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
@@ -444,7 +445,7 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
     }
 
     if (owns_result)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+        device_free_all(d_result);
     cuda_call_or_throw(launched, "sample_mirostat_v2 launch");
     cuda_call_or_throw(tok_copy, "sample_mirostat_v2 readback");
     cuda_call_or_throw(sur_copy, "sample_mirostat_v2 surprise readback");
@@ -460,7 +461,8 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, f
                            unsigned int seed, cudaStream_t stream) {
     // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
     int32_t* d_result = nullptr;
-    cuda_call_or_throw(cudaMalloc(&d_result, 2 * sizeof(int32_t)), "sample_mirostat_v2 scratch");
+    cuda_call_or_throw(device_alloc_all(dev_req(d_result, 2 * sizeof(int32_t))),
+                       "sample_mirostat_v2 scratch");
     return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, true, stream);
 }
 
