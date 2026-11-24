@@ -24,6 +24,12 @@ cudaError_t device_alloc_all_n(DeviceAllocReq* reqs, size_t n, bool async, cudaS
     return err;
 }
 
+void device_free_all_n(void* const* ptrs, size_t n) {
+    for (size_t i = 0; i < n; ++i)
+        if (ptrs[i])
+            IMP_CUDA_CHECK_LOG(cudaFree(ptrs[i]));
+}
+
 void device_free_all_async_n(void* const* ptrs, size_t n, cudaStream_t stream) {
     for (size_t i = 0; i < n; ++i)
         if (ptrs[i])
