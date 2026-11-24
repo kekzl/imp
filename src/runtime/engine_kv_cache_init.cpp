@@ -1160,7 +1160,8 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
         d_pf_block_tables_swa_ = ints(lay.pf_bt_swa);
         d_agl_block_tables_swa_ = ints(lay.agl_bt_swa);
     }
-    pool_bt_cap_ = bt_cap;
+    // diagnostics.graph_slot_pool=false: capacity 0, so both graph runners take their per-burst fallback.
+    pool_bt_cap_ = runtime_config_.diagnostics.graph_slot_pool ? bt_cap : 0;
     rg_rows_cap_ = config_.max_seq_len;
     rg_seq_cap_ = seq_cap;
     // M-RoPE position uploads (engine_qwen3vl.cpp) are sized once here, up to
