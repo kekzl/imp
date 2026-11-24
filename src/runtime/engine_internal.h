@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/device_alloc_all.h"
 #include "memory/plan.h"  // kMeasuredLibraryReserveBytes
 
 // Internal helpers shared across engine_*.cpp translation units.
@@ -28,16 +29,13 @@
 namespace imp::engine_internal {
 
 // Free prefill metadata buffers when not using the pre-allocated pool.
-// d_block_tables_swa may be nullptr; cudaFreeAsync ignores it, which is
+// d_block_tables_swa may be nullptr (skipped), which is
 // what non-SWA callers pass. Omitting it here leaked one buffer per
 // successful chunk on SWA models (#1644).
 inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables,
                                  int* d_block_tables_swa, int* d_context_lens, cudaStream_t stream) {
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
+    device_free_all_async(stream, d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
+                          d_context_lens);
 }
 
 // Per-step sampler seed: request seed (or hash(id) ^ clock, fixed at the request's first draw) + output

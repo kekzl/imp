@@ -343,11 +343,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         ~RaggedMeta() {
             if (pooled)
                 return;
-            for (void* p :
-                 {static_cast<void*>(d_tok), static_cast<void*>(d_pos), static_cast<void*>(d_bt),
-                  static_cast<void*>(d_ctx), static_cast<void*>(d_soff), static_cast<void*>(d_slots)})
-                if (p)
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(p, stream));
+            device_free_all_async(stream, d_tok, d_pos, d_bt, d_ctx, d_soff, d_slots);
         }
         RaggedMeta(const RaggedMeta&) = delete;
         RaggedMeta& operator=(const RaggedMeta&) = delete;
@@ -367,13 +363,12 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
         d_soff = d_rg_seq_offsets_;
         d_slots = d_rg_ssm_slots_;
     } else {
-        alloc_ok = cudaMallocAsync(&d_tok, h_tok.size() * sizeof(int32_t), stream) == cudaSuccess &&
-                   cudaMallocAsync(&d_pos, h_pos.size() * sizeof(int), stream) == cudaSuccess &&
-                   cudaMallocAsync(&d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int), stream) ==
-                       cudaSuccess &&
-                   cudaMallocAsync(&d_ctx, h_ctx.size() * sizeof(int), stream) == cudaSuccess &&
-                   cudaMallocAsync(&d_soff, h_soff.size() * sizeof(int), stream) == cudaSuccess &&
-                   cudaMallocAsync(&d_slots, h_slots.size() * sizeof(int), stream) == cudaSuccess;
+        alloc_ok = device_alloc_all_async(stream, dev_req(d_tok, h_tok.size() * sizeof(int32_t)),
+                                          dev_req(d_pos, h_pos.size() * sizeof(int)),
+                                          dev_req(d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int)),
+                                          dev_req(d_ctx, h_ctx.size() * sizeof(int)),
+                                          dev_req(d_soff, h_soff.size() * sizeof(int)),
+                                          dev_req(d_slots, h_slots.size() * sizeof(int))) == cudaSuccess;
     }
     if (!alloc_ok) {
         IMP_LOG_ERROR("prefill_batch: metadata allocation failed — cancelling %d requests", n_seq);

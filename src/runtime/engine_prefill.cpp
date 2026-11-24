@@ -309,26 +309,15 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
         d_context_lens = d_pf_context_lens_;
         pf_pool_used = true;
     } else {
-        if (!check(cudaMallocAsync(&d_token_ids, chunk_len * sizeof(int32_t), pf_stream),
-                   "malloc token_ids") ||
-            !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
-            !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream),
-                   "malloc block_tables") ||
-            (want_swa &&
-             !check(cudaMallocAsync(&d_block_tables_swa, swa_block_table.size() * sizeof(int), pf_stream),
-                    "malloc block_tables_swa")) ||
-            !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
-            if (d_token_ids)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, pf_stream));
-            if (d_positions)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, pf_stream));
-            if (d_block_tables)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, pf_stream));
-            if (d_block_tables_swa)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables_swa, pf_stream));
-            if (d_context_lens)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
-            // Not counted as KV pressure: this is a metadata cudaMallocAsync
+        // All five or none (the SWA table is 0 bytes and stays null without SWA).
+        if (!check(device_alloc_all_async(pf_stream, dev_req(d_token_ids, chunk_len * sizeof(int32_t)),
+                                          dev_req(d_positions, chunk_len * sizeof(int)),
+                                          dev_req(d_block_tables, block_table.size() * sizeof(int)),
+                                          dev_req(d_block_tables_swa,
+                                                  want_swa ? swa_block_table.size() * sizeof(int) : 0),
+                                          dev_req(d_context_lens, sizeof(int))),
+                   "metadata malloc")) {
+            // Not counted as KV pressure: this is a metadata allocation
             // failure, not the KV pool refusing blocks (#1641).
             cancel_sequence_(req);
             return false;

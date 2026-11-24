@@ -33,4 +33,13 @@ template <typename... R>
     return device_alloc_all_n(arr, sizeof...(R), /*async=*/true, stream);
 }
 
+// Stream-ordered release of buffers taken with device_alloc_all_async; null pointers are skipped.
+void device_free_all_async_n(void* const* ptrs, size_t n, cudaStream_t stream);
+
+template <typename... P>
+void device_free_all_async(cudaStream_t stream, P*... ptrs) {
+    void* const arr[] = {static_cast<void*>(ptrs)...};
+    device_free_all_async_n(arr, sizeof...(P), stream);
+}
+
 }  // namespace imp

@@ -1547,6 +1547,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
         tests/test_touch_audit.cu
+        tests/test_device_alloc_all.cu
         tests/test_capture_abort.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_kv_cache_gpu.cpp
