@@ -3,6 +3,7 @@
 // the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
@@ -204,7 +205,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     int ct_count = 0;
     if (ct_total > 0) {
         void* sf_slab = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&sf_slab, ct_total));
+        IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(sf_slab, ct_total)));
         if (!sf_slab) {
             // Defensive (floor over-commit or genuine exhaustion): a null
             // slab must not be offset into by the convert passes below.
@@ -414,7 +415,7 @@ if (mx_native > 0) {
         }
     }
     if (fp16_total > 0) {
-        cudaError_t ae = cudaMalloc(&d_fp16_bulk, fp16_total);
+        cudaError_t ae = device_alloc_all(dev_req(d_fp16_bulk, fp16_total));
         if (ae != cudaSuccess) {
             IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)", cudaGetErrorString(ae),
                           fp16_total / (1024.0 * 1024.0));

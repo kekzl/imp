@@ -8,6 +8,7 @@
 // quants without an external reference engine to compare against.
 
 #include "exec/quant_pipeline.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "quant/mxfp4_sfatom.h"
@@ -57,7 +58,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             }
             if (fp16_total > 0) {
                 void* d_fp16_bulk = nullptr;
-                IMP_CUDA_CHECK_LOG(cudaMalloc(&d_fp16_bulk, fp16_total));
+                IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(d_fp16_bulk, fp16_total)));
                 if (d_fp16_bulk) {
                     // Track bulk for shutdown cleanup (same pattern as Phase 3).
                     // Phase 3 and Phase 3c are mutually exclusive in practice
