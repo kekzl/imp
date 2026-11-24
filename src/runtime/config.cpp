@@ -312,6 +312,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("diagnostics.vram_audit", cfg.diagnostics.vram_audit);
     B("diagnostics.vram_touch_audit", cfg.diagnostics.vram_touch_audit);
     B("diagnostics.graph_slot_pool", cfg.diagnostics.graph_slot_pool);
+    B("diagnostics.i4_probe", cfg.diagnostics.i4_probe);
     B("diagnostics.lm_dequant_fp16", cfg.diagnostics.lm_dequant_fp16);
     S("diagnostics.vram_audit_dump", cfg.diagnostics.vram_audit_dump);
 

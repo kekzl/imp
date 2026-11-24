@@ -1,6 +1,6 @@
 # imp.conf example: the keys most runs touch, every one commented out at its default,
 # so a copy of this file changes nothing until a line is uncommented.
-# All 157 keys with full comments: imp.conf.reference
+# All 158 keys with full comments: imp.conf.reference
 #
 # Loading precedence (first non-empty wins):
 #   1. --config <path>              CLI flag

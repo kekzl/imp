@@ -253,5 +253,8 @@ Backend& cuda_malloc_backend();
 Backend* vmm_backend();
 // vmm_backend() when lazy (vram.lazy_commit), else null: what a pool that can also run fixed takes.
 inline Backend* growable_backend(bool lazy) { return lazy ? vmm_backend() : nullptr; }
+// Bytes the VMM backend has committed (mapped) across all its live regions, process-wide. Reads a
+// counter: it neither constructs the backend nor queries the device. 0 without VMM.
+[[nodiscard]] size_t vmm_committed_live_bytes();
 
 }  // namespace imp
