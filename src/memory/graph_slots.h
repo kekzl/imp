@@ -188,6 +188,6 @@ GraphSlotPool& graph_slot_pool();
 // context, and the penalty ring is prefix history + burst length, so twice the context
 // bounds it. Four slots covers the two runners that exist at a time with room to spare.
 // Never fatal: a pool that won't open just means the runner keeps allocating for itself.
-void graph_slot_pool_open_for(Backend& backend, int max_seq_len);
+void graph_slot_pool_open_for(Backend& backend, int max_seq_len, bool enabled = true);
 
 }  // namespace imp

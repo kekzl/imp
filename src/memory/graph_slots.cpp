@@ -232,8 +232,8 @@ GraphSlotPool& graph_slot_pool() {
     return pool;
 }
 
-void graph_slot_pool_open_for(Backend& backend, int max_seq_len) {
-    if (max_seq_len <= 0)
+void graph_slot_pool_open_for(Backend& backend, int max_seq_len, bool enabled) {
+    if (max_seq_len <= 0 || !enabled)
         return;
     GraphSlotCaps caps;
     caps.max_steps = max_seq_len;

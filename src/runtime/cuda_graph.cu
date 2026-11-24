@@ -1,4 +1,5 @@
 #include "runtime/cuda_graph.h"
+#include "memory/device_alloc_all.h"
 #include "runtime/think_stop_logic.h"
 #include "core/graph_diag.h"
 #include "core/pdl.h"
@@ -768,22 +769,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         d_step_limit_ = sv.step_limit;
         d_think_limit_ = sv.think_limit;
     } else {
-        err = cudaMalloc(&d_token_id_, SAMPLE_SCRATCH_BYTES);
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_position_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_context_len_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_step_counter_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_step_limit_, sizeof(int));
-        if (err != cudaSuccess)
-            goto fail;
-        err = cudaMalloc(&d_think_limit_, sizeof(int));
+        err = device_alloc_all(dev_req(d_token_id_, SAMPLE_SCRATCH_BYTES), dev_req(d_position_, sizeof(int)),
+                               dev_req(d_context_len_, sizeof(int)), dev_req(d_step_counter_, sizeof(int)),
+                               dev_req(d_step_limit_, sizeof(int)), dev_req(d_think_limit_, sizeof(int)));
         if (err != cudaSuccess)
             goto fail;
     }
@@ -792,7 +780,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         if (slotted) {
             d_stop_ids_ = slot_.view().stop_ids;
         } else {
-            err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
+            err = device_alloc_all(dev_req(d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t)));
             if (err != cudaSuccess)
                 goto fail;
         }
@@ -816,19 +804,10 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             d_content_after_think_ = sv.content_after_think;
             d_stop_mask_active_ = sv.stop_mask_active;
         } else {
-            err = cudaMalloc(&d_think_count_, sizeof(int));
-            if (err != cudaSuccess)
-                goto fail;
-            err = cudaMalloc(&d_in_think_, sizeof(int));
-            if (err != cudaSuccess)
-                goto fail;
-            err = cudaMalloc(&d_think_exit_step_, sizeof(int));
-            if (err != cudaSuccess)
-                goto fail;
-            err = cudaMalloc(&d_content_after_think_, sizeof(int));
-            if (err != cudaSuccess)
-                goto fail;
-            err = cudaMalloc(&d_stop_mask_active_, sizeof(int));
+            err = device_alloc_all(dev_req(d_think_count_, sizeof(int)), dev_req(d_in_think_, sizeof(int)),
+                                   dev_req(d_think_exit_step_, sizeof(int)),
+                                   dev_req(d_content_after_think_, sizeof(int)),
+                                   dev_req(d_stop_mask_active_, sizeof(int)));
             if (err != cudaSuccess)
                 goto fail;
         }
@@ -880,10 +859,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 d_penalty_ring_ = sv.penalty_ring;
                 d_penalty_count_ = sv.penalty_count;
             } else {
-                err = cudaMalloc(&d_penalty_ring_, total_penalty_slots * sizeof(int32_t));
-                if (err != cudaSuccess)
-                    goto fail;
-                err = cudaMalloc(&d_penalty_count_, sizeof(int));
+                err = device_alloc_all(dev_req(d_penalty_ring_, total_penalty_slots * sizeof(int32_t)),
+                                       dev_req(d_penalty_count_, sizeof(int)));
                 if (err != cudaSuccess)
                     goto fail;
             }
@@ -1344,62 +1321,23 @@ void CudaGraphConditionalRunner::cleanup() {
         return;
     }
 
-    if (d_token_id_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_));
-        d_token_id_ = nullptr;
-    }
-    if (d_position_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_position_));
-        d_position_ = nullptr;
-    }
-    if (d_step_limit_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_step_limit_));
-        d_step_limit_ = nullptr;
-    }
-    if (d_think_limit_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_think_limit_));
-        d_think_limit_ = nullptr;
-    }
-    if (d_context_len_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_));
-        d_context_len_ = nullptr;
-    }
-    if (d_step_counter_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_step_counter_));
-        d_step_counter_ = nullptr;
-    }
-    if (d_stop_ids_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_stop_ids_));
-        d_stop_ids_ = nullptr;
-    }
-    if (d_think_count_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_think_count_));
-        d_think_count_ = nullptr;
-    }
-    if (d_in_think_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_));
-        d_in_think_ = nullptr;
-    }
-    if (d_think_exit_step_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_think_exit_step_));
-        d_think_exit_step_ = nullptr;
-    }
-    if (d_content_after_think_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_content_after_think_));
-        d_content_after_think_ = nullptr;
-    }
-    if (d_stop_mask_active_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_stop_mask_active_));
-        d_stop_mask_active_ = nullptr;
-    }
-    if (d_penalty_ring_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_));
-        d_penalty_ring_ = nullptr;
-    }
-    if (d_penalty_count_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_count_));
-        d_penalty_count_ = nullptr;
-    }
+    device_free_all(d_token_id_, d_position_, d_step_limit_, d_think_limit_, d_context_len_, d_step_counter_,
+                    d_stop_ids_, d_think_count_, d_in_think_, d_think_exit_step_, d_content_after_think_,
+                    d_stop_mask_active_, d_penalty_ring_, d_penalty_count_);
+    d_token_id_ = nullptr;
+    d_position_ = nullptr;
+    d_step_limit_ = nullptr;
+    d_think_limit_ = nullptr;
+    d_context_len_ = nullptr;
+    d_step_counter_ = nullptr;
+    d_stop_ids_ = nullptr;
+    d_think_count_ = nullptr;
+    d_in_think_ = nullptr;
+    d_think_exit_step_ = nullptr;
+    d_content_after_think_ = nullptr;
+    d_stop_mask_active_ = nullptr;
+    d_penalty_ring_ = nullptr;
+    d_penalty_count_ = nullptr;
     penalty_capacity_ = 0;
 
     // reset() releases what this runner owned and is a no-op for a slot-backed

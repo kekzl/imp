@@ -771,7 +771,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                                  engine_arena().high_water());
     }
     // T2 slot pool for the conditional graph loop (A7 step 5.3).
-    graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len);
+    graph_slot_pool_open_for(cuda_malloc_backend(), config_.max_seq_len,
+                             runtime_config_.diagnostics.graph_slot_pool);
     gemm_init();
     // grouped-3x prewarm takes grouped NVFP4 staging + workspace slices from the T2
     // arena so the grouped NVFP4 GEMM never grows mid-capture. Gated on the
