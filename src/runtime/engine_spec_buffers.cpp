@@ -37,21 +37,24 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
         return !b.empty();
     };
-    bool ok = cudaMalloc(&d_spec_stage_, stage_ints * sizeof(int32_t)) == cudaSuccess &&
+    bool ok = (d_spec_stage_ = static_cast<int32_t*>(
+                   vram_alloc_.allocate(stage_ints * sizeof(int32_t), "spec_buffers"))) != nullptr &&
               pin(h_spec_stage_, stage_ints * sizeof(int32_t)) &&
-              cudaMalloc(&d_spec_argmax_, out_ints * sizeof(int32_t)) == cudaSuccess &&
+              (d_spec_argmax_ = static_cast<int32_t*>(
+                   vram_alloc_.allocate(out_ints * sizeof(int32_t), "spec_buffers"))) != nullptr &&
               pin(h_spec_argmax_, out_ints * sizeof(int32_t)) &&
-              cudaMalloc(&d_spec_block_table_, max_blocks * sizeof(int)) == cudaSuccess &&
+              (d_spec_block_table_ = static_cast<int*>(
+                   vram_alloc_.allocate(max_blocks * sizeof(int), "spec_buffers"))) != nullptr &&
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
               // flip can't leave it null; tiny (max_blocks ints).
-              cudaMalloc(&d_spec_block_table_swa_, max_blocks * sizeof(int)) == cudaSuccess &&
+              (d_spec_block_table_swa_ = static_cast<int*>(
+                   vram_alloc_.allocate(max_blocks * sizeof(int), "spec_buffers"))) != nullptr &&
               // #964 decode-attention verify route staging (see engine.h).
-              cudaMalloc(&d_spec_row_block_tables_,
-                         static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int)) ==
-                  cudaSuccess &&
-              pin(h_spec_row_tables_pinned_,
-                  static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t));
+              (d_spec_row_block_tables_ = static_cast<int*>(
+                   vram_alloc_.allocate(static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int),
+                                        "spec_buffers"))) != nullptr &&
+              pin(h_spec_row_tables_pinned_, static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t));
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
         free_spec_buffers_();
@@ -103,12 +106,10 @@ bool Engine::ensure_spec_state_scratch_() {
     if (!ssm_state_) return false;
     const size_t bytes = ssm_state_->per_seq_bytes();
     if (spec_state_scratch_ && spec_state_scratch_bytes_ >= bytes) return true;
-    if (spec_state_scratch_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
-        spec_state_scratch_ = nullptr;
-        spec_state_scratch_bytes_ = 0;
-    }
-    if (cudaMalloc(&spec_state_scratch_, bytes) != cudaSuccess) {
+    vram_alloc_.free(spec_state_scratch_);
+    spec_state_scratch_bytes_ = 0;
+    spec_state_scratch_ = vram_alloc_.allocate(bytes, "spec_state_scratch");
+    if (spec_state_scratch_ == nullptr) {
         IMP_LOG_WARN("spec-hybrid: state scratch alloc failed (%zu bytes) — "
                      "speculation disabled this step", bytes);
         return false;
@@ -203,19 +204,16 @@ void Engine::free_spec_buffers_() {
     }
     // Captured verify graphs bake these buffer pointers — drop them first.
     free_spec_graphs_();
-    if (spec_state_scratch_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(spec_state_scratch_));
-        spec_state_scratch_ = nullptr;
-        spec_state_scratch_bytes_ = 0;
-    }
+    vram_alloc_.free(spec_state_scratch_);
+    spec_state_scratch_ = nullptr;
+    spec_state_scratch_bytes_ = 0;
     // d_spec_tokens_/positions_/row_ctx_lens_/context_len_/past_len_/
     // chunk_len_ are sub-pointers into d_spec_stage_; d_spec_topm_ into
     // d_spec_argmax_ — only the block heads are freed.
-    if (d_spec_stage_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_stage_));
-    if (d_spec_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_));
-    if (d_spec_block_table_swa_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_block_table_swa_));
-    if (d_spec_row_block_tables_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_row_block_tables_));
-    if (d_spec_argmax_) IMP_CUDA_CHECK_LOG(cudaFree(d_spec_argmax_));
+    for (void* p : {static_cast<void*>(d_spec_stage_), static_cast<void*>(d_spec_block_table_),
+                    static_cast<void*>(d_spec_block_table_swa_), static_cast<void*>(d_spec_row_block_tables_),
+                    static_cast<void*>(d_spec_argmax_)})
+        vram_alloc_.free(p);
     d_spec_stage_ = nullptr;
     h_spec_stage_.reset();
     d_spec_tokens_ = nullptr;
