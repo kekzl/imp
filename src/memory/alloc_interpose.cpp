@@ -127,6 +127,8 @@ void print_sites() {
 void record(Counter& c, size_t bytes, imp::RegionTag tag, const void* site, bool device) {
     if (imp::alloc_phase() != imp::AllocPhase::Serving)
         return;
+    if (!device && imp::in_planned_host_alloc())
+        return;  // a refill worker's pin, off the request path (backend.h)
     c.calls.fetch_add(1, std::memory_order_relaxed);
     c.bytes.fetch_add(bytes, std::memory_order_relaxed);
     tally_site(site, bytes);

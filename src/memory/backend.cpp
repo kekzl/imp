@@ -117,6 +117,13 @@ void note_serving_allocation(RegionTag tag, size_t bytes, const void* site) {
 #endif
 }
 
+namespace {
+thread_local int t_planned_host_alloc = 0;
+}  // namespace
+PlannedHostAllocScope::PlannedHostAllocScope() { ++t_planned_host_alloc; }
+PlannedHostAllocScope::~PlannedHostAllocScope() { --t_planned_host_alloc; }
+bool in_planned_host_alloc() { return t_planned_host_alloc > 0; }
+
 void note_planned_commit(RegionTag tag, size_t bytes) {
     if (alloc_phase() != AllocPhase::Serving)
         return;

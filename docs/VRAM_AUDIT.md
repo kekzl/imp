@@ -490,3 +490,14 @@ Measured with `kv_cache.idle_release_s=10`: 10 prompts x 200 tokens, a long prom
 - The backend releases whole driver allocations (one per growth step and layer region, at most 64 MiB). A tail smaller than that inside a layer region stays mapped: Qwen3.8-27B (0.27 MiB per block) returns nothing at this size, Flint a part.
 - The first admission after a release maps one request of its size ahead again, off the admission path (Qwen3-8B: 1514 -> 2776 blocks in 165.6 ms, 110.5 ms of it zeroing).
 - `make verify-fast` server c8, two runs each: 1914.02 and 1885.82 tok/s with the change, 1872.03 and 1914.02 before.
+
+### Snapshot host tier pins ahead (2026-11-24)
+
+Releasing the warmup's pinned snapshot slabs (above, 5961 -> 3390 MiB RSS) moved their pinning into serving: `make check-alloc-interpose` counted 17 pinned-host allocations, 1351.5 MiB, on the request path while serving 20 requests on Qwen3.8-27B (pin 0). A worker now keeps 4 slabs pinned ahead and refills behind every demotion.
+
+| Qwen3.8-27B-NVFP4-vllm | released, pinned on first use | 4 pinned ahead |
+|---|---|---|
+| `check-alloc-interpose` phase A (batch 4, NVFP4 KV, MTP) | 17 calls, 1351.5 MiB | 0 calls |
+| RSS after start | 3513 MiB | 3842 MiB |
+| RSS after 10 prompts, a long prompt twice, 4 parallel requests | 4938 MiB | 5223 MiB |
+| 10 prompts x 200 tokens | 200.0 tok/s | 209.6 tok/s |

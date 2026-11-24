@@ -9,6 +9,8 @@
 #include "memory/recurrent_snapshot_store.h"
 
 #include <cstdint>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 #include "test_cuda_skip.h"
@@ -42,6 +44,7 @@ static std::vector<uint8_t> ReadEntry(const RecurrentSnapshotEntry& e) {
 TEST(RecurrentSnapshotStoreTest, EvictedEntriesMoveToHostTierAndRestore) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/2 * kEntryBytes);
     ASSERT_EQ(store.capacity(), 1);
     ASSERT_EQ(store.host_capacity(), 2);
@@ -103,6 +106,7 @@ TEST(RecurrentSnapshotStoreTest, ReleaseHostTierFreesItsPinnedSlabs) {
     };
     const size_t before = pinned();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/3 * kEntryBytes);
     DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44);
     ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
@@ -138,6 +142,7 @@ TEST(RecurrentSnapshotStoreTest, ReleaseHostTierFreesItsPinnedSlabs) {
 TEST(RecurrentSnapshotStoreTest, SaveFindRoundTrip) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 4 * kEntryBytes);
     ASSERT_TRUE(store.enabled());
     ASSERT_EQ(store.capacity(), 4);
@@ -163,6 +168,7 @@ TEST(RecurrentSnapshotStoreTest, SaveFindRoundTrip) {
 TEST(RecurrentSnapshotStoreTest, LRUEvictionAtCapacity) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 2 * kEntryBytes);  // capacity 2
     ASSERT_EQ(store.capacity(), 2);
 
@@ -184,6 +190,7 @@ TEST(RecurrentSnapshotStoreTest, LRUEvictionAtCapacity) {
 TEST(RecurrentSnapshotStoreTest, HeldEntrySurvivesEvictionThenRecycles) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, kEntryBytes);  // capacity 1
     ASSERT_EQ(store.capacity(), 1);
 
@@ -214,6 +221,7 @@ TEST(RecurrentSnapshotStoreTest, HeldEntrySurvivesEvictionThenRecycles) {
 TEST(RecurrentSnapshotStoreTest, SaveLandsInHostTierWhileEveryDeviceSlabIsHeld) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, kEntryBytes, 2 * kEntryBytes);  // 1 device slab, 2 host slabs
     ASSERT_EQ(store.capacity(), 1);
     ASSERT_EQ(store.host_capacity(), 2);
@@ -257,6 +265,7 @@ TEST(RecurrentSnapshotStoreTest, SaveLandsInHostTierWhileEveryDeviceSlabIsHeld) 
 TEST(RecurrentSnapshotStoreTest, ClearDropsEntriesButHeldBufferStaysValid) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 2 * kEntryBytes);
 
     DeviceSrc a(0x33);
@@ -279,6 +288,7 @@ TEST(RecurrentSnapshotStoreTest, SidecarTravelsWithTheSlabThroughBothTiers) {
     SKIP_IF_NO_CUDA();
     constexpr size_t kSide = 512;
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, kEntryBytes + kSide, /*host_budget_bytes=*/kEntryBytes + kSide, kSide);
     ASSERT_EQ(store.capacity(), 1);
     ASSERT_EQ(store.host_capacity(), 1);
@@ -310,6 +320,7 @@ TEST(RecurrentSnapshotStoreTest, SidecarTravelsWithTheSlabThroughBothTiers) {
 TEST(RecurrentSnapshotStoreTest, KvChainSurvivesHostEvictionAndEraseReplaces) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/1 * kEntryBytes);
     DeviceSrc a(0x11), b(0x22), c(0x33);
     const std::vector<KvChainLink> chain = {{101, 3, 7}, {202, 5, 9}};
@@ -366,6 +377,7 @@ TEST(RecurrentSnapshotStoreTest, CountersSplitDemotionsFromEvictions) {
 TEST(RecurrentSnapshotStoreTest, ProtectedEntrySkipsHostEvictionUntilUnprotect) {
     SKIP_IF_NO_CUDA();
     RecurrentSnapshotStore store;
+    store.set_host_spare(0);
     store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/2 * kEntryBytes);
     DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44), e(0x55);
     ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
@@ -386,6 +398,44 @@ TEST(RecurrentSnapshotStoreTest, ProtectedEntrySkipsHostEvictionUntilUnprotect) 
     ASSERT_NE(e1, nullptr);
     EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
     store.unprotect(7);  // unknown owner: no-op
+}
+
+// The refill worker keeps pinned slabs ready: a demotion takes one instead of pinning, and the
+// worker pins the next beside it. Without it every first use pinned on the request path
+// (Qwen3.8-27B: 17 pins of 79.5 MiB while serving 20 requests).
+TEST(RecurrentSnapshotStoreTest, DemotionsTakeSlabsTheWorkerPinnedAhead) {
+    SKIP_IF_NO_CUDA();
+    const auto wait_ready = [](const RecurrentSnapshotStore& s, int n) {
+        for (int i = 0; i < 400 && s.host_slabs_ready() != n; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return s.host_slabs_ready();
+    };
+    RecurrentSnapshotStore store;
+    store.set_host_spare(3);
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/8 * kEntryBytes);
+    ASSERT_EQ(store.host_capacity(), 8);
+    ASSERT_EQ(wait_ready(store, 3), 3) << "the worker pins the spare at init";
+    DeviceSrc a(0x11), b(0x22), c(0x33), d(0x44);
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));   // evicts 1 -> host
+    ASSERT_TRUE(store.save(3, 96, c.d, nullptr));   // evicts 2 -> host
+    ASSERT_TRUE(store.save(4, 128, d.d, nullptr));  // evicts 3 -> host
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.host_size(), 3);
+    EXPECT_EQ(store.host_inline_pins(), 0u) << "three demotions, three slabs ready";
+    EXPECT_EQ(wait_ready(store, 3), 3) << "the worker refills behind the demotions";
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_TRUE(e1->on_host);
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
+    // After the warmup release the spare comes back; the tier never exceeds its ceiling.
+    e1.reset();
+    EXPECT_GE(store.release_host_tier(), 3);
+    EXPECT_EQ(wait_ready(store, 3), 3);
+    size_t pinned = 0;
+    for (const HostPinnedSite& s : host_pinned_sites())
+        pinned += s.site == "recurrent_snapshots" ? s.bytes : 0;
+    EXPECT_LE(pinned, 8 * kEntryBytes);
 }
 
 }  // namespace

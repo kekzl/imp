@@ -7,7 +7,9 @@
 #include <list>
 #include <memory>
 #include <span>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -68,7 +70,15 @@ public:
     size_t entry_bytes() const { return entry_bytes_; }
     size_t sidecar_bytes() const { return sidecar_bytes_; }
     int capacity() const { return capacity_; }
-    int host_capacity() const { return host_capacity_; }
+    int host_capacity() const { return host_capacity_.load(std::memory_order_relaxed); }
+    // Pinned host slabs kept ready ahead of demand by the refill worker, so a demotion on the
+    // request path takes one instead of pinning (79.5 MiB per slab on Qwen3.8-27B). Before init().
+    void set_host_spare(int n) { host_spare_ = n; }
+    // Free pinned slabs right now, and slabs a demotion had to pin itself (the worker was outrun).
+    [[nodiscard]] int host_slabs_ready() const;
+    [[nodiscard]] uint64_t host_inline_pins() const {
+        return host_inline_pins_.load(std::memory_order_relaxed);
+    }
     int size() const { return static_cast<int>(entries_.size()); }
     int host_size() const { return static_cast<int>(host_entries_.size()); }
 
@@ -129,10 +139,22 @@ private:
         std::vector<void*> free_bufs;       // device slabs
         std::vector<void*> free_host_bufs;  // pinned host slabs
         bool shutdown = false;              // deleters free instead of recycling
+        std::condition_variable cv;         // wakes the host refill worker
+        bool refill_stop = false;
     };
 
     void* acquire_buffer_(cudaStream_t stream);
     void* acquire_host_buffer_();
+    // One more pinned slab while the tier is below its ceiling; null at the ceiling or when the host
+    // refuses (the ceiling then drops to what is pinned). Serialised by pin_mu_.
+    void* pin_host_slab_();
+    void host_refill_loop_();
+    void stop_host_refill_();
+    std::thread host_refill_;
+    std::mutex pin_mu_;
+    int host_spare_ = 4;
+    int refill_device_ = 0;
+    std::atomic<uint64_t> host_inline_pins_{0};
     void evict_device_lru_(cudaStream_t stream);
     [[nodiscard]] bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src,
                                      cudaStream_t stream, std::vector<KvChainLink> kv_chain);
@@ -151,8 +173,8 @@ private:
     size_t sidecar_bytes_ = 0;
     size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_
     int capacity_ = 0;
-    int host_capacity_ = 0;   // slab ceiling of the host tier
-    int host_allocated_ = 0;  // slabs pinned so far
+    std::atomic<int> host_capacity_{0};   // slab ceiling of the host tier
+    std::atomic<int> host_allocated_{0};  // slabs pinned so far
     int allocated_bufs_ = 0;  // pre-allocated at init (== capacity_)
 
     std::unordered_map<size_t, std::shared_ptr<RecurrentSnapshotEntry>> entries_;
