@@ -659,6 +659,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 size_t free_mem = 0, total_mem = 0;
                 // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
                 (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+                vram_i4_probe("expert_cache_budget");
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 int pct = dispatch_policy().moe.expert_cache_budget_pct;

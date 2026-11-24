@@ -75,6 +75,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         size_t free_mem = 0, total_mem = 0;
         // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
         (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        vram_i4_probe("cutlass_sf_budget");
         // Intentionally NOT using dctx.safety_reserve here: populating cutlass_nvfp4 in mode 2
         // destabilised CUDA-graph capture on some models. The dense in-loop safety relaxation
         // already delivers its decode win; the CUTLASS path stays conservative until the

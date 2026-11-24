@@ -104,6 +104,7 @@ size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
         return 0;
     size_t free_mem = 0, total_mem = 0;
     (void)vram_budget_mem_get_info(&free_mem, &total_mem);  // failure zeroes both: no slack
+    vram_i4_probe("expert_cache_regrow_slack");
     constexpr size_t kTail = 1536ULL << 20;
     const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ceiling_seqs(kv_ctx_batch_, true) *
                       kv_bytes_per_token_();
@@ -170,6 +171,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     size_t free_vram = 0, total_vram = 0;
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_vram, &total_vram);
+    vram_i4_probe("cache_build_root");
     // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
     // visible via nvidia-smi) — canonical floor in vram_query.h.
     size_t min_reserve = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));

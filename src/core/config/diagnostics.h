@@ -85,6 +85,9 @@ struct Diagnostics {
     // false: the graph runners and the ragged prefill get no slot pool and no pooled block tables and
     // allocate their device state per burst or batch (the fallback paths). For testing them. Default on.
     bool graph_slot_pool = true;
+    // One "I4PROBE site=..." log line at each of the 8 post-upload sizing readings: budget-view free
+    // bytes against vram_ledger_free_bytes() (memory/vram_query.h). A measurement. Default off.
+    bool i4_probe = false;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;
     // Finished bisect kept as a diagnostic (AUDIT_ARCH_2026 A2-9): LM head runs

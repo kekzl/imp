@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 
+#include "memory/device_alloc_all.h"
 #include "memory/vram_query.h"
 
 #include "test_cuda_skip.h"
@@ -116,6 +117,44 @@ TEST(VramQuerySnapshot, FreeAtInstallIsASnapshotCappedAtTheBudget) {
     imp::vram_budget_install(256);
     EXPECT_EQ(imp::vram_free_at_install_bytes(), size_t{256} << 20);
     imp::vram_budget_install(0);  // never leak the cap
+}
+
+// The own-bytes ledger: an allocation through device_alloc_all moves the live count and the ledger's
+// free bytes by exactly its size, and the free moves both back. No device reading is involved.
+TEST(VramLedger, PlainAllocationMovesLiveBytesAndLedgerFreeByItsSize) {
+    constexpr size_t kBytes = size_t{64} << 20;
+    size_t raw_free = 0, raw_total = 0;
+    if (!imp::vram_diag_mem_info(&raw_free, &raw_total) || raw_free < (size_t{512} << 20))
+        GTEST_SKIP() << "no device or under 512 MiB free";
+    imp::vram_budget_install(0);
+    const size_t live0 = imp::device_alloc_live_bytes();
+    const size_t free0 = imp::vram_ledger_free_bytes();
+    ASSERT_GE(free0, kBytes) << "the ledger must have room to fall by the allocation";
+    void* p = nullptr;
+    ASSERT_EQ(imp::device_alloc_all(imp::dev_req(p, kBytes)), cudaSuccess);
+    EXPECT_EQ(imp::device_alloc_live_bytes(), live0 + kBytes);
+    EXPECT_EQ(imp::vram_ledger_free_bytes(), free0 - kBytes);
+    imp::device_free_all(p);
+    EXPECT_EQ(imp::device_alloc_live_bytes(), live0);
+    EXPECT_EQ(imp::vram_ledger_free_bytes(), free0);
+}
+
+// A pointer the wrapper did not hand out is freed and leaves the count alone, also while a
+// counted allocation is live.
+TEST(VramLedger, FreeOfAnUnknownPointerLeavesTheCountUnchanged) {
+    size_t raw_free = 0, raw_total = 0;
+    if (!imp::vram_diag_mem_info(&raw_free, &raw_total) || raw_free < (size_t{512} << 20))
+        GTEST_SKIP() << "no device or under 512 MiB free";
+    void* counted = nullptr;
+    ASSERT_EQ(imp::device_alloc_all(imp::dev_req(counted, size_t{8} << 20)), cudaSuccess);
+    const size_t live = imp::device_alloc_live_bytes();
+    void* foreign = nullptr;
+    ASSERT_EQ(cudaMalloc(&foreign, size_t{4} << 20), cudaSuccess);
+    EXPECT_EQ(imp::device_alloc_live_bytes(), live) << "a raw cudaMalloc is not counted";
+    imp::device_free_all(foreign);
+    EXPECT_EQ(imp::device_alloc_live_bytes(), live);
+    imp::device_free_all(counted);
+    EXPECT_EQ(imp::device_alloc_live_bytes(), live - (size_t{8} << 20));
 }
 
 // The accounting view: used = total - free with the lazy pools' pending charge left out of "used".

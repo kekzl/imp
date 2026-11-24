@@ -1424,6 +1424,7 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t free_mem = 0, total_mem = 0;
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+    vram_i4_probe("expert_placement");
 
     // Overhead 10 % (aggressive, former moe.expert_overhead_pct) if ALL experts fit with it, else 30 %
     // (conservative). Saves users from a silent large perf penalty on Qwen3-Coder-30B/
@@ -2040,6 +2041,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         size_t free_mem = 0, total_mem = 0;
         // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
         (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        vram_i4_probe("upload_start");
         g_cached_free_mem = free_mem;
         g_total_allocated = 0;
         IMP_LOG_DEBUG("VRAM at upload start: %.2f GiB free / %.2f GiB total",
