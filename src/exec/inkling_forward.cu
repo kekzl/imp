@@ -150,7 +150,8 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
 }
 
 void InklingForward::reset(cudaStream_t s) {
-    pos_ = hw_ = ckpt_valid_ = 0;
+    pos_ = hw_ = ckpt_valid_ = ckpt_free_ = 0;
+    std::vector<std::vector<float>>().swap(ckpt_);  // none is valid any more
     look_pos0_ = -1;
     reset_draft_policy_();
     if (!armed_)
@@ -185,6 +186,19 @@ void InklingForward::checkpoint_at_(int grid, cudaStream_t s, const float* state
                                     s) == cudaSuccess &&
                     cudaStreamSynchronize(s) == cudaSuccess;
     ckpt_valid_ = ok ? static_cast<int>(g) : std::min(ckpt_valid_, static_cast<int>(g) - 1);
+    // match() resumes at checkpoint c only while hw_ - c * kGrid <= ring_ - window, and hw_ never falls
+    // within a sequence: older checkpoints are dead (3.8 MB each, one per 256 positions). A segment
+    // stores its checkpoints before hw_ moves, hence the seg_ of margin.
+    const int dead_below = std::max(hw_, grid * kGrid) - (ring_ - w_->cfg.window) - seg_;
+    for (; (ckpt_free_ + 1) * kGrid < dead_below; ++ckpt_free_)
+        std::vector<float>().swap(ckpt_[static_cast<size_t>(ckpt_free_)]);
+}
+
+size_t InklingForward::checkpoint_bytes() const {
+    size_t n = 0;
+    for (const std::vector<float>& c : ckpt_)
+        n += c.capacity() * sizeof(float);
+    return n;
 }
 
 int InklingForward::match(std::span<const int32_t> tokens) const {
@@ -202,8 +216,9 @@ int InklingForward::match(std::span<const int32_t> tokens) const {
 int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
     int g = match(tokens) / kGrid;
     const size_t n = conv_state_floats_ * conv_state_.size();
-    if (g > 0 && cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
-                                 cudaMemcpyHostToDevice, s) != cudaSuccess)
+    if (g > 0 && (ckpt_[static_cast<size_t>(g) - 1].size() != n ||
+                  cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
+                                  cudaMemcpyHostToDevice, s) != cudaSuccess))
         g = 0;
     hist_.assign(tokens.begin(), tokens.end());
     armed_ = true;
