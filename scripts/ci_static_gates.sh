@@ -75,6 +75,9 @@ if want lanes; then
     echo "== Test lanes =="
     run "every test in a ctest lane, none demoted" python3 tools/check_test_lanes.py --report
     run "that gate still catches its cases"     python3 tools/check_test_lanes.py --selftest
+    # X-1: a model variable read under tests/ is set by a target or listed with a reason (SETTLED I-1).
+    run "X-1 test model env wired or listed"    python3 tools/check_test_model_env.py
+    run "that gate still classifies its cases"  python3 tools/check_test_model_env.py --selftest
 fi
 
 # The container env -> argv translation. Belongs here on this file's own terms:
