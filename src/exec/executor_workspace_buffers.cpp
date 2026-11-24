@@ -656,9 +656,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
-                size_t free_mem = 0, total_mem = 0;
-                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-                (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+                // imp's own books, not the device (I4): identical on identical starts.
+                const size_t free_mem = vram_planned_free_bytes();
+                vram_i4_probe("expert_cache_budget");
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 int pct = dispatch_policy().moe.expert_cache_budget_pct;

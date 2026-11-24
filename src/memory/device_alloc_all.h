@@ -58,4 +58,9 @@ void device_free_all_async(cudaStream_t stream, P*... ptrs) {
     device_free_all_async_n(arr, sizeof...(P), stream);
 }
 
+// Sum of the requested bytes of every allocation of this file not yet freed through it. Exact for
+// requests, not for what the driver or a memory pool holds behind them. A free of a pointer this
+// file did not hand out leaves it unchanged.
+[[nodiscard]] size_t device_alloc_live_bytes();
+
 }  // namespace imp

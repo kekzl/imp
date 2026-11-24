@@ -88,6 +88,22 @@ size_t vram_own_peak_bytes();
 void vram_reserved_uncommitted_add(std::ptrdiff_t delta_bytes);
 size_t vram_reserved_uncommitted_bytes();
 
+// Free bytes by imp's own books, no device query: vram_free_at_install_bytes() minus live plain
+// allocations (device_alloc_live_bytes), VMM-committed bytes and the lazy pools' pending charge,
+// clamped at 0. The I4 candidate for the sizing sites that run after imp has allocated.
+[[nodiscard]] size_t vram_ledger_free_bytes();
+// What a size chosen after imp has allocated may count as free: the ledger minus what the device
+// holds beyond imp's books (driver rounding, pool slack: 41-73 MiB after the upload on 5 models,
+// 2026-11-24). Other processes are not in it: vram_fits and the KV residual clamp guard those.
+inline constexpr size_t kLedgerUnbookedBytes = size_t{64} << 20;
+[[nodiscard]] size_t vram_planned_free_bytes();
+
+// diagnostics.i4_probe: one "I4PROBE site=..." INFO line per call with the budget-view free bytes,
+// vram_ledger_free_bytes() and their difference. Off (default): no query, no line. Engine::init
+// passes the config key to vram_i4_probe_enable.
+void vram_i4_probe_enable(bool on);
+void vram_i4_probe(const char* site);
+
 // Canonical free-VRAM reserve floor for sizing phases: the measured allocator headroom
 // (4 %, #2482), or pct% of the (budget-visible) total when larger. pct = 0 (default,
 // B-29f: one measured margin, no policy percentage); vram.reserve_floor_pct opts in.

@@ -374,9 +374,9 @@ size_t Engine::effective_free_vram() const {
     // Budget-aware view (installed in init from config_.vram_budget_mb): uses
     // vram_query's process baseline delta, not global device usage, so a
     // co-tenant server's memory is never mis-charged to this process.
-    size_t free_mem = 0;
-    if (!vram_budget_mem_get_info(&free_mem, nullptr))
-        return 0;
+    // imp's own books, not the device (I4): the plan's budget input is identical on identical starts.
+    const size_t free_mem = vram_planned_free_bytes();
+    vram_i4_probe("plan_budget_input");
     return free_mem;
 }
 
@@ -635,6 +635,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // cudaMemGetInfo-based decision below (weight upload gates, cache budgets,
     // KV clamp, workspaces) reads through vram_budget_mem_get_info.
     vram_budget_install(config_.vram_budget_mb);
+    vram_i4_probe_enable(runtime_config_.diagnostics.i4_probe);
 
     // Publishes THIS engine's RuntimeConfig to the process_diag snapshot that
     // leaf kernels read, so exec/ and the kernels agree (a mismatch, e.g.
