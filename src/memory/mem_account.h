@@ -174,6 +174,11 @@ cudaMemPool_t release_on_free_pool(ReleasePool which);
 size_t release_on_free_pool_reserved(ReleasePool which);
 // cudaMallocAsync, from the release-on-free pool of the innermost live ReleasePoolScope if any.
 cudaError_t malloc_async_in_scope(void** ptr, size_t size, cudaStream_t stream);
+// T1 weights, the one acquisition point of weight memory: stream-ordered and booked as WEIGHTS.
+// in_scope false ignores a live ReleasePoolScope (default pool). A failure leaves *ptr null.
+[[nodiscard]] cudaError_t weights_alloc(void** ptr, size_t size, cudaStream_t stream, bool in_scope = true);
+// Uncharges WEIGHTS and frees stream-ordered; a null pointer is cudaSuccess.
+cudaError_t weights_free(void* ptr, cudaStream_t stream);
 class ReleasePoolScope {
 public:
     explicit ReleasePoolScope(ReleasePool which);

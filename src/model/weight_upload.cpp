@@ -104,10 +104,9 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
             *ptr = nullptr;
             return cudaErrorMemoryAllocation;
         }
-        cudaError_t err = malloc_async_in_scope(ptr, size, stream);
+        cudaError_t err = weights_alloc(ptr, size, stream);  // uncharged by Model (#2354)
         if (err == cudaSuccess) {
             g_total_allocated += size;
-            MemAccount::instance().note_alloc("WEIGHTS", *ptr, size);  // uncharged by Model (#2354)
             if (g_upload_log)
                 g_upload_log->note_alloc(*ptr, size);
         }
@@ -121,10 +120,9 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
     }
-    cudaError_t err = malloc_async_in_scope(ptr, size, stream);
+    // Booked outside upload passes too (Qwen3.8-27B-NVFP4: 7 F16 tensors, 710 MiB read as library reserve).
+    cudaError_t err = weights_alloc(ptr, size, stream);
     if (err == cudaSuccess) {
-        // Outside upload passes too (Qwen3.8-27B-NVFP4: 7 F16 tensors, 710 MiB read as library reserve).
-        MemAccount::instance().note_alloc("WEIGHTS", *ptr, size);
         if (g_upload_log)
             g_upload_log->note_alloc(*ptr, size);
     }
@@ -136,12 +134,11 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
 static void release_upload_alloc(std::vector<void*>& gpu_allocs, void* ptr, size_t size,
                                  cudaStream_t stream) {
     std::erase(gpu_allocs, ptr);
-    MemAccount::instance().note_free(ptr);
     if (g_upload_log)
         g_upload_log->evict_ptr(ptr);
     g_total_allocated = g_total_allocated > size ? g_total_allocated - size : 0;
     g_upload_freed += size;
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(ptr, stream));
+    IMP_CUDA_CHECK_LOG(weights_free(ptr, stream));
 }
 
 // Batch-shaped reserve (#2393): Pass 1 runs against the batch-1 reserve; a configured batch
@@ -246,10 +243,10 @@ static bool sync_upload(cudaStream_t stream, const char* what) {
 // Device copy of a host scale tensor. Any allocation goes into `allocs` and `WEIGHTS`; nullptr on failure.
 static void* scale_to_device(const void* src, size_t bytes, cudaStream_t stream, std::vector<void*>& allocs) {
     void* d_ptr = nullptr;
-    if (cudaMallocAsync(&d_ptr, bytes, stream) != cudaSuccess)
+    if (weights_alloc(&d_ptr, bytes, stream, /*in_scope=*/false) !=
+        cudaSuccess)  // uncharged by Model (#2354)
         return nullptr;
     allocs.push_back(d_ptr);
-    MemAccount::instance().note_alloc("WEIGHTS", d_ptr, bytes);  // uncharged by Model (#2354)
     const cudaError_t e = cudaMemcpyAsync(d_ptr, src, bytes, cudaMemcpyHostToDevice, stream);
     if (e != cudaSuccess)
         IMP_LOG_ERROR("scale upload: cudaMemcpyAsync %zu bytes: %s", bytes, cudaGetErrorString(e));
@@ -839,7 +836,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes, stream) != cudaSuccess ||
         !d_qzeros) {
         IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_qweight, stream));
         return false;
     }
     staged_ok &= gptq_h2d_ok(h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream), "qzeros");
@@ -849,8 +846,8 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     half* d_scales = nullptr;
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes, stream) != cudaSuccess || !d_scales) {
         IMP_LOG_ERROR("GPTQ: failed to allocate scales");
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_qweight, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_qzeros, stream));
         return false;
     }
     staged_ok &= gptq_h2d_ok(h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream), "scales");
@@ -876,11 +873,11 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes, stream) != cudaSuccess || !d_out) {
         if (staged_ok)
             IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_qweight, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_qzeros, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_scales, stream));
         if (d_g_idx)
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));
+            IMP_CUDA_CHECK_LOG(weights_free(d_g_idx, stream));
         return false;
     }
 
@@ -890,11 +887,11 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
 
     // 7. Sync and free temporary GPU buffers
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
+    IMP_CUDA_CHECK_LOG(weights_free(d_qweight, stream));
+    IMP_CUDA_CHECK_LOG(weights_free(d_qzeros, stream));
+    IMP_CUDA_CHECK_LOG(weights_free(d_scales, stream));
     if (d_g_idx)
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_g_idx, stream));
+        IMP_CUDA_CHECK_LOG(weights_free(d_g_idx, stream));
 
     // 8. Set output tensor
     int64_t out_shape[4] = {N, K, 0, 0};
@@ -1091,7 +1088,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
                      (long long)L.rope_freqs.numel());
         size_t bytes = L.rope_freqs.nbytes();
         void* d_data = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_data, bytes, ctx.stream));
+        IMP_CUDA_CHECK_LOG(weights_alloc(&d_data, bytes, ctx.stream, /*in_scope=*/false));
         if (!d_data) {
             IMP_LOG_ERROR("Failed to allocate GPU memory for rope_freqs layer %d", i);
             return false;
@@ -1321,7 +1318,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
         void* d_packed = nullptr;
         ReleasePoolScope pack_scope(ReleasePool::GdnPacks);  // Phase 4b frees it (default pool kept 1137 MiB)
-        if (malloc_async_in_scope(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
+        if (weights_alloc(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             char* base = static_cast<char*>(d_packed);
             // Concat in N (rows): each weight is a contiguous [out, d_model] block,
@@ -1365,7 +1362,8 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         size_t half_bytes = static_cast<size_t>(n_heads) * static_cast<size_t>(d_model) * es;
         size_t total_bytes = 2 * half_bytes;
         void* d_packed = nullptr;
-        if (cudaMallocAsync(&d_packed, total_bytes, ctx.stream) == cudaSuccess && d_packed) {
+        if (weights_alloc(&d_packed, total_bytes, ctx.stream, /*in_scope=*/false) == cudaSuccess &&
+            d_packed) {
             ctx.gpu_allocs.push_back(d_packed);
             IMP_CUDA_CHECK_LOG(
                 cudaMemcpyAsync(d_packed, c.data, half_bytes, cudaMemcpyDeviceToDevice, ctx.stream));
@@ -1627,7 +1625,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                         cudaError_t cpy_err = h2d_copy(gpu_ptr, packed.data, total_raw, ctx.stream);
                         if (cpy_err != cudaSuccess) {
                             IMP_LOG_ERROR("  %s: h2d_copy failed: %s", name, cudaGetErrorString(cpy_err));
-                            IMP_CUDA_CHECK_LOG(cudaFreeAsync(gpu_ptr, ctx.stream));
+                            IMP_CUDA_CHECK_LOG(weights_free(gpu_ptr, ctx.stream));
                             return false;
                         }
                         const QType src_qtype = packed.qtype;
@@ -1801,7 +1799,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                                                n_exp, cudaMemcpyDeviceToDevice, ctx.stream);
             if (cp != cudaSuccess) {
                 IMP_LOG_ERROR("Gemma 4: cudaMemcpy2DAsync failed (layer %d): %s", i, cudaGetErrorString(cp));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
+                IMP_CUDA_CHECK_LOG(weights_free(up_buf, ctx.stream));
                 return false;
             }
             // Gate half into its own buffer, then the fused buffer is freed. The in-place fallback
@@ -1832,7 +1830,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     if (cp_e != cudaSuccess) {
                         IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
                                       (long)e, cudaGetErrorString(cp_e));
-                        IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
+                        IMP_CUDA_CHECK_LOG(weights_free(up_buf, ctx.stream));
                         return false;
                     }
                 }
@@ -2244,11 +2242,11 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 if (e_ms == 0)
                     return;
                 void* slab = nullptr;
-                if (cudaMallocAsync(&slab, static_cast<size_t>(N) * e_ms, stream) != cudaSuccess)
+                // Booked as WEIGHTS (gpt-oss-20b NVFP4: 72 slabs, 1139 MiB).
+                if (weights_alloc(&slab, static_cast<size_t>(N) * e_ms, stream, /*in_scope=*/false) !=
+                    cudaSuccess)
                     return;
                 gpu_allocations_.push_back(slab);  // single base alloc; ~Model frees it once
-                // Raw cudaMallocAsync, so no tag claims it (gpt-oss-20b NVFP4: 72 slabs, 1139 MiB).
-                MemAccount::instance().note_alloc("WEIGHTS", slab, static_cast<size_t>(N) * e_ms);
                 moe_scale_slabs += upload_scale_slab(slab, grp, e_ms, stream, scale_count);
             };
             for (size_t i = 0; i < layers_.size(); ++i) {

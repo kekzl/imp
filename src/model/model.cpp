@@ -42,9 +42,8 @@ Model::~Model() {
     int free_fail = 0;
     cudaError_t first_err = cudaSuccess;
     for (void* ptr : gpu_allocations_) {
-        MemAccount::instance().note_free(ptr);
         if (ptr) {
-            cudaError_t e = cudaFreeAsync(ptr, nullptr);
+            cudaError_t e = weights_free(ptr, nullptr);
             if (e != cudaSuccess) {
                 if (free_fail == 0)
                     first_err = e;
@@ -135,7 +134,7 @@ void Model::release_gpu_allocation(void* ptr) {
 
 void Model::free_source_weight(Tensor& t, cudaStream_t stream) {
     release_gpu_allocation(t.data);
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
+    IMP_CUDA_CHECK_LOG(weights_free(t.data, stream));
     t.dropped_source = true;
 }
 
