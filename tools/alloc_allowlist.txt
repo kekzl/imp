@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 36 files, 113 sites
+# remaining: 32 files, 97 sites
 
 src/compute/encoder_forward.cu  # 5
 src/compute/gemm.cpp  # 4
@@ -24,15 +24,11 @@ src/exec/executor_attention_prefill.cpp  # 2
 src/exec/executor_forward.cu  # 2
 src/exec/executor_helpers.h  # 3
 src/exec/executor_workspace.cpp  # 2
-src/exec/executor_workspace_buffers.cpp  # 12
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cpp  # 1
 src/exec/moe_workspace.cpp  # 2
 src/exec/pre_dequant_phase0_nvfp4_loader.cpp  # 1
-src/exec/pre_dequant_phase2_fp8_cache.cpp  # 1
-src/exec/pre_dequant_phase3_cutlass.cpp  # 2
 src/exec/pre_dequant_phase3_moe.cpp  # 3
-src/exec/pre_dequant_phase3c_mxfp4.cpp  # 1
 src/exec/pre_dequant_phase4_tensor_registry.cpp  # 3
 src/exec/quant_scratch.cpp  # 1
 src/lora/lora_adapter.cpp  # 3

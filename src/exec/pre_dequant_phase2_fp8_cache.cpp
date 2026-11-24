@@ -316,7 +316,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     for (const auto& e : entries)
         total_rows += static_cast<size_t>(e.rows);
     float* d_row_scales = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_row_scales, total_rows * sizeof(float)));
+    IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(d_row_scales, total_rows * sizeof(float))));
     if (!d_row_scales) {
         vram_free(vram_alloc_, d_bulk);
         IMP_LOG_WARN("fp8_ssm_proj: row-scale alloc failed — decode keeps FP16");

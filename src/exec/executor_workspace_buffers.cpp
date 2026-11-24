@@ -3,6 +3,7 @@
 // MoE workspace, FP8 activation, NVFP4/MXFP4 tile-GEMM activation buffers.
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/executor.h"
 #include "exec/attention_dispatch_rules.h"
 #include "exec/dequant_cap.h"
@@ -1380,7 +1381,7 @@ void GraphExecutor::free_buffers() {
     smallm_ws_arena_ = false;
     smallm_xq_arena_ = false;
     if (lora_scratch_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(lora_scratch_));
+        device_free_all(lora_scratch_);
         lora_scratch_ = nullptr;
         lora_scratch_sz_ = 0;
     }
@@ -1417,11 +1418,11 @@ void GraphExecutor::free_buffers() {
 
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
+        device_free_all(longrope_short_freqs_);
         longrope_short_freqs_ = nullptr;
     }
     if (longrope_long_freqs_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
+        device_free_all(longrope_long_freqs_);
         longrope_long_freqs_ = nullptr;
     }
     longrope_n_pairs_ = 0;
@@ -1462,7 +1463,7 @@ void GraphExecutor::free_buffers() {
         wcache_.fp16.clear();
         wcache_.fp16_bytes = 0;
         if (wcache_.fp16_bulk_data) {
-            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp16_bulk_data));
+            device_free_all(wcache_.fp16_bulk_data);
             wcache_.fp16_bulk_data = nullptr;
             wcache_.fp16_bulk_data_size = 0;
         }
@@ -1501,7 +1502,7 @@ void GraphExecutor::free_buffers() {
         wcache_.cutlass_nvfp4_bytes = 0;
         wcache_.cutlass_nvfp4_noted_bytes = 0;
         if (wcache_.cutlass_sf_slab) {
-            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.cutlass_sf_slab));
+            device_free_all(wcache_.cutlass_sf_slab);
             wcache_.cutlass_sf_slab = nullptr;
             wcache_.cutlass_sf_slab_size = 0;
         }
@@ -1518,7 +1519,7 @@ void GraphExecutor::free_buffers() {
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data && fp8_entry_owns_weight(entry, wcache_))
-                IMP_CUDA_CHECK_LOG(cudaFree(entry.weight.data));
+                device_free_all(entry.weight.data);
             if (entry.d_scale) {
                 bool in_migrated = wcache_.fp8_migrated_scales &&
                                    entry.d_scale >= wcache_.fp8_migrated_scales &&
@@ -1527,7 +1528,7 @@ void GraphExecutor::free_buffers() {
                                    entry.d_scale >= wcache_.fp8_overflow_scales &&
                                    entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
                 if (!in_migrated && !in_overflow && !entry.native_source)
-                    IMP_CUDA_CHECK_LOG(cudaFree(entry.d_scale));
+                    device_free_all(entry.d_scale);
             }
         }
         wcache_.fp8.clear();
@@ -1535,7 +1536,7 @@ void GraphExecutor::free_buffers() {
         vram_free(vram_alloc_, std::exchange(wcache_.fp8_native_scales, nullptr));
         // FP8 bulk buffers
         if (wcache_.fp8_migrated_scales) {
-            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_migrated_scales));
+            device_free_all(wcache_.fp8_migrated_scales);
             wcache_.fp8_migrated_scales = nullptr;
             wcache_.fp8_migrated_count = 0;
         }
@@ -1545,7 +1546,7 @@ void GraphExecutor::free_buffers() {
             wcache_.fp8_migrated_data_size = 0;
         }
         if (wcache_.fp8_overflow_scales) {
-            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_overflow_scales));
+            device_free_all(wcache_.fp8_overflow_scales);
             wcache_.fp8_overflow_scales = nullptr;
             wcache_.fp8_overflow_count = 0;
         }
@@ -1560,7 +1561,7 @@ void GraphExecutor::free_buffers() {
             wcache_.fp8_ssm_sidecar_data_size = 0;
         }
         if (wcache_.fp8_ssm_sidecar_row_scales) {
-            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_ssm_sidecar_row_scales));
+            device_free_all(wcache_.fp8_ssm_sidecar_row_scales);
             wcache_.fp8_ssm_sidecar_row_scales = nullptr;
         }
         vram_free(vram_alloc_, wcache_.lm_head_fp8_bulk);
@@ -1642,11 +1643,11 @@ void GraphExecutor::free_buffers() {
     // success without returning the block to the async mempool (#834). Null stream + sync,
     // matching ~Model.
     if (chunk_eager_k_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(chunk_eager_k_, nullptr));
+        device_free_all_async(nullptr, chunk_eager_k_);
         chunk_eager_k_ = nullptr;
     }
     if (chunk_eager_v_) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(chunk_eager_v_, nullptr));
+        device_free_all_async(nullptr, chunk_eager_v_);
         chunk_eager_v_ = nullptr;
     }
     if (chunk_eager_bytes_ > 0)
