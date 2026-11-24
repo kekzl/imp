@@ -82,3 +82,19 @@ TEST_F(VramQueryTest, InstallClampsToDeviceTotal) {
 
 }  // namespace
 }  // namespace imp
+
+// vram_fits: a fixed size against the budget-view free bytes, margin on top, the caller's pending
+// reservation credited. The guard never chooses a size; it only answers yes or no.
+TEST(VramFits, ComparesTheSizePlusMarginWithFreePlusCredit) {
+    size_t free_b = 0, total_b = 0;
+    if (!imp::vram_budget_mem_get_info(&free_b, &total_b) || total_b == 0)
+        GTEST_SKIP() << "no device";
+    size_t seen = 0;
+    EXPECT_TRUE(imp::vram_fits(0, 0, 0, &seen));
+    EXPECT_GT(seen, 0u);
+    EXPECT_FALSE(imp::vram_fits(total_b, 0)) << "the whole card is never free";
+    EXPECT_FALSE(imp::vram_fits(0, total_b)) << "the margin counts like the size";
+    // A credit as large as the card makes any size up to the card fit.
+    EXPECT_TRUE(imp::vram_fits(total_b, 0, total_b));
+    EXPECT_FALSE(imp::vram_fits(2 * total_b + 1, 0, total_b));
+}

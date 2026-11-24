@@ -158,12 +158,12 @@ bool SSMState::ensure_slot(int slot) {
     // card (#1103). The reading excludes every lazy pool's pending charge except this one's,
     // which is added back since it's what this commit draws on; what is left must cover the
     // slot above the headroom.
-    size_t free_now = 0, total_now = 0;
-    if (vram_budget_mem_get_info(&free_now, &total_now) && total_now > 0) {
+    if (const size_t total_now = vram_budget_total_bytes(); total_now > 0) {
         const size_t own_pending = region_.reserved() - committed_bytes();
-        const size_t free_for_us = free_now + own_pending;
         const size_t floor = vram_allocator_headroom(total_now);
-        if (free_for_us < floor + slot_stride_bytes_) {
+        size_t free_now = 0;
+        if (!vram_fits(slot_stride_bytes_, floor, own_pending, &free_now)) {
+            const size_t free_for_us = free_now + own_pending;
             IMP_LOG_WARN(
                 "SSM state: slot %d not committed, %.0f MiB free against %.0f MiB headroom + %.1f MiB slot",
                 slot, free_for_us / (1024.0 * 1024.0), floor / (1024.0 * 1024.0),

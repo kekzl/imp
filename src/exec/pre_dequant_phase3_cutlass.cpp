@@ -393,12 +393,10 @@ if (mx_native > 0) {
         // into host RAM; cuBLASLt then fails at runtime when it can't allocate its internal
         // workspace (status 14 INVALID_VALUE) followed by a confusing downstream illegal memory
         // access. Refuse the alloc instead of paging, to keep the failure mode legible.
-        size_t free_mem = 0, total_mem = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
         constexpr size_t kRuntimeHeadroom = static_cast<size_t>(2) * 1024 * 1024 * 1024;
-        bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
-                              fp16_total + kRuntimeHeadroom > free_mem);
+        size_t free_mem = 0;
+        // fp16_total > 0 here, so fitting fp16_total above the headroom also covers free > headroom.
+        const bool oversubscribe = !vram_fits(fp16_total, kRuntimeHeadroom, 0, &free_mem);
         // Oversubscription is always refused.
         if (oversubscribe) {
             // Inside `if (!mxfp4_gemv_available)`: this FP16 fallback is the ONLY valid decode path

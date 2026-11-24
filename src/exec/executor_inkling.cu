@@ -103,15 +103,14 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     // behind them (draft contexts, library reserve, KV pool come later): 2 slots at 32768 take them, 4
     // slots or a 131072 context decode on fp16.
     constexpr size_t kDense8Spare = static_cast<size_t>(3) << 30;
-    size_t need = 0, free_b = 0, total_b = 0;
+    size_t need = 0, free_b = 0;
     for (const InklingLayer& ly : rt->w.layers)
         need += (static_cast<size_t>(ly.proj_rows) * rt->w.cfg.hidden +
                  static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
                 17 / 16;
     auto d8 = std::make_unique<InklingDense8>();
     // The budget view: context rows reserved and not committed yet are not free.
-    if (vram_budget_mem_get_info(&free_b, &total_b) && free_b >= need + kDense8Spare &&
-        build_inkling_dense8(rt->w, *va, *d8)) {
+    if (vram_fits(need, kDense8Spare, 0, &free_b) && build_inkling_dense8(rt->w, *va, *d8)) {
         for (auto& f : rt->slots)
             f->set_dense8(d8.get());
         rt->dense8 = std::move(d8);
