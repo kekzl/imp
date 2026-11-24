@@ -103,12 +103,12 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
 
     void* d_sf = nullptr;
     void* d_linear_sf = nullptr;
-    if (cudaMalloc(&d_sf, sf_bytes) != cudaSuccess ||
-        cudaMalloc(&d_linear_sf, linear_sf_bytes) != cudaSuccess) {
+    if (device_alloc_all(dev_req(d_sf, sf_bytes)) != cudaSuccess ||
+        device_alloc_all(dev_req(d_linear_sf, linear_sf_bytes)) != cudaSuccess) {
         if (d_sf)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_sf));
+            device_free_all(d_sf);
         if (d_linear_sf)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_linear_sf));
+            device_free_all(d_linear_sf);
         return false;
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
@@ -237,15 +237,15 @@ void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, voi
 
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {
     if (w.owns_data && w.data) {
-        IMP_CUDA_CHECK_LOG(cudaFree(const_cast<void*>(w.data)));
+        device_free_all(const_cast<void*>(w.data));
     }
     w.data = nullptr;
     if (w.scale_factors) {
-        IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors));
+        device_free_all(w.scale_factors);
         w.scale_factors = nullptr;
     }
     if (w.linear_scales) {
-        IMP_CUDA_CHECK_LOG(cudaFree(w.linear_scales));
+        device_free_all(w.linear_scales);
         w.linear_scales = nullptr;
     }
     w.N = w.K = 0;

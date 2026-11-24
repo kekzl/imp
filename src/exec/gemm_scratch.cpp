@@ -1,4 +1,5 @@
 #include "exec/gemm_scratch.h"
+#include "memory/device_alloc_all.h"
 
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -46,7 +47,7 @@ bool take_scratch(size_t bytes) {
         return true;
     }
     void* p = nullptr;
-    cudaError_t err = cudaMalloc(&p, bytes);
+    cudaError_t err = device_alloc_all(dev_req(p, bytes));
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("mmvq scratch: arena short by %zu B AND cudaMalloc failed: %s", bytes,
                       cudaGetErrorString(err));

@@ -584,7 +584,7 @@ void MoeRoutingBuffers::free() {
     if (pool && va_)
         va_->free(pool);
     else if (pool)
-        IMP_CUDA_CHECK_LOG(cudaFree(pool));
+        device_free_all(pool);
     pool = nullptr;
     pool_size = 0;
     expert_indices = nullptr;

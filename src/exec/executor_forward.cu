@@ -796,13 +796,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 int K = cfg.d_model;
                 void* w_fp16_dev = nullptr;
                 size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
-                cuda_alloc_or_throw(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream),
+                cuda_alloc_or_throw(device_alloc_all_async(stream, dev_req(w_fp16_dev, fp16_bytes)),
                                     "lm_dequant_fp16 LM head");
                 dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
                 int64_t w_shape[2] = {N, K};
                 Tensor w_fp16(w_fp16_dev, QType::F16, 2, w_shape, true);
                 gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
+                device_free_all_async(stream, w_fp16_dev);
                 IMP_LOG_DEBUG("[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path");
             } else {
                 auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);

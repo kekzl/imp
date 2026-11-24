@@ -5,6 +5,7 @@
 // IMMA computes the inner sum(X_s8*W_s8) per 32-K sub-block (design memo Section 3.2).
 
 #include "compute/mmq_q4k_imma_tile.h"
+#include "memory/device_alloc_all.h"
 #include "compute/mmq_q4k_imma_layout.h"
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
@@ -325,9 +326,9 @@ void mmq_q4k_imma_reset_static_cuda_state() {
     // frees every entry, order-independent (#2210)
     // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (auto& [_, c] : g_w_cache) {
-        (void)cudaFree(c.w_sym_s8);
-        (void)cudaFree(c.eff_alpha);
-        (void)cudaFree(c.eff_beta);
+        device_free_all(c.w_sym_s8);
+        device_free_all(c.eff_alpha);
+        device_free_all(c.eff_beta);
     }
     g_w_cache.clear();
     g_act_scratch = ActScratch{};
@@ -342,14 +343,17 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
     c.N = N;
     c.K = K;
     const int subs = K / 32;
-    if (cudaMalloc(&c.w_sym_s8, static_cast<size_t>(N) * K) != cudaSuccess) return false;
-    if (cudaMalloc(&c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
+    if (device_alloc_all(dev_req(c.w_sym_s8, static_cast<size_t>(N) * K)) != cudaSuccess)
+        return false;
+    if (device_alloc_all(dev_req(c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half))) !=
+        cudaSuccess) {
+        device_free_all(c.w_sym_s8);
         return false;
     }
-    if (cudaMalloc(&c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
-        IMP_CUDA_CHECK_LOG(cudaFree(c.eff_alpha));
+    if (device_alloc_all(dev_req(c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half))) !=
+        cudaSuccess) {
+        device_free_all(c.w_sym_s8);
+        device_free_all(c.eff_alpha);
         return false;
     }
     mmq_q4k_imma_reorder(W_q4k_blocks, N, K, c.w_sym_s8, c.eff_alpha, c.eff_beta, stream);

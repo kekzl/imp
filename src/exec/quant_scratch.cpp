@@ -1,4 +1,5 @@
 #include "exec/quant_scratch.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 
@@ -16,7 +17,7 @@ void QuantScratch::free(VRAMAllocator* alloc) {
         if (alloc)
             alloc->free(p);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(p));
+            device_free_all(p);
         p = nullptr;
     };
 

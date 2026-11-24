@@ -1,6 +1,7 @@
 #pragma once
 
 #include "memory/vram_allocator.h"
+#include "memory/device_alloc_all.h"
 #include "core/tensor.h"
 #include "core/storage_tier.h"
 #include "core/logging.h"
@@ -28,7 +29,7 @@ static inline void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* t
     if (alloc)
         return alloc->allocate(bytes, tag);
     void* ptr = nullptr;
-    if (cudaMalloc(&ptr, bytes) != cudaSuccess)
+    if (device_alloc_all(dev_req(ptr, bytes)) != cudaSuccess)
         return nullptr;
     return ptr;
 }
@@ -39,7 +40,7 @@ static inline void* vram_alloc_force(VRAMAllocator* alloc, size_t bytes, const c
     if (alloc)
         return alloc->allocate(bytes, tag, /*bypass_headroom=*/true);
     void* ptr = nullptr;
-    if (cudaMalloc(&ptr, bytes) != cudaSuccess)
+    if (device_alloc_all(dev_req(ptr, bytes)) != cudaSuccess)
         return nullptr;
     return ptr;
 }
@@ -50,7 +51,7 @@ static inline void vram_free(VRAMAllocator* alloc, void* ptr) {
     if (alloc)
         alloc->free(ptr);
     else
-        IMP_CUDA_CHECK_LOG(cudaFree(ptr));
+        device_free_all(ptr);
 }
 
 static inline int get_kv_layer(const std::vector<int>& kv_layer_map, int layer) {

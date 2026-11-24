@@ -604,7 +604,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // alloc is amortised in the pool.
             void* compact_buf = nullptr;
             const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
-            cuda_alloc_or_throw(cudaMallocAsync(&compact_buf, bytes, stream),
+            cuda_alloc_or_throw(device_alloc_all_async(stream, dev_req(compact_buf, bytes)),
                                 "MLA prefill output compaction");
             mla_compact_attn_output(static_cast<const half*>(ao.data),
                                     static_cast<half*>(compact_buf), n, nh, hd, vhd, stream);
@@ -612,7 +612,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // separate-buffer source — no in-place hazard) and narrow the view.
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ao.data, compact_buf, bytes,
                                                cudaMemcpyDeviceToDevice, stream));
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(compact_buf, stream));
+            device_free_all_async(stream, compact_buf);
         }
         // Both paths: narrow the view so o_proj sees nh*vhd. (Decode already
         // wrote compact data; prefill just copied compact data into ao.)

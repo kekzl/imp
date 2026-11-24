@@ -231,9 +231,9 @@ std::pair<float*, float*> absmax_scratch(int grid) {
         g_absmax_scratch_owned = false;
     } else {
         if (g_absmax_scratch_owned && g_absmax_scratch)
-            IMP_CUDA_CHECK_LOG(cudaFree(g_absmax_scratch));
+            device_free_all(g_absmax_scratch);
         void* p = nullptr;
-        if (cudaMalloc(&p, bytes) != cudaSuccess) {
+        if (device_alloc_all(dev_req(p, bytes)) != cudaSuccess) {
             g_absmax_scratch = nullptr;
             g_absmax_scratch_grid = 0;
             return {nullptr, nullptr};

@@ -3,6 +3,7 @@
 // wcache_->nvfp4, from which Phase 3b builds the prefill SfAtom. Colocated as both are loader-side concerns.
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -549,7 +550,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 q.K = K;
                 q.owned = false;
                 void* fp16buf = nullptr;
-                if (cudaMallocAsync(&fp16buf, static_cast<size_t>(N) * K * 2, stream) != cudaSuccess) {
+                if (device_alloc_all_async(stream, dev_req(fp16buf, static_cast<size_t>(N) * K * 2)) !=
+                    cudaSuccess) {
                     IMP_LOG_WARN("GDN NVFP4→FP16 dequant: alloc failed (layer %d) — leaving NVFP4", i);
                     continue;
                 }

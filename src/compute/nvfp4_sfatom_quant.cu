@@ -5,6 +5,7 @@
 // call: FP16 [M,K] -> NVFP4 packed [M,K/2] + SfAtom UE4M3 scales. No CUTLASS include.
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "memory/device_alloc_all.h"
 #include "compute/gpt_oss_glu.cuh"
 #include "model/model_config.h"
 #include "quant/nvfp4_quant.h"
@@ -235,7 +236,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
     // Allocate SfAtom scale buffer
     size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
-    cuda_alloc_or_throw(cudaMalloc(&d_sf, sf_bytes), "convert_nvfp4_to_cutlass scales");
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_sf, sf_bytes)), "convert_nvfp4_to_cutlass scales");
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
     // Convert scales to SfAtom layout (micro_scale only, tensor_scale deferred to GEMM alpha)
@@ -295,7 +296,7 @@ void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;
     if (w.scale_factors && !w.sf_borrowed) {
-        IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors));
+        device_free_all(w.scale_factors);
     }
     w.scale_factors = nullptr;
     w.sf_borrowed = false;

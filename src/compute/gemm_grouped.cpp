@@ -240,9 +240,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     }
 
     if (owns_ptrs) {
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_A_ptrs), stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_B_ptrs), stream));
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_C_ptrs), stream));
+        device_free_all_async(stream, static_cast<void*>(d_A_ptrs));
+        device_free_all_async(stream, static_cast<void*>(d_B_ptrs));
+        device_free_all_async(stream, static_cast<void*>(d_C_ptrs));
     }
 }
 

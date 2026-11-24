@@ -177,7 +177,7 @@ bool alloc_v_norm_ones(const Model& model, void** buf) {
     if (hd_max == 0)
         hd_max = model.config().head_dim;
     size_t buf_bytes = static_cast<size_t>(hd_max) * sizeof(half);
-    if (cudaMalloc(buf, buf_bytes) != cudaSuccess)
+    if (device_alloc_all(dev_req(*buf, buf_bytes)) != cudaSuccess)
         return true;
     // Fill with FP16 1.0 via memset is not possible (FP16 1.0 is 0x3C00).
     // Use a small host buffer + memcpy.
@@ -649,7 +649,7 @@ bool Workspace::allocate_persistent_workspace(int max_tokens) {
     // FP32 residual accumulator for post-norm architectures (Gemma-3).
     if (cfg.norm_placement == NormPlacement::POST_NORM) {
         size_t fp32_sz = align256(static_cast<size_t>(max_tokens) * d * sizeof(float));
-        cudaError_t e2 = cudaMalloc(&(*fp32_accum_buf_), fp32_sz);
+        cudaError_t e2 = device_alloc_all(dev_req(*fp32_accum_buf_, fp32_sz));
         if (e2 == cudaSuccess) {
             int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(d)};
             (*fp32_hidden_) = Tensor((*fp32_accum_buf_), QType::F32, 2, shape, true);

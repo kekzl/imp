@@ -1,4 +1,5 @@
 #include "exec/moe_workspace.h"
+#include "memory/device_alloc_all.h"
 #include "compute/gemm.h"         // moe_imma_prefill_supported
 #include "compute/mmq_q8_imma.h"  // mmq_imma_moe_shape_ok
 #include "core/logging.h"
@@ -53,7 +54,7 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
         if (alloc)
             alloc->free(p);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(p));
+            device_free_all(p);
         p = nullptr;
     };
 
@@ -104,7 +105,10 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
 
     // Phase 3c-full Step 3 per-layer caches.
     for (auto& c : per_layer_da_cache) {
-        auto cfree = [](void* p) { if (p) IMP_CUDA_CHECK_LOG(cudaFree(p)); };
+        auto cfree = [](void* p) {
+            if (p)
+                device_free_all(p);
+        };
         cfree(static_cast<void*>(c.d_gate_B_ptrs));
         cfree(static_cast<void*>(c.d_gate_SFB_ptrs));
         cfree(c.d_gate_alpha);

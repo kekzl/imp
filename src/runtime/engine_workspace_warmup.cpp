@@ -15,6 +15,7 @@
 // cache are up but before the engine becomes ready.
 
 #include "runtime/engine.h"
+#include "memory/device_alloc_all.h"
 #include "runtime/config.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
@@ -531,11 +532,11 @@ void Engine::warmup() {
     if (async_graph_runner_.is_setup())
         async_graph_runner_.cleanup();
     if (async_d_block_tables_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
+        device_free_all(async_d_block_tables_);
         async_d_block_tables_ = nullptr;
     }
     if (async_d_block_tables_swa_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+        device_free_all(async_d_block_tables_swa_);
         async_d_block_tables_swa_ = nullptr;
     }
     async_graph_req_ = nullptr;

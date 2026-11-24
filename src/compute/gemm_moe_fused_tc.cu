@@ -1,4 +1,5 @@
 #include "compute/gemm_moe_fused_tc.h"
+#include "memory/device_alloc_all.h"
 #include "core/device_info.h"
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
@@ -244,7 +245,7 @@ bool s_tile_counter_owned = false;  // cudaMalloc fallback (arena closed), freed
 
 void gemm_moe_fused_tc_reset_static_cuda_state() {
     if (s_tile_counter_owned && s_tile_counter)
-        (void)cudaFree(s_tile_counter);
+        device_free_all(s_tile_counter);
     s_tile_counter = nullptr;
     s_tile_counter_owned = false;
     s_grid_size = 0;
@@ -282,7 +283,7 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
             s_tile_counter = reinterpret_cast<int*>(slab.data());
             s_tile_counter_owned = false;
-        } else if (cudaMalloc(&s_tile_counter, sizeof(int)) == cudaSuccess) {
+        } else if (device_alloc_all(dev_req(s_tile_counter, sizeof(int))) == cudaSuccess) {
             s_tile_counter_owned = true;
         } else {
             IMP_LOG_ERROR("gemm_q6k_fused_moe_prefill_tc: could not obtain the tile counter");
