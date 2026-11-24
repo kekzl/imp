@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "memory/device_alloc_all.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/engine_internal.h"
@@ -24,10 +25,7 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
 
 void Engine::release_async_block_tables_() {
     if (!async_bt_pooled_) {
-        if (async_d_block_tables_)
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
-        if (async_d_block_tables_swa_)
-            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_swa_));
+        device_free_all(async_d_block_tables_, async_d_block_tables_swa_);
     }
     async_d_block_tables_ = nullptr;
     async_d_block_tables_swa_ = nullptr;
@@ -258,7 +256,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     const bool pooled = d_agl_block_tables_ != nullptr && bt_capacity <= pool_bt_cap_ &&
                         (!swa_sizing_active_ || d_agl_block_tables_swa_ != nullptr);
     int* d_bt = pooled ? d_agl_block_tables_ : nullptr;
-    if (!pooled && cudaMalloc(&d_bt, static_cast<size_t>(bt_capacity) * sizeof(int)) != cudaSuccess)
+    if (!pooled &&
+        device_alloc_all(dev_req(d_bt, static_cast<size_t>(bt_capacity) * sizeof(int))) != cudaSuccess)
         return false;
     // The tail past the live table is never read (kernels iterate over
     // max_context_len, stride by max_blocks_per_seq), but zeroing it keeps a
@@ -273,10 +272,11 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         if (swa_ok && pooled)
             d_bt_swa = d_agl_block_tables_swa_;
         else if (swa_ok)
-            swa_ok = cudaMalloc(&d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int)) == cudaSuccess;
+            swa_ok = device_alloc_all(dev_req(d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int))) ==
+                     cudaSuccess;
         if (!swa_ok) {
             if (!pooled)
-                IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+                device_free_all(d_bt);
             return false;
         }
         IMP_CUDA_CHECK_LOG(
@@ -329,18 +329,14 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         if (!pooled) {
-            if (d_bt_swa)
-                IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
-            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+            device_free_all(d_bt_swa, d_bt);
         }
         return false;
     }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
         if (!pooled) {
-            if (d_bt_swa)
-                IMP_CUDA_CHECK_LOG(cudaFree(d_bt_swa));
-            IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
+            device_free_all(d_bt_swa, d_bt);
         }
         return false;
     }
@@ -388,11 +384,11 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
         p.d_pos = d_cp_pos_;
         p.d_ctx = d_cp_ctx_;
     } else {
-        if (cudaMalloc(&p.d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
+        // All four or none.
+        if (device_alloc_all(dev_req(p.d_bt, max_blocks_per_seq * sizeof(int)),
+                             dev_req(p.d_token, SAMPLE_SCRATCH_BYTES), dev_req(p.d_pos, sizeof(int)),
+                             dev_req(p.d_ctx, sizeof(int))) != cudaSuccess)
             return false;
-        ok = cudaMalloc(&p.d_token, SAMPLE_SCRATCH_BYTES) == cudaSuccess &&
-             cudaMalloc(&p.d_pos, sizeof(int)) == cudaSuccess &&
-             cudaMalloc(&p.d_ctx, sizeof(int)) == cudaSuccess;
     }
     if (ok && p.h_token.empty())
         p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
@@ -558,14 +554,7 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));
     p.runner.invalidate();
     if (!p.pooled) {
-        if (p.d_bt)
-            IMP_CUDA_CHECK_LOG(cudaFree(p.d_bt));
-        if (p.d_token)
-            IMP_CUDA_CHECK_LOG(cudaFree(p.d_token));
-        if (p.d_pos)
-            IMP_CUDA_CHECK_LOG(cudaFree(p.d_pos));
-        if (p.d_ctx)
-            IMP_CUDA_CHECK_LOG(cudaFree(p.d_ctx));
+        device_free_all(p.d_bt, p.d_token, p.d_pos, p.d_ctx);
     }
     p.d_bt = nullptr;
     p.d_token = nullptr;

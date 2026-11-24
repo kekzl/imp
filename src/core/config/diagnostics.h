@@ -82,8 +82,8 @@ struct Diagnostics {
     // per tag how many MiB were written in between (memory/touch_audit.h). Adds a pass over the
     // device memory at both points. Default off.
     bool vram_touch_audit = false;
-    // false: the conditional graph runner gets no slot pool and allocates its device state per burst
-    // (the fallback a declined lease takes). For testing that fallback. Default on.
+    // false: the graph runners and the ragged prefill get no slot pool and no pooled block tables and
+    // allocate their device state per burst or batch (the fallback paths). For testing them. Default on.
     bool graph_slot_pool = true;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;

@@ -790,8 +790,8 @@ vram_audit           = false
 # Hashes every known device range in 64 KiB pages after warmup and at teardown and
 # logs per pool how many MiB were written in between (src/memory/touch_audit.h).
 vram_touch_audit     = false
-# false: the conditional graph runner gets no slot pool and allocates its device state
-# per burst (the fallback a declined lease takes). For testing that fallback.
+# false: the graph runners and the ragged prefill get no slot pool and no pooled block
+# tables and allocate their device state per burst or batch. For testing the fallbacks.
 graph_slot_pool      = true
 # Optional append-only file the VRAM audit table is mirrored into ("" = off).
 vram_audit_dump      = ""
