@@ -505,13 +505,13 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         if (!needs)
             continue;
         const int need = static_cast<int>(req.output_tokens.size());
-        if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0 || need + T > penalty_hist_cap_)
+        if (!d_penalty_hist_ || penalty_hist_slots_ <= 0 || need + T > penalty_hist_cap_)
             return decline("penalty_history_unavailable");
         const int slot = penalty_hist_slot_(req.id, reqs);
         if (slot < 0)
             return decline("penalty_history_unavailable");
         auto& hs = penalty_hist_state_[static_cast<size_t>(slot)];
-        int32_t* base = d_penalty_hist_ + (static_cast<size_t>(slot) * penalty_hist_cap_);
+        int32_t* base = d_penalty_hist_.get() + (static_cast<size_t>(slot) * penalty_hist_cap_);
         if (hs.synced != need) {
             // Full (re)sync: first batch entry of this request or a diverged
             // host history (pageable source, the same copy the plain step does).
@@ -616,7 +616,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     for (int g = 0; g < N && any_pen; ++g) {
         if (pen_slot[g] < 0)
             continue;
-        int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
+        int32_t* base = d_penalty_hist_.get() + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
         if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + (static_cast<size_t>(T) * g) + 1,
                                    static_cast<size_t>(D) * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                    "penalty draft H2D")) {
@@ -757,7 +757,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         // Device penalty history: the emitted tokens are rows T*g.. of the
         // pinned argmax buffer, in order.
         if (pen_slot[g] >= 0 && emitted > 0) {
-            int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
+            int32_t* base = d_penalty_hist_.get() + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
             auto& hs = penalty_hist_state_[static_cast<size_t>(pen_slot[g])];
             if (cudaMemcpyAsync(base + pen_need[g], h_am + (static_cast<size_t>(T) * g),
                                 static_cast<size_t>(emitted) * sizeof(int32_t), cudaMemcpyHostToDevice,

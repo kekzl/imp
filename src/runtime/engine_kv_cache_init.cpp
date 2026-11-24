@@ -1076,9 +1076,8 @@ bool Engine::init_kv_cache() {
             std::min(config_.max_batch_size, (int)imp::PenaltyAppendArgs::kMaxRows);
         penalty_hist_cap_ = config_.max_seq_len;
         if (penalty_hist_slots_ > 1 && penalty_hist_cap_ > 0) {
-            d_penalty_hist_ = static_cast<int32_t*>(vram_alloc_.allocate(
-                (size_t)penalty_hist_slots_ * penalty_hist_cap_ * sizeof(int32_t),
-                "penalty_hist"));
+            d_penalty_hist_ = VramOwned<int32_t>(vram_alloc_, (size_t)penalty_hist_slots_ * penalty_hist_cap_,
+                                                 "penalty_hist");
             if (d_penalty_hist_) {
                 penalty_hist_state_.assign(penalty_hist_slots_, {});
             } else {

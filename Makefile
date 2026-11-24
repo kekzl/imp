@@ -671,6 +671,10 @@ check-alloc-sites:
 check-live-vram-queries:
 	@$(PY_RUN) tools/check_live_vram_queries.py
 
+# I5 gate: hand-written release sites and owner-or-view flags outside src/memory/, shrinking allowlist.
+check-owning-frees:
+	@$(PY_RUN) tools/check_owning_frees.py
+
 # Remaining direct allocation sites, worst files first. Never fails.
 alloc-sites-stats:
 	@$(PY_RUN) tools/check_alloc_sites.py --stats
