@@ -154,6 +154,7 @@ Engine::~Engine() {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
+    d_penalty_hist_.reset();  // had no release before; the owner also frees at member teardown
     if (d_embed_pool_scratch_) {
         vram_alloc_.free(d_embed_pool_scratch_);
         d_embed_pool_scratch_ = nullptr;

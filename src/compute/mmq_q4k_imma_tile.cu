@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -294,12 +295,42 @@ void quantize_fp16_to_int8_subblock(const __half* X_fp16, int M, int K, int8_t* 
 
 namespace {
 
+// Owns its 3 planes. Move-only: a copy would be two owners of one allocation. No destructor on
+// purpose: the map is a static, and a release at process exit would run after the CUDA runtime.
 struct WeightCache {
     int8_t* w_sym_s8 = nullptr;
     __half* eff_alpha = nullptr;
     __half* eff_beta = nullptr;
     int N = 0;
     int K = 0;
+
+    WeightCache() = default;
+    WeightCache(const WeightCache&) = delete;
+    WeightCache& operator=(const WeightCache&) = delete;
+    WeightCache(WeightCache&& o) noexcept { take(o); }
+    WeightCache& operator=(WeightCache&& o) noexcept {
+        if (this != &o) {
+            free_planes();
+            take(o);
+        }
+        return *this;
+    }
+
+    void free_planes() noexcept {
+        device_free_all(w_sym_s8, eff_alpha, eff_beta);  // null pointers are skipped
+        w_sym_s8 = nullptr;
+        eff_alpha = nullptr;
+        eff_beta = nullptr;
+    }
+
+private:
+    void take(WeightCache& o) noexcept {
+        w_sym_s8 = std::exchange(o.w_sym_s8, nullptr);
+        eff_alpha = std::exchange(o.eff_alpha, nullptr);
+        eff_beta = std::exchange(o.eff_beta, nullptr);
+        N = o.N;
+        K = o.K;
+    }
 };
 
 struct ActScratch {
@@ -325,11 +356,8 @@ void mmq_q4k_imma_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     // frees every entry, order-independent (#2210)
     // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
-    for (auto& [_, c] : g_w_cache) {
-        device_free_all(c.w_sym_s8);
-        device_free_all(c.eff_alpha);
-        device_free_all(c.eff_beta);
-    }
+    for (auto& [_, c] : g_w_cache)
+        c.free_planes();
     g_w_cache.clear();
     g_act_scratch = ActScratch{};
 }
@@ -347,17 +375,17 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
         return false;
     if (device_alloc_all(dev_req(c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half))) !=
         cudaSuccess) {
-        device_free_all(c.w_sym_s8);
+        c.free_planes();
         return false;
     }
     if (device_alloc_all(dev_req(c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half))) !=
         cudaSuccess) {
-        device_free_all(c.w_sym_s8);
-        device_free_all(c.eff_alpha);
+        c.free_planes();
         return false;
     }
     mmq_q4k_imma_reorder(W_q4k_blocks, N, K, c.w_sym_s8, c.eff_alpha, c.eff_beta, stream);
-    g_w_cache[W_q4k_blocks] = c;
+    // Same source pointer, other shape: the move assignment frees the entry's 3 old planes.
+    g_w_cache[W_q4k_blocks] = std::move(c);
     return true;
 }
 

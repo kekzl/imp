@@ -102,7 +102,8 @@ loop, and the shared part is already factored out.
   `src/` are comments stating the feature does **not** exist on sm_120a. They read like
   clutter and they are load-bearing — they stop the next reader reaching for a
   datacenter-Blackwell design.
-- **A `VramOwned` type does not exist.** Past audits hallucinated it.
+- **`VramOwned<T>` exists since 2026-08-21** (`src/memory/vram_owned.h`: move-only, carries its
+  allocator); audits before that date named it while it did not.
 - **The `src/exec/executor_kernels.h` decl-only sweep ran on 2026-08-03.** Three kernels had
   a declaration and a definition and nothing else — no launch, no address-taken use, no
   test — and were removed: `add_fp16_bias_to_fp32_kernel`, `write_kv_cache_fp8_kernel`,
