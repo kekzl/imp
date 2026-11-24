@@ -1,4 +1,4 @@
-# CPU-only libFuzzer build: parser targets + the 6 TUs they need, no CUDA language, no deps fetched.
+# CPU-only libFuzzer build: parser targets + the 7 TUs they need, no CUDA language, no deps fetched.
 # Full build (IMP_FUZZERS=ON) links against imp and adds file-format/tool-stream targets (loader,
 # httplib). Commands: fuzz/README.md.
 
@@ -15,6 +15,7 @@ add_library(imp_fuzz_parsers OBJECT
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/regex_nfa.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/gbnf_grammar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/gbnf_parser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/audio/audio_wav.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/logging.cpp)
 target_include_directories(imp_fuzz_parsers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # fuzzer-no-link instruments the library for coverage feedback without pulling
@@ -22,7 +23,7 @@ target_include_directories(imp_fuzz_parsers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_compile_options(imp_fuzz_parsers PRIVATE
     -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -g)
 
-set(IMP_FUZZ_CPU_TARGETS json_schema regex gbnf)
+set(IMP_FUZZ_CPU_TARGETS json_schema regex gbnf wav)
 foreach(t ${IMP_FUZZ_CPU_TARGETS})
     add_executable(fuzz_${t} ${CMAKE_CURRENT_SOURCE_DIR}/fuzz/fuzz_${t}.cpp)
     target_include_directories(fuzz_${t} PRIVATE

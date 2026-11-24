@@ -17,7 +17,7 @@ Legend:
 
 **What "verified" means here:**
 
-- CI has no GPU runner: the `test` job is gated behind `vars.HAS_GPU_RUNNER`, and the lane that runs executes in under a second without launching a CUDA kernel.
+- CI has no GPU runner and no GPU job (the dormant `Test` job was removed 2026-11-25): the lane that runs executes in under a second without launching a CUDA kernel.
 - Current case count: `python3 tools/check_test_lanes.py --report` (a literal here was 248 low within nine days, #1673).
 - For anything GPU-shaped the gate is `make verify-fast`, locally, before push. No document in this repo should claim CI tests the kernels.
 

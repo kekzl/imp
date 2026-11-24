@@ -63,7 +63,7 @@ Chasing "more context at good speed" on Qwen3.8-27B-NVFP4 produced four confiden
 
 | | `scripts/verify.sh` | `scripts/bench_gate.sh` |
 |---|---|---|
-| driven by | `make verify`, `make verify-fast`, the pre-push hook | the `Test` CI job (self-hosted GPU runner) |
+| driven by | `make verify`, `make verify-fast`, the pre-push hook | by hand only (its caller, the dormant CI `Test` job, was removed 2026-11-25) |
 | trials | 3 independent processes, median | 1 process, 3 internal reps |
 | VRAM gate | yes | no |
 | speculation | off | off since #1625; **was on**, so it measured a quantity the pin does not describe |

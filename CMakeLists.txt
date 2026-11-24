@@ -969,7 +969,7 @@ if(IMP_BUILD_TESTS)
     set_source_files_properties(
         fuzz/fuzz_json_schema.cpp fuzz/fuzz_regex.cpp fuzz/fuzz_gbnf.cpp
         fuzz/fuzz_safetensors.cpp fuzz/fuzz_tokenizer_json.cpp
-        fuzz/fuzz_gguf.cpp fuzz/fuzz_mmproj.cpp
+        fuzz/fuzz_gguf.cpp fuzz/fuzz_mmproj.cpp fuzz/fuzz_wav.cpp
         PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
     set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
 
@@ -1103,7 +1103,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gbnf_grammar.cpp
         # Fuzz targets driven over committed corpus + deterministic mutator (#1620), same entry points
         # libFuzzer drives. Unconditional so -DIMP_BUILD_SERVER=OFF (sanitizer build) runs them too.
-        # IMP_FUZZ_NO_ENTRY drops LLVMFuzzerTestOneInput so the eight targets don't collide in one binary.
+        # IMP_FUZZ_NO_ENTRY drops LLVMFuzzerTestOneInput so the nine targets don't collide in one binary.
         fuzz/fuzz_json_schema.cpp
         fuzz/fuzz_regex.cpp
         fuzz/fuzz_gbnf.cpp
@@ -1111,6 +1111,7 @@ if(IMP_BUILD_TESTS)
         fuzz/fuzz_tokenizer_json.cpp
         fuzz/fuzz_gguf.cpp
         fuzz/fuzz_mmproj.cpp
+        fuzz/fuzz_wav.cpp
         tests/test_fuzz_corpus.cpp
         # Pre-dequant VRAM budget split (#1100). CPU-only: pure arithmetic in
         # runtime/vram_budget.h, and it belongs in the lane CI actually runs.
@@ -1854,7 +1855,7 @@ if(IMP_FUZZERS)
     endif()
     # fuzz_tool_stream needs nlohmann through tool_call.h, so it is only built
     # when the server sources are configured in.
-    set(IMP_FUZZ_TARGETS json_schema regex gbnf safetensors tokenizer_json)
+    set(IMP_FUZZ_TARGETS json_schema regex gbnf safetensors tokenizer_json wav)
     if(IMP_BUILD_SERVER)
         list(APPEND IMP_FUZZ_TARGETS tool_stream)
     endif()

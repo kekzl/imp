@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-10
-commit: 92c01c5c
+verified: 2026-11-25
+commit: d786a45b
 -->
 
 # fuzz — targets for the parsers that take untrusted bytes
@@ -18,11 +18,15 @@ whose generator output is asserted **valid** before use.
 |---|---|---|---|
 | corpus + mutator | `make dev` | `tests/test_fuzz_corpus.cpp` | CPU lane, every PR, ~0.7 s |
 | libFuzzer | `-DIMP_FUZZERS=ON`, clang | `fuzz_<target>` binaries | on demand |
-| libFuzzer, parsers only | `-DIMP_FUZZERS_CPU_ONLY=ON`, clang | 3 `fuzz_<target>` binaries | nightly, 10 min each |
+| libFuzzer, parsers only | `-DIMP_FUZZERS_CPU_ONLY=ON`, clang | 4 `fuzz_<target>` binaries | nightly, 10 min each |
 
-`IMP_FUZZERS_CPU_ONLY=ON` builds `fuzz_json_schema`, `fuzz_regex` and
-`fuzz_gbnf` from four translation units with no CUDA language and no dependency
-fetched (`cmake/imp-fuzzers-cpu.cmake`), which is what the nightly job runs:
+`IMP_FUZZERS_CPU_ONLY=ON` builds `fuzz_json_schema`, `fuzz_regex`, `fuzz_gbnf`
+and `fuzz_wav` from 7 translation units with no CUDA language and no dependency
+fetched (`cmake/imp-fuzzers-cpu.cmake`), which is what the nightly job runs.
+Every source in that file, every header a target includes and every file tagged
+"Untrusted input" in its first 15 lines needs a prefix in
+`tools/untrusted_input_sources.txt`, the `Sanitizers` PR path filter
+(`tools/check_untrusted_sources.py`, static gate `untrusted`):
 
 ```bash
 docker run --rm -v $PWD:/src -w /src ubuntu:26.04 bash -c '
@@ -71,6 +75,7 @@ factor; a new corpus entry or a new target is.
 | `fuzz_tokenizer_json` | `Tokenizer::load` on a real file | #1606 |
 | `fuzz_gguf` | `load_gguf` on a real file | AUDIT_ARCH_2026 F1-1, F1-5, F1-7, F1-11 |
 | `fuzz_mmproj` | `vision_gguf_probe` on a real file (dry pass of the upload path) | AUDIT_ARCH_2026 F1-2 |
+| `fuzz_wav` | `decode_wav` on the buffer | none (added 2026-11-25, AUDIT_ARCH_2026_11_24 X-5) |
 
 ## What these do not cover
 

@@ -1,3 +1,4 @@
+// Untrusted input: an mmproj GGUF is a file the user supplies (fuzz/fuzz_mmproj.cpp).
 #include "vision/vision_loader.h"
 #include "vision/vision_loader_check.h"
 #include "model/gguf_loader.h"
