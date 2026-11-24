@@ -73,6 +73,20 @@ static size_t s_workspace_size = 0;
 // cache miss, which fragments and can run while serving.
 static void* s_bench_scratch = nullptr;
 static size_t s_bench_scratch_size = 0;
+// Lazy arena: the scratch is taken by the first algo probe that needs it (bench_scratch_), so a
+// model whose GEMMs never reach the probe keeps the 32 MiB unbacked. The size is set at init.
+static bool s_bench_deferred = false;
+
+static void* bench_scratch_() {
+    if (!s_bench_scratch && s_bench_deferred) {
+        s_bench_deferred = false;
+        auto slab = engine_arena().take_bytes(s_bench_scratch_size);
+        s_bench_scratch = slab.empty() ? nullptr : slab.data();
+        if (!s_bench_scratch)
+            s_bench_scratch_size = 0;
+    }
+    return s_bench_scratch;
+}
 // Arena generation of both slices. reset()/close() bumps it: a slice from an older generation is
 // handed out again, and a stale workspace aliased the new bench scratch (cuBLASLt hang, #2611).
 static uint64_t s_slices_gen = 0;
@@ -88,6 +102,7 @@ void gemm_init() {
         s_workspace_size = 0;
         s_bench_scratch = nullptr;
         s_bench_scratch_size = 0;
+        s_bench_deferred = false;
     }
     s_slices_gen = gen;
 
@@ -129,9 +144,11 @@ void gemm_init() {
     if (s_workspace_size < prev_workspace_size)
         gemm_cleanup();
 
-    if (!s_bench_scratch) {
-        auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
-        if (!slab.empty()) {
+    if (!s_bench_scratch && !s_bench_deferred) {
+        if (engine_arena().lazy() && engine_arena().remaining() >= kGemmBenchScratchBytes) {
+            s_bench_deferred = true;
+            s_bench_scratch_size = kGemmBenchScratchBytes;
+        } else if (auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes); !slab.empty()) {
             s_bench_scratch = slab.data();
             s_bench_scratch_size = kGemmBenchScratchBytes;
         }
@@ -517,7 +534,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // hd=256 models, surfacing as silent repeated-token garbage on FFN GEMMs). Warmup-probe
     // candidates in heuristic order and pick the first that survives: that order is stable.
     int pick = 0;
-    if (nresults > 1 && s_bench_scratch && C_bytes <= s_bench_scratch_size) {
+    if (nresults > 1 && C_bytes <= s_bench_scratch_size && bench_scratch_() != nullptr) {
         void* temp_c = s_bench_scratch;
         constexpr int kDetWarmupIters = 2;
         pick = -1;
@@ -672,6 +689,7 @@ void gemm_reset_static_cuda_state() {
     s_workspace_size = 0;
     s_bench_scratch = nullptr;
     s_bench_scratch_size = 0;
+    s_bench_deferred = false;
 }
 
 // Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
