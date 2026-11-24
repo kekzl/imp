@@ -46,6 +46,14 @@ size_t vram_own_used_bytes();
 // the phase the peak forms in; serving adds nothing to it (I2).
 size_t vram_own_peak_bytes();
 
+// The device's raw free / total, for a log line, an audit table or a measurement. NEVER an input
+// to a size: sizing reads the plan (invariant I4, tools/check_live_vram_queries.py counts the
+// budget readings below, not this one). False (zeros) if the query fails.
+[[nodiscard]] bool vram_diag_mem_info(size_t* free_bytes, size_t* total_bytes);
+// Total device memory under the budget view: a property of the card, not a reading of what is
+// free right now. 0 if the query fails.
+[[nodiscard]] size_t vram_budget_total_bytes();
+
 // cudaMemGetInfo with the budget view applied. Either out pointer may be
 // null. Returns false (zeros) if the raw query fails.
 [[nodiscard]] bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);

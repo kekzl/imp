@@ -167,6 +167,22 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
     return best;
 }
 
+bool vram_diag_mem_info(size_t* free_bytes, size_t* total_bytes) {
+    size_t f = 0, t = 0;
+    const bool ok = cudaMemGetInfo(&f, &t) == cudaSuccess;
+    if (free_bytes)
+        *free_bytes = ok ? f : 0;
+    if (total_bytes)
+        *total_bytes = ok ? t : 0;
+    return ok;
+}
+
+size_t vram_budget_total_bytes() {
+    size_t t = 0;
+    (void)vram_budget_mem_get_info(nullptr, &t);
+    return t;
+}
+
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     return vram_budget_mem_get_info_ex(free_bytes, total_bytes, /*exclude_pending=*/true);
 }

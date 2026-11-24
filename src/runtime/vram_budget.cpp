@@ -56,8 +56,7 @@ void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, siz
                                  bool nvfp4_prequant) {
     if (!plan.ok || nvfp4_prequant)
         return;
-    size_t total_vram = 0;
-    (void)vram_budget_mem_get_info(nullptr, &total_vram);
+    const size_t total_vram = vram_budget_total_bytes();
     // The plan leaves no allocator headroom; KV growth keeps it free (kv_cache.cu).
     const size_t headroom = vram_allocator_headroom(total_vram);
     const size_t planned = plan.plan.total();

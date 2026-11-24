@@ -70,8 +70,7 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
     }
     if (!pool_) {
         size_t free_bytes = 0, total_device = 0;
-        if (cudaMemGetInfo(&free_bytes, &total_device) != cudaSuccess)
-            free_bytes = 0;
+        (void)vram_diag_mem_info(&free_bytes, &total_device);
         IMP_LOG_ERROR("%s", ssm_pool_failure_message(total_bytes_, max_sequences_, n_reserved_,
                                                      n_ssm_layers_, free_bytes)
                                 .c_str());

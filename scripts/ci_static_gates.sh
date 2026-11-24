@@ -116,6 +116,9 @@ if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py
     run "allocate/free API pairing"             python3 tools/check_alloc_pairs.py
+    # I4: readings of free device memory outside the query layer, against a list that only shrinks.
+    run "I4 live VRAM query allowlist"          python3 tools/check_live_vram_queries.py
+    run "that gate still classifies its cases"  python3 tools/check_live_vram_queries.py --selftest
     # Lazy device statics re-arm across ~Engine / imp_gpu_release (the
     # IMP_REGISTER_CUDA_STATIC_RESET convention). Six TUs had none on
     # 2026-09-05, one of them a use-after-free on the default model-swap path.

@@ -154,9 +154,7 @@ UploadReserve upload_reserve_for(const Model& model, const EngineConfig& cfg, co
     // is 0 for NVFP4/MXFP4_KV and zeroed the KV headroom.
     r.kv_bytes_per_seq = static_cast<size_t>(blocks_per_seq) * n_attn *
                          kv_block_bytes_per_layer(cfg.kv_cache_dtype, est_bs, mcfg.n_kv_heads, head_dim_est);
-    size_t total_vram = 0, f = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&f, &total_vram);
+    const size_t total_vram = vram_budget_total_bytes();  // 0 on a failed query: no KV cap
     // MoE > 16 experts: all-GPU experts (decode fast path, graph capture) win over a big KV reserve.
     r.kv_cap_bytes = total_vram / ((mcfg.n_experts > 16) ? 10 : 5);
     if (mcfg.ssm_inner_size <= 0)
@@ -273,7 +271,7 @@ bool Engine::init_weights() {
 
     // Upload weights
     size_t free_before = 0, total_before = 0;
-    const bool mem_before_ok = cudaMemGetInfo(&free_before, &total_before) == cudaSuccess;
+    const bool mem_before_ok = vram_diag_mem_info(&free_before, &total_before);
     IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
                  free_before / (1024UL * 1024), total_before / (1024UL * 1024));
 
@@ -315,7 +313,7 @@ bool Engine::init_weights() {
 
     size_t free_after = 0, total_after = 0;
     // A failed query on either side: no occupancy verdict.
-    const bool mem_ok = cudaMemGetInfo(&free_after, &total_after) == cudaSuccess && mem_before_ok;
+    const bool mem_ok = vram_diag_mem_info(&free_after, &total_after) && mem_before_ok;
     // A free-VRAM delta is not a weight size: on WSL2 the driver reports the
     // whole card as free until a process allocates, so a server started beside
     // a neighbour only learns of it THROUGH its own upload (MEMORY.md B8).

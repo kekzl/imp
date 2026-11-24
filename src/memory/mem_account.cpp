@@ -67,10 +67,7 @@ constexpr double kMiB = 1024.0 * 1024.0;
 
 void query_free_total(size_t& free_b, size_t& total_b) {
     // total_b == 0 is the failure sentinel every caller checks.
-    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
-        free_b = 0;
-        total_b = 0;
-    }
+    (void)vram_diag_mem_info(&free_b, &total_b);
 }
 
 // cudaMallocAsync default-pool slack: freed-but-not-returned-to-OS memory
@@ -454,7 +451,7 @@ std::vector<MemTierStat> memory_tier_stats() {
     // sits inside, so a scraper can sanity-check the rest against it.
     {
         size_t free_b = 0, total_b = 0;
-        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess)
+        if (vram_diag_mem_info(&free_b, &total_b))
             push("device", total_b, total_b > free_b ? total_b - free_b : 0);
     }
     // The async mempool is the tier where capacity and occupancy diverge most:

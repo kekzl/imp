@@ -1,4 +1,5 @@
 #include "memory/recurrent_snapshot_store.h"
+#include "memory/vram_query.h"
 #include "memory/device_alloc_all.h"
 #include "memory/backend.h"
 #include "memory/host_pinned.h"
@@ -66,8 +67,7 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
         // caching off with a message about the BUDGET, which was not the problem: the budget
         // bought `want` slots and the device refused every one of them.
         size_t free_bytes = 0, total_device = 0;
-        if (cudaMemGetInfo(&free_bytes, &total_device) != cudaSuccess)
-            free_bytes = 0;
+        (void)vram_diag_mem_info(&free_bytes, &total_device);
         IMP_LOG_ERROR(
             "RecurrentSnapshotStore: 0/%d slots x %.1f MiB allocated (budget %.0f MiB, %.0f MiB "
             "free) - hybrid prefix caching stays OFF; every turn re-prefills its whole prompt",
