@@ -33,6 +33,15 @@ template <typename... R>
     return device_alloc_all_n(arr, sizeof...(R), /*async=*/true, stream);
 }
 
+// Release of buffers taken with device_alloc_all; null pointers are skipped.
+void device_free_all_n(void* const* ptrs, size_t n);
+
+template <typename... P>
+void device_free_all(P*... ptrs) {
+    void* const arr[] = {static_cast<void*>(ptrs)...};
+    device_free_all_n(arr, sizeof...(P));
+}
+
 // Stream-ordered release of buffers taken with device_alloc_all_async; null pointers are skipped.
 void device_free_all_async_n(void* const* ptrs, size_t n, cudaStream_t stream);
 

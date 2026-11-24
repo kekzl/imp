@@ -78,8 +78,7 @@ bool quantize_head_nvfp4(const Tensor& lm, NvFP4QuantResult& out, const char* pa
     out.tensor_scale = h_tscale;
     out.N = lm.shape[0];
     out.K = lm.shape[1];
-    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+    device_free_all(d_absmax_buf, d_tscale_buf);
     return true;
 }
 }  // namespace
@@ -432,7 +431,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
             size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
             void* dq_buf = qscratch_->dequant;
             if (need > qscratch_->dequant_size) {
-                if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+                if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)
                     continue;
                 dq_buf = tmp_buf;
             }
@@ -466,8 +465,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         actual_bytes += nvfp4_bytes;
         actual_count++;
 
-        if (tmp_buf)
-            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+        device_free_all(tmp_buf);
 
         // Free FP16 cache entry to reclaim VRAM for next weight
         if (!e.from_scratch) {
@@ -486,8 +484,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         }
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+    device_free_all(d_absmax_buf, d_tscale_buf);
 
     wcache_->nvfp4_bytes = actual_bytes;
     dctx.nvfp4_dense_bytes = actual_bytes;
@@ -551,7 +548,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
             void* dq_buf = qscratch_->dequant;
             if (need > qscratch_->dequant_size) {
                 void* tmp = nullptr;
-                if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp)
+                if (device_alloc_all(dev_req(tmp, need)) != cudaSuccess)
                     continue;
                 dq_buf = tmp;
                 tmp_bufs.push_back(tmp);
@@ -578,7 +575,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
 
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     for (void* p : tmp_bufs)
-        IMP_CUDA_CHECK_LOG(cudaFree(p));
+        device_free_all(p);
 
     std::vector<float> h_tscales(budgeted.size());
     IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all, budgeted.size() * sizeof(float),
@@ -590,8 +587,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
         }
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tscales_all));
+    device_free_all(d_absmax_buf, d_tscales_all);
 
     wcache_->nvfp4_bytes = budget_used;
     if (nvfp4_from_scratch > 0) {
@@ -644,7 +640,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         if (!dequant_gpu_supported(e.qtype) || !qscratch_->dequant)
             continue;
         if (need > qscratch_->dequant_size) {
-            if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+            if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)
                 continue;
             dq_buf = tmp_buf;
         }
@@ -663,12 +659,10 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         second_bytes += nvfp4_bytes;
         second_count++;
 
-        if (tmp_buf)
-            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+        device_free_all(tmp_buf);
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf2));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf2));
+    device_free_all(d_absmax_buf2, d_tscale_buf2);
 
     if (second_count > 0) {
         wcache_->nvfp4_bytes += second_bytes;

@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 51 files, 254 sites
+# remaining: 50 files, 240 sites
 
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
@@ -40,7 +40,6 @@ src/exec/pre_dequant_phase2_fp8_cache.cpp  # 3
 src/exec/pre_dequant_phase3_cutlass.cpp  # 2
 src/exec/pre_dequant_phase3_fp8.cpp  # 2
 src/exec/pre_dequant_phase3_moe.cpp  # 3
-src/exec/pre_dequant_phase3_nvfp4_decode.cpp  # 14
 src/exec/pre_dequant_phase3c_mxfp4.cpp  # 1
 src/exec/pre_dequant_phase4_tensor_registry.cpp  # 3
 src/exec/quant_scratch.cpp  # 1

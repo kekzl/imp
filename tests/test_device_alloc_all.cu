@@ -46,6 +46,25 @@ TEST(DeviceAllocAllGpu, AsyncTakesEveryBufferAndTheReleaseReturnsThem) {
     EXPECT_EQ(pool_used(), before);
 }
 
+// The synchronous pair: device memory in use returns to its value before (64 MiB, above the noise).
+TEST(DeviceAllocAllGpu, SyncReleaseReturnsTheBuffers) {
+    size_t free0 = 0, free1 = 0, free2 = 0, total = 0;
+    ASSERT_EQ(cudaMemGetInfo(&free0, &total), cudaSuccess);
+    char* a = nullptr;
+    char* none = nullptr;
+    char* b = nullptr;
+    const size_t each = size_t{64} << 20;
+    ASSERT_EQ(device_alloc_all(dev_req(a, each), dev_req(none, 0), dev_req(b, each)), cudaSuccess);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(none, nullptr);
+    ASSERT_EQ(cudaMemGetInfo(&free1, &total), cudaSuccess);
+    EXPECT_LE(free1 + 2 * each, free0 + (size_t{8} << 20));
+    device_free_all(a, none, b);
+    ASSERT_EQ(cudaMemGetInfo(&free2, &total), cudaSuccess);
+    EXPECT_GE(free2 + (size_t{8} << 20), free0);
+}
+
 // A request the device cannot serve: the error comes back, every pointer is null, the buffer taken
 // before it is released and no error stays pending.
 TEST(DeviceAllocAllGpu, AsyncFailureLeavesNothingBehind) {
