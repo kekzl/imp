@@ -153,10 +153,9 @@ __global__ void hadamard_128_kernel(const half* __restrict__ input, half* __rest
 
 void hadamard_transform_fp16(const half* input, half* output, int M, int K, int block_size,
                              cudaStream_t stream) {
-    if (K % block_size != 0) {
-        IMP_LOG_ERROR("hadamard: K=%d not divisible by block_size=%d", K, block_size);
-        return;
-    }
+    if (K % block_size != 0)
+        throw_runtime_error("hadamard_transform_fp16: K=%d not divisible by block_size=%d (M=%d)", K,
+                            block_size, M);
 
     int total_blocks = M * (K / block_size);
 

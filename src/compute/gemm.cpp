@@ -1042,11 +1042,9 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                 }
                 float a_scale_h = 1.0f, b_scale_h = 1.0f;
                 const cudaError_t serr = read_gemm_scales(aScale, bScale, &a_scale_h, &b_scale_h, stream);
-                if (serr != cudaSuccess) {  // a wrong scale would be a silent wrong result
-                    IMP_LOG_ERROR("gemm_cublaslt: FP8 fallback scale read failed M=%ld K=%ld N=%ld: %s",
-                                  (long)M, (long)K, (long)N, cudaGetErrorString(serr));
-                    return;
-                }
+                if (serr != cudaSuccess)  // a wrong scale would be a silent wrong result
+                    throw_runtime_error("gemm_cublaslt: FP8 fallback scale read failed M=%ld K=%ld N=%ld: %s",
+                                        (long)M, (long)K, (long)N, cudaGetErrorString(serr));
 
                 int a_elems = static_cast<int>(M * K);
                 int b_elems = static_cast<int>(N * K);

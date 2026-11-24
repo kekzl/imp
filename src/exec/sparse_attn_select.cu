@@ -658,10 +658,11 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
         // The init gate refuses NVFP4 without a scale pool, so a null here
         // would be a wiring bug, not a configuration: fail loud rather than
         // write metadata from garbage.
-        if (k_scale_base == nullptr) {
-            IMP_LOG_ERROR("sparse_update_key_minmax: NVFP4 cache without a scale pool");
-            return;
-        }
+        if (k_scale_base == nullptr)
+            throw_runtime_error(
+                "sparse_update_key_minmax_all_layers: NVFP4 cache without a scale pool "
+                "(%d tokens, %d layers)",
+                n_tokens, n_layers);
         sparse_update_key_minmax_layers_nvfp4_kernel<<<grid, threads, 0, stream>>>(
             static_cast<const uint8_t*>(k_base), k_layer_stride_bytes,
             static_cast<const uint8_t*>(k_scale_base), sc_layer_stride_bytes,

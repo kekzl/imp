@@ -66,10 +66,11 @@ void shortconv_forward(void* state_or_pool, const int* seq_slots, int64_t slot_s
                        cudaStream_t stream) {
     if (n_seq <= 0 || n_tok <= 0)
         return;
-    if (kernel_size < 1 || kernel_size > kMaxKernel) {
-        IMP_LOG_ERROR("shortconv: kernel size %d outside 1..%d", kernel_size, kMaxKernel);
-        return;
-    }
+    if (kernel_size < 1 || kernel_size > kMaxKernel)
+        throw_runtime_error(
+            "shortconv_forward: kernel size %d outside 1..%d (%d sequences, %d tokens, "
+            "hidden %d)",
+            kernel_size, kMaxKernel, n_seq, n_tok, hidden);
     constexpr int kThreads = 256;
     const int cblocks = (hidden + kThreads - 1) / kThreads;
     shortconv_out_kernel<<<dim3(cblocks, n_tok, n_seq), kThreads, 0, stream>>>(state_or_pool, seq_slots,

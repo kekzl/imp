@@ -314,11 +314,9 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
     // (a >2.1B-element tensor would corrupt with a wrong grid + wrapped indices, F-A11) rather
     // than silently truncating; callers now pass the full size_t, so this is the only place it
     // could still happen.
-    if (n_elements > static_cast<int64_t>(INT_MAX)) {
-        IMP_LOG_ERROR("calibrate_and_quantize_fp8_async: n_elements=%lld exceeds int range — skipping",
-                      static_cast<long long>(n_elements));
-        return;
-    }
+    if (n_elements > static_cast<int64_t>(INT_MAX))
+        throw_runtime_error("calibrate_and_quantize_fp8_async: n_elements=%lld exceeds int range",
+                            static_cast<long long>(n_elements));
     const int n = static_cast<int>(n_elements);
 
     const int grid = compute_grid(n);
@@ -422,28 +420,25 @@ void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows,
 
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_scale_out, cudaStream_t stream,
                                float* d_block_maxes_ext, float* d_absmax_ext, int max_grid_ext) {
-    if (!input.on_device || input.data == nullptr) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: input must be a non-null device tensor");
-        return;
-    }
-    if (!output.on_device || output.data == nullptr) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: output must be a pre-allocated device tensor");
-        return;
-    }
-    if (input.qtype != QType::F16) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: input dtype must be FP16");
-        return;
-    }
+    if (!input.on_device || input.data == nullptr)
+        throw_runtime_error(
+            "quantize_fp16_to_fp8_e4m3: input must be a non-null device tensor (%lld elements)",
+            (long long)input.numel());
+    if (!output.on_device || output.data == nullptr)
+        throw_runtime_error(
+            "quantize_fp16_to_fp8_e4m3: output must be a pre-allocated device tensor (%lld elements)",
+            (long long)input.numel());
+    if (input.qtype != QType::F16)
+        throw_runtime_error("quantize_fp16_to_fp8_e4m3: input dtype must be FP16, got %s",
+                            qtype_name(input.qtype));
 
     const int n = (int)input.numel();
     if (n <= 0)
         return;
 
-    if (output.numel() != input.numel()) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: output numel (%lld) != input numel (%lld)",
-                      (long long)output.numel(), (long long)input.numel());
-        return;
-    }
+    if (output.numel() != input.numel())
+        throw_runtime_error("quantize_fp16_to_fp8_e4m3: output numel (%lld) != input numel (%lld)",
+                            (long long)output.numel(), (long long)input.numel());
 
     // Fast path: pre-allocated reduction buffers → fully async (no malloc, no sync)
     if (d_block_maxes_ext && d_absmax_ext && max_grid_ext > 0) {
@@ -594,10 +589,9 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, 
                                       cudaStream_t stream) {
     if (n_elements <= 0)
         return;
-    if (input_fp16 == nullptr || output_fp8 == nullptr) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_scaled: null pointer");
-        return;
-    }
+    if (input_fp16 == nullptr || output_fp8 == nullptr)
+        throw_runtime_error("quantize_fp16_to_fp8_e4m3_scaled: null %s pointer (%d elements)",
+                            input_fp16 ? "output" : "input", n_elements);
 
     float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
 
@@ -619,10 +613,9 @@ void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16, int n
                                  cudaStream_t stream) {
     if (n_elements <= 0)
         return;
-    if (input_fp8 == nullptr || output_fp16 == nullptr) {
-        IMP_LOG_ERROR("dequantize_fp8_e4m3_to_fp16: null pointer");
-        return;
-    }
+    if (input_fp8 == nullptr || output_fp16 == nullptr)
+        throw_runtime_error("dequantize_fp8_e4m3_to_fp16: null %s pointer (%d elements)",
+                            input_fp8 ? "output" : "input", n_elements);
 
     const int grid = compute_grid(n_elements);
 
