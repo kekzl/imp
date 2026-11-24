@@ -5,9 +5,8 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 45 files, 164 sites
+# remaining: 38 files, 134 sites
 
-src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
 src/compute/gemm.cpp  # 4
 src/compute/gemm_batched.cpp  # 2
@@ -19,18 +18,12 @@ src/compute/mmq_q8_imma_scratch.cu  # 3
 src/compute/moe_routing.cu  # 1
 src/compute/mtp_forward.cu  # 3
 src/compute/nvfp4_sfatom_quant.cu  # 2
-src/compute/sampling.cu  # 2
-src/compute/sampling_penalties.cu  # 2
-src/compute/sampling_topk_topp.cu  # 2
 src/core/buffer.cpp  # 2
 src/exec/executor_attention.cpp  # 2
-src/exec/executor_attention_prefill.cpp  # 8
+src/exec/executor_attention_prefill.cpp  # 2
 src/exec/executor_forward.cu  # 2
-src/exec/executor_forward_moe.cu  # 4
 src/exec/executor_helpers.h  # 3
-src/exec/executor_lora.cu  # 2
-src/exec/executor_perplexity.cu  # 2
-src/exec/executor_workspace.cpp  # 6
+src/exec/executor_workspace.cpp  # 2
 src/exec/executor_workspace_buffers.cpp  # 12
 src/exec/expert_cache.cu  # 4
 src/exec/gemm_scratch.cpp  # 1

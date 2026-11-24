@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "memory/device_alloc_all.h"
 #include "exec/workspace.h"
 #include "exec/workspace_sizes.h"
 #include "exec/executor_kernels.h"
@@ -249,19 +250,10 @@ bool GraphExecutor::init_rope_tables_(const ModelConfig& cfg) {
             long_freqs[i] = base_freq / cfg.rope_long_factor[i];
         }
 
-        cudaError_t e1 = cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
-        cudaError_t e2 = cudaMalloc(&longrope_long_freqs_, pairs * sizeof(float));
-        if (e1 != cudaSuccess || e2 != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s",
-                          cudaGetErrorString(e1 != cudaSuccess ? e1 : e2));
-            if (longrope_short_freqs_) {
-                IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
-                longrope_short_freqs_ = nullptr;
-            }
-            if (longrope_long_freqs_) {
-                IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
-                longrope_long_freqs_ = nullptr;
-            }
+        if (const cudaError_t e = device_alloc_all(dev_req(longrope_short_freqs_, pairs * sizeof(float)),
+                                                   dev_req(longrope_long_freqs_, pairs * sizeof(float)));
+            e != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s", cudaGetErrorString(e));
             return false;
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float),

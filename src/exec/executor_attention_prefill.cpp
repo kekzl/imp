@@ -133,16 +133,12 @@
                 if (chunk_eager_bytes_ < full_bytes) {
                     constexpr size_t kGrowStep = 64u << 20;
                     const size_t cap = ((full_bytes + kGrowStep - 1) / kGrowStep) * kGrowStep;
-                    if (chunk_eager_k_) { cudaFreeAsync(chunk_eager_k_, stream); chunk_eager_k_ = nullptr; }
-                    if (chunk_eager_v_) { cudaFreeAsync(chunk_eager_v_, stream); chunk_eager_v_ = nullptr; }
+                    device_free_all_async(stream, chunk_eager_k_, chunk_eager_v_);
                     chunk_eager_bytes_ = 0;
-                    if (cudaMallocAsync(&chunk_eager_k_, cap, stream) == cudaSuccess &&
-                        cudaMallocAsync(&chunk_eager_v_, cap, stream) == cudaSuccess) {
+                    // Both or none: a failure leaves the two pointers null.
+                    if (device_alloc_all_async(stream, dev_req(chunk_eager_k_, cap), dev_req(chunk_eager_v_, cap)) ==
+                        cudaSuccess)
                         chunk_eager_bytes_ = cap;
-                    } else {
-                        if (chunk_eager_k_) { cudaFreeAsync(chunk_eager_k_, stream); chunk_eager_k_ = nullptr; }
-                        if (chunk_eager_v_) { cudaFreeAsync(chunk_eager_v_, stream); chunk_eager_v_ = nullptr; }
-                    }
                 }
                 if (chunk_eager_bytes_ >= full_bytes) {
                     k_full = chunk_eager_k_;

@@ -6,6 +6,7 @@
 // persistent scratch sized at set_lora() time; the engine invalidates decode graphs on adapter swap.
 
 #include "exec/executor.h"
+#include "memory/device_alloc_all.h"
 #include "compute/gemm.h"
 #include "core/logging.h"
 #include "lora/lora_adapter.h"
@@ -59,11 +60,10 @@ void GraphExecutor::set_lora(const LoraAdapter* adapter) {
     size_t need = (sizeof(float) * static_cast<size_t>(adapter->max_rank())) +
                   (sizeof(half) * static_cast<size_t>(max_tokens_) * adapter->max_rank());
     if (need > lora_scratch_sz_) {
-        if (lora_scratch_)
-            IMP_CUDA_CHECK_LOG(cudaFree(lora_scratch_));
+        device_free_all(lora_scratch_);
         lora_scratch_ = nullptr;
         lora_scratch_sz_ = 0;
-        if (cudaMalloc(&lora_scratch_, need) != cudaSuccess) {
+        if (device_alloc_all(dev_req(lora_scratch_, need)) != cudaSuccess) {
             IMP_LOG_ERROR("LoRA: scratch alloc failed (%zu B) — adapter disabled", need);
             lora_ = nullptr;
             return;

@@ -1,4 +1,5 @@
 #include "compute/sampling.h"
+#include "memory/device_alloc_all.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
@@ -626,7 +627,7 @@ struct OwnedSampleScratch {
     OwnedSampleScratch(int32_t* ptr, bool is_owned) : p(ptr), owned(is_owned) {}
     ~OwnedSampleScratch() {
         if (owned)
-            IMP_CUDA_CHECK_LOG(cudaFree(p));
+            device_free_all(p);
     }
     OwnedSampleScratch(const OwnedSampleScratch&) = delete;
 };
@@ -661,7 +662,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
     float inv_temperature = 1.0f / temperature;
 
     int32_t* d_result = nullptr;
-    cuda_call_or_throw(cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES), "sample_topk_topp scratch");
+    cuda_call_or_throw(device_alloc_all(dev_req(d_result, SAMPLE_SCRATCH_BYTES)), "sample_topk_topp scratch");
 
     return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, true,
                                  stream);
