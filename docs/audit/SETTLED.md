@@ -49,15 +49,15 @@ F-10) — always a finding that got fixed while the ledger kept calling it open.
 
 | # | Claim that keeps coming back | Verdict | Anchor — what makes it settled | Since |
 |---|---|---|---|---|
-| S-1 | Architecture dispatch is duplicated across ~8 sites | **REFUTED** | `src/model/model_profile.h` — capability traits (19 since #2458, no `is_gemma4` / `is_gpt_oss`) + one `AttnVariant`, decided once in `model_profile.cpp`; the hot path reads those, not the enum. `layer_swa_window()` (`:78`) unifies four SWA variants so mask and KV sizing cannot drift. `ModelArch::` is in 15 files, 9 of them `src/model/`; arch #17 costs 6 files | 2026-07-29 (D1) |
+| S-1 | Architecture dispatch is duplicated across ~8 sites | **REFUTED** | `src/model/model_profile.h` — capability traits (19 since #2458, no `is_gemma4` / `is_gpt_oss`) + one `AttnVariant`, decided once in `model_profile.cpp`; the hot path reads those, not the enum. `layer_swa_window()` (`:78`) unifies four SWA variants so mask and KV sizing cannot drift. `ModelArch::` is in 15 files, 9 of them `src/model/`; arch #17 costs 6 files. **2026-11-24: 22 files, 16 of them `src/model/`** (`rg -c 'ModelArch::' src -g '*.cpp' -g '*.h' -g '*.cu' -g '*.cuh' \| wc -l`); exec reads it 2 times, compute 0; the verdict holds ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) section 6) | 2026-07-29 (D1) |
 | S-2 | Quant dispatch is duplicated across 8 formats × 5 concerns | **REFUTED as stated** — CONFIRMED narrowly for KV dtypes only | `src/exec/gemm_kernel_registry.cpp` — an 85-LOC table replacing "~33 hand-written kernels", plus 8 `DequantTraits<>` in `src/compute/gemv_dp4a_traits.cuh`, pinned by `tests/test_gemm_kernel_registry.cu` (40 tests of the dispatch *contract*). A new quant format on the GEMM path costs 2 files | 2026-07-29 |
 | S-3 | GGUF and SafeTensors loaders duplicate tensor mapping | **REFUTED** | Name normalisation and layer indexing live once in `src/model/weight_map.cpp` + `src/model/tensor_kind_table.cpp`; the loader bodies differ only where the formats differ | 2026-07-29 |
 | S-4 | The KV cache has more than one implementation | **REFUTED** | One `src/memory/kv_cache.h` / `src/memory/kv_cache.cu`, backed by one `src/memory/block_pool.h` | 2026-07-29 |
-| S-5 | Execution paths multiply (eager × graph × batch × spec) | **REFUTED** | One `step()` → `step_decode()` → `step_decode_forward()` chain in `src/runtime/engine.cpp`; the variants are parameters on it, not parallel paths | 2026-07-29 |
-| S-6 | Per-architecture layer primitives are re-pasted | **REFUTED** | RMSNorm, RoPE, SwiGLU and MoE top-k have one implementation each under `src/compute/` | 2026-07-29 |
+| S-5 | Execution paths multiply (eager × graph × batch × spec) | **REFUTED** | One `step()` → `step_decode()` → `step_decode_forward()` chain in `src/runtime/engine.cpp`; the variants are parameters on it, not parallel paths. **2026-11-24: the chain lives in `src/runtime/engine_scheduler.cpp`** (`rg 'Engine::step\(\)\|step_decode_forward' src/runtime/engine.cpp` = 0), and the early-return lanes in `step_impl_` are parallel paths the sentence no longer covers ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) C-5, C-8) | 2026-07-29 |
+| S-6 | Per-architecture layer primitives are re-pasted | **REFUTED** | RMSNorm, RoPE, SwiGLU and MoE top-k have one implementation each under `src/compute/`. **2026-11-24: no longer true for the drafters**: norm + RoPE is pasted in `src/exec/inkling_draft.cu` and `src/runtime/dspark_drafter.cu`, RMSNorm again in `src/compute/inkling_ops.cu` ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-14, open) | 2026-07-29 |
 | S-7 | Sampling is several overlapping chains and constrained decode bypasses part of it | **REFUTED** | `apply_constraint_mask()` at `src/exec/executor.cu:56` — nine lines called from every sampling path. **Keep the comment with the code**: it records that four copies of this chain is exactly how an unmasked path ships | 2026-07-29 |
 | S-8 | The legacy materialised cuBLAS prefill is a vestige (~18 % of prefill) | **REFUTED, with one exception** | 0.0 % on hd=128/256. **Gemma-4's hd=512 global layers take it by design and by measurement** — `src/compute/attention_cublas.cu`, gated per layer at `src/exec/executor_attention_prefill.cpp`. It is a deliberately retained tier, not a vestige | 2026-07-29 (F-16) |
-| S-9 | Nemotron-H / SSM carries a private mini-runtime | **REFUTED for SSM**; CONFIRMED for vision | `src/compute/ssm.cu` and `src/memory/recurrent_snapshot_store.h` sit in the shared tree, not beside the model | 2026-07-29 |
+| S-9 | Nemotron-H / SSM carries a private mini-runtime | **REFUTED for SSM**; CONFIRMED for vision | `src/compute/ssm.cu` and `src/memory/recurrent_snapshot_store.h` sit in the shared tree, not beside the model. **2026-11-24: Inkling-2-Mini is a private runtime** (9378 LOC in 44 files, own forward, weights and slot map, no `WeightRegistry` / `KVCache` use; [`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-4, C-6, open) | 2026-07-29 |
 | S-10 | `tools/`, `tests/` and the bench CLI duplicate benchmark logic | **REFUTED for benching** — was CONFIRMED for arg parsing (27 flags, F-15), **fixed in #1209**: the shared table lives in `tools/common/args_common.cpp` | `tools/imp-bench/` has no overlap against `tests/`; the perf gate reads `tests/perf_baseline.json` through `scripts/verify.sh` locally and `scripts/bench_gate.sh` in the GPU CI job (two scripts, not one — see BENCHMARKING.md, #1625); `tools/common/args_common.h` | 2026-07-29, F-15 closed 2026-08-02 |
 | S-11 | NVFP4 grouped-GEMM has two competing paths | **CONFIRMED — but a designed 4-tier ladder, not a twin** | `src/exec/moe_prefill_decision.h` documents the tiers; each is selected by explicit preconditions and the bottom one serves host-offloaded experts. No death date exists for it | 2026-07-29 |
 
@@ -75,7 +75,9 @@ loop, and the shared part is already factored out.
   `mmq_q8_imma_q6k.cu`, `mmq_q8_imma_q51.cu`. Same reasoning: the delta is the dequant
   inner step.
 - **`src/compute/gdn_scan.cu` vs `src/compute/gdn_scan_tc.cu`** — scalar vs tensor-core
-  scan, different arithmetic intensity.
+  scan, different arithmetic intensity. **2026-11-24: `gdn_scan_tc.cu` (660 lines) and
+  `gdn_scan_chunkwise_wy_f32` have no production caller, only `tests/test_gdn.cu`; owner call
+  delete or keep as oracle ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-13).**
 - **Prefill vs decode kernels throughout** — different arithmetic intensity, by definition.
 - **`src/vision/vision_encoder.cu` (SigLIP) vs `src/vision/qwen3vl_encoder.cpp`** —
   genuinely different tower architectures.
@@ -102,7 +104,9 @@ loop, and the shared part is already factored out.
   `src/` are comments stating the feature does **not** exist on sm_120a. They read like
   clutter and they are load-bearing — they stop the next reader reaching for a
   datacenter-Blackwell design.
-- **A `VramOwned` type does not exist.** Past audits hallucinated it.
+- **A `VramOwned` type does not exist.** Past audits hallucinated it. **2026-11-24: it exists since
+  #1530, `src/memory/vram_owned.h` (move-only, carries its allocator); 43 use lines in 19 files
+  outside `src/memory/`.**
 - **The `src/exec/executor_kernels.h` decl-only sweep ran on 2026-08-03.** Three kernels had
   a declaration and a definition and nothing else — no launch, no address-taken use, no
   test — and were removed: `add_fp16_bias_to_fp32_kernel`, `write_kv_cache_fp8_kernel`,
@@ -362,7 +366,9 @@ the fixes did.
 - **F-16's "device sync per layer" is false.** The only `cudaDeviceSynchronize` in
   `src/compute/attention_cublas.cu` is inside `attention_cublas_prewarm()`, called once
   from `src/runtime/engine.cpp`. The prefill function contains none. The audit read one
-  call site; grepping the file settles it without a profile.
+  call site; grepping the file settles it without a profile. **2026-11-24: the symbol
+  `attention_cublas_prewarm` is gone (`rg attention_cublas_prewarm src` = 0); the verdict
+  holds, the file has no `cudaDeviceSynchronize`.**
 - **F-17 does not reproduce.** The CUTLASS grouped GEMM genuinely never consults
   `process_diag_deterministic_gemm()` (`src/core/process_diag.h`), but the determinism
   E2E test is 3/3 green with bit-identical greedy output and perplexity.
@@ -399,7 +405,7 @@ that re-derives them pays for that work twice. See
 | F-3 (rest) | WON'T FIX **with a mechanism** — the chain's predicates include "did this tier work", so the model can only ever be replayed against a prefix | #1239 |
 | F-5 (rest) | WON'T FIX — no GPU runner, repo-owner decision 2026-08-03; the consequence is load-bearing and stated below | #1211 (dormant) |
 | F-9 | FIXED by repairing the estimator, **not** by persisting the result; R-16 REJECTED | #1228 |
-| F-10 | FIXED — the nine dispatch sections lifted into `core/DispatchPolicy`; `src/exec/` includes `runtime/config.h` **zero** times | #1227 |
+| F-10 | FIXED — the nine dispatch sections lifted into `core/DispatchPolicy`; `src/exec/` includes `runtime/config.h` **zero** times. **2026-11-24: the include edge stays closed, the rebuild cost moved**: `src/core/config/*` + `core/dispatch_policy.h` take 80 of 395 commits in 30 days behind 99 including files ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) X-4, open) | #1227 |
 | F-12 | RE-SCOPED and closed — migratable consumers moved to the T2 arena; the residual is `VRAMAllocator`'s acquisition job for tiers sized *after* the upload | #1229-#1238 |
 | F-24 | Proposed extraction REFUTED on churn (2 % of commits); fan-in cut instead, 33 → 23 TUs | #1233 |
 
@@ -711,7 +717,7 @@ a P2 kill-list verdict; nothing is open in the queue.
 | F1-11 truncated shard: `size() - stensor_count` wraps | FIXED — the shard path got the fourth `failed()` check; no split-file fixture, so no test | `src/model/gguf_loader.cpp` | #1910 |
 | F1-12 fuzz coverage 2 of 10 parsers | PARTLY — `fuzz_gguf` (`load_gguf`) and `fuzz_mmproj` (`vision_gguf_probe`, the dry pass) in `tests/test_fuzz_corpus.cpp` and the `Sanitizers` job: 8 of 10. Open: `config.json`, Jinja, SentencePiece, warm cache, LoRA | `fuzz/fuzz_gguf.cpp`, `fuzz/fuzz_mmproj.cpp` | #1910 |
 
-| I-1 = D-3 five model-backed suites run from no target | FIXED — second container in `make test-e2e` with `IMP_TEST_MODEL`/`IMP_TEST_GGUF` = Qwen3-8B-Q8_0 (the model the lock rows name) running `GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*`, a third for the NVFP4-cortecs lock rows. First run: 11 green, the greedy lock RED on the `17 + 25` row for both checkpoints (trajectory moved after token 3 to the continuation llama.cpp gave in the 06-04 verification; answer unchanged); rows regenerated with `IMP_LOCK_PRINT=1`, the mover is unrecorded because nothing ran the lock for 3 months | `Makefile` `test-e2e`, `tests/refs/e2e_greedy_locks.h` | #1911 |
+| I-1 = D-3 five model-backed suites run from no target | FIXED — second container in `make test-e2e` with `IMP_TEST_MODEL`/`IMP_TEST_GGUF` = Qwen3-8B-Q8_0 (the model the lock rows name) running `GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*`, a third for the NVFP4-cortecs lock rows. First run: 11 green, the greedy lock RED on the `17 + 25` row for both checkpoints (trajectory moved after token 3 to the continuation llama.cpp gave in the 06-04 verification; answer unchanged); rows regenerated with `IMP_LOCK_PRINT=1`, the mover is unrecorded because nothing ran the lock for 3 months. **2026-11-24: the class is open a third time**: 15 `IMP_TEST_MODEL_*` names plus `IMP_MTP_MODEL` are set by no target, script or workflow (Inkling 17 tests in 3 files skip green; [`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) X-1, no gate yet) | `Makefile` `test-e2e`, `tests/refs/e2e_greedy_locks.h` | #1911 |
 | I-3 `make verify` red by construction | FIXED — `_LANE_FILTER` synced; `scripts/check_lane_filter_copy.sh` (`guard_lane_filter_copy`, unit lane) diffs the two literals, fails on the stale copy (mutation run) | `scripts/check_lane_filter_copy.sh` | #1911 |
 | I-7 Makefile filters unguarded against "matches nothing = PASSED" | FIXED — `scripts/check_makefile_filters.sh` (`guard_makefile_filters`, unit lane) resolves every `--gtest_filter` literal against the binary the line names, 17 patterns; it found a LIVE one: `Makefile` ran `test-text --gtest_filter="*Qwen38TokenizerParity*"` for a suite in `test-e2e`, "0 tests, PASSED" on every `make test-gpu` | `scripts/check_makefile_filters.sh` | #1911 |
 | I-8 `make test-gpu` sets no model env | DOCUMENTED, not changed — the target's comment states it (every macro, not every checkpoint; the battery is `make test-e2e`); adding three checkpoints to one process hits the VRAM ceiling TEST_INVENTORY section 5 records | `Makefile` `test-gpu` | #1911 |
