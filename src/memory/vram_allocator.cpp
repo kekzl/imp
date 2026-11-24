@@ -39,10 +39,8 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
         // Headroom check failed, but check if physical GPU memory suffices: for models using
         // nearly all VRAM, the headroom is too conservative. Critical allocations
         // (workspace, SSM state, dequant scratch) should still succeed if CUDA has memory.
-        size_t free_mem = 0, total_mem = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
-        if (free_mem >= bytes + (64 << 20)) {  // 64 MiB minimum safety
+        size_t free_mem = 0;
+        if (vram_fits(bytes, size_t{64} << 20, 0, &free_mem)) {  // 64 MiB minimum safety
             IMP_LOG_WARN(
                 "VRAMAllocator: %s (%.2f MiB) exceeds headroom, "
                 "allowing (%.0f MiB GPU free)",
@@ -119,11 +117,7 @@ bool VRAMAllocator::can_allocate(size_t bytes) const {
 
     // Check against actual free VRAM (not just our tracking)
     // to account for external allocations (driver, other processes).
-    size_t free_mem = 0, total = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&free_mem, &total);
-
-    return free_mem >= bytes + headroom_;
+    return vram_fits(bytes, headroom_);
 }
 
 size_t VRAMAllocator::available() const {

@@ -724,10 +724,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 const size_t total = static_cast<size_t>(stage_slots) * proj_bytes;
                 // Only worth it if it fits comfortably: this runs on a model
                 // that already did not fit, so never take the last of VRAM.
-                size_t free_mem = 0, total_mem = 0;
-                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-                (void)vram_budget_mem_get_info(&free_mem, &total_mem);
-                if (total + (512u << 20) < free_mem) {
+                size_t free_mem = 0;
+                if (vram_fits(total, (size_t{512} << 20) + 1, 0, &free_mem)) {
                     moe_.layer_stage_buf = vram_alloc(vram_alloc_, total, "moe_layer_stage");
                     if (moe_.layer_stage_buf) {
                         moe_.layer_stage_proj_bytes = proj_bytes;

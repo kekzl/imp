@@ -46,6 +46,13 @@ size_t vram_own_used_bytes();
 // the phase the peak forms in; serving adds nothing to it (I2).
 size_t vram_own_peak_bytes();
 
+// A fit guard: does an allocation of a size already decided fit right now, `margin` above it, with
+// `credit` bytes the caller's own pending reservation adds back? It never chooses a size, so the
+// I4 gate does not count it; it protects a planned allocation against what other processes took
+// (WSL2: the card is shared). `free_out` (optional) gets the budget-view free bytes for a log line.
+// False on a failed query.
+[[nodiscard]] bool vram_fits(size_t bytes, size_t margin, size_t credit = 0, size_t* free_out = nullptr);
+
 // The device's raw free / total, for a log line, an audit table or a measurement. NEVER an input
 // to a size: sizing reads the plan (invariant I4, tools/check_live_vram_queries.py counts the
 // budget readings below, not this one). False (zeros) if the query fails.

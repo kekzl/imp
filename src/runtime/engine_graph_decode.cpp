@@ -57,10 +57,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
         return 0;
 
     {
-        size_t f = 0, t = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&f, &t);
-        if (f < 256ULL * 1024 * 1024)
+        if (!vram_fits(0, 256ULL * 1024 * 1024))
             return 0;
     }
 

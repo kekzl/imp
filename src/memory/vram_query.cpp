@@ -177,6 +177,14 @@ bool vram_diag_mem_info(size_t* free_bytes, size_t* total_bytes) {
     return ok;
 }
 
+bool vram_fits(size_t bytes, size_t margin, size_t credit, size_t* free_out) {
+    size_t f = 0;
+    const bool ok = vram_budget_mem_get_info(&f, nullptr);
+    if (free_out)
+        *free_out = f;
+    return ok && f + credit >= bytes + margin;
+}
+
 size_t vram_budget_total_bytes() {
     size_t t = 0;
     (void)vram_budget_mem_get_info(nullptr, &t);
