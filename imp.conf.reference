@@ -798,6 +798,9 @@ vram_touch_audit     = false
 # false: the graph runners and the ragged prefill get no slot pool and no pooled block
 # tables and allocate their device state per burst or batch. For testing the fallbacks.
 graph_slot_pool      = true
+# One "I4PROBE site=..." log line at each of the 8 post-upload sizing readings: free device
+# memory against imp's own ledger (vram_ledger_free_bytes, src/memory/vram_query.h).
+i4_probe             = false
 # Optional append-only file the VRAM audit table is mirrored into ("" = off).
 vram_audit_dump      = ""
 # Directory for the FINAL LM logits of every forward pass (one .npy per pass,
