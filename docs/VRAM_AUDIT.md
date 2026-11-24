@@ -501,3 +501,15 @@ Releasing the warmup's pinned snapshot slabs (above, 5961 -> 3390 MiB RSS) moved
 | RSS after start | 3513 MiB | 3842 MiB |
 | RSS after 10 prompts, a long prompt twice, 4 parallel requests | 4938 MiB | 5223 MiB |
 | 10 prompts x 200 tokens | 200.0 tok/s | 209.6 tok/s |
+
+### GEMM benchmark scratch taken at first use, and what stays in the arena (2026-11-24)
+
+The 32 MiB scratch of the cuBLASLt algo probe is taken by the first probe that needs it: `engine_arena` 220.0 -> 188.0 MiB on Qwen3.8-27B and 316.0 -> 284.0 MiB on Qwen3-8B; Inkling-2-Mini (114.0) and Flint (274.0) run the probe at start and are unchanged.
+
+What the arena still takes at init, with the reason it stays (MiB held / written from the table above):
+
+| Take | Held / written | Why it stays |
+|---|---|---|
+| cuBLASLt workspace | 64.0 / 10.0 (Qwen3.8), 96.0 / 38.9 with the probe scratch (Inkling) | written on 3 of 4 models; the pointer is passed to every cuBLASLt call |
+| split-K attention scratch | 96.8 / 4.3 (Qwen3.8), 65.0 / 0.7 (Qwen3-8B) | sized for `max_batch`, written by batched decode |
+| APA scratch | 136.7 / 75.0 (Qwen3-8B), 130.7 / 0.0 (Flint) | one slab at the planned bound for the longest prompt, taken by the first APA call |
