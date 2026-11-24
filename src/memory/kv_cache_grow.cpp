@@ -1,6 +1,8 @@
 // KVCache growth: try_grow_to and the grow-ahead worker (grow-ahead). Split from
 // kv_cache.cu for the file-size gate; same class, same invariants.
 #include "memory/kv_cache.h"
+#include "memory/backend.h"
+#include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "core/cuda_raii.h"
 #include "core/logging.h"
@@ -133,6 +135,8 @@ void KVCache::start_grow_ahead() {
     if (cudaGetDevice(&grow_device_) != cudaSuccess)
         return;
     staged_blocks_.store(committed_blocks_, std::memory_order_release);
+    idle_floor_blocks_ = committed_blocks_;
+    note_activity_();
     grow_thread_ = std::thread(&KVCache::grow_ahead_loop_, this);
     IMP_LOG_INFO("KV cache: grow-ahead on (next step committed off the admission path, %d of %d blocks now)",
                  usable_blocks_.load(std::memory_order_relaxed), max_blocks_);
@@ -146,7 +150,7 @@ void KVCache::grow_ahead_tick() {
         return;
     // A quarter of the pool, at most kGrowAheadStepBytes: the step is a buffer for the next request,
     // and the last admission's size keeps a large one from waiting for its mapping.
-    const int step = std::max({64, std::min(have / 4, grow_step_cap_blocks_()), last_admit_blocks_});
+    const int step = std::max({64, std::min(have / 4, grow_step_cap_blocks_()), last_admit_blocks_.load()});
     if (blocks_.free_count() >= step || grow_refused_recently_())
         return;
     {
@@ -154,6 +158,63 @@ void KVCache::grow_ahead_tick() {
         grow_want_ = std::max(grow_want_, have + step);
     }
     grow_cv_.notify_one();
+}
+
+void KVCache::note_activity_() { last_activity_ns_ = steady_ns(); }
+
+bool KVCache::idle_release_due_() const {
+    return idle_release_ms_ > 0 && last_activity_ns_ != 0 &&
+           steady_ns() - last_activity_ns_ >= static_cast<int64_t>(idle_release_ms_) * 1000000;
+}
+
+int KVCache::release_idle_tail() {
+    last_activity_ns_ = 0;  // one attempt per idle period; the next admission re-arms it
+    if (accounting_only_ || !growable_ || !region_)
+        return 0;
+    // Never waits for the worker: an in-flight commit means the pool is not idle.
+    std::unique_lock<std::mutex> commit_lock(commit_mu_, std::try_to_lock);
+    if (!commit_lock.owns_lock())
+        return 0;
+    // Runs on the worker: read only. Growth the scheduler has not adopted yet means not idle.
+    const int have = usable_blocks_.load(std::memory_order_acquire);
+    if (have != committed_blocks_ || staged_blocks_.load(std::memory_order_acquire) != have)
+        return 0;
+    const int keep = std::max(idle_floor_blocks_, blocks_.highest_live_block() + 1 + grow_step_cap_blocks_());
+    if (keep >= have)
+        return 0;
+    // staged first: adopt_grown() on the scheduler thread must not re-append the ids being dropped.
+    staged_blocks_.store(keep, std::memory_order_release);
+    if (blocks_.shrink_slots(keep) != MemError::Ok) {
+        staged_blocks_.store(have, std::memory_order_release);
+        return 0;
+    }
+    usable_blocks_.store(keep, std::memory_order_release);
+    Backend* be = vmm_backend();
+    const char* base = static_cast<const char*>(pool_);
+    const size_t before = region_.committed();
+    for (int l = 0; l < n_layers_; l++) {
+        const size_t bb = layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[l];
+        // A sliding-window layer's region holds swa_max_blocks_ of another id space: not touched.
+        if (bb == 0 || layer_capacity_(l) != static_cast<size_t>(max_blocks_))
+            continue;
+        // To the end of the layer's region, not to the committed tail: the backend releases whole
+        // driver allocations only, and the last one was rounded out past the tail when it was mapped.
+        const size_t skip = static_cast<size_t>(keep) * bb;
+        const size_t bytes = (static_cast<size_t>(max_blocks_) - static_cast<size_t>(keep)) * bb;
+        (void)be->decommit_range(region_, (static_cast<const char*>(k_ptr(l, 0)) - base) + skip, bytes);
+        (void)be->decommit_range(region_, (static_cast<const char*>(v_ptr(l, 0)) - base) + skip, bytes);
+    }
+    const size_t freed = before > region_.committed() ? before - region_.committed() : 0;
+    MemAccount::instance().note("kv_cache", -static_cast<std::ptrdiff_t>(freed));
+    committed_blocks_ = keep;
+    last_admit_blocks_ = 0;
+    idle_releases_.fetch_add(1, std::memory_order_relaxed);
+    IMP_LOG_INFO(
+        "KV cache: idle for %d s, released %d -> %d blocks (%.0f MiB back to the driver, %.0f MiB "
+        "committed)",
+        idle_release_ms_ / 1000, have, keep, freed / (1024.0 * 1024.0),
+        region_.committed() / (1024.0 * 1024.0));
+    return have - keep;
 }
 
 void KVCache::grow_ahead_loop_() {
@@ -168,10 +229,16 @@ void KVCache::grow_ahead_loop_() {
         int want = 0;
         {
             std::unique_lock<std::mutex> lk(grow_mu_);
-            grow_cv_.wait(lk, [this] { return grow_stop_ || grow_want_ > 0; });
+            // Wakes once a second without work: the idle release is checked here, off every request path.
+            grow_cv_.wait_for(lk, std::chrono::seconds(1), [this] { return grow_stop_ || grow_want_ > 0; });
             if (grow_stop_)
                 break;
             want = std::exchange(grow_want_, 0);
+        }
+        if (want == 0) {
+            if (idle_release_due_())
+                (void)release_idle_tail();
+            continue;
         }
         std::lock_guard<std::mutex> commit_lock(commit_mu_);
         const int base = committed_blocks_;

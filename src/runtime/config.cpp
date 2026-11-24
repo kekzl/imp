@@ -175,6 +175,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("kv_cache.fp8_scale_split", cfg.kv_cache.fp8_scale_split);
     B("kv_cache.growable", cfg.kv_cache.growable);
     I("kv_cache.growable_initial_pct", cfg.kv_cache.growable_initial_pct);
+    I("kv_cache.idle_release_s", cfg.kv_cache.idle_release_s);
     S("kv_cache.swa_sizing", cfg.kv_cache.swa_sizing);
     I("kv_cache.swa_snapshot_mb", cfg.kv_cache.swa_snapshot_mb);
     I("kv_cache.host_spill_mb", cfg.kv_cache.host_spill_mb);

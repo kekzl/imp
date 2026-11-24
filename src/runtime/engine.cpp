@@ -69,10 +69,11 @@ namespace {
 // After warmup's raise_ceiling (it refuses once the worker runs). Needs relaxed capture (cuda_graph.cu):
 // a global capture would forbid the worker's driver calls while the engine captures. The retry window
 // starts with serving: init growth (replan) always reads free VRAM.
-void start_kv_grow_ahead(KVCache* kv) {
+void start_kv_grow_ahead(KVCache* kv, int idle_release_s) {
     if (kv == nullptr)
         return;
     kv->set_grow_retry_ms(cfg::kKvGrowRetryMs);
+    kv->set_idle_release_ms(idle_release_s * 1000);
     kv->start_grow_ahead();
 }
 }  // namespace
@@ -879,7 +880,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // serving-phase acquisition; release builds count it per tag and log once,
     // since a production server must not die over an accounting bug.
     set_alloc_phase(AllocPhase::Serving);
-    start_kv_grow_ahead(kv_cache_raw_);
+    start_kv_grow_ahead(kv_cache_raw_, runtime_config_.kv_cache.idle_release_s);
     // Arm the CUDA-side watermarks too: the phase guard only sees Backend
     // traffic, these see every cudaMallocAsync and every graph-owned
     // allocation regardless of who made it (AUDIT B8).
