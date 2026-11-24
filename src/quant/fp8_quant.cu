@@ -490,8 +490,7 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3 kernel launch failed: %s", cudaGetErrorString(err));
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_scale_device));
+    device_free_all(d_block_maxes, d_scale_device);
 
     IMP_LOG_DEBUG("quantize_fp16_to_fp8_e4m3: n=%d  scale=%.6f", n, scale);
 }
