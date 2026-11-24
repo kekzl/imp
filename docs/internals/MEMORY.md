@@ -267,13 +267,13 @@ V8 is the migration safety net: record a journal from a real GPU run once per mo
 
 | ID | Invariant | Status | Target |
 |---|---|---|---|
-| I1 | Single acquisition point | partial - device-memory sites remain outside `src/memory/` (`tools/alloc_allowlist.txt`); the pinned-host class is closed, every site moved to T5b's `PinnedBuffer`/`HostRegistration` | `Backend`, empty allowlist, CI gate |
+| I1 | Single acquisition point | partial - device-memory sites remain outside `src/memory/` (`tools/alloc_allowlist.txt`: 49 files and 231 sites on 2026-11-24, 60 and 322 on 2026-11-23; open families: weights and weight caches, the graph runner's pool-less fallback, per-request fallbacks); the pinned-host class is closed, every site moved to T5b's `PinnedBuffer`/`HostRegistration` | `Backend`, empty allowlist, CI gate |
 | I2 | No allocation on the hot path | partial - `make check-alloc-interpose` (2026-09-07): the ragged-prefill/constrained-decoding path reads 0 driver calls while serving; the upload family (block tables, token ids, positions, M-RoPE) is one T2 pool | phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | partial - `StableSpan` exists and is passkey-enforced, so only a tier allocator can mint one; some kernel signatures still take raw pointers | `StableSpan` in every kernel signature, no `DeviceSpan` conversion |
 | I4 | Capacity planned, not discovered | partial - `plan_memory()` is pure and deterministic (byte-identical across 5 identical starts); the balloon is deleted; the KV block count is the plan's, the live pass only a fallback | `plan_memory()` never queries the device; fails at load with a report |
 | I5 | Unidirectional ownership | partial - KV blocks and the T2/T3 tiers own through move-only RAII (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | `Owned`-style non-copyable handles everywhere, no raw device pointers above L1 |
 | I6 | OOM is typed and recoverable | done - plan-time refusal at load with the block arithmetic; admission-time `IMP_ERROR_CAPACITY` -> HTTP 503 `capacity_error`, distinct from a client cancel | plan-time failure at load; admission-time 429/503 |
-| I7 | Capacity != occupancy | partial - per-tier reserved and live served on `/metrics`, plus KV blocks and budget-vs-own; accounting improves once the library reserve is charged at its measured value rather than a fixed constant | per-tier reserved and live, library reserve named, >=95 % accounted |
+| I7 | Capacity != occupancy | partial - per-tier reserved and live served on `/metrics`, plus KV blocks and budget-vs-own; `diagnostics.vram_touch_audit` reports per tag the bytes held and the bytes written, `make vram-touch-audit` gates them per model, and every audit table ends with the pinned-host sites; accounting improves once the library reserve is charged at its measured value rather than a fixed constant | per-tier reserved and live, library reserve named, >=95 % accounted |
 
 Nothing in the set was dropped.
 

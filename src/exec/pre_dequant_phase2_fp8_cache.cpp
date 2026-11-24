@@ -4,6 +4,7 @@
 // cause); FFN/SSM weights tolerate 8-bit and go to FP8 for prefill speed.
 
 #include "exec/quant_pipeline.h"
+#include "memory/device_alloc_all.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -209,8 +210,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 }
             }
 
-            IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
-            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
+            device_free_all(d_block_maxes, d_absmax);
             // Track bulk buffers for cleanup
             wcache_->fp8_overflow_scales = d_scales_all;
             wcache_->fp8_overflow_count = actual_count;

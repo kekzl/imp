@@ -2,6 +2,7 @@
 // keep each .cu under the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -98,8 +99,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 }
             }
 
-            IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
-            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
+            device_free_all(d_block_maxes, d_absmax);
             wcache_->fp8_migrated_scales = d_scales_all;
             wcache_->fp8_migrated_count = migrated;
         }

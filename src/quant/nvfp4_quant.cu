@@ -314,7 +314,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     float* d_global_max = d_reusable_max;
     bool own_alloc = false;
     if (!d_global_max) {
-        cuda_alloc_or_throw(cudaMalloc(&d_global_max, sizeof(float)), "calibrate_nvfp4_scales");
+        cuda_alloc_or_throw(device_alloc_all(dev_req(d_global_max, sizeof(float))), "calibrate_nvfp4_scales");
         own_alloc = true;
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
@@ -333,7 +333,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     if (own_alloc)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_global_max));
+        device_free_all(d_global_max);
 
     if (h_absmax == 0.0f) {
         IMP_LOG_WARN("calibrate_nvfp4_scales: tensor is all zeros, using scale 1.0");
@@ -643,7 +643,7 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(d_global_max));
+    device_free_all(d_global_max);
 
     // Fill result
     result.packed_data = d_packed;
