@@ -706,7 +706,7 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
     // cudaMalloc + cudaFree 4 routing arrays (device-wide sync), so a failed pool fails init.
     if (*has_moe_) {
         const auto& cfg = model_->config();
-        if (!moe_->routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active))
+        if (!moe_->routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active, vram_alloc_))
             return false;
     }
     return true;
