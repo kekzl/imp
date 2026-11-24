@@ -8,6 +8,7 @@
 // Bench/eval only, does not touch production forward_logits; reuses gemm_via_handle_.
 
 #include "exec/executor.h"
+#include "exec/executor_helpers.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_sampling_internal.h"
 #include "compute/gemm.h"
@@ -375,10 +376,10 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     const size_t scratch_needed =
         static_cast<size_t>(mb) * kArgmaxSplits * (sizeof(float) + sizeof(int));
     if (verify_argmax_scratch_sz_ < scratch_needed) {
-        if (verify_argmax_scratch_)
-            IMP_CUDA_CHECK_LOG(cudaFree(verify_argmax_scratch_));
-        if (cudaMalloc(&verify_argmax_scratch_, scratch_needed) != cudaSuccess) {
-            verify_argmax_scratch_ = nullptr;
+        vram_free(vram_alloc_, verify_argmax_scratch_);
+        verify_argmax_scratch_ = static_cast<decltype(verify_argmax_scratch_)>(
+            vram_alloc_force(vram_alloc_, scratch_needed, "verify_argmax_scratch"));
+        if (!verify_argmax_scratch_) {
             verify_argmax_scratch_sz_ = 0;
             return false;
         }
@@ -388,11 +389,10 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
         return true;
     const int V = model_->config().vocab_size;
     if (verify_pen_counts_cap_ < V) {
-        if (verify_pen_counts_)
-            IMP_CUDA_CHECK_LOG(cudaFree(verify_pen_counts_));
-        if (cudaMalloc(&verify_pen_counts_, static_cast<size_t>(V) * sizeof(int32_t)) !=
-            cudaSuccess) {
-            verify_pen_counts_ = nullptr;
+        vram_free(vram_alloc_, verify_pen_counts_);
+        verify_pen_counts_ = static_cast<decltype(verify_pen_counts_)>(
+            vram_alloc_force(vram_alloc_, static_cast<size_t>(V) * sizeof(int32_t), "verify_pen_counts"));
+        if (!verify_pen_counts_) {
             verify_pen_counts_cap_ = 0;
             return false;
         }

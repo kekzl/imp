@@ -1370,11 +1370,11 @@ void GraphExecutor::free_buffers() {
     free_shexp_overlap_();
     // T2 arena slabs (allocate_smallm_scratch) die with the arena.
     if (smallm_ws_ && !smallm_ws_arena_)
-        IMP_CUDA_CHECK_LOG(cudaFree(smallm_ws_));
+        vram_free(vram_alloc_, smallm_ws_);
     smallm_ws_ = nullptr;
     smallm_ws_bytes_ = 0;
     if (smallm_xq_ && !smallm_xq_arena_)
-        IMP_CUDA_CHECK_LOG(cudaFree(smallm_xq_));
+        vram_free(vram_alloc_, smallm_xq_);
     smallm_xq_ = nullptr;
     smallm_xq_bytes_ = 0;
     smallm_ws_arena_ = false;
@@ -1385,12 +1385,12 @@ void GraphExecutor::free_buffers() {
         lora_scratch_sz_ = 0;
     }
     if (verify_argmax_scratch_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(verify_argmax_scratch_));
+        vram_free(vram_alloc_, verify_argmax_scratch_);
         verify_argmax_scratch_ = nullptr;
         verify_argmax_scratch_sz_ = 0;
     }
     if (verify_pen_counts_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(verify_pen_counts_));
+        vram_free(vram_alloc_, verify_pen_counts_);
         verify_pen_counts_ = nullptr;
         verify_pen_counts_cap_ = 0;
     }
