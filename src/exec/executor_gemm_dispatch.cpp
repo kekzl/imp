@@ -850,6 +850,10 @@ void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
         cap = cudaStreamCaptureStatusActive;  // be conservative
     if (cap != cudaStreamCaptureStatusNone)
         return;
+    // A graph captured on the old address must not replay it: the FFN and verify graph caches
+    // drop on the workspace generation (I3, tools/check_graph_stability.py G1).
+    if (smallm_ws_ != nullptr)
+        ws_.bump_generation();
     if (smallm_ws_ && !smallm_ws_arena_)
         vram_free(vram_alloc_, smallm_ws_);
     smallm_ws_ = static_cast<decltype(smallm_ws_)>(vram_alloc_force(vram_alloc_, need, "smallm_ws_grown"));
@@ -865,6 +869,8 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
         cap = cudaStreamCaptureStatusActive;  // be conservative
     if (cap != cudaStreamCaptureStatusNone)
         return;
+    if (smallm_xq_ != nullptr)
+        ws_.bump_generation();  // as ensure_smallm_ws_: no replay on the old address
     if (smallm_xq_ && !smallm_xq_arena_)
         vram_free(vram_alloc_, smallm_xq_);
     smallm_xq_arena_ = false;

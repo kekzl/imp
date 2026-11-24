@@ -66,6 +66,8 @@ public:
     // holding raw pointers into the arena (captured verify graphs, #847) use
     // this to detect that their baked addresses died.
     uint64_t generation() const { return generation_; }
+    // An executor scratch a captured graph can bake moved (small-M regrow): same invalidation.
+    void bump_generation() { ++generation_; }
 
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
