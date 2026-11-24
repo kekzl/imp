@@ -14,7 +14,9 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace imp {
 
@@ -64,14 +66,17 @@ public:
     PinnedBuffer& operator=(const PinnedBuffer&) = delete;
 
     // Empty on failure — deliberately not an exception and not an abort.
+    // file: the acquiring site, recorded for the host audit (host_pinned_sites()).
     static PinnedBuffer acquire(HostPinnedAllocator& alloc, size_t bytes,
-                                HostPinnedKind kind = HostPinnedKind::Plain);
+                                HostPinnedKind kind = HostPinnedKind::Plain,
+                                const char* file = __builtin_FILE());
 
     // Pageable memory, written by `fill`, then cudaHostRegister'd: the driver pins resident
     // pages at 26-29 GB/s on WSL2 where cudaHostAlloc runs 1.0-1.1 GB/s; DMA and zero-copy
     // reads are equal (57 / 53 GB/s). Empty on failure.
     static PinnedBuffer acquire_filled(size_t bytes, HostPinnedKind kind,
-                                       const std::function<void(void*)>& fill);
+                                       const std::function<void(void*)>& fill,
+                                       const char* file = __builtin_FILE());
 
     // Release the memory. Idempotent, and safe on a moved-from buffer.
     void reset();
@@ -148,7 +153,8 @@ public:
     // Empty on failure; the caller carries on with an unpinned mapping, which is
     // what every current call site already does.
     static HostRegistration acquire_read_only(void* ptr, size_t bytes,
-                                              HostRegistrar& reg = cuda_host_registrar());
+                                              HostRegistrar& reg = cuda_host_registrar(),
+                                              const char* file = __builtin_FILE());
 
     void reset();
 
@@ -162,5 +168,14 @@ private:
     void* ptr_ = nullptr;
     size_t bytes_ = 0;
 };
+
+// Pinned host memory held right now, summed per acquiring file ("registered:<file>" for a
+// HostRegistration, memory imp page-locked and does not own). Largest first.
+struct HostPinnedSite {
+    std::string site;
+    size_t bytes = 0;
+    int count = 0;
+};
+[[nodiscard]] std::vector<HostPinnedSite> host_pinned_sites();
 
 }  // namespace imp

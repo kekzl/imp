@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "memory/host_pinned.h"
+#include "memory/mem_account.h"
 
 #include <cstdlib>
 #include <utility>
@@ -375,4 +376,36 @@ TEST(PinnedBuffer, RealAllocatorEitherFailsCleanlyOrMapsOnlyWhenAsked) {
         ASSERT_FALSE(mapped.empty());
         EXPECT_NE(mapped.device(), nullptr);
     }
+}
+
+// The host audit lists what is pinned right now per acquiring file: a buffer appears with its bytes at
+// acquire, stays once through a move and leaves at reset; a failed acquire leaves nothing.
+TEST(HostPinnedSites, FollowAcquireMoveAndReset) {
+    const auto mine = [] {
+        HostPinnedSite s;
+        for (const HostPinnedSite& x : host_pinned_sites())
+            if (x.site == "test_host_pinned.cpp")
+                s = x;
+        return s;
+    };
+    CountingHostPinned alloc;
+    const HostPinnedSite before = mine();
+    {
+        PinnedBuffer a = PinnedBuffer::acquire(alloc, 3000);
+        PinnedBuffer b = PinnedBuffer::acquire(alloc, 5000, HostPinnedKind::Mapped);
+        ASSERT_TRUE(a);
+        ASSERT_TRUE(b);
+        EXPECT_EQ(mine().bytes, before.bytes + 8000);
+        EXPECT_EQ(mine().count, before.count + 2);
+        PinnedBuffer c = std::move(a);
+        EXPECT_EQ(mine().bytes, before.bytes + 8000);
+        EXPECT_EQ(mine().count, before.count + 2);
+        b.reset();
+        EXPECT_EQ(mine().bytes, before.bytes + 3000);
+        EXPECT_EQ(mine().count, before.count + 1);
+    }
+    EXPECT_EQ(mine().bytes, before.bytes);
+    EXPECT_EQ(mine().count, before.count);
+    EXPECT_NE(host_audit_text().find("pinned TOTAL"), std::string::npos);
+    EXPECT_NE(host_audit_text().find("process: RSS"), std::string::npos);
 }

@@ -2,13 +2,40 @@
 
 #include "core/logging.h"
 
+#include <string>
+
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <unordered_map>
 
 namespace imp {
 
 namespace {
+
+// Every live PinnedBuffer / HostRegistration by host pointer, for host_pinned_sites().
+struct PinnedNote {
+    size_t bytes = 0;
+    std::string site;
+};
+std::mutex g_notes_mu;
+std::unordered_map<const void*, PinnedNote>& notes() {
+    static std::unordered_map<const void*, PinnedNote> m;
+    return m;
+}
+void note_pinned(const void* p, size_t bytes, const char* file, const char* prefix) {
+    std::string f = file ? file : "?";
+    f = prefix + f.substr(f.find_last_of('/') + 1);
+    std::lock_guard<std::mutex> lock(g_notes_mu);
+    notes()[p] = PinnedNote{bytes, std::move(f)};
+}
+void forget_pinned(const void* p) {
+    std::lock_guard<std::mutex> lock(g_notes_mu);
+    notes().erase(p);
+}
 
 class CudaHostPinnedAllocator final : public HostPinnedAllocator {
 public:
@@ -76,8 +103,27 @@ HostPinnedAllocator& cuda_host_pinned_allocator() {
     return a;
 }
 
+std::vector<HostPinnedSite> host_pinned_sites() {
+    std::map<std::string, HostPinnedSite> by_site;
+    {
+        std::lock_guard<std::mutex> lock(g_notes_mu);
+        for (const auto& [p, n] : notes()) {
+            HostPinnedSite& s = by_site[n.site];
+            s.site = n.site;
+            s.bytes += n.bytes;
+            ++s.count;
+        }
+    }
+    std::vector<HostPinnedSite> out;
+    for (auto& [k, s] : by_site)
+        out.push_back(std::move(s));
+    std::sort(out.begin(), out.end(),
+              [](const HostPinnedSite& a, const HostPinnedSite& b) { return a.bytes > b.bytes; });
+    return out;
+}
+
 PinnedBuffer PinnedBuffer::acquire_filled(size_t bytes, HostPinnedKind kind,
-                                          const std::function<void(void*)>& fill) {
+                                          const std::function<void(void*)>& fill, const char* file) {
     PinnedBuffer out;
     if (bytes == 0)
         return out;
@@ -103,10 +149,12 @@ PinnedBuffer PinnedBuffer::acquire_filled(size_t bytes, HostPinnedKind kind,
     out.host_ = host;
     out.device_ = device;
     out.bytes_ = bytes;
+    note_pinned(host, bytes, file, "");
     return out;
 }
 
-PinnedBuffer PinnedBuffer::acquire(HostPinnedAllocator& alloc, size_t bytes, HostPinnedKind kind) {
+PinnedBuffer PinnedBuffer::acquire(HostPinnedAllocator& alloc, size_t bytes, HostPinnedKind kind,
+                                   const char* file) {
     PinnedBuffer out;
     if (bytes == 0)
         return out;  // a zero-size request is a caller bug, not an allocation
@@ -118,12 +166,15 @@ PinnedBuffer PinnedBuffer::acquire(HostPinnedAllocator& alloc, size_t bytes, Hos
     out.host_ = host;
     out.device_ = device;
     out.bytes_ = bytes;
+    note_pinned(host, bytes, file, "");
     return out;
 }
 
 void PinnedBuffer::reset() {
-    if (owner_ && host_)
+    if (owner_ && host_) {
+        forget_pinned(host_);
         owner_->free(host_);
+    }
     owner_ = nullptr;
     host_ = nullptr;
     device_ = nullptr;
@@ -156,7 +207,8 @@ HostRegistrar& cuda_host_registrar() {
     return r;
 }
 
-HostRegistration HostRegistration::acquire_read_only(void* ptr, size_t bytes, HostRegistrar& reg) {
+HostRegistration HostRegistration::acquire_read_only(void* ptr, size_t bytes, HostRegistrar& reg,
+                                                     const char* file) {
     HostRegistration out;
     if (!ptr || bytes == 0)
         return out;
@@ -165,12 +217,15 @@ HostRegistration HostRegistration::acquire_read_only(void* ptr, size_t bytes, Ho
     out.reg_ = &reg;
     out.ptr_ = ptr;
     out.bytes_ = bytes;
+    note_pinned(ptr, bytes, file, "registered:");
     return out;
 }
 
 void HostRegistration::reset() {
-    if (reg_ && ptr_)
+    if (reg_ && ptr_) {
+        forget_pinned(ptr_);
         reg_->unregister(ptr_);
+    }
     reg_ = nullptr;
     ptr_ = nullptr;
     bytes_ = 0;
