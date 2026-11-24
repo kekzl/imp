@@ -2,6 +2,7 @@
 // applications run in exec/inkling_forward.h, one kept sequence per slot.
 
 #include "exec/executor.h"
+#include "exec/inkling_slot_map.h"
 #include "memory/vram_query.h"
 
 #include "core/logging.h"
@@ -173,7 +174,7 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
             s = rt.pos[0] == 0 ? 0 : rt.slot_of_block(rt.blk[0]);
         ok = s >= 0;
         if (ok) {
-            rt.slot_block[static_cast<size_t>(s)] = rt.blk[0];
+            inkling_claim_block(rt.slot_block, static_cast<size_t>(s), rt.blk[0]);
             ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data(),
                                                        state.vision_embeddings ? state.vision_token_id : -1);
         }
