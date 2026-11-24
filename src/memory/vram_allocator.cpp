@@ -17,8 +17,8 @@ VRAMAllocator::~VRAMAllocator() {
 }
 
 bool VRAMAllocator::init(float headroom_fraction) {
-    size_t free_mem = 0;
-    if (!vram_budget_mem_get_info(&free_mem, &total_)) {
+    total_ = vram_budget_total_bytes();
+    if (total_ == 0) {
         IMP_LOG_ERROR("VRAMAllocator: cudaMemGetInfo failed");
         return false;
     }

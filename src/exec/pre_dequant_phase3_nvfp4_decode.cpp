@@ -320,9 +320,8 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
         dctx.safety_reserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
         // GGUF with a plan: the capped 16K estimate refused Devstral-24B decode_all a 13.9k prompt.
-        size_t free_mem = 0, total_mem = 0;
-        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
-        dctx.safety_reserve = std::max(dctx.safety_reserve, planned_post_cache_reserve(budget, total_mem));
+        dctx.safety_reserve = std::max(dctx.safety_reserve,
+                                       planned_post_cache_reserve(budget, vram_budget_total_bytes()));
     }
 
     nvfp4_decode_collect_candidates_(cfg, dctx);
