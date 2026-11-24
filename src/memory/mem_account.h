@@ -12,6 +12,10 @@
 
 namespace imp {
 
+// The host half of the audit table: process RSS split from /proc/self/status and the pinned host
+// memory per acquiring file (memory/host_pinned.h). Lines joined with '\n'.
+[[nodiscard]] std::string host_audit_text();
+
 // MemAccount: process-global VRAM accounting harness (Phase-0 audit). VRAMAllocator only
 // tracks allocations routed through it; the large consumers (KV pool, NVFP4 decode
 // cache, cuBLASLt/own-GEMM workspaces, CUDA-graph buffers, weights) call cudaMalloc

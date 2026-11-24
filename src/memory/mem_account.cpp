@@ -3,14 +3,63 @@
 #include "memory/backend.h"
 #include "memory/engine_arena.h"
 #include "memory/graph_slots.h"
+#include "memory/host_pinned.h"
 #include "memory/vram_query.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 
 namespace imp {
+
+namespace {
+// A whole line of host_audit_text() per extraction.
+struct HostLine {
+    std::string text;
+    friend std::istream& operator>>(std::istream& in, HostLine& l) { return std::getline(in, l.text); }
+};
+}  // namespace
+
+std::string host_audit_text() {
+    // kB values of /proc/self/status; absent keys (no procfs) read 0.
+    double rss = 0, hwm = 0, anon = 0, file = 0, shm = 0, swap = 0;
+    std::ifstream st("/proc/self/status");
+    for (std::string key; st >> key;) {
+        double* v = key == "VmRSS:"      ? &rss
+                    : key == "VmHWM:"    ? &hwm
+                    : key == "RssAnon:"  ? &anon
+                    : key == "RssFile:"  ? &file
+                    : key == "RssShmem:" ? &shm
+                    : key == "VmSwap:"   ? &swap
+                                         : nullptr;
+        if (v)
+            st >> *v;
+    }
+    char line[256];
+    std::snprintf(
+        line, sizeof line,
+        "--- host memory (MiB) ---\nprocess: RSS %.0f (anonymous %.0f, file-backed %.0f, shmem %.0f), "
+        "peak RSS %.0f, swap %.0f",
+        rss / 1024.0, anon / 1024.0, file / 1024.0, shm / 1024.0, hwm / 1024.0, swap / 1024.0);
+    std::ostringstream out;
+    out << line;
+    double pinned = 0;
+    for (const HostPinnedSite& s : host_pinned_sites()) {
+        pinned += static_cast<double>(s.bytes);
+        if (s.bytes < (size_t{1} << 20))
+            continue;
+        std::snprintf(line, sizeof line, "\npinned %-40s %10.1f  (%d)", s.site.c_str(),
+                      static_cast<double>(s.bytes) / (1024.0 * 1024.0), s.count);
+        out << line;
+    }
+    std::snprintf(line, sizeof line, "\npinned %-40s %10.1f", "TOTAL", pinned / (1024.0 * 1024.0));
+    out << line;
+    return out.str();
+}
 
 namespace {
 constexpr double kMiB = 1024.0 * 1024.0;
@@ -375,6 +424,10 @@ void MemAccount::report(const char* phase_label) {
                  "residual < 0 — pools sum above device usage, i.e. at least one "
                  "region is counted twice (suballocation reported by both owner and pool).");
     }
+    // One emit per line: emit formats into a fixed buffer.
+    std::istringstream host_lines(host_audit_text());
+    std::for_each(std::istream_iterator<HostLine>(host_lines), std::istream_iterator<HostLine>(),
+                  [&](const HostLine& l) { emit("%s", l.text.c_str()); });
     emit("===== END VRAM AUDIT [%s] =====", phase_label ? phase_label : "?");
 
     IMP_LOG_INFO("\n%s", out.c_str());

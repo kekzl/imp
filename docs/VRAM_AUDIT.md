@@ -389,3 +389,20 @@ Read:
 `mtp_workspace` charged through `note()` without pointers and was missing from the audit. With its 47 buffers registered: 583.9 MiB held, 112.7 MiB written (19.3 %) by the gate workload (`make vram-touch-audit`, at most 4 parallel sequences). The head's K/V caches are sized for every sequence slot (`max_batch_size` 32 x head rows per slot) and committed at init. Open: commit a slot's K/V on its first use, as the recurrent state slab does.
 
 After the head KV moved to per-slot commits (8 slots x 16 MiB per cache on this model; slot 0 at init, a slot's rows at its first use): `mtp_workspace` 583.9 -> 327.9 MiB held after warmup, the two KV regions start at 64 MiB instead of 256 MiB and reach 256 MiB once 8 sequences ran in parallel.
+
+### Host half of the audit table (2026-11-24, main 7b40f35a + `host_audit_text`)
+
+Every VRAM audit table now ends with the process RSS split (`/proc/self/status`) and the pinned host memory per acquiring file (`host_pinned_sites()`: `PinnedBuffer` and `HostRegistration`). Default flags, 10 prompts x 300 tokens plus an 18126-token prompt, MiB after init -> at shutdown:
+
+| | Inkling-2-Mini | Qwen3.8-27B-NVFP4-vllm |
+|---|---|---|
+| RSS | 1590 -> 2075 | 5961 -> 7157 |
+| anonymous | 1378 -> 1858 | 3048 -> 3273 |
+| shmem | 78 -> 78 | 2782 -> 3742 |
+| peak RSS (load) | 34421 | 24031 |
+| pinned, `host_embedding.cpp` | 883.4 | 2425.0 |
+| pinned, total | 884.4 | 2430.1 -> 2429.1 |
+
+Read:
+- Inkling-2-Mini grows 480 MiB of anonymous memory over the workload (not attributed; its conv-state checkpoints for prefix reuse are host vectors, one per 256 tokens).
+- Qwen3.8-27B grows 960 MiB of shmem that the pinned list does not show: memory pinned outside `PinnedBuffer` / `HostRegistration` (open).
