@@ -671,6 +671,10 @@ check-alloc-sites:
 check-live-vram-queries:
 	@$(PY_RUN) tools/check_live_vram_queries.py
 
+# I3 gate: regrow sites, unkeyed graph captures, unwrapped StableSpan mints, shrinking allowlist.
+check-graph-stability:
+	@$(PY_RUN) tools/check_graph_stability.py
+
 # I5 gate: hand-written release sites and owner-or-view flags outside src/memory/, shrinking allowlist.
 check-owning-frees:
 	@$(PY_RUN) tools/check_owning_frees.py

@@ -348,7 +348,7 @@ the *tokens* a real vocabulary spells them with. A third class is not unlikely.
 
 | # | Thing | Why it must survive |
 |---|---|---|
-| S-20 | `src/memory/span.h` — `StableSpan` vs `DeviceSpan`, passkey-enforced | Encodes in the type system which memory a captured CUDA graph may bake an address into. Turns a bug class that actually happened (`AUDIT.md` B9/B13) into a compile error. Extend it; do not weaken it |
+| S-20 | `src/memory/span.h` — `StableSpan` vs `DeviceSpan`, passkey-enforced | Encodes in the type system which memory a captured CUDA graph may bake an address into. Turns a bug class that actually happened (`AUDIT.md` B9/B13) into a compile error. Extend it; do not weaken it. The compile error holds at the mint only: no function outside `src/memory/` takes a span yet, and `tools/check_graph_stability.py` counts the mint sites that unwrap it (87 on 2026-11-24, shrinking) |
 | S-21 | `src/memory/plan.h` — `plan_memory()` | Plans capacity without ever querying the device; pure function of a plain struct, runs in the CPU-only CI lane. Retired the #1103 class (free VRAM swinging 1.6 GB between identical invocations → different plan) |
 | S-22 | The `throw` in `src/compute/attention_dispatch.cpp` (#654) | "No tier accepted" is an error, not a degraded answer. It replaced a silent fallback that produced teacher-forced PPL ~1e10. Never soften it back into a fallback |
 | S-23 | Zero virtual dispatch in `src/exec/` and `src/compute/` | Not one vtable call per token, layer or launch. Polymorphism is templates and traits |

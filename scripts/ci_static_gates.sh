@@ -119,6 +119,9 @@ if want alloc; then
     # I4: readings of free device memory outside the query layer, against a list that only shrinks.
     run "I4 live VRAM query allowlist"          python3 tools/check_live_vram_queries.py
     run "that gate still classifies its cases"  python3 tools/check_live_vram_queries.py --selftest
+    # I3: regrow sites, graph captures that read no generation, unwrapped StableSpan mints; shrinking list.
+    run "I3 graph stability allowlist"          python3 tools/check_graph_stability.py
+    run "that gate still classifies its cases"  python3 tools/check_graph_stability.py --selftest
     # I5: hand-written release sites and owner-or-view flags outside src/memory/, same shrinking rule.
     run "I5 owning free allowlist"              python3 tools/check_owning_frees.py
     run "that gate still classifies its cases"  python3 tools/check_owning_frees.py --selftest
