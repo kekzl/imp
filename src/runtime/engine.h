@@ -19,6 +19,7 @@
 #include "runtime/suffix_draft.h"
 #include "runtime/vram_budget.h"
 #include "runtime/kv_replan.h"
+#include "runtime/recurrent_slot.h"
 #include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
 #include "memory/library_reserve_cache.h"
@@ -609,7 +610,7 @@ private:
     // among live sequences: the recurrent state IS the sequence's memory, so
     // a shared slot leaks one request's context into another.
     std::vector<int> free_recurrent_slots_;           // available slot ids
-    std::unordered_map<int, int> recurrent_slot_of_;  // req.id -> slot
+    RecurrentSlotMap recurrent_slot_of_;              // req.id -> slot
     // Device-side slot table for BATCHED GDN decode: max_batch_size ints,
     // allocated once beside the SSM state, refilled per step. Stable POINTER
     // on purpose: a CUDA graph captures the address, so which sequences are

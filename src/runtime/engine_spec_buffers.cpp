@@ -182,8 +182,8 @@ void Engine::prewarm_spec_state_scratch_() {
                  spec_state_snap_ ? "" : ", snapshot slab failed");
 }
 
-// Mirror of fill_recurrent_state's slot resolution (decode requests own a
-// slot acquired at prefill; the modulo fallback matches its legacy path).
+// Slot of a decode request (acquired at prefill). The modulo fallback is legacy:
+// fill_recurrent_state throws for an id without a slot instead of using it.
 int Engine::recurrent_slot_for_(int req_id) const {
     auto it = recurrent_slot_of_.find(req_id);
     if (it != recurrent_slot_of_.end()) return it->second;

@@ -222,12 +222,11 @@ void Engine::reset_ssm_state(int seq_id) {
     // Public teardown entry point (API re-prefill / context reset / server
     // cancellation): must return the slot to the free list or it leaks (these
     // paths bypass finish_request), exhausting the pool onto id%cap aliasing.
-    auto it = recurrent_slot_of_.find(seq_id);
-    if (ssm_state_) {
-        const int cap = ssm_state_->max_sequences();
-        int slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? seq_id % cap : 0);
-        ssm_state_->reset_sequence(slot, stream_);
-    }
+    // An id without a slot (cancelled while queued, before its first prefill) resets nothing:
+    // `seq_id % cap` is a slot another live sequence can hold.
+    if (ssm_state_)
+        if (const auto slot = recurrent_slot_for_reset(recurrent_slot_of_, seq_id))
+            ssm_state_->reset_sequence(*slot, stream_);
     release_recurrent_slot_(seq_id);
     mtp_release_(seq_id);
 }

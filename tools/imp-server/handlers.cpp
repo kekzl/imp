@@ -841,6 +841,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         int32_t co = state.tok->find_token("<|channel>");
         int32_t cc = state.tok->find_token("<channel|>");
         int32_t nl = state.tok->find_token("\n");
+        // A swap to a model without the pair must not keep the previous model's ids.
+        state.channel_open_id = state.channel_close_id = state.channel_newline_id = -1;
         if (co >= 0 && cc >= 0) {
             state.channel_open_id = co;
             state.channel_close_id = cc;

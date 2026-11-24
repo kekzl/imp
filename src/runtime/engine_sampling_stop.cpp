@@ -387,9 +387,12 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
         slot = acquire_recurrent_slot_(req.id);  // fresh slot for a new sequence
     } else {
         auto it = recurrent_slot_of_.find(req.id);
-        // Decode / later prefill chunks reuse the slot acquired at offset==0.
-        const int cap = ssm_state_->max_sequences();
-        slot = (it != recurrent_slot_of_.end()) ? it->second : (cap > 0 ? req.id % cap : 0);
+        // Decode / later prefill chunks reuse the slot acquired at offset==0. No entry with a
+        // pool (cap > 0) is a lifecycle bug: `req.id % cap` would bind another sequence's state.
+        if (it == recurrent_slot_of_.end() && ssm_state_->max_sequences() > 0)
+            throw std::runtime_error("recurrent state: req " + std::to_string(req.id) +
+                                     " runs a decode or later prefill chunk without a slot");
+        slot = (it != recurrent_slot_of_.end()) ? it->second : 0;
     }
     if (ssm_state_) {
         state.ssm_state = ssm_state_.get();
