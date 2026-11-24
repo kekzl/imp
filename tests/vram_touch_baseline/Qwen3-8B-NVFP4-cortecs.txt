@@ -1,5 +1,5 @@
 # VRAM touch audit baseline: <pool> <max MiB held> <reason>. make vram-touch-audit MODEL=/models/Qwen3-8B-NVFP4-cortecs
-arena:executor_workspace_buffers.cpp 290 insurance buffers with pointers in captured graphs: NVFP4 dequant fallback, chunk-capture K/V scratch, split-K scratch sized for max_batch (docs/VRAM_AUDIT.md)
+arena:executor_workspace_buffers.cpp 66 split-K attention scratch sized for max_batch; the dequant fallback and chunk-capture buffers are taken at first use (docs/VRAM_AUDIT.md)
 arena:gemm.cpp 65 cuBLASLt workspace, used by the algos that ask for one
 fp8_lm_head 595 read-only FP8 copy of the LM head
 WEIGHTS 3728 read-only weights

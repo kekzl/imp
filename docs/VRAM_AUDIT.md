@@ -457,3 +457,17 @@ The library reserve of a start is max(forward window, whole-init residual). The 
 | Flint NVFP4: charged, accounted | 977 MiB, 98.9 % | 851 MiB, 98.5 % |
 
 Flint's window was 16 and 2 MiB in the two runs, so its charge is the whole-init residual in both; the 126 MiB between them is the spread of that residual between two starts. With a persisted `library_reserve` cache the old value made the next Inkling start plan 2579 MiB instead of 1251.
+
+### Insurance buffers taken at first use (2026-11-24)
+
+The engine arena commits as takes reach it. Two buffers were taken at init and never written by the workloads above: the NVFP4 dequant fallback workspace and the chunk-capture K/V pair. Both are now taken by the first code path that needs them (host side, before the kernel is launched or captured); the arena keeps the room reserved.
+
+| after start, default flags | before | after |
+|---|---|---|
+| Qwen3.8-27B-NVFP4-vllm: `engine_arena` committed | 518.0 MiB | 220.0 MiB |
+| Qwen3.8-27B-NVFP4-vllm: device used | 22479 MiB | 22181 MiB |
+| Qwen3-8B-NVFP4-cortecs: `engine_arena` committed | 540.0 MiB | 316.0 MiB |
+| Qwen3-8B-NVFP4-cortecs: device used | 9075 MiB | 8851 MiB |
+| Flint NVFP4: `engine_arena` committed | 298.0 MiB | 274.0 MiB |
+
+Neither buffer was taken during 10 prompts, a long prompt sent twice and 4 parallel requests on any of the three models. The reserved bytes stay in the reserved-uncommitted ledger, so the KV plan is unchanged; the gain is device memory not backed.

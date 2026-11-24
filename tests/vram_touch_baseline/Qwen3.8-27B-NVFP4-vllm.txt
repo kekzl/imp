@@ -1,9 +1,9 @@
 # VRAM touch audit baseline: <pool> <max MiB held> <reason>. make vram-touch-audit MODEL=/models/Qwen3.8-27B-NVFP4-vllm
-arena:executor_workspace_buffers.cpp 396 insurance buffers with pointers in captured graphs: NVFP4 dequant fallback, chunk-capture K/V scratch, split-K scratch sized for max_batch (docs/VRAM_AUDIT.md)
+arena:executor_workspace_buffers.cpp 98 split-K attention scratch sized for max_batch; the dequant fallback and chunk-capture buffers are taken at first use (docs/VRAM_AUDIT.md)
 arena:gemm.cpp 65 cuBLASLt workspace, used by the algos that ask for one
 fp8_lm_head 1214 read-only FP8 copy of the LM head
 gdn_chunkpar_ws 124 GDN chunk-parallel prefill workspace sized for the largest chunk
-region:kv_block_pool 1305 KV pool buffer: 512 MiB at start plus one request of the last size mapped ahead
+mtp_workspace 329 read-only NVFP4 copy of the MTP body (236 MiB) and the feed scratch of the batched head pass
+spec_state_scratch 80 state scratch of the hybrid verify, not written by this workload: open
 spec_state_snapshot 160 recurrent state snapshot of the speculative verify, written when a draft is rejected
 WEIGHTS 13879 read-only weights
-mtp_workspace 330 read-only NVFP4 copy of the MTP body (236 MiB) and the feed scratch of the batched head pass

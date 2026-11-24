@@ -537,6 +537,7 @@ set(IMP_EXEC_SOURCES
     src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cpp
     src/exec/executor_workspace_buffers.cpp
+    src/exec/executor_lazy_scratch.cpp
     src/exec/executor_sparse_prefill.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
