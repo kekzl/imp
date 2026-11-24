@@ -1,4 +1,5 @@
 #include "quant/nvfp4_gemm.h"
+#include "memory/device_alloc_all.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm.h"
 #include "core/cuda_static_reset.h"
@@ -112,7 +113,7 @@ static std::mutex s_nvfp4_dequant_mtx;
 void nvfp4_gemm_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
     if (s_nvfp4_dequant_buf) {
-        (void)cudaFree(s_nvfp4_dequant_buf);
+        device_free_all(s_nvfp4_dequant_buf);
         s_nvfp4_dequant_buf = nullptr;
     }
     s_nvfp4_dequant_buf_size = 0;
@@ -174,10 +175,10 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
     if (needed <= s_nvfp4_dequant_buf_size)
         return s_nvfp4_dequant_buf;
     if (s_nvfp4_dequant_buf)
-        IMP_CUDA_CHECK_LOG(cudaFree(s_nvfp4_dequant_buf));
+        device_free_all(s_nvfp4_dequant_buf);
     s_nvfp4_dequant_buf = nullptr;
     s_nvfp4_dequant_buf_size = 0;
-    cudaError_t err = cudaMalloc(&s_nvfp4_dequant_buf, needed);
+    cudaError_t err = device_alloc_all(dev_req(s_nvfp4_dequant_buf, needed));
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("gemm_nvfp4: failed to allocate %zu bytes for dequant buffer: %s", needed,
                       cudaGetErrorString(err));

@@ -3,6 +3,7 @@
 // encoder_workspace_init.
 
 #include "compute/encoder_forward.h"
+#include "memory/device_alloc_all.h"
 #include "compute/activation.h"
 #include "compute/attention_cublas.h"
 #include "compute/embedding.h"
@@ -64,7 +65,7 @@ void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
     const int rows = static_cast<int>(w.shape[0]);
     const int cols = static_cast<int>(w.shape[1]);
     void* dst = nullptr;
-    if (cudaMalloc(&dst, static_cast<size_t>(rows) * cols * sizeof(__half)) != cudaSuccess)
+    if (device_alloc_all(dev_req(dst, static_cast<size_t>(rows) * cols * sizeof(__half))) != cudaSuccess)
         return nullptr;
     bool ok = true;
     if (w.qtype == QType::F16) {
@@ -80,7 +81,7 @@ void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
         ok = false;
     }
     if (!ok) {
-        IMP_CUDA_CHECK_LOG(cudaFree(dst));
+        device_free_all(dst);
         return nullptr;
     }
     return dst;
@@ -127,7 +128,7 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
     const size_t nff = static_cast<size_t>(max_tokens) * ws.d_ff * sizeof(__half);
     const size_t ns = static_cast<size_t>(ws.n_heads) * max_tokens * max_tokens * sizeof(float);
     bool ok = true;
-    auto alloc = [&](void** p, size_t bytes) { ok &= cudaMalloc(p, bytes) == cudaSuccess; };
+    auto alloc = [&](void** p, size_t bytes) { ok &= device_alloc_all(dev_req(*p, bytes)) == cudaSuccess; };
     alloc(reinterpret_cast<void**>(&ws.d_tokens), max_tokens * sizeof(int32_t));
     alloc(reinterpret_cast<void**>(&ws.d_positions), max_tokens * sizeof(int32_t));
     alloc(&ws.d_h, nd);
@@ -164,12 +165,14 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
 void encoder_workspace_free(EncoderWorkspace& ws) {
     for (auto& E : ws.layers)
         for (void* p : {E.wq, E.wk, E.wv, E.wo, E.wg, E.wu, E.wd})
-            if (p) cudaFree(p);
+            if (p)
+                device_free_all(p);
     ws.layers.clear();
     for (void* p : {static_cast<void*>(ws.d_tokens), static_cast<void*>(ws.d_positions), ws.d_h,
                     ws.d_q, ws.d_k, ws.d_v, ws.d_attn, ws.d_proj, ws.d_gate, ws.d_up, ws.d_act,
                     ws.d_scores, static_cast<void*>(ws.d_pooled)})
-        if (p) cudaFree(p);
+        if (p)
+            device_free_all(p);
     ws.d_tokens = nullptr;
     ws.d_positions = nullptr;
     ws.d_h = ws.d_q = ws.d_k = ws.d_v = ws.d_attn = ws.d_proj = nullptr;

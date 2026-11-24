@@ -7,6 +7,7 @@
 // reads the scratch pointers directly for kernel args.
 
 #include "compute/mmq_q8_imma.h"
+#include "memory/device_alloc_all.h"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -170,9 +171,10 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     const size_t need = imma_q8_plane_bytes(N, K);
     if (!imma_plane_budget_take(need, "Q8_0 plane", N, K))
         return false;
-    if (cudaMalloc(&w.qs, static_cast<size_t>(N) * K) != cudaSuccess) return false;
-    if (cudaMalloc(&w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half)) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(w.qs));
+    if (device_alloc_all(dev_req(w.qs, static_cast<size_t>(N) * K)) != cudaSuccess)
+        return false;
+    if (device_alloc_all(dev_req(w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half))) != cudaSuccess) {
+        device_free_all(w.qs);
         return false;
     }
     g_imma_plane_used += need;

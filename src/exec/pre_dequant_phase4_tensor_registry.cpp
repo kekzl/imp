@@ -3,6 +3,7 @@
 // per-layer NVFP4 device-args caches for the MoE prefill fast path.
 
 #include "exec/executor.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/logging.h"
@@ -445,9 +446,15 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                     h_alpha[e] = h.cutlass_nvfp4_alpha(proj_act_scale);
                 }
                 cudaError_t err;
-                err = cudaMalloc(&d_B,   ne * sizeof(const void*)); if (err != cudaSuccess) return false;
-                err = cudaMalloc(&d_SFB, ne * sizeof(const void*)); if (err != cudaSuccess) return false;
-                err = cudaMalloc(&d_alpha, ne * sizeof(float));     if (err != cudaSuccess) return false;
+                err = device_alloc_all(dev_req(d_B, ne * sizeof(const void*)));
+                if (err != cudaSuccess)
+                    return false;
+                err = device_alloc_all(dev_req(d_SFB, ne * sizeof(const void*)));
+                if (err != cudaSuccess)
+                    return false;
+                err = device_alloc_all(dev_req(d_alpha, ne * sizeof(float)));
+                if (err != cudaSuccess)
+                    return false;
                 // Upload failure = build failure, as a failed cudaMalloc above (layer not ready).
                 IMP_CUDA_CHECK_BOOL(cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)),
                                                static_cast<const void*>(h_B_ptrs.data()),

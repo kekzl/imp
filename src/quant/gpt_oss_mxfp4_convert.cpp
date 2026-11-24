@@ -1,4 +1,5 @@
 #include "quant/gpt_oss_mxfp4_convert.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 
 #include <cuda_fp8.h>
@@ -74,23 +75,23 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     void* d_packed = nullptr;
     void* d_ms = nullptr;
     float* d_ts = nullptr;
-    if (cudaMalloc(&d_packed, packed.size()) != cudaSuccess)
+    if (device_alloc_all(dev_req(d_packed, packed.size())) != cudaSuccess)
         return false;
-    if (cudaMalloc(&d_ms, mscales.size()) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
+    if (device_alloc_all(dev_req(d_ms, mscales.size())) != cudaSuccess) {
+        device_free_all(d_packed);
         return false;
     }
-    if (cudaMalloc(&d_ts, sizeof(float) * ne) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_ms));
+    if (device_alloc_all(dev_req(d_ts, sizeof(float) * ne)) != cudaSuccess) {
+        device_free_all(d_packed);
+        device_free_all(d_ms);
         return false;
     }
     if (cudaMemcpy(d_packed, packed.data(), packed.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ms, mscales.data(), mscales.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ts, tscales.data(), sizeof(float) * ne, cudaMemcpyHostToDevice) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_ms));
-        IMP_CUDA_CHECK_LOG(cudaFree(d_ts));
+        device_free_all(d_packed);
+        device_free_all(d_ms);
+        device_free_all(d_ts);
         return false;
     }
 

@@ -560,9 +560,9 @@ void free_nvfp4_result(NvFP4QuantResult& result) {
     // invalid-argument error. Only free storage this result allocated.
     if (result.owned) {
         if (result.packed_data)
-            IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
+            device_free_all(result.packed_data);
         if (result.micro_scales)
-            IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
+            device_free_all(result.micro_scales);
     }
     result.packed_data = nullptr;
     result.micro_scales = nullptr;
@@ -672,15 +672,15 @@ void free_nvfp4_moe_result(NvFP4MoEQuantResult& result) {
         return;
     }
     if (result.packed_data) {
-        IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
+        device_free_all(result.packed_data);
         result.packed_data = nullptr;
     }
     if (result.micro_scales) {
-        IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
+        device_free_all(result.micro_scales);
         result.micro_scales = nullptr;
     }
     if (result.tensor_scales) {
-        IMP_CUDA_CHECK_LOG(cudaFree(result.tensor_scales));
+        device_free_all(result.tensor_scales);
         result.tensor_scales = nullptr;
     }
     result.n_experts = 0;

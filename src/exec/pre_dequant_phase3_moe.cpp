@@ -4,6 +4,7 @@
 // threshold.
 
 #include "core/dispatch_policy.h"
+#include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
@@ -511,7 +512,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                                     // returns success without returning the block to the async mempool
                                     // (#834); the "freed"
                                     // VRAM would be phantom.
-                                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(old_sc, stream));
+                                    device_free_all_async(stream, old_sc);
                                     freed += e_ms;
                                 }
                                 w.scales = new_sc;
@@ -665,7 +666,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             if (w.data) {
                 if (mut_model->is_base_gpu_allocation(w.data)) {
                     mut_model->release_gpu_allocation(w.data);
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(w.data, stream));
+                    device_free_all_async(stream, w.data);
                     freed_bytes += expert_packed_bytes;
                 }
                 w.data = nullptr;
@@ -674,7 +675,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             if (w.scales) {
                 if (mut_model->is_base_gpu_allocation(w.scales)) {
                     mut_model->release_gpu_allocation(w.scales);
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(w.scales, stream));
+                    device_free_all_async(stream, w.scales);
                     freed_bytes += expert_ms_bytes;
                 }
                 w.scales = nullptr;

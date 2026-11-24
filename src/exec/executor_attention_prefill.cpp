@@ -147,7 +147,7 @@
                 } else {
                     // One allocation for K and V: a failure leaves nothing to free (#2288).
                     half* kv = nullptr;
-                    const cudaError_t kv_err = cudaMallocAsync(&kv, chunk_kv_bytes(full_bytes), stream);
+                    const cudaError_t kv_err = device_alloc_all_async(stream, dev_req(kv, chunk_kv_bytes(full_bytes)));
                     chunk_kv_split(kv_err, kv, full_bytes, &k_full, &v_full);
                 }
             }
@@ -250,7 +250,7 @@
             }
 
             if (!cap_replay && !used_eager_scratch) {
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(k_full, stream));  // v_full lives in the same allocation
+                device_free_all_async(stream, k_full);  // v_full lives in the same allocation
             }
 
             // Persist current chunk's K/V (same as non-chunked path).

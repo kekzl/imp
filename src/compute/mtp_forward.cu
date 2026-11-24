@@ -990,7 +990,7 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     int* d_idx = ws.d_argmax;
     bool owned_idx = false;
     if (d_idx == nullptr) {
-        if (cudaMallocAsync(&d_idx, sizeof(int), stream) != cudaSuccess) {
+        if (device_alloc_all_async(stream, dev_req(d_idx, sizeof(int))) != cudaSuccess) {
             IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
             return false;
         }
@@ -1007,10 +1007,12 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     }
     if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-        if (owned_idx) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_idx, stream));
+        if (owned_idx)
+            device_free_all_async(stream, d_idx);
         return false;
     }
-    if (owned_idx) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_idx, stream));
+    if (owned_idx)
+        device_free_all_async(stream, d_idx);
     return cudaStreamSynchronize(stream) == cudaSuccess;  // false: *out_token_id not valid
 }
 

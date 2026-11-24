@@ -1,4 +1,5 @@
 #include "vision/vision_pipeline.h"
+#include "memory/device_alloc_all.h"
 #include "memory/engine_arena.h"
 #include "vision/vision_loader.h"
 #include "vision/image_processor.h"
@@ -126,7 +127,7 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
     half* d_px = d_pixels_;
     bool need_free = false;
     if (!d_px || pixel_bytes > d_pixels_size_) {
-        if (cudaMalloc(&d_px, pixel_bytes) != cudaSuccess) {
+        if (device_alloc_all(dev_req(d_px, pixel_bytes)) != cudaSuccess) {
             IMP_LOG_ERROR("Vision: cudaMalloc failed for %d pixels", n_pixels);
             return false;
         }
@@ -147,7 +148,7 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
         ok = false;
     }
     if (need_free)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_px));
+        device_free_all(d_px);
 
     if (ok) {
         has_input_ = true;

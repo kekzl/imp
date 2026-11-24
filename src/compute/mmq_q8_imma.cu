@@ -6,6 +6,7 @@
 // (mmq_q4k_imma_layout.h).
 
 #include "compute/mmq_q8_imma.h"
+#include "memory/device_alloc_all.h"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/device_info.h"
 #include "core/logging.h"
@@ -689,8 +690,8 @@ void mmq_q8_imma_release_all() {
     // frees every entry, order-independent (#2210)
     // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (auto& [_, w] : g_imma_weights) {
-        IMP_CUDA_CHECK_LOG(cudaFree(w.qs));
-        IMP_CUDA_CHECK_LOG(cudaFree(w.sc));
+        device_free_all(w.qs);
+        device_free_all(w.sc);
     }
     g_imma_weights.clear();
     g_imma_act = ActScratch{};

@@ -1,4 +1,5 @@
 #include "executor.h"
+#include "memory/device_alloc_all.h"
 #include "exec/expert_cache.h"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
@@ -63,7 +64,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     if (alloc_) {
         pool_ = alloc_->allocate(total, "expert_cache");
     } else {
-        cudaError_t err = cudaMalloc(&pool_, total);
+        cudaError_t err = device_alloc_all(dev_req(pool_, total));
         if (err != cudaSuccess)
             pool_ = nullptr;
     }
@@ -101,7 +102,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     if (n_experts_ > 0 && debug_parity_) {
         size_t cells = static_cast<size_t>(n_layers_) * kExpertProjCount * n_experts_;
         size_t bytes = cells * sizeof(int);
-        cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_lookup_), bytes);
+        cudaError_t err = device_alloc_all(dev_req(d_lookup_, bytes));
         if (err != cudaSuccess || !d_lookup_) {
             IMP_LOG_WARN(
                 "Expert LRU cache: device-side mirror alloc failed (%zu bytes, err=%s) - "
@@ -518,11 +519,11 @@ void ExpertLRUCache::destroy() {
         if (alloc_)
             alloc_->free(pool_);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            device_free_all(pool_);
         pool_ = nullptr;
     }
     if (d_lookup_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_lookup_));
+        device_free_all(d_lookup_);
         d_lookup_ = nullptr;
     }
     // d_slot_scales_ points into pool_, freed above - nothing of its own.
