@@ -448,8 +448,8 @@ void Engine::warmup() {
     // init only (AUDIT B41).
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
     size_t warm_free_before = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&warm_free_before, nullptr);
+    // A measurement, not a size: only "did the query work" is read (measure_library_forward_window).
+    (void)vram_diag_mem_info(&warm_free_before, nullptr);
     const size_t imma_planes_before = mmq_q8_imma_plane_bytes_used();
     const int64_t residual_before = MemAccount::instance().unattributed_signed_bytes();
 

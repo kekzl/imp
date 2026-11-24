@@ -236,12 +236,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
     // Opt-in policy floor (vram.reserve_floor_pct, default 0 = the 4 % allocator headroom), skipped for
     // mode 2: 10 % on top of its own ~1 GiB reserve pushed `available` to 0 on a 32 GiB card.
-    size_t total_vram = 0;
-    {
-        size_t f;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&f, &total_vram);
-    }
+    const size_t total_vram = vram_budget_total_bytes();  // 0 on a failed query: no floor
     // Budget-planner knobs (imp.conf [vram]): clamp once here so direct
     // EngineConfig embedders (tests, C-API) get the same envelope.
     const float kv_fraction = std::clamp(config.kv_fraction, 0.05f, 1.0f);
