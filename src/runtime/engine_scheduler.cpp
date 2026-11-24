@@ -15,6 +15,7 @@
 //   step_async_graph_resume — for the CUDA-graph-captured decode path.
 
 #include "runtime/engine.h"
+#include "memory/device_alloc_all.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -90,14 +91,14 @@ bool s_h_normed_owned = false;
 void* mtp_prenorm_scratch(size_t need) {
     if (s_h_normed && need <= s_h_normed_cap)
         return s_h_normed;
-    if (s_h_normed_owned && s_h_normed)
-        (void)cudaFree(s_h_normed);
+    if (s_h_normed_owned)
+        device_free_all(s_h_normed);
     s_h_normed = nullptr;
     s_h_normed_cap = 0;
     s_h_normed_owned = false;
     if (auto slab = engine_arena().take_bytes(need); !slab.empty()) {
         s_h_normed = slab.data();
-    } else if (cudaMalloc(&s_h_normed, need) != cudaSuccess) {
+    } else if (device_alloc_all(dev_req(s_h_normed, need)) != cudaSuccess) {
         s_h_normed = nullptr;
         return nullptr;
     } else {
@@ -108,8 +109,8 @@ void* mtp_prenorm_scratch(size_t need) {
 }
 
 void engine_scheduler_reset_static_cuda_state() {
-    if (s_h_normed_owned && s_h_normed)
-        (void)cudaFree(s_h_normed);
+    if (s_h_normed_owned)
+        device_free_all(s_h_normed);
     s_h_normed = nullptr;
     s_h_normed_cap = 0;
     s_h_normed_owned = false;
@@ -487,16 +488,9 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
     if (ppl_capture_.active || n < 2 || !executor_) {
         return false;
     }
-    if (cudaMalloc(&ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)) != cudaSuccess) {
-        ppl_capture_.d_tokens = nullptr;
+    if (device_alloc_all(dev_req(ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)),
+                         dev_req(ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double))) != cudaSuccess)
         return false;
-    }
-    if (cudaMalloc(&ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double)) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
-        ppl_capture_.d_tokens = nullptr;
-        ppl_capture_.d_nll = nullptr;
-        return false;
-    }
     // On the prefill stream that reads them: legacy-stream writes are not ordered before it (#2275).
     const cudaStream_t s = prefill_stream();
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ppl_capture_.d_tokens, tokens.data(),
@@ -504,12 +498,10 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double), s));
     // Greedy-agreement probe rides along for free (fused into the NLL max
     // pass); allocation failure just disables it.
-    if (cudaMalloc(&ppl_capture_.d_match, static_cast<size_t>(n) * sizeof(int32_t)) == cudaSuccess) {
+    if (device_alloc_all(dev_req(ppl_capture_.d_match, static_cast<size_t>(n) * sizeof(int32_t))) ==
+        cudaSuccess)
         IMP_CUDA_CHECK_LOG(
             cudaMemsetAsync(ppl_capture_.d_match, 0, static_cast<size_t>(n) * sizeof(int32_t), s));
-    } else {
-        ppl_capture_.d_match = nullptr;
-    }
     ppl_capture_.n = n;
     ppl_capture_.active = true;
     return true;
@@ -541,10 +533,8 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         match_sum = 0;
         for (int i = first; i <= last; ++i)
             match_sum += h_match[i];
-        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_match));
     }
-    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
-    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_nll));
+    device_free_all(ppl_capture_.d_match, ppl_capture_.d_tokens, ppl_capture_.d_nll);
     ppl_capture_ = PplCapture{};
 
     // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).

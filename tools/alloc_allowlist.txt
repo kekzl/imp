@@ -5,7 +5,7 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 47 files, 186 sites
+# remaining: 45 files, 164 sites
 
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
@@ -17,7 +17,7 @@ src/compute/mmq_q4k_imma_tile.cu  # 9
 src/compute/mmq_q8_imma.cu  # 2
 src/compute/mmq_q8_imma_scratch.cu  # 3
 src/compute/moe_routing.cu  # 1
-src/compute/mtp_forward.cu  # 10
+src/compute/mtp_forward.cu  # 3
 src/compute/nvfp4_sfatom_quant.cu  # 2
 src/compute/sampling.cu  # 2
 src/compute/sampling_penalties.cu  # 2
@@ -50,7 +50,5 @@ src/quant/gpt_oss_mxfp4_convert.cpp  # 9
 src/quant/mxfp4_sfatom.cu  # 7
 src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 5
-src/runtime/batch.cpp  # 5
-src/runtime/engine_scheduler.cpp  # 10
 src/runtime/engine_workspace_warmup.cpp  # 2
 src/vision/vision_pipeline.cpp  # 2
