@@ -53,6 +53,8 @@ public:
     [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s);
     // True when a checkpoint exists: recycling the slot would lose a prefix another prompt could reuse.
     [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
+    // Host bytes the conv-state checkpoints hold.
+    [[nodiscard]] size_t checkpoint_bytes() const;
     [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
@@ -174,6 +176,7 @@ private:
     float* conv_all_ = nullptr;             // the n_apps conv states, contiguous
     std::vector<std::vector<float>> ckpt_;  // [g - 1] = conv state at position g * kGrid
     int ckpt_valid_ = 0;                    // checkpoints 1..ckpt_valid_ belong to this sequence
+    int ckpt_free_ = 0;                     // checkpoints 1..ckpt_free_ are freed: too far back to resume
     int hw_ = 0;                            // highest position written since the last start at 0
     std::vector<int32_t> hist_;             // tokens of the sequence; rows [0, pos_) are computed
     bool armed_ = false;                    // rewind() set hist_ for the run that follows

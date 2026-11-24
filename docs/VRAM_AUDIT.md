@@ -422,3 +422,7 @@ A growable KV pool committed 25 % of its plan at start and grew ahead by a quart
 | device used after the two 15k prompts | 16444 MiB | 15778 MiB |
 
 The first large prompt after a start pays the mapping once (48.7 and 51.0 ms logged for the two sizes); from the second on the grow-ahead worker keeps one request of the last size mapped. Qwen3.8-27B-NVFP4-vllm: 22876 -> 22354 MiB after start, first 15223-token prompt 1530 -> 1448 ms.
+
+### Inkling-2-Mini conv-state checkpoints (2026-11-24)
+
+The 480 MiB of anonymous growth above are the forward's conv-state checkpoints: 3.8 MB per 256 positions and slot, kept for the whole sequence, while a resume only reaches `kSeg + kSlack` positions behind the high-water mark. Freed past that window: after a 54348-token prompt, its resend and an 18126-token prompt on the second slot (2 slots x 81920) the process holds 1753 MiB of anonymous memory instead of 2579; the resend reuses 54272 tokens in both builds, texts equal.

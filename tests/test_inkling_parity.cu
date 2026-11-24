@@ -478,6 +478,61 @@ TEST(InklingLookahead, CheckpointInsideACallIsTheRowsState) {
     }
 }
 
+// Conv-state checkpoints further back than a resume can reach are freed (3.8 MB each, one per 256
+// positions): after 9000 positions the forward holds the last 24, a prompt that diverges 2000 positions
+// before the end still resumes at its checkpoint with the rows of a fresh run (calls of 256 rows in
+// both, so the shapes match and the rows are bit-equal), one that diverges 6000 before the end starts
+// over as before.
+TEST(InklingRewind, CheckpointsBehindTheResumeWindowAreFreed) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> p = read_ids(std::string(oracle) + "/sky_prompt.json");
+    const std::vector<int32_t> q = read_ids(std::string(oracle) + "/paris_prompt.json");
+    ASSERT_FALSE(p.empty());
+    ASSERT_FALSE(q.empty());
+    const int N = 9000;
+    std::vector<int32_t> a;
+    for (int i = 0; i < N; ++i)
+        a.push_back(p[static_cast<size_t>(i) % p.size()]);
+    std::vector<int> cuts;
+    for (int c = 256; c < N; c += 256)
+        cuts.push_back(c);
+    InklingForward kept, fresh;
+    ASSERT_TRUE(kept.init(fx.w, fx.va, 512, 16384));
+    ASSERT_TRUE(fresh.init(fx.w, fx.va, 512, 16384));
+    ASSERT_FALSE(run_rows(kept, fx.w, a, 0, cuts).empty());
+    // 35 checkpoints taken; resumable are those within 5632 positions of 9000, kept with 512 of margin.
+    const size_t one = kept.checkpoint_bytes() / 24;
+    EXPECT_EQ(kept.checkpoint_bytes(), 24 * one);
+    EXPECT_GT(one, size_t{3} << 20);
+    EXPECT_LT(one, size_t{5} << 20);
+    std::printf("checkpoints after %d positions: %.1f MiB (35 taken)\n", N,
+                static_cast<double>(kept.checkpoint_bytes()) / 1048576.0);
+    // Diverges at 7000: resumes at checkpoint 27 (6912).
+    std::vector<int32_t> b(a.begin(), a.begin() + 7000);
+    for (int i = 0; i < 200; ++i)
+        b.push_back(q[static_cast<size_t>(i) % q.size()]);
+    std::vector<int32_t> far(a.begin(), a.begin() + 3000);
+    far.push_back(q[0]);
+    far.push_back(q[1]);
+    EXPECT_EQ(kept.match(far), 0);
+    ASSERT_EQ(kept.rewind(b, nullptr), 6912);
+    const std::vector<float> got = run_rows(kept, fx.w, b, 6912, {});
+    std::vector<int> cuts_b;
+    for (int c = 256; c <= 6912; c += 256)
+        cuts_b.push_back(c);
+    const std::vector<float> want = run_rows(fresh, fx.w, b, 0, cuts_b);
+    ASSERT_FALSE(got.empty());
+    ASSERT_GT(want.size(), got.size());
+    EXPECT_EQ(std::memcmp(got.data(), want.data() + (want.size() - got.size()), got.size() * sizeof(float)),
+              0);
+}
+
 // Context K/V that commit their rows as the sequence grows (growable backend): 5000 positions in calls
 // of 512 and one-row steps cross two commit steps and give the rows of a forward that holds all 8192.
 TEST(InklingRewind, GrowableContextIsBitEqual) {
