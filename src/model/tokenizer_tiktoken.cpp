@@ -157,6 +157,25 @@ std::unordered_map<int64_t, std::string> named_specials(const std::string& confi
     return named;
 }
 
+// Upstream moonshotai Kimi names of slots n_base+11..+15; llm-compressor re-exports keep 12 of 17.
+constexpr std::pair<int64_t, const char*> kKimiToolSlots[] = {
+    {11, "<|tool_calls_section_begin|>"}, {12, "<|tool_calls_section_end|>"}, {13, "<|tool_call_begin|>"},
+    {14, "<|tool_call_argument_begin|>"}, {15, "<|tool_call_end|>"},
+};
+
+// Kimi layout (<|im_system|> at +10, <|im_middle|> at +17): name the unnamed tool slots; returns count.
+size_t restore_kimi_tool_names(std::unordered_map<int64_t, std::string>& named, int64_t n_base) {
+    auto sys = named.find(n_base + 10);
+    auto mid = named.find(n_base + 17);
+    if (sys == named.end() || mid == named.end() || sys->second != "<|im_system|>" ||
+        mid->second != "<|im_middle|>")
+        return 0;
+    size_t restored = 0;
+    for (const auto& [off, name] : kKimiToolSlots)
+        restored += named.try_emplace(n_base + off, name).second ? 1 : 0;
+    return restored;
+}
+
 // (left id << 32 | right id) -> {rank, merged id} for every split of a token into two tokens.
 std::unordered_map<uint64_t, std::pair<int, int32_t>> merge_pairs(const Ranks& r) {
     std::unordered_map<uint64_t, std::pair<int, int32_t>> pairs;
@@ -189,7 +208,8 @@ bool Tokenizer::load_tiktoken(const std::string& model_path, const std::string& 
     const auto n_base = static_cast<int64_t>(r.raw.size());
 
     // Specials: added_tokens_decoder names, every other slot <|reserved_token_N|> as tiktoken names it.
-    const auto named = named_specials(config_path, n_base);
+    auto named = named_specials(config_path, n_base);
+    const size_t n_restored = restore_kimi_tool_names(named, n_base);
     int64_t n_total = n_base + kTiktokenSpecialSlots;
     for (const auto& [id, content] : named)
         n_total = std::max(n_total, id + 1);
@@ -230,9 +250,9 @@ bool Tokenizer::load_tiktoken(const std::string& model_path, const std::string& 
         return false;
     }
     build_special_pieces();
-    IMP_LOG_INFO("tiktoken: %s: %lld ranks, %lld specials (%zu named), %zu merge pairs", model_path.c_str(),
-                 static_cast<long long>(n_base), static_cast<long long>(n_total - n_base), named.size(),
-                 merge_pairs_.size());
+    IMP_LOG_INFO("tiktoken: %s: %lld ranks, %lld specials (%zu named, %zu of them restored), %zu merge pairs",
+                 model_path.c_str(), static_cast<long long>(n_base), static_cast<long long>(n_total - n_base),
+                 named.size(), n_restored, merge_pairs_.size());
     return true;
 }
 
