@@ -525,7 +525,7 @@ private:
     // carry penalties — chained steps sample against this history (host
     // upload at entry, advance-kernel append per step). Mapped-pinned
     // per-row append positions, parity-alternated like the patches.
-    int32_t* d_pipe_hist_ = nullptr;
+    VramOwned<int32_t> d_pipe_hist_;
     int pipe_hist_stride_ = 0;
     PinnedBuffer h_hist_pos_[2];  // mapped (T5b)
     int* d_hist_pos_[2] = {nullptr, nullptr};
@@ -615,7 +615,7 @@ private:
     // allocated once beside the SSM state, refilled per step. Stable POINTER
     // on purpose: a CUDA graph captures the address, so which sequences are
     // in the step can change without forcing a re-capture.
-    int* d_ssm_seq_slots_ = nullptr;
+    VramOwned<int> d_ssm_seq_slots_;
     std::vector<int> h_ssm_seq_slots_;
     bool recurrent_slots_initialized_ = false;
     // Recurrent-state snapshots (hybrid prefix caching): LRU store of
@@ -628,7 +628,7 @@ private:
     // SWA window snapshots (kv_cache.swa_snapshot_mb): packed windowed-layer
     // KV per prefix hash, makes prefix caching valid under SWA sizing.
     std::unique_ptr<RecurrentSnapshotStore> swa_snapshots_;
-    void* swa_snap_slab_ = nullptr;  // pack/save scratch, swa_snapshot_bytes()
+    VramOwned<char> swa_snap_slab_;  // pack/save scratch, swa_snapshot_bytes()
     // Hybrid decode fairness: round-robin rotation state for the batch-1
     // recurrent decode (quantum-based; see step_decode).
     int hybrid_active_req_ = -1;    // request id currently holding the decode slice
@@ -684,9 +684,9 @@ private:
     // shared buffer would reallocate it and leave replayed graphs reading
     // freed memory. The decode buffer is sized once to the batch ceiling and
     // never moves; only the prefill one grows.
-    int32_t* d_mrope_prefill_ = nullptr;
+    VramOwned<int32_t> d_mrope_prefill_;
     int mrope_prefill_cap_ = 0;
-    int32_t* d_mrope_decode_ = nullptr;
+    VramOwned<int32_t> d_mrope_decode_;
     int mrope_decode_cap_ = 0;
     // Binds M-RoPE onto a SINGLE-request decode state (graph templates, the
     // speculative chunk). Generated text needs only the scalar delta, so this
@@ -697,7 +697,7 @@ private:
     // Uploads `h_mrope_scratch_` ([3, n]) and points `state.mrope` at it, with
     // the section split from the model config. No-op for a model without
     // M-RoPE, which is how every text-only model keeps the unchanged path.
-    void bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int& cap, bool fixed,
+    void bind_mrope_(InferenceState& state, int n_tokens, VramOwned<int32_t>& buf, int& cap, bool fixed,
                      cudaStream_t stream);
     // The prompt's own (t, h, w) rows for one prefill chunk.
     // Ragged prefill: concatenate the per-request M-RoPE axis rows of K
@@ -772,7 +772,7 @@ private:
     } prompt_lp_scratch_;
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
-    void* prefill_pool_ = nullptr;
+    VramOwned<char> prefill_pool_;
     size_t prefill_pool_size_ = 0;
     int32_t* d_pf_token_ids_ = nullptr;
     int* d_pf_positions_ = nullptr;
@@ -819,7 +819,7 @@ private:
     // break overhead; resets to 8 on a successful verify.
     int spec_rr_yield_interval_ = 8;
 
-    int32_t* d_penalty_tokens_ = nullptr;
+    VramOwned<int32_t> d_penalty_tokens_;
     // Per-request device-resident penalty histories for the n>1 decode loop
     // (#1755). A slot holds the history on device; one kernel appends each
     // step's sampled tokens from the sample slots. req_id-keyed with lazy
@@ -840,7 +840,7 @@ private:
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
     // consumed synchronously per chunk (host accumulation on the request) so
     // interleaved chunks of concurrent embedding requests can share it.
-    float* d_embed_pool_scratch_ = nullptr;
+    VramOwned<float> d_embed_pool_scratch_;
     size_t d_penalty_tokens_capacity_ = 0;
 
     // ── MTP spec-decode ──────────────────────────────────────────
@@ -1123,14 +1123,14 @@ private:
     // device block (d_spec_stage_) with a pinned host twin, one H2D per
     // step; the named pointers below are stable sub-pointers into it. Same
     // layout trick for [argmax | topm], one D2H per step.
-    int32_t* d_spec_stage_ = nullptr;
+    VramOwned<int32_t> d_spec_stage_;
     PinnedBuffer h_spec_stage_;  // pinned twin of d_spec_stage_ (T5b)
     int32_t* d_spec_tokens_ = nullptr;
     int* d_spec_positions_ = nullptr;
-    int* d_spec_block_table_ = nullptr;
-    int* d_spec_block_table_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
+    VramOwned<int> d_spec_block_table_;
+    VramOwned<int> d_spec_block_table_swa_;  // SWA-group mirror (kv_cache.swa_sizing)
     int* d_spec_context_len_ = nullptr;
-    int32_t* d_spec_argmax_ = nullptr;  // head of the [argmax | topm] block
+    VramOwned<int32_t> d_spec_argmax_;  // head of the [argmax | topm] block
     // diagnostics.spec_trace only: the chunk's full logits, so the trace can
     // report the top-2 gap per row rather than just which token won.
     VramOwned<float> d_spec_logits_;
@@ -1145,7 +1145,7 @@ private:
     // the chunk's attention runs the batched-decode split-K kernels: row i
     // becomes a same-KV "sequence" with ctx p0+1+i (causality via lengths).
     int* d_spec_row_ctx_lens_ = nullptr;  // sub-pointer into d_spec_stage_
-    int* d_spec_row_block_tables_ = nullptr;
+    VramOwned<int> d_spec_row_block_tables_;
     PinnedBuffer h_spec_row_tables_pinned_;  // pinned staging, chunk_cap * table_cap (T5b)
     int spec_chunk_cap_ = 0;
     int spec_block_table_cap_ = 0;
@@ -1153,8 +1153,8 @@ private:
     // recurrent-state slab across the speculative chunk forward (the chunk
     // advances state through rejected draft positions; on partial acceptance
     // the slab is restored and the accepted prefix re-forwarded).
-    void* spec_state_scratch_ = nullptr;
-    void* spec_state_snap_ = nullptr;   // mid-chunk recurrent snapshot (row 0, then row 1 where written)
+    VramOwned<char> spec_state_scratch_;
+    VramOwned<char> spec_state_snap_;   // mid-chunk recurrent snapshot (row 0, then row 1 where written)
     int64_t spec_state_snap2_off_ = 0;  // bytes to the row-1 snapshot, 0 = one row only
     [[nodiscard]] int spec_snap_rows_() const;  // 2 = GDN conv + fused scan write both rows
     // diagnostics.spec_capture_fidelity tallies (see the flag in dispatch_policy.h).
@@ -1342,7 +1342,7 @@ private:
     // prematurely release the grace. Host vector + device mirror for the GPU
     // conditional-graph loop; size == vocab.
     std::vector<uint8_t> token_is_whitespace_;
-    uint8_t* d_token_is_whitespace_ = nullptr;
+    VramOwned<uint8_t> d_token_is_whitespace_;
     [[nodiscard]] bool token_is_whitespace(int32_t token) const {
         return token >= 0 && token < static_cast<int32_t>(token_is_whitespace_.size()) &&
                token_is_whitespace_[token];

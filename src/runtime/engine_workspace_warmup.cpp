@@ -171,13 +171,11 @@ bool Engine::init_features() {
                     if (think_logic::piece_is_whitespace(ptok->decode_token(id)))
                         token_is_whitespace_[id] = 1;
                 }
-                d_token_is_whitespace_ = static_cast<uint8_t*>(
-                    vram_alloc_.allocate(vocab * sizeof(uint8_t),
-                                                              "token_is_whitespace"));
+                d_token_is_whitespace_ = VramOwned<uint8_t>(vram_alloc_, static_cast<size_t>(vocab),
+                                                            "token_is_whitespace");
                 if (d_token_is_whitespace_) {
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_is_whitespace_,
-                                                       token_is_whitespace_.data(),
-                                                       vocab * sizeof(uint8_t),
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_is_whitespace_.get(),
+                                                       token_is_whitespace_.data(), vocab * sizeof(uint8_t),
                                                        cudaMemcpyHostToDevice, stream_));
                     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream_));
                 }

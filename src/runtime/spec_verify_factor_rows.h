@@ -13,7 +13,7 @@ struct RuntimeConfig;
 class SSMState;
 class VRAMAllocator;
 
-void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
+void free_factored_rows(BatchVerifyState& bv);
 
 // Factor rows and conv taps per (verify group, level) and the fold lists (bv.d_fac, d_tap, d_clear), levels =
 // drafts - 1. false = nothing allocated (geometry, state dtype or VRAM): the caller verifies 1 draft.

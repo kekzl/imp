@@ -145,24 +145,14 @@ Engine::~Engine() {
     // pipeline (teardown keeps them); this is their one release.
     cpipe_.h_token.reset();
     cpipe_.ev.reset();
-    vram_alloc_.free(swa_snap_slab_);
-    swa_snap_slab_ = nullptr;
-    vram_alloc_.free(d_ssm_seq_slots_);  // was never released
-    d_ssm_seq_slots_ = nullptr;
+    // VramOwned members: reset() here keeps the release order of the hand-written frees it replaced.
+    swa_snap_slab_.reset();
+    d_ssm_seq_slots_.reset();
     free_mrope_buffers_();
-    if (d_penalty_tokens_) {
-        vram_alloc_.free(d_penalty_tokens_);
-        d_penalty_tokens_ = nullptr;
-    }
+    d_penalty_tokens_.reset();
     d_penalty_hist_.reset();  // had no release before; the owner also frees at member teardown
-    if (d_embed_pool_scratch_) {
-        vram_alloc_.free(d_embed_pool_scratch_);
-        d_embed_pool_scratch_ = nullptr;
-    }
-    if (d_token_is_whitespace_) {
-        vram_alloc_.free(d_token_is_whitespace_);
-        d_token_is_whitespace_ = nullptr;
-    }
+    d_embed_pool_scratch_.reset();
+    d_token_is_whitespace_.reset();
     abandon_decode_pipeline();
     for (int p = 0; p < 2; ++p) {
         // T5b owners release themselves; the d_* mirrors are views into them, so
@@ -174,14 +164,10 @@ Engine::~Engine() {
         d_bt_patch_val_[p] = nullptr;
         d_hist_pos_[p] = nullptr;
     }
-    vram_alloc_.free(d_pipe_hist_);
-    d_pipe_hist_ = nullptr;
+    d_pipe_hist_.reset();
     log_spec_stats_();
     free_spec_buffers_();
-    if (prefill_pool_) {
-        vram_alloc_.free(prefill_pool_);
-        prefill_pool_ = nullptr;
-    }
+    prefill_pool_.reset();
     pf_staging_evt_.reset();
     // Encoder embedder workspace cleanup (#836)
     if (encoder_ws_storage_) {

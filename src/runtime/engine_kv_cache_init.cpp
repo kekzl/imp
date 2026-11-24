@@ -710,7 +710,7 @@ void enable_prefix_caching(const KvInitCtx& c, KVCacheManager& kvm,
 // The Engine members the recurrent-state phase builds.
 struct RecurrentStateOut {
     std::unique_ptr<SSMState>& ssm_state;
-    int*& d_seq_slots;
+    VramOwned<int>& d_seq_slots;
     std::vector<int>& h_seq_slots;
     std::unique_ptr<RecurrentSnapshotStore>& snapshots;
 };
@@ -749,12 +749,13 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
     // rebuilt when the set of active sequences changes.
     if (out.ssm_state && c.ec.max_batch_size > 0) {
         const size_t bytes = static_cast<size_t>(c.ec.max_batch_size) * sizeof(int);
-        out.d_seq_slots = alloc ? static_cast<int*>(alloc->allocate(bytes, "ssm_seq_slots")) : nullptr;
+        out.d_seq_slots = alloc ? VramOwned<int>(*alloc, bytes / sizeof(int), "ssm_seq_slots")
+                                : VramOwned<int>();
         if (!out.d_seq_slots) {
             IMP_LOG_WARN("batched GDN decode: slot table alloc failed — staying single-sequence");
         } else {
             // Log only: the scheduler uploads the table before every batched step.
-            IMP_CUDA_CHECK_LOG(cudaMemset(out.d_seq_slots, 0, bytes));
+            IMP_CUDA_CHECK_LOG(cudaMemset(out.d_seq_slots.get(), 0, bytes));
             out.h_seq_slots.assign(static_cast<size_t>(c.ec.max_batch_size), 0);
         }
     }
@@ -812,14 +813,15 @@ void init_recurrent_state(const KvInitCtx& c, KVCacheManager& kvm, int ssm_reser
 // off.
 void init_swa_snapshots(const KvInitCtx& c, bool swa_active, KVCacheManager& kvm, Scheduler* scheduler,
                         Scheduler::PrefixReuseLimitFn reuse_limit,
-                        std::unique_ptr<RecurrentSnapshotStore>& store, void*& slab, VRAMAllocator& va) {
+                        std::unique_ptr<RecurrentSnapshotStore>& store, VramOwned<char>& slab,
+                        VRAMAllocator& va) {
     if (!swa_active || !kvm.prefix_caching_enabled())
         return;
     const int budget_mb = c.rc.kv_cache.swa_snapshot_mb;
     if (budget_mb > 0 && kvm.enable_swa_snapshots()) {
         const size_t slab_bytes = kvm.swa_snapshot_bytes();
-        slab = va.allocate(slab_bytes, "swa_snapshot_slab");
-        if (slab != nullptr) {
+        slab = VramOwned<char>(va, slab_bytes, "swa_snapshot_slab");
+        if (slab) {
             store = std::make_unique<RecurrentSnapshotStore>();
             store->init(slab_bytes, static_cast<size_t>(budget_mb) << 20);
             if (store->enabled()) {
@@ -827,8 +829,7 @@ void init_swa_snapshots(const KvInitCtx& c, bool swa_active, KVCacheManager& kvm
                 log_swa_snapshot_store(*store, budget_mb);
             } else {
                 store.reset();
-                va.free(slab);
-                slab = nullptr;
+                slab.reset();
             }
         }
     }
@@ -1064,8 +1065,7 @@ bool Engine::init_kv_cache() {
         IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
-        d_penalty_tokens_ = static_cast<int32_t*>(
-            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+        d_penalty_tokens_ = VramOwned<int32_t>(vram_alloc_, d_penalty_tokens_capacity_, "penalty_tokens");
         if (!d_penalty_tokens_) {
             IMP_LOG_WARN("Failed to pre-allocate penalty token buffer");
             d_penalty_tokens_capacity_ = 0;
@@ -1133,12 +1133,12 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     const auto lay = ServingMetadataLayout::compute(config_.max_seq_len, seq_cap, bt_cap, swa_sizing_active_,
                                                     SAMPLE_SCRATCH_BYTES);
     prefill_pool_size_ = lay.total;
-    prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
+    prefill_pool_ = VramOwned<char>(vram_alloc_, prefill_pool_size_, "prefill_pool");
     if (!prefill_pool_) {
         IMP_LOG_WARN("Failed to pre-allocate the serving metadata pool, will use per-request malloc");
         return;
     }
-    auto* base = static_cast<char*>(prefill_pool_);
+    char* base = prefill_pool_.get();
     auto ints = [base](size_t o) { return reinterpret_cast<int*>(base + o); };
     d_pf_token_ids_ = reinterpret_cast<int32_t*>(base + lay.pf_tok);
     d_pf_positions_ = ints(lay.pf_pos);
@@ -1168,11 +1168,9 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     // ceiling, decode rows to the batch ceiling. bind_mrope_ never regrows a fitting buffer.
     if (model_->config_.has_mrope()) {
         const int rows = std::max(1, executor_ ? executor_->max_tokens() : config_.max_seq_len);
-        d_mrope_prefill_ = static_cast<int32_t*>(
-            vram_alloc_.allocate(static_cast<size_t>(3) * rows * sizeof(int32_t), "mrope_positions"));
+        d_mrope_prefill_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(3) * rows, "mrope_positions");
         mrope_prefill_cap_ = d_mrope_prefill_ ? rows : 0;
-        d_mrope_decode_ = static_cast<int32_t*>(
-            vram_alloc_.allocate(static_cast<size_t>(seq_cap) * sizeof(int32_t), "mrope_delta"));
+        d_mrope_decode_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(seq_cap), "mrope_delta");
         mrope_decode_cap_ = d_mrope_decode_ ? seq_cap : 0;
     }
     IMP_LOG_INFO("Serving metadata pool: %.1f MiB (rows %d, %d tables x %d blocks)",
