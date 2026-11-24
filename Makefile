@@ -295,7 +295,8 @@ test-e2e: build
 	@# The three groups below ran from NO target until 2026-11-24: the AUDIT_ARCH_2026 I-1
 	@# escape class a third time (AUDIT_ARCH_2026_11_24 X-1), 16 model variables set nowhere.
 	@# tools/check_test_model_env.py now fails a variable read under tests/ that no target sets.
-	@# Inkling lives in test-compute. 2 of its 19 model tests need the checkpoint alone; 17 also
+	@# Inkling lives in test-compute: one process, one 17.61 GiB load (tests/inkling_fixture.h), a test
+	@# with its own load fails here. 2 of its 19 model tests need the checkpoint alone; 17 also
 	@# need the transformers reference dumps, which are not in the model store: pass
 	@# INKLING_ORACLE=<dir> (16 tests) and INKLING_KLD=<dir> (1 test, tools/analysis/inkling_kld_oracle.py).
 	@[ -n "$(INKLING_ORACLE)" ] || echo "test-e2e: inkling: INKLING_ORACLE unset, 16 of 19 tests SKIP"
