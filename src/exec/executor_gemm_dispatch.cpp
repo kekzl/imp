@@ -7,6 +7,7 @@
 // WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
 // dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
 #include "exec/executor_kernels.h"
+#include "exec/executor_helpers.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/gemm_context.h"
 #include "exec/gemm_dispatch_fallback.h"
@@ -850,13 +851,9 @@ void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
     if (cap != cudaStreamCaptureStatusNone)
         return;
     if (smallm_ws_ && !smallm_ws_arena_)
-        IMP_CUDA_CHECK_LOG(cudaFree(smallm_ws_));
-    if (cudaMalloc(&smallm_ws_, need) == cudaSuccess)
-        smallm_ws_bytes_ = need;
-    else {
-        smallm_ws_ = nullptr;
-        smallm_ws_bytes_ = 0;
-    }
+        vram_free(vram_alloc_, smallm_ws_);
+    smallm_ws_ = static_cast<decltype(smallm_ws_)>(vram_alloc_force(vram_alloc_, need, "smallm_ws_grown"));
+    smallm_ws_bytes_ = smallm_ws_ ? need : 0;
     smallm_ws_arena_ = false;
 }
 
@@ -869,14 +866,10 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
     if (cap != cudaStreamCaptureStatusNone)
         return;
     if (smallm_xq_ && !smallm_xq_arena_)
-        IMP_CUDA_CHECK_LOG(cudaFree(smallm_xq_));
+        vram_free(vram_alloc_, smallm_xq_);
     smallm_xq_arena_ = false;
-    if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
-        smallm_xq_bytes_ = xq_need;
-    else {
-        smallm_xq_ = nullptr;
-        smallm_xq_bytes_ = 0;
-    }
+    smallm_xq_ = static_cast<decltype(smallm_xq_)>(vram_alloc_force(vram_alloc_, xq_need, "smallm_xq_grown"));
+    smallm_xq_bytes_ = smallm_xq_ ? xq_need : 0;
     smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
     smallm_xq_from_producer_ = false;
 }
