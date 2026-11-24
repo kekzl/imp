@@ -517,19 +517,18 @@ bool kv_pool_fits_vram_budget(const EngineConfig& ec, int kv_bs, size_t per_bloc
 }
 
 // Returns the blocks to commit up front; a growable pool may start under the clamped count.
-int growable_initial_blocks(const RuntimeConfig& rc, int max_blocks, int kv_ceiling_blocks, int kv_bs) {
+int growable_initial_blocks(const RuntimeConfig& rc, int max_blocks, int kv_ceiling_blocks, int kv_bs,
+                            size_t per_block_bytes) {
     if (kv_ceiling_blocks > 0) {
-        // Commit a fraction on purpose when the operator asked: the clamp above
-        // answers "what fits" from a reading that is wrong in both directions on
-        // this platform, so starting under it is the only way to stay resident.
-        const int pct = std::clamp(rc.kv_cache.growable_initial_pct, 1, 100);
-        if (pct < 100) {
-            const int initial = std::max(16, max_blocks / 100 * pct);
-            if (initial < max_blocks) {
-                IMP_LOG_INFO("KV cache: committing %d%% of the pool up front (%d of %d blocks)", pct, initial,
-                             max_blocks);
-                max_blocks = initial;
-            }
+        // A buffer on purpose: the clamp above reads "what fits" wrong in both directions here, and
+        // what the pool does not hold yet stays with the card's other tenants (kv_replan.h).
+        const int pct = rc.kv_cache.growable_initial_pct;
+        const int initial = kv_initial_commit_blocks(max_blocks, pct, per_block_bytes);
+        if (initial < max_blocks) {
+            IMP_LOG_INFO(
+                "KV cache: committing %d of %d blocks up front (%.0f MiB; %d%% of the pool, at most 512)",
+                initial, max_blocks, static_cast<double>(initial) * per_block_bytes / 1048576.0, pct);
+            max_blocks = initial;
         }
     }
     if (kv_ceiling_blocks > max_blocks) {
@@ -1010,7 +1009,8 @@ bool Engine::init_kv_cache() {
     const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
     // What the pool was actually built with; the retry loop below may lower it.
     int kv_ceiling_effective = kv_ceiling_blocks;
-    max_blocks = growable_initial_blocks(runtime_config_, max_blocks, kv_ceiling_blocks, kv_bs);
+    max_blocks = growable_initial_blocks(runtime_config_, max_blocks, kv_ceiling_blocks, kv_bs,
+                                         per_block_total_bytes);
     log_kv_pool_summary(ctx, kv, max_blocks);
 
     std::unique_ptr<KVCache> kv_cache = allocate_kv_pool(ctx, kv, &vram_alloc_, vram_budget.swa_max_blocks,

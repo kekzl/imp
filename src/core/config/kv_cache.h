@@ -34,9 +34,9 @@ struct KVCache {
     bool growable = true;
     // Percent of the planned pool to commit at startup when growable. 100
     // commits whatever the residual clamp allowed, growing only if short; a
-    // lower value (default 25, since vram.lazy_commit) commits a fraction and
-    // grows at admission: a successful cudaMalloc proves nothing about free
-    // VRAM on WSL2 (a full-size commit can silently spill to host memory).
+    // lower value (default 25) commits that share, at most 512 MiB
+    // (kKvInitialCommitCapBytes), and grows at admission: the pool starts as a
+    // buffer and the rest of the card stays free until a request needs it.
     int growable_initial_pct = 25;
     // SWA-aware KV sizing: sliding-window layers allocate only the trailing
     // window instead of full-length KV. Auto-disabled for models without SWA,

@@ -63,7 +63,7 @@ TEST(KvReplan, PlansWhatACachedMeasurementPlans) {
     EXPECT_EQ(r.plan_blocks, plan_blocks_at(in.probe, 1930 * kMiB));
     EXPECT_EQ(in.plan_blocks, 5998) << "fixture reproduces the logged first-start plan";
     EXPECT_NEAR(r.plan_blocks, 8688, 1) << "and the logged plan at the cached 1930 MiB (MiB-rounded inputs)";
-    EXPECT_EQ(r.commit_blocks, kv_initial_commit_blocks(r.plan_blocks, 25));
+    EXPECT_EQ(r.commit_blocks, kv_initial_commit_blocks(r.plan_blocks, 25, in.per_block_bytes));
 }
 
 // 1970 MiB less reserve / 288 KiB per block = 7004 blocks: 13599 -> 20603, the second start's ceiling.
@@ -113,6 +113,20 @@ TEST(KvReplan, InitialCommitFollowsTheInitRule) {
     EXPECT_EQ(kv_initial_commit_blocks(40, 25), 16);
     EXPECT_EQ(kv_initial_commit_blocks(10, 25), 10);
     EXPECT_EQ(kv_initial_commit_blocks(8688, 100), 8688);
+}
+
+// With the block size the commit is a buffer of at most kKvInitialCommitCapBytes (512 MiB): 1820
+// blocks of 288 KiB, 256 of 2 MiB. pct 100 still commits the plan, and 16 blocks stay the floor.
+TEST(KvReplan, InitialCommitIsCappedInBytes) {
+    EXPECT_EQ(kKvInitialCommitCapBytes, size_t{512} * kMiB);
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 25, 288 * kKiB), 1820);
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 25, 2 * kMiB), 256);
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 5, 2 * kMiB), 256)
+        << "5 % of the plan is 430 blocks, over the cap";
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 1, 2 * kMiB), 86) << "under the cap the share decides";
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 100, 2 * kMiB), 8688);
+    EXPECT_EQ(kv_initial_commit_blocks(8688, 25, 1024 * kMiB), 16);
+    EXPECT_EQ(kv_initial_commit_blocks(10, 25, 2 * kMiB), 10);
 }
 
 TEST(KvReplan, ArmsOnlyForAnAcceptedPlanThatChargedTheConstant) {

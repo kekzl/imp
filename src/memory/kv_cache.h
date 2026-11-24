@@ -301,6 +301,9 @@ private:
     int try_grow_to_(int wanted, bool honor_retry);
     // True while a refused growth's retry window (grow_retry_ms_) is open.
     [[nodiscard]] bool grow_refused_recently_() const;
+    // Blocks of kGrowAheadStepBytes at this pool's geometry (K + V of every layer), at least 1.
+    [[nodiscard]] int grow_step_cap_blocks_() const;
+    static constexpr size_t kGrowAheadStepBytes = size_t{256} << 20;
     int grow_retry_ms_ = 0;
     int last_admit_blocks_ = 0;
     std::atomic<int64_t> grow_refused_at_ns_{0};  // steady_clock, 0 = never refused

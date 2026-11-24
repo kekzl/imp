@@ -19,6 +19,14 @@ int64_t steady_ns() {
 }
 }  // namespace
 
+int KVCache::grow_step_cap_blocks_() const {
+    size_t per_block = 0;
+    for (int l = 0; l < n_layers_; l++)
+        per_block += 2 *
+                     (layer_block_bytes_.empty() ? block_bytes_ : layer_block_bytes_[static_cast<size_t>(l)]);
+    return per_block > 0 ? std::max(1, static_cast<int>(kGrowAheadStepBytes / per_block)) : 1 << 30;
+}
+
 bool KVCache::grow_refused_recently_() const {
     const int64_t at = grow_refused_at_ns_.load(std::memory_order_relaxed);
     return grow_retry_ms_ > 0 && at != 0 && steady_ns() - at < static_cast<int64_t>(grow_retry_ms_) * 1000000;
@@ -136,7 +144,9 @@ void KVCache::grow_ahead_tick() {
     const int have = adopt_grown();
     if (have >= max_blocks_)
         return;
-    const int step = std::max({64, have / 4, last_admit_blocks_});
+    // A quarter of the pool, at most kGrowAheadStepBytes: the step is a buffer for the next request,
+    // and the last admission's size keeps a large one from waiting for its mapping.
+    const int step = std::max({64, std::min(have / 4, grow_step_cap_blocks_()), last_admit_blocks_});
     if (blocks_.free_count() >= step || grow_refused_recently_())
         return;
     {
