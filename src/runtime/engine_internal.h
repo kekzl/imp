@@ -164,6 +164,16 @@ inline size_t library_reserve_charge(int library_reserve_mb) {
 // The library reserve this start measured: max(forward window, whole-init residual), the residual
 // being device use minus the pool ledger. None without a forward window, and none when the residual
 // is negative: the ledger then counts a pool twice and hides the libraries (#2347, 27B: -253 MiB).
+// What the first forward claimed that no pool and no named charge explains: the growth of the
+// reconciliation residual across the window, less named_in_window (bytes the window took that
+// are attributed outside the ledger, the IMMA prefill planes). Device growth alone counted every
+// tracked buffer the forward commits lazily a second time (Inkling-2-Mini: 733 MiB).
+inline size_t library_forward_window(int64_t residual_before, int64_t residual_after,
+                                     size_t named_in_window) {
+    const int64_t grown = residual_after - residual_before - static_cast<int64_t>(named_in_window);
+    return grown > 0 ? static_cast<size_t>(grown) : 0;
+}
+
 inline std::optional<size_t> library_reserve_measurement(size_t forward_window, int64_t residual) {
     if (forward_window == SIZE_MAX || residual < 0)
         return std::nullopt;

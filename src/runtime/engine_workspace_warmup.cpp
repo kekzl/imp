@@ -353,14 +353,13 @@ void Engine::build_banned_token_list() {
 // `named_in_window` subtracts what the window swallowed that IS already attributed: the
 // IMMA prefill planes the first forward takes and the plan already charged (#1899).
 // Without it the window double-counts them as an unattributed library claim across starts.
-static size_t measure_library_forward_window(size_t free_before, size_t named_in_window) {
+static size_t measure_library_forward_window(size_t free_before, int64_t residual_before,
+                                             size_t named_in_window) {
     if (free_before == 0)
         return SIZE_MAX;
-    size_t free_after = 0;
-    if (!vram_budget_mem_get_info(&free_after, nullptr))
-        return SIZE_MAX;
-    const size_t window = free_before > free_after ? free_before - free_after : 0;
-    return window > named_in_window ? window - named_in_window : 0;
+    return engine_internal::library_forward_window(residual_before,
+                                                   MemAccount::instance().unattributed_signed_bytes(),
+                                                   named_in_window);
 }
 
 // What this start measured, or why it measured nothing (negative residual: #2347).
@@ -452,6 +451,7 @@ void Engine::warmup() {
     // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
     (void)vram_budget_mem_get_info(&warm_free_before, nullptr);
     const size_t imma_planes_before = mmq_q8_imma_plane_bytes_used();
+    const int64_t residual_before = MemAccount::instance().unattributed_signed_bytes();
 
     for (int prompt_len : {16, 32}) {
         auto req = std::make_shared<Request>();
@@ -474,7 +474,8 @@ void Engine::warmup() {
     const size_t imma_planes_in_window = mmq_q8_imma_plane_bytes_used() > imma_planes_before
                                              ? mmq_q8_imma_plane_bytes_used() - imma_planes_before
                                              : 0;
-    const size_t forward_window = measure_library_forward_window(warm_free_before, imma_planes_in_window);
+    const size_t forward_window = measure_library_forward_window(warm_free_before, residual_before,
+                                                                 imma_planes_in_window);
 
     // Which library claims WHEN depends on the model's execution path, so the forward window
     // only sees part of the charge (Q8_0 measures ~7.5 GiB in-forward; NVFP4 with CUTLASS claimed
