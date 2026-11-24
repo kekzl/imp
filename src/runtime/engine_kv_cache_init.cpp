@@ -872,7 +872,7 @@ void build_post_cache_gemm_buffers(const EngineConfig& ec, GraphExecutor& execut
 
 void log_gpu_memory(VRAMAllocator& alloc) {
     size_t free_mem = 0, total_mem = 0;
-    if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess)
+    if (vram_diag_mem_info(&free_mem, &total_mem))
         IMP_LOG_INFO("GPU memory: %.0f MiB used / %.0f MiB total (%.0f MiB free)",
                      (total_mem - free_mem) / (1024.0 * 1024.0), total_mem / (1024.0 * 1024.0),
                      free_mem / (1024.0 * 1024.0));

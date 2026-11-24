@@ -169,7 +169,7 @@ void VRAMAllocator::report() const {
 
     size_t tracked = allocated_.load(std::memory_order_relaxed);
     size_t free_mem = 0, total = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total));
+    (void)vram_diag_mem_info(&free_mem, &total);
 
     IMP_LOG_INFO(
         "VRAMAllocator report: tracked=%.0f MiB, free=%.0f MiB, "

@@ -667,6 +667,10 @@ sanitize:
 check-alloc-sites:
 	@$(PY_RUN) tools/check_alloc_sites.py
 
+# I4 gate: readings of free device memory outside src/memory/vram_query.*, shrinking allowlist.
+check-live-vram-queries:
+	@$(PY_RUN) tools/check_live_vram_queries.py
+
 # Remaining direct allocation sites, worst files first. Never fails.
 alloc-sites-stats:
 	@$(PY_RUN) tools/check_alloc_sites.py --stats
