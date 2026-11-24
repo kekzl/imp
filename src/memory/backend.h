@@ -66,6 +66,17 @@ void note_serving_allocation(RegionTag tag, size_t bytes, const void* site = nul
 // from the I2 violations above and logged once per tag at INFO.
 void note_planned_commit(RegionTag tag, size_t bytes);
 
+// Host-pinned memory a refill worker takes off the request path while serving: planned growth of a
+// tier sized at init, so the allocation interposer does not count it against I2. Thread-local RAII.
+class PlannedHostAllocScope {
+public:
+    PlannedHostAllocScope();
+    ~PlannedHostAllocScope();
+    PlannedHostAllocScope(const PlannedHostAllocScope&) = delete;
+    PlannedHostAllocScope& operator=(const PlannedHostAllocScope&) = delete;
+};
+[[nodiscard]] bool in_planned_host_alloc();
+
 // Total acquisitions observed while in AllocPhase::Serving, all tags.
 uint64_t steady_state_allocations();
 // Per-tag breakdown; `tag` indexes the RegionTag enum.

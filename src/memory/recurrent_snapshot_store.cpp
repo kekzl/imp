@@ -1,4 +1,5 @@
 #include "memory/recurrent_snapshot_store.h"
+#include "memory/backend.h"
 #include "memory/host_pinned.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"
@@ -9,6 +10,7 @@ namespace imp {
 RecurrentSnapshotStore::~RecurrentSnapshotStore() {
     if (!pool_)
         return;
+    stop_host_refill_();
     MemAccount::instance().note("recurrent_snapshots",
                                 -static_cast<std::ptrdiff_t>(static_cast<size_t>(allocated_bufs_) *
                                                              buf_bytes_));
@@ -87,11 +89,80 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     // Host tier: pinned, so the eviction D2H and the restore H2D run as stream-ordered async copies.
     // A slab is pinned when a demotion first needs it (103 slabs up front held a start for 10 s).
     host_capacity_ = static_cast<int>(host_budget_bytes / buf_bytes_);
-    if (host_capacity_ > 0)
-        IMP_LOG_INFO(
-            "RecurrentSnapshotStore: host tier up to %d slots x %.1f MiB, pinned on first use "
-            "(budget %.0f MiB)",
-            host_capacity_, entry_bytes / (1024.0 * 1024.0), host_budget_bytes / (1024.0 * 1024.0));
+    if (host_capacity_ <= 0)
+        return;
+    IMP_LOG_INFO(
+        "RecurrentSnapshotStore: host tier up to %d slots x %.1f MiB, %d pinned ahead by a worker "
+        "(budget %.0f MiB)",
+        host_capacity_.load(), entry_bytes / (1024.0 * 1024.0), host_spare_,
+        host_budget_bytes / (1024.0 * 1024.0));
+    if (host_spare_ > 0 && cudaGetDevice(&refill_device_) == cudaSuccess)
+        host_refill_ = std::thread(&RecurrentSnapshotStore::host_refill_loop_, this);
+}
+
+int RecurrentSnapshotStore::host_slabs_ready() const {
+    if (!pool_)
+        return 0;
+    std::lock_guard<std::mutex> lk(pool_->mu);
+    return static_cast<int>(pool_->free_host_bufs.size());
+}
+
+void* RecurrentSnapshotStore::pin_host_slab_() {
+    if (host_allocated_.load() >= host_capacity_.load())
+        return nullptr;
+    void* p = nullptr;
+    if (host_ram_spares(buf_bytes_) && cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) == cudaSuccess) {
+        ++host_allocated_;
+        host_pinned_note(p, buf_bytes_, "recurrent_snapshots");
+        return p;
+    }
+    (void)cudaGetLastError();
+    IMP_LOG_WARN(
+        "RecurrentSnapshotStore: the host refused slab %d of %d (%.1f MiB each), the host tier "
+        "stays at %d; fewer snapshots means more full re-prefills",
+        host_allocated_.load() + 1, host_capacity_.load(), buf_bytes_ / (1024.0 * 1024.0),
+        host_allocated_.load());
+    host_capacity_ = host_allocated_.load();
+    return nullptr;
+}
+
+// Keeps host_spare_ free pinned slabs while the tier is below its ceiling. Pinning 79.5 MiB is a
+// page-locking call: here it runs beside the requests, not inside a demotion.
+void RecurrentSnapshotStore::host_refill_loop_() {
+    if (cudaSetDevice(refill_device_) != cudaSuccess)
+        return;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(pool_->mu);
+            pool_->cv.wait(lk, [this] {
+                return pool_->refill_stop || (static_cast<int>(pool_->free_host_bufs.size()) < host_spare_ &&
+                                              host_allocated_.load() < host_capacity_.load());
+            });
+            if (pool_->refill_stop)
+                return;
+        }
+        void* p = nullptr;
+        {
+            PlannedHostAllocScope planned;
+            std::lock_guard<std::mutex> pl(pin_mu_);
+            p = pin_host_slab_();
+        }
+        if (!p)
+            continue;  // at the ceiling now: the predicate holds the worker until a slab is released
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        pool_->free_host_bufs.push_back(p);
+    }
+}
+
+void RecurrentSnapshotStore::stop_host_refill_() {
+    if (!host_refill_.joinable())
+        return;
+    {
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        pool_->refill_stop = true;
+    }
+    pool_->cv.notify_all();
+    host_refill_.join();
 }
 
 std::shared_ptr<const RecurrentSnapshotEntry> RecurrentSnapshotStore::find(size_t key) {
@@ -141,29 +212,27 @@ std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(
 }
 
 void* RecurrentSnapshotStore::acquire_host_buffer_() {
-    {
+    const auto take_ready = [this]() -> void* {
         std::lock_guard<std::mutex> lk(pool_->mu);
-        if (!pool_->free_host_bufs.empty()) {
-            void* p = pool_->free_host_bufs.back();
-            pool_->free_host_bufs.pop_back();
-            return p;
+        if (pool_->free_host_bufs.empty())
+            return nullptr;
+        void* p = pool_->free_host_bufs.back();
+        pool_->free_host_bufs.pop_back();
+        return p;
+    };
+    void* p = take_ready();
+    if (!p) {
+        // The worker was outrun (or is off): pin here, after a pin of its own that may be in flight.
+        std::lock_guard<std::mutex> pl(pin_mu_);
+        p = take_ready();
+        if (!p) {
+            p = pin_host_slab_();
+            host_inline_pins_.fetch_add(p != nullptr ? 1 : 0, std::memory_order_relaxed);
         }
     }
-    if (host_allocated_ < host_capacity_) {
-        void* p = nullptr;
-        if (host_ram_spares(buf_bytes_) &&
-            cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) == cudaSuccess) {
-            ++host_allocated_;
-            host_pinned_note(p, buf_bytes_, "recurrent_snapshots");
-            return p;
-        }
-        (void)cudaGetLastError();
-        IMP_LOG_WARN(
-            "RecurrentSnapshotStore: the host refused slab %d of %d (%.1f MiB each), the host tier "
-            "stays at %d; fewer snapshots means more full re-prefills",
-            host_allocated_ + 1, host_capacity_, buf_bytes_ / (1024.0 * 1024.0), host_allocated_);
-        host_capacity_ = host_allocated_;
-    }
+    pool_->cv.notify_one();
+    if (p)
+        return p;
     // Protected keys rotate to the tail; one pass over the list bounds the walk.
     for (size_t n = host_lru_.size(); n > 0 && !host_lru_.empty(); --n) {
         size_t victim = host_lru_.front();
@@ -175,12 +244,8 @@ void* RecurrentSnapshotStore::acquire_host_buffer_() {
         host_lru_map_.erase(victim);
         host_entries_.erase(victim);  // may run the deleter right here
         ++evictions_;
-        std::lock_guard<std::mutex> lk(pool_->mu);
-        if (!pool_->free_host_bufs.empty()) {
-            void* p = pool_->free_host_bufs.back();
-            pool_->free_host_bufs.pop_back();
-            return p;
-        }
+        if (void* freed = take_ready())
+            return freed;
     }
     return nullptr;
 }
@@ -286,7 +351,7 @@ bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void*
                 "RecurrentSnapshotStore: snapshot dropped, every device slab is held by an "
                 "in-flight request and no host slab is free (%d device / %d host slots); the "
                 "next turn of this session prefills its whole history",
-                capacity_, host_capacity_);
+                capacity_, host_capacity_.load());
         return false;
     }
     if (!copy_in_(hbuf, src, sidecar_src, cudaMemcpyDeviceToHost, stream)) {
@@ -355,6 +420,7 @@ int RecurrentSnapshotStore::release_host_tier() {
     }
     // A slab a request still holds stays counted and returns to the pool with its entry.
     host_allocated_ -= static_cast<int>(slabs.size());
+    pool_->cv.notify_one();  // the worker pins its spare again, beside the requests
     return static_cast<int>(slabs.size());
 }
 
