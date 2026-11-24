@@ -130,6 +130,25 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     vfree(raw_staging_buf);
     raw_staging_size = 0;
 
+    // Layer staging and slot index (vram_alloc, allocate_auxiliary_buffers): 6 buffers had no release.
+    auto vfree_as = [&vfree](auto*& p) {
+        void* v = static_cast<void*>(p);
+        vfree(v);
+        p = nullptr;
+    };
+    vfree(layer_stage_buf);
+    vfree(layer_stage_sf);
+    vfree_as(layer_stage_b_ptrs);
+    vfree_as(layer_stage_sfb_ptrs);
+    vfree_as(layer_stage_alpha);
+    vfree_as(d_slot_idx);
+    layer_stage_size = layer_stage_proj_bytes = 0;
+    layer_stage_sf_size = layer_stage_sf_proj_bytes = 0;
+    layer_stage_experts = layer_stage_slots = layer_stage_ptr_stride = 0;
+    d_slot_idx_count = 0;
+    layer_stage_alpha_filled.clear();
+    layer_stage_ptr_sig.clear();
+
     vfree(cutlass3x_packed);
     cutlass3x_packed_size = 0;
     vfree(cutlass3x_sf);

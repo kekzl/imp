@@ -26,6 +26,7 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -33,6 +34,9 @@
 
 namespace imp {
 namespace {
+
+// Mirror of stats_.live_bytes readable without constructing the backend (vmm_committed_live_bytes).
+std::atomic<size_t> g_vmm_committed{0};
 
 // The driver API is loaded by hand rather than linked: linking it would put a hard
 // DT_NEEDED on libcuda.so.1 into the imp library, and every CPU-only test binary would
@@ -330,6 +334,7 @@ private:
             r.chunks.emplace(c.offset, c);
             r.committed += size;
             stats_.live_bytes += size;
+            g_vmm_committed.store(stats_.live_bytes, std::memory_order_relaxed);
             stats_.peak_bytes = std::max(stats_.peak_bytes, stats_.live_bytes);
             off += size;
         }
@@ -353,6 +358,7 @@ private:
             driver().MemRelease(it->second.handle);
             r.committed -= std::min(r.committed, it->second.size);
             stats_.live_bytes -= std::min(stats_.live_bytes, it->second.size);
+            g_vmm_committed.store(stats_.live_bytes, std::memory_order_relaxed);
             it = r.chunks.erase(it);
         }
     }
@@ -401,5 +407,7 @@ Backend* vmm_backend() {
     static VmmBackend inst;
     return &inst;
 }
+
+size_t vmm_committed_live_bytes() { return g_vmm_committed.load(std::memory_order_relaxed); }
 
 }  // namespace imp
