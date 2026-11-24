@@ -1,4 +1,5 @@
 #include "memory/touch_audit.h"
+#include "memory/device_alloc_all.h"
 
 #include "core/logging.h"
 #include "memory/backend.h"
@@ -87,7 +88,7 @@ std::vector<Range> live_ranges(const VRAMAllocator& va) {
 
 TouchAudit::~TouchAudit() {
     if (d_out_)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_out_));
+        device_free_all(d_out_);
 }
 
 bool TouchAudit::hash_(const void* p, size_t bytes, std::vector<uint64_t>& out) {
@@ -97,10 +98,10 @@ bool TouchAudit::hash_(const void* p, size_t bytes, std::vector<uint64_t>& out) 
         return true;
     if (pages > d_cap_) {
         if (d_out_)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_out_));
+            device_free_all(d_out_);
         d_out_ = nullptr, d_cap_ = 0;
         void* q = nullptr;
-        if (cudaMalloc(&q, pages * sizeof(uint64_t)) != cudaSuccess)
+        if (device_alloc_all(dev_req(q, pages * sizeof(uint64_t))) != cudaSuccess)
             return false;
         d_out_ = static_cast<uint64_t*>(q), d_cap_ = pages;
     }

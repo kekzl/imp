@@ -4,7 +4,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "runtime/batch.h"
 #include "compute/mtp_forward.h"
 #include "compute/dispatch_record.h"

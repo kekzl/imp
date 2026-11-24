@@ -1,4 +1,5 @@
 #include "memory/weight_snapshot.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 #include "model/model.h"
 #include <algorithm>
@@ -364,13 +365,13 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
         void* p = nullptr;
         if (ops.alloc(&p, rec.allocs[i].bytes, stream) != cudaSuccess || !p) {
             for (void* q : new_allocs)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));
+                device_free_all_async(stream, q);
             return false;  // out of VRAM — cold path will make its own call
         }
         if (ops.copy_h2d(p, blob.views[i], rec.allocs[i].bytes, stream) != cudaSuccess) {
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(p, stream));
+            device_free_all_async(stream, p);
             for (void* q : new_allocs)
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(q, stream));
+                device_free_all_async(stream, q);
             return false;
         }
         new_allocs.push_back(p);

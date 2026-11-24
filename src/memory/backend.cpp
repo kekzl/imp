@@ -1,4 +1,5 @@
 #include "memory/backend.h"
+#include "memory/device_alloc_all.h"
 #include "memory/vram_query.h"
 #include "core/logging.h"
 
@@ -306,7 +307,7 @@ protected:
         }
 
         void* p = nullptr;
-        if (cudaMalloc(&p, bytes) != cudaSuccess || p == nullptr) {
+        if (device_alloc_all(dev_req(p, bytes)) != cudaSuccess || p == nullptr) {
             (void)cudaGetLastError();  // clear the sticky error; the caller decides
             return MemError::OutOfMemory;
         }
@@ -324,7 +325,7 @@ protected:
     }
 
     void do_release(void* base, size_t committed, size_t reserved, RegionTag) override {
-        IMP_CUDA_CHECK_LOG(cudaFree(base));
+        device_free_all(base);
         std::lock_guard<std::mutex> lock(mu_);
         live_.erase(base);
         stats_.live_bytes -= std::min(stats_.live_bytes, committed);

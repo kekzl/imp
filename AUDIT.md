@@ -66,7 +66,7 @@ before every run (0 containers, no compute processes); healthy under load
 | # | Finding |
 |---|---|
 | D1 | **`ArenaAllocator` and `PoolAllocator` (`src/core/allocator.{h,cpp}`, 168 LOC) are entirely dead** — zero references in `src/ include/ tools/ tests/`. They implement bump-arena and fixed-block-pool disciplines, i.e. two of the five tiers this design needs, written once and never wired up. Migration step 1 revives them rather than writing new ones. |
-| D2 | **`Buffer` (`src/core/buffer.{h,cpp}`) has exactly one producer** (`engine_qwen3vl.cpp:559 Buffer::device(per_image * req.images.size())`, vision embeddings) and one holder (`Request::vision_emb`). It is a single-purpose helper, not a general RAII layer. Not dead, but not a foundation either. |
+| D2 | **`Buffer` (`src/memory/buffer.{h,cpp}`) has exactly one producer** (`engine_qwen3vl.cpp:559 Buffer::device(per_image * req.images.size())`, vision embeddings) and one holder (`Request::vision_emb`). It is a single-purpose helper, not a general RAII layer. Not dead, but not a foundation either. |
 
 ### GOTCHAS (cost real time; do not repeat)
 

@@ -4,7 +4,7 @@
 #include "lora/control_vector.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/kv_fp8_scale_init.h"
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_vision_load.h"
 #include "vision/vision_pipeline.h"

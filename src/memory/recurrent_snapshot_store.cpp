@@ -1,4 +1,5 @@
 #include "memory/recurrent_snapshot_store.h"
+#include "memory/device_alloc_all.h"
 #include "memory/backend.h"
 #include "memory/host_pinned.h"
 #include "core/logging.h"
@@ -22,7 +23,7 @@ RecurrentSnapshotStore::~RecurrentSnapshotStore() {
         to_free_host.swap(pool_->free_host_bufs);
     }
     for (void* p : to_free)
-        IMP_CUDA_CHECK_LOG(cudaFree(p));
+        device_free_all(p);
     for (void* p : to_free_host) {
         host_pinned_forget(p);
         IMP_CUDA_CHECK_LOG(cudaFreeHost(p));
@@ -49,7 +50,7 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     pool_ = std::make_shared<BufferPool>();
     for (int i = 0; i < want; ++i) {
         void* p = nullptr;
-        if (cudaMalloc(&p, buf_bytes_) != cudaSuccess)
+        if (device_alloc_all(dev_req(p, buf_bytes_)) != cudaSuccess)
             break;
         pool_->free_bufs.push_back(p);
         allocated_bufs_++;
@@ -206,7 +207,7 @@ std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(
                 host_pinned_forget(e->data);
                 IMP_CUDA_CHECK_LOG(cudaFreeHost(e->data));
             } else
-                IMP_CUDA_CHECK_LOG(cudaFree(e->data));
+                device_free_all(e->data);
             delete e;
         });
 }

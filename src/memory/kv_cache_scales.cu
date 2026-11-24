@@ -1,6 +1,7 @@
 // KVCache quantized-KV scale plane (INT8/INT4/NVFP4/MXFP4_KV). Split from kv_cache.cu for
 // the file-size gate; same class, same invariants.
 #include "memory/kv_cache.h"
+#include "memory/device_alloc_all.h"
 #include "memory/backend.h"
 #include "memory/mem_account.h"
 #include "memory/vram_allocator.h"
@@ -48,7 +49,7 @@ void KVCache::alloc_scale_pool_(size_t total) {
     if (!scale_pool_) {
         if (alloc_) {
             scale_pool_ = alloc_->allocate(total, "kv_cache_scales");
-        } else if (cudaMalloc(&scale_pool_, total) != cudaSuccess) {
+        } else if (device_alloc_all(dev_req(scale_pool_, total)) != cudaSuccess) {
             scale_pool_ = nullptr;
         }
     }
@@ -59,7 +60,7 @@ void KVCache::alloc_scale_pool_(size_t total) {
         } else if (alloc_) {
             alloc_->free(pool_);
         } else {
-            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            device_free_all(pool_);
         }
         pool_ = nullptr;
         char msg[256];

@@ -1,4 +1,5 @@
 #include "memory/kv_cache.h"
+#include "memory/device_alloc_all.h"
 #include "memory/backend.h"
 #include "memory/vram_allocator.h"
 #include "memory/mem_account.h"
@@ -55,7 +56,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
         if (alloc_) {
             pool_ = alloc_->allocate(total, "kv_cache");
         } else {
-            cudaError_t err = cudaMalloc(&pool_, total);
+            cudaError_t err = device_alloc_all(dev_req(pool_, total));
             if (err != cudaSuccess)
                 pool_ = nullptr;
         }
@@ -148,7 +149,7 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         if (alloc_) {
             pool_ = alloc_->allocate(total, "kv_cache");
         } else {
-            cudaError_t err = cudaMalloc(&pool_, total);
+            cudaError_t err = device_alloc_all(dev_req(pool_, total));
             if (err != cudaSuccess)
                 pool_ = nullptr;
         }
@@ -312,7 +313,7 @@ KVCache::~KVCache() {
     blocks_.abandon();
     swa_blocks_.abandon();
     if (d_copy_meta_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_copy_meta_));
+        device_free_all(d_copy_meta_);
         d_copy_meta_ = nullptr;
     }
     if (scale_region_) {
@@ -324,7 +325,7 @@ KVCache::~KVCache() {
         if (alloc_)
             alloc_->free(scale_pool_);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
+            device_free_all(scale_pool_);
         scale_pool_ = nullptr;
     }
     if (minmax_region_) {
@@ -336,7 +337,7 @@ KVCache::~KVCache() {
         if (alloc_)
             alloc_->free(minmax_pool_);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(minmax_pool_));
+            device_free_all(minmax_pool_);
         minmax_pool_ = nullptr;
     }
     if (region_) {
@@ -347,7 +348,7 @@ KVCache::~KVCache() {
         if (alloc_)
             alloc_->free(pool_);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            device_free_all(pool_);
         pool_ = nullptr;
     }
 }
@@ -841,7 +842,7 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
                 m[3] = m[4] = m[5] = 0;
             }
         }
-        if (cudaMalloc(&d_copy_meta_, meta.size() * sizeof(size_t)) != cudaSuccess) {
+        if (device_alloc_all(dev_req(d_copy_meta_, meta.size() * sizeof(size_t))) != cudaSuccess) {
             d_copy_meta_ = nullptr;
             return;
         }

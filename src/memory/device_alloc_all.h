@@ -33,6 +33,13 @@ template <typename... R>
     return device_alloc_all_n(arr, sizeof...(R), /*async=*/true, stream);
 }
 
+// One stream-ordered buffer from a memory pool (pool null: the default pool). The pointer is null
+// on failure; the error is returned, not cleared (weights_alloc reports it).
+[[nodiscard]] cudaError_t device_alloc_pool_async(void** ptr, size_t bytes, cudaMemPool_t pool,
+                                                  cudaStream_t stream);
+// Stream-ordered release that hands the driver's result back (teardown counts failures).
+cudaError_t device_free_async_checked(void* ptr, cudaStream_t stream);
+
 // Release of buffers taken with device_alloc_all; null pointers are skipped.
 void device_free_all_n(void* const* ptrs, size_t n);
 

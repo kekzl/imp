@@ -1,6 +1,7 @@
 // KVCache sparse decode key min/max metadata pool (#1808, #2360). Split from kv_cache.cu
 // for the file-size gate; same class, same invariants.
 #include "memory/kv_cache.h"
+#include "memory/device_alloc_all.h"
 #include "memory/backend.h"
 #include "memory/mem_account.h"
 #include "memory/vram_allocator.h"
@@ -61,7 +62,7 @@ bool KVCache::enable_key_minmax() {
     if (alloc_) {
         minmax_pool_ = alloc_->allocate(total, "kv_cache_minmax");
     } else {
-        cudaError_t err = cudaMalloc(&minmax_pool_, total);
+        cudaError_t err = device_alloc_all(dev_req(minmax_pool_, total));
         if (err != cudaSuccess)
             minmax_pool_ = nullptr;
     }

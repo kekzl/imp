@@ -1,4 +1,5 @@
-#include "core/buffer.h"
+#include "memory/buffer.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cstring>
@@ -37,7 +38,7 @@ Buffer Buffer::device(size_t nbytes) {
     buf.size_ = nbytes;
     buf.on_device_ = true;
     if (nbytes > 0) {
-        check_cuda(cudaMalloc(&buf.data_, nbytes), "cudaMalloc");
+        check_cuda(device_alloc_all(dev_req(buf.data_, nbytes)), "cudaMalloc");
     }
     return buf;
 }
@@ -74,7 +75,7 @@ void Buffer::reset() {
     if (!data_)
         return;
     if (on_device_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(data_));
+        device_free_all(data_);
     } else {
         std::free(data_);
     }

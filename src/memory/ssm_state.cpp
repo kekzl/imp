@@ -1,4 +1,5 @@
 #include "memory/ssm_state.h"
+#include "memory/device_alloc_all.h"
 
 #include <algorithm>
 #include "memory/mem_account.h"
@@ -26,7 +27,7 @@ SSMState::~SSMState() {
         if (alloc_)
             alloc_->free(pool_);
         else
-            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            device_free_all(pool_);
         pool_ = nullptr;
     }
 }
@@ -63,7 +64,7 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
         // knew. A rejected pool is a refused configuration now, with the numbers and the lever.
         pool_ = alloc_->allocate(total_bytes_, "ssm_state");
     } else {
-        cudaError_t err = cudaMalloc(&pool_, total_bytes_);
+        cudaError_t err = device_alloc_all(dev_req(pool_, total_bytes_));
         if (err != cudaSuccess)
             pool_ = nullptr;
     }

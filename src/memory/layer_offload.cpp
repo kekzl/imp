@@ -1,4 +1,5 @@
 #include "memory/layer_offload.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 #include "core/qtype.h"
 #include <algorithm>
@@ -74,7 +75,7 @@ LayerOffloadPlan plan_layer_offload(const Model& model, int gpu_layers) {
 LayerOffloadManager::~LayerOffloadManager() {
     for (auto& slot : slots_) {
         if (slot.gpu_buf) {
-            IMP_CUDA_CHECK_LOG(cudaFree(slot.gpu_buf));
+            device_free_all(slot.gpu_buf);
             slot.gpu_buf = nullptr;
         }
         // Buffer freed before the slot event/stream (same order as before).
@@ -141,7 +142,7 @@ bool LayerOffloadManager::init(Model* model, int gpu_layers) {
 
     // Allocate double-buffered GPU staging slots
     for (int s = 0; s < 2; s++) {
-        cudaError_t err = cudaMalloc(&slots_[s].gpu_buf, max_layer_bytes);
+        cudaError_t err = device_alloc_all(dev_req(slots_[s].gpu_buf, max_layer_bytes));
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to allocate offload slot %d (%zu bytes): %s", s, max_layer_bytes,
                           cudaGetErrorString(err));

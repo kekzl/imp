@@ -1,7 +1,7 @@
 // Engine side of audio input: features on the handler thread (AudioPipeline::preprocess), encode
 // on the batch worker, spliced like mmproj images (vision_emb at the audio soft token).
 
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "core/logging.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"

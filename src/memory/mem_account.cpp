@@ -1,4 +1,5 @@
 #include "memory/mem_account.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 #include "memory/backend.h"
 #include "memory/engine_arena.h"
@@ -561,13 +562,13 @@ ReleasePoolScope::~ReleasePoolScope() { g_release_scope = prev_; }
 
 cudaError_t malloc_async_in_scope(void** ptr, size_t size, cudaStream_t stream) {
     cudaMemPool_t pool = g_release_scope >= 0 ? release_on_free_pool(static_cast<ReleasePool>(g_release_scope)) : nullptr;
-    return pool ? cudaMallocFromPoolAsync(ptr, size, pool, stream) : cudaMallocAsync(ptr, size, stream);
+    return device_alloc_pool_async(ptr, size, pool, stream);
 }
 
 cudaError_t weights_alloc(void** ptr, size_t size, cudaStream_t stream, bool in_scope) {
     *ptr = nullptr;
     const cudaError_t err = in_scope ? malloc_async_in_scope(ptr, size, stream)
-                                     : cudaMallocAsync(ptr, size, stream);
+                                     : device_alloc_pool_async(ptr, size, nullptr, stream);
     if (err != cudaSuccess) {
         *ptr = nullptr;
         return err;
@@ -580,7 +581,7 @@ cudaError_t weights_free(void* ptr, cudaStream_t stream) {
     if (ptr == nullptr)
         return cudaSuccess;
     MemAccount::instance().note_free(ptr);
-    return cudaFreeAsync(ptr, stream);
+    return device_free_async_checked(ptr, stream);
 }
 
 size_t release_on_free_pool_reserved(ReleasePool which) {
