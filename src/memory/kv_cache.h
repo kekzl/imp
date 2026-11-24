@@ -140,7 +140,17 @@ public:
     void grow_ahead_tick();
     // The step also covers the last admitted request's blocks, so a second prompt of the same
     // size finds them committed. Same thread as allocation.
-    void note_admitted(int blocks) { last_admit_blocks_ = blocks; }
+    void note_admitted(int blocks) {
+        last_admit_blocks_ = blocks;
+        note_activity_();
+    }
+    // Idle release: after ms without an admission the committed tail above the highest referenced
+    // block plus one grow-ahead step goes back to the driver, never below the size the pool
+    // started serving with. Checked by the grow-ahead worker once a second. 0 = off.
+    void set_idle_release_ms(int ms) { idle_release_ms_ = ms; }
+    // Releases that tail now; returns the blocks released. The worker calls it after an idle period.
+    int release_idle_tail();
+    [[nodiscard]] uint64_t idle_releases() const { return idle_releases_.load(std::memory_order_relaxed); }
     // Publish what the worker committed (block ids appended, capacity raised). Returns
     // total_blocks(). Same thread as allocation.
     int adopt_grown();
@@ -305,7 +315,13 @@ private:
     [[nodiscard]] int grow_step_cap_blocks_() const;
     static constexpr size_t kGrowAheadStepBytes = size_t{256} << 20;
     int grow_retry_ms_ = 0;
-    int last_admit_blocks_ = 0;
+    std::atomic<int> last_admit_blocks_{0};  // reset by the worker's idle release
+    int idle_release_ms_ = 0;
+    int idle_floor_blocks_ = 0;                 // committed_blocks_ at start_grow_ahead
+    std::atomic<int64_t> last_activity_ns_{0};  // steady_clock of the last admission, 0 after a release
+    std::atomic<uint64_t> idle_releases_{0};
+    void note_activity_();
+    [[nodiscard]] bool idle_release_due_() const;
     std::atomic<int64_t> grow_refused_at_ns_{0};  // steady_clock, 0 = never refused
     std::atomic<uint64_t> free_vram_queries_{0};
 

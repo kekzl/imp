@@ -108,3 +108,92 @@ TEST(KVCacheGrowAdmissionTest, GrowAheadStepCoversTheLastAdmission) {
 }
 
 }  // namespace
+
+// Idle release: a pool grown for a large request gives its free tail back. The cached prefix
+// below stays where it is, the released blocks are no longer handed out, device memory drops,
+// and a later growth maps them again, zeroed.
+TEST(KVCacheIdleReleaseTest, FreeTailGoesBackAndTheCachedPrefixStays) {
+    SKIP_IF_NO_CUDA();
+    auto cache = std::make_unique<KVCache>(/*n_layers=*/4, /*n_kv_heads=*/8, /*head_dim=*/128, QType::F16,
+                                           /*max_blocks=*/64, /*block_size=*/16, /*alloc=*/nullptr,
+                                           /*ceiling_blocks=*/65536);
+    if (!cache->growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    KVCache* kvc = cache.get();
+    KVCacheManager mgr(std::move(cache));
+    mgr.set_prefix_caching_enabled(true);
+    kvc->start_grow_ahead();  // the start size (64 blocks) becomes the floor
+    // 16001 blocks: the committed tail of a layer region does not end on a backend granule, as in
+    // a serving pool (the backend rounds a mapping out and releases whole driver allocations only).
+    const int grown = kvc->try_grow_to_now(16001);
+    ASSERT_EQ(grown, 16001);
+    make_cached_seq(&mgr, 0, 200, 1000);  // blocks 0..199 cached
+    ASSERT_EQ(mgr.num_reclaimable_cached_blocks(), 200);
+    // A pattern in a cached block: it has to survive the release.
+    const size_t probe_bytes = 4096;
+    ASSERT_EQ(cudaMemset(kvc->k_ptr(0, 199), 0x5A, probe_bytes), cudaSuccess);
+    size_t free0 = 0, free1 = 0, total = 0;
+    ASSERT_EQ(cudaMemGetInfo(&free0, &total), cudaSuccess);
+
+    const int released = kvc->release_idle_tail();
+    const int kept = grown - released;
+    ASSERT_GT(released, 8192) << "the tail above the cached prefix and one grow-ahead step";
+    EXPECT_GE(kept, 200);
+    EXPECT_EQ(kvc->total_blocks(), kept);
+    EXPECT_EQ(kvc->idle_releases(), 1u);
+    EXPECT_EQ(mgr.num_reclaimable_cached_blocks(), 200);
+    ASSERT_EQ(cudaMemGetInfo(&free1, &total), cudaSuccess);
+    // 4 layers x K and V x 8 heads x 128 x 16 tokens x 2 bytes = 262144 bytes per block.
+    const size_t per_block = size_t{4} * 2 * 8 * 128 * 16 * 2;
+    EXPECT_GE(free1, free0 + static_cast<size_t>(released) * per_block * 9 / 10);
+    std::vector<unsigned char> probe(probe_bytes);
+    ASSERT_EQ(cudaMemcpy(probe.data(), kvc->k_ptr(0, 199), probe_bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+    for (unsigned char c : probe)
+        ASSERT_EQ(c, 0x5A);
+    // Every block the pool still hands out lies below the kept count.
+    std::vector<int> ids;
+    for (int id = kvc->allocate_block(); id >= 0; id = kvc->allocate_block())
+        ids.push_back(id);
+    ASSERT_EQ(static_cast<int>(ids.size()), kept - 200);
+    for (int id : ids)
+        ASSERT_LT(id, kept);
+    for (int id : ids)
+        kvc->free_block(id);
+    // Growing again maps the tail and hands it out zeroed.
+    ASSERT_EQ(kvc->try_grow_to_now(grown), grown);
+    ASSERT_EQ(cudaMemcpy(probe.data(), kvc->k_ptr(3, grown - 1), probe_bytes, cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (unsigned char c : probe)
+        ASSERT_EQ(c, 0);
+    EXPECT_EQ(kvc->release_idle_tail(), released) << "a second idle period releases the same tail";
+}
+
+// Nothing to give back: a pool at its start size, and a pool whose last block is referenced.
+TEST(KVCacheIdleReleaseTest, AReferencedTailAndTheStartSizeStay) {
+    SKIP_IF_NO_CUDA();
+    auto cache = std::make_unique<KVCache>(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,
+                                           /*max_blocks=*/64, /*block_size=*/16, /*alloc=*/nullptr,
+                                           /*ceiling_blocks=*/65536);
+    if (!cache->growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    KVCache* kvc = cache.get();
+    kvc->start_grow_ahead();
+    EXPECT_EQ(kvc->release_idle_tail(), 0) << "start size is the floor";
+    const int grown = kvc->try_grow_to_now(32768);
+    ASSERT_EQ(grown, 32768);
+    std::vector<int> ids;
+    for (int id = kvc->allocate_block(); id >= 0; id = kvc->allocate_block())
+        ids.push_back(id);
+    ASSERT_EQ(static_cast<int>(ids.size()), grown);
+    // Only the highest block stays referenced: nothing above it, so nothing is released.
+    int top = -1;
+    for (int id : ids)
+        top = std::max(top, id);
+    for (int id : ids)
+        if (id != top)
+            kvc->free_block(id);
+    EXPECT_EQ(kvc->release_idle_tail(), 0);
+    EXPECT_EQ(kvc->total_blocks(), grown);
+    kvc->free_block(top);
+    EXPECT_GT(kvc->release_idle_tail(), 0);
+}

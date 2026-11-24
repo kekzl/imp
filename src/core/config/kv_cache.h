@@ -38,6 +38,10 @@ struct KVCache {
     // (kKvInitialCommitCapBytes), and grows at admission: the pool starts as a
     // buffer and the rest of the card stays free until a request needs it.
     int growable_initial_pct = 25;
+    // Seconds without an admission after which a growable pool returns its committed tail above the
+    // highest referenced block plus one grow-ahead step (256 MiB) to the driver, never below its
+    // start size. The next large prompt maps it again (39 ms for 2.8 GiB measured). 0 = never.
+    int idle_release_s = 120;
     // SWA-aware KV sizing: sliding-window layers allocate only the trailing
     // window instead of full-length KV. Auto-disabled for models without SWA,
     // INT8/INT4 KV, hybrids, MLA, StreamingLLM, deterministic mode. Numerically

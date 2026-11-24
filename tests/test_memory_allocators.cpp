@@ -529,3 +529,53 @@ TEST(SSMStateLazy, ReservedSlotsCommitAtInit) {
     EXPECT_EQ(vram_reserved_uncommitted_bytes(), ledger0);
     vram_reserved_uncommitted_add(-guard);
 }
+
+// acquire() hands out the lowest free id, also after ids were freed out of order and after the
+// pool grew: the grown tail stays unreferenced while a lower id is free.
+TEST(BlockPoolSlots, TheLowestFreeIdGoesOutFirst) {
+    BlockPool pool;
+    ASSERT_EQ(pool.open_slots(8), MemError::Ok);
+    std::vector<BlockRef> refs;
+    for (int i = 0; i < 8; ++i) {
+        refs.push_back(pool.acquire());
+        ASSERT_EQ(refs.back().id(), i);
+    }
+    refs[5].reset();
+    refs[2].reset();
+    refs[6].reset();
+    ASSERT_EQ(pool.grow_slots(12), MemError::Ok);
+    BlockRef a = pool.acquire(), b = pool.acquire(), c = pool.acquire(), d = pool.acquire();
+    EXPECT_EQ(a.id(), 2);
+    EXPECT_EQ(b.id(), 5);
+    EXPECT_EQ(c.id(), 6);
+    EXPECT_EQ(d.id(), 8);
+    EXPECT_EQ(pool.highest_live_block(), 8);
+    EXPECT_EQ(pool.free_count() + pool.live_blocks(), pool.num_blocks());
+}
+
+// shrink_slots drops unreferenced ids above the new count and refuses when one is referenced;
+// what is left still goes out lowest first, and the dropped ids never come back.
+TEST(BlockPoolSlots, ShrinkDropsTheFreeTailOnly) {
+    BlockPool pool;
+    ASSERT_EQ(pool.open_slots(16), MemError::Ok);
+    EXPECT_EQ(pool.highest_live_block(), -1);
+    std::vector<BlockRef> refs;
+    for (int i = 0; i < 10; ++i)
+        refs.push_back(pool.acquire());
+    EXPECT_EQ(pool.highest_live_block(), 9);
+    EXPECT_EQ(pool.shrink_slots(9), MemError::InvalidArgument) << "id 9 is referenced";
+    EXPECT_EQ(pool.shrink_slots(16), MemError::InvalidArgument) << "not below the current count";
+    EXPECT_EQ(pool.num_blocks(), 16);
+    refs[9].reset();
+    refs[3].reset();
+    ASSERT_EQ(pool.shrink_slots(9), MemError::Ok);
+    EXPECT_EQ(pool.num_blocks(), 9);
+    EXPECT_EQ(pool.free_count(), 1);
+    EXPECT_EQ(pool.highest_live_block(), 8);
+    BlockRef a = pool.acquire();
+    EXPECT_EQ(a.id(), 3);
+    EXPECT_FALSE(pool.acquire().valid()) << "ids 9..15 are gone";
+    ASSERT_EQ(pool.grow_slots(11), MemError::Ok);
+    BlockRef b = pool.acquire();
+    EXPECT_EQ(b.id(), 9);
+}

@@ -157,6 +157,11 @@ growable                    = true
 # proves nothing, and a pool that spilled into host memory decodes at a
 # fraction of the bandwidth with nothing reporting an error.
 growable_initial_pct        = 25
+# Seconds without an admission after which a growable pool returns its committed
+# tail to the driver: everything above the highest referenced block plus one
+# grow-ahead step (256 MiB), never below its start size. Cached prefixes stay.
+# The next large prompt maps the blocks again. 0 = never.
+idle_release_s              = 120
 # SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
 # other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
 # small dedicated block group instead of full-length KV. The saving grows with

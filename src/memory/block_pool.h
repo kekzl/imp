@@ -91,6 +91,13 @@ public:
     // BlockRef.
     [[nodiscard]] MemError grow_slots(int new_num_blocks);
 
+    // Drop the ids at and above new_num_blocks (slot-only pools): the reverse of grow_slots for a
+    // pool whose memory shrank underneath it. InvalidArgument, and nothing changed, when one of
+    // them is referenced or new_num_blocks is not below the current count.
+    [[nodiscard]] MemError shrink_slots(int new_num_blocks);
+    // Highest id with a live reference, -1 when none.
+    int highest_live_block() const;
+
     // Release the region. Asserts (debug) that no refs are outstanding — a
     // non-zero count here is exactly the "block outlived its request" bug.
     void close();
@@ -141,7 +148,7 @@ private:
     size_t block_bytes_ = 0;
     int num_blocks_ = 0;
     std::vector<int> refcount_;   // per block id
-    std::vector<int> free_list_;  // ids with refcount 0
+    std::vector<int> free_list_;  // ids with refcount 0, a min-heap: the lowest id goes out first
 };
 
 }  // namespace imp

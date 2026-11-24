@@ -1,7 +1,9 @@
 #include "memory/block_pool.h"
 #include "core/logging.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <functional>
 
 namespace imp {
 
@@ -38,10 +40,10 @@ void BlockPool::init_slots_(int num_blocks) {
     refcount_.assign(static_cast<size_t>(num_blocks), 0);
     free_list_.clear();
     free_list_.reserve(static_cast<size_t>(num_blocks));
-    // Descending so the first acquire() hands out block 0 — deterministic ids
-    // make a journal replay comparable across runs, and it matches the order
-    // KVCache's own free list handed out before the migration.
-    for (int i = num_blocks - 1; i >= 0; --i)
+    // A min-heap on the id (ascending is one): acquire() hands out the LOWEST free id, so ids
+    // are deterministic and the tail of a pool grown ahead stays unreferenced, which is what
+    // lets KVCache::release_idle_tail give it back.
+    for (int i = 0; i < num_blocks; ++i)
         free_list_.push_back(i);
 }
 
@@ -84,10 +86,32 @@ MemError BlockPool::grow_slots(int new_num_blocks) {
     // must be invisible to anything already holding a reference.
     refcount_.resize(static_cast<size_t>(new_num_blocks), 0);
     free_list_.reserve(free_list_.size() + static_cast<size_t>(new_num_blocks - num_blocks_));
-    for (int i = new_num_blocks - 1; i >= num_blocks_; --i)
-        free_list_.push_back(i);
+    for (int i = num_blocks_; i < new_num_blocks; ++i)
+        free_list_.push_back(i);  // above every id in the heap: still a heap
     num_blocks_ = new_num_blocks;
     return MemError::Ok;
+}
+
+MemError BlockPool::shrink_slots(int new_num_blocks) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!open_ || block_bytes_ != 0 || new_num_blocks < 0 || new_num_blocks >= num_blocks_)
+        return MemError::InvalidArgument;
+    for (int i = new_num_blocks; i < num_blocks_; ++i)
+        if (refcount_[static_cast<size_t>(i)] != 0)
+            return MemError::InvalidArgument;
+    std::erase_if(free_list_, [new_num_blocks](int id) { return id >= new_num_blocks; });
+    std::make_heap(free_list_.begin(), free_list_.end(), std::greater<>());
+    refcount_.resize(static_cast<size_t>(new_num_blocks));
+    num_blocks_ = new_num_blocks;
+    return MemError::Ok;
+}
+
+int BlockPool::highest_live_block() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (int i = num_blocks_ - 1; i >= 0; --i)
+        if (refcount_[static_cast<size_t>(i)] != 0)
+            return i;
+    return -1;
 }
 
 void BlockPool::close() {
@@ -122,6 +146,7 @@ BlockRef BlockPool::acquire() {
     std::lock_guard<std::mutex> lock(mu_);
     if (free_list_.empty())
         return BlockRef();
+    std::pop_heap(free_list_.begin(), free_list_.end(), std::greater<>());
     const int id = free_list_.back();
     free_list_.pop_back();
     refcount_[static_cast<size_t>(id)] = 1;
@@ -154,8 +179,10 @@ void BlockPool::dec_ref_impl_(int id, bool strict) {
 #endif
         return;
     }
-    if (--rc == 0)
+    if (--rc == 0) {
         free_list_.push_back(id);
+        std::push_heap(free_list_.begin(), free_list_.end(), std::greater<>());
+    }
 }
 
 void BlockPool::acquire_raw(int id) { inc_ref_(id); }

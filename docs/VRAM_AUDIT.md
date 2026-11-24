@@ -471,3 +471,22 @@ The engine arena commits as takes reach it. Two buffers were taken at init and n
 | Flint NVFP4: `engine_arena` committed | 298.0 MiB | 274.0 MiB |
 
 Neither buffer was taken during 10 prompts, a long prompt sent twice and 4 parallel requests on any of the three models. The reserved bytes stay in the reserved-uncommitted ledger, so the KV plan is unchanged; the gain is device memory not backed.
+
+### KV pool idle release (2026-11-24)
+
+A growable KV pool kept every block it had mapped. After `kv_cache.idle_release_s` (default 120) without an admission the grow-ahead worker gives the committed tail back: everything above the highest referenced block plus one grow-ahead step (256 MiB), never below the start size. Cached prefixes stay. Block ids now go out lowest first, so the tail mapped ahead stays unreferenced.
+
+Measured with `kv_cache.idle_release_s=10`: 10 prompts x 200 tokens, a long prompt, 25 s idle, the long prompt again, 10 more prompts, 4 parallel requests.
+
+| | Qwen3-8B-NVFP4-cortecs | Flint NVFP4 | Qwen3.8-27B-NVFP4-vllm |
+|---|---|---|---|
+| blocks after the load -> after the idle period | 2806 -> 1514 | 2522 -> 1361 | 3084 -> 2471 |
+| back to the driver | 2826 MiB | 462 MiB | 0 MiB |
+| device used after the load -> after the idle period | 14836 -> 12010 MiB | 29314 -> 28852 MiB | 22914 -> 22914 MiB |
+| long prompt sent again after the release: tokens reused | 20016 of 20051 | 16784 of 16821 | 20048 of 20093 |
+| its first token, without -> with the release before it | 157 to 229 ms -> 162 to 284 ms | 298 to 314 ms -> 211 to 300 ms | 144 to 305 ms -> 202 to 297 ms |
+| text of 20 replies against the build before | equal | equal | equal |
+
+- The backend releases whole driver allocations (one per growth step and layer region, at most 64 MiB). A tail smaller than that inside a layer region stays mapped: Qwen3.8-27B (0.27 MiB per block) returns nothing at this size, Flint a part.
+- The first admission after a release maps one request of its size ahead again, off the admission path (Qwen3-8B: 1514 -> 2776 blocks in 165.6 ms, 110.5 ms of it zeroing).
+- `make verify-fast` server c8, two runs each: 1914.02 and 1885.82 tok/s with the change, 1872.03 and 1914.02 before.
