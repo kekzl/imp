@@ -803,11 +803,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // Cap at remaining free VRAM minus a reserve for KV cache + workspaces (init_kv_cache
                 // runs after this and sees what's left). Leave >= 1 GiB free: covers vram_budget reserve
                 // (~768 MiB) plus a useful KV cache.
-                size_t free_now = 0, total_now = 0;
-                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-                (void)vram_budget_mem_get_info(&free_now, &total_now);
                 constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
-                size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
 
                 int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
                 bool allocated = false;
@@ -816,9 +812,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         continue;
                     ne_try = std::min(ne_try, cfg.n_experts);
                     size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
-                    if (cap_bytes > 0 && sz > cap_bytes) {
-                        IMP_LOG_DEBUG("MoE dequant: skipping %d experts (%.0f MiB > cap %.0f MiB)", ne_try,
-                                      sz / (1024.0 * 1024.0), cap_bytes / (1024.0 * 1024.0));
+                    size_t free_now = 0;
+                    if (!vram_fits(sz, kPostBufReserve, 0, &free_now)) {
+                        IMP_LOG_DEBUG(
+                            "MoE dequant: skipping %d experts (%.0f MiB + 1024 MiB reserve > %.0f MiB free)",
+                            ne_try, sz / (1024.0 * 1024.0), free_now / (1024.0 * 1024.0));
                         continue;
                     }
                     moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");

@@ -405,11 +405,10 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
 
         // Check actual free VRAM against the per-call safety reserve computed
         // in pre_dequant_phase3_nvfp4_decode_ (see dctx.safety_reserve).
-        size_t free_mem = 0, total_mem = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        size_t free_mem = 0;
         size_t nvfp4_safety = std::max(dctx.safety_reserve, static_cast<size_t>(1024 * 1024));
-        if (free_mem < nvfp4_bytes + nvfp4_safety) {
+        // A failed query stops the loop (vram_query.h): never over.
+        if (!vram_fits(nvfp4_bytes, nvfp4_safety, 0, &free_mem)) {
             IMP_LOG_INFO(
                 "NVFP4 incremental: VRAM exhausted after %d tensors "
                 "(%.1f MiB, %.1f MiB free)",
@@ -625,11 +624,8 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
                              (static_cast<size_t>(rows) * cols / 16) + 4;
 
-        size_t free_mem2 = 0, total_mem2 = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_mem2, &total_mem2);
-        size_t nvfp4_safety2 = vram_reserve_floor(total_mem2);
-        if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
+        // A failed query stops the loop (vram_query.h): never over.
+        if (!vram_fits(nvfp4_bytes, vram_reserve_floor(vram_budget_total_bytes())))
             break;
 
         // Dequant from quantized weights via scratch buffer

@@ -71,6 +71,19 @@ size_t vram_used_at_install_bytes() {
     return total > free_b ? total - free_b : 0;
 }
 
+size_t vram_free_at_install_bytes() {
+    const size_t free_b = g_free_at_install.load(std::memory_order_relaxed);
+    const size_t budget = g_budget_bytes.load(std::memory_order_relaxed);
+    return budget > 0 ? std::min(free_b, budget) : free_b;
+}
+
+bool vram_view_used_bytes(size_t* used_bytes) {
+    size_t free_b = 0, total_b = 0;
+    const bool ok = vram_budget_mem_get_info_ex(&free_b, &total_b, /*exclude_pending=*/false);
+    *used_bytes = ok && total_b > free_b ? total_b - free_b : 0;
+    return ok;
+}
+
 size_t vram_own_peak_bytes() { return g_own_peak.load(std::memory_order_relaxed); }
 
 size_t vram_own_used_bytes() {

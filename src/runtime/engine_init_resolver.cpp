@@ -357,9 +357,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
     }
 
     if (config_.max_batch_size <= 0) {
-        size_t free_vram_now = 0, total_vram_now = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
+        // Nothing of imp's is on the card yet: the capacity is the install snapshot.
+        const size_t free_vram_now = vram_free_at_install_bytes();
         size_t approx_weight_bytes = approx_weight_footprint_bytes(
             mcfg, estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now));
         // Weight-footprint tier: kept as a FLOOR so this never regresses
@@ -382,9 +381,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
         // avoid a batch<->seq_len circular dependency. FP16-conservative,
         // all-layers over-estimate of per-token KV (safe: smaller batch).
         int auto_batch = tier;
-        size_t free_vram = 0, total_vram = 0;
+        const size_t free_vram = vram_free_at_install_bytes();
         size_t headroom = 0;
-        if (vram_budget_mem_get_info(&free_vram, &total_vram) && free_vram > 0) {
+        if (free_vram > 0) {
             // Per-slot serving context floor. 4096 at FP16 KV capped Qwen3-8B at 24 slots: 32 clients
             // queued 2.4 s with 23 GB free (roadmap row 66); the paged pool and admission bound the rest.
             constexpr int kRefCtxTokens = 2048;
@@ -890,9 +889,8 @@ void Engine::init_compute_max_seq_len_() {
     max_seq_len_explicit_ = config_.max_seq_len > 0;
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
-        size_t free_vram = 0, total_vram = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_vram, &total_vram);
+        // Pre-upload: the capacity is the install snapshot (0 if the query failed: sized as none).
+        const size_t free_vram = vram_free_at_install_bytes();
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
         // n_kv_heads_per_layer with zeros for non-attention layers, which

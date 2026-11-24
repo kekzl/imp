@@ -113,10 +113,8 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
         return err;
     }
     // Fallback: per-tensor check (used outside upload passes)
-    size_t free_mem = 0, total_mem = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&free_mem, &total_mem);
-    if (size + reserve > free_mem) {
+    // A failed query refuses the tensor (vram_query.h): never over.
+    if (!vram_fits(size, reserve)) {
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
     }
@@ -1558,9 +1556,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     if (expert_placement_needs_host_path(ctx.is_nvfp4_prequant, layer_expert_bytes,
                                          experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
-        size_t free_mem = 0, total_mem = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        size_t free_mem = 0;
+        (void)vram_diag_mem_info(&free_mem, nullptr);  // log line only
         IMP_LOG_INFO(
             "NVFP4 experts: %d MoE layer(s) stay host-resident (%zu MiB of experts, %zu MiB free) — "
             "they will be served from the expert cache. Decode on those layers is materially "
@@ -2379,11 +2376,11 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         // Refuse a head that does not fit BEFORE uploading any of it. See
         // mtp_upload_peak_bytes: a per-allocation refusal partway through
         // strands everything already uploaded for the life of the process.
-        size_t mtp_free = 0, mtp_total = 0;
+        size_t mtp_free = 0;
         const size_t mtp_need = mtp_upload_peak_bytes(*mtp_);
-        const bool have_reading = vram_budget_mem_get_info(&mtp_free, &mtp_total);
-        const size_t mtp_headroom = vram_allocator_headroom(mtp_total);
-        if (have_reading && mtp_free < mtp_need + mtp_headroom) {
+        const size_t mtp_headroom = vram_allocator_headroom(vram_budget_total_bytes());
+        // A failed query skips the head as well (vram_fits is false then).
+        if (!vram_fits(mtp_need, mtp_headroom, 0, &mtp_free)) {
             IMP_LOG_WARN(
                 "MTP head: needs %zu MiB plus %zu MiB allocator headroom, %zu MiB free. "
                 "Skipping the head, spec-decode disabled.",
@@ -2395,15 +2392,13 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     if (mtp_ && mtp_->loaded) {
         size_t allocs_before = gpu_allocations_.size();
         size_t mtp_free_before = 0;
-        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-        (void)vram_budget_mem_get_info(&mtp_free_before, nullptr);
+        (void)vram_diag_mem_info(&mtp_free_before, nullptr);  // measurement for the log line below
         if (upload_mtp_weights(*mtp_, ctx)) {
             // Report what the device actually gave up, not the size on disk:
             // the restacking copy makes the second number roughly 2.5x the
             // first, and the file size read like the whole cost.
             size_t mtp_free_after = 0;
-            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-            (void)vram_budget_mem_get_info(&mtp_free_after, nullptr);
+            (void)vram_diag_mem_info(&mtp_free_after, nullptr);
             const size_t mtp_used = mtp_free_before > mtp_free_after ? mtp_free_before - mtp_free_after : 0;
             IMP_LOG_INFO(
                 "MTP head: uploaded to GPU (%zu allocations, %zu MiB of device free, "

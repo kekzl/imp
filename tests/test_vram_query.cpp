@@ -98,3 +98,38 @@ TEST(VramFits, ComparesTheSizePlusMarginWithFreePlusCredit) {
     EXPECT_TRUE(imp::vram_fits(total_b, 0, total_b));
     EXPECT_FALSE(imp::vram_fits(2 * total_b + 1, 0, total_b));
 }
+
+// The pre-upload capacity is the install snapshot capped at the budget, not a later reading:
+// an allocation after install leaves it where it was.
+TEST(VramQuerySnapshot, FreeAtInstallIsASnapshotCappedAtTheBudget) {
+    size_t raw_free = 0, raw_total = 0;
+    if (!imp::vram_diag_mem_info(&raw_free, &raw_total) || raw_free < (size_t{512} << 20))
+        GTEST_SKIP() << "no device or under 512 MiB free";
+    imp::vram_budget_install(0);
+    const size_t uncapped = imp::vram_free_at_install_bytes();
+    EXPECT_GT(uncapped, 0u);
+    EXPECT_LE(uncapped, raw_total);
+    void* p = nullptr;
+    ASSERT_EQ(cudaMalloc(&p, size_t{128} << 20), cudaSuccess);
+    EXPECT_EQ(imp::vram_free_at_install_bytes(), uncapped) << "a snapshot does not follow the device";
+    cudaFree(p);
+    imp::vram_budget_install(256);
+    EXPECT_EQ(imp::vram_free_at_install_bytes(), size_t{256} << 20);
+    imp::vram_budget_install(0);  // never leak the cap
+}
+
+// The accounting view: used = total - free with the lazy pools' pending charge left out of "used".
+TEST(VramQuerySnapshot, ViewUsedDoesNotCountPendingReservations) {
+    size_t free_b = 0, total_b = 0;
+    if (!imp::vram_budget_mem_get_info(&free_b, &total_b) || total_b == 0)
+        GTEST_SKIP() << "no device";
+    imp::vram_budget_install(0);
+    size_t before = 0, pending = 0;
+    ASSERT_TRUE(imp::vram_view_used_bytes(&before));
+    imp::vram_reserved_uncommitted_add(std::ptrdiff_t{64} << 20);
+    ASSERT_TRUE(imp::vram_view_used_bytes(&pending));
+    imp::vram_reserved_uncommitted_add(-(std::ptrdiff_t{64} << 20));
+    // Another tenant may move the device by a few MiB between the two reads; 64 MiB would show.
+    const size_t diff = pending > before ? pending - before : before - pending;
+    EXPECT_LT(diff, size_t{32} << 20);
+}
