@@ -33,3 +33,28 @@ TEST(LibraryReserveMeasurement, NegativeResidualIsNotAMeasurement) {
 
 }  // namespace
 }  // namespace imp
+
+// Inkling-2-Mini, 2 x 81920: the first forward took 2048 MiB of device memory, 733 MiB of it
+// context rows a tracked pool committed in the window. The residual grew by the difference only.
+TEST(LibraryForwardWindow, TrackedGrowthInTheWindowIsNotALibraryClaim) {
+    const int64_t mib = int64_t{1} << 20;
+    const int64_t before = 0, device_growth = 2048 * mib, pool_growth = 733 * mib;
+    EXPECT_EQ(imp::engine_internal::library_forward_window(before, before + device_growth - pool_growth, 0),
+              static_cast<size_t>(1315 * mib));
+}
+
+// Bytes attributed outside the ledger (IMMA planes) come off as well; a window that explains
+// more than the residual grew reads 0, never a wrapped size_t.
+TEST(LibraryForwardWindow, NamedBytesComeOffAndTheResultNeverWraps) {
+    const int64_t mib = int64_t{1} << 20;
+    EXPECT_EQ(imp::engine_internal::library_forward_window(100 * mib, 900 * mib,
+                                                           static_cast<size_t>(300 * mib)),
+              static_cast<size_t>(500 * mib));
+    EXPECT_EQ(imp::engine_internal::library_forward_window(100 * mib, 300 * mib,
+                                                           static_cast<size_t>(300 * mib)),
+              0u);
+    EXPECT_EQ(imp::engine_internal::library_forward_window(500 * mib, 100 * mib, 0), 0u);
+    // A ledger above device use before the window (negative residual) still measures the growth.
+    EXPECT_EQ(imp::engine_internal::library_forward_window(-200 * mib, 300 * mib, 0),
+              static_cast<size_t>(500 * mib));
+}

@@ -443,3 +443,17 @@ The 32 slabs held the snapshots of the warmup's synthetic prewarm prompts. The e
 ### Load peak of the host RSS is the mapped checkpoint (2026-11-24)
 
 Sampled from `/proc/<pid>/status` during the first second of the load: Inkling-2-Mini 19068 MiB RSS = 18701 MiB file-backed + 366 MiB anonymous; Qwen3.8-27B-NVFP4-vllm 19937 MiB = 19686 MiB file-backed + 251 MiB anonymous. The peak is the mmap'd weight file, which the kernel reclaims; Inkling's `VmHWM` of 30 to 38 GiB counts the same file twice, once per mapping (the generic loader and `load_inkling_weights`). Not memory imp holds.
+
+### Library reserve counted tracked growth twice (2026-11-24)
+
+The library reserve of a start is max(forward window, whole-init residual). The forward window was the device growth across the first forward, less the IMMA planes. A pool that commits lazily inside that forward was counted in its own row and again as library reserve. The window is now the growth of the unattributed residual.
+
+| after one prompt, default flags | before | after |
+|---|---|---|
+| Inkling-2-Mini (2 x 81920): forward window / charged | 2579 / 2579 MiB | 970 / 1251 MiB |
+| Inkling-2-Mini: accounted share of device used | 104.7 % (residual -1230.9 MiB) | 99.9 % (residual 36.5 MiB) |
+| Qwen3.8-27B-NVFP4-vllm: charged, accounted | 367 MiB, 98.4 % | 367 MiB, 98.4 % |
+| Qwen3-8B-NVFP4-cortecs: charged, accounted | 29 MiB, 96.6 % | 29 MiB, 96.6 % |
+| Flint NVFP4: charged, accounted | 977 MiB, 98.9 % | 851 MiB, 98.5 % |
+
+Flint's window was 16 and 2 MiB in the two runs, so its charge is the whole-init residual in both; the 126 MiB between them is the spread of that residual between two starts. With a persisted `library_reserve` cache the old value made the next Inkling start plan 2579 MiB instead of 1251.
