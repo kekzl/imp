@@ -991,7 +991,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
 // =====================================================================
 
 int Engine::penalty_hist_slot_(int req_id, const std::vector<std::shared_ptr<Request>>& batch) {
-    if (d_penalty_hist_ == nullptr || penalty_hist_slots_ <= 0)
+    if (!d_penalty_hist_ || penalty_hist_slots_ <= 0)
         return -1;
     int free_i = -1;
     for (int i = 0; i < penalty_hist_slots_; i++) {
@@ -1186,13 +1186,13 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
                 if (hs.synced != need) {
                     // Full (re)sync: first batch entry of this request, or
                     // the host history diverged (sync-row step, think strip).
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_hist_ + ((size_t)slot * penalty_hist_cap_),
-                                                       req->output_tokens.data(),
-                                                       (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                                       dec_stream));
+                    IMP_CUDA_CHECK_LOG(
+                        cudaMemcpyAsync(d_penalty_hist_.get() + ((size_t)slot * penalty_hist_cap_),
+                                        req->output_tokens.data(), (size_t)need * sizeof(int32_t),
+                                        cudaMemcpyHostToDevice, dec_stream));
                     hs.synced = need;
                 }
-                per_state.penalty_tokens = d_penalty_hist_ + ((size_t)slot * penalty_hist_cap_);
+                per_state.penalty_tokens = d_penalty_hist_.get() + ((size_t)slot * penalty_hist_cap_);
                 per_state.n_penalty_tokens = need;
                 pen_row_slot[i] = slot;
             } else if (d_penalty_tokens_ && (size_t)need <= d_penalty_tokens_capacity_) {
@@ -1245,12 +1245,12 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
         bool appended = false;
         if (executor_->gather_sampled_tokens_async(n, dec_stream)) {
             if (any_append)
-                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream);
+                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_.get(), dec_stream);
             toks = executor_->wait_gathered_tokens(executor_->sample_parity());
         } else {
             toks = executor_->collect_sampled_tokens(n, dec_stream);
             if (toks && any_append)
-                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_, dec_stream);
+                appended = executor_->append_sampled_history(pen_append, d_penalty_hist_.get(), dec_stream);
         }
         if (toks) {
             for (int i = 0; i < n; i++)

@@ -824,7 +824,7 @@ private:
     // step's sampled tokens from the sample slots. req_id-keyed with lazy
     // evict; a synced-length guard resyncs divergence (host output_tokens is
     // the source of truth).
-    int32_t* d_penalty_hist_ = nullptr;
+    VramOwned<int32_t> d_penalty_hist_;
     int penalty_hist_cap_ = 0;    // tokens per slot (= max_seq_len)
     int penalty_hist_slots_ = 0;  // = max_batch_size, <= PenaltyAppendArgs::kMaxRows
     struct PenaltyHistSlot {

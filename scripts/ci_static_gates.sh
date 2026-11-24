@@ -122,6 +122,9 @@ if want alloc; then
     # I3: regrow sites, graph captures that read no generation, unwrapped StableSpan mints; shrinking list.
     run "I3 graph stability allowlist"          python3 tools/check_graph_stability.py
     run "that gate still classifies its cases"  python3 tools/check_graph_stability.py --selftest
+    # I5: hand-written release sites and owner-or-view flags outside src/memory/, same shrinking rule.
+    run "I5 owning free allowlist"              python3 tools/check_owning_frees.py
+    run "that gate still classifies its cases"  python3 tools/check_owning_frees.py --selftest
     # Lazy device statics re-arm across ~Engine / imp_gpu_release (the
     # IMP_REGISTER_CUDA_STATIC_RESET convention). Six TUs had none on
     # 2026-09-05, one of them a use-after-free on the default model-swap path.
