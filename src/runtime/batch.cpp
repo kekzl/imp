@@ -60,26 +60,12 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
 }
 
 void GPUBatch::free() {
-    if (d_token_ids) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_token_ids));
-        d_token_ids = nullptr;
-    }
-    if (d_positions) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_positions));
-        d_positions = nullptr;
-    }
-    if (d_seq_offsets) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_seq_offsets));
-        d_seq_offsets = nullptr;
-    }
-    if (d_block_tables) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_block_tables));
-        d_block_tables = nullptr;
-    }
-    if (d_context_lens) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_context_lens));
-        d_context_lens = nullptr;
-    }
+    device_free_all(d_token_ids, d_positions, d_seq_offsets, d_block_tables, d_context_lens);
+    d_token_ids = nullptr;
+    d_positions = nullptr;
+    d_seq_offsets = nullptr;
+    d_block_tables = nullptr;
+    d_context_lens = nullptr;
     n_sequences = 0;
     total_tokens = 0;
     max_blocks_per_seq = 0;

@@ -8,6 +8,7 @@
 //   token    = argmax(logits)
 
 #include "compute/warp_reduce.cuh"
+#include "memory/device_alloc_all.h"
 #include "compute/mtp_forward.h"
 #include "compute/mtp_forward_internal.h"
 #include "compute/mtp_draft_rows.h"
@@ -343,7 +344,8 @@ static_assert(sizeof(block_q8_1) == kMtpQ8_1BlockBytes, "mtp_workspace_bytes pri
 // Every device buffer of the head goes through here: ws.device_bytes is checked against the plan's
 // mtp_workspace_bytes, and the VRAM audit shows the pool as mtp_workspace.
 bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
-    if (cudaMalloc(p, bytes) != cudaSuccess)
+    DeviceAllocReq req{p, bytes};
+    if (device_alloc_all_n(&req, 1, /*async=*/false, nullptr) != cudaSuccess)
         return false;
     const size_t footprint = mtp_alloc_footprint(bytes);
     ws.device_bytes += footprint;
@@ -618,7 +620,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
 
 void mtp_workspace_free(MtpDraftWorkspace& ws) {
     auto frfn = [](void*& p) {
-        if (p) { IMP_CUDA_CHECK_LOG(cudaFree(p)); p = nullptr; }
+        device_free_all(p);
+        p = nullptr;
     };
     frfn(ws.d_emb_norm);
     frfn(ws.d_h_norm);
@@ -629,18 +632,10 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_logits_f32);
     frfn(ws.d_q8_1);
     frfn(ws.d_d8);
-    if (ws.d_chain_tokens) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_chain_tokens));
-        ws.d_chain_tokens = nullptr;
-    }
-    if (ws.d_argmax) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_argmax));
-        ws.d_argmax = nullptr;
-    }
-    if (ws.d_tok) {
-        IMP_CUDA_CHECK_LOG(cudaFree(ws.d_tok));
-        ws.d_tok = nullptr;
-    }
+    device_free_all(ws.d_chain_tokens, ws.d_argmax, ws.d_tok);
+    ws.d_chain_tokens = nullptr;
+    ws.d_argmax = nullptr;
+    ws.d_tok = nullptr;
     frfn(ws.d_post_norm);
     frfn(ws.d_expert_gate_up);
     frfn(ws.d_expert_act);
@@ -674,7 +669,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_v_proj);
     frfn(ws.d_attn_out);
     frfn(ws.d_attn_residual);
-    if (ws.d_mtp_position) { cudaFree(ws.d_mtp_position); ws.d_mtp_position = nullptr; }
+    device_free_all(ws.d_mtp_position);
+    ws.d_mtp_position = nullptr;
     ws.d_scan_part = nullptr;  // alias into the d_mtp_position allocation
     mtp_kv_release(ws);        // d_k_cache / d_v_cache are views into the slot allocation
     frfn(ws.d_k_cache_base);
@@ -691,7 +687,8 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.h_pass_tables.reset();
     ws.pass_tables_copied.reset();
     ws.d_b_gather = ws.d_b_h_final = nullptr;
-    if (ws.d_feed_tokens) { cudaFree(ws.d_feed_tokens); ws.d_feed_tokens = nullptr; }
+    device_free_all(ws.d_feed_tokens);
+    ws.d_feed_tokens = nullptr;
     frfn(ws.d_b_emb);
     frfn(ws.d_b_h_norm);
     frfn(ws.d_b_fc_in);
