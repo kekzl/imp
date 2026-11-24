@@ -439,3 +439,7 @@ The KV host spill and the recurrent snapshot store page-lock through the driver 
 | pinned `recurrent_snapshots` at shutdown | 3498.0 (44 slabs) | 715.5 (9 slabs) |
 
 The 32 slabs held the snapshots of the warmup's synthetic prewarm prompts. The engine now releases the host tier after warmup (`RecurrentSnapshotStore::release_host_tier`). A 20093-token prompt sent again reuses 20048 tokens in both builds.
+
+### Load peak of the host RSS is the mapped checkpoint (2026-11-24)
+
+Sampled from `/proc/<pid>/status` during the first second of the load: Inkling-2-Mini 19068 MiB RSS = 18701 MiB file-backed + 366 MiB anonymous; Qwen3.8-27B-NVFP4-vllm 19937 MiB = 19686 MiB file-backed + 251 MiB anonymous. The peak is the mmap'd weight file, which the kernel reclaims; Inkling's `VmHWM` of 30 to 38 GiB counts the same file twice, once per mapping (the generic loader and `load_inkling_weights`). Not memory imp holds.
