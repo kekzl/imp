@@ -749,9 +749,9 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
     // rebuilt when the set of active sequences changes.
     if (out.ssm_state && c.ec.max_batch_size > 0) {
         const size_t bytes = static_cast<size_t>(c.ec.max_batch_size) * sizeof(int);
-        if (cudaMalloc(&out.d_seq_slots, bytes) != cudaSuccess) {
+        out.d_seq_slots = alloc ? static_cast<int*>(alloc->allocate(bytes, "ssm_seq_slots")) : nullptr;
+        if (!out.d_seq_slots) {
             IMP_LOG_WARN("batched GDN decode: slot table alloc failed — staying single-sequence");
-            out.d_seq_slots = nullptr;
         } else {
             // Log only: the scheduler uploads the table before every batched step.
             IMP_CUDA_CHECK_LOG(cudaMemset(out.d_seq_slots, 0, bytes));
@@ -812,13 +812,14 @@ void init_recurrent_state(const KvInitCtx& c, KVCacheManager& kvm, int ssm_reser
 // off.
 void init_swa_snapshots(const KvInitCtx& c, bool swa_active, KVCacheManager& kvm, Scheduler* scheduler,
                         Scheduler::PrefixReuseLimitFn reuse_limit,
-                        std::unique_ptr<RecurrentSnapshotStore>& store, void*& slab) {
+                        std::unique_ptr<RecurrentSnapshotStore>& store, void*& slab, VRAMAllocator& va) {
     if (!swa_active || !kvm.prefix_caching_enabled())
         return;
     const int budget_mb = c.rc.kv_cache.swa_snapshot_mb;
     if (budget_mb > 0 && kvm.enable_swa_snapshots()) {
         const size_t slab_bytes = kvm.swa_snapshot_bytes();
-        if (cudaMalloc(&slab, slab_bytes) == cudaSuccess) {
+        slab = va.allocate(slab_bytes, "swa_snapshot_slab");
+        if (slab != nullptr) {
             store = std::make_unique<RecurrentSnapshotStore>();
             store->init(slab_bytes, static_cast<size_t>(budget_mb) << 20);
             if (store->enabled()) {
@@ -826,7 +827,7 @@ void init_swa_snapshots(const KvInitCtx& c, bool swa_active, KVCacheManager& kvm
                 log_swa_snapshot_store(*store, budget_mb);
             } else {
                 store.reset();
-                IMP_CUDA_CHECK_LOG(cudaFree(slab));
+                va.free(slab);
                 slab = nullptr;
             }
         }
@@ -1044,7 +1045,8 @@ bool Engine::init_kv_cache() {
         {ssm_state_, d_ssm_seq_slots_, h_ssm_seq_slots_, recurrent_snapshots_});
     init_swa_snapshots(
         ctx, swa_sizing_active_, *kv_manager_, scheduler_.get(),
-        [this](Request& r) { return swa_prefix_reuse_limit_(r); }, swa_snapshots_, swa_snap_slab_);
+        [this](Request& r) { return swa_prefix_reuse_limit_(r); }, swa_snapshots_, swa_snap_slab_,
+        vram_alloc_);
 
     IMP_CUDA_CHECK_BOOL(cudaStreamSynchronize(stream_));
 

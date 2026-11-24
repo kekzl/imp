@@ -192,8 +192,9 @@ bool Engine::pipeline_staging_ensure_() {
                  pin_mapped(h_hist_pos_[p], &d_hist_pos_[p], patch_bytes);
         }
         if (ok)
-            ok = cudaMalloc(&d_pipe_hist_, static_cast<size_t>(kMaxGraphPoolSize) * pipe_hist_stride_ *
-                                               sizeof(int32_t)) == cudaSuccess;
+            ok = (d_pipe_hist_ = static_cast<int32_t*>(vram_alloc_.allocate(
+                      static_cast<size_t>(kMaxGraphPoolSize) * pipe_hist_stride_ * sizeof(int32_t),
+                      "pipe_hist"))) != nullptr;
         if (!ok) {
             for (int p = 0; p < 2; ++p) {
                 h_bt_patch_off_[p].reset();
@@ -201,10 +202,8 @@ bool Engine::pipeline_staging_ensure_() {
                 h_hist_pos_[p].reset();
                 d_bt_patch_off_[p] = d_bt_patch_val_[p] = d_hist_pos_[p] = nullptr;
             }
-            if (d_pipe_hist_) {
-                IMP_CUDA_CHECK_LOG(cudaFree(d_pipe_hist_));
-                d_pipe_hist_ = nullptr;
-            }
+            vram_alloc_.free(d_pipe_hist_);
+            d_pipe_hist_ = nullptr;
             bt_patch_cap_ = -1;  // don't retry every step
             return false;
         }
