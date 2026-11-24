@@ -188,6 +188,13 @@ void nvfp4_gemv_batched_pdl_register();
 // the buffer's lifetime, this only stores pointer+size.
 void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes);
 
+// The same workspace, taken at the first fallback that needs it: provide(ctx) returns the buffer
+// of size_bytes (null: none, the fallback then behaves as without a workspace). It runs once, on
+// the host, before the kernel that reads the buffer is launched or captured.
+// set_nvfp4_dequant_workspace(nullptr, 0) clears the provider too.
+using Nvfp4WorkspaceProvider = void* (*)(void* ctx);
+void set_nvfp4_dequant_workspace_provider(Nvfp4WorkspaceProvider provide, void* ctx, size_t size_bytes);
+
 // Test probe: current size of the lazy cudaMalloc'd dequant buffer (the legacy
 // non-graph-safe path). After set_nvfp4_dequant_workspace() is set, subsequent gemm_nvfp4
 // calls should not grow this. Exposed for tests to assert workspace-vs-lazy choice.

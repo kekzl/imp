@@ -92,7 +92,7 @@
             const bool cap_replay = state.ctx_capacity > 0 && state.d_past_len != nullptr;
             if (cap_replay &&
                 (!chunk_fa2_serves || ctx_len > state.ctx_capacity || state.n_sequences != 1 ||
-                 chunk_capture_k_ == nullptr || chunk_capture_ctx_ < state.ctx_capacity)) {
+                 chunk_capture_ctx_ < state.ctx_capacity || !take_chunk_capture_scratch_())) {
                 // Reaching here means the engine's chunk_capture_supported() gate and its
                 // scratch pre-allocation disagree with this dispatch: a wiring bug.
                 // Throwing fails the capture (or eager warmup) cleanly instead of dooming it silently.

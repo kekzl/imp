@@ -1316,26 +1316,8 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     if (covered_bytes == 0)
         return !nvfp4_dequant_uncapturable_;
 
-    // T2: taken from the engine-persistent arena, sized to include exactly this buffer
-    // (exec/workspace_sizes.h) so pre-dequant cache build doesn't leave nothing behind
-    // (AUDIT B23). Falls back to direct allocation when the arena is closed (bare
-    // GraphExecutor in tests) or short, like the MMVQ tenant.
-    {
-        auto slab = engine_arena().take_bytes(covered_bytes);
-        if (!slab.empty()) {
-            nvfp4_dequant_ws_buf_ = slab.data();
-            nvfp4_dequant_ws_from_arena_ = true;
-        } else {
-            nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, covered_bytes, "nvfp4_dequant");
-            nvfp4_dequant_ws_from_arena_ = false;
-            if (nvfp4_dequant_ws_buf_)
-                IMP_LOG_WARN("nvfp4_dequant: engine arena could not supply %.2f MiB "
-                             "(remaining %.2f MiB) — fell back to a direct allocation",
-                             covered_bytes / (1024.0 * 1024.0),
-                             engine_arena().remaining() / (1024.0 * 1024.0));
-        }
-    }
-    if (!nvfp4_dequant_ws_buf_) {
+    // T2 engine arena, deferred to first use when the arena is lazy (executor_lazy_scratch.cpp).
+    if (!acquire_nvfp4_dequant_ws_(covered_bytes)) {
         IMP_LOG_WARN("gemm_nvfp4 dequant workspace: alloc failed (%zu bytes) — prefill graph "
                      "capture disabled (M>1 fallback runs eager).",
                      covered_bytes);
@@ -1343,8 +1325,6 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
         nvfp4_dequant_uncapturable_ = true;
         return false;
     }
-    nvfp4_dequant_ws_size_ = covered_bytes;
-    set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_, nvfp4_dequant_ws_size_);
     IMP_LOG_INFO(
         "gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback; "
         "covers dense=%zu, moe=%zu, cutlass=%zu cache entries + per-layer "
@@ -1577,13 +1557,7 @@ void GraphExecutor::free_buffers() {
     expert_cache_.destroy();
 
     // Free gemm_nvfp4 dequant workspace and unregister from the free function.
-    if (nvfp4_dequant_ws_buf_) {
-        set_nvfp4_dequant_workspace(nullptr, 0);
-        if (!nvfp4_dequant_ws_from_arena_)
-            vram_free(vram_alloc_, nvfp4_dequant_ws_buf_);
-        nvfp4_dequant_ws_buf_ = nullptr;
-        nvfp4_dequant_ws_size_ = 0;
-    }
+    release_nvfp4_dequant_ws_();
     if (lm_head_cutlass_ready_) {
         // Frees only the owned SfAtom scales; .data is borrowed from the decode cache.
         free_cutlass_nvfp4_weight(lm_head_cutlass_);
@@ -1861,18 +1835,21 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
     // (engine_spec_capture.cpp clamps the cap to max_seq_len). Both pointers are baked into
     // the captured verify graph, so cudaFree here would hand a replay a freed address (AUDIT B13).
     chunk_capture_ctx_ = 0;
-    auto k_slab = engine_arena().take_bytes(bytes);
-    auto v_slab = engine_arena().take_bytes(bytes);
-    if (k_slab.empty() || v_slab.empty()) {
-        IMP_LOG_WARN("chunk-capture scratch unavailable from the T2 arena (2x %.1f MiB, %.1f MiB "
-                     "free) — captured verify disabled",
-                     bytes / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
-        chunk_capture_k_ = nullptr;
-        chunk_capture_v_ = nullptr;
-        return false;
+    chunk_capture_k_ = nullptr;
+    chunk_capture_v_ = nullptr;
+    chunk_capture_bytes_ = bytes;
+    if (engine_arena().lazy() && engine_arena().remaining() >= 2 * bytes + 512) {
+        // Taken at the first captured chunk (take_chunk_capture_scratch_): the lazy arena backs
+        // the pair only then (Qwen3.8-27B: 128 MiB held, 0 written without a captured chunk).
+        chunk_capture_ctx_ = ctx_capacity;
+        IMP_LOG_INFO(
+            "chunk-capture K/V scratch: 2x %.1f MiB reserved, taken at the first captured chunk "
+            "(ctx_capacity=%d, nkv=%d, hd=%d)",
+            bytes / (1024.0 * 1024.0), ctx_capacity, nkv_u, hd_u);
+        return true;
     }
-    chunk_capture_k_ = reinterpret_cast<half*>(k_slab.data());
-    chunk_capture_v_ = reinterpret_cast<half*>(v_slab.data());
+    if (!take_chunk_capture_scratch_())
+        return false;
     chunk_capture_ctx_ = ctx_capacity;
     IMP_LOG_INFO("chunk-capture K/V scratch: 2x %.1f MiB (ctx_capacity=%d, nkv=%d, hd=%d)",
                  bytes / (1024.0 * 1024.0), ctx_capacity, nkv_u, hd_u);

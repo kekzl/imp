@@ -139,10 +139,23 @@ __global__ void nvfp4_fp32_to_fp16_kernel(const float* __restrict__ in, __half* 
 static void* s_nvfp4_dequant_ws_buf = nullptr;
 static size_t s_nvfp4_dequant_ws_size = 0;
 
+static Nvfp4WorkspaceProvider s_nvfp4_dequant_ws_provide = nullptr;
+static void* s_nvfp4_dequant_ws_ctx = nullptr;
+
 void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes) {
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
     s_nvfp4_dequant_ws_buf = buf;
     s_nvfp4_dequant_ws_size = size_bytes;
+    s_nvfp4_dequant_ws_provide = nullptr;
+    s_nvfp4_dequant_ws_ctx = nullptr;
+}
+
+void set_nvfp4_dequant_workspace_provider(Nvfp4WorkspaceProvider provide, void* ctx, size_t size_bytes) {
+    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
+    s_nvfp4_dequant_ws_buf = nullptr;
+    s_nvfp4_dequant_ws_size = provide ? size_bytes : 0;
+    s_nvfp4_dequant_ws_provide = provide;
+    s_nvfp4_dequant_ws_ctx = ctx;
 }
 
 size_t nvfp4_lazy_dequant_buf_size_for_testing() {
@@ -152,6 +165,13 @@ size_t nvfp4_lazy_dequant_buf_size_for_testing() {
 
 // Must be called with s_nvfp4_dequant_mtx held.
 static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
+    // A deferred workspace is taken now, once (a provider that has none leaves no workspace).
+    if (s_nvfp4_dequant_ws_provide && needed <= s_nvfp4_dequant_ws_size) {
+        s_nvfp4_dequant_ws_buf = s_nvfp4_dequant_ws_provide(s_nvfp4_dequant_ws_ctx);
+        s_nvfp4_dequant_ws_provide = nullptr;
+        if (!s_nvfp4_dequant_ws_buf)
+            s_nvfp4_dequant_ws_size = 0;
+    }
     // Prefer the pre-allocated workspace (graph-safe path).
     if (s_nvfp4_dequant_ws_buf && needed <= s_nvfp4_dequant_ws_size)
         return s_nvfp4_dequant_ws_buf;

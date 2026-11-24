@@ -881,6 +881,10 @@ private:
     half* chunk_capture_k_ = nullptr;
     half* chunk_capture_v_ = nullptr;
     int chunk_capture_ctx_ = 0;
+    // Lazy engine arena: ensure_chunk_capture_scratch only checks the room; the pair of
+    // chunk_capture_bytes_ each is taken by take_chunk_capture_scratch_ at the first captured chunk.
+    size_t chunk_capture_bytes_ = 0;
+    [[nodiscard]] bool take_chunk_capture_scratch_();
 
     // Persistent K/V gather scratch for the EAGER chunked path. Spec-verify
     // re-enters that path per layer per verify step; per-call
@@ -966,6 +970,12 @@ private:
     // path to run inside CUDA stream capture without crashing on cudaMalloc.
     void* nvfp4_dequant_ws_buf_ = nullptr;
     size_t nvfp4_dequant_ws_size_ = 0;
+    // Lazy engine arena: the workspace is taken at the first fallback that needs it
+    // (set_nvfp4_dequant_workspace_provider); until then the buffer is null and the size is set.
+    bool nvfp4_dequant_ws_deferred_ = false;
+    static void* provide_nvfp4_dequant_ws_(void* self);
+    [[nodiscard]] bool acquire_nvfp4_dequant_ws_(size_t covered_bytes);
+    void release_nvfp4_dequant_ws_();
 
     // MLA persistent QKV scratch, pre-allocated once (sized for max_tokens) so
     // the materialized two-step KV projection never calls cudaMallocAsync
