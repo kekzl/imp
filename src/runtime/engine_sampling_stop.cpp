@@ -290,6 +290,11 @@ int Engine::acquire_recurrent_slot_(int req_id) {
 }
 
 void Engine::trim_recurrent_slots_after_warmup_() {
+    // The prewarm prompts are synthetic: their snapshots serve no request, their pinned slabs go back.
+    if (const int n = recurrent_snapshots_ ? recurrent_snapshots_->release_host_tier() : 0; n > 0)
+        IMP_LOG_INFO("recurrent snapshots: %d host slab(s) of the warmup released (%.0f MiB pinned)", n,
+                     static_cast<double>(n) * static_cast<double>(recurrent_snapshots_->entry_bytes()) /
+                         1048576.0);
     if (!ssm_state_ || !ssm_state_->lazy())
         return;
     // The slot the next request pops stays committed: with every slot handed back, a lazy upload

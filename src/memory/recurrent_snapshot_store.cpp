@@ -1,4 +1,5 @@
 #include "memory/recurrent_snapshot_store.h"
+#include "memory/host_pinned.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"
 #include "memory/weight_snapshot.h"
@@ -20,8 +21,10 @@ RecurrentSnapshotStore::~RecurrentSnapshotStore() {
     }
     for (void* p : to_free)
         IMP_CUDA_CHECK_LOG(cudaFree(p));
-    for (void* p : to_free_host)
+    for (void* p : to_free_host) {
+        host_pinned_forget(p);
         IMP_CUDA_CHECK_LOG(cudaFreeHost(p));
+    }
     // Entries still held by requests free their buffers via the deleter.
 }
 
@@ -128,9 +131,10 @@ std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(
                     return;
                 }
             }
-            if (e->on_host)
+            if (e->on_host) {
+                host_pinned_forget(e->data);
                 IMP_CUDA_CHECK_LOG(cudaFreeHost(e->data));
-            else
+            } else
                 IMP_CUDA_CHECK_LOG(cudaFree(e->data));
             delete e;
         });
@@ -150,6 +154,7 @@ void* RecurrentSnapshotStore::acquire_host_buffer_() {
         if (host_ram_spares(buf_bytes_) &&
             cudaHostAlloc(&p, buf_bytes_, cudaHostAllocDefault) == cudaSuccess) {
             ++host_allocated_;
+            host_pinned_note(p, buf_bytes_, "recurrent_snapshots");
             return p;
         }
         (void)cudaGetLastError();
@@ -333,6 +338,24 @@ void RecurrentSnapshotStore::clear() {
     host_entries_.clear();
     host_lru_.clear();
     host_lru_map_.clear();
+}
+
+int RecurrentSnapshotStore::release_host_tier() {
+    clear();
+    if (!pool_)
+        return 0;
+    std::vector<void*> slabs;
+    {
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        slabs.swap(pool_->free_host_bufs);
+    }
+    for (void* p : slabs) {
+        host_pinned_forget(p);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(p));
+    }
+    // A slab a request still holds stays counted and returns to the pool with its entry.
+    host_allocated_ -= static_cast<int>(slabs.size());
+    return static_cast<int>(slabs.size());
 }
 
 void log_swa_snapshot_store(const RecurrentSnapshotStore& store, int budget_mb) {

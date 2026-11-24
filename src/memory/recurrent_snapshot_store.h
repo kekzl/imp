@@ -111,6 +111,9 @@ public:
     // Drop all entries (context reset). Outstanding request-held entries
     // stay valid until released.
     void clear();
+    // clear(), then the host tier's free slabs go back to the host. After warmup: its synthetic
+    // prompts leave one pinned slab per prewarm request behind. Returns the slabs released.
+    int release_host_tier();
 
     // A running request's prompt-boundary snapshot: host eviction skips it until unprotect(owner),
     // which marks it most-recently-used. dev50h (4 agents, 28 slots): 39.5 % of turns after a

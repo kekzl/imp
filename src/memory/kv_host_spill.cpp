@@ -1,4 +1,5 @@
 #include "memory/kv_host_spill.h"
+#include "memory/host_pinned.h"
 
 #include "core/logging.h"
 #include "memory/kv_cache.h"
@@ -170,8 +171,10 @@ KVHostSpill::KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc, Fr
 }
 
 KVHostSpill::~KVHostSpill() {
-    for (char* c : chunks_)
+    for (char* c : chunks_) {
+        host_pinned_forget(c);
         free_(c);
+    }
 }
 
 bool KVHostSpill::grow_() {
@@ -188,6 +191,7 @@ bool KVHostSpill::grow_() {
         return false;
     }
     chunks_.push_back(c);
+    host_pinned_note(c, static_cast<size_t>(n) * slot_bytes_, "kv_host_spill");
     for (int s = pinned_slots_ + n - 1; s >= pinned_slots_; --s)
         free_slots_.push_back(s);
     pinned_slots_ += n;
