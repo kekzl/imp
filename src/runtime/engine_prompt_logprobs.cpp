@@ -6,8 +6,10 @@
 #include "exec/executor.h"
 #include "compute/prompt_logprobs_rows.h"
 #include "core/logging.h"
+#include "memory/vram_query.h"
 
 #include <algorithm>
+#include <limits>
 
 #include <cuda_runtime.h>
 
@@ -64,7 +66,11 @@ void Engine::prompt_logprobs_chunk_(Request& req, int offset, int chunk_len, cud
     // Logits chunk for one LM-head GEMM per chunk (#2257). Scoped to this call: freed on every exit,
     // no VRAM held between passes. Failed allocation = per-batch driver.
     const int vocab = model_->config().vocab_size;
-    const int want = prompt_lp_chunk_rows(rows, vocab, vram_alloc_.available());
+    // Largest chunk first, halved until twice its bytes fit above the allocator headroom.
+    int want = prompt_lp_chunk_rows(rows, vocab, std::numeric_limits<size_t>::max());
+    while (want > 0 && !vram_fits(2 * static_cast<size_t>(want) * static_cast<size_t>(vocab) * sizeof(float),
+                                  vram_alloc_.headroom()))
+        want /= 2;
     VramOwned<float> logits(vram_alloc_, static_cast<size_t>(want) * static_cast<size_t>(vocab),
                             "prompt_lp_logits");
     const int logit_rows = logits ? want : 0;

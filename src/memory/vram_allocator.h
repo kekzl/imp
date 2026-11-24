@@ -47,10 +47,6 @@ public:
     // Bytes currently tracked as allocated through this allocator.
     size_t allocated() const { return allocated_.load(std::memory_order_relaxed); }
 
-    // Bytes available for allocation (total - allocated - headroom - external).
-    // 'external' = VRAM used by other processes / driver overhead.
-    size_t available() const;
-
     // Reserved headroom bytes (not available for allocation).
     size_t headroom() const { return headroom_; }
 

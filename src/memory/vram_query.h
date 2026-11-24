@@ -61,6 +61,15 @@ size_t vram_own_peak_bytes();
 // free right now. 0 if the query fails.
 [[nodiscard]] size_t vram_budget_total_bytes();
 
+// Free device memory at install, capped at the budget: the capacity the pre-upload resolvers
+// (auto batch, auto context, host-expert estimate) size from. One snapshot per process, not a
+// reading: nothing of imp's is on the card at those sites. 0 if the install query failed.
+[[nodiscard]] size_t vram_free_at_install_bytes();
+// Device-used under the budget view, lazy pools' pending charge NOT counted as used (address space,
+// not memory): what the accounting reconciles its ledger against. One read, so it cannot race a
+// slot commit. A measurement, never an input to a free-space size. False on a failed query.
+[[nodiscard]] bool vram_view_used_bytes(size_t* used_bytes);
+
 // cudaMemGetInfo with the budget view applied. Either out pointer may be
 // null. Returns false (zeros) if the raw query fails.
 [[nodiscard]] bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes);

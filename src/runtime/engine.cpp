@@ -685,12 +685,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Everything already resident before imp allocates anything: CUDA primary
     // context + driver overhead on this WSL2/WDDM box - measured, not assumed,
     // and not imp's memory.
-    size_t ctx_baseline_bytes = 0;
-    {
-        size_t f = 0, tot = 0;
-        if (vram_budget_mem_get_info(&f, &tot))
-            ctx_baseline_bytes = tot > f ? tot - f : 0;
-    }
+    // Under --vram-budget the context is outside the slice (vram_query.h): 0.
+    const size_t ctx_baseline_bytes = vram_budget_bytes() ? 0 : vram_used_at_install_bytes();
 
     // Headroom kAllocatorHeadroomPct (vram_query.h): covers allocations after the KV pool
     // capped (608 MiB measured, #2482) plus ~500 MiB WSL2/WDDM driver overhead.

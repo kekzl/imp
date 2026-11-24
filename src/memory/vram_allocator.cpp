@@ -120,17 +120,6 @@ bool VRAMAllocator::can_allocate(size_t bytes) const {
     return vram_fits(bytes, headroom_);
 }
 
-size_t VRAMAllocator::available() const {
-    if (!initialized_)
-        return 0;
-
-    size_t free_mem = 0, total = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&free_mem, &total);
-
-    return (free_mem > headroom_) ? (free_mem - headroom_) : 0;
-}
-
 std::vector<std::pair<std::string, size_t>> VRAMAllocator::bytes_by_tag() const {
     std::map<std::string, size_t> by_tag;
     {

@@ -234,13 +234,9 @@ void MemAccount::sample_once() {
 }
 
 int64_t MemAccount::unattributed_signed_bytes() const {
-    size_t free_b = 0, total_b = 0;
-    // The planner view hides what the lazy pools have charged but not committed (address
-    // space, not device memory in use). Read the raw view in one call: the planner view plus
-    // the ledger added back afterwards would race the prewarm's slot commits.
-    if (!vram_budget_mem_get_info_ex(&free_b, &total_b, /*exclude_pending=*/false))
+    size_t used = 0;
+    if (!vram_view_used_bytes(&used))
         return 0;
-    const size_t used = total_b > free_b ? total_b - free_b : 0;
     std::lock_guard<std::mutex> lock(mu_);
     int64_t cur = 0;
     for (const auto& p : pools_)
