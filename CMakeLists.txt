@@ -164,7 +164,6 @@ set(IMP_CORE_SOURCES
     src/core/pdl.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
-    src/core/buffer.cpp
     src/core/logging.cpp
     src/core/cuda_static_reset.cpp
 )
@@ -198,6 +197,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
     src/memory/device_alloc_all.cpp
+    src/memory/buffer.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cpp
     src/memory/layer_offload.cpp

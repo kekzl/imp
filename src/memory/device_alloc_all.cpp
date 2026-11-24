@@ -24,6 +24,19 @@ cudaError_t device_alloc_all_n(DeviceAllocReq* reqs, size_t n, bool async, cudaS
     return err;
 }
 
+cudaError_t device_alloc_pool_async(void** ptr, size_t bytes, cudaMemPool_t pool, cudaStream_t stream) {
+    *ptr = nullptr;
+    const cudaError_t err = pool ? cudaMallocFromPoolAsync(ptr, bytes, pool, stream)
+                                 : cudaMallocAsync(ptr, bytes, stream);
+    if (err != cudaSuccess)
+        *ptr = nullptr;
+    return err;
+}
+
+cudaError_t device_free_async_checked(void* ptr, cudaStream_t stream) {
+    return ptr ? cudaFreeAsync(ptr, stream) : cudaSuccess;
+}
+
 void device_free_all_n(void* const* ptrs, size_t n) {
     for (size_t i = 0; i < n; ++i)
         if (ptrs[i])

@@ -1,4 +1,5 @@
 #include "memory/vram_allocator.h"
+#include "memory/device_alloc_all.h"
 #include "memory/mem_account.h"
 
 #include <string>
@@ -56,7 +57,7 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroo
     }
 
     void* ptr = nullptr;
-    cudaError_t err = cudaMalloc(&ptr, bytes);
+    cudaError_t err = device_alloc_all(dev_req(ptr, bytes));
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("VRAMAllocator: cudaMalloc failed for %s (%.2f MiB): %s", tag,
                       bytes / (1024.0 * 1024.0), cudaGetErrorString(err));
@@ -95,7 +96,7 @@ void VRAMAllocator::free(void* ptr) {
         }
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFree(ptr));
+    device_free_all(ptr);
 
     if (bytes > 0) {
         allocated_.fetch_sub(bytes, std::memory_order_relaxed);

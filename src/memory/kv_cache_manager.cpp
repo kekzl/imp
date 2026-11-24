@@ -1,4 +1,5 @@
 #include "memory/kv_cache_manager.h"
+#include "memory/device_alloc_all.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -58,7 +59,7 @@ KVCacheManager::~KVCacheManager() {
         h_swa_descs_ = nullptr;
     }
     if (d_swa_descs_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_swa_descs_));
+        device_free_all(d_swa_descs_);
         d_swa_descs_ = nullptr;
     }
 }
@@ -967,8 +968,8 @@ bool KVCacheManager::enable_swa_snapshots() {
         static_cast<int>(swa_snap_layers_.size()) * swa_snap_win_blocks_ * 4;
     if (cudaMallocHost(reinterpret_cast<void**>(&h_swa_descs_),
                        static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc)) != cudaSuccess ||
-        cudaMalloc(reinterpret_cast<void**>(&d_swa_descs_),
-                   static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc)) != cudaSuccess) {
+        device_alloc_all(dev_req(d_swa_descs_, static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc))) !=
+            cudaSuccess) {
         IMP_LOG_WARN("KVCacheManager: SWA snapshot desc alloc failed — snapshots disabled");
         if (h_swa_descs_) {
             IMP_CUDA_CHECK_LOG(cudaFreeHost(h_swa_descs_));

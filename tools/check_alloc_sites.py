@@ -133,6 +133,33 @@ def scan() -> dict[str, list[tuple[int, str]]]:
     return hits
 
 
+# Inside the memory layer: plain device memory is taken and released by ONE file, and the VMM
+# backend maps reservations. Every other file in src/memory/ goes through them, so there is one
+# place to interpose, account and fail (invariant I1, "single acquisition point").
+DEVICE_APIS = ["cudaMallocFromPoolAsync", "cudaMallocAsync", "cudaMalloc", "cudaFreeAsync", "cudaFree"]
+PATTERN_DEVICE = re.compile(r"\b(" + "|".join(re.escape(a) for a in DEVICE_APIS) + r")\s*\(")
+DEVICE_DRIVER_FILES = ("src/memory/device_alloc_all.cpp", "src/memory/alloc_interpose.cpp")
+
+
+def scan_memory_layer() -> list[tuple[str, int, str]]:
+    """(rel_path, line_no, api) for a direct device-memory driver call outside the driver files."""
+    out: list[tuple[str, int, str]] = []
+    for path in sorted((SRC / "memory").rglob("*")):
+        if path.suffix not in SUFFIXES or not path.is_file():
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        if rel in DEVICE_DRIVER_FILES:
+            continue
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for n, line in enumerate(fh, 1):
+                if COMMENT_LINE.match(line):
+                    continue
+                m = PATTERN_DEVICE.search(line)
+                if m and not in_string_literal(line, m.start()):
+                    out.append((rel, n, m.group(1)))
+    return out
+
+
 def read_allowlist() -> dict[str, int]:
     """rel_path -> budgeted site count.
 
@@ -199,6 +226,15 @@ def main() -> int:
 
     print(f"I1: {len(hits)} files / {total_sites} sites outside src/memory/ "
           f"(allowlist: {len(allowed)} files / {budget_total} sites)")
+
+    inner = scan_memory_layer()
+    print(f"I1: {len(inner)} direct device-memory driver call(s) in src/memory/ outside "
+          f"{', '.join(pathlib.PurePosixPath(f).name for f in DEVICE_DRIVER_FILES)}")
+    if inner and not args.stats:
+        for rel, n, api in inner:
+            print(f"  FAIL {rel}:{n} {api}: go through memory/device_alloc_all.h")
+        print("FAIL: the memory layer has one file that calls the driver for plain device memory.")
+        return 1
 
     if args.stats:
         # Acquisition/release split (I1, "single ACQUISITION point"): an acquisition needs a tier to

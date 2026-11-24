@@ -1,6 +1,6 @@
 // Inkling2-Loop in the engine: what the first serving path of the arch runs without.
 
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"

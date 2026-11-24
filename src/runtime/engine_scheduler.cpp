@@ -20,7 +20,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/decode_graph_ctx.h"
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "runtime/batch.h"
 #include "runtime/think_stop_logic.h"
 #include "compute/mtp_forward.h"

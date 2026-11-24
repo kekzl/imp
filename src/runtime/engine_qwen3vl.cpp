@@ -11,7 +11,7 @@
 
 #include <fstream>
 
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "runtime/engine_internal.h"

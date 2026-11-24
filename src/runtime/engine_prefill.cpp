@@ -9,7 +9,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
-#include "core/buffer.h"
+#include "memory/buffer.h"
 #include "core/cuda_errors.h"
 #include "compute/mtp_forward.h"
 #include "compute/dispatch_record.h"
