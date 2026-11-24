@@ -299,6 +299,7 @@ void handle_decide(const httplib::Request& req, httplib::Response& res, ServerSt
     std::vector<ScoreJob> jobs;
     std::vector<std::vector<std::string>> letters_per_item;
     int total_prompt_tokens = 0;
+    std::shared_ptr<ModelLease> lease;  // pins the model until the scores are back (C-2)
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
         if (!lock.owns_lock()) {
@@ -309,6 +310,9 @@ void handle_decide(const httplib::Request& req, httplib::Response& res, ServerSt
         if (requested_model.empty())
             requested_model = state.model_name;
         if (!ensure_model_loaded(state, requested_model, res))
+            return;
+        lease = lease_model_locked(state, res);
+        if (!lease)
             return;
         if (!state.have_template || state.chat_tpl.is_raw() || !state.tok) {
             bad_request(res, "The loaded model (" + state.model_name +
@@ -454,6 +458,7 @@ void handle_score(const httplib::Request& req, httplib::Response& res, ServerSta
 
     std::string requested_model = body.value("model", std::string());
     ScoreJob job;
+    std::shared_ptr<ModelLease> lease;  // pins the model until the scores are back (C-2)
     {
         std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
         if (!lock.owns_lock()) {
@@ -464,6 +469,9 @@ void handle_score(const httplib::Request& req, httplib::Response& res, ServerSta
         if (requested_model.empty())
             requested_model = state.model_name;
         if (!ensure_model_loaded(state, requested_model, res))
+            return;
+        lease = lease_model_locked(state, res);
+        if (!lease)
             return;
         if (!state.tok) {
             send_json_error(res, 500, "server_error", "No tokenizer loaded");

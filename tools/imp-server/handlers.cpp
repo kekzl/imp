@@ -452,8 +452,14 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
 
 // ensure_model_loaded: resolves/loads/swaps as needed. server.model_swap (default on) drains
 // in-flight generations before teardown and restores the prior model on a failed load. Unknown
-// names 404 without loading anything. Caller must hold state.mtx.
+// names 404 without loading anything. Caller must hold state.mtx; a swap releases and re-takes it
+// while it waits for the other handlers (ModelExclusiveScope).
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res) {
+    // A swap/suspend waiting for its handlers released state.mtx: answer, do not queue behind it (C-2).
+    if (state.lifetime.exclusive_pending()) {
+        send_model_busy(res, "Server busy (model swap or suspend in progress), retry shortly");
+        return false;
+    }
     // Idle suspend (--idle-unload-seconds): warm resume from the snapshot, then serve (#2199).
     if (!resume_if_idle_locked(state, res))
         return false;
@@ -503,20 +509,22 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
     if (state.runtime_config.server.model_swap) {
         std::string path = find_model_path(state, requested_model);
         if (!path.empty()) {
-            // Swap drains in-flight generations first (never cancelled, same contract as /admin/suspend).
-            // state.mtx held throughout; on drain timeout nothing is torn down and the current model keeps
-            // serving.
-            const int drain_ms = state.runtime_config.server.model_swap_drain_ms;
+            // Every other handler finishes first (never cancelled, same contract as /admin/suspend):
+            // state.mtx is released for that wait only. On a timeout nothing is torn down and the
+            // current model keeps serving (C-2).
+            ModelExclusiveScope exclusive(state);
+            if (!exclusive.acquired()) {
+                send_model_busy(res, "model swap to '" + requested_model + "' not started: " +
+                                         exclusive.refusal() + "; still serving '" + state.model_name + "'");
+                return false;
+            }
+            const int drain_ms = exclusive.pause_budget_ms();
             if (state.batching && !state.batching->pause(drain_ms)) {
                 state.batching->resume();
-                res.status = 503;
-                json err = {{"error",
-                             {{"message", "model swap to '" + requested_model +
-                                              "' aborted: in-flight requests did not drain within " +
-                                              std::to_string(drain_ms) + "ms — still serving '" +
-                                              state.model_name + "'"},
-                              {"type", "server_error"}}}};
-                res.set_content(dump_safe(err), "application/json");
+                send_model_busy(res, "model swap to '" + requested_model +
+                                         "' aborted: in-flight requests did not drain within " +
+                                         std::to_string(drain_ms) + "ms; still serving '" + state.model_name +
+                                         "'");
                 return false;
             }
             const std::string previous = state.model_name;
@@ -659,6 +667,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         std::atomic<bool>& flag;
         ~SwapScope() { flag.store(false); }
     } swap_scope{state.swapping};
+    // Every load starts a new epoch: a snapshot of the old one is refused at submit (C-2). With a
+    // model loaded the caller holds a ModelExclusiveScope, so no lease is alive below this line.
+    state.lifetime.bump_epoch();
 
     // Stop batching engine before freeing context
     if (state.batching) {

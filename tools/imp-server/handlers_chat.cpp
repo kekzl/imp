@@ -59,17 +59,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // C-API fallback, no engine pause.
 
     // Submit to batching engine for continuous batching
-    {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!state.batching || !state.batching->is_running()) {
-            res.status = 503;
-            json err = {
-                {"error",
-                 {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
-            res.set_content(dump_safe(err), "application/json");
-            return;
-        }
-        state.batching->submit(server_req);
+    if (!submit_for_lease(state, ctx.snap.lease, server_req)) {
+        send_model_busy(res, "Inference engine not ready. Please retry.");
+        return;
     }
 
     std::string comp_id = ctx.req_id;

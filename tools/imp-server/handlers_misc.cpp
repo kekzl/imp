@@ -56,15 +56,12 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     }
 
     // Snapshot model pointer (+ context size) under lock
-    ImpModel snap_model;
+    ImpModel snap_model = nullptr;
     int snap_max_seq_len = 0;
-    {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!resume_if_idle_locked(state, res))
-            return;
-        snap_model = state.model;
-        snap_max_seq_len = state.max_seq_len;
-    }
+    // The lease pins snap_model until the handler returns (C-2).
+    const auto lease = lease_model_snapshot(state, res, snap_model, &snap_max_seq_len);
+    if (!lease)
+        return;
     if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
@@ -128,13 +125,11 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     }
 
     // Snapshot model pointer under lock
-    ImpModel snap_model;
-    {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!resume_if_idle_locked(state, res))
-            return;
-        snap_model = state.model;
-    }
+    ImpModel snap_model = nullptr;
+    // The lease pins snap_model until the handler returns (C-2).
+    const auto lease = lease_model_snapshot(state, res, snap_model);
+    if (!lease)
+        return;
     if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"}, {"type", "server_error"}}}};
@@ -587,6 +582,10 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
     if (requested_model.empty())
         requested_model = state.model_name;
     if (!ensure_model_loaded(state, requested_model, res))
+        return;
+    // Pins the model past lock.unlock() below, until the handler returns (C-2).
+    const auto lease = lease_model_locked(state, res);
+    if (!lease)
         return;
 
     // Decoder models with a running batching worker take the SCHEDULED path (#1005): embeddings
