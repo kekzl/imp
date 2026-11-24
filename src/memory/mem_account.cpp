@@ -564,6 +564,25 @@ cudaError_t malloc_async_in_scope(void** ptr, size_t size, cudaStream_t stream) 
     return pool ? cudaMallocFromPoolAsync(ptr, size, pool, stream) : cudaMallocAsync(ptr, size, stream);
 }
 
+cudaError_t weights_alloc(void** ptr, size_t size, cudaStream_t stream, bool in_scope) {
+    *ptr = nullptr;
+    const cudaError_t err = in_scope ? malloc_async_in_scope(ptr, size, stream)
+                                     : cudaMallocAsync(ptr, size, stream);
+    if (err != cudaSuccess) {
+        *ptr = nullptr;
+        return err;
+    }
+    MemAccount::instance().note_alloc("WEIGHTS", *ptr, size);
+    return cudaSuccess;
+}
+
+cudaError_t weights_free(void* ptr, cudaStream_t stream) {
+    if (ptr == nullptr)
+        return cudaSuccess;
+    MemAccount::instance().note_free(ptr);
+    return cudaFreeAsync(ptr, stream);
+}
+
 size_t release_on_free_pool_reserved(ReleasePool which) {
     cudaMemPool_t pool = release_on_free_pool(which);
     unsigned long long rsv = 0;
