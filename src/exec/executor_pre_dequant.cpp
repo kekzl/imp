@@ -102,8 +102,7 @@ size_t GraphExecutor::kv_bytes_per_token_() const {
 size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
     if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0)
         return 0;
-    size_t free_mem = 0, total_mem = 0;
-    (void)vram_budget_mem_get_info(&free_mem, &total_mem);  // failure zeroes both: no slack
+    const size_t free_mem = vram_planned_free_bytes();  // imp's own books, not the device (I4)
     vram_i4_probe("expert_cache_regrow_slack");
     constexpr size_t kTail = 1536ULL << 20;
     const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ceiling_seqs(kv_ctx_batch_, true) *
@@ -168,9 +167,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // Compute effective cache budget from free VRAM minus reserve.
     // This preserves the existing per-phase budget tracking while the VRAMBudget
     // struct controls strategy-level decisions (which phases to skip).
-    size_t free_vram = 0, total_vram = 0;
-    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-    (void)vram_budget_mem_get_info(&free_vram, &total_vram);
+    // imp's own books, not the device (I4): identical on identical starts.
+    const size_t free_vram = vram_planned_free_bytes();
+    const size_t total_vram = vram_budget_total_bytes();
     vram_i4_probe("cache_build_root");
     // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
     // visible via nvidia-smi) — canonical floor in vram_query.h.

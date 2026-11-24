@@ -19,6 +19,7 @@ std::atomic<size_t> g_budget_bytes{0};
 std::atomic<size_t> g_free_at_install{0};
 std::atomic<size_t> g_total_at_install{0};
 std::atomic<size_t> g_own_peak{0};
+std::atomic<size_t> g_ledger_first_use_capacity{0};
 std::atomic<std::ptrdiff_t> g_reserved_uncommitted{0};
 std::atomic<bool> g_i4_probe{false};  // diagnostics.i4_probe
 }  // namespace
@@ -208,10 +209,25 @@ size_t vram_budget_total_bytes() {
 }
 
 size_t vram_ledger_free_bytes() {
-    const size_t capacity = vram_free_at_install_bytes();
-    const size_t held = device_alloc_live_bytes() + vmm_committed_live_bytes() +
-                        vram_reserved_uncommitted_bytes();
+    const size_t own = device_alloc_live_bytes() + vmm_committed_live_bytes();
+    size_t capacity = vram_free_at_install_bytes();
+    // No engine installed the view (an executor built alone in a test or a tool): one snapshot
+    // at first use, own bytes added back so the ledger starts where the device is.
+    if (capacity == 0 && g_total_at_install.load(std::memory_order_relaxed) == 0) {
+        capacity = g_ledger_first_use_capacity.load(std::memory_order_relaxed);
+        size_t free_b = 0, total_b = 0;
+        if (capacity == 0 && cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+            capacity = free_b + own;
+            g_ledger_first_use_capacity.store(capacity, std::memory_order_relaxed);
+        }
+    }
+    const size_t held = own + vram_reserved_uncommitted_bytes();
     return capacity > held ? capacity - held : 0;
+}
+
+size_t vram_planned_free_bytes() {
+    const size_t ledger = vram_ledger_free_bytes();
+    return ledger > kLedgerUnbookedBytes ? ledger - kLedgerUnbookedBytes : 0;
 }
 
 void vram_i4_probe_enable(bool on) { g_i4_probe.store(on, std::memory_order_relaxed); }

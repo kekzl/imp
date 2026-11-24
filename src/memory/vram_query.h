@@ -92,6 +92,11 @@ size_t vram_reserved_uncommitted_bytes();
 // allocations (device_alloc_live_bytes), VMM-committed bytes and the lazy pools' pending charge,
 // clamped at 0. The I4 candidate for the sizing sites that run after imp has allocated.
 [[nodiscard]] size_t vram_ledger_free_bytes();
+// What a size chosen after imp has allocated may count as free: the ledger minus what the device
+// holds beyond imp's books (driver rounding, pool slack: 41-73 MiB after the upload on 5 models,
+// 2026-11-24). Other processes are not in it: vram_fits and the KV residual clamp guard those.
+inline constexpr size_t kLedgerUnbookedBytes = size_t{64} << 20;
+[[nodiscard]] size_t vram_planned_free_bytes();
 
 // diagnostics.i4_probe: one "I4PROBE site=..." INFO line per call with the budget-view free bytes,
 // vram_ledger_free_bytes() and their difference. Off (default): no query, no line. Engine::init

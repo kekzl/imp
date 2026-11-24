@@ -134,6 +134,8 @@ TEST(VramLedger, PlainAllocationMovesLiveBytesAndLedgerFreeByItsSize) {
     ASSERT_EQ(imp::device_alloc_all(imp::dev_req(p, kBytes)), cudaSuccess);
     EXPECT_EQ(imp::device_alloc_live_bytes(), live0 + kBytes);
     EXPECT_EQ(imp::vram_ledger_free_bytes(), free0 - kBytes);
+    // The sizing figure keeps kLedgerUnbookedBytes back and follows the ledger byte for byte.
+    EXPECT_EQ(imp::vram_planned_free_bytes(), imp::vram_ledger_free_bytes() - imp::kLedgerUnbookedBytes);
     imp::device_free_all(p);
     EXPECT_EQ(imp::device_alloc_live_bytes(), live0);
     EXPECT_EQ(imp::vram_ledger_free_bytes(), free0);

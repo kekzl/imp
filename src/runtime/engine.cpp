@@ -373,9 +373,8 @@ size_t Engine::effective_free_vram() const {
     // Budget-aware view (installed in init from config_.vram_budget_mb): uses
     // vram_query's process baseline delta, not global device usage, so a
     // co-tenant server's memory is never mis-charged to this process.
-    size_t free_mem = 0;
-    if (!vram_budget_mem_get_info(&free_mem, nullptr))
-        return 0;
+    // imp's own books, not the device (I4): the plan's budget input is identical on identical starts.
+    const size_t free_mem = vram_planned_free_bytes();
     vram_i4_probe("plan_budget_input");
     return free_mem;
 }
