@@ -5,6 +5,7 @@
 // launch_ban_logits.
 
 #include "exec/executor.h"
+#include "exec/executor_helpers.h"
 #include "exec/executor_sampling_internal.h"
 #include "compute/sampling.h"
 #include "core/cuda_errors.h"
@@ -191,15 +192,13 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
     banned_cache_next_ = (banned_cache_next_ + 1) % kBannedCacheEntries;
     const size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
     if (e.cap < static_cast<size_t>(state.n_banned_tokens)) {
-        if (e.d)
-            IMP_CUDA_CHECK_LOG(cudaFree(e.d));  // releases the undersized old buffer; nothing reads it after
-        e.d = nullptr;
+        vram_free(vram_alloc_, e.d);  // the undersized old buffer; nothing reads it after
         e.cap = 0;
-        if (const cudaError_t err = cudaMalloc(&e.d, ban_bytes); err != cudaSuccess) {
-            e.d = nullptr;
+        e.d = static_cast<int32_t*>(vram_alloc(vram_alloc_, ban_bytes, "banned_cache"));
+        if (e.d == nullptr) {
             e.src = nullptr;
             e.n = 0;
-            cuda_call_or_throw(err, "banned_cache_ alloc");
+            cuda_call_or_throw(cudaErrorMemoryAllocation, "banned_cache_ alloc");
         }
         e.cap = static_cast<size_t>(state.n_banned_tokens);
     }

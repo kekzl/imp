@@ -1616,8 +1616,7 @@ void GraphExecutor::free_buffers() {
     n_pending_greedy_rows_ = 0;
     n_pending_pen_rows_ = 0;
     for (auto& e : banned_cache_entries_) {
-        if (e.d)
-            IMP_CUDA_CHECK_LOG(cudaFree(e.d));
+        vram_free(vram_alloc_, e.d);
         e = BannedCacheEntry{};
     }
     banned_cache_next_ = 0;
