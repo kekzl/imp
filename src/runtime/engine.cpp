@@ -144,10 +144,10 @@ Engine::~Engine() {
     // pipeline (teardown keeps them); this is their one release.
     cpipe_.h_token.reset();
     cpipe_.ev.reset();
-    if (swa_snap_slab_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
-        swa_snap_slab_ = nullptr;
-    }
+    vram_alloc_.free(swa_snap_slab_);
+    swa_snap_slab_ = nullptr;
+    vram_alloc_.free(d_ssm_seq_slots_);  // was never released
+    d_ssm_seq_slots_ = nullptr;
     free_mrope_buffers_();
     if (d_penalty_tokens_) {
         vram_alloc_.free(d_penalty_tokens_);
@@ -172,10 +172,8 @@ Engine::~Engine() {
         d_bt_patch_val_[p] = nullptr;
         d_hist_pos_[p] = nullptr;
     }
-    if (d_pipe_hist_) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_pipe_hist_));
-        d_pipe_hist_ = nullptr;
-    }
+    vram_alloc_.free(d_pipe_hist_);
+    d_pipe_hist_ = nullptr;
     log_spec_stats_();
     free_spec_buffers_();
     if (prefill_pool_) {
