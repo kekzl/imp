@@ -25,7 +25,7 @@
 
 namespace imp {
 
-void Engine::bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int& cap, bool fixed,
+void Engine::bind_mrope_(InferenceState& state, int n_tokens, VramOwned<int32_t>& buf, int& cap, bool fixed,
                          cudaStream_t stream) {
     const ModelConfig& mc = model_->config_;
     if (!mc.has_mrope() || n_tokens <= 0)
@@ -44,10 +44,8 @@ void Engine::bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int
         }
         // A fixed buffer is sized once, to the batch ceiling, not to this step.
         const int want = fixed ? std::max(n_tokens, std::max(1, config_.max_batch_size)) : n_tokens;
-        if (buf)
-            vram_alloc_.free(buf);
-        const size_t bytes = static_cast<size_t>(3) * want * sizeof(int32_t);
-        buf = static_cast<int32_t*>(vram_alloc_.allocate(bytes, "mrope_positions"));
+        buf.reset();  // before the allocation: old and new never coexist
+        buf = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(3) * want, "mrope_positions");
         if (!buf) {
             IMP_LOG_ERROR("M-RoPE: could not allocate %d positions — falling back to single-axis", want);
             cap = 0;
@@ -57,10 +55,10 @@ void Engine::bind_mrope_(InferenceState& state, int n_tokens, int32_t*& buf, int
         cap = want;
     }
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(buf, h_mrope_scratch_.data(),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(buf.get(), h_mrope_scratch_.data(),
                                        h_mrope_scratch_.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
                                        stream));
-    state.mrope.positions = buf;
+    state.mrope.positions = buf.get();
     state.mrope.stride = n_tokens;
     state.mrope.sec_t = mc.mrope_section[0];
     state.mrope.sec_h = mc.mrope_section[1];
@@ -165,16 +163,15 @@ void Engine::bind_mrope_decode_(InferenceState& state, const std::vector<std::sh
             return;
         }
         const int want = std::max(n, std::max(1, config_.max_batch_size));
-        d_mrope_decode_ = static_cast<int32_t*>(
-            vram_alloc_.allocate(static_cast<size_t>(want) * sizeof(int32_t), "mrope_delta"));
+        d_mrope_decode_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(want), "mrope_delta");
         if (!d_mrope_decode_)
             return;
         mrope_decode_cap_ = want;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_mrope_decode_, h_mrope_scratch_.data(),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_mrope_decode_.get(), h_mrope_scratch_.data(),
                                        static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice,
                                        stream));
-    state.mrope.pos_delta = d_mrope_decode_;
+    state.mrope.pos_delta = d_mrope_decode_.get();
     state.mrope.stride = n;
     state.mrope.sec_t = mc.mrope_section[0];
     state.mrope.sec_h = mc.mrope_section[1];
@@ -183,12 +180,8 @@ void Engine::bind_mrope_decode_(InferenceState& state, const std::vector<std::sh
 }
 
 void Engine::free_mrope_buffers_() {
-    for (int32_t** b : {&d_mrope_prefill_, &d_mrope_decode_}) {
-        if (*b) {
-            vram_alloc_.free(*b);
-            *b = nullptr;
-        }
-    }
+    d_mrope_prefill_.reset();
+    d_mrope_decode_.reset();
     mrope_prefill_cap_ = 0;
     mrope_decode_cap_ = 0;
 }

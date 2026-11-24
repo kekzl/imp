@@ -921,7 +921,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     hybrid_decode_waiting_ = false;
     // Batched GDN decode runs all of them in one step; the rotation below is
     // the fallback for when it is unavailable (no slot table).
-    const bool gdn_batch_ok = d_ssm_seq_slots_ != nullptr;
+    const bool gdn_batch_ok = static_cast<bool>(d_ssm_seq_slots_);
     if (ssm_state_ && decode_batch.size() > 1 && !gdn_batch_ok) {
         int cur = -1;
         for (size_t i = 0; i < decode_batch.size(); ++i) {
@@ -1057,10 +1057,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
         // A request without a slot would read another sequence's state, so the
         // whole step falls back rather than guessing one.
         if (all_known) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ssm_seq_slots_, h_ssm_seq_slots_.data(),
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ssm_seq_slots_.get(), h_ssm_seq_slots_.data(),
                                                static_cast<size_t>(gpu_batch.n_sequences) * sizeof(int),
                                                cudaMemcpyHostToDevice, dec_stream));
-            state.ssm_seq_slots = d_ssm_seq_slots_;
+            state.ssm_seq_slots = d_ssm_seq_slots_.get();
             state.ssm_n_seq = gpu_batch.n_sequences;
         }
     }
@@ -1197,10 +1197,10 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
                 pen_row_slot[i] = slot;
             } else if (d_penalty_tokens_ && (size_t)need <= d_penalty_tokens_capacity_) {
                 // No slot pool: the old shared-buffer upload path.
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_.get(), req->output_tokens.data(),
                                                    (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                    dec_stream));
-                per_state.penalty_tokens = d_penalty_tokens_;
+                per_state.penalty_tokens = d_penalty_tokens_.get();
                 per_state.n_penalty_tokens = need;
             }
         }
@@ -1280,9 +1280,9 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
         if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
             size_t rn = req->output_tokens.size();
             if (rn <= d_penalty_tokens_capacity_) {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_.get(), req->output_tokens.data(),
                                                    rn * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream));
-                per_state.penalty_tokens = d_penalty_tokens_;
+                per_state.penalty_tokens = d_penalty_tokens_.get();
                 per_state.n_penalty_tokens = static_cast<int>(rn);
             }
         }

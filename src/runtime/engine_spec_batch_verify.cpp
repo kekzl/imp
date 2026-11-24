@@ -196,7 +196,7 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     const int cap_seq = mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size);
     if (cap_seq <= 0)
         return true;  // nothing to stage, and that is not a failure
-    if (bv_.d_stage != nullptr)
+    if (bv_.d_stage)
         return true;
     const int table_cap = decode_batch_pool_.is_allocated() ? decode_batch_pool_.max_blocks_per_seq() : 0;
     if (table_cap <= 0)
@@ -221,13 +221,10 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
         return !b.empty();
     };
-    bv_.d_stage = static_cast<int32_t*>(
-        vram_alloc_.allocate(stage_ints * sizeof(int32_t), "spec_batch_stage"));
-    bv_.d_row_tables = static_cast<int32_t*>(
-        vram_alloc_.allocate(table_ints * sizeof(int32_t), "spec_batch_row_tables"));
-    bv_.d_argmax = static_cast<int32_t*>(
-        vram_alloc_.allocate(static_cast<size_t>(cap_rows) * sizeof(int32_t), "spec_batch_argmax"));
-    const bool ok = bv_.d_stage != nullptr && bv_.d_row_tables != nullptr && bv_.d_argmax != nullptr &&
+    bv_.d_stage = VramOwned<int32_t>(vram_alloc_, stage_ints, "spec_batch_stage");
+    bv_.d_row_tables = VramOwned<int32_t>(vram_alloc_, table_ints, "spec_batch_row_tables");
+    bv_.d_argmax = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(cap_rows), "spec_batch_argmax");
+    const bool ok = bv_.d_stage && bv_.d_row_tables && bv_.d_argmax &&
                     pin(bv_.h_stage, stage_ints * sizeof(int32_t)) &&
                     pin(bv_.h_row_tables, table_ints * sizeof(int32_t)) &&
                     pin(bv_.h_argmax, static_cast<size_t>(cap_rows) * sizeof(int32_t));
@@ -257,14 +254,10 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
 }
 
 void Engine::free_batch_verify_bufs_() {
-    if (bv_.d_stage)
-        vram_alloc_.free(bv_.d_stage);
-    if (bv_.d_row_tables)
-        vram_alloc_.free(bv_.d_row_tables);
-    if (bv_.d_argmax)
-        vram_alloc_.free(bv_.d_argmax);
-    bv_.d_stage = bv_.d_row_tables = bv_.d_argmax = nullptr;
-    free_factored_rows(vram_alloc_, bv_);
+    bv_.d_stage.reset();
+    bv_.d_row_tables.reset();
+    bv_.d_argmax.reset();
+    free_factored_rows(bv_);
     bv_.h_stage = PinnedBuffer{};
     bv_.h_row_tables = PinnedBuffer{};
     bv_.h_argmax = PinnedBuffer{};
@@ -385,7 +378,7 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return "no_spare_slots";
         if (swa_sizing_active_ || config_.streaming_kv_enabled)
             return "swa_or_streaming_kv";
-        if (d_ssm_seq_slots_ == nullptr)
+        if (!d_ssm_seq_slots_)
             return "no_gdn_slot_table";
         // A think budget whose forcing is due needs the eager step (it forces
         // </think>); any such row sends the whole batch to the plain step.
@@ -586,7 +579,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     }
     h_misc[0] = T;  // real rows per group
     h_misc[1] = 1;  // snapshot row (live slot, in place)
-    int32_t* d = bv_.d_stage;
+    int32_t* d = bv_.d_stage.get();
     int32_t* d_tok = d;
     int32_t* d_pos = d + cap_rows;
     int32_t* d_ctx = d + (2ull * cap_rows);
@@ -604,7 +597,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const size_t stage_ints = batch_verify_stage_ints(cap_rows, cap_seq);
     if (!check(cudaMemcpyAsync(d, h, stage_ints * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                "stage H2D") ||
-        !check(cudaMemcpyAsync(bv_.d_row_tables, h_tab,
+        !check(cudaMemcpyAsync(bv_.d_row_tables.get(), h_tab,
                                static_cast<size_t>(T) * N * table_cap * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream),
                "row tables H2D")) {
@@ -642,7 +635,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.positions = d_pos;
     state.n_tokens = T * N;
     state.kv_cache = kv_cache_raw_;
-    state.block_tables = bv_.d_row_tables;
+    state.block_tables = bv_.d_row_tables.get();
     state.context_lens = d_ctx;
     state.max_context_len = max_ctx;
     state.n_sequences = T * N;
@@ -662,10 +655,10 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.ssm_snap_slots = d_snap;
     // Factor rows: 1 row in place, all T rows into the spare, rows 2 .. D as factor rows + taps by group
     // and level. d_fac is null unless factor_row.
-    state.ssm_fac_out = bv_.d_fac;
+    state.ssm_fac_out = bv_.d_fac.get();
     state.ssm_fac_stride = bv_.fac_stride;
     state.ssm_fac_layer_stride = bv_.fac_layer_stride;
-    state.ssm_tap_out = bv_.d_tap;
+    state.ssm_tap_out = bv_.d_tap.get();
     state.ssm_tap_layer_stride = bv_.tap_layer_stride;
     state.ssm_tap_levels = bv_.factor_row ? D - 1 : 0;
     state.d_chunk_len = d_misc;
@@ -705,13 +698,13 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     const std::vector<VerifySampling> row_draw =
         engine_internal::verify_row_draws(reqs, T, model_->config().vocab_size);
     executor_->set_verify_sampling_rows(row_draw.data(), static_cast<int>(row_draw.size()));
-    executor_->greedy_argmax_all(n_rows, bv_.d_argmax, stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f, nullptr,
-                                 0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
+    executor_->greedy_argmax_all(n_rows, bv_.d_argmax.get(), stream, nullptr, 0, nullptr, 1.0f, 0.0f, 0.0f,
+                                 nullptr, 0, d_ban, n_ban, /*allow_cutlass=*/true, d_alt, n_alt,
                                  any_alt ? row_alt.data() : nullptr, any_pen ? pen_hist.data() : nullptr,
                                  any_pen ? pen_n.data() : nullptr, any_pen ? pen_v.data() : nullptr);
     executor_->set_verify_sampling(nullptr);
     int32_t* h_am = bv_.h_argmax.as<int32_t>();
-    if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax, static_cast<size_t>(n_rows) * sizeof(int32_t),
+    if (!check(cudaMemcpyAsync(h_am, bv_.d_argmax.get(), static_cast<size_t>(n_rows) * sizeof(int32_t),
                                cudaMemcpyDeviceToHost, stream),
                "argmax D2H") ||
         !check(cudaStreamSynchronize(stream), "verify sync")) {

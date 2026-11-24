@@ -155,7 +155,7 @@ InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     const bool needs_pen = (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
                             req.presence_penalty != 0.0f);
     if (needs_pen && d_pipe_hist_) {
-        per.penalty_tokens = d_pipe_hist_ + (static_cast<size_t>(row_idx) * pipe_hist_stride_);
+        per.penalty_tokens = d_pipe_hist_.get() + (static_cast<size_t>(row_idx) * pipe_hist_stride_);
         per.n_penalty_tokens = static_cast<int>(req.output_tokens.size()) + 1;
     }
     per.schema_constrainer = nullptr;
@@ -191,10 +191,12 @@ bool Engine::pipeline_staging_ensure_() {
                  pin_mapped(h_bt_patch_val_[p], &d_bt_patch_val_[p], patch_bytes) &&
                  pin_mapped(h_hist_pos_[p], &d_hist_pos_[p], patch_bytes);
         }
-        if (ok)
-            ok = (d_pipe_hist_ = static_cast<int32_t*>(vram_alloc_.allocate(
-                      static_cast<size_t>(kMaxGraphPoolSize) * pipe_hist_stride_ * sizeof(int32_t),
-                      "pipe_hist"))) != nullptr;
+        if (ok) {
+            d_pipe_hist_ = VramOwned<int32_t>(vram_alloc_,
+                                              static_cast<size_t>(kMaxGraphPoolSize) * pipe_hist_stride_,
+                                              "pipe_hist");
+            ok = static_cast<bool>(d_pipe_hist_);
+        }
         if (!ok) {
             for (int p = 0; p < 2; ++p) {
                 h_bt_patch_off_[p].reset();
@@ -202,8 +204,7 @@ bool Engine::pipeline_staging_ensure_() {
                 h_hist_pos_[p].reset();
                 d_bt_patch_off_[p] = d_bt_patch_val_[p] = d_hist_pos_[p] = nullptr;
             }
-            vram_alloc_.free(d_pipe_hist_);
-            d_pipe_hist_ = nullptr;
+            d_pipe_hist_.reset();
             bt_patch_cap_ = -1;  // don't retry every step
             return false;
         }
@@ -277,8 +278,8 @@ bool Engine::pipeline_enqueue_next_(int parity, cudaStream_t stream) {
     decode_pipeline_advance(n, executor_->sample_slot_base(parity ^ 1), SAMPLE_SCRATCH_BYTES,
                             bd_pipe_.gpu.d_token_ids, bd_pipe_.gpu.d_positions, bd_pipe_.gpu.d_context_lens,
                             bd_pipe_.gpu.d_block_tables, n_patches, d_bt_patch_off_[parity],
-                            d_bt_patch_val_[parity], d_pipe_hist_, pipe_hist_stride_, d_hist_pos_[parity],
-                            stream);
+                            d_bt_patch_val_[parity], d_pipe_hist_.get(), pipe_hist_stride_,
+                            d_hist_pos_[parity], stream);
     if (!runner.replay_only(stream))
         return false;  // abandoned chained forward is safe: the per-step path
                        // re-uploads batch state and rewrites the same KV slot
@@ -331,7 +332,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
             // keeps it current on chained steps). Async H2D from the
             // pageable vector is safe: the gather event below syncs before
             // process_outputs can grow it.
-            int32_t* row_hist = d_pipe_hist_ + (static_cast<size_t>(i) * pipe_hist_stride_);
+            int32_t* row_hist = d_pipe_hist_.get() + (static_cast<size_t>(i) * pipe_hist_stride_);
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(row_hist, req->output_tokens.data(), count * sizeof(int32_t),
                                                cudaMemcpyHostToDevice, stream));
             per.penalty_tokens = row_hist;
