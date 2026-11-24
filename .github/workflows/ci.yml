@@ -18,23 +18,10 @@ on:
   # squashed), but the branch's reported status is stale, and this makes it
   # refreshable without a PAT or a merge queue.
   workflow_dispatch:
-  # Nightly, 03:17 UTC.
-  #
-  # NOTE (2026-08-03): the repo owner has decided against a self-hosted GPU
-  # runner for now, so the `test` job below stays skipped and this schedule
-  # currently buys only reason 2. Reason 1 is kept because the job is written
-  # and the decision is reversible — if a runner is ever registered, the lane
-  # starts covering `main` on its own cadence with no further change here.
-  #
-  #  1. The GPU lane (`test`, below) is the only lane that runs the full ctest,
-  #     compute-sanitizer and the perf gate. It is gated on a self-hosted runner,
-  #     and a runner that only ever sees push/pull_request events tests whatever
-  #     someone happened to open a PR for — never `main` on its own schedule.
-  #  2. It refreshes `main`'s reported status, which the workflow_dispatch note
-  #     above exists to work around by hand: an auto-merge squash does not start
-  #     a run, so main's newest result can be many commits stale.
-  #
-  # Costs nothing while HAS_GPU_RUNNER is unset beyond one nightly CPU build.
+  # Nightly, 03:17 UTC: refreshes `main`'s reported status (an auto-merge squash
+  # armed with GITHUB_TOKEN starts no run, see above), runs Sanitizers without
+  # its path filter and the libFuzzer job. No job here uses a GPU: there is no
+  # GPU runner (docs/DESIGN_DECISIONS.md), GPU gates are local (`make verify-fast`).
   schedule:
     - cron: "17 3 * * *"
 
@@ -53,7 +40,6 @@ jobs:
     runs-on: ubuntu-26.04
     outputs:
       code: ${{ steps.changes.outputs.code }}
-      cpp: ${{ steps.changes.outputs.cpp }}
 
     container:
       # .github/ci-image/Dockerfile (1104 MB compressed; nvidia/cuda devel was 5007 MB, median 72 s pull):
@@ -108,11 +94,10 @@ jobs:
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           code=true
-          # `cpp` gates the clang-tidy job, which lints changed src|tools *.cpp
-          # and the host side of changed src/*.cu (#2210). It used to start on
-          # every code PR and pay ~2.6 min (container pull + cache round trip)
-          # to print "nothing to lint". Same FAIL-OPEN rule as `code`: any
-          # uncertainty runs the job.
+          # `cpp` gates the clang-tidy steps below, which lint changed src|tools
+          # *.cpp and the host side of changed src/*.cu (#2210): no apt install
+          # when there is nothing to lint. Same FAIL-OPEN rule as `code`: any
+          # uncertainty runs them.
           cpp=true
           # Say so when the fail-open fires. Without this the step prints a
           # perfectly normal-looking `code=true` and an empty file list, which
@@ -301,20 +286,57 @@ jobs:
       # needs no GPU and no model — it is the half of the suite that CAN run here.
       # GPU correctness lives in the local pre-commit hook (Stage 1), since this
       # CUDA build container has no device. Before this step CI built the CPU
-      # tests but never ran them (only mock-api + the usually-absent self-hosted
-      # GPU job did), so e.g. the tool-call and Bearer-auth unit tests were dark.
+      # tests but never ran them (only mock-api did), so e.g. the tool-call and
+      # Bearer-auth unit tests were dark.
       - name: Run CPU unit tests (ctest -L unit)
         if: steps.changes.outputs.code == 'true'
         # -j4: guard_verify_filter (11.8 s) and guard_makefile_filters (11.1 s) were
         # 23 of 27 s serial; both only list gtests and write per-PID temp files.
         run: cd build && ctest -L unit -j4 --output-on-failure --timeout 120
 
-      # clang-tidy moved OUT of this job into the separate non-required `tidy` job
-      # below. It was ~22 min of this ~26 min job and — being advisory
-      # (continue-on-error) — only delayed the merge-gating `Build` check without
-      # ever failing it. The `tidy` job reuses this job's cached build/ for
-      # compile_commands.json + _deps, lints only the PR's changed .cpp, and never
-      # blocks merge.
+      # clang-tidy, BLOCKING since 2026-11-25 (AUDIT_ARCH_2026_11_24 X-2): as its own
+      # non-required job it was red on main on 3 consecutive pushes (runs 45259686168,
+      # 45259954018, 45270975645) and each merged. Here because the ruleset requires
+      # the one context `Build`. Lints only the changed src|tools .cpp and the host
+      # side of changed src .cu (clang `-x cuda --cuda-host-only`, #2210) against this
+      # job's own build/ (compile_commands.json, _deps, generated headers).
+      # Cost over 8 PR runs of the former job: install 8-11 s + lint 9-37 s, median
+      # 30 s, against a median 327 s `Build` on the 12 PR runs that linted.
+      # Device code has no automated lane (docs/audit/SETTLED.md F-5, F2-7).
+      # Pin, key fingerprint: scripts/install_llvm.sh. The CUDA apt source goes first:
+      # its index shipped malformed on 2026-09-16 and the script runs apt-get update.
+      - name: Install clang-tidy
+        if: steps.changes.outputs.cpp == 'true' && steps.changes.outputs.code == 'true'
+        run: |
+          rm -f /etc/apt/sources.list.d/cuda*.list
+          bash scripts/install_llvm.sh clang-tidy
+
+      # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
+      # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
+      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*) over its pin in
+      # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`;
+      # changed files only: `make preflight`.
+      - name: clang-tidy (blocking, changed .cpp + .cu host side)
+        if: steps.changes.outputs.cpp == 'true' && steps.changes.outputs.code == 'true'
+        # This job's default is `sh -e`: `mapfile` and `< <(...)` fail there (#2187).
+        shell: bash
+        env:
+          TIDY_LOGS: ${{ runner.temp }}/tidy
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          # `|| true` on the whole pipeline made "git failed" and "no .cpp changed"
+          # the same outcome (#1626): fail the diff loudly, keep the empty list quiet.
+          if ! diff_out="$(git diff --name-only --diff-filter=d "$base" HEAD)"; then
+            echo "::error::git diff failed against base $base: the lint list would be empty"
+            exit 1
+          fi
+          mapfile -t files < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$|^src/.*\.cu$' || true)
+          if [ "${#files[@]}" -eq 0 ]; then echo "no src/tools .cpp or src .cu changed: nothing to lint"; exit 0; fi
+          echo "linting ${#files[@]} changed file(s) (a fragment lints its includer):"; printf '  %s\n' "${files[@]}"
+          bash scripts/tidy_lane.sh "${files[@]}"
 
       # Joins the background gate run; its exit code is this step's. Runs after a
       # failed compile too, so a red gate is never hidden behind a red build.
@@ -341,151 +363,13 @@ jobs:
           path: /github/home/.ccache
           key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
 
-      # `Real API contract` reads imp-server only; the full set (median 13 s) is for the GPU lane.
+      # `Real API contract` reads imp-server only.
       - name: Upload imp-server
-        if: steps.changes.outputs.code == 'true' && vars.HAS_GPU_RUNNER != 'true'
+        if: steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: imp-build
           path: build/imp-server
-
-      - name: Upload build artifacts
-        if: steps.changes.outputs.code == 'true' && vars.HAS_GPU_RUNNER == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: imp-build
-          path: |
-            build/imp-cli
-            build/imp-server
-            build/imp-tests
-            build/test-core
-            build/test-text
-            build/test-compute
-            build/test-attention
-            build/test-quant
-            build/test-kv
-            build/test-moe-gdn
-            build/test-e2e
-            build/libimp.a
-
-  # clang-tidy (NON-REQUIRED check, hard on WarningsAsErrors findings, #2210) - split out of the Build job so it never
-  # delays the merge-gating `Build` check (it was ~22 min of that job). Reuses the
-  # Build job's cached build/ (compile_commands.json + FetchContent _deps such as
-  # CUTLASS) via the same cache key, so no second CUDA configure is needed. Lints
-  # only the .cpp and .cu CHANGED in the PR: a normal PR is seconds, a big refactor is
-  # bounded to its own files. A .cu is linted host-side only (clang `-x cuda
-  # --cuda-host-only`, database from tools/tidy_cu_db.py, #2210). Device code has
-  # no automated lane: the `test` job (GPU tests + compute-sanitizer) needs a GPU
-  # runner that does not exist (docs/audit/SETTLED.md F-5, F2-7).
-  tidy:
-    name: clang-tidy
-    needs: build
-    if: needs.build.outputs.cpp == 'true'
-    runs-on: ubuntu-26.04
-    container:
-      image: ghcr.io/kekzl/imp-ci:cuda13.5@sha256:d9b67d58c7af2a54e70cf1a996d8c5381f90661f2629ab36abaa639615f24e5c
-    env:
-      CUDA_VERSION: "13.5"
-    # Default is `sh -e` (dash): `mapfile` and `< <(...)` fail there (#2187).
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # Its index shipped malformed on 2026-09-16; scripts/install_llvm.sh runs apt-get update.
-      - name: Drop the CUDA apt source
-        run: rm -f /etc/apt/sources.list.d/cuda*.list
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0  # base SHA must be present for the changed-files diff
-      # cache/restore, not cache: this job only READS compile_commands.json and
-      # _deps. Plain `actions/cache` also runs a post-step that re-uploaded the
-      # ~476 MB build/ under a key the Build job had already written - 29 s on
-      # every run, and that much more of the repo's 10 GB cache quota spent
-      # evicting entries the next PR wants.
-      - name: Restore build dir (compile_commands.json + _deps)
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build
-          key: imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-${{ hashFiles('tests/**') }}
-          restore-keys: |
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ hashFiles('src/**', 'include/**', 'tools/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
-            imp-build-${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-
-      # #1626: without this the job's first `git` call dies with exit 128
-      # ("dubious ownership" — the container UID is not the checkout's owner),
-      # the file list comes back empty, the step prints "nothing to lint" and
-      # `continue-on-error` reports green. It had never linted a file. The Build
-      # job has carried this line since check-release.sh hit the same wall.
-      - name: Trust the checkout (container UID differs from the runner's)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      # Pin, key fingerprint: scripts/install_llvm.sh.
-      - name: Install clang-tidy
-        run: bash scripts/install_llvm.sh clang-tidy
-
-      # Setup is a hard step: a failure here fails the job. Only the lint findings
-      # below are advisory (#2187: continue-on-error hid exit 128 on every run).
-      - name: Select changed .cpp / .cu + compile databases
-        id: files
-        run: |
-          base="${{ github.event.pull_request.base.sha }}"
-          [ -z "$base" ] && base="${{ github.event.before }}"
-          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
-          fi
-          # `|| true` on the pipeline made "git failed" and "no .cpp changed"
-          # the same outcome (#1626). Fail the diff loudly, keep the empty list
-          # quiet - only one of those two is normal.
-          if ! diff_out="$(git diff --name-only --diff-filter=d "$base" HEAD)"; then
-            echo "::error::git diff failed against base $base — the lint list would be empty"
-            exit 1
-          fi
-          mapfile -t cpp < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
-          mapfile -t cu_changed < <(printf '%s\n' "$diff_out" | grep -E '^src/.*\.cu$' || true)
-          # A .cu #include'd into another body is not a TU: lint its includer instead.
-          cu=()
-          for f in "${cu_changed[@]}"; do
-            if ! inc="$(grep -rlF --include='*.cu' "#include \"${f#src/}\"" src)"; then inc="$f"; fi
-            mapfile -t -O "${#cu[@]}" cu < <(printf '%s\n' "$inc")
-          done
-          mapfile -t cu < <(printf '%s\n' "${cu[@]}" | sed '/^$/d' | sort -u)
-          echo "count=$(( ${#cpp[@]} + ${#cu[@]} ))" >> "$GITHUB_OUTPUT"
-          if [ $(( ${#cpp[@]} + ${#cu[@]} )) -eq 0 ]; then echo "no src/tools .cpp or src .cu changed: nothing to lint"; exit 0; fi
-          printf '%s\n' "${cpp[@]}" | sed '/^$/d' > "$RUNNER_TEMP/tidy_cpp.txt"
-          printf '%s\n' "${cu[@]}" | sed '/^$/d' > "$RUNNER_TEMP/tidy_cu.txt"
-          # compile_commands.json comes from the cached build/. If the cache missed
-          # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
-          # a fully cold _deps fetch is the rare worst case.
-          # PRs no longer save build/, so the restore is main's: a file the PR adds is not in it.
-          missing=0
-          for f in "${cpp[@]}" "${cu[@]}"; do grep -qF "/$f\"" build/compile_commands.json 2>/dev/null || missing=$((missing+1)); done
-          if [ ! -f build/compile_commands.json ] || [ "$missing" -gt 0 ]; then
-            echo "::warning::compile_commands.json missing or lacks $missing changed file(s) - reconfiguring"
-            cmake -B build -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON \
-              -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
-              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
-          fi
-          # Generated header (imp-server main.cpp): a configure-only build/ lacks it, #2285.
-          cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake
-          # nvcc entries -> clang host-only entries; a changed .cu absent from it would lint nothing.
-          if [ ${#cu[@]} -gt 0 ]; then
-            python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu
-            for f in "${cu[@]}"; do
-              grep -qF "/$f\"" build/tidy-cu/compile_commands.json || { echo "::error::$f is not in build/tidy-cu/compile_commands.json"; exit 1; }
-            done
-          fi
-          echo "linting ${#cpp[@]} changed .cpp + ${#cu[@]} .cu (host side):"; printf '  %s\n' "${cpp[@]}" "${cu[@]}" | sed '/^  $/d'
-
-      # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
-      # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
-      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*) over its pin in
-      # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`.
-      - name: clang-tidy (changed .cpp + .cu host side)
-        if: steps.files.outputs.count != '0'
-        env:
-          TIDY_LOGS: ${{ runner.temp }}/tidy
-        run: |
-          mapfile -t files < <(cat "$RUNNER_TEMP/tidy_cpp.txt" "$RUNNER_TEMP/tidy_cu.txt")
-          bash scripts/tidy_lane.sh "${files[@]}"
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
@@ -877,16 +761,18 @@ jobs:
             base="${{ github.event.pull_request.base.sha || github.event.before }}"
             if [ -n "$base" ] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
               files="$(git diff --name-only "$base" HEAD)"
-              # Fail-open: an unreadable diff runs the job.
-              # grep -q exits at the first match and pipefail turns the
-              # producer EPIPE into a non-zero pipeline (#1499): here-string.
-              # The list is the untrusted-input surface, not only the files
-              # with a fuzz target (AUDIT_ARCH_2026 F2-8): request bytes also
-              # go through utils.cpp (base64, nesting depth), the stb decoder,
-              # the GGUF parsers and the chat parameter parser.
-              if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util|gguf_|sentencepiece_loader|jinja|hf_config)|src/vision/image_|src/memory/weight_cache_file|tools/imp-server/(tool_stream_filter|utils|handlers_chat_params)|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
-                run=false
-              fi
+              # The prefixes live in tools/untrusted_input_sources.txt; the static
+              # gate `untrusted` (scripts/ci_static_gates.sh, inside `Build`) fails
+              # when a fuzz source or a file tagged "Untrusted input" has none. As
+              # a regex on this line the list missed 4 parser files
+              # (AUDIT_ARCH_2026_11_24 X-5). It is the untrusted-input surface,
+              # not only the files with a fuzz target (AUDIT_ARCH_2026 F2-8).
+              # Fail-open: only exit 1 (no path matched) skips; an unreadable diff
+              # or a tool error runs the job. Here-string: no producer to take
+              # EPIPE under pipefail (#1499).
+              rc=0
+              python3 tools/check_untrusted_sources.py --match <<< "$files" || rc=$?
+              [ "$rc" -ne 1 ] || run=false
             fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
@@ -1012,7 +898,7 @@ jobs:
   # replays 1500 fixed-seed iterations per target and can only re-find a known
   # defect class; libFuzzer with coverage feedback is what finds a new one, and
   # nothing ran it unless someone typed the docker line in fuzz/README.md. The
-  # three parser targets, 10 minutes each, corpus carried between nights in
+  # four parser targets, 10 minutes each, corpus carried between nights in
   # the cache, crashers in the run's artifacts. Advisory: a crasher is a
   # warning here and an issue for a human. fuzz_tool_stream is not here: it
   # needs tool_call.cpp, whose utils.h pulls httplib and whose utils.cpp pulls
@@ -1056,12 +942,12 @@ jobs:
           cmake -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
                 -DIMP_FUZZERS_CPU_ONLY=ON
           cmake --build build-fuzz -j"$(nproc)" \
-                --target fuzz_json_schema fuzz_regex fuzz_gbnf
+                --target fuzz_wav fuzz_json_schema fuzz_regex fuzz_gbnf
 
       - name: Fuzz each target for 10 minutes
         run: |
           mkdir -p fuzz/crashes
-          for t in fuzz_json_schema fuzz_regex fuzz_gbnf; do
+          for t in fuzz_wav fuzz_json_schema fuzz_regex fuzz_gbnf; do
             mkdir -p "fuzz/corpus/$t"
             echo "== $t =="
             ./build-fuzz/$t -max_total_time=600 -artifact_prefix="fuzz/crashes/$t-" "fuzz/corpus/$t" \
@@ -1075,73 +961,3 @@ jobs:
           name: fuzz-crashes
           path: fuzz/crashes
           if-no-files-found: ignore
-
-  test:
-    name: Test
-    needs: build
-    # GPU tests need a self-hosted runner with NVIDIA GPU. To turn this lane on:
-    #
-    #   1. On the GPU box: Settings → Actions → Runners → New self-hosted runner,
-    #      and give it the labels  self-hosted, gpu, cuda  (all three; the
-    #      runs-on below requires the full set).
-    #   2. Settings → Secrets and variables → Actions → Variables → new variable
-    #      HAS_GPU_RUNNER = true.
-    #   3. Optional: set IMP_MODELS_DIR on the runner to the directory holding
-    #      the baseline GGUF, or the perf gate below skips instead of running.
-    #
-    # This is the only lane that runs the full ctest, compute-sanitizer and the
-    # perf gate — everything else in CI is CPU-only. Until step 2, the job is
-    # skipped rather than failing. Until then,
-    # this job is skipped — same effective behavior as the prior `if: false`,
-    # but flips automatically when a runner appears. Also skipped on docs-only
-    # changes (build uploads no artifact then — nothing to download/test).
-    if: ${{ vars.HAS_GPU_RUNNER == 'true' && needs.build.outputs.code == 'true' }}
-    runs-on: [self-hosted, gpu, cuda]
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Download build
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: imp-build
-          path: build/
-
-      - name: Run tests
-        run: |
-          chmod +x build/imp-tests || true
-          chmod +x build/test-* 2>/dev/null || true
-          cd build && ctest --output-on-failure --timeout 120
-
-      # compute-sanitizer (memcheck) — the real "linter" for CUDA kernels: catches
-      # out-of-bounds, misaligned and use-after-free device accesses that clang-tidy
-      # fundamentally cannot see (it parses no .cu). Advisory for now (continue-on-
-      # error); scoped to the kernel-heavy binaries to bound the ~10-30x slowdown.
-      # Mirrors the local `make sanitize` target. Flip to a hard gate once clean.
-      - name: compute-sanitizer (memcheck, advisory)
-        continue-on-error: true
-        run: |
-          SAN="$(command -v compute-sanitizer || echo /usr/local/cuda/bin/compute-sanitizer)"
-          # Fast kernel binaries only — memcheck is ~10-30x, so the slow FA2 sweeps
-          # in test-attention are deliberately excluded to keep this advisory step
-          # bounded (run it there on demand via `make sanitize`).
-          for b in test-kv test-moe-gdn test-quant; do
-            echo "== compute-sanitizer memcheck: $b =="
-            chmod +x "build/$b" 2>/dev/null || true
-            "$SAN" --tool memcheck --error-exitcode 1 --leak-check no "build/$b" \
-              || { echo "::warning::compute-sanitizer flagged $b"; }
-          done
-
-      # Perf regression gate against tests/perf_baseline.json (decode 3% / prefill 5%).
-      # Previously this gate lived ONLY in the local pre-push hook (scripts/verify.sh),
-      # so a decode regression could reach main unflagged — exactly what happened with
-      # the FP8-disable × FP16-widen interaction (Qwen3-8B Q8_0 tg128 284→146). This
-      # step closes that gap. Skips (does not fail) when the baseline model isn't on
-      # the runner — set IMP_MODELS_DIR to the directory holding the baseline GGUF.
-      - name: Perf regression gate
-        # Logic extracted to scripts/bench_gate.sh so the same gate runs locally
-        # (scripts/verify.sh) and here. Skips when the baseline model isn't on the
-        # runner; set IMP_MODELS_DIR to the directory holding the baseline GGUF.
-        run: |
-          chmod +x build/imp-cli scripts/bench_gate.sh || true
-          scripts/bench_gate.sh build/imp-cli tests/perf_baseline.json

@@ -11,7 +11,7 @@ description: Open, merge, release a PR - branch off main, gh pr create, auto-mer
 |---|---|---|
 | 1 | Branch off fresh `origin/main`, `gh pr create --base main`, NEVER stack | `git fetch origin && git switch -c <topic> origin/main`. Stacking on a squash repo caused recovery-PR cascades. Fewer, batched PRs. |
 | 2 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)` = the CHANGELOG line at the release cut. |
-| 3 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
+| 3 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene), clang-tidy on changed files since 2026-11-25 (a step of `Build`, no own check). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
 | 4 | PRs do not edit `CHANGELOG.md` | Until 2026-11-15 every merged PR dirtied every open PR through it (263 of 374 commits in 30 days). PRs that share no file may be in flight together; a conflict: resolve, `git commit` (hook: `make preflight`, ~20 s). |
 | 5 | Perf- or VRAM-moving change refreshes `tests/perf_baseline.json` IN THE SAME PR and says so | Gate 8% decode / 8% prefill / 10% `own_peak_mb`; `scripts/gen_perf_baseline.sh` (benchmark-cuda). |
 

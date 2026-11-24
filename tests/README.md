@@ -78,7 +78,7 @@ stages — install the hooks with `make install-hooks`:
 - **Stage 2 — CI (CPU).** `.github/workflows/ci.yml` builds everything and runs
   `ctest -L unit` (`test-core` incl. tool-call + Bearer-auth, `test-text`, the
   CPU subset of `test-e2e`) plus the Python mock-API suite. The `gpu`/`perf`
-  lanes are skipped (the self-hosted GPU job runs only if `HAS_GPU_RUNNER`).
+  lanes do not run in CI: it has no GPU job.
 - **Stage 3 — server (GPU), local, opt-in.** `make test-server`
   (`scripts/test_server.sh`) boots a real `imp-server` against a live model and
   GATES on the OpenAI+Anthropic wire batteries — the only place `handlers.cpp` /

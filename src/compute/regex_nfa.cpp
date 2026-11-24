@@ -1,5 +1,5 @@
 // RegexNfa (compute/json_schema.h): the JSON-Schema "pattern" compiler and executor, moved
-// verbatim out of json_schema.cpp.
+// verbatim out of json_schema.cpp. Untrusted input: the pattern is a request field.
 #include "compute/json_schema.h"
 
 #include <algorithm>
