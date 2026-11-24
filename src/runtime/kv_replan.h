@@ -33,8 +33,12 @@ struct KvReplan {
 // Never smaller than init; no-op unless armed and the measurement is below the charge.
 KvReplan replan_kv_for_measured_reserve(const KvReplanInput& in, size_t measured);
 
-// Commit a growable pool makes up front: pct of the plan, at least 16 blocks (init rule).
-int kv_initial_commit_blocks(int plan_blocks, int initial_pct);
+// A growable pool's up-front commit is a buffer, not a share of the card: pct of the plan, capped at
+// this many bytes (Qwen3-8B committed 5231 MiB at start and 9172 MiB after a workload that wrote 4167).
+constexpr size_t kKvInitialCommitCapBytes = size_t{512} << 20;
+// Commit a growable pool makes up front: pct of the plan, at least 16 blocks, at most
+// kKvInitialCommitCapBytes when per_block_bytes is given (0 = no cap). pct 100 commits the plan.
+int kv_initial_commit_blocks(int plan_blocks, int initial_pct, size_t per_block_bytes = 0);
 
 // Init half, after the plan: arms only for an accepted plan that charged the constant.
 void kv_replan_arm(KvReplanInput& r, const ShadowPlanProbe& probe, const VRAMBudget& live, int plan_blocks,

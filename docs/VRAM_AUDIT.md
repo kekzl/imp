@@ -406,3 +406,19 @@ Every VRAM audit table now ends with the process RSS split (`/proc/self/status`)
 Read:
 - Inkling-2-Mini grows 480 MiB of anonymous memory over the workload (not attributed; its conv-state checkpoints for prefix reuse are host vectors, one per 256 tokens).
 - Qwen3.8-27B grows 960 MiB of shmem that the pinned list does not show: memory pinned outside `PinnedBuffer` / `HostRegistration` (open).
+
+### KV pool up-front commit as a buffer (2026-11-24)
+
+A growable KV pool committed 25 % of its plan at start and grew ahead by a quarter of what it held. Now: min(25 % of the plan, 512 MiB) at start, and a grow-ahead step of max(64 blocks, min(a quarter, 256 MiB), the last admission). Default flags, fresh server per row, two runs each:
+
+| Qwen3-8B-NVFP4-cortecs | before | after |
+|---|---|---|
+| device used after start | 14148 MiB | 8950 MiB |
+| first 8091-token prompt, first token | 232 / 232 ms | 281 / 278 ms |
+| second 8091-token prompt | 233 / 229 ms | 237 / 231 ms |
+| first 15181-token prompt | 499 / 501 ms | 557 / 554 ms |
+| second 15181-token prompt | 503 / 509 ms | 506 / 506 ms |
+| device used after the two 8k prompts | 14150 MiB | 12604 MiB |
+| device used after the two 15k prompts | 16444 MiB | 15778 MiB |
+
+The first large prompt after a start pays the mapping once (48.7 and 51.0 ms logged for the two sizes); from the second on the grow-ahead worker keeps one request of the last size mapped. Qwen3.8-27B-NVFP4-vllm: 22876 -> 22354 MiB after start, first 15223-token prompt 1530 -> 1448 ms.

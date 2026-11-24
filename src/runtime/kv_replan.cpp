@@ -3,14 +3,17 @@
 #include "memory/plan.h"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace imp {
 
-int kv_initial_commit_blocks(int plan_blocks, int initial_pct) {
+int kv_initial_commit_blocks(int plan_blocks, int initial_pct, size_t per_block_bytes) {
     const int pct = std::clamp(initial_pct, 1, 100);
     if (pct >= 100)
         return plan_blocks;
-    return std::min(plan_blocks, std::max(16, plan_blocks / 100 * pct));
+    const size_t cap = per_block_bytes > 0 ? kKvInitialCommitCapBytes / per_block_bytes : SIZE_MAX;
+    const int share = static_cast<int>(std::min<size_t>(static_cast<size_t>(plan_blocks / 100 * pct), cap));
+    return std::min(plan_blocks, std::max(16, share));
 }
 
 // Live pass ceiling at a smaller reserve: only the post-weight fit clamp depends on it, 1 block
@@ -39,7 +42,7 @@ KvReplan replan_kv_for_measured_reserve(const KvReplanInput& in, size_t measured
         probe.kv_growable_ceiling_blocks = live;
     const PlanResult plan = plan_memory(shadow_plan_input(probe));
     out.plan_blocks = std::max(in.plan_blocks, plan.ok ? plan.plan.kv.blocks : 0);
-    out.commit_blocks = kv_initial_commit_blocks(out.plan_blocks, in.initial_pct);
+    out.commit_blocks = kv_initial_commit_blocks(out.plan_blocks, in.initial_pct, in.per_block_bytes);
     out.ceiling_blocks = in.ceiling_blocks > 0 ? std::max({in.ceiling_blocks, out.plan_blocks, live}) : 0;
     out.apply = out.plan_blocks > in.plan_blocks || out.ceiling_blocks > in.ceiling_blocks;
     return out;

@@ -3,7 +3,7 @@ arena:executor_workspace_buffers.cpp 396 insurance buffers with pointers in capt
 arena:gemm.cpp 65 cuBLASLt workspace, used by the algos that ask for one
 fp8_lm_head 1214 read-only FP8 copy of the LM head
 gdn_chunkpar_ws 124 GDN chunk-parallel prefill workspace sized for the largest chunk
-region:kv_block_pool 1305 KV pool commits 25 % of its ceiling up front (kv_cache.growable_initial_pct): open policy question
+region:kv_block_pool 1305 KV pool buffer: 512 MiB at start plus one request of the last size mapped ahead
 spec_state_snapshot 160 recurrent state snapshot of the speculative verify, written when a draft is rejected
 WEIGHTS 13879 read-only weights
 mtp_workspace 330 read-only NVFP4 copy of the MTP body (236 MiB) and the feed scratch of the batched head pass

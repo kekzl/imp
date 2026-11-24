@@ -2,5 +2,5 @@
 arena:attention_apa.cu 132 APA prefill scratch at the planned bound, not reached by this workload on this model: open
 arena:gemm.cpp 65 cuBLASLt workspace, used by the algos that ask for one
 fp8_lm_head 295 read-only FP8 copy of the LM head
-region:kv_block_pool 1857 KV pool commits 25 % of its ceiling up front (kv_cache.growable_initial_pct): open policy question
+region:kv_block_pool 1857 KV pool buffer: 512 MiB at start plus one request of the last size mapped ahead
 WEIGHTS 21048 read-only weights

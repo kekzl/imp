@@ -151,11 +151,11 @@ fp8_scale_split             = false
 # runs before the prefix cache is reclaimed and stops at the allocator headroom.
 growable                    = true
 # Percent of the planned pool to commit at startup when growable. 100 commits
-# the clamped size; 25 starts at a quarter and grows at admission (+25 % per
-# step) into the same plan, which is the only way to be sure the pool is
-# resident: on WSL2 a successful allocation proves nothing, and a pool that
-# spilled into host memory decodes at a fraction of the bandwidth with nothing
-# reporting an error.
+# the clamped size; 25 starts at a quarter, at most 512 MiB, and grows at
+# admission into the same plan: the pool starts as a buffer, the rest of the
+# card stays free until a request needs it. On WSL2 a successful allocation
+# proves nothing, and a pool that spilled into host memory decodes at a
+# fraction of the bandwidth with nothing reporting an error.
 growable_initial_pct        = 25
 # SWA-aware KV sizing: sliding-window layers (gpt-oss window=128 on every
 # other layer, gemma-3/4 5:1 pattern) allocate only the trailing window in a
