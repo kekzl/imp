@@ -433,3 +433,14 @@ cost three red CI jobs (#1124, #1125, #1127). Nothing is split here — the repo
 rule is to split on conflation, not on proximity to a threshold — but the same
 remedy applies when one of them next needs to grow: move a responsibility out,
 do not shave lines, and run `python3 tools/check_filesize.py` before committing.
+
+## 2026-11-25: `gdn_scan_tc.cu` deleted (D-13, B-118)
+
+The WY scans had no production caller ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-13).
+The 2026-06-24 split row `gdn.cu` -> `gdn_scan` + `gdn_scan_tc` now ends in one scalar chunkwise file.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/compute/gdn_scan_tc.cu` | 660 | deleted | none |
+| `src/compute/gdn_scan.cu` | 498 | 243 | none |
+| `tests/test_gdn.cu` | 1696 | 1374 | 1399 -> 1133 (`--update`) |

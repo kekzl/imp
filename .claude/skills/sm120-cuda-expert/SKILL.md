@@ -116,7 +116,7 @@ Padding two access patterns at once may not fit (chunkpar histories at stride 13
 
 ## Where to look
 
-- `src/compute/`: attention (`attention_fmha_*`, `attention_paged_nvfp4.cu`), GDN (`gdn_scan_chunkpar*.cu`, `gdn_scan_tc.cu`), `pdl_device.cuh`, sparse attention kernels.
+- `src/compute/`: attention (`attention_fmha_*`, `attention_paged_nvfp4.cu`), GDN (`gdn_scan_chunkpar*.cu`, `gdn_scan.cu`), `pdl_device.cuh`, sparse attention kernels.
 - `src/quant/`: dequant, `nvfp4_gemm_smallm_v2.cu`, `nvfp4_pack.cuh`.
 - `src/exec/`: `executor_gemm_dispatch.cu`, `executor_gemm_smallm.cpp`, `executor_sampling.cu`, `executor_attention_decode.cu`, producer-fused norm/swiglu+quantize, `sparse_attn_geometry.h`.
 - `src/runtime/`: `cuda_graph.h`, `pdl.h`, `engine_init_resolver.cpp`.

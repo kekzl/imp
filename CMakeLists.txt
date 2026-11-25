@@ -372,7 +372,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan.cu
     src/compute/gdn_scan_chunkpar.cu
     src/compute/gdn_scan_chunkpar_pass.cu
-    src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemv_fp8_rowscale_f16.cu
