@@ -1113,7 +1113,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // NVFP4 tile-GEMM activation buffers (qscratch_.cutlass_*): pre-allocate for max prefill dimensions.
     // Only needed when NVFP4 decode is active and sm_120 is available.
-    if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
+    if (wcache_.nvfp4_decode_mode > 0) {
         int max_k = 0;
         int max_n = 0;
         // NVFP4 prequant tensors carry K_packed = K_logical/2 in shape[1]. Phase 0b promote runs

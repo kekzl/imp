@@ -107,7 +107,4 @@ void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up
                                            void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream,
                                            float act_scale = 1.0f);
 
-// SfAtom NVFP4 tier available (own tile GEMMs; the CUTLASS GEMM was removed 2026-10-31). Always true.
-[[nodiscard]] bool cutlass_sm120_nvfp4_available();
-
 }  // namespace imp

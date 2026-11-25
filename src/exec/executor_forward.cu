@@ -175,7 +175,7 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;
     // Opt-in (gemm.nvfp4_lm_head_cutlass). Only batched decode (n>1) uses it;
     // single-stream (n==1) keeps the weight-bound M=1 GEMV.
-    if (!dispatch_policy().gemm.nvfp4_lm_head_cutlass || !cutlass_sm120_nvfp4_available())
+    if (!dispatch_policy().gemm.nvfp4_lm_head_cutlass)
         return;
     auto it = wcache_.nvfp4.find(model_->output_proj().data);
     if (it == wcache_.nvfp4.end())

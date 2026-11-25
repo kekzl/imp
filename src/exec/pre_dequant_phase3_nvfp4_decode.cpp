@@ -12,7 +12,6 @@
 #include "exec/pre_dequant_internal.h"
 #include "model/mtp_head.h"
 #include "model/nvfp4_module_policy.h"
-#include "compute/gemm_cutlass_sm120.h"
 #include "compute/mtp_draft_rows.h"
 #include "quant/mxfp4_sfatom.h"
 #include "quant/dequant_gpu.h"
@@ -372,7 +371,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     if (!skip_decode_cache)
         nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
-    if (!wcache_->nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
+    if (!wcache_->nvfp4.empty()) {
         nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
     }
 
