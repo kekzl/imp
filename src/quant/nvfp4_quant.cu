@@ -6,6 +6,7 @@
 #include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "core/pdl_launch.cuh"
 #include "core/pdl_device.cuh"
 #include <cuda_runtime.h>
@@ -312,10 +313,10 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
 
     // Use caller's reusable buffer or allocate per-call
     float* d_global_max = d_reusable_max;
-    bool own_alloc = false;
+    DeviceOwned<float> max_own;  // holds the per-call buffer only
     if (!d_global_max) {
         cuda_alloc_or_throw(device_alloc_all(dev_req(d_global_max, sizeof(float))), "calibrate_nvfp4_scales");
-        own_alloc = true;
+        max_own.adopt(d_global_max, sizeof(float), nullptr);
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
 
@@ -332,8 +333,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
         cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float), cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
-    if (own_alloc)
-        device_free_all(d_global_max);
+    max_own.reset();
 
     if (h_absmax == 0.0f) {
         IMP_LOG_WARN("calibrate_nvfp4_scales: tensor is all zeros, using scale 1.0");
@@ -598,6 +598,8 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
                                          dev_req(d_tensor_scales, n_experts * sizeof(float)),
                                          dev_req(d_global_max, sizeof(float))),
                         "quantize_packed_experts_to_nvfp4");
+    DeviceOwned<float> max_own;  // scratch only; the three outputs go to `result`
+    max_own.adopt(d_global_max, sizeof(float), nullptr);
 
     // Compute expert stride in source GGML data
     size_t src_expert_stride = static_cast<size_t>(eff) * qtype_row_bytes(qtype, K);
@@ -643,7 +645,7 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     }
 
-    device_free_all(d_global_max);
+    max_own.reset();
 
     // Fill result
     result.packed_data = d_packed;

@@ -9,6 +9,7 @@
 
 #include "compute/warp_reduce.cuh"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "compute/mtp_forward.h"
 #include "compute/mtp_forward_internal.h"
 #include "compute/mtp_draft_rows.h"
@@ -988,13 +989,13 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     // Host path: persistent argmax scratch (ws.d_argmax) — a per-draft
     // cudaMallocAsync/cudaFreeAsync pair costs host time on the chain.
     int* d_idx = ws.d_argmax;
-    bool owned_idx = false;
+    DeviceOwned<int> idx_own;  // holds the per-call scratch only (no ws.d_argmax)
     if (d_idx == nullptr) {
         if (device_alloc_all_async(stream, dev_req(d_idx, sizeof(int))) != cudaSuccess) {
             IMP_LOG_ERROR("mtp_draft_step: argmax scratch alloc failed");
             return false;
         }
-        owned_idx = true;
+        idx_own.adopt_async(d_idx, sizeof(int), stream);
     }
     if (f32_lm) {
         mtp_argmax_kernel<<<1, 256, 0, stream>>>(
@@ -1007,12 +1008,10 @@ bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidde
     }
     if (cudaMemcpyAsync(out_token_id, d_idx, sizeof(int),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
-        if (owned_idx)
-            device_free_all_async(stream, d_idx);
+        idx_own.reset();
         return false;
     }
-    if (owned_idx)
-        device_free_all_async(stream, d_idx);
+    idx_own.reset();
     return cudaStreamSynchronize(stream) == cudaSuccess;  // false: *out_token_id not valid
 }
 

@@ -1151,6 +1151,10 @@ if(IMP_BUILD_TESTS)
         tests/test_host_pinned.cpp
         # DeviceOwned: one release per allocation through the family that produced it (I5).
         tests/test_device_owned.cpp
+        # LeakedStatic / StaticDeviceOwned: static owners release in the reset hook, never at exit.
+        tests/test_leaked_static.cpp
+        # ViewOrOwned: a StableSpan view or a DeviceOwned allocation, never both (I3 + I5).
+        tests/test_view_or_owned.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
         # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).

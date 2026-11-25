@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "compute/cublas_handle.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include <algorithm>
@@ -1055,6 +1056,9 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                 if (device_alloc_all_async(stream, dev_req(d_b16, static_cast<size_t>(b_elems) *
                                                                       sizeof(half))) != cudaSuccess)
                     d_b16 = nullptr;
+                DeviceOwned<half> a16_own, b16_own;  // stream-ordered release, also on a throw
+                a16_own.adopt_async(d_a16, static_cast<size_t>(a_elems) * sizeof(half), stream);
+                b16_own.adopt_async(d_b16, static_cast<size_t>(b_elems) * sizeof(half), stream);
                 if (d_a16 && d_b16) {
                     dequantize_fp8_e4m3_to_fp16(A.data, d_a16, a_elems, a_scale_h, stream);
                     dequantize_fp8_e4m3_to_fp16(B.data, d_b16, b_elems, b_scale_h, stream);
@@ -1067,10 +1071,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                     IMP_LOG_ERROR("gemm_cublaslt: FP8 dequant fallback alloc failed M=%ld K=%ld N=%ld",
                                   (long)M, (long)K, (long)N);
                 }
-                if (d_a16)
-                    device_free_all_async(stream, d_a16);
-                if (d_b16)
-                    device_free_all_async(stream, d_b16);
+                a16_own.reset();
+                b16_own.reset();
             }
         }
     }

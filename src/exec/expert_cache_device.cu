@@ -355,12 +355,12 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
     auto al = [](size_t v) { return (v + 255) / 256 * 256; };
     tables_bytes_ = al(src_b) + al(slot_of_b) + al(key_b) + al(stamp_b) + al(clock_b) + al(stats_b) +
                     al(miss_b);
-    tables_ = vram_alloc(alloc_, tables_bytes_, "expert_cache_dev");
+    tables_ = DeviceOwned<void>::allocate(alloc_, tables_bytes_, "expert_cache_dev");
     if (!tables_) {
         destroy();
         return false;
     }
-    char* base = static_cast<char*>(tables_);
+    char* base = static_cast<char*>(tables_.get());
     DevExpertSrc* d_src = reinterpret_cast<DevExpertSrc*>(base);
     base += al(src_b);
     int32_t* d_slot_of = reinterpret_cast<int32_t*>(base);
@@ -589,9 +589,7 @@ void DeviceExpertCache::destroy() {
     tier_stage_src_h_ = tier_stage_src_d_ = nullptr;
     tier_mb_ = tier_mb_d_ = nullptr;
     d_tier_seq_ = nullptr;
-    if (tables_)
-        vram_free(alloc_, tables_);
-    tables_ = nullptr;
+    tables_.reset();
     tables_bytes_ = 0;
     d_misses_ = nullptr;
     d_n_miss_ = nullptr;

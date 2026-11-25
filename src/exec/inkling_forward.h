@@ -163,7 +163,7 @@ private:
     VRAMAllocator* va_ = nullptr;
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
-    std::vector<void*> owned_;
+    std::vector<VramOwned<std::byte>> owned_;
     GrowRows ctx_;  // K/V of the full-attention applications
     // Per-call buffers in allocation order: a forward given as scratch hands them out again.
     std::vector<void*> scratch_;
@@ -255,12 +255,12 @@ struct InklingRuntime {
     std::vector<int32_t> ids;  // host copies of one call's token ids, positions, first blocks
     std::vector<int> pos, blk;
     // The three row arrays of a call packed on the device ([3][rows_cap]) and their host copy.
-    int32_t* d_rows = nullptr;
+    VramOwned<int32_t> d_rows;
     int rows_cap = 0;
     std::vector<int32_t> rows;
     // Lookahead slots: logits of every row of the slot's stored call ([kGraphRows][vocab], one LM-head
     // pass for all of them), and the row the running decode step takes instead of its own head pass.
-    std::vector<float*> look_logits;
+    std::vector<VramOwned<float>> look_logits;
     std::vector<long> look_serial;  // the stored call (its lookahead step count) the slot's logits belong to
     const float* logit_src = nullptr;
     VRAMAllocator* va = nullptr;

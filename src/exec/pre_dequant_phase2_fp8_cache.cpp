@@ -149,12 +149,12 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
             }
 
             // Scratch + bulk; a failed scratch leaves the bulk null, so the loop below never runs (#2446).
-            const pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
+            pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
                 vram_alloc_, max_grid, fp8_entries.size(), total_fp8_bytes, "fp8_weight_cache");
-            float* d_block_maxes = bufs.block_maxes;
-            float* d_absmax = bufs.absmax;
-            float* d_scales_all = bufs.scales;
-            uint8_t* d_fp8_bulk = bufs.bulk;
+            float* d_block_maxes = bufs.block_maxes.get();
+            float* d_absmax = bufs.absmax.get();
+            float* d_scales_all = bufs.scales.get();
+            uint8_t* d_fp8_bulk = bufs.bulk.get();
             if (!d_fp8_bulk) {
                 cudaError_t e = cudaGetLastError();
                 IMP_LOG_WARN("FP8 weight cache bulk alloc failed (%.1f MiB): %s",
@@ -210,11 +210,12 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 }
             }
 
-            device_free_all(d_block_maxes, d_absmax);
-            // Track bulk buffers for cleanup
-            wcache_->fp8_overflow_scales = d_scales_all;
+            bufs.block_maxes.reset();
+            bufs.absmax.reset();
+            // Hand-off: WeightCaches::fp8_overflow_scales / fp8_overflow_data own the slabs from here.
+            wcache_->fp8_overflow_scales = bufs.scales.release();
             wcache_->fp8_overflow_count = actual_count;
-            wcache_->fp8_overflow_data = d_fp8_bulk;
+            wcache_->fp8_overflow_data = bufs.bulk.release();
             wcache_->fp8_overflow_data_size = total_fp8_bytes;
             fp8_count = actual_count;
         }
@@ -300,8 +301,8 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     if (entries.empty())
         return;
 
-    uint8_t* d_bulk =
-        static_cast<uint8_t*>(vram_alloc(vram_alloc_, total_bytes, "fp8_ssm_sidecar"));
+    auto bulk_own = DeviceOwned<uint8_t>::allocate(vram_alloc_, total_bytes, "fp8_ssm_sidecar");
+    uint8_t* d_bulk = bulk_own.get();
     if (!d_bulk) {
         cudaError_t e = cudaGetLastError();
         IMP_LOG_WARN("fp8_ssm_proj: sidecar alloc failed (%.1f MiB): %s — decode keeps FP16",
@@ -318,7 +319,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     float* d_row_scales = nullptr;
     IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(d_row_scales, total_rows * sizeof(float))));
     if (!d_row_scales) {
-        vram_free(vram_alloc_, d_bulk);
+        bulk_own.reset();
         IMP_LOG_WARN("fp8_ssm_proj: row-scale alloc failed — decode keeps FP16");
         return;
     }
@@ -343,7 +344,8 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // Attributed by VRAMAllocator under the "fp8_ssm_sidecar" tag; record the
     // amount so the WEIGHT_CACHE_FP8 note can leave it out.
     wcache_->fp8_sidecar_bytes += total_bytes;
-    wcache_->fp8_ssm_sidecar_data = d_bulk;
+    // Hand-off: WeightCaches::fp8_ssm_sidecar_data owns the slab from here.
+    wcache_->fp8_ssm_sidecar_data = bulk_own.release();
     wcache_->fp8_ssm_sidecar_data_size = total_bytes;
     wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
 

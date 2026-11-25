@@ -111,6 +111,14 @@ public:
         clear_();
     }
 
+    // Hands the buffer to an owner that is not a DeviceOwned (a weight-cache entry): returns
+    // the pointer and empties the handle without a release. The receiver frees in the same family.
+    [[nodiscard]] T* release() noexcept {
+        T* p = ptr_;
+        clear_();
+        return p;
+    }
+
     T* get() const noexcept { return ptr_; }
     explicit operator bool() const noexcept { return ptr_ != nullptr; }
     size_t bytes() const noexcept { return bytes_; }

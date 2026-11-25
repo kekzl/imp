@@ -58,8 +58,13 @@ bool GraphExecutor::qsa_alloc_(int max_tokens) {
     }
     const int cap = cfg.qsa_budget + cfg.qsa_ratio - 1;
     qsa_rows_ = cfg::kQsaRows;
+    // I5: qsa_store_ owns every QSA device buffer, the members are views of it.
+    auto take = [&](size_t bytes, const char* tag) -> void* {
+        qsa_store_.push_back(DeviceOwned<void>::allocate(vram_alloc_, bytes, tag));
+        return qsa_store_.back().get();
+    };
     auto alloc_f16 = [&](Tensor& t, int64_t r, int64_t c, const char* tag) {
-        void* p = vram_alloc(vram_alloc_, align256(static_cast<size_t>(r) * c * 2), tag);
+        void* p = take(align256(static_cast<size_t>(r) * c * 2), tag);
         if (!p)
             return false;
         const int64_t shape[2] = {r, c};
@@ -70,9 +75,9 @@ bool GraphExecutor::qsa_alloc_(int max_tokens) {
         !alloc_f16(qsa_q_, max_tokens, static_cast<int64_t>(n_heads) * kQsaDim, "qsa_q"))
         return false;
     qsa_sel_tokens_ = static_cast<int32_t*>(
-        vram_alloc(vram_alloc_, align256(static_cast<size_t>(qsa_rows_) * cap * sizeof(int32_t)), "qsa_sel"));
-    qsa_sel_count_ = static_cast<int32_t*>(vram_alloc(vram_alloc_, 256, "qsa_sel_count"));
-    qsa_scratch_ctx_ = static_cast<int32_t*>(vram_alloc(vram_alloc_, 256, "qsa_scratch_ctx"));
+        take(align256(static_cast<size_t>(qsa_rows_) * cap * sizeof(int32_t)), "qsa_sel"));
+    qsa_sel_count_ = static_cast<int32_t*>(take(256, "qsa_sel_count"));
+    qsa_scratch_ctx_ = static_cast<int32_t*>(take(256, "qsa_scratch_ctx"));
     if (!qsa_sel_tokens_ || !qsa_sel_count_ || !qsa_scratch_ctx_)
         return false;
     IMP_LOG_INFO("QSA indexer: %d query heads x %d, block %d, budget %d (top %d blocks), rows/pass %d",
@@ -95,6 +100,10 @@ bool GraphExecutor::qsa_ensure_ctx_(const InferenceState& state, cudaStream_t st
     const int cap = cfg.qsa_budget + cfg.qsa_ratio - 1;
     const int bpr = (cap + bs - 1) / bs;
     qsa_layers_.assign(cfg.n_layers, QsaLayerState{});
+    auto take = [&](size_t bytes, const char* tag) -> void* {
+        qsa_store_.push_back(DeviceOwned<void>::allocate(vram_alloc_, bytes, tag));
+        return qsa_store_.back().get();
+    };
     size_t bytes = 0;
     for (int i = 0; i < cfg.n_layers; ++i) {
         if (model_->layer(i).qsa_index_qk.data == nullptr)
@@ -102,8 +111,8 @@ bool GraphExecutor::qsa_ensure_ctx_(const InferenceState& state, cudaStream_t st
         QsaLayerState& L = qsa_layers_[i];
         const size_t rk = align256(static_cast<size_t>(max_ctx) * kQsaDim * 2);
         const size_t bk = align256(static_cast<size_t>(nb_max) * kQsaDim * 2);
-        L.raw_keys = vram_alloc(vram_alloc_, rk, "qsa_raw_keys");
-        L.block_keys = vram_alloc(vram_alloc_, bk, "qsa_block_keys");
+        L.raw_keys = take(rk, "qsa_raw_keys");
+        L.block_keys = take(bk, "qsa_block_keys");
         if (!L.raw_keys || !L.block_keys)
             return false;
         bytes += rk + bk;
@@ -111,10 +120,10 @@ bool GraphExecutor::qsa_ensure_ctx_(const InferenceState& state, cudaStream_t st
     const size_t sc = align256(static_cast<size_t>(qsa_rows_) * nb_max * sizeof(float));
     const size_t kv = align256(static_cast<size_t>(qsa_rows_) * bpr * bs * cfg.n_kv_heads * cfg.head_dim * 2);
     const size_t bt = align256(static_cast<size_t>(qsa_rows_) * bpr * sizeof(int32_t));
-    qsa_scores_ = static_cast<float*>(vram_alloc(vram_alloc_, sc, "qsa_scores"));
-    qsa_k_scratch_ = vram_alloc(vram_alloc_, kv, "qsa_k_scratch");
-    qsa_v_scratch_ = vram_alloc(vram_alloc_, kv, "qsa_v_scratch");
-    qsa_scratch_bt_ = static_cast<int32_t*>(vram_alloc(vram_alloc_, bt, "qsa_scratch_bt"));
+    qsa_scores_ = static_cast<float*>(take(sc, "qsa_scores"));
+    qsa_k_scratch_ = take(kv, "qsa_k_scratch");
+    qsa_v_scratch_ = take(kv, "qsa_v_scratch");
+    qsa_scratch_bt_ = static_cast<int32_t*>(take(bt, "qsa_scratch_bt"));
     if (!qsa_scores_ || !qsa_k_scratch_ || !qsa_v_scratch_ || !qsa_scratch_bt_)
         return false;
     qsa_init_scratch_bt(qsa_scratch_bt_, qsa_rows_, bpr, stream);
@@ -127,26 +136,20 @@ bool GraphExecutor::qsa_ensure_ctx_(const InferenceState& state, cudaStream_t st
 }
 
 void GraphExecutor::qsa_free_() {
-    auto fr = [&](void*& p) {
-        if (p)
-            vram_free(vram_alloc_, p);
-        p = nullptr;
-    };
-    for (QsaLayerState& L : qsa_layers_) {
-        fr(L.raw_keys);
-        fr(L.block_keys);
-    }
+    // The views first, then the one release of every buffer (allocation order).
     qsa_layers_.clear();
-    fr(qsa_qk_.data);
-    fr(qsa_q_.data);
-    void* p;
-    p = qsa_sel_tokens_;   fr(p); qsa_sel_tokens_ = nullptr;
-    p = qsa_sel_count_;    fr(p); qsa_sel_count_ = nullptr;
-    p = qsa_scratch_ctx_;  fr(p); qsa_scratch_ctx_ = nullptr;
-    p = qsa_scores_;       fr(p); qsa_scores_ = nullptr;
-    p = qsa_scratch_bt_;   fr(p); qsa_scratch_bt_ = nullptr;
-    fr(qsa_k_scratch_);
-    fr(qsa_v_scratch_);
+    qsa_qk_.data = nullptr;
+    qsa_q_.data = nullptr;
+    qsa_sel_tokens_ = nullptr;
+    qsa_sel_count_ = nullptr;
+    qsa_scratch_ctx_ = nullptr;
+    qsa_scores_ = nullptr;
+    qsa_scratch_bt_ = nullptr;
+    qsa_k_scratch_ = nullptr;
+    qsa_v_scratch_ = nullptr;
+    for (DeviceOwned<void>& b : qsa_store_)
+        b.reset();
+    qsa_store_.clear();
     qsa_max_ctx_ = 0;
 }
 

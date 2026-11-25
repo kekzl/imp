@@ -3,6 +3,7 @@
 // per KV source layer, its normed + rotated K/V rows of the current forward for the shared layers.
 
 #include "core/tensor.h"
+#include "memory/device_owned.h"
 #include "model/model_config.h"
 
 #include <cuda_runtime.h>
@@ -15,9 +16,10 @@ struct GemmaPliState {
     Tensor inputs;  // [max_tokens, n_layers * pli_dim] FP16, this forward's per-layer inputs
     Tensor gate;    // [max_tokens, pli_dim] FP16 scratch
     Tensor out;     // [max_tokens, d_model] FP16 scratch
+    DeviceOwned<void> inputs_buf, gate_buf, out_buf;  // I5: the allocations behind the three tensors
     struct KvShareRows {
-        void* k = nullptr;
-        void* v = nullptr;
+        DeviceOwned<void> k;
+        DeviceOwned<void> v;
         int64_t cols = 0;  // nkv * hd of the source layer
     };
     std::vector<KvShareRows> kv_rows;  // [n_layers], set on source layers only

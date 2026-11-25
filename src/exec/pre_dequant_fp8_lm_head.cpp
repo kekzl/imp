@@ -54,7 +54,8 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     const size_t code_bytes = ((static_cast<size_t>(rows) * cols) + 255) & ~static_cast<size_t>(255);
     const size_t total = code_bytes + (static_cast<size_t>(rows) * sizeof(float));
     // Past the headroom like the NVFP4 head (raw cudaMalloc): Phase 4b then frees the source head.
-    auto* bulk = static_cast<uint8_t*>(vram_alloc_force(vram_alloc_, total, "fp8_lm_head"));
+    auto bulk_own = DeviceOwned<uint8_t>::allocate(vram_alloc_, total, "fp8_lm_head", /*force=*/true);
+    uint8_t* bulk = bulk_own.get();
     if (!bulk) {
         IMP_LOG_WARN("FP8 LM head: alloc of %.1f MiB failed; the head keeps its source path",
                      total / (1024.0 * 1024.0));
@@ -69,7 +70,7 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
         const int slab = static_cast<int>(
             std::min<size_t>(rows, qscratch_->dequant_size / (static_cast<size_t>(cols) * sizeof(half))));
         if (slab <= 0) {
-            vram_free(vram_alloc_, bulk);
+            bulk_own.reset();
             IMP_LOG_WARN("FP8 LM head: dequant scratch below one row; the head keeps its source path");
             return;
         }
@@ -89,7 +90,8 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     e.weight = Tensor(bulk, QType::FP8_E4M3, 2, shape, true);
     e.d_row_scales = scales;
     wcache_->lm_head_fp8 = e;
-    wcache_->lm_head_fp8_bulk = bulk;
+    // Hand-off: WeightCaches::lm_head_fp8_bulk owns codes + row scales from here.
+    wcache_->lm_head_fp8_bulk = bulk_own.release();
     wcache_->lm_head_fp8_bytes = total;
     IMP_LOG_INFO(
         "FP8 LM head: [%d x %d] %s -> E4M3 per-row scales (%.1f MiB), all LM-head rows; "

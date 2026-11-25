@@ -10,6 +10,7 @@
 
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 
 namespace imp {
 
@@ -21,28 +22,17 @@ namespace imp {
 // and a mid-decode failure returned without masking, answering prose where JSON was promised.)
 class ConstrainDeviceBuffers {
 public:
+    // Move-only through its three owners; each releases once, in ~ConstrainDeviceBuffers or free().
     ConstrainDeviceBuffers() = default;
-    ~ConstrainDeviceBuffers() { free(); }
-
-    ConstrainDeviceBuffers(const ConstrainDeviceBuffers&) = delete;
-    ConstrainDeviceBuffers& operator=(const ConstrainDeviceBuffers&) = delete;
-
-    ConstrainDeviceBuffers(ConstrainDeviceBuffers&& o) noexcept { swap(o); }
-    ConstrainDeviceBuffers& operator=(ConstrainDeviceBuffers&& o) noexcept {
-        if (this != &o) {
-            free();
-            swap(o);
-        }
-        return *this;
-    }
 
     // Per-token allow list, one byte per vocabulary entry.
     [[nodiscard]] bool alloc_token_allow(const char* owner, int vocab_size) {
-        cudaError_t err = device_alloc_all(dev_req(d_token_allow_, static_cast<size_t>(vocab_size)));
+        uint8_t* p = nullptr;
+        cudaError_t err = device_alloc_all(dev_req(p, static_cast<size_t>(vocab_size)));
+        d_token_allow_.adopt(p, static_cast<size_t>(vocab_size), nullptr);  // null p: empty
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate the %d-token allow list: %s", owner, vocab_size,
                           cudaGetErrorString(err));
-            d_token_allow_ = nullptr;  // three of the four did this; the fourth did not
             return false;
         }
         return true;
@@ -51,13 +41,14 @@ public:
     // Per-token category bitmask, uploaded once and never mutated.
     [[nodiscard]] bool alloc_categories(const char* owner, const uint16_t* host, int vocab_size) {
         const size_t bytes = static_cast<size_t>(vocab_size) * sizeof(uint16_t);
-        cudaError_t err = device_alloc_all(dev_req(d_token_categories_, bytes));
+        uint16_t* p = nullptr;
+        cudaError_t err = device_alloc_all(dev_req(p, bytes));
+        d_token_categories_.adopt(p, bytes, nullptr);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate device categories: %s", owner, cudaGetErrorString(err));
-            d_token_categories_ = nullptr;
             return false;
         }
-        err = cudaMemcpy(d_token_categories_, host, bytes, cudaMemcpyHostToDevice);
+        err = cudaMemcpy(d_token_categories_.get(), host, bytes, cudaMemcpyHostToDevice);
         // Pageable H2D may return before the DMA lands; drain before a mask kernel reads it (#2275).
         if (err == cudaSuccess)
             err = cudaStreamSynchronize(nullptr);
@@ -70,38 +61,32 @@ public:
 
     // Single-word "which categories are allowed right now", rewritten per step.
     [[nodiscard]] bool alloc_allowed_mask(const char* owner) {
-        cudaError_t err = device_alloc_all(dev_req(d_allowed_mask_, sizeof(uint16_t)));
+        uint16_t* p = nullptr;
+        cudaError_t err = device_alloc_all(dev_req(p, sizeof(uint16_t)));
+        d_allowed_mask_.adopt(p, sizeof(uint16_t), nullptr);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to allocate mask buffer: %s", owner, cudaGetErrorString(err));
-            d_allowed_mask_ = nullptr;
             return false;
         }
         return true;
     }
 
     void free() {
-        device_free_all(d_token_categories_, d_token_allow_, d_allowed_mask_);
-        d_token_categories_ = nullptr;
-        d_token_allow_ = nullptr;
-        d_allowed_mask_ = nullptr;
+        d_token_categories_.reset();
+        d_token_allow_.reset();
+        d_allowed_mask_.reset();
     }
 
-    uint8_t* token_allow() const { return d_token_allow_; }
-    uint16_t* categories() const { return d_token_categories_; }
-    uint16_t* allowed_mask() const { return d_allowed_mask_; }
+    uint8_t* token_allow() const { return d_token_allow_.get(); }
+    uint16_t* categories() const { return d_token_categories_.get(); }
+    uint16_t* allowed_mask() const { return d_allowed_mask_.get(); }
 
-    bool has_token_allow() const { return d_token_allow_ != nullptr; }
+    bool has_token_allow() const { return static_cast<bool>(d_token_allow_); }
 
 private:
-    void swap(ConstrainDeviceBuffers& o) noexcept {
-        std::swap(d_token_allow_, o.d_token_allow_);
-        std::swap(d_token_categories_, o.d_token_categories_);
-        std::swap(d_allowed_mask_, o.d_allowed_mask_);
-    }
-
-    uint8_t* d_token_allow_ = nullptr;
-    uint16_t* d_token_categories_ = nullptr;
-    uint16_t* d_allowed_mask_ = nullptr;
+    DeviceOwned<uint8_t> d_token_allow_;
+    DeviceOwned<uint16_t> d_token_categories_;
+    DeviceOwned<uint16_t> d_allowed_mask_;
 };
 
 }  // namespace imp

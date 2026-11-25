@@ -183,18 +183,21 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         cw.K = w.shape[1];
         cw.data_bytes = static_cast<size_t>(cw.N) * cw.K;
         cw.sf_bytes = cutlass_mxfp8_sf_size(static_cast<int>(cw.N), static_cast<int>(cw.K));
-        cw.data = vram_alloc(vram_alloc_, cw.data_bytes, "mxfp8_prefill_copy");
-        cw.scale_factors = cw.data ? vram_alloc(vram_alloc_, cw.sf_bytes, "mxfp8_prefill_sf") : nullptr;
-        if (!cw.data || !cw.scale_factors) {
+        auto data = DeviceOwned<void>::allocate(vram_alloc_, cw.data_bytes, "mxfp8_prefill_copy");
+        auto sf = data ? DeviceOwned<void>::allocate(vram_alloc_, cw.sf_bytes, "mxfp8_prefill_sf")
+                       : DeviceOwned<void>{};
+        if (!data || !sf) {
             IMP_LOG_WARN("gemm.mxfp8_gdn_proj_prefill: copy of [%lld x %lld] refused (VRAM), kept FP16",
                          (long long)w.shape[0], (long long)w.shape[1]);
-            if (cw.data)
-                vram_free(vram_alloc_, cw.data);
+            data.reset();  // nothing enqueued yet
             return;
         }
-        quantize_fp16_to_mxfp8_cutlass(w.data, cw.data, cw.scale_factors, static_cast<int>(cw.N),
+        quantize_fp16_to_mxfp8_cutlass(w.data, data.get(), sf.get(), static_cast<int>(cw.N),
                                        static_cast<int>(cw.K), stream);
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+        // Hand-off: the WeightCaches::cutlass_mxfp8_prefill entry owns copy + scale factors from here.
+        cw.data = data.release();
+        cw.scale_factors = sf.release();
         wcache_->cutlass_mxfp8_prefill[w.data] = cw;
         n_mx++;
         mx_bytes += cw.data_bytes + cw.sf_bytes;

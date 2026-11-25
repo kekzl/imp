@@ -122,6 +122,7 @@
 
             half* k_full = nullptr;
             half* v_full = nullptr;
+            DeviceOwned<half> kv_own;  // I5: the per-call K/V fallback allocation, released on `stream`
             bool used_eager_scratch = false;
             if (cap_replay) {
                 k_full = chunk_capture_k_;
@@ -154,6 +155,7 @@
                     half* kv = nullptr;
                     const cudaError_t kv_err = device_alloc_all_async(stream, dev_req(kv, chunk_kv_bytes(full_bytes)));
                     chunk_kv_split(kv_err, kv, full_bytes, &k_full, &v_full);
+                    kv_own.adopt_async(kv, chunk_kv_bytes(full_bytes), stream);  // null kv: stays empty
                 }
             }
             // The append below offsets k_full/v_full by att_off rows; a null buffer is UB (#2288).
@@ -255,7 +257,7 @@
             }
 
             if (!cap_replay && !used_eager_scratch) {
-                device_free_all_async(stream, k_full);  // v_full lives in the same allocation
+                kv_own.reset();  // stream-ordered, behind the attention above; v_full lives in the same allocation
             }
 
             // Persist current chunk's K/V (same as non-chunked path).

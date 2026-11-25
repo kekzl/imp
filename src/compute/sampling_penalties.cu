@@ -1,5 +1,6 @@
 #include "compute/sampling.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
@@ -414,8 +415,7 @@ __global__ void mirostat_v2_sample_kernel(const float* __restrict__ logits, int 
 }
 
 static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, float tau, float eta,
-                                       float* mu, unsigned int seed, int32_t* d_result, bool owns_result,
-                                       cudaStream_t stream) {
+                                       float* mu, unsigned int seed, int32_t* d_result, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
@@ -431,7 +431,8 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
                                                             d_result, d_surprise);
     const cudaError_t launched = sampler_launch_status(cudaGetLastError(), "sample_mirostat_v2");
 
-    // Read results; every failure frees an owned d_result, then throws with mu unchanged (#2307).
+    // Read results; every failure throws with mu unchanged (#2307); the owning overload
+    // releases its d_result on unwind.
     // Failed launch: no readback of a stale token (#2310).
     int32_t h_result = 0;
     float h_surprise = 0.0f;
@@ -444,8 +445,6 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
         synced = cudaStreamSynchronize(stream);
     }
 
-    if (owns_result)
-        device_free_all(d_result);
     cuda_call_or_throw(launched, "sample_mirostat_v2 launch");
     cuda_call_or_throw(tok_copy, "sample_mirostat_v2 readback");
     cuda_call_or_throw(sur_copy, "sample_mirostat_v2 surprise readback");
@@ -463,12 +462,14 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, f
     int32_t* d_result = nullptr;
     cuda_call_or_throw(device_alloc_all(dev_req(d_result, 2 * sizeof(int32_t))),
                        "sample_mirostat_v2 scratch");
-    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, true, stream);
+    DeviceOwned<int32_t> scratch;  // released on return and on a throw (#2307)
+    scratch.adopt(d_result, 2 * sizeof(int32_t), nullptr);
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, stream);
 }
 
 int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
                            unsigned int seed, int32_t* d_result, cudaStream_t stream) {
-    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, false, stream);
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, stream);
 }
 
 // ============================================================================

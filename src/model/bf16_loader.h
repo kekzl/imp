@@ -5,14 +5,16 @@
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/tensor.h"
-#include "memory/vram_allocator.h"
+#include "memory/vram_owned.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -27,7 +29,7 @@ inline float bf16_to_float(uint16_t b) {
 struct Bf16Loader {
     std::unordered_map<std::string, Tensor> t;
     VRAMAllocator& va;
-    std::vector<void*>& owned;
+    std::vector<VramOwned<std::byte>>& owned;  // I5: every dev() allocation, released by its holder
     const char* tag = "bf16_weights";
     bool ok = true;
 
@@ -42,13 +44,14 @@ struct Bf16Loader {
         return static_cast<const uint16_t*>(it->second.data);
     }
     void* dev(size_t bytes, const char* as = nullptr) {
-        void* p = va.allocate(bytes, as ? as : tag);
+        VramOwned<std::byte> buf(va, bytes, as ? as : tag);
+        void* p = buf.get();
         if (!p) {
             IMP_LOG_ERROR("%s: device allocation of %.1f MiB failed", tag, bytes / 1048576.0);
             ok = false;
             return nullptr;
         }
-        owned.push_back(p);
+        owned.push_back(std::move(buf));
         return p;
     }
     std::vector<float> host(const std::string& name, int64_t numel) {

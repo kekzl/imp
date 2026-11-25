@@ -4,6 +4,7 @@
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
+#include "memory/leaked_static.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -240,14 +241,12 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 namespace {
 bool s_configured = false;
 int s_grid_size = 0;
-int* s_tile_counter = nullptr;
-bool s_tile_counter_owned = false;  // cudaMalloc fallback (arena closed), freed here
+int* s_tile_counter = nullptr;              // view: arena slice or s_tile_counter_own
+StaticDeviceOwned<int> s_tile_counter_own;  // cudaMalloc fallback (arena closed), released here
 
 void gemm_moe_fused_tc_reset_static_cuda_state() {
-    if (s_tile_counter_owned && s_tile_counter)
-        device_free_all(s_tile_counter);
+    s_tile_counter_own.reset();
     s_tile_counter = nullptr;
-    s_tile_counter_owned = false;
     s_grid_size = 0;
     s_configured = false;
 }
@@ -283,9 +282,8 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         // (a bare GEMM unit test has no engine), like the other migrated one-shot tenants.
         if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
             s_tile_counter = reinterpret_cast<int*>(slab.data());
-            s_tile_counter_owned = false;
         } else if (device_alloc_all(dev_req(s_tile_counter, sizeof(int))) == cudaSuccess) {
-            s_tile_counter_owned = true;
+            s_tile_counter_own.adopt(s_tile_counter, sizeof(int), nullptr);
         } else {
             s_tile_counter = nullptr;
             throw_runtime_error(

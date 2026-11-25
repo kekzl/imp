@@ -46,7 +46,8 @@ bool GraphExecutor::ple_alloc_(int max_tokens) {
         return false;
     }
     const size_t emb_bytes = align256(static_cast<size_t>(max_tokens) * d * 2);
-    void* pe = vram_alloc(vram_alloc_, emb_bytes, "ple_emb");
+    ple_emb_buf_ = DeviceOwned<void>::allocate(vram_alloc_, emb_bytes, "ple_emb");
+    void* pe = ple_emb_buf_.get();
     if (pe == nullptr)
         return false;
     const int64_t emb_shape[2] = {max_tokens, d};
@@ -63,10 +64,8 @@ bool GraphExecutor::ple_alloc_(int max_tokens) {
 
 void GraphExecutor::ple_free_() {
     ple_host_.reset();
-    if (ple_emb_dev_.data != nullptr) {
-        vram_free(vram_alloc_, ple_emb_dev_.data);
-        ple_emb_dev_.data = nullptr;
-    }
+    ple_emb_buf_.reset();
+    ple_emb_dev_.data = nullptr;
     ple_h2d_done_.reset();
 }
 

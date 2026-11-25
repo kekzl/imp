@@ -1,6 +1,6 @@
 # tools/check_sync_device_writes.py (#2275): synchronous legacy-stream device writes, one line per site.
 # <path> <key> <init|debug|offline|synced>  # reason. Serving-path writes use *Async on the consumer stream.
-src/compute/constrain_device_buffers.h cudaMemcpy(d_token_categories_ synced  # cudaStreamSynchronize(nullptr) right after
+src/compute/constrain_device_buffers.h cudaMemcpy(d_token_categories_.get() synced  # cudaStreamSynchronize(nullptr) right after
 src/compute/gemm_batched.cpp cudaMemcpy(d_sa offline  # gemm_cublaslt_fp8_probe, no caller
 src/compute/gemm_batched.cpp cudaMemcpy(d_sb offline  # gemm_cublaslt_fp8_probe, no caller
 src/compute/gemm_batched.cpp cudaMemset(d_a offline  # gemm_cublaslt_fp8_probe, no caller
@@ -27,7 +27,7 @@ src/exec/expert_cache_device.cu cudaMemset(d_n_miss_ init  # device expert cache
 src/exec/expert_cache_device.cu cudaMemset(d_slot_of init  # device expert cache init
 src/exec/expert_cache_device.cu cudaMemset(d_stamp init  # device expert cache init
 src/exec/expert_cache_device.cu cudaMemset(d_stats_ init  # device expert cache init
-src/exec/expert_cache_prefetch.cu cudaMemset(pf_tables_ init  # moe.expert_prefetch tables, allocated with the device expert cache before serving
+src/exec/expert_cache_prefetch.cu cudaMemset(pf_tables_.get() init  # moe.expert_prefetch tables, allocated with the device expert cache before serving
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(d_alpha init  # pre-dequant at load
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)) init  # pre-dequant at load
 src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)) init  # pre-dequant at load

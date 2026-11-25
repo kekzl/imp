@@ -55,7 +55,7 @@ struct InklingDraftWeights {
     half *mask = nullptr, *rnn_state_w = nullptr, *rnn_ctx_w = nullptr, *w1 = nullptr, *fold_w = nullptr;
     const float* embed_norm = nullptr;  // the target's, not owned
     InklingHeadView head;
-    std::vector<void*> owned;
+    std::vector<VramOwned<std::byte>> owned;
     VRAMAllocator* va = nullptr;
 
     InklingDraftWeights() = default;
@@ -104,7 +104,7 @@ private:
 
     const InklingDraftWeights* w_ = nullptr;
     VRAMAllocator* va_ = nullptr;
-    std::vector<void*> owned_;
+    std::vector<VramOwned<std::byte>> owned_;
     GrowRows ctx_;  // K/V of the layers that keep one row per position
     [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
     bool ok_ = true;

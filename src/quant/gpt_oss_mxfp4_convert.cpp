@@ -75,23 +75,14 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     void* d_packed = nullptr;
     void* d_ms = nullptr;
     float* d_ts = nullptr;
-    if (device_alloc_all(dev_req(d_packed, packed.size())) != cudaSuccess)
+    // All three or none: a failed request releases the ones already taken.
+    if (device_alloc_all(dev_req(d_packed, packed.size()), dev_req(d_ms, mscales.size()),
+                         dev_req(d_ts, sizeof(float) * ne)) != cudaSuccess)
         return false;
-    if (device_alloc_all(dev_req(d_ms, mscales.size())) != cudaSuccess) {
-        device_free_all(d_packed);
-        return false;
-    }
-    if (device_alloc_all(dev_req(d_ts, sizeof(float) * ne)) != cudaSuccess) {
-        device_free_all(d_packed);
-        device_free_all(d_ms);
-        return false;
-    }
     if (cudaMemcpy(d_packed, packed.data(), packed.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ms, mscales.data(), mscales.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ts, tscales.data(), sizeof(float) * ne, cudaMemcpyHostToDevice) != cudaSuccess) {
-        device_free_all(d_packed);
-        device_free_all(d_ms);
-        device_free_all(d_ts);
+        device_free_all(d_packed, d_ms, d_ts);  // not handed to `out` yet
         return false;
     }
 

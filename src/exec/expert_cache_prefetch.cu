@@ -210,11 +210,11 @@ bool DeviceExpertCache::enable_prefetch(int budget, int blocks_per_key) {
     const size_t logits_b = al(static_cast<size_t>(n_experts_) * sizeof(float));
     const size_t pred_b = al(kDevExpertMaxTopK * sizeof(int32_t));
     const size_t bytes = slots_b + count_b + miss_b + 256 + logits_b + pred_b + count_b;  // last: pf_done
-    pf_tables_ = vram_alloc(alloc_, bytes, "expert_prefetch");
+    pf_tables_ = DeviceOwned<void>::allocate(alloc_, bytes, "expert_prefetch");
     if (!pf_tables_)
         return false;
-    IMP_CUDA_CHECK_LOG(cudaMemset(pf_tables_, 0, bytes));
-    char* base = static_cast<char*>(pf_tables_);
+    IMP_CUDA_CHECK_LOG(cudaMemset(pf_tables_.get(), 0, bytes));
+    char* base = static_cast<char*>(pf_tables_.get());
     auto* slots = reinterpret_cast<int32_t*>(base);
     auto* counts = reinterpret_cast<int32_t*>(base + slots_b);
     pf_misses_ = reinterpret_cast<DevMissEntry*>(base + slots_b + count_b);
@@ -239,9 +239,7 @@ bool DeviceExpertCache::enable_prefetch(int budget, int blocks_per_key) {
 }
 
 void DeviceExpertCache::free_prefetch_() {
-    if (pf_tables_)
-        vram_free(alloc_, pf_tables_);
-    pf_tables_ = nullptr;
+    pf_tables_.reset();
     pf_misses_ = nullptr;
     pf_n_miss_ = nullptr;
     pf_logits_ = nullptr;

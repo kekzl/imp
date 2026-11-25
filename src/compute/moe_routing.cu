@@ -544,6 +544,7 @@ bool MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val, VRAMAl
         pool_size = 0;
         return false;
     }
+    pool_own_.adopt(pool, pool_size, va_);
 
     char* ptr = static_cast<char*>(pool);
     expert_indices = reinterpret_cast<int32_t*>(ptr);
@@ -565,6 +566,7 @@ MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept 
     if (this == &o)
         return *this;
     free();
+    pool_own_ = std::move(o.pool_own_);
     pool = std::exchange(o.pool, nullptr);
     va_ = std::exchange(o.va_, nullptr);
     pool_size = std::exchange(o.pool_size, 0);
@@ -581,10 +583,7 @@ MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept 
 }
 
 void MoeRoutingBuffers::free() {
-    if (pool && va_)
-        va_->free(pool);
-    else if (pool)
-        device_free_all(pool);
+    pool_own_.reset();
     pool = nullptr;
     pool_size = 0;
     expert_indices = nullptr;

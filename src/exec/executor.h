@@ -5,7 +5,9 @@
 #include "core/dispatch_policy.h"
 
 #include "model/model.h"
+#include "memory/device_owned.h"
 #include "memory/host_pinned.h"
+#include "memory/view_or_owned.h"
 #include "memory/vram_owned.h"
 #include "memory/kv_cache.h"
 #include "memory/ssm_state.h"
@@ -40,6 +42,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -821,11 +824,14 @@ private:
     Tensor hc_low_;     // [max_tokens, hc_lowrank] FP16
     Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
+    // I5: the allocations behind the six hc_* tensors, in that order.
+    std::array<DeviceOwned<void>, 6> hc_buf_;
     // Qwen4Exp PLE (executor_ple.cpp): pinned staging for the gathered n-gram rows, the
     // n-gram id scratch. Sequence state (conv rows) is the SSM slab tail per slot.
     PinnedBuffer ple_host_;
     PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
     Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
+    DeviceOwned<void> ple_emb_buf_;  // I5: the allocation behind ple_emb_dev_
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
     CudaEvent ple_h2d_done_;
@@ -838,6 +844,7 @@ private:
         void* block_keys = nullptr;
     };
     std::vector<QsaLayerState> qsa_layers_;
+    std::vector<DeviceOwned<void>> qsa_store_;  // I5: owns every QSA buffer below, the members are views
     Tensor qsa_qk_, qsa_q_;  // [max_tokens, (nh+1)*128], [max_tokens, nh*128] FP16
     float* qsa_scores_ = nullptr;
     int32_t* qsa_sel_tokens_ = nullptr;
@@ -944,7 +951,7 @@ private:
         CudaStream stream;
         CudaEvent fork;
         CudaEvent join;
-        char* buf = nullptr;  // gate | up | act ([eff] each) | down ([d]), compute dtype
+        DeviceOwned<char> buf;  // gate | up | act ([eff] each) | down ([d]), compute dtype
         int eff = 0;
         int d = 0;
         bool pending = false;  // forked, phase 8 has not joined yet
@@ -961,14 +968,12 @@ private:
         VramOwned<char> pf_x;  // [d_model] FP16, hc-norm router input (Qwen4Exp)
     } gather_overlap_;
 
-    // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
-    // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
-    // (freed wholesale) rather than from VRAMAllocator.
-    bool nvfp4_dequant_ws_from_arena_ = false;
+    // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only): a view of the
+    // engine-persistent arena (freed wholesale) or a private allocation (arena closed or short).
     // Set up by allocate_nvfp4_dequant_workspace() and registered with the
     // free function via set_nvfp4_dequant_workspace(). Allows the fallback
     // path to run inside CUDA stream capture without crashing on cudaMalloc.
-    void* nvfp4_dequant_ws_buf_ = nullptr;
+    ViewOrOwned<void> nvfp4_dequant_ws_buf_;
     size_t nvfp4_dequant_ws_size_ = 0;
     // Lazy engine arena: the workspace is taken at the first fallback that needs it
     // (set_nvfp4_dequant_workspace_provider); until then the buffer is null and the size is set.

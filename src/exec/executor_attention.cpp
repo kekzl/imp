@@ -602,17 +602,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Compacts hd-strided -> vhd-compact via a scratch buffer (src/dst must
             // not alias). Prefill isn't CUDA-graph-captured, so the stream-ordered
             // alloc is amortised in the pool.
-            void* compact_buf = nullptr;
+            void* compact_raw = nullptr;
             const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
-            cuda_alloc_or_throw(device_alloc_all_async(stream, dev_req(compact_buf, bytes)),
+            cuda_alloc_or_throw(device_alloc_all_async(stream, dev_req(compact_raw, bytes)),
                                 "MLA prefill output compaction");
-            mla_compact_attn_output(static_cast<const half*>(ao.data),
-                                    static_cast<half*>(compact_buf), n, nh, hd, vhd, stream);
+            // I5: released on `stream`; an exception past here frees behind the kernels already enqueued.
+            DeviceOwned<void> compact_buf;
+            compact_buf.adopt_async(compact_raw, bytes, stream);
+            mla_compact_attn_output(static_cast<const half*>(ao.data), static_cast<half*>(compact_buf.get()),
+                                    n, nh, hd, vhd, stream);
             // Copy compacted result back into attn_out_ (dst pitch < src pitch,
             // separate-buffer source — no in-place hazard) and narrow the view.
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ao.data, compact_buf, bytes,
-                                               cudaMemcpyDeviceToDevice, stream));
-            device_free_all_async(stream, compact_buf);
+            IMP_CUDA_CHECK_LOG(
+                cudaMemcpyAsync(ao.data, compact_buf.get(), bytes, cudaMemcpyDeviceToDevice, stream));
+            compact_buf.reset();  // stream-ordered, behind the copy above
         }
         // Both paths: narrow the view so o_proj sees nh*vhd. (Decode already
         // wrote compact data; prefill just copied compact data into ao.)

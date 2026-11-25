@@ -199,6 +199,36 @@ TEST_F(DeviceOwnedTest, AdoptingNullLeavesTheHandleEmpty) {
     EXPECT_TRUE(log().empty());
 }
 
+// release() is the hand-off to a non-DeviceOwned owner (weight cache): no release, ever.
+TEST_F(DeviceOwnedTest, ReleaseHandsThePointerOverWithoutFreeing) {
+    {
+        DeviceOwned<float> h;
+        h.adopt(a_, 8, &va_);
+        EXPECT_EQ(h.release(), a_);
+        EXPECT_FALSE(h);
+        EXPECT_EQ(h.bytes(), 0u);
+        EXPECT_EQ(h.family(), DeviceFamily::None);
+        EXPECT_EQ(h.release(), nullptr);
+        h.reset();
+    }
+    EXPECT_TRUE(log().empty());
+}
+
+// An owner that is not released (error path before the hand-off) still frees once.
+TEST_F(DeviceOwnedTest, UnreleasedOwnerFreesAtScopeEndReleasedOneDoesNot) {
+    {
+        DeviceOwned<float> kept;
+        DeviceOwned<float> handed;
+        kept.adopt_async(a_, 8, stream_);
+        handed.adopt(b_, 8, nullptr);
+        EXPECT_EQ(handed.release(), b_);
+    }
+    ASSERT_EQ(log().size(), 1u);
+    EXPECT_EQ(log()[0].ptr, a_);
+    EXPECT_EQ(log()[0].family, DeviceFamily::Async);
+    EXPECT_EQ(log()[0].stream, stream_);
+}
+
 // A struct of owners reset by whole-struct assignment (MoEWorkspace::free): every member is
 // released once, a member added later needs no line in the release.
 TEST_F(DeviceOwnedTest, AssigningAFreshStructReleasesEveryMember) {

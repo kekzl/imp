@@ -5,6 +5,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -62,18 +63,15 @@ __global__ void accum_abs_cols_experts_kernel(const half* __restrict__ x, const 
 ActivationCalibrator::~ActivationCalibrator() {
     if (!alloc_)
         return;
+    // I5: the order the hand frees had (statistics, expert statistics, Hessians), by key.
     for (auto& [key, e] : entries_)
-        if (e.d_sum)
-            alloc_->free(e.d_sum);
+        e.d_sum.reset();
     for (auto& [key, e] : expert_entries_) {
-        if (e.d_sum)
-            alloc_->free(e.d_sum);
-        if (e.d_rows)
-            alloc_->free(e.d_rows);
+        e.d_sum.reset();
+        e.d_rows.reset();
     }
     for (auto& [key, e] : hess_)
-        if (e.d_H)
-            alloc_->free(e.d_H);
+        e.d_H.reset();
 }
 
 void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const Tensor& input,
@@ -96,21 +94,19 @@ void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const 
         e.K = K;
         e.ne = ne;
         const size_t sum_bytes = static_cast<size_t>(ne) * static_cast<size_t>(2 * K) * sizeof(double);
-        e.d_sum = static_cast<double*>(alloc_->allocate(sum_bytes, "activation_calibration"));
-        e.d_rows = static_cast<uint64_t*>(
-            alloc_->allocate(static_cast<size_t>(ne) * sizeof(uint64_t), "activation_calibration"));
+        e.d_sum = VramOwned<double>(*alloc_, sum_bytes / sizeof(double), "activation_calibration");
+        e.d_rows = VramOwned<uint64_t>(*alloc_, static_cast<size_t>(ne), "activation_calibration");
         if (!e.d_sum || !e.d_rows) {
             IMP_LOG_WARN("calibration: allocation failed for layer %d kind %s (%d experts, K=%lld)", layer,
                          tensor_kind_name(kind), ne, static_cast<long long>(K));
-            if (e.d_sum)
-                alloc_->free(e.d_sum);
-            if (e.d_rows)
-                alloc_->free(e.d_rows);
+            e.d_sum.reset();
+            e.d_rows.reset();
             return;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum, 0, sum_bytes, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_rows, 0, static_cast<size_t>(ne) * sizeof(uint64_t), stream));
-        it = expert_entries_.emplace(key, e).first;
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum.get(), 0, sum_bytes, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemsetAsync(e.d_rows.get(), 0, static_cast<size_t>(ne) * sizeof(uint64_t), stream));
+        it = expert_entries_.emplace(key, std::move(e)).first;
     } else if (it->second.K != K || it->second.ne != ne) {
         IMP_LOG_WARN("calibration: layer %d kind %s changed shape (K %lld, %d experts), ignoring", layer,
                      tensor_kind_name(kind), static_cast<long long>(K), ne);
@@ -119,8 +115,9 @@ void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const 
 
     const dim3 grid(static_cast<unsigned>((K + kThreads - 1) / kThreads), static_cast<unsigned>(ne));
     accum_abs_cols_experts_kernel<<<grid, kThreads, 0, stream>>>(static_cast<const half*>(input.data),
-                                                                 d_offsets, K, row_stride, it->second.d_sum,
-                                                                 it->second.d_rows);
+                                                                 d_offsets, K, row_stride,
+                                                                 it->second.d_sum.get(),
+                                                                 it->second.d_rows.get());
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -144,15 +141,15 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
         // Allocating here is why calibration forces CUDA graphs off (alloc inside
         // capture is an error). One buffer of 3K: [0,K) sum|x|, [K,2K) sum x^2,
         // [2K,3K) max|x|, avoiding three allocations per entry.
-        e.d_sum = static_cast<double*>(
-            alloc_->allocate(static_cast<size_t>(3 * K) * sizeof(double), "activation_calibration"));
+        e.d_sum = VramOwned<double>(*alloc_, static_cast<size_t>(3 * K), "activation_calibration");
         if (!e.d_sum) {
             IMP_LOG_WARN("calibration: allocation failed for layer %d kind %s (K=%lld)", layer,
                          tensor_kind_name(kind), static_cast<long long>(K));
             return;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum, 0, static_cast<size_t>(3 * K) * sizeof(double), stream));
-        it = entries_.emplace(key, e).first;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemsetAsync(e.d_sum.get(), 0, static_cast<size_t>(3 * K) * sizeof(double), stream));
+        it = entries_.emplace(key, std::move(e)).first;
     } else if (it->second.K != K) {
         // Same (layer, kind) arriving with a different inner dimension means the
         // key is not identifying what we think it is. Refuse rather than blend.
@@ -163,8 +160,9 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
 
     const int blocks = static_cast<int>((K + kThreads - 1) / kThreads);
     accum_abs_cols_kernel<<<blocks, kThreads, 0, stream>>>(static_cast<const half*>(input.data), rows, K,
-                                                           row_stride, it->second.d_sum, it->second.d_sum + K,
-                                                           it->second.d_sum + (2 * K));
+                                                           row_stride, it->second.d_sum.get(),
+                                                           it->second.d_sum.get() + K,
+                                                           it->second.d_sum.get() + (2 * K));
     IMP_CUDA_CHECK_LAUNCH();
     it->second.rows += static_cast<uint64_t>(rows);
     if (hessian_)
@@ -182,7 +180,7 @@ CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) con
         if (!e.d_sum || e.rows == 0)
             continue;
         host.resize(static_cast<size_t>(3 * e.K));
-        if (cudaMemcpy(host.data(), e.d_sum, host.size() * sizeof(double), cudaMemcpyDeviceToHost) !=
+        if (cudaMemcpy(host.data(), e.d_sum.get(), host.size() * sizeof(double), cudaMemcpyDeviceToHost) !=
             cudaSuccess) {
             IMP_LOG_WARN("calibration: D2H copy failed for key %u", key);
             continue;
@@ -208,9 +206,9 @@ CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) con
         const size_t k = static_cast<size_t>(e.K);
         host.resize(static_cast<size_t>(e.ne) * 2 * k);
         rows.resize(static_cast<size_t>(e.ne));
-        if (cudaMemcpy(host.data(), e.d_sum, host.size() * sizeof(double), cudaMemcpyDeviceToHost) !=
+        if (cudaMemcpy(host.data(), e.d_sum.get(), host.size() * sizeof(double), cudaMemcpyDeviceToHost) !=
                 cudaSuccess ||
-            cudaMemcpy(rows.data(), e.d_rows, rows.size() * sizeof(uint64_t), cudaMemcpyDeviceToHost) !=
+            cudaMemcpy(rows.data(), e.d_rows.get(), rows.size() * sizeof(uint64_t), cudaMemcpyDeviceToHost) !=
                 cudaSuccess) {
             IMP_LOG_WARN("calibration: D2H copy failed for expert key %u", key);
             continue;

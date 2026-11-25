@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "compute/gemm_internal.cuh"
 #include "compute/gemm_lt_ex.h"
 
@@ -102,16 +103,19 @@ bool gemm_cublaslt_fp8_probe() {
     constexpr size_t M = 15, K = 4096, N = 12288;
     void *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
     float *d_sa = nullptr, *d_sb = nullptr;
-    auto dalloc = [](auto** p, size_t bytes) {
-        if (device_alloc_all(dev_req(*p, bytes)) == cudaSuccess)
+    DeviceOwned<void> owned[5];  // one per dalloc call below
+    size_t n_owned = 0;
+    auto dalloc = [&](auto** p, size_t bytes) {
+        if (device_alloc_all(dev_req(*p, bytes)) == cudaSuccess) {
+            owned[n_owned++].adopt(*p, bytes, nullptr);
             return true;
+        }
         *p = nullptr;
         return false;
     };
     auto release = [&] {
-        for (void* p : {d_a, d_b, d_c, static_cast<void*>(d_sa), static_cast<void*>(d_sb)})
-            if (p)
-                device_free_all(p);
+        for (auto& o : owned)
+            o.reset();
     };
     const float one = 1.0f;
     // Setup failure = probe false (FP8 path off), same as a failed first cudaMalloc before.

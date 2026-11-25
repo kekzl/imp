@@ -22,6 +22,7 @@
 
 #include "exec/expert_cache.h"
 #include "exec/moe_workspace.h"
+#include "memory/device_owned.h"
 #include "memory/host_expert_tier.h"
 #include "memory/host_pinned.h"
 
@@ -209,7 +210,7 @@ private:
     std::vector<size_t> ms_off_;           // [n_layers * 3]
     std::vector<size_t> packed_bytes_;     // [n_layers * 3]
     std::vector<size_t> ms_bytes_;         // [n_layers * 3]
-    void* tables_ = nullptr;               // one device allocation for every table
+    DeviceOwned<void> tables_;             // one device allocation for every table
     size_t tables_bytes_ = 0;
     DevMissEntry* d_misses_ = nullptr;  // [3 * kDevExpertMaxTopK * kDevExpertMaxRows]
     int* d_n_miss_ = nullptr;
@@ -218,7 +219,7 @@ private:
     int layers_ready_ = 0;
     // Prefetch (enable_prefetch): one allocation for the per-layer pending lists, the prefetch miss
     // list, its count, the predict logits [n_experts] and predicted ids [kDevExpertMaxTopK].
-    void* pf_tables_ = nullptr;
+    DeviceOwned<void> pf_tables_;
     // [2][kDevExpertPrefetchMax] and [2] counts 64 B apart, by layer parity: layer L + 1's prefetch
     // resolve runs while layer L's prefetch gather may still read its list.
     DevMissEntry* pf_misses_ = nullptr;

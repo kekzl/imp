@@ -6,6 +6,7 @@
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 #include "memory/engine_arena.h"
+#include "memory/leaked_static.h"
 
 #include <algorithm>
 #include <utility>
@@ -209,10 +210,10 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__
 // nothing to remove. Falls back to a direct allocation when the arena is closed (a bare
 // quant unit in a test has no engine).
 namespace {
-float* g_absmax_scratch = nullptr;   // [grid] block maxima, then [1] result
+float* g_absmax_scratch = nullptr;  // [grid] block maxima, then [1] result; view (arena or owner)
 int g_absmax_scratch_grid = 0;
 uint64_t g_absmax_scratch_gen = 0;
-bool g_absmax_scratch_owned = false;
+StaticDeviceOwned<float> g_absmax_scratch_own;  // direct allocation when the arena is closed
 constexpr uint64_t kOwnedGen = ~0ull;
 
 // Returns {block_maxes, result} or {nullptr, nullptr}.
@@ -228,19 +229,18 @@ std::pair<float*, float*> absmax_scratch(int grid) {
     if (!slab.empty()) {
         g_absmax_scratch = reinterpret_cast<float*>(slab.data());
         g_absmax_scratch_gen = imp::engine_arena().generation();
-        g_absmax_scratch_owned = false;
     } else {
-        if (g_absmax_scratch_owned && g_absmax_scratch)
-            device_free_all(g_absmax_scratch);
-        void* p = nullptr;
-        if (device_alloc_all(dev_req(p, bytes)) != cudaSuccess) {
+        // adopt releases the previous direct block (if any); a failed allocation leaves none.
+        float* p = nullptr;
+        const bool ok = device_alloc_all(dev_req(p, bytes)) == cudaSuccess;
+        g_absmax_scratch_own.adopt(ok ? p : nullptr, bytes, nullptr);
+        if (!ok) {
             g_absmax_scratch = nullptr;
             g_absmax_scratch_grid = 0;
             return {nullptr, nullptr};
         }
-        g_absmax_scratch = static_cast<float*>(p);
+        g_absmax_scratch = p;
         g_absmax_scratch_gen = kOwnedGen;
-        g_absmax_scratch_owned = true;
     }
     g_absmax_scratch_grid = grid;
     return {g_absmax_scratch, g_absmax_scratch + grid};
@@ -455,6 +455,9 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
     cuda_alloc_or_throw(device_alloc_all(dev_req(d_block_maxes, (size_t)grid * sizeof(float)),
                                          dev_req(d_scale_device, sizeof(float))),
                         "quantize_fp16_to_fp8_e4m3");
+    DeviceOwned<float> block_maxes_own, scale_device_own;  // released below, and on a throw
+    block_maxes_own.adopt(d_block_maxes, (size_t)grid * sizeof(float), nullptr);
+    scale_device_own.adopt(d_scale_device, sizeof(float), nullptr);
 
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
                                                           n);
@@ -485,7 +488,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3 kernel launch failed: %s", cudaGetErrorString(err));
     }
 
-    device_free_all(d_block_maxes, d_scale_device);
+    block_maxes_own.reset();
+    scale_device_own.reset();
 
     IMP_LOG_DEBUG("quantize_fp16_to_fp8_e4m3: n=%d  scale=%.6f", n, scale);
 }

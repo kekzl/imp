@@ -10,7 +10,7 @@
 
 #include "core/tensor.h"
 #include "core/tensor_kind.h"
-#include "memory/vram_allocator.h"
+#include "memory/vram_owned.h"
 #include "quant/calibration_stats.h"
 
 #include <cstdint>
@@ -55,22 +55,22 @@ private:
     void accumulate_hessian_(int layer, TensorKind kind, const Tensor& input, int64_t row_stride,
                              cudaStream_t stream);
     struct HessEntry {
-        float* d_H = nullptr;
+        VramOwned<float> d_H;
         int64_t K = 0;
         uint64_t rows = 0;  // rows in H
     };
     std::map<uint32_t, HessEntry> hess_;  // same key as entries_
     bool hessian_ = false;
     struct Entry {
-        double* d_sum = nullptr;  // [3K] sum|x|, sum x^2, max|x|; FP64 so long corpora keep the tail
+        VramOwned<double> d_sum;  // [3K] sum|x|, sum x^2, max|x|; FP64 so long corpora keep the tail
         int64_t K = 0;
         uint64_t rows = 0;
     };
     // key = layer * 256 + kind, both bounded well below that.
     std::map<uint32_t, Entry> entries_;
     struct ExpertEntry {
-        double* d_sum = nullptr;     // [ne][2K]: sum|x| then sum x^2 per expert
-        uint64_t* d_rows = nullptr;  // [ne]
+        VramOwned<double> d_sum;     // [ne][2K]: sum|x| then sum x^2 per expert
+        VramOwned<uint64_t> d_rows;  // [ne]
         int64_t K = 0;
         int ne = 0;
     };

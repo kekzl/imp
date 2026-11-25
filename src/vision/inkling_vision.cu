@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <unordered_map>
+#include <utility>
 
 namespace imp {
 
@@ -162,8 +163,8 @@ void axis_tap(int i, int size, int side, int& i0, int& i1, float& w1) {
 }  // namespace
 
 InklingVision::~InklingVision() {
-    for (void* p : owned_)
-        va_->free(p);
+    for (auto& b : owned_)
+        b.reset();
 }
 
 void InklingVision::grid(int h, int w, int& rows, int& cols) const {
@@ -259,10 +260,11 @@ bool InklingVision::alloc_workspace_() {
     const size_t P = static_cast<size_t>(kMaxTokens) * 4, N = P + 1, Hs = static_cast<size_t>(c.hidden);
     bool ok = true;
     const auto take = [&](size_t bytes) {
-        void* p = va_->allocate(bytes, "inkling_vision_ws");
+        VramOwned<std::byte> buf(*va_, bytes, "inkling_vision_ws");
+        void* p = buf.get();
         ok = ok && p != nullptr;
         if (p)
-            owned_.push_back(p);
+            owned_.push_back(std::move(buf));
         return p;
     };
     const auto F = [&](size_t n) { return static_cast<float*>(take(n * sizeof(float))); };

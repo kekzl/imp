@@ -54,12 +54,12 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             }
 
             // Scratch + bulk; a failed scratch leaves the bulk null, so the loop below never runs (#2446).
-            const pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
+            pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
                 vram_alloc_, max_grid, to_migrate.size(), total_fp8_bytes, "fp8_migration_cache");
-            float* d_block_maxes = bufs.block_maxes;
-            float* d_absmax = bufs.absmax;
-            float* d_scales_all = bufs.scales;
-            uint8_t* d_fp8_bulk = bufs.bulk;
+            float* d_block_maxes = bufs.block_maxes.get();
+            float* d_absmax = bufs.absmax.get();
+            float* d_scales_all = bufs.scales.get();
+            uint8_t* d_fp8_bulk = bufs.bulk.get();
             if (!d_fp8_bulk) {
                 cudaError_t e = cudaGetLastError();
                 IMP_LOG_WARN("FP8 migration cache alloc failed (%.1f MiB): %s",
@@ -82,7 +82,8 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 migrated_bytes += e.n_elems + sizeof(float);
             }
 
-            wcache_->fp8_migrated_data = d_fp8_bulk;
+            // Hand-off: WeightCaches::fp8_migrated_data owns the slab from here.
+            wcache_->fp8_migrated_data = bufs.bulk.release();
             wcache_->fp8_migrated_data_size = total_fp8_bytes;
 
             if (migrated > 0) {
@@ -99,8 +100,10 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 }
             }
 
-            device_free_all(d_block_maxes, d_absmax);
-            wcache_->fp8_migrated_scales = d_scales_all;
+            bufs.block_maxes.reset();
+            bufs.absmax.reset();
+            // Hand-off: WeightCaches::fp8_migrated_scales owns the scale array from here.
+            wcache_->fp8_migrated_scales = bufs.scales.release();
             wcache_->fp8_migrated_count = migrated;
         }
     }
