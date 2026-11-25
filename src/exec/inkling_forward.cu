@@ -99,7 +99,8 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
         ok_ = side_[i].create() && fork_ev_[i].create() && join_ev_[i].create();
     part_ = F_(attention_part_floats(c.n_heads, c.head_dim, c.window, max_ctx));
     if (!attn_work_) {
-        attn_work_bytes_ = attention_rows_bytes(c.n_heads, c.head_dim, c.d_rel, c.window, max_ctx, seg_);
+        attn_work_bytes_ = attention_rows_bytes(c.n_heads, c.n_kv_heads, c.head_dim, c.d_rel, c.window,
+                                                max_ctx, seg_);
         attn_work_ = alloc_(attn_work_bytes_);
     }
     for (half** p : {&xq_, &xk_, &xv_, &o_h_, &xm_})
@@ -126,6 +127,7 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     scratch_on_ = false;
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
+    ok_ = ok_ && init_ctx_blocks_(max_ctx);
     dec_h_ = Hf_(H * kGraphRows);
     conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     ctx_.init(va, growable, "inkling_state", KD * sizeof(half), static_cast<size_t>(max_ctx), kCtxStep);
@@ -384,19 +386,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     join_(sk, s, 0);
     join_(sv, s, 1);
 
-    AttnArgs a;
-    a.q = proj_h_, a.rel = proj_h_ + QD, a.sink = proj_h_ + QD + RD, a.gate = proj_h_ + QD + RD + c.n_heads;
-    a.q_scale = ly.q_scale, a.rel_scale = ly.rel_scale, a.proj = ly.rel_proj;
-    a.k = k_[app], a.v = v_[app], a.out = ao_h_, a.d_pos = d_pos_;
-    a.part = part_, a.max_ctx = max_ctx_;
-    a.work = attn_gemm_ ? attn_work_ : nullptr, a.work_bytes = attn_work_bytes_;
-    a.pos0 = T > kGraphRows ? pos_ : -1;
-    a.T = T, a.stride = q_stride, a.n_heads = c.n_heads, a.n_kv = c.n_kv_heads, a.hd = c.head_dim;
-    a.d_rel = c.d_rel, a.rel_extent = global ? c.rel_extent : c.window;
-    a.window = global ? 0 : c.window, a.ring = global ? 0 : ring_;
-    a.scale = 1.0f / sqrtf(static_cast<float>(c.head_dim)), a.q_thr = c.qk_clip, a.rel_thr = c.rel_clip;
-    a.log_alpha = global ? c.log_alpha : 0.0f, a.log_floor = c.log_floor;
-    attention(a, s);
+    attend_(ly, app, global, T, q_stride, s);
     lin_(ao_h_, T, QD, ly.wo, H, o_h_, s);
 
     // Block boundary: the layer input joins the block states and the residual restarts at the conv output.

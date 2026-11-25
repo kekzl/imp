@@ -581,6 +581,7 @@ set(IMP_EXEC_SOURCES
     src/exec/inkling_forward.cu
     src/exec/inkling_forward_spec.cu
     src/exec/inkling_forward_moe.cu
+    src/exec/inkling_forward_attn.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp
     src/exec/executor_ple.cpp
@@ -1415,6 +1416,7 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_parity.cu
         tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
+        tests/test_inkling_attn_paged.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu

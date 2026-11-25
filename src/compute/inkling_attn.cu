@@ -52,7 +52,7 @@ __global__ void attention_k(AttnArgs a) {
         acc[i] = 0.0f;
     float m = -FLT_MAX, l = 0.0f;
     for (int k = lo + threadIdx.x; k <= pos; k += blockDim.x) {
-        const int slot = a.ring > 0 ? k % a.ring : k;
+        const int slot = kv_slot(k, a.ring, a.blocks, a.kv_block);
         const half* kp = a.k + ((size_t)slot * a.n_kv + kvh) * a.hd;
         const half* vp = a.v + ((size_t)slot * a.n_kv + kvh) * a.hd;
         float dot = 0.0f;
@@ -103,7 +103,7 @@ __device__ __forceinline__ void attn_load_tiles(const AttnArgs& a, half (*sk)[kA
     const int per = a.hd / 8;
     for (int i = threadIdx.x; i < n * per; i += blockDim.x) {
         const int key = i / per, cc = (i % per) * 8;
-        const int slot = a.ring > 0 ? (k0 + key) % a.ring : k0 + key;
+        const int slot = kv_slot(k0 + key, a.ring, a.blocks, a.kv_block);
         const size_t at = ((size_t)slot * a.n_kv + kvh) * a.hd + cc;
         *reinterpret_cast<uint4*>(&sk[key][cc]) = *reinterpret_cast<const uint4*>(a.k + at);
         *reinterpret_cast<uint4*>(&sv[key][cc]) = *reinterpret_cast<const uint4*>(a.v + at);
@@ -229,7 +229,7 @@ __device__ __forceinline__ void rows_load(const AttnArgs& a, RowsSmem& m, const 
     const int tid = threadIdx.x, per = a.hd / 8;
     for (int i = tid; i < x.n * per; i += blockDim.x) {
         const int key = i / per, cc = (i % per) * 8;
-        const int slot = a.ring > 0 ? (x.k0 + key) % a.ring : x.k0 + key;
+        const int slot = kv_slot(x.k0 + key, a.ring, a.blocks, a.kv_block);
         const size_t at = ((size_t)slot * a.n_kv + x.kvh) * a.hd + cc;
         *reinterpret_cast<uint4*>(&m.sk[key][cc]) = *reinterpret_cast<const uint4*>(a.k + at);
         *reinterpret_cast<uint4*>(&m.sv[key][cc]) = *reinterpret_cast<const uint4*>(a.v + at);
@@ -379,7 +379,7 @@ __device__ __forceinline__ void rows_load_t(const AttnArgs& a, RowsSmem& m, cons
     for (int j = 0; j < kKv; ++j) {
         const int i = tid + j * kPartThreads;
         const int key = min(i / kFixPer, x.n - 1), cc = (i % kFixPer) * 8;
-        const int slot = a.ring > 0 ? (x.k0 + key) % a.ring : x.k0 + key;
+        const int slot = kv_slot(x.k0 + key, a.ring, a.blocks, a.kv_block);
         const size_t at = ((size_t)slot * a.n_kv + x.kvh) * kFixHd + cc;
         kk[j] = *reinterpret_cast<const uint4*>(a.k + at);
         vv[j] = *reinterpret_cast<const uint4*>(a.v + at);
@@ -610,8 +610,11 @@ __global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows, bool batched
 }  // namespace
 
 void attention(const AttnArgs& a, cudaStream_t s) {
-    if (a.hd > kAttnMaxHd || a.d_rel > 32) {
-        IMP_LOG_ERROR("inkling attention: head_dim %d or d_rel %d out of range", a.hd, a.d_rel);
+    if (a.hd > kAttnMaxHd || a.d_rel > 32 ||
+        (a.blocks && (a.ring > 0 || a.kv_block < 16 || a.kv_block % 16 != 0))) {
+        IMP_LOG_ERROR(
+            "inkling attention: head_dim %d, d_rel %d or block table (ring %d, block %d) out of range", a.hd,
+            a.d_rel, a.ring, a.kv_block);
         return;
     }
     // Few rows (decode, lookahead, paced prefill): the rows and the heads of a KV head share the key loads.
