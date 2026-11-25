@@ -621,7 +621,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Workspace pinned to the largest batch: every N's graph then bakes the
     // same activation carve, and growing N never reallocates (which would
     // drop every cached graph).
-    if (!executor_->resize_workspace(bv_.cap_rows, stream)) {
+    if (!executor_->try_resize_workspace(bv_.cap_rows, stream)) {
         rollback_all(N);
         return false;
     }

@@ -526,11 +526,10 @@ public:
     void set_ffn_graphs_enabled(bool cuda_graphs);
     [[nodiscard]] uint64_t ffn_graph_replays() const { return ffn_graphs_.replays(); }
 
-    // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
-    // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
-    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream) {
-        return ws_.resize_workspace(new_max_tokens, stream);
-    }
+    // Carve the shared workspace for a token count. try_: false on a failed grow, old carve kept;
+    // resize_workspace throws there instead (a caller that cannot fall back, audit C-11).
+    [[nodiscard]] bool try_resize_workspace(int n, cudaStream_t s) { return ws_.try_resize_workspace(n, s); }
+    void resize_workspace(int rows, cudaStream_t s) { ws_.resize_workspace(rows, s); }
     int max_tokens() const { return max_tokens_; }
 
     // Takes the small-M NVFP4 workspace + activation scratch for the largest

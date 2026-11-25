@@ -112,7 +112,7 @@ public:
     // into an explicit set of physical blocks.
     void prefill(const std::vector<int32_t>& tokens, const std::vector<int>& blocks) {
         const int n = static_cast<int>(tokens.size());
-        (void)ex_.resize_workspace(n, nullptr);
+        ex_.resize_workspace(n, nullptr);
         std::vector<int> positions(n);
         for (int i = 0; i < n; i++)
             positions[i] = i;
@@ -144,7 +144,7 @@ public:
                                    const std::vector<int>& ctx_lens, const std::vector<int>& block_tables) {
         const int n = static_cast<int>(tokens.size());
         // Mirrors engine_scheduler.cpp's step_decode_forward: the workspace is sized to the batch.
-        (void)ex_.resize_workspace(n, nullptr);
+        ex_.resize_workspace(n, nullptr);
         cudaMemcpy(d_tokens_, tokens.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice);
         cudaMemcpy(d_pos_, positions.data(), n * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_ctx_, ctx_lens.data(), n * sizeof(int), cudaMemcpyHostToDevice);

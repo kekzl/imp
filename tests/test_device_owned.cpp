@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "exec/workspace.h"
 #include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
 
@@ -246,4 +247,51 @@ TEST_F(DeviceOwnedTest, AssigningAFreshStructReleasesEveryMember) {
     EXPECT_FALSE(bag.x);
     EXPECT_FALSE(bag.y);
     EXPECT_EQ(bag.n, 0);
+}
+
+// grow_keeping_old (exec/workspace.h, audit C-11): a failed grow leaves the shared workspace
+// as it was, never null with a stale token count; a grow takes the new buffer first.
+TEST_F(DeviceOwnedTest, FailedGrowKeepsTheOldBufferAndSize) {
+    DeviceOwned<void> buf;
+    buf.adopt(a_, 64, &va_);
+    size_t held = 64;
+    int takes = 0;
+    EXPECT_FALSE(grow_keeping_old(buf, held, 128, [&](size_t) {
+        ++takes;
+        return DeviceOwned<void>{};
+    }));
+    EXPECT_EQ(takes, 1);
+    EXPECT_EQ(buf.get(), static_cast<void*>(a_));
+    EXPECT_EQ(held, 64u);
+    EXPECT_TRUE(log().empty());
+}
+
+TEST_F(DeviceOwnedTest, GrowTakesTheNewBufferBeforeReleasingTheOld) {
+    DeviceOwned<void> buf;
+    buf.adopt(a_, 64, &va_);
+    size_t held = 64;
+    size_t released_before_take = 99;
+    EXPECT_TRUE(grow_keeping_old(buf, held, 128, [&](size_t bytes) {
+        released_before_take = log().size();
+        DeviceOwned<void> fresh;
+        fresh.adopt(b_, bytes, &va_);
+        return fresh;
+    }));
+    EXPECT_EQ(released_before_take, 0u);
+    EXPECT_EQ(buf.get(), static_cast<void*>(b_));
+    EXPECT_EQ(held, 128u);
+    ASSERT_EQ(log().size(), 1u);
+    EXPECT_EQ(log()[0].ptr, static_cast<void*>(a_));
+}
+
+TEST_F(DeviceOwnedTest, GrowWithinTheHeldSizeTakesNothing) {
+    DeviceOwned<void> buf;
+    buf.adopt(a_, 64, &va_);
+    size_t held = 64;
+    EXPECT_TRUE(grow_keeping_old(buf, held, 32, [](size_t) -> DeviceOwned<void> {
+        ADD_FAILURE() << "no take below the held size";
+        return {};
+    }));
+    EXPECT_EQ(buf.get(), static_cast<void*>(a_));
+    EXPECT_EQ(held, 64u);
 }
