@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include "exec/moe_nvfp4_released_keys.h"
 #include "exec/weight_cache_entries.h"
 #include "exec/weight_caches.h"
 #include "exec/weight_handle.h"
@@ -218,6 +219,40 @@ TEST_F(WeightCacheEntriesTest, CutlassEntriesSliceASlabThatIsReleasedOnceAfterTh
     EXPECT_EQ(released(at(8)), 1);
     EXPECT_EQ(released(at(12)), 1);
     EXPECT_EQ(log()[2].family, DeviceFamily::Vram);
+}
+
+// B-135: the native MoE copy releases each expert block; no nvfp4 / cutlass_nvfp4 key survives it.
+TEST_F(WeightCacheEntriesTest, NativeMoeCopyErasesEveryKeyOfAReleasedExpertBlock) {
+    constexpr int kExperts = 4;
+    WeightCaches wc;
+    for (int e = 0; e < kExperts; ++e) {
+        NvFP4QuantResult view;  // Phase 0b register_prequant: a view of the expert's own block
+        view.packed_data = at(e);
+        view.micro_scales = at(4 + e);
+        view.owned = false;
+        wc.nvfp4[at(e)] = NvFP4CacheEntry(std::move(view));
+        CutlassNvFP4Weight cw;
+        cw.data = at(e);
+        cw.scale_factors = at(8 + e);
+        cw.sf_borrowed = e != kExperts - 1;  // the last one owns its SfAtom buffer
+        cw.sf_bytes = 4;
+        wc.cutlass_nvfp4[at(e)] = CutlassNvFP4CacheEntry(std::move(cw));
+    }
+    NvFP4QuantResult other;  // a weight outside the layer keeps its entry
+    other.packed_data = at(15);
+    other.owned = false;
+    wc.nvfp4[at(15)] = NvFP4CacheEntry(std::move(other));
+    for (int e = 0; e < kExperts; ++e)
+        EXPECT_EQ(erase_released_expert_keys(wc, at(e)), 2);
+    for (int e = 0; e < kExperts; ++e) {
+        EXPECT_FALSE(wc.nvfp4.contains(at(e))) << "expert " << e;
+        EXPECT_FALSE(wc.cutlass_nvfp4.contains(at(e))) << "expert " << e;
+    }
+    EXPECT_TRUE(wc.nvfp4.contains(at(15)));
+    EXPECT_EQ(erase_released_expert_keys(wc, at(0)), 0);  // a block without entries
+    // Borrowed entries release nothing, the owned SfAtom buffer once.
+    ASSERT_EQ(log().size(), 1u);
+    EXPECT_EQ(released(at(8 + kExperts - 1)), 1);
 }
 
 TEST_F(WeightCacheEntriesTest, Mxfp8RowViewReleasesItsScaleBlockAndNotTheBorrowedRows) {

@@ -6,6 +6,7 @@
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "quant/dequant_gpu.h"
 #include "exec/storage_planner.h"
@@ -582,9 +583,12 @@ void QuantPipeline::free_source_(Tensor& t, cudaStream_t stream) {
 // F16 rebuild target of released_source_gemm_, grown to the largest released weight.
 bool QuantPipeline::ensure_released_scratch_(size_t bytes) {
     if (wcache_->released_f16_scratch.bytes() < bytes) {
+        const void* const before = wcache_->released_f16_scratch.get();
         wcache_->released_f16_scratch.reset();
         wcache_->released_f16_scratch = DeviceOwned<void>::allocate(vram_alloc_, bytes,
                                                                     "released_f16_scratch");
+        // I3: released_source_gemm_ bakes it into captured forwards; grows only in Phase 4b (load).
+        (void)bump_graph_epoch_if_moved(before, wcache_->released_f16_scratch.get());
     }
     return static_cast<bool>(wcache_->released_f16_scratch);
 }

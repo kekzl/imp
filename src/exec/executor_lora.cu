@@ -8,6 +8,7 @@
 #include "exec/executor.h"
 #include "memory/device_alloc_all.h"
 #include "compute/gemm.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "lora/lora_adapter.h"
 
@@ -60,9 +61,12 @@ void GraphExecutor::set_lora(const LoraAdapter* adapter) {
     size_t need = (sizeof(float) * static_cast<size_t>(adapter->max_rank())) +
                   (sizeof(half) * static_cast<size_t>(max_tokens_) * adapter->max_rank());
     if (need > lora_scratch_sz_) {
+        const void* const before = lora_scratch_.get();
         lora_scratch_.reset();
         lora_scratch_sz_ = 0;
         lora_scratch_ = DeviceOwned<void>::allocate_plain(need);
+        // I3: lora_delta_ runs inside captured forwards (7 call sites); a larger adapter moves the scratch.
+        (void)bump_graph_epoch_if_moved(before, lora_scratch_.get());
         if (!lora_scratch_) {
             IMP_LOG_ERROR("LoRA: scratch alloc failed (%zu B) — adapter disabled", need);
             lora_ = nullptr;

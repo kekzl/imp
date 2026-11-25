@@ -10,6 +10,16 @@ three places where that is not yet true, against tools/graph_stability_allowlist
                        X followed within 25 lines of the same function by an allocation into X.
                        The owner spelling counts too: X.reset(); then X = DeviceOwned<T>::allocate*
                        or X.adopt*, or X.set_owned / X.set_view (ViewOrOwned); `(void)` and `->` spellings too.
+                       A site is cleared only by what this tool reads in the source:
+                         guarded       a bump_graph_epoch( / bump_graph_epoch_if_moved( / bump_generation(
+                                       call in the same function body, or a comment at the site
+                                       `// I3-bumped-by: <function>` naming a function defined in src/
+                                       whose body holds that call;
+                         not bakeable  a comment at the site `// I3-not-bakeable: <reason>` (3+ words),
+                                       counted and listed per file as G1n and printed on every run.
+                       "At the site" = on the release line or in the comment block directly above it.
+                       G1 counts the rest (unguarded, target 0); a marker without a reason, naming
+                       no bumping function, or at no unguarded regrow site fails outright.
   G2 unkeyed captures  cudaStreamBeginCapture* calls in a file that reads no generation
                        (a generation getter call, a comparison against a stored generation, or
                        a read of the process graph epoch, graph_epoch() of core/graph_epoch.h).
@@ -36,9 +46,10 @@ SRC = REPO / "src"
 ALLOWLIST = REPO / "tools" / "graph_stability_allowlist.txt"
 EXEMPT_PREFIX = "src/memory/"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh", ".hpp")
-METRICS = ("G1", "G2", "G3")
+METRICS = ("G1", "G1n", "G2", "G3")
 NAMES = {
-    "G1": "buffer(s) freed and reallocated in place",
+    "G1": "buffer(s) freed and reallocated in place with no epoch bump",
+    "G1n": "regrow site(s) marked I3-not-bakeable",
     "G2": "graph capture(s) in a file that reads no generation",
     "G3": "take site(s) not kept as a StableSpan",
 }
@@ -57,6 +68,11 @@ ALLOC_OUT = r"\b(?:device_alloc_all\w*|device_alloc_pool_async|cudaMalloc\w*)\s*
 OWNER_RESET = re.compile(r"^\s*(?:\(void\)\s*|(?:const\s+)?bool\s+\w+\s*=\s*)?([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)(?:\.|->)reset\(\)\s*;")
 OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|(?:\.|->)adopt(?:_async)?\s*\(|(?:\.|->)set_(?:owned|view)\s*\()"
 FUNCTION_END = re.compile(r"^}")
+BUMP = re.compile(r"\bbump_graph_epoch(?:_if_moved)?\s*\(|\bbump_generation\s*\(")
+MARK_NOT_BAKEABLE = re.compile(r"//.*?\bI3-not-bakeable:(.*)$")
+MARK_BUMPED_BY = re.compile(r"//.*?\bI3-bumped-by:\s*([A-Za-z_][\w:]*)?")
+MARK_ANY = re.compile(r"//.*?\bI3-(?:not-bakeable|bumped-by):")
+REASON_WORDS = 3
 CAPTURE = re.compile(r"\bcudaStreamBeginCapture\w*\s*\(")
 GENERATION = re.compile(r"\w*generation\w*\s*\(\s*\)|\w*generation\w*\s*!=|!=\s*\w*generation\w*"
                         r"|\bgraph_epoch\s*\(\s*\)")
@@ -104,14 +120,15 @@ def owner_regrow(lines: list[str], i: int) -> bool:
     return False
 
 
-def count_regrow(lines: list[str]) -> int:
-    n = 0
+def regrow_sites(lines: list[str]) -> list[int]:
+    """Line index of the release of every regrow site."""
+    sites = []
     for i, line in enumerate(lines):
         m = RELEASE.search(line)
         if not m:
             # Adjacent owner resets are one site, as one multi-argument free call is.
             if owner_regrow(lines, i) and not (i > 0 and owner_regrow(lines, i - 1)):
-                n += 1
+                sites.append(i)
             continue
         hit = False
         for arg in split_args(m.group(1)):
@@ -129,8 +146,85 @@ def count_regrow(lines: list[str]) -> int:
                     break
             if hit:
                 break
-        n += hit
-    return n
+        if hit:
+            sites.append(i)
+    return sites
+
+
+def count_regrow(lines: list[str]) -> int:
+    return len(regrow_sites(lines))
+
+
+def function_bumps(name: str, files: dict[str, list[str]]) -> bool | None:
+    """True if a definition of `name` in files holds a bump call, False if none does, None if undefined."""
+    head = re.compile(r"^[A-Za-z_].*(?<!\w)" + re.escape(name) + r"\s*\(")
+    found = None
+    for lines in files.values():
+        for i, line in enumerate(lines):
+            if not head.match(line):
+                continue
+            j = i
+            while j < len(lines) and "{" not in lines[j] and ";" not in lines[j]:
+                j += 1
+            if j == len(lines) or "{" not in lines[j].split(";", 1)[0]:
+                continue  # a declaration
+            end = next((k for k in range(j + 1, len(lines)) if FUNCTION_END.match(lines[k])), len(lines))
+            if any(BUMP.search(l) for l in lines[j:end]):
+                return True
+            found = False
+    return found
+
+
+def site_marker(raw: list[str], i: int) -> tuple[int, str] | None:
+    """The I3 marker line at site i: on the release line, or in the comment block directly above."""
+    if MARK_ANY.search(raw[i]):
+        return i, raw[i]
+    j = i - 1
+    while j >= 0 and COMMENT_LINE.match(raw[j]):
+        if MARK_ANY.search(raw[j]):
+            return j, raw[j]
+        j -= 1
+    return None
+
+
+def classify(raw: list[str], lines: list[str], files: dict[str, list[str]]) -> dict:
+    """Every regrow site as unguarded, guarded or marked not bakeable; errors fail the gate outright."""
+    out = {"unguarded": [], "guarded": [], "marked": [], "errors": []}
+    used = set()
+    for i in regrow_sites(lines):
+        begin = next((j + 1 for j in range(i - 1, -1, -1) if FUNCTION_END.match(lines[j])), 0)
+        end = next((j for j in range(i + 1, len(lines)) if FUNCTION_END.match(lines[j])), len(lines))
+        if any(BUMP.search(l) for l in lines[begin:end]):
+            out["guarded"].append(i)
+            continue
+        mark = site_marker(raw, i)
+        if mark is None:
+            out["unguarded"].append(i)
+            continue
+        used.add(mark[0])
+        by = MARK_BUMPED_BY.search(mark[1])
+        if by:
+            bumps = function_bumps(by.group(1), files) if by.group(1) else None
+            if bumps:
+                out["guarded"].append(i)
+                continue
+            out["unguarded"].append(i)
+            out["errors"].append((mark[0], "I3-bumped-by names no function" if not by.group(1) else
+                                  f"I3-bumped-by: {by.group(1)} is "
+                                  + ("defined nowhere in src/" if bumps is None else "defined without a bump call")))
+            continue
+        reason = MARK_NOT_BAKEABLE.search(mark[1]).group(1).strip()
+        if len(re.findall(r"\w+", reason)) < REASON_WORDS:
+            out["unguarded"].append(i)
+            out["errors"].append((mark[0], f"I3-not-bakeable needs a reason of {REASON_WORDS}+ words on its line"))
+            continue
+        # The printed claim is the whole comment from the marker down to the site.
+        more = [re.sub(r"^\s*//+\s?", "", raw[k]).strip() for k in range(mark[0] + 1, i)]
+        out["marked"].append((i, " ".join([reason, *more]).strip()))
+    for j, line in enumerate(raw):
+        if MARK_ANY.search(line) and j not in used:
+            out["errors"].append((j, "I3 marker at no unguarded regrow site: delete it"))
+    return out
 
 
 def count_unkeyed_captures(lines: list[str]) -> int:
@@ -148,22 +242,32 @@ def count_discarded(lines: list[str]) -> int:
     return sum(1 for line in lines if TAKE.search(line) and not KEPT.search(line))
 
 
-def scan() -> tuple[dict[str, dict[str, int]], int]:
+def scan() -> tuple[dict[str, dict[str, int]], int, dict]:
+    """Per-metric hits, the capture total, and the G1 detail: guarded count, claims, marker errors."""
     hits: dict[str, dict[str, int]] = {m: {} for m in METRICS}
     total_captures = 0
+    raw: dict[str, list[str]] = {}
     for path in sorted(SRC.rglob("*")):
         if path.suffix not in SUFFIXES or not path.is_file():
             continue
-        rel = path.relative_to(REPO).as_posix()
+        raw[path.relative_to(REPO).as_posix()] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    # A named bumping function may live in src/memory/; regrow sites there stay exempt.
+    files = {rel: code_lines("\n".join(text)) for rel, text in raw.items()}
+    g1 = {"guarded": 0, "regrow_files": 0, "claims": [], "errors": []}
+    for rel, lines in files.items():
         if rel.startswith(EXEMPT_PREFIX):
             continue
-        lines = code_lines(path.read_text(encoding="utf-8", errors="replace"))
         total_captures += count_captures(lines)
-        for metric, n in (("G1", count_regrow(lines)), ("G2", count_unkeyed_captures(lines)),
-                          ("G3", count_discarded(lines))):
+        c = classify(raw[rel], lines, files)
+        g1["guarded"] += len(c["guarded"])
+        g1["regrow_files"] += bool(c["unguarded"] or c["guarded"] or c["marked"])
+        g1["claims"] += [f"{rel}:{i + 1}: {reason}" for i, reason in c["marked"]]
+        g1["errors"] += [f"FAIL {rel}:{j + 1}: {msg}" for j, msg in c["errors"]]
+        for metric, n in (("G1", len(c["unguarded"])), ("G1n", len(c["marked"])),
+                          ("G2", count_unkeyed_captures(lines)), ("G3", count_discarded(lines))):
             if n:
                 hits[metric][rel] = n
-    return hits, total_captures
+    return hits, total_captures, g1
 
 
 def read_allowlist() -> dict[str, dict[str, int]]:
@@ -186,6 +290,8 @@ def write_allowlist(hits: dict[str, dict[str, int]]) -> None:
         "# Generated by tools/check_graph_stability.py --update. THIS LIST ONLY SHRINKS:",
         "# a new buffer comes from a tier allocator and stays a StableSpan, a new capture site reads",
         "# the generation of what it bakes (docs/internals/MEMORY.md, invariant I3).",
+        "# G1 is the unguarded regrow sites (target 0: bump the graph epoch where the address moves).",
+        "# G1n is the sites carrying `// I3-not-bakeable: <reason>`: a new one needs this list changed, in review.",
         "#",
     ]
     body += [f"# {m} {NAMES[m]}: {len(hits[m])} files, {sum(hits[m].values())}" for m in METRICS]
@@ -247,6 +353,46 @@ def selftest() -> int:
         ("G1 owner another buffer", g1("    ws_.reset();\n    xq_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
     ]
 
+    def cls(src: str) -> tuple[int, int, int, int]:
+        lines = code_lines(src)
+        c = classify(src.splitlines(), lines, {"a.cpp": lines})
+        return len(c["unguarded"]), len(c["guarded"]), len(c["marked"]), len(c["errors"])
+
+    grow = "    ws_.reset();\n    ws_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n"
+    f_grow = "void f() {\n" + grow + "}\n"
+    g_bumps = "void E::g() {\n    f();\n    bump_graph_epoch();\n}\n"
+    results += [
+        ("G1 new unguarded site", cls(f_grow) == (1, 0, 0, 0)),
+        ("G1 a new unguarded site fails", bool(verdict({"a.cpp": 1}, {}, "G1"))),
+        ("G1 guarded by a bump in the same function",
+         cls("void f() {\n    const void* b = ws_.get();\n" + grow + "    bump_graph_epoch_if_moved(b, ws_.get());\n}\n") == (0, 1, 0, 0)),
+        ("G1 guarded by a workspace generation bump",
+         cls("void f() {\n    if (ws_.reset())\n        w.bump_generation();\n" + grow + "}\n") == (0, 1, 0, 0)),
+        ("G1 bump in another function, no marker", cls(f_grow + g_bumps) == (1, 0, 0, 0)),
+        ("G1 bump in a comment is no guard", cls("void f() {\n    // bump_graph_epoch();\n" + grow + "}\n") == (1, 0, 0, 0)),
+        ("G1 marker names the bumping caller",
+         cls("void f() {\n    // I3-bumped-by: E::g\n" + grow + "}\n" + g_bumps) == (0, 1, 0, 0)),
+        ("G1 marker names a function without a bump",
+         cls("void f() {\n    // I3-bumped-by: E::g\n" + grow + "}\nvoid E::g() {\n    f();\n}\n") == (1, 0, 0, 1)),
+        ("G1 marker names an undefined function",
+         cls("void f() {\n    // I3-bumped-by: E::h\n" + grow + "}\nvoid E::h();\n" + g_bumps) == (1, 0, 0, 1)),
+        ("G1 marker names nothing", cls("void f() {\n    // I3-bumped-by:\n" + grow + "}\n" + g_bumps) == (1, 0, 0, 1)),
+        ("G1 not bakeable with a reason",
+         cls("void f() {\n    // I3-not-bakeable: both readers run eager\n    // after the forward.\n" + grow + "}\n") == (0, 0, 1, 0)),
+        ("G1 not bakeable on the release line",
+         cls("void f() {\n    ws_.reset();  // I3-not-bakeable: refuses under a capture\n"
+             "    ws_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n}\n") == (0, 0, 1, 0)),
+        ("G1 not bakeable without a reason", cls("void f() {\n    // I3-not-bakeable:\n" + grow + "}\n") == (1, 0, 0, 1)),
+        ("G1 not bakeable with a one-word reason", cls("void f() {\n    // I3-not-bakeable: eager\n" + grow + "}\n") == (1, 0, 0, 1)),
+        ("G1 marker not directly above the site",
+         cls("void f() {\n    // I3-not-bakeable: both readers run eager\n    n_ = 0;\n" + grow + "}\n") == (1, 0, 0, 1)),
+        ("G1 marker at a guarded site is stale",
+         cls("void f() {\n    bump_graph_epoch();\n    // I3-not-bakeable: both readers run eager\n" + grow + "}\n") == (0, 1, 0, 1)),
+        ("G1 marker at no regrow site", cls("void f() {\n    // I3-not-bakeable: both readers run eager\n    n_ = 0;\n}\n") == (0, 0, 0, 1)),
+        ("G1n a new not-bakeable site fails", bool(verdict({"a.cpp": 2}, {"a.cpp": 1}, "G1n"))),
+        ("G1n listed and unchanged", not verdict({"a.cpp": 1}, {"a.cpp": 1}, "G1n")),
+    ]
+
     def g2(src: str) -> int:
         return count_unkeyed_captures(code_lines(src))
 
@@ -286,24 +432,28 @@ def main() -> int:
     args = ap.parse_args()
     if args.selftest:
         return selftest()
-    hits, total_captures = scan()
+    hits, total_captures, g1 = scan()
     if args.update:
         write_allowlist(hits)
         print("allowlist updated: " + ", ".join(f"{m} {sum(hits[m].values())}" for m in METRICS))
         return 0
     allowed = read_allowlist()
-    print(f"I3: G1 {sum(hits['G1'].values())} regrow sites in {len(hits['G1'])} files, "
+    unguarded, marked = sum(hits["G1"].values()), sum(hits["G1n"].values())
+    print(f"I3: G1 {unguarded} unguarded regrow sites, {g1['guarded']} guarded, {marked} marked not bakeable "
+          f"({unguarded + g1['guarded'] + marked} sites in {g1['regrow_files']} files), "
           f"G2 {sum(hits['G2'].values())} of {total_captures} graph captures read no generation "
           f"({len(hits['G2'])} files), G3 {sum(hits['G3'].values())} take sites in {len(hits['G3'])} files "
           f"not kept as StableSpan (allowlist: "
           + " / ".join(f"{m} {sum(allowed[m].values())}" for m in METRICS) + ")")
-    fails = [f for m in METRICS for f in verdict(hits[m], allowed[m], m)]
+    for claim in g1["claims"]:
+        print("  G1n " + claim)
+    fails = g1["errors"] + [f for m in METRICS for f in verdict(hits[m], allowed[m], m)]
     for f in fails:
         print("  " + f)
     if fails:
         print("FAIL: a graph-baked address can move unseen (invariant I3).")
         return 1
-    print("OK: no new regrow site, unkeyed capture or discarded StableSpan.")
+    print("OK: no new unguarded or not-bakeable regrow site, unkeyed capture or discarded StableSpan.")
     return 0
 
 
