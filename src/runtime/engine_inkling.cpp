@@ -55,7 +55,8 @@ void Engine::init_inkling_limits_() {
 }
 
 void Engine::inkling_fit_slots_() {
-    const int got = executor_ ? static_cast<int>(executor_->inkling_slot_requests().size()) : 0;
+    const InklingSlotTable* t = executor_ ? executor_->inkling_slots() : nullptr;
+    const int got = t ? static_cast<int>(t->size()) : 0;
     if (got == 0 || got >= config_.max_batch_size)
         return;
     IMP_LOG_WARN("inkling2_loop: %d of %d sequence slots fit, batch size lowered", got,
@@ -69,20 +70,24 @@ void Engine::inkling_fit_slots_() {
 int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
     if (offset != 0 || model_->config().arch != ModelArch::INKLING2 || !executor_)
         return offset;
-    // A slot is busy while the request bound to it is in this step's prefill or decode batch.
-    const std::vector<int> bound = executor_->inkling_slot_requests();
-    std::vector<bool> busy(bound.size());
-    const auto live = [&](int id) {
-        const auto is = [id](const std::shared_ptr<Request>& r) { return r && r->id == id; };
-        return std::any_of(sched_prefill_batch_.begin(), sched_prefill_batch_.end(), is) ||
-               std::any_of(sched_decode_batch_.begin(), sched_decode_batch_.end(), is);
-    };
-    for (size_t i = 0; i < bound.size(); ++i)
-        busy[i] = bound[i] >= 0 && bound[i] != req.id && live(bound[i]);
-    // Always called at offset 0: an empty span makes the slot forget its sequence.
+    // A slot is busy while a request is bound to it: the request_tables row "inkling_slot" unbinds it
+    // on finish and cancel. Always called at offset 0: an empty span makes the slot forget its sequence.
     const bool reuse = req.prefix_reuse_allowed() && !ppl_capture_.active;
-    const int r = executor_->inkling_resume(req.id, reuse ? req.key_tokens() : std::span<const int32_t>(),
-                                            busy, stream);
+    const std::span<const int32_t> key = reuse ? req.key_tokens() : std::span<const int32_t>();
+    int r = executor_->inkling_resume(req.id, key, stream);
+    if (InklingSlotTable* t = executor_->inkling_slots(); r < 0 && t) {
+        // Every slot bound: a binding whose request the engine no longer holds skipped its teardown.
+        for (size_t i = 0; i < t->size(); ++i)
+            if (const int id = t->req_of(i); id >= 0 && !held_request_(id)) {
+                IMP_LOG_ERROR("inkling2_loop: slot %zu still bound to ended request %d, unbound", i, id);
+                t->release(id);
+            }
+        r = executor_->inkling_resume(req.id, key, stream);
+    }
+    if (r < 0) {
+        IMP_LOG_ERROR("inkling2_loop: no free sequence slot for request %d, cancelled", req.id);
+        return -1;
+    }
     if (r > 0) {
         IMP_LOG_INFO("inkling2_loop: seq %d resumes at %d of %zu prompt tokens", req.id, r,
                      req.input_tokens.size());

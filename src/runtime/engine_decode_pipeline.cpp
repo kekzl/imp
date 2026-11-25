@@ -365,6 +365,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
     bd_pipe_.graph_idx = graph_idx;
     bd_pipe_.gpu = gpu_batch;
     bd_pipe_.base_state = state;
+    bd_pipe_.base_state.h_seq_ids = nullptr;  // points at this step's rows, stale for the next
     bd_pipe_.parity = 0;
     bd_pipe_.in_flight = false;
     bd_pipe_.steps_since_spec_yield = 0;

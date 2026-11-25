@@ -256,7 +256,7 @@ TEST(InklingRewind, ResumedPrefixMatchesAFreshRun) {
     EXPECT_EQ(kept.rewind(c, nullptr), 0);
 }
 
-// Slot choice: a busy slot is never taken, the longest shared prefix wins; on a tie a slot without a
+// Slot choice: a bound slot is never taken, the longest shared prefix wins; on a tie a slot without a
 // checkpoint goes before one with, then the oldest binding.
 TEST(InklingRewind, ARequestBindsToTheFreeSlotWithTheLongestPrefix) {
     const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
@@ -278,25 +278,30 @@ TEST(InklingRewind, ARequestBindsToTheFreeSlotWithTheLongestPrefix) {
             rt.slots.push_back(std::make_unique<InklingForward>());
             ASSERT_TRUE(rt.slots.back()->init(fx.w, fx.va, 512, 4096));
         }
-        rt.slot_req.assign(3, -1);
-        rt.slot_block.assign(3, -1);
-        rt.slot_used.assign(3, 0);
+        rt.table = InklingSlotTable(3);
         // Three empty slots: bound in order.
-        ASSERT_EQ(rt.bind(10, a, {false, false, false}), 0);
+        ASSERT_EQ(rt.bind(10, a), 0);
         ASSERT_EQ(rt.slots[0]->rewind(a, nullptr), 0);
         ASSERT_FALSE(run_rows(*rt.slots[0], fx.w, a, 0, {}).empty());
-        EXPECT_EQ(rt.bind(11, other, {true, false, false}), 1);
-        EXPECT_EQ(rt.slot_of_req(11), 1);
-        // The kept prompt again: slot 0 shares 256 positions, slots 1 and 2 none.
-        EXPECT_EQ(rt.bind(12, a, {false, false, false}), 0);
-        EXPECT_EQ(rt.slot_of_req(10), -1);
-        // Slot 0 busy: the never-bound slot 2 is older than slot 1.
-        EXPECT_EQ(rt.bind(13, a, {true, false, false}), 2);
-        // No match anywhere, all free: slot 1 holds the oldest binding now.
-        EXPECT_EQ(rt.bind(14, other, {false, false, false}), 1);
-        // Again: slot 0 holds the oldest binding but also the only checkpoint, so slot 2 goes.
-        EXPECT_EQ(rt.bind(16, other, {false, false, false}), 2);
-        EXPECT_EQ(rt.bind(15, a, {true, true, true}), -1);
+        EXPECT_EQ(rt.bind(11, other), 1);  // slot 0 is bound to 10
+        EXPECT_EQ(rt.table.find(11), 1);
+        // 10 and 11 end. The kept prompt again: slot 0 shares 256 positions, slots 1 and 2 none.
+        rt.table.release(10);
+        rt.table.release(11);
+        EXPECT_EQ(rt.bind(12, a), 0);
+        EXPECT_EQ(rt.table.find(10), -1);
+        // Slot 0 bound: the never-bound slot 2 is older than slot 1.
+        EXPECT_EQ(rt.bind(13, a), 2);
+        // 12 and 13 end. No match anywhere: slot 1 holds the oldest binding now.
+        rt.table.release(12);
+        rt.table.release(13);
+        EXPECT_EQ(rt.bind(14, other), 1);
+        // 14 ends. Slot 0 holds the oldest binding but also the only checkpoint, so slot 2 goes.
+        rt.table.release(14);
+        EXPECT_EQ(rt.bind(16, other), 2);
+        EXPECT_EQ(rt.bind(17, a), 0);
+        EXPECT_EQ(rt.bind(18, a), 1);
+        EXPECT_EQ(rt.bind(15, a), -1);  // every slot bound
     }
 }
 

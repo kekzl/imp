@@ -4,10 +4,10 @@
 # prompts on real models (degeneration detector). Steps 3/4 plus peak-VRAM/CUDA-graph gates need
 # real checkpoints under $MODELS and skip individually when absent; a run where no model-backed
 # gate measured anything fails rather than reporting OK.
-# Modes: verify.sh fast (unit tests + perf + 1 smoke, ~90s), verify.sh full (full ctest + perf +
+# Modes: verify.sh fast (unit tests + perf + 1 smoke ~90s, + Inkling serve smoke), verify.sh full (full ctest + perf +
 # 2 smoke, ~5min).
 # Env: IMP_VERIFY_BIN, IMP_VERIFY_TESTS, IMP_VERIFY_MODELS, IMP_VERIFY_MODEL_STORE, IMP_VERIFY_BASELINE,
-# IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_PERF=1
+# IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_INKLING=1, IMP_VERIFY_SKIP_PERF=1
 # (stale baseline; refresh via gen_perf_baseline.sh), IMP_VERIFY_TRIALS=3 (processes the perf
 # gate medians over), IMP_VERIFY_IN_DOCKER=1 (internal re-exec sentinel, do not set manually).
 # Auto-Docker fallback: re-execs inside the worktree image (scripts/image_tag.sh) when cmake is
@@ -43,6 +43,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_SKIP_GRAPHS="${IMP_VERIFY_SKIP_GRAPHS:-0}" \
         -e IMP_VERIFY_SKIP_SERVER="${IMP_VERIFY_SKIP_SERVER:-0}" \
         -e IMP_VERIFY_SKIP_DRIFT="${IMP_VERIFY_SKIP_DRIFT:-0}" \
+        -e IMP_VERIFY_SKIP_INKLING="${IMP_VERIFY_SKIP_INKLING:-0}" \
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
@@ -801,6 +802,27 @@ smoke_prompt "Qwen3-8B NVFP4 (dense)" \
     5
 # One row per model class, 12 checkpoints swept on main 2026-11-20: step arm -5.07 .. +1.13 %.
 decode_route_parity "Qwen3-8B-NVFP4-cortecs"  # dense NVFP4: -3.57 %
+
+# Inkling-2-Mini runs its own forward and sequence slots (audit D-4): no other row covers it. #3270
+# broke it with every gate green (0 of 9 requests served after a reply past 256 tokens, #3272).
+inkling_smoke() {
+    local label="Inkling-2-Mini serve smoke (2 slots, 2 replies past 256 tokens, then 9 new requests)"
+    local dir; dir=$(model_dir "Inkling-2-Mini")
+    local srv; srv="$(dirname "$BIN")/imp-server"
+    if [ "${IMP_VERIFY_SKIP_INKLING:-0}" = "1" ]; then
+        skip "$label (IMP_VERIFY_SKIP_INKLING=1)"
+    elif [ -z "$dir" ] || [ ! -x "$srv" ] || ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        skip "$label (model, imp-server, jq or curl missing)"
+    else
+        model_gate_ran
+        local out rc
+        out=$(bash "$ROOT/scripts/inkling_smoke.sh" "$srv" "$dir" 2>&1)
+        rc=$?
+        sed 's/^/  /' <<< "$out"
+        if [ "$rc" -eq 0 ]; then pass "$label"; else fail "$label"; fi
+    fi
+}
+inkling_smoke
 
 if [ "$MODE" = "full" ]; then
     smoke_prompt "Qwen3.8-27B NVFP4 (GDN)" \

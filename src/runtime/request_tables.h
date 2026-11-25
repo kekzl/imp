@@ -81,8 +81,8 @@ template <class V>
             .release = [&table](int id, const Request*) { table.erase(id); }};
 }
 
-// The engine's members. Host containers by reference; the 4 tables behind a device or a
-// foreign owner (KV manager, phrase slabs, snapshot store, MTP pool) as the engine's rows.
+// The engine's members. Host containers by reference; the 5 tables behind a device or a
+// foreign owner (KV manager, phrase slabs, snapshot store, MTP pool, Inkling slots) as the engine's rows.
 template <class SuffixIndex>
 struct EngineRequestTables {
     RequestTableRow kv_sequence;
@@ -94,10 +94,12 @@ struct EngineRequestTables {
     std::vector<int>& recurrent_slot_free;
     RequestTableRow mtp_bind;
     std::unordered_map<int, SuffixIndex>& spec_suffix_index;
+    RequestTableRow inkling_slot;
 };
 
-// THE teardown list (7 tables). Order = the finish path's since #1632: KV first, the recurrent
-// slot after its spare, phrase slabs and snapshot protection, MTP after the slot.
+// THE teardown list (8 tables). Order = the finish path's since #1632: KV first, the recurrent
+// slot after its spare, phrase slabs and snapshot protection, MTP after the slot; the Inkling
+// sequence slot last (it keeps its sequence for the next prompt's prefix match).
 template <class SuffixIndex>
 [[nodiscard]] RequestTableList make_request_table_list(EngineRequestTables<SuffixIndex> t) {
     RequestTableList list;
@@ -108,6 +110,7 @@ template <class SuffixIndex>
     list.add(pooled_slot_table("recurrent_slot", t.recurrent_slot_of, t.recurrent_slot_free));
     list.add(std::move(t.mtp_bind));
     list.add(keyed_table("spec_suffix_index", t.spec_suffix_index));
+    list.add(std::move(t.inkling_slot));
     return list;
 }
 

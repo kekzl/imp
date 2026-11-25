@@ -1033,6 +1033,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     state.positions = gpu_batch.d_positions;
     state.n_tokens = gpu_batch.total_tokens;
     state.n_sequences = gpu_batch.n_sequences;
+    h_seq_ids_.resize(valid_decode.size());
+    for (size_t i = 0; i < valid_decode.size(); ++i)
+        h_seq_ids_[i] = valid_decode[i]->id;
+    state.h_seq_ids = h_seq_ids_.data();
 
     // Batched GDN decode: hand the recurrent kernels one slot id per sequence.
     // Only for a genuine multi-sequence decode step: a single sequence keeps

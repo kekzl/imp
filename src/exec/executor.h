@@ -565,10 +565,9 @@ public:
     // need no S-matrix and return `desired` unchanged. 0 = even a kv_bs chunk
     // cannot be served; caller must reject the request.
     int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
-    // executor_inkling.cu: one request id per Inkling2-Loop sequence slot (empty for every other arch).
-    int inkling_resume(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy,
-                       cudaStream_t stream);
-    std::vector<int> inkling_slot_requests() const;
+    // executor_inkling.cu: Inkling2-Loop sequence slots by request id (null for every other arch).
+    int inkling_resume(int req, std::span<const int32_t> tokens, cudaStream_t stream);
+    InklingSlotTable* inkling_slots() const { return inkling_ ? &inkling_->table : nullptr; }
     void set_inkling_lookahead(bool on, bool lazy) { inkling_lookahead_ = on, inkling_lazy_ = lazy; }
 
     // Graph-captured verify chunk (#847): the chunked continuation forward is

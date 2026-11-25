@@ -378,6 +378,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     int total_input = static_cast<int>(req->input_tokens.size());
     int offset = inkling_resume_(*req, req->prefill_offset, pf_stream);
+    if (offset < 0) {  // Inkling: no sequence slot for it
+        req->status = RequestStatus::CANCELLED;
+        cancel_sequence_(req);
+        return;
+    }
 
     // Out-of-scope archs (Gemma-3/4 SWA, Llama-4, sub-byte KV) lack a paged
     // chunked-prefill path: executor_attention.cu aborts on chunk 2+. Reject
@@ -573,6 +578,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.is_prefill = true;
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
     state.prefill_req_id = req->id;
+    state.h_seq_ids = &req->id;
     fill_sampling_params(*req, state);
 
     // Constraints via the per-request ConstraintManager: prepared once on
