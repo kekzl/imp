@@ -381,6 +381,56 @@ std::vector<std::string> mmproj_corpus() {
     };
 }
 
+// RIFF/WAVE: `fmt ` then `data`. One entry per decoder branch (PCM 8/16/24/32, float 32/64,
+// extensible) plus the size fields a sender controls; no entry here has broken the decoder.
+std::vector<std::string> wav_corpus() {
+    auto wav = [](uint16_t format, uint16_t channels, uint16_t bits, uint32_t fmt_size, uint32_t data_size,
+                  size_t payload) {
+        GgufWriter w;  // reused for its little-endian u32 / raw writers only
+        auto u16 = [&w](uint16_t v) { w.raw(&v, 2); };
+        w.s += "RIFF";
+        w.u32(0);
+        w.s += "WAVE";
+        w.s += "fmt ";
+        w.u32(fmt_size);
+        u16(fmt_size == 40 ? uint16_t{0xFFFE} : format);
+        u16(channels);
+        w.u32(16000);
+        w.u32(0);
+        u16(0);
+        u16(bits);
+        if (fmt_size == 40) {
+            u16(22);
+            u16(bits);
+            w.u32(0);
+            u16(format);  // subformat GUID, first two bytes
+            w.s.append(14, '\0');
+        }
+        w.s += "data";
+        w.u32(data_size);
+        w.s.append(payload, '\x40');
+        return w.s;
+    };
+    return {
+        wav(1, 1, 16, 16, 16, 16),
+        wav(1, 1, 8, 16, 16, 16),
+        wav(1, 2, 24, 16, 24, 24),
+        wav(1, 1, 32, 16, 16, 16),
+        wav(3, 1, 32, 16, 16, 16),
+        wav(3, 2, 64, 16, 32, 32),
+        wav(3, 1, 32, 40, 16, 16),           // WAVE_FORMAT_EXTENSIBLE
+        wav(1, 1, 16, 16, 0xFFFFFFFFu, 6),   // streamed writer: data size past the buffer
+        wav(1, 32, 16, 16, 64, 64),          // channel cap
+        wav(1, 0, 16, 16, 16, 16),           // channels = 0 would divide by the frame size
+        wav(1, 1, 0, 16, 16, 16),            // bits = 0, same division
+        wav(1, 1, 16, 8, 16, 16),            // fmt chunk shorter than its fixed part
+        wav(1, 1, 16, 0xFFFFFFF0u, 16, 16),  // fmt size past the buffer
+        std::string("RIFF\0\0\0\0WAVE", 12),
+        "RIFF",
+        "",
+    };
+}
+
 // Iteration counts: enough that the mutator reaches past the corpus, small
 // enough that the file stays inside the CPU lane's budget. The file-backed
 // targets get fewer because each execution writes and removes a temp file.
@@ -411,5 +461,7 @@ TEST(FuzzCorpus, TokenizerJson) {
 TEST(FuzzCorpus, GgufLoader) { run_target({"gguf", imp_fuzz_gguf, gguf_corpus()}, 250, 0xA5A5); }
 
 TEST(FuzzCorpus, MmprojLoader) { run_target({"mmproj", imp_fuzz_mmproj, mmproj_corpus()}, 250, 0x5A5A); }
+
+TEST(FuzzCorpus, Wav) { run_target({"wav", imp_fuzz_wav, wav_corpus()}, 1500, 0x3A7E); }
 
 }  // namespace

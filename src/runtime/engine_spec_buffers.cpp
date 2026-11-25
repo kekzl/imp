@@ -37,23 +37,20 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
         return !b.empty();
     };
-    bool ok = (d_spec_stage_ = static_cast<int32_t*>(
-                   vram_alloc_.allocate(stage_ints * sizeof(int32_t), "spec_buffers"))) != nullptr &&
+    const size_t n_blocks = static_cast<size_t>(max_blocks);
+    bool ok = (d_spec_stage_ = VramOwned<int32_t>(vram_alloc_, stage_ints, "spec_buffers")) &&
               pin(h_spec_stage_, stage_ints * sizeof(int32_t)) &&
-              (d_spec_argmax_ = static_cast<int32_t*>(
-                   vram_alloc_.allocate(out_ints * sizeof(int32_t), "spec_buffers"))) != nullptr &&
+              (d_spec_argmax_ = VramOwned<int32_t>(vram_alloc_, out_ints, "spec_buffers")) &&
               pin(h_spec_argmax_, out_ints * sizeof(int32_t)) &&
-              (d_spec_block_table_ = static_cast<int*>(
-                   vram_alloc_.allocate(max_blocks * sizeof(int), "spec_buffers"))) != nullptr &&
+              (d_spec_block_table_ = VramOwned<int>(vram_alloc_, n_blocks, "spec_buffers")) &&
               // SWA-group mirror (kv_cache.swa_sizing): same capacity as the
               // main table. Allocated unconditionally so a mid-session gate
               // flip can't leave it null; tiny (max_blocks ints).
-              (d_spec_block_table_swa_ = static_cast<int*>(
-                   vram_alloc_.allocate(max_blocks * sizeof(int), "spec_buffers"))) != nullptr &&
+              (d_spec_block_table_swa_ = VramOwned<int>(vram_alloc_, n_blocks, "spec_buffers")) &&
               // #964 decode-attention verify route staging (see engine.h).
-              (d_spec_row_block_tables_ = static_cast<int*>(
-                   vram_alloc_.allocate(static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int),
-                                        "spec_buffers"))) != nullptr &&
+              (d_spec_row_block_tables_ = VramOwned<int>(vram_alloc_,
+                                                         static_cast<size_t>(chunk_cap) * n_blocks,
+                                                         "spec_buffers")) &&
               pin(h_spec_row_tables_pinned_, static_cast<size_t>(chunk_cap) * max_blocks * sizeof(int32_t));
     if (!ok) {
         IMP_LOG_WARN("spec-ngram: buffer allocation failed — speculation disabled this step");
@@ -62,14 +59,14 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     }
     // Sub-pointer layout (all int32): [tokens | positions | row_ctx_lens |
     // ctx_len, past_len, chunk_len] and [argmax | topm].
-    d_spec_tokens_ = d_spec_stage_;
-    d_spec_positions_ = d_spec_stage_ + chunk_cap;
-    d_spec_row_ctx_lens_ = d_spec_stage_ + (2ull * chunk_cap);
-    d_spec_context_len_ = d_spec_stage_ + (3ull * chunk_cap);
+    d_spec_tokens_ = d_spec_stage_.get();
+    d_spec_positions_ = d_spec_stage_.get() + chunk_cap;
+    d_spec_row_ctx_lens_ = d_spec_stage_.get() + (2ull * chunk_cap);
+    d_spec_context_len_ = d_spec_stage_.get() + (3ull * chunk_cap);
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
     d_spec_snap_n_ = d_spec_context_len_ + 3;
-    d_spec_topm_ = d_spec_argmax_ + chunk_cap;
+    d_spec_topm_ = d_spec_argmax_.get() + chunk_cap;
     h_spec_topm_ = h_spec_argmax_.as<int32_t>() + chunk_cap;
     spec_chunk_cap_ = chunk_cap;
     spec_block_table_cap_ = max_blocks;
@@ -106,10 +103,10 @@ bool Engine::ensure_spec_state_scratch_() {
     if (!ssm_state_) return false;
     const size_t bytes = ssm_state_->per_seq_bytes();
     if (spec_state_scratch_ && spec_state_scratch_bytes_ >= bytes) return true;
-    vram_alloc_.free(spec_state_scratch_);
+    spec_state_scratch_.reset();  // before the allocation: old and new never coexist
     spec_state_scratch_bytes_ = 0;
-    spec_state_scratch_ = vram_alloc_.allocate(bytes, "spec_state_scratch");
-    if (spec_state_scratch_ == nullptr) {
+    spec_state_scratch_ = VramOwned<char>(vram_alloc_, bytes, "spec_state_scratch");
+    if (!spec_state_scratch_) {
         IMP_LOG_WARN("spec-hybrid: state scratch alloc failed (%zu bytes) — "
                      "speculation disabled this step", bytes);
         return false;
@@ -124,14 +121,13 @@ bool Engine::ensure_spec_state_scratch_() {
     // direct driver calls to src/memory/, and this file's alloc-site
     // allowlist only ever shrinks (a raw pair here broke the Alloc-sites
     // gate, #1459).
-    if (spec_state_snap_ == nullptr) {
+    if (!spec_state_snap_) {
         // Two rows where the kernels write both (spec_snap_rows_): state after row 0 and after row 1.
-        spec_state_snap_ = vram_alloc_.allocate(bytes * static_cast<size_t>(spec_snap_rows_()),
-                                                "spec_state_snapshot");
-        spec_state_snap2_off_ = (spec_state_snap_ != nullptr && spec_snap_rows_() == 2)
-                                    ? static_cast<int64_t>(bytes)
-                                    : 0;
-        if (spec_state_snap_ == nullptr)
+        spec_state_snap_ = VramOwned<char>(vram_alloc_, bytes * static_cast<size_t>(spec_snap_rows_()),
+                                           "spec_state_snapshot");
+        spec_state_snap2_off_ = (spec_state_snap_ && spec_snap_rows_() == 2) ? static_cast<int64_t>(bytes)
+                                                                             : 0;
+        if (!spec_state_snap_)
             IMP_LOG_WARN(
                 "spec-hybrid: snapshot slab alloc failed (%zu bytes) — partial acceptances "
                 "will re-forward instead of adopting the snapshot",
@@ -171,7 +167,7 @@ size_t Engine::spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int re
 
 // Init-time allocation of the hybrid verify scratch; a no-op once sized or on a non-hybrid model.
 void Engine::prewarm_spec_state_scratch_() {
-    if (!ssm_state_ || spec_state_scratch_ != nullptr)
+    if (!ssm_state_ || spec_state_scratch_)
         return;
     if (!ensure_spec_state_scratch_())
         return;
@@ -198,35 +194,27 @@ void Engine::free_spec_buffers_() {
     d_spec_logits_.reset();
     h_spec_logits_.clear();
     h_spec_logits_.shrink_to_fit();
-    if (spec_state_snap_) {
-        vram_alloc_.free(spec_state_snap_);
-        spec_state_snap_ = nullptr;
-    }
+    spec_state_snap_.reset();
     // Captured verify graphs bake these buffer pointers — drop them first.
     free_spec_graphs_();
-    vram_alloc_.free(spec_state_scratch_);
-    spec_state_scratch_ = nullptr;
+    spec_state_scratch_.reset();
     spec_state_scratch_bytes_ = 0;
     // d_spec_tokens_/positions_/row_ctx_lens_/context_len_/past_len_/
     // chunk_len_ are sub-pointers into d_spec_stage_; d_spec_topm_ into
-    // d_spec_argmax_ — only the block heads are freed.
-    for (void* p : {static_cast<void*>(d_spec_stage_), static_cast<void*>(d_spec_block_table_),
-                    static_cast<void*>(d_spec_block_table_swa_), static_cast<void*>(d_spec_row_block_tables_),
-                    static_cast<void*>(d_spec_argmax_)})
-        vram_alloc_.free(p);
-    d_spec_stage_ = nullptr;
+    // d_spec_argmax_: only the block heads own.
+    d_spec_stage_.reset();
+    d_spec_block_table_.reset();
+    d_spec_block_table_swa_.reset();
+    d_spec_row_block_tables_.reset();
+    d_spec_argmax_.reset();
     h_spec_stage_.reset();
     d_spec_tokens_ = nullptr;
     d_spec_positions_ = nullptr;
-    d_spec_block_table_ = nullptr;
-    d_spec_block_table_swa_ = nullptr;
     d_spec_row_ctx_lens_ = nullptr;
-    d_spec_row_block_tables_ = nullptr;
     h_spec_row_tables_pinned_.reset();
     d_spec_context_len_ = nullptr;
     d_spec_past_len_ = nullptr;
     d_spec_chunk_len_ = nullptr;
-    d_spec_argmax_ = nullptr;
     h_spec_argmax_.reset();
     d_spec_topm_ = nullptr;
     h_spec_topm_ = nullptr;

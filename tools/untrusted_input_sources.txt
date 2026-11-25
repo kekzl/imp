@@ -1,0 +1,41 @@
+# Untrusted-input surface: a change under one of these path prefixes runs the Sanitizers job
+# (ASan/UBSan over test-core + test-text) on a PR. Read by tools/check_untrusted_sources.py:
+#   --match  the CI path filter (.github/workflows/ci.yml, job `sanitizers`)
+#   default  the static gate: every fuzz source, every file a fuzz target includes and every
+#            file tagged "Untrusted input" in its first 15 lines must match a prefix here.
+# One prefix per line. `!prefix  reason` exempts a file the gate would otherwise demand.
+
+# Parsers of request bytes
+src/compute/json_schema
+src/compute/json_number_bounds
+src/compute/regex_nfa
+src/compute/gbnf
+src/audio/audio_wav
+src/vision/image_
+tools/imp-server/tool_stream_filter
+tools/imp-server/stream_pipeline
+tools/imp-server/utils
+tools/imp-server/handlers_chat_params
+
+# Parsers of files a user supplies
+src/model/safetensors_loader
+src/model/tokenizer
+src/model/json_util
+src/model/gguf_
+src/model/sentencepiece_loader
+src/model/jinja
+src/model/hf_config
+src/vision/vision_loader
+src/memory/weight_cache_file
+
+# The lane itself
+fuzz/
+tests/test_fuzz_corpus
+cmake/imp-fuzzers
+tools/sanitizers/
+tools/untrusted_input_sources.txt
+tools/check_untrusted_sources.py
+CMakeLists.txt
+.github/workflows/ci.yml
+
+!src/core/logging  fuzz build dependency (fuzz_common.h quiets it); parses no input

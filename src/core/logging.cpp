@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstring>
 #include <ranges>
+#include <stdexcept>
 
 namespace imp {
 
@@ -84,6 +85,15 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
 
     fprintf(out, "\n");
     fflush(out);
+}
+
+void throw_runtime_error(const char* fmt, ...) {
+    char msg[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    throw std::runtime_error(msg);
 }
 
 }  // namespace imp

@@ -41,22 +41,16 @@ size_t mtp_bound_verify_factor_row_plan_bytes(const RuntimeConfig& cfg, const Mo
                                          mc.ssm_inner_size / heads, mc.ssm_conv_channels());
 }
 
-void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv) {
-    if (bv.d_fac)
-        alloc.free(bv.d_fac);
-    if (bv.d_tap)
-        alloc.free(bv.d_tap);
-    if (bv.d_clear)
-        alloc.free(bv.d_clear);
-    bv.d_fac = nullptr;
-    bv.d_tap = nullptr;
-    bv.d_clear = nullptr;
+void free_factored_rows(BatchVerifyState& bv) {
+    bv.d_fac.reset();
+    bv.d_tap.reset();
+    bv.d_clear.reset();
     bv.h_clear = PinnedBuffer{};
 }
 
 bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
                                    BatchVerifyState& bv, int groups, int levels, cudaStream_t stream) {
-    if (bv.d_fac != nullptr)
+    if (bv.d_fac)
         return true;
     const int layers = ssm ? ssm->n_ssm_layers() : 0;
     const int rows = groups * levels;
@@ -76,19 +70,19 @@ bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAll
     const size_t fac_bytes = static_cast<size_t>(layers) * bv.fac_layer_stride * sizeof(float);
     const size_t tap_bytes = static_cast<size_t>(layers) * bv.tap_layer_stride * sizeof(uint16_t);
     const size_t list_bytes = 3 * static_cast<size_t>(groups) * sizeof(int32_t);
-    bv.d_fac = static_cast<float*>(alloc.allocate(fac_bytes, "spec_bound_fac_rows"));
-    bv.d_tap = alloc.allocate(tap_bytes, "spec_bound_fac_taps");
-    bv.d_clear = static_cast<int*>(alloc.allocate(list_bytes, "spec_bound_fac_folds"));
+    bv.d_fac = VramOwned<float>(alloc, fac_bytes / sizeof(float), "spec_bound_fac_rows");
+    bv.d_tap = VramOwned<char>(alloc, tap_bytes, "spec_bound_fac_taps");
+    bv.d_clear = VramOwned<int>(alloc, list_bytes / sizeof(int), "spec_bound_fac_folds");
     bv.h_clear = PinnedBuffer::acquire(cuda_host_pinned_allocator(), list_bytes);
-    if (bv.d_fac == nullptr || bv.d_tap == nullptr || bv.d_clear == nullptr || bv.h_clear.empty()) {
+    if (!bv.d_fac || !bv.d_tap || !bv.d_clear || bv.h_clear.empty()) {
         IMP_LOG_WARN(
             "speculative.mtp_batch_verify_factor_row: %.1f MiB of factor rows and taps would not fit",
             (fac_bytes + tap_bytes) / (1024.0 * 1024.0));
-        free_factored_rows(alloc, bv);
+        free_factored_rows(bv);
         return false;
     }
     // On the verify stream: a legacy-stream memset is not ordered before its kernels (#2275).
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(bv.d_fac, 0, fac_bytes, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(bv.d_fac.get(), 0, fac_bytes, stream));
     bv.fac_levels = levels;
     IMP_LOG_INFO(
         "speculative.mtp_batch_verify_factor_row: %d layers x %d groups x %d draft(s), %.1f MiB of factor "
@@ -100,7 +94,7 @@ bool bound_verify_factor_row_alloc(const ModelConfig& mc, SSMState* ssm, VRAMAll
 
 void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVerifyState& bv, int levels,
                                   const int* live, const int* fold, int n_groups, cudaStream_t stream) {
-    if (!bv.factor_row || bv.d_fac == nullptr || levels <= 0 || levels > bv.fac_levels)
+    if (!bv.factor_row || !bv.d_fac || levels <= 0 || levels > bv.fac_levels)
         return;
     // Three lists of n (bound_verify_fold_lists). Pinned twin: untouched until the next verify, which syncs
     // this stream first.
@@ -108,21 +102,21 @@ void bound_verify_factor_row_fold(const ModelConfig& mc, SSMState& ssm, BatchVer
     const int n = bound_verify_fold_lists(levels, live, fold, n_groups, h_list);
     if (n == 0)
         return;
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(bv.d_clear, h_list, 3ull * n * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
-    const int* d_live = bv.d_clear;
-    const int* d_row = bv.d_clear + n;
-    const int* d_count = bv.d_clear + (static_cast<ptrdiff_t>(n) * 2);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(bv.d_clear.get(), h_list, 3ull * n * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, stream));
+    const int* d_live = bv.d_clear.get();
+    const int* d_row = bv.d_clear.get() + n;
+    const int* d_count = bv.d_clear.get() + (static_cast<ptrdiff_t>(n) * 2);
     const int layers = ssm.n_ssm_layers();
     const int heads = mc.ssm_dt_rank;
     const auto slot_stride = static_cast<int64_t>(ssm.slot_stride_bytes());
     const int64_t layer_stride = layers > 1 ? static_cast<char*>(ssm.h_state(0, 1)) -
                                                   static_cast<char*>(ssm.h_state(0, 0))
                                             : 0;
-    ssm_conv_tap_fold(ssm.conv_state(0, 0), slot_stride, layer_stride, bv.d_tap, bv.tap_layer_stride, layers,
-                      mc.ssm_conv_channels(), mc.ssm_conv_kernel, d_live, d_row, n, stream, d_count);
-    gdn_factor_fold(ssm.h_state(0, 0), ssm.h_dtype() == QType::BF16, slot_stride, layer_stride, bv.d_fac,
-                    bv.fac_layer_stride, layers, d_live, d_row, n, heads, mc.ssm_state_size,
+    ssm_conv_tap_fold(ssm.conv_state(0, 0), slot_stride, layer_stride, bv.d_tap.get(), bv.tap_layer_stride,
+                      layers, mc.ssm_conv_channels(), mc.ssm_conv_kernel, d_live, d_row, n, stream, d_count);
+    gdn_factor_fold(ssm.h_state(0, 0), ssm.h_dtype() == QType::BF16, slot_stride, layer_stride,
+                    bv.d_fac.get(), bv.fac_layer_stride, layers, d_live, d_row, n, heads, mc.ssm_state_size,
                     mc.ssm_inner_size / heads, bv.fac_stride, stream, d_count);
 }
 

@@ -77,10 +77,9 @@ void pli_project_combine(void* proj, const void* table, const int32_t* ids, cons
                          float tok_scale, float out_scale, cudaStream_t stream) {
     if (n <= 0 || n_layers <= 0 || dim <= 0)
         return;
-    if (dim > 4 * kPliThreads) {
-        IMP_LOG_ERROR("pli_project_combine: dim %d > %d", dim, 4 * kPliThreads);
-        return;
-    }
+    if (dim > 4 * kPliThreads)
+        throw_runtime_error("pli_project_combine: dim %d > %d (%d rows, %d layers)", dim, 4 * kPliThreads, n,
+                            n_layers);
     const dim3 grid(static_cast<unsigned>(n_layers), static_cast<unsigned>(n));
     pli_project_combine_kernel<<<grid, kPliThreads, 0, stream>>>(static_cast<half*>(proj),
                                                                  static_cast<const half*>(table), ids,

@@ -46,4 +46,8 @@ int imp_fuzz_gguf(const uint8_t* data, size_t size);
 // hand-copied fork of the GGUF parse loop that never got the shared checks).
 int imp_fuzz_mmproj(const uint8_t* data, size_t size);
 
+// WAV (RIFF) decoder (src/audio/audio_wav.cpp), on the buffer. Reached from an audio
+// request part; non-zero when more samples come back than bytes went in.
+int imp_fuzz_wav(const uint8_t* data, size_t size);
+
 }  // extern "C"

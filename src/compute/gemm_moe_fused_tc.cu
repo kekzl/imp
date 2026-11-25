@@ -271,10 +271,11 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
             &max_blocks_per_sm, gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK, SMEM_TOTAL));
         // Failure: stay unconfigured (grid 0 would stick), as on the tile-counter failure below.
         const int num_sms = device_sm_count_or_0();
-        if (num_sms == 0) {
-            IMP_LOG_ERROR("gemm_q6k_fused_moe_prefill_tc: SM count query failed, not launched");
-            return;
-        }
+        if (num_sms == 0)
+            throw_runtime_error(
+                "gemm_q6k_fused_moe_prefill_tc: SM count query failed, not launched "
+                "(N=%d K=%d, %d experts)",
+                N, K, n_experts);
         s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
         // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
@@ -286,9 +287,11 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         } else if (device_alloc_all(dev_req(s_tile_counter, sizeof(int))) == cudaSuccess) {
             s_tile_counter_owned = true;
         } else {
-            IMP_LOG_ERROR("gemm_q6k_fused_moe_prefill_tc: could not obtain the tile counter");
             s_tile_counter = nullptr;
-            return;
+            throw_runtime_error(
+                "gemm_q6k_fused_moe_prefill_tc: could not obtain the tile counter "
+                "(N=%d K=%d, %d experts)",
+                N, K, n_experts);
         }
         s_configured = true;
     }
