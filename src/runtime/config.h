@@ -335,7 +335,7 @@ struct RuntimeConfig {
 };
 
 // Token burst of the autonomous decode graph loop (non-streaming, non-speculative, not
-// deterministic): the worker polls cancel between bursts; output is identical, 128 trades
+// deterministic): a cancel waits out the running burst; output is identical, 128 trades
 // relaunch overhead against cancel latency. Also the SWA burst span the KV group is sized for.
 inline constexpr int kDecodeBurst = 128;
 // A prompt whose block-aligned prefix is shorter takes no prefix-cache snapshot and no prefill

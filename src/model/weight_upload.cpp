@@ -2051,13 +2051,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // Qwen3.5/3.6 SafeTensors stores block-norm gammas as deltas (gamma = 1+W).
     // GGUF stores the post-+1 values directly. We bake the +1 in during the
     // BF16→FP16 upload conversion; F32-source norms (GGUF) are unaffected.
-    const float arch_norm_offset = (config_.arch == ModelArch::QWEN35 ||
-                                    config_.arch == ModelArch::QWEN35_MOE ||
-                                    config_.arch == ModelArch::QWEN36_MOE ||
-                                    config_.arch == ModelArch::QWEN4_EXP ||
-                                    config_.arch == ModelArch::QWEN3_NEXT)
-                                       ? 1.0f
-                                       : 0.0f;
+    // Which archs: the norm_gamma column of kArchRegistry (model.cpp), 5 rows DELTA.
+    const float arch_norm_offset = norm_gamma_is_delta(config_.arch) ? 1.0f : 0.0f;
     const bool mxfp4_experts_deferred = (config_.arch == ModelArch::GPT_OSS);
     UploadCtx ctx{compute_dtype,
                   stream,

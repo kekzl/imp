@@ -79,18 +79,6 @@ static void load_fim_meta_ids(const std::unordered_map<std::string, GGUFValue>& 
     }
 }
 
-// Archs wired from config.json only (layer pattern, fused KDA tensors): no GGUF tensor layout exists.
-static void refuse_safetensors_only_arch(ModelArch arch) {
-    if (arch == ModelArch::BAILING_HYBRID)
-        throw std::runtime_error("bailing_hybrid GGUF is not supported; load the SafeTensors checkpoint");
-    if (arch == ModelArch::KIMI_LINEAR)
-        throw std::runtime_error("kimi_linear GGUF is not supported; load the SafeTensors checkpoint");
-    if (arch == ModelArch::FLINT)
-        throw std::runtime_error("flint GGUF is not supported; load the SafeTensors checkpoint");
-    if (arch == ModelArch::INKLING2)
-        throw std::runtime_error("inkling2_loop GGUF is not supported; load the SafeTensors checkpoint");
-}
-
 // ---- Main GGUF loader ----
 
 std::unique_ptr<Model> load_gguf(const std::string& path) {
@@ -338,17 +326,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                                  "embedding encoders need pooling support — only "
                                  "nomic-bert is wired, #836)");
     }
-    // llama.cpp qwen3next GGUFs keep ssm_in fused under names imp does not split (#2410).
-    if (cfg.arch == ModelArch::QWEN3_NEXT)
-        throw std::runtime_error("qwen3next GGUF is not supported; load the SafeTensors checkpoint (#2410)");
-    // The sliding/full layer pattern and the post-norm-only block are wired from config.json only.
-    if (cfg.arch == ModelArch::COHERE2)
-        throw std::runtime_error("cohere2moe GGUF is not supported; load the SafeTensors checkpoint");
-    if (cfg.arch == ModelArch::LFM2)
-        throw std::runtime_error("lfm2 GGUF is not supported; load the SafeTensors checkpoint");
-    if (cfg.arch == ModelArch::OLMO3)
-        throw std::runtime_error("olmo3 GGUF is not supported; load the SafeTensors checkpoint");
-    refuse_safetensors_only_arch(cfg.arch);
+    // SafeTensors-only archs (8): the refusal text is the row's gguf column in kArchRegistry (model.cpp).
+    if (const char* why = gguf_refusal(cfg.arch))
+        throw std::runtime_error(why);
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));
 
