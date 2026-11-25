@@ -1,4 +1,4 @@
-// Regression: Engine::reset_ssm_state fell back to slot `seq_id % cap` for an id without a
+// Regression: the cancel path fell back to slot `seq_id % cap` for an id without a
 // slot. The server cancels requests that still wait for admission (no prefill, no slot), and
 // that slot belonged to another running sequence, whose GDN/SSM state was zeroed.
 

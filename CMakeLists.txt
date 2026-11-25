@@ -1182,8 +1182,10 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_attn_guard.cpp
         tests/test_mtp_kv_slots.cpp
         tests/test_spec_gates.cpp
-        # reset_ssm_state resets only a slot the id holds, never `id % cap` (cancel while queued).
+        # a cancel resets only a slot the id holds, never `id % cap` (cancel while queued).
         tests/test_recurrent_slot.cpp
+        # One teardown list for finish and cancel: no id-keyed table keeps an entry (audit C-4).
+        tests/test_request_tables.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
         # three decide something on a GPU path from pure inputs; CI has no GPU.

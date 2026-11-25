@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-11-05
-commit: 8623a6aa
+verified: 2026-11-25
+commit: 4d7eebf8
 -->
 
 # imp - Architecture
@@ -66,6 +66,40 @@ Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 | Engine init | `imp_context_create(model, ImpConfig) → ImpContext` |
 | Prefill | `imp_prefill_with_params(tokens, n) → status` |
 | Decode | `imp_decode_step(params) → next_token` (or streaming: `imp_generate_streaming`) |
+
+## Source directories
+
+One row per directory under `src/`; `tools/check_arch_map.py` fails on a directory without a row. Include direction (`tools/check_layering.py`): `api > runtime > vision = audio > exec > lora > model > compute > quant > memory > core`.
+
+| Directory | Holds |
+|---|---|
+| `src/api/` | the C ABI of `include/imp/`: entry points, admission, suspend, token and vision calls |
+| `src/runtime/` | `Engine`: init, scheduler, prefill and decode steps, speculation, CUDA graph capture, `RuntimeConfig` |
+| `src/vision/` | image towers and projectors (SigLIP/gemma4v, Qwen3-VL, InternVL, Inkling2 ViT) that write LM-ready embeddings |
+| `src/audio/` | Gemma-4 audio input: WAV decode (`audio_wav.cpp`), log-mel features (`audio_features.cpp`), Conformer encoder on the GPU (`gemma4_audio_encoder.cpp`, `gemma4_audio_kernels.cu`), `AudioPipeline` (`audio_pipeline.cpp`) from bytes to embeddings |
+| `src/exec/` | `GraphExecutor`: the forward pass per layer, attention and FFN dispatch, pre-dequant caches, workspaces; the Inkling forward and draft |
+| `src/lora/` | activation-path adapters, no weight patching: PEFT LoRA deltas per projection (`lora_adapter.cpp`) and control vectors added after a layer (`control_vector.cpp`); set through `GraphExecutor::set_lora` / `set_control_vector` |
+| `src/model/` | loaders (GGUF, SafeTensors), `WeightMap`, tokenizer, chat template, `ModelConfig`, weight upload |
+| `src/compute/` | kernels that are not a weight format: attention, GEMM/GEMV, norms, RoPE, sampling, GDN, MoE routing |
+| `src/quant/` | weight-format kernels and converters: NVFP4, FP8, MXFP4, GGUF dequant |
+| `src/memory/` | device and host allocation: backend, T2 arena, block pool, KV cache, host tiers, the memory plan |
+| `src/core/` | leaf headers every layer may include: logging, tensor, CUDA RAII, PDL, graph epoch, static-reset registry |
+
+## Inkling path
+
+Inkling2-Loop (`ModelArch::INKLING2`) is a private runtime inside `GraphExecutor`: the standard path embeds, norms and projects, everything between runs here.
+
+| Part | Files | What it does |
+|---|---|---|
+| Branch point | `src/exec/executor_forward.cu` (`run_inkling_`), `src/exec/executor_inkling.cu` | replaces the generic layer loop: `run_inkling_` returns 0 when the Inkling branch ran every layer |
+| Forward | `src/exec/inkling_forward.{h,cu}`, `inkling_forward_moe.cu`, `inkling_forward_spec.cu` | `InklingForward`: one kept sequence per slot, own K/V and conv state outside the paged KV cache |
+| Kernels | `src/compute/inkling_*.cu`, `src/compute/inkling_ops.h` | attention, MoE, gate and fused building blocks: FP32 residual stream, FP16 linear inputs and outputs |
+| Draft | `src/exec/inkling_draft.{h,cu}`, `inkling_draft_head.{h,cu}`, `inkling_draft_weights.cu`, `inkling_draft_policy.h` | DSpark lookahead (`mtp.safetensors`): a small dense transformer over the target's feature rows, then a recurrent Markov head |
+| Weights | `src/model/inkling_weights.{h,cu}`, `src/model/inkling_loader_hooks.h` | the checkpoint on the device under the vendor tensor names (`model.llm.*`), read at engine init; the standard loader keeps embedding, final norm and LM head |
+| Vision | `src/vision/inkling_vision.{h,cu}` | ViT tower (`model.visual.*`), 2x2 patch merge into one LM token |
+| Engine | `src/runtime/engine_inkling.cpp` | context and slot limits; the engine prefix cache is off, the forward reuses a prefix itself |
+| Graphs | `InklingForward::decode_graph_`, the draft's `graph_` | its own captured graphs, one per row count up to `kGraphRows`, each compared against `graph_epoch()` before replay; not the engine's decode graph |
+| Slot identity | `src/exec/inkling_slot_map.h` (`inkling_claim_block`) | a decode row finds its slot by the first KV block id of its sequence; the KV pool holds no Inkling data, so a KV, BlockPool or scheduler change can break it (`docs/audit/AUDIT_ARCH_2026_11_24.md` D-4, #3270 fixed by #3272) |
 
 ## Components
 

@@ -324,6 +324,16 @@ bool Scheduler::has_pending() const { return !pending_.empty(); }
 
 int Scheduler::active_count() const { return static_cast<int>(active_.size()); }
 int Scheduler::pending_count() const { return static_cast<int>(pending_.size()); }
+std::shared_ptr<Request> Scheduler::find(int id) const {
+    for (const auto& r : active_)
+        if (r->id == id)
+            return r;
+    for (const auto& r : pending_)
+        if (r->id == id)
+            return r;
+    return nullptr;
+}
+
 std::vector<int> Scheduler::active_ids() const {
     std::vector<int> ids;
     ids.reserve(active_.size());

@@ -74,10 +74,10 @@ docker run --rm --gpus all -v $HOME/models:/models \
 | `lanes` | Build, hooks, own check `Test lanes` (#1770) | `check_test_lanes.py --report` (macros per lane, no-lane delta vs base); `guard_unit_skips` inside `ctest -L unit` fails on any runtime skip |
 | `entrypoint` | Build, hooks | `tests/test_entrypoint.sh` drives `docker-entrypoint.sh` against a stub (25 assertions) |
 | `untrusted` | Build, hooks | `check_untrusted_sources.py`: every CPU fuzz source, fuzz-target include and file tagged "Untrusted input" (first 15 lines) has a prefix in `tools/untrusted_input_sources.txt`, the `Sanitizers` PR path filter (27 prefixes, 90 files) |
-| `alloc` | Build, hooks | `check_alloc_sites.py` + `check_alloc_pairs.py` (allowlist is two-way: removing a site needs the allowlist edit) |
+| `alloc` | Build, hooks | `check_alloc_sites.py` + `check_alloc_pairs.py` (allowlist is two-way: removing a site needs the allowlist edit); `check_static_reset.py`: each lazy device static of a re-arming TU is named in its reset hook, sits behind an `engine_arena().generation()` check, or is listed in `tools/static_reset_allowlist.txt` as `<path>::<name>  reset-by=<function>` |
 | `kernels` | Build only (needs artifact) | `make kernel-resources` vs `tools/kernel_resource_baseline.txt` (REG >= 240 or non-zero local frame) |
-| `launchguards` | Build, hooks | `check_launch_guards.py` |
-| `docs` | Build, hooks, `Docs` job | `sync_docs.py --check`, `docs_lint.py` |
+| `launchguards` | Build, hooks | `check_launch_guards.py`; `check_pdl_registration.py`: a kernel whose body reaches `pdl_wait()` has a `pdl::enable_kernel` / `pdl::enable` reference, a registered kernel waits, every `*_pdl_register()` is called from `executor_workspace.cpp` or a called register function (`make check-pdl-registration` lists them) |
+| `docs` | Build, hooks, `Docs` job | `sync_docs.py --check`, `docs_lint.py`, `check_arch_map.py` (every directory under `src/` has a row in the Source directories table of `docs/internals/ARCHITECTURE.md` and a rank in `check_layering.py`) |
 | `citations` | Build, hooks | `check_doc_citations.py` over all living docs (#1783) |
 | `hygiene` | Build, `Release hygiene` job only | `check-release.sh` with `SKIP_VERIFY=1` (also resolves relative links in docs) |
 

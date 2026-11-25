@@ -145,6 +145,14 @@ bool Model::is_base_gpu_allocation(void* ptr) const {
 }
 
 namespace {
+enum class NormGamma : uint8_t { UNSET, DIRECT, DELTA };
+enum class StRope : uint8_t { UNSET, AS_ROW, NEOX };
+constexpr const char* kGgufLoads = "";
+constexpr auto kDirect = NormGamma::DIRECT;
+constexpr auto kDelta = NormGamma::DELTA;
+constexpr auto kAsRow = StRope::AS_ROW;
+constexpr auto kNeox = StRope::NEOX;
+
 // Architecture registry: single source of truth for per-arch metadata, replacing scattered
 // switch statements in model.cpp/chat_template.cpp/presets.cpp/imp_api.cpp (RF-003).
 struct ArchEntry {
@@ -164,6 +172,11 @@ struct ArchEntry {
     float temperature;
     float top_p;
     int top_k;
+
+    // Loader traits (B-120): no default, kArchRowsComplete rejects a row that leaves one UNSET / null.
+    NormGamma norm_gamma;  // DELTA: SafeTensors block norms store W, gamma = 1 + W
+    StRope st_rope;        // NEOX: SafeTensors forces rope_neox (GGUF pre-permutes Q/K, #503)
+    const char* gguf;      // kGgufLoads, or the refusal load_gguf throws
 };
 }  // namespace
 
@@ -197,65 +210,68 @@ enum {
     kApiInkling2 = 25,
 };
 
+// clang-format off
 static constexpr ArchEntry kArchRegistry[] = {
+    // trailing 3: norm gamma form, SafeTensors RoPE, GGUF (kGgufLoads or the refusal text)
     // arch                      name              c_api    rope  embed  ffn  norm  sigm  ewnorm  temp  top_p
     // top_k
-    {ModelArch::LLAMA, "llama", kApiLlama, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::MISTRAL, "mistral", kApiMistral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::MIXTRAL, "mixtral", kApiMixtral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::LLAMA, "llama", kApiLlama, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kNeox, kGgufLoads},
+    {ModelArch::MISTRAL, "mistral", kApiMistral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kNeox, kGgufLoads},
+    {ModelArch::MIXTRAL, "mixtral", kApiMixtral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kNeox, kGgufLoads},
     // rope=0 (interleaved): DeepSeek-V2/V3 apply_rotary_pos_emb deinterleaves
     // q_pe/k_pe (view[d/2,2].transpose) before NeoX rotate_half, so the effective
     // decoupled-RoPE rotation is on interleaved pairs (2i,2i+1), NOT NeoX (i,i+d/2).
-    {ModelArch::DEEPSEEK, "deepseek", kApiDeepseek, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::DEEPSEEK, "deepseek", kApiDeepseek, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kAsRow, kGgufLoads},
     {ModelArch::NEMOTRON_H_MOE, "nemotron_h_moe", kApiNemotronHMoe, -1, 0, 2, -1, true, false, 0.6f, 0.95f,
-     0},
-    {ModelArch::QWEN3, "qwen3", kApiQwen3, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN3_MOE, "qwen3moe", kApiQwen3Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+     0, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::QWEN3, "qwen3", kApiQwen3, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::QWEN3_MOE, "qwen3moe", kApiQwen3Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20, kDelta, kAsRow, kGgufLoads},
+    {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20, kDelta, kAsRow, kGgufLoads},
+    {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20, kDelta, kAsRow, kGgufLoads},
     // Qwen3.8-Flash-Next generation_config: temperature 1.0, top_p 0.95, top_k 20. Router is the
     // Qwen3.6 one (top-k softmax + norm_topk_prob, shared expert with sigmoid gate).
-    {ModelArch::QWEN4_EXP, "qwen4exp", kApiQwen4Exp, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 20},
+    {ModelArch::QWEN4_EXP, "qwen4exp", kApiQwen4Exp, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 20, kDelta, kAsRow, kGgufLoads},
     // ewnorm=true: gpt-oss routes softmax-after-topk - selection on biased logits +
     // renormalized top-k softmax equals imp's norm_weights path once router bias is added to
     // logits. embed_scale=2^-4: residual rescale for gpt-oss's BF16 activations overflowing
     // FP16 hidden (inf by L23); all h-contributors scaled to match, RMSNorm keeps output exact.
     {ModelArch::GPT_OSS, "gpt_oss", kApiGptOss, 1, 0.0625f, 3 /*GPT_OSS_GLU*/, -1, false, true, 1.0f, 1.0f,
-     0},
-    {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
-    {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+     0, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20, kDirect, kAsRow, kGgufLoads},
+    {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kNeox, kGgufLoads},
     // Encoder-only embedder (#836): rotary (neox pairs), SwiGLU FFN; sampling
     // defaults unused (no LM head). Post-LN + pooling handled by the encoder
     // forward, not the decoder loop.
-    {ModelArch::NOMIC_BERT, "nomic-bert", kApiNomicBert, 1, 0, -1, -1, false, false, 1.0f, 1.0f, 0},
+    {ModelArch::NOMIC_BERT, "nomic-bert", kApiNomicBert, 1, 0, -1, -1, false, false, 1.0f, 1.0f, 0, kDirect, kAsRow, kGgufLoads},
     // Granite 4.2: Llama RoPE convention (GGUF pre-permuted, SafeTensors forced NeoX), SwiGLU;
     // multipliers from config.json / GGUF metadata
     // (parse_granite_multipliers, gguf_loader.cpp), sampling from generation_config.
-    {ModelArch::GRANITE, "granite", kApiGranite, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::GRANITE, "granite", kApiGranite, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kNeox, kGgufLoads},
     // Qwen3-Coder-Next generation_config: temperature 1.0, top_p 0.95, top_k 40; Qwen3.6 router.
-    {ModelArch::QWEN3_NEXT, "qwen3next", kApiQwen3Next, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 40},
+    {ModelArch::QWEN3_NEXT, "qwen3next", kApiQwen3Next, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 40, kDelta, kAsRow, "qwen3next GGUF is not supported; load the SafeTensors checkpoint (#2410)"},
     // Olmo-3: post-norm only (norm=1 takes the FP32 residual accumulator); generation_config 0.6/0.95.
-    {ModelArch::OLMO3, "olmo3", kApiOlmo3, -1, 0, -1, 1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::OLMO3, "olmo3", kApiOlmo3, -1, 0, -1, 1, false, false, 0.6f, 0.95f, 0, kDirect, kAsRow, "olmo3 GGUF is not supported; load the SafeTensors checkpoint"},
     // LFM2-MoE: sigmoid router + expert bias, norm_topk_prob; generation_config sets no sampling.
-    {ModelArch::LFM2, "lfm2", kApiLfm2, -1, 0, -1, -1, true, true, 0.3f, 0.95f, 0},
+    {ModelArch::LFM2, "lfm2", kApiLfm2, -1, 0, -1, -1, true, true, 0.3f, 0.95f, 0, kDirect, kAsRow, "lfm2 GGUF is not supported; load the SafeTensors checkpoint"},
     // Cohere2-MoE: interleaved RoPE (rotate_half on even/odd pairs), sigmoid router without norm.
-    {ModelArch::COHERE2, "cohere2moe", kApiCohere2, 0, 0, -1, -1, true, false, 0.3f, 0.95f, 0},
+    {ModelArch::COHERE2, "cohere2moe", kApiCohere2, 0, 0, -1, -1, true, false, 0.3f, 0.95f, 0, kDirect, kAsRow, "cohere2moe GGUF is not supported; load the SafeTensors checkpoint"},
     // Ling-3.0: MLA rope_interleave (pairs 2i,2i+1, as DeepSeek), sigmoid router + expert_bias,
     // norm_topk_prob; generation_config 1.0 / 0.95 / 20.
     {ModelArch::BAILING_HYBRID, "bailing_hybrid", kApiBailingHybrid, 0, 0, -1, -1, true, true, 1.0f, 0.95f,
-     20},
+     20, kDirect, kAsRow, "bailing_hybrid GGUF is not supported; load the SafeTensors checkpoint"},
     // Kimi-Linear: MLA NoPE (rope flag unused), sigmoid router + e_score_correction_bias, moe_renormalize;
     // generation_config sets no sampling, so the GENERIC defaults.
-    {ModelArch::KIMI_LINEAR, "kimi_linear", kApiKimiLinear, 0, 0, -1, -1, true, true, 0.6f, 0.95f, 0},
+    {ModelArch::KIMI_LINEAR, "kimi_linear", kApiKimiLinear, 0, 0, -1, -1, true, true, 0.6f, 0.95f, 0, kDirect, kAsRow, "kimi_linear GGUF is not supported; load the SafeTensors checkpoint"},
     // Flint: HF rotate_half RoPE on the sliding layers, sigmoid router (+ selection-only expert_bias),
     // norm_topk_prob from config (hf_config/flint.cpp); generation_config 1.0 / 0.95 / 20.
-    {ModelArch::FLINT, "flint", kApiFlint, -1, 0, -1, -1, true, false, 1.0f, 0.95f, 20},
+    {ModelArch::FLINT, "flint", kApiFlint, -1, 0, -1, -1, true, false, 1.0f, 0.95f, 20, kDirect, kAsRow, "flint GGUF is not supported; load the SafeTensors checkpoint"},
     // Inkling2-Loop: no RoPE (distance bias), sigmoid router; the forward is exec/inkling_forward.cu.
-    {ModelArch::INKLING2, "inkling2_loop", kApiInkling2, -1, 0, -1, -1, true, true, 1.0f, 0.95f, 0},
-    {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::INKLING2, "inkling2_loop", kApiInkling2, -1, 0, -1, -1, true, true, 1.0f, 0.95f, 0, kDirect, kAsRow, "inkling2_loop GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0, kDirect, kAsRow, kGgufLoads},
 };
+// clang-format on
 
 static const ArchEntry& lookup_arch(ModelArch arch) {
     for (const auto& e : kArchRegistry)
@@ -264,7 +280,34 @@ static const ArchEntry& lookup_arch(ModelArch arch) {
     return kArchRegistry[(sizeof(kArchRegistry) / sizeof(kArchRegistry[0])) - 1];  // GENERIC
 }
 
+// One row per enumerator 0..GENERIC, every loader trait stated: a short row fails the build (B-120).
+constexpr bool arch_rows_complete() {
+    for (int i = 0; i <= static_cast<int>(ModelArch::GENERIC); i++) {
+        int rows = 0;
+        for (const auto& e : kArchRegistry) {
+            if (e.arch != static_cast<ModelArch>(i))
+                continue;
+            rows++;
+            if (e.norm_gamma == NormGamma::UNSET || e.st_rope == StRope::UNSET || e.gguf == nullptr)
+                return false;
+        }
+        if (rows != 1)
+            return false;
+    }
+    return true;
+}
+static_assert(arch_rows_complete(), "kArchRegistry: one row per ModelArch, norm_gamma / st_rope / gguf set");
+
 const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
+
+bool norm_gamma_is_delta(ModelArch arch) { return lookup_arch(arch).norm_gamma == NormGamma::DELTA; }
+
+bool safetensors_forces_neox_rope(ModelArch arch) { return lookup_arch(arch).st_rope == StRope::NEOX; }
+
+const char* gguf_refusal(ModelArch arch) {
+    const char* why = lookup_arch(arch).gguf;
+    return (why != nullptr && why[0] != '\0') ? why : nullptr;
+}
 
 // Arch families verified safe to honor the checkpoint's kv_cache_quant_algo=FP8 hint by
 // default (kv_cache.dtype=auto): QWEN3, QWEN3_MOE, LLAMA (Phi-4-style hint-declaring

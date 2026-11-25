@@ -204,17 +204,102 @@ cudaStream_t Engine::prefill_stream() const { return stream_; }
 
 cudaStream_t Engine::decode_stream() const { return stream_; }
 
-void Engine::reset_ssm_state(int seq_id) {
-    // Public teardown entry point (API re-prefill / context reset / server
-    // cancellation): must return the slot to the free list or it leaks (these
-    // paths bypass finish_request), exhausting the pool onto id%cap aliasing.
-    // An id without a slot (cancelled while queued, before its first prefill) resets nothing:
-    // `seq_id % cap` is a slot another live sequence can hold.
+void Engine::release_request_tables_(Request& req, bool finished) {
+    // The 4 rows behind a device or a foreign owner; the 3 host containers go in by reference.
+    if (request_tables_.empty())
+        request_tables_ = make_request_table_list(EngineRequestTables<SuffixDraftIndex>{
+            .kv_sequence = {.name = "kv_sequence",
+                            .holds = [this](int id) { return !kv_manager_->block_table(id).empty(); },
+                            .release = [this](int id, const Request*) { kv_manager_->free_sequence(id); }},
+            .verify_spare_of = bv_.spare_of,
+            .verify_spare_free = bv_.free,
+            .phrase_ban_state = {.name = "phrase_ban_state",
+                                 .holds = [this](int id) { return phrase_rec_.contains(id); },
+                                 .release = [this](int id, const Request*) { phrase_release_(id); }},
+            .snapshot_protection = {.name = "snapshot_protection",
+                                    .holds = {},
+                                    .release =
+                                        [this](int id, const Request*) {
+                                            if (recurrent_snapshots_)
+                                                recurrent_snapshots_->unprotect(id);
+                                        }},
+            .recurrent_slot_of = recurrent_slot_of_,
+            .recurrent_slot_free = free_recurrent_slots_,
+            .mtp_bind = {.name = "mtp_bind",
+                         .holds = [this](int id) { return mtp_bound(mtp_active_, mtp_pool_, id); },
+                         .release =
+                             [this](int id, const Request* fin) {
+                                 // Finish only: the slot's history covers the whole answer for the next turn.
+                                 if (fin != nullptr)
+                                     mtp_carry_flush_(*fin);
+                                 mtp_release_(id);
+                             }},
+            .spec_suffix_index = spec_suffix_idx_,
+        });
+    request_tables_.release_all(req.id, finished ? &req : nullptr);
+    if (const char* left = request_tables_.first_holding(req.id))
+        IMP_LOG_ERROR("request %d: table %s still holds an entry after its teardown", req.id, left);
+    // State on the request itself: snapshot buffers, the swapped KV copy, the grammar.
+    req.recurrent_restore.reset();
+    req.swa_restore.reset();
+    req.kv_swap.reset();
+    if (req.constraints)
+        constraints_return_(std::move(req.constraints));
+}
+
+std::shared_ptr<Request> Engine::held_request_(int id) const {
+    const auto live = [id](const std::shared_ptr<Request>& r) {
+        return r && r->id == id && r->status != RequestStatus::FINISHED &&
+               r->status != RequestStatus::CANCELLED;
+    };
+    if (scheduler_)
+        if (auto r = scheduler_->find(id); live(r))
+            return r;
+    for (const auto* list : {&cfg_held_, &cfg_shadows_})  // guidance: owners held, shadows
+        for (const auto& r : *list)
+            if (live(r))
+                return r;
+    for (const auto* lane : {&async_graph_req_, &cpipe_.req})
+        if (live(*lane))
+            return *lane;
+    return nullptr;
+}
+
+void Engine::async_graph_abandon_() {
+    // Stream sync, not the done flag: the burst has no device-side abort, it runs to its limit.
+    async_graph_runner_.finish_burst_blocking(decode_stream());
+    async_graph_runner_.cleanup();
+    release_async_block_tables_();
+    async_parked_req_id_ = -1;
+    async_graph_req_ = nullptr;
+    async_pending_tokens_.clear();
+    async_pending_cursor_ = 0;
+}
+
+bool Engine::cancel_request(const std::shared_ptr<Request>& req, CancelLanes lanes) {
+    // Same object, not only the same id: a never-admitted Request carries the default id 0.
+    if (!req || held_request_(req->id) != req)
+        return false;
+    // 1. Lanes: nothing on the device may still read or write the KV blocks and the recurrent
+    //    slot freed in step 4. Wait collects all 3 (pipelined step, graph burst, constrained forward).
+    if (lanes == CancelLanes::Wait) {
+        drain_decode_pipeline();
+        if (req->status == RequestStatus::FINISHED)
+            return true;  // its last token was in the collected step: finished and released there
+        if (async_graph_req_ == req || async_parked_req_id_ == req->id)
+            async_graph_abandon_();
+        if (cpipe_.active && cpipe_.req == req)
+            teardown_constrained_pipeline(/*synchronize=*/true);
+    }
+    // 2. Terminal status first: finish_request and every lane's harvest refuse a CANCELLED request.
+    req->status = RequestStatus::CANCELLED;
+    // 3. The slot it holds is zeroed, never `id % cap` (recurrent_slot.h): stream-ordered behind step 1.
     if (ssm_state_)
-        if (const auto slot = recurrent_slot_for_reset(recurrent_slot_of_, seq_id))
+        if (const auto slot = recurrent_slot_for_reset(recurrent_slot_of_, req->id))
             ssm_state_->reset_sequence(*slot, stream_);
-    release_recurrent_slot_(seq_id);
-    mtp_release_(seq_id);
+    // 4. Every per-request table, through the list finish_request uses.
+    release_request_tables_(*req, /*finished=*/false);
+    return true;
 }
 
 void Engine::clear_recurrent_snapshots() {
@@ -376,6 +461,9 @@ size_t Engine::effective_free_vram() const {
 }
 
 void Engine::finish_request(std::shared_ptr<Request>& req) {
+    // CANCELLED is terminal: its tables were released by the cancel, a late harvest finishes nothing.
+    if (req->status == RequestStatus::CANCELLED)
+        return;
     req->status = RequestStatus::FINISHED;
     finish_request_release_(req);
 }
@@ -438,14 +526,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
                                      now_ms);
         }
     }
-    kv_manager_->free_sequence(req->id);
-    release_recurrent_slot_(req->id);
-    mtp_carry_flush_(*req);  // the slot's history covers the whole answer for the chat's next turn
-    mtp_release_(req->id);
-    req->recurrent_restore.reset();  // release the snapshot buffer for recycling
-    spec_suffix_idx_.erase(req->id);
-    if (req->constraints)
-        constraints_return_(std::move(req->constraints));
+    release_request_tables_(*req, /*finished=*/true);
     // Server visibility: the engine outlives requests, so cumulative
     // speculation telemetry is logged per request end (no-op when idle).
     if (spec_any_drafter_enabled_(*req))
@@ -453,21 +534,9 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
 }
 
 void Engine::cancel_sequence_(const std::shared_ptr<Request>& req) {
-    // Abnormal end of a request, counterpart to finish_request's graceful one -
-    // both must release the same per-request resources, including the
-    // recurrent-state slot: a fixed-size pool that, once empty, falls back to
-    // `id % cap` aliasing and shares one SSM state across sequences (#1632).
-    // Not shared with finish_request: prefix pinning (not worth it on cancel)
-    // and speculation telemetry (no completed generation to report).
-    kv_manager_->free_sequence(req->id);
-    release_recurrent_slot_(req->id);
-    mtp_release_(req->id);
-    req->recurrent_restore.reset();
-    req->swa_restore.reset();
-    req->kv_swap.reset();
-    spec_suffix_idx_.erase(req->id);
-    if (req->constraints)
-        constraints_return_(std::move(req->constraints));
+    // Same list as finish_request (#1632). Finish-only steps stay there: block hashes, prefix
+    // pins, transcript snapshot, MTP carry flush, speculation telemetry.
+    release_request_tables_(*req, /*finished=*/false);
 }
 
 void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t stream) {

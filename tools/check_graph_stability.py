@@ -239,7 +239,7 @@ def selftest() -> int:
         ("G1 owner adopt", g1("    k_.reset();\n    n_ = 0;\n    k_.adopt_async(raw, n, s);\n") == 1),
         ("G1 owner pair is one site", g1("    k_.reset();\n    v_.reset();\n    k_.adopt_async(a, n, s);\n    v_.adopt_async(b, n, s);\n") == 1),
         ("G1 view-or-owned regrow", g1("    ws_.reset();\n    moved = ws_.set_owned(DeviceOwned<void>::allocate(a_, n, \"t\"));\n") == 1),
-        ("G1 owner reset only",g1("    ws_.reset();\n    ws_bytes_ = 0;\n") == 0),
+        ("G1 owner reset only", g1("    ws_.reset();\n    ws_bytes_ = 0;\n") == 0),
         ("G1 owner local", g1("    tmp.reset();\n    tmp = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
         ("G1 owner another buffer", g1("    ws_.reset();\n    xq_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
     ]
