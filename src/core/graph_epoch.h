@@ -21,4 +21,13 @@ inline uint64_t bump_graph_epoch() noexcept {
     return detail::g_graph_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
+// I3 regrow rule: the owner passes the buffer address before and after. Bumps only when a live
+// address went away (before non-null and != after): 0 bumps on a first allocation or a reuse.
+[[nodiscard]] inline bool bump_graph_epoch_if_moved(const void* before, const void* after) noexcept {
+    if (before == nullptr || before == after)
+        return false;
+    (void)bump_graph_epoch();
+    return true;
+}
+
 }  // namespace imp
