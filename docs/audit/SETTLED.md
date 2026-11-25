@@ -74,10 +74,10 @@ loop, and the shared part is already factored out.
 - **The `mmq_q8_imma` family** — `src/compute/mmq_q8_imma.cu`, `mmq_q8_imma_q4k.cu`,
   `mmq_q8_imma_q6k.cu`, `mmq_q8_imma_q51.cu`. Same reasoning: the delta is the dequant
   inner step.
-- **`src/compute/gdn_scan.cu` vs `src/compute/gdn_scan_tc.cu`** — scalar vs tensor-core
-  scan, different arithmetic intensity. **2026-11-24: `gdn_scan_tc.cu` (660 lines) and
-  `gdn_scan_chunkwise_wy_f32` have no production caller, only `tests/test_gdn.cu`; owner call
-  delete or keep as oracle ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-13).**
+- **GDN scans: one scalar chunkwise file, `src/compute/gdn_scan.cu`.** The tensor-core
+  `gdn_scan_tc.cu` (660 lines) and `gdn_scan_chunkwise_wy_f32` had no production caller and
+  were deleted 2026-11-25 ([`AUDIT_ARCH_2026_11_24.md`](AUDIT_ARCH_2026_11_24.md) D-13);
+  the WY-rep form in production is `gdn_scan_chunkpar*.cu`.
 - **Prefill vs decode kernels throughout** — different arithmetic intensity, by definition.
 - **`src/vision/vision_encoder.cu` (SigLIP) vs `src/vision/qwen3vl_encoder.cpp`** —
   genuinely different tower architectures.

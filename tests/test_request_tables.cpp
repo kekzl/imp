@@ -26,10 +26,11 @@ using imp::SuffixDraftIndex;
 
 namespace {
 
-// The engine's 7 tables: the 3 host containers as the engine declares them, the 4 tables behind
-// a device or a foreign owner (KV manager, phrase slabs, snapshot store, MTP pool) as id sets.
+// The engine's 8 tables: the 3 host containers as the engine declares them, the 5 tables behind a
+// device or a foreign owner (KV manager, phrase slabs, snapshot store, MTP pool, Inkling slots) as id
+// sets.
 struct Tables {
-    std::set<int> kv, phrase, snapshot, mtp;
+    std::set<int> kv, phrase, snapshot, mtp, inkling;
     std::unordered_map<int, int> spare_of;
     std::vector<int> spare_free;
     RecurrentSlotMap slot_of;
@@ -63,12 +64,13 @@ struct Tables {
             .recurrent_slot_free = slot_free,
             .mtp_bind = fake("mtp_bind", mtp),
             .spec_suffix_index = suffix,
+            .inkling_slot = fake("inkling_slot", inkling),
         });
     }
 
     // A request that holds an entry in every table.
     void admit(int id, int slot, int spare) {
-        for (auto* s : {&kv, &phrase, &snapshot, &mtp})
+        for (auto* s : {&kv, &phrase, &snapshot, &mtp, &inkling})
             s->insert(id);
         spare_of[id] = spare;
         slot_of[id] = slot;
@@ -92,17 +94,19 @@ struct Tables {
             out.emplace_back("mtp_bind");
         if (suffix.contains(id))
             out.emplace_back("spec_suffix_index");
+        if (inkling.contains(id))
+            out.emplace_back("inkling_slot");
         return out;
     }
 };
 
 const std::vector<std::string> kAllTables = {"kv_sequence",         "verify_spare",   "phrase_ban_state",
                                              "snapshot_protection", "recurrent_slot", "mtp_bind",
-                                             "spec_suffix_index"};
+                                             "spec_suffix_index",   "inkling_slot"};
 
 }  // namespace
 
-TEST(RequestTables, TheListIsTheSevenTablesInFinishOrder) {
+TEST(RequestTables, TheListIsTheEightTablesInFinishOrder) {
     Tables t;
     EXPECT_EQ(t.list().names(), kAllTables);
 }

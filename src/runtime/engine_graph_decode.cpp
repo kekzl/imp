@@ -427,6 +427,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.n_sequences = 1;
     st.max_blocks_per_seq = max_blocks_per_seq;
     st.is_prefill = false;
+    st.h_seq_ids = &req->id;  // p.req holds the request for the whole run
     (void)fill_recurrent_state(*req, st, /*reset=*/false, stream);  // reset=false cannot fail
     bind_mrope_single_(st, *req, stream);
     if (p.d_banned) {

@@ -372,7 +372,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan.cu
     src/compute/gdn_scan_chunkpar.cu
     src/compute/gdn_scan_chunkpar_pass.cu
-    src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemv_fp8_rowscale_f16.cu
@@ -1235,7 +1234,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_map_out_norm_warn.cpp
         tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp
-        tests/test_inkling_slot_map.cpp
+        tests/test_inkling_slot_table.cpp
         tests/test_weight_page_release.cpp
         tests/test_checkpoint_limits.cpp
         tests/test_exit_codes.cpp

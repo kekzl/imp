@@ -99,7 +99,7 @@ Inkling2-Loop (`ModelArch::INKLING2`) is a private runtime inside `GraphExecutor
 | Vision | `src/vision/inkling_vision.{h,cu}` | ViT tower (`model.visual.*`), 2x2 patch merge into one LM token |
 | Engine | `src/runtime/engine_inkling.cpp` | context and slot limits; the engine prefix cache is off, the forward reuses a prefix itself |
 | Graphs | `InklingForward::decode_graph_`, the draft's `graph_` | its own captured graphs, one per row count up to `kGraphRows`, each compared against `graph_epoch()` before replay; not the engine's decode graph |
-| Slot identity | `src/exec/inkling_slot_map.h` (`inkling_claim_block`) | a decode row finds its slot by the first KV block id of its sequence; the KV pool holds no Inkling data, so a KV, BlockPool or scheduler change can break it (`docs/audit/AUDIT_ARCH_2026_11_24.md` D-4, #3270 fixed by #3272) |
+| Slot identity | `src/exec/inkling_slot_table.h` (`InklingSlotTable`), `InferenceState::h_seq_ids` | every row finds its slot by its request id (decode `h_seq_ids`, prefill `prefill_req_id`); an unbound id throws, no KV block id is read; the `inkling_slot` row of `src/runtime/request_tables.h` unbinds on finish and cancel, the slot keeps its sequence for the next prefix match. Until audit D-4 the key was the first KV block id (`docs/audit/AUDIT_ARCH_2026_11_24.md`, #3270 broke it, #3272). Gate: `scripts/inkling_smoke.sh` in `make verify-fast` |
 
 ## Components
 

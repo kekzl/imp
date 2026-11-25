@@ -205,7 +205,7 @@ cudaStream_t Engine::prefill_stream() const { return stream_; }
 cudaStream_t Engine::decode_stream() const { return stream_; }
 
 void Engine::release_request_tables_(Request& req, bool finished) {
-    // The 4 rows behind a device or a foreign owner; the 3 host containers go in by reference.
+    // The 5 rows behind a device or a foreign owner; the 3 host containers go in by reference.
     if (request_tables_.empty())
         request_tables_ = make_request_table_list(EngineRequestTables<SuffixDraftIndex>{
             .kv_sequence = {.name = "kv_sequence",
@@ -235,6 +235,19 @@ void Engine::release_request_tables_(Request& req, bool finished) {
                                  mtp_release_(id);
                              }},
             .spec_suffix_index = spec_suffix_idx_,
+            .inkling_slot = {.name = "inkling_slot",
+                             .holds =
+                                 [this](int id) {
+                                     const InklingSlotTable* t = executor_ ? executor_->inkling_slots()
+                                                                           : nullptr;
+                                     return t && t->find(id) >= 0;
+                                 },
+                             .release =
+                                 [this](int id, const Request*) {
+                                     if (InklingSlotTable* t = executor_ ? executor_->inkling_slots()
+                                                                         : nullptr)
+                                         t->release(id);
+                                 }},
         });
     request_tables_.release_all(req.id, finished ? &req : nullptr);
     if (const char* left = request_tables_.first_holding(req.id))
@@ -972,7 +985,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     spec_ngram_model_capable_flag_ = spec_ngram_model_capable_uncached_();
     // An Inkling2-Loop executor holds its sequence slots: its forward replaces the layer loop.
     caps_ = derive_capabilities({.model_loaded = true,
-                                 .layer_loop_replaced = !executor_->inkling_slot_requests().empty(),
+                                 .layer_loop_replaced = executor_->inkling_slots() != nullptr,
                                  .gated_residual = model_->profile().gated_residual,
                                  .recurrent_state = ssm_state_ != nullptr,
                                  .batched_recurrent_decode = static_cast<bool>(d_ssm_seq_slots_)});

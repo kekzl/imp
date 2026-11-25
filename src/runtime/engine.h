@@ -619,7 +619,7 @@ private:
     // on purpose: a CUDA graph captures the address, so which sequences are
     // in the step can change without forcing a re-capture.
     VramOwned<int> d_ssm_seq_slots_;
-    std::vector<int> h_ssm_seq_slots_;
+    std::vector<int> h_ssm_seq_slots_, h_seq_ids_;  // per decode row: recurrent slot, request id
     bool recurrent_slots_initialized_ = false;
     // Recurrent-state snapshots (hybrid prefix caching): LRU store of
     // per-sequence SSM/GDN state slabs keyed by the chained KV block hash of
@@ -1238,7 +1238,8 @@ private:
     void inkling_encode_images_(Request& req, int resume, cudaStream_t stream);
     std::unique_ptr<InklingVision> inkling_vision_;
     bool inkling_lookahead_ = true;
-    // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop, else offset.
+    // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop (-1 = no free
+    // slot), else offset.
     int inkling_resume_(Request& req, int offset, cudaStream_t stream);
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,

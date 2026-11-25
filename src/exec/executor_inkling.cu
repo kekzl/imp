@@ -2,7 +2,6 @@
 // applications run in exec/inkling_forward.h, one kept sequence per slot.
 
 #include "exec/executor.h"
-#include "exec/inkling_slot_map.h"
 #include "memory/vram_query.h"
 
 #include "core/logging.h"
@@ -18,14 +17,11 @@ namespace imp {
 
 namespace {
 
-// out = [pos[n]; ids[n]; first block of n_blk tables]: one device-to-host copy per call instead of three.
-__global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, const int* blk, int stride, int n,
-                                    int n_blk, int32_t* out) {
+// out = [pos[n]; ids[n]]: one device-to-host copy per call instead of two.
+__global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, int n, int32_t* out) {
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
         out[i] = pos[i];
         out[n + i] = ids[i];
-        if (i < n_blk)
-            out[2 * n + i] = blk[(size_t)i * stride];
     }
 }
 
@@ -38,41 +34,12 @@ InklingRuntime::~InklingRuntime() {
         p.reset();
 }
 
-int InklingRuntime::slot_of_req(int req) const {
-    for (size_t i = 0; i < slot_req.size(); ++i)
-        if (slot_req[i] == req)
-            return static_cast<int>(i);
-    return -1;
-}
-
-int InklingRuntime::slot_of_block(int block) const {
-    for (size_t i = 0; i < slot_block.size(); ++i)
-        if (slot_block[i] == block)
-            return static_cast<int>(i);
-    return -1;
-}
-
-int InklingRuntime::bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy) {
-    int best = -1, best_match = -1;
-    // Recycling order on a tie: (holds a checkpoint, decodes without lookahead, bind tick), smallest first.
-    const auto cost = [&](size_t i) {
-        return std::tuple(slots[i]->reusable(), !slots[i]->has_lookahead(), slot_used[i]);
-    };
-    for (size_t i = 0; i < slots.size(); ++i) {
-        if (i < busy.size() && busy[i])
-            continue;
-        const int m = slots[i]->match(tokens);
-        if (m > best_match || (m == best_match && cost(i) < cost(static_cast<size_t>(best)))) {
-            best = static_cast<int>(i);
-            best_match = m;
-        }
-    }
-    if (best >= 0) {
-        slot_req[static_cast<size_t>(best)] = req;
-        slot_block[static_cast<size_t>(best)] = -1;
-        slot_used[static_cast<size_t>(best)] = ++tick;
-    }
-    return best;
+int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
+    // Smallest first: (longer kept prefix, holds a checkpoint, decodes without lookahead); the table
+    // breaks a tie by bind tick.
+    return table.bind(req, [&](size_t i) {
+        return std::tuple(-slots[i]->match(tokens), slots[i]->reusable(), !slots[i]->has_lookahead());
+    });
 }
 
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
@@ -125,11 +92,9 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     rt->growable = growable;
     rt->va = va;
     rt->rows_cap = max_tokens;
-    rt->d_rows = VramOwned<int32_t>(*va, 3 * static_cast<size_t>(max_tokens), "inkling_state");
+    rt->d_rows = VramOwned<int32_t>(*va, 2 * static_cast<size_t>(max_tokens), "inkling_state");
     rt->cap = std::min(max_tokens, InklingForward::kSeg);
-    rt->slot_req.assign(rt->slots.size(), -1);
-    rt->slot_block.assign(rt->slots.size(), -1);
-    rt->slot_used.assign(rt->slots.size(), 0);
+    rt->table = InklingSlotTable(rt->slots.size());
     return rt;
 }
 
@@ -141,46 +106,42 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
         inkling_attach_draft_(stream);
     const size_t N = static_cast<size_t>(n);
     rt.logit_src = nullptr;
-    // Host reads of the rows' positions, tokens and first KV blocks: this path is eager.
+    // Host reads of the rows' positions and tokens: this path is eager. Slots are keyed by request
+    // id only (inkling_slot_table.h); unbound ids throw.
     const bool decode = !state.is_prefill;
-    const int n_blk = state.block_tables ? (decode ? n : 1) : 0;
+    if (decode && state.n_sequences != n)
+        throw std::runtime_error("inkling2_loop: a decode call carries one row per sequence");
+    if (decode)
+        rt.table.rows_to_slots(state.h_seq_ids, n, rt.row_slot);
     rt.ids.resize(N);
     rt.pos.resize(N);
-    rt.blk.assign(N, -1);
-    rt.rows.resize(3 * N);
+    rt.rows.resize(2 * N);
     bool ok = h.qtype == QType::F16 && rt.d_rows && n <= rt.rows_cap;
     if (ok) {
-        inkling_pack_rows_k<<<1, 256, 0, stream>>>(state.positions, state.token_ids, state.block_tables,
-                                                   std::max(state.max_blocks_per_seq, 1), n, n_blk,
-                                                   rt.d_rows.get());
+        inkling_pack_rows_k<<<1, 256, 0, stream>>>(state.positions, state.token_ids, n, rt.d_rows.get());
         IMP_CUDA_CHECK_LAUNCH();
         // The copy waits for the stream's work.
-        ok = cudaMemcpyAsync(rt.rows.data(), rt.d_rows.get(), 3 * N * sizeof(int32_t), cudaMemcpyDeviceToHost,
+        ok = cudaMemcpyAsync(rt.rows.data(), rt.d_rows.get(), 2 * N * sizeof(int32_t), cudaMemcpyDeviceToHost,
                              stream) == cudaSuccess &&
              cudaStreamSynchronize(stream) == cudaSuccess;
         std::copy_n(rt.rows.begin(), N, rt.pos.begin());
         std::copy_n(rt.rows.begin() + static_cast<std::ptrdiff_t>(N), N, rt.ids.begin());
-        std::copy_n(rt.rows.begin() + static_cast<std::ptrdiff_t>(2 * N), static_cast<size_t>(n_blk),
-                    rt.blk.begin());
     }
     half* hd = static_cast<half*>(h.data);
     if (ok && !decode) {
-        // One sequence: the slot its request was bound to (a forward outside a request takes slot 0).
-        int s = rt.slot_of_req(state.prefill_req_id);
-        if (s < 0)
-            s = rt.pos[0] == 0 ? 0 : rt.slot_of_block(rt.blk[0]);
-        ok = s >= 0;
-        if (ok) {
-            inkling_claim_block(rt.slot_block, static_cast<size_t>(s), rt.blk[0]);
-            ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data(),
-                                                       state.vision_embeddings ? state.vision_token_id : -1);
-        }
+        // One sequence on its request's slot; a forward outside a request may start an unbound slot 0.
+        const int s = state.prefill_req_id >= 0 ? rt.table.slot_of(state.prefill_req_id) : 0;
+        if (state.prefill_req_id < 0 && (rt.pos[0] != 0 || rt.table.bound(0)))
+            throw std::runtime_error("inkling2_loop: a prefill without a request id at position " +
+                                     std::to_string(rt.pos[0]) + " (only position 0 of an unbound slot 0)");
+        ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data(),
+                                                   state.vision_embeddings ? state.vision_token_id : -1);
     }
-    // Decode: one row per sequence, each on the slot that holds its sequence.
+    // Decode: one row per sequence, each on the slot its request is bound to.
     for (size_t i = 0; ok && decode && i < N; ++i) {
-        const int s = rt.slots.size() == 1 ? 0 : rt.slot_of_block(rt.blk[i]);
-        ok = s >= 0 && rt.slots[static_cast<size_t>(s)]->run(hd + i * static_cast<size_t>(h.shape[1]), 1,
-                                                             rt.pos[i], stream, &rt.ids[i]);
+        const int s = rt.row_slot[i];
+        ok = rt.slots[static_cast<size_t>(s)]->run(hd + i * static_cast<size_t>(h.shape[1]), 1, rt.pos[i],
+                                                   stream, &rt.ids[i]);
         if (ok && N == 1)
             inkling_look_logits_(s, stream);
     }
@@ -227,19 +188,13 @@ bool GraphExecutor::inkling_take_logits_(Tensor& lg, cudaStream_t stream) {
                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess;
 }
 
-// Prefix reuse: binds the request to a slot and returns the position its prefill resumes at.
-int GraphExecutor::inkling_resume(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy,
-                                  cudaStream_t stream) {
+// Prefix reuse: binds the request to a slot and returns the position its prefill resumes at, -1 when
+// every slot is bound (the caller fails the request; no bound slot is taken from its request).
+int GraphExecutor::inkling_resume(int req, std::span<const int32_t> tokens, cudaStream_t stream) {
     if (!inkling_)
         return 0;
-    int s = inkling_->bind(req, tokens, busy);
-    if (s < 0) {
-        // The scheduler admits one request per slot, so this is a bookkeeping fault: say so and
-        // recycle the oldest binding instead of failing the request.
-        IMP_LOG_WARN("inkling2_loop: no free sequence slot for request %d, recycling the oldest", req);
-        s = inkling_->bind(req, tokens, {});
-    }
-    return inkling_->slots[static_cast<size_t>(s)]->rewind(tokens, stream);
+    const int s = inkling_->bind(req, tokens);
+    return s < 0 ? -1 : inkling_->slots[static_cast<size_t>(s)]->rewind(tokens, stream);
 }
 
 // The checkpoint's draft model behind every slot's decode lookahead; without it (no mtp.safetensors,
@@ -282,10 +237,6 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
     }
     IMP_LOG_INFO("inkling2_loop: decode lookahead on %d of %zu slots, %d drafts per step", on,
                  rt.slots.size(), w->cfg.block - 1);
-}
-
-std::vector<int> GraphExecutor::inkling_slot_requests() const {
-    return inkling_ ? inkling_->slot_req : std::vector<int>();
 }
 
 }  // namespace imp

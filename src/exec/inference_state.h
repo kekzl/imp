@@ -143,6 +143,9 @@ struct InferenceState {
     // Request id of a single-sequence prefill (unique per request), -1 otherwise. Owner key of the APA
     // tile cache: a chunk reuses cached tiles only when the same request quantized them.
     int prefill_req_id = -1;
+    // HOST [n_sequences] request id per sequence, valid for the forward it is built for; null = not
+    // carried. Inkling decode rows find their slot by it (exec/inkling_slot_table.h).
+    const int* h_seq_ids = nullptr;
 
     // Sampling parameters
     float temperature = 1.0f;

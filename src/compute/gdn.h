@@ -70,32 +70,7 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
                             int chunk_size = 64, int grouped_layout = 0, const int* d_real_n = nullptr,
                             float* h_snap = nullptr, const int* d_snap_n = nullptr, int64_t snap2_off = 0);
 
-// Phase 2a WY-rep parallel delta-rule scan: numerically equivalent to the sequential delta
-// rule, factors the chunk-internal dependency into a triangular solve + matmuls (naive
-// shared-memory; TC MMA is Phase 2b). HD=SS=128 CHUNK=32 only, else falls back to gdn_scan_fused_f32.
-void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                               const float* A_log, const float* dt_bias, float* h_state, half* y,
-                               int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                               cudaStream_t stream, int grouped_layout = 0);
-
-// Phase 2b: WY-rep delta-rule scan with Tensor Core MMA on KK/QK/KH/QH; H_L stays scalar.
-// CHUNK=16 to fit FP16 K~/Q~/H_0 + FP32 KH/QH in the 99 KiB sm_120 opt-in cap. HD=SS=128
-// only, else falls back to gdn_scan_fused_f32. FP16 storage error stays in tolerance budget.
-void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, const half* alpha,
-                                  const half* beta, const float* A_log, const float* dt_bias,
-                                  float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
-                                  int state_size, int n_groups, cudaStream_t stream, int grouped_layout = 0);
-
-// Phase 2c: WY-rep TC MMA on all 5 chunk-internal matmuls (KK, QK, KH, QH-inlined, H_L).
-// CHUNK=32 by dropping s_qh and reusing s_kh for the H_L strip output. Parallel L2 norm
-// across 4 warps (one token per warp, warp-shuffle reduction). HD=SS=128 only, else fallback.
-void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, const half* alpha,
-                                   const half* beta, const float* A_log, const float* dt_bias,
-                                   float* h_state, half* y, int n_tokens, int n_heads, int head_dim_ssm,
-                                   int state_size, int n_groups, cudaStream_t stream,
-                                   int grouped_layout = 0);
-
-// Chunk-parallel prefill scan (gdn.chunkpar_scan): same numerics as the WY kernels; grid
+// Chunk-parallel prefill scan (gdn.chunkpar_scan): WY-rep delta rule (Yang et al. 2024); grid
 // (chunks x heads), only a short matmul chain stays sequential. HD=SS=128 only; needs
 // gdn_scan_chunkpar_workspace_bytes(n_heads) bytes, 256B aligned; no d_real_n (padded verify
 // chunks use the fused kernel). StateT float or BF16, rounds to BF16 once at commit.
