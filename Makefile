@@ -243,7 +243,7 @@ MOE_MODEL ?= /models/Gemma-4-26B-A4B-it-NVFP4
 HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*:CancelLifecycleHybridTest.*"
 # The hybrid group of test-e2e alone: scripts/check-release.sh runs it (red 2026-10-04 to #2820 unblocked).
 test-hybrid-restore: build
 	$(HYBRID_RESTORE_RUN)
@@ -271,7 +271,7 @@ test-e2e: build
 	@# one, the loader + RoPE path the #503 class shipped prompt-blind on).
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
-		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*" \
+		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*:CancelLifecycleTest.*" \
 		|| echo locks-degeneration-prefix >> $(E2E_FAILED)
 	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
 	@# buckets. Both skip on a dense checkpoint, and every line above loads a
