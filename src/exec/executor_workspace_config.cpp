@@ -164,7 +164,7 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
             vram_free(vram_alloc_, shared_workspace_);
             shared_workspace_ = nullptr;
         }
-        generation_++;  // arena moves — captured verify graphs must invalidate
+        bump_generation();  // arena moves: every captured graph recaptures
         shared_workspace_ = vram_alloc(vram_alloc_, new_shared, "shared_workspace");
         if (!shared_workspace_) {
             IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes", new_shared);

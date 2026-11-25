@@ -981,6 +981,8 @@ if(IMP_BUILD_TESTS)
         tests/test_ffn_graph_cache.cpp
         # Serial prefill graph runners: one per short length, one shared (runtime.prefill_graph_prewarm).
         tests/test_prefill_graph_cache.cpp
+        # I3: the process graph epoch every capture site stores and compares before replay.
+        tests/test_graph_epoch.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
         # cuBLASLt route counter labels and table (diagnostics.log_gemm_algo, roadmap row 123).

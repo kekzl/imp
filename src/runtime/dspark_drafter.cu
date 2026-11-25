@@ -4,6 +4,7 @@
 #include "compute/dspark_attention.h"
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "model/json_util.h"
@@ -177,6 +178,7 @@ struct DSparkDrafter::Impl {
     bool graph = false;  // capture on the next eager-warmed propose
     bool warm = false;
     cudaGraphExec_t exec = nullptr;
+    uint64_t exec_epoch = 0;  // graph_epoch() before the capture (I3)
     int replays = 0;
     int* d_params = nullptr;            // [pos, ctx rows] for the propose
     int* h_params = nullptr;            // pin_params
@@ -658,8 +660,14 @@ void DSparkDrafter::Impl::enqueue_propose(cudaStream_t st_) {
 // Eager on the first propose (cuBLAS picks its algorithms outside a capture), captured on the second,
 // replayed after; a failed capture stays eager.
 void DSparkDrafter::Impl::launch_propose(cudaStream_t st_) {
+    // I3: a graph of an older epoch is dropped and captured again below (propose() synced the last launch).
+    if (exec && exec_epoch != graph_epoch()) {
+        IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec));
+        exec = nullptr;
+    }
     if (graph && warm && !exec) {
         cudaGraph_t g = nullptr;
+        exec_epoch = graph_epoch();
         if (cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal) == cudaSuccess) {
             enqueue_propose(st_);
             const cudaError_t end = cudaStreamEndCapture(st_, &g);

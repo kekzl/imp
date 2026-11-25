@@ -118,6 +118,7 @@ bool InklingForward::step_spec_(half* h, int32_t tok, cudaStream_t s) {
     }
     n = std::clamp(n, 0, kGraphRows - 1);
     const int rows = n + 1;
+    drop_stale_graphs_(s);
     if (decode_graph_ok_ && !decode_exec_[rows - 1].get())
         capture_decode_(rows, s);
     if (!decode_graph_ok_ || !decode_exec_[rows - 1].get()) {

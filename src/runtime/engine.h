@@ -99,6 +99,11 @@ public:
     // deterministic output — stale graph captures can produce different results)
     void invalidate_graphs();
 
+    // The ONE entry point for "the forward's baked addresses or topology changed" (LoRA, control
+    // vector, KV ceiling raise): bumps the graph epoch every capture family checks before replay
+    // (core/graph_epoch.h, I3) and tears down the families that hold in-flight or request state.
+    void invalidate_forward_graphs(const char* reason);
+
     // LoRA hot-swap (#522): activation-path low-rank deltas, compose with
     // every quant tier (no weight patching). Swapping invalidates decode
     // graphs (captures hold adapter kernels/pointers); swap between requests.

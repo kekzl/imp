@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "core/cuda_raii.h"
+#include "core/graph_epoch.h"
 #include "memory/graph_slots.h"
 
 namespace imp {
@@ -102,8 +103,8 @@ public:
             step_count_ = 0;
     }
 
-    // Check if graph is ready for replay
-    bool is_ready() const { return graph_.is_captured(); }
+    // Check if graph is ready for replay: captured, and under the current graph epoch (I3).
+    bool is_ready() const { return graph_.is_captured() && captured_epoch_ == graph_epoch(); }
 
     // Replay the captured graph WITHOUT the capture/warmup state machine or a decode_fn: used
     // by the pipelined batched decode to re-enqueue the forward for step N+1 after the
@@ -147,6 +148,10 @@ private:
     int capture_count_ = 0;
     bool capture_failed_ = false;  // Set when capture fails; prevents infinite retry
     bool fail_next_replay_for_test_ = false;  // see set_fail_next_replay_for_test()
+    // I3: graph_epoch() read before the capture began; a replay under another epoch is refused
+    // and the step recaptures through invalidate_for_update(). 0 = nothing captured.
+    uint64_t captured_epoch_ = 0;
+    int epoch_moved_in_capture_ = 0;  // consecutive captures the epoch moved inside; 2 = stay eager
 
     // Track batch config to detect changes
     int last_batch_size_ = -1;
@@ -329,6 +334,9 @@ private:
     Config config_;
     int last_read_step_ = 0;
     bool launched_ = false;
+    // I3: graph_epoch() at setup(); rearm() and launch() refuse under another epoch, the caller
+    // tears down and runs a full setup() (rearm) or decodes per step (launch).
+    uint64_t captured_epoch_ = 0;
 };
 
 // Advance the device-side decode cursor for the pipelined constrained loop:
