@@ -130,6 +130,10 @@ private:
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     [[nodiscard]] bool own_projections_(const InklingLayer& ly, int T) const;
     void* alloc_(size_t bytes);
+    // inkling_forward_attn.cu: the block table of ctx_ and the attention of application app over the q,
+    // rel, sink, gate rows in proj_h_ (q_stride halves apart) into ao_h_.
+    [[nodiscard]] bool init_ctx_blocks_(int max_ctx);
+    void attend_(const InklingLayer& ly, size_t app, bool global, int T, int q_stride, cudaStream_t s);
     // Memory for context rows [0, rows): false = the device refused, the call must not run.
     [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
     cudaStream_t fork_(cudaStream_t s, int i);
@@ -165,7 +169,8 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<VramOwned<std::byte>> owned_;
-    GrowRows ctx_;  // K/V of the full-attention applications
+    GrowRows ctx_;               // K/V of the full-attention applications
+    int* ctx_blocks_ = nullptr;  // identity block table over ctx_ rows, kKVBlockSize rows per entry
     // Per-call buffers in allocation order: a forward given as scratch hands them out again.
     std::vector<void*> scratch_;
     const InklingForward* share_ = nullptr;

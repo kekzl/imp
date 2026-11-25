@@ -147,6 +147,10 @@ struct AttnArgs {
     int pos0 = -1;
     int T = 0, stride = 0, n_heads = 0, n_kv = 0, hd = 0, d_rel = 0, rel_extent = 0;
     int window = 0, ring = 0;  // window 0 = all earlier keys; ring 0 = slot is the position
+    // ring 0 with blocks: key k at row blocks[k / kv_block] * kv_block + k % kv_block of k / v, one
+    // entry per kv_block (% 16 == 0) keys up to the last row's position.
+    const int* blocks = nullptr;
+    int kv_block = 16;
     float scale = 1.0f, q_thr = 0.0f, rel_thr = 0.0f;
     float log_alpha = 0.0f,
           log_floor = 1.0f;  // alpha > 0: q and rel scaled by 1 + alpha * ln(max((pos + 1) / floor, 1))
@@ -154,8 +158,10 @@ struct AttnArgs {
 // q = clip(q * q_scale), rel = clip(rel * rel_scale); softmax over [q.k * scale + rel . proj[distance],
 // sink].
 void attention(const AttnArgs& a, cudaStream_t s);
-// Bytes of AttnArgs::work: a sliding call of max_rows rows at once, a full-context one in sub-batches.
-size_t attention_rows_bytes(int n_heads, int hd, int d_rel, int window, int max_ctx, int max_rows);
+// Bytes of AttnArgs::work: a sliding call of max_rows rows at once, a full-context one in sub-batches,
+// plus attention_gather_bytes: the tail a call with a block table gathers 8192 keys at a time into.
+size_t attention_rows_bytes(int n_heads, int n_kv, int hd, int d_rel, int window, int max_ctx, int max_rows);
+size_t attention_gather_bytes(int n_kv, int hd, int max_ctx);
 // The GEMM form behind attention(); false = not served (no scratch, a row does not fit).
 [[nodiscard]] bool attention_rows(const AttnArgs& a, cudaStream_t s);
 // Floats of AttnArgs::part for a model with this window and context.
