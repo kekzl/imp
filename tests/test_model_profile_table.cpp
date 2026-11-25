@@ -28,40 +28,45 @@ struct ProfileRow {
     bool gemma3, gemma4, gpt_oss, llama4, encoder;
     Variant swa_variant;
     std::array<int, kLayers> swa_windows;
+    // Loader traits pinned from the pre-B-120 hand lists: 5 delta, 5 neox, 8 refusals.
+    bool norm_delta, st_neox;
+    const char* gguf_refusal;  // kLoads or the exact error text; null = row left short
 };
+
+constexpr const char* kLoads = "";
 
 constexpr std::array<int, kLayers> kMasked = {kWindow, 0, kWindow, 0};
 constexpr std::array<int, kLayers> kAll = {kWindow, kWindow, kWindow, kWindow};
 
 // clang-format off
 constexpr ProfileRow kRows[] = {
-    // arch                       gemma3 gemma4 gpt_oss llama4 encoder  variant              windows
-    {ModelArch::LLAMA,            false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::MISTRAL,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::MIXTRAL,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::DEEPSEEK,         false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::NEMOTRON_H_MOE,   false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN3,            false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN3_MOE,        false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN35,           false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN35_MOE,       false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN36_MOE,       false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN4_EXP,        false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::GPT_OSS,          false, false, true,   false, false,   Variant::GPTOSS_SWA, kMasked},
-    {ModelArch::GEMMA3,           true,  false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::GEMMA4,           false, true,  false,  false, false,   Variant::GEMMA4_SWA, kMasked},
-    {ModelArch::LLAMA4,           false, false, false,  true,  false,   Variant::STANDARD,   kAll},
-    {ModelArch::NOMIC_BERT,       false, false, false,  false, true,    Variant::STANDARD,   kAll},
-    {ModelArch::GRANITE,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::QWEN3_NEXT,       false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::OLMO3,            false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::LFM2,             false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::COHERE2,          false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked},
-    {ModelArch::BAILING_HYBRID,   false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::KIMI_LINEAR,      false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::FLINT,            false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked},
-    {ModelArch::INKLING2,         false, false, false,  false, false,   Variant::STANDARD,   kAll},
-    {ModelArch::GENERIC,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
+    // arch                       gemma3 gemma4 gpt_oss llama4 encoder  variant              windows  delta  neox   gguf refusal
+    {ModelArch::LLAMA,            false, false, false,  false, false,   Variant::STANDARD,   kAll, false, true,  kLoads},
+    {ModelArch::MISTRAL,          false, false, false,  false, false,   Variant::STANDARD,   kAll, false, true,  kLoads},
+    {ModelArch::MIXTRAL,          false, false, false,  false, false,   Variant::STANDARD,   kAll, false, true,  kLoads},
+    {ModelArch::DEEPSEEK,         false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::NEMOTRON_H_MOE,   false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::QWEN3,            false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::QWEN3_MOE,        false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::QWEN35,           false, false, false,  false, false,   Variant::STANDARD,   kAll, true,  false, kLoads},
+    {ModelArch::QWEN35_MOE,       false, false, false,  false, false,   Variant::STANDARD,   kAll, true,  false, kLoads},
+    {ModelArch::QWEN36_MOE,       false, false, false,  false, false,   Variant::STANDARD,   kAll, true,  false, kLoads},
+    {ModelArch::QWEN4_EXP,        false, false, false,  false, false,   Variant::STANDARD,   kAll, true,  false, kLoads},
+    {ModelArch::GPT_OSS,          false, false, true,   false, false,   Variant::GPTOSS_SWA, kMasked, false, false, kLoads},
+    {ModelArch::GEMMA3,           true,  false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::GEMMA4,           false, true,  false,  false, false,   Variant::GEMMA4_SWA, kMasked, false, false, kLoads},
+    {ModelArch::LLAMA4,           false, false, false,  true,  false,   Variant::STANDARD,   kAll, false, true,  kLoads},
+    {ModelArch::NOMIC_BERT,       false, false, false,  false, true,    Variant::STANDARD,   kAll, false, false, kLoads},
+    {ModelArch::GRANITE,          false, false, false,  false, false,   Variant::STANDARD,   kAll, false, true,  kLoads},
+    {ModelArch::QWEN3_NEXT,       false, false, false,  false, false,   Variant::STANDARD,   kAll, true,  false, "qwen3next GGUF is not supported; load the SafeTensors checkpoint (#2410)"},
+    {ModelArch::OLMO3,            false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, "olmo3 GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::LFM2,             false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, "lfm2 GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::COHERE2,          false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked, false, false, "cohere2moe GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::BAILING_HYBRID,   false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, "bailing_hybrid GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::KIMI_LINEAR,      false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, "kimi_linear GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::FLINT,            false, false, false,  false, false,   Variant::GPTOSS_SWA, kMasked, false, false, "flint GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::INKLING2,         false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, "inkling2_loop GGUF is not supported; load the SafeTensors checkpoint"},
+    {ModelArch::GENERIC,          false, false, false,  false, false,   Variant::STANDARD,   kAll, false, false, kLoads},
 };
 // clang-format on
 
@@ -125,6 +130,29 @@ TEST(ModelProfileTable, ArchKeyedFieldsAndSwaWindows) {
         for (int l = 0; l < kLayers; l++)
             EXPECT_EQ(imp::layer_swa_window(cfg, p, l), r->swa_windows[l]) << "layer " << l;
     }
+}
+
+// B-120: the loaders read these three per-arch traits from kArchRegistry; rows pin the old lists.
+TEST(ModelProfileTable, LoaderTraitsMatchThePinnedLists) {
+    int n_delta = 0, n_neox = 0, n_refused = 0;
+    for (int i = 0; i < kArchCount; i++) {
+        const auto arch = static_cast<ModelArch>(i);
+        const ProfileRow* r = find_row(arch);
+        if (r == nullptr)
+            continue;  // EveryArchHasOneRow reports it
+        SCOPED_TRACE(imp::model_arch_name(arch));
+        ASSERT_NE(r->gguf_refusal, nullptr) << "row must state norm_delta, st_neox and gguf_refusal";
+        EXPECT_EQ(imp::norm_gamma_is_delta(arch), r->norm_delta);
+        EXPECT_EQ(imp::safetensors_forces_neox_rope(arch), r->st_neox);
+        const char* why = imp::gguf_refusal(arch);
+        EXPECT_STREQ(why != nullptr ? why : kLoads, r->gguf_refusal);
+        n_delta += r->norm_delta ? 1 : 0;
+        n_neox += r->st_neox ? 1 : 0;
+        n_refused += why != nullptr ? 1 : 0;
+    }
+    EXPECT_EQ(n_delta, 5);
+    EXPECT_EQ(n_neox, 5);
+    EXPECT_EQ(n_refused, 8);
 }
 
 // Without swa_layers no arch takes a per-layer SWA variant; Gemma-3 pattern 2 globals odd layers.
