@@ -630,16 +630,15 @@ void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, 
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
+bool sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     if (max_seq_len <= 0)
-        return;
+        return true;
     size_t cap = static_cast<size_t>(max_seq_len);
     if (cap <= s_dry_buf_cap)
-        return;  // already large enough
+        return true;  // already large enough
 
-    // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len; caller treats a null
-    // buffer as "DRY penalty off", so no direct-allocation fallback (stays off the I1
-    // allowlist rather than moving, AUDIT B47).
+    // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len; no direct-allocation
+    // fallback (stays off the I1 allowlist, AUDIT B47): a failed take fails init (B-108).
     s_dry_tokens_buf = {};
     s_dry_values_buf = {};
     s_dry_buf_cap = 0;
@@ -647,15 +646,14 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     StableSpan<std::byte> tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
     StableSpan<std::byte> values = engine_arena().take_bytes(cap * sizeof(float));
     if (tokens.empty() || values.empty()) {
-        IMP_LOG_WARN("sampling_preallocate_dry: %zu slots unavailable from the T2 arena — the DRY "
-                     "penalty will be skipped",
-                     cap);
-        return;
+        IMP_LOG_ERROR("sampling_preallocate_dry: %zu slots unavailable from the T2 arena", cap);
+        return false;
     }
     s_dry_tokens_buf = tokens.as<int32_t>();
     s_dry_values_buf = values.as<float>();
     s_dry_buf_cap = cap;
     IMP_LOG_DEBUG("sampling_preallocate_dry: pre-allocated %zu DRY penalty slots", cap);
+    return true;
 }
 
 // Free persistent DRY penalty buffers. Called by sampling_cleanup().
