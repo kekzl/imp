@@ -19,7 +19,7 @@
 #include "runtime/suffix_draft.h"
 #include "runtime/vram_budget.h"
 #include "runtime/kv_replan.h"
-#include "runtime/recurrent_slot.h"
+#include "runtime/request_tables.h"
 #include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
 #include "memory/library_reserve_cache.h"
@@ -88,8 +88,10 @@ public:
 
     void add_request(std::shared_ptr<Request> req);
 
-    // Reset SSM state for a sequence (call on context_reset for hybrid models)
-    void reset_ssm_state(int seq_id);
+    // The 1 cancel entry point (server, C API, warmup, guidance): lanes per CancelLanes
+    // (request_tables.h), then CANCELLED, then every per-request table. Engine thread only.
+    // False = no-op: the engine holds no live request that is this object.
+    [[nodiscard]] bool cancel_request(const std::shared_ptr<Request>& r, CancelLanes how = CancelLanes::Wait);
 
     // Drop all recurrent-state snapshots (call on context_reset alongside the
     // prefix-cache block eviction — stale snapshots must not match new data)
@@ -1357,7 +1359,15 @@ private:
     // False only on a reset whose transcript-snapshot tail block is gone (caller cancels).
     [[nodiscard]] bool fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
-    void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
+    // Every table keyed by request id (runtime/request_tables.h, 7 rows), built on first use.
+    // Finish and cancel release through release_request_tables_ only.
+    RequestTableList request_tables_;
+    void release_request_tables_(Request& req, bool finished);
+    // The live request the engine holds under id (scheduler, guidance hold, lanes), else nullptr.
+    // The live request the engine holds under id (scheduler, guidance lists, lanes), else nullptr.
+    [[nodiscard]] std::shared_ptr<Request> held_request_(int id) const;
+    // Ends the async graph loop: waits out an in-flight burst, frees the runner and its tables.
+    void async_graph_abandon_();
     // Scheduler admission gate: the slot the next acquire will hand out is
     // committed (lazy SSM slab), or there is no slab to commit. False leaves
     // the request pending for the next round.
@@ -1366,8 +1376,8 @@ private:
     // and touched every recurrent slot doing so. Hand the free ones back so
     // the lazy slab starts serving at zero committed slots.
     void trim_recurrent_slots_after_warmup_();
-    // Teardown for a request that ends abnormally. finish_request is the
-    // graceful twin; both release the same per-request resources (#1632).
+    // Teardown for a request the engine itself ends mid-step (KV exhaustion, failed prefill): no
+    // lane references it there. Releases through release_request_tables_, like finish_request.
     void cancel_sequence_(const std::shared_ptr<Request>& req);
     // Recurrent-state snapshots (hybrid prefix caching, engine_sampling_stop.cpp):
     // admission hook (longest restorable prefix, in blocks) + save/position helpers.
@@ -1539,7 +1549,7 @@ private:
 public:
     // Collect + process an in-flight pipelined step and release deferred KV.
     // MUST be called before any external KV free while the engine may have a
-    // chained decode step in flight (BatchingEngine cancel path), and runs
+    // chained decode step in flight (cancel_request does), and runs
     // implicitly before prefill work and on composition changes.
     void drain_decode_pipeline();
     // Exception-path variant: drop the in-flight step without waiting on the

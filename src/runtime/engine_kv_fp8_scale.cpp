@@ -197,8 +197,7 @@ void calibrate_fp8_kv_scales(Engine& engine, QType kv_dtype, int prefill_chunk_s
     engine.add_request(req);  // public path, assigns the id
     for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++)
         (void)engine.step();
-    engine.kv_manager()->free_sequence(req->id);
-    engine.reset_ssm_state(req->id);
+    (void)engine.cancel_request(req);  // no-op once FINISHED
     while (engine.kv_manager()->evict_cached_block()) {
     }  // no block written under the calibration scale survives
     req->status = RequestStatus::CANCELLED;

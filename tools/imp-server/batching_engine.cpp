@@ -261,16 +261,15 @@ WorkerTiming g_wt;
 
 void BatchingEngine::fail_active_requests_(const std::string& why, cudaError_t observed) {
     imp::Engine* engine = ctx_->engine.get();
-    imp::KVCacheManager* kv_mgr = engine->kv_manager();
     IMP_LOG_ERROR("BatchingEngine: %s - cancelling %zu active request(s)", why.c_str(),
                   active_requests_.size());
     for (auto& sr : active_requests_) {
+        // Abandon: the device may be poisoned, no lane is waited on; invalidate_graphs() below
+        // drops them. False = the engine holds nothing for it, only the status is left to set.
         if (sr->request->status != imp::RequestStatus::FINISHED &&
-            sr->request->status != imp::RequestStatus::CANCELLED) {
+            sr->request->status != imp::RequestStatus::CANCELLED &&
+            !engine->cancel_request(sr->request, imp::CancelLanes::Abandon))
             sr->request->status = imp::RequestStatus::CANCELLED;
-            kv_mgr->free_sequence(sr->request->id);
-            engine->reset_ssm_state(sr->request->id);
-        }
         sr->push_finish("internal_error");
     }
     // Distinguishes a host-side throw (device clean: recover) from a CUDA fault that poisoned the
@@ -444,23 +443,13 @@ void BatchingEngine::worker_loop() {
             queue_running.store(running, std::memory_order_relaxed);
         }
 
-        // Check for cancelled requests before stepping: a pipelined batched-decode step may still be
-        // in flight and WRITING these sequences' KV, so it must be collected before freeing their
-        // blocks (engine invariant; drain is a no-op when nothing is in flight).
+        // Cancelled requests before stepping, through the engine's 1 cancel entry point: it collects
+        // every lane that still writes the sequence's KV (pipelined step, graph burst, constrained
+        // forward) before the blocks and the slot go. A request that finished in that collect stays FINISHED.
         for (auto& sr : active_requests_) {
             if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
-                sr->request->status != imp::RequestStatus::CANCELLED) {
-                engine->drain_decode_pipeline();
-                break;
-            }
-        }
-        for (auto& sr : active_requests_) {
-            if (sr->is_cancelled() && sr->request->status != imp::RequestStatus::FINISHED &&
-                sr->request->status != imp::RequestStatus::CANCELLED) {
-                sr->request->status = imp::RequestStatus::CANCELLED;
-                kv_mgr->free_sequence(sr->request->id);
-                engine->reset_ssm_state(sr->request->id);
-            }
+                sr->request->status != imp::RequestStatus::CANCELLED && !engine->cancel_request(sr->request))
+                sr->request->status = imp::RequestStatus::CANCELLED;  // the engine holds nothing for it
         }
 
         // Run one engine step. Wrapped in try/catch: a bug in any model/quant/cuda path that throws

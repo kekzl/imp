@@ -691,11 +691,11 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
 
     ctx->prefill_token = -1;
     try {
-        // If there is an existing active request, free its KV cache and mark
-        // cancelled so the scheduler removes it from active_ on next schedule().
+        // A still-running active request ends through the engine's 1 cancel entry point (lanes
+        // collected, every per-request table released); a finished one is left as it is.
         if (ctx->active_request) {
-            ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
-            ctx->engine->reset_ssm_state(ctx->active_request->id);
+            (void)ctx->engine->cancel_request(ctx->active_request);
+            // Finished ones are marked too, as before: an abandoned length stays out of the decode estimate.
             ctx->active_request->status = imp::RequestStatus::CANCELLED;
             ctx->active_request = nullptr;
         }
@@ -964,17 +964,16 @@ ImpError imp_context_reset(ImpContext ctx) {
     }
 
     return imp::api_guard("imp_context_reset", [&]() -> ImpError {
-        // Free the active request's KV cache and mark it cancelled so the
-        // scheduler removes it from active_ on the next schedule() call.
+        // A still-running active request ends through the engine's 1 cancel entry point (KV,
+        // recurrent slot zeroed and released, every per-request table); a finished one holds nothing.
         if (ctx->active_request) {
-            ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+            (void)ctx->engine->cancel_request(ctx->active_request);
+            // Finished ones are marked too, as before: an abandoned length stays out of the decode estimate.
+            ctx->active_request->status = imp::RequestStatus::CANCELLED;
             // Evict all cached blocks to prevent prefix cache hits with stale data
             while (ctx->engine->kv_manager()->evict_cached_block()) {}
             // Drop recurrent-state snapshots for the same reason (hybrid models)
             ctx->engine->clear_recurrent_snapshots();
-            // Reset SSM state for hybrid models (Mamba2)
-            ctx->engine->reset_ssm_state(ctx->active_request->id);
-            ctx->active_request->status = imp::RequestStatus::CANCELLED;
             ctx->active_request = nullptr;
             ctx->consumed_output = 0;
         }

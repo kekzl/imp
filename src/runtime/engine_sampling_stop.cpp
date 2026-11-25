@@ -356,22 +356,6 @@ int Engine::recurrent_slot(int req_id) const {
     return (it != recurrent_slot_of_.end()) ? it->second : -1;
 }
 
-void Engine::release_recurrent_slot_(int req_id) {
-    // Batched verify spare, if the request held one.
-    if (auto sp = bv_.spare_of.find(req_id); sp != bv_.spare_of.end()) {
-        bv_.free.push_back(sp->second);
-        bv_.spare_of.erase(sp);
-    }
-    phrase_release_(req_id);  // banned-phrase recurrent slabs
-    if (recurrent_snapshots_)
-        recurrent_snapshots_->unprotect(req_id);
-    auto it = recurrent_slot_of_.find(req_id);
-    if (it == recurrent_slot_of_.end())
-        return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
-    free_recurrent_slots_.push_back(it->second);
-    recurrent_slot_of_.erase(it);
-}
-
 bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
                                   cudaStream_t stream) {
     state.ple_hist_in = req.input_tokens.data();
@@ -573,8 +557,8 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
     if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream,
                                     nullptr, std::move(chain)))
         return;
-    // release_recurrent_slot_ runs right after and the next tenant's prefill writes the
-    // slot on another stream: the copy must be complete before this returns.
+    // The recurrent_slot row of release_request_tables_ runs right after and the next tenant's prefill writes
+    // the slot on another stream: the copy must be complete before this returns.
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     IMP_LOG_DEBUG("RecurrentSnapshot: saved %d-token transcript state for req %d (%d/%d slots) in %.1f ms", n,
                   req.id, recurrent_snapshots_->size(), recurrent_snapshots_->capacity(),

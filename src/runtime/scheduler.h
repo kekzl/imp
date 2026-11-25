@@ -42,6 +42,9 @@ public:
     [[nodiscard]] int pending_count() const;  // admitted, not yet in a batch
     // Ids of the admitted requests still running (engine thread only, like schedule()).
     [[nodiscard]] std::vector<int> active_ids() const;
+    // The request queued or running under id, nullptr = none (engine thread only). Finished and
+    // cancelled ones linger until the next schedule(): the caller checks the status.
+    [[nodiscard]] std::shared_ptr<Request> find(int id) const;
     // Live sequences whose KV StreamingLLM evicted (engine thread only, like schedule()).
     [[nodiscard]] int active_evicted_count() const;
     // Sum of kv_unmet_blocks (graph_eligibility.h) over the live sequences (engine thread only).
