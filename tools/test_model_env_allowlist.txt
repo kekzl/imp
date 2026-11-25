@@ -1,0 +1,12 @@
+# X-1 allowlist: model environment variables read under tests/ that no target sets.
+# One line per variable: NAME  # reason (what is missing, or why the suite runs without it).
+# tools/check_test_model_env.py fails on an entry without a reason, on an entry for a
+# variable that is wired by now, and on an entry no test reads any more.
+
+IMP_TEST_MODEL_DEEPSEEK  # optional override: unset, the 4 MLAConfig tests read tests/fixtures/deepseek_v2_lite and run in the unit lane
+IMP_TEST_MODEL_GEMMA4_AUDIO  # checkpoint gemma-4-E4B-it is in the model store, the reference dir IMP_TEST_GEMMA4_AUDIO_REF (tools/analysis/gemma4_audio_ref.py output) is not: 2 tests skip
+IMP_TEST_MODEL_GEMMA4_E4B  # checkpoint gemma-4-E4B-it is in the model store, the reference dir IMP_TEST_GEMMA4_E4B_REF (ids.txt, greedy_ids.txt from transformers) is not: 2 tests skip
+IMP_TEST_MODEL_LING3  # checkpoint Ling-3.0-tiny is in the model store, the reference dir IMP_TEST_LING3_REF (ids.txt, greedy_ids.txt from ling_ref.py) is not: 2 tests skip
+IMP_TEST_MODEL_LLAMA  # no local checkpoint: Llama-3.2-3B-Instruct-Q8_0.gguf (legacy GGUF, not in the model store); 1 ChunkedPrefillTest and 3 LoraHotSwap tests skip
+IMP_TEST_MODEL_MISTRAL  # no local checkpoint: Mistral-Small-3.2-24B-Instruct-2506-NVFP4; 1 LlmCompressorE2E test skips
+IMP_TEST_MODEL_QWEN4B  # no local checkpoint: Qwen3-4B-Instruct-2507-Q8_0.gguf (legacy GGUF, not in the model store); 6 ChunkedPrefillTest tests skip

@@ -30,9 +30,6 @@ inline constexpr const char* kEnvModel = "IMP_TEST_MODEL";
 // Generic GGUF model for loader/tensor-kind coverage.
 inline constexpr const char* kEnvGguf = "IMP_TEST_GGUF";
 
-// Tokenizer-compat golden (paired with kEnvModel).
-inline constexpr const char* kEnvGolden = "IMP_TEST_GOLDEN";
-
 // Architecture-specific overrides for the multi-model E2E suite.
 inline constexpr const char* kEnvModelGdn = "IMP_TEST_MODEL_GDN";
 // Mamba2 hybrid (Nemotron-H) for the batched SSM decode gate.

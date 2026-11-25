@@ -191,6 +191,11 @@ test-gpu-suite:
 	docker run --rm -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B-NVFP4-vllm \
 		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen38TokenizerParity*"
+	@# Same shape again for the Kimi tiktoken parity battery (4 tests, reads tiktoken.model
+	@# and tokenizer_config.json only): set by no target until 2026-11-24 (X-1).
+	docker run --rm -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_KIMI=/models/Kimi-Linear-48B-A3B-Instruct-nvfp4 \
+		$(DOCKER_IMG) test-e2e --gtest_filter="KimiTiktokenParityTest.*"
 	@# Everything else that reads IMP_TEST_MODEL* skips here by design: this
 	@# target carries no model env (DOCKER_RUN has none), so "full suite" means
 	@# every macro, not every checkpoint. The model battery is `make test-e2e`
@@ -284,12 +289,49 @@ test-e2e: build
 	@# needs ~14 GiB free and its own deterministic-mode process state.
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_NVFP4=$(BATCH_INVARIANCE_MODEL) \
+		-e IMP_TEST_MODEL_FP8=$(BATCH_INVARIANCE_FP8_MODEL) \
 		$(DOCKER_IMG) test-e2e --gtest_filter="BatchInvarianceTest.*" \
 		|| echo batch-invariance >> $(E2E_FAILED)
+	@# The three groups below ran from NO target until 2026-11-24: the AUDIT_ARCH_2026 I-1
+	@# escape class a third time (AUDIT_ARCH_2026_11_24 X-1), 16 model variables set nowhere.
+	@# tools/check_test_model_env.py now fails a variable read under tests/ that no target sets.
+	@# Inkling lives in test-compute: one process, one 17.61 GiB load (tests/inkling_fixture.h), a test
+	@# with its own load fails here. 2 of its 19 model tests need the checkpoint alone; 17 also
+	@# need the transformers reference dumps, which are not in the model store: pass
+	@# INKLING_ORACLE=<dir> (16 tests) and INKLING_KLD=<dir> (1 test, tools/analysis/inkling_kld_oracle.py).
+	@[ -n "$(INKLING_ORACLE)" ] || echo "test-e2e: inkling: INKLING_ORACLE unset, 16 of 19 tests SKIP"
+	@[ -n "$(INKLING_KLD)" ] || echo "test-e2e: inkling: INKLING_KLD unset, InklingQuality SKIPS"
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_INKLING=$(INKLING_MODEL) \
+		$(if $(INKLING_ORACLE),-v $(INKLING_ORACLE):/inkling_oracle:ro -e IMP_TEST_INKLING_ORACLE=/inkling_oracle) \
+		$(if $(INKLING_KLD),-v $(INKLING_KLD):/inkling_kld:ro -e IMP_TEST_INKLING_KLD=/inkling_kld) \
+		$(DOCKER_IMG) test-compute --gtest_filter="InklingDraftModel.*:*InklingParity*:InklingRewind.*:InklingLookahead.*:InklingVisionParity.*:InklingPrefill.GroupedExpertsMatchTheSlotForm:InklingQuality.*" \
+		|| echo inkling >> $(E2E_FAILED)
+	@# MTP greedy identity on the hybrid checkpoint: two 20 GiB loads back to back, and the
+	@# suite skips below 24000 MiB free, so it gets a fresh process (free VRAM only falls).
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_MTP=/models/Qwen3.8-27B-NVFP4-vllm \
+		$(DOCKER_IMG) test-e2e --gtest_filter="MtpGreedyIdentityTest.MtpDoesNotChange*:MtpGreedyIdentityTest.NgramDoesNotChangeGreedyTokensHybrid" \
+		|| echo mtp-identity >> $(E2E_FAILED)
+	@# Block drafters on the dense 8B target (12000 MiB precondition), plus the two MTP head
+	@# checks that read tensors without loading a model.
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL_DSPARK_TARGET=/models/Qwen3-8B-NVFP4-cortecs \
+		-e IMP_TEST_MODEL_DSPARK=/models/dflash_qwen3_8b_block7 \
+		-e IMP_TEST_MODEL_DFLASH=/models/Qwen3-8B-DFlash-b16 \
+		-e IMP_TEST_MODEL_MTP_QWEN4EXP=/models/Qwen3.8-Flash-Next-NVFP4 \
+		-e IMP_MTP_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
+		$(DOCKER_IMG) test-e2e --gtest_filter="DSparkDrafterTest.*:DFlashDrafterTest.*:MtpGreedyIdentityTest.NgramDoesNotChangeGreedyTokensDense:MtpGreedyIdentityTest.DSparkDoesNotChangeGreedyTokens:MtpGreedyIdentityTest.DFlashDoesNotChangeGreedyTokens:MtpQwen4ExpReference.*:MtpProbe.FindsTheHeadInARealCheckpoint" \
+		|| echo drafters >> $(E2E_FAILED)
 	@if [ -s $(E2E_FAILED) ]; then echo "test-e2e: FAIL, red group(s): $$(tr '\n' ' ' < $(E2E_FAILED))"; exit 1; fi
-	@echo "test-e2e: PASS, 4 groups green"
+	@echo "test-e2e: PASS, 7 groups green"
 
 BATCH_INVARIANCE_MODEL ?= /models/Qwen3-14B-NVFP4
+BATCH_INVARIANCE_FP8_MODEL ?= /models/Qwen3-8B-FP8
+INKLING_MODEL ?= /models/Inkling-2-Mini
+# Host directories with the Inkling reference dumps; empty = the tests that need them skip.
+INKLING_ORACLE ?=
+INKLING_KLD ?=
 
 # Speculative capture fidelity (gate 3). Its own container because the check
 # runs a second full forward per verify step against a 20 GiB checkpoint: after
@@ -670,6 +712,10 @@ check-alloc-sites:
 # I4 gate: readings of free device memory outside src/memory/vram_query.*, shrinking allowlist.
 check-live-vram-queries:
 	@$(PY_RUN) tools/check_live_vram_queries.py
+
+# X-1 gate: every model variable read under tests/ is set by a target or listed with a reason.
+check-test-model-env:
+	@$(PY_RUN) tools/check_test_model_env.py
 
 # B-108 gate: ERROR/WARN line then a bare `return;` in src/exec, src/compute, src/quant, shrinking allowlist.
 check-silent-void-returns:
