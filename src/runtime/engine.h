@@ -14,6 +14,7 @@
 #include "audio/audio_pipeline.h"
 #include "runtime/config.h"
 #include "runtime/engine_config.h"
+#include "runtime/engine_capabilities.h"
 #include "core/dispatch_policy.h"
 #include "runtime/graph_eligibility.h"
 #include "runtime/suffix_draft.h"
@@ -121,15 +122,11 @@ public:
     int active_control_vector() const { return active_cvec_; }
     float active_control_vector_scale() const { return active_cvec_scale_; }
 
-    // Logit lens (row 115): false for gated-residual models; add_request then drops logit_lens.
-    [[nodiscard]] bool logit_lens_supported() const;
+    // Lens, SAE, LoRA, control vector, phrase ban, CFG on this load (C-6); add_request drops the rest.
+    [[nodiscard]] const EngineCapabilities& capabilities() const { return caps_; }
     // SAE (row 116): one Gemma Scope layout dir per engine; width, 0 = refused.
     int sae_load(const std::string& dir);
     [[nodiscard]] int sae_width() const;
-    // Banned phrases (row 118): false only without a loaded model.
-    [[nodiscard]] bool phrase_ban_supported() const;
-    // Classifier-free guidance (row 117): a pair decodes as two rows of one step.
-    [[nodiscard]] bool cfg_supported() const;
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -1072,6 +1069,7 @@ private:
     // and the model profile are final.
     [[nodiscard]] bool spec_ngram_model_capable_uncached_() const;
     bool spec_ngram_model_capable_flag_ = false;
+    EngineCapabilities caps_;  // set beside the flag above; all false before init
     // Which gate refuses, or nullptr when none does. See the definition in
     // engine_spec_ngram.cpp for why the reason is a string and not a bool.
     const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;

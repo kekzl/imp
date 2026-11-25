@@ -3014,7 +3014,9 @@
    "params": {}
   },
   "{\"lora\":\"a\"}": {
-   "params": {}
+   "params": {
+    "lora": "a"
+   }
   },
   "{\"guided_regex\":\"[a-z]+\"}": {
    "params": {
@@ -4296,7 +4298,9 @@
    "params": {}
   },
   "{\"lora\":\"a\"}": {
-   "params": {}
+   "params": {
+    "lora": "a"
+   }
   },
   "{\"guided_regex\":\"[a-z]+\"}": {
    "params": {}

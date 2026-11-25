@@ -257,7 +257,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
     if (const ExtensionError e = extension_error(ctx); !e.message.empty()) {
-        send_json_error(res, 400, "invalid_request_error", e.message, e.param);
+        send_json_error(res, 400, "invalid_request_error", e.message, e.param, e.code);
         return false;
     }
 

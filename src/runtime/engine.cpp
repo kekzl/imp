@@ -371,6 +371,10 @@ void Engine::invalidate_forward_graphs(const char* reason) {
 }
 
 int Engine::lora_load(const std::string& path) {
+    if (!caps_.lora) {
+        IMP_LOG_ERROR("lora: %s refused, the loaded forward applies no adapter", path.c_str());
+        return 0;
+    }
     auto a = std::make_unique<LoraAdapter>();
     if (!a->load(path, model_ ? model_->n_layers() : 0))
         return 0;
@@ -966,6 +970,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Model + profile + ssm_state_ are final here and none of the inputs can
     // change afterwards, so the answer is taken once, off the per-step path.
     spec_ngram_model_capable_flag_ = spec_ngram_model_capable_uncached_();
+    // An Inkling2-Loop executor holds its sequence slots: its forward replaces the layer loop.
+    caps_ = derive_capabilities({.model_loaded = true,
+                                 .layer_loop_replaced = !executor_->inkling_slot_requests().empty(),
+                                 .gated_residual = model_->profile().gated_residual,
+                                 .recurrent_state = ssm_state_ != nullptr,
+                                 .batched_recurrent_decode = static_cast<bool>(d_ssm_seq_slots_)});
     install_ngram_corpus(runtime_config_.speculative.ngram_corpus, model_->tokenizer(),
                          runtime_config_.speculative.min_match, runtime_config_.speculative.max_match,
                          spec_suffix_idx_);
@@ -988,7 +998,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         embed_prepare_(*req);
         // Logit lens rides the logprobs path: eager decode, no ragged prefill, no speculation.
         if (req->logit_lens > 0) {
-            if (logit_lens_supported())
+            if (caps_.logit_lens)
                 req->logprobs = true;
             else
                 req->logit_lens = 0;

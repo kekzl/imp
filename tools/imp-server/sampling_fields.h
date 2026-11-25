@@ -120,6 +120,14 @@ inline constexpr SamplingKey kSamplingKeys[] = {
     {"cache_prompt", &SamplingFields::cache_prompt, 0},
     {"session_id", &SamplingFields::session_id, kViaMessages | kViaResponses},
     {"speculative", std::monostate{}, kViaMessages | kViaResponses},
+    // Generation-changing imp extensions a load may lack (C-6): the chat parser applies or 400s them.
+    {"lora", std::monostate{}, kViaMessages | kViaResponses},
+    {"control_vector", std::monostate{}, kViaMessages | kViaResponses},
+    {"banned_strings", std::monostate{}, kViaMessages | kViaResponses},
+    {"banned_regex", std::monostate{}, kViaMessages | kViaResponses},
+    {"cfg_scale", std::monostate{}, kViaMessages | kViaResponses},
+    {"cfg_negative_prompt", std::monostate{}, kViaMessages | kViaResponses},
+    {"sae_clamp", std::monostate{}, kViaMessages | kViaResponses},
 };
 
 // Same contract as body.value(key, default): absent keeps the default, a wrong JSON type throws
