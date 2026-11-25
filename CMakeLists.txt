@@ -1158,6 +1158,8 @@ if(IMP_BUILD_TESTS)
         tests/test_leaked_static.cpp
         # ViewOrOwned: a StableSpan view or a DeviceOwned allocation, never both (I3 + I5).
         tests/test_view_or_owned.cpp
+        # Weight-cache entries: owned buffers released once, a viewed slab slice never (I5).
+        tests/test_weight_cache_entries.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
         # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).

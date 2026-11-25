@@ -53,7 +53,8 @@ PERSISTENT = re.compile(r"_$|->|\.|^(?:s_|g_)")
 ALLOC_ASSIGN = r"\s*=[^=;]*\b(?:vram_alloc|vram_alloc_force|weights_alloc|cudaMalloc\w*)\s*\("
 ALLOC_OUT = r"\b(?:device_alloc_all\w*|device_alloc_pool_async|cudaMalloc\w*)\s*\([^;]*(?:\(|&|,\s*)\s*"
 # The owner spelling of the same regrow: X.reset(); then X = DeviceOwned<T>::allocate*(...) or X.adopt*(...).
-OWNER_RESET = re.compile(r"^\s*(?:\(void\)\s*)?([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)(?:\.|->)reset\(\)\s*;")
+# `(void)X->reset();` and `bool moved = X.reset();` are the same release (ViewOrOwned reports whether the address moved).
+OWNER_RESET = re.compile(r"^\s*(?:\(void\)\s*|(?:const\s+)?bool\s+\w+\s*=\s*)?([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)(?:\.|->)reset\(\)\s*;")
 OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|(?:\.|->)adopt(?:_async)?\s*\(|(?:\.|->)set_(?:owned|view)\s*\()"
 FUNCTION_END = re.compile(r"^}")
 CAPTURE = re.compile(r"\bcudaStreamBeginCapture\w*\s*\(")
@@ -241,6 +242,7 @@ def selftest() -> int:
         ("G1 view-or-owned regrow", g1("    ws_.reset();\n    moved = ws_.set_owned(DeviceOwned<void>::allocate(a_, n, \"t\"));\n") == 1),
         ("G1 static view-or-owned regrow", g1("    (void)s_ws->reset();\n    (void)s_ws->set_view(arena.take_bytes(n));\n") == 1),
         ("G1 owner reset only", g1("    ws_.reset();\n    ws_bytes_ = 0;\n") == 0),
+        ("G1 view-or-owned regrow, moved kept", g1("    const bool moved = ws_.reset();\n    if (moved)\n        bump();\n    (void)ws_.set_owned(DeviceOwned<void>::allocate(a_, n, \"t\", true));\n") == 1),
         ("G1 owner local", g1("    tmp.reset();\n    tmp = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
         ("G1 owner another buffer", g1("    ws_.reset();\n    xq_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
     ]

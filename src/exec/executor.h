@@ -304,15 +304,12 @@ public:
 
     // Split-K workspace for gemm_nvfp4_smallm (batched-decode small-M GEMMs).
     // Sized lazily on the first eager use, stable across graph capture.
-    void* smallm_ws_ = nullptr;
+    // Each a T2 arena slice (never freed) or, after a lazy regrowth, a private allocation the
+    // handle releases: per scratch, the workspace can outgrow its slice while xq keeps its own.
+    ViewOrOwned<void> smallm_ws_;
     size_t smallm_ws_bytes_ = 0;
-    void* smallm_xq_ = nullptr;   // A4 activation quantize scratch [32, Kmax]
+    ViewOrOwned<void> smallm_xq_;  // A4 activation quantize scratch [32, Kmax]
     size_t smallm_xq_bytes_ = 0;
-    // Per scratch: a T2 arena slab is never cudaFree'd. One flag for both let a
-    // lazy regrowth of the workspace (A16 kernel, larger than the v2 plan) mark the
-    // still-arena activation scratch as owned and cudaFree it at teardown.
-    bool smallm_ws_arena_ = false;
-    bool smallm_xq_arena_ = false;
     // What smallm_xq_ currently holds (source pointer + shape of the last
     // activation quantize). Lets a dispatch with a matching hint skip
     // re-quantizing when two GEMMs share one normed input (gate/up, q/k/v, GDN
@@ -1046,7 +1043,7 @@ private:
     // SfAtom NVFP4 LM head for the batched-decode (n>1) tile GEMM (#2937). Borrows
     // the FP4 data from the NVFP4 decode cache; owns only the SfAtom scales.
     // Built by build_lm_head_cutlass_() when serving; freed in the destructor.
-    CutlassNvFP4Weight lm_head_cutlass_{};
+    CutlassNvFP4CacheEntry lm_head_cutlass_;  // SfAtom owned, or a view of the prefill cache entry
     bool lm_head_cutlass_ready_ = false;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).

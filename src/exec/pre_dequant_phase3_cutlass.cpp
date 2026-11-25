@@ -57,7 +57,7 @@ G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const
     cw.N = nvfp4.N;
     cw.K = nvfp4.K;
     cw.sf_borrowed = true;  // scale_factors stays null: nothing to free
-    wc.cutlass_nvfp4[ptr] = cw;
+    wc.cutlass_nvfp4[ptr] = CutlassNvFP4CacheEntry(std::move(cw));
     return G3::SfLess;
 }
 
@@ -205,9 +205,10 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
 
     int ct_count = 0;
     if (ct_total > 0) {
-        void* sf_slab = nullptr;
-        IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(sf_slab, ct_total)));
+        auto sf_slab_own = DeviceOwned<void>::allocate_plain(ct_total);
+        void* sf_slab = sf_slab_own.get();
         if (!sf_slab) {
+            IMP_CUDA_CHECK_LOG(cudaGetLastError());
             // Defensive (floor over-commit or genuine exhaustion): a null
             // slab must not be offset into by the convert passes below.
             IMP_LOG_WARN("CUTLASS NVFP4 cache: slab cudaMalloc(%.1f MiB) failed — "
@@ -218,8 +219,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         // Zero every entry's SfAtom padding rows at once (convert kernels write
         // only valid (n, k_group) cells).
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(sf_slab, 0, ct_total, stream));
-        wcache_->cutlass_sf_slab = sf_slab;
-        wcache_->cutlass_sf_slab_size = ct_total;
+        wcache_->cutlass_sf_slab = std::move(sf_slab_own);  // the entries below slice it
         auto* slab = static_cast<uint8_t*>(sf_slab);
         // Pass 2a: one batched convert per MoE group → per-expert borrowed slices.
         for (size_t gi = 0; gi < n_groups_inc; ++gi) {
@@ -234,7 +234,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
                 cw.K = g.K;
                 cw.sf_bytes = g.sf_per_expert;
                 cw.sf_borrowed = true;
-                wcache_->cutlass_nvfp4[g.data_ptrs[e]] = cw;
+                wcache_->cutlass_nvfp4[g.data_ptrs[e]] = CutlassNvFP4CacheEntry(std::move(cw));
                 ++ct_count;
             }
         }
@@ -246,7 +246,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             CutlassNvFP4Weight cw;
             convert_nvfp4_to_cutlass_borrowed(it->second, cw, slab + off, stream);
             if (cw.data) {
-                wcache_->cutlass_nvfp4[ptr] = cw;
+                wcache_->cutlass_nvfp4[ptr] = CutlassNvFP4CacheEntry(std::move(cw));
                 ct_count++;
             }
         }
@@ -320,10 +320,10 @@ auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
     CutlassMxFP4Weight mw;
     if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
         mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
-        wcache_->cutlass_mxfp4[w.data] = mw;
         const size_t packed = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);  // compacted in place
         const size_t linear_sf = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 32);
         mx_native_bytes += mw.sf_bytes + linear_sf + packed;
+        wcache_->cutlass_mxfp4[w.data] = CutlassMxFP4CacheEntry(std::move(mw));
         wcache_->cutlass_mxfp4_inplace_bytes += packed;  // already in WEIGHTS
         mx_native++;
     }
@@ -417,18 +417,10 @@ if (mx_native > 0) {
         }
     }
     if (fp16_total > 0) {
-        cudaError_t ae = device_alloc_all(dev_req(d_fp16_bulk, fp16_total));
-        if (ae != cudaSuccess) {
-            IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)", cudaGetErrorString(ae),
-                          fp16_total / (1024.0 * 1024.0));
-            d_fp16_bulk = nullptr;
-        } else {
-            // Track the bulk for shutdown cleanup. Each fp16 Tensor written
-            // below points to a sub-range of this allocation, so we cannot
-            // cudaFree the sub-pointers — only the bulk base.
-            wcache_->fp16_bulk_data = d_fp16_bulk;
-            wcache_->fp16_bulk_data_size = fp16_total;
-        }
+        // The fp16 entries written below are slices of this bulk; Phase 3c never runs with it
+        // (nvfp4_decode_mode == 0 there, > 0 here).
+        wcache_->fp16_bulk_data = pre_dequant_internal::alloc_fp16_bulk(fp16_total);
+        d_fp16_bulk = wcache_->fp16_bulk_data.get();
     }
 
     if (d_fp16_bulk) {
@@ -447,7 +439,7 @@ if (mx_native > 0) {
             // offset N*K/2).
             dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
             int64_t shape[2] = {mw.N, mw.K};
-            wcache_->fp16[ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
+            wcache_->fp16[ptr] = Fp16CacheEntry(Tensor(d_fp16, QType::F16, 2, shape, true));  // bulk slice
         }
     }  // end if (d_fp16_bulk)
 

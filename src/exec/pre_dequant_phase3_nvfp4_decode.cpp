@@ -245,7 +245,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     NvFP4QuantResult result;
     if (!quantize_head_nvfp4(lm, result, "NVFP4 LM head", stream))
         return;
-    wcache_->nvfp4[lm.data] = result;
+    wcache_->nvfp4[lm.data] = NvFP4CacheEntry(std::move(result));
 
     // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
     const size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
@@ -278,9 +278,11 @@ void QuantPipeline::mtp_draft_lm_head_nvfp4_(cudaStream_t stream) {
     Tensor rows(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
     rows.shape[0] = mtp_draft_copy_rows(static_cast<int>(lm.shape[0]),
                                         dispatch_policy().speculative.mtp_draft_vocab);
-    NvFP4QuantResult& r = wcache_->mtp_lm_head_nvfp4;
-    if (!quantize_head_nvfp4(rows, r, "MTP draft NVFP4 LM head", stream))
+    NvFP4QuantResult q;
+    if (!quantize_head_nvfp4(rows, q, "MTP draft NVFP4 LM head", stream))
         return;
+    wcache_->mtp_lm_head_nvfp4 = NvFP4CacheEntry(std::move(q));
+    const NvFP4QuantResult& r = wcache_->mtp_lm_head_nvfp4;
     IMP_LOG_INFO(
         "MTP draft LM head: NVFP4 copy of FP16 head rows [0, %lld) of %lld (%.1f MiB), verification "
         "stays on FP8",
@@ -478,7 +480,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         IMP_CUDA_CHECK_LOG(
             cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
         result.tensor_scale = h_tscale;
-        wcache_->nvfp4[e.orig_ptr] = result;
+        wcache_->nvfp4[e.orig_ptr] = NvFP4CacheEntry(std::move(result));
         actual_bytes += nvfp4_bytes;
         actual_count++;
 
@@ -491,8 +493,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
                 size_t freed = it->second.nbytes();
                 IMP_LOG_DEBUG("NVFP4 cache: freeing FP16 companion %p (%zu B) after quantize",
                               e.orig_ptr, freed);
-                vram_free(vram_alloc_, it->second.data);
-                wcache_->fp16.erase(it);
+                wcache_->fp16.erase(it);  // the entry releases its copy
                 wcache_->fp16_bytes -= freed;
                 actual_from_fp16++;
             }
@@ -588,7 +589,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
 
         NvFP4QuantResult result;
         quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscales_all + i, stream);
-        wcache_->nvfp4[e.orig_ptr] = result;
+        wcache_->nvfp4[e.orig_ptr] = NvFP4CacheEntry(std::move(result));
     }
 
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -672,7 +673,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         IMP_CUDA_CHECK_LOG(
             cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost));
         result.tensor_scale = h_tscale;
-        wcache_->nvfp4[e.orig_ptr] = result;
+        wcache_->nvfp4[e.orig_ptr] = NvFP4CacheEntry(std::move(result));
         second_bytes += nvfp4_bytes;
         second_count++;
 

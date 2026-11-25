@@ -57,14 +57,11 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                 collect(L.gdn_beta, L.gdn_beta.qtype);
             }
             if (fp16_total > 0) {
-                void* d_fp16_bulk = nullptr;
-                IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(d_fp16_bulk, fp16_total)));
+                // Phase 3 and Phase 3c are mutually exclusive (gated on `nvfp4_decode_mode`), so
+                // only one hands a bulk over. The fp16 entries below are slices of it.
+                wcache_->fp16_bulk_data = pre_dequant_internal::alloc_fp16_bulk(fp16_total);
+                void* d_fp16_bulk = wcache_->fp16_bulk_data.get();
                 if (d_fp16_bulk) {
-                    // Track bulk for shutdown cleanup (same pattern as Phase 3).
-                    // Phase 3 and Phase 3c are mutually exclusive in practice
-                    // (gated on `nvfp4_decode_mode`), so only one writes here.
-                    wcache_->fp16_bulk_data = d_fp16_bulk;
-                    wcache_->fp16_bulk_data_size = fp16_total;
                     size_t offset = 0;
                     for (auto& sw : small_weights) {
                         size_t bytes = static_cast<size_t>(sw.N) * sw.K * sizeof(half);
@@ -72,7 +69,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                         offset += bytes;
                         dequant_mxfp4_to_fp16(sw.ptr, sw.N, sw.K, d_fp16, stream);
                         int64_t shape[2] = {sw.N, sw.K};
-                        wcache_->fp16[sw.ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
+                        wcache_->fp16[sw.ptr] = Fp16CacheEntry(Tensor(d_fp16, QType::F16, 2, shape, true));
                     }
                     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                     IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
@@ -110,7 +107,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             CutlassMxFP4Weight mw;
             if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
                 mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
-                wcache_->cutlass_mxfp4[w.data] = mw;
+                wcache_->cutlass_mxfp4[w.data] = CutlassMxFP4CacheEntry(std::move(mw));
                 mx_count++;
             }
         };

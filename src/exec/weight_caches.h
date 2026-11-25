@@ -1,6 +1,8 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "exec/weight_cache_entries.h"  // the move-only value types of the maps below
+#include "memory/device_owned.h"
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
 #include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
 #include "quant/cutlass_mxfp4_weight.h"      // CutlassMxFP4Weight
@@ -13,9 +15,9 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// FP8 weight cache entry (used by WeightCaches::fp8).
-// ---------------------------------------------------------------------------
+// FP8 weight cache entry (WeightCaches::fp8, released_fp8_view, lm_head_fp8). A view, copyable:
+// every pointer is a slice of a WeightCaches slab (overflow, migrated, SSM sidecar, native
+// scales, LM head bulk) or the checkpoint's own bytes. No builder allocates per entry (5 of 5).
 struct FP8CacheEntry {
     Tensor weight;     // [N, K] FP8_E4M3 on device
     float host_scale{};  // absmax / 448
@@ -39,23 +41,21 @@ inline size_t nvfp4_result_bytes(const NvFP4QuantResult& r) {
 
 // WeightCaches: all pre-quantized weight maps for the inference engine. Replaces the
 // former WeightCacheManager type. All members public for zero-overhead forward-pass
-// access. Lifecycle: allocated during pre_dequant_weights(), freed in free_buffers().
+// access. Lifecycle: built by QuantPipeline during pre_dequant_weights(), released by
+// GraphExecutor::free_buffers() (maps cleared before the slabs their entries slice). Move-only.
 struct WeightCaches {
     // --- FP16 weight cache ---
-    std::unordered_map<const void*, Tensor> fp16;
+    std::unordered_map<const void*, Fp16CacheEntry> fp16;
     size_t fp16_bytes = 0;
 
-    // Bulk allocation for the MXFP4->FP16 decode fallback: every Tensor::data in fp16 is a
-    // SUB-pointer into this one cudaMalloc'd buffer (cudaFree on a sub-pointer returns
-    // invalid argument). On shutdown, range-check each fp16 entry against this region and
-    // skip the per-tensor cudaFree; free the bulk pointer once via raw cudaFree.
-    void* fp16_bulk_data = nullptr;
-    size_t fp16_bulk_data_size = 0;
+    // Bulk allocation for the MXFP4->FP16 decode fallback (plain family): the fp16 entries built
+    // from it hold slices and no owner. Reset after fp16 is cleared.
+    DeviceOwned<void> fp16_bulk_data;
 
     // Fused KV: [wk; wv] per layer for strided batched prefill GEMM.
-    std::unordered_map<int, Tensor> fused_kv;
+    std::unordered_map<int, Fp16CacheEntry> fused_kv;
     // Fused gate+up: [w_gate; w_up] per layer.
-    std::unordered_map<int, Tensor> fused_gate_up;
+    std::unordered_map<int, Fp16CacheEntry> fused_gate_up;
 
     // --- FP8 E4M3 weight cache ---
     std::unordered_map<const void*, FP8CacheEntry> fp8;
@@ -67,38 +67,33 @@ struct WeightCaches {
     bool use_fp8 = false;
 
     // Bulk-allocated buffers for FP16→FP8 migration
-    float* fp8_migrated_scales = nullptr;
-    int fp8_migrated_count = 0;
-    void* fp8_migrated_data = nullptr;
-    size_t fp8_migrated_data_size = 0;
+    DeviceOwned<float> fp8_migrated_scales;  // plain family, one float per migrated entry
+    DeviceOwned<uint8_t> fp8_migrated_data;  // VRAMAllocator
 
     // Native FP8 checkpoint weights: input_scale per weight (Phase 0 -> Phase 1, then cleared), and
     // one device buffer {weight_scale, input_scale} per native entry that its scale pointers use.
     std::unordered_map<const void*, float> fp8_native_act_scale;
-    float* fp8_native_scales = nullptr;
+    DeviceOwned<float> fp8_native_scales;  // VRAMAllocator
 
     // Overflow FP8 cache
-    float* fp8_overflow_scales = nullptr;
-    int fp8_overflow_count = 0;
-    void* fp8_overflow_data = nullptr;
-    size_t fp8_overflow_data_size = 0;
+    DeviceOwned<float> fp8_overflow_scales;  // plain family, one float per entry
+    DeviceOwned<uint8_t> fp8_overflow_data;  // VRAMAllocator
 
     // FP8 decode sidecar for GDN/SSM projections; entries
     // carry per-row scales (d_row_scales into the bulk below, d_scale = null).
-    void* fp8_ssm_sidecar_data = nullptr;
-    size_t fp8_ssm_sidecar_data_size = 0;
-    float* fp8_ssm_sidecar_row_scales = nullptr;
+    DeviceOwned<uint8_t> fp8_ssm_sidecar_data;      // VRAMAllocator
+    DeviceOwned<float> fp8_ssm_sidecar_row_scales;  // plain family
     // FP8 E4M3 per-row LM head (gemm.nvfp4_lm_head=fp8): weight.data null = absent. Kept out of
     // `fp8` so the registry never tiers the head on it. One bulk: [vocab*d_model] codes, then scales.
     FP8CacheEntry lm_head_fp8;
-    void* lm_head_fp8_bulk = nullptr;
+    DeviceOwned<uint8_t> lm_head_fp8_bulk;  // VRAMAllocator; empty for a checkpoint FP8 head
     // Source-head bytes Phase 4b returned to the driver, minus the FP8 head (expert-cache regrow).
     size_t lm_head_released_bytes = 0;
     size_t lm_head_fp8_bytes = 0;  // the FP8 head bulk (codes + scales)
     // MTP draft-only NVFP4 copy of a 16-bit head served as FP8 (speculative.mtp_nvfp4_head), rows
     // [0, speculative.mtp_draft_vocab): 270 MiB at 98304 rows, 682 MiB at all 248320 (Qwen3.8-27B; FP8 head
     // 1213 MiB). Verify keeps the FP8 head. Empty = absent.
-    NvFP4QuantResult mtp_lm_head_nvfp4;
+    NvFP4CacheEntry mtp_lm_head_nvfp4;
     // Bytes Phase 4b freed: GDN (F16 input packs; with host-resident experts also the F16
     // ssm_in / gdn_gate / ssm_out), F16 q/k/v/o with host-resident experts, and what of them
     // reached the driver net of the rebuild scratch: the expert cache grows by it.
@@ -111,8 +106,7 @@ struct WeightCaches {
     // Released ssm_in: FP8 view into its pack's sidecar rows, keyed by the freed pointer.
     std::unordered_map<const void*, FP8CacheEntry> released_fp8_view;
     // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
-    void* released_f16_scratch = nullptr;
-    size_t released_f16_scratch_bytes = 0;
+    DeviceOwned<void> released_f16_scratch;  // VRAMAllocator
     // Phase 4c: dense Q8_0 weights whose source is freed, keyed by the freed
     // pointer; their IMMA planes are the only 8-bit copy until mmq_q8_imma_release_all (teardown).
     std::unordered_set<const void*> q8_planes_only;
@@ -120,53 +114,48 @@ struct WeightCaches {
 
     // --- NVFP4 decode weight cache ---
     // Mode: 0=off, 1=additive, 2=only
-    std::unordered_map<const void*, NvFP4QuantResult> nvfp4;
+    std::unordered_map<const void*, NvFP4CacheEntry> nvfp4;
     size_t nvfp4_bytes = 0;
     // FP16 LM head re-quantized to NVFP4: ledger only, outside nvfp4_bytes (budget input).
     size_t nvfp4_lm_head_bytes = 0;
     int nvfp4_decode_mode = 0;
 
     // Per-expert NVFP4
-    std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe;
+    std::unordered_map<const void*, NvFP4MoECacheEntry> nvfp4_moe;
     size_t nvfp4_moe_bytes = 0;
     // Part of nvfp4_moe_bytes VRAMAllocator already noted under its own tag (native MoE cache):
     // the WEIGHT_CACHE_NVFP4 note excludes it.
     size_t nvfp4_moe_noted_bytes = 0;
 
     // --- CUTLASS sm_120 block-scaled NVFP4 ---
-    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
+    std::unordered_map<const void*, CutlassNvFP4CacheEntry> cutlass_nvfp4;
     size_t cutlass_nvfp4_bytes = 0;
     // Part of cutlass_nvfp4_bytes VRAMAllocator already noted (MoE SfAtom slabs): the
     // WEIGHT_CACHE_CUTLASS_SF note excludes it (gpt-oss-20b GGUF: 1164 MiB counted twice).
     size_t cutlass_nvfp4_noted_bytes = 0;
     // NVFP4 PREFILL copies of full-precision GDN projections (gemm.nvfp4_gdn_proj_prefill),
     // keyed by the F16 source pointer; the source stays the M=1 / M<=32 path. The packed
-    // data is owned by the quant results here (micro-scales already freed), the SfAtom
-    // buffer by the entry.
-    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4_prefill;
-    std::vector<NvFP4QuantResult> cutlass_nvfp4_prefill_src;
+    // data is owned by the entries of cutlass_nvfp4_prefill_src (micro-scales already freed),
+    // the SfAtom buffer by the map entry: clear the map before the vector.
+    std::unordered_map<const void*, CutlassNvFP4CacheEntry> cutlass_nvfp4_prefill;
+    std::vector<NvFP4CacheEntry> cutlass_nvfp4_prefill_src;
     size_t cutlass_nvfp4_prefill_bytes = 0;
     // MXFP8 prefill copies (gemm.mxfp8_gdn_proj_prefill), same keying; checked ahead of the
     // NVFP4 map at dispatch. Entries own their data and SfAtom buffers.
-    std::unordered_map<const void*, CutlassMxFP8Weight> cutlass_mxfp8_prefill;
+    std::unordered_map<const void*, CutlassMxFP8CacheEntry> cutlass_mxfp8_prefill;
     size_t cutlass_mxfp8_prefill_bytes = 0;
 
-    // Single bulk allocation backing every cutlass_nvfp4 entry's SfAtom scale factors
-    // (mirrors fp16_bulk_data). Each entry's scale_factors is a sub-pointer with
-    // sf_borrowed=true, so the per-tensor cudaFree is skipped and this slab is freed once at
-    // teardown, replacing thousands of per-tensor cudaMalloc+cudaMemsetAsync calls on large
-    // MoE loads.
-    void* cutlass_sf_slab = nullptr;
-    size_t cutlass_sf_slab_size = 0;
-    // Per-(layer, projection) SfAtom slabs built by the MoE phase. Their per-expert slices
-    // become CutlassNvFP4Weight::scale_factors with sf_borrowed=true, so
-    // free_cutlass_nvfp4_weight skips them and the BASE pointers must be owned here.
-    // Allocated via vram_alloc_force (plain cudaMalloc), so release through VRAMAllocator,
-    // NOT Model::gpu_allocations_ (which frees with cudaFreeAsync, #834).
-    std::vector<void*> owned_sf_slabs;
+    // Single bulk allocation backing the SfAtom scale factors of the cutlass_nvfp4 entries
+    // Phase 3b builds (plain family): one slab instead of thousands of per-tensor allocations
+    // on large MoE loads. Those entries hold slices and no owner. Reset after the map is cleared.
+    DeviceOwned<void> cutlass_sf_slab;
+    // Per-(layer, projection) SfAtom slabs built by the MoE phase (VRAMAllocator, forced); their
+    // per-expert slices are cutlass_nvfp4 entries without an owner. Never in
+    // Model::gpu_allocations_ (stream-ordered release, #834).
+    std::vector<DeviceOwned<void>> owned_sf_slabs;
 
     // --- CUTLASS sm_120 MXFP4 ---
-    std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;
+    std::unordered_map<const void*, CutlassMxFP4CacheEntry> cutlass_mxfp4;
     size_t cutlass_mxfp4_bytes = 0;
     // Native MXFP4 GGUF: packed data compacted in place in the source buffers (already WEIGHTS).
     size_t cutlass_mxfp4_inplace_bytes = 0;

@@ -204,17 +204,13 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     // Register fused KV / gate+up overlays, layer-keyed (not pointer-keyed): a fused tensor
     // is built fresh, so the unfused source pointers (wk, wv) don't appear in any
     // per-tensor wcache_ map.
-    // Ownership transfer (Phase 4.2): the handle takes ownership of the GPU pointer
-    // (h.owned_bytes = allocation size, freed by free_owned_storage); the wcache_ map entry
-    // is erased after transfer so workspace cleanup's wcache_->fused_kv loop is a no-op.
-    auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
+    // Ownership transfer (Phase 4.2): the registry takes the entry's owner
+    // (adopt_fp16_storage; released by free_owned_storage), then the maps are cleared.
+    auto register_fused = [&](TensorKind kind, Fp16CacheEntry& t) -> TensorID {
         if (!t.data)
             return kInvalidTensorID;
         TensorID id = registry_->reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
-        auto& h = registry_->handle(id);
-        h.primary_tier = StorageTier::FP16;
-        h.payload.fp16.data = static_cast<half*>(t.data);
-        h.owned_bytes = static_cast<int64_t>(t.nbytes());
+        registry_->adopt_fp16_storage(id, std::move(t.owned));
         return id;
     };
     for (int i = 0; i < cfg.n_layers; ++i) {
@@ -226,10 +222,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
         }
     }
-    // Transfer storage ownership: clear wcache_->fused_kv / fused_gate_up so the legacy
-    // cleanup loops in executor_workspace_buffers.cu find them empty. The underlying
-    // pointers live on in the registry handles, freed by registry_->free_owned_storage() in
-    // workspace cleanup.
+    // The entries are views now (owner moved out): clearing the maps releases nothing.
     wcache_->fused_kv.clear();
     wcache_->fused_gate_up.clear();
 
@@ -588,12 +581,12 @@ void QuantPipeline::free_source_(Tensor& t, cudaStream_t stream) {
 
 // F16 rebuild target of released_source_gemm_, grown to the largest released weight.
 bool QuantPipeline::ensure_released_scratch_(size_t bytes) {
-    if (wcache_->released_f16_scratch_bytes < bytes) {
-        vram_free(vram_alloc_, wcache_->released_f16_scratch);
-        wcache_->released_f16_scratch = vram_alloc(vram_alloc_, bytes, "released_f16_scratch");
-        wcache_->released_f16_scratch_bytes = wcache_->released_f16_scratch ? bytes : 0;
+    if (wcache_->released_f16_scratch.bytes() < bytes) {
+        wcache_->released_f16_scratch.reset();
+        wcache_->released_f16_scratch = DeviceOwned<void>::allocate(vram_alloc_, bytes,
+                                                                    "released_f16_scratch");
     }
-    return wcache_->released_f16_scratch != nullptr;
+    return static_cast<bool>(wcache_->released_f16_scratch);
 }
 
 // F16 q/k/v/o with an FP8 row-scale decode sidecar (gemm.fp8_attn_proj): M = 1 reads the sidecar either
@@ -761,7 +754,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // it), so every later allocation sees the same free VRAM as without the release.
         const size_t dropped = wcache_->dropped_gdn_bytes + wcache_->dropped_attn_bytes;
         const size_t released = std::min(dropped, pool_released + trim_device_mempool());
-        const size_t price = wcache_->released_f16_scratch_bytes +
+        const size_t price = wcache_->released_f16_scratch.bytes() +
                              (released_layers > 0 ? wcache_->cutlass_mxfp8_prefill_bytes : 0);
         wcache_->dropped_released_bytes = released - std::min(released, price);
         IMP_LOG_INFO(

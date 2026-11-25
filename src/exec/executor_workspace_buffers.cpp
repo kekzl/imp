@@ -1325,32 +1325,13 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     return !nvfp4_dequant_uncapturable_;
 }
 
-// An FP8 cache entry owns its weight bytes unless they sit in a bulk buffer (migrated, overflow,
-// SSM sidecar) or are the checkpoint's own FP8 tensor (native_source: the Model frees those).
-static bool fp8_entry_owns_weight(const FP8CacheEntry& e, const WeightCaches& wc) {
-    const auto p = reinterpret_cast<uintptr_t>(e.weight.data);
-    auto in = [p](const void* base, size_t size) {
-        const auto b = reinterpret_cast<uintptr_t>(base);
-        return base != nullptr && p >= b && p < b + size;
-    };
-    return !e.native_source && !in(wc.fp8_migrated_data, wc.fp8_migrated_data_size) &&
-           !in(wc.fp8_overflow_data, wc.fp8_overflow_data_size) &&
-           !in(wc.fp8_ssm_sidecar_data, wc.fp8_ssm_sidecar_data_size);
-}
-
 void GraphExecutor::free_buffers() {
     free_shexp_overlap_();
-    // T2 arena slabs (allocate_smallm_scratch) die with the arena.
-    if (smallm_ws_ && !smallm_ws_arena_)
-        vram_free(vram_alloc_, smallm_ws_);
-    smallm_ws_ = nullptr;
+    // A T2 arena slice (allocate_smallm_scratch) dies with the arena; a grown buffer is released.
+    (void)smallm_ws_.reset();
     smallm_ws_bytes_ = 0;
-    if (smallm_xq_ && !smallm_xq_arena_)
-        vram_free(vram_alloc_, smallm_xq_);
-    smallm_xq_ = nullptr;
+    (void)smallm_xq_.reset();
     smallm_xq_bytes_ = 0;
-    smallm_ws_arena_ = false;
-    smallm_xq_arena_ = false;
     if (lora_scratch_) {
         lora_scratch_.reset();
         lora_scratch_sz_ = 0;
@@ -1381,146 +1362,52 @@ void GraphExecutor::free_buffers() {
     longrope_n_pairs_ = 0;
     longrope_orig_max_pos_ = 0;
 
-    // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
+    // Weight caches: every entry and slab releases its own buffers (weight_cache_entries.h), so
+    // this is the release ORDER only, unchanged. A map is cleared before the slab its entries
+    // slice. One view outlives its buffer for 6 lines, as before: cutlass_nvfp4 data points at
+    // nvfp4 packed data; nothing reads it here.
     {
-        // Registry-owned overlays (Phase 4.2): fused_kv / fused_gate_up storage is owned by
-        // WeightRegistry handles, not wcache_. The maps below stay empty (pre_dequant_weights);
-        // this helper frees any handle with owned_bytes > 0.
-        registry_.free_owned_storage(vram_alloc_);
-        // Legacy loops — both maps must be empty now. Kept as a defensive
-        // fallback in case a code path writes to them without going through
-        // the Phase-4 registration helper.
-        for (auto& [idx, tensor] : wcache_.fused_kv)
-            if (tensor.data)
-                vram_free(vram_alloc_, tensor.data);
-        wcache_.fused_kv.clear();
-        for (auto& [idx, tensor] : wcache_.fused_gate_up)
-            if (tensor.data)
-                vram_free(vram_alloc_, tensor.data);
+        registry_.free_owned_storage();  // fused KV / gate+up overlays (owners moved in Phase 4)
+        wcache_.fused_kv.clear();        // empty after Phase 4
         wcache_.fused_gate_up.clear();
-        // FP16 cache — entries from the MXFP4 → FP16 decode fallback are
-        // sub-pointers into wcache_.fp16_bulk_data (single bulk cudaMalloc);
-        // skip the per-tensor cudaFree for those, free the bulk once below.
-        for (auto& [ptr, tensor] : wcache_.fp16) {
-            if (!tensor.data)
-                continue;
-            bool in_bulk = wcache_.fp16_bulk_data &&
-                           reinterpret_cast<uintptr_t>(tensor.data) >=
-                               reinterpret_cast<uintptr_t>(wcache_.fp16_bulk_data) &&
-                           reinterpret_cast<uintptr_t>(tensor.data) <
-                               reinterpret_cast<uintptr_t>(wcache_.fp16_bulk_data) +
-                                   wcache_.fp16_bulk_data_size;
-            if (!in_bulk)
-                vram_free(vram_alloc_, tensor.data);
-        }
-        wcache_.fp16.clear();
+        wcache_.fp16.clear();  // private copies; MXFP4-fallback entries slice fp16_bulk_data
         wcache_.fp16_bytes = 0;
-        if (wcache_.fp16_bulk_data) {
-            device_free_all(wcache_.fp16_bulk_data);
-            wcache_.fp16_bulk_data = nullptr;
-            wcache_.fp16_bulk_data_size = 0;
-        }
-        // NVFP4 decode cache
-        for (auto& [ptr, result] : wcache_.nvfp4)
-            free_nvfp4_result(result);
-        wcache_.nvfp4.clear();
+        wcache_.fp16_bulk_data.reset();
+        wcache_.nvfp4.clear();  // per-expert entries slice nvfp4_moe buffers: before nvfp4_moe
         wcache_.nvfp4_bytes = 0;
         wcache_.nvfp4_lm_head_bytes = 0;
-        // NVFP4 MoE expert cache
-        for (auto& [ptr, result] : wcache_.nvfp4_moe)
-            free_nvfp4_moe_result(result);
         wcache_.nvfp4_moe.clear();
         wcache_.nvfp4_moe_bytes = 0;
         wcache_.nvfp4_moe_noted_bytes = 0;
-        // CUTLASS NVFP4 cache. Entries' scale_factors are sub-pointers into
-        // cutlass_sf_slab (sf_borrowed=true) so free_cutlass_nvfp4_weight skips
-        // the per-tensor cudaFree; the slab is freed once below.
-        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4)
-            free_cutlass_nvfp4_weight(cw);
-        wcache_.cutlass_nvfp4.clear();
-        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4_prefill)
-            free_cutlass_nvfp4_weight(cw);
-        wcache_.cutlass_nvfp4_prefill.clear();
-        for (auto& result : wcache_.cutlass_nvfp4_prefill_src)
-            free_nvfp4_result(result);
+        wcache_.cutlass_nvfp4.clear();          // SfAtom slices of the two slab kinds below, or own buffer
+        wcache_.cutlass_nvfp4_prefill.clear();  // data views into cutlass_nvfp4_prefill_src
         wcache_.cutlass_nvfp4_prefill_src.clear();
         wcache_.cutlass_nvfp4_prefill_bytes = 0;
-        for (auto& [ptr, cw] : wcache_.cutlass_mxfp8_prefill) {
-            if (!cw.borrowed_data)
-                vram_free(vram_alloc_, cw.data);
-            vram_free(vram_alloc_, cw.scale_factors);  // a borrowed view's col_scale lives in this block
-        }
-        wcache_.cutlass_mxfp8_prefill.clear();
+        wcache_.cutlass_mxfp8_prefill.clear();  // fp8rows views slice fp8_ssm_sidecar_data
         wcache_.cutlass_mxfp8_prefill_bytes = 0;
         wcache_.cutlass_nvfp4_bytes = 0;
         wcache_.cutlass_nvfp4_noted_bytes = 0;
-        if (wcache_.cutlass_sf_slab) {
-            device_free_all(wcache_.cutlass_sf_slab);
-            wcache_.cutlass_sf_slab = nullptr;
-            wcache_.cutlass_sf_slab_size = 0;
-        }
-        // Per-(layer, projection) SfAtom slabs from the MoE phase. Their
-        // slices are sf_borrowed, so this is the only owner.
-        for (void* slab : wcache_.owned_sf_slabs)
-            vram_free(vram_alloc_, slab);
+        wcache_.cutlass_sf_slab.reset();
+        for (auto& slab : wcache_.owned_sf_slabs)
+            slab.reset();  // front to back, as the hand loop
         wcache_.owned_sf_slabs.clear();
-        // CUTLASS MXFP4 cache
-        for (auto& [ptr, mw] : wcache_.cutlass_mxfp4)
-            free_cutlass_mxfp4_weight(mw);
         wcache_.cutlass_mxfp4.clear();
         wcache_.cutlass_mxfp4_bytes = 0;
-        // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
-        for (auto& [ptr, entry] : wcache_.fp8) {
-            if (entry.weight.data && fp8_entry_owns_weight(entry, wcache_))
-                device_free_all(entry.weight.data);
-            if (entry.d_scale) {
-                bool in_migrated = wcache_.fp8_migrated_scales &&
-                                   entry.d_scale >= wcache_.fp8_migrated_scales &&
-                                   entry.d_scale < wcache_.fp8_migrated_scales + wcache_.fp8_migrated_count;
-                bool in_overflow = wcache_.fp8_overflow_scales &&
-                                   entry.d_scale >= wcache_.fp8_overflow_scales &&
-                                   entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
-                if (!in_migrated && !in_overflow && !entry.native_source)
-                    device_free_all(entry.d_scale);
-            }
-        }
+        // FP8: the entries are views of the slabs below (and of the checkpoint's bytes).
         wcache_.fp8.clear();
+        wcache_.released_fp8_view.clear();
         wcache_.fp8_bytes = 0;
-        vram_free(vram_alloc_, std::exchange(wcache_.fp8_native_scales, nullptr));
-        // FP8 bulk buffers
-        if (wcache_.fp8_migrated_scales) {
-            device_free_all(wcache_.fp8_migrated_scales);
-            wcache_.fp8_migrated_scales = nullptr;
-            wcache_.fp8_migrated_count = 0;
-        }
-        if (wcache_.fp8_migrated_data) {
-            vram_free(vram_alloc_, wcache_.fp8_migrated_data);
-            wcache_.fp8_migrated_data = nullptr;
-            wcache_.fp8_migrated_data_size = 0;
-        }
-        if (wcache_.fp8_overflow_scales) {
-            device_free_all(wcache_.fp8_overflow_scales);
-            wcache_.fp8_overflow_scales = nullptr;
-            wcache_.fp8_overflow_count = 0;
-        }
-        if (wcache_.fp8_overflow_data) {
-            vram_free(vram_alloc_, wcache_.fp8_overflow_data);
-            wcache_.fp8_overflow_data = nullptr;
-            wcache_.fp8_overflow_data_size = 0;
-        }
-        if (wcache_.fp8_ssm_sidecar_data) {
-            vram_free(vram_alloc_, wcache_.fp8_ssm_sidecar_data);
-            wcache_.fp8_ssm_sidecar_data = nullptr;
-            wcache_.fp8_ssm_sidecar_data_size = 0;
-        }
-        if (wcache_.fp8_ssm_sidecar_row_scales) {
-            device_free_all(wcache_.fp8_ssm_sidecar_row_scales);
-            wcache_.fp8_ssm_sidecar_row_scales = nullptr;
-        }
-        vram_free(vram_alloc_, wcache_.lm_head_fp8_bulk);
-        wcache_.lm_head_fp8_bulk = nullptr;
+        wcache_.fp8_native_scales.reset();
+        wcache_.fp8_migrated_scales.reset();
+        wcache_.fp8_migrated_data.reset();
+        wcache_.fp8_overflow_scales.reset();
+        wcache_.fp8_overflow_data.reset();
+        wcache_.fp8_ssm_sidecar_data.reset();
+        wcache_.fp8_ssm_sidecar_row_scales.reset();
         wcache_.lm_head_fp8 = FP8CacheEntry{};
-        free_nvfp4_result(wcache_.mtp_lm_head_nvfp4);
+        wcache_.lm_head_fp8_bulk.reset();
+        wcache_.mtp_lm_head_nvfp4 = NvFP4CacheEntry{};
+        wcache_.released_f16_scratch.reset();
     }
 
     qscratch_.free();
@@ -1531,12 +1418,9 @@ void GraphExecutor::free_buffers() {
 
     // Free gemm_nvfp4 dequant workspace and unregister from the free function.
     release_nvfp4_dequant_ws_();
-    if (lm_head_cutlass_ready_) {
-        // Frees only the owned SfAtom scales; .data is borrowed from the decode cache.
-        free_cutlass_nvfp4_weight(lm_head_cutlass_);
-        lm_head_cutlass_ = {};
-        lm_head_cutlass_ready_ = false;
-    }
+    // Releases only SfAtom scales it built itself; .data and a borrowed SfAtom are cache views.
+    lm_head_cutlass_ = CutlassNvFP4CacheEntry{};
+    lm_head_cutlass_ready_ = false;
     // MLA quartet and absorbed cache are arena-owned since A7 step 4b.2: no frees here;
     // ~Engine closes the arena after every executor teardown.
     mla_kv_a_buf_ = nullptr;

@@ -668,7 +668,7 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
             // cutlass_nvfp4[ptr] for every entry, so a SfAtom built here is immediately orphaned
             // (leaked, never freed) rather than reused. Phase 3b is the authoritative, budget-aware
             // builder; seeding nvfp4 here is all Phase 0b needs to do.
-            wcache_->nvfp4[w.data] = tmp;
+            wcache_->nvfp4[w.data] = NvFP4CacheEntry(std::move(tmp));
             ct_count++;
         };
         for (int i = 0; i < cfg.n_layers; i++) {

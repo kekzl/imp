@@ -75,7 +75,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
             return;
         }
 
-        void* fp16_buf = vram_alloc(vram_alloc_, fp16_bytes, "fp16_weight_cache");
+        auto fp16_own = DeviceOwned<void>::allocate(vram_alloc_, fp16_bytes, "fp16_weight_cache");
+        void* fp16_buf = fp16_own.get();
         if (!fp16_buf) {
             budget_exhausted = true;
             IMP_LOG_WARN("FP16 cache: allocation failed after %d tensors (%.1f MiB)", cached_count,
@@ -90,7 +91,7 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         }
 
         Tensor fp16_tensor(fp16_buf, QType::F16, w.ndim, w.shape, true);
-        wcache_->fp16[w.data] = fp16_tensor;
+        wcache_->fp16[w.data] = Fp16CacheEntry(fp16_tensor, std::move(fp16_own));
         total_cache_bytes += fp16_bytes;
         cached_count++;
 
@@ -199,9 +200,8 @@ static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
     if (!own || cudaMemcpyAsync(own.get(), host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice,
                                 stream) != cudaSuccess)
         return false;  // a failed enqueue leaves nothing on the stream: the owner frees here
-    // Hand-off: WeightCaches::fp8_native_scales owns the array from here.
-    float* d = own.release();
-    wc.fp8_native_scales = d;
+    float* d = own.get();
+    wc.fp8_native_scales = std::move(own);
     for (size_t i = 0; i < entries.size(); ++i) {
         entries[i]->d_scale = d + (2 * i);
         entries[i]->d_act_scale = host[(2 * i) + 1] > 0.0f ? d + (2 * i) + 1 : nullptr;  // null: dynamic

@@ -55,6 +55,15 @@ struct Fp8CacheBuffers {
     return b;
 }
 
+// The MXFP4 -> FP16 fallback bulk (plain family): empty and logged when the driver refuses.
+[[nodiscard]] inline DeviceOwned<void> alloc_fp16_bulk(size_t bytes) {
+    auto bulk = DeviceOwned<void>::allocate_plain(bytes);
+    if (!bulk)
+        IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)", cudaGetErrorString(cudaGetLastError()),
+                      bytes / (1024.0 * 1024.0));
+    return bulk;
+}
+
 // A base allocation leaves the model's list for a stream-ordered owner (#834: these blocks are
 // stream-ordered, a plain free would not return them). Empty when `p` is not a base allocation.
 [[nodiscard]] inline DeviceOwned<void> take_model_allocation_async(Model& m, void* p, size_t bytes,
@@ -231,12 +240,10 @@ inline void deduct_budget(size_t& budget, size_t amount) {
     budget = (budget > amount) ? (budget - amount) : 0;
 }
 
-[[nodiscard]] inline bool create_fused_weight_pair(const Tensor& w_a, const Tensor& w_b,
-                                     const std::unordered_map<const void*, Tensor>& fp16_cache,
-                                     VRAMAllocator* allocator, size_t& total_cache_bytes,
-                                     size_t remaining_budget, cudaStream_t stream,
-                                     std::unordered_map<int, Tensor>& out_map, int layer_idx,
-                                     bool& should_stop) {
+[[nodiscard]] inline bool create_fused_weight_pair(
+    const Tensor& w_a, const Tensor& w_b, const std::unordered_map<const void*, Fp16CacheEntry>& fp16_cache,
+    VRAMAllocator* allocator, size_t& total_cache_bytes, size_t remaining_budget, cudaStream_t stream,
+    std::unordered_map<int, Fp16CacheEntry>& out_map, int layer_idx, bool& should_stop) {
     should_stop = false;
     if (!w_a.data || !w_b.data)
         return false;
@@ -254,7 +261,8 @@ inline void deduct_budget(size_t& budget, size_t amount) {
         return false;
     }
 
-    void* fused_buf = vram_alloc(allocator, 2 * one_sz, "fp16_weight_cache");
+    auto fused_own = DeviceOwned<void>::allocate(allocator, 2 * one_sz, "fp16_weight_cache");
+    void* fused_buf = fused_own.get();
     if (!fused_buf) {
         should_stop = true;
         return false;
@@ -266,7 +274,7 @@ inline void deduct_budget(size_t& budget, size_t amount) {
                                        cudaMemcpyDeviceToDevice, stream));
 
     int64_t shape[2] = {2 * static_cast<int64_t>(a_rows), static_cast<int64_t>(K)};
-    out_map[layer_idx] = Tensor(fused_buf, QType::F16, 2, shape, true);
+    out_map[layer_idx] = Fp16CacheEntry(Tensor(fused_buf, QType::F16, 2, shape, true), std::move(fused_own));
     total_cache_bytes += 2 * one_sz;
     return true;
 }

@@ -621,7 +621,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 ensure_smallm_ws_(need16, ctx.stream);
                 if (smallm_ws_bytes_ >= need16 &&
                     gemm_nvfp4_smallm(nv, reinterpret_cast<const half*>(input.data),
-                                      reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_, ctx.stream,
+                                      reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_.get(),
+                                      ctx.stream,
                                       /*accumulate=*/ctx.beta == 1.0f))
                     return;
             }
@@ -642,7 +643,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
             ensure_smallm_xq_(xq_need, ctx.stream);
             if (kernel_ok && smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
-                uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
+                uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_.get());
                 uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
                 // Shared-activation skip: the call site marked this input as already
                 // quantized by the PREVIOUS dispatch (act-quant hint), and the scratch tag
@@ -672,8 +673,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 xq.tensor_scale = as;
                 xq.N = M;
                 xq.K = K;
-                if (smallm_launch_a4(kern, nv, xq, reinterpret_cast<half*>(output.data), M, N, K, smallm_ws_,
-                                     ctx.beta, ctx.stream))
+                if (smallm_launch_a4(kern, nv, xq, reinterpret_cast<half*>(output.data), M, N, K,
+                                     smallm_ws_.get(), ctx.beta, ctx.stream))
                     return;
             }
         }
@@ -841,7 +842,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 // ensure_smallm_ws_ grows the small-M workspace/xq scratch: never
 // allocates while `stream` is capturing (allocate_smallm_scratch sizes
 // both from the T2 arena at init; growth past that is the lazy fallback).
-// An arena slab is never freed here; it belongs to the arena.
+// An arena slice is never freed (ViewOrOwned drops the view); it belongs to the arena.
 void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
     if (need <= smallm_ws_bytes_)
         return;
@@ -852,13 +853,12 @@ void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
         return;
     // A graph captured on the old address must not replay it: the FFN and verify graph caches
     // drop on the workspace generation (I3, tools/check_graph_stability.py G1).
-    if (smallm_ws_ != nullptr)
+    const bool ws_moved = smallm_ws_.reset();  // an arena slice is dropped, a grown buffer released
+    if (ws_moved)
         ws_.bump_generation();
-    if (smallm_ws_ && !smallm_ws_arena_)
-        vram_free(vram_alloc_, smallm_ws_);
-    smallm_ws_ = static_cast<decltype(smallm_ws_)>(vram_alloc_force(vram_alloc_, need, "smallm_ws_grown"));
+    (void)smallm_ws_.set_owned(
+        DeviceOwned<void>::allocate(vram_alloc_, need, "smallm_ws_grown", /*force=*/true));
     smallm_ws_bytes_ = smallm_ws_ ? need : 0;
-    smallm_ws_arena_ = false;
 }
 
 void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
@@ -869,12 +869,11 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
         cap = cudaStreamCaptureStatusActive;  // be conservative
     if (cap != cudaStreamCaptureStatusNone)
         return;
-    if (smallm_xq_ != nullptr)
+    const bool xq_moved = smallm_xq_.reset();
+    if (xq_moved)
         ws_.bump_generation();  // as ensure_smallm_ws_: no replay on the old address
-    if (smallm_xq_ && !smallm_xq_arena_)
-        vram_free(vram_alloc_, smallm_xq_);
-    smallm_xq_arena_ = false;
-    smallm_xq_ = static_cast<decltype(smallm_xq_)>(vram_alloc_force(vram_alloc_, xq_need, "smallm_xq_grown"));
+    (void)smallm_xq_.set_owned(
+        DeviceOwned<void>::allocate(vram_alloc_, xq_need, "smallm_xq_grown", /*force=*/true));
     smallm_xq_bytes_ = smallm_xq_ ? xq_need : 0;
     smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
     smallm_xq_from_producer_ = false;
