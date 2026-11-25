@@ -343,9 +343,8 @@ bool WeightSnapshot::matches(const Model& model) const {
     return arch_id_ == static_cast<int>(model.config().arch) && n_layers_ == model.n_layers();
 }
 
-bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t stream,
-                                 std::vector<void*>& gpu_allocs, const WarmRestoreOps& ops,
-                                 WeightUploadLog* new_log) {
+bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t stream, WeightSet& gpu_allocs,
+                                 const WarmRestoreOps& ops, WeightUploadLog* new_log) {
     if (!key || !ops.alloc || !ops.copy_h2d)
         return false;
     auto it = blobs_.find(key);
@@ -377,8 +376,8 @@ bool WeightSnapshot::try_restore(const char* key, Tensor& weight, cudaStream_t s
         new_allocs.push_back(p);
     }
 
-    for (void* p : new_allocs)
-        gpu_allocs.push_back(p);
+    for (size_t i = 0; i < new_allocs.size(); ++i)
+        gpu_allocs.adopt(new_allocs[i], rec.allocs[i].bytes);
 
     weight = rec.tensor;
     weight.data = static_cast<char*>(new_allocs[rec.data_alloc]) + rec.data_off;

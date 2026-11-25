@@ -46,15 +46,25 @@ TEST(ExpertPack, RefusesQuantizedHostSingleOrMixedShapes) {
     EXPECT_FALSE(expert_pack_shape(hole, s));
 }
 
-std::vector<void*> owned_by(const std::vector<Tensor>& v) {
-    std::vector<void*> a;
+// The CPU lane has no device: the set's releases of these host addresses go to a no-op hook.
+struct NoDeviceRelease {
+    NoDeviceRelease()
+        : prev(set_weight_owned_release_hook(
+              +[](void*, cudaStream_t) -> cudaError_t { return cudaSuccess; })) {}
+    ~NoDeviceRelease() { set_weight_owned_release_hook(prev); }
+    WeightOwnedReleaseHook prev;
+};
+
+WeightSet owned_by(const std::vector<Tensor>& v) {
+    WeightSet a;
     for (const Tensor& t : v)
-        a.push_back(t.data);
+        a.adopt(t.data, 0);
     return a;
 }
 
 TEST(ExpertPack, FailedAllocationLeavesExpertsUntouched) {
     auto v = experts(4, 64, 64);
+    const NoDeviceRelease no_device;
     auto allocs = owned_by(v);
     const void* before = v[3].data;
     Tensor packed;
@@ -77,8 +87,9 @@ TEST(ExpertPack, FailedAllocationLeavesExpertsUntouched) {
 // A slab or view (data not an allocation of this load) is never released piecewise.
 TEST(ExpertPack, ExpertsNotOwnedAreLeftAlone) {
     auto v = experts(4, 64, 64);
+    const NoDeviceRelease no_device;
     auto allocs = owned_by(v);
-    allocs.pop_back();
+    (void)allocs.extract(v.back().data).release();
     Tensor packed;
     int tries = 0;
     EXPECT_FALSE(pack_device_experts(
@@ -93,6 +104,7 @@ TEST(ExpertPack, ExpertsNotOwnedAreLeftAlone) {
 
 TEST(ExpertPack, AlreadyPackedLayerIsLeftAlone) {
     auto v = experts(4, 64, 64);
+    const NoDeviceRelease no_device;
     auto allocs = owned_by(v);
     static char buf[8];
     const int64_t shape[4] = {4, 64, 64, 0};

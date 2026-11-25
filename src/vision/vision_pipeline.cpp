@@ -1,5 +1,5 @@
 #include "vision/vision_pipeline.h"
-#include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "memory/engine_arena.h"
 #include "vision/vision_loader.h"
 #include "vision/image_processor.h"
@@ -125,13 +125,14 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
 bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream) {
     size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
     half* d_px = d_pixels_;
-    bool need_free = false;
+    DeviceOwned<half> oversize;  // an image past the preallocated buffer: freed after the sync below
     if (!d_px || pixel_bytes > d_pixels_size_) {
-        if (device_alloc_all(dev_req(d_px, pixel_bytes)) != cudaSuccess) {
+        oversize = DeviceOwned<half>::allocate_plain(pixel_bytes);
+        if (!oversize) {
             IMP_LOG_ERROR("Vision: cudaMalloc failed for %d pixels", n_pixels);
             return false;
         }
-        need_free = true;
+        d_px = oversize.get();
     }
     cudaMemcpyAttributes attrs{};
     attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
@@ -147,8 +148,7 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
         IMP_LOG_ERROR("Vision: encode sync failed: %s", cudaGetErrorString(se));
         ok = false;
     }
-    if (need_free)
-        device_free_all(d_px);
+    oversize.reset();
 
     if (ok) {
         has_input_ = true;

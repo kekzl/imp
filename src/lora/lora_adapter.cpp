@@ -1,5 +1,5 @@
 #include "lora/lora_adapter.h"
-#include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "core/logging.h"
 #include "model/json_util.h"
 #include "model/model_limits.h"
@@ -62,16 +62,16 @@ bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is
 namespace {
 
 // Convert one host tensor (F32 / F16 / BF16 wire dtype) to an F16 device
-// buffer. Returns nullptr on failure.
-void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, int64_t numel) {
+// buffer. Empty on failure.
+DeviceOwned<void> upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, int64_t numel) {
     std::vector<uint16_t> h(numel);
     if (dtype == "F16") {
         if (nbytes != static_cast<size_t>(numel) * 2)
-            return nullptr;
+            return {};
         std::memcpy(h.data(), src, nbytes);
     } else if (dtype == "BF16") {
         if (nbytes != static_cast<size_t>(numel) * 2)
-            return nullptr;
+            return {};
         const uint16_t* bf = reinterpret_cast<const uint16_t*>(src);
         for (int64_t i = 0; i < numel; i++) {
             const __half_raw hf(__float2half(bf16_to_float(bf[i])));
@@ -79,33 +79,31 @@ void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, in
         }
     } else if (dtype == "F32") {
         if (nbytes != static_cast<size_t>(numel) * 4)
-            return nullptr;
+            return {};
         const float* f = reinterpret_cast<const float*>(src);
         for (int64_t i = 0; i < numel; i++) {
             const __half_raw hf(__float2half(f[i]));
             h[i] = hf.x;
         }
     } else {
-        return nullptr;
+        return {};
     }
-    void* dev = nullptr;
-    if (device_alloc_all(dev_req(dev, static_cast<size_t>(numel) * 2)) != cudaSuccess)
-        return nullptr;
+    DeviceOwned<void> owned = DeviceOwned<void>::allocate_plain(static_cast<size_t>(numel) * 2);
+    void* dev = owned.get();
+    if (!dev)
+        return owned;
     // Pageable H2D may return before the DMA lands: drain it before a LoRA GEMM reads it (#2275).
     if (cudaMemcpy(dev, h.data(), static_cast<size_t>(numel) * 2, cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaStreamSynchronize(nullptr) != cudaSuccess) {
-        device_free_all(dev);
-        return nullptr;
-    }
-    return dev;
+        cudaStreamSynchronize(nullptr) != cudaSuccess)
+        owned.reset();
+    return owned;
 }
 
 }  // namespace
 
 LoraAdapter::~LoraAdapter() {
-    for (void* p : device_allocs_)
-        if (p)
-            device_free_all(p);
+    for (DeviceOwned<void>& b : device_allocs_)  // front to back, as the loop it replaces
+        b.reset();
 }
 
 bool LoraAdapter::check_dims(const LoraDims& d, std::string* why) const {
@@ -255,12 +253,13 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
                           static_cast<long long>(shape[0]), static_cast<long long>(shape[1]), dtype.c_str());
             return false;
         }
-        void* dev = upload_f16(data.data() + off0, off1 - off0, dtype, numel);
+        DeviceOwned<void> owned = upload_f16(data.data() + off0, off1 - off0, dtype, numel);
+        void* dev = owned.get();
         if (!dev) {
             IMP_LOG_ERROR("LoRA: tensor '%s' upload failed (dtype=%s)", key.c_str(), dtype.c_str());
             return false;
         }
-        device_allocs_.push_back(dev);
+        device_allocs_.push_back(std::move(owned));
 
         LoraWeights& w = layers_[layer].proj[std::to_underlying(proj)];
         // A is [r, K], B is [N, r]: the rank is declared twice and has to agree

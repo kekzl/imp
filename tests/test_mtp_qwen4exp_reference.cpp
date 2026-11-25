@@ -191,7 +191,8 @@ TEST(MtpQwen4ExpReference, TwoDraftStepsMatchVllmMath) {
     ASSERT_EQ(head.layout, imp::MtpLayout::Qwen4Exp);
     ASSERT_EQ(head.hc_count, kHc);
 
-    std::vector<void*> allocs, head_allocs;
+    std::vector<void*> allocs;
+    imp::WeightSet head_allocs;  // stream-ordered pool, freed through weights_free as Model does
     ASSERT_TRUE(imp::upload_mtp_head(head, imp::QType::F16, /*arch_norm_offset=*/1.0f, nullptr, head_allocs));
     imp::Tensor emb_bf16, lm_bf16;
     ASSERT_TRUE(ck.tensor("model.language_model.embed_tokens.weight", emb_bf16));
@@ -252,7 +253,6 @@ TEST(MtpQwen4ExpReference, TwoDraftStepsMatchVllmMath) {
     imp::mtp_workspace_free(ws);
     for (void* p : allocs)
         cudaFree(p);
-    for (void* p : head_allocs)
-        cudaFreeAsync(p, nullptr);  // stream-ordered pool, as Model frees its weights
+    EXPECT_EQ(head_allocs.release_all(nullptr), 0);
     cudaDeviceSynchronize();
 }

@@ -2,6 +2,7 @@
 
 #include "memory/host_pinned.h"
 #include "memory/upload_reserve.h"
+#include "memory/weight_owned.h"
 #include "model/generation_config.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
@@ -109,11 +110,14 @@ public:
     // during the last upload_weights_gpu pass. 0 for a fully-cold load.
     int last_warm_hits() const { return last_warm_hits_; }
 
-    // Remove a pointer from gpu_allocations_ tracking (does not free).
+    // The block leaves gpu_allocations_ and the WEIGHTS account without a free: the caller owns it.
     void release_gpu_allocation(void* ptr);
     // Untrack, async free and mark dropped_source (the pointer stays a cache key): the one free
     // site for source weights nothing reads any more (Phases 4b/4c, the encoder).
     void free_source_weight(Tensor& t, cudaStream_t stream);
+    // Moves the handle of base pointer `ptr` out, evicts its snapshot record and marks the
+    // sources consumed (#830); empty when `ptr` is not a tracked base.
+    [[nodiscard]] WeightOwned take_gpu_allocation_(void* ptr);
 
     // Return true if `ptr` is a BASE pointer tracked in gpu_allocations_
     // (1:1 with a cudaMallocAsync), false if it's an offset into a shared
@@ -191,7 +195,8 @@ public:
     // Used to derive the on-disk warm-cache location and its fingerprint
     // (memory/weight_cache_file.h). Empty for synthetically-built models.
     std::string source_path_;
-    std::vector<void*> gpu_allocations_;
+    // Every weight block of this model in upload order (I5); ~Model frees them on the null stream.
+    WeightSet gpu_allocations_;
     // mmap regions page-locked via cudaHostRegister. Owners (T5b): the
     // unregister loop that used to live in ~Model is gone.
     std::vector<HostRegistration> host_pinned_;
@@ -205,8 +210,8 @@ public:
 };
 
 // Uploads an MTP head that belongs to no Model (tests/test_mtp_qwen4exp_reference.cpp) through the
-// same path Model::upload_weights_gpu takes. Allocations land in gpu_allocs; the caller frees them.
-[[nodiscard]] bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset, cudaStream_t stream,
-                     std::vector<void*>& gpu_allocs);
+// same path Model::upload_weights_gpu takes. Allocations land in gpu_allocs, which frees them.
+[[nodiscard]] bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset,
+                                   cudaStream_t stream, WeightSet& gpu_allocs);
 
 }  // namespace imp

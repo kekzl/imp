@@ -9,6 +9,8 @@
 // adapter_model.safetensors (...layers.N.<proj>.lora_{A,B}.weight). A is [r,K], B is
 // [N,r]; F32/F16/BF16 accepted, stored F16 on device.
 
+#include "memory/device_owned.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -101,7 +103,7 @@ private:
         LoraWeights proj[std::to_underlying(LoraProj::COUNT)];
     };
     std::vector<LayerSlots> layers_;
-    std::vector<void*> device_allocs_;
+    std::vector<DeviceOwned<void>> device_allocs_;  // plain family, released in ~LoraAdapter
     float scale_ = 1.0f;
     int max_rank_ = 0;
     int n_tensors_ = 0;

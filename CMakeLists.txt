@@ -198,6 +198,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/weight_cache_file.cpp
     src/memory/device_alloc_all.cpp
     src/memory/device_owned.cpp
+    src/memory/weight_owned.cpp
     src/memory/buffer.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cpp
@@ -1151,6 +1152,8 @@ if(IMP_BUILD_TESTS)
         tests/test_host_pinned.cpp
         # DeviceOwned: one release per allocation through the family that produced it (I5).
         tests/test_device_owned.cpp
+        # WeightOwned / WeightSet: weight blocks release through weights_free, once, on a named stream (I5).
+        tests/test_weight_owned.cpp
         # LeakedStatic / StaticDeviceOwned: static owners release in the reset hook, never at exit.
         tests/test_leaked_static.cpp
         # ViewOrOwned: a StableSpan view or a DeviceOwned allocation, never both (I3 + I5).

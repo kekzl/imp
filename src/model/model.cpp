@@ -38,27 +38,18 @@ Model::~Model() {
     // a stream-ordered alloc returns success without returning the block to the pool, leaking
     // weights-sized VRAM per unload. At exit the runtime may tear down the pool before this
     // destructor runs; ignore errors then, the driver reclaims all device memory on context destroy.
-    const bool had_gpu_weights = !gpu_allocations_.empty();
-    int free_fail = 0;
+    const size_t n_gpu_weights = gpu_allocations_.size();
+    const bool had_gpu_weights = n_gpu_weights > 0;
     cudaError_t first_err = cudaSuccess;
-    for (void* ptr : gpu_allocations_) {
-        if (ptr) {
-            cudaError_t e = weights_free(ptr, nullptr);
-            if (e != cudaSuccess) {
-                if (free_fail == 0)
-                    first_err = e;
-                free_fail++;
-            }
-        }
-    }
+    // Front to back on the null stream, through each handle (weights_free).
+    const int free_fail = gpu_allocations_.release_all(nullptr, &first_err);
     if (had_gpu_weights)
         (void)cudaStreamSynchronize(nullptr);  // retire the frees for the pool
     if (free_fail > 0) {
-        IMP_LOG_WARN("Model teardown: %d/%zu weight frees failed (first: %s)", free_fail,
-                     gpu_allocations_.size(), cudaGetErrorString(first_err));
+        IMP_LOG_WARN("Model teardown: %d/%zu weight frees failed (first: %s)", free_fail, n_gpu_weights,
+                     cudaGetErrorString(first_err));
         (void)cudaGetLastError();  // clear sticky error (e.g. process-exit teardown)
     }
-    gpu_allocations_.clear();
     // Returns freed weights to the driver: the default cudaMallocAsync pool has an unbounded
     // release threshold, so cudaFreeAsync only parks memory - the next plain cudaMalloc can't
     // see it and OOMs. Trim here so ANY model destruction returns it, not just C-API teardown.
@@ -114,13 +105,9 @@ size_t Model::release_weight_pages() {
 #endif
 }
 
-void Model::release_gpu_allocation(void* ptr) {
-    if (!ptr)
-        return;
-    auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
-    if (it != gpu_allocations_.end()) {
-        gpu_allocations_.erase(it);
-        MemAccount::instance().note_free(ptr);  // every caller frees it next (#2354)
+WeightOwned Model::take_gpu_allocation_(void* ptr) {
+    WeightOwned h = gpu_allocations_.extract(ptr);
+    if (h) {
         // Suspend-to-RAM: this source is about to be freed — its snapshot
         // record is no longer capturable (the tensor re-uploads cold at resume).
         if (upload_log_)
@@ -130,19 +117,24 @@ void Model::release_gpu_allocation(void* ptr) {
         // second engine on this handle instead of reading freed memory and poisoning CUDA (#830).
         sources_consumed_ = true;
     }
+    return h;
+}
+
+void Model::release_gpu_allocation(void* ptr) {
+    WeightOwned h = take_gpu_allocation_(ptr);
+    if (h)
+        MemAccount::instance().note_free(h.release());  // the caller frees it next (#2354)
 }
 
 void Model::free_source_weight(Tensor& t, cudaStream_t stream) {
-    release_gpu_allocation(t.data);
-    IMP_CUDA_CHECK_LOG(weights_free(t.data, stream));
+    WeightOwned h = take_gpu_allocation_(t.data);
+    if (!h)  // not a tracked base: freed all the same, as before the handles
+        h = WeightOwned::adopt(t.data, 0, stream);
+    IMP_CUDA_CHECK_LOG(h.reset_on(stream));
     t.dropped_source = true;
 }
 
-bool Model::is_base_gpu_allocation(void* ptr) const {
-    if (!ptr)
-        return false;
-    return std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr) != gpu_allocations_.end();
-}
+bool Model::is_base_gpu_allocation(void* ptr) const { return gpu_allocations_.contains(ptr); }
 
 namespace {
 enum class NormGamma : uint8_t { UNSET, DIRECT, DELTA };
