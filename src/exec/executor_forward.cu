@@ -184,8 +184,8 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
     // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
     if (const auto ct = wcache_.cutlass_nvfp4.find(model_->output_proj().data);
         ct != wcache_.cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) {
-        lm_head_cutlass_ = ct->second;
-        lm_head_cutlass_.sf_borrowed = true;
+        CutlassNvFP4Weight view = ct->second;  // sf_borrowed inside an entry: a view, no owner
+        lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(view));
         lm_head_cutlass_ready_ = lm_head_cutlass_.data != nullptr;
         IMP_LOG_INFO(
             "LM head: batched-decode CUTLASS GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
@@ -193,12 +193,13 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;
     }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
-    convert_nvfp4_to_cutlass(it->second, lm_head_cutlass_, stream);
+    CutlassNvFP4Weight built;
+    convert_nvfp4_to_cutlass(it->second, built, stream);
+    lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(built));  // owns the SfAtom scales
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {
         IMP_LOG_WARN("LM head: CUTLASS NVFP4 conversion failed (%s), GEMV path stays",
                      cudaGetErrorString(err));
-        free_cutlass_nvfp4_weight(lm_head_cutlass_);
-        lm_head_cutlass_ = {};
+        lm_head_cutlass_ = CutlassNvFP4CacheEntry{};
         return;
     }
     lm_head_cutlass_ready_ =
@@ -909,7 +910,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
                 ensure_smallm_xq_(xq_need, stream);
                 if (smallm_xq_bytes_ >= xq_need) {
-                    uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
+                    uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_.get());
                     uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
                     if (!rmsnorm_nvfp4(h_final, model_->output_norm(), no_final, xq_packed, xq_scales,
                                        cfg.rms_norm_eps, stream, norm_w_off_)) {

@@ -4,33 +4,15 @@
 # a new allocation gets a move-only owner instead (VramOwned or DeviceOwned, src/memory/;
 # docs/internals/MEMORY.md, invariant I5).
 #
-# remaining: 77 release sites in 23 files, 2 owner-or-view flags in 2 files
+# remaining: 15 release sites in 6 files, 1 owner-or-view flags in 1 files
 
 [release sites]
 src/compute/mtp_forward.cu  # 4
 src/compute/nvfp4_sfatom_quant.cu  # 1
 src/exec/executor_forward_moe.cu  # 1
-src/exec/executor_gemm_dispatch.cpp  # 2
-src/exec/executor_workspace_buffers.cpp  # 20
-src/exec/pre_dequant_phase3_fp8.cpp  # 3
-src/exec/pre_dequant_phase3_nvfp4_decode.cpp  # 1
-src/exec/pre_dequant_phase4_tensor_registry.cpp  # 1
-src/exec/weight_handle.cpp  # 1
-src/lora/lora_adapter.cpp  # 2
-src/model/model.cpp  # 2
-src/model/weight_upload.cpp  # 15
 src/quant/gpt_oss_mxfp4_convert.cpp  # 1
 src/quant/mxfp4_sfatom.cu  # 3
 src/quant/nvfp4_quant.cu  # 5
-src/runtime/batch.cpp  # 1
-src/runtime/cuda_graph.cu  # 1
-src/runtime/engine_graph_decode.cpp  # 5
-src/runtime/engine_internal.h  # 1
-src/runtime/engine_prefill_ragged.cpp  # 1
-src/runtime/engine_scheduler.cpp  # 3
-src/runtime/engine_workspace_warmup.cpp  # 2
-src/vision/vision_pipeline.cpp  # 1
 
 [owner-or-view flags]
 src/quant/nvfp4_quant.h  # 1
-src/runtime/engine_scheduler.cpp  # 1

@@ -53,7 +53,8 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 if (fp16_all_bytes + fp16_bytes > fp8_budget)
                     return;
 
-                void* fp16_buf = vram_alloc(vram_alloc_, fp16_bytes, "fp16_nvfp4_cache");
+                auto fp16_own = DeviceOwned<void>::allocate(vram_alloc_, fp16_bytes, "fp16_nvfp4_cache");
+                void* fp16_buf = fp16_own.get();
                 if (!fp16_buf)
                     return;
 
@@ -71,7 +72,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 
                 int64_t fp16_shape[4] = {static_cast<int64_t>(rows), logical_K, 0, 0};
                 Tensor fp16_tensor(fp16_buf, QType::F16, 2, fp16_shape, true);
-                wcache_->fp16[w.data] = fp16_tensor;
+                wcache_->fp16[w.data] = Fp16CacheEntry(fp16_tensor, std::move(fp16_own));
                 fp16_all_count++;
                 fp16_all_bytes += fp16_bytes;
             };
@@ -212,11 +213,9 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 
             bufs.block_maxes.reset();
             bufs.absmax.reset();
-            // Hand-off: WeightCaches::fp8_overflow_scales / fp8_overflow_data own the slabs from here.
-            wcache_->fp8_overflow_scales = bufs.scales.release();
-            wcache_->fp8_overflow_count = actual_count;
-            wcache_->fp8_overflow_data = bufs.bulk.release();
-            wcache_->fp8_overflow_data_size = total_fp8_bytes;
+            // The fp8 entries above slice these two slabs.
+            wcache_->fp8_overflow_scales = std::move(bufs.scales);
+            wcache_->fp8_overflow_data = std::move(bufs.bulk);
             fp8_count = actual_count;
         }
 
@@ -316,8 +315,8 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     size_t total_rows = 0;
     for (const auto& e : entries)
         total_rows += static_cast<size_t>(e.rows);
-    float* d_row_scales = nullptr;
-    IMP_CUDA_CHECK_LOG(device_alloc_all(dev_req(d_row_scales, total_rows * sizeof(float))));
+    auto row_scales_own = DeviceOwned<float>::allocate_plain(total_rows * sizeof(float));
+    float* d_row_scales = row_scales_own.get();
     if (!d_row_scales) {
         bulk_own.reset();
         IMP_LOG_WARN("fp8_ssm_proj: row-scale alloc failed — decode keeps FP16");
@@ -344,10 +343,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // Attributed by VRAMAllocator under the "fp8_ssm_sidecar" tag; record the
     // amount so the WEIGHT_CACHE_FP8 note can leave it out.
     wcache_->fp8_sidecar_bytes += total_bytes;
-    // Hand-off: WeightCaches::fp8_ssm_sidecar_data owns the slab from here.
-    wcache_->fp8_ssm_sidecar_data = bulk_own.release();
-    wcache_->fp8_ssm_sidecar_data_size = total_bytes;
-    wcache_->fp8_ssm_sidecar_row_scales = d_row_scales;
+    // The fp8 entries above slice these two slabs.
+    wcache_->fp8_ssm_sidecar_data = std::move(bulk_own);
+    wcache_->fp8_ssm_sidecar_row_scales = std::move(row_scales_own);
 
     IMP_LOG_INFO(
         "fp8 decode sidecar: %zu projections%s%s (%.1f MiB, %zu per-row scales; "

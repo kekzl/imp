@@ -76,14 +76,16 @@ void borrow_fp8_rows(WeightCaches& wc, VRAMAllocator* alloc, const Tensor& w, co
     cw.sf_bytes = cutlass_mxfp8_sf_size(static_cast<int>(cw.N), static_cast<int>(cw.K));
     const size_t sf_aligned = (cw.sf_bytes + 255) & ~size_t{255};
     const size_t bytes = sf_aligned + (cw.N * sizeof(float));
-    cw.scale_factors = vram_alloc(alloc, bytes, "mxfp8_rows_sf");
+    auto sf_own = DeviceOwned<void>::allocate(alloc, bytes, "mxfp8_rows_sf");
+    cw.scale_factors = sf_own.get();
     if (!cw.scale_factors)
         return;
     float* col_scale = reinterpret_cast<float*>(static_cast<char*>(cw.scale_factors) + sf_aligned);
     mxfp8_sf_from_row_scales(e.d_row_scales + row0, cw.scale_factors, col_scale, static_cast<int>(cw.N),
                              static_cast<int>(cw.K), stream);
     cw.col_scale = col_scale;
-    wc.cutlass_mxfp8_prefill[w.data] = cw;
+    // Data: rows of the FP8 sidecar (no owner). SFB + col_scale: one block, the entry's.
+    wc.cutlass_mxfp8_prefill[w.data] = CutlassMxFP8CacheEntry(cw, DeviceOwned<void>{}, std::move(sf_own));
     out.n++;
     out.bytes += bytes;
     out.max_k = std::max(out.max_k, w.shape[1]);
@@ -169,10 +171,10 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         micro.micro_scales = result.micro_scales;
         free_nvfp4_result(micro);
         result.micro_scales = nullptr;
-        wcache_->cutlass_nvfp4_prefill_src.push_back(result);
-        wcache_->cutlass_nvfp4_prefill[w.data] = cw;
-        n_nv++;
         nv_bytes += (static_cast<size_t>(w.shape[0]) * w.shape[1] / 2) + cw.sf_bytes;
+        wcache_->cutlass_nvfp4_prefill_src.emplace_back(std::move(result));
+        wcache_->cutlass_nvfp4_prefill[w.data] = CutlassNvFP4CacheEntry(std::move(cw));
+        n_nv++;
     };
 
     auto quantize_mxfp8 = [&](const Tensor& w) {
@@ -195,12 +197,11 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         quantize_fp16_to_mxfp8_cutlass(w.data, data.get(), sf.get(), static_cast<int>(cw.N),
                                        static_cast<int>(cw.K), stream);
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        // Hand-off: the WeightCaches::cutlass_mxfp8_prefill entry owns copy + scale factors from here.
-        cw.data = data.release();
-        cw.scale_factors = sf.release();
-        wcache_->cutlass_mxfp8_prefill[w.data] = cw;
-        n_mx++;
+        cw.data = data.get();
+        cw.scale_factors = sf.get();
         mx_bytes += cw.data_bytes + cw.sf_bytes;
+        wcache_->cutlass_mxfp8_prefill[w.data] = CutlassMxFP8CacheEntry(cw, std::move(data), std::move(sf));
+        n_mx++;
         mx_max_k = std::max(mx_max_k, w.shape[1]);
     };
 

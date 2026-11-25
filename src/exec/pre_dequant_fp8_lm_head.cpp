@@ -90,8 +90,7 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     e.weight = Tensor(bulk, QType::FP8_E4M3, 2, shape, true);
     e.d_row_scales = scales;
     wcache_->lm_head_fp8 = e;
-    // Hand-off: WeightCaches::lm_head_fp8_bulk owns codes + row scales from here.
-    wcache_->lm_head_fp8_bulk = bulk_own.release();
+    wcache_->lm_head_fp8_bulk = std::move(bulk_own);  // codes + row scales, the entry above is a view
     wcache_->lm_head_fp8_bytes = total;
     IMP_LOG_INFO(
         "FP8 LM head: [%d x %d] %s -> E4M3 per-row scales (%.1f MiB), all LM-head rows; "
@@ -108,7 +107,7 @@ void QuantPipeline::adopt_checkpoint_fp8_lm_head_(LmHeadMode mode) {
     e.weight = Tensor(lm.data, QType::FP8_E4M3, 2, lm.shape, true);
     e.d_row_scales = static_cast<float*>(sc.data);
     wcache_->lm_head_fp8 = e;
-    wcache_->lm_head_fp8_bulk = nullptr;
+    wcache_->lm_head_fp8_bulk.reset();
     wcache_->lm_head_fp8_bytes = 0;
     const double mib = ((static_cast<double>(lm.shape[0]) * lm.shape[1]) + sc.nbytes()) / (1024.0 * 1024.0);
     IMP_LOG_INFO(

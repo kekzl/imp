@@ -21,11 +21,11 @@ bool expert_pack_shape(const std::vector<Tensor>& experts, int64_t out_shape[3])
     return true;
 }
 
-bool pack_device_experts(std::vector<Tensor>& experts, Tensor& packed, std::vector<void*>& allocs,
+bool pack_device_experts(std::vector<Tensor>& experts, Tensor& packed, WeightSet& allocs,
                          const ExpertPackAlloc& alloc, const ExpertPackRelease& release,
                          cudaStream_t stream) {
     int64_t shape[3] = {};
-    auto owned = [&](const Tensor& t) { return std::ranges::find(allocs, t.data) != allocs.end(); };
+    auto owned = [&](const Tensor& t) { return allocs.contains(t.data); };
     if (packed.data != nullptr || !expert_pack_shape(experts, shape) || !std::ranges::all_of(experts, owned))
         return false;
     const size_t expert_bytes = static_cast<size_t>(shape[1]) * shape[2] * sizeof(uint16_t);
@@ -49,7 +49,7 @@ bool pack_device_experts(std::vector<Tensor>& experts, Tensor& packed, std::vect
         experts[e] = Tensor(buf + e * expert_bytes, QType::F16, 2, eshape, true);
     }
     packed = Tensor(buf, QType::F16, 3, shape, true);
-    allocs.push_back(buf);
+    allocs.adopt(buf, total);
     return true;
 }
 

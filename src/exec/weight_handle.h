@@ -5,6 +5,7 @@
 #include "core/qtype.h"
 #include "core/tensor_kind.h"
 #include "core/storage_tier.h"
+#include "memory/device_owned.h"
 
 #include <cstdint>
 #include <cuda_fp16.h>
@@ -12,8 +13,6 @@
 #include <vector>
 
 namespace imp {
-
-class VRAMAllocator;
 
 class WeightRegistry {
 public:
@@ -34,14 +33,17 @@ public:
 
     void clear();
 
-    // Free VRAM for any handle whose owned_bytes > 0. Borrowed handles (owned_bytes == 0)
-    // are left alone; their storage is managed by the original allocator. Idempotent: each
-    // freed handle's owned_bytes resets to 0 and payload to nullptr, so a second call is a
-    // no-op.
-    size_t free_owned_storage(VRAMAllocator* alloc);
+    // An FP16 overlay (fused KV / gate+up) hands its buffer to handle `id`: payload.fp16.data and
+    // owned_bytes describe it, the owner is kept here. WeightHandle stays a copyable view.
+    void adopt_fp16_storage(TensorID id, DeviceOwned<void>&& storage);
+
+    // Releases every adopted buffer once and nulls the payload of its handle (owned_bytes back
+    // to 0). Handles that borrow (owned_bytes == 0) are left alone. Idempotent. Returns bytes.
+    size_t free_owned_storage();
 
 private:
     std::vector<WeightHandle> handles_;
+    std::vector<DeviceOwned<void>> owned_storage_;  // survives clear(): released only above
 };
 
 }  // namespace imp

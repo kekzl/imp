@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "memory/device_owned.h"
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -27,7 +28,7 @@ struct Batch {
     int actual_blocks_per_seq = 0;  // Pre-padding block count (for upload cache invalidation)
 };
 
-// GPU-side batch data (device pointers)
+// GPU-side batch data: non-owning device pointers (pool slices, or the buffers of a GPUBatchOwned)
 struct GPUBatch {
     int32_t* d_token_ids = nullptr;  // [total_tokens]
     int* d_positions = nullptr;      // [total_tokens]
@@ -40,13 +41,27 @@ struct GPUBatch {
     int total_tokens = 0;
     int max_blocks_per_seq = 0;
 
-    // Upload CPU Batch to GPU (async)
+    bool is_valid() const { return d_token_ids != nullptr; }
+};
+
+// A privately allocated batch (no pool: bare engines, tests). The 5 buffers are owned here and the
+// base holds the views; not copyable, not movable (a moved-from base would keep stale views).
+struct GPUBatchOwned : GPUBatch {
+    GPUBatchOwned() = default;
+    GPUBatchOwned(const GPUBatchOwned&) = delete;
+    GPUBatchOwned& operator=(const GPUBatchOwned&) = delete;
+
+    // Upload CPU Batch to GPU (async); releases a previous upload first.
     void upload(const Batch& batch, cudaStream_t stream = nullptr);
 
-    // Free device memory
+    // Free device memory. Idempotent; the destructor frees too.
     void free();
 
-    bool is_valid() const { return d_token_ids != nullptr; }
+    // The non-owning copy handed to the forward.
+    const GPUBatch& view() const { return *this; }
+
+private:
+    DeviceOwned<void> own_[5];
 };
 
 // Pre-allocated GPU batch pool for CUDA Graph compatibility.

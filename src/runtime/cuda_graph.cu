@@ -797,9 +797,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         d_step_limit_ = sv.step_limit;
         d_think_limit_ = sv.think_limit;
     } else {
-        err = device_alloc_all(dev_req(d_token_id_, SAMPLE_SCRATCH_BYTES), dev_req(d_position_, sizeof(int)),
-                               dev_req(d_context_len_, sizeof(int)), dev_req(d_step_counter_, sizeof(int)),
-                               dev_req(d_step_limit_, sizeof(int)), dev_req(d_think_limit_, sizeof(int)));
+        err = alloc_owned_(dev_req(d_token_id_, SAMPLE_SCRATCH_BYTES), dev_req(d_position_, sizeof(int)),
+                           dev_req(d_context_len_, sizeof(int)), dev_req(d_step_counter_, sizeof(int)),
+                           dev_req(d_step_limit_, sizeof(int)), dev_req(d_think_limit_, sizeof(int)));
         if (err != cudaSuccess)
             goto fail;
     }
@@ -808,7 +808,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         if (slotted) {
             d_stop_ids_ = slot_.view().stop_ids;
         } else {
-            err = device_alloc_all(dev_req(d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t)));
+            err = alloc_owned_(dev_req(d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t)));
             if (err != cudaSuccess)
                 goto fail;
         }
@@ -832,10 +832,10 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
             d_content_after_think_ = sv.content_after_think;
             d_stop_mask_active_ = sv.stop_mask_active;
         } else {
-            err = device_alloc_all(dev_req(d_think_count_, sizeof(int)), dev_req(d_in_think_, sizeof(int)),
-                                   dev_req(d_think_exit_step_, sizeof(int)),
-                                   dev_req(d_content_after_think_, sizeof(int)),
-                                   dev_req(d_stop_mask_active_, sizeof(int)));
+            err = alloc_owned_(dev_req(d_think_count_, sizeof(int)), dev_req(d_in_think_, sizeof(int)),
+                               dev_req(d_think_exit_step_, sizeof(int)),
+                               dev_req(d_content_after_think_, sizeof(int)),
+                               dev_req(d_stop_mask_active_, sizeof(int)));
             if (err != cudaSuccess)
                 goto fail;
         }
@@ -887,8 +887,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 d_penalty_ring_ = sv.penalty_ring;
                 d_penalty_count_ = sv.penalty_count;
             } else {
-                err = device_alloc_all(dev_req(d_penalty_ring_, total_penalty_slots * sizeof(int32_t)),
-                                       dev_req(d_penalty_count_, sizeof(int)));
+                err = alloc_owned_(dev_req(d_penalty_ring_, total_penalty_slots * sizeof(int32_t)),
+                                   dev_req(d_penalty_count_, sizeof(int)));
                 if (err != cudaSuccess)
                     goto fail;
             }
@@ -1358,9 +1358,7 @@ void CudaGraphConditionalRunner::cleanup() {
         return;
     }
 
-    device_free_all(d_token_id_, d_position_, d_step_limit_, d_think_limit_, d_context_len_, d_step_counter_,
-                    d_stop_ids_, d_think_count_, d_in_think_, d_think_exit_step_, d_content_after_think_,
-                    d_stop_mask_active_, d_penalty_ring_, d_penalty_count_);
+    owned_dev_.clear();  // the 14 fallback allocations behind the pointers nulled below
     d_token_id_ = nullptr;
     d_position_ = nullptr;
     d_step_limit_ = nullptr;

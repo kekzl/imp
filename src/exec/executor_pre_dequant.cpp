@@ -275,7 +275,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // Raw allocations no tag claimed, so they read as library reserve: the GDN NVFP4 prefill copy
     // (Qwen3.5-4B MXFP4: 270 MiB) and the MXFP4 FP16 decode fallback bulk (same model: 8020 MiB).
     note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->cutlass_nvfp4_prefill_bytes);
-    note_total("WEIGHT_CACHE_MXFP4_FP16", wcache_->fp16_bulk_data_size);
+    note_total("WEIGHT_CACHE_MXFP4_FP16", wcache_->fp16_bulk_data.bytes());
 }
 
 QuantPipeline::~QuantPipeline() {

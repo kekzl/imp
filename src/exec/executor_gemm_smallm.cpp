@@ -118,14 +118,15 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
         ensure_smallm_xq_(xq_need, stream);
         return;
     }
-    smallm_ws_ = ws.data();
+    // Both slices or neither. A grown buffer held before is released: its address moved.
+    const bool ws_moved = smallm_ws_.set_view(ws);
+    const bool xq_moved = smallm_xq_.set_view(xq);
+    if (ws_moved || xq_moved)
+        ws_.bump_generation();
     smallm_ws_bytes_ = ws_need;
-    smallm_xq_ = xq.data();
     smallm_xq_bytes_ = xq_need;
     smallm_xq_src_ = nullptr;
     smallm_xq_from_producer_ = false;
-    smallm_ws_arena_ = true;
-    smallm_xq_arena_ = true;
     IMP_LOG_INFO(
         "small-M NVFP4 scratch: %d weights, workspace %zu KiB + activation %zu KiB from the T2 arena",
         n_weights, ws_need / 1024, xq_need / 1024);
@@ -149,9 +150,9 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
     ensure_smallm_xq_(xq_need, stream);
     if (smallm_xq_bytes_ < xq_need)
         return nullptr;
-    *scales_out = static_cast<uint8_t*>(smallm_xq_) + ((size_t)32 * (K / 2));
+    *scales_out = static_cast<uint8_t*>(smallm_xq_.get()) + ((size_t)32 * (K / 2));
     *act_scale_out = act_scale_of_(consumer_id);
-    return static_cast<uint8_t*>(smallm_xq_);
+    return static_cast<uint8_t*>(smallm_xq_.get());
 }
 
 float GraphExecutor::act_scale_of_(TensorID id) const {
@@ -399,7 +400,7 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
         for (int i = 0; i < count; ++i)
             calib_->accumulate(cur_layer_, registry_.handle(ids[i]).kind, input, ctx.stream);
     }
-    uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
+    uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_.get());
     uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
     // One activation quantize serves every sibling: siblings share one act scale (merged at load).
     const float as = act_scale_of_(ids[0]);

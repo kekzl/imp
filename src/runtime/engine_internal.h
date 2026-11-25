@@ -1,6 +1,6 @@
 #pragma once
 
-#include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "memory/plan.h"  // kMeasuredLibraryReserveBytes
 
 // Internal helpers shared across engine_*.cpp translation units.
@@ -19,6 +19,7 @@
 #include "core/logging.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -28,15 +29,24 @@
 
 namespace imp::engine_internal {
 
-// Free prefill metadata buffers when not using the pre-allocated pool.
-// d_block_tables_swa may be nullptr (skipped), which is
-// what non-SWA callers pass. Omitting it here leaked one buffer per
-// successful chunk on SWA models (#1644).
-inline void free_prefill_buffers(int32_t* d_token_ids, int* d_positions, int* d_block_tables,
-                                 int* d_block_tables_swa, int* d_context_lens, cudaStream_t stream) {
-    device_free_all_async(stream, d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
-                          d_context_lens);
-}
+// The prefill metadata buffers of one chunk when the pre-allocated pool was not used: 5
+// stream-ordered owners (the SWA table is null without SWA, #1644), all empty on the pool path.
+// reset() only after the last kernel reading them is enqueued on that stream.
+struct PrefillMetaFallback {
+    struct Buf {
+        void* ptr;
+        size_t bytes;
+    };
+    DeviceOwned<void> own[5];
+    void adopt(cudaStream_t stream, const std::array<Buf, 5>& bufs) {
+        for (size_t i = 0; i < bufs.size(); ++i)
+            own[i].adopt_async(bufs[i].ptr, bufs[i].bytes, stream);
+    }
+    void reset() {
+        for (auto& o : own)
+            o.reset();
+    }
+};
 
 // Per-step sampler seed: request seed (or hash(id) ^ clock, fixed at the request's first draw) + output
 // token count. Masked to 31 bits: samplers read a negative seed as unset and draw with the fixed 42u.

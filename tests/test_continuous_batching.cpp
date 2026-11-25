@@ -187,7 +187,7 @@ TEST(GPUBatchTest, UploadAndFree) {
     ASSERT_EQ(batch.n_sequences, 2);
     ASSERT_EQ(batch.max_blocks_per_seq, 3);
 
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(batch);
     cudaStreamSynchronize(nullptr);
 
@@ -249,7 +249,7 @@ TEST(GPUBatchTest, SingleSequenceNoSeqOffsets) {
     builder.add_decode_sequence(42, 7, std::span(bt, 1), 8);
 
     Batch batch = builder.build();
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(batch);
     cudaStreamSynchronize(nullptr);
 
@@ -324,7 +324,7 @@ TEST(GPUBatchTest, SixteenSequenceUpload) {
     }
 
     Batch batch = builder.build();
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(batch);
     cudaStreamSynchronize(nullptr);
 
@@ -420,7 +420,7 @@ TEST(GPUBatchTest, DoubleFree) {
     builder.add_decode_sequence(1, 0, std::span(bt, 1), 1);
 
     Batch batch = builder.build();
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(batch);
     cudaStreamSynchronize(nullptr);
 
@@ -437,7 +437,7 @@ TEST(GPUBatchTest, EmptyBatch) {
     SKIP_IF_NO_CUDA();
 
     Batch empty_batch;
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(empty_batch);
 
     EXPECT_FALSE(gpu_batch.is_valid());
@@ -487,7 +487,7 @@ TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
     EXPECT_EQ(batch.total_tokens, 4);
     EXPECT_EQ(batch.max_blocks_per_seq, 8);  // max of {4, 1, 8, 2}
 
-    GPUBatch gpu_batch;
+    GPUBatchOwned gpu_batch;
     gpu_batch.upload(batch);
     cudaStreamSynchronize(nullptr);
 

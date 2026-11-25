@@ -82,9 +82,8 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 migrated_bytes += e.n_elems + sizeof(float);
             }
 
-            // Hand-off: WeightCaches::fp8_migrated_data owns the slab from here.
-            wcache_->fp8_migrated_data = bufs.bulk.release();
-            wcache_->fp8_migrated_data_size = total_fp8_bytes;
+            // The fp8 entries above slice this slab.
+            wcache_->fp8_migrated_data = std::move(bufs.bulk);
 
             if (migrated > 0) {
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -102,9 +101,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
 
             bufs.block_maxes.reset();
             bufs.absmax.reset();
-            // Hand-off: WeightCaches::fp8_migrated_scales owns the scale array from here.
-            wcache_->fp8_migrated_scales = bufs.scales.release();
-            wcache_->fp8_migrated_count = migrated;
+            wcache_->fp8_migrated_scales = std::move(bufs.scales);
         }
     }
 
@@ -132,7 +129,6 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
         const auto fp8_it = wcache_->fp8.find(ptr);
         const bool has_fp8 = (fp8_it != wcache_->fp8.end()) && !fp8_it->second.native_source;
         if (has_nvfp4 || has_fp8) {
-            vram_free(vram_alloc_, tensor.data);
             freed += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
             to_erase.push_back(ptr);
         } else {
@@ -141,7 +137,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
         }
     }
     for (auto p : to_erase)
-        wcache_->fp16.erase(p);
+        wcache_->fp16.erase(p);  // the entry releases its copy
     wcache_->fp16_bytes = kept_bytes;
     if (kept_count > 0) {
         IMP_LOG_INFO(
@@ -150,16 +146,8 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             kept_count, kept_bytes / (1024.0 * 1024.0));
     }
 
-    // Free fused caches (prefill uses individual FP8 weights)
-    for (auto& [idx, tensor] : wcache_->fused_kv) {
-        if (tensor.data)
-            vram_free(vram_alloc_, tensor.data);
-    }
+    // Free fused caches (prefill uses individual FP8 weights): each entry releases its buffer.
     wcache_->fused_kv.clear();
-    for (auto& [idx, tensor] : wcache_->fused_gate_up) {
-        if (tensor.data)
-            vram_free(vram_alloc_, tensor.data);
-    }
     wcache_->fused_gate_up.clear();
 
     remaining_budget += freed;

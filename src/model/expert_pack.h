@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "memory/weight_owned.h"
 
 #include <cuda_runtime.h>
 
@@ -22,8 +23,8 @@ using ExpertPackRelease = std::function<void(void* ptr, size_t bytes)>;  // one 
 
 // Experts all in `allocs` (own allocations): copies them into one buffer (tracked in `allocs`),
 // releases each expert buffer, re-points the experts. False = nothing changed.
-[[nodiscard]] bool pack_device_experts(std::vector<Tensor>& experts, Tensor& packed,
-                                       std::vector<void*>& allocs, const ExpertPackAlloc& alloc,
-                                       const ExpertPackRelease& release, cudaStream_t stream);
+[[nodiscard]] bool pack_device_experts(std::vector<Tensor>& experts, Tensor& packed, WeightSet& allocs,
+                                       const ExpertPackAlloc& alloc, const ExpertPackRelease& release,
+                                       cudaStream_t stream);
 
 }  // namespace imp

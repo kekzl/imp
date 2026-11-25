@@ -44,10 +44,10 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
         }
     }
     const size_t bytes = static_cast<size_t>(h.shape[0]) * h.shape[1] * sizeof(half);
-    IMP_CHECK(wcache_.released_f16_scratch && bytes <= wcache_.released_f16_scratch_bytes,
+    IMP_CHECK(wcache_.released_f16_scratch && bytes <= wcache_.released_f16_scratch.bytes(),
               "released_source_gemm_: no rebuild scratch for a %lld x %lld weight",
               static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
-    void* w16 = wcache_.released_f16_scratch;
+    void* w16 = wcache_.released_f16_scratch.get();
     if (const auto mx = wcache_.cutlass_mxfp8_prefill.find(h.source_data); mx != wcache_.cutlass_mxfp8_prefill.end()) {
         dequantize_mxfp8_cutlass_to_fp16(mx->second, w16, ctx.stream);
     } else {

@@ -26,6 +26,7 @@
 // order, both of which are unstable across a teardown.
 
 #include "core/tensor.h"
+#include "memory/weight_owned.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <memory>
@@ -167,8 +168,8 @@ public:
     // append to gpu_allocs, re-record into new_log so a later suspend still works.
     // Returns false (weight untouched) on miss/mismatch; caller falls back to cold upload.
     [[nodiscard]] bool try_restore(const char* key, Tensor& weight, cudaStream_t stream,
-                     std::vector<void*>& gpu_allocs, const WarmRestoreOps& ops,
-                     WeightUploadLog* new_log);
+                                   WeightSet& gpu_allocs, const WarmRestoreOps& ops,
+                                   WeightUploadLog* new_log);
 
     size_t total_bytes() const { return total_bytes_; }
     int hits() const { return hits_; }

@@ -147,10 +147,13 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
             int64_t shp[3] = {r.n_experts, r.N, r.K};
             packed_slot = Tensor(r.packed_data, QType::NVFP4, 3, shp, /*on_device=*/true);
-            // wcache_ is the single owner (teardown frees via free_nvfp4_moe_result). Also
-            // registering these pointers in Model::gpu_allocations_ double-frees them at teardown
-            // (harmless standalone, but a SIGSEGV under nsys's CUDA interception).
-            wcache_->nvfp4_moe[r.packed_data] = r;
+            // The wcache_ entry is the single owner (plain family). Also registering these pointers
+            // in Model::gpu_allocations_ double-frees them at teardown (harmless standalone, but a
+            // SIGSEGV under nsys's CUDA interception). `r` keeps its layout as a view for the code below.
+            const void* key = r.packed_data;
+            NvFP4MoEQuantResult owned = r;
+            r.borrowed = true;
+            wcache_->nvfp4_moe[key] = NvFP4MoECacheEntry(std::move(owned));
         };
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);
@@ -170,7 +173,9 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             const size_t sf_per_expert =
                 cutlass_nvfp4_sf_size(static_cast<int>(r.N), static_cast<int>(r.K));
             const size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
-            void* d_sfatom = vram_alloc_force(vram_alloc_, sfatom_total, "gptoss_moe_sfatom");
+            auto sfatom_own = DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "gptoss_moe_sfatom",
+                                                          /*force=*/true);
+            void* d_sfatom = sfatom_own.get();
             if (!d_sfatom) {
                 IMP_LOG_WARN("gpt-oss L%d: SfAtom alloc failed (%.1f MiB) — prefill stays on the "
                              "dequant fallback",
@@ -181,8 +186,8 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                                                static_cast<int>(r.K), /*stream=*/nullptr);
             IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
             // NOT gpu_allocations_: that list is freed with cudaFreeAsync
-            // (#834) and this came from vram_alloc_force, i.e. cudaMalloc.
-            wcache_->owned_sf_slabs.push_back(d_sfatom);
+            // (#834) and this came from the forced VRAMAllocator path, i.e. cudaMalloc.
+            wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
             experts.assign(ne, Tensor{});
             for (int e = 0; e < ne; ++e) {
                 void* data_slice = static_cast<char*>(r.packed_data) +
@@ -202,7 +207,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 nv.tensor_scale = h_ts[e];
                 nv.N = r.N;
                 nv.K = r.K;
-                wcache_->nvfp4[data_slice] = nv;
+                wcache_->nvfp4[data_slice] = NvFP4CacheEntry(std::move(nv));
 
                 CutlassNvFP4Weight cw;
                 cw.data = data_slice;
@@ -212,7 +217,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 cw.K = r.K;
                 cw.sf_bytes = sf_per_expert;
                 cw.sf_borrowed = true;
-                wcache_->cutlass_nvfp4[data_slice] = cw;
+                wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
             }
             wcache_->cutlass_nvfp4_bytes += sfatom_total;
             wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
@@ -483,16 +488,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(),
                                                            static_cast<size_t>(ne_z) * sizeof(float),
                                                            cudaMemcpyHostToDevice, stream));
-                        // Hand-off: the WeightCaches::nvfp4_moe entry owns restack slab, scale copy and
-                        // tensor scales from here.
-                        if (slab_own)
-                            data_base = slab_own.release();
-                        if (ms_own)
-                            ms_base = ms_own.release();
+                        // The nvfp4_moe entry below takes the restack slab, the scale copy and the
+                        // tensor scales as owners (empty where the pointer is the model's upload).
                         NvFP4MoEQuantResult r;
                         r.packed_data = data_base;  // borrowed (resident, contiguous) or the restack slab
                         r.micro_scales = ms_base;   // borrowed or small contiguous copy
-                        r.tensor_scales = ts_own.release();
+                        r.tensor_scales = d_ts;
                         r.n_experts = ne_z;
                         r.N = N_z;
                         r.K = K_z;
@@ -501,7 +502,9 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         r.borrowed = true;  // data borrowed from model; scales/ts via VRAMAllocator
                         int64_t shp[3] = {static_cast<int64_t>(ne_z), N_z, K_z};
                         packed = Tensor(data_base, QType::NVFP4, 3, shp, /*on_device=*/true);
-                        wcache_->nvfp4_moe[data_base] = r;
+                        wcache_->nvfp4_moe[data_base] = NvFP4MoECacheEntry(r, std::move(slab_own),
+                                                                           std::move(ms_own),
+                                                                           std::move(ts_own));
                         dctx.nvfp4_moe_count++;
                         // The contiguous micro-scale copy becomes the single source for every consumer
                         // (decode
@@ -637,11 +640,11 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(), total_ts, cudaMemcpyHostToDevice, stream));
 
-        // Hand-off: the WeightCaches::nvfp4_moe entry owns packed, micro-scales and tensor scales.
+        // The nvfp4_moe entry below takes packed, micro-scales and tensor scales as owners.
         NvFP4MoEQuantResult r;
-        r.packed_data = packed_own.release();
-        r.micro_scales = ms_own.release();
-        r.tensor_scales = ts_own.release();
+        r.packed_data = d_packed;
+        r.micro_scales = d_ms;
+        r.tensor_scales = d_ts;
         r.n_experts = ne;
         r.N = N;
         r.K = K;
@@ -654,7 +657,8 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         int64_t shape[3] = {static_cast<int64_t>(ne), N, K};
         packed = Tensor(d_packed, QType::NVFP4, 3, shape, /*on_device=*/true);
 
-        wcache_->nvfp4_moe[d_packed] = r;
+        wcache_->nvfp4_moe[d_packed] = NvFP4MoECacheEntry(r, std::move(packed_own), std::move(ms_own),
+                                                          std::move(ts_own));
         dctx.nvfp4_moe_total += add_bytes;
         wcache_->nvfp4_moe_noted_bytes += allocator_noted(vram_alloc_, add_bytes);
         dctx.nvfp4_moe_count++;
@@ -710,17 +714,17 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
             void* d_sfatom = nullptr;
             if (!phase0_has_cutlass) {
-                d_sfatom = (sfatom_total <= moe_logical_avail)
-                               ? vram_alloc_force(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom")
-                               : nullptr;
+                auto sfatom_own = (sfatom_total <= moe_logical_avail)
+                                      ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total,
+                                                                    "nvfp4_moe_sfatom", /*force=*/true)
+                                      : DeviceOwned<void>{};
+                d_sfatom = sfatom_own.get();
                 if (d_sfatom) {
                     convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
                                                        static_cast<int>(K), stream);
-                    // Per-expert slices below are handed out with sf_borrowed=true, so
-                    // free_cutlass_nvfp4_weight skips them; without this the base pointer had no owner and
-                    // leaked one SfAtom slab per (layer, projection) for the life of the process (AUDIT
-                    // B5/L1).
-                    wcache_->owned_sf_slabs.push_back(d_sfatom);
+                    // The per-expert slices below are entries without an owner: the slab's owner
+                    // lives in owned_sf_slabs (AUDIT B5/L1: it leaked once per layer and projection).
+                    wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
                 }
             }
             if (d_sfatom || phase0_has_cutlass) {
@@ -737,20 +741,20 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         // Move Phase 0's CUTLASS entry from old key to new key
                         auto it = wcache_->cutlass_nvfp4.find(old_data);
                         if (it != wcache_->cutlass_nvfp4.end()) {
-                            CutlassNvFP4Weight cw = it->second;
+                            CutlassNvFP4CacheEntry cw = std::move(it->second);
                             cw.data = data_slice;
                             wcache_->cutlass_nvfp4.erase(it);
-                            wcache_->cutlass_nvfp4[data_slice] = cw;
+                            wcache_->cutlass_nvfp4[data_slice] = std::move(cw);
                         }
                         // Move NVFP4 entry too
                         auto nit = wcache_->nvfp4.find(old_data);
                         if (nit != wcache_->nvfp4.end()) {
-                            NvFP4QuantResult nv = nit->second;
+                            NvFP4QuantResult nv = nit->second;  // layout only: the new entry is a view
                             nv.packed_data = data_slice;
                             nv.micro_scales = w.scales;
-                            nv.owned = false;  // borrows resident model storage — don't cudaFree on teardown
+                            nv.owned = false;  // slices of the contiguous copy above
                             wcache_->nvfp4.erase(nit);
-                            wcache_->nvfp4[data_slice] = nv;
+                            wcache_->nvfp4[data_slice] = NvFP4CacheEntry(std::move(nv));
                         }
                     } else {
                         void* sf_slice = static_cast<char*>(d_sfatom) +
@@ -763,7 +767,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                         cw.K = K;
                         cw.sf_bytes = sf_per_expert;
                         cw.sf_borrowed = true;
-                        wcache_->cutlass_nvfp4[data_slice] = cw;
+                        wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
                     }
                 }
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -827,7 +831,7 @@ void QuantPipeline::cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3
         quantize_packed_experts_to_nvfp4(t.data, t.qtype, static_cast<int>(t.shape[0]),
                                          static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]),
                                          qscratch_->dequant.get(), result, stream);
-        wcache_->nvfp4_moe[t.data] = result;
+        wcache_->nvfp4_moe[t.data] = NvFP4MoECacheEntry(std::move(result));
         dctx.nvfp4_moe_total += nvfp4_bytes(t);
         dctx.nvfp4_moe_count++;
     }

@@ -1,5 +1,4 @@
 #include "exec/weight_handle.h"
-#include "memory/vram_allocator.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -23,43 +22,27 @@ TensorID WeightRegistry::reserve(TensorKind kind, int64_t rows, int64_t cols) {
 
 void WeightRegistry::clear() { handles_.clear(); }
 
-size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
-    if (!alloc)
-        return 0;
+void WeightRegistry::adopt_fp16_storage(TensorID id, DeviceOwned<void>&& storage) {
+    auto& h = handle(id);
+    h.primary_tier = StorageTier::FP16;
+    h.payload.fp16.data = static_cast<half*>(storage.get());
+    h.owned_bytes = storage ? static_cast<int64_t>(storage.bytes()) : 0;
+    if (storage)
+        owned_storage_.push_back(std::move(storage));
+}
+
+size_t WeightRegistry::free_owned_storage() {
     size_t freed_bytes = 0;
+    // Only adopt_fp16_storage sets owned_bytes: an owning handle is an FP16 overlay.
     for (auto& h : handles_) {
         if (h.owned_bytes == 0)
             continue;
-        // Frees the primary-tier payload pointer. Tiers with auxiliary buffers (NVFP4 scales,
-        // CUTLASS sf, MXFP4 scales) are freed by their native free_nvfp4_result /
-        // free_cutlass_nvfp4_weight helpers instead; this registry helper currently serves only
-        // FP16 overlay tensors (fused_kv, fused_gate_up) with a single contiguous pointer.
-        switch (h.primary_tier) {
-            case StorageTier::FP16:
-                if (h.payload.fp16.data) {
-                    alloc->free(h.payload.fp16.data);
-                    h.payload.fp16.data = nullptr;
-                    freed_bytes += static_cast<size_t>(h.owned_bytes);
-                    h.owned_bytes = 0;
-                }
-                break;
-            case StorageTier::FP32:
-            case StorageTier::FP8:
-            case StorageTier::NVFP4:
-            case StorageTier::CUTLASS_NVFP4:
-            case StorageTier::MXFP4:
-            case StorageTier::Undefined:
-                // Not currently owned by the registry — fall through to
-                // legacy free paths.
-                IMP_LOG_WARN(
-                    "WeightRegistry::free_owned_storage: handle id=%d "
-                    "kind=%d tier=%d has owned_bytes=%lld but no "
-                    "type-specific free is wired; skipping.",
-                    h.id, std::to_underlying(h.kind), std::to_underlying(h.primary_tier),
-                    static_cast<long long>(h.owned_bytes));
-                break;
-        }
+        if (h.primary_tier == StorageTier::FP16)
+            h.payload.fp16.data = nullptr;
+        freed_bytes += static_cast<size_t>(h.owned_bytes);
+        h.owned_bytes = 0;
     }
+    owned_storage_.clear();  // each buffer once, through the family that allocated it
     return freed_bytes;
 }
 
