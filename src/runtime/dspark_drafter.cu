@@ -3,6 +3,7 @@
 #include "compute/activation.h"
 #include "compute/dspark_attention.h"
 #include "compute/gemm.h"
+#include "compute/head_norm_rope.h"
 #include "compute/layernorm.h"
 #include "core/graph_epoch.h"
 #include "core/logging.h"
@@ -27,36 +28,7 @@ namespace imp {
 
 namespace {
 
-constexpr int kHeadDim = 128;  // the norm + RoPE kernel's pair layout (64 threads x 2)
-
-// Per (row, head): RMSNorm over head_dim, then NeoX RoPE at positions[row], in place.
-__global__ void dspark_head_norm_rope_kernel(half* __restrict__ x, int row_stride, int heads,
-                                             const half* __restrict__ w, const int* __restrict__ pos,
-                                             float log2_theta, float eps) {
-    const int row = blockIdx.x / heads;
-    const int head = blockIdx.x % heads;
-    half* v = x + (static_cast<size_t>(row) * row_stride) + (static_cast<size_t>(head) * kHeadDim);
-    const int i = threadIdx.x;  // pair (i, i + 64)
-    float a = __half2float(v[i]);
-    float b = __half2float(v[i + (kHeadDim / 2)]);
-    float ss = (a * a) + (b * b);
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
-        ss += __shfl_xor_sync(0xffffffffu, ss, o);
-    __shared__ float part[2];
-    if ((i & 31) == 0)
-        part[i >> 5] = ss;
-    __syncthreads();
-    const float inv = rsqrtf(((part[0] + part[1]) / kHeadDim) + eps);
-    a *= inv * __half2float(w[i]);
-    b *= inv * __half2float(w[i + (kHeadDim / 2)]);
-    const float freq = exp2f(-log2_theta * (2.0f * i) / kHeadDim);
-    float s = 0.0f;
-    float c = 0.0f;
-    sincosf(static_cast<float>(pos[row]) * freq, &s, &c);
-    v[i] = __float2half((a * c) - (b * s));
-    v[i + (kHeadDim / 2)] = __float2half((b * c) + (a * s));
-}
+constexpr int kHeadDim = kHeadNormRopeDim;  // the norm + RoPE kernel's pair layout (64 threads x 2)
 
 __global__ void dspark_iota_kernel(int* __restrict__ out, int base, int n) {
     const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
@@ -240,11 +212,7 @@ struct DSparkDrafter::Impl {
     void launch_propose(cudaStream_t st_);
 
     void head_norm_rope(half* x, int rows, int row_stride, int heads, const half* w, cudaStream_t st_) const {
-        if (rows <= 0)
-            return;
-        dspark_head_norm_rope_kernel<<<rows * heads, kHeadDim / 2, 0, st_>>>(x, row_stride, heads, w, d_pos,
-                                                                             log2_theta, eps);
-        IMP_CUDA_CHECK_LAUNCH();
+        head_norm_rope_fp16(x, rows, row_stride, heads, w, d_pos, log2_theta, eps, st_);
     }
 
     // Positions pos0 .. pos0 + n - 1 written on the device: no pinned staging reused across async copies.
