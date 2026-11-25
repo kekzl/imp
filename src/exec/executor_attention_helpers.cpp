@@ -66,7 +66,7 @@ void GraphExecutor::mla_q_projection_(const TransformerLayer& ly, const Tensor& 
         return;
     }
     const int64_t shape[2] = {n, model_->config().q_lora_rank};
-    Tensor q_a(mla_q_a_buf_, QType::F16, 2, shape, true);
+    Tensor q_a(mla_q_a_buf_.data(), QType::F16, 2, shape, true);
     gemm_via_handle_(ly.q_a_proj_id, no, q_a, ctx);
     rmsnorm(q_a, ly.q_a_layernorm, q_a, eps, ctx.stream, 0.0f);  // plain gamma, like kv_a_layernorm
     gemm_via_handle_(ly.wq_id, q_a, qv, ctx);
@@ -75,36 +75,36 @@ void GraphExecutor::mla_q_projection_(const TransformerLayer& ly, const Tensor& 
 void GraphExecutor::quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream) {
     if (paged_attention_take_q8_epilogue())
         return;
-    quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), static_cast<block_q8_1*>(qscratch_.q8_1_buf),
-                          qscratch_.d8_buf, K, stream);
+    quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), qscratch_.q8_1_buf.data(),
+                          qscratch_.d8_buf.data(), K, stream);
 }
 
 bool GraphExecutor::dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const {
-    return n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr && no.qtype == QType::F16 &&
-           ly.wq.qtype == ly.wk.qtype && is_dp4a_qtype(ly.wq.qtype) && ly.wv.data != nullptr &&
-           is_dp4a_qtype(ly.wv.qtype);
+    return n == 1 && qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr &&
+           no.qtype == QType::F16 && ly.wq.qtype == ly.wk.qtype && is_dp4a_qtype(ly.wq.qtype) &&
+           ly.wv.data != nullptr && is_dp4a_qtype(ly.wv.qtype);
 }
 
 // Cohere2 parallel block: two [max_tokens, d_model] FP16 residual copies, charged as
 // ExecT2Demand::parallel_block. Dereferenced unconditionally: a short arena refuses the load.
 bool GraphExecutor::take_parallel_block_buffers_() {
     const auto& cfg = model_->config();
-    if (!cfg.parallel_block || par_in_buf_ != nullptr)
+    if (!cfg.parallel_block || par_in_buf_)
         return true;
     if (compute_dtype_ != QType::F16) {
         IMP_LOG_ERROR("parallel_block needs an FP16 residual stream");
         return false;
     }
     const size_t bytes = static_cast<size_t>(max_tokens_) * static_cast<size_t>(cfg.d_model) * sizeof(half);
-    auto in = engine_arena().take_bytes(bytes);
-    auto attn = engine_arena().take_bytes(bytes);
+    StableSpan<std::byte> in = engine_arena().take_bytes(bytes);
+    StableSpan<std::byte> attn = engine_arena().take_bytes(bytes);
     if (in.empty() || attn.empty()) {
         IMP_LOG_ERROR("parallel-block residual scratch (2 x %.1f MiB) unavailable from the T2 arena",
                       bytes / (1024.0 * 1024.0));
         return false;
     }
-    par_in_buf_ = in.data();
-    par_attn_buf_ = attn.data();
+    par_in_buf_ = in.as<half>();
+    par_attn_buf_ = attn.as<half>();
     return true;
 }
 
@@ -115,14 +115,13 @@ void GraphExecutor::parallel_block_step_(int stage, int n, cudaStream_t stream) 
     const size_t bytes = static_cast<size_t>(count) * sizeof(half);
     auto* h = static_cast<half*>(hidden_.data);
     if (stage == 0) {
-        device_copy_async(par_in_buf_, h, bytes, stream);
+        device_copy_async(par_in_buf_.data(), h, bytes, stream);
     } else if (stage == 1) {
         // FFN reads norm(layer input): park input + attn, restore the input.
-        device_copy_async(par_attn_buf_, h, bytes, stream);
-        device_copy_async(h, par_in_buf_, bytes, stream);
+        device_copy_async(par_attn_buf_.data(), h, bytes, stream);
+        device_copy_async(h, par_in_buf_.data(), bytes, stream);
     } else {
-        parallel_residual_merge(h, static_cast<const half*>(par_attn_buf_),
-                                static_cast<const half*>(par_in_buf_), count, stream);
+        parallel_residual_merge(h, par_attn_buf_.data(), par_in_buf_.data(), count, stream);
     }
 }
 

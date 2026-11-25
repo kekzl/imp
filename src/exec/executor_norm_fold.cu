@@ -33,17 +33,17 @@ void GraphExecutor::norm_fold_begin_(int n, cudaStream_t stream) {
         return;
     const size_t bytes = sizeof(unsigned long long) *
                          static_cast<size_t>(norm_fold_slots(model_->config().n_layers));
-    if (norm_fold_ssq_ == nullptr) {
-        auto slab = engine_arena().take_bytes(bytes);
+    if (!norm_fold_ssq_) {
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             IMP_LOG_WARN("norm fold: %zu B unavailable from the T2 arena, off", bytes);
             norm_fold_on_ = false;
             return;
         }
-        norm_fold_ssq_ = reinterpret_cast<unsigned long long*>(slab.data());
+        norm_fold_ssq_ = slab.as<unsigned long long>();
     }
     const int n_slots = norm_fold_slots(model_->config().n_layers);
-    norm_fold_zero_kernel<<<(n_slots + 255) / 256, 256, 0, stream>>>(norm_fold_ssq_, n_slots);
+    norm_fold_zero_kernel<<<(n_slots + 255) / 256, 256, 0, stream>>>(norm_fold_ssq_.data(), n_slots);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -68,7 +68,7 @@ NvFP4NormFoldOut GraphExecutor::norm_fold_arm_(int layer, bool after_ffn, const 
     f.gamma = static_cast<const half*>(gamma->data);
     f.offset = norm_w_off_;
     f.out = static_cast<half*>(no.data);
-    f.ssq = norm_fold_ssq_ + norm_fold_slot_++;
+    f.ssq = norm_fold_ssq_.data() + norm_fold_slot_++;
     norm_fold_gamma_ = gamma->data;
     norm_fold_out_ = no.data;
     norm_fold_pending_ = f.ssq;

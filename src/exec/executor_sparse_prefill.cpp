@@ -24,18 +24,19 @@ void GraphExecutor::allocate_sparse_prefill_scratch_() {
                                                cfg::kSparsePrefillRecentTokens, 0, max_ctx_tokens,
                                                kv_block_size_);
     const int cap = geo.max_ctx_blocks;
-    auto sc = engine_arena().take_bytes((size_t)kPrefillRows * cap * sizeof(float));
-    auto agg = engine_arena().take_bytes((size_t)cap * sizeof(float));
-    auto tbl = engine_arena().take_bytes((size_t)cap * sizeof(int));
-    auto ctx = engine_arena().take_bytes(2 * sizeof(int));  // [past len in, selected len out]
+    StableSpan<std::byte> sc = engine_arena().take_bytes((size_t)kPrefillRows * cap * sizeof(float));
+    StableSpan<std::byte> agg = engine_arena().take_bytes((size_t)cap * sizeof(float));
+    StableSpan<std::byte> tbl = engine_arena().take_bytes((size_t)cap * sizeof(int));
+    StableSpan<std::byte> ctx = engine_arena().take_bytes(2 *
+                                                          sizeof(int));  // [past len in, selected len out]
     if (sc.empty() || agg.empty() || tbl.empty() || ctx.empty()) {
         IMP_LOG_WARN("sparse prefill scratch unavailable from the T2 arena - feature disabled");
         return;
     }
-    qscratch_.sp_prefill_scores = reinterpret_cast<float*>(sc.data());
-    qscratch_.sp_prefill_agg = reinterpret_cast<float*>(agg.data());
-    qscratch_.sp_prefill_table = reinterpret_cast<int*>(tbl.data());
-    qscratch_.sp_prefill_ctx = reinterpret_cast<int*>(ctx.data());
+    qscratch_.sp_prefill_scores = sc.as<float>();
+    qscratch_.sp_prefill_agg = agg.as<float>();
+    qscratch_.sp_prefill_table = tbl.as<int>();
+    qscratch_.sp_prefill_ctx = ctx.as<int>();
     qscratch_.sp_prefill_budget_blocks = geo.budget_blocks;
     qscratch_.sp_prefill_sink_blocks = geo.sink_blocks;
     qscratch_.sp_prefill_recent_blocks = geo.recent_blocks;
@@ -66,8 +67,8 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
                                                 table, q_offset, nh, nkv, hd, kv_bs, s.sp_prefill_cap_blocks,
                                                 s.sp_prefill_budget_blocks, s.sp_prefill_sink_blocks,
                                                 s.sp_prefill_recent_blocks, cfg::kSparseScoreStdCoef,
-                                                s.sp_prefill_scores, s.sp_prefill_agg, s.sp_prefill_table,
-                                                s.sp_prefill_ctx, stream);
+                                                s.sp_prefill_scores.data(), s.sp_prefill_agg.data(),
+                                                s.sp_prefill_table.data(), s.sp_prefill_ctx.data(), stream);
     if (past <= 0)
         return dense;
     // Activity proof (prefill is not graph-captured, so this fires where the selection runs).
@@ -77,7 +78,7 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
         IMP_LOG_INFO("sparse prefill attention ACTIVE: past %d -> %d tokens at L%d", q_offset, past,
                      kv_layer);
     }
-    return SparsePrefillPast{s.sp_prefill_table, past};
+    return SparsePrefillPast{s.sp_prefill_table.data(), past};
 }
 
 }  // namespace imp

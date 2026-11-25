@@ -123,8 +123,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                  h.qtype == QType::F16 &&
                                  (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
-                                    qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                                    h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
+                                    qscratch_.q8_1_buf.data() != nullptr &&
+                                    qscratch_.d8_buf.data() != nullptr && h.qtype == QType::F16 &&
+                                    is_dp4a_qtype(ly.w_down.qtype));
     // gemm.fp8_smallm_m1: one FP8 decode row accumulates into hidden like n > 1.
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && !will_fuse_down_nvfp4 &&
                                  fp8_beta1_rows(n, fp8x8_min_rows_, wd_tier) &&
@@ -146,7 +147,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // 3. Gate and Up projections
     //    For decode (n=1): fuse RMSNorm→Q8_1→GEMV to avoid redundant quantization.
     {
-        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+        auto* q8 = qscratch_.q8_1_buf.data();
         int d = static_cast<int>(h.shape[1]);
         // Fetch handles for w_gate and w_up
         const WeightHandle* hwg = (ly.w_gate_id != kInvalidTensorID) ? &registry_.handle(ly.w_gate_id)
@@ -165,7 +166,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4) || nv_g_secondary;
         const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
         bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
-        bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
+        bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype) &&
                                is_dp4a_qtype(ly.w_up.qtype));
         if (mxfp4_ffn) {
@@ -216,19 +217,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         } else if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ffn_norm_w.data),
-                                  q8, qscratch_.d8_buf, static_cast<half*>(no.data), d, eps, stream,
+                                  q8, qscratch_.d8_buf.data(), static_cast<half*>(no.data), d, eps, stream,
                                   norm_w_off_);
             // Fused gate+up GEMV reads both weights in one format: mixed types (UD GGUF, e.g.
             // Q4_K gate + IQ4_XS up) run one dp4a GEMV each on the same Q8_1 input.
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
             if (ly.w_up.qtype == ly.w_gate.qtype) {
-                gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
+                gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                    ly.w_gate.qtype, stream);
-            } else if (!ffn_gate_up_dp4a_multi(ly.w_gate, ly.w_up, q8, qscratch_.d8_buf, go, uo, d, stream)) {
-                dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf,
+            } else if (!ffn_gate_up_dp4a_multi(ly.w_gate, ly.w_up, q8, qscratch_.d8_buf.data(), go, uo, d,
+                                               stream)) {
+                dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(go.data), ffn_rows, d, stream);
-                dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf,
+                dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(uo.data), static_cast<int>(ly.w_up.shape[0]), d,
                                    stream);
             }
@@ -296,9 +298,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // fuse activation->Q8_1->GEMV+residual. SwiGLU: swiglu_quantize_q8_1 fuses
     // activation+Q8_1 in one kernel, no intermediate FP16 buffer.
     {
-        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+        auto* q8 = qscratch_.q8_1_buf.data();
         bool fused_down_residual = (!has_post_ffn_norm && n == 1 && q8 != nullptr &&
-                                    qscratch_.d8_buf != nullptr && so.qtype == QType::F16 &&
+                                    qscratch_.d8_buf.data() != nullptr && so.qtype == QType::F16 &&
                                     is_dp4a_qtype(ly.w_down.qtype));
         if (will_fuse_down_mxfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
@@ -383,14 +385,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // memory-bound on weight reads. Separate quant + kpar reaches higher occupancy.
             if (cfg.ffn_activation != FFNActivation::GEGLU) {
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data), static_cast<const half*>(uo.data), q8,
-                                     qscratch_.d8_buf, K_d, stream);
+                                     qscratch_.d8_buf.data(), K_d, stream);
             } else {
                 geglu_quantize_q8_1(static_cast<const half*>(go.data), static_cast<const half*>(uo.data), q8,
-                                    qscratch_.d8_buf, K_d, stream);
+                                    qscratch_.d8_buf.data(), K_d, stream);
             }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
-            dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf,
+            dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4 &&
                    h.qtype == QType::F16) {
@@ -418,19 +420,19 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), cfg.d_model, eps, norm_w_off_);
             IMP_CUDA_CHECK_LAUNCH();
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && q8 != nullptr &&
-                   qscratch_.d8_buf != nullptr && is_dp4a_qtype(ly.w_down.qtype)) {
+                   qscratch_.d8_buf.data() != nullptr && is_dp4a_qtype(ly.w_down.qtype)) {
             // Post-norm FP32 accum decode: fused activation→Q8_1 + GEMV + fused post-norm.
             // Saves 3 kernel launches per layer vs the fallback path.
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
             if (cfg.ffn_activation != FFNActivation::GEGLU)
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data), static_cast<const half*>(uo.data), q8,
-                                     qscratch_.d8_buf, K_d, stream);
+                                     qscratch_.d8_buf.data(), K_d, stream);
             else
                 geglu_quantize_q8_1(static_cast<const half*>(go.data), static_cast<const half*>(uo.data), q8,
-                                    qscratch_.d8_buf, K_d, stream);
+                                    qscratch_.d8_buf.data(), K_d, stream);
             half* fo_ptr = static_cast<half*>(fo.data);
-            dispatch_dp4a_gemv(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d,
+            dispatch_dp4a_gemv(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(), fo_ptr, M_d, K_d,
                                stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(

@@ -10,6 +10,7 @@
 #include "memory/view_or_owned.h"
 #include "memory/vram_owned.h"
 #include "memory/kv_cache.h"
+#include "memory/span.h"
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
 #include "compute/moe_routing.h"
@@ -256,8 +257,8 @@ public:
     // kernel reads sampled tokens strided by SAMPLE_SCRATCH_BYTES from here).
     const int32_t* sample_slot_base(int parity) const;
     [[nodiscard]] bool sample_pipeline_ready() const {
-        return d_sample_result_ && !h_sample_pinned_.empty() && !h_row_args_.empty() && d_row_args_ &&
-               sample_gather_evt_[0] && sample_gather_evt_[1];
+        return d_sample_result_.data() && !h_sample_pinned_.empty() && !h_row_args_.empty() &&
+               d_row_args_.data() && sample_gather_evt_[0] && sample_gather_evt_[1];
     }
     int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
                                       cudaStream_t stream = nullptr);
@@ -459,7 +460,7 @@ public:
     // take (when allow), else rmsnorm_for_smallm_() into no.
     NvFP4NormFoldIn norm_fold_or_norm_(bool allow, const Tensor& h, const Tensor& w, Tensor& no,
                                        TensorID consumer_id, int n, float eps, cudaStream_t stream);
-    unsigned long long* norm_fold_ssq_ = nullptr;  // fixed-point slots, engine arena, zeroed per M=1 forward
+    StableSpan<unsigned long long> norm_fold_ssq_;  // fixed-point slots, engine arena, zeroed per M=1 forward
     int norm_fold_slot_ = 0;
     bool norm_fold_on_ = false;       // this forward: n == 1, flag on, not deterministic
     const void* norm_fold_gamma_ = nullptr;
@@ -603,7 +604,7 @@ public:
     // QJL projection accessor removed (TurboQuant retired Phase 5, 2026-05-17).
 
     // Pre-allocated device buffer for sampling output (stable address for CUDA graph).
-    int32_t* d_sample_result() const { return d_sample_result_; }
+    int32_t* d_sample_result() const { return d_sample_result_.data(); }
 
     // Pinned host buffer for logprobs extraction.
     float* h_logits_pinned() const { return h_logits_pinned_.as<float>(); }
@@ -882,8 +883,8 @@ private:
     // Persistent K/V scratch for the graph-captured verify chunk (#847),
     // sized by ensure_chunk_capture_scratch. chunk_capture_ctx_ is the
     // ctx_capacity the buffers cover (0 = unallocated).
-    half* chunk_capture_k_ = nullptr;
-    half* chunk_capture_v_ = nullptr;
+    StableSpan<half> chunk_capture_k_;
+    StableSpan<half> chunk_capture_v_;
     int chunk_capture_ctx_ = 0;
     // Lazy engine arena: ensure_chunk_capture_scratch only checks the room; the pair of
     // chunk_capture_bytes_ each is taken by take_chunk_capture_scratch_ at the first captured chunk.
@@ -983,21 +984,21 @@ private:
     // the materialized two-step KV projection never calls cudaMallocAsync
     // inside the CUDA-graph-captured decode region (capture rejects
     // stream-ordered alloc/free -> silent eager fallback + degeneration).
-    void* mla_kv_a_buf_ = nullptr;    // [max_tokens, kv_lora_rank + qk_rope_head_dim]
-    void* mla_latent_buf_ = nullptr;  // [max_tokens, kv_lora_rank]
-    void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
-    void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
-    void* mla_q_a_buf_ = nullptr;     // [max_tokens, q_lora_rank], q_lora models only
-    void* par_in_buf_ = nullptr;      // [max_tokens, d_model] FP16, parallel_block only: layer input
-    void* par_attn_buf_ = nullptr;    // [max_tokens, d_model] FP16, parallel_block only: input + attn
+    StableSpan<half> mla_kv_a_buf_;    // [max_tokens, kv_lora_rank + qk_rope_head_dim]
+    StableSpan<half> mla_latent_buf_;  // [max_tokens, kv_lora_rank]
+    StableSpan<half> mla_k_rope_buf_;  // [max_tokens, qk_rope_head_dim]
+    StableSpan<half> mla_kv_b_buf_;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
+    StableSpan<half> mla_q_a_buf_;     // [max_tokens, q_lora_rank], q_lora models only
+    StableSpan<half> par_in_buf_;      // [max_tokens, d_model] FP16, parallel_block only: layer input
+    StableSpan<half> par_attn_buf_;    // [max_tokens, d_model] FP16, parallel_block only: input + attn
 
     // MLA absorbed-decode latent KV cache (opt-in attention.mla_absorb).
     // Per-layer slice [max_seq, kv_lora_rank+qk_rope_head_dim] FP16: cols
     // [0:kv_lora_rank] = RMSNorm'd latent, rest = post-RoPE decoupled key.
     // Allocated only when mla_absorb is set, model is_mla(), every layer's kv_b_proj is FP16. Single-sequence
     // only.
-    void* mla_absorb_cache_ = nullptr;        // [n_layers, max_seq, kv_lora+rope]
-    float* mla_absorb_scores_ = nullptr;      // [n_heads, max_seq] decode scratch
+    StableSpan<half> mla_absorb_cache_;       // [n_layers, max_seq, kv_lora+rope]
+    StableSpan<float> mla_absorb_scores_;     // [n_heads, max_seq] decode scratch
     size_t mla_absorb_layer_stride_ = 0;      // halfs per layer = max_seq*(kv_lora+rope)
     int mla_absorb_max_seq_ = 0;
     // The MLA QKV quartet is the one T2 tenant with no null-tolerant consumer, so
@@ -1058,7 +1059,7 @@ private:
     // args (one pinned H2D) and fires ONE partial + ONE finalize launch for
     // the whole batch. Greedy rows launch immediately.
     PinnedBuffer h_row_args_;            // pinned, 2 x sample_slots_ entries (parity halves, T5b)
-    TopkRowArgs* d_row_args_ = nullptr;  // device mirror (same layout)
+    StableSpan<TopkRowArgs> d_row_args_;  // device mirror (same layout)
     int n_pending_topk_rows_ = 0;
     int pending_topk_max_k_ = 0;
     int pending_topk_vocab_ = 0;
@@ -1068,10 +1069,10 @@ private:
     [[nodiscard]] cudaError_t flush_pending_greedy_rows_(cudaStream_t stream);
     [[nodiscard]] cudaError_t flush_pending_penalty_rows_(cudaStream_t stream);
     PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
-    GreedyRowArgs* d_greedy_args_ = nullptr;  // device mirror
+    StableSpan<GreedyRowArgs> d_greedy_args_;  // device mirror
     int n_pending_greedy_rows_ = 0;
     PinnedBuffer h_pen_args_;                 // pinned, 2 x sample_slots_ (parity halves)
-    PenaltyRowArgs* d_pen_args_ = nullptr;    // device mirror
+    StableSpan<PenaltyRowArgs> d_pen_args_;   // device mirror
     int n_pending_pen_rows_ = 0;
     int pending_sample_vocab_ = 0;
     // Static banned-token list cache (see apply_row_filters_): one device copy
@@ -1088,9 +1089,9 @@ private:
     static constexpr int kBannedCacheEntries = 4;
     BannedCacheEntry banned_cache_entries_[kBannedCacheEntries];
     int banned_cache_next_ = 0;
-    int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
-                                          // (2 x sample_slots_ x SAMPLE_SCRATCH_BYTES parity
-                                          // halves; slot 0 of parity 0 = single-seq)
+    StableSpan<int32_t> d_sample_result_;  // device buffer for argmax/sample kernel output
+                                           // (2 x sample_slots_ x SAMPLE_SCRATCH_BYTES parity
+                                           // halves; slot 0 of parity 0 = single-seq)
     PinnedBuffer h_sample_pinned_;        // async D2H sample result staging (T5b)
                                           // (2 x sample_slots_ int32s, parity halves)
     int sample_slots_ = 0;                // batched sampling slots per parity set (= max_batch_size)
@@ -1544,8 +1545,8 @@ public:
     int64_t expert_cache_misses() const { return expert_cache_.misses_; }
     // Test hook: the state a failed T2 take of the q8_1/d8 scratch leaves (MoE decode -> FP16 arm).
     void drop_dp4a_scratch_for_test() {
-        qscratch_.q8_1_buf = nullptr;
-        qscratch_.d8_buf = nullptr;
+        qscratch_.q8_1_buf = {};
+        qscratch_.d8_buf = {};
     }
     std::vector<int32_t>& ngram_step_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 

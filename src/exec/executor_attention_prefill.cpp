@@ -125,8 +125,8 @@
             DeviceOwned<half> kv_own;  // I5: the per-call K/V fallback allocation, released on `stream`
             bool used_eager_scratch = false;
             if (cap_replay) {
-                k_full = chunk_capture_k_;
-                v_full = chunk_capture_v_;
+                k_full = chunk_capture_k_.data();
+                v_full = chunk_capture_v_.data();
             } else {
                 // Persistent gather scratch (grow-only, 64 MiB steps so a
                 // growing ctx doesn't re-allocate every chunk). Falls back to

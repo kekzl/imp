@@ -10,8 +10,9 @@
 // StableSpan widens to DeviceSpan implicitly; there is no conversion the other way, no
 // StableSpan(T*) constructor, no as_stable() escape hatch. The only way to obtain one is
 // from a tier allocator that can make the promise (passkey idiom). No kernel wrapper takes
-// one yet: every mint site outside src/memory unwraps to a raw pointer at once, and the
-// runtime guard is a generation the graph runners compare (tools/check_graph_stability.py).
+// one yet: src/exec and src/runtime hold theirs as members and unwrap at the launch, the rest
+// unwrap at the take (G3), and the runtime guard is a generation the graph runners compare
+// (tools/check_graph_stability.py).
 
 #include <cstddef>
 #include <cstdint>

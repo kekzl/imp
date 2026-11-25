@@ -5,6 +5,7 @@
 #include "core/tensor.h"
 #include "compute/moe_routing.h"
 #include "memory/device_owned.h"
+#include "memory/span.h"
 #include "memory/vram_allocator.h"
 #include "memory/host_pinned.h"
 #include <cuda_runtime.h>
@@ -91,38 +92,38 @@ struct MoEWorkspace {
 
     // Pre-allocated device pointer array for batched MoE GEMM.
     // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
-    void** d_work_ptrs = nullptr;
+    StableSpan<void*> d_work_ptrs;
     int d_work_ptrs_count = 0;
 
     // Per-expert FP8 scale buffer: [n_experts] floats on device.
-    float* d_fp8_scales = nullptr;
+    StableSpan<float> d_fp8_scales;
 
     // Per-expert token-count buffer [n_experts] int32, device. Populated by
     // compute_M_per_from_offsets_device from routing.expert_offsets. Replaces the host-side
     // D2H+sync+loop pattern; prerequisite for CUDA-graph capture of the prefill path.
-    int32_t* d_M_per = nullptr;
+    StableSpan<int32_t> d_M_per;
     int d_M_per_count = 0;
 
     // Compact-alpha output buffer: [n_experts] floats on device. Populated by
     // compact_alpha_active and consumed by the grouped GEMM dispatch when not
     // all experts are active. First d_na valid entries; rest unused.
-    float* d_alpha_compact = nullptr;
+    StableSpan<float> d_alpha_compact;
     // Active-expert count: [1] int32 on device. Written by compact_alpha_active.
-    int32_t* d_na = nullptr;
+    StableSpan<int32_t> d_na;
 
     // Per-expert SFA byte-offsets into the SfAtom-padded grouped-GEMM staging buffer.
     // Exclusive prefix sum of cutlass_nvfp4_sf_size(M_per[e], K), populated each forward by
     // compute_sfa_offsets_device. [n_experts+1] int64.
-    int64_t* d_sfa_offsets = nullptr;
+    StableSpan<int64_t> d_sfa_offsets;
 
     // Phase 3c-full device-args caches: d_B_ptrs_cache/d_SFB_ptrs_cache/d_alpha_full are
     // [n_experts] device arrays filled per-call from the registry handles via
     // cudaMemcpyAsync, shared across gate/up/down within one forward layer. Replaces the
     // per-call cudaMallocAsync of the MVP wire. Superseded by per_layer_da_cache when
     // da_cache_ready; kept for any future per-call fallback path.
-    const void** d_B_ptrs_cache   = nullptr;
-    const void** d_SFB_ptrs_cache = nullptr;
-    float*       d_alpha_full     = nullptr;
+    StableSpan<const void*> d_B_ptrs_cache;
+    StableSpan<const void*> d_SFB_ptrs_cache;
+    StableSpan<float> d_alpha_full;
 
     // Per-layer pre-cached device-args ptr arrays, built once at model-load time
     // (pre_dequant_weights) when handle payloads are populated; reused on every forward call
@@ -160,7 +161,7 @@ struct MoEWorkspace {
     }
 
     // Device-side weight pointer array for device-grouped GEMM.
-    void** d_weight_ptrs = nullptr;
+    StableSpan<void*> d_weight_ptrs;
     int d_weight_ptrs_count = 0;
 
     // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
@@ -224,7 +225,7 @@ struct MoEWorkspace {
     size_t cutlass3x_packed_size = 0;
     DeviceOwned<void> cutlass3x_sf;
     size_t cutlass3x_sf_size = 0;
-    uint8_t** cutlass3x_sfa_ptrs = nullptr;  // device [ne] uint8_t* array
+    StableSpan<uint8_t*> cutlass3x_sfa_ptrs;  // device [ne] uint8_t* array
     int cutlass3x_sfa_ptrs_count = 0;
 
     // Releases every owned buffer and returns the struct to its initial state. Kept: the
