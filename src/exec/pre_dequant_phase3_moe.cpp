@@ -443,9 +443,11 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 // blocks; a pool shaped by an earlier engine splits them (#2180). Restack into one
                 // slab; the originals stay for the CUTLASS prefill entries keyed on them.
                 void* data_base = experts[0].data;
-                void* slab = (shapes_ok && !data_contig)
-                                 ? vram_alloc_force(vram_alloc_, ne_z * e_packed, "nvfp4_moe_restack")
-                                 : nullptr;
+                auto slab_own = (shapes_ok && !data_contig)
+                                    ? DeviceOwned<void>::allocate(vram_alloc_, ne_z * e_packed,
+                                                                  "nvfp4_moe_restack", /*force=*/true)
+                                    : DeviceOwned<void>{};
+                void* slab = slab_own.get();
                 for (int e = 0; slab && e < ne_z; ++e)
                     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(slab) + (e * e_packed),
                                                        experts[e].data, e_packed, cudaMemcpyDeviceToDevice,
@@ -457,9 +459,12 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 if (shapes_ok && data_contig) {
                     const size_t total_ms = static_cast<size_t>(ne_z) * e_ms;
                     void* ms_base = experts[0].scales;
+                    DeviceOwned<void> ms_own;
                     void* d_ms_copy = nullptr;
                     if (!scales_contig) {
-                        d_ms_copy = vram_alloc_force(vram_alloc_, total_ms, "nvfp4_moe_ms_ref");
+                        ms_own = DeviceOwned<void>::allocate(vram_alloc_, total_ms, "nvfp4_moe_ms_ref",
+                                                             /*force=*/true);
+                        d_ms_copy = ms_own.get();
                         if (d_ms_copy) {
                             for (int e = 0; e < ne_z; ++e)
                                 IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(d_ms_copy) +
@@ -469,17 +474,25 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                             ms_base = d_ms_copy;
                         }
                     }
-                    float* d_ts = static_cast<float*>(
-                        vram_alloc_force(vram_alloc_, static_cast<size_t>(ne_z) * sizeof(float),
-                                         "nvfp4_moe_ts_ref"));
+                    auto ts_own = DeviceOwned<float>::allocate(vram_alloc_,
+                                                               static_cast<size_t>(ne_z) * sizeof(float),
+                                                               "nvfp4_moe_ts_ref",
+                                                               /*force=*/true);
+                    float* d_ts = ts_own.get();
                     if ((scales_contig || d_ms_copy) && d_ts) {
                         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(),
                                                            static_cast<size_t>(ne_z) * sizeof(float),
                                                            cudaMemcpyHostToDevice, stream));
+                        // Hand-off: the WeightCaches::nvfp4_moe entry owns restack slab, scale copy and
+                        // tensor scales from here.
+                        if (slab_own)
+                            data_base = slab_own.release();
+                        if (ms_own)
+                            ms_base = ms_own.release();
                         NvFP4MoEQuantResult r;
                         r.packed_data = data_base;  // borrowed (resident, contiguous) or the restack slab
                         r.micro_scales = ms_base;   // borrowed or small contiguous copy
-                        r.tensor_scales = d_ts;
+                        r.tensor_scales = ts_own.release();
                         r.n_experts = ne_z;
                         r.N = N_z;
                         r.K = K_z;
@@ -506,16 +519,13 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                                 void* old_sc = w.scales;
                                 void* new_sc = static_cast<char*>(d_ms_copy) +
                                                (static_cast<size_t>(e) * e_ms);
-                                if (old_sc && mut_model->is_base_gpu_allocation(old_sc)) {
-                                    mut_model->release_gpu_allocation(old_sc);
-                                    // cudaFreeAsync, NOT cudaFree: on this stack a sync free of a
-                                    // stream-ordered allocation
-                                    // returns success without returning the block to the async mempool
-                                    // (#834); the "freed"
-                                    // VRAM would be phantom.
-                                    device_free_all_async(stream, old_sc);
+                                // Stream-ordered owner, NOT a plain free (#834: a sync free of a
+                                // stream-ordered block is phantom). Released on `stream` right here,
+                                // at the end of the if statement.
+                                if (auto old = pre_dequant_internal::take_model_allocation_async(*mut_model,
+                                                                                                 old_sc, e_ms,
+                                                                                                 stream))
                                     freed += e_ms;
-                                }
                                 w.scales = new_sc;
                                 auto nit = wcache_->nvfp4.find(w.data);
                                 if (nit != wcache_->nvfp4.end() && nit->second.micro_scales == old_sc)
@@ -530,10 +540,9 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                             ne_z, (long long)N_z, (long long)K_z, (int)scales_contig);
                         return true;
                     }
-                    if (d_ms_copy)
-                        vram_free(vram_alloc_, d_ms_copy);
-                    if (data_base != experts[0].data)
-                        vram_free(vram_alloc_, data_base);
+                    // Declined: same point and order as the hand frees (no stream sync precedes them).
+                    ms_own.reset();
+                    slab_own.reset();
                 }
                 IMP_LOG_INFO(
                     "NVFP4 MoE native: zero-copy decode declined (shapes_ok=%d data_contig=%d) — "
@@ -581,16 +590,20 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             return false;
         }
 
-        void* d_packed = vram_alloc_force(vram_alloc_, total_packed, "nvfp4_moe_packed_native");
-        void* d_ms = vram_alloc_force(vram_alloc_, total_ms, "nvfp4_moe_ms_native");
-        void* d_ts_raw = vram_alloc_force(vram_alloc_, total_ts, "nvfp4_moe_ts_native");
-        if (!d_packed || !d_ms || !d_ts_raw) {
-            if (d_packed)
-                vram_free(vram_alloc_, d_packed);
-            if (d_ms)
-                vram_free(vram_alloc_, d_ms);
-            if (d_ts_raw)
-                vram_free(vram_alloc_, d_ts_raw);
+        // Owned until the nvfp4_moe insert below; every return before it frees all three.
+        auto packed_own = DeviceOwned<void>::allocate(vram_alloc_, total_packed, "nvfp4_moe_packed_native",
+                                                      /*force=*/true);
+        auto ms_own = DeviceOwned<void>::allocate(vram_alloc_, total_ms, "nvfp4_moe_ms_native",
+                                                  /*force=*/true);
+        auto ts_own = DeviceOwned<float>::allocate(vram_alloc_, total_ts, "nvfp4_moe_ts_native",
+                                                   /*force=*/true);
+        void* d_packed = packed_own.get();
+        void* d_ms = ms_own.get();
+        float* d_ts = ts_own.get();
+        if (!d_packed || !d_ms || !d_ts) {
+            packed_own.reset();
+            ms_own.reset();
+            ts_own.reset();
             moe_budget_exhausted = true;
             IMP_LOG_WARN(
                 "NVFP4 MoE native cache: cudaMalloc failed at %d "
@@ -599,7 +612,6 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             return false;
         }
         moe_logical_avail = (moe_logical_avail > add_bytes) ? (moe_logical_avail - add_bytes) : 0;
-        float* d_ts = static_cast<float*>(d_ts_raw);
 
         std::vector<float> h_ts(ne);
         for (int e = 0; e < ne; ++e) {
@@ -609,9 +621,10 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                     "NVFP4 MoE native: expert %d shape/data mismatch, "
                     "rolling back layer",
                     e);
-                vram_free(vram_alloc_, d_packed);
-                vram_free(vram_alloc_, d_ms);
-                vram_free(vram_alloc_, d_ts_raw);
+                // Same point and order as the hand frees (no stream sync precedes them).
+                packed_own.reset();
+                ms_own.reset();
+                ts_own.reset();
                 return false;
             }
             IMP_CUDA_CHECK_LOG(
@@ -624,10 +637,11 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(), total_ts, cudaMemcpyHostToDevice, stream));
 
+        // Hand-off: the WeightCaches::nvfp4_moe entry owns packed, micro-scales and tensor scales.
         NvFP4MoEQuantResult r;
-        r.packed_data = d_packed;
-        r.micro_scales = d_ms;
-        r.tensor_scales = d_ts;
+        r.packed_data = packed_own.release();
+        r.micro_scales = ms_own.release();
+        r.tensor_scales = ts_own.release();
         r.n_experts = ne;
         r.N = N;
         r.K = K;
@@ -664,21 +678,18 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             // cudaFreeAsync, NOT cudaFree (#834): a sync free of a stream-ordered allocation on this
             // stack returns success without returning the block to the pool. Stream-ordered on
             // `stream` also sequences the frees behind the copies above without a device sync.
+            // Each owner releases on `stream` at the end of its if statement: data, then scales.
             if (w.data) {
-                if (mut_model->is_base_gpu_allocation(w.data)) {
-                    mut_model->release_gpu_allocation(w.data);
-                    device_free_all_async(stream, w.data);
+                if (auto old = pre_dequant_internal::take_model_allocation_async(*mut_model, w.data,
+                                                                                 expert_packed_bytes, stream))
                     freed_bytes += expert_packed_bytes;
-                }
                 w.data = nullptr;
                 w.on_device = false;
             }
             if (w.scales) {
-                if (mut_model->is_base_gpu_allocation(w.scales)) {
-                    mut_model->release_gpu_allocation(w.scales);
-                    device_free_all_async(stream, w.scales);
+                if (auto old = pre_dequant_internal::take_model_allocation_async(*mut_model, w.scales,
+                                                                                 expert_ms_bytes, stream))
                     freed_bytes += expert_ms_bytes;
-                }
                 w.scales = nullptr;
             }
         }

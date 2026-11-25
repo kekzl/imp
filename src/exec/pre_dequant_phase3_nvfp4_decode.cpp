@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <unordered_set>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -56,20 +57,36 @@ const char* lm_head_skip_reason(bool gdn_head_ok, bool fp8_head_built, const std
 
 // Scale scratch for one decode-cache pass. False (both null) when either allocation fails: the
 // caller skips the pass instead of quantizing through a null buffer (#2446).
-bool alloc_scale_scratch(float** a, size_t a_count, float** b, size_t b_count, const char* pass) {
-    if (device_alloc_all(dev_req(*a, a_count * sizeof(float)), dev_req(*b, b_count * sizeof(float))) ==
-        cudaSuccess)
+// Plain family, released synchronously: reset() only after the stream that read them is synced.
+struct ScaleScratch {
+    DeviceOwned<float> absmax;
+    DeviceOwned<float> tscale;
+    void reset() noexcept {
+        absmax.reset();
+        tscale.reset();
+    }
+};
+
+bool alloc_scale_scratch(ScaleScratch& s, size_t a_count, size_t b_count, const char* pass) {
+    float* a = nullptr;
+    float* b = nullptr;
+    if (device_alloc_all(dev_req(a, a_count * sizeof(float)), dev_req(b, b_count * sizeof(float))) ==
+        cudaSuccess) {
+        s.absmax.adopt(a, a_count * sizeof(float), nullptr);
+        s.tscale.adopt(b, b_count * sizeof(float), nullptr);
         return true;
+    }
     IMP_LOG_WARN("%s: scale scratch alloc failed, pass skipped", pass);
     return false;
 }
 
 // FP16 [rows, cols] device head -> NVFP4 with its own tensor scale; false = scratch alloc failed.
 bool quantize_head_nvfp4(const Tensor& lm, NvFP4QuantResult& out, const char* pass, cudaStream_t stream) {
-    float* d_absmax_buf = nullptr;
-    float* d_tscale_buf = nullptr;
-    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, pass))
+    ScaleScratch scratch;
+    if (!alloc_scale_scratch(scratch, 1, 1, pass))
         return false;
+    float* d_absmax_buf = scratch.absmax.get();
+    float* d_tscale_buf = scratch.tscale.get();
     Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
     quantize_fp16_to_nvfp4_async(fp16_view, out, d_absmax_buf, d_tscale_buf, stream);
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -78,7 +95,7 @@ bool quantize_head_nvfp4(const Tensor& lm, NvFP4QuantResult& out, const char* pa
     out.tensor_scale = h_tscale;
     out.N = lm.shape[0];
     out.K = lm.shape[1];
-    device_free_all(d_absmax_buf, d_tscale_buf);
+    scratch.reset();
     return true;
 }
 }  // namespace
@@ -387,10 +404,11 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
                          return a_sz < b_sz;
                      });
 
-    float* d_absmax_buf = nullptr;
-    float* d_tscale_buf = nullptr;
-    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, "NVFP4 decode cache mode 2"))
+    ScaleScratch scratch;
+    if (!alloc_scale_scratch(scratch, 1, 1, "NVFP4 decode cache mode 2"))
         return;
+    float* d_absmax_buf = scratch.absmax.get();
+    float* d_tscale_buf = scratch.tscale.get();
 
     int actual_count = 0;
     size_t actual_bytes = 0;
@@ -423,15 +441,16 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         }
 
         const half* fp16_ptr = nullptr;
-        void* tmp_buf = nullptr;
+        DeviceOwned<void> tmp_buf;  // oversized dequant target of this entry, plain family
 
         if (e.from_scratch) {
             size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
             void* dq_buf = qscratch_->dequant.get();
             if (need > qscratch_->dequant_size) {
-                if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)
+                tmp_buf = DeviceOwned<void>::allocate_plain(need);
+                if (!tmp_buf)
                     continue;
-                dq_buf = tmp_buf;
+                dq_buf = tmp_buf.get();
             }
             dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
             fp16_ptr = reinterpret_cast<const half*>(dq_buf);
@@ -463,7 +482,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         actual_bytes += nvfp4_bytes;
         actual_count++;
 
-        device_free_all(tmp_buf);
+        tmp_buf.reset();  // after the sync above
 
         // Free FP16 cache entry to reclaim VRAM for next weight
         if (!e.from_scratch) {
@@ -482,7 +501,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
         }
     }
 
-    device_free_all(d_absmax_buf, d_tscale_buf);
+    scratch.reset();
 
     wcache_->nvfp4_bytes = actual_bytes;
     dctx.nvfp4_dense_bytes = actual_bytes;
@@ -529,12 +548,13 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
         budgeted.push_back(e);
     }
 
-    float* d_absmax_buf = nullptr;
-    float* d_tscales_all = nullptr;
-    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscales_all, budgeted.size(), "NVFP4 decode cache mode 1"))
+    ScaleScratch scratch;
+    if (!alloc_scale_scratch(scratch, 1, budgeted.size(), "NVFP4 decode cache mode 1"))
         return;
+    float* d_absmax_buf = scratch.absmax.get();
+    float* d_tscales_all = scratch.tscale.get();
 
-    std::vector<void*> tmp_bufs;
+    std::vector<DeviceOwned<void>> tmp_bufs;  // oversized dequant targets, plain family
     for (size_t i = 0; i < budgeted.size(); i++) {
         auto& e = budgeted[i];
         const half* fp16_ptr = nullptr;
@@ -545,11 +565,11 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
             size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
             void* dq_buf = qscratch_->dequant.get();
             if (need > qscratch_->dequant_size) {
-                void* tmp = nullptr;
-                if (device_alloc_all(dev_req(tmp, need)) != cudaSuccess)
+                auto tmp = DeviceOwned<void>::allocate_plain(need);
+                if (!tmp)
                     continue;
-                dq_buf = tmp;
-                tmp_bufs.push_back(tmp);
+                dq_buf = tmp.get();
+                tmp_bufs.push_back(std::move(tmp));
             }
             dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
             fp16_ptr = reinterpret_cast<const half*>(dq_buf);
@@ -572,8 +592,8 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
     }
 
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    for (void* p : tmp_bufs)
-        device_free_all(p);
+    for (auto& p : tmp_bufs)
+        p.reset();
 
     std::vector<float> h_tscales(budgeted.size());
     IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all, budgeted.size() * sizeof(float),
@@ -585,7 +605,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
         }
     }
 
-    device_free_all(d_absmax_buf, d_tscales_all);
+    scratch.reset();
 
     wcache_->nvfp4_bytes = budget_used;
     if (nvfp4_from_scratch > 0) {
@@ -608,10 +628,11 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
     (void)budget;
     auto& nvfp4_entries = dctx.entries;
 
-    float* d_absmax_buf2 = nullptr;
-    float* d_tscale_buf2 = nullptr;
-    if (!alloc_scale_scratch(&d_absmax_buf2, 1, &d_tscale_buf2, 1, "NVFP4 second pass"))
+    ScaleScratch scratch;
+    if (!alloc_scale_scratch(scratch, 1, 1, "NVFP4 second pass"))
         return;
+    float* d_absmax_buf2 = scratch.absmax.get();
+    float* d_tscale_buf2 = scratch.tscale.get();
 
     int second_count = 0;
     size_t second_bytes = 0;
@@ -631,13 +652,14 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         // Dequant from quantized weights via scratch buffer
         size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
         void* dq_buf = qscratch_->dequant.get();
-        void* tmp_buf = nullptr;
+        DeviceOwned<void> tmp_buf;  // oversized dequant target of this entry, plain family
         if (!dequant_gpu_supported(e.qtype) || !qscratch_->dequant.get())
             continue;
         if (need > qscratch_->dequant_size) {
-            if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)
+            tmp_buf = DeviceOwned<void>::allocate_plain(need);
+            if (!tmp_buf)
                 continue;
-            dq_buf = tmp_buf;
+            dq_buf = tmp_buf.get();
         }
         dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
 
@@ -654,10 +676,10 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         second_bytes += nvfp4_bytes;
         second_count++;
 
-        device_free_all(tmp_buf);
+        tmp_buf.reset();  // after the sync above
     }
 
-    device_free_all(d_absmax_buf2, d_tscale_buf2);
+    scratch.reset();
 
     if (second_count > 0) {
         wcache_->nvfp4_bytes += second_bytes;

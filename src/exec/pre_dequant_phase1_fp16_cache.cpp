@@ -195,12 +195,12 @@ static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
         const auto it = wc.fp8_native_act_scale.find(entries[i]->weight.data);
         host[(2 * i) + 1] = it != wc.fp8_native_act_scale.end() ? it->second : 0.0f;
     }
-    auto* d = static_cast<float*>(vram_alloc(alloc, host.size() * sizeof(float), "fp8_native_scales"));
-    if (!d || cudaMemcpyAsync(d, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice, stream) !=
-                  cudaSuccess) {
-        vram_free(alloc, d);
-        return false;
-    }
+    auto own = DeviceOwned<float>::allocate(alloc, host.size() * sizeof(float), "fp8_native_scales");
+    if (!own || cudaMemcpyAsync(own.get(), host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice,
+                                stream) != cudaSuccess)
+        return false;  // a failed enqueue leaves nothing on the stream: the owner frees here
+    // Hand-off: WeightCaches::fp8_native_scales owns the array from here.
+    float* d = own.release();
     wc.fp8_native_scales = d;
     for (size_t i = 0; i < entries.size(); ++i) {
         entries[i]->d_scale = d + (2 * i);

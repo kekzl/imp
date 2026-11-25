@@ -12,6 +12,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/weight_handle.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
 #include "model/model.h"
 #include "model/layer_host_keep.h"
@@ -30,20 +31,40 @@ namespace imp::pre_dequant_internal {
 
 // FP8 cache buffers: scale scratch (block maxes [max_grid], absmax, scales [n]) all or none, then the
 // data bulk. Null bulk = pass skipped, never run on a null scratch (#2446); scratch freed by the caller.
+// block_maxes and absmax are scratch of the pass; scales and bulk are released into the cache.
 struct Fp8CacheBuffers {
-    float* block_maxes = nullptr;
-    float* absmax = nullptr;
-    float* scales = nullptr;
-    uint8_t* bulk = nullptr;
+    DeviceOwned<float> block_maxes;
+    DeviceOwned<float> absmax;
+    DeviceOwned<float> scales;
+    DeviceOwned<uint8_t> bulk;
 };
 
 [[nodiscard]] inline Fp8CacheBuffers alloc_fp8_cache_buffers(VRAMAllocator* va, size_t max_grid, size_t n,
                                                              size_t bulk_bytes, const char* tag) {
     Fp8CacheBuffers b;
-    if (device_alloc_all(dev_req(b.block_maxes, max_grid * sizeof(float)), dev_req(b.absmax, sizeof(float)),
-                         dev_req(b.scales, n * sizeof(float))) == cudaSuccess)
-        b.bulk = static_cast<uint8_t*>(vram_alloc(va, bulk_bytes, tag));
+    float* block_maxes = nullptr;
+    float* absmax = nullptr;
+    float* scales = nullptr;
+    if (device_alloc_all(dev_req(block_maxes, max_grid * sizeof(float)), dev_req(absmax, sizeof(float)),
+                         dev_req(scales, n * sizeof(float))) == cudaSuccess) {
+        b.block_maxes.adopt(block_maxes, max_grid * sizeof(float), nullptr);
+        b.absmax.adopt(absmax, sizeof(float), nullptr);
+        b.scales.adopt(scales, n * sizeof(float), nullptr);
+        b.bulk = DeviceOwned<uint8_t>::allocate(va, bulk_bytes, tag);
+    }
     return b;
+}
+
+// A base allocation leaves the model's list for a stream-ordered owner (#834: these blocks are
+// stream-ordered, a plain free would not return them). Empty when `p` is not a base allocation.
+[[nodiscard]] inline DeviceOwned<void> take_model_allocation_async(Model& m, void* p, size_t bytes,
+                                                                   cudaStream_t stream) {
+    DeviceOwned<void> out;
+    if (p != nullptr && m.is_base_gpu_allocation(p)) {
+        m.release_gpu_allocation(p);
+        out.adopt_async(p, bytes, stream);
+    }
+    return out;
 }
 
 // The per-row FP8 head (pre_dequant_fp8_lm_head.cpp) can serve this head: F16 or GPU-dequantable

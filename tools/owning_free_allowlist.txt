@@ -4,7 +4,7 @@
 # a new allocation gets a move-only owner instead (VramOwned or DeviceOwned, src/memory/;
 # docs/internals/MEMORY.md, invariant I5).
 #
-# remaining: 135 release sites in 47 files, 2 owner-or-view flags in 2 files
+# remaining: 111 release sites in 42 files, 2 owner-or-view flags in 2 files
 
 [release sites]
 src/compute/mtp_forward.cu  # 4
@@ -29,13 +29,8 @@ src/exec/expert_cache_prefetch.cu  # 1
 src/exec/inkling_draft.cu  # 1
 src/exec/inkling_draft_weights.cu  # 4
 src/exec/inkling_forward.cu  # 1
-src/exec/pre_dequant_fp8_lm_head.cpp  # 1
-src/exec/pre_dequant_phase1_fp16_cache.cpp  # 1
-src/exec/pre_dequant_phase2_fp8_cache.cpp  # 2
-src/exec/pre_dequant_phase3_fp8.cpp  # 4
-src/exec/pre_dequant_phase3_gdn_prefill.cpp  # 1
-src/exec/pre_dequant_phase3_moe.cpp  # 11
-src/exec/pre_dequant_phase3_nvfp4_decode.cpp  # 8
+src/exec/pre_dequant_phase3_fp8.cpp  # 3
+src/exec/pre_dequant_phase3_nvfp4_decode.cpp  # 1
 src/exec/pre_dequant_phase4_tensor_registry.cpp  # 1
 src/exec/weight_handle.cpp  # 1
 src/lora/lora_adapter.cpp  # 2
