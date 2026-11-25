@@ -5,6 +5,7 @@
 // count comes from the image, buffers sized to a patch budget). Tower weights live in the
 // Model (same checkpoint); this holds a reference, not ownership, uploading on first init.
 
+#include "memory/span.h"
 #include "vision/image_processor.h"  // QwenPatches
 #include "vision/internvl_encoder.h"
 #include "vision/qwen3vl_encoder.h"
@@ -119,9 +120,9 @@ private:
     bool lazy_ = false;
     std::mutex ready_mu_;
 
-    half* d_patches_ = nullptr;
-    half* d_out_ = nullptr;
-    std::vector<half*> d_deepstack_;
+    StableSpan<half> d_patches_;  // engine arena slices
+    StableSpan<half> d_out_;
+    std::vector<StableSpan<half>> d_deepstack_;
     std::vector<void*> allocs_;
 };
 

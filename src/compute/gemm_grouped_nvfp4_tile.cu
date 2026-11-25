@@ -269,13 +269,13 @@ int sm_count() {
 }
 
 // Host-args staging, one T2 slice per arena generation (a model swap re-takes it).
-void* s_staging = nullptr;
+StableSpan<std::byte> s_staging;  // engine arena slice
 uint64_t s_staging_gen = ~0ull;
 
 void* staging() {
     if (engine_arena().generation() != s_staging_gen)
         return nullptr;
-    return s_staging;
+    return s_staging.data();
 }
 
 size_t align128(size_t x) { return (x + 127) & ~size_t(127); }
@@ -374,18 +374,18 @@ bool gemm_grouped_nvfp4_host_args(int n_experts, int N, int K, int expanded, con
 void gemm_grouped_nvfp4_prewarm() {
     gemm_grouped_nvfp4_decode_prewarm();
     const uint64_t gen = engine_arena().generation();
-    if (s_staging != nullptr && s_staging_gen == gen)
+    if (s_staging.data() != nullptr && s_staging_gen == gen)
         return;
-    auto slab = engine_arena().take_bytes(kGroupedNvfp4StagingBytes);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(kGroupedNvfp4StagingBytes);
     if (slab.empty()) {
         IMP_LOG_ERROR(
             "grouped NVFP4: staging (%zu KiB) unavailable from the T2 arena, host-args MoE prefill "
             "will fail",
             kGroupedNvfp4StagingBytes >> 10);
-        s_staging = nullptr;
+        s_staging = {};
         return;
     }
-    s_staging = slab.data();
+    s_staging = slab;
     s_staging_gen = gen;
 }
 

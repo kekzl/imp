@@ -331,15 +331,16 @@ bool launch_q4k_wave_tail(const uint8_t* w4, __half* out, int M, int N, int K, d
     if (t.used == 0 || !imma_ensure_splitk(static_cast<size_t>(M) * (N - n0) * t.used, capturing))
         return false;
     const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
-    kbig<<<dim3(t.nx_big, grid.y), kThreads, q4k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                                            g_imma_act.xrowsum, w4, out, M, N,
-                                                                            K, nullptr, w_stride_blocks,
-                                                                            nullptr, 0);
+    kbig<<<dim3(t.nx_big, grid.y), kThreads, q4k_smem_bytes(128), stream>>>(g_imma_act.xs8.data(),
+                                                                            g_imma_act.xscale.data(),
+                                                                            g_imma_act.xrowsum.data(), w4,
+                                                                            out, M, N, K, nullptr,
+                                                                            w_stride_blocks, nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
     ksplit<<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, q4k_smem_bytes(128), stream>>>(
-        g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
-        w4 + (static_cast<size_t>(n0) * (K / 256) * 144), out, M, N - n0, K, nullptr, 0, g_imma_splitk.buf,
-        t.per);
+        g_imma_act.xs8.data(), g_imma_act.xscale.data(), g_imma_act.xrowsum.data(),
+        w4 + (static_cast<size_t>(n0) * (K / 256) * 144), out, M, N - n0, K, nullptr, 0,
+        g_imma_splitk.buf.data(), t.per);
     IMP_CUDA_CHECK_LAUNCH();
     imma_splitk_finalize_cols(t.used, M, N - n0, out + n0, N, beta1, stream);
     return true;
@@ -377,8 +378,8 @@ bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 gr
         const size_t slice = static_cast<size_t>(M) * N;
         if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
             k32s<<<dim3(grid.x, 1, used), kThreads, q4k_smem_bytes(32), stream>>>(
-                g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4, out_f16, M, N, K, nullptr,
-                w_stride_blocks, g_imma_splitk.buf, per);
+                g_imma_act.xs8.data(), g_imma_act.xscale.data(), g_imma_act.xrowsum.data(), w4, out_f16, M, N,
+                K, nullptr, w_stride_blocks, g_imma_splitk.buf.data(), per);
             IMP_CUDA_CHECK_LAUNCH();
             const int total = static_cast<int>(slice);
             imma_splitk_finalize(used, total, out_f16, beta1, stream);
@@ -390,10 +391,11 @@ bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 gr
                              k128s))
         return true;
     const Q4Kernel k = small_m ? (beta1 ? k32b : k32) : (beta1 ? k128b : k128);
-    k<<<grid, kThreads, q4k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                                      g_imma_act.xrowsum, w4, out_f16, M, N,
-                                                                      K, d_offsets, w_stride_blocks, nullptr,
-                                                                      0);
+    k<<<grid, kThreads, q4k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8.data(),
+                                                                      g_imma_act.xscale.data(),
+                                                                      g_imma_act.xrowsum.data(), w4, out_f16,
+                                                                      M, N, K, d_offsets, w_stride_blocks,
+                                                                      nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

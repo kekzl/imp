@@ -14,8 +14,8 @@ namespace imp {
 // Arena slices: the arena releases wholesale on close, so this only drops
 // pointers (F-12).
 VisionPipeline::~VisionPipeline() {
-    d_embeddings_ = nullptr;
-    d_pixels_ = nullptr;
+    d_embeddings_ = {};
+    d_pixels_ = {};
 }
 
 // Everything the T2 arena owes the mmproj (Gemma-3/Gemma-4v) path: SigLIP tower plus
@@ -66,12 +66,12 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     int n_img_tokens = model_->config.num_image_tokens;
     size_t emb_bytes = static_cast<size_t>(n_img_tokens) * lm_d * sizeof(half);
     {
-        auto slab = engine_arena().take_bytes(emb_bytes);
-        d_embeddings_ = slab.empty() ? nullptr : reinterpret_cast<half*>(slab.data());
-        if (d_embeddings_)
+        StableSpan<std::byte> slab = engine_arena().take_bytes(emb_bytes);
+        d_embeddings_ = slab.as<half>();
+        if (d_embeddings_.data())
             taken_bytes_ += emb_bytes;
     }
-    if (!d_embeddings_) {
+    if (!d_embeddings_.data()) {
         IMP_LOG_ERROR("Failed to allocate vision embedding buffer (%zu bytes)", emb_bytes);
         encoder_.reset();
         model_.reset();
@@ -82,12 +82,12 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
     int img_sz = model_->config.image_size;
     d_pixels_size_ = static_cast<size_t>(3) * img_sz * img_sz * sizeof(half);
     {
-        auto slab = engine_arena().take_bytes(d_pixels_size_);
-        d_pixels_ = slab.empty() ? nullptr : reinterpret_cast<half*>(slab.data());
-        if (d_pixels_)
+        StableSpan<std::byte> slab = engine_arena().take_bytes(d_pixels_size_);
+        d_pixels_ = slab.as<half>();
+        if (d_pixels_.data())
             taken_bytes_ += d_pixels_size_;
     }
-    if (!d_pixels_) {
+    if (!d_pixels_.data()) {
         IMP_LOG_WARN("Failed to pre-allocate vision pixel buffer (%.1f MiB), will alloc per-image",
                      d_pixels_size_ / (1024.0 * 1024.0));
         d_pixels_size_ = 0;
@@ -124,7 +124,7 @@ bool VisionPipeline::init(const std::string& mmproj_path, int lm_d_model, Model*
 
 bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream) {
     size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
-    half* d_px = d_pixels_;
+    half* d_px = d_pixels_.data();
     DeviceOwned<half> oversize;  // an image past the preallocated buffer: freed after the sync below
     if (!d_px || pixel_bytes > d_pixels_size_) {
         oversize = DeviceOwned<half>::allocate_plain(pixel_bytes);
@@ -143,7 +143,7 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
     if (cp != cudaSuccess)
         IMP_LOG_ERROR("Vision: pixel upload failed: %s", cudaGetErrorString(cp));
 
-    bool ok = cp == cudaSuccess && encoder_->encode(d_px, d_embeddings_, stream);
+    bool ok = cp == cudaSuccess && encoder_->encode(d_px, d_embeddings_.data(), stream);
     if (const cudaError_t se = cudaStreamSynchronize(stream); se != cudaSuccess) {
         IMP_LOG_ERROR("Vision: encode sync failed: %s", cudaGetErrorString(se));
         ok = false;
@@ -165,14 +165,15 @@ bool VisionPipeline::preprocess(std::span<const uint8_t> data, ImageData& out) c
 }
 
 bool VisionPipeline::encode_to(const ImageData& img, half* out, cudaStream_t stream) {
-    if (!encoder_ || !d_embeddings_ || !out || img.pixels.empty())
+    if (!encoder_ || !d_embeddings_.data() || !out || img.pixels.empty())
         return false;
     // Encode into the stable scratch d_embeddings_ (the encoder CUDA graph is
     // keyed on the output pointer — encoding straight into a per-request buffer
     // would recapture ~200 kernels every image), then copy to the caller buffer.
     if (!encode_image(img.pixels.data(), static_cast<int>(img.pixels.size()), stream))
         return false;
-    cudaError_t e = cudaMemcpyAsync(out, d_embeddings_, embeddings_bytes(), cudaMemcpyDeviceToDevice, stream);
+    cudaError_t e = cudaMemcpyAsync(out, d_embeddings_.data(), embeddings_bytes(), cudaMemcpyDeviceToDevice,
+                                    stream);
     if (e == cudaSuccess)
         e = cudaStreamSynchronize(stream);
     // encode_image sets the legacy global has_input_ flag as a side effect; the

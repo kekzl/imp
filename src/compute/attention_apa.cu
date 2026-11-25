@@ -24,7 +24,7 @@ static_assert(APA_P2_SEG && !APA_P2_F32O);  // exec_apa_workspace_bytes: pass-2 
 // T2 arena scratch (AUDIT B13 family), taken once at the planned bound (exec_t2_demand apa_scratch);
 // unplanned it grows, and a bump arena keeps each old slice valid inside a captured graph. Arena
 // exhausted or need over the plan = decline (ra2 / FA2 serve).
-static uint8_t* s_apa_ws = nullptr;
+static StableSpan<uint8_t> s_apa_ws;  // engine arena slice
 static size_t s_apa_ws_cap = 0;
 static uint64_t s_apa_ws_gen = 0;
 static size_t s_apa_ws_bound = 0;  // planned demand, attention_apa_set_workspace_bound
@@ -45,15 +45,16 @@ static uint8_t* ensure_apa_workspace(size_t need) {
     const uint64_t gen = engine_arena().generation();
     if (gen != s_apa_ws_gen) {  // model swap: re-take instead of trusting a stale capacity
         s_apa_ws_gen = gen;
-        s_apa_ws = nullptr;
+        s_apa_ws = {};
         s_apa_ws_cap = 0;
     }
-    if (s_apa_ws != nullptr && need <= s_apa_ws_cap)
-        return s_apa_ws;
-    if (s_apa_ws != nullptr && s_apa_ws_bound > 0)  // planned slab taken: no second take outside the plan
+    if (s_apa_ws.data() != nullptr && need <= s_apa_ws_cap)
+        return s_apa_ws.data();
+    if (s_apa_ws.data() != nullptr &&
+        s_apa_ws_bound > 0)  // planned slab taken: no second take outside the plan
         return nullptr;
     const size_t take = std::max(need, s_apa_ws_bound);
-    auto slab = engine_arena().take_bytes(take);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(take);
     if (slab.empty()) {
         static bool warned = false;  // once: a default-on tier must not log per layer and chunk
         if (!warned)
@@ -64,9 +65,9 @@ static uint8_t* ensure_apa_workspace(size_t need) {
         warned = true;
         return nullptr;
     }
-    s_apa_ws = reinterpret_cast<uint8_t*>(slab.data());
+    s_apa_ws = slab.as<uint8_t>();
     s_apa_ws_cap = take;
-    return s_apa_ws;
+    return s_apa_ws.data();
 }
 
 bool attention_apa_prefill(const Tensor& q, const Tensor& k, const Tensor& v, Tensor& o, int n, int kv_len,
@@ -119,7 +120,7 @@ static apa::KvState* kv_state(int layer, int nkv, int kv_len, int owner) {
         return nullptr;
     if (s_kvs.empty()) {
         const size_t stride = (apa::kv_state_bytes(1, nkv, 128, s_kvs_cap) + 255) & ~size_t(255);
-        auto slab = engine_arena().take_bytes(stride * s_kvs_layers);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(stride * s_kvs_layers);
         if (slab.empty()) {
             IMP_LOG_WARN("apa prefill: tile cache %.1f MiB unavailable from the T2 arena, running without",
                          stride * s_kvs_layers / (1024.0 * 1024.0));
@@ -213,7 +214,7 @@ void attention_apa_warmup(int nh, int nkv, int hd, int d_model, float eps, cudaS
 }
 
 void attention_apa_reset_static_cuda_state() {
-    s_apa_ws = nullptr;
+    s_apa_ws = {};
     s_apa_ws_cap = 0;
     s_kvs.clear();
 }
