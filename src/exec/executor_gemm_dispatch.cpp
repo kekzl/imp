@@ -16,6 +16,7 @@
 #include "exec/executor.h"
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/sm120_limits.h"
 #include "compute/gemm.h"
@@ -118,9 +119,8 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
                                    const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
     if (h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.payload.cutlass_nvfp4.sf == nullptr &&
         h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;
+        if (logged.first()) {
             IMP_LOG_INFO("gemm: GGUF %s weight without SfAtom, M=%lld beta=%.0f runs on the source",
                          qtype_name(h.source_qtype), static_cast<long long>(input.shape[0]), ctx.beta);
         }
@@ -199,13 +199,12 @@ static bool nvfp4_prefill_copy_routes(const WeightHandle& h, int M, bool spec_ve
            qs.cutlass_act_sf.get() != nullptr;
 }
 
-// One ACTIVE / DECLINED line per tensor kind (log only, a benign race between engines).
+// One ACTIVE / DECLINED line per tensor kind and model load (log only).
 static void log_nvfp4_prefill_copy_route(const WeightHandle& h, int M, float beta, bool active) {
-    static bool logged[256] = {};
+    static LogOnce logged[256];
     const auto k = static_cast<unsigned>(h.kind) & 255u;
-    if (logged[k])
+    if (!logged[k].first())
         return;
-    logged[k] = true;
     IMP_LOG_INFO(
         "GDN NVFP4 prefill route %s: %s [%lld x %lld] M=%d beta=%.1f primary_tier=%d source_qtype=%d",
         active ? "ACTIVE" : "DECLINED", tensor_kind_name(h.kind), (long long)h.shape[0],
@@ -213,11 +212,10 @@ static void log_nvfp4_prefill_copy_route(const WeightHandle& h, int M, float bet
 }
 
 static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float beta, bool active) {
-    static bool logged[256] = {};
+    static LogOnce logged[256];
     const auto k = static_cast<unsigned>(h.kind) & 255u;
-    if (logged[k])
+    if (!logged[k].first())
         return;
-    logged[k] = true;
     IMP_LOG_INFO(
         "GDN MXFP8 prefill route %s: %s [%lld x %lld] M=%d beta=%.1f primary_tier=%d source_qtype=%d",
         active ? "ACTIVE" : "DECLINED", tensor_kind_name(h.kind), (long long)h.shape[0],
@@ -234,9 +232,8 @@ static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight&
     if (!gemm_mxfp8_tile(qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), cw.data, cw.scale_factors,
                          cw.col_scale, out, M, N, K, stream, /*variant=*/-1, ws, qs.cutlass_workspace_size))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("MXFP8 prefill: own tile GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
     }
     return true;
@@ -259,9 +256,8 @@ static bool mxfp4_tile_rows(const uint8_t* w, const uint8_t* s, const Tensor& in
         !gemm_mxfp4_f16_tile(input.data, w, s, output.data, M, N, K, 1.0f, 0.0f,
                              process_diag_cublas_fp16_acc(), ctx.stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("mxfp4_tile: fused MXFP4 W4A16 GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
     }
     return true;
@@ -307,9 +303,8 @@ static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, co
                                              static_cast<size_t>(N) * es, qs.mxfp4_slice_out.get(), nr * es,
                                              nr * es, M, cudaMemcpyDeviceToDevice, ctx.stream));
     }
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("MXFP4 GEMM: W4A16 dequant scratch ACTIVE (M=%d N=%d K=%d, slice %d)", M, N, K, slice);
     }
 }
@@ -773,9 +768,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                              gemm_nvfp4_f16_tile(input.data, nv.packed_data, nv.micro_scales, output.data, M,
                                                  static_cast<int>(nv.N), static_cast<int>(nv.K),
                                                  nv.tensor_scale * 256.0f, ctx.beta, false, ctx.stream)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("nvfp4_prompt_a16_attn: W4A16 prompt GEMM ACTIVE (M=%d N=%lld K=%lld)", M,
                          static_cast<long long>(nv.N), static_cast<long long>(nv.K));
         }
@@ -902,8 +896,8 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
         gemm(input, w16, output, 1.0f, ctx.beta, ctx.stream);
         return;
     }
-    static bool s_native_warned = false;
-    if (e.native_source && !std::exchange(s_native_warned, true))
+    static LogOnce s_native_warned;
+    if (e.native_source && s_native_warned.first())
         IMP_LOG_ERROR("native FP8 prefill: no activation or dequant scratch (N=%ld K=%ld)",
                       static_cast<long>(wshape[0]), static_cast<long>(wshape[1]));
     gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
@@ -920,9 +914,8 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     if ((cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
         gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
                         a.per_row)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("gemm.fp8_smallm_max_m: own FP8 small-M GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M,
                          N, K, beta);
         }
@@ -936,9 +929,8 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     if ((a.per_row || M >= imp::cfg::kFp8TileMinM) && own_ok &&
         gemm_fp8_tile(a8.data, w8.data, a.d, w_scale, beta, out.data, M, N, K, stream, -1, sk_ws,
                       qscratch_.fp8_tile_ws_size, a.per_row)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("fp8_tile: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N, K, beta);
         }
         return;
@@ -964,9 +956,8 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
         t[i] = {w8[i].data, w_scale[i], static_cast<half*>(out[i]->data), static_cast<int>(w8[i].shape[0])};
     }
     if (ok && gemm_fp8_smallm_multi(t, count, a8.data, a.d, M, K, stream, a.per_row)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
                          count, K);
         }
@@ -993,9 +984,8 @@ Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tenso
         hw.shape[0] % 8 == 0 &&
         quantize_fp8_act_rows(input.data, qscratch_.fp8_act.get(), static_cast<int>(M), K,
                               qscratch_.d_act_row_scales.data(), stream)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("FP8 activations: per-token dynamic scales ACTIVE (M=%ld K=%d)",
                          static_cast<long>(M), K);
         }
@@ -1004,8 +994,8 @@ Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tenso
     // Legacy batch-wide absmax (K % 64 != 0, no row-scale scratch): a row depends on its batch.
     if (!qscratch_.d_act_scale.data())
         return {};
-    static bool warned = false;
-    if (!std::exchange(warned, true))
+    static LogOnce warned;
+    if (warned.first())
         IMP_LOG_WARN("FP8 activations: batch-wide absmax scale (M=%ld K=%d N=%ld), rows depend on the batch",
                      static_cast<long>(M), K, static_cast<long>(hw.shape[0]));
     Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);

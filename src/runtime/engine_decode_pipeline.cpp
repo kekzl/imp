@@ -10,6 +10,7 @@
 #include "compute/dispatch_record.h"
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 
 #include <climits>
@@ -107,13 +108,12 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
 
 // Same logging blind spot the prefill-graph gates had (#1646): seven silent
 // conditions gate the pipeline, so a non-pipelining model looks identical to
-// one that pipelines. Logged once per process, at the first batch that
+// one that pipelines. Logged once per model load, at the first batch that
 // reaches this check.
 void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows) {
-    static bool logged = false;
-    if (logged)
+    static LogOnce logged;
+    if (!logged.first())
         return;
-    logged = true;
     bool rows_ok = true;
     for (const auto& r : rows)
         if (!pipeline_row_eligible_(*r)) {

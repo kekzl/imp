@@ -9,6 +9,7 @@
 #include "compute/gemm_grouped_nvfp4_tile.h"
 
 #include "compute/gemm_grouped_nvfp4_decode.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "quant/nvfp4_gemm_tile_core.cuh"
@@ -311,9 +312,8 @@ bool gemm_grouped_nvfp4_dispatch(int n_experts, int N, int K, int expanded,
                                  const GroupedNvfp4DeviceArgs& args, cudaStream_t stream) {
     if (!gemm_grouped_nvfp4_tile(n_experts, N, K, expanded, args, stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("MoE prefill: own grouped NVFP4 GEMM ACTIVE (experts=%d N=%d K=%d)", n_experts, N, K);
     }
     return true;

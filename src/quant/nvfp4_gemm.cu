@@ -5,6 +5,7 @@
 #include "compute/gemm.h"
 #include "core/cuda_static_reset.h"
 #include "core/tensor.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/pdl.h"
 #include <cuda_runtime.h>
@@ -259,15 +260,14 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
 
     // Fallback path: dequantize full weight matrix to FP16 and use cuBLAS GEMM.
     // This is slow and memory-heavy — warn on first use.
-    static bool s_warned = false;
-    if (!s_warned) {
+    static LogOnce s_warned;
+    if (s_warned.first()) {
         IMP_LOG_WARN(
             "gemm_nvfp4: using slow dequant-to-FP16 fallback for M=%lld "
             "(CUTLASS/cuBLASLt NVFP4 unavailable). "
             "Allocating %.1f MiB dequant buffer for [%lld, %lld] weight matrix",
             (long long)M, (double)((size_t)(N * K) * sizeof(half)) / (1024.0 * 1024.0), (long long)N,
             (long long)K);
-        s_warned = true;
     }
 
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);

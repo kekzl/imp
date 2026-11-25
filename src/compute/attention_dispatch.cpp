@@ -1,5 +1,6 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/dispatch_policy.h"
 #include "core/process_diag.h"
@@ -24,10 +25,9 @@ static void verify_against_routing_model(const DispatchPolicy& rcfg, const AttnK
     const AttnPrefillPath modeled = select_attn_prefill_path(rcfg, sup, has_sinks);
     if (modeled == chosen)
         return;
-    static bool warned = false;
-    if (warned)
+    static LogOnce warned;
+    if (!warned.first())
         return;
-    warned = true;
     IMP_LOG_ERROR(
         "attention routing model disagrees with the dispatch: dispatch ran %s, "
         "select_attn_prefill_path() says %s. attention_dispatch.cpp and "

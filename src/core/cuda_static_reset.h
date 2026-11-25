@@ -24,6 +24,9 @@ void reset_static_cuda_state();
 // otherwise turn the whole mechanism into a no-op that still "passes".
 int cuda_static_reset_hook_count();
 
+// True when `fn` is registered: a test checks one hook's wiring without a device reset.
+[[nodiscard]] bool cuda_static_reset_has_hook(void (*fn)());
+
 namespace detail {
 
 // Appends `fn` to the hook list when constructed. File-scope instances run

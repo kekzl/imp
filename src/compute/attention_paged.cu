@@ -7,6 +7,7 @@
 #include "core/pdl_device.cuh"
 #include "core/pdl_launch.cuh"
 #include "compute/attention.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -843,12 +844,11 @@ bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
     }
 }
 
-// One warning per process: the generic kernel is scalar, one CTA per (batch, head), no split-K.
+// One warning per model load: the generic kernel is scalar, one CTA per (batch, head), no split-K.
 static void warn_generic_decode_once(int head_dim, int v_head_dim, int n_heads, int n_kv_heads) {
-    static bool warned = false;
-    if (warned)
+    static LogOnce warned;
+    if (!warned.first())
         return;
-    warned = true;
     IMP_LOG_WARN(
         "paged_attention_decode: generic kernel (no split-K) for head_dim=%d v_head_dim=%d "
         "n_heads=%d n_kv_heads=%d",
@@ -864,9 +864,8 @@ static void launch_paged_decode_mha(const Tensor& Q, const Tensor& K_cache, cons
                                     int n_sinks, float softcap, bool has_attn_sinks, size_t smem_bytes,
                                     cudaStream_t stream) {
     if (has_attn_sinks) {
-        static bool warned_sinks_mha = false;
-        if (!warned_sinks_mha) {
-            warned_sinks_mha = true;
+        static LogOnce warned_sinks_mha;
+        if (warned_sinks_mha.first()) {
             IMP_LOG_WARN(
                 "paged_attention_decode: MHA fallback ignores learned attention sinks "
                 "(gpt-oss) - output will be wrong for this config");
