@@ -18,10 +18,10 @@
 
 // Per-tag split of the engine's VRAM allocator, and what imp_vram_own_bytes holds outside it
 // (arena, async mempools, library workspaces): roadmap row 97.
-static void append_allocator_tags(std::string& out, ServerState& state, size_t own_bytes) {
-    if (!state.ctx || !state.ctx->engine)
+static void append_allocator_tags(std::string& out, imp::Engine* engine, size_t own_bytes) {
+    if (!engine)
         return;
-    const imp::VRAMAllocator& alloc = state.ctx->engine->vram_allocator();
+    const imp::VRAMAllocator& alloc = engine->vram_allocator();  // own map mutex, atomic total
     out += "# HELP imp_vram_allocator_bytes Device bytes the VRAM allocator holds per allocation tag\n";
     out += "# TYPE imp_vram_allocator_bytes gauge\n";
     for (const auto& [tag, bytes] : alloc.bytes_by_tag())
@@ -32,214 +32,216 @@ static void append_allocator_tags(std::string& out, ServerState& state, size_t o
     out += "imp_vram_untracked_bytes " + std::to_string(own_bytes > tracked ? own_bytes - tracked : 0) + "\n";
 }
 
-void append_memory_metrics(std::string& out, ServerState& state) {
-// Reports memory capacity AND occupancy per tier (invariant I7): a single "VRAM used" gauge
-// cannot distinguish a KV pool that is 90% full from one that is 90% reserved and empty, and an
-// operator needs to ask both questions.
-out += "# HELP imp_memory_reserved_bytes Capacity held by a memory tier\n";
-out += "# TYPE imp_memory_reserved_bytes gauge\n";
-out += "# HELP imp_memory_live_bytes In use inside that tier\n";
-out += "# TYPE imp_memory_live_bytes gauge\n";
-for (const auto& t : imp::memory_tier_stats()) {
-    const std::string tag = std::string("{tier=\"") + t.tier + "\"} ";
-    out += "imp_memory_reserved_bytes" + tag + std::to_string(t.reserved) + "\n";
-    out += "imp_memory_live_bytes" + tag + std::to_string(t.live) + "\n";
-}
-// The KV pool is per-engine, so it is added here rather than by the
-// process-global snapshot. blocks, not bytes: it is the unit admission
-// control actually rations.
-if (state.ctx && state.ctx->engine) {
-    // MoE expert-imbalance ratio (#1548): max(M_e) per launch sets grouped-GEMM cost (kernel pads
-    // every expert to one M tile) - computed on the host for tiling and then dropped, so asking
-    // the M distribution meant reading a once-per-process INFO line.
-    // Scraped live (not written at shutdown): a serving process is exactly the one that couldn't be asked
-    // before.
-    if (const auto* ex = state.ctx->engine->executor()) {
-        const auto imb = ex->moe_imbalance();
-        bool any = false;
-        for (const auto& l : imb)
-            any = any || l.launches > 0;
-        if (any) {
-            out += "# HELP imp_moe_expert_imbalance mean max(M_e) over mean rows per expert, per layer\n";
-            out += "# TYPE imp_moe_expert_imbalance gauge\n";
-            out += "# HELP imp_moe_expert_peak_rows worst max(M_e) seen on that layer\n";
-            out += "# TYPE imp_moe_expert_peak_rows gauge\n";
-            for (size_t l = 0; l < imb.size(); ++l) {
-                if (imb[l].launches == 0)
-                    continue;  // dense layer of a hybrid, or not reached yet
-                const std::string tag = std::string("{layer=\"") + std::to_string(l) + "\"} ";
-                const double ratio = imb[l].mean_rows > 0.0 ? imb[l].mean_max / imb[l].mean_rows : 0.0;
-                out += "imp_moe_expert_imbalance" + tag + std::to_string(ratio) + "\n";
-                out += "imp_moe_expert_peak_rows" + tag + std::to_string(imb[l].peak_max) + "\n";
+void append_memory_metrics(std::string& out, imp::Engine* engine, const imp::EngineMetricsSnapshot& es) {
+    // Reports memory capacity AND occupancy per tier (invariant I7): a single "VRAM used" gauge
+    // cannot distinguish a KV pool that is 90% full from one that is 90% reserved and empty, and an
+    // operator needs to ask both questions.
+    out += "# HELP imp_memory_reserved_bytes Capacity held by a memory tier\n";
+    out += "# TYPE imp_memory_reserved_bytes gauge\n";
+    out += "# HELP imp_memory_live_bytes In use inside that tier\n";
+    out += "# TYPE imp_memory_live_bytes gauge\n";
+    for (const auto& t : imp::memory_tier_stats()) {
+        const std::string tag = std::string("{tier=\"") + t.tier + "\"} ";
+        out += "imp_memory_reserved_bytes" + tag + std::to_string(t.reserved) + "\n";
+        out += "imp_memory_live_bytes" + tag + std::to_string(t.live) + "\n";
+    }
+    // The KV pool is per-engine, so it is added here rather than by the
+    // process-global snapshot. blocks, not bytes: it is the unit admission
+    // control actually rations.
+    if (engine) {
+        // MoE expert-imbalance ratio (#1548): max(M_e) per launch sets grouped-GEMM cost (kernel pads
+        // every expert to one M tile) - computed on the host for tiling and then dropped, so asking
+        // the M distribution meant reading a once-per-process INFO line.
+        // Scraped live (not written at shutdown): a serving process is exactly the one that couldn't be asked
+        // before.
+        {
+            const auto imb = imp::GraphExecutor::read_moe_imbalance(
+                {es.moe_imb_acc, es.moe_imb_layers, es.moe_imb_experts});
+            bool any = false;
+            for (const auto& l : imb)
+                any = any || l.launches > 0;
+            if (any) {
+                out += "# HELP imp_moe_expert_imbalance mean max(M_e) over mean rows per expert, per layer\n";
+                out += "# TYPE imp_moe_expert_imbalance gauge\n";
+                out += "# HELP imp_moe_expert_peak_rows worst max(M_e) seen on that layer\n";
+                out += "# TYPE imp_moe_expert_peak_rows gauge\n";
+                for (size_t l = 0; l < imb.size(); ++l) {
+                    if (imb[l].launches == 0)
+                        continue;  // dense layer of a hybrid, or not reached yet
+                    const std::string tag = std::string("{layer=\"") + std::to_string(l) + "\"} ";
+                    const double ratio = imb[l].mean_rows > 0.0 ? imb[l].mean_max / imb[l].mean_rows : 0.0;
+                    out += "imp_moe_expert_imbalance" + tag + std::to_string(ratio) + "\n";
+                    out += "imp_moe_expert_peak_rows" + tag + std::to_string(imb[l].peak_max) + "\n";
+                }
             }
         }
-    }
-    // Host spill tier (#2203, kv_cache.host_spill_mb): present only when it is on.
-    if (const imp::KVHostSpill* spill = state.ctx->engine->kv_host_spill()) {
-        out += "# HELP imp_kv_host_spill_saves_total Prefix blocks copied to the host tier on reclaim\n";
-        out += "# TYPE imp_kv_host_spill_saves_total counter\n";
-        out += "imp_kv_host_spill_saves_total " + std::to_string(spill->saves()) + "\n";
-        out += "# HELP imp_kv_host_spill_restores_total Prefix blocks restored from the host tier (H2D)\n";
-        out += "# TYPE imp_kv_host_spill_restores_total counter\n";
-        out += "imp_kv_host_spill_restores_total " + std::to_string(spill->restores()) + "\n";
-        out += "# HELP imp_kv_host_spill_replacements_total Host-tier entries dropped to make room\n";
-        out += "# TYPE imp_kv_host_spill_replacements_total counter\n";
-        out += "imp_kv_host_spill_replacements_total " + std::to_string(spill->replacements()) + "\n";
-        out += "# HELP imp_kv_host_spill_pinned_bytes Host RAM the tier has pinned so far\n";
-        out += "# TYPE imp_kv_host_spill_pinned_bytes gauge\n";
-        out += "imp_kv_host_spill_pinned_bytes " +
-               std::to_string(static_cast<uint64_t>(spill->pinned_slots()) * spill->slot_bytes()) + "\n";
-    }
-    // Hybrid prefix reuse: a cached KV prefix restores only with the recurrent state at its end.
-    if (const imp::RecurrentSnapshotStore* snaps = state.ctx->engine->recurrent_snapshots()) {
-        const auto counter = [&out](const char* name, const char* help, uint64_t v) {
-            out += std::string("# HELP ") + name + " " + help + "\n# TYPE " + name + " counter\n" + name +
-                   " " + std::to_string(v) + "\n";
-        };
-        counter("imp_recurrent_snapshot_saves_total", "Recurrent-state snapshots stored (either tier)",
-                snaps->saves());
-        counter("imp_recurrent_snapshot_demotions_total", "Snapshots moved from the device to the host tier",
-                snaps->demotions());
-        counter("imp_recurrent_snapshot_evictions_total", "Snapshots dropped from both tiers",
-                snaps->evictions());
-        const auto& h = snaps->reuse();
-        out +=
-            "# HELP imp_prefix_snapshot_restores_total Requests that restored a recurrent snapshot, by "
-            "tier\n";
-        out += "# TYPE imp_prefix_snapshot_restores_total counter\n";
-        out += "imp_prefix_snapshot_restores_total{tier=\"device\"} " +
-               std::to_string(h.restores_device.load()) + "\n";
-        out += "imp_prefix_snapshot_restores_total{tier=\"host\"} " + std::to_string(h.restores_host.load()) +
-               "\n";
-        out +=
-            "# HELP imp_prefix_snapshot_misses_total Requests with a cached KV prefix and no restorable "
-            "snapshot: none stored (absent) or stored but unpaired (stale)\n";
-        out += "# TYPE imp_prefix_snapshot_misses_total counter\n";
-        out += "imp_prefix_snapshot_misses_total{reason=\"absent\"} " +
-               std::to_string(h.misses_absent.load()) + "\n";
-        out += "imp_prefix_snapshot_misses_total{reason=\"stale\"} " + std::to_string(h.misses_stale.load()) +
-               "\n";
-        counter("imp_prefix_snapshot_unused_tokens_total",
-                "Cached prefix tokens prefilled again for want of a snapshot at their end",
-                h.unused_tokens.load());
-    }
-    if (const auto* kv = state.ctx->engine->kv_cache()) {
-        const int total_blocks = kv->total_blocks();
-        const int free_blocks = kv->num_free_blocks();
-        out += "# HELP imp_kv_blocks_total KV pool capacity in blocks\n";
-        out += "# TYPE imp_kv_blocks_total gauge\n";
-        out += "imp_kv_blocks_total " + std::to_string(total_blocks) + "\n";
-        // Residency, the platform fact that had no runtime check (B-6): a
-        // device-to-device copy inside the pool at init. ~1500 GB/s resident,
-        // ~240 spilled into host memory by the WDDM driver; 0 = not measured.
-        out +=
-            "# HELP imp_kv_pool_bandwidth_gbps Copy bandwidth measured inside the KV pool at init, "
-            "GB/s read plus write; a spilled pool reads a sixth of a resident one\n";
-        out += "# TYPE imp_kv_pool_bandwidth_gbps gauge\n";
-        out += "imp_kv_pool_bandwidth_gbps " + std::to_string(kv->residency_gbps()) + "\n";
-        out += "# HELP imp_kv_blocks_used KV blocks held by anything — live sequences, the "
-               "prefix cache, pins\n";
-        out += "# TYPE imp_kv_blocks_used gauge\n";
-        out += "imp_kv_blocks_used " + std::to_string(total_blocks - free_blocks) + "\n";
-        // KV blocks: "used" growing per request can be prefix-cache reclaim, not a leak (#1115) - a
-        // freed sequence's last reference MOVES into the cache instead of being dropped (occupied AND
-        // reclaimable, invariant I7). A soak test should assert imp_kv_blocks_live returns to baseline.
-        if (auto* mgr = state.ctx->engine->kv_manager()) {
-            const int cached = mgr->num_cached_blocks();
-            out += "# HELP imp_kv_blocks_cached KV blocks held by the prefix cache (occupied but "
-                   "reusable)\n";
-            out += "# TYPE imp_kv_blocks_cached gauge\n";
-            out += "imp_kv_blocks_cached " + std::to_string(cached) + "\n";
-            out += "# HELP imp_kv_blocks_reclaimable Cached blocks eviction can hand back\n";
-            out += "# TYPE imp_kv_blocks_reclaimable gauge\n";
-            out += "imp_kv_blocks_reclaimable " +
-                   std::to_string(mgr->num_reclaimable_cached_blocks()) + "\n";
-            out += "# HELP imp_kv_blocks_pinned Cached blocks pinned by cache_control or session_id\n";
-            out += "# TYPE imp_kv_blocks_pinned gauge\n";
-            out += "imp_kv_blocks_pinned " + std::to_string(mgr->num_pinned_blocks()) + "\n";
-            out += "# HELP imp_kv_session_pinned_blocks Blocks pinned by session_id, summed per session\n";
-            out += "# TYPE imp_kv_session_pinned_blocks gauge\n";
-            out += "imp_kv_session_pinned_blocks " + std::to_string(mgr->num_session_pinned_blocks()) + "\n";
-            out += "# HELP imp_kv_sessions Sessions holding a session_id prefix pin\n";
-            out += "# TYPE imp_kv_sessions gauge\n";
-            out += "imp_kv_sessions " + std::to_string(mgr->num_sessions()) + "\n";
-            out += "# HELP imp_kv_blocks_live KV blocks held by LIVE SEQUENCES only — the number "
-                   "that must return to baseline when the load stops\n";
-            out += "# TYPE imp_kv_blocks_live gauge\n";
-            out += "imp_kv_blocks_live " + std::to_string(total_blocks - free_blocks - cached) +
-                   "\n";
-            // Promised at admission and not yet written (#1635). Free blocks
-            // minus this is what the next request is admitted against, and
-            // without it a queue behind a full-looking pool reads as a bug.
+        // Host spill tier (#2203, kv_cache.host_spill_mb): present only when it is on.
+        if (es.has_host_spill) {
+            out += "# HELP imp_kv_host_spill_saves_total Prefix blocks copied to the host tier on reclaim\n";
+            out += "# TYPE imp_kv_host_spill_saves_total counter\n";
+            out += "imp_kv_host_spill_saves_total " + std::to_string(es.spill_saves) + "\n";
             out +=
-                "# HELP imp_kv_blocks_reserved KV blocks promised to admitted requests for "
-                "their remaining generation, not yet written\n";
-            out += "# TYPE imp_kv_blocks_reserved gauge\n";
-            out += "imp_kv_blocks_reserved " + std::to_string(mgr->outstanding_reserved_blocks()) + "\n";
+                "# HELP imp_kv_host_spill_restores_total Prefix blocks restored from the host tier (H2D)\n";
+            out += "# TYPE imp_kv_host_spill_restores_total counter\n";
+            out += "imp_kv_host_spill_restores_total " + std::to_string(es.spill_restores) + "\n";
+            out += "# HELP imp_kv_host_spill_replacements_total Host-tier entries dropped to make room\n";
+            out += "# TYPE imp_kv_host_spill_replacements_total counter\n";
+            out += "imp_kv_host_spill_replacements_total " + std::to_string(es.spill_replacements) + "\n";
+            out += "# HELP imp_kv_host_spill_pinned_bytes Host RAM the tier has pinned so far\n";
+            out += "# TYPE imp_kv_host_spill_pinned_bytes gauge\n";
+            out += "imp_kv_host_spill_pinned_bytes " + std::to_string(es.spill_pinned_bytes) + "\n";
         }
-        out +=
-            "# HELP imp_kv_swaps_total Decoding requests whose KV went to host on a dry pool "
-            "instead of being cancelled (#2486)\n";
-        out += "# TYPE imp_kv_swaps_total counter\n";
-        out += "imp_kv_swaps_total " + std::to_string(state.ctx->engine->kv_swaps_out()) + "\n";
+        // Hybrid prefix reuse: a cached KV prefix restores only with the recurrent state at its end.
+        if (es.has_recurrent_snapshots) {
+            const auto counter = [&out](const char* name, const char* help, uint64_t v) {
+                out += std::string("# HELP ") + name + " " + help + "\n# TYPE " + name + " counter\n" + name +
+                       " " + std::to_string(v) + "\n";
+            };
+            counter("imp_recurrent_snapshot_saves_total", "Recurrent-state snapshots stored (either tier)",
+                    es.snap_saves);
+            counter("imp_recurrent_snapshot_demotions_total",
+                    "Snapshots moved from the device to the host tier", es.snap_demotions);
+            counter("imp_recurrent_snapshot_evictions_total", "Snapshots dropped from both tiers",
+                    es.snap_evictions);
+            out +=
+                "# HELP imp_prefix_snapshot_restores_total Requests that restored a recurrent snapshot, by "
+                "tier\n";
+            out += "# TYPE imp_prefix_snapshot_restores_total counter\n";
+            out += "imp_prefix_snapshot_restores_total{tier=\"device\"} " +
+                   std::to_string(es.snap_restores_device) + "\n";
+            out += "imp_prefix_snapshot_restores_total{tier=\"host\"} " +
+                   std::to_string(es.snap_restores_host) + "\n";
+            out +=
+                "# HELP imp_prefix_snapshot_misses_total Requests with a cached KV prefix and no restorable "
+                "snapshot: none stored (absent) or stored but unpaired (stale)\n";
+            out += "# TYPE imp_prefix_snapshot_misses_total counter\n";
+            out += "imp_prefix_snapshot_misses_total{reason=\"absent\"} " +
+                   std::to_string(es.snap_misses_absent) + "\n";
+            out += "imp_prefix_snapshot_misses_total{reason=\"stale\"} " +
+                   std::to_string(es.snap_misses_stale) + "\n";
+            counter("imp_prefix_snapshot_unused_tokens_total",
+                    "Cached prefix tokens prefilled again for want of a snapshot at their end",
+                    es.snap_unused_tokens);
+        }
+        if (es.has_kv) {
+            const int total_blocks = es.kv_total_blocks;
+            const int free_blocks = es.kv_free_blocks;
+            out += "# HELP imp_kv_blocks_total KV pool capacity in blocks\n";
+            out += "# TYPE imp_kv_blocks_total gauge\n";
+            out += "imp_kv_blocks_total " + std::to_string(total_blocks) + "\n";
+            // Residency, the platform fact that had no runtime check (B-6): a
+            // device-to-device copy inside the pool at init. ~1500 GB/s resident,
+            // ~240 spilled into host memory by the WDDM driver; 0 = not measured.
+            out +=
+                "# HELP imp_kv_pool_bandwidth_gbps Copy bandwidth measured inside the KV pool at init, "
+                "GB/s read plus write; a spilled pool reads a sixth of a resident one\n";
+            out += "# TYPE imp_kv_pool_bandwidth_gbps gauge\n";
+            out += "imp_kv_pool_bandwidth_gbps " + std::to_string(es.kv_bandwidth_gbps) + "\n";
+            out +=
+                "# HELP imp_kv_blocks_used KV blocks held by anything — live sequences, the "
+                "prefix cache, pins\n";
+            out += "# TYPE imp_kv_blocks_used gauge\n";
+            out += "imp_kv_blocks_used " + std::to_string(total_blocks - free_blocks) + "\n";
+            // KV blocks: "used" growing per request can be prefix-cache reclaim, not a leak (#1115) - a
+            // freed sequence's last reference MOVES into the cache instead of being dropped (occupied AND
+            // reclaimable, invariant I7). A soak test should assert imp_kv_blocks_live returns to baseline.
+            if (es.has_kv_manager) {
+                const int cached = es.kv_cached_blocks;
+                out +=
+                    "# HELP imp_kv_blocks_cached KV blocks held by the prefix cache (occupied but "
+                    "reusable)\n";
+                out += "# TYPE imp_kv_blocks_cached gauge\n";
+                out += "imp_kv_blocks_cached " + std::to_string(cached) + "\n";
+                out += "# HELP imp_kv_blocks_reclaimable Cached blocks eviction can hand back\n";
+                out += "# TYPE imp_kv_blocks_reclaimable gauge\n";
+                out += "imp_kv_blocks_reclaimable " + std::to_string(es.kv_reclaimable_blocks) + "\n";
+                out += "# HELP imp_kv_blocks_pinned Cached blocks pinned by cache_control or session_id\n";
+                out += "# TYPE imp_kv_blocks_pinned gauge\n";
+                out += "imp_kv_blocks_pinned " + std::to_string(es.kv_pinned_blocks) + "\n";
+                out +=
+                    "# HELP imp_kv_session_pinned_blocks Blocks pinned by session_id, summed per session\n";
+                out += "# TYPE imp_kv_session_pinned_blocks gauge\n";
+                out += "imp_kv_session_pinned_blocks " + std::to_string(es.kv_session_pinned_blocks) + "\n";
+                out += "# HELP imp_kv_sessions Sessions holding a session_id prefix pin\n";
+                out += "# TYPE imp_kv_sessions gauge\n";
+                out += "imp_kv_sessions " + std::to_string(es.kv_sessions) + "\n";
+                out +=
+                    "# HELP imp_kv_blocks_live KV blocks held by LIVE SEQUENCES only — the number "
+                    "that must return to baseline when the load stops\n";
+                out += "# TYPE imp_kv_blocks_live gauge\n";
+                out += "imp_kv_blocks_live " + std::to_string(total_blocks - free_blocks - cached) + "\n";
+                // Promised at admission and not yet written (#1635). Free blocks
+                // minus this is what the next request is admitted against, and
+                // without it a queue behind a full-looking pool reads as a bug.
+                out +=
+                    "# HELP imp_kv_blocks_reserved KV blocks promised to admitted requests for "
+                    "their remaining generation, not yet written\n";
+                out += "# TYPE imp_kv_blocks_reserved gauge\n";
+                out += "imp_kv_blocks_reserved " + std::to_string(es.kv_reserved_blocks) + "\n";
+            }
+            out +=
+                "# HELP imp_kv_swaps_total Decoding requests whose KV went to host on a dry pool "
+                "instead of being cancelled (#2486)\n";
+            out += "# TYPE imp_kv_swaps_total counter\n";
+            out += "imp_kv_swaps_total " + std::to_string(es.kv_swaps_out) + "\n";
 
-        // Speculative-decode metrics (#1321): without them a test can't tell whether the drafter ran -
-        // the n-gram matcher only fires on repetitive context, so on ordinary prompts drafted stays 0
-        // and a test silently compares the non-speculative path against itself.
-        const auto& sp = state.ctx->engine->spec_stats();
-        out += "# HELP imp_spec_drafted_total Draft tokens proposed by speculative decoding\n";
-        out += "# TYPE imp_spec_drafted_total counter\n";
-        out += "imp_spec_drafted_total " + std::to_string(sp.drafted) + "\n";
-        out += "# HELP imp_spec_accepted_total Draft tokens the verify step accepted\n";
-        out += "# TYPE imp_spec_accepted_total counter\n";
-        out += "imp_spec_accepted_total " + std::to_string(sp.accepted) + "\n";
-        out += "# HELP imp_spec_verify_steps_total Verify forwards run\n";
-        out += "# TYPE imp_spec_verify_steps_total counter\n";
-        out += "imp_spec_verify_steps_total " + std::to_string(sp.verify_steps) + "\n";
-        out += "# HELP imp_spec_miss_steps_total Decode steps with no usable draft\n";
-        out += "# TYPE imp_spec_miss_steps_total counter\n";
-        out += "imp_spec_miss_steps_total " + std::to_string(sp.miss_steps) + "\n";
+            // Speculative-decode metrics (#1321): without them a test can't tell whether the drafter ran -
+            // the n-gram matcher only fires on repetitive context, so on ordinary prompts drafted stays 0
+            // and a test silently compares the non-speculative path against itself.
+            const imp::SpecStats& sp = es.spec;
+            out += "# HELP imp_spec_drafted_total Draft tokens proposed by speculative decoding\n";
+            out += "# TYPE imp_spec_drafted_total counter\n";
+            out += "imp_spec_drafted_total " + std::to_string(sp.drafted) + "\n";
+            out += "# HELP imp_spec_accepted_total Draft tokens the verify step accepted\n";
+            out += "# TYPE imp_spec_accepted_total counter\n";
+            out += "imp_spec_accepted_total " + std::to_string(sp.accepted) + "\n";
+            out += "# HELP imp_spec_verify_steps_total Verify forwards run\n";
+            out += "# TYPE imp_spec_verify_steps_total counter\n";
+            out += "imp_spec_verify_steps_total " + std::to_string(sp.verify_steps) + "\n";
+            out += "# HELP imp_spec_miss_steps_total Decode steps with no usable draft\n";
+            out += "# TYPE imp_spec_miss_steps_total counter\n";
+            out += "imp_spec_miss_steps_total " + std::to_string(sp.miss_steps) + "\n";
 
-        // Per-draft-SOURCE stats: the aggregate can't price the MTP head alone (n-gram/prediction/
-        // recycling share the same verify chunk and totals). accepted/drafted = acceptance rate per
-        // source; emitted/verify_steps = what the step bought; verify_wall_ms = its cost. `ngram` covers
-        // every non-MTP drafter.
-        auto spec_source = [&out](const char* name, const imp::Engine::SpecSourceStats& s) {
-            const std::string p = std::string("imp_spec_") + name + "_";
-            out += "# HELP " + p + "verify_steps_total Verify forwards this source drafted\n";
-            out += "# TYPE " + p + "verify_steps_total counter\n";
-            out += p + "verify_steps_total " + std::to_string(s.verify_steps) + "\n";
-            out += "# HELP " + p + "drafted_total Draft tokens proposed by this source\n";
-            out += "# TYPE " + p + "drafted_total counter\n";
-            out += p + "drafted_total " + std::to_string(s.drafted) + "\n";
-            out += "# HELP " + p + "accepted_total Draft tokens the verify step accepted\n";
-            out += "# TYPE " + p + "accepted_total counter\n";
-            out += p + "accepted_total " + std::to_string(s.accepted) + "\n";
-            out += "# HELP " + p + "emitted_total Tokens emitted by this source's verify steps\n";
-            out += "# TYPE " + p + "emitted_total counter\n";
-            out += p + "emitted_total " + std::to_string(s.emitted) + "\n";
-            out += "# HELP " + p + "verify_wall_ms_total Host wall inside this source's verify steps\n";
-            out += "# TYPE " + p + "verify_wall_ms_total counter\n";
-            out += p + "verify_wall_ms_total " + std::to_string(s.verify_wall_ms) + "\n";
-        };
-        spec_source("mtp", sp.mtp);
-        spec_source("ngram", sp.other);
+            // Per-draft-SOURCE stats: the aggregate can't price the MTP head alone (n-gram/prediction/
+            // recycling share the same verify chunk and totals). accepted/drafted = acceptance rate per
+            // source; emitted/verify_steps = what the step bought; verify_wall_ms = its cost. `ngram` covers
+            // every non-MTP drafter.
+            auto spec_source = [&out](const char* name, const imp::SpecSourceStats& s) {
+                const std::string p = std::string("imp_spec_") + name + "_";
+                out += "# HELP " + p + "verify_steps_total Verify forwards this source drafted\n";
+                out += "# TYPE " + p + "verify_steps_total counter\n";
+                out += p + "verify_steps_total " + std::to_string(s.verify_steps) + "\n";
+                out += "# HELP " + p + "drafted_total Draft tokens proposed by this source\n";
+                out += "# TYPE " + p + "drafted_total counter\n";
+                out += p + "drafted_total " + std::to_string(s.drafted) + "\n";
+                out += "# HELP " + p + "accepted_total Draft tokens the verify step accepted\n";
+                out += "# TYPE " + p + "accepted_total counter\n";
+                out += p + "accepted_total " + std::to_string(s.accepted) + "\n";
+                out += "# HELP " + p + "emitted_total Tokens emitted by this source's verify steps\n";
+                out += "# TYPE " + p + "emitted_total counter\n";
+                out += p + "emitted_total " + std::to_string(s.emitted) + "\n";
+                out += "# HELP " + p + "verify_wall_ms_total Host wall inside this source's verify steps\n";
+                out += "# TYPE " + p + "verify_wall_ms_total counter\n";
+                out += p + "verify_wall_ms_total " + std::to_string(s.verify_wall_ms) + "\n";
+            };
+            spec_source("mtp", sp.mtp);
+            spec_source("ngram", sp.other);
+        }
     }
-}
-// --vram-budget adherence. own_bytes is this process's allocations since
-// engine init — the thing the budget is a cap on — as opposed to
-// device-used, which also carries the CUDA context and any neighbour.
-{
-    const imp::MemBudgetStat b = imp::memory_budget_stat();
-    out += "# HELP imp_vram_budget_bytes Installed --vram-budget (0 = uncapped)\n";
-    out += "# TYPE imp_vram_budget_bytes gauge\n";
-    out += "imp_vram_budget_bytes " + std::to_string(b.budget_bytes) + "\n";
-    out += "# HELP imp_vram_own_bytes Device memory allocated by this process since init\n";
-    out += "# TYPE imp_vram_own_bytes gauge\n";
-    out += "imp_vram_own_bytes " + std::to_string(b.own_bytes) + "\n";
-    out += "# HELP imp_vram_own_peak_bytes High water of imp_vram_own_bytes\n";
-    out += "# TYPE imp_vram_own_peak_bytes gauge\n";
-    out += "imp_vram_own_peak_bytes " + std::to_string(b.own_peak_bytes) + "\n";
-    append_allocator_tags(out, state, b.own_bytes);
-}
+    // --vram-budget adherence. own_bytes is this process's allocations since
+    // engine init — the thing the budget is a cap on — as opposed to
+    // device-used, which also carries the CUDA context and any neighbour.
+    {
+        const imp::MemBudgetStat b = imp::memory_budget_stat();
+        out += "# HELP imp_vram_budget_bytes Installed --vram-budget (0 = uncapped)\n";
+        out += "# TYPE imp_vram_budget_bytes gauge\n";
+        out += "imp_vram_budget_bytes " + std::to_string(b.budget_bytes) + "\n";
+        out += "# HELP imp_vram_own_bytes Device memory allocated by this process since init\n";
+        out += "# TYPE imp_vram_own_bytes gauge\n";
+        out += "imp_vram_own_bytes " + std::to_string(b.own_bytes) + "\n";
+        out += "# HELP imp_vram_own_peak_bytes High water of imp_vram_own_bytes\n";
+        out += "# TYPE imp_vram_own_peak_bytes gauge\n";
+        out += "imp_vram_own_peak_bytes " + std::to_string(b.own_peak_bytes) + "\n";
+        append_allocator_tags(out, engine, b.own_bytes);
+    }
 }

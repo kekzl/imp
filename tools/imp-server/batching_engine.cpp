@@ -59,6 +59,7 @@ void BatchingEngine::stop() {
         sr->push_finish("cancelled");
     }
     active_requests_.clear();
+    active_count_.store(0, std::memory_order_relaxed);
 }
 
 bool BatchingEngine::pause(int timeout_ms) {
@@ -209,7 +210,7 @@ void BatchingEngine::apply_session_ops_(imp::KVCacheManager* kv, int ttl_s) {
 
 int BatchingEngine::queue_depth() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    return static_cast<int>(pending_queue_.size()) + static_cast<int>(active_requests_.size());
+    return static_cast<int>(pending_queue_.size()) + active_count_.load(std::memory_order_relaxed);
 }
 
 void BatchingEngine::notify_loop_() {
@@ -290,6 +291,7 @@ void BatchingEngine::fail_active_requests_(const std::string& why, cudaError_t o
     engine->invalidate_graphs();
     engine->reset_batch_pool_cache();
     active_requests_.clear();
+    active_count_.store(0, std::memory_order_relaxed);
 }
 
 void BatchingEngine::worker_loop() {
@@ -420,10 +422,14 @@ void BatchingEngine::worker_loop() {
                     active_requests_.push_back(std::move(sr));
                 }
             }
+            active_count_.store(static_cast<int>(active_requests_.size()), std::memory_order_relaxed);
         }
         apply_session_ops_(kv_mgr, engine->runtime_config().server.session_ttl_s);
 
         if (active_requests_.empty()) {
+            // Idle tick (every 10 ms wait): session ops, cancels and resets since the last step
+            // reach /metrics without a step (C-13).
+            engine->publish_metrics_snapshot();
             decode_batch_last.store(0, std::memory_order_relaxed);
             // The split below runs only while something is active: idle, imp_queue_running kept the
             // last batch's count (1 after every single request).
@@ -643,6 +649,7 @@ void BatchingEngine::worker_loop() {
                 ++it;
             }
         }
+        active_count_.store(static_cast<int>(active_requests_.size()), std::memory_order_relaxed);
         if (!staged.empty()) {
             {
                 std::lock_guard<std::mutex> lock(nq_mutex_);

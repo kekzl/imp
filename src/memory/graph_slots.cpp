@@ -123,6 +123,17 @@ bool GraphSlotPool::is_open() const {
     return open_;
 }
 
+// Under mu_: /metrics reads these on a handler thread while a load opens or closes the pool (C-13).
+int GraphSlotPool::num_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return num_slots_;
+}
+
+size_t GraphSlotPool::device_bytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return device_bytes_;
+}
+
 GraphSlotView GraphSlotPool::carve_(int index) const {
     GraphSlotView v{};
     auto* d = static_cast<std::byte*>(region_.base()) + (slot_device_stride_ * static_cast<size_t>(index));

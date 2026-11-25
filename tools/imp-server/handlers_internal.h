@@ -384,6 +384,14 @@ std::shared_ptr<ModelLease> lease_model_locked(ServerState& state, httplib::Resp
 std::shared_ptr<ModelLease> lease_model_snapshot(ServerState& state, httplib::Response& res, ImpModel& model,
                                                  int* max_seq_len = nullptr);
 
+// /metrics (C-13): the loaded engine pinned by a lease, or null (none loaded, swap pending). Never
+// waits on state.mtx (#889). Read the engine only via metrics_snapshot() and its locked allocator.
+struct EngineScrape {
+    std::shared_ptr<ModelLease> lease;
+    imp::Engine* engine = nullptr;
+};
+EngineScrape lease_engine_for_scrape(ServerState& state);
+
 // Takes state.mtx and submits when the engine runs AND `lease` is of the current load epoch.
 // False = nothing submitted, the caller answers 503 + Retry-After.
 bool submit_for_lease(ServerState& state, const std::shared_ptr<ModelLease>& lease,
