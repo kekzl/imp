@@ -525,7 +525,8 @@ json responses_to_openai_body(const json& rsp) {
         }
     }
 
-    // temperature, top_p, priority, stream, speculative: kSamplingKeys rows with kViaResponses.
+    // temperature, top_p, priority, stream, speculative, imp extensions (lora, ...): kSamplingKeys rows
+    // with kViaResponses.
     pass_sampling_keys(rsp, kViaResponses, oai);
     if (rsp.contains("max_output_tokens"))
         oai["max_tokens"] = rsp["max_output_tokens"];

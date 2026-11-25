@@ -1191,6 +1191,8 @@ if(IMP_BUILD_TESTS)
         tests/test_recurrent_slot.cpp
         # One teardown list for finish and cancel: no id-keyed table keeps an entry (audit C-4).
         tests/test_request_tables.cpp
+        # C-6: what a request may ask of a load, a pure function of its forward (Inkling: no loop hooks).
+        tests/test_engine_capabilities.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
         # three decide something on a GPU path from pure inputs; CI has no GPU.
@@ -1334,6 +1336,8 @@ if(IMP_BUILD_TESTS)
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.
             tests/test_constraint_validation.cpp
+            # C-6: a feature the load's forward lacks = 400 on every chat dialect.
+            tests/test_capability_refusal.cpp
             tests/test_server_json_key_order.cpp
             tests/test_server_vision_inline.cpp
             tests/test_tool_result_images.cpp

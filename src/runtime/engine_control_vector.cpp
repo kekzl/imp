@@ -16,10 +16,11 @@ namespace imp {
 int Engine::control_vector_load(const std::string& path) {
     if (!model_)
         return 0;
-    // The gated-residual stream (Qwen4Exp hc_hidden_) is not the d_model hidden state the
-    // vector was trained against.
-    if (model_->profile().gated_residual) {
-        IMP_LOG_ERROR("control vector: %s refused, gated-residual models are not supported", path.c_str());
+    // Gated residual (Qwen4Exp hc_hidden_) or an own forward (Inkling2): no d_model stream to add to.
+    if (!caps_.control_vector) {
+        IMP_LOG_ERROR(
+            "control vector: %s refused, the loaded forward has no residual stream it is shaped for",
+            path.c_str());
         return 0;
     }
     ControlVectorHost host;

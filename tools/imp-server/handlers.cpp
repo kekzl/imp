@@ -196,6 +196,7 @@ struct LoadedModelView {
     int max_seq_len = 0;  // min(plan, KV pool), same number as /props and /info (#1542)
     bool vision = false;
     bool thinking = false;
+    imp::EngineCapabilities caps;  // what the chat dialects refuse with 400 (C-6)
     bool effort_known = false;  // false on lock contention: the template list is read under the lock only
     std::vector<std::string> effort_values;
     std::string effort_default;
@@ -228,6 +229,7 @@ LoadedModelView loaded_model_view(ServerState& state) {
     // Set once per load, read without the lock like max_seq_len.
     v.max_seq_len = servable_context_tokens(state.max_seq_len, kv_capacity_tokens);
     v.vision = state.vision_ok.load(std::memory_order_relaxed);
+    v.caps = imp::EngineCapabilities::from_bits(state.caps_bits.load(std::memory_order_relaxed));
     v.thinking = state.is_think_model;
     return v;
 }
@@ -268,6 +270,9 @@ json capabilities_json(const LoadedModelView& v) {
             effort[level] = supported(true);
         caps["effort"] = std::move(effort);
     }
+    json& ext = caps["imp_extensions"] = json::object();  // the table the 400 reads (C-6)
+    for (const auto& [name, flag] : imp::kCapabilityNames)
+        ext[name] = supported(v.caps.*flag);
     return caps;
 }
 
@@ -764,11 +769,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     state.mtp_head_present.store(state.mtp_head_loaded.load(std::memory_order_relaxed) ||
                                      state.model->model->mtp_head_available_unloaded_,
                                  std::memory_order_relaxed);
-    state.logit_lens_ok.store(state.ctx && state.ctx->engine->logit_lens_supported(),
-                              std::memory_order_relaxed);
-    state.phrase_ban_ok.store(state.ctx && state.ctx->engine->phrase_ban_supported(),
-                              std::memory_order_relaxed);
-    state.cfg_ok.store(state.ctx && state.ctx->engine->cfg_supported(), std::memory_order_relaxed);
+    state.caps_bits.store(state.ctx ? state.ctx->engine->capabilities().bits() : 0u,
+                          std::memory_order_relaxed);
     state.vision_ok.store(state.ctx && state.ctx->engine->has_vision(), std::memory_order_relaxed);
 
     // A trailing "/" still yields a non-empty id (#756); an HF cache snapshot dir is listed as

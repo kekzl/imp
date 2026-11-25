@@ -34,14 +34,8 @@ std::shared_ptr<Request> cfg_partner(const Request& r) {
 
 }  // namespace
 
-bool Engine::cfg_supported() const {
-    // A pair decodes as two rows of one step: hybrids need the batched GDN decode for that.
-    const bool gdn_batch_ok = static_cast<bool>(d_ssm_seq_slots_);
-    return model_ && (!ssm_state_ || gdn_batch_ok);
-}
-
 void Engine::cfg_admit_(std::shared_ptr<Request> req) {
-    if (req->cfg && req->cfg->shadow && !cfg_supported()) {
+    if (req->cfg && req->cfg->shadow && !caps_.cfg) {
         IMP_LOG_WARN("cfg: req %d runs unguided, the model cannot decode the pair in one step", req->id);
         req->cfg.reset();
     }
