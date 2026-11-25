@@ -278,6 +278,10 @@ std::shared_ptr<Request> Engine::held_request_(int id) const {
     return nullptr;
 }
 
+bool Engine::graph_burst_holds(int req_id) const {
+    return async_parked_req_id_ == req_id || (async_graph_req_ && async_graph_req_->id == req_id);
+}
+
 void Engine::async_graph_abandon_() {
     // Stream sync, not the done flag: the burst has no device-side abort, it runs to its limit.
     async_graph_runner_.finish_burst_blocking(decode_stream());

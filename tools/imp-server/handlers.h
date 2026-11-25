@@ -404,6 +404,8 @@ int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& run
 ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg,
                        const std::string& model_path = {});
 std::string load_model_into_state(ServerState& state, const std::string& path);
+// The three channel_*_id of this load from its tokenizer; -1 each without the pair (C-3).
+void detect_channel_markers(ServerState& state, const imp::Tokenizer& tok);
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Readiness (AUDIT_ARCH_2026 E-5): 200 only when an inference request would be

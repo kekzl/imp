@@ -256,6 +256,8 @@ public:
     // and a cold prefill can diverge in state before it crosses an argmax.
     SSMState* ssm_state() const noexcept { return ssm_state_.get(); }
     int recurrent_slot(int req_id) const;
+    // A graph burst (running or parked) still references req_id: false after cancel_request(Wait) (C-5).
+    [[nodiscard]] bool graph_burst_holds(int req_id) const;
 
     // Speculative-decode counters, for /metrics and for tests that prove the
     // drafter actually ran (#1321). Per draft SOURCE: `mtp` is what the

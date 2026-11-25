@@ -4,8 +4,8 @@
 # 2 sequence slots at runtime.max_seq_len=81920: 2 concurrent chats whose replies run past 256
 # tokens, then 9 new chats in 3 waves of 3 (more requests than slots), temperature 0. Each reply
 # must be served (HTTP 200, finish_reason) and pass scripts/degen_verdict.sh on its words.
-# Prints one line per request; exit 0 = 11 of 11 served and coherent. verify.sh and
-# `make verify-inkling` run it.
+# Prints one line per request; exit 0 = 11 of 11 served and coherent and a logit_lens request
+# refused with 400 unsupported_feature (audit C-6). verify.sh and `make verify-inkling` run it.
 set -uo pipefail
 SRV="$1" MODEL="$2" PORT="${3:-18190}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,6 +29,17 @@ chat() {
 }
 
 FAILS=0 SERVED=0
+# C-6: the layer-loop features Inkling's own forward skips are refused, not served without them.
+jq -nc --arg m "$M" '{model:$m,messages:[{role:"user",content:"hi"}],max_tokens:4,logit_lens:2}' >"$TMP/lens.req"
+code=$(curl -s -m 120 -o "$TMP/lens.json" -w '%{http_code}' "http://127.0.0.1:$PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d @"$TMP/lens.req")
+err=$(jq -r '"\(.error.code // "")/\(.error.param // "")"' "$TMP/lens.json" 2>/dev/null)
+if [ "$code" = "400" ] && [ "$err" = "unsupported_feature/logit_lens" ]; then
+    echo "ok   caps: logit_lens refused, HTTP 400 $err"
+else
+    echo "FAIL caps: logit_lens answered HTTP ${code:-none} '$err', want 400 unsupported_feature/logit_lens"
+    FAILS=$((FAILS + 1))
+fi
 # judge <tag> <min_completion_tokens>: served, long enough, coherent.
 judge() {
     local tag="$1" min="$2" code toks fin words verdict
