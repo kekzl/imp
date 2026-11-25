@@ -61,13 +61,9 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     const size_t scale_bytes =
         nvfp4_slots_ ? static_cast<size_t>(n_slots_) * sizeof(float) : 0;
     size_t total = slot_bytes_total + scale_bytes;
-    if (alloc_) {
-        pool_ = alloc_->allocate(total, "expert_cache");
-    } else {
-        cudaError_t err = device_alloc_all(dev_req(pool_, total));
-        if (err != cudaSuccess)
-            pool_ = nullptr;
-    }
+    // I5: the helper's two-way choice (allocator, or the driver without one) lives in the owner.
+    pool_buf_ = DeviceOwned<void>::allocate(alloc_, total, "expert_cache");
+    pool_ = pool_buf_.get();
     if (!pool_) {
         IMP_LOG_WARN("Expert LRU cache: allocation failed for %zu bytes (%d slots)", total, n_slots_);
         n_slots_ = 0;
@@ -111,6 +107,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
             d_lookup_ = nullptr;
         } else {
             // (int32_t)-1 = 0xFFFFFFFF - memset 0xFF gives -1 in every cell.
+            lookup_buf_.adopt(d_lookup_, bytes, nullptr);  // plain family, released in destroy()
             IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, bytes));
         }
     }
@@ -516,14 +513,11 @@ void ExpertLRUCache::destroy() {
             IMP_LOG_INFO("Expert LRU cache stats: %ld hits, %ld misses (%.1f%% hit rate)", (long)hits_,
                          (long)misses_, hit_rate() * 100.0f);
         }
-        if (alloc_)
-            alloc_->free(pool_);
-        else
-            device_free_all(pool_);
+        pool_buf_.reset();
         pool_ = nullptr;
     }
     if (d_lookup_) {
-        device_free_all(d_lookup_);
+        lookup_buf_.reset();
         d_lookup_ = nullptr;
     }
     // d_slot_scales_ points into pool_, freed above - nothing of its own.

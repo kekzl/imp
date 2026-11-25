@@ -20,8 +20,7 @@ namespace imp {
 using namespace inkling;
 
 InklingForward::~InklingForward() {
-    for (void* p : owned_)
-        va_->free(p);
+    owned_.clear();  // I5: before the graphs and GrowRows members go, front to back in libstdc++
 }
 
 // Side stream i, started behind everything queued on s so far; s itself for the default stream (tests).
@@ -47,13 +46,14 @@ void* InklingForward::alloc_(size_t bytes) {
         ok_ = false;
         return nullptr;
     }
-    void* p = va_->allocate(bytes, "inkling_state");
+    VramOwned<std::byte> buf(*va_, bytes, "inkling_state");
+    void* p = buf.get();
     if (!p) {
         IMP_LOG_ERROR("inkling: workspace allocation of %.1f MiB failed", bytes / 1048576.0);
         ok_ = false;
         return nullptr;
     }
-    owned_.push_back(p);
+    owned_.push_back(std::move(buf));
     if (scratch_on_)
         scratch_.push_back(p);
     return p;

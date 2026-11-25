@@ -32,11 +32,10 @@ __global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, const in
 }  // namespace
 
 InklingRuntime::~InklingRuntime() {
-    if (d_rows && va)
-        va->free(d_rows);
-    for (float* p : look_logits)
-        if (p && va)
-            va->free(p);
+    // I5: before the slots, drafts and weights go (the order the hand frees had).
+    d_rows.reset();
+    for (auto& p : look_logits)
+        p.reset();
 }
 
 int InklingRuntime::slot_of_req(int req) const {
@@ -126,8 +125,7 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     rt->growable = growable;
     rt->va = va;
     rt->rows_cap = max_tokens;
-    rt->d_rows = static_cast<int32_t*>(
-        va->allocate(3 * static_cast<size_t>(max_tokens) * sizeof(int32_t), "inkling_state"));
+    rt->d_rows = VramOwned<int32_t>(*va, 3 * static_cast<size_t>(max_tokens), "inkling_state");
     rt->cap = std::min(max_tokens, InklingForward::kSeg);
     rt->slot_req.assign(rt->slots.size(), -1);
     rt->slot_block.assign(rt->slots.size(), -1);
@@ -154,10 +152,10 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
     if (ok) {
         inkling_pack_rows_k<<<1, 256, 0, stream>>>(state.positions, state.token_ids, state.block_tables,
                                                    std::max(state.max_blocks_per_seq, 1), n, n_blk,
-                                                   rt.d_rows);
+                                                   rt.d_rows.get());
         IMP_CUDA_CHECK_LAUNCH();
         // The copy waits for the stream's work.
-        ok = cudaMemcpyAsync(rt.rows.data(), rt.d_rows, 3 * N * sizeof(int32_t), cudaMemcpyDeviceToHost,
+        ok = cudaMemcpyAsync(rt.rows.data(), rt.d_rows.get(), 3 * N * sizeof(int32_t), cudaMemcpyDeviceToHost,
                              stream) == cudaSuccess &&
              cudaStreamSynchronize(stream) == cudaSuccess;
         std::copy_n(rt.rows.begin(), N, rt.pos.begin());
@@ -197,7 +195,7 @@ void GraphExecutor::inkling_look_logits_(int slot, cudaStream_t stream) {
     InklingRuntime& rt = *inkling_;
     const InklingForward& f = *rt.slots[static_cast<size_t>(slot)];
     float* stash = static_cast<size_t>(slot) < rt.look_logits.size()
-                       ? rt.look_logits[static_cast<size_t>(slot)]
+                       ? rt.look_logits[static_cast<size_t>(slot)].get()
                        : nullptr;
     const int row = f.look_row();
     if (!stash || row < 0)
@@ -276,8 +274,9 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
             !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
             break;
         rt.drafts.push_back(std::move(d));
-        rt.look_logits.push_back(static_cast<float*>(vram_alloc_->allocate(
-            InklingForward::kGraphRows * static_cast<size_t>(head.vocab) * sizeof(float), "inkling_state")));
+        rt.look_logits.emplace_back(*vram_alloc_,
+                                    InklingForward::kGraphRows * static_cast<size_t>(head.vocab),
+                                    "inkling_state");
         rt.look_serial.push_back(-1);
         ++on;
     }

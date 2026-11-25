@@ -3,16 +3,17 @@
 // table resampled to the patch grid, axial 2D RoPE, layer scale, 2x2 patch merge into one LM token.
 // Reference: transformers models/inkling2/modeling_inkling2.py (Inkling2VisionModel).
 
+#include "memory/vram_owned.h"
+
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace imp {
-
-class VRAMAllocator;
 
 struct InklingVisionConfig {
     int layers = 23, hidden = 1024, heads = 16, patch = 20, merge = 2, grid = 32;
@@ -53,7 +54,7 @@ private:
 
     InklingVisionConfig cfg_;
     VRAMAllocator* va_ = nullptr;
-    std::vector<void*> owned_;
+    std::vector<VramOwned<std::byte>> owned_;
     std::vector<Layer> layers_;
     half *patch_w_ = nullptr, *proj_in_ = nullptr, *proj_out_ = nullptr;
     float *cls_ = nullptr, *pre_w_ = nullptr, *pre_b_ = nullptr;

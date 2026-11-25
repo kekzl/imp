@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 namespace imp {
 
@@ -148,25 +149,31 @@ bool InklingDraftWeights::quantize_blocks_(cudaStream_t s) {
         const size_t n = static_cast<size_t>(rows * K);
         if (!w || K % 256 != 0)
             return;
-        auto* q = static_cast<int8_t*>(va->allocate(n, "inkling_draft"));
-        auto* sc = static_cast<half*>(va->allocate(n / 32 * sizeof(half), "inkling_draft"));
+        VramOwned<std::byte> q_own(*va, n, "inkling_draft");
+        VramOwned<std::byte> sc_own(*va, n / 32 * sizeof(half), "inkling_draft");
+        auto* q = reinterpret_cast<int8_t*>(q_own.get());
+        auto* sc = reinterpret_cast<half*>(sc_own.get());
         bool done = q != nullptr && sc != nullptr;
         if (done) {
             quantize_i8b32(w, q, sc, static_cast<size_t>(rows), static_cast<int>(K), s);
             done = cudaStreamSynchronize(s) == cudaSuccess;
         }
         if (!done) {
-            if (q)
-                va->free(q);
-            if (sc)
-                va->free(sc);
+            q_own.reset();
+            sc_own.reset();
             return;
         }
-        owned.push_back(q);
-        owned.push_back(sc);
+        owned.push_back(std::move(q_own));
+        owned.push_back(std::move(sc_own));
         o.q = q, o.scales = sc;
-        owned.erase(std::remove(owned.begin(), owned.end(), static_cast<void*>(w)), owned.end());
-        va->free(w);
+        // I5: the fp16 block leaves the list through its owner (every w here came from Bf16Loader::dev).
+        const auto it = std::find_if(owned.begin(), owned.end(), [&](const VramOwned<std::byte>& b) {
+            return static_cast<const void*>(b.get()) == static_cast<const void*>(w);
+        });
+        if (it != owned.end()) {
+            it->reset();
+            owned.erase(it);
+        }
         w = nullptr;
     };
     for (Layer& ly : layers) {
@@ -179,8 +186,8 @@ bool InklingDraftWeights::quantize_blocks_(cudaStream_t s) {
 }
 
 InklingDraftWeights::~InklingDraftWeights() {
-    for (void* p : owned)
-        va->free(p);
+    for (auto& b : owned)
+        b.reset();
 }
 
 bool InklingDraftWeights::load(const std::string& dir, VRAMAllocator& va_in, const float* embed_norm_in,
@@ -236,9 +243,10 @@ bool InklingDraftWeights::load(const std::string& dir, VRAMAllocator& va_in, con
         const int chunk = 8;
         std::vector<half> xr(static_cast<size_t>(chunk) * static_cast<size_t>(H));
         // Scratch for the fold only, returned before load() ends.
-        auto* d_x = static_cast<half*>(va_in.allocate(xr.size() * sizeof(half), "inkling_draft"));
-        auto* d_t = static_cast<half*>(
-            va_in.allocate(static_cast<size_t>(chunk) * V * sizeof(half), "inkling_draft"));
+        VramOwned<half> x_own(va_in, xr.size(), "inkling_draft");
+        VramOwned<half> t_own(va_in, static_cast<size_t>(chunk) * V, "inkling_draft");
+        half* const d_x = x_own.get();
+        half* const d_t = t_own.get();
         ok = d_x != nullptr && d_t != nullptr;
         for (int64_t j0 = 0; ok && j0 <= r; j0 += chunk) {
             // Rows = columns j0.. of hidden_out; one more pass (j0 == r) carries the bias.
@@ -257,10 +265,8 @@ bool InklingDraftWeights::load(const std::string& dir, VRAMAllocator& va_in, con
                 ok = cudaStreamSynchronize(s) == cudaSuccess;
             }
         }
-        if (d_x)
-            va_in.free(d_x);
-        if (d_t)
-            va_in.free(d_t);
+        x_own.reset();
+        t_own.reset();
     }
     ok = ok && quantize_blocks_(s);
     munmap(base, size);

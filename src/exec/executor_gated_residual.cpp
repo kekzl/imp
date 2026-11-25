@@ -52,9 +52,12 @@ bool GraphExecutor::hc_alloc_(int max_tokens) {
     const int hc = cfg.hc_count;
     const int d = cfg.d_model;
     const size_t es = dtype_size(compute_dtype_);
+    size_t slot = 0;
     auto mk = [&](Tensor& t, int cols, const char* tag) -> bool {
         const size_t bytes = align256(static_cast<size_t>(max_tokens) * cols * es);
-        void* p = vram_alloc(vram_alloc_, bytes, tag);
+        DeviceOwned<void>& own = hc_buf_[slot++];
+        own = DeviceOwned<void>::allocate(vram_alloc_, bytes, tag);
+        void* p = own.get();
         if (p == nullptr)
             return false;
         const int64_t shape[2] = {max_tokens, cols};
@@ -73,12 +76,11 @@ bool GraphExecutor::hc_alloc_(int max_tokens) {
 }
 
 void GraphExecutor::hc_free_() {
-    for (Tensor* t : {&hc_hidden_, &hc_normed_, &hc_mixw_, &hc_low_, &hc_inj_, &hc_mixed_}) {
-        if (t->data != nullptr) {
-            vram_free(vram_alloc_, t->data);
-            t->data = nullptr;
-        }
-    }
+    for (Tensor* t : {&hc_hidden_, &hc_normed_, &hc_mixw_, &hc_low_, &hc_inj_, &hc_mixed_})
+        t->data = nullptr;
+    // I5: allocation order = the order of the tensor list above.
+    for (DeviceOwned<void>& b : hc_buf_)
+        b.reset();
 }
 
 void GraphExecutor::hc_write_(int n, cudaStream_t stream) {

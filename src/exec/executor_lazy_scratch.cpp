@@ -14,7 +14,6 @@ namespace imp {
 // closed or short: bare tests) a direct allocation. False: none.
 bool GraphExecutor::acquire_nvfp4_dequant_ws_(size_t covered_bytes) {
     nvfp4_dequant_ws_size_ = covered_bytes;
-    nvfp4_dequant_ws_from_arena_ = true;
     if (engine_arena().lazy() && engine_arena().remaining() >= covered_bytes) {
         nvfp4_dequant_ws_deferred_ = true;
         set_nvfp4_dequant_workspace_provider(&GraphExecutor::provide_nvfp4_dequant_ws_, this, covered_bytes);
@@ -24,11 +23,11 @@ bool GraphExecutor::acquire_nvfp4_dequant_ws_(size_t covered_bytes) {
             covered_bytes / (1024.0 * 1024.0));
         return true;
     }
-    auto slab = engine_arena().take_bytes(covered_bytes);
-    nvfp4_dequant_ws_buf_ = slab.empty() ? nullptr : slab.data();
+    // No graph epoch bump stands at these setters today: their address report is dropped.
+    (void)nvfp4_dequant_ws_buf_.set_view(engine_arena().take_bytes(covered_bytes));
     if (!nvfp4_dequant_ws_buf_) {
-        nvfp4_dequant_ws_from_arena_ = false;
-        nvfp4_dequant_ws_buf_ = vram_alloc(vram_alloc_, covered_bytes, "nvfp4_dequant");
+        (void)nvfp4_dequant_ws_buf_.set_owned(
+            DeviceOwned<void>::allocate(vram_alloc_, covered_bytes, "nvfp4_dequant"));
         if (nvfp4_dequant_ws_buf_)
             IMP_LOG_WARN(
                 "nvfp4_dequant: engine arena could not supply %.2f MiB (remaining %.2f MiB) — "
@@ -37,7 +36,7 @@ bool GraphExecutor::acquire_nvfp4_dequant_ws_(size_t covered_bytes) {
     }
     if (!nvfp4_dequant_ws_buf_)
         return false;
-    set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_, covered_bytes);
+    set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_.get(), covered_bytes);
     return true;
 }
 
@@ -45,9 +44,8 @@ void GraphExecutor::release_nvfp4_dequant_ws_() {
     if (!nvfp4_dequant_ws_buf_ && !nvfp4_dequant_ws_deferred_)
         return;
     set_nvfp4_dequant_workspace(nullptr, 0);  // clears a provider still pointing at this executor
-    if (nvfp4_dequant_ws_buf_ && !nvfp4_dequant_ws_from_arena_)
-        vram_free(vram_alloc_, nvfp4_dequant_ws_buf_);
-    nvfp4_dequant_ws_buf_ = nullptr;
+    // I5: releases a private allocation, drops an arena view.
+    (void)nvfp4_dequant_ws_buf_.reset();
     nvfp4_dequant_ws_size_ = 0;
     nvfp4_dequant_ws_deferred_ = false;
 }
@@ -74,15 +72,14 @@ bool GraphExecutor::take_chunk_capture_scratch_() {
 
 void* GraphExecutor::provide_nvfp4_dequant_ws_(void* self) {
     auto* ex = static_cast<GraphExecutor*>(self);
-    auto slab = engine_arena().take_bytes(ex->nvfp4_dequant_ws_size_);
-    ex->nvfp4_dequant_ws_buf_ = slab.empty() ? nullptr : slab.data();
+    (void)ex->nvfp4_dequant_ws_buf_.set_view(engine_arena().take_bytes(ex->nvfp4_dequant_ws_size_));
     if (ex->nvfp4_dequant_ws_buf_)
         IMP_LOG_INFO("gemm_nvfp4 dequant workspace: %.2f MiB taken from the engine arena at first use",
                      ex->nvfp4_dequant_ws_size_ / (1024.0 * 1024.0));
     else
         IMP_LOG_WARN("gemm_nvfp4 dequant workspace: the engine arena could not supply %.2f MiB at first use",
                      ex->nvfp4_dequant_ws_size_ / (1024.0 * 1024.0));
-    return ex->nvfp4_dequant_ws_buf_;
+    return ex->nvfp4_dequant_ws_buf_.get();
 }
 
 }  // namespace imp

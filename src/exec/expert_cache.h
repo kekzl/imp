@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/cuda_raii.h"
+#include "memory/device_owned.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
@@ -78,6 +79,8 @@ struct ExpertLRUCache {
         size_t ms_off = 0;
     };
 
+    // I5: owns pool_ (allocator or plain, as init chose); pool_ stays the raw view the hot path reads.
+    DeviceOwned<void> pool_buf_;
     void* pool_ = nullptr;     // contiguous GPU allocation for all slots
     size_t slot_size_ = 0;     // bytes per slot (max expert raw size)
     int slots_per_layer_ = 0;  // S — uniform per-layer pool depth (Phase 3)
@@ -135,7 +138,8 @@ struct ExpertLRUCache {
     // do this from inside dispatch kernels):
     //   slot = d_lookup_[layer * 3 * n_experts + proj * n_experts + expert];
     //   if (slot >= 0) src = pool_ + (layer * slots_per_layer + slot) * slot_size;
-    int* d_lookup_ = nullptr;
+    int* d_lookup_ = nullptr;  // raw view of lookup_buf_
+    DeviceOwned<int> lookup_buf_;
     int n_layers_ = 0;
     int n_experts_ = 0;
 

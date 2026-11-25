@@ -1,6 +1,7 @@
 #pragma once
 // Inkling2-Loop checkpoint on the device, under the vendor tensor names (model.llm.*).
 
+#include "memory/vram_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -84,7 +85,7 @@ struct InklingDense8 {
     };
     std::vector<Matrix> m;
     VRAMAllocator* va = nullptr;
-    std::vector<void*> owned;
+    std::vector<VramOwned<std::byte>> owned;
     InklingDense8() = default;
     InklingDense8(const InklingDense8&) = delete;
     InklingDense8& operator=(const InklingDense8&) = delete;
@@ -101,8 +102,8 @@ struct InklingWeights {
     half *embed = nullptr, *unembed = nullptr;
     float *embed_norm = nullptr, *norm = nullptr, *out_query = nullptr;
     float* msg_query = nullptr;   // [loop layers, 4 (q, k, v, mlp), hidden]
-    std::vector<void*> owned;     // every device allocation above
-    VRAMAllocator* va = nullptr;  // owner of `owned`
+    std::vector<VramOwned<std::byte>> owned;  // every device allocation above
+    VRAMAllocator* va = nullptr;              // the allocator of `owned`
     size_t device_bytes = 0;
 
     InklingWeights() = default;

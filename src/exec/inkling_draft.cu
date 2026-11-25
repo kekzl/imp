@@ -154,8 +154,8 @@ __global__ void draft_cat_k(const half* hid, const half* frnn, half* x2, size_t 
 }  // namespace
 
 InklingDraft::~InklingDraft() {
-    for (void* p : owned_)
-        va_->free(p);
+    for (auto& b : owned_)
+        b.reset();
 }
 
 void InklingDraft::lin8_(const half* x, int T, int K, const InklingDraftWeights::Q8& w8, const half* w, int N,
@@ -169,13 +169,14 @@ void InklingDraft::lin8_(const half* x, int T, int K, const InklingDraftWeights:
 }
 
 void* InklingDraft::alloc_(size_t bytes) {
-    void* p = va_->allocate(bytes, "inkling_draft_ctx");
+    VramOwned<std::byte> buf(*va_, bytes, "inkling_draft_ctx");
+    void* p = buf.get();
     if (!p) {
         IMP_LOG_WARN("inkling draft: context allocation of %.1f MiB failed", bytes / 1048576.0);
         ok_ = false;
         return nullptr;
     }
-    owned_.push_back(p);
+    owned_.push_back(std::move(buf));
     return p;
 }
 

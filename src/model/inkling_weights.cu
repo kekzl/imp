@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <unordered_map>
+#include <utility>
 
 namespace imp {
 
@@ -51,13 +52,14 @@ struct Loader {
         return &x;
     }
     void* dev(size_t bytes) {
-        void* p = w.va->allocate(bytes, "inkling_weights");
+        VramOwned<std::byte> buf(*w.va, bytes, "inkling_weights");
+        void* p = buf.get();
         if (!p) {
             IMP_LOG_ERROR("inkling: device allocation of %.1f MiB failed", bytes / 1048576.0);
             ok = false;
             return nullptr;
         }
-        w.owned.push_back(p);
+        w.owned.push_back(std::move(buf));
         w.device_bytes += bytes;
         return p;
     }
@@ -167,13 +169,14 @@ struct Loader {
 }  // namespace
 
 InklingWeights::~InklingWeights() {
-    for (void* p : owned)
-        va->free(p);
+    // I5: front to back, before any other member goes (the order the hand frees had).
+    for (auto& b : owned)
+        b.reset();
 }
 
 InklingDense8::~InklingDense8() {
-    for (void* p : owned)
-        va->free(p);
+    for (auto& b : owned)
+        b.reset();
 }
 
 const InklingDense8::Matrix* InklingDense8::find(const half* w, int K, size_t& row) const {
@@ -198,12 +201,14 @@ bool build_inkling_dense8(const InklingWeights& w, VRAMAllocator& va, InklingDen
             x.rows = which == 0 ? static_cast<size_t>(ly.proj_rows) : H;
             x.K = static_cast<int>(which == 0 ? H : QD);
             const size_t n = x.rows * static_cast<size_t>(x.K);
-            x.q = static_cast<int8_t*>(va.allocate(n, "inkling_dense8"));
-            if (x.q)
-                out.owned.push_back(x.q);
-            x.scales = static_cast<half*>(va.allocate(n / 32 * sizeof(half), "inkling_dense8"));
-            if (x.scales)
-                out.owned.push_back(x.scales);
+            VramOwned<std::byte> q(va, n, "inkling_dense8");
+            x.q = reinterpret_cast<int8_t*>(q.get());
+            if (q)
+                out.owned.push_back(std::move(q));
+            VramOwned<std::byte> sc(va, n / 32 * sizeof(half), "inkling_dense8");
+            x.scales = reinterpret_cast<half*>(sc.get());
+            if (sc)
+                out.owned.push_back(std::move(sc));
             ok = x.base && x.q && x.scales;
             if (ok) {
                 quantize_i8b32(x.base, x.q, x.scales, x.rows, x.K, nullptr);
@@ -213,8 +218,8 @@ bool build_inkling_dense8(const InklingWeights& w, VRAMAllocator& va, InklingDen
     }
     ok = ok && cudaDeviceSynchronize() == cudaSuccess;
     if (!ok) {
-        for (void* p : out.owned)
-            va.free(p);
+        for (auto& b : out.owned)
+            b.reset();
         out.owned.clear();
         out.m.clear();
     }

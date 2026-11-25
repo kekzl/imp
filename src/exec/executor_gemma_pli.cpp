@@ -41,27 +41,30 @@ bool GraphExecutor::gemma_pli_alloc_(int max_tokens) {
         IMP_LOG_ERROR("Gemma 4 per-layer inputs / KV sharing need FP16 compute");
         return false;
     }
-    auto alloc = [&](int64_t cols, const char* tag) -> void* {
-        return vram_alloc(vram_alloc_, align256(static_cast<size_t>(max_tokens) * cols * sizeof(uint16_t)),
-                          tag);
+    auto alloc = [&](int64_t cols, const char* tag) {
+        return DeviceOwned<void>::allocate(
+            vram_alloc_, align256(static_cast<size_t>(max_tokens) * cols * sizeof(uint16_t)), tag);
     };
     size_t bytes = 0;
     if (pli) {
         const int64_t wide = static_cast<int64_t>(cfg.n_layers) * cfg.pli_dim;
-        void* in = alloc(wide, "pli_inputs");
-        void* gate = alloc(cfg.pli_dim, "pli_gate");
-        void* out = alloc(cfg.d_model, "pli_out");
+        gpli_.inputs_buf = alloc(wide, "pli_inputs");
+        gpli_.gate_buf = alloc(cfg.pli_dim, "pli_gate");
+        gpli_.out_buf = alloc(cfg.d_model, "pli_out");
+        void* in = gpli_.inputs_buf.get();
+        void* gate = gpli_.gate_buf.get();
+        void* out = gpli_.out_buf.get();
         if (in == nullptr || gate == nullptr || out == nullptr)
-            return false;
+            return false;  // gemma_pli_free_ releases what was taken
         gpli_.inputs = rows_tensor(in, max_tokens, wide);
         gpli_.gate = rows_tensor(gate, max_tokens, cfg.pli_dim);
         gpli_.out = rows_tensor(out, max_tokens, cfg.d_model);
         bytes += static_cast<size_t>(max_tokens) * (wide + cfg.pli_dim + cfg.d_model) * 2;
     }
-    gpli_.kv_rows.assign(static_cast<size_t>(cfg.n_layers), GemmaPliState::KvShareRows{});
+    gpli_.kv_rows = std::vector<GemmaPliState::KvShareRows>(static_cast<size_t>(cfg.n_layers));
     for (int l = 0; l < cfg.n_layers; ++l) {
         const int src = cfg.kv_source(l);
-        if (src < 0 || gpli_.kv_rows[static_cast<size_t>(src)].k != nullptr)
+        if (src < 0 || gpli_.kv_rows[static_cast<size_t>(src)].k)
             continue;
         const int nkv = src < static_cast<int>(cfg.n_kv_heads_per_layer.size())
                             ? cfg.n_kv_heads_per_layer[static_cast<size_t>(src)]
@@ -73,7 +76,7 @@ bool GraphExecutor::gemma_pli_alloc_(int max_tokens) {
         r.cols = static_cast<int64_t>(nkv) * hd;
         r.k = alloc(r.cols, "kv_share_k");
         r.v = alloc(r.cols, "kv_share_v");
-        if (r.k == nullptr || r.v == nullptr)
+        if (!r.k || !r.v)
             return false;
         bytes += static_cast<size_t>(max_tokens) * r.cols * 4;
     }
@@ -86,16 +89,14 @@ bool GraphExecutor::gemma_pli_alloc_(int max_tokens) {
 }
 
 void GraphExecutor::gemma_pli_free_() {
-    for (Tensor* t : {&gpli_.inputs, &gpli_.gate, &gpli_.out}) {
-        if (t->data != nullptr)
-            vram_free(vram_alloc_, t->data);
+    gpli_.inputs_buf.reset();
+    gpli_.gate_buf.reset();
+    gpli_.out_buf.reset();
+    for (Tensor* t : {&gpli_.inputs, &gpli_.gate, &gpli_.out})
         t->data = nullptr;
-    }
     for (GemmaPliState::KvShareRows& r : gpli_.kv_rows) {
-        if (r.k != nullptr)
-            vram_free(vram_alloc_, r.k);
-        if (r.v != nullptr)
-            vram_free(vram_alloc_, r.v);
+        r.k.reset();
+        r.v.reset();
     }
     gpli_.kv_rows.clear();
 }
@@ -147,11 +148,11 @@ void kv_share_save(const GemmaPliState& s, int layer, const Tensor& k, const Ten
     if (layer < 0 || layer >= static_cast<int>(s.kv_rows.size()) || n <= 0)
         return;
     const GemmaPliState::KvShareRows& r = s.kv_rows[static_cast<size_t>(layer)];
-    if (r.k == nullptr)
+    if (!r.k)
         return;
     const size_t bytes = static_cast<size_t>(n) * r.cols * sizeof(uint16_t);
-    device_copy_async(r.k, k.data, bytes, stream);
-    device_copy_async(r.v, v.data, bytes, stream);
+    device_copy_async(r.k.get(), k.data, bytes, stream);
+    device_copy_async(r.v.get(), v.data, bytes, stream);
 }
 
 bool kv_share_bind(const GemmaPliState& s, const ModelConfig& cfg, int layer, Tensor& k, Tensor& v, int n) {
@@ -159,10 +160,10 @@ bool kv_share_bind(const GemmaPliState& s, const ModelConfig& cfg, int layer, Te
     if (src < 0 || src >= static_cast<int>(s.kv_rows.size()))
         return false;
     const GemmaPliState::KvShareRows& r = s.kv_rows[static_cast<size_t>(src)];
-    if (r.k == nullptr || r.cols != k.shape[1])
+    if (!r.k || r.cols != k.shape[1])
         return false;
-    k = rows_tensor(r.k, n, r.cols);
-    v = rows_tensor(r.v, n, r.cols);
+    k = rows_tensor(r.k.get(), n, r.cols);
+    v = rows_tensor(r.v.get(), n, r.cols);
     return true;
 }
 

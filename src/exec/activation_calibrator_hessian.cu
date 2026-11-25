@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -24,14 +25,14 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
         HessEntry e;
         e.K = K;
         const size_t bytes = static_cast<size_t>(K) * static_cast<size_t>(K) * sizeof(float);
-        e.d_H = static_cast<float*>(alloc_->allocate(bytes, "calibration_hessian"));
+        e.d_H = VramOwned<float>(*alloc_, bytes / sizeof(float), "calibration_hessian");
         if (!e.d_H) {
             IMP_LOG_WARN("calibration: no VRAM for the %.1f MiB Hessian of layer %d kind %s",
                          bytes / 1048576.0, layer, tensor_kind_name(kind));
             return;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_H, 0, bytes, stream));
-        it = hess_.emplace(key, e).first;
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_H.get(), 0, bytes, stream));
+        it = hess_.emplace(key, std::move(e)).first;
     } else if (it->second.K != K) {
         return;
     }
@@ -40,7 +41,7 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
     const auto ld = static_cast<int>(row_stride);
     const cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_T, static_cast<int>(K), static_cast<int>(K),
                                          static_cast<int>(rows), &one, input.data, CUDA_R_16F, ld, input.data,
-                                         CUDA_R_16F, ld, &one, it->second.d_H, CUDA_R_32F,
+                                         CUDA_R_16F, ld, &one, it->second.d_H.get(), CUDA_R_32F,
                                          static_cast<int>(K), CUBLAS_COMPUTE_32F, stream);
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_WARN("calibration: Hessian GEMM failed (status %d) at layer %d kind %s", static_cast<int>(st),
@@ -61,7 +62,7 @@ std::string ActivationCalibrator::write_hessians(const std::string& path, cudaSt
     for (const auto& [key, e] : hess_) {
         const size_t n = static_cast<size_t>(e.K) * static_cast<size_t>(e.K);
         host.resize(n);
-        if (cudaMemcpyAsync(host.data(), e.d_H, n * sizeof(float), cudaMemcpyDeviceToHost, stream) !=
+        if (cudaMemcpyAsync(host.data(), e.d_H.get(), n * sizeof(float), cudaMemcpyDeviceToHost, stream) !=
                 cudaSuccess ||
             cudaStreamSynchronize(stream) != cudaSuccess)
             return "Hessian D2H failed";
