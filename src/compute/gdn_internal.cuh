@@ -2,7 +2,7 @@
 
 // Shared preamble for the GDN kernel TUs, split (file-size gate) into gdn.cu (fused scan,
 // RMSNorm-gated-SiLU, V-head reorder, reference scan, legacy decode), gdn_scan.cu (chunkwise
-// scalar variants), gdn_scan_tc.cu (WY-rep TC/WMMA variants). Host launchers in compute/gdn.h.
+// scalar variant), gdn_scan_chunkpar.cu (chunk-parallel WY-rep). Host launchers in compute/gdn.h.
 // Shared __device__ helper: gdn_block_sum (K/Q L2-norm reduction); other math is inlined per kernel.
 
 #include "compute/gdn.h"

@@ -17,14 +17,14 @@ namespace imp {
 // its linearity in incoming state H_0: u = u_A - W @ H_0, where u_A solves the chunk's
 // triangular system with RHS beta_t*v_t and W solves the same system with RHS
 // beta_t*D[0..t+1]*k~_t (both H_0-independent). Substituting into the WY forms
-// (gdn_scan_chunkwise_wy_kernel):
+// (Yang et al. 2024):
 //   y_t = Qeff[t] @ H_0 + Y_A[t],  H_L = D[0..L]*H_0 - K_d^T(W @ H_0) + K_d^T U_A
 // with Qeff[t,:] = D[0..t+1] q~_t - sum_j P[t,j] W[j,:], Y_A[t,:] = sum_j P[t,j] U_A[j,:],
 // P[t,j] = D[j+1..t+1] QK[t,j] (j<=t), K_d[t,:] = D[t+1..L] k~_t.
 // W, K_d, U_A, Qeff, Y_A are all H_0-independent: kernel 1 computes them on grid
 // (n_chunks x n_heads); kernel 2 runs the sequential per-head chain (three L x 128 x 128
 // matmuls per chunk against the register-resident state).
-// Numerics match gdn_scan_chunkwise_wy_kernel (log-space decay, same softplus/sigmoid/L2-norm),
+// Numerics: log-space decay, softplus/sigmoid/L2-norm as in gdn_scan_fused_kernel,
 // reassociated per above; validated by GDNScanTest.ChunkparMatchesFused.
 // Scope: HD=SS=128, single-sequence prefill, no d_real_n (padded verify chunks use the fused
 // kernel). StateT float or bf16; state stays FP32 in registers/side buffer across strips
