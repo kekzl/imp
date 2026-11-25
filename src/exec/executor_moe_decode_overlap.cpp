@@ -121,8 +121,8 @@ bool GraphExecutor::predict_next_experts_(int layer, const void* x, cudaStream_t
     if (issue)  // x (norm_out_) and hc_hidden_ read: main may overwrite after (it waits on the gather)
         IMP_CUDA_CHECK_LOG(cudaEventRecord(g.pf_read, ps));
     DeviceExpertCache::PredTrace tr;
-    if (moe_.expert_trace != nullptr && moe_.trace_top_k == cfg.n_experts_active)
-        tr = {moe_.expert_trace, moe_.trace_weights, moe_.trace_cursor,
+    if (moe_.expert_trace.get() != nullptr && moe_.trace_top_k == cfg.n_experts_active)
+        tr = {moe_.expert_trace.get(), moe_.trace_weights, moe_.trace_cursor.get(),
               static_cast<unsigned long long>(moe_.trace_capacity)};
     dev_expert_cache_.predict_topk(dev_expert_cache_.pf_logits(), cfg.n_experts, cfg.n_experts_active, next,
                                    tr, ps);
@@ -183,7 +183,8 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
     if (!g.stream || non_gated_experts || dev_expert_cache_.layer_tiered(layer) || !pf_here)
         join_expert_prefetch_(stream);  // no-op without a prefetch in flight
     if (!g.stream || non_gated_experts || dev_expert_cache_.layer_tiered(layer)) {
-        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx, stream);
+        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx.get(),
+                                            stream);
         return false;
     }
     if (pf_here)  // this layer's tables are settled once its prefetch resolve ran
@@ -191,7 +192,7 @@ bool GraphExecutor::stage_dev_experts_(int layer, const int32_t* expert_indices,
     g.pf_layer = -1;
     const bool pf_next = !non_gated_experts &&
                          predict_next_experts_(layer, n_rows == 1 ? x : nullptr, stream);
-    dev_expert_cache_.resolve(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx, moe_.entry_miss(),
+    dev_expert_cache_.resolve(layer, expert_indices, top_k, n_rows, moe_.d_slot_idx.get(), moe_.entry_miss(),
                               stream);
     IMP_CUDA_CHECK_LOG(cudaEventRecord(g.resolved, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(g.stream, g.resolved, 0));

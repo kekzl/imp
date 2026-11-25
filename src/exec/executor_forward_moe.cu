@@ -168,7 +168,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
-    ctx.will_skip_residual_copy = can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
+    ctx.will_skip_residual_copy = can_decode_fast(ctx.n, ly, moe_.dequant_buf.get(), compute_dtype_,
                                                   host_expert_pool_ready(ly.expert_up_packed, layer,
                                                                          expert_cache_, moe_,
                                                                          model_->config().n_experts_active),
@@ -190,12 +190,12 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // FP16 directly) and for Gemma-4 FP32 accum (compute norm from the FP32
     // residual, quantize to Q8_1 separately): the fused kernel's FP16 h read
     // loses precision that compounds catastrophically through 128-expert top-8 MoE routing.
-    ctx.gemma4_fp32_norm = (prof.fp32_residual_norms && fp32_accum_buf_ != nullptr);
+    ctx.gemma4_fp32_norm = (prof.fp32_residual_norms && fp32_accum_buf_.get() != nullptr);
     // When the FP32 residual accumulator is active AND post_ffn_norm exists,
     // defer the residual add to rmsnorm_fp32_accum_to_fp16_kernel (keeps
     // fp32_hidden_ in sync + applies overflow scaling). Without this,
     // moe_weighted_sum_residual adds in FP16 and the FP32 shadow goes stale, compounding drift across layers.
-    ctx.moe_use_fp32_residual = (prof.fp32_residual_norms && fp32_accum_buf_ != nullptr &&
+    ctx.moe_use_fp32_residual = (prof.fp32_residual_norms && fp32_accum_buf_.get() != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
     ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                              ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
@@ -234,7 +234,7 @@ Tensor GraphExecutor::moe_router_in_fp16_(const TransformerLayer& ly, const MoeF
     router_prenorm_ = nullptr;
     if (done)
         return router_in;
-    if (fp32_accum_buf_ != nullptr) {
+    if (fp32_accum_buf_.get() != nullptr) {
         Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
         rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, ctx.eps, stream, 0.0f);
     } else {
@@ -265,7 +265,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
         // Keeps router_in in FP32 to prevent precision loss that causes routing
         // instability at later layers: the FP16 intermediate loses enough
         // precision to change expert selection in the 128-expert top-8 MoE.
-        if (fp32_accum_buf_ != nullptr && ctx.n == 1) {
+        if (fp32_accum_buf_.get() != nullptr && ctx.n == 1) {
             // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) * 1/sqrt(d) → FP32
             // Stays in FP32 all the way through gate GEMV (no FP16 truncation).
             float* fp32_router = static_cast<float*>(moe_.scatter_out.data);
@@ -306,7 +306,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     bool norm_weights = cfg.expert_weights_norm;
 
     ctx.up_qtype         = ly.expert_up_packed.qtype;
-    ctx.will_decode_fast = can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
+    ctx.will_decode_fast = can_decode_fast(ctx.n, ly, moe_.dequant_buf.get(), compute_dtype_,
                                            host_expert_pool_ready(ly.expert_up_packed, layer, expert_cache_,
                                                                   moe_, cfg.n_experts_active),
                                            nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_,
@@ -324,7 +324,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     // (expert_w_gate[e] etc. FP16 on GPU, legacy/unquantized packed) or
     // on-the-fly dequant (expert_*_packed raw Q6_K/Q8_0/Q4_0, dequant per GEMM).
     // Packed F16 experts need no dequant: the per-expert views into the pack are the FP16 weights.
-    ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
+    ctx.use_packed_dequant = (ly.expert_up_packed.data != nullptr && moe_.dequant_buf.get() != nullptr &&
                               ly.expert_up_packed.qtype != QType::F16);
 
     // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
@@ -364,7 +364,7 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     if (!gemm_grouped_nvfp4_moe_supports(model_->config().n_experts, model_->config().d_model,
                                          max_expert_eff_))
         return true;
-    if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
+    if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get())
         return true;
     // Host-resident NVFP4 experts stage per chunk from host memory: a captured M=512 prefill
     // faulted on replay (IMA / SIGSEGV, Qwen3-Coder-Next, Qwen3.6-35B force_host_experts, #2574).
@@ -389,7 +389,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         return false;
     if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))
         return false;
-    if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
+    if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get())
         return false;
     if (!moe_.d_M_per || moe_.d_M_per_count < ctx.ne)
         return false;
@@ -544,7 +544,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                static_cast<size_t>(ly.expert_down_packed.shape[2]));
                 size_t fp8_buf_needed = std::max(up_fp8_sz, down_fp8_sz) +
                                         (static_cast<size_t>(expanded) * max_act_cols);
-                bool can_fp8_batch = (!can_fp16_batch_nosync && moe_.batch_dequant_buf != nullptr &&
+                bool can_fp8_batch = (!can_fp16_batch_nosync && moe_.batch_dequant_buf.get() != nullptr &&
                                       moe_.batch_dequant_buf_size >= fp8_buf_needed &&
                                       ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                                       ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
@@ -750,7 +750,7 @@ void GraphExecutor::moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeF
     // so the residual stays FP32; a plain FP16 elementwise_add here plus the
     // forced downstream sync would clobber the FP32 accum, drifting ~1-2%/layer.
     const bool moe_fp32_accum = (prof.fp32_residual_norms && ly.post_ffn_norm.data != nullptr &&
-                                 fp32_accum_buf_ != nullptr && !ctx.residual_fused);
+                                 fp32_accum_buf_.get() != nullptr && !ctx.residual_fused);
     if (moe_fp32_accum) {
         // fp32_hidden_ holds the pre-MoE residual (written by run_attention's
         // FP32 accum path). Kernel: fp32_h += rmsnorm(h) * post_ffn_norm; h = half(fp32_h).

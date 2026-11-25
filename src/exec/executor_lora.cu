@@ -60,10 +60,10 @@ void GraphExecutor::set_lora(const LoraAdapter* adapter) {
     size_t need = (sizeof(float) * static_cast<size_t>(adapter->max_rank())) +
                   (sizeof(half) * static_cast<size_t>(max_tokens_) * adapter->max_rank());
     if (need > lora_scratch_sz_) {
-        device_free_all(lora_scratch_);
-        lora_scratch_ = nullptr;
+        lora_scratch_.reset();
         lora_scratch_sz_ = 0;
-        if (device_alloc_all(dev_req(lora_scratch_, need)) != cudaSuccess) {
+        lora_scratch_ = DeviceOwned<void>::allocate_plain(need);
+        if (!lora_scratch_) {
             IMP_LOG_ERROR("LoRA: scratch alloc failed (%zu B) — adapter disabled", need);
             lora_ = nullptr;
             return;
@@ -79,7 +79,7 @@ void GraphExecutor::lora_delta_(const LoraWeights& w, const void* x, void* y, in
                                 cudaStream_t stream) {
     const float s = lora_->scale();
     if (n == 1) {
-        float* t = static_cast<float*>(lora_scratch_);
+        float* t = static_cast<float*>(lora_scratch_.get());
         lora_gemv_a_kernel<<<w.r, 256, 0, stream>>>(static_cast<const half*>(w.A),
                                                     static_cast<const half*>(x), t, w.r, w.K);
         IMP_CUDA_CHECK_LAUNCH();
@@ -92,7 +92,7 @@ void GraphExecutor::lora_delta_(const LoraWeights& w, const void* x, void* y, in
     }
     // Prefill: t = x · A^T  (gemm computes C = alpha · A_in @ B_w^T + beta · C
     // with B_w row-major [N, K] — exactly A's [r, K] layout).
-    half* t_buf = reinterpret_cast<half*>(static_cast<float*>(lora_scratch_) + lora_->max_rank());
+    half* t_buf = reinterpret_cast<half*>(static_cast<float*>(lora_scratch_.get()) + lora_->max_rank());
     int64_t x_shape[2] = {n, w.K};
     int64_t a_shape[2] = {w.r, w.K};
     int64_t t_shape[2] = {n, w.r};

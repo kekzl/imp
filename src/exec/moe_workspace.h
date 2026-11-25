@@ -4,6 +4,7 @@
 
 #include "core/tensor.h"
 #include "compute/moe_routing.h"
+#include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
 #include "memory/host_pinned.h"
 #include <cuda_runtime.h>
@@ -26,7 +27,8 @@ struct MoeExpertServe {
 
 // MoE workspace: holds all MoE-specific tensors and buffers. Phase tensors are views into
 // the executor's shared_workspace_ (no separate allocation); separately allocated buffers
-// are owned/freed by this struct. All members public for zero-overhead access.
+// are DeviceOwned members (move-only struct). Every member is an owner, a view or a plain
+// value: free() resets the whole struct, so a member added later cannot be missed there.
 struct MoEWorkspace {
     // --- Phase tensors (views into shared_workspace_, set by configure_moe_workspace) ---
     MoeRoutingBuffers routing_buffers;
@@ -39,32 +41,32 @@ struct MoEWorkspace {
     Tensor scatter_out;    // [max_tokens, d_model] FP32 (scatter output)
 
     // --- Separately allocated buffers ---
-    void* router_ws = nullptr;  // fp32 split-K partials of the router GEMM (gemm_f16_splitk)
+    DeviceOwned<void> router_ws;  // fp32 split-K partials of the router GEMM (gemm_f16_splitk)
     size_t router_ws_bytes = 0;
-    void* router_fused_ws = nullptr;  // moe_router_fused: split-K tickets (zeroed once) + fp32 partials
+    DeviceOwned<void> router_fused_ws;  // moe_router_fused: split-K tickets (zeroed once) + fp32 partials
     size_t router_fused_ws_bytes = 0;
-    void* router_ticket = nullptr;  // unsigned int, moe_router_decode: last-CTA ticket (zeroed once)
+    DeviceOwned<void> router_ticket;  // unsigned int, moe_router_decode: last-CTA ticket (zeroed once)
 
     // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
-    void* dequant_buf = nullptr;
+    DeviceOwned<void> dequant_buf;
     size_t dequant_buf_size = 0;
 
     // Batch dequant buffer for MoE prefill: holds a chunk of experts' weights
     // dequanted to FP16 for L2-resident chunked processing.
-    void* batch_dequant_buf = nullptr;
+    DeviceOwned<void> batch_dequant_buf;
     size_t batch_dequant_buf_size = 0;
     // Every on-device expert tensor fits the MoE IMMA kernel: the FP16 batch path runs without
     // batch_dequant_buf, a runtime decline dequants into a stream-ordered temporary.
     bool imma_serves_all = false;
     [[nodiscard]] bool fp16_batch_buffer_ok(size_t need) const {
-        return (batch_dequant_buf != nullptr && batch_dequant_buf_size >= need) || imma_serves_all;
+        return (batch_dequant_buf.get() != nullptr && batch_dequant_buf_size >= need) || imma_serves_all;
     }
 
     // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the key names a
     // path. [n_layers*n_experts] device counters, incremented once per (token,k) routing
     // decision. Answers how skewed expert selection is, deciding whether a resident/host
     // split of MoE experts can pay (docs/ROADMAP.md).
-    unsigned int* expert_hist = nullptr;
+    DeviceOwned<unsigned int> expert_hist;
     int hist_layers = 0;
     int hist_experts = 0;
     int hist_top_k = 0;
@@ -74,16 +76,16 @@ struct MoEWorkspace {
     // away. Device-side because the NVFP4 prefill path keeps expert args on-card for graph
     // capture; reading them back would trade capture for a diagnostic. Four counters per
     // layer: [peak_max, sum_max, sum_rows, launches], recorded only at n>1 (decode pays nothing).
-    unsigned int* imb_acc = nullptr;
+    DeviceOwned<unsigned int> imb_acc;
     int imb_layers = 0;
     int imb_experts = 0;
 
     // Per-token expert trace (diagnostics.moe_expert_trace): flat append of
     // [layer, e0..e_{top_k-1}], one per (token, layer), in stream order. Decode only: a
     // prefill call would append n*top_k at once and break the fixed record stride.
-    int* expert_trace = nullptr;
+    DeviceOwned<int> expert_trace;
     float* trace_weights = nullptr;        // [record * top_k + j], tail of the expert_trace allocation
-    unsigned int* trace_cursor = nullptr;  // device counter, in ints
+    DeviceOwned<unsigned int> trace_cursor;  // device counter, in ints
     size_t trace_capacity = 0;             // ints
     int trace_top_k = 0;
 
@@ -142,6 +144,9 @@ struct MoEWorkspace {
         bool ready = false;
     };
     std::vector<PerLayerNvfp4DeviceArgsCache> per_layer_da_cache;
+    // Owners of the arrays per_layer_da_cache views (that struct is also built as a view of
+    // the staged layer, so it holds no owner): up to 9 per layer, in build order.
+    std::vector<DeviceOwned<void>> per_layer_da_storage;
     // Static NVFP4 act tensor scale per MoE layer (max WeightHandle::act_scale over the experts):
     // gu = the shared gate|up input quantize, dn = the down input. Every alpha table carries it.
     struct ActScales {
@@ -159,7 +164,7 @@ struct MoEWorkspace {
     int d_weight_ptrs_count = 0;
 
     // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
-    void* raw_staging_buf = nullptr;
+    DeviceOwned<void> raw_staging_buf;
     size_t raw_staging_size = 0;
 
     // Whole-layer staging for host-resident NVFP4 experts during PREFILL. Per-expert route
@@ -168,7 +173,7 @@ struct MoEWorkspace {
     // slabs, or the mmap, already lay a projection's experts back to back).
     // Sized for one layer, reused across layers (forward is sequential). Null when experts
     // are device-resident, model is not NVFP4-prequant, or one layer doesn't fit the budget.
-    void* layer_stage_buf = nullptr;      // [layer_stage_slots][layer_stage_experts * expert_bytes]
+    DeviceOwned<void> layer_stage_buf;    // [layer_stage_slots][layer_stage_experts * expert_bytes]
     size_t layer_stage_proj_bytes = 0;    // per-projection span within the buffer
     size_t layer_stage_size = 0;          // total allocation
     int layer_stage_experts = 0;          // experts per projection slot (a block when chunked)
@@ -179,12 +184,12 @@ struct MoEWorkspace {
     // scale factors and device arrays of per-expert pointers; staged bytes carry the native
     // per-16 layout, converted once per staged layer into layer_stage_sf with rebuilt pointer
     // arrays. Lets a host-resident layer take the same prefill path as a resident one.
-    void* layer_stage_sf = nullptr;        // [layer_stage_slots][layer_stage_experts * sf_size]
+    DeviceOwned<void> layer_stage_sf;      // [layer_stage_slots][layer_stage_experts * sf_size]
     size_t layer_stage_sf_proj_bytes = 0;  // per-projection span
     size_t layer_stage_sf_size = 0;
-    const void** layer_stage_b_ptrs = nullptr;    // [kExpertProjCount * n_experts]
-    const void** layer_stage_sfb_ptrs = nullptr;  // [kExpertProjCount * n_experts]
-    float* layer_stage_alpha = nullptr;           // [n_layers][kExpertProjCount * n_experts]
+    DeviceOwned<const void*> layer_stage_b_ptrs;    // [kExpertProjCount * n_experts]
+    DeviceOwned<const void*> layer_stage_sfb_ptrs;  // [kExpertProjCount * n_experts]
+    DeviceOwned<float> layer_stage_alpha;           // [n_layers][kExpertProjCount * n_experts]
     // Pointer arrays and alpha rows depend only on the staging layout and the load-time tensor
     // scales: uploaded once (pageable H2D per block cost ~1800 copies per Flash-Next prefill).
     std::vector<uint8_t> layer_stage_alpha_filled;  // [n_layers]
@@ -200,11 +205,13 @@ struct MoEWorkspace {
     // Slot indices for the host-offload decode path: [3 * kDevExpertMaxRows * top_k] int32, one block per
     // projection (gate, up, down). Fused MoE decode kernels address an expert as
     // base + idx*stride; idx is the expert's LRU-cache slot, not its id.
-    int32_t* d_slot_idx = nullptr;
+    DeviceOwned<int32_t> d_slot_idx;
     int d_slot_idx_count = 0;
     // Per-entry miss flags ([kDevExpertMaxRows * top_k] int32) behind the slot indices:
     // the hit GEMVs skip them.
-    [[nodiscard]] int32_t* entry_miss() const { return d_slot_idx ? d_slot_idx + d_slot_idx_count : nullptr; }
+    [[nodiscard]] int32_t* entry_miss() const {
+        return d_slot_idx ? d_slot_idx.get() + d_slot_idx_count : nullptr;
+    }
     // Pinned landing zone for the per-layer routing readback (top_k int32). A D2H into a
     // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
     PinnedBuffer h_routing_readback;
@@ -213,15 +220,17 @@ struct MoEWorkspace {
     //   packed: [max_expanded, max_K/2] contiguous FP4 activations
     //   sf: per-expert SfAtom slabs, worst-case padded to 128 rows per expert
     //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)
-    void* cutlass3x_packed = nullptr;
+    DeviceOwned<void> cutlass3x_packed;
     size_t cutlass3x_packed_size = 0;
-    void* cutlass3x_sf = nullptr;
+    DeviceOwned<void> cutlass3x_sf;
     size_t cutlass3x_sf_size = 0;
     uint8_t** cutlass3x_sfa_ptrs = nullptr;  // device [ne] uint8_t* array
     int cutlass3x_sfa_ptrs_count = 0;
 
-    // Free all separately allocated buffers (NOT the phase tensor views).
-    void free(VRAMAllocator* alloc);
+    // Releases every owned buffer and returns the struct to its initial state. Kept: the
+    // process-wide diagnostics (hist, imbalance, trace: released by ~GraphExecutor after
+    // their dump) and the pinned routing readback.
+    void free();
 };
 
 }  // namespace imp

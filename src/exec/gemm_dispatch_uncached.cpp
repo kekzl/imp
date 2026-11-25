@@ -28,7 +28,7 @@ namespace imp {
 // larger (Gemma-4: 262144 x 2816 = 1408 MiB FP16 vs 44 MiB, #2046). Whole-weight dequant
 // into it is only legal when it fits.
 static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
-    if (qs == nullptr || qs->dequant == nullptr)
+    if (qs == nullptr || qs->dequant.get() == nullptr)
         return false;
     const size_t need = static_cast<size_t>(weight.shape[0]) * static_cast<size_t>(weight.shape[1]) *
                         sizeof(uint16_t);
@@ -290,8 +290,8 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
                     ctx.beta, qtype_name(qtype), rows, cols,
                     static_cast<double>(rows) * cols * 2.0 / (1024.0 * 1024.0));
             }
-            dequant_weight_fp16(weight, qs->dequant, ctx.stream);
-            Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
+            dequant_weight_fp16(weight, qs->dequant.get(), ctx.stream);
+            Tensor w_fp16(qs->dequant.get(), QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
@@ -319,7 +319,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
         args.stream = ctx.stream;
         args.beta = ctx.beta;
         args.weight_payload = &weight;
-        args.dequant_scratch = qs->dequant;
+        args.dequant_scratch = qs->dequant.get();
         args.dequant_scratch_size = qs->dequant_size;
         GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
         if (GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok)
@@ -347,8 +347,8 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
                           (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
             return;
         }
-        dequant_weight_fp16(weight, qs->dequant, ctx.stream);
-        Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
+        dequant_weight_fp16(weight, qs->dequant.get(), ctx.stream);
+        Tensor w_fp16(qs->dequant.get(), QType::F16, weight.ndim, weight.shape, true);
         gemm(input, w_fp16, output, 1.0f, 0.0f, ctx.stream);
         return;
     }
@@ -372,12 +372,12 @@ void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& ou
     }
     const auto* qs = ctx.qscratch;
     const size_t need = static_cast<size_t>(h.shape[0]) * static_cast<size_t>(h.shape[1]) * sizeof(half);
-    IMP_CHECK(qs && qs->dequant && qs->dequant_size >= need,
+    IMP_CHECK(qs && qs->dequant.get() && qs->dequant_size >= need,
               "gguf_source_fallback: no dequant scratch for a %lld x %lld Q8_0 weight without source",
               static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
-    IMP_CHECK(mmq_q8_imma_planes_to_f16(h.source_data, static_cast<half*>(qs->dequant), ctx.stream),
+    IMP_CHECK(mmq_q8_imma_planes_to_f16(h.source_data, static_cast<half*>(qs->dequant.get()), ctx.stream),
               "gguf_source_fallback: a Q8_0 weight without source has no IMMA planes");
-    Tensor w16(qs->dequant, QType::F16, 2, h.shape, true);
+    Tensor w16(qs->dequant.get(), QType::F16, 2, h.shape, true);
     gemm(input, w16, output, 1.0f, ctx.beta, ctx.stream);
 }
 

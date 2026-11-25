@@ -43,7 +43,7 @@ void GraphExecutor::control_vector_add_(int layer, int n, cudaStream_t stream) {
     IMP_CUDA_CHECK_LAUNCH();
     // Post-norm models (Gemma-3 too, not only fp32_residual_norms Gemma-4) carry the residual in
     // fp32_hidden_: an edit of the FP16 copy alone is overwritten by the next residual add.
-    if (fp32_accum_buf_) {
+    if (fp32_accum_buf_.get()) {
         control_vector_add_fp32_kernel<<<blocks, kThreads, 0, stream>>>(
             static_cast<float*>(view_tokens(fp32_hidden_, n).data), v, cvec_scale_, d, total);
         IMP_CUDA_CHECK_LAUNCH();

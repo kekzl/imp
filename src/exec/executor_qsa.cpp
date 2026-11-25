@@ -289,10 +289,13 @@ void GraphExecutor::qsa_debug_rows_(int layer, const InferenceState& state, cons
         std::copy(row0.begin(), row0.end(), h_bt.begin() + static_cast<size_t>(r) * mb);
         h_ctx[r] = p0 + r + 1;
     }
-    int* d_bt = static_cast<int*>(vram_alloc(vram_alloc_, h_bt.size() * sizeof(int), "qsa_debug"));
-    int* d_ctx = static_cast<int*>(vram_alloc(vram_alloc_, h_ctx.size() * sizeof(int), "qsa_debug"));
-    half* d_o = static_cast<half*>(vram_alloc(vram_alloc_, o_elems * sizeof(half), "qsa_debug"));
-    half* d_o2 = static_cast<half*>(vram_alloc(vram_alloc_, o_elems * sizeof(half), "qsa_debug"));
+    // Owners: released at every return (a partial allocation used to leak here).
+    const auto bt_own = DeviceOwned<int>::allocate(vram_alloc_, h_bt.size() * sizeof(int), "qsa_debug");
+    const auto ctx_own = DeviceOwned<int>::allocate(vram_alloc_, h_ctx.size() * sizeof(int), "qsa_debug");
+    const auto o_own = DeviceOwned<half>::allocate(vram_alloc_, o_elems * sizeof(half), "qsa_debug");
+    const auto o2_own = DeviceOwned<half>::allocate(vram_alloc_, o_elems * sizeof(half), "qsa_debug");
+    int *d_bt = bt_own.get(), *d_ctx = ctx_own.get();
+    half *d_o = o_own.get(), *d_o2 = o2_own.get();
     if (!d_bt || !d_ctx || !d_o || !d_o2) {
         IMP_LOG_WARN("[qsa-debug] scratch allocation failed, skipping the comparison");
         return;
@@ -326,10 +329,6 @@ void GraphExecutor::qsa_debug_rows_(int layer, const InferenceState& state, cons
     IMP_LOG_INFO("[qsa-debug] layer %d rows %d..%d: max|fa2 - paged_cache| %.4g, max|paged_cache - selected| %.4g, "
                  "max|fa2| %.3g",
                  layer, p0, p0 + rows - 1, d_fp, d_ps, mx);
-    vram_free(vram_alloc_, d_bt);
-    vram_free(vram_alloc_, d_ctx);
-    vram_free(vram_alloc_, d_o);
-    vram_free(vram_alloc_, d_o2);
 }
 
 }  // namespace imp

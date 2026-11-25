@@ -53,15 +53,15 @@ void GraphExecutor::dump_moe_expert_hist_() {
     // model runs a prefill, while the histogram needs a diagnostics key, so
     // tying their release to the histogram's presence would leak them normally.
     const auto imb = moe_imbalance();
-    vram_free(vram_alloc_, moe_.imb_acc);
-    moe_.imb_acc = nullptr;
+    moe_.imb_acc.reset();
     moe_.imb_layers = 0;
-    if (moe_.expert_hist == nullptr)
+    if (moe_.expert_hist.get() == nullptr)
         return;
     const std::string& path = dispatch_policy().diagnostics.moe_expert_hist;
     size_t n = static_cast<size_t>(moe_.hist_layers) * moe_.hist_experts;
     std::vector<unsigned int> h(n, 0u);
-    cudaError_t rc = cudaMemcpy(h.data(), moe_.expert_hist, n * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    cudaError_t rc = cudaMemcpy(h.data(), moe_.expert_hist.get(), n * sizeof(unsigned int),
+                                cudaMemcpyDeviceToHost);
     if (rc != cudaSuccess) {
         IMP_LOG_WARN("moe expert histogram: readback failed (%s) — not written", cudaGetErrorString(rc));
     } else {
@@ -100,24 +100,23 @@ void GraphExecutor::dump_moe_expert_hist_() {
                          moe_.hist_layers, moe_.hist_experts, path.c_str());
         }
     }
-    vram_free(vram_alloc_, moe_.expert_hist);
-    moe_.expert_hist = nullptr;
+    moe_.expert_hist.reset();
 }
 
 // Write the per-token expert trace (diagnostics.moe_expert_trace) and release
 // it. Same destructor-ordering argument as the histogram above.
 void GraphExecutor::dump_moe_expert_trace_() {
-    if (moe_.expert_trace == nullptr)
+    if (moe_.expert_trace.get() == nullptr)
         return;
     const std::string& path = dispatch_policy().diagnostics.moe_expert_trace;
     unsigned int used = 0;
-    cudaError_t rc = cudaMemcpy(&used, moe_.trace_cursor, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    cudaError_t rc = cudaMemcpy(&used, moe_.trace_cursor.get(), sizeof(unsigned int), cudaMemcpyDeviceToHost);
     if (rc == cudaSuccess) {
         bool truncated = used > moe_.trace_capacity;
         size_t n = std::min(static_cast<size_t>(used), moe_.trace_capacity);
         std::vector<int> t(n, 0);
         if (n > 0)
-            rc = cudaMemcpy(t.data(), moe_.expert_trace, n * sizeof(int), cudaMemcpyDeviceToHost);
+            rc = cudaMemcpy(t.data(), moe_.expert_trace.get(), n * sizeof(int), cudaMemcpyDeviceToHost);
         const int rec = 1 + moe_.trace_top_k;
         size_t records = (rc == cudaSuccess) ? n / rec : 0;
         std::vector<float> w(records * moe_.trace_top_k, 0.0f);
@@ -153,11 +152,9 @@ void GraphExecutor::dump_moe_expert_trace_() {
     } else {
         IMP_LOG_WARN("moe expert trace: cursor readback failed (%s)", cudaGetErrorString(rc));
     }
-    vram_free(vram_alloc_, moe_.expert_trace);  // also frees trace_weights (same allocation)
-    vram_free(vram_alloc_, moe_.trace_cursor);
-    moe_.expert_trace = nullptr;
+    moe_.expert_trace.reset();  // also frees trace_weights (same allocation)
+    moe_.trace_cursor.reset();
     moe_.trace_weights = nullptr;
-    moe_.trace_cursor = nullptr;
 }
 
 GraphExecutor::~GraphExecutor() {
@@ -250,15 +247,18 @@ bool GraphExecutor::init_rope_tables_(const ModelConfig& cfg) {
             long_freqs[i] = base_freq / cfg.rope_long_factor[i];
         }
 
-        if (const cudaError_t e = device_alloc_all(dev_req(longrope_short_freqs_, pairs * sizeof(float)),
-                                                   dev_req(longrope_long_freqs_, pairs * sizeof(float)));
-            e != cudaSuccess) {
+        float *short_raw = nullptr, *long_raw = nullptr;
+        const cudaError_t e = device_alloc_all(dev_req(short_raw, pairs * sizeof(float)),
+                                               dev_req(long_raw, pairs * sizeof(float)));
+        longrope_short_freqs_.adopt(short_raw, pairs * sizeof(float), nullptr);  // all-or-none: both or null
+        longrope_long_freqs_.adopt(long_raw, pairs * sizeof(float), nullptr);
+        if (e != cudaSuccess) {
             IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s", cudaGetErrorString(e));
             return false;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float),
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_.get(), short_freqs.data(), pairs * sizeof(float),
                                       cudaMemcpyHostToDevice));
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_long_freqs_, long_freqs.data(), pairs * sizeof(float),
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_long_freqs_.get(), long_freqs.data(), pairs * sizeof(float),
                                       cudaMemcpyHostToDevice));
 
         IMP_LOG_INFO("LongRoPE: %d freq pairs, orig_max_pos=%d", pairs, longrope_orig_max_pos_);
@@ -625,14 +625,14 @@ bool Workspace::allocate_persistent_workspace(int max_tokens) {
 
     size_t total = hidden_sz + residual_sz + norm_out_sz + logits_sz;
 
-    persistent_workspace_ = vram_alloc(vram_alloc_, total, "persistent_workspace");
-    if (!persistent_workspace_) {
+    persistent_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, total, "persistent_workspace");
+    if (!persistent_workspace_.get()) {
         IMP_LOG_ERROR("Failed to allocate persistent workspace (%.1f MiB)", total / (1024.0 * 1024.0));
         return false;
     }
     persistent_workspace_size_ = total;
 
-    char* ptr = static_cast<char*>(persistent_workspace_);
+    char* ptr = static_cast<char*>(persistent_workspace_.get());
 
     (*hidden_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, hidden_sz);
     (*residual_) = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, residual_sz);
@@ -649,10 +649,12 @@ bool Workspace::allocate_persistent_workspace(int max_tokens) {
     // FP32 residual accumulator for post-norm architectures (Gemma-3).
     if (cfg.norm_placement == NormPlacement::POST_NORM) {
         size_t fp32_sz = align256(static_cast<size_t>(max_tokens) * d * sizeof(float));
-        cudaError_t e2 = device_alloc_all(dev_req(*fp32_accum_buf_, fp32_sz));
+        void* fp32_raw = nullptr;
+        cudaError_t e2 = device_alloc_all(dev_req(fp32_raw, fp32_sz));
+        fp32_accum_buf_->adopt(fp32_raw, fp32_sz, nullptr);
         if (e2 == cudaSuccess) {
             int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(d)};
-            (*fp32_hidden_) = Tensor((*fp32_accum_buf_), QType::F32, 2, shape, true);
+            (*fp32_hidden_) = Tensor(fp32_accum_buf_->get(), QType::F32, 2, shape, true);
             IMP_LOG_INFO("FP32 residual accumulator: %.2f MiB (post-norm architecture)",
                          fp32_sz / (1024.0 * 1024.0));
         } else {
@@ -669,15 +671,16 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
         return true;  // no workspace needed
 
     generation_++;  // fresh arena — any prior baked pointers are dead
-    shared_workspace_ = vram_alloc(vram_alloc_, max_shared, "shared_workspace");
-    if (!shared_workspace_) {
+    shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, max_shared, "shared_workspace");
+    if (!shared_workspace_.get()) {
         // Shared workspace is critical for GEMV scratch buffers. Retry past the headroom
         // (Nemotron-30B leaves <headroom free), still through the allocator so free_buffers()
         // and the accounting see the bytes.
         IMP_LOG_WARN("Shared workspace: allocator rejected (%.1f MiB), retrying past the headroom",
                      max_shared / (1024.0 * 1024.0));
-        shared_workspace_ = vram_alloc_force(vram_alloc_, max_shared, "shared_workspace");
-        if (!shared_workspace_) {
+        shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, max_shared, "shared_workspace",
+                                                        /*force=*/true);
+        if (!shared_workspace_.get()) {
             IMP_LOG_ERROR("Failed to allocate shared workspace (%.1f MiB)", max_shared / (1024.0 * 1024.0));
             return false;
         }
@@ -705,15 +708,13 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
 }
 
 void Workspace::free_buffers() {
-    if (shared_workspace_) {
-        vram_free(vram_alloc_, shared_workspace_);
-        shared_workspace_ = nullptr;
+    if (shared_workspace_.get()) {
+        shared_workspace_.reset();
         generation_++;
     }
     shared_workspace_size_ = 0;
-    if (persistent_workspace_) {
-        vram_free(vram_alloc_, persistent_workspace_);
-        persistent_workspace_ = nullptr;
+    if (persistent_workspace_.get()) {
+        persistent_workspace_.reset();
     }
     persistent_workspace_size_ = 0;
 }

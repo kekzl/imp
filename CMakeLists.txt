@@ -197,6 +197,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
     src/memory/device_alloc_all.cpp
+    src/memory/device_owned.cpp
     src/memory/buffer.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cpp
@@ -1145,6 +1146,8 @@ if(IMP_BUILD_TESTS)
         # once, never after a move — is ownership, not CUDA, so it belongs in the
         # lane CI actually runs.
         tests/test_host_pinned.cpp
+        # DeviceOwned: one release per allocation through the family that produced it (I5).
+        tests/test_device_owned.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
         # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).

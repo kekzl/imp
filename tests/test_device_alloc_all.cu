@@ -7,6 +7,8 @@
 #include <cstdint>
 
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
+#include "memory/vram_allocator.h"
 
 using namespace imp;
 
@@ -79,6 +81,57 @@ TEST(DeviceAllocAllGpu, AsyncFailureLeavesNothingBehind) {
     EXPECT_EQ(huge, nullptr);
     EXPECT_EQ(c, nullptr);
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_EQ(pool_used(), before);
+}
+
+// DeviceOwned on the real driver, one case per family (ownership logic: tests/test_device_owned.cpp).
+// Vram: the allocator's tracked bytes return to their value before, also for the forced variant.
+TEST(DeviceOwnedGpu, AllocatorFamilyReturnsTheTrackedBytes) {
+    VRAMAllocator va;
+    const size_t before = va.allocated();
+    {
+        auto a = DeviceOwned<float>::allocate(&va, 1 << 20, "device_owned_test");
+        auto b = DeviceOwned<void>::allocate(&va, 1 << 16, "device_owned_test", /*force=*/true);
+        ASSERT_TRUE(a);
+        ASSERT_TRUE(b);
+        EXPECT_EQ(a.family(), DeviceFamily::Vram);
+        EXPECT_EQ(va.allocated(), before + (1 << 20) + (1 << 16));
+        EXPECT_EQ(cudaMemset(a.get(), 0, a.bytes()), cudaSuccess);
+        b.reset();
+        EXPECT_EQ(va.allocated(), before + (1 << 20));
+    }
+    EXPECT_EQ(va.allocated(), before);
+}
+
+// Plain: no allocator, the driver's ledger returns to its value before.
+TEST(DeviceOwnedGpu, PlainFamilyReturnsTheLedgerBytes) {
+    const size_t before = device_alloc_live_bytes();
+    {
+        auto a = DeviceOwned<char>::allocate(nullptr, 1 << 20, "unused");
+        auto b = DeviceOwned<char>::allocate_plain(1 << 16);
+        ASSERT_TRUE(a);
+        ASSERT_TRUE(b);
+        EXPECT_EQ(a.family(), DeviceFamily::Plain);
+        EXPECT_EQ(device_alloc_live_bytes(), before + (1 << 20) + (1 << 16));
+    }
+    EXPECT_EQ(device_alloc_live_bytes(), before);
+}
+
+// Async: the stream pool returns to its value before; an adopted pair of one all-or-none call too.
+TEST(DeviceOwnedGpu, AsyncFamilyReturnsThePoolBytes) {
+    const uint64_t before = pool_used();
+    {
+        auto a = DeviceOwned<int>::allocate_async(nullptr, 1 << 20);
+        ASSERT_TRUE(a);
+        EXPECT_EQ(a.family(), DeviceFamily::Async);
+        int *k = nullptr, *v = nullptr;
+        ASSERT_EQ(device_alloc_all_async(nullptr, dev_req(k, 1 << 16), dev_req(v, 1 << 16)), cudaSuccess);
+        DeviceOwned<int> ko, vo;
+        ko.adopt_async(k, 1 << 16, nullptr);
+        vo.adopt_async(v, 1 << 16, nullptr);
+        EXPECT_GE(pool_used(), before + (1 << 20) + (2 << 16));
+    }
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     EXPECT_EQ(pool_used(), before);
 }

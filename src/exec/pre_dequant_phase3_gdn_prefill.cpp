@@ -114,16 +114,13 @@ RowViews borrow_gdn_fp8_rows(const Model& model, int n_layers, WeightCaches& wc,
 void alloc_mxfp8_act_scratch(QuantScratch& qs, VRAMAllocator* alloc, int max_tokens, int64_t max_k) {
     qs.mxfp8_act_data_size = static_cast<size_t>(max_tokens) * max_k;
     qs.mxfp8_act_sf_size = cutlass_mxfp8_sf_size(max_tokens, static_cast<int>(max_k));
-    qs.mxfp8_act_data = vram_alloc(alloc, qs.mxfp8_act_data_size, "mxfp8_act_data");
-    qs.mxfp8_act_sf = vram_alloc(alloc, qs.mxfp8_act_sf_size, "mxfp8_act_sf");
-    if (!qs.mxfp8_act_data || !qs.mxfp8_act_sf) {
+    qs.mxfp8_act_data = DeviceOwned<void>::allocate(alloc, qs.mxfp8_act_data_size, "mxfp8_act_data");
+    qs.mxfp8_act_sf = DeviceOwned<void>::allocate(alloc, qs.mxfp8_act_sf_size, "mxfp8_act_sf");
+    if (!qs.mxfp8_act_data.get() || !qs.mxfp8_act_sf.get()) {
         IMP_LOG_WARN("GDN MXFP8 prefill: activation scratch (%.1f MiB) refused, the copies stay unused",
                      (qs.mxfp8_act_data_size + qs.mxfp8_act_sf_size) / (1024.0 * 1024.0));
-        if (qs.mxfp8_act_data)
-            vram_free(alloc, qs.mxfp8_act_data);
-        if (qs.mxfp8_act_sf)
-            vram_free(alloc, qs.mxfp8_act_sf);
-        qs.mxfp8_act_data = qs.mxfp8_act_sf = nullptr;
+        qs.mxfp8_act_data.reset();
+        qs.mxfp8_act_sf.reset();
         qs.mxfp8_act_data_size = qs.mxfp8_act_sf_size = 0;
     }
 }

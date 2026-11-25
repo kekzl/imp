@@ -141,7 +141,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
             return;
 
         bool from_scratch = (!wcache_->fp16.contains(w.data));
-        if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
+        if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant.get()))
             return;
         // gemma-3 (#959): from-scratch entries are skipped; with companions on every NVFP4-tier
         // entry this drops only the tied LM head (no companion), which stays Q6_K.
@@ -427,7 +427,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
 
         if (e.from_scratch) {
             size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-            void* dq_buf = qscratch_->dequant;
+            void* dq_buf = qscratch_->dequant.get();
             if (need > qscratch_->dequant_size) {
                 if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)
                     continue;
@@ -543,7 +543,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
 
         if (e.from_scratch) {
             size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-            void* dq_buf = qscratch_->dequant;
+            void* dq_buf = qscratch_->dequant.get();
             if (need > qscratch_->dequant_size) {
                 void* tmp = nullptr;
                 if (device_alloc_all(dev_req(tmp, need)) != cudaSuccess)
@@ -630,9 +630,9 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 
         // Dequant from quantized weights via scratch buffer
         size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-        void* dq_buf = qscratch_->dequant;
+        void* dq_buf = qscratch_->dequant.get();
         void* tmp_buf = nullptr;
-        if (!dequant_gpu_supported(e.qtype) || !qscratch_->dequant)
+        if (!dequant_gpu_supported(e.qtype) || !qscratch_->dequant.get())
             continue;
         if (need > qscratch_->dequant_size) {
             if (device_alloc_all(dev_req(tmp_buf, need)) != cudaSuccess)

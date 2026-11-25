@@ -91,11 +91,11 @@ __global__ void moe_imbalance_kernel(const int32_t* __restrict__ offsets, unsign
 }
 std::vector<GraphExecutor::MoeImbalance> GraphExecutor::moe_imbalance() const {
     std::vector<MoeImbalance> out;
-    if (moe_.imb_acc == nullptr || moe_.imb_layers <= 0)
+    if (moe_.imb_acc.get() == nullptr || moe_.imb_layers <= 0)
         return out;
     std::vector<unsigned int> raw(static_cast<size_t>(moe_.imb_layers) * 4, 0u);
     // A scrape, not the hot path: /metrics asks for this, the forward never does.
-    if (cudaMemcpy(raw.data(), moe_.imb_acc, raw.size() * sizeof(unsigned int),
+    if (cudaMemcpy(raw.data(), moe_.imb_acc.get(), raw.size() * sizeof(unsigned int),
                    cudaMemcpyDeviceToHost) != cudaSuccess)
         return out;
     out.resize(moe_.imb_layers);
@@ -123,7 +123,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
                                    sizeof(half);
     const bool ok = ly.nvfp4_moe_up_ptr != nullptr && ly.nvfp4_moe_down_ptr != nullptr &&
                     (ctx.non_gated_experts || ly.nvfp4_moe_gate_ptr != nullptr) &&
-                    moe_.batch_dequant_buf != nullptr &&
+                    moe_.batch_dequant_buf.get() != nullptr &&
                     moe_.batch_dequant_buf_size >= static_cast<size_t>(ctx.ne) * fp16_per_expert &&
                     moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ctx.ne;
     if (!ok) return false;
@@ -139,7 +139,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
                               "nvfp4 dequant batch prefill");
     moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "nvfp4 dequant batch prefill");
 
-    char* buf                = static_cast<char*>(moe_.batch_dequant_buf);
+    char* buf = static_cast<char*>(moe_.batch_dequant_buf.get());
     char* gathered_base      = static_cast<char*>(moe_.gathered.data);
     char* expert_gate_base   = static_cast<char*>(moe_.expert_gate.data);
     char* expert_up_base     = static_cast<char*>(moe_.expert_up.data);
@@ -309,8 +309,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     bool can_fused = (ne > 16 && ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                       ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
                       is_fuseable(up_qtype) && is_fuseable(ly.expert_down_packed.qtype) &&
-                      compute_dtype_ == QType::F16 &&
-                      moe_.batch_dequant_buf != nullptr);
+                      compute_dtype_ == QType::F16 && moe_.batch_dequant_buf.get() != nullptr);
     if (can_fused && !non_gated_experts)
         can_fused = (ly.expert_gate_packed.data && ly.expert_gate_packed.on_device &&
                      is_fuseable(ly.expert_gate_packed.qtype));
@@ -342,7 +341,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
 
     // Step 2: Quantize gathered activations to Q8_1 (reuse batch dequant buf)
     int gate_up_elems = expanded * d;
-    block_q8_1* q8_buf = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
+    block_q8_1* q8_buf = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf.get());
     float* d8_buf = reinterpret_cast<float*>(reinterpret_cast<char*>(q8_buf) +
                                              (static_cast<size_t>(gate_up_elems / 32) * sizeof(block_q8_1)));
     quantize_fp16_to_q8_1(static_cast<const half*>(moe_.gathered.data), q8_buf, d8_buf,
@@ -367,7 +366,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     size_t down_stride = expert_stride(ly.expert_down_packed, down_qtype);
 
     int down_elems = expanded * eff;
-    block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
+    block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf.get());
     float* d8_down = reinterpret_cast<float*>(reinterpret_cast<char*>(q8_down) +
                                               (static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1)));
     quantize_fp16_to_q8_1(reinterpret_cast<const half*>(down_act), q8_down, d8_down,
@@ -388,7 +387,7 @@ bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream
         IMP_LOG_INFO("MoE prefill: FP8 batch path (n=%d, expanded=%d, buf=%.1f MiB)", n, expanded,
                      moe_.batch_dequant_buf_size / (1024.0 * 1024.0));
 
-    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+    char* buf = static_cast<char*>(moe_.batch_dequant_buf.get());
 
     auto chunked_fp8_gemm = [&](const Tensor& packed, QType qtype, const char* a_base_fp16,
                                 char* c_base_fp16, int K_dim, int N_dim) {
@@ -480,7 +479,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         return h_offsets.data();
     };
 
-    char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+    char* buf = static_cast<char*>(moe_.batch_dequant_buf.get());
     char* gathered_base = static_cast<char*>(moe_.gathered.data);
     char* expert_gate_base = static_cast<char*>(moe_.expert_gate.data);
     char* expert_up_base = static_cast<char*>(moe_.expert_up.data);
@@ -513,13 +512,14 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
         const int32_t* offsets = host_offsets();  // syncs: this path is never captured
         // imma_serves_all keeps no persistent buffer: an IMMA decline dequants into a temporary.
-        void* tmp = nullptr;
+        DeviceOwned<void> tmp;
         if (buf == nullptr) {
-            tmp = vram_alloc(vram_alloc_, static_cast<size_t>(ne) * expert_fp16_sz, "moe_imma_decline");
-            if (tmp == nullptr)
+            tmp = DeviceOwned<void>::allocate(vram_alloc_, static_cast<size_t>(ne) * expert_fp16_sz,
+                                              "moe_imma_decline");
+            if (!tmp)
                 throw std::runtime_error("MoE IMMA decline: no VRAM for the FP16 dequant buffer");
         }
-        char* dst = buf != nullptr ? buf : static_cast<char*>(tmp);
+        char* dst = buf != nullptr ? buf : static_cast<char*>(tmp.get());
         dequant_gpu(static_cast<const uint8_t*>(packed.data), dst, qtype, ne * static_cast<int>(rows),
                     static_cast<int>(cols), stream);
         std::vector<const void*> b_ptrs(ne);
@@ -527,9 +527,9 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
             b_ptrs[e] = dst + (static_cast<size_t>(e) * expert_fp16_sz);
         gemm_moe_batched(a_base, c_base, offsets, b_ptrs.data(), K_dim, N_dim, QType::F16, ne, stream,
                          moe_.d_work_ptrs, out_dtype);
-        if (tmp != nullptr) {
+        if (tmp) {
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // the GEMM reads tmp
-            vram_free(vram_alloc_, tmp);
+            tmp.reset();
         }
     };
 
@@ -679,9 +679,10 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                   norm_weights, router_bias_ptr,
                                   RouterFusedGate{grp.active(), model_->profile().moe_router_logit_bias,
                                                   ly.router_bias.data},
-                                  moe_.routing_buffers, moe_.router_fused_ws, moe_.router_fused_ws_bytes,
+                                  moe_.routing_buffers, moe_.router_fused_ws.get(),
+                                  moe_.router_fused_ws_bytes,
                                   RouterDecodeScratch{static_cast<float*>(moe_.gate_logits.data),
-                                                      moe_.router_ticket},
+                                                      moe_.router_ticket.get()},
                                   stream)) {
         moe_topk_finish(n, ne, top_k, moe_.routing_buffers, routing, stream, will_decode_fast);
     } else if (ne <= grp.fused_expert_cap(kMaxFusedExperts) && n == 1 && compute_dtype_ == QType::F16 &&
@@ -703,7 +704,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                 static_cast<float*>(gate_logits_f32.data), n, ne, d, stream);
         } else {
             router_logits_gemm(router_in, ly.moe_gate, moe_.gathered.data, compute_dtype_,
-                               static_cast<float*>(gate_logits_f32.data), n, ne, moe_.router_ws,
+                               static_cast<float*>(gate_logits_f32.data), n, ne, moe_.router_ws.get(),
                                moe_.router_ws_bytes, stream);
         }
 
@@ -718,18 +719,19 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // routes one token and a kernel launch per MoE layer would decide nothing (~48 launches/decode step).
     if (n > 1 && ne > 0) {
         const int n_layers_imb = model_->config().n_layers;
-        if (moe_.imb_acc == nullptr && n_layers_imb > 0) {
+        if (moe_.imb_acc.get() == nullptr && n_layers_imb > 0) {
             const size_t bytes = static_cast<size_t>(n_layers_imb) * 4 * sizeof(unsigned int);
-            moe_.imb_acc = static_cast<unsigned int*>(vram_alloc(vram_alloc_, bytes, "moe_imbalance"));
-            if (moe_.imb_acc != nullptr) {
-                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.imb_acc, 0, bytes, stream));
+            moe_.imb_acc = DeviceOwned<unsigned int>::allocate(vram_alloc_, bytes, "moe_imbalance");
+            if (moe_.imb_acc.get() != nullptr) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.imb_acc.get(), 0, bytes, stream));
                 moe_.imb_layers = n_layers_imb;
                 moe_.imb_experts = ne;
             }
         }
-        if (moe_.imb_acc != nullptr && layer < moe_.imb_layers && ne == moe_.imb_experts) {
-            moe_imbalance_kernel<<<1, 256, 0, stream>>>(
-                static_cast<const int32_t*>(routing.expert_offsets.data), moe_.imb_acc, ne, layer);
+        if (moe_.imb_acc.get() != nullptr && layer < moe_.imb_layers && ne == moe_.imb_experts) {
+            moe_imbalance_kernel<<<1, 256, 0, stream>>>(static_cast<const int32_t*>(
+                                                            routing.expert_offsets.data),
+                                                        moe_.imb_acc.get(), ne, layer);
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
@@ -738,15 +740,15 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // funnel, not inside run_topk: the fused gate+top-k decode branch above
     // never calls run_topk, so a hook there would silently miss every single-token decode.
     if (!dispatch_policy().diagnostics.moe_expert_hist.empty()) {
-        if (moe_.expert_hist == nullptr) {
+        if (moe_.expert_hist.get() == nullptr) {
             int n_layers = cfg.n_layers;
             size_t bytes = static_cast<size_t>(n_layers) * ne * sizeof(unsigned int);
             // vram_alloc, not cudaMalloc: I1 (docs/internals/MEMORY.md) keeps
             // direct CUDA allocation out of everything but src/memory/, against
             // a list that only shrinks. A diagnostic is no reason to grow it.
-            moe_.expert_hist = static_cast<unsigned int*>(vram_alloc(vram_alloc_, bytes, "moe_expert_hist"));
-            if (moe_.expert_hist != nullptr) {
-                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_hist, 0, bytes, stream));
+            moe_.expert_hist = DeviceOwned<unsigned int>::allocate(vram_alloc_, bytes, "moe_expert_hist");
+            if (moe_.expert_hist.get() != nullptr) {
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_hist.get(), 0, bytes, stream));
                 moe_.hist_layers = n_layers;
                 moe_.hist_experts = ne;
                 moe_.hist_top_k = top_k;
@@ -758,13 +760,13 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         }
         // ne can differ per layer in principle; a mismatch would alias buckets,
         // so refuse rather than record something that reads plausible.
-        if (moe_.expert_hist != nullptr && ne == moe_.hist_experts && layer < moe_.hist_layers) {
+        if (moe_.expert_hist.get() != nullptr && ne == moe_.hist_experts && layer < moe_.hist_layers) {
             int n_dec = n * top_k;
             int threads = 256;
             int blocks = (n_dec + threads - 1) / threads;
             moe_expert_hist_kernel<<<blocks, threads, 0, stream>>>(static_cast<const int32_t*>(
                                                                        routing.expert_indices.data),
-                                                                   moe_.expert_hist, n_dec, ne, layer);
+                                                                   moe_.expert_hist.get(), n_dec, ne, layer);
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
@@ -773,36 +775,34 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // once and would append n*top_k behind a single record header, which the
     // reader cannot split back apart. The per-token stream is what the cache is judged on anyway.
     if (n == 1 && !dispatch_policy().diagnostics.moe_expert_trace.empty()) {
-        if (moe_.expert_trace == nullptr) {
+        if (moe_.expert_trace.get() == nullptr) {
             // 8M ints ~= 32 MiB: 512 tokens x 48 layers x (1+8) is 221k, so this
             // holds a very long run before the capacity guard bites.
             moe_.trace_capacity = 8u << 20;
             // One allocation: capacity ints of records, then capacity floats of routing
             // weights (records * top_k < capacity, so every record's weights fit).
-            moe_.expert_trace = static_cast<int*>(
-                vram_alloc(vram_alloc_, moe_.trace_capacity * (sizeof(int) + sizeof(float)),
-                           "moe_expert_trace"));
-            moe_.trace_cursor = static_cast<unsigned int*>(
-                vram_alloc(vram_alloc_, sizeof(unsigned int), "moe_trace_cursor"));
-            if (moe_.expert_trace != nullptr && moe_.trace_cursor != nullptr) {
-                moe_.trace_weights = reinterpret_cast<float*>(moe_.expert_trace + moe_.trace_capacity);
-                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.trace_cursor, 0, sizeof(unsigned int), stream));
+            moe_.expert_trace = DeviceOwned<int>::allocate(
+                vram_alloc_, moe_.trace_capacity * (sizeof(int) + sizeof(float)), "moe_expert_trace");
+            moe_.trace_cursor = DeviceOwned<unsigned int>::allocate(vram_alloc_, sizeof(unsigned int),
+                                                                    "moe_trace_cursor");
+            if (moe_.expert_trace.get() != nullptr && moe_.trace_cursor.get() != nullptr) {
+                moe_.trace_weights = reinterpret_cast<float*>(moe_.expert_trace.get() + moe_.trace_capacity);
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.trace_cursor.get(), 0, sizeof(unsigned int), stream));
                 moe_.trace_top_k = top_k;
                 IMP_LOG_INFO("moe expert trace: recording -> %s",
                              dispatch_policy().diagnostics.moe_expert_trace.c_str());
             } else {
-                vram_free(vram_alloc_, moe_.expert_trace);
-                vram_free(vram_alloc_, moe_.trace_cursor);
-                moe_.expert_trace = nullptr;
-                moe_.trace_cursor = nullptr;
+                moe_.expert_trace.reset();
+                moe_.trace_cursor.reset();
                 IMP_LOG_WARN("moe expert trace: allocation failed - not recording");
             }
         }
-        if (moe_.expert_trace != nullptr && top_k == moe_.trace_top_k) {
+        if (moe_.expert_trace.get() != nullptr && top_k == moe_.trace_top_k) {
             moe_expert_trace_kernel<<<1, 32, 0, stream>>>(
                 static_cast<const int32_t*>(routing.expert_indices.data),
-                static_cast<const float*>(routing.expert_weights.data), moe_.expert_trace, moe_.trace_weights,
-                moe_.trace_cursor, static_cast<unsigned long long>(moe_.trace_capacity), top_k, layer);
+                static_cast<const float*>(routing.expert_weights.data), moe_.expert_trace.get(),
+                moe_.trace_weights, moe_.trace_cursor.get(),
+                static_cast<unsigned long long>(moe_.trace_capacity), top_k, layer);
             IMP_CUDA_CHECK_LAUNCH();
         }
     }
@@ -941,16 +941,16 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     auto address_pool = [&] {
         char* layer_pool = expert_cache_.layer_pool(layer);
         gate_base = up_base = down_base = layer_pool;
-        gate_idx = moe_.d_slot_idx;
-        up_idx = moe_.d_slot_idx + top_k;
-        down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2 * top_k);
+        gate_idx = moe_.d_slot_idx.get();
+        up_idx = moe_.d_slot_idx.get() + top_k;
+        down_idx = moe_.d_slot_idx.get() + static_cast<ptrdiff_t>(2 * top_k);
         slot_stride = expert_cache_.slot_size_;
         pool_addressed = true;
     };
 
     if (host_experts && dev_expert_cache_.layer_ready(layer)) {
         // Device expert cache: routing, residency and the miss copies on the device (capture-safe).
-        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, 1, moe_.d_slot_idx, stream);
+        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, 1, moe_.d_slot_idx.get(), stream);
         address_pool();
     } else if (host_experts) {
         moe_host_args_capture_guard(stream);
@@ -984,7 +984,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         if (stage(ly.expert_gate_packed, ExpertProj::Gate, 0) &&
             stage(ly.expert_up_packed, ExpertProj::Up, top_k) &&
             stage(ly.expert_down_packed, ExpertProj::Down, 2 * top_k)) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx.get(), h_slots.data(),
                                                h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                stream));
             address_pool();

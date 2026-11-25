@@ -160,13 +160,10 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         // The branch is unreachable today (allocate_shared_workspace sizes at max_tokens_, this
         // clamps to it, every phase term monotone in T); fixed rather than deleted because that
         // argument depends on surrounding code, not this branch.
-        if (shared_workspace_) {
-            vram_free(vram_alloc_, shared_workspace_);
-            shared_workspace_ = nullptr;
-        }
+        shared_workspace_.reset();
         generation_++;  // arena moves — captured verify graphs must invalidate
-        shared_workspace_ = vram_alloc(vram_alloc_, new_shared, "shared_workspace");
-        if (!shared_workspace_) {
+        shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, new_shared, "shared_workspace");
+        if (!shared_workspace_.get()) {
             IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes", new_shared);
             shared_workspace_size_ = 0;
             return false;

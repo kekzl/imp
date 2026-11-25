@@ -158,15 +158,15 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         Tensor lg = view_tokens(logits_, csz);             // [csz, V]
         bool lm_cutlass_done = false;
         if (allow_cutlass && lm_is_nvfp4 && lm_head_cutlass_ready_ &&
-            qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr) {
+            qscratch_.cutlass_act_data.get() != nullptr && qscratch_.cutlass_act_sf.get() != nullptr) {
             // Same NVFP4-activation tensor-core path as batched decode, letting the
             // perplexity harness measure its quality directly (the per-row GEMV below
             // keeps FP16 activations; toggling gemm.nvfp4_lm_head_cutlass gives the
             // PPL trade). NVFP4 act quant is per-row, so M (csz) affects only speed.
             Tensor noc = view_tokens(norm_out_, csz);
             rmsnorm(hc, model_->output_norm(), noc, cfg.rms_norm_eps, stream, norm_w_off_);
-            quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
-                                           csz, cfg.d_model, stream);
+            quantize_fp16_to_nvfp4_cutlass(noc.data, qscratch_.cutlass_act_data.get(),
+                                           qscratch_.cutlass_act_sf.get(), csz, cfg.d_model, stream);
             lm_cutlass_done = lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream);
         }
         if (lm_cutlass_done) {
@@ -376,10 +376,11 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     const size_t scratch_needed =
         static_cast<size_t>(mb) * kArgmaxSplits * (sizeof(float) + sizeof(int));
     if (verify_argmax_scratch_sz_ < scratch_needed) {
-        vram_free(vram_alloc_, verify_argmax_scratch_);
-        verify_argmax_scratch_ = static_cast<decltype(verify_argmax_scratch_)>(
-            vram_alloc_force(vram_alloc_, scratch_needed, "verify_argmax_scratch"));
-        if (!verify_argmax_scratch_) {
+        verify_argmax_scratch_.reset();
+        verify_argmax_scratch_ = DeviceOwned<void>::allocate(vram_alloc_, scratch_needed,
+                                                             "verify_argmax_scratch",
+                                                             /*force=*/true);
+        if (!verify_argmax_scratch_.get()) {
             verify_argmax_scratch_sz_ = 0;
             return false;
         }
@@ -389,10 +390,11 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
         return true;
     const int V = model_->config().vocab_size;
     if (verify_pen_counts_cap_ < V) {
-        vram_free(vram_alloc_, verify_pen_counts_);
-        verify_pen_counts_ = static_cast<decltype(verify_pen_counts_)>(
-            vram_alloc_force(vram_alloc_, static_cast<size_t>(V) * sizeof(int32_t), "verify_pen_counts"));
-        if (!verify_pen_counts_) {
+        verify_pen_counts_.reset();
+        verify_pen_counts_ = DeviceOwned<int32_t>::allocate(vram_alloc_,
+                                                            static_cast<size_t>(V) * sizeof(int32_t),
+                                                            "verify_pen_counts", /*force=*/true);
+        if (!verify_pen_counts_.get()) {
             verify_pen_counts_cap_ = 0;
             return false;
         }
@@ -449,7 +451,7 @@ void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n
                       cudaGetErrorString(e));
     }
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
-    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    float* pvals = static_cast<float*>(verify_argmax_scratch_.get());
     int* pidxs = reinterpret_cast<int*>(pvals + (static_cast<size_t>(mb) * kArgmaxSplits));
     dim3 grid(csz, kArgmaxSplits);
     rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals,
@@ -509,7 +511,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         if (!ensure_verify_scratch(/*with_penalties=*/true))
             return;
         verify_hist_count_kernel<<<(V + 255) / 256, 256, 0, stream>>>(d_hist, n_hist, V,
-                                                                      verify_pen_counts_);
+                                                                      verify_pen_counts_.get());
         IMP_CUDA_CHECK_LAUNCH();
     }
 
@@ -520,9 +522,9 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                             [&](const Tensor& lg, int row0, int csz) {
         if (penalties) {
             dim3 pgrid((V + 255) / 256, csz);
-            verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(
-                static_cast<float*>(lg.data), row0, V, verify_pen_counts_, d_draft, rep_pen,
-                freq_pen, pres_pen);
+            verify_penalties_kernel<<<pgrid, 256, 0, stream>>>(static_cast<float*>(lg.data), row0, V,
+                                                               verify_pen_counts_.get(), d_draft, rep_pen,
+                                                               freq_pen, pres_pen);
             IMP_CUDA_CHECK_LAUNCH();
         }
         // Bans special tokens (chat-template delimiters) before this argmax, same
@@ -587,8 +589,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
     const float* s8 = nullptr;
     const bool fp8 = !w4a16 && !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
     if (!w4a16 && !fp8 &&
-        (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data == nullptr ||
-         qscratch_.cutlass_act_sf == nullptr))
+        (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data.get() == nullptr ||
+         qscratch_.cutlass_act_sf.get() == nullptr))
         return false;
     const auto& cfg = model_->config();
     // Rows scored: a head prefix (speculative.mtp_draft_vocab, the draft copy), the logits packed V to a row.
@@ -598,7 +600,7 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         return false;
     if (draw_top_k > 0 && (draw_row0 < 0 || draw_row0 + n_rows > kDraftDrawRows || !draft_draw_scratch_))
         return false;
-    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    float* pvals = static_cast<float*>(verify_argmax_scratch_.get());
     int* pidxs = reinterpret_cast<int*>(pvals + (static_cast<size_t>(mb) * kArgmaxSplits));
     for (int c = 0; c < n_rows; c += mb) {
         const int csz = std::min(mb, n_rows - c);
@@ -613,8 +615,8 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
                                         V, cfg.d_model, csz, stream))
                 return false;
         } else {
-            quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz,
-                                           cfg.d_model, stream);
+            quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data.get(),
+                                           qscratch_.cutlass_act_sf.get(), csz, cfg.d_model, stream);
             if (!lm_head_nvfp4_gemm_f32_(csz, static_cast<float*>(lg.data), stream))
                 return false;
         }
@@ -657,6 +659,10 @@ double GraphExecutor::perplexity_nll(std::span<const int32_t> tokens, cudaStream
         IMP_LOG_ERROR("perplexity_nll: device buffers (n=%d): %s", n, cudaGetErrorString(err));
         return -1.0;
     }
+    DeviceOwned<int32_t> tokens_own;  // plain family, released where the hand free stood
+    DeviceOwned<double> nll_own;
+    tokens_own.adopt(d_tokens, static_cast<size_t>(n) * sizeof(int32_t), nullptr);
+    nll_own.adopt(d_nll, static_cast<size_t>(n) * sizeof(double), nullptr);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens.data(), static_cast<size_t>(n) * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));
@@ -668,7 +674,8 @@ double GraphExecutor::perplexity_nll(std::span<const int32_t> tokens, cudaStream
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_nll_pos.data(), d_nll, static_cast<size_t>(n) * sizeof(double),
                                        cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-    device_free_all(d_tokens, d_nll);
+    tokens_own.reset();
+    nll_own.reset();
     double h_nll = 0.0;
     for (int i = 0; i < n - 1; ++i)
         h_nll += h_nll_pos[i];

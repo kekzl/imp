@@ -151,7 +151,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
                                        StagedProj out[kExpertProjCount]) {
     for (int i = 0; i < kExpertProjCount; ++i)
         out[i] = StagedProj{};
-    if (!moe_.layer_stage_buf || moe_.layer_stage_proj_bytes == 0)
+    if (!moe_.layer_stage_buf.get() || moe_.layer_stage_proj_bytes == 0)
         return false;
 
     const auto& ly = model_->layer(layer);
@@ -165,9 +165,10 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_experts) {
         const auto& up0 = ly.expert_w_up[0];
         const auto layout = nvfp4_slot_layout(up0.shape[0], up0.shape[1] * 2);
-        touched_staged = dev_expert_cache_.stage_touched(
-            layer, expert_offsets, static_cast<char*>(moe_.layer_stage_buf),
-            moe_.layer_stage_proj_bytes, layout.packed_bytes, layout.ms_bytes, stream);
+        touched_staged = dev_expert_cache_.stage_touched(layer, expert_offsets,
+                                                         static_cast<char*>(moe_.layer_stage_buf.get()),
+                                                         moe_.layer_stage_proj_bytes, layout.packed_bytes,
+                                                         layout.ms_bytes, stream);
     }
     bool any = false;
     for (int p = 0; p < kExpertProjCount; ++p) {
@@ -183,7 +184,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         if (static_cast<size_t>(ne) * (pb + mb) > moe_.layer_stage_proj_bytes)
             continue;
 
-        char* base = static_cast<char*>(moe_.layer_stage_buf) +
+        char* base = static_cast<char*>(moe_.layer_stage_buf.get()) +
                      (static_cast<size_t>(p) * moe_.layer_stage_proj_bytes);
         char* packed_dst = base;
         char* ms_dst = base + (static_cast<size_t>(ne) * pb);
@@ -234,14 +235,14 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
         // Device-args view: the grouped GEMM reads SfAtom-ordered scale
         // factors and per-expert pointer arrays, neither of which staged bytes
         // carry. Building them here lets a host-resident layer take the same prefill path as a resident one.
-        if (!moe_.layer_stage_sf || moe_.layer_stage_sf_proj_bytes == 0)
+        if (!moe_.layer_stage_sf.get() || moe_.layer_stage_sf_proj_bytes == 0)
             continue;
         const int64_t N = experts[0].shape[0];
         const int64_t K = experts[0].shape[1] * 2;
         const size_t sf_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
         if (static_cast<size_t>(ne) * sf_expert > moe_.layer_stage_sf_proj_bytes)
             continue;
-        char* sf_base = static_cast<char*>(moe_.layer_stage_sf) +
+        char* sf_base = static_cast<char*>(moe_.layer_stage_sf.get()) +
                         (static_cast<size_t>(p) * moe_.layer_stage_sf_proj_bytes);
         convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, ne, static_cast<int>(N), static_cast<int>(K),
                                            stream, expert_offsets);
@@ -256,7 +257,7 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
 
 bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
                                        const int32_t* expert_offsets, cudaStream_t stream) {
-    if (!moe_.layer_stage_buf || !moe_.layer_stage_sf || n <= 0 || n > moe_.layer_stage_experts)
+    if (!moe_.layer_stage_buf.get() || !moe_.layer_stage_sf.get() || n <= 0 || n > moe_.layer_stage_experts)
         return false;
     const auto& ly = model_->layer(layer);
     const std::vector<Tensor>* projs[kExpertProjCount] = {&ly.expert_w_gate, &ly.expert_w_up,
@@ -265,11 +266,10 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
     const auto& up0 = ly.expert_w_up[0];
     const auto layout = nvfp4_slot_layout(up0.shape[0], up0.shape[1] * 2);
     const bool gathered = expert_offsets &&
-                          dev_expert_cache_.stage_touched_range(layer, expert_offsets,
-                                                                static_cast<char*>(moe_.layer_stage_buf),
-                                                                moe_.layer_stage_proj_bytes,
-                                                                layout.packed_bytes, layout.ms_bytes, e0, n,
-                                                                p0, p1, stream);
+                          dev_expert_cache_.stage_touched_range(
+                              layer, expert_offsets, static_cast<char*>(moe_.layer_stage_buf.get()),
+                              moe_.layer_stage_proj_bytes, layout.packed_bytes, layout.ms_bytes, e0, n, p0,
+                              p1, stream);
     for (int z = 0; z < 2; ++z) {
         const int p = slot_proj[z];
         if (p < 0)
@@ -281,7 +281,7 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
         const size_t pb = lay.packed_bytes, mb = lay.ms_bytes;
         if (static_cast<size_t>(n) * (pb + mb) > moe_.layer_stage_proj_bytes)
             return false;
-        char* packed_dst = static_cast<char*>(moe_.layer_stage_buf) +
+        char* packed_dst = static_cast<char*>(moe_.layer_stage_buf.get()) +
                            (static_cast<size_t>(z) * moe_.layer_stage_proj_bytes);
         char* ms_dst = packed_dst + (static_cast<size_t>(n) * pb);
         if (!gathered) {
@@ -298,7 +298,7 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
         const size_t sf_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
         if (static_cast<size_t>(n) * sf_expert > moe_.layer_stage_sf_proj_bytes)
             return false;
-        char* sf_base = static_cast<char*>(moe_.layer_stage_sf) +
+        char* sf_base = static_cast<char*>(moe_.layer_stage_sf.get()) +
                         (static_cast<size_t>(z) * moe_.layer_stage_sf_proj_bytes);
         convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, n, static_cast<int>(N), static_cast<int>(K),
                                            stream, expert_offsets ? expert_offsets + e0 : nullptr);
@@ -320,10 +320,10 @@ void GraphExecutor::stage_ptrs_(int p, int e0, int n, const char* packed, size_t
         hb[i] = packed + (static_cast<size_t>(i) * pb);
         hsfb[i] = sf + (static_cast<size_t>(i) * sfe);
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs.get() + off),
                                        static_cast<const void*>(hb.data()), n * sizeof(const void*),
                                        cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs.get() + off),
                                        static_cast<const void*>(hsfb.data()), n * sizeof(const void*),
                                        cudaMemcpyHostToDevice, stream));
     if (off < moe_.layer_stage_ptr_sig.size())
@@ -333,10 +333,10 @@ void GraphExecutor::stage_ptrs_(int p, int e0, int n, const char* packed, size_t
 // Alpha row of `layer` ([kExpertProjCount * n_experts] tensor scales, fixed after load), uploaded
 // on the layer's first staging.
 float* GraphExecutor::stage_alpha_row_(int layer, cudaStream_t stream) {
-    if (!moe_.layer_stage_alpha)
+    if (!moe_.layer_stage_alpha.get())
         return nullptr;
     const size_t stride = static_cast<size_t>(moe_.layer_stage_ptr_stride);
-    float* row = moe_.layer_stage_alpha + (static_cast<size_t>(layer) * kExpertProjCount * stride);
+    float* row = moe_.layer_stage_alpha.get() + (static_cast<size_t>(layer) * kExpertProjCount * stride);
     if (layer >= static_cast<int>(moe_.layer_stage_alpha_filled.size()) ||
         moe_.layer_stage_alpha_filled[layer])
         return row;
@@ -391,8 +391,8 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
     // Chunked buffer: the grouped NVFP4 dispatch stages expert blocks itself (stage_nvfp4_block_).
     if (moe_.layer_stage_slots == 2) {
         const auto& ly = model_->layer(layer);
-        ctx.staged_blocks = ctx.n > 1 && moe_.layer_stage_buf && moe_.layer_stage_sf &&
-                            moe_.layer_stage_b_ptrs && nvfp4_host_experts_servable(ly.expert_w_up) &&
+        ctx.staged_blocks = ctx.n > 1 && moe_.layer_stage_buf.get() && moe_.layer_stage_sf.get() &&
+                            moe_.layer_stage_b_ptrs.get() && nvfp4_host_experts_servable(ly.expert_w_up) &&
                             nvfp4_host_experts_servable(ly.expert_w_down) &&
                             (ctx.non_gated_experts || nvfp4_host_experts_servable(ly.expert_w_gate)) &&
                             static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_ptr_stride;
@@ -400,7 +400,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
             ctx.staged_alpha = stage_alpha_row_(layer, stream);
         return ctx.staged_blocks;
     }
-    if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
+    if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf.get())
         ctx.staged_done = stage_nvfp4_layer_(
             layer, stream, static_cast<const int32_t*>(ctx.routing.expert_offsets.data),
             ctx.staged);
@@ -418,7 +418,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
 bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
-    if (!(ctx.staged_done || ctx.staged_blocks) || !moe_.layer_stage_b_ptrs ||
+    if (!(ctx.staged_done || ctx.staged_blocks) || !moe_.layer_stage_b_ptrs.get() ||
         moe_.layer_stage_ptr_stride <= 0 || !ctx.staged_alpha)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
@@ -428,14 +428,14 @@ bool GraphExecutor::build_staged_device_args_(
 
     const size_t stride = static_cast<size_t>(moe_.layer_stage_ptr_stride);
     const auto at = [&](ExpertProj p) { return static_cast<size_t>(std::to_underlying(p)) * stride; };
-    out.d_gate_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Gate);
-    out.d_gate_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Gate);
+    out.d_gate_B_ptrs = moe_.layer_stage_b_ptrs.get() + at(ExpertProj::Gate);
+    out.d_gate_SFB_ptrs = moe_.layer_stage_sfb_ptrs.get() + at(ExpertProj::Gate);
     out.d_gate_alpha = ctx.staged_alpha + at(ExpertProj::Gate);
-    out.d_up_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Up);
-    out.d_up_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Up);
+    out.d_up_B_ptrs = moe_.layer_stage_b_ptrs.get() + at(ExpertProj::Up);
+    out.d_up_SFB_ptrs = moe_.layer_stage_sfb_ptrs.get() + at(ExpertProj::Up);
     out.d_up_alpha = ctx.staged_alpha + at(ExpertProj::Up);
-    out.d_down_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Down);
-    out.d_down_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Down);
+    out.d_down_B_ptrs = moe_.layer_stage_b_ptrs.get() + at(ExpertProj::Down);
+    out.d_down_SFB_ptrs = moe_.layer_stage_sfb_ptrs.get() + at(ExpertProj::Down);
     out.d_down_alpha = ctx.staged_alpha + at(ExpertProj::Down);
     out.ready = true;
     return true;
@@ -555,7 +555,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         SlotIdxBatch b{};
         b.n = static_cast<int>(std::min<size_t>(kSlotIdxBatch, h_slots.size() - off));
         std::copy_n(h_slots.begin() + static_cast<std::ptrdiff_t>(off), b.n, b.v);
-        write_slot_idx_kernel<<<1, kSlotIdxBatch, 0, stream>>>(moe_.d_slot_idx + off, b);
+        write_slot_idx_kernel<<<1, kSlotIdxBatch, 0, stream>>>(moe_.d_slot_idx.get() + off, b);
         IMP_CUDA_CHECK_LAUNCH();
     }
     }  // host staging
@@ -567,9 +567,9 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
 
     // nk slots per projection; slot j reads input row j / top_k (x_stride d, the same row for n_rows 1).
     const int nk = n_rows * top_k;
-    const int32_t* gate_idx = moe_.d_slot_idx;
-    const int32_t* up_idx = moe_.d_slot_idx + nk;
-    const int32_t* down_idx = moe_.d_slot_idx + (static_cast<ptrdiff_t>(2) * nk);
+    const int32_t* gate_idx = moe_.d_slot_idx.get();
+    const int32_t* up_idx = moe_.d_slot_idx.get() + nk;
+    const int32_t* down_idx = moe_.d_slot_idx.get() + (static_cast<ptrdiff_t>(2) * nk);
 
     const NvFP4MoEQuantResult up_view =
         pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Up)], slot_scales,

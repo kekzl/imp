@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/device_owned.h"
 #include "memory/vram_allocator.h"
 #include <cuda_runtime.h>
 #include <cstddef>
@@ -17,15 +18,16 @@ struct Fp8ActScale {
 
 // Quantization scratch buffers: pre-allocated per-GEMM scratch for activation
 // quantization, on-the-fly weight dequant, and dp4a GEMV. Allocated once during
-// GraphExecutor::allocate_workspaces(), freed by free(). All members public for
+// GraphExecutor::allocate_workspaces(), freed by free(). Move-only: the separately allocated
+// buffers are DeviceOwned, the rest are T2 arena views and plain values. All members public for
 // zero-overhead forward-pass access.
 struct QuantScratch {
     // --- Generic on-the-fly dequant scratch (Q8_0/Q6_K) ---
-    void* dequant = nullptr;
+    DeviceOwned<void> dequant;
     size_t dequant_size = 0;
 
     // --- FP8 activation quantization scratch ---
-    void* fp8_act = nullptr;  // max_tokens * max_dim bytes
+    DeviceOwned<void> fp8_act;  // max_tokens * max_dim bytes
     size_t fp8_act_size = 0;
     float* d_act_scale = nullptr;        // 1 float on device
     float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
@@ -33,29 +35,29 @@ struct QuantScratch {
     int fp8_max_grid = 0;                // max grid size for reduction
     float* d_act_row_scales = nullptr;   // per-token dynamic act scales, act_row_scales_n floats (T2 arena)
     int act_row_scales_n = 0;
-    void* fp8_tile_ws = nullptr;         // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
+    DeviceOwned<void> fp8_tile_ws;  // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
     size_t fp8_tile_ws_size = 0;
 
     // --- CUTLASS NVFP4 prefill activation buffers ---
-    void* cutlass_act_data = nullptr;  // [max_tokens, max_K/2] packed FP4
-    void* cutlass_act_sf = nullptr;    // SfAtom scale factors (NVFP4: UE4M3)
+    DeviceOwned<void> cutlass_act_data;  // [max_tokens, max_K/2] packed FP4
+    DeviceOwned<void> cutlass_act_sf;    // SfAtom scale factors (NVFP4: UE4M3)
     size_t cutlass_act_data_size = 0;
     size_t cutlass_act_sf_size = 0;
     // Act tensor scale the bytes in cutlass_act_data were quantized with: a hinted dedupe reuses
     // them only at the same scale (mutable: GemmContext holds the scratch const).
     mutable float cutlass_act_scale = 1.0f;
-    void* cutlass_workspace = nullptr;  // CUTLASS GEMM workspace
+    DeviceOwned<void> cutlass_workspace;  // CUTLASS GEMM workspace
     size_t cutlass_workspace_size = 0;
 
     // --- Native MXFP4 W4A16 GEMM (M > 1): one dense weight dequantized to FP16 (largest non-LM-head N x K)
     // and the LM-head slice output, same size. Own buffers: the shared workspace holds the GDN state. ---
-    void* mxfp4_wdeq = nullptr;
-    void* mxfp4_slice_out = nullptr;
+    DeviceOwned<void> mxfp4_wdeq;
+    DeviceOwned<void> mxfp4_slice_out;
     size_t mxfp4_wdeq_size = 0;
 
     // --- MXFP8 GDN prefill activation buffers (gemm.mxfp8_gdn_proj_prefill) ---
-    void* mxfp8_act_data = nullptr;  // [max_tokens, max_K] E4M3
-    void* mxfp8_act_sf = nullptr;    // SfAtom UE8M0
+    DeviceOwned<void> mxfp8_act_data;  // [max_tokens, max_K] E4M3
+    DeviceOwned<void> mxfp8_act_sf;    // SfAtom UE8M0
     size_t mxfp8_act_data_size = 0;
     size_t mxfp8_act_sf_size = 0;
 
@@ -103,8 +105,8 @@ struct QuantScratch {
     int sp_prefill_cap_blocks = 0;
     int sp_prefill_rows = 0;
 
-    // Free all buffers.
-    void free(VRAMAllocator* alloc);
+    // Releases every owned buffer and returns the struct to its initial state (arena views nulled).
+    void free();
 };
 
 }  // namespace imp

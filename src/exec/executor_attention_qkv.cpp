@@ -234,7 +234,7 @@
             const Fp8ActScale fp8_a_scale = fp8_qkv_rows ? quantize_act_fp8_(*fp8_hwq, no, stream)
                                                          : Fp8ActScale{};
             if (fp8_a_scale) {
-                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
+                Tensor fp8_no(qscratch_.fp8_act.get(), QType::FP8_E4M3, no.ndim, no.shape, true);
                 // Reconstruct FP8 weight tensors from handle payloads.
                 auto make_fp8_tensor = [](const WeightHandle* hw) {
                     int64_t wshape[2] = {hw->shape[0], hw->shape[1]};

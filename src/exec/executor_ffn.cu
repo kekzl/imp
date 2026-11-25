@@ -107,7 +107,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // Qwen3.5: uses post_attn_norm instead of ffn_norm (ffn_norm is null)
     const Tensor& ffn_norm_w = ffn_norm_weight_(ly);
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
-    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
+    const bool using_fp32_accum = (fp32_accum_buf_.get() != nullptr && has_post_ffn_norm);
 
     // Fetch handles for w_down (used in multiple fuse-flag decisions below).
     const WeightHandle* hwd = (ly.w_down_id != kInvalidTensorID) ? &registry_.handle(ly.w_down_id) : nullptr;
@@ -131,7 +131,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                  (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                          !will_fuse_down_nvfp4 && !will_fuse_down_beta1 && n > 1 &&
-                                         qscratch_.dequant != nullptr &&
+                                         qscratch_.dequant.get() != nullptr &&
                                          dequant_gpu_supported(ly.w_down.qtype));
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
         !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !using_fp32_accum) {
@@ -249,7 +249,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
                     return Tensor(hw->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 };
-                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
+                Tensor fp8_no(qscratch_.fp8_act.get(), QType::FP8_E4M3, no.ndim, no.shape, true);
                 Tensor fp8_tg = make_fp8_tensor(hwg);
                 Tensor fp8_tu = make_fp8_tensor(hwu);
                 const Tensor w2[2] = {fp8_tg, fp8_tu};
@@ -457,7 +457,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                                  : Fp8ActScale{};
             if (down_a_scale) {
                 // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
-                Tensor fp8_so(qscratch_.fp8_act, QType::FP8_E4M3, so.ndim, so.shape, true);
+                Tensor fp8_so(qscratch_.fp8_act.get(), QType::FP8_E4M3, so.ndim, so.shape, true);
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
@@ -465,7 +465,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
-                       qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down.qtype)) {
+                       qscratch_.dequant.get() != nullptr && dequant_gpu_supported(ly.w_down.qtype)) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else {

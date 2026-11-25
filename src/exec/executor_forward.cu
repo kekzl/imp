@@ -212,11 +212,11 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
 
 bool GraphExecutor::lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_t stream) {
     const auto& cfg = model_->config();
-    return gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, lm_head_cutlass_.data,
-                               lm_head_cutlass_.scale_factors, lm_head_cutlass_.tensor_scale, logits, rows,
-                               cfg.vocab_size, cfg.d_model, stream,
-                               process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace,
-                               qscratch_.cutlass_workspace_size);
+    void* const ws = process_diag_deterministic() ? nullptr : qscratch_.cutlass_workspace.get();
+    return gemm_nvfp4_tile_f32(qscratch_.cutlass_act_data.get(), qscratch_.cutlass_act_sf.get(),
+                               lm_head_cutlass_.data, lm_head_cutlass_.scale_factors,
+                               lm_head_cutlass_.tensor_scale, logits, rows, cfg.vocab_size, cfg.d_model,
+                               stream, ws, qscratch_.cutlass_workspace_size);
 }
 
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
@@ -384,7 +384,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 
     // Initialize FP32 residual accumulator from FP16 embedding (post-norm models only).
-    if (fp32_accum_buf_) {
+    if (fp32_accum_buf_.get()) {
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
         int threads = 256;
         int blocks = static_cast<int>((total + threads - 1) / threads);
@@ -394,7 +394,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     }
 
     // Dump FP32 accumulator for decode debugging
-    if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
+    if (fp32_accum_buf_.get() && n == 1 && debug_forward_enabled()) {
         float tmp[4];
         if (debug_d2h_async(tmp, view_tokens(fp32_hidden_, n).data, 4 * sizeof(float), stream,
                             "fp32_accum_init"))
@@ -542,7 +542,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 // Also scales the FP32 residual accumulator so the next layer's attention
                 // sees the correctly-scaled residual stream; without this the FP32 accum
                 // grows unbounded (layer_out_scale compensates residual growth, per llama's gemma4-iswa).
-                if (fp32_accum_buf_ && model_->profile().fp32_residual_norms) {
+                if (fp32_accum_buf_.get() && model_->profile().fp32_residual_norms) {
                     int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
                         static_cast<float*>(view_tokens(fp32_hidden_, n).data),
@@ -593,7 +593,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // layer_out_scale (Gemma-4), and any FP16→FP32 sync.
         dump_tensor_npy("C_post_layer", view_tokens(h, n), stream, i, decode_step);
         // Also dump the FP32 shadow so we can diff FP32-truth vs FP16-view vs llama.cpp.
-        if (fp32_accum_buf_) {
+        if (fp32_accum_buf_.get()) {
             dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream, i, decode_step);
         }
 
@@ -660,14 +660,14 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Final FP32→FP16 conversion for the tokens that need LM head projection.
     // run_attention/run_ffn already keep hidden_ in sync with fp32_hidden_,
     // but this ensures the final state is clean (no stale data from earlier layers).
-    if (debug_forward_enabled() && fp32_accum_buf_) {
+    if (debug_forward_enabled() && fp32_accum_buf_.get()) {
         // Compare FP32 accum vs FP16 hidden for last token before final conversion
         Tensor h_view = view_tokens(hidden_, n);
         Tensor fp32_view = view_tokens(fp32_hidden_, n);
         debug_tensor_stats("pre_final_conv_fp16", h_view, stream);
         debug_tensor_stats("pre_final_conv_fp32", fp32_view, stream);
     }
-    if (fp32_accum_buf_) {
+    if (fp32_accum_buf_.get()) {
         fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
             static_cast<const float*>(view_tokens(fp32_hidden_, n).data), static_cast<half*>(h.data), n,
             cfg.d_model);
@@ -938,10 +938,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             // Tensor-core path: one NVFP4 tile GEMM (M=n, gemm_nvfp4_tile_f32) reads the
             // LM-head weight ONCE vs ceil(n/4)x for the batched GEMV. FP32 output (samplers read
             // float logits). Falls back to the GEMV if disabled or the kernel declines the shape.
-            if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data != nullptr &&
-                qscratch_.cutlass_act_sf != nullptr) {
-                quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data,
-                                               qscratch_.cutlass_act_sf, n, cfg.d_model, stream);
+            if (!lm_done && lm_head_cutlass_ready_ && qscratch_.cutlass_act_data.get() != nullptr &&
+                qscratch_.cutlass_act_sf.get() != nullptr) {
+                quantize_fp16_to_nvfp4_cutlass(no_final.data, qscratch_.cutlass_act_data.get(),
+                                               qscratch_.cutlass_act_sf.get(), n, cfg.d_model, stream);
                 lm_done = lm_head_nvfp4_gemm_f32_(n, static_cast<float*>(lg.data), stream);
             }
             if (!lm_done) {

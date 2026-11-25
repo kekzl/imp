@@ -54,7 +54,7 @@
             // n*ctx_len <= s_cap^2, NOT ctx_len <= s_cap (the old guard wrongly
             // aborted once cumulative ctx_len crossed s_cap even when the matrix still
             // fit). FP32 overflow auto-falls back to FP16-S, so only the FP16 footprint needs guarding here.
-            int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
+            int s_cap = attn_scores_buf_.get() ? static_cast<int>(attn_scores_.shape[1]) : 0;
             int64_t fp16_elems_needed = static_cast<int64_t>(seq_n) * ctx_len;
             int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
             const bool smatrix_fits =
@@ -133,16 +133,21 @@
                 if (chunk_eager_bytes_ < full_bytes) {
                     constexpr size_t kGrowStep = 64u << 20;
                     const size_t cap = ((full_bytes + kGrowStep - 1) / kGrowStep) * kGrowStep;
-                    device_free_all_async(stream, chunk_eager_k_, chunk_eager_v_);
+                    chunk_eager_k_.set_release_stream(stream);  // grow path: ordered on this stream
+                    chunk_eager_v_.set_release_stream(stream);
+                    chunk_eager_k_.reset();
+                    chunk_eager_v_.reset();
                     chunk_eager_bytes_ = 0;
                     // Both or none: a failure leaves the two pointers null.
-                    if (device_alloc_all_async(stream, dev_req(chunk_eager_k_, cap), dev_req(chunk_eager_v_, cap)) ==
-                        cudaSuccess)
+                    half *k_raw = nullptr, *v_raw = nullptr;
+                    if (device_alloc_all_async(stream, dev_req(k_raw, cap), dev_req(v_raw, cap)) == cudaSuccess)
                         chunk_eager_bytes_ = cap;
+                    chunk_eager_k_.adopt_async(k_raw, cap, stream);
+                    chunk_eager_v_.adopt_async(v_raw, cap, stream);
                 }
                 if (chunk_eager_bytes_ >= full_bytes) {
-                    k_full = chunk_eager_k_;
-                    v_full = chunk_eager_v_;
+                    k_full = chunk_eager_k_.get();
+                    v_full = chunk_eager_v_.get();
                     used_eager_scratch = true;
                 } else {
                     // One allocation for K and V: a failure leaves nothing to free (#2288).
@@ -268,7 +273,7 @@
         // hd=512 global layers stay on cuBLAS (faster than the SMEM-capped fused
         // hd=512 kernel, Bq=16 forced by its 99 KB opt-in). The fused hd=512
         // kernel exists only as the O(n)-memory overflow fallback for long context.
-        const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
+        const bool s_matrix_fits = attn_scores_buf_.get() != nullptr &&
                                    seq_n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold (see the chunked path for why the
         // #493 prefer-FA2-everywhere override was reverted). hd=512 never prefers
@@ -311,7 +316,7 @@
             attention_cublas_prefill(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
-        } else if (hd == 512 && !prefer_fmha && attn_scores_buf_ != nullptr &&
+        } else if (hd == 512 && !prefer_fmha && attn_scores_buf_.get() != nullptr &&
                    attention_cublas_prefill_sliced(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
                                                    /*causal=*/true, cfg.attn_logit_softcap,
                                                    /*q_offset=*/0, stream, layer_sliding_window,

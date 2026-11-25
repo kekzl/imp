@@ -129,7 +129,7 @@ void GraphExecutor::pli_layer_run_(int layer, int n, cudaStream_t stream) {
     gemm(h, ly.pli_gate, g, 1.0f, 0.0f, stream);  // [n, d] x [pli_dim, d]^T
     pli_gate_mul(g.data, gpli_.inputs.data, n, cfg.n_layers, cfg.pli_dim, layer, stream);
     gemm(g, ly.pli_proj, p, 1.0f, 0.0f, stream);  // [n, pli_dim] x [d, pli_dim]^T
-    if (fp32_accum_buf_ != nullptr && model_->profile().fp32_residual_norms) {
+    if (fp32_accum_buf_.get() != nullptr && model_->profile().fp32_residual_norms) {
         // fp32 residual += rmsnorm(p) * w, h = fp16(fp32 residual): same arm as post_ffn_norm
         rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(p.data),
                                    static_cast<const half*>(ly.pli_norm.data),

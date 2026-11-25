@@ -118,7 +118,7 @@ TEST(Q8PlanesOnly, DeclineFallbackComputesFromThePlanes) {
     WeightCaches wc;
     wc.q8_planes_only.insert(w.src);
     QuantScratch qs;
-    qs.dequant = scratch;
+    qs.dequant.adopt(scratch, kElems * sizeof(__half), nullptr);  // plain family: qs releases it
     qs.dequant_size = kElems * sizeof(__half);
     WeightHandle h;
     h.source_data = w.src;
@@ -144,7 +144,6 @@ TEST(Q8PlanesOnly, DeclineFallbackComputesFromThePlanes) {
     cudaFree(x);
     cudaFree(y);
     cudaFree(yref);
-    cudaFree(scratch);
 }
 
 }  // namespace

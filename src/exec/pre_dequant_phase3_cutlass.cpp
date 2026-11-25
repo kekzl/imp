@@ -289,15 +289,18 @@ void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
     const Tensor& head = model_->output_proj();
     if (max_nk_mx == 0 && head.qtype == QType::MXFP4)  // only the LM head: slices of 8192 rows
         max_nk_mx = static_cast<size_t>(8192) * head.shape[1];
-    if (max_nk_mx > 0 && !qscratch_->mxfp4_wdeq) {
+    if (max_nk_mx > 0 && !qscratch_->mxfp4_wdeq.get()) {
         qscratch_->mxfp4_wdeq_size = max_nk_mx * sizeof(half);
-        qscratch_->mxfp4_wdeq = vram_alloc(vram_alloc_, qscratch_->mxfp4_wdeq_size, "mxfp4_wdeq");
-        qscratch_->mxfp4_slice_out = vram_alloc(vram_alloc_, qscratch_->mxfp4_wdeq_size, "mxfp4_slice_out");
+        qscratch_->mxfp4_wdeq = DeviceOwned<void>::allocate(vram_alloc_, qscratch_->mxfp4_wdeq_size,
+                                                            "mxfp4_wdeq");
+        qscratch_->mxfp4_slice_out = DeviceOwned<void>::allocate(vram_alloc_, qscratch_->mxfp4_wdeq_size,
+                                                                 "mxfp4_slice_out");
     }
-    if (max_k > 0 && !qscratch_->cutlass_act_data) {
+    if (max_k > 0 && !qscratch_->cutlass_act_data.get()) {
         qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-        qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
-                                                 "cutlass_act_data");
+        qscratch_->cutlass_act_data = DeviceOwned<void>::allocate(vram_alloc_,
+                                                                  qscratch_->cutlass_act_data_size,
+                                                                  "cutlass_act_data");
     }
 }
 

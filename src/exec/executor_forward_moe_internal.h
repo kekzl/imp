@@ -82,7 +82,7 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
                                                  const ExpertLRUCache& cache, const MoEWorkspace& moe,
                                                  int top_k) {
     return (!up_packed.on_device && cache.layer_cached(layer) && cache.n_slots_ > 0 &&
-            cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx != nullptr &&
+            cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx.get() != nullptr &&
             moe.d_slot_idx_count >= kExpertProjCount * top_k &&
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
@@ -103,7 +103,7 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
                                                 const MoEWorkspace& moe, int top_k) {
     return (cache.nvfp4_slots_ && cache.layer_cached(layer) && cache.d_slot_scales_ != nullptr &&
             cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
-            moe.d_slot_idx != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
+            moe.d_slot_idx.get() != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
 

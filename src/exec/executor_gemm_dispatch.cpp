@@ -107,7 +107,7 @@ static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& outp
     args.weight_payload = &src;
     args.q8_1_buf = qs->q8_1_buf;
     args.d8_buf = qs->d8_buf;
-    args.dequant_scratch = qs->dequant;
+    args.dequant_scratch = qs->dequant.get();
     args.dequant_scratch_size = qs->dequant_size;
     args.force_mmvq = ctx.force_mmvq;
     GemmStrategy strat{StorageTier::FP16, h.source_qtype, true};
@@ -140,16 +140,16 @@ static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const T
                                            const GemmContext& ctx, int M, float act_scale = 1.0f,
                                            const void* pre_act = nullptr, const void* pre_sf = nullptr) {
     const auto* qs = ctx.qscratch;
-    if (!cw.scale_factors || !qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
+    if (!cw.scale_factors || !qs || !qs->cutlass_act_data.get() || !qs->cutlass_act_sf.get())
         return false;
     GemmKernelArgs args{};
     args.input = &input;
     args.output = &output;
     args.stream = ctx.stream;
     args.weight_payload = &cw;
-    args.cutlass_act_data = pre_act ? const_cast<void*>(pre_act) : qs->cutlass_act_data;
-    args.cutlass_act_sf = pre_act ? const_cast<void*>(pre_sf) : qs->cutlass_act_sf;
-    args.cutlass_workspace = qs->cutlass_workspace;
+    args.cutlass_act_data = pre_act ? const_cast<void*>(pre_act) : qs->cutlass_act_data.get();
+    args.cutlass_act_sf = pre_act ? const_cast<void*>(pre_sf) : qs->cutlass_act_sf.get();
+    args.cutlass_workspace = qs->cutlass_workspace.get();
     args.cutlass_workspace_size = qs->cutlass_workspace_size;
     args.act_prequantized = pre_act != nullptr ||
                             ((ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
@@ -195,8 +195,8 @@ static bool nvfp4_prefill_copy_routes(const WeightHandle& h, int M, bool spec_ve
                                       const QuantScratch& qs) {
     return M > 32 && !spec_verify && h.source_qtype == QType::F16 &&
            (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
-           wc.cutlass_nvfp4_prefill.contains(h.source_data) && qs.cutlass_act_data != nullptr &&
-           qs.cutlass_act_sf != nullptr;
+           wc.cutlass_nvfp4_prefill.contains(h.source_data) && qs.cutlass_act_data.get() != nullptr &&
+           qs.cutlass_act_sf.get() != nullptr;
 }
 
 // One ACTIVE / DECLINED line per tensor kind (log only, a benign race between engines).
@@ -230,9 +230,9 @@ static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float bet
 static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight& cw, void* out, int M, int K,
                                cudaStream_t stream) {
     const int N = static_cast<int>(cw.N);
-    void* ws = process_diag_deterministic() ? nullptr : qs.cutlass_workspace;
-    if (!gemm_mxfp8_tile(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw.data, cw.scale_factors, cw.col_scale, out, M,
-                         N, K, stream, /*variant=*/-1, ws, qs.cutlass_workspace_size))
+    void* ws = process_diag_deterministic() ? nullptr : qs.cutlass_workspace.get();
+    if (!gemm_mxfp8_tile(qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), cw.data, cw.scale_factors,
+                         cw.col_scale, out, M, N, K, stream, /*variant=*/-1, ws, qs.cutlass_workspace_size))
         return false;
     static bool logged = false;  // activity proof, once
     if (!logged) {
@@ -292,19 +292,19 @@ static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, co
     for (int n0 = 0; n0 < N; n0 += slice) {
         const int nr = std::min(slice, N - n0);
         dequant_mxfp4_linear_to_fp16(w + (static_cast<size_t>(n0) * (K / 2)),
-                                     s + (static_cast<size_t>(n0) * (K / 32)), nr, K, qs.mxfp4_wdeq,
+                                     s + (static_cast<size_t>(n0) * (K / 32)), nr, K, qs.mxfp4_wdeq.get(),
                                      ctx.stream);
         int64_t w_shape[2] = {nr, K};
-        Tensor wt(qs.mxfp4_wdeq, QType::F16, 2, w_shape, true);
+        Tensor wt(qs.mxfp4_wdeq.get(), QType::F16, 2, w_shape, true);
         if (whole > 0) {
             gemm(input, wt, output, 1.0f, 0.0f, ctx.stream);
             break;
         }
         int64_t o_shape[2] = {M, nr};
-        Tensor part(qs.mxfp4_slice_out, output.qtype, 2, o_shape, true);
+        Tensor part(qs.mxfp4_slice_out.get(), output.qtype, 2, o_shape, true);
         gemm(input, wt, part, 1.0f, 0.0f, ctx.stream);
         IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(static_cast<char*>(output.data) + (static_cast<size_t>(n0) * es),
-                                             static_cast<size_t>(N) * es, qs.mxfp4_slice_out, nr * es,
+                                             static_cast<size_t>(N) * es, qs.mxfp4_slice_out.get(), nr * es,
                                              nr * es, M, cudaMemcpyDeviceToDevice, ctx.stream));
     }
     static bool logged = false;  // activity proof, once
@@ -361,7 +361,7 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     if (h.source_data != nullptr && dequant_gpu_supported(h.source_qtype))
         return false;
     // The NVFP4 tile block itself requires the activation scratch.
-    return qscratch_.cutlass_act_data != nullptr && qscratch_.cutlass_act_sf != nullptr;
+    return qscratch_.cutlass_act_data.get() != nullptr && qscratch_.cutlass_act_sf.get() != nullptr;
 }
 
 // gemm_via_handle_: WeightHandle dispatch for all registered weights. M>1
@@ -420,11 +420,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                       !cur_spec_verify_ && h.source_qtype == QType::F16 &&
                       (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
-                      qs.mxfp8_act_data != nullptr && qs.mxfp8_act_sf != nullptr &&
+                      qs.mxfp8_act_data.get() != nullptr && qs.mxfp8_act_sf.get() != nullptr &&
                       static_cast<size_t>(Mp) * Kp <= qs.mxfp8_act_data_size &&
                       cutlass_mxfp8_sf_size(Mp, Kp) <= qs.mxfp8_act_sf_size;
         if (active) {
-            quantize_fp16_to_mxfp8_cutlass(input.data, qs.mxfp8_act_data, qs.mxfp8_act_sf, Mp, Kp,
+            quantize_fp16_to_mxfp8_cutlass(input.data, qs.mxfp8_act_data.get(), qs.mxfp8_act_sf.get(), Mp, Kp,
                                            ctx.stream);
             active = mxfp8_prefill_gemm(qs, cw, output.data, Mp, Kp, ctx.stream);
         }
@@ -892,18 +892,18 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     // cuBLASLt has no F16 x FP8 GEMM (status 15): quantize the activation first.
     if (input.qtype == QType::F16 && e.d_scale) {
         if (const Fp8ActScale a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
-            Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
+            Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
             gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
             return;
         }
     }
     // Native FP8 the activation scratch cannot serve: FP16 weight in the dequant scratch.
     const size_t w_f16 = static_cast<size_t>(wshape[0]) * wshape[1] * sizeof(half);
-    if (e.native_source && input.qtype == QType::F16 && qscratch_.dequant &&
+    if (e.native_source && input.qtype == QType::F16 && qscratch_.dequant.get() &&
         w_f16 <= qscratch_.dequant_size) {
-        dequantize_fp8_e4m3_to_fp16(fp8_w.data, qscratch_.dequant, static_cast<int>(wshape[0] * wshape[1]),
-                                    e.host_scale, ctx.stream);
-        Tensor w16(qscratch_.dequant, QType::F16, 2, wshape, true);
+        dequantize_fp8_e4m3_to_fp16(fp8_w.data, qscratch_.dequant.get(),
+                                    static_cast<int>(wshape[0] * wshape[1]), e.host_scale, ctx.stream);
+        Tensor w16(qscratch_.dequant.get(), QType::F16, 2, wshape, true);
         gemm(input, w16, output, 1.0f, ctx.beta, ctx.stream);
         return;
     }
@@ -937,7 +937,7 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     // -18
     // %). Per-token scales take the tile at every M: cuBLASLt 13.4 refuses FP8 OUTER_VEC_32F on sm_120. They
     // run data-parallel only (no stream-K plan chosen by M), so a prompt row does not change with its chunk.
-    void* sk_ws = (process_diag_deterministic() || a.per_row) ? nullptr : qscratch_.fp8_tile_ws;
+    void* sk_ws = (process_diag_deterministic() || a.per_row) ? nullptr : qscratch_.fp8_tile_ws.get();
     if ((a.per_row || M >= imp::cfg::kFp8TileMinM) && own_ok &&
         gemm_fp8_tile(a8.data, w8.data, a.d, w_scale, beta, out.data, M, N, K, stream, -1, sk_ws,
                       qscratch_.fp8_tile_ws_size, a.per_row)) {
@@ -985,11 +985,11 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
 
 Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,
                                              cudaStream_t stream) {
-    if (!qscratch_.fp8_act || !input.is_contiguous() ||
+    if (!qscratch_.fp8_act.get() || !input.is_contiguous() ||
         static_cast<size_t>(input.numel()) > qscratch_.fp8_act_size)
         return {};
     if (hw.payload.fp8.d_act_scale && dispatch_policy().gemm.fp8_static_act_scale &&
-        quantize_fp16_to_fp8_e4m3_dscale(input.data, qscratch_.fp8_act, input.numel(),
+        quantize_fp16_to_fp8_e4m3_dscale(input.data, qscratch_.fp8_act.get(), input.numel(),
                                          hw.payload.fp8.d_act_scale, stream))
         return {hw.payload.fp8.d_act_scale, false};
     // Per-token dynamic scales (vLLM's dynamic FP8): a row's codes and scale depend on that row only.
@@ -998,7 +998,7 @@ Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tenso
     const int64_t M = K > 0 ? input.numel() / K : 0;
     if (qscratch_.d_act_row_scales && M <= qscratch_.act_row_scales_n && K % 64 == 0 &&
         hw.shape[0] % 8 == 0 &&
-        quantize_fp8_act_rows(input.data, qscratch_.fp8_act, static_cast<int>(M), K,
+        quantize_fp8_act_rows(input.data, qscratch_.fp8_act.get(), static_cast<int>(M), K,
                               qscratch_.d_act_row_scales, stream)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
@@ -1015,7 +1015,7 @@ Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tenso
     if (!std::exchange(warned, true))
         IMP_LOG_WARN("FP8 activations: batch-wide absmax scale (M=%ld K=%d N=%ld), rows depend on the batch",
                      static_cast<long>(M), K, static_cast<long>(hw.shape[0]));
-    Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
+    Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
     quantize_fp16_to_fp8_e4m3(input, fp8_in, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
                               qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
     return {qscratch_.d_act_scale, false};

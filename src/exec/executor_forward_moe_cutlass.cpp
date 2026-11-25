@@ -106,8 +106,8 @@ static bool launch_moe_decode_grouped(const MoEWorkspace::PerLayerNvfp4DeviceArg
     a.d_M_per = moe.d_M_per;
     a.d_expert_offsets = d_offsets;
     a.d_sfa_offsets = moe.d_sfa_offsets;  // prep_sfa(d) of the gate/up input
-    a.base_A_packed = moe.cutlass3x_packed;
-    a.base_A_sf = moe.cutlass3x_sf;
+    a.base_A_packed = moe.cutlass3x_packed.get();
+    a.base_A_sf = moe.cutlass3x_sf.get();
     a.d_B_ptrs = da.d_up_B_ptrs;
     a.d_SFB_ptrs = da.d_up_SFB_ptrs;
     a.d_alpha = da.d_up_alpha;
@@ -307,8 +307,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     obs.staged_blocks = ctx.staged_blocks;
     const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
-    obs.grouped_available = gemm_grouped_nvfp4_moe_supports(ne, d, eff) && moe_.cutlass3x_packed &&
-                            moe_.cutlass3x_sf && (staged_covers || ids_cover);
+    obs.grouped_available = gemm_grouped_nvfp4_moe_supports(ne, d, eff) && moe_.cutlass3x_packed.get() &&
+                            moe_.cutlass3x_sf.get() && (staged_covers || ids_cover);
     if (!obs.grouped_available) {
         verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, obs, MoePrefillPath::LEGACY);
         return false;
@@ -324,9 +324,9 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         // (GPT_OSS_GLU) + a plain quantize instead. The staged path keeps gpt-oss on legacy.
         const bool use_device_args = (cfg.arch != ModelArch::GPT_OSS || !ctx.staged_blocks) && moe_.d_M_per &&
                                      moe_.d_M_per_count >= ne && moe_.d_sfa_offsets && moe_.d_B_ptrs_cache &&
-                                     moe_.d_SFB_ptrs_cache && moe_.d_alpha_full && moe_.cutlass3x_packed &&
-                                     moe_.cutlass3x_sf && moe_.cutlass3x_sfa_ptrs &&
-                                     moe_.cutlass3x_sfa_ptrs_count >= ne;
+                                     moe_.d_SFB_ptrs_cache && moe_.d_alpha_full &&
+                                     moe_.cutlass3x_packed.get() && moe_.cutlass3x_sf.get() &&
+                                     moe_.cutlass3x_sfa_ptrs && moe_.cutlass3x_sfa_ptrs_count >= ne;
         if (use_device_args) {
             // Log once per process; layer==0 fires on every
             // forward, but only the first ever needs to flag
@@ -353,12 +353,12 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             auto prep_sfa = [&](int K_in) {
                 imp::compute_sfa_offsets_device(moe_.d_M_per, moe_.d_sfa_offsets, ne, K_in, stream,
                                                 reinterpret_cast<uint8_t**>(moe_.cutlass3x_sfa_ptrs),
-                                                moe_.cutlass3x_sf);
+                                                moe_.cutlass3x_sf.get());
                 // Zeroes only the ACTIVE prefix of the SFA staging buffer: padded rows of
                 // the SfAtom layout must be 0 for clean grouped-GEMM reads. QW5 (#604) replaces
                 // the full cudaMemsetAsync with a bounded device kernel that reads
                 // d_sfa_offsets[ne] as the byte count, capped at cutlass3x_sf_size.
-                imp::bzero_sfa_active(moe_.cutlass3x_sf, moe_.d_sfa_offsets, ne, moe_.cutlass3x_sf_size,
+                imp::bzero_sfa_active(moe_.cutlass3x_sf.get(), moe_.d_sfa_offsets, ne, moe_.cutlass3x_sf_size,
                                       stream);
             };
             // (Former quantize_device lambda removed — the gate/up call site
@@ -374,7 +374,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                                  const void* up_bias = nullptr) {
                 prep_sfa(K_in);
                 imp::fused_act_quantize_fp16_to_nvfp4_cutlass_moe(
-                    gate_base, up_base, moe_.cutlass3x_packed,
+                    gate_base, up_base, moe_.cutlass3x_packed.get(),
                     reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
                     static_cast<const int*>(routing.expert_offsets.data), expanded, K_in, ne, act_type,
                     stream, gate_bias, up_bias, las.dn);
@@ -413,8 +413,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                     routing.expert_offsets.data) + e0;
                 dargs.d_sfa_offsets    = moe_.d_sfa_offsets + e0;
                 dargs.d_alpha          = d_a + e0;
-                dargs.base_A_packed    = moe_.cutlass3x_packed;
-                dargs.base_A_sf        = moe_.cutlass3x_sf;
+                dargs.base_A_packed = moe_.cutlass3x_packed.get();
+                dargs.base_A_sf = moe_.cutlass3x_sf.get();
                 dargs.d_B_ptrs         = d_B + e0;
                 dargs.d_SFB_ptrs       = d_SFB + e0;
                 dargs.base_D           = c_base;
@@ -428,7 +428,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                 prep_sfa(d);
                 imp::quantize_fp16_to_nvfp4_cutlass_moe_gather(
                     ctx.no.data, static_cast<const int32_t*>(routing.sorted_token_ids.data),
-                    moe_.cutlass3x_packed, reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
+                    moe_.cutlass3x_packed.get(), reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
                     static_cast<const int*>(routing.expert_offsets.data), expanded, d, ne, stream, las.gu);
             };
             // gemm.nvfp4_prompt_a16_moe takes prompt rows past the decode-rows launch, so it runs first; it
@@ -580,7 +580,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                               total_packed, total_sfa, moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
                 return false;
             }
-            uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
+            uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf.get());
             for (int e = 0; e < ne; ++e) {
                 if (M_per[e] > 0)
                     h_sfa_bases[e] = all_sfa + sfa_offsets[e];
@@ -593,7 +593,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             // Zero active SFA region (SfAtom pads rows to 128).
             IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
             // Fused per-expert quantize in one kernel launch.
-            quantize_fp16_to_nvfp4_cutlass_moe(a_base, moe_.cutlass3x_packed, moe_.cutlass3x_sfa_ptrs,
+            quantize_fp16_to_nvfp4_cutlass_moe(a_base, moe_.cutlass3x_packed.get(), moe_.cutlass3x_sfa_ptrs,
                                                routing.expert_offsets.data
                                                    ? static_cast<const int*>(routing.expert_offsets.data)
                                                    : nullptr,
@@ -620,8 +620,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
             args.B = hB.data();
             args.SFB = hSFB.data();
             args.alpha = hAlpha.data();
-            args.base_A_packed = moe_.cutlass3x_packed;
-            args.base_A_sf = moe_.cutlass3x_sf;
+            args.base_A_packed = moe_.cutlass3x_packed.get();
+            args.base_A_sf = moe_.cutlass3x_sf.get();
             args.base_D = c_base;
             // Last tier: an unwritten expert output fails the request instead of reaching the logits (#2446).
             if (!gemm_grouped_nvfp4_host_args(ne, N_out, K_in, expanded, args, stream))
