@@ -15,6 +15,7 @@
 #include "vision/image_processor.h"
 #include "vision/video_evs.h"
 #include "vision/vision_family.h"
+#include "runtime/engine_capabilities.h"
 #include "runtime/request.h"
 #include "runtime/spec_request.h"
 #include "memory/kv_cache.h"
@@ -140,9 +141,7 @@ struct ChatStateSnapshot {
     int mtp_armed_k = 0;
     bool mtp_head_present = false;
     bool mtp_head_loaded = false;
-    bool logit_lens_ok = false;
-    bool phrase_ban_ok = false;
-    bool cfg_ok = false;
+    imp::EngineCapabilities caps;  // the load's capability table (C-6)
     int sae_width = 0;
     std::vector<int32_t> cfg_tokens;  // row 117: the shadow prompt, cfg_render_negative
     imp::Tokenizer* tok = nullptr;
@@ -283,10 +282,8 @@ template <typename State, typename Snap>
 inline void snapshot_mtp_state_(const State& state, Snap& snap) {
     snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
     snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
-    snap.logit_lens_ok = state.logit_lens_ok.load(std::memory_order_relaxed);
-    snap.phrase_ban_ok = state.phrase_ban_ok.load(std::memory_order_relaxed);
+    snap.caps = imp::EngineCapabilities::from_bits(state.caps_bits.load(std::memory_order_relaxed));
     snap.sae_width = state.sae_width.load(std::memory_order_relaxed);
-    snap.cfg_ok = state.cfg_ok.load(std::memory_order_relaxed);
     snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
 }
 
@@ -449,8 +446,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 struct ExtensionError {
     std::string message;
     const char* param = nullptr;
+    const char* code = nullptr;  // "unsupported_feature": the load's forward lacks it (C-6)
 };
 ExtensionError extension_error(const ChatRequestContext& ctx);
+// The first request field asking for a feature c says this load lacks, or nullptr (C-6).
+const char* unsupported_feature_field(const ChatRequestParams& p, const imp::EngineCapabilities& c);
 // Classifier-free guidance (row 117): "cfg_scale" in [1, 10], "cfg_negative_prompt"; "" or the 400 message.
 std::string parse_cfg_fields(const nlohmann::ordered_json& body, ChatRequestParams& p);
 // SAE (row 116): "sae_features" 0..kSaeMaxTopN, "sae_clamp" {"id": value}; "" or the 400 message for *field.

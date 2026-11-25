@@ -1,4 +1,4 @@
-// imp chat extensions a load or a request cannot honour (rows 115, 118): checked after the model snapshot.
+// imp chat extensions a load or a request cannot honour (rows 115-118, C-6): checked after the snapshot.
 
 #include "handlers_internal.h"
 #include "runtime/cfg_guidance.h"
@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <utility>
 
 std::string parse_cfg_fields(const nlohmann::ordered_json& body, ChatRequestParams& p) {
     if (const auto s = body.find("cfg_scale"); s != body.end() && !s->is_null()) {
@@ -82,13 +83,31 @@ void cfg_render_negative(ChatRequestContext& ctx, bool force_thinking) {
                                     ctx.snap.reasoning_effort);
 }
 
+const char* unsupported_feature_field(const ChatRequestParams& p, const imp::EngineCapabilities& c) {
+    const bool sae = p.sae_features > 0 || !p.sae_clamp.empty();
+    const bool ban = !p.banned_strings.empty() || !p.banned_regex.empty();
+    const std::pair<const char*, bool> refused[] = {
+        {"logit_lens", p.logit_lens > 0 && !c.logit_lens},
+        {p.sae_clamp.empty() ? "sae_features" : "sae_clamp", sae && !c.sae},
+        {"lora", !p.lora_name.empty() && !c.lora},
+        {"control_vector", !p.cvec_name.empty() && !c.control_vector},
+        {p.banned_strings.empty() ? "banned_regex" : "banned_strings", ban && !c.phrase_ban},
+        {"cfg_scale", p.cfg_scale > 1.0f && !c.cfg},
+    };
+    for (const auto& [field, no] : refused)
+        if (no)
+            return field;
+    return nullptr;
+}
+
 ExtensionError extension_error(const ChatRequestContext& ctx) {
     const auto& p = ctx.params;
-    if (p.logit_lens > 0 && !ctx.snap.logit_lens_ok)
-        return {
-            "\"logit_lens\" is not available for this model: its residual stream is not the d_model stream "
-            "the LM head reads (gated-residual architecture)",
-            "logit_lens"};
+    if (const char* field = unsupported_feature_field(p, ctx.snap.caps)) {
+        const std::string& model = ctx.snap.model_name;
+        return {"\"" + std::string(field) + "\" is not supported by the loaded model '" + model +
+                    "': its forward does not implement it, so the request would run without it",
+                field, "unsupported_feature"};
+    }
     if (p.sae_features > 0 || !p.sae_clamp.empty()) {
         const char* field = p.sae_clamp.empty() ? "sae_features" : "sae_clamp";
         if (ctx.snap.sae_width <= 0)
@@ -100,11 +119,6 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
                         "sae_clamp"};
     }
     if (p.cfg_scale > 1.0f) {
-        if (!ctx.snap.cfg_ok)
-            return {
-                "\"cfg_scale\" needs a model that decodes two sequences in one step (hybrids: "
-                "batched GDN decode)",
-                "cfg_scale"};
         if (!p.images.empty() || !p.videos.empty() || !p.audios.empty() || p.has_tools ||
             !p.banned_strings.empty() || !p.banned_regex.empty())
             return {
@@ -122,8 +136,6 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
     if (p.banned_strings.empty() && p.banned_regex.empty())
         return {};
     const char* field = p.banned_strings.empty() ? "banned_regex" : "banned_strings";
-    if (!ctx.snap.phrase_ban_ok)
-        return {"\"" + std::string(field) + "\" needs a loaded model", field};
     if (p.json_mode || !p.json_schema_str.empty() || !p.regex_pattern.empty() || !p.grammar.empty() ||
         !p.tool_constraint_tools.empty() || p.mirostat != 0)
         return {

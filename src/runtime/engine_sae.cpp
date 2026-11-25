@@ -16,8 +16,9 @@ namespace imp {
 int Engine::sae_load(const std::string& dir) {
     if (!model_ || !executor_)
         return 0;
-    if (model_->profile().gated_residual) {  // the stream is hc_count x d_model, not what the SAE read
-        IMP_LOG_ERROR("sae: %s refused, gated-residual models are not supported", dir.c_str());
+    if (!caps_.sae) {  // gated residual (hc_count x d_model) or an own forward: no layer the SAE reads
+        IMP_LOG_ERROR("sae: %s refused, the loaded forward has no residual stream it is shaped for",
+                      dir.c_str());
         return 0;
     }
     SaeHost host;

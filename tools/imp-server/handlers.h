@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include "model_lifetime.h"
@@ -268,9 +269,7 @@ struct ServerState {
     std::atomic<int> armed_mtp_k{0};        // Engine::mtp_spec_decode_k()
     std::atomic<bool> mtp_head_present{false};  // checkpoint ships MTP tensors
     std::atomic<bool> mtp_head_loaded{false};   // ... and this process uploaded them
-    std::atomic<bool> logit_lens_ok{false};     // engine reads the residual per layer (row 115)
-    std::atomic<bool> phrase_ban_ok{false};     // engine can rewind a decode (row 118)
-    std::atomic<bool> cfg_ok{false};            // engine decodes a guidance pair in one step (row 117)
+    std::atomic<uint32_t> caps_bits{0};         // Engine::capabilities().bits() of this load (C-6)
     std::atomic<bool> vision_ok{false};         // a vision encoder is loaded: image blocks are served
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};

@@ -14,11 +14,6 @@
 
 namespace imp {
 
-bool Engine::logit_lens_supported() const {
-    // Qwen4Exp's gated residual is hc_count x d_model wide, not the stream the final norm reads.
-    return model_ && executor_ && !model_->profile().gated_residual;
-}
-
 bool Engine::decode_eager_only_(const std::vector<std::shared_ptr<Request>>& rows) {
     std::vector<int> idx;  // decode: hidden_ row i is rows[i]
     for (int i = 0; i < static_cast<int>(rows.size()); ++i)
