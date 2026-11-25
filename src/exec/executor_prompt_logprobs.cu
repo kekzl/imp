@@ -98,7 +98,7 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
     const StorageTier tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
     const bool has_fp8 = wcache_.fp8.contains(w);
     const bool nvfp4 = !has_fp8 && (tier == StorageTier::NVFP4 || wcache_.nvfp4.contains(w));
-    const bool dp4a = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(qt) &&
+    const bool dp4a = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 && is_dp4a_qtype(qt) &&
                       tier != StorageTier::MXFP4 && !has_fp8;
     // Vocab slab = dequant-scratch rows; below 256 rows the per-batch driver wins.
     const int slab = qscratch_.dequant.get()

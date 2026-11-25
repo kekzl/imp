@@ -112,7 +112,7 @@ static bool can_decode_fast(int n, const TransformerLayer& ly, void* dequant_buf
         (non_gated || ly.nvfp4_moe_gate_ptr != nullptr))
         return true;
     // #2444: gate, up and down each need an arm in the sub-path that runs; the dispatch throws otherwise.
-    const bool dp4a = moe_decode_uses_dp4a(ly, qs.q8_1_buf != nullptr && qs.d8_buf != nullptr);
+    const bool dp4a = moe_decode_uses_dp4a(ly, qs.q8_1_buf.data() != nullptr && qs.d8_buf.data() != nullptr);
     auto has_arm = dp4a ? moe_dp4a_decode_supported : moe_fp16_decode_supported;
     if (!non_gated && (ly.expert_gate_packed.data == nullptr || !has_arm(ly.expert_gate_packed.qtype)))
         return false;
@@ -197,18 +197,17 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     // moe_weighted_sum_residual adds in FP16 and the FP32 shadow goes stale, compounding drift across layers.
     ctx.moe_use_fp32_residual = (prof.fp32_residual_norms && fp32_accum_buf_.get() != nullptr &&
                                  ly.post_ffn_norm.data != nullptr);
-    ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                             ctx.h.qtype == QType::F16 && !ctx.nvfp4_covers_layer &&
-                             !ctx.gemma4_fp32_norm);
+    ctx.moe_fused_norm_q8 = (ctx.n == 1 && qscratch_.q8_1_buf.data() != nullptr &&
+                             qscratch_.d8_buf.data() != nullptr && ctx.h.qtype == QType::F16 &&
+                             !ctx.nvfp4_covers_layer && !ctx.gemma4_fp32_norm);
     if (norm_w.data == nullptr) {
         // Qwen4Exp gated residual: the block input is already the mixed, hc_norm'ed stream; the
         // pre-norm is the identity (the Q8_1 decode producer is not filled on this path).
         device_copy_async(ctx.no.data, ctx.h.data, ctx.h.nbytes(), stream);
     } else if (ctx.moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
-        rmsnorm_quantize_q8_1(static_cast<const half*>(ctx.h.data),
-                              static_cast<const half*>(norm_w.data),
-                              static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf,
+        rmsnorm_quantize_q8_1(static_cast<const half*>(ctx.h.data), static_cast<const half*>(norm_w.data),
+                              qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
                               static_cast<half*>(ctx.no.data), ctx.d, ctx.eps, stream, norm_w_off_);
     } else {
         // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
@@ -391,11 +390,12 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         return false;
     if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get())
         return false;
-    if (!moe_.d_M_per || moe_.d_M_per_count < ctx.ne)
+    if (!moe_.d_M_per.data() || moe_.d_M_per_count < ctx.ne)
         return false;
-    if (!moe_.d_sfa_offsets || !moe_.d_B_ptrs_cache || !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full)
+    if (!moe_.d_sfa_offsets.data() || !moe_.d_B_ptrs_cache.data() || !moe_.d_SFB_ptrs_cache.data() ||
+        !moe_.d_alpha_full.data())
         return false;
-    if (!moe_.cutlass3x_sfa_ptrs || moe_.cutlass3x_sfa_ptrs_count < ctx.ne)
+    if (!moe_.cutlass3x_sfa_ptrs.data() || moe_.cutlass3x_sfa_ptrs_count < ctx.ne)
         return false;
     // All expert tensors must be CUTLASS_NVFP4 — covers_ids() in the inner
     // function. Mirrored here to avoid the upstream skip-gather firing when
@@ -526,7 +526,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                          sizeof(half);
                 bool can_fp16_batch_nosync = moe_.fp16_batch_buffer_ok(static_cast<size_t>(ne) *
                                                                        fp16_per_expert) &&
-                                             moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne &&
+                                             moe_.d_weight_ptrs.data() && moe_.d_weight_ptrs_count >= ne &&
                                              ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                                              ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
                                              dequant_gpu_supported(up_qtype) &&

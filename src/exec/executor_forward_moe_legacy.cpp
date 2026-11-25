@@ -541,8 +541,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             // gemm_moe_batched, one cuBLASLt batch per expert M: h_offsets is
             // already available from the D2H sync above, so no need for
             // gemm_moe_device_grouped (which does its own D2H sync + per-expert cublasLtMatmul calls).
-            gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim,
-                             QType::F16, ne, stream, moe_.d_work_ptrs);
+            gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim, QType::F16, ne,
+                             stream, moe_.d_work_ptrs.data());
         };
 
         // Path selection: 1 pre-cached FP16 (all experts in fp16_packed_*_cache,
@@ -578,12 +578,10 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             }
 
             if (!non_gated_experts)
-                gemm_moe_batched(gathered_base, expert_gate_base, h_offsets.data(),
-                                 gate_w_ptrs.data(), d, eff, QType::F16, ne, stream,
-                                 moe_.d_work_ptrs);
-            gemm_moe_batched(gathered_base, expert_up_base, h_offsets.data(),
-                             up_w_ptrs.data(), d, eff, QType::F16, ne, stream,
-                             moe_.d_work_ptrs);
+                gemm_moe_batched(gathered_base, expert_gate_base, h_offsets.data(), gate_w_ptrs.data(), d,
+                                 eff, QType::F16, ne, stream, moe_.d_work_ptrs.data());
+            gemm_moe_batched(gathered_base, expert_up_base, h_offsets.data(), up_w_ptrs.data(), d, eff,
+                             QType::F16, ne, stream, moe_.d_work_ptrs.data());
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts, expanded, eff,
@@ -592,9 +590,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             {
                 char* batch_down_act = non_gated_experts ? expert_up_base
                                                          : expert_swiglu_base;
-                gemm_moe_batched(batch_down_act, expert_down_base, h_offsets.data(),
-                                 down_w_ptrs.data(), eff, d, QType::F16, ne, stream,
-                                 moe_.d_work_ptrs);
+                gemm_moe_batched(batch_down_act, expert_down_base, h_offsets.data(), down_w_ptrs.data(), eff,
+                                 d, QType::F16, ne, stream, moe_.d_work_ptrs.data());
             }
 
         } else if (can_dequant_batch) {

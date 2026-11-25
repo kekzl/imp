@@ -105,8 +105,8 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
     ws_need = std::max<size_t>(ws_need, 256);  // a non-empty take keeps the arena path when ws needs none
     if (n_weights == 0 || smallm_ws_bytes_ >= ws_need)
         return;
-    auto ws = engine_arena().take_bytes(ws_need);
-    auto xq = ws.empty() ? ws : engine_arena().take_bytes(xq_need);
+    StableSpan<std::byte> ws = engine_arena().take_bytes(ws_need);
+    StableSpan<std::byte> xq = ws.empty() ? ws : engine_arena().take_bytes(xq_need);
     if (ws.empty() || xq.empty()) {
         // Arena closed or under-planned: the lazy growth path (cudaMalloc
         // outside capture) still serves eager forwards; captured ones fall

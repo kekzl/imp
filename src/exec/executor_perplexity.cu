@@ -136,8 +136,8 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     // illegal memory access on gemma-3-12b that poisoned context and surfaced as PPL=1.0000 (zeroed NLL
     // buffer).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
-                             lm_tier != StorageTier::MXFP4 && !lm_has_fp8;
+    const bool use_dp4a_lm = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 &&
+                             is_dp4a_qtype(out_qtype) && lm_tier != StorageTier::MXFP4 && !lm_has_fp8;
     NvFP4QuantResult nvfp4_lm_r{};
     if (lm_is_nvfp4) {
         if (lm_nvfp4_secondary) {
@@ -188,7 +188,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
             // the weight pass across rows (#847 lever 2), replacing a per-row loop
             // that re-read the full LM head every row. Falls back to per-row when the
             // multi-row scratch is unavailable or the batch is a single row.
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+            auto* q8 = qscratch_.q8_1_buf.data();
             const int stride = qscratch_.q8_1_max_blocks;
             if (csz > 1 && qscratch_.q8_1_rows >= 2) {
                 for (int r0 = 0; r0 < csz; r0 += qscratch_.q8_1_rows) {
@@ -198,10 +198,10 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
                         rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
                                               static_cast<const half*>(model_->output_norm().data),
                                               q8 + ((size_t)r * stride),
-                                              qscratch_.d8_buf + ((size_t)r * stride), nullptr, cfg.d_model,
-                                              cfg.rms_norm_eps, stream, norm_w_off_);
+                                              qscratch_.d8_buf.data() + ((size_t)r * stride), nullptr,
+                                              cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
                     }
-                    gemv_dp4a_fp32_batched(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                    gemv_dp4a_fp32_batched(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
                                            static_cast<float*>(lg.data) + ((size_t)r0 * cfg.vocab_size),
                                            cfg.vocab_size, cfg.d_model, rn, stride, stream);
                 }
@@ -211,11 +211,10 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
                     Tensor lg_row = lg.slice(r, r + 1);
                     rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
                                           static_cast<const half*>(model_->output_norm().data), q8,
-                                          qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
-                                          norm_w_off_);
-                    dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
-                                       static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model,
-                                       stream);
+                                          qscratch_.d8_buf.data(), nullptr, cfg.d_model, cfg.rms_norm_eps,
+                                          stream, norm_w_off_);
+                    dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
+                                       static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
                 }
             }
         } else {

@@ -105,8 +105,8 @@ static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& outp
     args.output = &output;
     args.stream = ctx.stream;
     args.weight_payload = &src;
-    args.q8_1_buf = qs->q8_1_buf;
-    args.d8_buf = qs->d8_buf;
+    args.q8_1_buf = qs->q8_1_buf.data();
+    args.d8_buf = qs->d8_buf.data();
     args.dequant_scratch = qs->dequant.get();
     args.dequant_scratch_size = qs->dequant_size;
     args.force_mmvq = ctx.force_mmvq;
@@ -695,7 +695,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
         if (prefill == StorageTier::FP16 && ctx.beta == 0.0f && M <= 64) {
             const auto* qs = ctx.qscratch;
-            if (qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf) {
+            if (qs && qs->q8_1_prefill_buf.data() && qs->d8_prefill_buf.data()) {
                 int N = static_cast<int>(h.shape[0]);
                 int K = static_cast<int>(h.shape[1]);
                 size_t smem_needed = static_cast<size_t>(16) * (K / 32) * 36;
@@ -704,19 +704,15 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 if (smem_needed <= kSm120SmemOptinBytes && needed_q8 <= qs->q8_1_prefill_bytes &&
                     needed_d8 <= qs->d8_prefill_bytes) {
                     if (h.source_qtype == QType::Q4_K) {
-                        gemm_q4k_dp4a_dense(h.source_data,
-                                            reinterpret_cast<const half*>(input.data),
-                                            reinterpret_cast<half*>(output.data),
-                                            qs->q8_1_prefill_buf, qs->d8_prefill_buf,
-                                            M, N, K, ctx.stream);
+                        gemm_q4k_dp4a_dense(h.source_data, reinterpret_cast<const half*>(input.data),
+                                            reinterpret_cast<half*>(output.data), qs->q8_1_prefill_buf.data(),
+                                            qs->d8_prefill_buf.data(), M, N, K, ctx.stream);
                         return;
                     }
                     if (h.source_qtype == QType::Q5_K) {
-                        gemm_q5k_dp4a_dense(h.source_data,
-                                            reinterpret_cast<const half*>(input.data),
-                                            reinterpret_cast<half*>(output.data),
-                                            qs->q8_1_prefill_buf, qs->d8_prefill_buf,
-                                            M, N, K, ctx.stream);
+                        gemm_q5k_dp4a_dense(h.source_data, reinterpret_cast<const half*>(input.data),
+                                            reinterpret_cast<half*>(output.data), qs->q8_1_prefill_buf.data(),
+                                            qs->d8_prefill_buf.data(), M, N, K, ctx.stream);
                         return;
                     }
                 }
@@ -993,29 +989,30 @@ Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tenso
     // Served by the own small-M / tile GEMMs (K % 64 == 0, N % 8 == 0).
     const int K = static_cast<int>(input.shape[input.ndim - 1]);
     const int64_t M = K > 0 ? input.numel() / K : 0;
-    if (qscratch_.d_act_row_scales && M <= qscratch_.act_row_scales_n && K % 64 == 0 &&
+    if (qscratch_.d_act_row_scales.data() && M <= qscratch_.act_row_scales_n && K % 64 == 0 &&
         hw.shape[0] % 8 == 0 &&
         quantize_fp8_act_rows(input.data, qscratch_.fp8_act.get(), static_cast<int>(M), K,
-                              qscratch_.d_act_row_scales, stream)) {
+                              qscratch_.d_act_row_scales.data(), stream)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;
             IMP_LOG_INFO("FP8 activations: per-token dynamic scales ACTIVE (M=%ld K=%d)",
                          static_cast<long>(M), K);
         }
-        return {qscratch_.d_act_row_scales, true};
+        return {qscratch_.d_act_row_scales.data(), true};
     }
     // Legacy batch-wide absmax (K % 64 != 0, no row-scale scratch): a row depends on its batch.
-    if (!qscratch_.d_act_scale)
+    if (!qscratch_.d_act_scale.data())
         return {};
     static bool warned = false;
     if (!std::exchange(warned, true))
         IMP_LOG_WARN("FP8 activations: batch-wide absmax scale (M=%ld K=%d N=%ld), rows depend on the batch",
                      static_cast<long>(M), K, static_cast<long>(hw.shape[0]));
     Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
-    quantize_fp16_to_fp8_e4m3(input, fp8_in, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
-                              qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-    return {qscratch_.d_act_scale, false};
+    quantize_fp16_to_fp8_e4m3(input, fp8_in, qscratch_.d_act_scale.data(), stream,
+                              qscratch_.d_fp8_block_maxes.data(), qscratch_.d_fp8_absmax.data(),
+                              qscratch_.fp8_max_grid);
+    return {qscratch_.d_act_scale.data(), false};
 }
 
 }  // namespace imp

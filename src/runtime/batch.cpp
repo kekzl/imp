@@ -201,18 +201,18 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, bool wit
 
     pool_size_ = demand_bytes(max_batch_size, max_blocks_per_seq, with_swa_tables);
 
-    auto slab = engine_arena().take_bytes(pool_size_);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(pool_size_);
     if (slab.empty()) {
         IMP_LOG_ERROR("decode batch pool: engine arena exhausted for %zu bytes — the arena was "
                       "reserved without this pool",
                       pool_size_);
-        pool_ = nullptr;
+        pool_ = {};
         pool_size_ = 0;
         return;
     }
-    pool_ = slab.data();
+    pool_ = slab;
 
-    char* ptr = static_cast<char*>(pool_);
+    char* ptr = reinterpret_cast<char*>(pool_.data());
     d_token_ids_ = reinterpret_cast<int32_t*>(ptr);
     ptr += token_ids_sz;
     d_positions_ = reinterpret_cast<int*>(ptr);
@@ -302,7 +302,7 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
 // An arena slice: released wholesale when the arena closes, so this only drops
 // pointers. allocate() runs once per engine, so nothing is leaked by not freeing.
 void GPUBatchPool::free_pool() {
-    pool_ = nullptr;
+    pool_ = {};
     pool_size_ = 0;
     d_token_ids_ = nullptr;
     d_positions_ = nullptr;
