@@ -15,7 +15,6 @@
 // cache are up but before the engine becomes ready.
 
 #include "runtime/engine.h"
-#include "memory/device_alloc_all.h"
 #include "runtime/config.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
@@ -529,14 +528,7 @@ void Engine::warmup() {
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup())
         async_graph_runner_.cleanup();
-    if (async_d_block_tables_) {
-        device_free_all(async_d_block_tables_);
-        async_d_block_tables_ = nullptr;
-    }
-    if (async_d_block_tables_swa_) {
-        device_free_all(async_d_block_tables_swa_);
-        async_d_block_tables_swa_ = nullptr;
-    }
+    release_async_block_tables_();  // pool views are dropped, only a fallback allocation is freed
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;

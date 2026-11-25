@@ -33,7 +33,7 @@
 #include "runtime/stop_mask.h"
 #include "exec/executor_fwd.h"
 #include "exec/inference_state.h"
-#include "core/cuda_raii.h"
+#include "memory/device_owned.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -558,12 +558,11 @@ private:
     int async_parked_req_id_ = -1;
     int async_bt_capacity_ = 0;  // block-table slots baked into the graph
     int* async_d_block_tables_swa_ = nullptr;  // SWA-group mirror (kv_cache.swa_sizing)
-    // The tables point into the serving metadata pool (d_agl_block_tables_*)
-    // unless the pool is absent; only the fallback allocation is freed.
-    bool async_bt_pooled_ = false;
-    // Drops the async loop's block tables: nulls the pool pointers, frees the
-    // fallback. The one release for the three teardown sites (scheduler,
-    // rearm rebuild, ~Engine).
+    // The two views point into the serving metadata pool (d_agl_block_tables_*) or at these
+    // owners, which hold a table only when the fallback allocated it (two allocations).
+    DeviceOwned<int> async_bt_own_, async_bt_swa_own_;
+    // Drops the async loop's block tables: nulls the views, resets the owners. The one release
+    // for the teardown sites (scheduler, rearm rebuild, warmup, ~Engine).
     void release_async_block_tables_();
 
     // Pipelined constrained decode (json_mode / json_schema, single sequence).
@@ -586,9 +585,9 @@ private:
         int* d_ctx = nullptr;        // [1] current context length
         int* d_bt = nullptr;         // uploaded block table
         int* d_bt_swa = nullptr;     // SWA-group mirror (kv_cache.swa_sizing)
-        // d_bt / d_token / d_pos / d_ctx point into the serving metadata pool
-        // (d_cp_*) unless the pool is absent; only the fallback is freed.
-        bool pooled = false;
+        // d_bt / d_token / d_pos / d_ctx point into the serving metadata pool (d_cp_*) or at
+        // these four owners, which are empty on the pool path.
+        DeviceOwned<void> own[4];
         int32_t* d_banned = nullptr;  // banned token ids (engine-owned d_banned_tokens_, not freed here)
         PinnedBuffer h_token;  // pinned landing for the sampled token (T5b)
         CudaEvent ev;                // sampled-token-ready event
@@ -604,9 +603,9 @@ private:
     struct PplCapture {
         bool active = false;
         int n = 0;
-        int32_t* d_tokens = nullptr;
-        double* d_nll = nullptr;
-        int32_t* d_match = nullptr;  // per-pos greedy-argmax == next-token
+        DeviceOwned<int32_t> d_tokens;
+        DeviceOwned<double> d_nll;
+        DeviceOwned<int32_t> d_match;  // per-pos greedy-argmax == next-token
     } ppl_capture_;
 
     // ── Model-specific state ─────────────────────────────────────────

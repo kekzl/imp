@@ -9,7 +9,7 @@ three places where that is not yet true, against tools/graph_stability_allowlist
   G1 regrow sites      a release (vram_free, device_free_all*, cudaFree*) of a member or static
                        X followed within 25 lines of the same function by an allocation into X.
                        The owner spelling counts too: X.reset(); then X = DeviceOwned<T>::allocate*
-                       or X.adopt*, or X.set_owned / X.set_view (ViewOrOwned).
+                       or X.adopt*, or X.set_owned / X.set_view (ViewOrOwned); `(void)` and `->` spellings too.
   G2 unkeyed captures  cudaStreamBeginCapture* calls in a file that reads no generation
                        (a generation getter call, a comparison against a stored generation, or
                        a read of the process graph epoch, graph_epoch() of core/graph_epoch.h).
@@ -53,14 +53,14 @@ PERSISTENT = re.compile(r"_$|->|\.|^(?:s_|g_)")
 ALLOC_ASSIGN = r"\s*=[^=;]*\b(?:vram_alloc|vram_alloc_force|weights_alloc|cudaMalloc\w*)\s*\("
 ALLOC_OUT = r"\b(?:device_alloc_all\w*|device_alloc_pool_async|cudaMalloc\w*)\s*\([^;]*(?:\(|&|,\s*)\s*"
 # The owner spelling of the same regrow: X.reset(); then X = DeviceOwned<T>::allocate*(...) or X.adopt*(...).
-OWNER_RESET = re.compile(r"^\s*([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)\.reset\(\)\s*;")
-OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|\.adopt(?:_async)?\s*\(|\.set_(?:owned|view)\s*\()"
+OWNER_RESET = re.compile(r"^\s*(?:\(void\)\s*)?([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)(?:\.|->)reset\(\)\s*;")
+OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|(?:\.|->)adopt(?:_async)?\s*\(|(?:\.|->)set_(?:owned|view)\s*\()"
 FUNCTION_END = re.compile(r"^}")
 CAPTURE = re.compile(r"\bcudaStreamBeginCapture\w*\s*\(")
 GENERATION = re.compile(r"\w*generation\w*\s*\(\s*\)|\w*generation\w*\s*!=|!=\s*\w*generation\w*"
                         r"|\bgraph_epoch\s*\(\s*\)")
 TAKE = re.compile(r"\.take(?:_bytes)?(?:<[^>]+>)?\(")
-KEPT = re.compile(r"\bStableSpan\s*<|\.set_view\s*\(")
+KEPT = re.compile(r"\bStableSpan\s*<|(?:\.|->)set_view\s*\(")
 
 
 def code_lines(text: str) -> list[str]:
@@ -239,6 +239,7 @@ def selftest() -> int:
         ("G1 owner adopt", g1("    k_.reset();\n    n_ = 0;\n    k_.adopt_async(raw, n, s);\n") == 1),
         ("G1 owner pair is one site", g1("    k_.reset();\n    v_.reset();\n    k_.adopt_async(a, n, s);\n    v_.adopt_async(b, n, s);\n") == 1),
         ("G1 view-or-owned regrow", g1("    ws_.reset();\n    moved = ws_.set_owned(DeviceOwned<void>::allocate(a_, n, \"t\"));\n") == 1),
+        ("G1 static view-or-owned regrow", g1("    (void)s_ws->reset();\n    (void)s_ws->set_view(arena.take_bytes(n));\n") == 1),
         ("G1 owner reset only", g1("    ws_.reset();\n    ws_bytes_ = 0;\n") == 0),
         ("G1 owner local", g1("    tmp.reset();\n    tmp = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
         ("G1 owner another buffer", g1("    ws_.reset();\n    xq_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
@@ -266,6 +267,7 @@ def selftest() -> int:
         ("G3 unwrapped", g3("    p_ = arena.take_bytes(n).data();\n    auto s = arena.take<float>(n);\n") == 2),
         ("G3 kept", g3("    StableSpan<float> s = arena.take<float>(n);\n") == 0),
         ("G3 kept in a view-or-owned", g3("    moved = ws_.set_view(arena.take_bytes(n));\n    p_ = set_view_of(arena.take_bytes(n));\n") == 1),
+        ("G3 kept through a static handle", g3("    (void)s_ws->set_view(arena.take_bytes(n));\n") == 0),
         ("G3 other call",g3("    q.take_all();\n    undertake(n);\n") == 0),
     ]
     bad = [name for name, ok in results if not ok]

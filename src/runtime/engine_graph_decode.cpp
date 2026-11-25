@@ -11,6 +11,7 @@
 #include "memory/vram_query.h"
 
 #include <cstring>
+#include <utility>
 #include <algorithm>
 #include <vector>
 
@@ -24,12 +25,10 @@ const int32_t* Engine::banned_tokens_device_(cudaStream_t stream) {
 }
 
 void Engine::release_async_block_tables_() {
-    if (!async_bt_pooled_) {
-        device_free_all(async_d_block_tables_, async_d_block_tables_swa_);
-    }
+    async_bt_own_.reset();  // empty when the views are pool slices
+    async_bt_swa_own_.reset();
     async_d_block_tables_ = nullptr;
     async_d_block_tables_swa_ = nullptr;
-    async_bt_pooled_ = false;
 }
 
 bool Engine::graph_loop_blocked_(const Request& r, bool experts_matter) const {
@@ -253,9 +252,15 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     const bool pooled = d_agl_block_tables_ != nullptr && bt_capacity <= pool_bt_cap_ &&
                         (!swa_sizing_active_ || d_agl_block_tables_swa_ != nullptr);
     int* d_bt = pooled ? d_agl_block_tables_ : nullptr;
-    if (!pooled &&
-        device_alloc_all(dev_req(d_bt, static_cast<size_t>(bt_capacity) * sizeof(int))) != cudaSuccess)
-        return false;
+    // Fallback allocations (2, one per table): freed on every failure exit below, moved into
+    // async_bt_own_ / async_bt_swa_own_ on success. Empty on the pool path.
+    DeviceOwned<int> bt_own, bt_swa_own;
+    if (!pooled) {
+        bt_own = DeviceOwned<int>::allocate_plain(static_cast<size_t>(bt_capacity) * sizeof(int));
+        d_bt = bt_own.get();
+        if (d_bt == nullptr)
+            return false;
+    }
     // The tail past the live table is never read (kernels iterate over
     // max_context_len, stride by max_blocks_per_seq), but zeroing it keeps a
     // stray index pointing at block 0 rather than whatever the allocator returned.
@@ -268,14 +273,13 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
         bool swa_ok = static_cast<int>(swa_bt.size()) == max_blocks_per_seq;
         if (swa_ok && pooled)
             d_bt_swa = d_agl_block_tables_swa_;
-        else if (swa_ok)
-            swa_ok = device_alloc_all(dev_req(d_bt_swa, static_cast<size_t>(bt_capacity) * sizeof(int))) ==
-                     cudaSuccess;
-        if (!swa_ok) {
-            if (!pooled)
-                device_free_all(d_bt);
-            return false;
+        else if (swa_ok) {
+            bt_swa_own = DeviceOwned<int>::allocate_plain(static_cast<size_t>(bt_capacity) * sizeof(int));
+            d_bt_swa = bt_swa_own.get();
+            swa_ok = d_bt_swa != nullptr;
         }
+        if (!swa_ok)
+            return false;
         IMP_CUDA_CHECK_LOG(
             cudaMemsetAsync(d_bt_swa, 0, static_cast<size_t>(bt_capacity) * sizeof(int), stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt_swa, swa_bt.data(), max_blocks_per_seq * sizeof(int),
@@ -324,24 +328,18 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     auto gcfg = build_graph_config(*req, capture_steps);
     gcfg.step_limit = step_limit;
 
-    if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (!pooled) {
-            device_free_all(d_bt_swa, d_bt);
-        }
+    if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream))
         return false;
-    }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
-        if (!pooled) {
-            device_free_all(d_bt_swa, d_bt);
-        }
         return false;
     }
 
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_d_block_tables_swa_ = d_bt_swa;
-    async_bt_pooled_ = pooled;
+    async_bt_own_ = std::move(bt_own);
+    async_bt_swa_own_ = std::move(bt_swa_own);
     async_bt_capacity_ = bt_capacity;
     async_parked_req_id_ = -1;
     IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens", state_template.n_d_banned_tokens);
@@ -373,9 +371,9 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     // Device state from the serving metadata pool; cudaMalloc is the fallback
     // for a pool that failed at init (invariant I2). Pinned landing + event
     // outlive one pipeline: acquired on first launch, released by ~Engine.
-    p.pooled = d_cp_block_tables_ != nullptr && max_blocks_per_seq <= pool_bt_cap_;
+    const bool pooled = d_cp_block_tables_ != nullptr && max_blocks_per_seq <= pool_bt_cap_;
     bool ok = true;
-    if (p.pooled) {
+    if (pooled) {
         p.d_bt = d_cp_block_tables_;
         p.d_token = d_cp_token_;
         p.d_pos = d_cp_pos_;
@@ -386,6 +384,10 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
                              dev_req(p.d_token, SAMPLE_SCRATCH_BYTES), dev_req(p.d_pos, sizeof(int)),
                              dev_req(p.d_ctx, sizeof(int))) != cudaSuccess)
             return false;
+        p.own[0].adopt(p.d_bt, max_blocks_per_seq * sizeof(int), nullptr);
+        p.own[1].adopt(p.d_token, SAMPLE_SCRATCH_BYTES, nullptr);
+        p.own[2].adopt(p.d_pos, sizeof(int), nullptr);
+        p.own[3].adopt(p.d_ctx, sizeof(int), nullptr);
     }
     if (ok && p.h_token.empty())
         p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
@@ -550,14 +552,12 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
     if (synchronize)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));
     p.runner.invalidate();
-    if (!p.pooled) {
-        device_free_all(p.d_bt, p.d_token, p.d_pos, p.d_ctx);
-    }
+    for (auto& own : p.own)  // empty on the pool path
+        own.reset();
     p.d_bt = nullptr;
     p.d_token = nullptr;
     p.d_pos = nullptr;
     p.d_ctx = nullptr;
-    p.pooled = false;
     p.d_banned = nullptr;  // engine-owned (d_banned_tokens_)
     // h_token and ev stay for the next pipeline; ~Engine releases them.
     p.req = nullptr;

@@ -8,6 +8,7 @@
 
 #include "core/cuda_raii.h"
 #include "core/graph_epoch.h"
+#include "memory/device_owned.h"
 #include "memory/graph_slots.h"
 
 namespace imp {
@@ -330,6 +331,16 @@ private:
     // individually owned and cleanup() only returns the lease; when the pool declines, setup()
     // allocates and cleanup() frees. Pointers are identical either way.
     GraphSlotLease slot_;
+    // The fallback allocations behind the device pointers above (up to 14), empty when
+    // slot-backed: setup() adopts each all-or-none call here, cleanup() clears the list.
+    std::vector<DeviceOwned<void>> owned_dev_;
+    template <typename... R>
+    [[nodiscard]] cudaError_t alloc_owned_(R... reqs) {
+        const cudaError_t err = device_alloc_all(reqs...);
+        if (err == cudaSuccess)
+            (owned_dev_.emplace_back().adopt(*reqs.ptr, reqs.bytes, nullptr), ...);
+        return err;
+    }
 
     Config config_;
     int last_read_step_ = 0;

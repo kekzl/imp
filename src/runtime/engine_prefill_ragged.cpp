@@ -326,34 +326,17 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     // uploads without allocating (invariant I2, AUDIT_ARCH_2026 B-4). The wave
     // is bounded by the row budget and batch size, so the allocs below are a
     // fallback for a pool that failed at init, not for an oversized wave.
-    // RAII, not a manual cleanup call: forward_logits and the sampling
-    // epilogue can throw, and the frees must run on that unwind.
+    // meta_own holds the 6 fallback allocations (empty on the pool path): forward_logits and the
+    // sampling epilogue can throw, the stream-ordered release runs at scope exit and on that unwind.
     const bool pooled = d_rg_token_ids_ != nullptr && total <= rg_rows_cap_ && n_seq <= rg_seq_cap_ &&
                         static_cast<int>(max_blocks) <= pool_bt_cap_;
-    struct RaggedMeta {
-        int32_t* d_tok = nullptr;
-        int* d_pos = nullptr;
-        int* d_bt = nullptr;
-        int* d_ctx = nullptr;
-        int* d_soff = nullptr;
-        int* d_slots = nullptr;
-        cudaStream_t stream;
-        bool pooled;
-        RaggedMeta(cudaStream_t s, bool p) : stream(s), pooled(p) {}
-        ~RaggedMeta() {
-            if (pooled)
-                return;
-            device_free_all_async(stream, d_tok, d_pos, d_bt, d_ctx, d_soff, d_slots);
-        }
-        RaggedMeta(const RaggedMeta&) = delete;
-        RaggedMeta& operator=(const RaggedMeta&) = delete;
-    } meta(stream, pooled);
-    auto& d_tok = meta.d_tok;
-    auto& d_pos = meta.d_pos;
-    auto& d_bt = meta.d_bt;
-    auto& d_ctx = meta.d_ctx;
-    auto& d_soff = meta.d_soff;
-    auto& d_slots = meta.d_slots;
+    int32_t* d_tok = nullptr;
+    int* d_pos = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
+    int* d_soff = nullptr;
+    int* d_slots = nullptr;
+    DeviceOwned<void> meta_own[6];
     bool alloc_ok = true;
     if (pooled) {
         d_tok = d_rg_token_ids_;
@@ -369,6 +352,13 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                                           dev_req(d_ctx, h_ctx.size() * sizeof(int)),
                                           dev_req(d_soff, h_soff.size() * sizeof(int)),
                                           dev_req(d_slots, h_slots.size() * sizeof(int))) == cudaSuccess;
+        // All six or none: a failed call left every pointer null, the owners stay empty.
+        meta_own[0].adopt_async(d_tok, h_tok.size() * sizeof(int32_t), stream);
+        meta_own[1].adopt_async(d_pos, h_pos.size() * sizeof(int), stream);
+        meta_own[2].adopt_async(d_bt, std::max<size_t>(h_bt.size(), 1) * sizeof(int), stream);
+        meta_own[3].adopt_async(d_ctx, h_ctx.size() * sizeof(int), stream);
+        meta_own[4].adopt_async(d_soff, h_soff.size() * sizeof(int), stream);
+        meta_own[5].adopt_async(d_slots, h_slots.size() * sizeof(int), stream);
     }
     if (!alloc_ok) {
         IMP_LOG_ERROR("prefill_batch: metadata allocation failed — cancelling %d requests", n_seq);

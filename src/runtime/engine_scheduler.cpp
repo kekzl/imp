@@ -15,7 +15,6 @@
 //   step_async_graph_resume — for the CUDA-graph-captured decode path.
 
 #include "runtime/engine.h"
-#include "memory/device_alloc_all.h"
 #include "runtime/constraint_manager.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -33,6 +32,8 @@
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
+#include "memory/leaked_static.h"
+#include "memory/view_or_owned.h"
 
 #include <algorithm>
 #include <climits>
@@ -50,7 +51,6 @@ namespace imp {
 using engine_internal::build_logprob_info;
 using engine_internal::compute_step_seed;
 using engine_internal::copy_d2h_sync;
-using engine_internal::free_prefill_buffers;
 
 // =====================================================================
 // step() — main inference loop
@@ -81,40 +81,22 @@ struct OutsideTiming {
 };
 OutsideTiming g_ot;
 
-// Post-norm hidden for the MTP chain draft: one [1, d_model] FP16 row from
-// the T2 arena, re-taken when the model's d_model outgrows it. Direct
-// allocation only when the arena is closed (no engine in a bare test).
-void* s_h_normed = nullptr;
-size_t s_h_normed_cap = 0;
-bool s_h_normed_owned = false;
+// Post-norm hidden for the MTP chain draft: one [1, d_model] FP16 row, a T2 arena slice or a
+// private allocation when the arena is closed (bare test); re-taken when d_model outgrows it.
+LeakedStatic<ViewOrOwned<void>> s_h_normed;
 
 void* mtp_prenorm_scratch(size_t need) {
-    if (s_h_normed && need <= s_h_normed_cap)
-        return s_h_normed;
-    if (s_h_normed_owned)
-        device_free_all(s_h_normed);
-    s_h_normed = nullptr;
-    s_h_normed_cap = 0;
-    s_h_normed_owned = false;
-    if (auto slab = engine_arena().take_bytes(need); !slab.empty()) {
-        s_h_normed = slab.data();
-    } else if (device_alloc_all(dev_req(s_h_normed, need)) != cudaSuccess) {
-        s_h_normed = nullptr;
-        return nullptr;
-    } else {
-        s_h_normed_owned = true;
-    }
-    s_h_normed_cap = need;
-    return s_h_normed;
+    if (*s_h_normed && need <= s_h_normed->bytes())
+        return s_h_normed->get();
+    // No graph epoch bump: 2 eager readers (rmsnorm, mtp_draft_step), no capture bakes the address.
+    (void)s_h_normed->reset();
+    (void)s_h_normed->set_view(engine_arena().take_bytes(need));
+    if (!*s_h_normed)
+        (void)s_h_normed->set_owned(DeviceOwned<void>::allocate_plain(need));
+    return s_h_normed->get();
 }
 
-void engine_scheduler_reset_static_cuda_state() {
-    if (s_h_normed_owned)
-        device_free_all(s_h_normed);
-    s_h_normed = nullptr;
-    s_h_normed_cap = 0;
-    s_h_normed_owned = false;
-}
+void engine_scheduler_reset_static_cuda_state() { (void)s_h_normed->reset(); }
 IMP_REGISTER_CUDA_STATIC_RESET(engine_scheduler_reset_static_cuda_state);
 }  // namespace
 
@@ -496,20 +478,25 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
     if (ppl_capture_.active || n < 2 || !executor_) {
         return false;
     }
-    if (device_alloc_all(dev_req(ppl_capture_.d_tokens, static_cast<size_t>(n) * sizeof(int32_t)),
-                         dev_req(ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double))) != cudaSuccess)
+    // Both or none.
+    ppl_capture_.d_tokens = DeviceOwned<int32_t>::allocate_plain(static_cast<size_t>(n) * sizeof(int32_t));
+    ppl_capture_.d_nll = DeviceOwned<double>::allocate_plain(static_cast<size_t>(n) * sizeof(double));
+    if (!ppl_capture_.d_tokens || !ppl_capture_.d_nll) {
+        ppl_capture_ = PplCapture{};
         return false;
+    }
     // On the prefill stream that reads them: legacy-stream writes are not ordered before it (#2275).
     const cudaStream_t s = prefill_stream();
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ppl_capture_.d_tokens, tokens.data(),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ppl_capture_.d_tokens.get(), tokens.data(),
                                        static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice, s));
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double), s));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemsetAsync(ppl_capture_.d_nll.get(), 0, static_cast<size_t>(n) * sizeof(double), s));
     // Greedy-agreement probe rides along for free (fused into the NLL max
     // pass); allocation failure just disables it.
-    if (device_alloc_all(dev_req(ppl_capture_.d_match, static_cast<size_t>(n) * sizeof(int32_t))) ==
-        cudaSuccess)
+    ppl_capture_.d_match = DeviceOwned<int32_t>::allocate_plain(static_cast<size_t>(n) * sizeof(int32_t));
+    if (ppl_capture_.d_match)
         IMP_CUDA_CHECK_LOG(
-            cudaMemsetAsync(ppl_capture_.d_match, 0, static_cast<size_t>(n) * sizeof(int32_t), s));
+            cudaMemsetAsync(ppl_capture_.d_match.get(), 0, static_cast<size_t>(n) * sizeof(int32_t), s));
     ppl_capture_.n = n;
     ppl_capture_.active = true;
     return true;
@@ -530,19 +517,20 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
     // Fixed-order host reduction over per-position NLLs (bit-reproducible —
     // same contract as GraphExecutor::perplexity_nll).
     std::vector<double> h_nll_pos(static_cast<size_t>(n), 0.0);
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_nll_pos.data(), ppl_capture_.d_nll,
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_nll_pos.data(), ppl_capture_.d_nll.get(),
                                   static_cast<size_t>(n) * sizeof(double), cudaMemcpyDeviceToHost));
     long match_sum = -1;
     if (ppl_capture_.d_match) {
         std::vector<int32_t> h_match(static_cast<size_t>(n), 0);
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_match.data(), ppl_capture_.d_match,
-                                      static_cast<size_t>(n) * sizeof(int32_t),
-                                      cudaMemcpyDeviceToHost));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_match.data(), ppl_capture_.d_match.get(),
+                                      static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyDeviceToHost));
         match_sum = 0;
         for (int i = first; i <= last; ++i)
             match_sum += h_match[i];
     }
-    device_free_all(ppl_capture_.d_match, ppl_capture_.d_tokens, ppl_capture_.d_nll);
+    ppl_capture_.d_match.reset();
+    ppl_capture_.d_tokens.reset();
+    ppl_capture_.d_nll.reset();
     ppl_capture_ = PplCapture{};
 
     // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).
@@ -1347,8 +1335,9 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
 
     Batch batch = decode_builder_.build();
 
-    // Upload to GPU using pre-allocated pool
+    // Upload to GPU using pre-allocated pool; gpu_private owns the buffers only without a pool.
     GPUBatch gpu_batch;
+    GPUBatchOwned gpu_private;
     if (decode_batch_pool_.is_allocated()) {
         int pool_max = decode_batch_pool_.max_blocks_per_seq();
         if (batch.max_blocks_per_seq < pool_max) {
@@ -1378,7 +1367,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         }
         gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
     } else {
-        gpu_batch.upload(batch, dec_stream);
+        gpu_private.upload(batch, dec_stream);
+        gpu_batch = gpu_private.view();
     }
 
     InferenceState state;
@@ -1506,9 +1496,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         tokens = sample_decode_rows_(state, valid_decode, decode_logits_out, dec_stream);
     }
 
-    if (!decode_batch_pool_.is_allocated()) {
-        gpu_batch.free();
-    }
+    gpu_private.free();  // no-op on the pool path
 
     // Measures MTP-draft prediction accuracy without changing generation.
     // Single-sequence only (batch=1 simplifies hidden-state addressing).

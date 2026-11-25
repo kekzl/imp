@@ -11,10 +11,10 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// GPUBatch
+// GPUBatchOwned
 // ---------------------------------------------------------------------------
 
-void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
+void GPUBatchOwned::upload(const Batch& batch, cudaStream_t stream) {
     free();  // Clean up any previous allocation
 
     n_sequences = batch.n_sequences;
@@ -38,6 +38,11 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
         free();
         cuda_alloc_or_throw(err, "GPUBatch::upload");
     }
+    own_[0].adopt(d_token_ids, total_tokens * sizeof(int32_t), nullptr);
+    own_[1].adopt(d_positions, total_tokens * sizeof(int), nullptr);
+    own_[2].adopt(d_seq_offsets, offsets_bytes, nullptr);
+    own_[3].adopt(d_block_tables, tables_bytes, nullptr);
+    own_[4].adopt(d_context_lens, n_sequences * sizeof(int), nullptr);
 
     // Async copy
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_ids, batch.token_ids.data(), total_tokens * sizeof(int32_t),
@@ -59,8 +64,9 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
     }
 }
 
-void GPUBatch::free() {
-    device_free_all(d_token_ids, d_positions, d_seq_offsets, d_block_tables, d_context_lens);
+void GPUBatchOwned::free() {
+    for (auto& own : own_)
+        own.reset();
     d_token_ids = nullptr;
     d_positions = nullptr;
     d_seq_offsets = nullptr;

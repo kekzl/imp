@@ -32,7 +32,7 @@
 namespace imp {
 
 using engine_internal::build_logprob_info;
-using engine_internal::free_prefill_buffers;
+using engine_internal::PrefillMetaFallback;
 
 namespace {
 // Hybrid riders wait on the whole chunk forward: min(cap, 512). Qwen3.8-27B-NVFP4, 31 riders + a
@@ -511,6 +511,15 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                   d_context_lens, pf_pool_used)) {
         return;  // caller already set req->status = CANCELLED
     }
+    // Fallback buffers (sizes as allocated in prefill_upload_metadata_): released on pf_stream
+    // behind the kernels enqueued so far, at the reset() below or on any earlier exit.
+    PrefillMetaFallback pf_meta;
+    if (!pf_pool_used)
+        pf_meta.adopt(pf_stream, {{{d_token_ids, chunk_len * sizeof(int32_t)},
+                                   {d_positions, chunk_len * sizeof(int)},
+                                   {d_block_tables, block_table.size() * sizeof(int)},
+                                   {d_block_tables_swa, swa_block_table.size() * sizeof(int)},
+                                   {d_context_lens, sizeof(int)}}});
 
     // First chunk of a request is where its image becomes device-resident: the
     // layout needs the prompt's final token sequence, which only exists now.
@@ -697,8 +706,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // Runs eagerly after the (possibly graph-replayed) forward; hidden_
         // holds exactly this chunk and nothing reads logits_ afterwards.
         if (ppl_capture_.active) {
-            executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
-                                              ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
+            executor_->perplexity_nll_partial(ppl_capture_.d_tokens.get(), ppl_capture_.n, offset, chunk_len,
+                                              ppl_capture_.d_nll.get(), pf_stream,
+                                              ppl_capture_.d_match.get());
         }
         prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
@@ -706,10 +716,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         if (req->embedding_request)
             embed_accumulate_chunk_(*req, chunk_len, pf_stream, /*last_chunk=*/false);
 
-        if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
-                                 pf_stream);
-        }
+        pf_meta.reset();  // empty on the pool path
 
         // MTP: feed this chunk's (token, hidden) pairs while the executor's
         // hidden_ buffer still holds it (feed-only forwards, no lm_head).
@@ -733,10 +740,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // as the embedding branch above, but the pooling is a two-logit read.
         Tensor score_logits;
         executor_->forward_logits(state, score_logits, pf_stream);
-        if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
-                                 pf_stream);
-        }
+        pf_meta.reset();  // empty on the pool path
         score_capture_(*req, score_logits, pf_stream);
         finish_request(req);
     } else if (req->embedding_request) {
@@ -745,10 +749,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // free + prefix-hash registration), so re-embedding the same document hits the cache for OTHER requests.
         Tensor logits_unused;
         executor_->forward_logits(state, logits_unused, pf_stream);
-        if (!pf_pool_used) {
-            free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
-                                 pf_stream);
-        }
+        pf_meta.reset();  // empty on the pool path
         embed_accumulate_chunk_(*req, chunk_len, pf_stream, /*last_chunk=*/true);
         embed_finish_(*req);
         finish_request(req);
@@ -799,10 +800,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 (void)prefill_done_.create();
             const cudaError_t rec_err = cudaEventRecord(prefill_done_, pf_stream);
 
-            if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
-                                     d_context_lens, pf_stream);
-            }
+            pf_meta.reset();  // empty on the pool path
 
             // Unrecorded or failed event: h_sample_pinned_ was never written.
             cuda_sync_or_throw(rec_err, "step_prefill_one event record");
@@ -818,17 +816,11 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
             next_token = sampled[0];
 
-            if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
-                                     d_context_lens, pf_stream);
-            }
+            pf_meta.reset();  // empty on the pool path
         } else {
             next_token = executor_->forward(state, pf_stream);
 
-            if (!pf_pool_used) {
-                free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
-                                     d_context_lens, pf_stream);
-            }
+            pf_meta.reset();  // empty on the pool path
         }
 
         if (req->mirostat == 2)
@@ -856,8 +848,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // sampling + logprob extraction: the partial pass overwrites logits_,
         // so it must run once nothing else reads this chunk's logits.
         if (ppl_capture_.active) {
-            executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
-                                              ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
+            executor_->perplexity_nll_partial(ppl_capture_.d_tokens.get(), ppl_capture_.n, offset, chunk_len,
+                                              ppl_capture_.d_nll.get(), pf_stream,
+                                              ppl_capture_.d_match.get());
         }
         prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
