@@ -279,6 +279,14 @@ void Engine::log_resolved_dispatch_once_() {
 
 int Engine::step_async_graph_resume() {
     if (async_graph_runner_.is_setup() && async_graph_req_) {
+        // Ended under the burst (a cancel that could not wait, CancelLanes::Abandon): no
+        // token is appended and nothing finishes it; the burst is waited out before step_schedule.
+        if (async_graph_req_->status != RequestStatus::DECODING) {
+            IMP_LOG_INFO("AsyncGraphLoop: seq %d is %s, burst abandoned", async_graph_req_->id,
+                         request_status_name(async_graph_req_->status));
+            async_graph_abandon_();
+            return 0;
+        }
         auto& req = async_graph_req_;
 
         // Incremental harvest (#754): poll the mapped ring buffer instead of
@@ -1811,10 +1819,10 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             //
             // F-A2: a request with speculation off would run the UNBOUNDED
             // on-device loop (spec_limit == 0) all the way to max_tokens;
-            // is_cancelled()/timeout are only polled between bursts, so a
-            // client disconnect could not interrupt it. Bound it to
-            // kDecodeBurst so the worker regains control to re-poll
-            // cancellation; output is identical (same decode, chunked and
+            // the worker polls is_cancelled() per harvested token (#754), but a
+            // burst has no device-side abort: Engine::cancel_request waits out
+            // its remaining steps before freeing the KV. kDecodeBurst bounds
+            // that wait; output is identical (same decode, chunked and
             // relaunched). Speculation keeps its own miss_burst limit.
             int launch_limit = spec_limit;
             // Bound only in the default (non-deterministic) serving mode.

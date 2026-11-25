@@ -88,9 +88,9 @@ void Engine::cfg_tick_() {
         if (shadow->status == RequestStatus::DECODING) {
             finish_request(shadow);
         } else {
-            shadow->status = RequestStatus::CANCELLED;
-            kv_manager_->free_sequence(shadow->id);
-            reset_ssm_state(shadow->id);
+            // Not decoding: no lane holds it (the pair decodes per step), so no lane is collected.
+            if (!cancel_request(shadow, CancelLanes::None))
+                shadow->status = RequestStatus::CANCELLED;  // the engine holds nothing for it
         }
         return true;
     });

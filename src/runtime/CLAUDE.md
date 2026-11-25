@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-11-14
-commit: 915395cf
+verified: 2026-11-25
+commit: 4d7eebf8
 -->
 
 # src/runtime - engine, scheduler, config, KV
@@ -15,6 +15,7 @@ Admission, continuous batching, KV allocation, CUDA-graph capture, config surfac
 - Unknown `--set` key = error.
 - Internal errors throw; `src/api/imp_api.cpp` translates to `ImpError`. No status returns.
 - Never size from a live `cudaMemGetInfo` reading.
+- A request ends through `Engine::cancel_request` (server, C API, warmup) or `finish_request`; no caller frees its KV or slot by hand. A new id-keyed table is a row in `request_tables.h`.
 
 ## Entry points
 

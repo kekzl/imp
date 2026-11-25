@@ -463,8 +463,7 @@ void Engine::warmup() {
         for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++)
             (void)step();
 
-        kv_manager_->free_sequence(req->id);
-        reset_ssm_state(req->id);
+        (void)cancel_request(req);  // no-op once FINISHED: the finish released every table
         while (kv_manager_->evict_cached_block()) {}
         req->status = RequestStatus::CANCELLED;
     }
@@ -620,9 +619,9 @@ void Engine::warmup() {
             else
                 missing += " " + std::to_string(i + 1);
         }
+        drain_decode_pipeline();  // budget ran out mid-chain: no deferred release outlives the evict below
         for (const auto& r : reqs) {
-            kv_manager_->free_sequence(r->id);
-            reset_ssm_state(r->id);
+            (void)cancel_request(r);
             r->status = RequestStatus::CANCELLED;
         }
         while (kv_manager_->evict_cached_block()) {}
@@ -679,8 +678,7 @@ void Engine::prewarm_prefill_graphs_(int32_t token_id) {
             scheduler_->add_request(req);
             for (int i = 0; i < 4 && req->status != RequestStatus::FINISHED; i++)
                 (void)step();
-            kv_manager_->free_sequence(req->id);
-            reset_ssm_state(req->id);
+            (void)cancel_request(req);
             req->status = RequestStatus::CANCELLED;
             while (kv_manager_->evict_cached_block()) {}
         }
