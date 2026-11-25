@@ -140,6 +140,7 @@ if want alloc; then
     # Lazy device statics re-arm across ~Engine / imp_gpu_release (the
     # IMP_REGISTER_CUDA_STATIC_RESET convention). Six TUs had none on
     # 2026-09-05, one of them a use-after-free on the default model-swap path.
+    # Per static since 2026-11-25: each name is in the hook, behind a generation check, or listed.
     run "lazy device statics re-arm"            python3 tools/check_static_reset.py
     run "that gate still classifies its cases"  python3 tools/check_static_reset.py --selftest
     # #2213: stream/event create/destroy only in src/core/cuda_raii.h; allowlist 0.
@@ -175,6 +176,10 @@ if want launchguards; then
     echo "== Launch guards =="
     run "post-launch check gate"                python3 tools/check_launch_guards.py
     run "that gate still sees .cu and .cuh"     python3 tools/check_launch_guards.py --selftest
+    # A kernel with pdl_wait() and no pdl::enable_kernel launches serialized, silently; the class
+    # recurred 3 times (SETTLED A1-3, A2-2, A2-5; AUDIT_ARCH_2026_11_24 X-6).
+    run "pdl_wait kernels registered, register functions called" python3 tools/check_pdl_registration.py
+    run "that gate still classifies its cases"  python3 tools/check_pdl_registration.py --selftest
     # #2254: 5 GDN scan kernels read s_reduce[0] and let thread 0 overwrite it with no barrier.
     run "smem reduce slot read behind a barrier" python3 tools/check_smem_reduce_barrier.py
     run "that gate still catches its cases"     python3 tools/check_smem_reduce_barrier.py --selftest
@@ -187,6 +192,9 @@ if want docs; then
     echo "== Docs =="
     run "generated perf blocks match baseline"  python3 scripts/sync_docs.py --check
     run "doc lint (layers, provenance, links)"  python3 scripts/docs_lint.py
+    # ARCHITECTURE.md named neither src/audio nor src/lora on 2026-11-24 (AUDIT_ARCH_2026_11_24 X-9).
+    run "every src/ directory has a row in ARCHITECTURE.md and a layer rank" python3 tools/check_arch_map.py
+    run "that gate still sees a directory without a row" python3 tools/check_arch_map.py --selftest
     # imp.conf.reference is the only key catalogue; 31 of 223 bound keys were
     # missing from it on 2026-09-05 (AUDIT_ARCH_2026 J-2). CHANGELOG entries:
     # 19 of the last 26 broke the 3-line rule nothing checked (J-8).
