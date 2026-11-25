@@ -211,9 +211,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                  qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
     // The split-K reduce writes ao as Q8_1 too; quantize_attn_out_q8_ skips the quantize then.
-    paged_attention_arm_q8_epilogue(attn_out_q8_epilogue_ok_(will_fuse_o_residual, has_attn_output_gate,
-                                                             cfg.is_mla()),
-                                    qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data());
+    // Local to this layer call (audit D-9): a path without a reduce leaves nothing armed.
+    PagedQ8Epilogue q8_epi;
+    if (attn_out_q8_epilogue_ok_(will_fuse_o_residual, has_attn_output_gate, cfg.is_mla())) {
+        q8_epi.q8 = qscratch_.q8_1_buf.data();
+        q8_epi.d8 = qscratch_.d8_buf.data();
+    }
     // Released wo at n <= 32: the beta = 0 FP8 row GEMV plus the residual add, not a per-call F16 rebuild.
     const bool wo_released_small = n <= 32 && ly.wo_id != kInvalidTensorID &&
                                    registry_.handle(ly.wo_id).source_released;
@@ -661,7 +664,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         int M_o = static_cast<int>(ly.wo.shape[0]);
         // Q8_1 of ao (reduce epilogue or a separate quantize), then the K-parallel GEMV + residual.
         const half* residual_ptr = static_cast<const half*>(h.data);
-        quantize_attn_out_q8_(ao, K_o, stream);
+        quantize_attn_out_q8_(ao, K_o, q8_epi.written, stream);
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
                                static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
