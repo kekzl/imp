@@ -80,6 +80,7 @@ int suspend_locked(ServerState& state, json& body) {
 
     // Full teardown — mirrors load_model_into_state's unload half.
     state.lifetime.bump_epoch();  // an unload ends the epoch, the resume load starts the next
+    state.publish_model_status(false, model_name);  // before the free: it drops the engine pointer (C-13)
     if (state.batching) {
         state.batching->stop();
         state.batching.reset();
@@ -100,7 +101,6 @@ int suspend_locked(ServerState& state, json& body) {
     for (auto& [name, entry] : state.control_vectors)
         entry.engine_id = 0;
     state.sae_width.store(0, std::memory_order_relaxed);  // sae_path stays for resume
-    state.publish_model_status(false, model_name);
 
     const bool device_reset = state.runtime_config.suspend.device_reset;
     // Measure the reclaim BEFORE imp_gpu_release when resetting: any CUDA call

@@ -1426,6 +1426,16 @@ public:
         uint32_t launches = 0;
     };
     std::vector<MoeImbalance> moe_imbalance() const;
+    // The accumulator moe_imbalance() reads, for the per-step metrics snapshot (C-13); null until
+    // the first MoE prefill allocates it. read_moe_imbalance: one D2H, any thread, buffer alive.
+    struct MoeImbalanceSource {
+        const unsigned int* acc = nullptr;
+        int layers = 0, experts = 0;
+    };
+    MoeImbalanceSource moe_imbalance_source() const {
+        return {moe_.imb_acc.get(), moe_.imb_layers, moe_.imb_experts};
+    }
+    static std::vector<MoeImbalance> read_moe_imbalance(const MoeImbalanceSource& src);
 
 private:
     // Write + release the expert-activation histogram (diagnostics.moe_expert_hist).

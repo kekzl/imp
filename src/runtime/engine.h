@@ -15,6 +15,7 @@
 #include "runtime/config.h"
 #include "runtime/engine_config.h"
 #include "runtime/engine_capabilities.h"
+#include "runtime/engine_metrics_snapshot.h"
 #include "core/dispatch_policy.h"
 #include "runtime/graph_eligibility.h"
 #include "runtime/suffix_draft.h"
@@ -259,30 +260,16 @@ public:
     // A graph burst (running or parked) still references req_id: false after cancel_request(Wait) (C-5).
     [[nodiscard]] bool graph_burst_holds(int req_id) const;
 
-    // Speculative-decode counters, for /metrics and for tests that prove the
-    // drafter actually ran (#1321). Per draft SOURCE: `mtp` is what the
-    // trained head drafted; `other` is every remaining source combined
-    // (n-gram/suffix matcher, prediction, recycling). Exposed as
-    // imp_spec_mtp_* / imp_spec_ngram_* in /metrics.
-    struct SpecSourceStats {
-        long long verify_steps = 0;
-        long long drafted = 0;
-        long long accepted = 0;
-        long long emitted = 0;
-        double verify_wall_ms = 0;
-    };
-    struct SpecStats {
-        long long verify_steps = 0;  // verify forwards run
-        long long miss_steps = 0;    // decode steps with no usable draft
-        long long drafted = 0;       // draft tokens proposed
-        long long accepted = 0;      // draft tokens accepted
-        long long emitted = 0;       // tokens emitted by verify steps
-        long long sampled = 0;       // verify steps that drew rows (speculative.sampled)
-        double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
-        SpecSourceStats mtp{};       // verify steps the MTP head drafted
-        SpecSourceStats other{};     // every non-MTP drafter
-    };
+    // Speculative-decode counters (#1321), engine thread and tests only; /metrics reads them
+    // through metrics_snapshot(). Types in engine_metrics_snapshot.h.
+    using SpecSourceStats = imp::SpecSourceStats;
+    using SpecStats = imp::SpecStats;
     const SpecStats& spec_stats() const noexcept { return spec_stats_; }
+    // Copy the stepping thread published at the end of the last step (or init, or an idle tick):
+    // the only engine state another thread may read while the engine runs (C-13).
+    EngineMetricsSnapshot metrics_snapshot() const { return metrics_cell_.read(); }
+    // Stepping thread only: step(), init() and the server worker's idle tick call it.
+    void publish_metrics_snapshot();
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
     // True when the KV pool fell back to its rescue floor (a few hundred
     // tokens, not a full context); every prompt past it is cancelled at
@@ -1192,6 +1179,7 @@ private:
     [[nodiscard]] bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
     // Session telemetry (logged when a request finishes).
     SpecStats spec_stats_{};
+    EngineMetricsCell metrics_cell_;  // publish_metrics_snapshot() writes, metrics_snapshot() reads
 
     // ── SWA-aware KV sizing (kv_cache.swa_sizing) ────────────────────
     // Resolved once in init_kv_cache (gate + geometry). When active, every

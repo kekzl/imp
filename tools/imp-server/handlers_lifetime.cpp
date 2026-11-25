@@ -36,6 +36,16 @@ std::shared_ptr<ModelLease> lease_model_snapshot(ServerState& state, httplib::Re
     return lease;
 }
 
+// Every free of a loaded engine runs under ModelExclusiveScope, which admits no lease, and clears
+// obs_engine first; an admitted lease therefore sees null or an engine alive until it leaves.
+EngineScrape lease_engine_for_scrape(ServerState& state) {
+    EngineScrape s;
+    s.lease = acquire_model_lease(state.lifetime);
+    if (s.lease)
+        s.engine = state.model_status_snapshot().engine;
+    return s;
+}
+
 bool submit_for_lease(ServerState& state, const std::shared_ptr<ModelLease>& lease,
                       const std::shared_ptr<ServerRequest>& req) {
     std::lock_guard<std::timed_mutex> lock(state.mtx);

@@ -68,6 +68,7 @@ using engine_internal::copy_d2h_sync;
 bool Engine::step() {
     const bool more = step_impl_();
     log_resolved_dispatch_once_();
+    publish_metrics_snapshot();  // the one per-step write /metrics reads (C-13)
     return more;
 }
 
