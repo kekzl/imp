@@ -40,6 +40,14 @@ enum class ModelArch {
 
 const char* model_arch_name(ModelArch arch);
 
+// Loader traits, one column each in kArchRegistry (model.cpp); a row must state all three (B-120).
+// SafeTensors block norms store W with gamma = 1 + W (5 Qwen GDN-family archs); GGUF bakes the +1 in.
+[[nodiscard]] bool norm_gamma_is_delta(ModelArch arch);
+// SafeTensors forces rope_neox: the row's interleaved default relies on GGUF's Q/K pre-permutation (#503).
+[[nodiscard]] bool safetensors_forces_neox_rope(ModelArch arch);
+// The error load_gguf throws for a SafeTensors-only arch (8 today); nullptr = GGUF loads.
+[[nodiscard]] const char* gguf_refusal(ModelArch arch);
+
 // True iff this arch family is empirically verified safe to honor a kv_cache_quant_algo=FP8
 // hint by default. Long-context quality gate for kv_cache.dtype=auto; see model.cpp for
 // per-family evidence. Keep conservative.
