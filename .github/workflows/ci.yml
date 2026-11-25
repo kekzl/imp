@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
   # Nightly, 03:17 UTC: refreshes `main`'s reported status (an auto-merge squash
   # armed with GITHUB_TOKEN starts no run, see above), runs Sanitizers without
-  # its path filter and the libFuzzer job. No job here uses a GPU: there is no
+  # its path filter, the libFuzzer job and the imp-bench build. No job here uses a GPU: there is no
   # GPU runner (docs/DESIGN_DECISIONS.md), GPU gates are local (`make verify-fast`).
   schedule:
     - cron: "17 3 * * *"
@@ -239,7 +239,8 @@ jobs:
           # diagnostic from being emitted twice (once per gencode). The shipped
           # fatbin carries no 120f PTX either since C-012 (sm_120a only); the opt-in
           # build is what the `PTX fallback` job below assembles (#1650).
-          # IMP_BUILD_BENCH=OFF skips imp-bench. The mxf4nvf4 probe/microbench TUs
+          # IMP_BUILD_BENCH=OFF skips imp-bench here; the step "Build imp-bench
+          # (nightly)" below compiles it on schedule and dispatch. The mxf4nvf4 probe/microbench TUs
           # build with the tests (imp_test_kernels), never into libimp.
 
       - name: Build
@@ -293,6 +294,16 @@ jobs:
         # -j4: guard_verify_filter (11.8 s) and guard_makefile_filters (11.1 s) were
         # 23 of 27 s serial; both only list gtests and write per-PID temp files.
         run: cd build && ctest -L unit -j4 --output-on-failure --timeout 120
+
+      # imp-bench (tools/imp-bench, 5 sources) is in no pull-request build
+      # (IMP_BUILD_BENCH=OFF above and in the `ci` preset), so a breakage showed
+      # only when someone measured (AUDIT_ARCH_2026_11_24 X-10). Nightly and on
+      # demand: same build/ and flags, only the option flips, only that target builds.
+      - name: Build imp-bench (nightly)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          cmake -B build -DIMP_BUILD_BENCH=ON
+          cmake --build build --target imp-bench -j"$(nproc)"
 
       # clang-tidy, BLOCKING since 2026-11-25 (AUDIT_ARCH_2026_11_24 X-2): as its own
       # non-required job it was red on main on 3 consecutive pushes (runs 45259686168,
