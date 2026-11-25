@@ -321,6 +321,11 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         return false;
     }
 
+    // I3: an address or the forward topology changed since the capture. Recapture in this call,
+    // exec kept for cudaGraphExecUpdate, no eager warmup step (invalidate_for_update).
+    if (graph_.is_captured() && captured_epoch_ != graph_epoch())
+        invalidate_for_update();
+
     // Phase 1: Warmup - run without graph capture
     if (step_count_ < warmup_steps_) {
         decode_fn_(stream);
@@ -339,6 +344,7 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         IMP_LOG_INFO("CudaGraphRunner: capturing CUDA graph (step %d)", step_count_);
 
+        const uint64_t epoch_at_capture = graph_epoch();
         if (!graph_.begin_capture(stream)) {
             // Capture failed -- fall back to direct execution permanently
             IMP_LOG_ERROR(
@@ -388,6 +394,21 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         capture_count_++;
         step_count_++;
+        captured_epoch_ = epoch_at_capture;
+        if (graph_epoch() != epoch_at_capture) {
+            // I3: a buffer moved inside the capture, the graph may hold its old address. Nothing
+            // ran yet: run eager, recapture on the next step; 2 in a row = eager like a failed capture.
+            IMP_LOG_WARN("CudaGraphRunner: graph epoch moved inside the capture, step runs eager");
+            if (++epoch_moved_in_capture_ >= 2) {
+                graph_.reset();
+                capture_failed_ = true;
+            } else {
+                invalidate_for_update();
+            }
+            decode_fn_(stream);
+            return true;
+        }
+        epoch_moved_in_capture_ = 0;
         // During graph capture the kernels are recorded but NOT executed; replay immediately so
         // this step produces actual results. Short-circuit order matters: the injected failure
         // must PREVENT the replay, not follow a successful one, since launching then resetting
@@ -433,6 +454,11 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 bool CudaGraphRunner::replay_only(cudaStream_t stream) {
     if (!graph_.is_captured())
         return false;
+    // I3: stale epoch = no graph for this caller; the next execute() recaptures.
+    if (captured_epoch_ != graph_epoch()) {
+        invalidate_for_update();
+        return false;
+    }
     if (!graph_.replay(stream)) {
         IMP_LOG_ERROR("CudaGraphRunner: pipelined replay failed — invalidating graph.");
         graph_.reset();
@@ -448,6 +474,8 @@ void CudaGraphRunner::invalidate() {
     graph_.reset();
     step_count_ = 0;
     capture_failed_ = false;
+    captured_epoch_ = 0;
+    epoch_moved_in_capture_ = 0;
     last_batch_size_ = -1;
     last_max_blocks_ = -1;
 }
@@ -1052,7 +1080,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
         cudaGraph_t body_graph = cond_params.conditional.phGraph_out[0];
 
-        // 5. Capture decode body into body_graph via stream capture
+        // 5. Capture decode body into body_graph via stream capture. I3: the epoch is read before
+        // the capture, so a buffer that moves inside it refuses the launch.
+        captured_epoch_ = graph_epoch();
         err = sync_then_begin_capture(stream, body_graph);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
@@ -1136,6 +1166,10 @@ fail:
 bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
     if (!exec_)
         return false;
+    if (captured_epoch_ != graph_epoch()) {
+        IMP_LOG_WARN("ConditionalRunner: graph epoch moved since setup, launch refused");
+        return false;
+    }
 
     graph_diag::PhaseScope scope(graph_diag::Phase::REPLAY);
     cudaError_t err = cudaGraphLaunch(exec_, stream);
@@ -1152,6 +1186,9 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
                                        bool in_think, int think_limit,
                                        const std::vector<int32_t>& penalty_history, cudaStream_t stream) {
     if (!exec_ || launched_)
+        return false;
+    // I3: the loop body baked addresses of an older epoch; the caller runs a full setup().
+    if (captured_epoch_ != graph_epoch())
         return false;
     // The captured graph sized its attention workspace for
     // initial_context_len + max_steps tokens; never replay past that.

@@ -4,6 +4,7 @@
 
 #include "core/logging.h"
 #include "handlers.h"
+#include "handlers_internal.h"
 #include "sampling_fields.h"
 #include "utils.h"
 
@@ -39,13 +40,23 @@ int suspend_locked(ServerState& state, json& body) {
     size_t vram_free_before = 0, vram_total = 0;
     IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&vram_free_before, &vram_total));
 
+    // Every handler holding a lease on the model finishes first; state.mtx is released for that
+    // wait only and new requests answer 503 until this function returns (C-2).
+    ModelExclusiveScope exclusive(state);
+    if (!exclusive.acquired()) {
+        body = admin_error("suspend not started: " + exclusive.refusal() + "; server keeps serving",
+                           "server_error");
+        return 503;
+    }
+
     // Drain: let in-flight generations FINISH (never cancels), then park the
     // worker. We hold state.mtx so no new request can be submitted meanwhile
     // (documented pause() contract, same as the embeddings exclusive window).
-    if (state.batching && !state.batching->pause(/*timeout_ms=*/60000)) {
+    const int drain_ms = exclusive.pause_budget_ms();
+    if (state.batching && !state.batching->pause(drain_ms)) {
         state.batching->resume();
-        body = admin_error("suspend aborted: in-flight requests did not drain "
-                           "within 60s — server keeps serving",
+        body = admin_error("suspend aborted: in-flight requests did not drain within " +
+                               std::to_string(drain_ms) + "ms; server keeps serving",
                            "server_error");
         return 503;
     }
@@ -68,6 +79,7 @@ int suspend_locked(ServerState& state, json& body) {
     const std::string model_name = state.model_name;
 
     // Full teardown — mirrors load_model_into_state's unload half.
+    state.lifetime.bump_epoch();  // an unload ends the epoch, the resume load starts the next
     if (state.batching) {
         state.batching->stop();
         state.batching.reset();
@@ -221,7 +233,9 @@ bool idle_unload_tick(ServerState& state) {
     if (!state.model_loaded() || state.suspended.load())
         return false;
     // Queued or generating work (a long stream) is activity: the clock starts when it ends.
-    if (state.inflight.inflight() > 0 || (state.batching && state.batching->queue_depth() > 0)) {
+    // lifetime.readers(): a stream body runs after post-routing left `inflight` (httplib order).
+    if (state.inflight.inflight() > 0 || state.lifetime.readers() > 0 ||
+        (state.batching && state.batching->queue_depth() > 0)) {
         state.touch_activity();
         return false;
     }
@@ -258,6 +272,8 @@ void handle_suspend(const httplib::Request& /*req*/, httplib::Response& res, Ser
     // An operator suspend is sticky, also over an idle one: only POST /admin/resume ends it.
     if (res.status == 200)
         state.idle_suspended.store(false);
+    if (res.status == 503)
+        res.set_header("Retry-After", std::to_string(kModelBusyRetryAfterSeconds));
     res.set_content(dump_safe(body), "application/json");
 }
 

@@ -183,6 +183,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!ensure_model_loaded(state, ctx.params.requested_model, res))
             return false;
+        // The lease pins tok and the engine until the last copy of ctx.snap is gone (C-2).
+        ctx.snap.lease = lease_model_locked(state, res);
+        if (!ctx.snap.lease)
+            return false;
         // Adapter name -> engine id under mtx: /admin/lora/{load,unload} edit the table (#2199).
         // -1 = named but not loaded, refused below.
         if (!ctx.params.lora_name.empty()) {
@@ -691,13 +695,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             server_req = std::make_shared<ServerRequest>();
             server_req->request = imp_req;
             server_req->public_ids = {ctx.req_id, ctx.log_client_request_id};
-            {
-                std::lock_guard<std::timed_mutex> lock(state.mtx);
-                if (!state.batching || !state.batching->is_running()) {
-                    break;
-                }
-                state.batching->submit(server_req);
-            }
+            if (!submit_for_lease(state, ctx.snap.lease, server_req))
+                break;
         }
 
         auto active_req = server_req->request;

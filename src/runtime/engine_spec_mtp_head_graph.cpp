@@ -4,6 +4,7 @@
 
 #include "compute/gemm.h"
 #include "compute/mtp_forward.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"
@@ -35,13 +36,14 @@ void note_failure(MtpHeadGraphs& G, const MtpHeadGraphKey& key, const char* what
     }
 }
 
-// The cached graph of key, or null; one whose captured pointers moved is dropped (captured again later).
+// The cached graph of key, or null; one whose captured pointers moved or whose graph epoch is past (I3) is
+// dropped (captured again later).
 MtpHeadGraph* cached_graph(MtpHeadGraphs& G, const MtpHeadGraphKey& key, const void* hidden,
                            const void* head) {
     auto it = G.by_key.find(key);
     if (it == G.by_key.end() || !it->second.exec)
         return nullptr;
-    if (it->second.hidden == hidden && it->second.head == head)
+    if (it->second.hidden == hidden && it->second.head == head && it->second.epoch == graph_epoch())
         return &it->second;
     G.by_key.erase(it);
     --G.n_graphs;
@@ -70,6 +72,7 @@ template <class Run>
 int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* hidden, const void* head,
             Run&& run, cudaStream_t stream) {
     const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t epoch = graph_epoch();
     cudaError_t err = cudaStreamBeginCapture(stream, get_capture_mode());
     if (err != cudaSuccess) {
         note_failure(G, key, "begin capture", err);
@@ -114,6 +117,7 @@ int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* 
     g.n_out = n_out;
     g.hidden = hidden;
     g.head = head;
+    g.epoch = epoch;
     ++G.n_graphs;
     G.failures = 0;
     IMP_LOG_INFO("[mtp-head-graph] captured n=%d m=%d chain=%d draw=%d (%zu scan nodes, %zu graphs): %.1f ms",

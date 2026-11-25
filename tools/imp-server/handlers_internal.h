@@ -146,6 +146,8 @@ struct ChatStateSnapshot {
     int sae_width = 0;
     std::vector<int32_t> cfg_tokens;  // row 117: the shadow prompt, cfg_render_negative
     imp::Tokenizer* tok = nullptr;
+    // Keeps `tok` and the engine alive: no swap/suspend frees them while a copy of this lives (C-2).
+    std::shared_ptr<ModelLease> lease;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
     std::string model_name;
@@ -372,6 +374,46 @@ extern thread_local std::string g_shim_stop_sequence;
 
 // Defined in handlers.cpp.
 bool ensure_model_loaded(ServerState& state, const std::string& requested_model, httplib::Response& res);
+
+// Retry-After on every "swap or suspend pending" 503: 1 s, the smallest whole value.
+inline constexpr int kModelBusyRetryAfterSeconds = 1;
+// 503 + Retry-After, OpenAI envelope (the /v1/messages shims re-wrap it).
+void send_model_busy(httplib::Response& res, const std::string& message);
+
+// Caller holds state.mtx. A lease on the loaded model, or null with the 503 set on `res` while a
+// swap/suspend is pending. Take it with every snapshot of state.tok / state.model / state.ctx.
+std::shared_ptr<ModelLease> lease_model_locked(ServerState& state, httplib::Response& res);
+// Takes state.mtx itself: idle resume, then the lease and the model pointer it pins (tokenize routes).
+std::shared_ptr<ModelLease> lease_model_snapshot(ServerState& state, httplib::Response& res, ImpModel& model,
+                                                 int* max_seq_len = nullptr);
+
+// Takes state.mtx and submits when the engine runs AND `lease` is of the current load epoch.
+// False = nothing submitted, the caller answers 503 + Retry-After.
+bool submit_for_lease(ServerState& state, const std::shared_ptr<ModelLease>& lease,
+                      const std::shared_ptr<ServerRequest>& req);
+
+// The one wait before state.model / state.ctx are freed (swap, suspend, idle unload). Caller holds
+// state.mtx: released while other handlers' leases drain (server.model_swap_drain_ms), re-held
+// after. New requests get 503 from the first line to the destructor; on a timeout nothing changed.
+class ModelExclusiveScope {
+public:
+    explicit ModelExclusiveScope(ServerState& state);
+    ~ModelExclusiveScope();
+    ModelExclusiveScope(const ModelExclusiveScope&) = delete;
+    ModelExclusiveScope& operator=(const ModelExclusiveScope&) = delete;
+    bool acquired() const { return result_ == ModelLifetimeGate::Exclusive::Acquired; }
+    // Why not: another swap/suspend is pending, or N handlers outlived the budget.
+    std::string refusal() const;
+    // What is left of the budget for BatchingEngine::pause(), never under 1000 ms.
+    int pause_budget_ms() const;
+
+private:
+    ServerState& state_;
+    ModelLifetimeGate::Exclusive result_;
+    int budget_ms_ = 0;
+    int waited_ms_ = 0;
+    int readers_left_ = 0;
+};
 bool validate_sampling_params(const json& body, httplib::Response& res);
 
 // Rejects a constraint imp cannot compile with 400 instead of answering

@@ -52,6 +52,7 @@ struct MtpHeadGraph {
     // Captured device pointers that are not fixed by the workspace: a change drops the graph.
     const void* hidden = nullptr;
     const void* head = nullptr;
+    uint64_t epoch = 0;  // graph_epoch() before the capture (I3): another epoch drops the graph
 };
 
 struct MtpHeadGraphs {

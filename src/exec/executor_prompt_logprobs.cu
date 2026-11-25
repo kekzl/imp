@@ -151,8 +151,9 @@ void GraphExecutor::prompt_logprobs_partial(const int32_t* d_targets, int n_rows
         if (!prompt_lm_head_chunk_(row0, csz, d_logits, slab_w, stream)) {
             if (row0 == 0)
                 break;  // no one-GEMM route for this head: the per-batch driver below
-            IMP_LOG_ERROR("prompt_logprobs: LM head route changed at row %d", row0);
-            return;
+            throw_runtime_error(
+                "prompt_logprobs_partial: LM head route changed at row %d of %d (%d-row chunks)", row0,
+                n_rows, chunk_rows);
         }
         if (cfg.final_logit_softcap > 0.0f) {
             const int64_t total = static_cast<int64_t>(csz) * V;

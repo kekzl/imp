@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/graph_epoch.h"
 #include "core/tensor.h"
 #include "core/qtype.h"
 #include "memory/device_owned.h"
@@ -63,12 +64,11 @@ public:
     // Persistent + shared bytes currently held; resident before the KV plan reads free VRAM (#2365).
     size_t allocated_bytes() const { return persistent_workspace_size_ + shared_workspace_size_; }
     int shared_max_tokens() const { return shared_workspace_max_tokens_; }
-    // Bumped whenever shared_workspace_ is (re)allocated or freed — consumers
-    // holding raw pointers into the arena (captured verify graphs, #847) use
-    // this to detect that their baked addresses died.
-    uint64_t generation() const { return generation_; }
+    // The process graph epoch (core/graph_epoch.h), bumped whenever shared_workspace_ is
+    // (re)allocated or freed: every graph runner compares it before replay (I3).
+    uint64_t generation() const { return graph_epoch(); }
     // An executor scratch a captured graph can bake moved (small-M regrow): same invalidation.
-    void bump_generation() { ++generation_; }
+    void bump_generation() { (void)bump_graph_epoch(); }
 
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
@@ -117,7 +117,6 @@ private:
     DeviceOwned<void> shared_workspace_;
     size_t shared_workspace_size_ = 0;
     int shared_workspace_max_tokens_ = 0;
-    uint64_t generation_ = 1;  // see generation()
 
     // Pre-computed phase sizes (for max_tokens_).
     size_t attn_shared_size_ = 0;

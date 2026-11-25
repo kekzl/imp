@@ -130,6 +130,7 @@ private:
     CudaGraph graph_;
     CudaGraphExec exec_;
     bool graph_ok_ = true;
+    uint64_t exec_epoch_ = 0;   // graph_epoch() before the capture (I3)
     float* d_conf_ = nullptr;   // softmax probability of every drafted token
     float *raw_ = nullptr, *latent_f_ = nullptr, *val_ = nullptr;  // recurrent step scratch
     float *cand0_ = nullptr, *mass_ = nullptr;  // candidates' unscored logits, vocabulary mass per span

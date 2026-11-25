@@ -670,7 +670,7 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
     if (max_shared == 0)
         return true;  // no workspace needed
 
-    generation_++;  // fresh arena — any prior baked pointers are dead
+    bump_generation();  // fresh arena: any prior baked pointers are dead
     shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, max_shared, "shared_workspace");
     if (!shared_workspace_.get()) {
         // Shared workspace is critical for GEMV scratch buffers. Retry past the headroom
@@ -710,7 +710,7 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
 void Workspace::free_buffers() {
     if (shared_workspace_.get()) {
         shared_workspace_.reset();
-        generation_++;
+        bump_generation();
     }
     shared_workspace_size_ = 0;
     if (persistent_workspace_.get()) {

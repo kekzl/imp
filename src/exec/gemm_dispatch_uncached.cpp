@@ -258,11 +258,12 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
                                      const GemmContext& ctx, bool decode_rows) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
-    if (!wc || !qs)
-        return;
-
     const QType qtype = weight.qtype;
     const int M = static_cast<int>(input.shape[0]);
+    if (!wc || !qs)
+        throw_runtime_error("gemm_dispatch_uncached_fallback: no %s for a %ld x %ld %s weight at M=%d",
+                            wc ? "quant scratch" : "weight cache", (long)weight.shape[0],
+                            (long)weight.shape[1], qtype_name(qtype), M);
     if (gemm_uncached_in_place(input, weight, output, ctx, decode_rows) ||
         dp4a_token_gemv(input, weight, output, ctx))
         return;
@@ -299,9 +300,9 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
             gemm(input, weight, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        IMP_LOG_ERROR("gemm_dispatch_uncached_fallback: beta=%.3f but no FP16 path for qtype=%d", ctx.beta,
-                      std::to_underlying(qtype));
-        return;
+        throw_runtime_error(
+            "gemm_dispatch_uncached_fallback: beta=%.3f but no FP16 path for a %ld x %ld %s weight at M=%d",
+            ctx.beta, (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
     }
 
     // Generic dequant catch-all (M>1 prefill for uncached weights)
@@ -326,27 +327,21 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
             return;
     }
 
-    if (weight.dropped_source) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            IMP_LOG_WARN(
-                "gemm_dispatch_uncached_fallback: dropped weight at final fallback! "
-                "M=%d qtype=%d kind=%s — overlay coverage gap.",
-                M, std::to_underlying(qtype), tensor_kind_name(weight.kind));
-        }
-        return;
-    }
+    // Source freed (Phase 4b) and no overlay took the call: nothing left to read. No caller sets the
+    // flag on the Tensor it builds today (4 call sites), so this arm is an overlay coverage gap.
+    if (weight.dropped_source)
+        throw_runtime_error(
+            "gemm_dispatch_uncached_fallback: dropped %s weight (%ld x %ld %s) at the final fallback, M=%d",
+            tensor_kind_name(weight.kind), (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype),
+            M);
 
     // Block-quant types (Q4_K, Q5_K, Q8_0, etc.) and native FP8: dequant to FP16 then cuBLAS.
     if (weight_dequant_supported(qtype)) {
-        if (!dequant_scratch_fits(qs, weight)) {
-            // gemm() has no block-quant arm: it would read the Q6_K/Q8_0 bytes as FP16 and run
-            // past the allocation. Output stays untouched; the WARN above names the weight.
-            IMP_LOG_ERROR("gemm_dispatch_uncached_fallback: no route for a %ld x %ld %s weight at M=%d",
-                          (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
-            return;
-        }
+        // gemm() has no block-quant arm: it would read the Q6_K/Q8_0 bytes as FP16 and run
+        // past the allocation. The WARN in dequant_scratch_fits names the sizes.
+        if (!dequant_scratch_fits(qs, weight))
+            throw_runtime_error("gemm_dispatch_uncached_fallback: no route for a %ld x %ld %s weight at M=%d",
+                                (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
         dequant_weight_fp16(weight, qs->dequant.get(), ctx.stream);
         Tensor w_fp16(qs->dequant.get(), QType::F16, weight.ndim, weight.shape, true);
         gemm(input, w_fp16, output, 1.0f, 0.0f, ctx.stream);

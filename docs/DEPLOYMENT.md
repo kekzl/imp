@@ -286,4 +286,5 @@ model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 One GPU holds one model; `server.model_swap` (default on, table above) drains in-flight generations first, never cancels them, and a failed load restores the previous model.
 
 - The requesting call pays the load, cheap on repeats via the warm weight cache.
+- A swap, `/admin/suspend` and the idle unload wait until every other request, its stream body included, has finished: at most `server.model_swap_drain_ms` (60 s), then 503 with `Retry-After: 1` and the loaded model keeps serving. Requests arriving during that wait get the same 503, they do not queue.
 - Strict single-model semantics: `server.model_swap=false`.

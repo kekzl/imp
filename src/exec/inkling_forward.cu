@@ -8,6 +8,7 @@
 #include "compute/inkling_ops.h"
 #include "core/logging.h"
 #include "core/cuda_raii.h"
+#include "core/graph_epoch.h"
 #include "core/tensor.h"
 #include "memory/vram_allocator.h"
 #include "quant/nvfp4_gemm.h"
@@ -512,6 +513,18 @@ void InklingForward::layers_(int T, cudaStream_t s, const int32_t* ids, int32_t 
                  c.eps, s);
 }
 
+void InklingForward::drop_stale_graphs_(cudaStream_t s) {
+    const uint64_t epoch = graph_epoch();
+    if (epoch == decode_epoch_)
+        return;
+    decode_epoch_ = epoch;
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));  // a queued replay holds its exec: let it end first
+    for (int i = 0; i < kGraphRows; ++i) {
+        decode_exec_[i].reset(nullptr);
+        decode_graph_[i].reset(nullptr);
+    }
+}
+
 // Captures the T-row step once: about 2000 kernel and cuBLAS launches become one replay.
 void InklingForward::capture_decode_(int T, cudaStream_t s) {
     const size_t n = static_cast<size_t>(T) * static_cast<size_t>(w_->cfg.hidden);
@@ -573,6 +586,8 @@ bool InklingForward::segment_(half* hs, int seg, cudaStream_t s, const int32_t* 
     bool graph = s != nullptr && !tap && seg <= kGraphRows && decode_graph_ok_;
     for (int i = 0; graph && ids && image_token >= 0 && i < seg; ++i)
         graph = ids[i] != image_token;
+    if (graph)
+        drop_stale_graphs_(s);
     if (graph && !decode_exec_[seg - 1].get())
         capture_decode_(seg, s);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));

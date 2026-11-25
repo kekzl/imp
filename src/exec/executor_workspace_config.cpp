@@ -161,7 +161,7 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         // clamps to it, every phase term monotone in T); fixed rather than deleted because that
         // argument depends on surrounding code, not this branch.
         shared_workspace_.reset();
-        generation_++;  // arena moves — captured verify graphs must invalidate
+        bump_generation();  // arena moves: every captured graph recaptures
         shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, new_shared, "shared_workspace");
         if (!shared_workspace_.get()) {
             IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes", new_shared);

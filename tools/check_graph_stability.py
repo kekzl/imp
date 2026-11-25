@@ -11,7 +11,8 @@ three places where that is not yet true, against tools/graph_stability_allowlist
                        The owner spelling counts too: X.reset(); then X = DeviceOwned<T>::allocate*
                        or X.adopt*.
   G2 unkeyed captures  cudaStreamBeginCapture* calls in a file that reads no generation
-                       (a generation getter call or a comparison against a stored generation).
+                       (a generation getter call, a comparison against a stored generation, or
+                       a read of the process graph epoch, graph_epoch() of core/graph_epoch.h).
   G3 discarded proofs  take / take_bytes call lines whose result is not declared StableSpan<T>.
 
 The list only shrinks: a file over its budget fails, a file that is not listed fails, and an
@@ -55,7 +56,8 @@ OWNER_RESET = re.compile(r"^\s*([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)\.reset\(\
 OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|\.adopt(?:_async)?\s*\()"
 FUNCTION_END = re.compile(r"^}")
 CAPTURE = re.compile(r"\bcudaStreamBeginCapture\w*\s*\(")
-GENERATION = re.compile(r"\w*generation\w*\s*\(\s*\)|\w*generation\w*\s*!=|!=\s*\w*generation\w*")
+GENERATION = re.compile(r"\w*generation\w*\s*\(\s*\)|\w*generation\w*\s*!=|!=\s*\w*generation\w*"
+                        r"|\bgraph_epoch\s*\(\s*\)")
 TAKE = re.compile(r"\.take(?:_bytes)?(?:<[^>]+>)?\(")
 KEPT = re.compile(r"\bStableSpan\s*<")
 
@@ -249,6 +251,8 @@ def selftest() -> int:
         ("G2 getter", g2(begin + "    if (gen_ != ws.generation()) drop();\n") == 0),
         ("G2 comparison", g2(begin + "    if (generation != generation_) drop();\n") == 0),
         ("G2 kv getter", g2(begin + "    key = ex->kv_calibration_generation();\n") == 0),
+        ("G2 graph epoch", g2(begin + "    if (captured_epoch_ != graph_epoch())\n        drop();\n") == 0),
+        ("G2 epoch bump is no read", g2(begin + "    bump_graph_epoch();\n    epoch_ = other_graph_epoch_;\n") == 1),
         ("G2 word in a comment or string", g2(begin + "    // generation() here\n    log(\"x.generation() != y\");\n") == 1),
         ("G2 capture name in a string", g2("    disable_(\"cudaStreamBeginCapture(\", err);\n") == 0),
     ]

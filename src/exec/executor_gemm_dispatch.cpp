@@ -948,12 +948,10 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         }
         return;
     }
-    if (a.per_row) {  // quantize_act_fp8_ checked K % 64 and N % 8: unreachable unless a sibling's N is odd
-        IMP_LOG_ERROR(
-            "FP8 per-token activation scales: no own GEMM serves M=%d N=%d K=%d, output not written", M, N,
-            K);
-        return;
-    }
+    if (a.per_row)  // quantize_act_fp8_ checked K % 64 and N % 8: unreachable unless a sibling's N is odd
+        throw_runtime_error(
+            "gemm_fp8x8_: FP8 per-token activation scales, no own GEMM serves M=%d N=%d K=%d beta=%.0f", M, N,
+            K, beta);
     gemm_cublaslt(a8, w8, out, 1.0f, beta, a.d, w_scale, stream);
 }
 

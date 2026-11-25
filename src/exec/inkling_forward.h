@@ -153,6 +153,8 @@ private:
     ConvLog conv_log_at_(size_t app, int T) const;
     void tap_features_(int T, cudaStream_t s);
     void capture_decode_(int T, cudaStream_t s);
+    // I3: drops the captured steps of an older graph epoch; the caller captures again as on first use.
+    void drop_stale_graphs_(cudaStream_t s);
     float* F_(size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); }
     half* Hf_(size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); }
 
@@ -209,6 +211,7 @@ private:
     CudaGraphExec decode_exec_[kGraphRows];
     half* dec_h_ = nullptr;
     bool decode_graph_ok_ = true;
+    uint64_t decode_epoch_ = 0;  // graph_epoch() every held decode_exec_ was captured under
     bool fuse_ = true;
     inkling::MixPre tail_;
     // Lookahead (enable_lookahead): feature planes of the running call, the conv state before the

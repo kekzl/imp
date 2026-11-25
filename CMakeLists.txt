@@ -898,6 +898,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/stream_driver.cpp
         tools/imp-server/handlers_admin.cpp
+        tools/imp-server/handlers_lifetime.cpp
         tools/imp-server/tracing.cpp)
     target_link_libraries(imp_server_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
 
@@ -982,6 +983,8 @@ if(IMP_BUILD_TESTS)
         tests/test_ffn_graph_cache.cpp
         # Serial prefill graph runners: one per short length, one shared (runtime.prefill_graph_prewarm).
         tests/test_prefill_graph_cache.cpp
+        # I3: the process graph epoch every capture site stores and compares before replay.
+        tests/test_graph_epoch.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
         # cuBLASLt route counter labels and table (diagnostics.log_gemm_algo, roadmap row 123).
@@ -1264,6 +1267,9 @@ if(IMP_BUILD_TESTS)
         # chunk clamp must answer 'can this head_dim skip the S-matrix' the
         # same way, or nothing bounds the chunk and cuBLAS aborts.
         tests/test_attention_dispatch_rules.cpp
+        # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
+        # (no kernel launches on these arms, so the CPU lane holds it).
+        tests/test_gemm_fallback_fails_loud.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
         tests/test_fmha_sm120_tile_select.cpp
@@ -1311,6 +1317,8 @@ if(IMP_BUILD_TESTS)
             tests/test_model_context.cpp
             tests/test_tracing.cpp
             tests/test_server_request_limits.cpp
+            # C-2: swap/suspend waits for in-flight handlers, load epoch at submit.
+            tests/test_model_lifetime_gate.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.

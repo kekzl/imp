@@ -220,17 +220,14 @@ bool GraphExecutor::lm_head_nvfp4_gemm_f32_(int rows, float* logits, cudaStream_
 }
 
 void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
-    if (!initialized_) {
-        IMP_LOG_ERROR("GraphExecutor::forward_logits called before init()");
-        return;
-    }
+    if (!initialized_)
+        throw_runtime_error("GraphExecutor::forward_logits called before init() (n_tokens %d)",
+                            state.n_tokens);
 
     const auto& cfg = model_->config();
     int n = state.n_tokens;
-    if (n <= 0) {
-        IMP_LOG_ERROR("n_tokens must be positive, got %d", n);
-        return;
-    }
+    if (n <= 0)
+        throw_runtime_error("GraphExecutor::forward_logits: n_tokens must be positive, got %d", n);
     if (n > max_tokens_) {
         // Throwing here lets BatchingEngine's try/catch cancel the request with
         // HTTP 500 instead of returning an uninitialized logits tensor that later
