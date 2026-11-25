@@ -293,6 +293,9 @@ class MockHandler(BaseHTTPRequestHandler):
                                      "types": {"enabled": sup(True), "adaptive": sup(True)}},
                         "effort": {"supported": True, "low": sup(True), "medium": sup(True),
                                    "high": sup(False), "xhigh": sup(True), "max": sup(False)},
+                        # EngineCapabilities of a generic dense load (C-6); Inkling-2-Mini: only cfg.
+                        "imp_extensions": {k: sup(True) for k in (
+                            "logit_lens", "sae", "lora", "control_vector", "phrase_ban", "cfg")},
                     },
                     "max_model_len": MOCK_MAX_SEQ_LEN,        # vLLM convention
                     "meta": {"n_ctx_train": MOCK_MAX_SEQ_LEN,   # llama.cpp convention
