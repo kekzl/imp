@@ -897,6 +897,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/stream_driver.cpp
         tools/imp-server/handlers_admin.cpp
+        tools/imp-server/handlers_lifetime.cpp
         tools/imp-server/tracing.cpp)
     target_link_libraries(imp_server_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
 
@@ -1313,6 +1314,8 @@ if(IMP_BUILD_TESTS)
             tests/test_model_context.cpp
             tests/test_tracing.cpp
             tests/test_server_request_limits.cpp
+            # C-2: swap/suspend waits for in-flight handlers, load epoch at submit.
+            tests/test_model_lifetime_gate.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.

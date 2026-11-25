@@ -20,6 +20,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include "model_lifetime.h"
 #include "rate_limit.h"
 #include "responses_store.h"
 
@@ -338,6 +339,9 @@ struct ServerState {
     // Admitted inference handlers right now (E-2); entered in pre-routing,
     // left in post-routing.
     InflightGate inflight;
+    // Leases on the loaded model (C-2): taken with the snapshot under mtx, held until the handler
+    // and its stream body are done. Every path that frees model/ctx drains it first.
+    ModelLifetimeGate lifetime;
     // Prompt tokens of admitted requests until their first output token (#2408).
     QueuedTokenGate queued_tokens;
 

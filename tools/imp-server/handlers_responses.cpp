@@ -506,13 +506,9 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         server_req->request = std::move(imp_req);
         server_req->queued_lease = ctx.queued_lease;
         server_req->public_ids = {response_id, log_client_request_id};  // end_thinking (#2420)
-        {
-            std::lock_guard<std::timed_mutex> lock(state.mtx);
-            if (!state.batching || !state.batching->is_running()) {
-                send_json_error(res, 503, "server_error", "Inference engine not ready. Please retry.");
-                return;
-            }
-            state.batching->submit(server_req);
+        if (!submit_for_lease(state, ctx.snap.lease, server_req)) {
+            send_model_busy(res, "Inference engine not ready. Please retry.");
+            return;
         }
 
         ctx.t_start = std::chrono::high_resolution_clock::now();

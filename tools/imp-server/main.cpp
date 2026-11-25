@@ -321,6 +321,9 @@ static int run_server(int argc, char** argv) {
             // the one case worth shedding for is readable without touching the lock. An idle
             // suspend is let through: the handler resumes it (#2199).
             if (state.swapping.load() || (state.suspended.load() && !state.idle_suspended.load())) {
+                // A swap ends on its own (bounded by server.model_swap_drain_ms + the load).
+                if (state.swapping.load())
+                    res.set_header("Retry-After", "1");
                 send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
                                    "Server busy (model swap or suspend in progress), retry shortly");
                 return httplib::Server::HandlerResponse::Handled;

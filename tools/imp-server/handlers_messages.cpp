@@ -462,6 +462,9 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
             json out = {{"type", "error"},
                         {"error", parsed.value("error",
                                                json{{"type", "invalid_request_error"}, {"message", "bad request"}})}};
+            // A 5xx from the snapshot (swap pending, drain timeout) carries an Anthropic type (#1556).
+            if (res.status >= 500 && out["error"].is_object())
+                out["error"]["type"] = anthropic_error_type_for(out["error"].value("type", ""), res.status);
             res.set_content(dump_safe(out), "application/json");
             return;
         }
@@ -489,14 +492,11 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         server_req->request = std::move(imp_req);
         server_req->queued_lease = ctx.queued_lease;
         server_req->public_ids = {msg_id, request_id, log_client_request_id};  // end_thinking (#2420)
-        {
-            std::lock_guard<std::timed_mutex> lock(state.mtx);
-            if (!state.batching || !state.batching->is_running()) {
-                send_anthropic_error(res, 503, "overloaded_error",
-                                     "Inference engine not ready. Please retry.", request_id);
-                return;
-            }
-            state.batching->submit(server_req);
+        if (!submit_for_lease(state, ctx.snap.lease, server_req)) {
+            res.set_header("Retry-After", std::to_string(kModelBusyRetryAfterSeconds));
+            send_anthropic_error(res, 503, "overloaded_error", "Inference engine not ready. Please retry.",
+                                 request_id);
+            return;
         }
 
         ctx.t_start = std::chrono::high_resolution_clock::now();

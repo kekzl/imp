@@ -61,7 +61,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `server.prefix_pin_budget_pct` | `25` | share of the KV pool (0-100) that `cache_control` / `cache_prompt` pins and `session_id` pins may hold together; over budget the oldest pin is released; `0` = no pins of either kind (StreamingLLM sink blocks stay pinned) |
 | `server.session_ttl_s` | `600` | a `session_id` prefix pin is released after this many idle seconds; `0` = only `POST /v1/sessions/{id}/close` or the pin budget release it ([API_FEATURES.md](API_FEATURES.md#agent-sessions-session_id)) |
 | `server.model_swap` | `true` | a request naming another model in the directory swaps to it |
-| `server.model_swap_drain_ms` | `60000` | drain budget for in-flight generations during a swap/shutdown |
+| `server.model_swap_drain_ms` | `60000` | drain budget for in-flight requests during a swap/suspend/shutdown |
 | `server.otlp_endpoint` | `""` (off) | OTLP/HTTP traces URL |
 | `server.otlp_service_name` | `imp-server` | OpenTelemetry service name |
 | `warm_cache.enabled` | `true` | persist transformed weight uploads across restarts |

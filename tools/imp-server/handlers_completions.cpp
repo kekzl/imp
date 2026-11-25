@@ -45,6 +45,7 @@ struct CompletionCtx {
     bool infill;                        // POST /infill: llama.cpp `content` mirrors the text (#2201)
     PromptLogprobsRequest plp;
     std::function<bool()> client_gone;  // req.is_connection_closed
+    std::shared_ptr<ModelLease> lease;  // pins snap_tok until the stream body is done (C-2)
 };
 
 // SSE path. The body is the move-verbatim contents of the old `if (stream)`
@@ -74,7 +75,8 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
         "text/event-stream",
         [&state, server_req, comp_id, created, n_prompt_tokens, t_start, stop_sequences, max_stop_len,
          ignore_eos, echo, prompt, include_usage, snap_tok, snap_model_name, snap_is_think_model,
-         req_logprobs, infill](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+         req_logprobs, infill, lease = c.lease](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+            (void)lease;  // held, not read: snap_tok stays valid while this provider lives
             int n_output_tokens = 0;
             const char* finish = nullptr;
 
@@ -553,6 +555,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
 
     // Snapshot state fields under lock for thread-safe access
     imp::Tokenizer* snap_tok;
+    std::shared_ptr<ModelLease> lease;  // pins snap_tok for the whole handler (C-2)
     std::string snap_model_name;
     bool snap_is_think_model;
     int32_t snap_channel_open_id;
@@ -562,6 +565,9 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         if (requested_model.empty())
             requested_model = state.model_name;
         if (!ensure_model_loaded(state, requested_model, res))
+            return;
+        lease = lease_model_locked(state, res);
+        if (!lease)
             return;
         snap_tok = state.tok;
         snap_model_name = state.model_name;
@@ -680,17 +686,9 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     server_req->queued_lease = std::move(queued_lease);
     server_req->public_ids = {req_id, res.get_header_value("X-Request-Id")};  // end_thinking (#2420)
 
-    {
-        std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!state.batching || !state.batching->is_running()) {
-            res.status = 503;
-            json err = {
-                {"error",
-                 {{"message", "Inference engine not ready. Please retry."}, {"type", "server_error"}}}};
-            res.set_content(dump_safe(err), "application/json");
-            return;
-        }
-        state.batching->submit(server_req);
+    if (!submit_for_lease(state, lease, server_req)) {
+        send_model_busy(res, "Inference engine not ready. Please retry.");
+        return;
     }
 
     std::string comp_id = req_id;
@@ -714,7 +712,8 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
                              ignore_eos,
                              infill,
                              p.plp,
-                             req.is_connection_closed};
+                             req.is_connection_closed,
+                             lease};
     if (p.stream) {
         stream_completion_response_(res, state, cctx, server_req);
     } else {

@@ -118,6 +118,10 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
         requested_model = state.model_name;
     if (!ensure_model_loaded(state, requested_model, res))
         return;
+    // Pins the model past lock.unlock() below, until the handler returns (C-2).
+    const auto lease = lease_model_locked(state, res);
+    if (!lease)
+        return;
 
     if (!looks_like_reranker(state.model_name)) {
         send_json_error(res, 400, "invalid_request_error",
