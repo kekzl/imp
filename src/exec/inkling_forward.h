@@ -3,6 +3,7 @@
 
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
+#include "exec/inkling_slot_table.h"
 #include "memory/grow_rows.h"
 #include "model/inkling_weights.h"
 
@@ -248,13 +249,11 @@ struct InklingRuntime {
     // the card has no room.
     std::unique_ptr<InklingDense8> dense8;
     std::vector<std::unique_ptr<InklingForward>> slots;
-    std::vector<int> slot_req;        // request bound to the slot, -1 = never bound
-    std::vector<int> slot_block;      // first KV block of that request's table: the key of a decode row
-    std::vector<uint64_t> slot_used;  // bind order, the oldest free slot is recycled first
-    uint64_t tick = 0;
-    std::vector<int32_t> ids;  // host copies of one call's token ids, positions, first blocks
-    std::vector<int> pos, blk;
-    // The three row arrays of a call packed on the device ([3][rows_cap]) and their host copy.
+    // Request id -> slot, the key of every row (InferenceState::h_seq_ids, prefill_req_id).
+    InklingSlotTable table;
+    std::vector<int32_t> ids;  // host copies of one call's token ids and positions, slot per decode row
+    std::vector<int> pos, row_slot;
+    // The two row arrays of a call packed on the device ([2][rows_cap]) and their host copy.
     VramOwned<int32_t> d_rows;
     int rows_cap = 0;
     std::vector<int32_t> rows;
@@ -268,13 +267,10 @@ struct InklingRuntime {
     InklingRuntime(const InklingRuntime&) = delete;
     InklingRuntime& operator=(const InklingRuntime&) = delete;
     ~InklingRuntime();
-    // Slot of a request / of a decode row's first block, -1 when unknown.
-    [[nodiscard]] int slot_of_req(int req) const;
-    [[nodiscard]] int slot_of_block(int block) const;
-    // Binds req to the free slot (busy[i] false) that shares the longest prefix with tokens; on a tie a
-    // slot without a checkpoint goes first, then one with the decode lookahead, then the oldest binding.
-    // Returns the slot, -1 = all busy.
-    [[nodiscard]] int bind(int req, std::span<const int32_t> tokens, const std::vector<bool>& busy);
+    // Binds req to the unbound slot that shares the longest prefix with tokens; on a tie a slot
+    // without a checkpoint goes first, then one with the decode lookahead, then the oldest binding.
+    // Returns the slot, -1 = every slot is bound.
+    [[nodiscard]] int bind(int req, std::span<const int32_t> tokens);
 };
 
 class Model;

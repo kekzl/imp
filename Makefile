@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens jinja-parity kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-inkling vram-touch-audit verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -550,12 +550,19 @@ test-golden: build
 verify: build check-gpu
 	@$(GPU_LOCKED) scripts/verify.sh full
 
-# verify-fast: pre-push gate. `build` + filtered tests + perf + 1 smoke.
+# verify-fast: pre-push gate. `build` + filtered tests + perf + 1 smoke + the Inkling serve smoke.
 # Measured on an unchanged tree: 3 s cached build + 37 s script. A source
 # change adds the full image build (#1587).
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast: build check-gpu
 	@$(GPU_LOCKED) scripts/verify.sh fast
+
+# verify-inkling: verify-fast's Inkling-2-Mini serve smoke alone (scripts/inkling_smoke.sh, ~25 GB):
+# 2 sequence slots, 2 replies past 256 tokens, then 9 new requests; 11 of 11 served and coherent.
+verify-inkling: build check-gpu
+	@$(GPU_LOCKED) docker run --rm --gpus all -v "$(CURDIR)":/src -w /src \
+	 -v "$(HOME)/models":"$(HOME)/models":ro --entrypoint bash $(DOCKER_IMG) \
+	 scripts/inkling_smoke.sh /usr/local/bin/imp-server "$(HOME)/models/Inkling-2-Mini"
 
 # vram-touch-audit: MiB held against MiB written per pool for one model (docs/VRAM_AUDIT.md). The
 # acceptance step of a model port and of any change to what a model allocates.
