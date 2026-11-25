@@ -35,6 +35,10 @@ inline LogLevel log_get_level() { return g_log_level.load(std::memory_order_rela
 void log_message(LogLevel level, const char* file, int line, const char* fmt, ...)
     __attribute__((format(printf, 4, 5)));
 
+// Throws std::runtime_error with the formatted text (384 bytes max): the exit of a wrapper that
+// cannot write its output. imp_api.cpp turns it into ImpError; tools/check_silent_void_returns.py.
+[[noreturn]] void throw_runtime_error(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
 }  // namespace imp
 
 #define IMP_LOG_DEBUG(...)                                                               \

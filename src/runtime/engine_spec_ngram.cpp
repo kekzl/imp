@@ -257,7 +257,7 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
 bool Engine::spec_verify_abandon_(int req_id, bool hybrid, int rec_slot, int p0, bool count_miss,
                                   cudaStream_t stream) {
     if (hybrid)
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_.get(),
                                            ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
     kv_manager_->rollback(req_id, p0);
     if (count_miss)
@@ -1070,8 +1070,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     int rec_slot = -1;
 
     const bool swa_table = swa_sizing_active_ && !swa_block_table.empty();
-    if (!upload_chunk(d_spec_stage_, h_stage, cap, d_spec_block_table_, block_table, d_spec_block_table_swa_,
-                      swa_block_table, swa_table, stream))
+    if (!upload_chunk(d_spec_stage_.get(), h_stage, cap, d_spec_block_table_.get(), block_table,
+                      d_spec_block_table_swa_.get(), swa_block_table, swa_table, stream))
         return false;
 
     // Forward the chunk through the standard continuation-prefill path.
@@ -1085,15 +1085,18 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
 
     InferenceState state;
     const int ctx_tier = ch.capture_on ? spec_capture_ctx_tier_(ch.ctx_len) : 0;
-    const VerifyDevPtrs dev{d_spec_tokens_,      d_spec_positions_,
-                            d_spec_block_table_, swa_table ? d_spec_block_table_swa_ : nullptr,
-                            d_spec_context_len_, d_spec_past_len_,
+    const VerifyDevPtrs dev{d_spec_tokens_,
+                            d_spec_positions_,
+                            d_spec_block_table_.get(),
+                            swa_table ? d_spec_block_table_swa_.get() : nullptr,
+                            d_spec_context_len_,
+                            d_spec_past_len_,
                             d_spec_chunk_len_};
     fill_verify_state(state, ch, kv_cache_raw_, dev, !runtime_config_.diagnostics.spec_capture_fidelity,
                       ctx_tier);
     if (decode_attn_route)
         bind_decode_attn_route(state, ch, block_table, h_spec_row_tables_pinned_.as<int32_t>(),
-                               spec_block_table_cap_, d_spec_row_block_tables_, d_spec_row_ctx_lens_,
+                               spec_block_table_cap_, d_spec_row_block_tables_.get(), d_spec_row_ctx_lens_,
                                ctx_tier, stream);
     // Declines after the KV growth: trim back to p0 (t0 not forwarded yet), count the miss.
     const auto decline = [&] {
@@ -1115,12 +1118,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (!ensure_spec_state_scratch_())
             return decline();
         rec_slot = recurrent_slot_for_(req->id);
-        if (!cuda_ok(cudaMemcpyAsync(spec_state_scratch_, ssm_state_->seq_base(rec_slot),
+        if (!cuda_ok(cudaMemcpyAsync(spec_state_scratch_.get(), ssm_state_->seq_base(rec_slot),
                                      ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream),
                      "state snapshot D2D"))
             return decline();
         (void)fill_recurrent_state(*req, state, /*reset=*/false, stream);  // reset=false cannot fail
-        arm_first_row_snapshot(state, spec_state_snap_, d_spec_snap_n_, spec_state_scratch_, ch,
+        arm_first_row_snapshot(state, spec_state_snap_.get(), d_spec_snap_n_, spec_state_scratch_.get(), ch,
                                spec_state_snap2_off_, stream);
     }
 
@@ -1162,9 +1165,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int n_ban = banned_count(d_ban, mask, stop_mask_, banned_token_ids_);
     const bool sampled = spec_arm_verify_sampling_(
         *req);  // rows draw instead of argmax (engine_spec_sampled.cpp)
-    if (!verify_argmax(*executor_, *req, ch.chunk_len, d_spec_argmax_, d_hist, n_hist, d_spec_tokens_ + 1,
-                       d_spec_topm_, recycle_m, d_ban, n_ban, h_spec_argmax_.as<int32_t>(), spec_chunk_cap_,
-                       stream))
+    if (!verify_argmax(*executor_, *req, ch.chunk_len, d_spec_argmax_.get(), d_hist, n_hist,
+                       d_spec_tokens_ + 1, d_spec_topm_, recycle_m, d_ban, n_ban,
+                       h_spec_argmax_.as<int32_t>(), spec_chunk_cap_, stream))
         // no tokens emitted: leave the request exactly as before the step
         return spec_verify_abandon_(req->id, hybrid, rec_slot, ch.p0, /*count_miss=*/false, stream);
 
@@ -1225,8 +1228,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // Drop KV for rejected draft positions: keep t0 + matched drafts.
     kv_manager_->rollback(req->id, ch.p0 + 1 + matched);
 
-    restore_hybrid_after_accept(hybrid, ssm_state_.get(), rec_slot, spec_state_scratch_, state, ch, matched,
-                                *req, spec_capture_doomed_, d_spec_chunk_len_, d_spec_context_len_,
+    restore_hybrid_after_accept(hybrid, ssm_state_.get(), rec_slot, spec_state_scratch_.get(), state, ch,
+                                matched, *req, spec_capture_doomed_, d_spec_chunk_len_, d_spec_context_len_,
                                 *executor_, captured_forward, stream);
 
     spec_stats_record_(

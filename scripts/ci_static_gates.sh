@@ -4,8 +4,9 @@
 # merged over red advisory gates because non-required jobs block nothing). Not `needs:` on
 # Build: a needs-skip's effect on required-check merging is unverified.
 # Deliberately kept advisory: Lint and Mock API (network installs in a required check),
-# clang-tidy, Real API (needs the build artifact), alloc-interpose (~15min+GPU, a
-# check-release.sh section). Everything here is cheap, hermetic, deterministic.
+# Real API (needs the build artifact), alloc-interpose (~15min+GPU, a check-release.sh
+# section). clang-tidy blocks as its own `Build` step, not here (needs the configured build/).
+# Everything here is cheap, hermetic, deterministic.
 set -uo pipefail
 
 # Repo root from this script's own location, not git: the Actions container runs as a
@@ -112,6 +113,14 @@ if want deps; then
     run "that gate still names its violations"        bash scripts/check_dep_pins.sh --selftest
 fi
 
+# The Sanitizers PR path filter reads tools/untrusted_input_sources.txt. As a regex in ci.yml it
+# missed 4 parser files on 2026-11-24 (AUDIT_ARCH_2026_11_24 X-5).
+if want untrusted; then
+    echo "== Untrusted-input surface =="
+    run "fuzz sources + tagged parsers in the Sanitizers filter" python3 tools/check_untrusted_sources.py
+    run "that gate still names a missing parser"   python3 tools/check_untrusted_sources.py --selftest
+fi
+
 if want alloc; then
     echo "== Alloc sites =="
     run "I1 allowlist gate"                     python3 tools/check_alloc_sites.py
@@ -166,6 +175,9 @@ if want launchguards; then
     # #2254: 5 GDN scan kernels read s_reduce[0] and let thread 0 overwrite it with no barrier.
     run "smem reduce slot read behind a barrier" python3 tools/check_smem_reduce_barrier.py
     run "that gate still catches its cases"     python3 tools/check_smem_reduce_barrier.py --selftest
+    # B-108: ERROR/WARN line then a bare `return;` in src/exec, src/compute, src/quant; shrinking list.
+    run "log-and-return exit allowlist"         python3 tools/check_silent_void_returns.py
+    run "that gate still classifies its cases"  python3 tools/check_silent_void_returns.py --selftest
 fi
 
 if want docs; then

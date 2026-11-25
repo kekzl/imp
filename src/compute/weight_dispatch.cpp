@@ -44,10 +44,11 @@ static bool cutlass_nvfp4_m1(const Tensor& x, void* act_data, void* act_sf, size
 // (K % 128 == 0). Stream-K takes the workspace past the activation; none under runtime.deterministic.
 static void mxfp4_prefill_gemm(const CutlassMxFP4Weight& mw, const Tensor& x, Tensor& y, int M, int N, int K,
                                void* workspace, size_t workspace_bytes, cudaStream_t stream) {
-    if (K % 128 != 0) {
-        IMP_LOG_ERROR("gemm_dispatch MXFP4: K=%d is not a multiple of 128 (one SfAtom per stage)", K);
-        return;
-    }
+    if (K % 128 != 0)
+        throw_runtime_error(
+            "gemm_dispatch MXFP4: K=%d is not a multiple of 128 (one SfAtom per stage), "
+            "M=%d N=%d",
+            K, M, N);
     const size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
     const size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
     const size_t total_needed = act_data_bytes + act_sf_bytes;
@@ -70,8 +71,10 @@ static void mxfp4_prefill_gemm(const CutlassMxFP4Weight& mw, const Tensor& x, Te
             return;
         }
     }
-    IMP_LOG_ERROR("gemm_dispatch MXFP4: workspace too small (need %zu, have %zu) or tile GEMM refused",
-                  total_needed, workspace_bytes);
+    throw_runtime_error(
+        "gemm_dispatch MXFP4: workspace too small (need %zu, have %zu) or tile GEMM "
+        "refused, M=%d N=%d K=%d",
+        total_needed, workspace_bytes, M, N, K);
 }
 
 void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
@@ -160,7 +163,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             if (M == 1) {
                 // Decode via CUTLASS_NVFP4: payload holds SfAtom (not per-16 FP8 micro_scales), so
                 // gemv_nvfp4_kpar cannot be used directly. Uses the own tile GEMM with an M=1
-                // quantized activation if workspace is large enough; else logs an error.
+                // quantized activation if workspace is large enough; else throws.
                 size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
                 size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
                 size_t total_needed = act_data_bytes + act_sf_bytes;  // the rest: optional stream-K partials
@@ -176,13 +179,11 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                                          workspace_bytes - total_needed, stream, as))
                         return;
                 }
-                // Fallback: dequant + cuBLAS (no NvFP4QuantResult with valid micro_scales).
-                IMP_LOG_WARN(
-                    "gemm_dispatch CUTLASS_NVFP4 M=1: workspace too small or the tile GEMM refused, "
-                    "falling back to gemm_cublaslt with FP16 weight approximation");
-                // Can't dequant without NvFP4QuantResult micro_scales — log error.
-                IMP_LOG_ERROR("gemm_dispatch CUTLASS_NVFP4 M=1: no valid fallback available");
-                return;
+                // No dequant fallback: the payload has no NvFP4QuantResult micro_scales.
+                throw_runtime_error(
+                    "gemm_dispatch CUTLASS_NVFP4 M=1: workspace too small (need %zu, have "
+                    "%zu) or the tile GEMM refused, no fallback, N=%d K=%d",
+                    total_needed, workspace_bytes, N, K);
             }
 
             // M>1 prefill: activate → NVFP4 cutlass, then GEMM.
@@ -206,23 +207,21 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                                           ws_left);
                 if (ok)
                     return;
-                IMP_LOG_ERROR(
+                throw_runtime_error(
                     "gemm_dispatch CUTLASS_NVFP4: GEMM failed (M=%d N=%d K=%d), "
                     "no dequant fallback (micro_scales unavailable in payload)",
                     M, N, K);
-                return;
             }
 
-            IMP_LOG_ERROR(
-                "gemm_dispatch CUTLASS_NVFP4: workspace too small (need %zu, have %zu) "
-                "and no dequant fallback (micro_scales unavailable in payload)",
-                total_needed, workspace_bytes);
-            return;
+            throw_runtime_error(
+                "gemm_dispatch CUTLASS_NVFP4: workspace too small (need %zu, have %zu) at "
+                "M=%d N=%d K=%d, no dequant fallback (micro_scales unavailable in payload)",
+                total_needed, workspace_bytes, M, N, K);
         }
 
         // MXFP4: weight is CutlassMxFP4Weight (UE8M0 SfAtom scales + linear_scales). M=1 decode:
         // gemv_mxfp4_kpar (linear_scales). M>1 prefill: quantize activation to MXFP4 SfAtom, then
-        // gemm_mxfp4_tile (mxfp4_prefill_gemm); a short workspace or a refusal logs an error.
+        // gemm_mxfp4_tile (mxfp4_prefill_gemm); a short workspace or a refusal throws.
         case StorageTier::MXFP4: {
             int M = static_cast<int>(x.shape[0]);
             int K = static_cast<int>(x.shape[1]);
@@ -242,12 +241,10 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
 
             if (M == 1) {
                 // Decode: MXFP4 GEMV using linear_scales.
-                if (mw.linear_scales != nullptr) {
-                    gemv_mxfp4_kpar(mw, reinterpret_cast<const half*>(x.data),
-                                    reinterpret_cast<half*>(y.data), N, K, stream);
-                } else {
-                    IMP_LOG_ERROR("gemm_dispatch MXFP4 M=1: linear_scales is null, cannot GEMV");
-                }
+                if (mw.linear_scales == nullptr)
+                    throw_runtime_error("gemm_dispatch MXFP4 M=1: linear_scales is null, N=%d K=%d", N, K);
+                gemv_mxfp4_kpar(mw, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data), N,
+                                K, stream);
                 return;
             }
 
@@ -293,10 +290,10 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
                 cudaError_t err = cudaMemcpyAsync(&host_scale, w.payload.fp8.d_scale, sizeof(float),
                                                   cudaMemcpyDeviceToHost, stream);
                 if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
-                if (err != cudaSuccess) {  // a default scale would be a silent wrong result
-                    IMP_LOG_ERROR("gemv_dispatch FP8: scale read failed: %s", cudaGetErrorString(err));
-                    return;
-                }
+                if (err != cudaSuccess)  // a default scale would be a silent wrong result
+                    throw_runtime_error("gemv_dispatch FP8: scale read failed for a %lld x %lld weight: %s",
+                                        static_cast<long long>(w.shape[0]),
+                                        static_cast<long long>(w.shape[1]), cudaGetErrorString(err));
             }
             Tensor w_tensor(w.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             gemv_fp8(w_tensor, x, y, host_scale, stream);
@@ -358,10 +355,9 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             mw.owns_data = false;
             mw.hadamard_bs = w.payload.mxfp4.hadamard_bs;
 
-            if (mw.linear_scales == nullptr) {
-                IMP_LOG_ERROR("gemv_dispatch MXFP4: linear_scales is null");
-                return;
-            }
+            if (mw.linear_scales == nullptr)
+                throw_runtime_error("gemv_dispatch MXFP4: linear_scales is null, shape=[%lld,%lld]",
+                                    static_cast<long long>(w.shape[0]), static_cast<long long>(w.shape[1]));
             gemv_mxfp4_kpar(mw, reinterpret_cast<const half*>(x.data), reinterpret_cast<half*>(y.data),
                             static_cast<int>(w.shape[0]), static_cast<int>(w.shape[1]), stream);
             return;

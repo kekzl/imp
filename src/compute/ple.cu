@@ -133,12 +133,9 @@ void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* co
     const int state_len = (kernel - 1) * dilation;
     if (n == 0 || n_seq <= 0)
         return;
-    if (kernel > kMaxKernel || state_len > kMaxKernel * kMaxKernel || n % n_seq != 0 ||
-        conv_state == nullptr) {
-        IMP_LOG_ERROR("ple_conv_add: kernel %d dilation %d rows %d sequences %d state %p not supported",
-                      kernel, dilation, n, n_seq, conv_state);
-        return;
-    }
+    if (kernel > kMaxKernel || state_len > kMaxKernel * kMaxKernel || n % n_seq != 0 || conv_state == nullptr)
+        throw_runtime_error("ple_conv_add: kernel %d dilation %d rows %d sequences %d state %p not supported",
+                            kernel, dilation, n, n_seq, conv_state);
     const int rows_per_seq = n / n_seq;
     const dim3 grid((channels + kThreads - 1) / kThreads, (n + kConvRowsPerBlock - 1) / kConvRowsPerBlock);
     ple_conv_add_kernel<<<grid, kThreads, 0, stream>>>(static_cast<const half*>(gv.data),

@@ -231,20 +231,18 @@ void Engine::upload_penalties(const Request& req, InferenceState& state, cudaStr
 
     size_t n = req.output_tokens.size();
     if (n > d_penalty_tokens_capacity_) {
-        if (d_penalty_tokens_)
-            vram_alloc_.free(d_penalty_tokens_);
+        d_penalty_tokens_.reset();  // before the allocation: old and new never coexist
         d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-        d_penalty_tokens_ = static_cast<int32_t*>(
-            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+        d_penalty_tokens_ = VramOwned<int32_t>(vram_alloc_, d_penalty_tokens_capacity_, "penalty_tokens");
         if (!d_penalty_tokens_) {
             IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
             d_penalty_tokens_capacity_ = 0;
             return;
         }
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req.output_tokens.data(), n * sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_.get(), req.output_tokens.data(), n * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
-    state.penalty_tokens = d_penalty_tokens_;
+    state.penalty_tokens = d_penalty_tokens_.get();
     state.n_penalty_tokens = static_cast<int>(n);
 }
 
@@ -698,9 +696,9 @@ void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> 
     if (swa_snapshots_->contains(key))
         return;  // identical prefix already snapshotted (e.g. it was just restored)
     const auto t0 = std::chrono::steady_clock::now();
-    if (!kv_manager_->swa_snapshot_pack(seq_id, snap_end, swa_snap_slab_, stream))
+    if (!kv_manager_->swa_snapshot_pack(seq_id, snap_end, swa_snap_slab_.get(), stream))
         return;  // read-relevant window not fully resident
-    if (swa_snapshots_->save(key, snap_end, swa_snap_slab_, stream)) {
+    if (swa_snapshots_->save(key, snap_end, swa_snap_slab_.get(), stream)) {
         const auto t1 = std::chrono::steady_clock::now();
         // Sync policy:
         //  - prefill-boundary save (hard_sync=false): NO sync needed. SWA blocks

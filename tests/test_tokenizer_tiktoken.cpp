@@ -106,6 +106,38 @@ TEST(TiktokenLoader, SpecialsAreAtomicAndReservedSlotsNamed) {
     EXPECT_EQ(tok.decode({264, 256, 263}), "<|im_end|>ab<|reserved_token_263|>");
 }
 
+// Kimi layout with base 262: <|im_system|> at +10 (272), <|im_middle|> at +17 (279), tool slots 273-277.
+TEST(TiktokenLoader, KimiLayoutRestoresTheFiveToolCallNames) {
+    const std::string anchors = R"("272": {"content": "<|im_system|>"}, "279": {"content": "<|im_middle|>"})";
+    Tokenizer tok;
+    ASSERT_TRUE(load(tok, rank_file(kExtra), R"({"added_tokens_decoder": {)" + anchors + "}}"));
+    EXPECT_EQ(tok.encode("<|tool_calls_section_begin|><|tool_call_begin|>ab<|tool_call_argument_begin|>"
+                         "<|tool_call_end|><|tool_calls_section_end|>"),
+              (Ids{273, 275, 256, 276, 277, 274}));
+    EXPECT_EQ(tok.decode({273, 274, 275, 276, 277}),
+              "<|tool_calls_section_begin|><|tool_calls_section_end|><|tool_call_begin|>"
+              "<|tool_call_argument_begin|><|tool_call_end|>");
+    // The upstream name replaces the reserved one, and no other slot gains a name.
+    EXPECT_EQ(tok.find_token("<|reserved_token_273|>"), -1);
+    EXPECT_EQ(tok.find_token("<|reserved_token_278|>"), 278);
+    EXPECT_EQ(tok.find_token("<|media_start|>"), -1);
+
+    // A name the config gives a tool slot wins over the built-in one.
+    Tokenizer own;
+    ASSERT_TRUE(load(own, rank_file(kExtra),
+                     R"({"added_tokens_decoder": {"273": {"content": "<|mine|>"}, )" + anchors + "}}"));
+    EXPECT_EQ(own.find_token("<|mine|>"), 273);
+    EXPECT_EQ(own.find_token("<|tool_calls_section_begin|>"), -1);
+    EXPECT_EQ(own.find_token("<|tool_call_begin|>"), 275);
+
+    // Without both anchors the marker text is ordinary bytes, as in tiktoken.
+    Tokenizer plain;
+    ASSERT_TRUE(load(plain, rank_file(kExtra)));
+    EXPECT_EQ(plain.find_token("<|tool_call_begin|>"), -1);
+    EXPECT_EQ(plain.find_token("<|reserved_token_275|>"), 275);
+    EXPECT_GT(plain.encode("<|tool_call_begin|>").size(), 1U);
+}
+
 TEST(TiktokenLoader, RawBytesRoundTrip) {
     Tokenizer tok;
     ASSERT_TRUE(load(tok, rank_file(kExtra)));
