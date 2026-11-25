@@ -70,6 +70,35 @@ TEST(GraphEpoch, WorkspaceGenerationIsTheGraphEpoch) {
     EXPECT_EQ(ws.generation(), e0 + 1);
 }
 
+// The regrow rule of the 4 DeviceOwned owners (LoRA, 2 verify scratches, released-source scratch).
+TEST(GraphEpoch, RegrowBumpsOnlyWhenALiveAddressWentAway) {
+    int a = 0, b = 0;
+    const uint64_t e0 = graph_epoch();
+    EXPECT_FALSE(bump_graph_epoch_if_moved(nullptr, &a)) << "first allocation: no graph holds an address yet";
+    EXPECT_FALSE(bump_graph_epoch_if_moved(nullptr, nullptr)) << "first allocation failed";
+    EXPECT_FALSE(bump_graph_epoch_if_moved(&a, &a)) << "the allocator handed the same address back";
+    EXPECT_EQ(graph_epoch(), e0) << "3 calls without a move: 0 recaptures";
+    EXPECT_TRUE(bump_graph_epoch_if_moved(&a, &b)) << "regrown at another address";
+    EXPECT_EQ(graph_epoch(), e0 + 1);
+    EXPECT_TRUE(bump_graph_epoch_if_moved(&a, nullptr))
+        << "released, the regrow failed: the old address is dead";
+    EXPECT_EQ(graph_epoch(), e0 + 2);
+}
+
+TEST(GraphEpoch, RegrowWithoutAMoveLeavesEveryRunnerReplaying) {
+    int a = 0, b = 0;
+    ModelRunner r;
+    r.step();
+    (void)bump_graph_epoch_if_moved(nullptr, &a);
+    (void)bump_graph_epoch_if_moved(&a, &a);
+    r.step();
+    EXPECT_EQ(r.captures, 1);
+    (void)bump_graph_epoch_if_moved(&a, &b);
+    r.step();
+    r.step();
+    EXPECT_EQ(r.captures, 2) << "one recapture for the one move";
+}
+
 TEST(GraphEpoch, RunnerWithoutAGraphIsNotReadyAndDoesNotReplay) {
     CudaGraphRunner r;
     EXPECT_FALSE(r.is_ready());

@@ -192,6 +192,8 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
     // Non-capture path: legacy lazy cudaMalloc (re-grows as needed).
     if (needed <= s_nvfp4_dequant_buf_size)
         return s_nvfp4_dequant_buf.get();
+    // I3-not-bakeable: this function returns nullptr under an active capture before both returns
+    // of the lazy buffer; a capture only ever gets the caller-owned workspace.
     s_nvfp4_dequant_buf.reset();
     s_nvfp4_dequant_buf_size = 0;
     void* raw = nullptr;

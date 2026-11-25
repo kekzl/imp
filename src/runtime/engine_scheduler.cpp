@@ -88,7 +88,8 @@ LeakedStatic<ViewOrOwned<void>> s_h_normed;
 void* mtp_prenorm_scratch(size_t need) {
     if (*s_h_normed && need <= s_h_normed->bytes())
         return s_h_normed->get();
-    // No graph epoch bump: 2 eager readers (rmsnorm, mtp_draft_step), no capture bakes the address.
+    // I3-not-bakeable: 2 eager readers on the decode stream (rmsnorm, mtp_draft_step via
+    // mtp_draft_one); the captured MTP head pass (mtp_head_pass_) takes the verify hidden rows instead.
     (void)s_h_normed->reset();
     (void)s_h_normed->set_view(engine_arena().take_bytes(need));
     if (!*s_h_normed)

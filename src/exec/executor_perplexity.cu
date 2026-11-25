@@ -17,6 +17,7 @@
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
 #include "compute/rowwise_topm.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 #include "core/tensor.h"
@@ -376,10 +377,13 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     const size_t scratch_needed =
         static_cast<size_t>(mb) * kArgmaxSplits * (sizeof(float) + sizeof(int));
     if (verify_argmax_scratch_sz_ < scratch_needed) {
+        const void* const before = verify_argmax_scratch_.get();
         verify_argmax_scratch_.reset();
         verify_argmax_scratch_ = DeviceOwned<void>::allocate(vram_alloc_, scratch_needed,
                                                              "verify_argmax_scratch",
                                                              /*force=*/true);
+        // I3: lm_head_rows_argmax launches on it inside the MTP head graph; 0 bumps on the first allocation.
+        (void)bump_graph_epoch_if_moved(before, verify_argmax_scratch_.get());
         if (!verify_argmax_scratch_.get()) {
             verify_argmax_scratch_sz_ = 0;
             return false;
@@ -390,10 +394,12 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
         return true;
     const int V = model_->config().vocab_size;
     if (verify_pen_counts_cap_ < V) {
+        const void* const before = verify_pen_counts_.get();
         verify_pen_counts_.reset();
         verify_pen_counts_ = DeviceOwned<int32_t>::allocate(vram_alloc_,
                                                             static_cast<size_t>(V) * sizeof(int32_t),
                                                             "verify_pen_counts", /*force=*/true);
+        (void)bump_graph_epoch_if_moved(before, verify_pen_counts_.get());  // I3: as the argmax scratch
         if (!verify_pen_counts_.get()) {
             verify_pen_counts_cap_ = 0;
             return false;

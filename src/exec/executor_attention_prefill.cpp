@@ -136,6 +136,8 @@
                     const size_t cap = ((full_bytes + kGrowStep - 1) / kGrowStep) * kGrowStep;
                     chunk_eager_k_.set_release_stream(stream);  // grow path: ordered on this stream
                     chunk_eager_v_.set_release_stream(stream);
+                    // I3-not-bakeable: q_offset > 0 without cap_replay is never captured: prefill graphs take
+                    // offset 0 only (engine_prefill.cpp), verify captures set cap_replay or chunk_decode_attn.
                     chunk_eager_k_.reset();
                     chunk_eager_v_.reset();
                     chunk_eager_bytes_ = 0;
