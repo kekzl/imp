@@ -8,7 +8,7 @@
 # G1 buffer(s) freed and reallocated in place with no epoch bump: 0 files, 0
 # G1n regrow site(s) marked I3-not-bakeable: 4 files, 4
 # G2 graph capture(s) in a file that reads no generation: 0 files, 0
-# G3 take site(s) not kept as a StableSpan: 0 files, 0
+# G3 take site(s) not kept as a StableSpan: closed at 0, not allowlistable (a hit fails outright)
 
 G1n src/exec/executor_attention_prefill.cpp  # 1
 G1n src/exec/executor_sampling.cu  # 1
