@@ -362,18 +362,21 @@ struct ServerState {
     std::mutex obs_mtx;
     bool obs_loaded = false;
     std::string obs_model_name;
+    imp::Engine* obs_engine = nullptr;  // dereference only under a model lease (C-13)
     struct ObsStatus {
         bool loaded;
         std::string model_name;
+        imp::Engine* engine;
     };
-    void publish_model_status(bool loaded, const std::string& name) {
+    void publish_model_status(bool loaded, const std::string& name, imp::Engine* engine = nullptr) {
         std::lock_guard<std::mutex> lk(obs_mtx);
         obs_loaded = loaded;
         obs_model_name = name;
+        obs_engine = engine;
     }
     ObsStatus model_status_snapshot() {
         std::lock_guard<std::mutex> lk(obs_mtx);
-        return {obs_loaded, obs_model_name};
+        return {obs_loaded, obs_model_name, obs_engine};
     }
 
 };
@@ -440,8 +443,11 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
 // Appends the per-tier memory gauges (I7) to a /metrics body. Lives in
-// metrics_memory.cpp.
-void append_memory_metrics(std::string& out, ServerState& state);
+// metrics_memory.cpp. `engine` is leased (lease_engine_for_scrape) or null; `es` its snapshot.
+namespace imp {
+struct EngineMetricsSnapshot;
+}  // namespace imp
+void append_memory_metrics(std::string& out, imp::Engine* engine, const imp::EngineMetricsSnapshot& es);
 // imp_gpu_power_watts / imp_gpu_energy_joules_total; nothing when NVML is absent. Energy counts
 // from start_power_metrics() (server start).
 void start_power_metrics();

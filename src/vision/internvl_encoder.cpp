@@ -48,8 +48,8 @@ size_t InternVLEncoder::demand_bytes(const VisionConfig& c) {
 
 void InternVLEncoder::free_buffers() {
     taken_bytes_ = 0;
-    d_hidden_ = d_normed_ = d_proj_ = d_qkv_ = d_q_ = d_k_ = d_v_ = d_attn_ = d_scores_ = nullptr;
-    d_ffn_ = d_shuffled_ = d_merge_norm_ = d_merge_fc_ = nullptr;
+    d_hidden_ = d_normed_ = d_proj_ = d_qkv_ = d_q_ = d_k_ = d_v_ = d_attn_ = d_scores_ = {};
+    d_ffn_ = d_shuffled_ = d_merge_norm_ = d_merge_fc_ = {};
 }
 
 bool InternVLEncoder::init(const VisionModel& model) {
@@ -62,18 +62,18 @@ bool InternVLEncoder::init(const VisionModel& model) {
     model_ = &model;
     const int64_t n = 1 + c.num_patches, H = c.hidden_size, m = c.num_patches / 4;
     bool ok = true;
-    auto take = [&](int64_t elems, const char* tag) -> half* {
+    auto take = [&](int64_t elems, const char* tag) -> StableSpan<half> {
         if (!ok)
-            return nullptr;
+            return {};
         const size_t bytes = static_cast<size_t>(elems) * sizeof(half);
-        auto slab = engine_arena().take_bytes(bytes);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             IMP_LOG_ERROR("InternVL encoder: engine arena exhausted for %s (%zu bytes)", tag, bytes);
             ok = false;
-            return nullptr;
+            return {};
         }
         taken_bytes_ += bytes;
-        return reinterpret_cast<half*>(slab.data());
+        return slab.as<half>();
     };
     d_hidden_ = take(n * H, "internvl_enc_hidden");
     d_normed_ = take(n * H, "internvl_enc_normed");
@@ -103,21 +103,20 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd)), zero = 0.0f, one = 1.0f;
     for (int c0 = 0; c0 < tokens; c0 += kAttnChunk) {
         const int rows = std::min(kAttnChunk, tokens - c0);
-        cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_,
-                                                    CUDA_R_16F, hd, static_cast<long long>(tokens) * hd,
-                                                    d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-                                                    static_cast<long long>(tokens) * hd, &zero, d_scores_,
-                                                    CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens,
-                                                    heads, CUBLAS_COMPUTE_32F, stream);
+        cublasStatus_t st = lt_gemm_strided_batched(
+            CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_.data(), CUDA_R_16F, hd,
+            static_cast<long long>(tokens) * hd, d_q_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F,
+            hd, static_cast<long long>(tokens) * hd, &zero, d_scores_.data(), CUDA_R_16F, tokens,
+            static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("InternVL encoder: QK^T failed (%d)", static_cast<int>(st));
             return false;
         }
-        launch_qwen3vl_softmax_rows(d_scores_, heads * rows, tokens, stream);
-        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_, CUDA_R_16F, hd,
-                                     static_cast<long long>(tokens) * hd, d_scores_, CUDA_R_16F, tokens,
-                                     static_cast<long long>(rows) * tokens, &zero,
-                                     d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+        launch_qwen3vl_softmax_rows(d_scores_.data(), heads * rows, tokens, stream);
+        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_.data(),
+                                     CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_.data(),
+                                     CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
+                                     d_attn_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
                                      static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("InternVL encoder: attn@V failed (%d)", static_cast<int>(st));
@@ -129,7 +128,7 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
 
 bool InternVLEncoder::encode(const half* d_patches, half* d_out, cudaStream_t stream,
                              const InternVLStageTaps* taps) {
-    if (!model_ || !d_hidden_) {
+    if (!model_ || !d_hidden_.data()) {
         IMP_LOG_ERROR("InternVL encoder: encode before init");
         return false;
     }
@@ -146,41 +145,45 @@ bool InternVLEncoder::encode(const half* d_patches, half* d_out, cudaStream_t st
     };
 
     // Conv2d with kernel == stride == patch is a GEMM against the flattened [H, 3*P*P] weight.
-    linear(d_patches, hp(M.patch_embd_w), d_hidden_ + H, np, H, features, hp(M.patch_embd_b), stream);
-    launch_internvl_cls_pos(d_hidden_, hp(M.cls_token), hp(M.position_embd), n, H, stream);
+    linear(d_patches, hp(M.patch_embd_w), d_hidden_.data() + H, np, H, features, hp(M.patch_embd_b), stream);
+    launch_internvl_cls_pos(d_hidden_.data(), hp(M.cls_token), hp(M.position_embd), n, H, stream);
     if (taps)
-        tap(taps->embeddings, d_hidden_, static_cast<int64_t>(n) * H);
+        tap(taps->embeddings, d_hidden_.data(), static_cast<int64_t>(n) * H);
 
     for (int l = 0; l < c.num_layers; ++l) {
         const VisionLayerWeights& L = M.layers[static_cast<size_t>(l)];
-        launch_qwen3vl_layernorm(d_hidden_, hp(L.ln1_w), hp(L.ln1_b), d_normed_, n, H, eps, stream);
-        linear(d_normed_, hp(L.wq), d_qkv_, n, 3 * H, H, hp(L.bq), stream);
-        launch_internvl_split_heads(d_qkv_, d_q_, d_k_, d_v_, n, c.num_heads, c.head_dim, stream);
+        launch_qwen3vl_layernorm(d_hidden_.data(), hp(L.ln1_w), hp(L.ln1_b), d_normed_.data(), n, H, eps,
+                                 stream);
+        linear(d_normed_.data(), hp(L.wq), d_qkv_.data(), n, 3 * H, H, hp(L.bq), stream);
+        launch_internvl_split_heads(d_qkv_.data(), d_q_.data(), d_k_.data(), d_v_.data(), n, c.num_heads,
+                                    c.head_dim, stream);
         if (!attention(n, stream))
             return false;
-        launch_qwen3vl_merge_heads(d_attn_, d_normed_, n, c.num_heads, c.head_dim, stream);
-        linear(d_normed_, hp(L.wo), d_proj_, n, H, H, hp(L.bo), stream);
-        launch_internvl_scaled_residual(d_hidden_, d_proj_, hp(L.ls1), n, H, stream);
+        launch_qwen3vl_merge_heads(d_attn_.data(), d_normed_.data(), n, c.num_heads, c.head_dim, stream);
+        linear(d_normed_.data(), hp(L.wo), d_proj_.data(), n, H, H, hp(L.bo), stream);
+        launch_internvl_scaled_residual(d_hidden_.data(), d_proj_.data(), hp(L.ls1), n, H, stream);
 
-        launch_qwen3vl_layernorm(d_hidden_, hp(L.ln2_w), hp(L.ln2_b), d_normed_, n, H, eps, stream);
-        linear(d_normed_, hp(L.ffn_up_w), d_ffn_, n, I, H, hp(L.ffn_up_b), stream);
-        launch_qwen3vl_gelu_erf(d_ffn_, static_cast<int64_t>(n) * I, stream);  // hidden_act "gelu"
-        linear(d_ffn_, hp(L.ffn_down_w), d_proj_, n, H, I, hp(L.ffn_down_b), stream);
-        launch_internvl_scaled_residual(d_hidden_, d_proj_, hp(L.ls2), n, H, stream);
+        launch_qwen3vl_layernorm(d_hidden_.data(), hp(L.ln2_w), hp(L.ln2_b), d_normed_.data(), n, H, eps,
+                                 stream);
+        linear(d_normed_.data(), hp(L.ffn_up_w), d_ffn_.data(), n, I, H, hp(L.ffn_up_b), stream);
+        launch_qwen3vl_gelu_erf(d_ffn_.data(), static_cast<int64_t>(n) * I, stream);  // hidden_act "gelu"
+        linear(d_ffn_.data(), hp(L.ffn_down_w), d_proj_.data(), n, H, I, hp(L.ffn_down_b), stream);
+        launch_internvl_scaled_residual(d_hidden_.data(), d_proj_.data(), hp(L.ls2), n, H, stream);
         if (taps && static_cast<size_t>(l) < taps->layers.size())
-            tap(taps->layers[static_cast<size_t>(l)], d_hidden_, static_cast<int64_t>(n) * H);
+            tap(taps->layers[static_cast<size_t>(l)], d_hidden_.data(), static_cast<int64_t>(n) * H);
     }
 
     // vision_feature_layer -1, select "default" (drop CLS), pixel shuffle 0.5, projector.
-    launch_internvl_pixel_shuffle(d_hidden_, d_shuffled_, c.pos_embed_grid, H, stream);
+    launch_internvl_pixel_shuffle(d_hidden_.data(), d_shuffled_.data(), c.pos_embed_grid, H, stream);
     if (taps)
-        tap(taps->shuffled, d_shuffled_, static_cast<int64_t>(m) * W);
-    launch_qwen3vl_layernorm(d_shuffled_, hp(M.merger.norm_w), hp(M.merger.norm_b), d_merge_norm_, m, W,
-                             1e-5f,
+        tap(taps->shuffled, d_shuffled_.data(), static_cast<int64_t>(m) * W);
+    launch_qwen3vl_layernorm(d_shuffled_.data(), hp(M.merger.norm_w), hp(M.merger.norm_b),
+                             d_merge_norm_.data(), m, W, 1e-5f,
                              stream);  // nn.LayerNorm default eps
-    linear(d_merge_norm_, hp(M.merger.fc1_w), d_merge_fc_, m, D, W, hp(M.merger.fc1_b), stream);
-    launch_qwen3vl_gelu_erf(d_merge_fc_, static_cast<int64_t>(m) * D, stream);  // projector_hidden_act "gelu"
-    linear(d_merge_fc_, hp(M.merger.fc2_w), d_out, m, D, D, hp(M.merger.fc2_b), stream);
+    linear(d_merge_norm_.data(), hp(M.merger.fc1_w), d_merge_fc_.data(), m, D, W, hp(M.merger.fc1_b), stream);
+    launch_qwen3vl_gelu_erf(d_merge_fc_.data(), static_cast<int64_t>(m) * D,
+                            stream);  // projector_hidden_act "gelu"
+    linear(d_merge_fc_.data(), hp(M.merger.fc2_w), d_out, m, D, D, hp(M.merger.fc2_b), stream);
     return true;
 }
 

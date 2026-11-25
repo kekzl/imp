@@ -210,40 +210,43 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__
 // nothing to remove. Falls back to a direct allocation when the arena is closed (a bare
 // quant unit in a test has no engine).
 namespace {
-float* g_absmax_scratch = nullptr;  // [grid] block maxima, then [1] result; view (arena or owner)
+StableSpan<float> g_absmax_scratch_view;  // [grid] block maxima, then [1] result: arena slice
 int g_absmax_scratch_grid = 0;
 uint64_t g_absmax_scratch_gen = 0;
 StaticDeviceOwned<float> g_absmax_scratch_own;  // direct allocation when the arena is closed
 constexpr uint64_t kOwnedGen = ~0ull;
 
+float* absmax_scratch_base() {
+    return g_absmax_scratch_gen == kOwnedGen ? g_absmax_scratch_own.get() : g_absmax_scratch_view.data();
+}
+
 // Returns {block_maxes, result} or {nullptr, nullptr}.
 std::pair<float*, float*> absmax_scratch(int grid) {
-    const bool live = g_absmax_scratch != nullptr &&
+    const bool live = absmax_scratch_base() != nullptr &&
                       (g_absmax_scratch_gen == kOwnedGen ||
                        g_absmax_scratch_gen == imp::engine_arena().generation());
     if (live && g_absmax_scratch_grid >= grid)
-        return {g_absmax_scratch, g_absmax_scratch + g_absmax_scratch_grid};
+        return {absmax_scratch_base(), absmax_scratch_base() + g_absmax_scratch_grid};
 
     const size_t bytes = (static_cast<size_t>(grid) + 1) * sizeof(float);
-    auto slab = imp::engine_arena().take_bytes(bytes);
+    StableSpan<std::byte> slab = imp::engine_arena().take_bytes(bytes);
     if (!slab.empty()) {
-        g_absmax_scratch = reinterpret_cast<float*>(slab.data());
+        g_absmax_scratch_view = slab.as<float>();
         g_absmax_scratch_gen = imp::engine_arena().generation();
     } else {
         // adopt releases the previous direct block (if any); a failed allocation leaves none.
         float* p = nullptr;
         const bool ok = device_alloc_all(dev_req(p, bytes)) == cudaSuccess;
         g_absmax_scratch_own.adopt(ok ? p : nullptr, bytes, nullptr);
+        g_absmax_scratch_view = {};
         if (!ok) {
-            g_absmax_scratch = nullptr;
             g_absmax_scratch_grid = 0;
             return {nullptr, nullptr};
         }
-        g_absmax_scratch = p;
         g_absmax_scratch_gen = kOwnedGen;
     }
     g_absmax_scratch_grid = grid;
-    return {g_absmax_scratch, g_absmax_scratch + grid};
+    return {absmax_scratch_base(), absmax_scratch_base() + grid};
 }
 }  // namespace
 

@@ -25,6 +25,8 @@ three places where that is not yet true, against tools/graph_stability_allowlist
                        a read of the process graph epoch, graph_epoch() of core/graph_epoch.h).
   G3 discarded proofs  take / take_bytes call lines whose result is not declared StableSpan<T>
                        or passed to X.set_view( on the same line (ViewOrOwned keeps the span).
+                       Closed at 0 since 2026-11-25 (84 before): every hit fails, no allowlist
+                       entry admits one, and a G3 line in the allowlist fails too.
 
 The list only shrinks: a file over its budget fails, a file that is not listed fails, and an
 entry above what the file still holds fails as stale.
@@ -53,6 +55,8 @@ NAMES = {
     "G2": "graph capture(s) in a file that reads no generation",
     "G3": "take site(s) not kept as a StableSpan",
 }
+# Metrics at 0 that the allowlist can no longer hold: a hit fails outright.
+CLOSED = ("G3",)
 WINDOW = 25
 
 COMMENT_LINE = re.compile(r"^\s*(//|\*|/\*)")
@@ -294,15 +298,21 @@ def write_allowlist(hits: dict[str, dict[str, int]]) -> None:
         "# G1n is the sites carrying `// I3-not-bakeable: <reason>`: a new one needs this list changed, in review.",
         "#",
     ]
-    body += [f"# {m} {NAMES[m]}: {len(hits[m])} files, {sum(hits[m].values())}" for m in METRICS]
+    body += [f"# {m} {NAMES[m]}: {len(hits[m])} files, {sum(hits[m].values())}" for m in METRICS if m not in CLOSED]
+    body += [f"# {m} {NAMES[m]}: closed at 0, not allowlistable (a hit fails outright)" for m in CLOSED]
     body.append("")
     for m in METRICS:
-        body += [f"{m} {rel}  # {hits[m][rel]}" for rel in sorted(hits[m])]
+        if m not in CLOSED:
+            body += [f"{m} {rel}  # {hits[m][rel]}" for rel in sorted(hits[m])]
     ALLOWLIST.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 
 def verdict(hits: dict[str, int], allowed: dict[str, int], metric: str) -> list[str]:
     what = NAMES[metric]
+    if metric in CLOSED:
+        return ([f"FAIL {metric} {rel}: {hits[rel]} {what}; {metric} is closed at 0, no allowlist entry admits one"
+                 for rel in sorted(hits)]
+                + [f"FAIL {metric} {rel}: {metric} is closed at 0, delete the entry" for rel in sorted(allowed)])
     fails = []
     for rel in sorted(hits):
         if rel not in allowed:
@@ -327,6 +337,13 @@ def selftest() -> int:
         ("exact", {"a.cpp": 2, "b.cu": 1}, {"a.cpp": 2, "b.cu": 1}, False),
     ]:
         results.append((name, bool(verdict(hits, allowed, "G1")) == want))
+    for name, hits, allowed, want in [
+        ("closed G3: a listed hit fails, so does its entry", {"a.cpp": 1}, {"a.cpp": 1}, 2),
+        ("closed G3: an unlisted hit fails", {"a.cpp": 1}, {}, 1),
+        ("closed G3: an entry fails", {}, {"a.cpp": 1}, 1),
+        ("closed G3: clean", {}, {}, 0),
+    ]:
+        results.append((name, len(verdict(hits, allowed, "G3")) == want))
 
     def g1(src: str) -> int:
         return count_regrow(code_lines(src))

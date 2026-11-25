@@ -7,6 +7,7 @@
 // mmq_q8_imma_q4k/_q6k/_q51.cu, dispatch in mmq_q8_imma.cu. Keep byte-identical.
 
 #include "memory/leaked_static.h"
+#include "memory/span.h"
 
 #include <algorithm>
 #include <mutex>
@@ -160,16 +161,16 @@ struct WeightPlanes {
 };
 
 struct ActScratch {
-    int8_t* xs8 = nullptr;
-    __half* xscale = nullptr;
-    float* xrowsum = nullptr;
+    StableSpan<int8_t> xs8;  // engine arena slices
+    StableSpan<__half> xscale;
+    StableSpan<float> xrowsum;
     size_t cap_mk = 0;
     size_t cap_msubs = 0;
     uint64_t gen = 0;
 };
 
 struct SplitKScratch {
-    float* buf = nullptr;
+    StableSpan<float> buf;  // engine arena slice
     size_t cap = 0;
     uint64_t gen = 0;
 };

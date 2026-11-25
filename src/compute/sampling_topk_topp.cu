@@ -459,12 +459,12 @@ __global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_
 
 // Persistent scratch for CUB sort (lazily allocated, grows only)
 struct CubSortScratch {
-    float* d_keys_in = nullptr;
-    float* d_keys_out = nullptr;
-    int32_t* d_vals_in = nullptr;
-    int32_t* d_vals_out = nullptr;
-    float* d_max_sum = nullptr;
-    void* d_temp = nullptr;
+    StableSpan<float> d_keys_in;
+    StableSpan<float> d_keys_out;
+    StableSpan<int32_t> d_vals_in;
+    StableSpan<int32_t> d_vals_out;
+    StableSpan<float> d_max_sum;
+    StableSpan<std::byte> d_temp;
     size_t temp_bytes = 0;
     int capacity = 0;  // max vocab_size allocated for
     uint64_t gen = 0;  // arena generation these came from (model swap invalidates)
@@ -479,32 +479,33 @@ struct CubSortScratch {
         *this = CubSortScratch{};
         size_t elem_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
         size_t idx_bytes = static_cast<size_t>(vocab_size) * sizeof(int32_t);
-        auto ki = engine_arena().take_bytes(elem_bytes);
-        auto ko = engine_arena().take_bytes(elem_bytes);
-        auto vi = engine_arena().take_bytes(idx_bytes);
-        auto vo = engine_arena().take_bytes(idx_bytes);
-        auto ms = engine_arena().take_bytes(2 * sizeof(float));
+        StableSpan<std::byte> ki = engine_arena().take_bytes(elem_bytes);
+        StableSpan<std::byte> ko = engine_arena().take_bytes(elem_bytes);
+        StableSpan<std::byte> vi = engine_arena().take_bytes(idx_bytes);
+        StableSpan<std::byte> vo = engine_arena().take_bytes(idx_bytes);
+        StableSpan<std::byte> ms = engine_arena().take_bytes(2 * sizeof(float));
         if (ki.empty() || ko.empty() || vi.empty() || vo.empty() || ms.empty()) {
             *this = CubSortScratch{};
             return false;
         }
-        d_keys_in = reinterpret_cast<float*>(ki.data());
-        d_keys_out = reinterpret_cast<float*>(ko.data());
-        d_vals_in = reinterpret_cast<int32_t*>(vi.data());
-        d_vals_out = reinterpret_cast<int32_t*>(vo.data());
-        d_max_sum = reinterpret_cast<float*>(ms.data());
+        d_keys_in = ki.as<float>();
+        d_keys_out = ko.as<float>();
+        d_vals_in = vi.as<int32_t>();
+        d_vals_out = vo.as<int32_t>();
+        d_max_sum = ms.as<float>();
         // Query CUB temp storage: one full-vocabulary descending radix sort.
         // (The DeviceTopK + small-sort plan this used to size for is gone —
         // see the sampler for why, issue #1142.)
         temp_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(nullptr, temp_bytes, d_keys_in, d_keys_out, d_vals_in,
-                                                  d_vals_out, vocab_size, 0, 32, stream);
-        auto tmp = engine_arena().take_bytes(temp_bytes);
+        cub::DeviceRadixSort::SortPairsDescending(nullptr, temp_bytes, d_keys_in.data(), d_keys_out.data(),
+                                                  d_vals_in.data(), d_vals_out.data(), vocab_size, 0, 32,
+                                                  stream);
+        StableSpan<std::byte> tmp = engine_arena().take_bytes(temp_bytes);
         if (tmp.empty()) {
             *this = CubSortScratch{};
             return false;
         }
-        d_temp = tmp.data();
+        d_temp = tmp;
         capacity = vocab_size;
         gen = g;
         IMP_LOG_DEBUG("CUB sort scratch: %.2f MiB from the T2 arena for vocab=%d (CUB temp %.2f MiB)",
@@ -550,7 +551,7 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     // Step 1: Compute softmax stats (max, then sum) entirely on device.
     // All intermediate values stay in d_max_sum — no D2H syncs needed.
     // d_max_sum[0] = global max, d_max_sum[1] = sum of exp.
-    init_cub_max_sum_kernel<<<1, 1, 0, stream>>>(sc.d_max_sum);
+    init_cub_max_sum_kernel<<<1, 1, 0, stream>>>(sc.d_max_sum.data());
     cudaError_t launched = cudaGetLastError();  // chain: first failure checked before the sort
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
@@ -559,28 +560,30 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
 
     // Phase 1: global max (result in d_max_sum[0]). atomicMax on the int-bitcast
     // of the max is order-independent and exact, so it is already deterministic.
-    softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
+    softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum.data());
     launched = first_launch_error(launched, cudaGetLastError());
 
     // Phase 2: sum of exp, reading max from device memory (no D2H sync). Default multi-block
     // kernel sums via cross-block FP atomicAdd (order varies run-to-run); deterministic mode
     // uses a single block with fixed-order tree reduction instead.
     if (deterministic) {
-        softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-            d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
+        softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
+                                                                                 inv_temperature,
+                                                                                 sc.d_max_sum.data(),
+                                                                                 sc.d_max_sum.data() + 1);
         launched = first_launch_error(launched, cudaGetLastError());
     } else {
         softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
-                                                                               inv_temperature, sc.d_max_sum,
-                                                                               sc.d_max_sum + 1);
+                                                                               inv_temperature,
+                                                                               sc.d_max_sum.data(),
+                                                                               sc.d_max_sum.data() + 1);
         launched = first_launch_error(launched, cudaGetLastError());
     }
 
     // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
     int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
-                                                                           inv_temperature, sc.d_max_sum,
-                                                                           sc.d_keys_in, sc.d_vals_in);
+    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, sc.d_max_sum.data(), sc.d_keys_in.data(), sc.d_vals_in.data());
     if (sampler_launch_status(first_launch_error(launched, cudaGetLastError()), "topk_cub") != cudaSuccess)
         return false;
 
@@ -592,8 +595,9 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     // top_k > MAX_TOP_K (rare, caller opted in).
     {
         size_t rs_bytes = sc.temp_bytes;
-        cudaError_t rc = cub::DeviceRadixSort::SortPairsDescending(sc.d_temp, rs_bytes, sc.d_keys_in,
-                                                                   sc.d_keys_out, sc.d_vals_in, sc.d_vals_out,
+        cudaError_t rc = cub::DeviceRadixSort::SortPairsDescending(sc.d_temp.data(), rs_bytes,
+                                                                   sc.d_keys_in.data(), sc.d_keys_out.data(),
+                                                                   sc.d_vals_in.data(), sc.d_vals_out.data(),
                                                                    vocab_size, 0, 32, stream);
         if (rc != cudaSuccess) {
             IMP_LOG_ERROR(
@@ -605,8 +609,8 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     }
 
     // Step 4: Top-p filter + sample from sorted top-k
-    topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out, sc.d_vals_out, top_k, top_p, seed,
-                                                        d_seed_salt, d_result);
+    topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out.data(), sc.d_vals_out.data(), top_k,
+                                                        top_p, seed, d_seed_salt, d_result);
     return sampler_launch_status(cudaGetLastError(), "topk_cub") == cudaSuccess;
 }
 

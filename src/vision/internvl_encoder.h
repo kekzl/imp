@@ -3,6 +3,7 @@
 // InternViT + pixel shuffle + projector (HF InternVL3.5): one fixed-size image -> num_image_tokens
 // LM embeddings. Weights from internvl_vision.h, uploaded through the shared tower upload.
 
+#include "memory/span.h"
 #include "vision/vision_model.h"
 
 #include <cuda_fp16.h>
@@ -43,9 +44,9 @@ private:
 
     const VisionModel* model_ = nullptr;
     size_t taken_bytes_ = 0;
-    half *d_hidden_ = nullptr, *d_normed_ = nullptr, *d_proj_ = nullptr, *d_qkv_ = nullptr;
-    half *d_q_ = nullptr, *d_k_ = nullptr, *d_v_ = nullptr, *d_attn_ = nullptr, *d_scores_ = nullptr;
-    half *d_ffn_ = nullptr, *d_shuffled_ = nullptr, *d_merge_norm_ = nullptr, *d_merge_fc_ = nullptr;
+    StableSpan<half> d_hidden_, d_normed_, d_proj_, d_qkv_;  // engine arena slices
+    StableSpan<half> d_q_, d_k_, d_v_, d_attn_, d_scores_;
+    StableSpan<half> d_ffn_, d_shuffled_, d_merge_norm_, d_merge_fc_;
 };
 
 }  // namespace imp

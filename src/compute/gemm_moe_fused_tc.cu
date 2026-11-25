@@ -241,12 +241,16 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 namespace {
 bool s_configured = false;
 int s_grid_size = 0;
-int* s_tile_counter = nullptr;              // view: arena slice or s_tile_counter_own
+StableSpan<int> s_tile_counter_view;        // arena slice
 StaticDeviceOwned<int> s_tile_counter_own;  // cudaMalloc fallback (arena closed), released here
+
+int* tile_counter() {
+    return s_tile_counter_view.data() ? s_tile_counter_view.data() : s_tile_counter_own.get();
+}
 
 void gemm_moe_fused_tc_reset_static_cuda_state() {
     s_tile_counter_own.reset();
-    s_tile_counter = nullptr;
+    s_tile_counter_view = {};
     s_grid_size = 0;
     s_configured = false;
 }
@@ -280,12 +284,12 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
         // arena tier for exactly this. Falls back to a direct allocation when the arena is closed
         // (a bare GEMM unit test has no engine), like the other migrated one-shot tenants.
-        if (auto slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
-            s_tile_counter = reinterpret_cast<int*>(slab.data());
-        } else if (device_alloc_all(dev_req(s_tile_counter, sizeof(int))) == cudaSuccess) {
-            s_tile_counter_own.adopt(s_tile_counter, sizeof(int), nullptr);
+        int* fallback = nullptr;
+        if (StableSpan<std::byte> slab = engine_arena().take_bytes(sizeof(int)); !slab.empty()) {
+            s_tile_counter_view = slab.as<int>();
+        } else if (device_alloc_all(dev_req(fallback, sizeof(int))) == cudaSuccess) {
+            s_tile_counter_own.adopt(fallback, sizeof(int), nullptr);
         } else {
-            s_tile_counter = nullptr;
             throw_runtime_error(
                 "gemm_q6k_fused_moe_prefill_tc: could not obtain the tile counter "
                 "(N=%d K=%d, %d experts)",
@@ -295,12 +299,12 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
     }
 
     // A stale counter makes the kernel skip tiles: no launch, error stays in cudaGetLastError.
-    IMP_CUDA_CHECK_VOID(cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream));
+    IMP_CUDA_CHECK_VOID(cudaMemsetAsync(tile_counter(), 0, sizeof(int), stream));
 
     gemm_q6k_fused_moe_prefill_tc_kernel<<<s_grid_size, TC_BLOCK, SMEM_TOTAL, stream>>>(
         static_cast<const uint8_t*>(packed_weights), static_cast<const half*>(activations),
         static_cast<half*>(output), d_offsets, sorted_token_ids, N, K, expert_stride_bytes, n_experts,
-        s_tile_counter);
+        tile_counter());
     IMP_CUDA_CHECK_LAUNCH();
 }
 

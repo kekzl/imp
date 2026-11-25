@@ -201,12 +201,13 @@ bool imma_ensure_act(int M, int K, bool capturing) {
     const size_t mk = static_cast<size_t>(M) * K;
     const size_t msubs = static_cast<size_t>(M) * (K / 32);
     const uint64_t gen = engine_arena().generation();
-    if (g_imma_act.xs8 && g_imma_act.gen == gen && g_imma_act.cap_mk >= mk && g_imma_act.cap_msubs >= msubs)
+    if (g_imma_act.xs8.data() && g_imma_act.gen == gen && g_imma_act.cap_mk >= mk &&
+        g_imma_act.cap_msubs >= msubs)
         return true;
-    if (g_imma_act.xs8 && g_imma_act.gen != gen)
+    if (g_imma_act.xs8.data() && g_imma_act.gen != gen)
         g_imma_act = ActScratch{};  // the arena was closed under us
     if (capturing) return false;
-    if (g_imma_act.xs8) {
+    if (g_imma_act.xs8.data()) {
         // Reachable only if mmq_q8_imma_preallocate()'s bound was too small: preallocation takes
         // the charged (rows, K) up front so a staircase of intermediate takes (each stranded in
         // the bump arena) cannot happen.
@@ -215,18 +216,18 @@ bool imma_ensure_act(int M, int K, bool capturing) {
             "preallocated bound — re-measure exec_imma_scratch_shape()",
             M, K, (mk + (msubs * 6)) / (1024.0 * 1024.0));
     }
-    auto xs8 = engine_arena().take_bytes(mk);
-    auto xscale = engine_arena().take_bytes(msubs * sizeof(__half));
-    auto xrowsum = engine_arena().take_bytes(msubs * sizeof(float));
+    StableSpan<std::byte> xs8 = engine_arena().take_bytes(mk);
+    StableSpan<std::byte> xscale = engine_arena().take_bytes(msubs * sizeof(__half));
+    StableSpan<std::byte> xrowsum = engine_arena().take_bytes(msubs * sizeof(float));
     if (xs8.empty() || xscale.empty() || xrowsum.empty()) {
         IMP_LOG_WARN("mmq_q8_imma: activation scratch for M=%d K=%d unavailable from the T2 arena "
                      "(%.1f MiB free) — this GEMM falls back to the dequant path",
                      M, K, engine_arena().remaining() / (1024.0 * 1024.0));
         return false;
     }
-    g_imma_act.xs8 = reinterpret_cast<int8_t*>(xs8.data());
-    g_imma_act.xscale = reinterpret_cast<__half*>(xscale.data());
-    g_imma_act.xrowsum = reinterpret_cast<float*>(xrowsum.data());
+    g_imma_act.xs8 = xs8.as<int8_t>();
+    g_imma_act.xscale = xscale.as<__half>();
+    g_imma_act.xrowsum = xrowsum.as<float>();
     g_imma_act.cap_mk = mk;
     g_imma_act.cap_msubs = msubs;
     g_imma_act.gen = gen;
@@ -240,21 +241,23 @@ SplitKScratch g_imma_splitk;
 // 512*kBN, so kExecImmaSplitkBytes covers every shape (see exec/workspace_sizes.h).
 bool imma_ensure_splitk(size_t floats, bool capturing) {
     const uint64_t gen = engine_arena().generation();
-    if (g_imma_splitk.buf && g_imma_splitk.gen == gen && g_imma_splitk.cap >= floats) return true;
-    if (g_imma_splitk.buf && g_imma_splitk.gen != gen) g_imma_splitk = SplitKScratch{};
+    if (g_imma_splitk.buf.data() && g_imma_splitk.gen == gen && g_imma_splitk.cap >= floats)
+        return true;
+    if (g_imma_splitk.buf.data() && g_imma_splitk.gen != gen)
+        g_imma_splitk = SplitKScratch{};
     if (capturing) return false;
-    if (g_imma_splitk.buf) {
+    if (g_imma_splitk.buf.data()) {
         IMP_LOG_WARN("mmq_q8_imma: split-K scratch regrew to %.1f MiB — the N*used bound in "
                      "exec/workspace_sizes.h (kExecImmaSplitkBytes) no longer holds",
                      floats * sizeof(float) / (1024.0 * 1024.0));
     }
-    auto slab = engine_arena().take_bytes(floats * sizeof(float));
+    StableSpan<std::byte> slab = engine_arena().take_bytes(floats * sizeof(float));
     if (slab.empty()) {
-        g_imma_splitk.buf = nullptr;
+        g_imma_splitk.buf = {};
         g_imma_splitk.cap = 0;
         return false;  // caller drops to the non-split-K path
     }
-    g_imma_splitk.buf = reinterpret_cast<float*>(slab.data());
+    g_imma_splitk.buf = slab.as<float>();
     g_imma_splitk.cap = floats;
     g_imma_splitk.gen = gen;
     return true;
@@ -283,16 +286,16 @@ void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
         return;
     const int total_warps = ((M * (K / 32)) + 7) / 8;  // 8 blocks of 32 per warp
     const int blocks = min(2048, (total_warps + 7) / 8);
-    quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8, g_imma_act.xscale,
-                                                         g_imma_act.xrowsum);
+    quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8.data(),
+                                                         g_imma_act.xscale.data(), g_imma_act.xrowsum.data());
     IMP_CUDA_CHECK_LAUNCH();
-    g_last_quant = LastQuant{x, M, K, stream, g_imma_act.xs8, g_imma_act.gen};
+    g_last_quant = LastQuant{x, M, K, stream, g_imma_act.xs8.data(), g_imma_act.gen};
 }
 
 bool imma_act_holds(const __half* x, int M, int K, cudaStream_t stream) {
     const LastQuant& l = g_last_quant;
     return l.xs8 != nullptr && l.x == x && l.M == M && l.K == K && l.stream == stream &&
-           l.xs8 == g_imma_act.xs8 && l.gen == g_imma_act.gen;
+           l.xs8 == g_imma_act.xs8.data() && l.gen == g_imma_act.gen;
 }
 
 void imma_act_forget() { g_last_quant = LastQuant{}; }

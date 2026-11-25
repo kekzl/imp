@@ -682,6 +682,10 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         state.batching.reset();
     }
 
+    // Publish "not loaded" for the whole load window, before the engine pointer it carries is freed;
+    // republished as loaded once the context is up and the name is set (#889, C-13).
+    state.publish_model_status(false, "");
+
     // Free existing model/context
     const bool swapping = state.ctx != nullptr || state.model != nullptr;
     if (state.ctx) {
@@ -699,9 +703,6 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     state.tok = nullptr;
     state.have_template = false;
     state.model_name.clear();
-    // Publish "not loaded" for the whole load window; republished as loaded
-    // once the context is up and the name is set (#889 observability snapshot).
-    state.publish_model_status(false, "");
 
     // Auto-detect format from path
     ImpModelFormat format = imp::is_safetensors_dir(path) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
@@ -777,7 +778,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // <org>/<name>, so a client sending the repo id matches instead of swapping (model_id_for_path).
     state.model_name = imp_server::model_id_for_path(path);
     state.loaded_model_path = path;  // remembered for /admin/resume
-    state.publish_model_status(true, state.model_name);
+    state.publish_model_status(true, state.model_name, state.ctx->engine.get());
 
     // Set up tokenizer and chat template
     state.tok = state.model->model->tokenizer();

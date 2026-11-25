@@ -912,6 +912,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         encoder_ws_storage_.reset(ews.release());
         IMP_LOG_INFO("Encoder embedder ready (arch=%s, max_tokens=%d, d=%d)",
                      model_arch_name(model_->config_.arch), cap, model_->config_.d_model);
+        publish_metrics_snapshot();  // /metrics reads only published state (C-13)
         return true;
     }
 
@@ -993,6 +994,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                          runtime_config_.speculative.min_match, runtime_config_.speculative.max_match,
                          spec_suffix_idx_);
 
+    publish_metrics_snapshot();  // /metrics reads only published state (C-13)
     return true;
 }
 

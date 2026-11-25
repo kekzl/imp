@@ -106,8 +106,8 @@ __global__ void rowwise_topm_reduce_kernel(const float* __restrict__ pvals,
 // Persistent partial scratch (rows*kTopMSplits*m floats+ints). Graph-safe:
 // allocated once at first use for the max shape and never freed mid-run.
 namespace {
-float* g_topm_pvals = nullptr;
-int32_t* g_topm_pidxs = nullptr;
+StableSpan<float> g_topm_pvals;  // engine arena slices
+StableSpan<int32_t> g_topm_pidxs;
 size_t g_topm_cap = 0;
 uint64_t g_topm_gen = 0;  // arena generation; a model swap invalidates the pair
 
@@ -118,28 +118,28 @@ uint64_t g_topm_gen = 0;  // arena generation; a model swap invalidates the pair
 // draws on arena slack and returns without a result if that runs out.
 bool topm_ensure(size_t need) {
     const uint64_t g = engine_arena().generation();
-    if (g_topm_pvals && g_topm_gen == g && need <= g_topm_cap)
+    if (g_topm_pvals.data() && g_topm_gen == g && need <= g_topm_cap)
         return true;
     if (g_topm_gen != g) {
-        g_topm_pvals = nullptr;
-        g_topm_pidxs = nullptr;
+        g_topm_pvals = {};
+        g_topm_pidxs = {};
         g_topm_cap = 0;
         g_topm_gen = g;
     }
-    auto pv = engine_arena().take_bytes(need * sizeof(float));
-    auto pi = engine_arena().take_bytes(need * sizeof(int32_t));
+    StableSpan<std::byte> pv = engine_arena().take_bytes(need * sizeof(float));
+    StableSpan<std::byte> pi = engine_arena().take_bytes(need * sizeof(int32_t));
     if (pv.empty() || pi.empty()) {
         IMP_LOG_WARN(
             "rowwise_topm: %.2f MiB unavailable from the T2 arena (%.1f MiB free) — top-M "
             "returns empty for this call",
             need * 8.0 / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
-        g_topm_pvals = nullptr;
-        g_topm_pidxs = nullptr;
+        g_topm_pvals = {};
+        g_topm_pidxs = {};
         g_topm_cap = 0;
         return false;
     }
-    g_topm_pvals = reinterpret_cast<float*>(pv.data());
-    g_topm_pidxs = reinterpret_cast<int32_t*>(pi.data());
+    g_topm_pvals = pv.as<float>();
+    g_topm_pidxs = pi.as<int32_t>();
     g_topm_cap = need;
     return true;
 }
@@ -154,10 +154,10 @@ void rowwise_topm(const float* d_logits, int rows, int vocab, int m, int32_t* d_
     if (!topm_ensure(need))
         return;
     dim3 grid(rows, kTopMSplits);
-    rowwise_topm_partial_kernel<<<grid, 256, 0, stream>>>(d_logits, vocab, m, g_topm_pvals,
-                                                          g_topm_pidxs);
+    rowwise_topm_partial_kernel<<<grid, 256, 0, stream>>>(d_logits, vocab, m, g_topm_pvals.data(),
+                                                          g_topm_pidxs.data());
     IMP_CUDA_CHECK_LAUNCH();
-    rowwise_topm_reduce_kernel<<<rows, 32, 0, stream>>>(g_topm_pvals, g_topm_pidxs, vocab, m,
+    rowwise_topm_reduce_kernel<<<rows, 32, 0, stream>>>(g_topm_pvals.data(), g_topm_pidxs.data(), vocab, m,
                                                         d_out);
     IMP_CUDA_CHECK_LAUNCH();
 }

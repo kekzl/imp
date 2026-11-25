@@ -472,6 +472,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_audio.cpp
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_stats.cpp
+    src/runtime/engine_metrics_snapshot.cpp
     src/runtime/engine_spec_sampled.cpp
     src/runtime/engine_spec_constrained.cpp
     src/runtime/engine_spec_buffers.cpp
@@ -1145,6 +1146,8 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_residual_sizing.cpp
         # KV re-sizing at the measured library reserve (#2436), pure.
         tests/test_kv_replan.cpp
+        # C-13: /metrics reads the per-step engine snapshot; a scrape never sees half a publish.
+        tests/test_engine_metrics_snapshot.cpp
         tests/test_graph_slots.cpp
         # T5's engine-persistent half. The property that matters — freed exactly
         # once, never after a move — is ownership, not CUDA, so it belongs in the

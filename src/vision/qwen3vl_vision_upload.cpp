@@ -75,7 +75,7 @@ std::expected<size_t, std::string> qwen3vl_upload_vision_tower(VisionModel& mode
             return;
         }
         const size_t bytes = staging.size() * sizeof(half);
-        auto slab = engine_arena().take_bytes(bytes);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             err = "engine arena exhausted uploading vision tower tensor '" + what +
                   "': the arena was reserved without this tower";

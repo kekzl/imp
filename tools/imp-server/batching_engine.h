@@ -247,6 +247,8 @@ private:
 
     // Active requests being processed by the engine
     std::vector<std::shared_ptr<ServerRequest>> active_requests_;
+    // active_requests_.size() for queue_depth(): the worker resizes the vector without a lock (C-13).
+    std::atomic<int> active_count_{0};
 
     // Session closes (HTTP threads -> worker) and the TTL sweep, run at most once per second.
     std::mutex session_mutex_;
