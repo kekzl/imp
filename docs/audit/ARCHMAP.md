@@ -9,7 +9,7 @@ this file is the ownership/lifetime/hot-path slice an auditor needs.
 Intended direction, an upper layer may include a lower one:
 
 ```
-api > runtime > vision > exec > lora > model > compute > quant > memory > core
+api > runtime > vision = audio > exec > lora > model > compute > quant > memory > core
 ```
 
 This is an order, not a DAG the tree satisfies. With one node per layer the include

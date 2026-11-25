@@ -35,6 +35,24 @@ A TU that is a candidate AND acquires AND does not re-arm fails unless it is
 in tools/static_reset_allowlist.txt with a reason. A listed TU that no longer
 matches is a stale entry and fails too, so the list cannot rot either way.
 
+Per NAME (AUDIT_ARCH_2026_11_24 X-7: one hook used to pass a TU however many
+statics it held). In a TU that acquires and re-arms, every candidate static
+must be covered:
+
+  by the hook   = its name occurs in the body of a function registered with
+                  IMP_REGISTER_CUDA_STATIC_RESET, or of a function of the same
+                  TU that the hook calls (transitively)
+  by the arena  = its name occurs in a function of the TU that reads
+                  engine_arena().generation(), or in one that calls such a
+                  function directly (the caller of a `valid()` helper), or its
+                  type is a struct of the TU with that read in a member
+
+An uncovered static fails unless the allowlist carries `<path>::<name>` with a
+reason. A static that another TU resets names the function:
+`<path>::<name>  reset-by=<function>  <reason>`; the function must be defined
+under src/ outside that TU. A name entry is stale when the static is gone or
+covered, or when its reset-by function no longer exists.
+
 Usage:
     python3 tools/check_static_reset.py             # check (CI)
     python3 tools/check_static_reset.py --list      # every candidate TU + status
@@ -46,6 +64,8 @@ import argparse
 import pathlib
 import re
 import sys
+
+from check_pdl_registration import balanced, strip_comments
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
@@ -60,6 +80,13 @@ ACQUIRE = re.compile(
 )
 REARM_HOOK = re.compile(r"\bIMP_REGISTER_CUDA_STATIC_RESET\s*\(")
 REARM_GEN = re.compile(r"\bengine_arena\(\)\s*\.\s*generation\s*\(")
+HOOK_ARG = re.compile(r"\bIMP_REGISTER_CUDA_STATIC_RESET\s*\(\s*(\w+)\s*\)")
+RESET_BY = re.compile(r"reset-by=(\w+)")
+NAMESPACE_HEAD = re.compile(r"(?:\bnamespace\b[^()=;]*|\bextern\s*\"[^\"]*\"\s*)$")
+FUNC_NAME = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+CALL = FUNC_NAME
+TYPE_HEAD = re.compile(r"\b(?:struct|class)\s+(\w+)[^;{()]*\{")
+NOT_A_NAME = {"__launch_bounds__", "__attribute__", "alignas", "decltype", "noexcept", "requires"}
 
 # `static <type> <name> [= init];` at any indentation. Function declarations
 # and definitions have a `(` before any `=`, which the initializer check drops.
@@ -126,7 +153,70 @@ def classify(text: str) -> tuple[str, list[str]]:
     return "no-rearm", names
 
 
-def scan() -> dict[str, tuple[str, list[str]]]:
+def function_bodies(text: str) -> list[tuple[str, str]]:
+    """(name, body) of every namespace-scope function definition in comment-stripped text."""
+    out = []
+    i, n, mark = 0, len(text), 0
+    while i < n:
+        ch = text[i]
+        if ch in ";}":
+            mark = i + 1
+        elif ch == "{":
+            header = "\n".join(ln for ln in text[mark:i].splitlines() if not ln.lstrip().startswith("#"))
+            if NAMESPACE_HEAD.search(header):
+                mark = i + 1  # transparent: its members are namespace scope too
+            else:
+                end = balanced(text, i, "{", "}")
+                if end < 0:
+                    break
+                names = [nm for nm in FUNC_NAME.findall(header) if nm not in NOT_A_NAME]
+                if names and "=" not in header.split("(", 1)[0]:
+                    out.append((names[0], text[i:end]))
+                i = mark = end
+                continue
+        i += 1
+    return out
+
+
+def uncovered(text: str, names: list[str]) -> list[str]:
+    """The candidate names neither a registered hook nor an arena-generation check reaches."""
+    code = strip_comments(text)
+    funcs = function_bodies(code)
+    bodies: dict[str, list[str]] = {}
+    for name, body in funcs:
+        bodies.setdefault(name, []).append(body)
+    reach: list[str] = []
+    todo = sorted(set(HOOK_ARG.findall(code)))
+    seen: set[str] = set()
+    while todo:
+        fn = todo.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        for body in bodies.get(fn, []):
+            reach.append(body)
+            todo.extend(sorted(c for c in set(CALL.findall(body)) if c in bodies and c not in seen))
+    gen_funcs = {name for name, body in funcs if REARM_GEN.search(body)}
+    for name, body in funcs:
+        if name in gen_funcs or gen_funcs & set(CALL.findall(body)):
+            reach.append(body)
+    covered = "\n".join(reach)
+    # A static whose own type checks the generation in a member function (CubSortScratch::ensure).
+    gen_types = set()
+    for m in TYPE_HEAD.finditer(code):
+        end = balanced(code, m.end() - 1, "{", "}")
+        if end > 0 and REARM_GEN.search(code[m.end():end]):
+            gen_types.add(m.group(1))
+
+    def by_type(nm: str) -> bool:
+        return any(re.search(r"\b" + re.escape(t) + r"\s+" + re.escape(nm) + r"\b", code) for t in gen_types)
+
+    return [nm for nm in names
+            if not re.search(r"\b" + re.escape(nm) + r"\b", covered) and not by_type(nm)]
+
+
+def scan() -> dict[str, tuple[str, list[str], list[str]]]:
+    """rel -> (status, candidate names, names no hook and no generation check covers)."""
     out = {}
     for p in sorted(SRC.rglob("*")):
         if p.suffix not in SUFFIXES or not p.is_file():
@@ -134,9 +224,10 @@ def scan() -> dict[str, tuple[str, list[str]]]:
         rel = p.relative_to(REPO).as_posix()
         if rel.startswith(EXEMPT_PREFIXES):
             continue
-        status, names = classify(p.read_text(encoding="utf-8", errors="replace"))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        status, names = classify(text)
         if names:
-            out[rel] = (status, names)
+            out[rel] = (status, names, uncovered(text, names) if status == "ok" else [])
     return out
 
 
@@ -153,17 +244,65 @@ def read_allowlist() -> dict[str, str]:
     return allowed
 
 
+def defined_outside(function: str, rel: str) -> bool:
+    """True when `function` is defined in a src/ file other than `rel`."""
+    call = re.compile(r"\b" + re.escape(function) + r"\s*\(")
+    for p in sorted(SRC.rglob("*")):
+        if p.suffix not in SUFFIXES + (".h", ".cuh") or not p.is_file():
+            continue
+        if p.relative_to(REPO).as_posix() == rel:
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if call.search(text) and any(nm == function for nm, _ in function_bodies(strip_comments(text))):
+            return True
+    return False
+
+
+def name_verdict(results: dict[str, tuple[str, list[str], list[str]]], allowed: dict[str, str],
+                 defined=defined_outside) -> list[str]:
+    """Failure lines of the per-name rule; `allowed` holds the `<path>::<name>` entries."""
+    fails = []
+    for rel, (_, _, missing) in sorted(results.items()):
+        for name in missing:
+            if f"{rel}::{name}" not in allowed:
+                fails.append(f"{rel}::{name}: lazy device static that no registered hook and no "
+                             f"engine_arena().generation() check of its TU reaches")
+    for key, reason in sorted(allowed.items()):
+        rel, _, name = key.partition("::")
+        if name not in results.get(rel, ("", [], []))[2]:
+            fails.append(f"{key}: stale allowlist entry (the static is gone, or its TU now resets it)")
+            continue
+        m = RESET_BY.match(reason)
+        if m and not defined(m.group(1), rel):
+            fails.append(f"{key}: stale allowlist entry, reset-by={m.group(1)} is not defined under src/ "
+                         f"outside {rel}")
+        if not (reason[m.end():] if m else reason).strip():
+            fails.append(f"{key}: allowlist entry without a reason")
+    return fails
+
+
 def check(list_all: bool) -> int:
     results = scan()
-    allowed = read_allowlist()
+    everything = read_allowlist()
+    allowed = {k: v for k, v in everything.items() if "::" not in k}
+    by_name = {k: v for k, v in everything.items() if "::" in k}
     if list_all:
-        for rel, (status, names) in results.items():
+        for rel, (status, names, missing) in results.items():
             tag = status if rel not in allowed else f"{status} (allowlisted)"
-            print(f"  {tag:<26} {rel}  [{', '.join(names)}]")
+            shown = [nm + ("" if nm not in missing else
+                           " (listed)" if f"{rel}::{nm}" in by_name else " (UNCOVERED)") for nm in names]
+            print(f"  {tag:<26} {rel}  [{', '.join(shown)}]")
     failures = 0
-    unlisted = [rel for rel, (s, _) in results.items() if s == "no-rearm" and rel not in allowed]
-    stale = [rel for rel in allowed if results.get(rel, ("not-candidate", []))[0] != "no-rearm"]
+    unlisted = [rel for rel, (s, *_) in results.items() if s == "no-rearm" and rel not in allowed]
+    stale = [rel for rel in allowed if results.get(rel, ("not-candidate", [], []))[0] != "no-rearm"]
     missing_reason = [rel for rel, reason in allowed.items() if not reason]
+    name_fails = name_verdict(results, by_name)
+    if name_fails:
+        failures += len(name_fails)
+        print("check_static_reset: per-name rule (reset the static in the TU's hook, or list")
+        print(f"  <path>::<name> in {ALLOWLIST.relative_to(REPO)} with reset-by=<function> or a reason):")
+        for line in name_fails:
+            print(f"  {line}")
     if unlisted:
         failures += len(unlisted)
         print("check_static_reset: lazy device static with no re-arm (register a hook with")
@@ -182,12 +321,16 @@ def check(list_all: bool) -> int:
         print("check_static_reset: allowlist entries without a reason:")
         for rel in missing_reason:
             print(f"  {rel}")
-    n_ok = sum(1 for s, _ in results.values() if s == "ok")
+    n_ok = sum(1 for s, *_ in results.values() if s == "ok")
     n_cand = len(results)
+    n_names = sum(len(names) for s, names, _ in results.values() if s == "ok")
+    n_missing = sum(len(missing) for _, _, missing in results.values())
+    tail = (f"{n_ok}/{n_cand} candidate TUs re-arm; {n_names} statics in them, {n_names - n_missing} "
+            f"covered by a hook or a generation check, {n_missing} not")
     if failures:
-        print(f"check_static_reset: {failures} failure(s) ({n_ok}/{n_cand} candidate TUs re-arm)")
+        print(f"check_static_reset: {failures} failure(s) ({tail})")
         return 1
-    print(f"check_static_reset: ok ({n_ok}/{n_cand} candidate TUs re-arm, {len(allowed)} allowlisted)")
+    print(f"check_static_reset: ok ({tail}; allowlist: {len(allowed)} TUs, {len(by_name)} statics)")
     return 0
 
 
@@ -246,7 +389,56 @@ def selftest() -> int:
         ok = got == want
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} {label}: {got} {names}" + ("" if ok else f" (want {want})"))
-    print(f"selftest: {len(cases) - failures}/{len(cases)} cases")
+    hook = ("static float* s_a = nullptr;\nstatic float* s_b = nullptr;\n"
+            "void fill() { cudaMalloc(&s_a, 4); cudaMalloc(&s_b, 4); }\n"
+            "namespace {\nvoid drop_b() { s_b = nullptr; }\n"
+            "void reset() { s_a = nullptr; %s}\nIMP_REGISTER_CUDA_STATIC_RESET(reset);\n}\n")
+    gen = ("static float* s_a = nullptr;\nstatic float* s_b = nullptr;\nstatic uint64_t s_gen = 0;\n"
+           "static bool valid() { return s_gen == engine_arena().generation(); }\n"
+           "float* a() { if (!valid()) { auto s = engine_arena().take_bytes(4); s_a = s.data(); } return s_a; }\n"
+           "float* b() { if (!s_b) cudaMalloc(&s_b, 4); return s_b; }\n")
+    name_cases = [
+        # (label, text, expected uncovered names)
+        ("both statics reset in the hook", hook % "s_b = nullptr; ", []),
+        ("second static not in the hook", hook % "", ["s_b"]),
+        ("second static reset by a function the hook calls", hook % "drop_b(); ", []),
+        ("a name only in a comment of the hook does not count", hook % "/* s_b */ ", ["s_b"]),
+        ("generation check covers the static of its caller, not the other one", gen, ["s_b"]),
+        ("generation check in a member function of the static's own type",
+         "struct Scratch {\n  float* p = nullptr;\n  uint64_t gen = 0;\n"
+         "  bool ensure() { if (gen == engine_arena().generation()) return true;\n"
+         "    p = engine_arena().take_bytes(4).data(); return true; }\n};\n"
+         "static Scratch s_scratch;\nstatic float* s_other = nullptr;\n"
+         "void f() { s_scratch.ensure(); cudaMalloc(&s_other, 4); }\n", ["s_other"]),
+    ]
+    for label, text, want in name_cases:
+        status, names = classify(text)
+        got = uncovered(text, names) if status == "ok" else ["<status " + status + ">"]
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}: uncovered {got}" + ("" if ok else f" (want {want})"))
+    res = {"src/a.cu": ("ok", ["s_a", "s_b"], ["s_b"])}
+    foreign = lambda fn, rel: fn == "other_tu_clear"  # noqa: E731
+    list_cases = [
+        # (label, results, allowlist, expected failure count)
+        ("uncovered static, not listed", res, {}, 1),
+        ("static reset via a listed foreign function",
+         res, {"src/a.cu::s_b": "reset-by=other_tu_clear  the executor clears it"}, 0),
+        ("listed with a reason and no reset-by", res, {"src/a.cu::s_b": "host callback, no device memory"}, 0),
+        ("reset-by names a function that does not exist",
+         res, {"src/a.cu::s_b": "reset-by=gone_fn  the executor clears it"}, 1),
+        ("reset-by without a reason", res, {"src/a.cu::s_b": "reset-by=other_tu_clear"}, 1),
+        ("stale entry: the hook now resets the static",
+         {"src/a.cu": ("ok", ["s_a", "s_b"], [])}, {"src/a.cu::s_b": "reset-by=other_tu_clear  x"}, 1),
+        ("stale entry: the TU is gone", {}, {"src/a.cu::s_b": "reason"}, 1),
+    ]
+    for label, results, allowed, want in list_cases:
+        got = len(name_verdict(results, allowed, foreign))
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}: {got} failure(s)" + ("" if ok else f" (want {want})"))
+    total = len(cases) + len(name_cases) + len(list_cases)
+    print(f"selftest: {total - failures}/{total} cases")
     return 1 if failures else 0
 
 

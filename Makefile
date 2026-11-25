@@ -733,9 +733,17 @@ check-owning-frees:
 alloc-sites-stats:
 	@$(PY_RUN) tools/check_alloc_sites.py --stats
 
+# X-6 gate: a kernel that calls pdl_wait() is registered, every *_pdl_register() is called.
+check-pdl-registration:
+	@$(PY_RUN) tools/check_pdl_registration.py --list
+
+# X-9 gate: every directory under src/ has a row in docs/internals/ARCHITECTURE.md and a layer rank.
+check-arch-map:
+	@$(PY_RUN) tools/check_arch_map.py
+
 # Lazy device statics must register an IMP_REGISTER_CUDA_STATIC_RESET hook (or
 # check engine_arena().generation()), else the second engine in a process reads
-# the first one's closed arena. CPU only, no GPU.
+# the first one's closed arena; per static, by name. CPU only, no GPU.
 check-static-reset:
 	@$(PY_RUN) tools/check_static_reset.py --list
 
