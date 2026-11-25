@@ -10,6 +10,7 @@
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/moe_nvfp4_cache_rule.h"
+#include "exec/moe_nvfp4_released_keys.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
@@ -684,6 +685,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
             // `stream` also sequences the frees behind the copies above without a device sync.
             // Each owner releases on `stream` at the end of its if statement: data, then scales.
             if (w.data) {
+                erase_released_expert_keys(*wcache_, w.data);
                 if (auto old = pre_dequant_internal::take_model_allocation_async(*mut_model, w.data,
                                                                                  expert_packed_bytes, stream))
                     freed_bytes += expert_packed_bytes;
@@ -706,69 +708,37 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         // wcache_->cutlass_nvfp4 lookup. Without this, expert_*_ids[e] = kInvalidTensorID and
         // covers_ids() rejects the fast path.
         if (cutlass_sm120_nvfp4_available()) {
-            // Phase 0 may have already created per-expert CUTLASS entries
-            // (with SfAtom scales). If so, just re-stamp the expert Tensors
-            // to point into the contiguous buffer and reuse Phase 0's entries.
-            bool phase0_has_cutlass = wcache_->cutlass_nvfp4.contains(experts[0].data);
             size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
             size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
-            void* d_sfatom = nullptr;
-            if (!phase0_has_cutlass) {
-                auto sfatom_own = (sfatom_total <= moe_logical_avail)
-                                      ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total,
-                                                                    "nvfp4_moe_sfatom", /*force=*/true)
-                                      : DeviceOwned<void>{};
-                d_sfatom = sfatom_own.get();
-                if (d_sfatom) {
-                    convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
-                                                       static_cast<int>(K), stream);
-                    // The per-expert slices below are entries without an owner: the slab's owner
-                    // lives in owned_sf_slabs (AUDIT B5/L1: it leaked once per layer and projection).
-                    wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
-                }
-            }
-            if (d_sfatom || phase0_has_cutlass) {
+            auto sfatom_own = (sfatom_total <= moe_logical_avail)
+                                  ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom",
+                                                                /*force=*/true)
+                                  : DeviceOwned<void>{};
+            void* d_sfatom = sfatom_own.get();
+            if (d_sfatom) {
+                convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
+                                                   static_cast<int>(K), stream);
+                // The per-expert slices below are entries without an owner: the slab's owner
+                // lives in owned_sf_slabs (AUDIT B5/L1: it leaked once per layer and projection).
+                wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
                 for (int e = 0; e < ne; ++e) {
                     auto& w = experts[e];
-                    void* old_data = w.data;
                     void* data_slice = static_cast<char*>(d_packed) +
                                        (static_cast<size_t>(e) * expert_packed_bytes);
                     w.data = data_slice;
                     w.scales = static_cast<char*>(d_ms) + (static_cast<size_t>(e) * expert_ms_bytes);
                     w.on_device = true;
                     w.tensor_scale = h_ts[e];
-                    if (phase0_has_cutlass) {
-                        // Move Phase 0's CUTLASS entry from old key to new key
-                        auto it = wcache_->cutlass_nvfp4.find(old_data);
-                        if (it != wcache_->cutlass_nvfp4.end()) {
-                            CutlassNvFP4CacheEntry cw = std::move(it->second);
-                            cw.data = data_slice;
-                            wcache_->cutlass_nvfp4.erase(it);
-                            wcache_->cutlass_nvfp4[data_slice] = std::move(cw);
-                        }
-                        // Move NVFP4 entry too
-                        auto nit = wcache_->nvfp4.find(old_data);
-                        if (nit != wcache_->nvfp4.end()) {
-                            NvFP4QuantResult nv = nit->second;  // layout only: the new entry is a view
-                            nv.packed_data = data_slice;
-                            nv.micro_scales = w.scales;
-                            nv.owned = false;  // slices of the contiguous copy above
-                            wcache_->nvfp4.erase(nit);
-                            wcache_->nvfp4[data_slice] = NvFP4CacheEntry(std::move(nv));
-                        }
-                    } else {
-                        void* sf_slice = static_cast<char*>(d_sfatom) +
-                                         (static_cast<size_t>(e) * sf_per_expert);
-                        CutlassNvFP4Weight cw;
-                        cw.data = data_slice;
-                        cw.scale_factors = sf_slice;
-                        cw.tensor_scale = h_ts[e];
-                        cw.N = N;
-                        cw.K = K;
-                        cw.sf_bytes = sf_per_expert;
-                        cw.sf_borrowed = true;
-                        wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
-                    }
+                    void* sf_slice = static_cast<char*>(d_sfatom) + (static_cast<size_t>(e) * sf_per_expert);
+                    CutlassNvFP4Weight cw;
+                    cw.data = data_slice;
+                    cw.scale_factors = sf_slice;
+                    cw.tensor_scale = h_ts[e];
+                    cw.N = N;
+                    cw.K = K;
+                    cw.sf_bytes = sf_per_expert;
+                    cw.sf_borrowed = true;
+                    wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
                 }
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_->cutlass_nvfp4_bytes += sfatom_total;
