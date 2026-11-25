@@ -1,5 +1,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "memory/device_alloc_all.h"
+#include "quant/leaked_static.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm.h"
 #include "core/cuda_static_reset.h"
@@ -104,7 +105,7 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
 // GEMM for NVFP4 weights: C = input @ A^T. A [N,K] NVFP4 packed, input [M,K] FP16,
 // C [M,N] FP16. Strategy: dequantize A to FP16, then call cuBLAS gemm.
 
-static void* s_nvfp4_dequant_buf = nullptr;
+static StaticDeviceOwned<void> s_nvfp4_dequant_buf;  // lazy fallback scratch, released by the hook
 static size_t s_nvfp4_dequant_buf_size = 0;
 static std::mutex s_nvfp4_dequant_mtx;
 
@@ -112,10 +113,7 @@ static std::mutex s_nvfp4_dequant_mtx;
 // cudaMalloc'd buffer is freed here — s_nvfp4_dequant_ws_buf is caller-owned.
 void nvfp4_gemm_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
-    if (s_nvfp4_dequant_buf) {
-        device_free_all(s_nvfp4_dequant_buf);
-        s_nvfp4_dequant_buf = nullptr;
-    }
+    s_nvfp4_dequant_buf.reset();
     s_nvfp4_dequant_buf_size = 0;
 }
 
@@ -193,19 +191,19 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
 
     // Non-capture path: legacy lazy cudaMalloc (re-grows as needed).
     if (needed <= s_nvfp4_dequant_buf_size)
-        return s_nvfp4_dequant_buf;
-    if (s_nvfp4_dequant_buf)
-        device_free_all(s_nvfp4_dequant_buf);
-    s_nvfp4_dequant_buf = nullptr;
+        return s_nvfp4_dequant_buf.get();
+    s_nvfp4_dequant_buf.reset();
     s_nvfp4_dequant_buf_size = 0;
-    cudaError_t err = device_alloc_all(dev_req(s_nvfp4_dequant_buf, needed));
+    void* raw = nullptr;
+    cudaError_t err = device_alloc_all(dev_req(raw, needed));
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("gemm_nvfp4: failed to allocate %zu bytes for dequant buffer: %s", needed,
                       cudaGetErrorString(err));
         return nullptr;
     }
+    s_nvfp4_dequant_buf.adopt(raw, needed, nullptr);
     s_nvfp4_dequant_buf_size = needed;
-    return s_nvfp4_dequant_buf;
+    return s_nvfp4_dequant_buf.get();
 }
 
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream, float beta) {

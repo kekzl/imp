@@ -2,6 +2,7 @@
 
 #include "compute/moe_group_limit.h"
 #include "core/tensor.h"
+#include "memory/device_owned.h"
 #include <cuda_runtime.h>
 #include <utility>
 #include <vector>
@@ -22,7 +23,7 @@ struct MoeRoutingResult {
 // Pre-allocated buffer pool for MoE routing temporaries.
 // Eliminates per-call cudaMalloc during moe_topk_gating.
 struct MoeRoutingBuffers {
-    void* pool = nullptr;
+    void* pool = nullptr;  // view of pool_own_ (null = not allocated)
     size_t pool_size = 0;
 
     // Pointers into pool
@@ -41,6 +42,7 @@ struct MoeRoutingBuffers {
     // and returns to (tag moe_routing); null takes it from the driver.
     [[nodiscard]] bool allocate(int max_tokens, int max_experts, int top_k, VRAMAllocator* va = nullptr);
     VRAMAllocator* va_ = nullptr;
+    DeviceOwned<void> pool_own_;  // the allocation `pool` views; releases through va_ or the driver
     void free();
     MoeRoutingBuffers() = default;
     // Owns pool: no copies (a copy double-frees, H-018); a move takes the pool and empties the source.

@@ -10,6 +10,7 @@
 // buffers so the forward is plain FP16 GEMMs.
 
 #include "core/tensor.h"
+#include "memory/device_owned.h"
 #include <cuda_runtime.h>
 #include <vector>
 #include <span>
@@ -38,10 +39,14 @@ struct EncoderWorkspace {
     float rope_theta = 10000.0f;
     float ln_eps = 1e-12f;
 
-    // Dequantized FP16 weights (owned).
+    // Every allocation the raw pointers below view (weights first, then scratch); released by
+    // encoder_workspace_free, each exactly once.
+    std::vector<DeviceOwned<void>> owned;
+
+    // Dequantized FP16 weights (views into `owned`).
     std::vector<EncoderLayerWeights> layers;
 
-    // Activation scratch (owned), sized for max_tokens.
+    // Activation scratch (views into `owned`), sized for max_tokens.
     int32_t* d_tokens = nullptr;     // [max_n]
     int32_t* d_positions = nullptr;  // [max_n]
     void* d_h = nullptr;             // [max_n, d] FP16 hidden

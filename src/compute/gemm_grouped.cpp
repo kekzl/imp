@@ -4,6 +4,7 @@
 #include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 
 #include <cublasLt.h>
 #include <cuda_runtime.h>
@@ -196,7 +197,7 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     void** d_A_ptrs = nullptr;
     void** d_B_ptrs = nullptr;
     void** d_C_ptrs = nullptr;
-    bool owns_ptrs = false;
+    DeviceOwned<void*> a_own, b_own, c_own;  // hold the arrays only when allocated here
 
     if (d_work_ptrs && n_active <= n_experts) {
         // Use pre-allocated device memory: [A..., B..., C...]
@@ -210,7 +211,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
                                                    dev_req(d_B_ptrs, ptr_bytes),
                                                    dev_req(d_C_ptrs, ptr_bytes)),
                             "gemm_moe_batched pointer arrays");
-        owns_ptrs = true;
+        a_own.adopt_async(d_A_ptrs, ptr_bytes, stream);
+        b_own.adopt_async(d_B_ptrs, ptr_bytes, stream);
+        c_own.adopt_async(d_C_ptrs, ptr_bytes, stream);
     }
 
     // Single upload of all pointer arrays
@@ -239,11 +242,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
                           g.M, g.count, K, N, (int)st);
     }
 
-    if (owns_ptrs) {
-        device_free_all_async(stream, static_cast<void*>(d_A_ptrs));
-        device_free_all_async(stream, static_cast<void*>(d_B_ptrs));
-        device_free_all_async(stream, static_cast<void*>(d_C_ptrs));
-    }
+    a_own.reset();
+    b_own.reset();
+    c_own.reset();
 }
 
 }  // namespace imp

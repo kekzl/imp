@@ -6,6 +6,8 @@
 // Tile constants, cp.async primitives, cross-TU kernel declarations; definitions live in
 // mmq_q8_imma_q4k/_q6k/_q51.cu, dispatch in mmq_q8_imma.cu. Keep byte-identical.
 
+#include "quant/leaked_static.h"
+
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
@@ -148,9 +150,11 @@ constexpr size_t q6k_smem_bytes(int BM) {
 // Weight caches are model-resident direct allocations (T1, A7 step 6 will move them);
 // activation triple + split-K slice come from the T2 arena, carrying their generation
 // (A7 step 8 / AUDIT B13).
+// Owns its 2 planes; move-only through its owners. g_imma_weights is a LeakedStatic: only
+// mmq_q8_imma_release_all releases, never a static destructor after the CUDA runtime.
 struct WeightPlanes {
-    int8_t* qs = nullptr;
-    __half* sc = nullptr;  // interleaved (alpha, beta) [N][K/32][2]
+    DeviceOwned<int8_t> qs;
+    DeviceOwned<__half> sc;  // interleaved (alpha, beta) [N][K/32][2]
     int N = 0;             // total rows (ne x per-expert rows for MoE)
     int K = 0;
 };
@@ -176,7 +180,7 @@ extern std::mutex g_imma_mtx;
 extern size_t g_imma_plane_budget;
 extern size_t g_imma_plane_used;
 extern bool g_imma_plane_budget_hit;
-extern std::unordered_map<const void*, WeightPlanes> g_imma_weights;
+extern LeakedStatic<std::unordered_map<const void*, WeightPlanes>> g_imma_weights;
 extern ActScratch g_imma_act;
 extern SplitKScratch g_imma_splitk;
 

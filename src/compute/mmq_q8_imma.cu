@@ -362,15 +362,15 @@ bool launch_q8_k128_split(const WeightPlanes& w, __half* out_f16, int M, int N, 
                           bool beta1, cudaStream_t stream) {
     const int rows_big = q8_rows_big(grid, M, n_sms);
     const dim3 gbig(grid.x, (rows_big + 127) / 128, 1);
-    if (!launch_q8_k128(g_imma_act.xs8, g_imma_act.xscale, w.qs, w.sc, out_f16, rows_big, N, K, 128, beta1,
-                        gbig, stream))
+    if (!launch_q8_k128(g_imma_act.xs8, g_imma_act.xscale, w.qs.get(), w.sc.get(), out_f16, rows_big, N, K,
+                        128, beta1, gbig, stream))
         return false;
     if (rows_big < M) {
         const size_t subs = static_cast<size_t>(K) / 32;
         const int rows_small = M - rows_big;
         const dim3 g32(grid.x, (rows_small + 31) / 32, 1);
         if (!launch_q8_k128(g_imma_act.xs8 + (static_cast<size_t>(rows_big) * K),
-                            g_imma_act.xscale + (rows_big * subs), w.qs, w.sc,
+                            g_imma_act.xscale + (rows_big * subs), w.qs.get(), w.sc.get(),
                             out_f16 + (static_cast<size_t>(rows_big) * N), rows_small, N, K, 32, beta1, g32,
                             stream))
             IMP_LOG_ERROR("mmq imma q8 k128: BM=32 tail launch refused after the BM=128 launch");
@@ -400,15 +400,15 @@ void launch_q8_plane_dense(const WeightPlanes& w, __half* out_f16, int M, int N,
     if (d_offsets == nullptr && launch_q8_k128_split(w, out_f16, M, N, K, grid, n_sms, false, stream))
         return;
     mmq_imma_kernel<128, false, false>
-        <<<gbig, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                        out_f16, rows_big, N, K, d_offsets, w_stride, wsc_stride);
+        <<<gbig, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs.get(),
+                                        w.sc.get(), out_f16, rows_big, N, K, d_offsets, w_stride, wsc_stride);
     IMP_CUDA_CHECK_LAUNCH();
     if (d_offsets != nullptr || rows_big >= M)
         return;
     mmq_imma_kernel<32, false, false>
         <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8 + (static_cast<size_t>(rows_big) * K),
                                        g_imma_act.xscale + (rows_big * subs),
-                                       g_imma_act.xrowsum + (rows_big * subs), w.qs, w.sc,
+                                       g_imma_act.xrowsum + (rows_big * subs), w.qs.get(), w.sc.get(),
                                        out_f16 + (static_cast<size_t>(rows_big) * N), rows_small, N, K,
                                        nullptr, w_stride, wsc_stride);
     IMP_CUDA_CHECK_LAUNCH();
@@ -427,13 +427,15 @@ bool launch_q8_small_grid(const WeightPlanes& w, __half* out_f16, int M, int N, 
         const dim3 gn(N / 32, m_tiles32, 1);
         if (beta == 1.0f) {
             mmq_imma_kernel<32, true, false, false, 32>
-                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs,
-                                              w.sc, out_f16, M, N, K, nullptr, w_stride, wsc_stride);
+                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+                                              w.qs.get(), w.sc.get(), out_f16, M, N, K, nullptr, w_stride,
+                                              wsc_stride);
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             mmq_imma_kernel<32, false, false, false, 32>
-                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs,
-                                              w.sc, out_f16, M, N, K, nullptr, w_stride, wsc_stride);
+                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+                                              w.qs.get(), w.sc.get(), out_f16, M, N, K, nullptr, w_stride,
+                                              wsc_stride);
             IMP_CUDA_CHECK_LAUNCH();
         }
         return true;
@@ -445,9 +447,9 @@ bool launch_q8_small_grid(const WeightPlanes& w, __half* out_f16, int M, int N, 
     if (!small_m && !dense_small_grid)
         return false;
     const dim3 g32(grid.x, m_tiles32, ne);
-    mmq_imma_kernel<32, false, false><<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                                    g_imma_act.xrowsum, w.qs, w.sc, out_f16,
-                                                                    M, N, K, d_offsets, w_stride, wsc_stride);
+    mmq_imma_kernel<32, false, false>
+        <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs.get(),
+                                       w.sc.get(), out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
@@ -529,7 +531,7 @@ bool gemm_common(const void* w_blocks,
         return launch_q6k(static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, grid, small_m, d_offsets,
                           beta, capturing, stream);
 
-    const auto& w = g_imma_weights[w_blocks];
+    const auto& w = (*g_imma_weights)[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
 
@@ -550,8 +552,8 @@ bool gemm_common(const void* w_blocks,
                 dim3 sgrid(n_tiles, 1, used);
                 mmq_imma_kernel<32, false, false, true>
                     <<<sgrid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
-                                                     w.qs, w.sc, out_f16, M, N, K, nullptr, w_stride,
-                                                     wsc_stride, g_imma_splitk.buf, ks_per_split);
+                                                     w.qs.get(), w.sc.get(), out_f16, M, N, K, nullptr,
+                                                     w_stride, wsc_stride, g_imma_splitk.buf, ks_per_split);
                 IMP_CUDA_CHECK_LAUNCH();
                 const int total = static_cast<int>(slice);
                 mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used,
@@ -572,8 +574,8 @@ bool gemm_common(const void* w_blocks,
         if (d_offsets == nullptr && launch_q8_k128_split(w, out_f16, M, N, K, grid, n_sms, true, stream))
             return true;
         mmq_imma_kernel<128, true, false>
-            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
+            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs.get(),
+                                            w.sc.get(), out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         launch_q8_plane_dense(w, out_f16, M, N, K, grid, ne, d_offsets, w_stride, wsc_stride, n_sms, stream);
@@ -687,13 +689,7 @@ void mmq_q8_imma_release_all() {
     // guards re-armed here). Q8_0 weight caches are direct allocations: model-resident
     // (T1, A7 step 6), keyed by source weight pointer, outlive nothing else here.
     g_imma_splitk = SplitKScratch{};
-    // frees every entry, order-independent (#2210)
-    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
-    for (auto& [_, w] : g_imma_weights) {
-        device_free_all(w.qs);
-        device_free_all(w.sc);
-    }
-    g_imma_weights.clear();
+    g_imma_weights->clear();  // every entry releases its 2 planes
     g_imma_act = ActScratch{};
     imma_act_forget();
     // The plane budget is per-model: a swap re-plans it. Give the accounting

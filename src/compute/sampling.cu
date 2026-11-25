@@ -5,6 +5,7 @@
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
+#include "quant/leaked_static.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -187,14 +188,12 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
 // can reach it: a function-local static went unreset by any teardown, so a second engine
 // in the process read the first one's closed arena (AUDIT_ARCH_2026 B-2).
 namespace {
-int32_t* s_greedy_result = nullptr;
-bool s_greedy_result_owned = false;  // cudaMalloc fallback (arena closed), freed here
+int32_t* s_greedy_result = nullptr;              // view: arena slice or s_greedy_result_own
+StaticDeviceOwned<int32_t> s_greedy_result_own;  // cudaMalloc fallback (arena closed), released here
 
 void sampling_reset_static_cuda_state() {
-    if (s_greedy_result_owned)
-        device_free_all(s_greedy_result);
+    s_greedy_result_own.reset();
     s_greedy_result = nullptr;
-    s_greedy_result_owned = false;
 }
 IMP_REGISTER_CUDA_STATIC_RESET(sampling_reset_static_cuda_state);
 }  // namespace
@@ -212,12 +211,11 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     if (!d_result) {
         if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
             d_result = reinterpret_cast<int32_t*>(slab.data());
-            s_greedy_result_owned = false;
         } else {
             // cudaMalloc fallback: arena closed in a bare unit test; runs at most once per process.
             cuda_call_or_throw(device_alloc_all(dev_req(d_result, sizeof(int32_t))),
                                "sample_greedy result scratch");
-            s_greedy_result_owned = true;
+            s_greedy_result_own.adopt(d_result, sizeof(int32_t), nullptr);
         }
         s_greedy_result = d_result;
     }

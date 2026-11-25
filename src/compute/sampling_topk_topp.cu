@@ -1,5 +1,6 @@
 #include "compute/sampling.h"
 #include "memory/device_alloc_all.h"
+#include "memory/device_owned.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
@@ -619,26 +620,10 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
     return sampler_readback_or_throw(d_result, stream, "sample_topk_topp readback");
 }
 
-namespace {
-// Frees an internally allocated d_result on every exit, including a throw (#2307).
-struct OwnedSampleScratch {
-    int32_t* const p;  // const members: copy assignment is implicitly deleted
-    const bool owned;
-    OwnedSampleScratch(int32_t* ptr, bool is_owned) : p(ptr), owned(is_owned) {}
-    ~OwnedSampleScratch() {
-        if (owned)
-            device_free_all(p);
-    }
-    OwnedSampleScratch(const OwnedSampleScratch&) = delete;
-};
-}  // namespace
-
 // Shared implementation for both sample_topk_topp overloads.
-// When owns_result is true, d_result was allocated internally and will be freed.
 static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int top_k, float top_p,
                                      float inv_temperature, unsigned int seed, int32_t* d_result,
-                                     bool owns_result, cudaStream_t stream) {
-    const OwnedSampleScratch scratch{d_result, owns_result};
+                                     cudaStream_t stream) {
     // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
     if (top_k > MAX_TOP_K)
         return sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
@@ -663,9 +648,10 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
 
     int32_t* d_result = nullptr;
     cuda_call_or_throw(device_alloc_all(dev_req(d_result, SAMPLE_SCRATCH_BYTES)), "sample_topk_topp scratch");
+    DeviceOwned<int32_t> scratch;  // released on every exit, including a throw (#2307)
+    scratch.adopt(d_result, SAMPLE_SCRATCH_BYTES, nullptr);
 
-    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, true,
-                                 stream);
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
 }
 
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
@@ -679,8 +665,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
         temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, false,
-                                 stream);
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
 }
 
 bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,

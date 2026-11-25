@@ -4,24 +4,11 @@
 # a new allocation gets a move-only owner instead (VramOwned or DeviceOwned, src/memory/;
 # docs/internals/MEMORY.md, invariant I5).
 #
-# remaining: 170 release sites in 62 files, 8 owner-or-view flags in 7 files
+# remaining: 135 release sites in 47 files, 2 owner-or-view flags in 2 files
 
 [release sites]
-src/compute/constrain_device_buffers.h  # 1
-src/compute/encoder_forward.cu  # 3
-src/compute/gemm.cpp  # 2
-src/compute/gemm_batched.cpp  # 1
-src/compute/gemm_grouped.cpp  # 3
-src/compute/gemm_moe_fused_tc.cu  # 1
-src/compute/mmq_q4k_imma_tile.cu  # 1
-src/compute/mmq_q8_imma.cu  # 2
-src/compute/mmq_q8_imma_scratch.cu  # 1
-src/compute/moe_routing.cu  # 2
-src/compute/mtp_forward.cu  # 6
+src/compute/mtp_forward.cu  # 4
 src/compute/nvfp4_sfatom_quant.cu  # 1
-src/compute/sampling.cu  # 1
-src/compute/sampling_penalties.cu  # 1
-src/compute/sampling_topk_topp.cu  # 1
 src/exec/activation_calibrator.cu  # 6
 src/exec/executor_attention.cpp  # 1
 src/exec/executor_attention_prefill.cpp  # 1
@@ -55,11 +42,9 @@ src/lora/lora_adapter.cpp  # 2
 src/model/inkling_weights.cu  # 3
 src/model/model.cpp  # 2
 src/model/weight_upload.cpp  # 15
-src/quant/fp8_quant.cu  # 2
-src/quant/gpt_oss_mxfp4_convert.cpp  # 6
-src/quant/mxfp4_sfatom.cu  # 5
-src/quant/nvfp4_gemm.cu  # 2
-src/quant/nvfp4_quant.cu  # 7
+src/quant/gpt_oss_mxfp4_convert.cpp  # 1
+src/quant/mxfp4_sfatom.cu  # 3
+src/quant/nvfp4_quant.cu  # 5
 src/runtime/batch.cpp  # 1
 src/runtime/cuda_graph.cu  # 1
 src/runtime/engine_graph_decode.cpp  # 5
@@ -71,10 +56,5 @@ src/vision/inkling_vision.cu  # 1
 src/vision/vision_pipeline.cpp  # 1
 
 [owner-or-view flags]
-src/compute/gemm_moe_fused_tc.cu  # 1
-src/compute/mtp_forward.cu  # 1
-src/compute/sampling.cu  # 1
-src/compute/sampling_topk_topp.cu  # 2
-src/quant/fp8_quant.cu  # 1
 src/quant/nvfp4_quant.h  # 1
 src/runtime/engine_scheduler.cpp  # 1

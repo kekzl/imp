@@ -96,7 +96,7 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
 
 
 std::mutex g_imma_mtx;
-std::unordered_map<const void*, WeightPlanes> g_imma_weights;
+LeakedStatic<std::unordered_map<const void*, WeightPlanes>> g_imma_weights;
 ActScratch g_imma_act;
 
 // Q8_0 weight caches (up to 8.6 GiB, 1.125B/element) are taken lazily on first prefill,
@@ -160,8 +160,9 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     // Q8_0 only: SoA planes cost 1.06x source, fine for dense Q8 models. Q4_K (esp. MoE
     // experts) reads raw blocks in-kernel instead: the plane variant duplicated all expert
     // weights and hit the 32-GB VRAM wall on Qwen3-30B (pp512 8x slower under UVM paging).
-    auto it = g_imma_weights.find(src);
-    if (it != g_imma_weights.end() && it->second.N == N && it->second.K == K) return true;
+    auto it = g_imma_weights->find(src);
+    if (it != g_imma_weights->end() && it->second.N == N && it->second.K == K)
+        return true;
     if (capturing) return false;  // never allocate inside graph capture
 
     WeightPlanes w;
@@ -171,19 +172,23 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     const size_t need = imma_q8_plane_bytes(N, K);
     if (!imma_plane_budget_take(need, "Q8_0 plane", N, K))
         return false;
-    if (device_alloc_all(dev_req(w.qs, static_cast<size_t>(N) * K)) != cudaSuccess)
+    const size_t qs_bytes = static_cast<size_t>(N) * K;
+    const size_t sc_bytes = static_cast<size_t>(N) * subs * 2 * sizeof(__half);
+    int8_t* qs = nullptr;
+    if (device_alloc_all(dev_req(qs, qs_bytes)) != cudaSuccess)
         return false;
-    if (device_alloc_all(dev_req(w.sc, static_cast<size_t>(N) * subs * 2 * sizeof(__half))) != cudaSuccess) {
-        device_free_all(w.qs);
-        return false;
-    }
+    w.qs.adopt(qs, qs_bytes, nullptr);
+    __half* sc = nullptr;
+    if (device_alloc_all(dev_req(sc, sc_bytes)) != cudaSuccess)
+        return false;  // w goes out of scope and releases qs
+    w.sc.adopt(sc, sc_bytes, nullptr);
     g_imma_plane_used += need;
     MemAccount::instance().note("imma_q8_planes", static_cast<std::ptrdiff_t>(need));
     const int total = N * static_cast<int>(subs);
-    q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const uint8_t*>(src),
-                                                             w.qs, w.sc, total);
+    q8_split_kernel<<<(total + 255) / 256, 256, 0, stream>>>(static_cast<const uint8_t*>(src), qs, sc, total);
     IMP_CUDA_CHECK_LAUNCH();
-    g_imma_weights[src] = w;
+    // Same source pointer, other shape: the move assignment releases the entry's 2 old planes.
+    (*g_imma_weights)[src] = std::move(w);
     return true;
 }
 
@@ -331,13 +336,12 @@ bool mmq_q8_imma_build_planes(const void* src, int N, int K, cudaStream_t stream
 
 bool mmq_q8_imma_planes_to_f16(const void* src, __half* dst, cudaStream_t stream) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
-    const auto it = g_imma_weights.find(src);
-    if (it == g_imma_weights.end())
+    const auto it = g_imma_weights->find(src);
+    if (it == g_imma_weights->end())
         return false;
     const int64_t total = static_cast<int64_t>(it->second.N) * it->second.K;
-    q8_planes_to_f16_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(it->second.qs,
-                                                                                            it->second.sc,
-                                                                                            dst, total);
+    q8_planes_to_f16_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(
+        it->second.qs.get(), it->second.sc.get(), dst, total);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

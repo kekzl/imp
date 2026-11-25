@@ -58,15 +58,18 @@ __global__ void encoder_l2_normalize_kernel(float* __restrict__ v, int d) {
     for (int i = threadIdx.x; i < d; i += blockDim.x) v[i] *= inv;
 }
 
-// Dequantize one weight tensor to a fresh FP16 device buffer. F16 sources are
-// device-copied as-is.
-void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
+// Dequantize one weight tensor to a fresh FP16 device buffer that `owned` takes. F16 sources
+// are device-copied as-is. Returns the view, null on failure (nothing kept).
+void* dequant_to_fp16(const Tensor& w, cudaStream_t stream, std::vector<DeviceOwned<void>>& owned) {
     if (!w.data) return nullptr;
     const int rows = static_cast<int>(w.shape[0]);
     const int cols = static_cast<int>(w.shape[1]);
     void* dst = nullptr;
-    if (device_alloc_all(dev_req(dst, static_cast<size_t>(rows) * cols * sizeof(__half))) != cudaSuccess)
+    const size_t bytes = static_cast<size_t>(rows) * cols * sizeof(__half);
+    if (device_alloc_all(dev_req(dst, bytes)) != cudaSuccess)
         return nullptr;
+    DeviceOwned<void> own;
+    own.adopt(dst, bytes, nullptr);
     bool ok = true;
     if (w.qtype == QType::F16) {
         const cudaError_t err = cudaMemcpyAsync(dst, w.data, static_cast<size_t>(rows) * cols * sizeof(__half),
@@ -80,10 +83,9 @@ void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
         IMP_LOG_ERROR("encoder: unsupported weight qtype %d", std::to_underlying(w.qtype));
         ok = false;
     }
-    if (!ok) {
-        device_free_all(dst);
-        return nullptr;
-    }
+    if (!ok)
+        return nullptr;  // own releases dst
+    owned.push_back(std::move(own));
     return dst;
 }
 
@@ -110,13 +112,13 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
     for (int i = 0; i < ws.n_layers; ++i) {
         const auto& L = model.layer(i);
         auto& E = ws.layers[i];
-        E.wq = dequant_to_fp16(L.wq, stream);
-        E.wk = dequant_to_fp16(L.wk, stream);
-        E.wv = dequant_to_fp16(L.wv, stream);
-        E.wo = dequant_to_fp16(L.wo, stream);
-        E.wg = dequant_to_fp16(L.w_gate, stream);
-        E.wu = dequant_to_fp16(L.w_up, stream);
-        E.wd = dequant_to_fp16(L.w_down, stream);
+        E.wq = dequant_to_fp16(L.wq, stream, ws.owned);
+        E.wk = dequant_to_fp16(L.wk, stream, ws.owned);
+        E.wv = dequant_to_fp16(L.wv, stream, ws.owned);
+        E.wo = dequant_to_fp16(L.wo, stream, ws.owned);
+        E.wg = dequant_to_fp16(L.w_gate, stream, ws.owned);
+        E.wu = dequant_to_fp16(L.w_up, stream, ws.owned);
+        E.wd = dequant_to_fp16(L.w_down, stream, ws.owned);
         if (!E.wq || !E.wk || !E.wv || !E.wo || !E.wg || !E.wu || !E.wd) {
             IMP_LOG_ERROR("encoder: weight dequant failed at layer %d", i);
             encoder_workspace_free(ws);
@@ -128,7 +130,10 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
     const size_t nff = static_cast<size_t>(max_tokens) * ws.d_ff * sizeof(__half);
     const size_t ns = static_cast<size_t>(ws.n_heads) * max_tokens * max_tokens * sizeof(float);
     bool ok = true;
-    auto alloc = [&](void** p, size_t bytes) { ok &= device_alloc_all(dev_req(*p, bytes)) == cudaSuccess; };
+    auto alloc = [&](void** p, size_t bytes) {
+        ok &= device_alloc_all(dev_req(*p, bytes)) == cudaSuccess;
+        ws.owned.emplace_back().adopt(*p, bytes, nullptr);  // null *p: an empty entry
+    };
     alloc(reinterpret_cast<void**>(&ws.d_tokens), max_tokens * sizeof(int32_t));
     alloc(reinterpret_cast<void**>(&ws.d_positions), max_tokens * sizeof(int32_t));
     alloc(&ws.d_h, nd);
@@ -163,16 +168,8 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
 }
 
 void encoder_workspace_free(EncoderWorkspace& ws) {
-    for (auto& E : ws.layers)
-        for (void* p : {E.wq, E.wk, E.wv, E.wo, E.wg, E.wu, E.wd})
-            if (p)
-                device_free_all(p);
+    ws.owned.clear();  // weights, then scratch: the order the hand frees had
     ws.layers.clear();
-    for (void* p : {static_cast<void*>(ws.d_tokens), static_cast<void*>(ws.d_positions), ws.d_h,
-                    ws.d_q, ws.d_k, ws.d_v, ws.d_attn, ws.d_proj, ws.d_gate, ws.d_up, ws.d_act,
-                    ws.d_scores, static_cast<void*>(ws.d_pooled)})
-        if (p)
-            device_free_all(p);
     ws.d_tokens = nullptr;
     ws.d_positions = nullptr;
     ws.d_h = ws.d_q = ws.d_k = ws.d_v = ws.d_attn = ws.d_proj = nullptr;

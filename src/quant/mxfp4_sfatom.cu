@@ -103,14 +103,9 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
 
     void* d_sf = nullptr;
     void* d_linear_sf = nullptr;
-    if (device_alloc_all(dev_req(d_sf, sf_bytes)) != cudaSuccess ||
-        device_alloc_all(dev_req(d_linear_sf, linear_sf_bytes)) != cudaSuccess) {
-        if (d_sf)
-            device_free_all(d_sf);
-        if (d_linear_sf)
-            device_free_all(d_linear_sf);
+    // Both or none: a failed second request releases the first.
+    if (device_alloc_all(dev_req(d_sf, sf_bytes), dev_req(d_linear_sf, linear_sf_bytes)) != cudaSuccess)
         return false;
-    }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
 
     const uint8_t* scale_src = static_cast<const uint8_t*>(raw_gpu) + data_bytes;
