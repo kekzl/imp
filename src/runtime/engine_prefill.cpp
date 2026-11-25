@@ -193,7 +193,8 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
     // An image request participates only through its content hash (cache is
     // addressed by TOKEN IDS, every image token shares one id): a request with
     // an image but no hash is excluded outright, degrading to "no reuse", never to "the previous picture".
-    const bool cacheable = req->prefix_reuse_allowed();
+    // Inkling2-Loop: inkling_resume_ already rewound its slot to this offset, reuse is decided at admission.
+    const bool cacheable = req->prefix_reuse_allowed() && model_->config().arch != ModelArch::INKLING2;
     if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0 && !ppl_capture_.active &&
         !req->embedding_request && cacheable) {
         // Hybrid models cap reuse at the recurrent-snapshot boundary, same as

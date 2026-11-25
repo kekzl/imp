@@ -33,7 +33,8 @@ template <int R>
 __global__ void dspark_attn_split_kernel(const half* __restrict__ q, const half* __restrict__ k,
                                          const half* __restrict__ v, float* __restrict__ work, int rows,
                                          int n_heads, int n_kv_heads, const int* __restrict__ d_ctx,
-                                         int kv_len_arg, float scale, const int* __restrict__ d_first) {
+                                         int kv_len_arg, float scale, const int* __restrict__ d_first,
+                                         const int* __restrict__ blocks) {
     const int kv_len = kv_len_of(d_ctx, rows, kv_len_arg);
     const int n_splits = n_splits_for(kv_len);
     if (static_cast<int>(blockIdx.y) >= n_splits)
@@ -75,8 +76,9 @@ __global__ void dspark_attn_split_kernel(const half* __restrict__ q, const half*
             const int key = i / (kHd / 8);
             const int c = (i % (kHd / 8)) * 8;
             const bool ok = j0 + key < j_end;
-            const size_t src = (static_cast<size_t>(first + j0 + key) * kv_stride) +
-                               (static_cast<size_t>(g) * kHd) + c;
+            const int kk = first + j0 + key;
+            const int row = ok && blocks ? (__ldg(blocks + (kk >> 4)) << 4) | (kk & 15) : kk;
+            const size_t src = (static_cast<size_t>(row) * kv_stride) + (static_cast<size_t>(g) * kHd) + c;
             const uint4 zero = {0u, 0u, 0u, 0u};
             *reinterpret_cast<uint4*>(&sk[key][c]) = ok ? *reinterpret_cast<const uint4*>(k + src) : zero;
             *reinterpret_cast<uint4*>(&sv[key][c]) = ok ? *reinterpret_cast<const uint4*>(v + src) : zero;
@@ -188,7 +190,8 @@ namespace {
 
 cudaError_t launch_dspark_attention(const half* q, const half* k, const half* v, half* o, float* work,
                                     int rows, int n_heads, int n_kv_heads, const int* d_ctx, int kv_len,
-                                    float scale, cudaStream_t stream, const int* d_first = nullptr) {
+                                    float scale, cudaStream_t stream, const int* d_first = nullptr,
+                                    const int* blocks = nullptr) {
     const int group = n_kv_heads > 0 ? n_heads / n_kv_heads : 0;
     const int r_cap = rows <= 8 ? 8 : 16;
     if (rows < 1 || rows > kDSparkMaxRows || n_kv_heads < 1 || n_heads % n_kv_heads != 0 || group < 1 ||
@@ -198,12 +201,12 @@ cudaError_t launch_dspark_attention(const half* q, const half* k, const half* v,
     const dim3 grid(n_kv_heads, splits);
     if (r_cap == 8) {
         dspark_attn_split_kernel<8><<<grid, group * 32, 0, stream>>>(q, k, v, work, rows, n_heads, n_kv_heads,
-                                                                     d_ctx, kv_len, scale, d_first);
+                                                                     d_ctx, kv_len, scale, d_first, blocks);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
         dspark_attn_split_kernel<16><<<grid, group * 32, 0, stream>>>(q, k, v, work, rows, n_heads,
                                                                       n_kv_heads, d_ctx, kv_len, scale,
-                                                                      d_first);
+                                                                      d_first, blocks);
         IMP_CUDA_CHECK_LAUNCH();
     }
     dspark_attn_combine_kernel<<<dim3(n_heads, rows), kHd, 0, stream>>>(work, o, rows, n_heads, splits, d_ctx,
@@ -222,11 +225,11 @@ cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* 
 
 cudaError_t dspark_attention_dev(const half* q, const half* k, const half* v, half* o, float* work, int rows,
                                  int n_heads, int n_kv_heads, const int* d_ctx, int max_kv_len, float scale,
-                                 cudaStream_t stream, const int* d_first) {
+                                 cudaStream_t stream, const int* d_first, const int* blocks) {
     if (!d_ctx)
         return cudaErrorInvalidValue;
     return launch_dspark_attention(q, k, v, o, work, rows, n_heads, n_kv_heads, d_ctx, max_kv_len, scale,
-                                   stream, d_first);
+                                   stream, d_first, blocks);
 }
 
 }  // namespace imp

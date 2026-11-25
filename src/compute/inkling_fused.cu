@@ -276,7 +276,7 @@ __global__ void kv_site_k(KvSiteArgs a) {
         }
         const float ss = block_sum(y * y, sh);
         const float f = a.is_key ? fminf(a.thr / (sqrtf(ss) + 1e-6f), 1.0f) : rsqrtf(ss / a.hd + a.eps);
-        const int slot = a.ring > 0 ? (pos0 + t) % a.ring : pos0 + t;
+        const int slot = kv_slot(pos0 + t, a.ring, a.blocks, a.kv_block);
         a.cache[((size_t)slot * a.n_heads + head) * a.hd + threadIdx.x] = __float2half(y * f);
         if (a.log)
             a.log[(size_t)t * C + c] = x;
@@ -319,7 +319,7 @@ __global__ void kv_site_rows_k(KvSiteArgs a) {
     const float ss = block_sum(y * y, sh);
     const float f = a.is_key ? fminf(a.thr / (sqrtf(ss) + 1e-6f), 1.0f) : rsqrtf(ss / a.hd + a.eps);
     const int pos = *a.d_pos + t;
-    const int slot = a.ring > 0 ? pos % a.ring : pos;
+    const int slot = kv_slot(pos, a.ring, a.blocks, a.kv_block);
     a.cache[((size_t)slot * a.n_heads + head) * a.hd + threadIdx.x] = __float2half(y * f);
 }
 
