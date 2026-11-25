@@ -15,6 +15,7 @@
 #include "exec/executor_kernels.h"
 #include "exec/executor_kernels.cuh"
 #include "exec/gemm_context.h"
+#include "exec/lm_head_route.h"
 #include "compute/layernorm.h"
 #include "compute/rowwise_topm.h"
 #include "core/graph_epoch.h"
@@ -120,37 +121,12 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
 
     GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_);
 
-    // LM-head tier detection (mirror forward_logits): NVFP4 decode-cache LM heads
-    // must use the per-row gemv_nvfp4_kpar_fp32 path, NOT gemm_via_handle_ (which
-    // doesn't read the NVFP4 cache → garbage logits). FP16/generic uses the handle.
-    const WeightHandle* lm_h =
-        (model_->out_proj_id != kInvalidTensorID) ? &registry_.handle(model_->out_proj_id) : nullptr;
-    const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
-    auto lm_nvfp4_it = wcache_.nvfp4.find(model_->output_proj().data);
-    const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
-    const bool lm_has_fp8 = (wcache_.fp8.contains(model_->output_proj().data));
-    const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
-    // Raw-GGUF-quant LM head (tied-embedding Gemma Q4_K etc.): mirrors the
-    // production use_dp4a_lm arm. Routing through gemm_via_handle_ at M=1 hits
-    // the GGUF GEMV handlers with an unquantized FP16 input, causing an
-    // illegal memory access on gemma-3-12b that poisoned context and surfaced as PPL=1.0000 (zeroed NLL
-    // buffer).
+    // The Eval route of lm_head_route() (exec/lm_head_route.h): NVFP4 heads take the batched GEMV
+    // (gemm_via_handle_ does not read the NVFP4 cache), GGUF heads the dp4a arm.
+    const LmHeadRoute route = lm_head_route(lm_head_facts_(), LmHeadUse::Eval);
+    const bool lm_is_nvfp4 = route == LmHeadRoute::Nvfp4;
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 &&
-                             is_dp4a_qtype(out_qtype) && lm_tier != StorageTier::MXFP4 && !lm_has_fp8;
-    NvFP4QuantResult nvfp4_lm_r{};
-    if (lm_is_nvfp4) {
-        if (lm_nvfp4_secondary) {
-            nvfp4_lm_r = lm_nvfp4_it->second;
-        } else {
-            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-            nvfp4_lm_r.tensor_scale =
-                (lm_h->payload.nvfp4.tensor_scale != nullptr) ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
-            nvfp4_lm_r.N = cfg.vocab_size;
-            nvfp4_lm_r.K = cfg.d_model;
-        }
-    }
+    const NvFP4QuantResult nvfp4_lm_r = lm_is_nvfp4 ? lm_head_nvfp4_() : NvFP4QuantResult{};
 
     Tensor hidden_all = lm_head_rows_(chunk_len);
     for (int c = 0; c < chunk_len; c += mb) {
@@ -183,7 +159,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
             gemv_nvfp4_kpar_batched_fp32(nvfp4_lm_r, static_cast<const half*>(noc.data),
                                          static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model,
                                          csz, stream);
-        } else if (use_dp4a_lm) {
+        } else if (route == LmHeadRoute::Dp4a) {
             // Fused RMSNorm->Q8_1 quantize per row, then ONE batched dp4a GEMV sharing
             // the weight pass across rows (#847 lever 2), replacing a per-row loop
             // that re-read the full LM head every row. Falls back to per-row when the
@@ -589,13 +565,14 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         return false;
     // Draft copy first, one weight read per 4 rows: 270 MiB over rows [0, 98304), 682 MiB over all. Without
     // it an FP8-served head (Qwen3.8-27B-NVFP4) reads its rows once in one FP8 GEMV: no W4A4 head is built.
-    const bool w4a16 = draft_nvfp4 != nullptr && draft_nvfp4->packed_data != nullptr;
     const void* w8 = nullptr;
     const float* s8 = nullptr;
-    const bool fp8 = !w4a16 && !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
-    if (!w4a16 && !fp8 &&
-        (!lm_head_cutlass_ready_ || qscratch_.cutlass_act_data.get() == nullptr ||
-         qscratch_.cutlass_act_sf.get() == nullptr))
+    const DraftHeadRoute route = draft_head_route(draft_nvfp4 != nullptr &&
+                                                      draft_nvfp4->packed_data != nullptr,
+                                                  lm_head_fp8_view(w8, s8), lm_head_cutlass_ready_,
+                                                  qscratch_.cutlass_act_data.get() != nullptr &&
+                                                      qscratch_.cutlass_act_sf.get() != nullptr);
+    if (route == DraftHeadRoute::None)
         return false;
     const auto& cfg = model_->config();
     // Rows scored: a head prefix (speculative.mtp_draft_vocab, the draft copy), the logits packed V to a row.
@@ -612,10 +589,10 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
         const void* rows = static_cast<const char*>(d_rows) +
                            (static_cast<size_t>(c) * cfg.d_model * sizeof(half));
         Tensor lg = view_tokens(logits_, csz);
-        if (w4a16) {
+        if (route == DraftHeadRoute::W4a16Draft) {
             gemv_nvfp4_kpar_batched_fp32(*draft_nvfp4, static_cast<const half*>(rows),
                                          static_cast<float*>(lg.data), V, cfg.d_model, csz, stream);
-        } else if (fp8) {
+        } else if (route == DraftHeadRoute::Fp8Head) {
             if (!gemv_fp8_rowscale_fp32(w8, s8, static_cast<const half*>(rows), static_cast<float*>(lg.data),
                                         V, cfg.d_model, csz, stream))
                 return false;

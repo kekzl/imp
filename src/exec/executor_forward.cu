@@ -10,6 +10,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/executor_debug.h"
 #include "exec/gemm_context.h"
+#include "exec/lm_head_route.h"
 #include <cstdio>
 #include <stdexcept>
 #include "compute/embedding.h"
@@ -677,8 +678,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Q6_K/Q8_0 output projection at n=1 uses fused RMSNorm->Q8_1 + dp4a GEMV
     // with FP32 output (reads quantized weights directly, saves bandwidth vs cuBLAS FP16).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 &&
-                             is_dp4a_qtype(out_qtype);
+    // The route is lm_head_route() (exec/lm_head_route.h), shared with perplexity and logprobs.
+    const LmHeadFacts lm_facts = lm_head_facts_();
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
@@ -688,13 +689,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
                                    ? &registry_.handle(model_->out_proj_id)
                                    : nullptr;
-    const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
-    // Phase-3 secondary NVFP4 decode cache (Q8_0/Q6_K/Q5_K source LM head).
-    // c8763ad refactor lost this fallback; restore by also probing wcache_.nvfp4.
-    auto lm_nvfp4_it = wcache_.nvfp4.find(model_->output_proj().data);
-    const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
-    const bool lm_has_fp8 = (wcache_.fp8.contains(model_->output_proj().data));
-    const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
+    const StorageTier lm_tier = lm_facts.tier;
 
     // L2 streaming hint for the LM head projection (QW3, #604): output_proj is
     // huge and touched once per forward, so it pollutes L2 normally; marking
@@ -732,8 +727,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
+        const LmHeadRoute route = lm_head_route(lm_facts, LmHeadUse::ServeRow);
         if (lm_head_fp8_(h_last, lg, stream)) {
-        } else if (lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
+        } else if (route == LmHeadRoute::Mxfp4Gemv) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             int hbs = lm_h->payload.mxfp4.hadamard_bs;
@@ -747,33 +743,22 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_last.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (lm_has_fp8) {
+        } else if (route == LmHeadRoute::Fp8Cache) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
             int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
             Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
-        } else if (lm_is_nvfp4) {
+        } else if (route == LmHeadRoute::Nvfp4) {
             Tensor no_last = view_tokens(norm_out_, 1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_last, model_->output_norm(), no_last,
                                                                kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
-            NvFP4QuantResult nvfp4_lm_r;
-            if (lm_nvfp4_secondary) {
-                nvfp4_lm_r = lm_nvfp4_it->second;
-            } else {
-                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                              ? *lm_h->payload.nvfp4.tensor_scale
-                                              : 1.0f;
-                nvfp4_lm_r.N = cfg.vocab_size;
-                nvfp4_lm_r.K = cfg.d_model;
-            }
+            const NvFP4QuantResult nvfp4_lm_r = lm_head_nvfp4_();
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_last.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream, lm_fold);
-        } else if (use_dp4a_lm) {
+        } else if (route == LmHeadRoute::Dp4a) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 debug_tensor_stats("before_final_rmsnorm", h_last, stream);
@@ -828,8 +813,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         Tensor h_final = view_tokens(hidden_, n);
         Tensor lg = view_tokens(logits_, n);
 
+        const LmHeadRoute route = lm_head_route(lm_facts,
+                                                n == 1 ? LmHeadUse::ServeRow : LmHeadUse::ServeBatch);
         if (lm_head_fp8_(h_final, lg, stream)) {
-        } else if (n == 1 && lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
+        } else if (route == LmHeadRoute::Mxfp4Gemv) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             int hbs = lm_h->payload.mxfp4.hadamard_bs;
@@ -843,33 +830,22 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
             gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_final.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n == 1 && lm_has_fp8) {
+        } else if (route == LmHeadRoute::Fp8Cache) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
             int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
             Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
-        } else if (n == 1 && lm_is_nvfp4) {
+        } else if (n == 1 && route == LmHeadRoute::Nvfp4) {
             Tensor no_final = view_tokens(norm_out_, 1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_final, model_->output_norm(), no_final,
                                                                kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
-            NvFP4QuantResult nvfp4_lm_r;
-            if (lm_nvfp4_secondary) {
-                nvfp4_lm_r = lm_nvfp4_it->second;
-            } else {
-                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                              ? *lm_h->payload.nvfp4.tensor_scale
-                                              : 1.0f;
-                nvfp4_lm_r.N = cfg.vocab_size;
-                nvfp4_lm_r.K = cfg.d_model;
-            }
+            const NvFP4QuantResult nvfp4_lm_r = lm_head_nvfp4_();
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
                                  static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream, lm_fold);
-        } else if (n == 1 && use_dp4a_lm) {
+        } else if (n == 1 && route == LmHeadRoute::Dp4a) {
             if (debug_forward_enabled()) {
                 Tensor no_final = view_tokens(norm_out_, 1);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
@@ -882,23 +858,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                   norm_w_off_);
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n > 1 && lm_is_nvfp4) {
+        } else if (n > 1 && route == LmHeadRoute::Nvfp4) {
             // Batched-M NVFP4 GEMV LM head for batched decode: reads the ~389 MiB
             // LM-head matrix from HBM ONCE and reuses it across all rows, replacing a
             // per-sequence M=1 GEMV loop that re-read it once per row (the #2 decode GPU consumer at
             // batch>1).
-            NvFP4QuantResult nvfp4_lm_r;
-            if (lm_nvfp4_secondary) {
-                nvfp4_lm_r = lm_nvfp4_it->second;
-            } else {
-                nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
-                nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
-                nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                                              ? *lm_h->payload.nvfp4.tensor_scale
-                                              : 1.0f;
-                nvfp4_lm_r.N = cfg.vocab_size;
-                nvfp4_lm_r.K = cfg.d_model;
-            }
+            const NvFP4QuantResult nvfp4_lm_r = lm_head_nvfp4_();
             Tensor no_final = view_tokens(norm_out_, n);
             bool lm_done = false;
             bool normed = false;
@@ -951,16 +916,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                              static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, n,
                                              stream);
             }
-        } else if (use_dp4a_lm && n > 1) {
-            // Per-row Q8_1 GEMV LM head for batched decode.
-            // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.
-            // Check if FP16 cache has the output projection — use cuBLAS GEMM if so.
-            if (lm_tier == StorageTier::FP16) {
-                Tensor no_final = view_tokens(norm_out_, n);
-                rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
-                goto lm_head_done;
-            }
+        } else if (n > 1 && route == LmHeadRoute::Dp4a) {
+            // Per-row Q8_1 GEMV LM head for batched decode: quantized weights (Q8_0/Q6_K) cannot go
+            // to cuBLAS directly. An FP16-tier copy routes to Handle (lm_head_route).
             auto* q8 = qscratch_.q8_1_buf.data();
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
@@ -987,7 +945,6 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             if (lm_tier != StorageTier::FP8 || !lm_head_fp8_tier_(*lm_h, no_final, lg, stream))
                 gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
         }
-    lm_head_done:
         logits_out = lg;
         debug_top_logits(lg, stream);
     }

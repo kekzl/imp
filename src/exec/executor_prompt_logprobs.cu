@@ -5,6 +5,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_kernels.cuh"
+#include "exec/lm_head_route.h"
 #include "compute/gemm.h"
 #include "compute/prompt_logprobs_rows.h"
 #include "core/logging.h"
@@ -89,24 +90,17 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
     if (lm_head_fp8_(hc, lgt, stream))
         return true;
 
-    // Route of for_each_lm_head_batch_'s dp4a arm only: GGUF head, no FP8/NVFP4 copy, FP16 compute.
+    // Only where for_each_lm_head_batch_ takes its dp4a arm (lm_head_route, Eval).
     const void* w = model_->output_proj().data;
     const QType qt = model_->out_proj_.qtype;
-    const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
-                                   ? &registry_.handle(model_->out_proj_id)
-                                   : nullptr;
-    const StorageTier tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
-    const bool has_fp8 = wcache_.fp8.contains(w);
-    const bool nvfp4 = !has_fp8 && (tier == StorageTier::NVFP4 || wcache_.nvfp4.contains(w));
-    const bool dp4a = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 && is_dp4a_qtype(qt) &&
-                      tier != StorageTier::MXFP4 && !has_fp8;
+    const bool dp4a = lm_head_route(lm_head_facts_(), LmHeadUse::Eval) == LmHeadRoute::Dp4a;
     // Vocab slab = dequant-scratch rows; below 256 rows the per-batch driver wins.
     const int slab = qscratch_.dequant.get()
                          ? static_cast<int>(std::min<size_t>(qscratch_.dequant_size /
                                                                  (static_cast<size_t>(K) * sizeof(half)),
                                                              static_cast<size_t>(V)))
                          : 0;
-    if (!w || nvfp4 || !dp4a || !dequant_gpu_supported(qt) || slab < 256 || (K % 32) != 0 || K > 32768)
+    if (!w || !dp4a || !dequant_gpu_supported(qt) || slab < 256 || (K % 32) != 0 || K > 32768)
         return false;
 
     Tensor noc = view_tokens(norm_out_, csz);
