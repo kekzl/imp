@@ -3,6 +3,7 @@
 
 #include "core/logging.h"
 #include "memory/engine_arena.h"
+#include "memory/span.h"
 
 #include <cuda_runtime.h>
 #include <atomic>
@@ -20,7 +21,8 @@ namespace imp {
 // A superseded slab taken from the arena stays stranded there: bounded, one-time,
 // visible in the arena's high-water mark.
 namespace {
-void* g_mmvq_scratch = nullptr;
+StableSpan<std::byte> g_mmvq_view;  // arena slab
+void* g_mmvq_fallback = nullptr;    // direct allocation on an arena shortfall, never freed
 size_t g_mmvq_scratch_size = 0;
 // Arena generation the cached pointer belongs to: an engine teardown or reset
 // invalidates every span it handed out. Without this the static would survive into the
@@ -29,19 +31,26 @@ uint64_t g_mmvq_scratch_gen = 0;
 // Sentinel generation for a slab we allocated ourselves (arena shortfall).
 constexpr uint64_t kFallbackGen = ~0ull;
 
+void* scratch_ptr() { return g_mmvq_view ? static_cast<void*>(g_mmvq_view.data()) : g_mmvq_fallback; }
+void clear_scratch() {
+    g_mmvq_view = {};
+    g_mmvq_fallback = nullptr;
+}
+
 bool scratch_is_live() {
-    if (!g_mmvq_scratch)
+    if (!g_mmvq_view && !g_mmvq_fallback)
         return false;
     // A fallback slab (gen 0 sentinel) is ours and outlives arena resets.
     return g_mmvq_scratch_gen == kFallbackGen || g_mmvq_scratch_gen == engine_arena().generation();
 }
 
 // Take `bytes` from the arena, falling back to a direct allocation. Returns
-// false only if BOTH fail. Sets g_mmvq_scratch/_size/_gen on success.
+// false only if BOTH fail. Sets the view or the fallback, _size and _gen on success.
 bool take_scratch(size_t bytes) {
-    auto slab = engine_arena().take_bytes(bytes);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
     if (!slab.empty()) {
-        g_mmvq_scratch = slab.data();
+        g_mmvq_view = slab;
+        g_mmvq_fallback = nullptr;
         g_mmvq_scratch_size = bytes;
         g_mmvq_scratch_gen = engine_arena().generation();
         return true;
@@ -56,7 +65,8 @@ bool take_scratch(size_t bytes) {
     IMP_LOG_WARN("mmvq scratch: engine arena could not supply %.2f MiB (remaining %.2f MiB) — "
                  "fell back to a direct allocation. The T2 tier is not planner-sized yet.",
                  bytes / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
-    g_mmvq_scratch = p;
+    g_mmvq_view = {};
+    g_mmvq_fallback = p;
     g_mmvq_scratch_size = bytes;
     g_mmvq_scratch_gen = kFallbackGen;
     return true;
@@ -71,7 +81,7 @@ void prewarm_mmvq_scratch(int max_tokens, int max_K) {
     if (scratch_is_live() && g_mmvq_scratch_size >= need)
         return;
     if (!take_scratch(need)) {
-        g_mmvq_scratch = nullptr;
+        clear_scratch();
         g_mmvq_scratch_size = 0;
         return;
     }
@@ -81,7 +91,7 @@ void prewarm_mmvq_scratch(int max_tokens, int max_K) {
 
 void mmvq_scratch_get_or_grow(std::size_t need, void** out_buf, std::size_t* out_size) {
     if (scratch_is_live() && g_mmvq_scratch_size >= need) {
-        *out_buf = g_mmvq_scratch;
+        *out_buf = scratch_ptr();
         *out_size = g_mmvq_scratch_size;
         return;
     }
@@ -97,13 +107,13 @@ void mmvq_scratch_get_or_grow(std::size_t need, void** out_buf, std::size_t* out
     }
     // The superseded slab is not reclaimable — that is the arena's contract.
     if (!take_scratch(need * 2)) {
-        g_mmvq_scratch = nullptr;
+        clear_scratch();
         g_mmvq_scratch_size = 0;
         *out_buf = nullptr;
         *out_size = 0;
         return;
     }
-    *out_buf = g_mmvq_scratch;
+    *out_buf = scratch_ptr();
     *out_size = g_mmvq_scratch_size;
 }
 

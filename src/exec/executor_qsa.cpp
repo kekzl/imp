@@ -177,7 +177,7 @@ void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, con
     // Split-K scratch as the dense decode uses it (the kernel re-checks the size against
     // rows x heads x splits and drops to fewer splits or none): without it one CTA per head
     // walks the 2051 tokens serially, 31.7 vs 54.1 tok/s at 4.5k context (2026-09-20).
-    paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+    paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
     // The selection holds at most cap tokens, and below cap it is every token in order:
     // the dense path splits on the real context, so this must too or the same bytes
     // reduce in a different order.

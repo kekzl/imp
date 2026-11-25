@@ -139,9 +139,9 @@ void GraphExecutor::moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, 
         smallm_xq_forget_(ctx.no.data);
     }
     // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
-    if (ctx.n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
-        quantize_fp16_to_q8_1(static_cast<const half*>(ctx.no.data),
-                              static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, ctx.d, stream);
+    if (ctx.n == 1 && qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr) {
+        quantize_fp16_to_q8_1(static_cast<const half*>(ctx.no.data), qscratch_.q8_1_buf.data(),
+                              qscratch_.d8_buf.data(), ctx.d, stream);
     }
 }
 

@@ -56,16 +56,16 @@ static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& 
     const int N = static_cast<int>(weight.shape[0]);
     const int K = static_cast<int>(weight.shape[1]);
     const size_t blocks = static_cast<size_t>(M) * (K / 32);
-    if (M > 64 || !qs || !qs->q8_1_prefill_buf || !qs->d8_prefill_buf ||
+    if (M > 64 || !qs || !qs->q8_1_prefill_buf.data() || !qs->d8_prefill_buf.data() ||
         blocks * sizeof(block_q8_1) > qs->q8_1_prefill_bytes || blocks * sizeof(float) > qs->d8_prefill_bytes)
         return false;
     const auto* x = reinterpret_cast<const __half*>(input.data);
     auto* y = reinterpret_cast<__half*>(output.data);
     const bool ok = weight.qtype == QType::Q8_0
-                        ? gemm_q8_0_dp4a_dense(weight.data, x, y, qs->q8_1_prefill_buf, qs->d8_prefill_buf, M,
-                                               N, K, ctx.beta, ctx.stream)
-                        : gemm_q4k_dp4a_dense_rows(weight.data, x, y, qs->q8_1_prefill_buf,
-                                                   qs->d8_prefill_buf, M, N, K, ctx.beta, ctx.stream);
+                        ? gemm_q8_0_dp4a_dense(weight.data, x, y, qs->q8_1_prefill_buf.data(),
+                                               qs->d8_prefill_buf.data(), M, N, K, ctx.beta, ctx.stream)
+                        : gemm_q4k_dp4a_dense_rows(weight.data, x, y, qs->q8_1_prefill_buf.data(),
+                                                   qs->d8_prefill_buf.data(), M, N, K, ctx.beta, ctx.stream);
     static bool s_logged[2] = {};  // activity proof per outcome, once each
     if (!s_logged[ok]) {
         s_logged[ok] = true;
@@ -184,13 +184,16 @@ static bool dp4a_few_rows(const Tensor& input, const Tensor& weight, Tensor& out
     const int K = static_cast<int>(weight.shape[1]);
     const size_t blocks = static_cast<size_t>(M) * (K / 32);
     if (M < 2 || M > 4 || !is_dp4a_qtype(weight.qtype) || (ctx.beta != 0.0f && ctx.beta != 1.0f) ||
-        K % 32 != 0 || qs == nullptr || qs->q8_1_prefill_buf == nullptr || qs->d8_prefill_buf == nullptr ||
-        blocks * sizeof(block_q8_1) > qs->q8_1_prefill_bytes || blocks * sizeof(float) > qs->d8_prefill_bytes)
+        K % 32 != 0 || qs == nullptr || qs->q8_1_prefill_buf.data() == nullptr ||
+        qs->d8_prefill_buf.data() == nullptr || blocks * sizeof(block_q8_1) > qs->q8_1_prefill_bytes ||
+        blocks * sizeof(float) > qs->d8_prefill_bytes)
         return false;
-    auto* q8 = static_cast<block_q8_1*>(qs->q8_1_prefill_buf);
-    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_prefill_buf, M * K, ctx.stream);
-    return gemv_dp4a_rows(weight.qtype, weight.data, q8, qs->d8_prefill_buf, static_cast<half*>(output.data),
-                          static_cast<int>(weight.shape[0]), K, M, ctx.beta == 1.0f, ctx.stream);
+    auto* q8 = qs->q8_1_prefill_buf.data();
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_prefill_buf.data(), M * K,
+                          ctx.stream);
+    return gemv_dp4a_rows(weight.qtype, weight.data, q8, qs->d8_prefill_buf.data(),
+                          static_cast<half*>(output.data), static_cast<int>(weight.shape[0]), K, M,
+                          ctx.beta == 1.0f, ctx.stream);
 }
 
 bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx,
@@ -233,16 +236,16 @@ static bool dp4a_token_gemv(const Tensor& input, const Tensor& weight, Tensor& o
     const int K = static_cast<int>(weight.shape[1]);
     if (input.shape[0] != 1 || !is_dp4a_qtype(weight.qtype) || weight.dropped_source ||
         (ctx.beta != 0.0f && ctx.beta != 1.0f) || input.qtype != QType::F16 || output.qtype != QType::F16 ||
-        qs == nullptr || qs->q8_1_buf == nullptr || qs->d8_buf == nullptr || K % 32 != 0 ||
+        qs == nullptr || qs->q8_1_buf.data() == nullptr || qs->d8_buf.data() == nullptr || K % 32 != 0 ||
         K / 32 > qs->q8_1_max_blocks)
         return false;
-    auto* q8 = static_cast<block_q8_1*>(qs->q8_1_buf);
+    auto* q8 = qs->q8_1_buf.data();
     auto* y = static_cast<half*>(output.data);
-    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_buf, K, ctx.stream);
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_buf.data(), K, ctx.stream);
     if (ctx.beta == 1.0f)
-        dispatch_gemv_residual(weight.qtype, weight.data, q8, qs->d8_buf, y, y, N, K, ctx.stream);
+        dispatch_gemv_residual(weight.qtype, weight.data, q8, qs->d8_buf.data(), y, y, N, K, ctx.stream);
     else
-        dispatch_dp4a_gemv(weight.qtype, weight.data, q8, qs->d8_buf, y, N, K, ctx.stream);
+        dispatch_dp4a_gemv(weight.qtype, weight.data, q8, qs->d8_buf.data(), y, N, K, ctx.stream);
     static bool s_logged[2] = {};  // activity proof per beta, once each
     if (!s_logged[ctx.beta == 1.0f]) {
         s_logged[ctx.beta == 1.0f] = true;

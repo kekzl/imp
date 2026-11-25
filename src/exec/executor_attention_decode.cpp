@@ -11,13 +11,13 @@
         // no paged cache read. Single-token decode (n==1) only; multi-token (spec) falls through to the
         // materialized paged path.
         if (mla_absorb_active && sub_n == 1) {
-            half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
+            half* cache_layer = mla_absorb_cache_.data() +
                                 static_cast<size_t>(layer) * mla_absorb_layer_stride_;
             // ao is [n, nh*hd]; the absorbed kernel writes nh*v_head_dim compact
             // (same layout the paged decode kernel produces), narrowed downstream.
             mla_absorbed_decode(static_cast<const half*>(sub_q.data),
                                 static_cast<const half*>(ly.kv_b_proj.data), cache_layer,
-                                static_cast<half*>(sub_ao.data), mla_absorb_scores_, sub_state.context_lens,
+                                static_cast<half*>(sub_ao.data), mla_absorb_scores_.data(), sub_state.context_lens,
                                 nh, hd, cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.kv_lora_rank,
                                 cfg.v_head_dim, mla_absorb_max_seq_, scale, stream);
             return;  // leaves the decode_attend lambda (executor_attention.cu)
@@ -127,10 +127,10 @@
                                  sub_state.max_blocks_per_seq, qscratch_.sparse_budget_blocks,
                                  qscratch_.sparse_sink_blocks, qscratch_.sparse_recent_blocks,
                                  qscratch_.sparse_engage_blocks, qscratch_.sparse_table_blocks,
-                                 qscratch_.sparse_scores, qscratch_.sparse_block_tables,
-                                 qscratch_.sparse_context_lens, cfg::kSparseScoreStdCoef, stream);
-            attn_bt = qscratch_.sparse_block_tables;
-            attn_ctx_lens = qscratch_.sparse_context_lens;
+                                 qscratch_.sparse_scores.data(), qscratch_.sparse_block_tables.data(),
+                                 qscratch_.sparse_context_lens.data(), cfg::kSparseScoreStdCoef, stream);
+            attn_bt = qscratch_.sparse_block_tables.data();
+            attn_ctx_lens = qscratch_.sparse_context_lens.data();
             attn_max_blocks = qscratch_.sparse_table_blocks;
         }
         // NVFP4 split-K sizes on the context the kernel walks (#2440): past the engage length a sparse row
@@ -144,7 +144,7 @@
         if (cache_dtype == QType::INT4) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT4);
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             paged_attention_decode_int4(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -154,7 +154,7 @@
         } else if (cache_dtype == QType::NVFP4) {
             dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                          static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                          static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -164,7 +164,7 @@
         } else if (cache_dtype == QType::MXFP4_KV) {
             dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);
             // MXFP4-KV paged attention: same kernel as NVFP4 but with UE8M0 scale decode.
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             paged_attention_decode_mxfp4_kv(q4, k_c, v_c, o4,
                                             static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                             static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -175,7 +175,7 @@
         } else if (cache_dtype == QType::INT8) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT8);
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             paged_attention_decode_int8(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -188,14 +188,14 @@
             // Separate K/V scales fold into (softmax scale, kv_scale): bit-equal when k == v.
             const Fp8KvDecodeScales ds = fp8_kv_decode_scales(
                 scale, kv_layer < static_cast<int>(kv_scales_.size()) ? kv_scales_[kv_layer] : Fp8KvScalePair{});
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             paged_attention_decode_fp8(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, ds.softmax_scale,
                                        ds.kv_scale, sub_state.max_context_len, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, attn_max_blocks,
                                        layer_n_sinks, attn_sinks);
         } else {
             dispatch_record::set_attn_decode(AttnDecodePath::FP16);
-            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
             // MLA: V slots are hd wide, zero past vhd (mla_assemble_kv v_dst_head_dim=hd): symmetric decode
             // (split-K, templated HD) into kk, dead after the KV write above, then compaction (#2374).
             paged_attention_decode_mla_padded(q4, k_c, v_c, o4, static_cast<half*>(sub_k.data), sub_k.numel(),
