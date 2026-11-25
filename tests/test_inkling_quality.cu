@@ -22,6 +22,7 @@
 #include "compute/inkling_ops.h"
 #include "core/tensor.h"
 #include "exec/inkling_forward.h"
+#include "inkling_fixture.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 
@@ -130,10 +131,13 @@ TEST(InklingQuality, KldAgainstTheReference) {
     const char* dir = std::getenv("IMP_TEST_INKLING_KLD");
     if (!model || !dir)
         GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_KLD not set";
-    VRAMAllocator va;
-    InklingWeights w;
-    ASSERT_TRUE(va.init());
-    ASSERT_TRUE(load_inkling_weights(model, w, va));
+    // The process's one load (inkling_fixture.h): a second 17.61 GiB copy does not fit a 32 GB card
+    // beside the one the static fixture holds until exit.
+    inkling_test::Fixture& fx = inkling_test::fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    VRAMAllocator& va = fx.va;
+    const InklingWeights& w = fx.w;
     const InklingConfig& c = w.cfg;
     const int H = c.hidden;
     const int64_t V = c.vocab;
