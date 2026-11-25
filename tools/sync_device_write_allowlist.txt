@@ -43,8 +43,8 @@ src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_packed offline  # load-time wei
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ts offline  # load-time weight conversion
 src/runtime/engine_kv_cache_init.cpp cudaMemset(out.d_seq_slots.get() init  # KV init; the scheduler uploads the table before each batched step
 src/vision/qwen3vl_vision_upload.cpp cudaMemcpy(d synced  # cudaStreamSynchronize(nullptr) after the upload loop
-src/vision/vision_encoder.cu cudaMemcpy(d_pos_x_ init  # VisionEncoder::init
-src/vision/vision_encoder.cu cudaMemcpy(d_pos_y_ init  # VisionEncoder::init
+src/vision/vision_encoder.cu cudaMemcpy(d_pos_x_.data() init  # VisionEncoder::init
+src/vision/vision_encoder.cu cudaMemcpy(d_pos_y_.data() init  # VisionEncoder::init
 src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
 src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
 src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init

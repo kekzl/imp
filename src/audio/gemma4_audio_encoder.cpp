@@ -92,31 +92,31 @@ bool Gemma4AudioEncoder::init(const Gemma4AudioModel& m, int max_frames) {
     const size_t T = static_cast<size_t>(g.T);
     const size_t H = static_cast<size_t>(c.hidden_size);
     bool ok = true;
-    auto take = [&](size_t bytes) -> void* {
-        auto slab = engine_arena().take_bytes(aligned(bytes));
+    auto take = [&](size_t bytes) -> StableSpan<std::byte> {
+        StableSpan<std::byte> slab = engine_arena().take_bytes(aligned(bytes));
         if (slab.empty()) {
             ok = false;
-            return nullptr;
+            return {};
         }
         taken_ += aligned(bytes);
-        return slab.data();
+        return slab;
     };
-    d_feat_ = static_cast<float*>(take(static_cast<size_t>(g.F) * c.n_mels * 4));
-    d_c0_ = static_cast<float*>(take(static_cast<size_t>(c.sub_channels0) * g.F1 * g.M1 * 4));
-    d_c1_ = static_cast<float*>(take(static_cast<size_t>(c.sub_channels1) * T * g.M2 * 4));
-    d_mask1_ = static_cast<uint8_t*>(take(static_cast<size_t>(g.F1)));
-    d_valid_ = static_cast<uint8_t*>(take(T));
-    d_x_ = static_cast<float*>(take(T * H * 4));
-    d_a16_ = static_cast<half*>(take(T * std::max(H, static_cast<size_t>(g.sub_width)) * 2));
-    d_tmp16_ = static_cast<half*>(take(T * 4 * H * 2));
-    d_wide16_ = static_cast<half*>(take(T * 4 * H * 2));
-    d_q_ = static_cast<half*>(take(T * H * 2));
-    d_k_ = static_cast<half*>(take(T * H * 2));
-    d_v_ = static_cast<half*>(take(T * H * 2));
-    d_o_ = static_cast<half*>(take(T * H * 2));
-    d_h16_ = static_cast<half*>(take(T * H * 2));
-    d_proj16_ = static_cast<half*>(take(T * static_cast<size_t>(c.output_proj_dims) * 2));
-    d_emb_in16_ = static_cast<half*>(take(T * static_cast<size_t>(c.output_proj_dims) * 2));
+    d_feat_ = take(static_cast<size_t>(g.F) * c.n_mels * 4).as<float>();
+    d_c0_ = take(static_cast<size_t>(c.sub_channels0) * g.F1 * g.M1 * 4).as<float>();
+    d_c1_ = take(static_cast<size_t>(c.sub_channels1) * T * g.M2 * 4).as<float>();
+    d_mask1_ = take(static_cast<size_t>(g.F1)).as<uint8_t>();
+    d_valid_ = take(T).as<uint8_t>();
+    d_x_ = take(T * H * 4).as<float>();
+    d_a16_ = take(T * std::max(H, static_cast<size_t>(g.sub_width)) * 2).as<half>();
+    d_tmp16_ = take(T * 4 * H * 2).as<half>();
+    d_wide16_ = take(T * 4 * H * 2).as<half>();
+    d_q_ = take(T * H * 2).as<half>();
+    d_k_ = take(T * H * 2).as<half>();
+    d_v_ = take(T * H * 2).as<half>();
+    d_o_ = take(T * H * 2).as<half>();
+    d_h16_ = take(T * H * 2).as<half>();
+    d_proj16_ = take(T * static_cast<size_t>(c.output_proj_dims) * 2).as<half>();
+    d_emb_in16_ = take(T * static_cast<size_t>(c.output_proj_dims) * 2).as<half>();
     if (!ok)
         IMP_LOG_ERROR("Audio encoder: engine arena exhausted (%zu bytes taken, %zu demanded)", taken_,
                       demand_bytes(c, max_frames));
@@ -127,8 +127,9 @@ void Gemma4AudioEncoder::linear_(const half* in, const Gemma4AudioLinear& l, hal
                                  int n_in, cudaStream_t stream) {
     const half* src = in;
     if (finite_bounds(l.in_min, l.in_max)) {
-        launch_g4a_clamp16(in, d_tmp16_, static_cast<int64_t>(rows) * n_in, l.in_min, l.in_max, stream);
-        src = d_tmp16_;
+        launch_g4a_clamp16(in, d_tmp16_.data(), static_cast<int64_t>(rows) * n_in, l.in_min, l.in_max,
+                           stream);
+        src = d_tmp16_.data();
     }
     gemm_nt(src, static_cast<const half*>(l.w.data), out, rows, n_out, n_in, stream);
     if (finite_bounds(l.out_min, l.out_max))
@@ -139,20 +140,20 @@ void Gemma4AudioEncoder::ffw_(const Gemma4AudioFfw& w, int rows, cudaStream_t st
     const Gemma4AudioConfig& c = m_->config;
     const int H = c.hidden_size;
     G4aNormArgs pre;
-    pre.in32 = d_x_;
+    pre.in32 = d_x_.data();
     pre.w = static_cast<const float*>(w.pre_norm.data);
-    pre.out16 = d_a16_;
+    pre.out16 = d_a16_.data();
     pre.clip = c.gradient_clipping;
     pre.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(pre, rows, H, stream);
-    linear_(d_a16_, w.up, d_wide16_, rows, 4 * H, H, stream);
-    launch_g4a_silu16(d_wide16_, static_cast<int64_t>(rows) * 4 * H, stream);
-    linear_(d_wide16_, w.down, d_h16_, rows, H, 4 * H, stream);
+    linear_(d_a16_.data(), w.up, d_wide16_.data(), rows, 4 * H, H, stream);
+    launch_g4a_silu16(d_wide16_.data(), static_cast<int64_t>(rows) * 4 * H, stream);
+    linear_(d_wide16_.data(), w.down, d_h16_.data(), rows, H, 4 * H, stream);
     G4aNormArgs post;
-    post.in16 = d_h16_;
+    post.in16 = d_h16_.data();
     post.w = static_cast<const float*>(w.post_norm.data);
-    post.residual = d_x_;
-    post.out32 = d_x_;
+    post.residual = d_x_.data();
+    post.out32 = d_x_.data();
     post.clip = c.gradient_clipping;
     post.eps = c.rms_norm_eps;
     post.scale = c.residual_weight;
@@ -165,50 +166,50 @@ void Gemma4AudioEncoder::block_(const Gemma4AudioLayer& L, int rows, cudaStream_
     ffw_(L.ffw1, rows, stream);
 
     G4aNormArgs pre;
-    pre.in32 = d_x_;
+    pre.in32 = d_x_.data();
     pre.w = static_cast<const float*>(L.norm_pre_attn.data);
-    pre.out16 = d_a16_;
+    pre.out16 = d_a16_.data();
     pre.clip = c.gradient_clipping;
     pre.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(pre, rows, H, stream);
-    linear_(d_a16_, L.q, d_q_, rows, H, H, stream);
-    linear_(d_a16_, L.k, d_k_, rows, H, H, stream);
-    linear_(d_a16_, L.v, d_v_, rows, H, H, stream);
+    linear_(d_a16_.data(), L.q, d_q_.data(), rows, H, H, stream);
+    linear_(d_a16_.data(), L.k, d_k_.data(), rows, H, H, stream);
+    linear_(d_a16_.data(), L.v, d_v_.data(), rows, H, H, stream);
     const float k_scale = static_cast<float>(std::log1p(std::numbers::e) / std::numbers::ln2);
-    launch_g4a_local_attention(d_q_, d_k_, d_v_, static_cast<const float*>(L.rel_k.data),
-                               static_cast<const float*>(L.q_scale.data), d_valid_, d_o_, rows, c.num_heads,
-                               c.head_dim(), c.context_left - 1, c.rel_positions(), k_scale, c.logit_cap,
-                               stream);
-    linear_(d_o_, L.post, d_h16_, rows, H, H, stream);
+    launch_g4a_local_attention(d_q_.data(), d_k_.data(), d_v_.data(), static_cast<const float*>(L.rel_k.data),
+                               static_cast<const float*>(L.q_scale.data), d_valid_.data(), d_o_.data(), rows,
+                               c.num_heads, c.head_dim(), c.context_left - 1, c.rel_positions(), k_scale,
+                               c.logit_cap, stream);
+    linear_(d_o_.data(), L.post, d_h16_.data(), rows, H, H, stream);
     G4aNormArgs post;
-    post.in16 = d_h16_;
+    post.in16 = d_h16_.data();
     post.w = static_cast<const float*>(L.norm_post_attn.data);
-    post.residual = d_x_;
-    post.out32 = d_x_;
+    post.residual = d_x_.data();
+    post.out32 = d_x_.data();
     post.clip = c.gradient_clipping;
     post.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(post, rows, H, stream);
 
     // Light conv: norm -> linear_start -> GLU -> causal depthwise conv -> clip, norm, SiLU -> linear_end.
     G4aNormArgs lc;
-    lc.in32 = d_x_;
+    lc.in32 = d_x_.data();
     lc.w = static_cast<const float*>(L.lconv_pre_norm.data);
-    lc.out16 = d_a16_;
+    lc.out16 = d_a16_.data();
     lc.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(lc, rows, H, stream);
-    linear_(d_a16_, L.lin_start, d_wide16_, rows, 2 * H, H, stream);
-    launch_g4a_glu16(d_wide16_, d_o_, rows, H, stream);
-    launch_g4a_dwconv_norm_silu(d_o_, static_cast<const float*>(L.dw_conv.data),
-                                static_cast<const float*>(L.lconv_conv_norm.data), d_a16_, rows, H,
+    linear_(d_a16_.data(), L.lin_start, d_wide16_.data(), rows, 2 * H, H, stream);
+    launch_g4a_glu16(d_wide16_.data(), d_o_.data(), rows, H, stream);
+    launch_g4a_dwconv_norm_silu(d_o_.data(), static_cast<const float*>(L.dw_conv.data),
+                                static_cast<const float*>(L.lconv_conv_norm.data), d_a16_.data(), rows, H,
                                 c.conv_kernel, c.gradient_clipping, c.rms_norm_eps, stream);
-    linear_(d_a16_, L.lin_end, d_h16_, rows, H, H, stream);
-    launch_g4a_add16_to32(d_x_, d_h16_, static_cast<int64_t>(rows) * H, stream);
+    linear_(d_a16_.data(), L.lin_end, d_h16_.data(), rows, H, H, stream);
+    launch_g4a_add16_to32(d_x_.data(), d_h16_.data(), static_cast<int64_t>(rows) * H, stream);
 
     ffw_(L.ffw2, rows, stream);
     G4aNormArgs out;
-    out.in32 = d_x_;
+    out.in32 = d_x_.data();
     out.w = static_cast<const float*>(L.norm_out.data);
-    out.out32 = d_x_;
+    out.out32 = d_x_.data();
     out.clip = c.gradient_clipping;
     out.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(out, rows, H, stream);
@@ -232,55 +233,58 @@ bool Gemma4AudioEncoder::encode(const AudioFeatures& f, half* d_out, cudaStream_
         mask1[static_cast<size_t>(i)] = f.mask[2 * static_cast<size_t>(i)];
     for (int i = 0; i < T; ++i)
         valid[static_cast<size_t>(i)] = mask1[2 * static_cast<size_t>(i)];
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_feat_.data(), f.mel.data(), f.mel.size() * sizeof(float),
+                                       cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(d_feat_, f.mel.data(), f.mel.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_mask1_, mask1.data(), mask1.size(), cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_valid_, valid.data(), valid.size(), cudaMemcpyHostToDevice, stream));
+        cudaMemcpyAsync(d_mask1_.data(), mask1.data(), mask1.size(), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(d_valid_.data(), valid.data(), valid.size(), cudaMemcpyHostToDevice, stream));
 
     // Subsampling: two Conv2d k3 s2 + channel LayerNorm + ReLU; layer1 input masked by mask[::2].
-    launch_g4a_conv2d_s2(d_feat_, static_cast<const float*>(m_->sub0_conv.data), d_c0_, 1, c.sub_channels0,
-                         g.F, c.n_mels, stream);
-    launch_g4a_chan_ln_relu(d_c0_, static_cast<const float*>(m_->sub0_norm.data), c.sub_channels0, g.F1, g.M1,
-                            c.rms_norm_eps, d_mask1_, d_c0_, nullptr, stream);
-    launch_g4a_conv2d_s2(d_c0_, static_cast<const float*>(m_->sub1_conv.data), d_c1_, c.sub_channels0,
-                         c.sub_channels1, g.F1, g.M1, stream);
-    launch_g4a_chan_ln_relu(d_c1_, static_cast<const float*>(m_->sub1_norm.data), c.sub_channels1, T, g.M2,
-                            c.rms_norm_eps, nullptr, nullptr, d_a16_, stream);
-    gemm_nt(d_a16_, static_cast<const half*>(m_->input_proj.data), d_h16_, T, H, g.sub_width, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_x_, 0, static_cast<size_t>(T) * H * sizeof(float), stream));
-    launch_g4a_add16_to32(d_x_, d_h16_, static_cast<int64_t>(T) * H, stream);
+    launch_g4a_conv2d_s2(d_feat_.data(), static_cast<const float*>(m_->sub0_conv.data), d_c0_.data(), 1,
+                         c.sub_channels0, g.F, c.n_mels, stream);
+    launch_g4a_chan_ln_relu(d_c0_.data(), static_cast<const float*>(m_->sub0_norm.data), c.sub_channels0,
+                            g.F1, g.M1, c.rms_norm_eps, d_mask1_.data(), d_c0_.data(), nullptr, stream);
+    launch_g4a_conv2d_s2(d_c0_.data(), static_cast<const float*>(m_->sub1_conv.data), d_c1_.data(),
+                         c.sub_channels0, c.sub_channels1, g.F1, g.M1, stream);
+    launch_g4a_chan_ln_relu(d_c1_.data(), static_cast<const float*>(m_->sub1_norm.data), c.sub_channels1, T,
+                            g.M2, c.rms_norm_eps, nullptr, nullptr, d_a16_.data(), stream);
+    gemm_nt(d_a16_.data(), static_cast<const half*>(m_->input_proj.data), d_h16_.data(), T, H, g.sub_width,
+            stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_x_.data(), 0, static_cast<size_t>(T) * H * sizeof(float), stream));
+    launch_g4a_add16_to32(d_x_.data(), d_h16_.data(), static_cast<int64_t>(T) * H, stream);
     if (taps != nullptr) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        taps->subsample = to_host(d_x_, static_cast<size_t>(T) * H);
+        taps->subsample = to_host(d_x_.data(), static_cast<size_t>(T) * H);
     }
 
     for (size_t i = 0; i < m_->layers.size(); ++i) {
         block_(m_->layers[i], T, stream);
         if (taps != nullptr && i == 0) {
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            taps->layer0 = to_host(d_x_, static_cast<size_t>(T) * H);
+            taps->layer0 = to_host(d_x_.data(), static_cast<size_t>(T) * H);
         }
     }
 
-    launch_g4a_f32_to_16(d_x_, d_a16_, static_cast<int64_t>(T) * H, stream);
-    gemm_nt(d_a16_, static_cast<const half*>(m_->out_proj_w.data), d_proj16_, T, c.output_proj_dims, H,
-            stream);
-    launch_g4a_add_bias16(d_proj16_, static_cast<const float*>(m_->out_proj_b.data), T, c.output_proj_dims,
-                          stream);
+    launch_g4a_f32_to_16(d_x_.data(), d_a16_.data(), static_cast<int64_t>(T) * H, stream);
+    gemm_nt(d_a16_.data(), static_cast<const half*>(m_->out_proj_w.data), d_proj16_.data(), T,
+            c.output_proj_dims, H, stream);
+    launch_g4a_add_bias16(d_proj16_.data(), static_cast<const float*>(m_->out_proj_b.data), T,
+                          c.output_proj_dims, stream);
     if (taps != nullptr) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        taps->tower = to_host(d_proj16_, static_cast<size_t>(T) * c.output_proj_dims);
+        taps->tower = to_host(d_proj16_.data(), static_cast<size_t>(T) * c.output_proj_dims);
     }
 
     // Embedder: RMSNorm without scale, then the projection, valid rows only (they lead: the
     // padding sits at the end of the clip).
     G4aNormArgs en;
-    en.in16 = d_proj16_;
-    en.out16 = d_emb_in16_;
+    en.in16 = d_proj16_.data();
+    en.out16 = d_emb_in16_.data();
     en.eps = c.rms_norm_eps;
     launch_g4a_rmsnorm(en, f.n_tokens, c.output_proj_dims, stream);
-    gemm_nt(d_emb_in16_, static_cast<const half*>(m_->embed_proj.data), d_out, f.n_tokens, c.lm_d_model,
-            c.output_proj_dims, stream);
+    gemm_nt(d_emb_in16_.data(), static_cast<const half*>(m_->embed_proj.data), d_out, f.n_tokens,
+            c.lm_d_model, c.output_proj_dims, stream);
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 

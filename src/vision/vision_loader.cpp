@@ -58,14 +58,14 @@ bool upload_tensor_fp16(const void* src, GgufWireType type, int64_t n_elements, 
         *d_out = nullptr;
         return true;
     }
-    auto slab = engine_arena().take_bytes(fp16_bytes);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(fp16_bytes);
     if (slab.empty()) {
         IMP_LOG_ERROR("Vision: engine arena exhausted for %zu bytes — the arena was reserved "
                       "without this mmproj",
                       fp16_bytes);
         return false;
     }
-    half* d_ptr = reinterpret_cast<half*>(slab.data());
+    half* d_ptr = slab.as<half>().data();
 
     if (type == GgufWireType::F16) {
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice));
@@ -131,13 +131,13 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
         for (int64_t c = 0; c < cols; c++)
             h_dst[(c * rows) + r] = h_src[(r * cols) + c];
 
-    auto slab = engine_arena().take_bytes(static_cast<size_t>(n) * sizeof(half));
+    StableSpan<std::byte> slab = engine_arena().take_bytes(static_cast<size_t>(n) * sizeof(half));
     if (slab.empty()) {
         IMP_LOG_ERROR("Vision: engine arena exhausted for transposed %zu bytes",
                       static_cast<size_t>(n) * sizeof(half));
         return false;
     }
-    half* d_ptr = reinterpret_cast<half*>(slab.data());
+    half* d_ptr = slab.as<half>().data();
     IMP_CUDA_CHECK_LOG(
         cudaMemcpy(d_ptr, h_dst.data(), static_cast<size_t>(n) * sizeof(half), cudaMemcpyHostToDevice));
     *d_out = d_ptr;

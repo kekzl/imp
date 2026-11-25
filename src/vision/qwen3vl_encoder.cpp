@@ -59,11 +59,11 @@ void Qwen3VLEncoder::free_buffers() {
     // there is nothing to hand back here. Dropping the pointers is what keeps a
     // re-init from reading slices that a closed arena no longer backs.
     taken_bytes_ = 0;
-    d_hidden_ = d_normed_ = d_proj_ = d_qkv_ = nullptr;
-    d_q_ = d_k_ = d_v_ = d_attn_ = d_scores_ = d_ffn_ = nullptr;
-    d_merge_norm_ = d_merge_fc_ = nullptr;
-    d_row_ = d_col_ = d_taps_ = nullptr;
-    d_weights_ = nullptr;
+    d_hidden_ = d_normed_ = d_proj_ = d_qkv_ = {};
+    d_q_ = d_k_ = d_v_ = d_attn_ = d_scores_ = d_ffn_ = {};
+    d_merge_norm_ = d_merge_fc_ = {};
+    d_row_ = d_col_ = d_taps_ = {};
+    d_weights_ = {};
     max_tokens_ = 0;
 }
 
@@ -98,23 +98,23 @@ bool Qwen3VLEncoder::init(const VisionModel& model, int max_tokens) {
     const int64_t n = max_tokens;
     const int64_t H = c.hidden_size;
     bool ok = true;
-    auto take = [&](int64_t elems, size_t elem_bytes, const char* tag) -> void* {
+    auto take = [&](int64_t elems, size_t elem_bytes, const char* tag) -> StableSpan<std::byte> {
         if (!ok)
-            return nullptr;
+            return {};
         const size_t bytes = static_cast<size_t>(elems) * elem_bytes;
-        auto slab = engine_arena().take_bytes(bytes);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             IMP_LOG_ERROR("Qwen3-VL encoder: engine arena exhausted for %s (%zu bytes) — the arena "
                           "was reserved without this encoder",
                           tag, bytes);
             ok = false;
-            return nullptr;
+            return {};
         }
         taken_bytes_ += bytes;
-        return slab.data();
+        return slab;
     };
     auto take_half = [&](int64_t elems, const char* tag) {
-        return static_cast<half*>(take(elems, sizeof(half), tag));
+        return take(elems, sizeof(half), tag).as<half>();
     };
 
     d_hidden_ = take_half(n * H, "vision_enc_hidden");
@@ -130,10 +130,10 @@ bool Qwen3VLEncoder::init(const VisionModel& model, int max_tokens) {
     d_ffn_ = take_half(n * c.intermediate_size, "vision_enc_ffn");
     d_merge_norm_ = take_half(n * H, "vision_enc_merge_norm");
     d_merge_fc_ = take_half(n * H, "vision_enc_merge_fc");
-    d_row_ = static_cast<int32_t*>(take(n, sizeof(int32_t), "vision_enc_row"));
-    d_col_ = static_cast<int32_t*>(take(n, sizeof(int32_t), "vision_enc_col"));
-    d_taps_ = static_cast<int32_t*>(take(n * kQwenVisionPosTaps, sizeof(int32_t), "vision_enc_taps"));
-    d_weights_ = static_cast<float*>(take(n * kQwenVisionPosTaps, sizeof(float), "vision_enc_weights"));
+    d_row_ = take(n, sizeof(int32_t), "vision_enc_row").as<int32_t>();
+    d_col_ = take(n, sizeof(int32_t), "vision_enc_col").as<int32_t>();
+    d_taps_ = take(n * kQwenVisionPosTaps, sizeof(int32_t), "vision_enc_taps").as<int32_t>();
+    d_weights_ = take(n * kQwenVisionPosTaps, sizeof(float), "vision_enc_weights").as<float>();
 
     if (!ok) {
         free_buffers();
@@ -155,26 +155,25 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
         const int rows = std::min(kAttnChunk, tokens - c0);
 
         // scores[h] = Q[h][c0 : c0+rows] @ K[h]^T * scale   -> [rows, tokens]
-        cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_,
-                                                    CUDA_R_16F, hd, static_cast<long long>(tokens) * hd,
-                                                    d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-                                                    static_cast<long long>(tokens) * hd, &zero, d_scores_,
-                                                    CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens,
-                                                    heads, CUBLAS_COMPUTE_32F, stream);
+        cublasStatus_t st = lt_gemm_strided_batched(
+            CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_.data(), CUDA_R_16F, hd,
+            static_cast<long long>(tokens) * hd, d_q_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F,
+            hd, static_cast<long long>(tokens) * hd, &zero, d_scores_.data(), CUDA_R_16F, tokens,
+            static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: QK^T failed (%d)", static_cast<int>(st));
             return false;
         }
 
         // Every head's chunk is contiguous, so one launch normalises them all.
-        launch_qwen3vl_softmax_rows(d_scores_, heads * rows, tokens, stream);
+        launch_qwen3vl_softmax_rows(d_scores_.data(), heads * rows, tokens, stream);
 
         // out[h][c0 : c0+rows] = scores[h] @ V[h]   -> [rows, head_dim]
         const float one = 1.0f;
-        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_, CUDA_R_16F, hd,
-                                     static_cast<long long>(tokens) * hd, d_scores_, CUDA_R_16F, tokens,
-                                     static_cast<long long>(rows) * tokens, &zero,
-                                     d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
+        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_.data(),
+                                     CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_.data(),
+                                     CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
+                                     d_attn_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
                                      static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: attn@V failed (%d)", static_cast<int>(st));
@@ -197,29 +196,29 @@ bool Qwen3VLEncoder::run_merger(const VisionMergerWeights& m, const half* d_hidd
     const bool postshuffle = m.norm_w.shape[0] == wide;
     if (postshuffle)
         launch_qwen3vl_layernorm(d_hidden, static_cast<const half*>(m.norm_w.data),
-                                 static_cast<const half*>(m.norm_b.data), d_merge_norm_, merged, wide,
+                                 static_cast<const half*>(m.norm_b.data), d_merge_norm_.data(), merged, wide,
                                  kLayerNormEps, stream);
     else
         launch_qwen3vl_layernorm(d_hidden, static_cast<const half*>(m.norm_w.data),
-                                 static_cast<const half*>(m.norm_b.data), d_merge_norm_, tokens,
+                                 static_cast<const half*>(m.norm_b.data), d_merge_norm_.data(), tokens,
                                  c.hidden_size, kLayerNormEps, stream);
 
-    gemm_nt(d_merge_norm_, static_cast<const half*>(m.fc1_w.data), d_merge_fc_, merged, wide, wide, 1.0f,
-            0.0f, stream);
-    launch_qwen3vl_add_bias(d_merge_fc_, static_cast<const half*>(m.fc1_b.data), merged, wide, stream);
+    gemm_nt(d_merge_norm_.data(), static_cast<const half*>(m.fc1_w.data), d_merge_fc_.data(), merged, wide,
+            wide, 1.0f, 0.0f, stream);
+    launch_qwen3vl_add_bias(d_merge_fc_.data(), static_cast<const half*>(m.fc1_b.data), merged, wide, stream);
     // nn.GELU(), i.e. the exact erf form — NOT the tanh approximation the block
     // MLP uses. Same symbol upstream, different function.
-    launch_qwen3vl_gelu_erf(d_merge_fc_, static_cast<int64_t>(merged) * wide, stream);
+    launch_qwen3vl_gelu_erf(d_merge_fc_.data(), static_cast<int64_t>(merged) * wide, stream);
 
-    gemm_nt(d_merge_fc_, static_cast<const half*>(m.fc2_w.data), d_out, merged, c.out_hidden_size, wide, 1.0f,
-            0.0f, stream);
+    gemm_nt(d_merge_fc_.data(), static_cast<const half*>(m.fc2_w.data), d_out, merged, c.out_hidden_size,
+            wide, 1.0f, 0.0f, stream);
     launch_qwen3vl_add_bias(d_out, static_cast<const half*>(m.fc2_b.data), merged, c.out_hidden_size, stream);
     return true;
 }
 
 bool Qwen3VLEncoder::encode(const half* d_patches, const QwenVisionGrid& grid, half* d_out,
                             const std::vector<half*>& d_deepstack_out, cudaStream_t stream) {
-    if (!model_ || !d_hidden_) {
+    if (!model_ || !d_hidden_.data()) {
         IMP_LOG_ERROR("Qwen3-VL encoder: encode before init");
         return false;
     }
@@ -238,66 +237,72 @@ bool Qwen3VLEncoder::encode(const half* d_patches, const QwenVisionGrid& grid, h
     const int H = c.hidden_size;
     const int features = static_cast<int>(model_->patch_embd_w.shape[1]);
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_row_, grid.row.data(), static_cast<size_t>(n) * sizeof(int32_t),
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_col_, grid.col.data(), static_cast<size_t>(n) * sizeof(int32_t),
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_taps_, grid.pos_taps.data(), grid.pos_taps.size() * sizeof(int32_t),
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_weights_, grid.pos_weights.data(),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_row_.data(), grid.row.data(),
+                                       static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_col_.data(), grid.col.data(),
+                                       static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_taps_.data(), grid.pos_taps.data(),
+                                       grid.pos_taps.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_weights_.data(), grid.pos_weights.data(),
                                        grid.pos_weights.size() * sizeof(float), cudaMemcpyHostToDevice,
                                        stream));
 
     // Patch embedding. The checkpoint's Conv3d has kernel == stride == the whole
     // patch, so it is a plain matrix product against the flattened weight.
-    gemm_nt(d_patches, static_cast<const half*>(model_->patch_embd_w.data), d_hidden_, n, H, features, 1.0f,
-            0.0f, stream);
-    launch_qwen3vl_add_bias(d_hidden_, static_cast<const half*>(model_->patch_embd_b.data), n, H, stream);
-    launch_qwen3vl_pos_embed_add(d_hidden_, static_cast<const half*>(model_->position_embd.data), d_taps_,
-                                 d_weights_, n, H, kQwenVisionPosTaps, stream);
+    gemm_nt(d_patches, static_cast<const half*>(model_->patch_embd_w.data), d_hidden_.data(), n, H, features,
+            1.0f, 0.0f, stream);
+    launch_qwen3vl_add_bias(d_hidden_.data(), static_cast<const half*>(model_->patch_embd_b.data), n, H,
+                            stream);
+    launch_qwen3vl_pos_embed_add(d_hidden_.data(), static_cast<const half*>(model_->position_embd.data),
+                                 d_taps_.data(), d_weights_.data(), n, H, kQwenVisionPosTaps, stream);
 
     size_t next_tap = 0;
     for (int l = 0; l < c.num_layers; ++l) {
         const VisionLayerWeights& L = model_->layers[static_cast<size_t>(l)];
 
-        launch_qwen3vl_layernorm(d_hidden_, static_cast<const half*>(L.ln1_w.data),
-                                 static_cast<const half*>(L.ln1_b.data), d_normed_, n, H, kLayerNormEps,
-                                 stream);
-        gemm_nt(d_normed_, static_cast<const half*>(L.wq.data), d_qkv_, n, 3 * H, H, 1.0f, 0.0f, stream);
-        launch_qwen3vl_add_bias(d_qkv_, static_cast<const half*>(L.bq.data), n, 3 * H, stream);
-        launch_qwen3vl_split_qkv_rope(d_qkv_, d_row_, d_col_, d_q_, d_k_, d_v_, n, c.num_heads, c.head_dim,
-                                      kVisionRopeTheta, stream);
+        launch_qwen3vl_layernorm(d_hidden_.data(), static_cast<const half*>(L.ln1_w.data),
+                                 static_cast<const half*>(L.ln1_b.data), d_normed_.data(), n, H,
+                                 kLayerNormEps, stream);
+        gemm_nt(d_normed_.data(), static_cast<const half*>(L.wq.data), d_qkv_.data(), n, 3 * H, H, 1.0f, 0.0f,
+                stream);
+        launch_qwen3vl_add_bias(d_qkv_.data(), static_cast<const half*>(L.bq.data), n, 3 * H, stream);
+        launch_qwen3vl_split_qkv_rope(d_qkv_.data(), d_row_.data(), d_col_.data(), d_q_.data(), d_k_.data(),
+                                      d_v_.data(), n, c.num_heads, c.head_dim, kVisionRopeTheta, stream);
         if (!attention(n, stream))
             return false;
-        launch_qwen3vl_merge_heads(d_attn_, d_normed_, n, c.num_heads, c.head_dim, stream);
-        gemm_nt(d_normed_, static_cast<const half*>(L.wo.data), d_proj_, n, H, H, 1.0f, 0.0f, stream);
-        launch_qwen3vl_add_bias(d_proj_, static_cast<const half*>(L.bo.data), n, H, stream);
-        launch_qwen3vl_residual_add(d_hidden_, d_proj_, static_cast<int64_t>(n) * H, stream);
+        launch_qwen3vl_merge_heads(d_attn_.data(), d_normed_.data(), n, c.num_heads, c.head_dim, stream);
+        gemm_nt(d_normed_.data(), static_cast<const half*>(L.wo.data), d_proj_.data(), n, H, H, 1.0f, 0.0f,
+                stream);
+        launch_qwen3vl_add_bias(d_proj_.data(), static_cast<const half*>(L.bo.data), n, H, stream);
+        launch_qwen3vl_residual_add(d_hidden_.data(), d_proj_.data(), static_cast<int64_t>(n) * H, stream);
 
-        launch_qwen3vl_layernorm(d_hidden_, static_cast<const half*>(L.ln2_w.data),
-                                 static_cast<const half*>(L.ln2_b.data), d_normed_, n, H, kLayerNormEps,
-                                 stream);
-        gemm_nt(d_normed_, static_cast<const half*>(L.ffn_up_w.data), d_ffn_, n, c.intermediate_size, H, 1.0f,
-                0.0f, stream);
-        launch_qwen3vl_add_bias(d_ffn_, static_cast<const half*>(L.ffn_up_b.data), n, c.intermediate_size,
-                                stream);
-        launch_qwen3vl_gelu_tanh(d_ffn_, static_cast<int64_t>(n) * c.intermediate_size, stream);
-        gemm_nt(d_ffn_, static_cast<const half*>(L.ffn_down_w.data), d_proj_, n, H, c.intermediate_size, 1.0f,
-                0.0f, stream);
-        launch_qwen3vl_add_bias(d_proj_, static_cast<const half*>(L.ffn_down_b.data), n, H, stream);
-        launch_qwen3vl_residual_add(d_hidden_, d_proj_, static_cast<int64_t>(n) * H, stream);
+        launch_qwen3vl_layernorm(d_hidden_.data(), static_cast<const half*>(L.ln2_w.data),
+                                 static_cast<const half*>(L.ln2_b.data), d_normed_.data(), n, H,
+                                 kLayerNormEps, stream);
+        gemm_nt(d_normed_.data(), static_cast<const half*>(L.ffn_up_w.data), d_ffn_.data(), n,
+                c.intermediate_size, H, 1.0f, 0.0f, stream);
+        launch_qwen3vl_add_bias(d_ffn_.data(), static_cast<const half*>(L.ffn_up_b.data), n,
+                                c.intermediate_size, stream);
+        launch_qwen3vl_gelu_tanh(d_ffn_.data(), static_cast<int64_t>(n) * c.intermediate_size, stream);
+        gemm_nt(d_ffn_.data(), static_cast<const half*>(L.ffn_down_w.data), d_proj_.data(), n, H,
+                c.intermediate_size, 1.0f, 0.0f, stream);
+        launch_qwen3vl_add_bias(d_proj_.data(), static_cast<const half*>(L.ffn_down_b.data), n, H, stream);
+        launch_qwen3vl_residual_add(d_hidden_.data(), d_proj_.data(), static_cast<int64_t>(n) * H, stream);
 
         // DeepStack taps read the block's OUTPUT, and `deepstack_indexes` is
         // sorted, so a running cursor is enough.
         if (next_tap < c.deepstack_indexes.size() && c.deepstack_indexes[next_tap] == l) {
-            if (!d_deepstack_out.empty() && !run_merger(model_->deepstack_mergers[next_tap], d_hidden_, n,
-                                                        d_deepstack_out[next_tap], stream))
+            if (!d_deepstack_out.empty() && !run_merger(model_->deepstack_mergers[next_tap], d_hidden_.data(),
+                                                        n, d_deepstack_out[next_tap], stream))
                 return false;
             ++next_tap;
         }
     }
 
-    return run_merger(model_->merger, d_hidden_, n, d_out, stream);
+    return run_merger(model_->merger, d_hidden_.data(), n, d_out, stream);
 }
 
 }  // namespace imp

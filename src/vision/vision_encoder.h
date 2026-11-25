@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/span.h"
 #include "runtime/cuda_graph.h"
 #include "vision/vision_model.h"
 #include <cuda_runtime.h>
@@ -32,19 +33,19 @@ private:
     int lm_d_model_ = 0;
 
     // Workspace buffers (pre-allocated, reused per encode)
-    half* d_patches_ = nullptr;      // [num_patches, patch_dim]
-    half* d_hidden_ = nullptr;       // [num_patches, hidden_size]
-    half* d_residual_ = nullptr;     // [num_patches, hidden_size]
-    half* d_q_ = nullptr;            // [num_patches, hidden_size]
-    half* d_k_ = nullptr;            // [num_patches, hidden_size]
-    half* d_v_ = nullptr;            // [num_patches, hidden_size]
-    half* d_attn_out_ = nullptr;     // [num_patches, hidden_size]
-    half* d_attn_scores_ = nullptr;  // [num_heads, num_patches, num_patches]
-    half* d_ffn_ = nullptr;          // [num_patches, intermediate_size]
-    half* d_pooled_ = nullptr;       // [num_image_tokens, hidden_size]
-    half* d_gate_ = nullptr;         // [num_patches, intermediate_size] (gemma4v GeGLU gate)
-    int* d_pos_x_ = nullptr;         // [num_patches] axial column index (gemma4v)
-    int* d_pos_y_ = nullptr;         // [num_patches] axial row index (gemma4v)
+    StableSpan<half> d_patches_;      // [num_patches, patch_dim]
+    StableSpan<half> d_hidden_;       // [num_patches, hidden_size]
+    StableSpan<half> d_residual_;     // [num_patches, hidden_size]
+    StableSpan<half> d_q_;            // [num_patches, hidden_size]
+    StableSpan<half> d_k_;            // [num_patches, hidden_size]
+    StableSpan<half> d_v_;            // [num_patches, hidden_size]
+    StableSpan<half> d_attn_out_;     // [num_patches, hidden_size]
+    StableSpan<half> d_attn_scores_;  // [num_heads, num_patches, num_patches]
+    StableSpan<half> d_ffn_;          // [num_patches, intermediate_size]
+    StableSpan<half> d_pooled_;       // [num_image_tokens, hidden_size]
+    StableSpan<half> d_gate_;         // [num_patches, intermediate_size] (gemma4v GeGLU gate)
+    StableSpan<int> d_pos_x_;         // [num_patches] axial column index (gemma4v)
+    StableSpan<int> d_pos_y_;         // [num_patches] axial row index (gemma4v)
 
     // CUDA graph for the full encoder forward: topology fixed once model/workspace sizes are
     // known, only input/output pointers change across calls. Invalidated when those pointers

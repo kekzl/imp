@@ -20,7 +20,7 @@ namespace imp {
 // Scratch: one 16-bit count per vocab entry per row, from the T2 arena
 // (sampling_preallocate_penalty_counts, ExecT2Demand::penalty_counts); count wraps past
 // 65535 (no window reaches it). Without the scratch, the vocab sweep runs instead.
-static uint32_t* s_pen_counts = nullptr;
+static StableSpan<uint32_t> s_pen_counts;
 static int s_pen_counts_rows = 0;
 static int s_pen_counts_vocab = 0;
 static constexpr int kPenHistThreads = 512;
@@ -121,7 +121,7 @@ bool sampling_preallocate_penalty_counts(int rows, int vocab_size) {
         return false;
     // Always re-taken: the caller re-opens the arena between engine loads.
     const size_t words = static_cast<size_t>(rows) * pen_words_per_row(vocab_size);
-    auto slab = engine_arena().take_bytes(words * sizeof(uint32_t));
+    StableSpan<std::byte> slab = engine_arena().take_bytes(words * sizeof(uint32_t));
     if (slab.empty()) {
         IMP_LOG_WARN("sampling_preallocate_penalty_counts: %zu bytes unavailable from the T2 arena, "
                      "penalties stay on the vocab sweep",
@@ -130,14 +130,14 @@ bool sampling_preallocate_penalty_counts(int rows, int vocab_size) {
     }
     if (cudaMemset(slab.data(), 0, words * sizeof(uint32_t)) != cudaSuccess)
         return false;
-    s_pen_counts = reinterpret_cast<uint32_t*>(slab.data());
+    s_pen_counts = slab.as<uint32_t>();
     s_pen_counts_rows = rows;
     s_pen_counts_vocab = vocab_size;
     return true;
 }
 
 void sampling_reset_penalty_counts() {
-    s_pen_counts = nullptr;
+    s_pen_counts = {};
     s_pen_counts_rows = 0;
     s_pen_counts_vocab = 0;
 }
@@ -146,7 +146,7 @@ void sampling_reset_penalty_counts() {
 IMP_REGISTER_CUDA_STATIC_RESET(sampling_reset_penalty_counts);
 
 static inline bool pen_hist_ready(int rows, int vocab_size) {
-    return s_pen_counts != nullptr && rows <= s_pen_counts_rows && vocab_size <= s_pen_counts_vocab;
+    return s_pen_counts.data() != nullptr && rows <= s_pen_counts_rows && vocab_size <= s_pen_counts_vocab;
 }
 
 void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_size, cudaStream_t stream) {
@@ -156,8 +156,8 @@ void launch_penalties_rows(const PenaltyRowArgs* d_rows, int n_rows, int vocab_s
     }
     dim3 grid(1, n_rows);
     pdl::enable_kernel(penalties_hist_rows_kernel);
-    pdl::launch(penalties_hist_rows_kernel, grid, dim3(kPenHistThreads), size_t(0), stream, d_rows, vocab_size,
-                s_pen_counts, pen_words_per_row(s_pen_counts_vocab));
+    pdl::launch(penalties_hist_rows_kernel, grid, dim3(kPenHistThreads), size_t(0), stream, d_rows,
+                vocab_size, s_pen_counts.data(), pen_words_per_row(s_pen_counts_vocab));
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -173,9 +173,10 @@ void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, in
                               presence_penalty, stream);
         return;
     }
-    penalties_hist_kernel<<<1, kPenHistThreads, 0, stream>>>(logits, token_ids, n_tokens, nullptr, 0, vocab_size,
-                                                             repetition_penalty, frequency_penalty,
-                                                             presence_penalty, s_pen_counts);
+    penalties_hist_kernel<<<1, kPenHistThreads, 0, stream>>>(logits, token_ids, n_tokens, nullptr, 0,
+                                                             vocab_size, repetition_penalty,
+                                                             frequency_penalty, presence_penalty,
+                                                             s_pen_counts.data());
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -190,8 +191,9 @@ void apply_penalties_device_count(float* logits, int vocab_size, const int32_t* 
         return;
     }
     penalties_hist_kernel<<<1, kPenHistThreads, 0, stream>>>(logits, token_ids, 0, d_n_tokens, repeat_last_n,
-                                                             vocab_size, repetition_penalty, frequency_penalty,
-                                                             presence_penalty, s_pen_counts);
+                                                             vocab_size, repetition_penalty,
+                                                             frequency_penalty, presence_penalty,
+                                                             s_pen_counts.data());
     IMP_CUDA_CHECK_LAUNCH();
 }
 

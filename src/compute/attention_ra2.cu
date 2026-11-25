@@ -22,7 +22,7 @@ static_assert((fp4_attn_geom::kRa2TileBytesPerD * 256) + fp4_attn_geom::kRa2Tile
 // T2 arena scratch (AUDIT B13 family), taken once at the planned bound (exec_t2_demand ra2_scratch);
 // unplanned it grows, and a bump arena keeps each old slice valid inside a captured graph. Arena
 // exhausted or need over the plan = decline (FA2 serves).
-static uint8_t* s_ra2_ws = nullptr;
+static StableSpan<uint8_t> s_ra2_ws;  // engine arena slice
 static size_t s_ra2_ws_cap = 0;
 static uint64_t s_ra2_ws_gen = 0;
 static size_t s_ra2_ws_bound = 0;  // planned demand, attention_ra2_set_workspace_bound
@@ -33,24 +33,25 @@ static uint8_t* ensure_ra2_workspace(size_t need) {
     const uint64_t gen = engine_arena().generation();
     if (gen != s_ra2_ws_gen) {  // model swap: re-take instead of trusting a stale capacity
         s_ra2_ws_gen = gen;
-        s_ra2_ws = nullptr;
+        s_ra2_ws = {};
         s_ra2_ws_cap = 0;
     }
-    if (s_ra2_ws != nullptr && need <= s_ra2_ws_cap)
-        return s_ra2_ws;
-    if (s_ra2_ws != nullptr && s_ra2_ws_bound > 0)  // planned slab taken: no second take outside the plan
+    if (s_ra2_ws.data() != nullptr && need <= s_ra2_ws_cap)
+        return s_ra2_ws.data();
+    if (s_ra2_ws.data() != nullptr &&
+        s_ra2_ws_bound > 0)  // planned slab taken: no second take outside the plan
         return nullptr;
     const size_t take = std::max(need, s_ra2_ws_bound);
-    auto slab = engine_arena().take_bytes(take);
+    StableSpan<std::byte> slab = engine_arena().take_bytes(take);
     if (slab.empty()) {
         IMP_LOG_WARN(
             "ra2 prefill: workspace %.2f MiB unavailable from the T2 arena (%.1f MiB free), declining",
             take / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
         return nullptr;
     }
-    s_ra2_ws = reinterpret_cast<uint8_t*>(slab.data());
+    s_ra2_ws = slab.as<uint8_t>();
     s_ra2_ws_cap = take;
-    return s_ra2_ws;
+    return s_ra2_ws.data();
 }
 
 bool attention_ra2_prefill(const Tensor& q, const Tensor& k, const Tensor& v, Tensor& o, int n, int kv_len,
@@ -76,7 +77,7 @@ bool attention_ra2_prefill(const Tensor& q, const Tensor& k, const Tensor& v, Te
 }
 
 void attention_ra2_reset_static_cuda_state() {
-    s_ra2_ws = nullptr;
+    s_ra2_ws = {};
     s_ra2_ws_cap = 0;
 }
 

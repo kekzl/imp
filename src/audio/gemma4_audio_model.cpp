@@ -401,7 +401,7 @@ std::expected<size_t, std::string> gemma4_audio_upload(Gemma4AudioModel& m) {
         } else {
             std::memcpy(staging.data(), f.data(), bytes);
         }
-        auto slab = engine_arena().take_bytes(bytes);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             err = "engine arena exhausted uploading audio tower tensor '" + what + "'";
             return;

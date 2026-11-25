@@ -43,8 +43,8 @@ void Qwen3VLPipeline::free_buffers() {
     uploaded_tower_ = false;
     configured_ = false;
     taken_bytes_ = 0;
-    d_patches_ = nullptr;
-    d_out_ = nullptr;
+    d_patches_ = {};
+    d_out_ = {};
     d_deepstack_.clear();
     max_patches_ = 0;
 }
@@ -166,19 +166,19 @@ bool Qwen3VLPipeline::build_() {
     const int features = static_cast<int>(tower.patch_embd_w.shape[1]);
     const int merged = max_patches / unit;
     bool ok = true;
-    auto take = [&](size_t bytes, const char* tag) -> half* {
+    auto take = [&](size_t bytes, const char* tag) -> StableSpan<half> {
         if (!ok)
-            return nullptr;
-        auto slab = engine_arena().take_bytes(bytes);
+            return {};
+        StableSpan<std::byte> slab = engine_arena().take_bytes(bytes);
         if (slab.empty()) {
             IMP_LOG_ERROR("Qwen3-VL pipeline: engine arena exhausted for %s (%zu bytes) — the arena "
                           "was reserved without this pipeline",
                           tag, bytes);
             ok = false;
-            return nullptr;
+            return {};
         }
         taken_bytes_ += bytes;
-        return reinterpret_cast<half*>(slab.data());
+        return slab.as<half>();
     };
     d_patches_ = take(static_cast<size_t>(max_patches) * features * sizeof(half), "vision_patches");
     const size_t emb_bytes = static_cast<size_t>(merged) * c.out_hidden_size * sizeof(half);
@@ -358,14 +358,14 @@ bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& o
             IMP_LOG_ERROR("InternVL pipeline: %d patches, the tile has %d", patches.tokens, c.num_patches);
             return false;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_, patches.data.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_.data(), patches.data.data(),
                                            patches.data.size() * sizeof(half), cudaMemcpyHostToDevice,
                                            stream));
-        if (!internvl_encoder_->encode(d_patches_, d_out_, stream))
+        if (!internvl_encoder_->encode(d_patches_.data(), d_out_.data(), stream))
             return false;
         out.grid_rows = out.grid_cols = c.pos_embed_grid / 2;
         out.tokens = c.num_image_tokens;
-        out.d_embeddings = d_out_;
+        out.d_embeddings = d_out_.data();
         out.d_deepstack.clear();
         return true;
     }
@@ -377,19 +377,22 @@ bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& o
     }
     const QwenVisionGrid& grid = *built;
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_, patches.data.data(), patches.data.size() * sizeof(half),
-                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_.data(), patches.data.data(),
+                                       patches.data.size() * sizeof(half), cudaMemcpyHostToDevice, stream));
 
-    std::vector<half*> deep(d_deepstack_.begin(), d_deepstack_.end());
-    if (!encoder_->encode(d_patches_, grid, d_out_, deep, stream))
+    std::vector<half*> deep;
+    deep.reserve(d_deepstack_.size());
+    for (const StableSpan<half>& d : d_deepstack_)
+        deep.push_back(d.data());
+    if (!encoder_->encode(d_patches_.data(), grid, d_out_.data(), deep, stream))
         return false;
 
     const int unit = c.merge_size * c.merge_size;
     out.grid_rows = patches.grid_h / c.merge_size;
     out.grid_cols = patches.grid_w / c.merge_size;
     out.tokens = patches.tokens / unit;
-    out.d_embeddings = d_out_;
-    out.d_deepstack.assign(d_deepstack_.begin(), d_deepstack_.end());
+    out.d_embeddings = d_out_.data();
+    out.d_deepstack.assign(deep.begin(), deep.end());
     return true;
 }
 

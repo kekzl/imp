@@ -6,6 +6,7 @@
 // rows since a full [heads,tokens,tokens] score matrix is the one buffer that grows
 // quadratically.
 
+#include "memory/span.h"
 #include "vision/qwen3vl_vision_grid.h"
 #include "vision/vision_model.h"
 
@@ -54,24 +55,23 @@ private:
     int max_tokens_ = 0;
     size_t taken_bytes_ = 0;
 
-    half* d_hidden_ = nullptr;  // [max_tokens, hidden]
-    half* d_normed_ = nullptr;  // [max_tokens, hidden]
-    half* d_proj_ = nullptr;    // [max_tokens, hidden]
-    half* d_qkv_ = nullptr;     // [max_tokens, 3*hidden]
-    half* d_q_ = nullptr;       // [heads, max_tokens, head_dim]
-    half* d_k_ = nullptr;
-    half* d_v_ = nullptr;
-    half* d_attn_ = nullptr;        // [heads, max_tokens, head_dim]
-    half* d_scores_ = nullptr;      // [heads, chunk, max_tokens]
-    half* d_ffn_ = nullptr;         // [max_tokens, intermediate]
-    half* d_merge_norm_ = nullptr;  // [max_tokens, hidden] (== [merged, merge^2*hidden])
-    half* d_merge_fc_ = nullptr;    // [merged, merge^2*hidden]
+    StableSpan<half> d_hidden_;  // [max_tokens, hidden]
+    StableSpan<half> d_normed_;  // [max_tokens, hidden]
+    StableSpan<half> d_proj_;    // [max_tokens, hidden]
+    StableSpan<half> d_qkv_;     // [max_tokens, 3*hidden]
+    StableSpan<half> d_q_;       // [heads, max_tokens, head_dim]
+    StableSpan<half> d_k_;
+    StableSpan<half> d_v_;
+    StableSpan<half> d_attn_;        // [heads, max_tokens, head_dim]
+    StableSpan<half> d_scores_;      // [heads, chunk, max_tokens]
+    StableSpan<half> d_ffn_;         // [max_tokens, intermediate]
+    StableSpan<half> d_merge_norm_;  // [max_tokens, hidden] (== [merged, merge^2*hidden])
+    StableSpan<half> d_merge_fc_;    // [merged, merge^2*hidden]
 
-    int32_t* d_row_ = nullptr;
-    int32_t* d_col_ = nullptr;
-    int32_t* d_taps_ = nullptr;
-    float* d_weights_ = nullptr;
-
+    StableSpan<int32_t> d_row_;
+    StableSpan<int32_t> d_col_;
+    StableSpan<int32_t> d_taps_;
+    StableSpan<float> d_weights_;
 };
 
 }  // namespace imp

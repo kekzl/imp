@@ -6,6 +6,7 @@
 
 #include "audio/audio_features.h"
 #include "audio/gemma4_audio_model.h"
+#include "memory/span.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -49,22 +50,22 @@ private:
     const Gemma4AudioModel* m_ = nullptr;
     int max_frames_ = 0;
     size_t taken_ = 0;
-    float* d_feat_ = nullptr;     // [F, n_mels]
-    float* d_c0_ = nullptr;       // [c0, F1, n_mels/2] conv0 out, then LN+ReLU+mask in place
-    float* d_c1_ = nullptr;       // [c1, T, n_mels/4]
-    uint8_t* d_mask1_ = nullptr;  // [F1]
-    uint8_t* d_valid_ = nullptr;  // [T]
-    float* d_x_ = nullptr;        // [T, H] residual
-    half* d_a16_ = nullptr;       // [T, max(H, sub width)]
-    half* d_tmp16_ = nullptr;     // [T, 4H] clamped linear input
-    half* d_wide16_ = nullptr;    // [T, 4H]
-    half* d_q_ = nullptr;
-    half* d_k_ = nullptr;
-    half* d_v_ = nullptr;
-    half* d_o_ = nullptr;
-    half* d_h16_ = nullptr;       // [T, H]
-    half* d_proj16_ = nullptr;    // [T, out_dims]
-    half* d_emb_in16_ = nullptr;  // [T, out_dims]
+    StableSpan<float> d_feat_;     // [F, n_mels]
+    StableSpan<float> d_c0_;       // [c0, F1, n_mels/2] conv0 out, then LN+ReLU+mask in place
+    StableSpan<float> d_c1_;       // [c1, T, n_mels/4]
+    StableSpan<uint8_t> d_mask1_;  // [F1]
+    StableSpan<uint8_t> d_valid_;  // [T]
+    StableSpan<float> d_x_;        // [T, H] residual
+    StableSpan<half> d_a16_;       // [T, max(H, sub width)]
+    StableSpan<half> d_tmp16_;     // [T, 4H] clamped linear input
+    StableSpan<half> d_wide16_;    // [T, 4H]
+    StableSpan<half> d_q_;
+    StableSpan<half> d_k_;
+    StableSpan<half> d_v_;
+    StableSpan<half> d_o_;
+    StableSpan<half> d_h16_;       // [T, H]
+    StableSpan<half> d_proj16_;    // [T, out_dims]
+    StableSpan<half> d_emb_in16_;  // [T, out_dims]
 };
 
 }  // namespace imp

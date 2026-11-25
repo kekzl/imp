@@ -307,9 +307,9 @@ struct WeightCache {
 };
 
 struct ActScratch {
-    int8_t* X_s8 = nullptr;
-    __half* x_scale = nullptr;
-    float* x_rowsum = nullptr;
+    StableSpan<int8_t> X_s8;  // engine arena slices
+    StableSpan<__half> x_scale;
+    StableSpan<float> x_rowsum;
     int max_M = 0;
     int max_K = 0;
     // Arena generation these came from — close()/reset() bumps it, so a model
@@ -368,18 +368,20 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
 // draws on arena alignment slack instead, and a short arena falls back to the dequant path.
 bool ensure_act_scratch(int M, int K) {
     const uint64_t gen = engine_arena().generation();
-    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.gen == gen && g_act_scratch.max_M >= M &&
+    if (g_act_scratch.X_s8.data() != nullptr && g_act_scratch.gen == gen && g_act_scratch.max_M >= M &&
         g_act_scratch.max_K >= K)
         return true;
-    if (g_act_scratch.X_s8 != nullptr && g_act_scratch.gen != gen)
+    if (g_act_scratch.X_s8.data() != nullptr && g_act_scratch.gen != gen)
         g_act_scratch = ActScratch{};  // the arena was closed under us
     const int new_M = std::max(M, g_act_scratch.max_M);
     const int new_K = std::max(K, g_act_scratch.max_K);
     const int subs = new_K / 32;
     g_act_scratch = ActScratch{};
-    auto xs8 = engine_arena().take_bytes(static_cast<size_t>(new_M) * new_K);
-    auto xscale = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs * sizeof(__half));
-    auto xrowsum = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs * sizeof(float));
+    StableSpan<std::byte> xs8 = engine_arena().take_bytes(static_cast<size_t>(new_M) * new_K);
+    StableSpan<std::byte> xscale = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs *
+                                                             sizeof(__half));
+    StableSpan<std::byte> xrowsum = engine_arena().take_bytes(static_cast<size_t>(new_M) * subs *
+                                                              sizeof(float));
     if (xs8.empty() || xscale.empty() || xrowsum.empty()) {
         IMP_LOG_WARN(
             "mmq_q4k_imma_tile: activation scratch for M=%d K=%d unavailable from the T2 "
@@ -387,9 +389,9 @@ bool ensure_act_scratch(int M, int K) {
             new_M, new_K, engine_arena().remaining() / (1024.0 * 1024.0));
         return false;
     }
-    g_act_scratch.X_s8 = reinterpret_cast<int8_t*>(xs8.data());
-    g_act_scratch.x_scale = reinterpret_cast<__half*>(xscale.data());
-    g_act_scratch.x_rowsum = reinterpret_cast<float*>(xrowsum.data());
+    g_act_scratch.X_s8 = xs8.as<int8_t>();
+    g_act_scratch.x_scale = xscale.as<__half>();
+    g_act_scratch.x_rowsum = xrowsum.as<float>();
     g_act_scratch.max_M = new_M;
     g_act_scratch.max_K = new_K;
     g_act_scratch.gen = gen;
@@ -414,12 +416,12 @@ bool mmq_q4k_imma_gemm(const void* W_q4k_blocks, const __half* X_fp16, __half* Y
         return false;
     }
 
-    quantize_fp16_to_int8_subblock(X_fp16, M, K, g_act_scratch.X_s8, g_act_scratch.x_scale,
-                                   g_act_scratch.x_rowsum, stream);
+    quantize_fp16_to_int8_subblock(X_fp16, M, K, g_act_scratch.X_s8.data(), g_act_scratch.x_scale.data(),
+                                   g_act_scratch.x_rowsum.data(), stream);
 
     const auto& wc = (*g_w_cache)[W_q4k_blocks];
-    mmq_q4k_imma_tile(g_act_scratch.X_s8, g_act_scratch.x_scale, g_act_scratch.x_rowsum, wc.w_sym_s8.get(),
-                      wc.eff_alpha.get(), wc.eff_beta.get(), Y_fp16, M, N, K, stream);
+    mmq_q4k_imma_tile(g_act_scratch.X_s8.data(), g_act_scratch.x_scale.data(), g_act_scratch.x_rowsum.data(),
+                      wc.w_sym_s8.get(), wc.eff_alpha.get(), wc.eff_beta.get(), Y_fp16, M, N, K, stream);
     return true;
 }
 

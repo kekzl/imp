@@ -193,8 +193,8 @@ void apply_penalties_device_count_sweep(float* logits, int vocab_size, const int
 // File-scope persistent GPU buffers for DRY penalty. Promoted from function-local statics
 // so sampling_preallocate_dry() can pre-allocate at engine init and avoid a
 // cudaStreamSynchronize on first use.
-static int32_t* s_dry_tokens_buf = nullptr;
-static float* s_dry_values_buf = nullptr;
+static StableSpan<int32_t> s_dry_tokens_buf;  // engine arena slice
+static StableSpan<float> s_dry_values_buf;
 static size_t s_dry_buf_cap = 0;
 
 // Sparse penalty application kernel: subtracts penalty from each listed token.
@@ -261,7 +261,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
     // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc
     // (buffers are file-scope; pre-allocated by sampling_preallocate_dry at engine init)
     size_t needed = static_cast<size_t>(n);
-    if (!s_dry_tokens_buf || !s_dry_values_buf)
+    if (!s_dry_tokens_buf.data() || !s_dry_values_buf.data())
         return;  // preallocation did not run or the arena was closed
     if (needed > s_dry_buf_cap) {
         // Unreachable by construction: `n` counts DISTINCT tokens from the penalty window, bounded
@@ -274,13 +274,14 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
         n = static_cast<int>(s_dry_buf_cap);
     }
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf.data(), h_tokens.data(), n * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_values_buf.data(), h_values.data(), n * sizeof(float),
                                        cudaMemcpyHostToDevice, stream));
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_dry_tokens_buf, s_dry_values_buf, n);
+    apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_dry_tokens_buf.data(),
+                                                             s_dry_values_buf.data(), n);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -540,8 +541,8 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
 // logit_bias (#1617)
 // ---------------------------------------------------------------------------
 
-static int32_t* s_bias_tokens_buf = nullptr;
-static float* s_bias_values_buf = nullptr;
+static StableSpan<int32_t> s_bias_tokens_buf;  // engine arena slice
+static StableSpan<float> s_bias_values_buf;
 static size_t s_bias_buf_cap = 0;
 
 __global__ void apply_logit_bias_kernel(float* __restrict__ logits, const int32_t* __restrict__ tokens,
@@ -561,12 +562,12 @@ void sampling_preallocate_logit_bias(int max_entries) {
     if (cap <= s_bias_buf_cap)
         return;
 
-    s_bias_tokens_buf = nullptr;
-    s_bias_values_buf = nullptr;
+    s_bias_tokens_buf = {};
+    s_bias_values_buf = {};
     s_bias_buf_cap = 0;
 
-    auto tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
-    auto values = engine_arena().take_bytes(cap * sizeof(float));
+    StableSpan<std::byte> tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
+    StableSpan<std::byte> values = engine_arena().take_bytes(cap * sizeof(float));
     if (tokens.empty() || values.empty()) {
         IMP_LOG_WARN(
             "sampling_preallocate_logit_bias: %zu slots unavailable from the T2 arena — "
@@ -574,8 +575,8 @@ void sampling_preallocate_logit_bias(int max_entries) {
             cap);
         return;
     }
-    s_bias_tokens_buf = reinterpret_cast<int32_t*>(tokens.data());
-    s_bias_values_buf = reinterpret_cast<float*>(values.data());
+    s_bias_tokens_buf = tokens.as<int32_t>();
+    s_bias_values_buf = values.as<float>();
     s_bias_buf_cap = cap;
     IMP_LOG_DEBUG("sampling_preallocate_logit_bias: pre-allocated %zu slots", cap);
 }
@@ -603,7 +604,7 @@ void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, 
     if (m == 0)
         return;
 
-    if (s_bias_tokens_buf == nullptr || static_cast<size_t>(m) > s_bias_buf_cap) {
+    if (s_bias_tokens_buf.data() == nullptr || static_cast<size_t>(m) > s_bias_buf_cap) {
         // No arena slots: the old path, so the bias is still applied. Bounded
         // by --max-logit-bias on the server side. The read is ordered on `stream`: a legacy
         // cudaMemcpy does not wait for a non-blocking stream's logits write (#2275).
@@ -619,13 +620,13 @@ void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, 
         return;
     }
 
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_tokens_buf, h_tokens.data(), m * sizeof(int32_t),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_tokens_buf.data(), h_tokens.data(), m * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_values_buf, h_values.data(), m * sizeof(float),
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_bias_values_buf.data(), h_values.data(), m * sizeof(float),
                                        cudaMemcpyHostToDevice, stream));
     const int grid = (m + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_logit_bias_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_bias_tokens_buf, s_bias_values_buf,
-                                                             m);
+    apply_logit_bias_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_bias_tokens_buf.data(),
+                                                             s_bias_values_buf.data(), m);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -639,20 +640,20 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
     // T2 (A7 step 8). Engine-lifetime, sized once from max_seq_len; caller treats a null
     // buffer as "DRY penalty off", so no direct-allocation fallback (stays off the I1
     // allowlist rather than moving, AUDIT B47).
-    s_dry_tokens_buf = nullptr;
-    s_dry_values_buf = nullptr;
+    s_dry_tokens_buf = {};
+    s_dry_values_buf = {};
     s_dry_buf_cap = 0;
 
-    auto tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
-    auto values = engine_arena().take_bytes(cap * sizeof(float));
+    StableSpan<std::byte> tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
+    StableSpan<std::byte> values = engine_arena().take_bytes(cap * sizeof(float));
     if (tokens.empty() || values.empty()) {
         IMP_LOG_WARN("sampling_preallocate_dry: %zu slots unavailable from the T2 arena — the DRY "
                      "penalty will be skipped",
                      cap);
         return;
     }
-    s_dry_tokens_buf = reinterpret_cast<int32_t*>(tokens.data());
-    s_dry_values_buf = reinterpret_cast<float*>(values.data());
+    s_dry_tokens_buf = tokens.as<int32_t>();
+    s_dry_values_buf = values.as<float>();
     s_dry_buf_cap = cap;
     IMP_LOG_DEBUG("sampling_preallocate_dry: pre-allocated %zu DRY penalty slots", cap);
 }
@@ -661,8 +662,8 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
 void sampling_cleanup_dry() {
     // Arena-owned since A7 step 8 — ~Engine closes the arena after every
     // executor teardown, so only the pointer nulling remains here.
-    s_dry_tokens_buf = nullptr;
-    s_dry_values_buf = nullptr;
+    s_dry_tokens_buf = {};
+    s_dry_values_buf = {};
     s_dry_buf_cap = 0;
 }
 
@@ -671,8 +672,8 @@ void sampling_cleanup_dry() {
 // sampling_preallocate_logit_bias short-circuited and wrote into the closed arena's
 // address range (AUDIT_ARCH_2026 B-1).
 void sampling_cleanup_bias() {
-    s_bias_tokens_buf = nullptr;
-    s_bias_values_buf = nullptr;
+    s_bias_tokens_buf = {};
+    s_bias_values_buf = {};
     s_bias_buf_cap = 0;
 }
 
