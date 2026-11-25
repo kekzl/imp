@@ -175,6 +175,10 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
 
 void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     auto& m = state.metrics;
+    // Engine state only as the stepping thread's last snapshot, the engine pinned by a lease (C-13).
+    const EngineScrape scrape = lease_engine_for_scrape(state);
+    const imp::EngineMetricsSnapshot es = scrape.engine ? scrape.engine->metrics_snapshot()
+                                                        : imp::EngineMetricsSnapshot{};
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
                                                                    m.start_time)
                       .count();
@@ -257,21 +261,15 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     // ServerMetrics: the decision is the engine's, and a second copy is a
     // second thing to keep in sync (#1641).
     {
-        uint64_t kv_rejects = 0, kv_growths = 0, kv_auto_stream = 0, prefix_evictions = 0;
-        if (state.ctx && state.ctx->engine) {
-            kv_rejects = state.ctx->engine->kv_pressure_rejections();
-            kv_growths = state.ctx->engine->kv_pool_growths();
-            kv_auto_stream = state.ctx->engine->streaming_kv_auto_enables();
-            prefix_evictions = state.ctx->engine->prefix_cache_evictions();
-        }
+        const uint64_t kv_rejects = es.kv_pressure_rejections, kv_growths = es.kv_pool_growths;
+        const uint64_t kv_auto_stream = es.streaming_kv_auto_enables;
+        const uint64_t prefix_evictions = es.prefix_cache_evictions;
         out +=
             "# HELP imp_kv_pressure_rejections_total Requests cancelled because the KV pool "
             "could not give them blocks\n";
         out += "# TYPE imp_kv_pressure_rejections_total counter\n";
         out += "imp_kv_pressure_rejections_total " + std::to_string(kv_rejects) + "\n";
-        uint64_t mixed_steps = 0;
-        if (state.ctx && state.ctx->engine)
-            mixed_steps = state.ctx->engine->mixed_decode_steps();
+        const uint64_t mixed_steps = es.mixed_decode_steps;
         out +=
             "# HELP imp_mixed_decode_steps_total Engine steps whose decoders rode the ragged prefill "
             "forward (mixed prefill+decode step)\n";
@@ -297,7 +295,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# TYPE imp_last_ttft_ms gauge\n";
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
 
-    append_memory_metrics(out, state);
+    append_memory_metrics(out, scrape.engine, es);
     append_power_metrics(out);
 
     // Emits a Prometheus histogram (cumulative _bucket{le=...}, _sum, _count; seconds). `labels` is

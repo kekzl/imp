@@ -90,23 +90,27 @@ __global__ void moe_imbalance_kernel(const int32_t* __restrict__ offsets, unsign
     atomicAdd(&slot[3], 1u);
 }
 std::vector<GraphExecutor::MoeImbalance> GraphExecutor::moe_imbalance() const {
+    return read_moe_imbalance(moe_imbalance_source());
+}
+
+std::vector<GraphExecutor::MoeImbalance> GraphExecutor::read_moe_imbalance(const MoeImbalanceSource& src) {
     std::vector<MoeImbalance> out;
-    if (moe_.imb_acc.get() == nullptr || moe_.imb_layers <= 0)
+    if (src.acc == nullptr || src.layers <= 0)
         return out;
-    std::vector<unsigned int> raw(static_cast<size_t>(moe_.imb_layers) * 4, 0u);
+    std::vector<unsigned int> raw(static_cast<size_t>(src.layers) * 4, 0u);
     // A scrape, not the hot path: /metrics asks for this, the forward never does.
-    if (cudaMemcpy(raw.data(), moe_.imb_acc.get(), raw.size() * sizeof(unsigned int),
-                   cudaMemcpyDeviceToHost) != cudaSuccess)
+    if (cudaMemcpy(raw.data(), src.acc, raw.size() * sizeof(unsigned int), cudaMemcpyDeviceToHost) !=
+        cudaSuccess)
         return out;
-    out.resize(moe_.imb_layers);
-    for (int l = 0; l < moe_.imb_layers; ++l) {
+    out.resize(src.layers);
+    for (int l = 0; l < src.layers; ++l) {
         const unsigned int* slot = raw.data() + (static_cast<size_t>(l) * 4);
         out[l].peak_max = slot[0];
         out[l].launches = slot[3];
         if (slot[3] > 0) {
             out[l].mean_max = static_cast<double>(slot[1]) / slot[3];
             const double rows = static_cast<double>(slot[2]) / slot[3];
-            out[l].mean_rows = moe_.imb_experts > 0 ? rows / moe_.imb_experts : 0.0;
+            out[l].mean_rows = src.experts > 0 ? rows / src.experts : 0.0;
         }
     }
     return out;

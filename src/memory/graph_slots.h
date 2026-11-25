@@ -147,7 +147,7 @@ public:
     [[nodiscard]] GraphSlotLease acquire(const GraphSlotCaps& need);
 
     const GraphSlotCaps& caps() const { return caps_; }
-    int num_slots() const { return num_slots_; }
+    int num_slots() const;
     int free_slots() const;
     // Times acquire() declined. A non-zero count in a steady-state server is
     // the signal that the caps or the slot count are wrong, so the VRAM audit table
@@ -157,7 +157,7 @@ public:
     uint64_t declines_exhausted() const;
     uint64_t declines_too_small() const;
 
-    size_t device_bytes() const { return device_bytes_; }
+    size_t device_bytes() const;
 
 private:
     friend class GraphSlotLease;
