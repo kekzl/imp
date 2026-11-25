@@ -137,7 +137,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
         // Same priority order — attention first, then SSM/FFN
         for_each_dense_weight(*model_, cfg, collect_weight_fp8);
 
-        if (!fp8_entries.empty() && qscratch_->dequant) {
+        if (!fp8_entries.empty() && qscratch_->dequant.get()) {
             // Pre-allocate reusable calibration temp buffers
             int max_grid = 0;
             size_t total_fp8_bytes = 0;
@@ -175,16 +175,16 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                     nv.tensor_scale = e.weight.tensor_scale;
                     nv.N = rows;
                     nv.K = static_cast<int64_t>(cols) * 2;
-                    dequantize_nvfp4_to_fp16(nv, qscratch_->dequant, stream);
+                    dequantize_nvfp4_to_fp16(nv, qscratch_->dequant.get(), stream);
                 } else {
-                    dequant_gpu(e.weight.data, qscratch_->dequant, e.qtype, rows, cols, stream);
+                    dequant_gpu(e.weight.data, qscratch_->dequant.get(), e.qtype, rows, cols, stream);
                 }
 
                 void* fp8_buf = d_fp8_bulk + fp8_offset;
                 fp8_offset += e.n_elems;
 
                 // Async calibrate + quantize (no host sync)
-                calibrate_and_quantize_fp8_async(qscratch_->dequant, fp8_buf,
+                calibrate_and_quantize_fp8_async(qscratch_->dequant.get(), fp8_buf,
                                                  static_cast<int64_t>(e.n_elems), d_block_maxes, max_grid,
                                                  d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
 

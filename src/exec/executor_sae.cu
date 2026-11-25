@@ -188,7 +188,7 @@ void GraphExecutor::sae_apply_(int n, cudaStream_t stream) {
     const int r_n = static_cast<int>(sae_rows_.size());
     half* h16 = static_cast<half*>(view_tokens(hidden_, n).data);
     // Post-norm models (Gemma-3, Gemma-4) carry the residual in fp32_hidden_; hidden_ is its FP16 copy.
-    float* h32 = fp32_accum_buf_ ? static_cast<float*>(view_tokens(fp32_hidden_, n).data) : nullptr;
+    float* h32 = fp32_accum_buf_.get() ? static_cast<float*>(view_tokens(fp32_hidden_, n).data) : nullptr;
     const int* idx = sae_idx_.get();
     const int* rows = idx;
     const int* slot = idx + r_n;

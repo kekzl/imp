@@ -193,7 +193,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // FP32 residual accumulator (Gemma-3 dense + Gemma-4 MoE post-norm architecture).
     // Kernel semantics: fp32_h += rmsnorm(po) * w. llama's build_norm(attn) + residual
     // is mathematically identical for both Gemma-3 and Gemma-4 (normalize-then-add).
-    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
+    const bool using_fp32_accum = (fp32_accum_buf_.get() != nullptr && has_post_attn_norm);
     if (debug_forward_enabled() && layer <= 1) {
         IMP_LOG_DEBUG(
             "[DEBUG_FWD] L%d attn: has_post_attn_norm=%d using_fp32_accum=%d "
@@ -222,7 +222,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                               (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
-                                      !will_fuse_o_beta1 && n > 1 && qscratch_.dequant != nullptr &&
+                                      !will_fuse_o_beta1 && n > 1 && qscratch_.dequant.get() != nullptr &&
                                       dequant_gpu_supported(ly.wo.qtype));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 && !will_fuse_o_nvfp4 &&
         !using_fp32_accum) {
@@ -320,9 +320,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     // Select LongRoPE frequency table based on context length (nullptr if not longrope)
     const float* longrope_freqs = nullptr;
-    if (longrope_short_freqs_) {
-        longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_) ? longrope_short_freqs_
-                                                                           : longrope_long_freqs_;
+    if (longrope_short_freqs_.get()) {
+        longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_) ? longrope_short_freqs_.get()
+                                                                           : longrope_long_freqs_.get();
     }
     // Gemma 4: per-layer rope_freqs (pre-computed effective frequencies for
     // global layers, gguf_loader.cpp:1160), matching llama.cpp's
@@ -663,14 +663,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
-               qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+               qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
         // scales, as q/k/v and the FFN: a batch-wide absmax made a row depend on its neighbours.
         const WeightHandle& wo_h = registry_.handle(ly.wo_id);
         if (const Fp8ActScale a = quantize_act_fp8_(wo_h, ao, stream)) {
             int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
             Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-            Tensor fp8_ao(qscratch_.fp8_act, QType::FP8_E4M3, ao.ndim, ao.shape, true);
+            Tensor fp8_ao(qscratch_.fp8_act.get(), QType::FP8_E4M3, ao.ndim, ao.shape, true);
             gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, a, wo_h.payload.fp8.d_scale, stream);
         } else {
             gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
@@ -679,7 +679,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
         gemm_via_handle_(ly.wo_id, ao, h, ctx.with_beta(1.0f));
-    } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) && qscratch_.dequant != nullptr &&
+    } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) && qscratch_.dequant.get() != nullptr &&
                dequant_gpu_supported(ly.wo.qtype) &&
                !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual

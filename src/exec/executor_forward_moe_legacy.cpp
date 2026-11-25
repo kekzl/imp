@@ -159,11 +159,10 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     void* cached = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
                                                              expert_raw, stream);
                     src = static_cast<const char*>(cached);
-                } else if (moe_.raw_staging_buf) {
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr,
-                                                       expert_raw, cudaMemcpyHostToDevice,
-                                                       stream));
-                    src = static_cast<const char*>(moe_.raw_staging_buf);
+                } else if (moe_.raw_staging_buf.get()) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.raw_staging_buf.get(), host_ptr, expert_raw,
+                                                       cudaMemcpyHostToDevice, stream));
+                    src = static_cast<const char*>(moe_.raw_staging_buf.get());
                 } else {
                     IMP_LOG_ERROR("dequant_expert: no staging buffer for host expert %d",
                                   expert_idx);
@@ -173,7 +172,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 src = static_cast<const char*>(packed.data) + offset;
             }
 
-            char* dst = static_cast<char*>(moe_.dequant_buf);  // always slot 0
+            char* dst = static_cast<char*>(moe_.dequant_buf.get());  // always slot 0
 
             dequant_gpu(src, dst, qtype, static_cast<int>(rows), static_cast<int>(cols),
                         stream);
@@ -300,11 +299,12 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                                 layer, proj, ck, w.data, layout.packed_bytes, w.scales,
                                 layout.ms_bytes, layout.packed_off(), w.tensor_scale, stream);
                             expert_cache_.flush_staging(stream);
-                        } else if (moe_.raw_staging_buf && moe_.raw_staging_size >= layout.slot_bytes()) {
+                        } else if (moe_.raw_staging_buf.get() &&
+                                   moe_.raw_staging_size >= layout.slot_bytes()) {
                             // Same slot layout, one buffer: packed at 0, the
                             // micro-scales behind it, so the NvFP4QuantResult
                             // below is built the same way for both routes.
-                            char* st = static_cast<char*>(moe_.raw_staging_buf);
+                            char* st = static_cast<char*>(moe_.raw_staging_buf.get());
                             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(st, w.data, layout.packed_bytes,
                                                                cudaMemcpyHostToDevice, stream));
                             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(st + layout.packed_off(), w.scales,
@@ -415,11 +415,11 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         ExpertCacheKey ck{packed.data, eidx};
                         w = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
                                                        expert_raw, stream);
-                    } else if (moe_.raw_staging_buf && expert_raw <= moe_.raw_staging_size) {
+                    } else if (moe_.raw_staging_buf.get() && expert_raw <= moe_.raw_staging_size) {
                         // Failed staging: w stays null, the dequant + GEMM fallback below runs.
-                        w = staged_or_null(cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
+                        w = staged_or_null(cudaMemcpyAsync(moe_.raw_staging_buf.get(), host_ptr, expert_raw,
                                                            cudaMemcpyHostToDevice, stream),
-                                           moe_.raw_staging_buf, eidx);
+                                           moe_.raw_staging_buf.get(), eidx);
                     }
                 }
 
@@ -504,7 +504,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             int64_t cols = packed.shape[2];
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
 
-            if (!moe_.batch_dequant_buf || expert_fp16_sz == 0) {
+            if (!moe_.batch_dequant_buf.get() || expert_fp16_sz == 0) {
                 // No buffer - serial fallback
                 for (int e = 0; e < ne; ++e) {
                     int start = h_offsets[e];
@@ -526,7 +526,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             }
 
             const uint8_t* raw_base = static_cast<const uint8_t*>(packed.data);
-            char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+            char* buf = static_cast<char*>(moe_.batch_dequant_buf.get());
 
             // Dequant all experts in one batch, then single GEMM.
             // With pp=512 and top_k=8, nearly all 128 experts are active, so
@@ -551,9 +551,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // the D2H sync.
 
         bool has_precached_up = (ly.fp16_packed_up_cache != nullptr);
-        bool can_dequant_batch = (moe_.batch_dequant_buf != nullptr &&
-                                  ly.expert_up_packed.data != nullptr &&
-                                  ly.expert_up_packed.on_device &&
+        bool can_dequant_batch = (moe_.batch_dequant_buf.get() != nullptr &&
+                                  ly.expert_up_packed.data != nullptr && ly.expert_up_packed.on_device &&
                                   dequant_gpu_supported(ly.expert_up_packed.qtype));
 
         if (has_precached_up) {

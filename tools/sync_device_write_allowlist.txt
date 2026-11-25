@@ -10,14 +10,14 @@ src/compute/sampling_penalties_history.cu cudaMemset(slab.data() init  # preallo
 src/memory/buffer.cpp cudaMemset(data_ offline  # Buffer::zero, no caller
 src/exec/executor_qsa.cpp cudaMemcpy(d_bt debug  # attention.qsa_debug comparison rows
 src/exec/executor_qsa.cpp cudaMemcpy(d_ctx debug  # attention.qsa_debug comparison rows
-src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab_prefill init  # executor init, before the warmup device syncs
-src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab init  # executor init, before the warmup device syncs
-src/exec/executor_workspace_buffers.cpp cudaMemset(qscratch_.cutlass_act_sf init  # executor init, before the warmup device syncs
-src/exec/executor_workspace_buffers.cpp cudaMemset(moe_.router_fused_ws init  # executor init, before the warmup device syncs
-src/exec/executor_workspace_buffers.cpp cudaMemset(moe_.router_ticket init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab_prefill.get() init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ws_.ab.get() init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(qscratch_.cutlass_act_sf.get() init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(moe_.router_fused_ws.get() init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(moe_.router_ticket.get() init  # executor init, before the warmup device syncs
 src/exec/executor_workspace.cpp cudaMemcpy(*buf init  # GraphExecutor::init, Gemma-4 V-norm ones
-src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_ init  # GraphExecutor::init
-src/exec/executor_workspace.cpp cudaMemcpy(longrope_short_freqs_ init  # GraphExecutor::init
+src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_.get() init  # GraphExecutor::init
+src/exec/executor_workspace.cpp cudaMemcpy(longrope_short_freqs_.get() init  # GraphExecutor::init
 src/exec/expert_cache.cu cudaMemset(d_lookup_ init  # expert cache init and reinit_or_disable at pre-dequant
 src/exec/expert_cache.cu cudaMemset(d_slot_scales_ init  # expert cache init
 src/exec/expert_cache_device.cu cudaMemcpy(d_src init  # device expert cache init

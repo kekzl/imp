@@ -1,73 +1,10 @@
 #include "exec/quant_scratch.h"
-#include "memory/device_alloc_all.h"
-#include "core/logging.h"
-#include <cuda_runtime.h>
 
 namespace imp {
 
-// FP8 reduction trio + the dp4a input-staging family are T2 arena tenants (A7 step
-// 4b.2): engine-lifetime, charged by exec_t2_demand as fp8_reduction, quant_scratch and
-// splitk_scratch. ~Engine closes the arena after teardown, so only pointer nulling
-// remains here; what is still freed below draws from the VRAMAllocator, not the arena.
-
-void QuantScratch::free(VRAMAllocator* alloc) {
-    auto vfree = [alloc](void*& p) {
-        if (!p)
-            return;
-        if (alloc)
-            alloc->free(p);
-        else
-            device_free_all(p);
-        p = nullptr;
-    };
-
-    vfree(dequant);
-    dequant_size = 0;
-
-    vfree(fp8_act);
-    fp8_act_size = 0;
-    if (d_act_scale) {
-        d_act_scale = nullptr;
-    }
-    if (d_fp8_block_maxes) {
-        d_fp8_block_maxes = nullptr;
-    }
-    if (d_fp8_absmax) {
-        d_fp8_absmax = nullptr;
-    }
-    fp8_max_grid = 0;
-    d_act_row_scales = nullptr;
-    act_row_scales_n = 0;
-    vfree(fp8_tile_ws);
-    fp8_tile_ws_size = 0;
-
-    vfree(cutlass_act_data);
-    cutlass_act_data_size = 0;
-    vfree(cutlass_act_sf);
-    cutlass_act_sf_size = 0;
-    vfree(cutlass_workspace);
-    cutlass_workspace_size = 0;
-    vfree(mxfp4_wdeq);
-    vfree(mxfp4_slice_out);
-    mxfp4_wdeq_size = 0;
-
-    vfree(mxfp8_act_data);
-    mxfp8_act_data_size = 0;
-    vfree(mxfp8_act_sf);
-    mxfp8_act_sf_size = 0;
-
-    q8_1_buf = nullptr;
-    d8_buf = nullptr;
-    q8_1_max_blocks = 0;
-
-    q8_1_prefill_buf = nullptr;
-    d8_prefill_buf = nullptr;
-    q8_1_prefill_bytes = 0;
-    d8_prefill_bytes = 0;
-
-
-    splitk = nullptr;
-    splitk_size = 0;
-}
+// Whole-struct reset: the DeviceOwned members release through their own family; the FP8
+// reduction trio, the dp4a staging family, split-K and sparse scratch are T2 arena tenants
+// (closed by ~Engine) and are only nulled. A member added later cannot be missed here.
+void QuantScratch::free() { *this = QuantScratch{}; }
 
 }  // namespace imp

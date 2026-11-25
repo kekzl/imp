@@ -206,7 +206,7 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
 bool GraphExecutor::residual_fusion_ok_(int n) const {
     return n >= 2 && n <= 32 && lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() &&
            !model_->profile().gated_residual && !model_->config().parallel_block &&
-           fp32_accum_buf_ == nullptr && !debug_forward_enabled();
+           fp32_accum_buf_.get() == nullptr && !debug_forward_enabled();
 }
 
 bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, const Tensor& w, Tensor& no,
@@ -253,8 +253,8 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
         prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
         const float as = act_scale_of_(consumer_id);
-        swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
-                                              qscratch_.cutlass_act_sf, n, K, stream, as);
+        swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data.get(),
+                                              qscratch_.cutlass_act_sf.get(), n, K, stream, as);
         qscratch_.cutlass_act_scale = as;
         return true;
     }
@@ -325,9 +325,10 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
         const bool no_ws = process_diag_deterministic() || !process_diag_nvfp4_prompt_streamk();
         auto* q = static_cast<uint8_t*>(uo.data);
         uint8_t* sf = q + swiglu_epi_sf_offset(n, N);
-        if (gemm_nvfp4_tile_swiglu_quant(qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, cu.weight,
-                                         cu.sf, alpha, go.data, q, sf, act_scale_of_(ly.w_down_id), n, N, K,
-                                         ctx.stream, no_ws ? nullptr : qscratch_.cutlass_workspace,
+        if (gemm_nvfp4_tile_swiglu_quant(qscratch_.cutlass_act_data.get(), qscratch_.cutlass_act_sf.get(),
+                                         cu.weight, cu.sf, alpha, go.data, q, sf, act_scale_of_(ly.w_down_id),
+                                         n, N, K, ctx.stream,
+                                         no_ws ? nullptr : qscratch_.cutlass_workspace.get(),
                                          qscratch_.cutlass_workspace_size)) {
             static bool logged = false;  // activity proof, once
             if (!logged) {

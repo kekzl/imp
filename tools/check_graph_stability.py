@@ -8,6 +8,8 @@ three places where that is not yet true, against tools/graph_stability_allowlist
 
   G1 regrow sites      a release (vram_free, device_free_all*, cudaFree*) of a member or static
                        X followed within 25 lines of the same function by an allocation into X.
+                       The owner spelling counts too: X.reset(); then X = DeviceOwned<T>::allocate*
+                       or X.adopt*.
   G2 unkeyed captures  cudaStreamBeginCapture* calls in a file that reads no generation
                        (a generation getter call, a comparison against a stored generation, or
                        a read of the process graph epoch, graph_epoch() of core/graph_epoch.h).
@@ -49,6 +51,9 @@ LVALUE = re.compile(r"[A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*")
 PERSISTENT = re.compile(r"_$|->|\.|^(?:s_|g_)")
 ALLOC_ASSIGN = r"\s*=[^=;]*\b(?:vram_alloc|vram_alloc_force|weights_alloc|cudaMalloc\w*)\s*\("
 ALLOC_OUT = r"\b(?:device_alloc_all\w*|device_alloc_pool_async|cudaMalloc\w*)\s*\([^;]*(?:\(|&|,\s*)\s*"
+# The owner spelling of the same regrow: X.reset(); then X = DeviceOwned<T>::allocate*(...) or X.adopt*(...).
+OWNER_RESET = re.compile(r"^\s*([A-Za-z_]\w*(?:(?:->|\.)\w+|\[\w+\])*)\.reset\(\)\s*;")
+OWNER_ALLOC = r"(?:\s*=[^=;]*\bDeviceOwned\s*<|\.adopt(?:_async)?\s*\()"
 FUNCTION_END = re.compile(r"^}")
 CAPTURE = re.compile(r"\bcudaStreamBeginCapture\w*\s*\(")
 GENERATION = re.compile(r"\w*generation\w*\s*\(\s*\)|\w*generation\w*\s*!=|!=\s*\w*generation\w*"
@@ -84,11 +89,27 @@ def split_args(args: str) -> list[str]:
     return parts
 
 
+def owner_regrow(lines: list[str], i: int) -> bool:
+    m = OWNER_RESET.match(lines[i])
+    if not m or not PERSISTENT.search(m.group(1)):
+        return False
+    again = re.compile(r"(?<![\w.>])" + re.escape(m.group(1)) + OWNER_ALLOC)
+    for j in range(i + 1, min(len(lines), i + 1 + WINDOW)):
+        if FUNCTION_END.match(lines[j]):
+            return False
+        if again.search(lines[j] + " " + (lines[j + 1].strip() if j + 1 < len(lines) else "")):
+            return True
+    return False
+
+
 def count_regrow(lines: list[str]) -> int:
     n = 0
     for i, line in enumerate(lines):
         m = RELEASE.search(line)
         if not m:
+            # Adjacent owner resets are one site, as one multi-argument free call is.
+            if owner_regrow(lines, i) and not (i > 0 and owner_regrow(lines, i - 1)):
+                n += 1
             continue
         hit = False
         for arg in split_args(m.group(1)):
@@ -213,6 +234,12 @@ def selftest() -> int:
         ("G1 next function", g1("    vram_free(a_, ws_);\n}\nvoid g() {\n    ws_ = vram_alloc(a_, n, \"t\");\n") == 0),
         ("G1 past the window", g1("    vram_free(a_, ws_);\n" + "    x++;\n" * WINDOW + "    ws_ = vram_alloc(a_, n, \"t\");\n") == 0),
         ("G1 comment", g1("    // vram_free(a_, ws_);\n    ws_ = vram_alloc(a_, n, \"t\");\n") == 0),
+        ("G1 owner regrow", g1("    ws_.reset();\n    ws_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 1),
+        ("G1 owner adopt", g1("    k_.reset();\n    n_ = 0;\n    k_.adopt_async(raw, n, s);\n") == 1),
+        ("G1 owner pair is one site", g1("    k_.reset();\n    v_.reset();\n    k_.adopt_async(a, n, s);\n    v_.adopt_async(b, n, s);\n") == 1),
+        ("G1 owner reset only", g1("    ws_.reset();\n    ws_bytes_ = 0;\n") == 0),
+        ("G1 owner local", g1("    tmp.reset();\n    tmp = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
+        ("G1 owner another buffer", g1("    ws_.reset();\n    xq_ = DeviceOwned<void>::allocate(a_, n, \"t\");\n") == 0),
     ]
 
     def g2(src: str) -> int:

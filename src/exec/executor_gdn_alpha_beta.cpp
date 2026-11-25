@@ -58,7 +58,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     // runtime.deterministic: prefill at split 1 (no workspace), a row's bits independent of M.
     // cuBLAS picks its algorithm per M bucket (#2556).
     const bool det_prefill = prefill && process_diag_deterministic();
-    if (prefill ? (!det_prefill && gdn_ws_.ab_prefill == nullptr) : gdn_ws_.ab == nullptr)
+    if (prefill ? (!det_prefill && gdn_ws_.ab_prefill.get() == nullptr) : gdn_ws_.ab.get() == nullptr)
         return false;
     if (alpha_id == kInvalidTensorID || beta_id == kInvalidTensorID)
         return false;
@@ -87,7 +87,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         const bool ok = gemm_f16_narrow_prefill(static_cast<const half*>(input.data), M, static_cast<int>(K),
                                                 wa, static_cast<half*>(alpha_out.data), static_cast<int>(N),
                                                 wb, static_cast<half*>(beta_out.data), static_cast<int>(N),
-                                                det_prefill ? nullptr : gdn_ws_.ab_prefill,
+                                                det_prefill ? nullptr : gdn_ws_.ab_prefill.get(),
                                                 det_prefill ? 0 : gdn_ws_.ab_prefill_bytes, stream);
         if (ok && !gdn_ws_.ab_prefill_logged) {
             gdn_ws_.ab_prefill_logged = true;
@@ -98,8 +98,8 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
     }
     const bool ok = gemm_f16_narrow_smallm(static_cast<const half*>(input.data), M, static_cast<int>(K), wa,
                                            static_cast<half*>(alpha_out.data), static_cast<int>(N), wb,
-                                           static_cast<half*>(beta_out.data), static_cast<int>(N), gdn_ws_.ab,
-                                           gdn_ws_.ab_bytes, stream);
+                                           static_cast<half*>(beta_out.data), static_cast<int>(N),
+                                           gdn_ws_.ab.get(), gdn_ws_.ab_bytes, stream);
     if (ok && !gdn_ws_.ab_narrow_logged) {
         gdn_ws_.ab_narrow_logged = true;
         IMP_LOG_INFO("gdn alpha/beta narrow GEMM ACTIVE (M=%d, K=%lld, N=%lld x 2)", M, (long long)K,

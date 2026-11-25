@@ -3,6 +3,7 @@
 #include "core/graph_epoch.h"
 #include "core/tensor.h"
 #include "core/qtype.h"
+#include "memory/device_owned.h"
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <cstdint>
@@ -35,8 +36,8 @@ public:
               // persistent activation tensors (carved by allocate_persistent; the four
               // per-phase configure_* carvers are back on GraphExecutor, so the 16 phase
               // tensors no longer pass through here)
-              Tensor* hidden, Tensor* residual, Tensor* norm_out, Tensor* logits, void** fp32_accum_buf,
-              Tensor* fp32_hidden) {
+              Tensor* hidden, Tensor* residual, Tensor* norm_out, Tensor* logits,
+              DeviceOwned<void>* fp32_accum_buf, Tensor* fp32_hidden) {
         model_ = &model;
         vram_alloc_ = alloc;
         compute_dtype_ = compute_dtype;
@@ -57,8 +58,8 @@ public:
     }
 
     // --- zero-overhead inline accessors (hot path reads these) ---
-    void* shared() const { return shared_workspace_; }
-    void* persistent() const { return persistent_workspace_; }
+    void* shared() const { return shared_workspace_.get(); }
+    void* persistent() const { return persistent_workspace_.get(); }
     size_t shared_size() const { return shared_workspace_size_; }
     // Persistent + shared bytes currently held; resident before the KV plan reads free VRAM (#2365).
     size_t allocated_bytes() const { return persistent_workspace_size_ + shared_workspace_size_; }
@@ -105,15 +106,15 @@ private:
     Tensor* residual_ = nullptr;
     Tensor* norm_out_ = nullptr;
     Tensor* logits_ = nullptr;
-    void** fp32_accum_buf_ = nullptr;
+    DeviceOwned<void>* fp32_accum_buf_ = nullptr;
     Tensor* fp32_hidden_ = nullptr;
 
     // --- owned: persistent GPU workspace (always valid, not reconfigured) ---
-    void* persistent_workspace_ = nullptr;
+    DeviceOwned<void> persistent_workspace_;
     size_t persistent_workspace_size_ = 0;
 
     // --- owned: shared GPU workspace (reconfigured per layer phase) ---
-    void* shared_workspace_ = nullptr;
+    DeviceOwned<void> shared_workspace_;
     size_t shared_workspace_size_ = 0;
     int shared_workspace_max_tokens_ = 0;
 

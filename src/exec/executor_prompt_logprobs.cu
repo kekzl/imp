@@ -101,7 +101,7 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
     const bool dp4a = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(qt) &&
                       tier != StorageTier::MXFP4 && !has_fp8;
     // Vocab slab = dequant-scratch rows; below 256 rows the per-batch driver wins.
-    const int slab = qscratch_.dequant
+    const int slab = qscratch_.dequant.get()
                          ? static_cast<int>(std::min<size_t>(qscratch_.dequant_size /
                                                                  (static_cast<size_t>(K) * sizeof(half)),
                                                              static_cast<size_t>(V)))
@@ -117,11 +117,11 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
     const size_t row_bytes = qtype_row_bytes(qt, K);
     for (int n0 = 0; n0 < V; n0 += slab) {
         const int ws = std::min(slab, V - n0);
-        dequant_gpu(static_cast<const uint8_t*>(w) + (static_cast<size_t>(n0) * row_bytes), qscratch_.dequant,
-                    qt, ws, K, stream);
+        dequant_gpu(static_cast<const uint8_t*>(w) + (static_cast<size_t>(n0) * row_bytes),
+                    qscratch_.dequant.get(), qt, ws, K, stream);
         const int64_t w_shape[2] = {ws, K};
         const int64_t c_shape[2] = {csz, ws};
-        Tensor wt(qscratch_.dequant, QType::F16, 2, w_shape, true);
+        Tensor wt(qscratch_.dequant.get(), QType::F16, 2, w_shape, true);
         Tensor ct(lg + (static_cast<size_t>(n0) * csz), QType::F32, 2, c_shape, true);
         gemm(noc, wt, ct, 1.0f, 0.0f, stream);
     }

@@ -23,7 +23,7 @@ int GraphExecutor::ffn_graph_begin_(const InferenceState& state, int n, cudaStre
     if (rows <= 0 || rows > max_tokens_)
         return 0;
     // Host state the FFN reads or writes per call, which a replay would skip.
-    if (calib_ || lora_ != nullptr || offload_mgr_ != nullptr || fp32_accum_buf_ != nullptr ||
+    if (calib_ || lora_ != nullptr || offload_mgr_ != nullptr || fp32_accum_buf_.get() != nullptr ||
         model_->profile().gated_residual)
         return 0;
     const auto& diag = dispatch_policy().diagnostics;

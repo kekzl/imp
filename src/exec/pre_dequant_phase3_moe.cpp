@@ -783,7 +783,8 @@ void QuantPipeline::cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3
         const Tensor& t = *gud[p];
         const bool cacheable = t.data && nvfp4_beneficial(t.qtype, decode_all) &&
                                !wcache_->nvfp4_moe.contains(t.data) && t.on_device && t.ndim >= 3 &&
-                               t.shape[2] % 16 == 0 && dequant_gpu_supported(t.qtype) && qscratch_->dequant;
+                               t.shape[2] % 16 == 0 && dequant_gpu_supported(t.qtype) &&
+                               qscratch_->dequant.get();
         st[p] = MoeProjCacheState{t.data != nullptr || cached[p], cached[p], !cached[p] && cacheable};
     }
     if (!moe_layer_cache_whole(st[0], st[1], st[2])) {
@@ -814,7 +815,7 @@ void QuantPipeline::cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3
         NvFP4MoEQuantResult result;
         quantize_packed_experts_to_nvfp4(t.data, t.qtype, static_cast<int>(t.shape[0]),
                                          static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]),
-                                         qscratch_->dequant, result, stream);
+                                         qscratch_->dequant.get(), result, stream);
         wcache_->nvfp4_moe[t.data] = result;
         dctx.nvfp4_moe_total += nvfp4_bytes(t);
         dctx.nvfp4_moe_count++;

@@ -429,6 +429,10 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         bool any_built = false;
 
         float proj_act_scale = 1.0f;  // static act scale build_proj folds into the alpha table
+        // MoEWorkspace owns each array from the moment it exists (plain family); c.* stay views.
+        auto own = [this](const void* p, size_t bytes) {
+            moe_->per_layer_da_storage.emplace_back().adopt(const_cast<void*>(p), bytes, nullptr);
+        };
         auto build_proj =
             [&](const std::vector<TensorID>& ids, const void**& d_B,
                 const void**& d_SFB, float*& d_alpha) -> bool {
@@ -449,12 +453,15 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 err = device_alloc_all(dev_req(d_B, ne * sizeof(const void*)));
                 if (err != cudaSuccess)
                     return false;
+                own(static_cast<const void*>(d_B), ne * sizeof(const void*));
                 err = device_alloc_all(dev_req(d_SFB, ne * sizeof(const void*)));
                 if (err != cudaSuccess)
                     return false;
+                own(static_cast<const void*>(d_SFB), ne * sizeof(const void*));
                 err = device_alloc_all(dev_req(d_alpha, ne * sizeof(float)));
                 if (err != cudaSuccess)
                     return false;
+                own(d_alpha, ne * sizeof(float));
                 // Upload failure = build failure, as a failed cudaMalloc above (layer not ready).
                 IMP_CUDA_CHECK_BOOL(cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)),
                                                static_cast<const void*>(h_B_ptrs.data()),

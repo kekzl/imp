@@ -1,10 +1,10 @@
 #include "exec/moe_workspace.h"
-#include "memory/device_alloc_all.h"
 #include "compute/gemm.h"         // moe_imma_prefill_supported
 #include "compute/mmq_q8_imma.h"  // mmq_imma_moe_shape_ok
 #include "core/logging.h"
 #include "model/model.h"
 #include <cuda_runtime.h>
+#include <utility>
 
 namespace imp {
 
@@ -43,120 +43,25 @@ MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill, Q
     return s;
 }
 
-// Batched-MoE pointer/scale arrays are T2 arena tenants (A7 step 4b.2): engine-lifetime,
-// sized from n_experts, charged as moe_arrays. Arena is closed by ~Engine after teardown;
-// only pointer nulling remains here.
-
-void MoEWorkspace::free(VRAMAllocator* alloc) {
-    auto vfree = [alloc](void*& p) {
-        if (!p)
-            return;
-        if (alloc)
-            alloc->free(p);
-        else
-            device_free_all(p);
-        p = nullptr;
-    };
-
-    routing_buffers.free();
-
-    vfree(dequant_buf);
-    dequant_buf_size = 0;
-
-    vfree(batch_dequant_buf);
-    batch_dequant_buf_size = 0;
-    imma_serves_all = false;
-
-    if (d_work_ptrs) {
-        d_work_ptrs = nullptr;
-        d_work_ptrs_count = 0;
-    }
-
-    if (d_fp8_scales) {
-        d_fp8_scales = nullptr;
-    }
-
-    if (d_M_per) {
-        d_M_per = nullptr;
-        d_M_per_count = 0;
-    }
-
-    if (d_alpha_compact) {
-        d_alpha_compact = nullptr;
-    }
-
-    if (d_na) {
-        d_na = nullptr;
-    }
-
-    if (d_sfa_offsets) {
-        d_sfa_offsets = nullptr;
-    }
-
-    if (d_B_ptrs_cache) {
-        d_B_ptrs_cache = nullptr;
-    }
-    if (d_SFB_ptrs_cache) {
-        d_SFB_ptrs_cache = nullptr;
-    }
-    if (d_alpha_full) {
-        d_alpha_full = nullptr;
-    }
-
-    // Phase 3c-full Step 3 per-layer caches.
-    for (auto& c : per_layer_da_cache) {
-        auto cfree = [](void* p) {
-            if (p)
-                device_free_all(p);
-        };
-        cfree(static_cast<void*>(c.d_gate_B_ptrs));
-        cfree(static_cast<void*>(c.d_gate_SFB_ptrs));
-        cfree(c.d_gate_alpha);
-        cfree(static_cast<void*>(c.d_up_B_ptrs));
-        cfree(static_cast<void*>(c.d_up_SFB_ptrs));
-        cfree(c.d_up_alpha);
-        cfree(static_cast<void*>(c.d_down_B_ptrs));
-        cfree(static_cast<void*>(c.d_down_SFB_ptrs));
-        cfree(c.d_down_alpha);
-        c = {};
-    }
-    per_layer_da_cache.clear();
-
-    if (d_weight_ptrs) {
-        d_weight_ptrs = nullptr;
-        d_weight_ptrs_count = 0;
-    }
-
-    vfree(raw_staging_buf);
-    raw_staging_size = 0;
-
-    // Layer staging and slot index (vram_alloc, allocate_auxiliary_buffers): 6 buffers had no release.
-    auto vfree_as = [&vfree](auto*& p) {
-        void* v = static_cast<void*>(p);
-        vfree(v);
-        p = nullptr;
-    };
-    vfree(layer_stage_buf);
-    vfree(layer_stage_sf);
-    vfree_as(layer_stage_b_ptrs);
-    vfree_as(layer_stage_sfb_ptrs);
-    vfree_as(layer_stage_alpha);
-    vfree_as(d_slot_idx);
-    layer_stage_size = layer_stage_proj_bytes = 0;
-    layer_stage_sf_size = layer_stage_sf_proj_bytes = 0;
-    layer_stage_experts = layer_stage_slots = layer_stage_ptr_stride = 0;
-    d_slot_idx_count = 0;
-    layer_stage_alpha_filled.clear();
-    layer_stage_ptr_sig.clear();
-
-    vfree(cutlass3x_packed);
-    cutlass3x_packed_size = 0;
-    vfree(cutlass3x_sf);
-    cutlass3x_sf_size = 0;
-    if (cutlass3x_sfa_ptrs) {
-        cutlass3x_sfa_ptrs = nullptr;
-        cutlass3x_sfa_ptrs_count = 0;
-    }
+// Whole-struct reset: owners release through their own family, T2 arena tenants (pointer
+// and scale arrays, closed by ~Engine) and views are nulled. No buffer's release depends on
+// another's. A member added later is released here unless it is carried over below.
+void MoEWorkspace::free() {
+    MoEWorkspace next;
+    next.expert_hist = std::move(expert_hist);
+    next.hist_layers = hist_layers;
+    next.hist_experts = hist_experts;
+    next.hist_top_k = hist_top_k;
+    next.imb_acc = std::move(imb_acc);
+    next.imb_layers = imb_layers;
+    next.imb_experts = imb_experts;
+    next.expert_trace = std::move(expert_trace);
+    next.trace_weights = trace_weights;
+    next.trace_cursor = std::move(trace_cursor);
+    next.trace_capacity = trace_capacity;
+    next.trace_top_k = trace_top_k;
+    next.h_routing_readback = std::move(h_routing_readback);
+    *this = std::move(next);
 }
 
 }  // namespace imp

@@ -543,7 +543,7 @@ public:
     // Engine's chunked-prefill path must clamp chunk_len so n × ctx_len ≤ cap².
     // Returns 0 if the buffer wasn't allocated (VRAM-constrained / WMMA fallback).
     int attn_scores_cap() const {
-        return attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
+        return attn_scores_buf_.get() ? static_cast<int>(attn_scores_.shape[1]) : 0;
     }
 
     // Attention shapes are uniform when per-layer shape arrays are absent or
@@ -727,11 +727,11 @@ private:
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).
-    void* verify_argmax_scratch_ = nullptr;
+    DeviceOwned<void> verify_argmax_scratch_;
     size_t verify_argmax_scratch_sz_ = 0;
     // Spec-decode verify penalty counts: [vocab] int32 occurrence counts of
     // the shared history (lazy; freed in free_buffers).
-    int32_t* verify_pen_counts_ = nullptr;
+    DeviceOwned<int32_t> verify_pen_counts_;
     int verify_pen_counts_cap_ = 0;
     // Sampled verify: device [rows x TopkRowArgs (256-aligned) | rows x SAMPLE_SCRATCH_BYTES], pinned args
     // twin.
@@ -753,7 +753,7 @@ private:
 
     // LoRA (issue #522)
     const LoraAdapter* lora_ = nullptr;
-    void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]
+    DeviceOwned<void> lora_scratch_;  // fp32[max_rank] + fp16[max_tokens*max_rank]
     size_t lora_scratch_sz_ = 0;
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
     const ControlVectorDevice* cvec_ = nullptr;
@@ -855,7 +855,7 @@ private:
     // prevents FP16 overflow in the residual stream over many layers. FP32 is
     // the "true" hidden state; FP16 hidden_ is only RMSNorm input (scale-
     // invariant, so clamping is safe). nullptr for pre-norm models.
-    void* fp32_accum_buf_ = nullptr;
+    DeviceOwned<void> fp32_accum_buf_;
     Tensor fp32_hidden_;  // [max_tokens, d_model] FP32 — true hidden state
 
     // Shared/persistent workspace buffers + per-phase sizes live in ws_. The
@@ -871,7 +871,7 @@ private:
 
     // cuBLAS attention S-matrix workspace (separately allocated, not part of shared workspace).
     // [n_heads, max_tokens, max_tokens] FP16 — used only during prefill.
-    void* attn_scores_buf_ = nullptr;
+    DeviceOwned<void> attn_scores_buf_;
     size_t attn_scores_buf_size_ = 0;
     Tensor attn_scores_;  // 3D tensor view into attn_scores_buf_
 
@@ -890,8 +890,8 @@ private:
     // re-enters that path per layer per verify step; per-call
     // cudaMallocAsync/FreeAsync cost ~140 alloc pairs per verify on hybrids
     // (#847). Grow-only, reused across layers (stream-ordered use).
-    half* chunk_eager_k_ = nullptr;
-    half* chunk_eager_v_ = nullptr;
+    DeviceOwned<half> chunk_eager_k_;
+    DeviceOwned<half> chunk_eager_v_;
     size_t chunk_eager_bytes_ = 0;
 
     // Dense FFN phase tensors (views into shared_workspace_, set by configure_ffn_workspace)
@@ -1080,7 +1080,7 @@ private:
     struct BannedCacheEntry {
         const int32_t* src = nullptr;
         int n = 0;
-        int32_t* d = nullptr;
+        DeviceOwned<int32_t> d;
         size_t cap = 0;
     };
     static constexpr int kBannedCacheEntries = 4;
@@ -1123,8 +1123,8 @@ private:
     float yarn_corr_dims_[2] = {0.0f, 0.0f};
 
     // LongRoPE pre-computed inverse frequencies (device memory)
-    float* longrope_short_freqs_ = nullptr;  // [rope_pairs] device
-    float* longrope_long_freqs_ = nullptr;   // [rope_pairs] device
+    DeviceOwned<float> longrope_short_freqs_;  // [rope_pairs] device
+    DeviceOwned<float> longrope_long_freqs_;   // [rope_pairs] device
     int longrope_orig_max_pos_ = 0;
     int longrope_n_pairs_ = 0;
 

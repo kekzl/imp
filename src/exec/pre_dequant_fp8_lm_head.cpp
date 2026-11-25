@@ -33,7 +33,8 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     }
     // F16 quantizes in place; GGUF sources dequant in row slabs through the shared scratch.
     const bool f16_src = q == QType::F16;
-    if (!pre_dequant_internal::fp8_lm_head_eligible(*model_) || (!f16_src && qscratch_->dequant == nullptr)) {
+    if (!pre_dequant_internal::fp8_lm_head_eligible(*model_) ||
+        (!f16_src && qscratch_->dequant.get() == nullptr)) {
         // auto falls back to the #982 NVFP4 rule (Phase 3); an explicit fp8 keeps the source path.
         const bool f16_compute = !model_->output_norm().data || model_->output_norm().qtype == QType::F16;
         if (mode == LmHeadMode::Fp8)
@@ -76,9 +77,9 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
         for (int r0 = 0; r0 < rows; r0 += slab) {
             const int n = std::min(slab, rows - r0);
             dequant_gpu(static_cast<const uint8_t*>(lm.data) + (static_cast<size_t>(r0) * row_src),
-                        qscratch_->dequant, q, n, cols, stream);
-            quantize_fp8_rows_async(qscratch_->dequant, bulk + (static_cast<size_t>(r0) * cols), n, cols,
-                                    scales + r0, stream);
+                        qscratch_->dequant.get(), q, n, cols, stream);
+            quantize_fp8_rows_async(qscratch_->dequant.get(), bulk + (static_cast<size_t>(r0) * cols), n,
+                                    cols, scales + r0, stream);
         }
     }
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));

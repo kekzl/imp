@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "memory/device_owned.h"
+
 namespace imp {
 
 // FP8 bytes gemm_via_handle_ hands gemv_fp8 at M=1 (GraphExecutor::fp8_decode_weight_).
@@ -20,15 +22,15 @@ struct GdnWorkspace {
     // Chunk-parallel GDN prefill scan workspace (gdn.chunkpar_scan): five
     // per-(chunk,head) strip arrays + FP32 inter-strip state. Engine lifetime,
     // allocated when the model has GDN layers; nullptr degrades to the fused scan.
-    void* chunkpar = nullptr;
+    DeviceOwned<void> chunkpar;
     size_t chunkpar_bytes = 0;
 
     // GDN alpha/beta narrow GEMM workspace: split-K
     // partials + per-tile tickets, ~100 KiB, zeroed once at allocation.
     // nullptr keeps the two cuBLAS calls.
-    void* ab = nullptr;
+    DeviceOwned<void> ab;
     size_t ab_bytes = 0;
-    void* ab_prefill = nullptr;  // split-K partials of the prefill launch (own tickets)
+    DeviceOwned<void> ab_prefill;  // split-K partials of the prefill launch (own tickets)
     size_t ab_prefill_bytes = 0;
     bool ab_narrow_logged = false;
     bool ab_prefill_logged = false;

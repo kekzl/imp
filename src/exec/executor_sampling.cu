@@ -184,8 +184,8 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
     if (state.banned_tokens == nullptr || state.n_banned_tokens <= 0)
         return nullptr;
     for (const auto& e : banned_cache_entries_)
-        if (e.d != nullptr && e.src == state.banned_tokens && e.n == state.n_banned_tokens)
-            return e.d;
+        if (e.d && e.src == state.banned_tokens && e.n == state.n_banned_tokens)
+            return e.d.get();
     // Miss: a fresh entry per list (round-robin past kBannedCacheEntries lists;
     // the engine has two: the special-token bans and the think stop mask).
     BannedCacheEntry& e = banned_cache_entries_[banned_cache_next_];
@@ -194,18 +194,18 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
     if (e.cap < static_cast<size_t>(state.n_banned_tokens)) {
         // I3 G1: no graph bakes e.d. Its 2 callers (sample_single_from_logits{,_async}) run eager
         // after the forward; captured forwards read the engine-owned state.d_banned_tokens instead.
-        vram_free(vram_alloc_, e.d);  // the undersized old buffer; nothing reads it after
+        e.d.reset();  // the undersized old buffer; nothing reads it after
         e.cap = 0;
-        e.d = static_cast<int32_t*>(vram_alloc(vram_alloc_, ban_bytes, "banned_cache"));
-        if (e.d == nullptr) {
+        e.d = DeviceOwned<int32_t>::allocate(vram_alloc_, ban_bytes, "banned_cache");
+        if (!e.d) {
             e.src = nullptr;
             e.n = 0;
             cuda_call_or_throw(cudaErrorMemoryAllocation, "banned_cache_ alloc");
         }
         e.cap = static_cast<size_t>(state.n_banned_tokens);
     }
-    if (const cudaError_t err = cudaMemcpyAsync(e.d, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice,
-                                                stream);
+    if (const cudaError_t err = cudaMemcpyAsync(e.d.get(), state.banned_tokens, ban_bytes,
+                                                cudaMemcpyHostToDevice, stream);
         err != cudaSuccess) {
         e.src = nullptr;  // not cached: the next call uploads again
         e.n = 0;
@@ -213,7 +213,7 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
     }
     e.src = state.banned_tokens;
     e.n = state.n_banned_tokens;
-    return e.d;
+    return e.d.get();
 }
 
 // Shared per-row logits filter chain (penalties, DRY, token bans, logit

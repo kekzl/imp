@@ -169,8 +169,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         if (max_weight_elems > 0) {
             qscratch_.dequant_size = max_weight_elems * sizeof(uint16_t);
-            qscratch_.dequant = vram_alloc(vram_alloc_, qscratch_.dequant_size, "dequant_scratch");
-            if (!qscratch_.dequant) {
+            qscratch_.dequant = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.dequant_size,
+                                                            "dequant_scratch");
+            if (!qscratch_.dequant.get()) {
                 IMP_LOG_ERROR("Failed to allocate dequant scratch (%.1f MiB)",
                               qscratch_.dequant_size / (1024.0 * 1024.0));
                 qscratch_.dequant_size = 0;
@@ -495,8 +496,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
         }
         if (attn_seq > 0) {
-            attn_scores_buf_ = vram_alloc(vram_alloc_, s_sz, "attn_scores");
-            if (!attn_scores_buf_) {
+            attn_scores_buf_ = DeviceOwned<void>::allocate(vram_alloc_, s_sz, "attn_scores");
+            if (!attn_scores_buf_.get()) {
                 cudaError_t e = cudaGetLastError();
                 IMP_LOG_WARN(
                     "Failed to allocate cuBLAS attention S-matrix (%.1f MiB): %s — "
@@ -507,7 +508,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 attn_scores_buf_size_ = s_sz;
                 int64_t s_shape[3] = {static_cast<int64_t>(nh), static_cast<int64_t>(attn_seq),
                                       static_cast<int64_t>(attn_seq)};
-                attn_scores_ = Tensor(attn_scores_buf_, QType::F16, 3, s_shape, true);
+                attn_scores_ = Tensor(attn_scores_buf_.get(), QType::F16, 3, s_shape, true);
                 IMP_LOG_INFO("cuBLAS attention S-matrix: %.2f MiB (%d heads x %d x %d)",
                              s_sz / (1024.0 * 1024.0), nh, attn_seq, attn_seq);
             }
@@ -535,8 +536,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         {
             size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
             size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
-            moe_.dequant_buf = vram_alloc(vram_alloc_, dequant_sz, "moe_dequant");
-            if (!moe_.dequant_buf) {
+            moe_.dequant_buf = DeviceOwned<void>::allocate(vram_alloc_, dequant_sz, "moe_dequant");
+            if (!moe_.dequant_buf.get()) {
                 IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes)", dequant_sz);
                 moe_.dequant_buf_size = 0;
             } else {
@@ -595,8 +596,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 }
             }
             if (max_expert_raw > 0 && any_host_packed_experts) {
-                moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
-                if (!moe_.raw_staging_buf) {
+                moe_.raw_staging_buf = DeviceOwned<void>::allocate(vram_alloc_, max_expert_raw,
+                                                                   "moe_staging");
+                if (!moe_.raw_staging_buf.get()) {
                     IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes)", max_expert_raw);
                     moe_.raw_staging_size = 0;
                 } else {
@@ -705,9 +707,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     const int per_proj = kDevExpertMaxRows * std::max(1, mcfg.n_experts_active);
                     int idx_count = kExpertProjCount * per_proj;
                     size_t idx_bytes = static_cast<size_t>(idx_count + per_proj) * sizeof(int32_t);
-                    moe_.d_slot_idx = static_cast<int32_t*>(
-                        vram_alloc(vram_alloc_, idx_bytes, "moe_slot_idx"));
-                    moe_.d_slot_idx_count = moe_.d_slot_idx ? idx_count : 0;
+                    moe_.d_slot_idx = DeviceOwned<int32_t>::allocate(vram_alloc_, idx_bytes, "moe_slot_idx");
+                    moe_.d_slot_idx_count = moe_.d_slot_idx.get() ? idx_count : 0;
                 }
             } else if (has_host_experts) {
                 IMP_LOG_INFO("Expert LRU cache disabled via moe.no_expert_cache (staging fallback)");
@@ -726,8 +727,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // that already did not fit, so never take the last of VRAM.
                 size_t free_mem = 0;
                 if (vram_fits(total, (size_t{512} << 20) + 1, 0, &free_mem)) {
-                    moe_.layer_stage_buf = vram_alloc(vram_alloc_, total, "moe_layer_stage");
-                    if (moe_.layer_stage_buf) {
+                    moe_.layer_stage_buf = DeviceOwned<void>::allocate(vram_alloc_, total, "moe_layer_stage");
+                    if (moe_.layer_stage_buf.get()) {
                         moe_.layer_stage_proj_bytes = proj_bytes;
                         moe_.layer_stage_size = total;
                         moe_.layer_stage_experts = stage_experts;
@@ -745,18 +746,19 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         const size_t sf_total = static_cast<size_t>(stage_slots) * sf_proj;
                         const size_t ptr_count =
                             static_cast<size_t>(kExpertProjCount) * stage_cfg.n_experts;
-                        moe_.layer_stage_sf = vram_alloc(vram_alloc_, sf_total, "moe_layer_stage_sf");
-                        moe_.layer_stage_b_ptrs = static_cast<const void**>(
-                            vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_bptr"));
-                        moe_.layer_stage_sfb_ptrs = static_cast<const void**>(
-                            vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_sfbptr"));
+                        moe_.layer_stage_sf = DeviceOwned<void>::allocate(vram_alloc_, sf_total,
+                                                                          "moe_layer_stage_sf");
+                        moe_.layer_stage_b_ptrs = DeviceOwned<const void*>::allocate(
+                            vram_alloc_, ptr_count * sizeof(void*), "moe_stage_bptr");
+                        moe_.layer_stage_sfb_ptrs = DeviceOwned<const void*>::allocate(
+                            vram_alloc_, ptr_count * sizeof(void*), "moe_stage_sfbptr");
                         const int n_layers = model_->config().n_layers;  // one alpha row per layer
-                        moe_.layer_stage_alpha = static_cast<float*>(
-                            vram_alloc(vram_alloc_, ptr_count * n_layers * sizeof(float), "moe_stage_alpha"));
+                        moe_.layer_stage_alpha = DeviceOwned<float>::allocate(
+                            vram_alloc_, ptr_count * n_layers * sizeof(float), "moe_stage_alpha");
                         moe_.layer_stage_alpha_filled.assign(n_layers, 0);
                         moe_.layer_stage_ptr_sig.assign(ptr_count, {});
-                        if (moe_.layer_stage_sf && moe_.layer_stage_b_ptrs &&
-                            moe_.layer_stage_sfb_ptrs && moe_.layer_stage_alpha) {
+                        if (moe_.layer_stage_sf.get() && moe_.layer_stage_b_ptrs.get() &&
+                            moe_.layer_stage_sfb_ptrs.get() && moe_.layer_stage_alpha.get()) {
                             moe_.layer_stage_sf_proj_bytes = sf_proj;
                             moe_.layer_stage_sf_size = sf_total;
                             IMP_LOG_INFO(
@@ -793,7 +795,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                          serve.f16_all       ? "F16 experts need no dequant"
                          : serve.cutlass_fp4 ? "grouped NVFP4 GEMM serves every expert tensor"
                                              : "MoE IMMA prefill serves every expert tensor");
-            moe_.batch_dequant_buf = nullptr;
+            moe_.batch_dequant_buf = {};  // no buffer on this route (none held at init)
             moe_.batch_dequant_buf_size = 0;
         } else
             // Batch dequant: sized for a chunk of experts (L2-resident strategy). Dequant a chunk to
@@ -819,8 +821,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             ne_try, sz / (1024.0 * 1024.0), free_now / (1024.0 * 1024.0));
                         continue;
                     }
-                    moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
-                    if (!moe_.batch_dequant_buf) {
+                    moe_.batch_dequant_buf = DeviceOwned<void>::allocate(vram_alloc_, sz,
+                                                                         "moe_batch_dequant");
+                    if (!moe_.batch_dequant_buf.get()) {
                         IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
                         continue;
                     }
@@ -832,12 +835,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 }
                 if (!allocated) {
                     IMP_LOG_INFO("MoE batch dequant buffer: skipped (VRAM insufficient)");
-                    moe_.batch_dequant_buf = nullptr;
+                    moe_.batch_dequant_buf.reset();
                     moe_.batch_dequant_buf_size = 0;
                 }
             } else {
                 IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
-                moe_.batch_dequant_buf = nullptr;
+                moe_.batch_dequant_buf.reset();
                 moe_.batch_dequant_buf_size = 0;
             }
 
@@ -854,9 +857,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // so sum over ne of cutlass_nvfp4_sf_size(M_i, max_K) ≤
             // cutlass_nvfp4_sf_size(max_expanded + 128*ne, max_K).
             size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + (128 * cfg.n_experts), max_K);
-            moe_.cutlass3x_packed = vram_alloc(vram_alloc_, packed_sz, "moe_3x_packed");
-            moe_.cutlass3x_sf = vram_alloc(vram_alloc_, sf_sz, "moe_3x_sf");
-            if (moe_.cutlass3x_packed && moe_.cutlass3x_sf) {
+            moe_.cutlass3x_packed = DeviceOwned<void>::allocate(vram_alloc_, packed_sz, "moe_3x_packed");
+            moe_.cutlass3x_sf = DeviceOwned<void>::allocate(vram_alloc_, sf_sz, "moe_3x_sf");
+            if (moe_.cutlass3x_packed.get() && moe_.cutlass3x_sf.get()) {
                 moe_.cutlass3x_packed_size = packed_sz;
                 moe_.cutlass3x_sf_size = sf_sz;
                 // Device array of per-expert SFA base pointers for the fused quantize kernel. Last of the
@@ -875,14 +878,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              sf_sz / (1024.0 * 1024.0), max_expanded);
             } else {
                 IMP_LOG_WARN("CUTLASS 3.x MoE staging: allocation failed, path disabled");
-                if (moe_.cutlass3x_packed) {
-                    vram_free(vram_alloc_, moe_.cutlass3x_packed);
-                    moe_.cutlass3x_packed = nullptr;
-                }
-                if (moe_.cutlass3x_sf) {
-                    vram_free(vram_alloc_, moe_.cutlass3x_sf);
-                    moe_.cutlass3x_sf = nullptr;
-                }
+                moe_.cutlass3x_packed.reset();
+                moe_.cutlass3x_sf.reset();
             }
         }
 
@@ -980,8 +977,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // failure the route degrades to the fused scan (dispatch checks nullptr).
     if (has_gdn_ && dispatch_policy().gdn.chunkpar_scan && cfg.ssm_dt_rank > 0) {
         gdn_ws_.chunkpar_bytes = gdn_scan_chunkpar_workspace_bytes(cfg.ssm_dt_rank);
-        gdn_ws_.chunkpar = vram_alloc(vram_alloc_, gdn_ws_.chunkpar_bytes, "gdn_chunkpar_ws");
-        if (!gdn_ws_.chunkpar) {
+        gdn_ws_.chunkpar = DeviceOwned<void>::allocate(vram_alloc_, gdn_ws_.chunkpar_bytes,
+                                                       "gdn_chunkpar_ws");
+        if (!gdn_ws_.chunkpar.get()) {
             IMP_LOG_WARN("gdn_chunkpar workspace unavailable (%.1f MiB) — fused scan route",
                          gdn_ws_.chunkpar_bytes / (1024.0 * 1024.0));
             gdn_ws_.chunkpar_bytes = 0;
@@ -993,9 +991,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // init. nullptr keeps the two-GEMM route.
     if (has_gdn_ && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_bytes = gemm_f16_narrow_smallm_workspace_bytes(2 * cfg.ssm_dt_rank);
-        gdn_ws_.ab = vram_alloc(vram_alloc_, gdn_ws_.ab_bytes, "gdn_ab_ws");
-        if (gdn_ws_.ab) {
-            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab, 0, gdn_ws_.ab_bytes));
+        gdn_ws_.ab = DeviceOwned<void>::allocate(vram_alloc_, gdn_ws_.ab_bytes, "gdn_ab_ws");
+        if (gdn_ws_.ab.get()) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab.get(), 0, gdn_ws_.ab_bytes));
         } else {
             IMP_LOG_WARN("gdn alpha/beta workspace unavailable (%zu B) - two-call route", gdn_ws_.ab_bytes);
             gdn_ws_.ab_bytes = 0;
@@ -1006,9 +1004,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // split adapts to what fits (split 1 needs none); nullptr keeps the two-GEMM route.
     if (has_gdn_ && cfg.ssm_dt_rank > 0) {
         gdn_ws_.ab_prefill_bytes = size_t(8) << 20;
-        gdn_ws_.ab_prefill = vram_alloc(vram_alloc_, gdn_ws_.ab_prefill_bytes, "gdn_ab_prefill_ws");
-        if (gdn_ws_.ab_prefill) {
-            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab_prefill, 0, gdn_ws_.ab_prefill_bytes));
+        gdn_ws_.ab_prefill = DeviceOwned<void>::allocate(vram_alloc_, gdn_ws_.ab_prefill_bytes,
+                                                         "gdn_ab_prefill_ws");
+        if (gdn_ws_.ab_prefill.get()) {
+            IMP_CUDA_CHECK_LOG(cudaMemset(gdn_ws_.ab_prefill.get(), 0, gdn_ws_.ab_prefill_bytes));
         } else {
             IMP_LOG_WARN("gdn alpha/beta prefill workspace unavailable (%zu B) - two-call route",
                          gdn_ws_.ab_prefill_bytes);
@@ -1020,22 +1019,25 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     if (has_moe_ && cfg.n_experts > 0 && cfg.n_experts <= 128 &&
         cfg.d_model >= 2560) {  // the shapes it takes
         moe_.router_ws_bytes = size_t(8) << 20;
-        moe_.router_ws = vram_alloc(vram_alloc_, moe_.router_ws_bytes, "moe_router_ws");
-        if (!moe_.router_ws)
+        moe_.router_ws = DeviceOwned<void>::allocate(vram_alloc_, moe_.router_ws_bytes, "moe_router_ws");
+        if (!moe_.router_ws.get())
             moe_.router_ws_bytes = 0;
     }
     if (has_moe_ && cfg.n_experts > 0 && cfg.n_experts <= 128) {
         moe_.router_fused_ws_bytes = moe_router_fused_workspace_bytes(max_tokens_);
-        moe_.router_fused_ws = vram_alloc(vram_alloc_, moe_.router_fused_ws_bytes, "moe_router_fused_ws");
-        if (moe_.router_fused_ws)
-            IMP_CUDA_CHECK_LOG(cudaMemset(moe_.router_fused_ws, 0, moe_.router_fused_ws_bytes));  // tickets
+        moe_.router_fused_ws = DeviceOwned<void>::allocate(vram_alloc_, moe_.router_fused_ws_bytes,
+                                                           "moe_router_fused_ws");
+        if (moe_.router_fused_ws.get())
+            IMP_CUDA_CHECK_LOG(
+                cudaMemset(moe_.router_fused_ws.get(), 0, moe_.router_fused_ws_bytes));  // tickets
         else
             moe_.router_fused_ws_bytes = 0;
     }
     if (has_moe_ && cfg.n_experts > 128) {  // moe_router_decode, the routers moe_router_fused refuses
-        moe_.router_ticket = vram_alloc(vram_alloc_, sizeof(unsigned int), "moe_router_ticket");
-        if (moe_.router_ticket)
-            IMP_CUDA_CHECK_LOG(cudaMemset(moe_.router_ticket, 0, sizeof(unsigned int)));
+        moe_.router_ticket = DeviceOwned<void>::allocate(vram_alloc_, sizeof(unsigned int),
+                                                         "moe_router_ticket");
+        if (moe_.router_ticket.get())
+            IMP_CUDA_CHECK_LOG(cudaMemset(moe_.router_ticket.get(), 0, sizeof(unsigned int)));
     }
 
     // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
@@ -1055,8 +1057,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             max_dim = std::max(max_dim, cfg.ssm_inner_size);
         }
         qscratch_.fp8_act_size = static_cast<size_t>(max_tokens_) * max_dim;
-        qscratch_.fp8_act = vram_alloc(vram_alloc_, qscratch_.fp8_act_size, "fp8_activation");
-        if (!qscratch_.fp8_act) {
+        qscratch_.fp8_act = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.fp8_act_size,
+                                                        "fp8_activation");
+        if (!qscratch_.fp8_act.get()) {
             IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%.1f MiB)",
                          qscratch_.fp8_act_size / (1024.0 * 1024.0));
             qscratch_.fp8_act_size = 0;
@@ -1065,8 +1068,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // data-parallel only. Qwen3-8B-FP8 pp4096 FP8 GEMM sum 907.5-909.1 -> 898.4-901.7 ms with them.
         {
             qscratch_.fp8_tile_ws_size = gemm_tile_streamk_workspace_bytes();
-            qscratch_.fp8_tile_ws = vram_alloc(vram_alloc_, qscratch_.fp8_tile_ws_size, "fp8_tile_ws");
-            if (!qscratch_.fp8_tile_ws)
+            qscratch_.fp8_tile_ws = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.fp8_tile_ws_size,
+                                                                "fp8_tile_ws");
+            if (!qscratch_.fp8_tile_ws.get())
                 qscratch_.fp8_tile_ws_size = 0;
         }
         {
@@ -1080,7 +1084,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         // Pre-allocate reduction buffers for async FP8 activation quantization.
         // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
-        if (qscratch_.fp8_act && qscratch_.d_act_scale) {
+        if (qscratch_.fp8_act.get() && qscratch_.d_act_scale) {
             int max_n = static_cast<int>(qscratch_.fp8_act_size);   // max elements
             int threads_needed = (max_n + 3) / 4;                   // kElemsPerThread=4
             qscratch_.fp8_max_grid = (threads_needed + 255) / 256;  // kBlockSize=256
@@ -1162,30 +1166,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Stream-K workspace of the own tile GEMMs (SMs x 64 KiB)
             qscratch_.cutlass_workspace_size = gemm_tile_streamk_workspace_bytes();  // tile stream-K partials
 
-            qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size,
-                                                    "cutlass_act_data");
-            qscratch_.cutlass_act_sf = vram_alloc(vram_alloc_, qscratch_.cutlass_act_sf_size,
-                                                  "cutlass_act_sf");
-            qscratch_.cutlass_workspace = (qscratch_.cutlass_workspace_size > 0)
-                                              ? vram_alloc(vram_alloc_, qscratch_.cutlass_workspace_size,
-                                                           "cutlass_workspace")
-                                              : nullptr;
-            if (!qscratch_.cutlass_act_data || !qscratch_.cutlass_act_sf ||
-                (qscratch_.cutlass_workspace_size > 0 && !qscratch_.cutlass_workspace)) {
+            qscratch_.cutlass_act_data = DeviceOwned<void>::allocate(vram_alloc_,
+                                                                     qscratch_.cutlass_act_data_size,
+                                                                     "cutlass_act_data");
+            qscratch_.cutlass_act_sf = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.cutlass_act_sf_size,
+                                                                   "cutlass_act_sf");
+            qscratch_.cutlass_workspace = DeviceOwned<void>::allocate(vram_alloc_,
+                                                                      qscratch_.cutlass_workspace_size,
+                                                                      "cutlass_workspace");  // 0 bytes: empty
+            if (!qscratch_.cutlass_act_data.get() || !qscratch_.cutlass_act_sf.get() ||
+                (qscratch_.cutlass_workspace_size > 0 && !qscratch_.cutlass_workspace.get())) {
                 IMP_LOG_WARN(
                     "Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
-                if (qscratch_.cutlass_act_data) {
-                    vram_free(vram_alloc_, qscratch_.cutlass_act_data);
-                    qscratch_.cutlass_act_data = nullptr;
-                }
-                if (qscratch_.cutlass_act_sf) {
-                    vram_free(vram_alloc_, qscratch_.cutlass_act_sf);
-                    qscratch_.cutlass_act_sf = nullptr;
-                }
-                if (qscratch_.cutlass_workspace) {
-                    vram_free(vram_alloc_, qscratch_.cutlass_workspace);
-                    qscratch_.cutlass_workspace = nullptr;
-                }
+                qscratch_.cutlass_act_data.reset();
+                qscratch_.cutlass_act_sf.reset();
+                qscratch_.cutlass_workspace.reset();
                 qscratch_.cutlass_act_data_size = 0;
                 qscratch_.cutlass_act_sf_size = 0;
                 qscratch_.cutlass_workspace_size = 0;
@@ -1194,8 +1189,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // writes the M x K_groups valid SF cells, leaving padding as whatever was there before.
                 // Zeroing once here lets the per-call path skip its own cudaMemsetAsync. Sync because
                 // executor init may finish before the first stream-bound call uses this buffer.
-                IMP_CUDA_CHECK_LOG(cudaMemset(qscratch_.cutlass_act_sf, 0,
-                                              qscratch_.cutlass_act_sf_size));
+                IMP_CUDA_CHECK_LOG(
+                    cudaMemset(qscratch_.cutlass_act_sf.get(), 0, qscratch_.cutlass_act_sf_size));
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
                              (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size +
                               qscratch_.cutlass_workspace_size) /
@@ -1357,50 +1352,32 @@ void GraphExecutor::free_buffers() {
     smallm_ws_arena_ = false;
     smallm_xq_arena_ = false;
     if (lora_scratch_) {
-        device_free_all(lora_scratch_);
-        lora_scratch_ = nullptr;
+        lora_scratch_.reset();
         lora_scratch_sz_ = 0;
     }
     if (verify_argmax_scratch_) {
-        vram_free(vram_alloc_, verify_argmax_scratch_);
-        verify_argmax_scratch_ = nullptr;
+        verify_argmax_scratch_.reset();
         verify_argmax_scratch_sz_ = 0;
     }
     if (verify_pen_counts_) {
-        vram_free(vram_alloc_, verify_pen_counts_);
-        verify_pen_counts_ = nullptr;
+        verify_pen_counts_.reset();
         verify_pen_counts_cap_ = 0;
     }
-    // Helper: free through VRAMAllocator if pointer was tracked, else cudaFree.
-    auto vfree = [this](void*& p) {
-        if (p) {
-            vram_free(vram_alloc_, p);
-            p = nullptr;
-        }
-    };
-
-    vfree(gdn_ws_.chunkpar);
+    gdn_ws_.chunkpar.reset();
     gdn_ws_.chunkpar_bytes = 0;
-    vfree(gdn_ws_.ab);
+    gdn_ws_.ab.reset();
     gdn_ws_.ab_bytes = 0;
-    vfree(gdn_ws_.ab_prefill);
+    gdn_ws_.ab_prefill.reset();
     gdn_ws_.ab_prefill_bytes = 0;
-    vfree(moe_.router_ws);
+    moe_.router_ws.reset();
     moe_.router_ws_bytes = 0;
-    vfree(moe_.router_fused_ws);
+    moe_.router_fused_ws.reset();
     moe_.router_fused_ws_bytes = 0;
-    vfree(moe_.router_ticket);
-    moe_.router_ticket = nullptr;
+    moe_.router_ticket.reset();
 
     // Free LongRoPE frequency tables
-    if (longrope_short_freqs_) {
-        device_free_all(longrope_short_freqs_);
-        longrope_short_freqs_ = nullptr;
-    }
-    if (longrope_long_freqs_) {
-        device_free_all(longrope_long_freqs_);
-        longrope_long_freqs_ = nullptr;
-    }
+    longrope_short_freqs_.reset();
+    longrope_long_freqs_.reset();
     longrope_n_pairs_ = 0;
     longrope_orig_max_pos_ = 0;
 
@@ -1546,9 +1523,9 @@ void GraphExecutor::free_buffers() {
         free_nvfp4_result(wcache_.mtp_lm_head_nvfp4);
     }
 
-    qscratch_.free(vram_alloc_);
+    qscratch_.free();
 
-    moe_.free(vram_alloc_);
+    moe_.free();
     dev_expert_cache_.destroy();
     expert_cache_.destroy();
 
@@ -1586,10 +1563,8 @@ void GraphExecutor::free_buffers() {
     d_pen_args_ = nullptr;
     n_pending_greedy_rows_ = 0;
     n_pending_pen_rows_ = 0;
-    for (auto& e : banned_cache_entries_) {
-        vram_free(vram_alloc_, e.d);
-        e = BannedCacheEntry{};
-    }
+    for (auto& e : banned_cache_entries_)
+        e = BannedCacheEntry{};  // releases e.d
     banned_cache_next_ = 0;
     if (d_row_args_) {
         // Arena-owned since A7 step 4b.2 — no free here. The arena is closed by
@@ -1602,7 +1577,7 @@ void GraphExecutor::free_buffers() {
     sample_parity_ = 0;
     h_logits_pinned_.reset();
     h_logits_pinned_size_ = 0;
-    vfree(attn_scores_buf_);
+    attn_scores_buf_.reset();
     attn_scores_buf_size_ = 0;
     // Arena-owned since A7 step 4b.2 — ~Engine closes the region; re-arm only.
     chunk_capture_k_ = nullptr;
@@ -1612,14 +1587,10 @@ void GraphExecutor::free_buffers() {
     // these with cudaMallocAsync, and a sync free on a stream-ordered allocation returns
     // success without returning the block to the async mempool (#834). Null stream + sync,
     // matching ~Model.
-    if (chunk_eager_k_) {
-        device_free_all_async(nullptr, chunk_eager_k_);
-        chunk_eager_k_ = nullptr;
-    }
-    if (chunk_eager_v_) {
-        device_free_all_async(nullptr, chunk_eager_v_);
-        chunk_eager_v_ = nullptr;
-    }
+    chunk_eager_k_.set_release_stream(nullptr);
+    chunk_eager_v_.set_release_stream(nullptr);
+    chunk_eager_k_.reset();
+    chunk_eager_v_.reset();
     if (chunk_eager_bytes_ > 0)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));  // retire the frees for the pool
     chunk_eager_bytes_ = 0;
@@ -1628,7 +1599,7 @@ void GraphExecutor::free_buffers() {
     gemma_pli_free_();   // Gemma-4 E-variant per-layer inputs + KV-share rows
     qsa_free_();         // Qwen4Exp QSA indexer key caches + scratch
     ws_.free_buffers();  // shared + persistent workspace (Workspace-owned)
-    vfree(fp32_accum_buf_);
+    fp32_accum_buf_.reset();
     ssm_layer_map_.clear();
     initialized_ = false;
 }
@@ -1738,7 +1709,7 @@ bool GraphExecutor::chunk_capture_supported() const {
         return false;  // absorbed-decode latent cache writes are host-parameterized
     if (model_->profile().learned_attn_sinks)
         return false;  // learned sinks — cuBLAS-only chunked attention
-    if (longrope_short_freqs_ != nullptr)
+    if (longrope_short_freqs_.get() != nullptr)
         return false;  // host branch on max_context_len picks the freq table
     if (!attn_shapes_uniform())
         return false;
@@ -1771,7 +1742,7 @@ bool GraphExecutor::chunk_capture_supported() const {
         if (!gemm_grouped_nvfp4_moe_supports(cfg.n_experts, cfg.d_model, max_expert_eff_))
             return false;
         const int ne = cfg.n_experts;
-        if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf || !moe_.d_M_per ||
+        if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get() || !moe_.d_M_per ||
             moe_.d_M_per_count < ne || !moe_.d_sfa_offsets || !moe_.d_B_ptrs_cache ||
             !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full || !moe_.cutlass3x_sfa_ptrs ||
             moe_.cutlass3x_sfa_ptrs_count < ne)
