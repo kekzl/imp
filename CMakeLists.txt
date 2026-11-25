@@ -1335,6 +1335,8 @@ if(IMP_BUILD_TESTS)
             tests/test_server_request_limits.cpp
             # C-2: swap/suspend waits for in-flight handlers, load epoch at submit.
             tests/test_model_lifetime_gate.cpp
+            # C-2/C-3 at the call sites: swap/suspend under a lease, channel ids across a swap.
+            tests/test_model_swap_state.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.
@@ -1674,6 +1676,8 @@ if(IMP_BUILD_TESTS)
         tests/test_hybrid_restore_chain.cu
         # Engine-level batch invariance of the batched GDN decode: eight rows vs solo, greedy.
         tests/test_hybrid_batched_decode.cu
+        # Engine::cancel_request on a real checkpoint: audit C-1 (GDN slot), C-4 (tables), C-5 (burst).
+        tests/test_cancel_lifecycle.cpp
         # #2198 shared scoring: rows restoring one recurrent snapshot in one ragged forward.
         tests/test_hybrid_shared_score.cu
         # Row-batched sampler keeps each row's own banned list through the penalty stash (#2019).

@@ -661,6 +661,23 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
     return config;
 }
 
+// Detect Gemma-4 channel model: has <|channel> and <channel|> as dedicated tokens.
+// These wrap reasoning/answer headers like "<|channel>thought\n...<channel|>\n".
+// We strip the headers from the user-facing content stream.
+void detect_channel_markers(ServerState& state, const imp::Tokenizer& tok) {
+    int32_t co = tok.find_token("<|channel>");
+    int32_t cc = tok.find_token("<channel|>");
+    int32_t nl = tok.find_token("\n");
+    // A swap to a model without the pair must not keep the previous model's ids.
+    state.channel_open_id = state.channel_close_id = state.channel_newline_id = -1;
+    if (co >= 0 && cc >= 0) {
+        state.channel_open_id = co;
+        state.channel_close_id = cc;
+        state.channel_newline_id = nl;
+        printf("Channel model: <|channel>=%d, <channel|>=%d, \\n=%d\n", co, cc, nl);
+    }
+}
+
 // Load a model into ServerState. Caller must hold state.mtx.
 // Returns error message on failure, empty string on success.
 std::string load_model_into_state(ServerState& state, const std::string& path) {
@@ -848,22 +865,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         }
     }
 
-    // Detect Gemma-4 channel model: has <|channel> and <channel|> as dedicated tokens.
-    // These wrap reasoning/answer headers like "<|channel>thought\n...<channel|>\n".
-    // We strip the headers from the user-facing content stream.
-    {
-        int32_t co = state.tok->find_token("<|channel>");
-        int32_t cc = state.tok->find_token("<channel|>");
-        int32_t nl = state.tok->find_token("\n");
-        // A swap to a model without the pair must not keep the previous model's ids.
-        state.channel_open_id = state.channel_close_id = state.channel_newline_id = -1;
-        if (co >= 0 && cc >= 0) {
-            state.channel_open_id = co;
-            state.channel_close_id = cc;
-            state.channel_newline_id = nl;
-            printf("Channel model: <|channel>=%d, <channel|>=%d, \\n=%d\n", co, cc, nl);
-        }
-    }
+    detect_channel_markers(state, *state.tok);
 
     if (state.have_template) {
         printf("Chat template: %s\n", imp::chat_template_family_name(state.chat_tpl.family()));
