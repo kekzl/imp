@@ -43,7 +43,7 @@ int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
 }
 
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots, Backend* growable) {
+                                                     int max_ctx, int slots) {
     const std::string& dir = model.inkling_dir;
     if (dir.empty())
         return nullptr;
@@ -56,7 +56,7 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
         auto f = std::make_unique<InklingForward>();
         // The first slot's per-call buffers serve every slot: they run one after the other.
         if (!f->init(rt->w, *va, max_tokens, max_ctx, rt->slots.empty() ? nullptr : rt->slots[0].get(),
-                     growable)) {
+                     /*own_kv=*/false)) {
             ok = i > 0;  // fewer slots than asked for: the engine lowers its batch size
             IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
             break;
@@ -66,8 +66,8 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
     // I8B32 copies of the dense projections for the decode steps, when the card keeps kDense8Spare free
-    // behind them (draft contexts, library reserve, KV pool come later): 2 slots at 32768 take them, 4
-    // slots or a 131072 context decode on fp16.
+    // behind them and the KV pool the engine reserves next (every slot at max_ctx, kv_bytes; draft contexts
+    // and library reserve come later): 2 slots at 32768 or 81920 take them, a 131072 context decodes on fp16.
     constexpr size_t kDense8Spare = static_cast<size_t>(3) << 30;
     size_t need = 0, free_b = 0;
     for (const InklingLayer& ly : rt->w.layers)
@@ -75,8 +75,11 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
                  static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
                 17 / 16;
     auto d8 = std::make_unique<InklingDense8>();
-    // The budget view: context rows reserved and not committed yet are not free.
-    if (vram_fits(need, kDense8Spare, 0, &free_b) && build_inkling_dense8(rt->w, *va, *d8)) {
+    const size_t kv_bytes = static_cast<size_t>(inkling_pool_blocks(static_cast<int>(rt->slots.size()),
+                                                                    max_ctx, kKVBlockSize)) *
+                            kKVBlockSize * rt->w.cfg.n_kv_heads * rt->w.cfg.head_dim * sizeof(half) * 2 *
+                            static_cast<size_t>(inkling_kv_apps(rt->w.cfg, true).n_layers());
+    if (vram_fits(need, kDense8Spare + kv_bytes, 0, &free_b) && build_inkling_dense8(rt->w, *va, *d8)) {
         for (auto& f : rt->slots)
             f->set_dense8(d8.get());
         rt->dense8 = std::move(d8);
@@ -85,11 +88,11 @@ std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAll
     } else {
         IMP_LOG_INFO(
             "inkling2_loop: decode steps read the fp16 dense projections (%.0f MiB free, I8B32 copies "
-            "need %.0f MiB + %.0f MiB spare)",
-            free_b / 1048576.0, need / 1048576.0, kDense8Spare / 1048576.0);
+            "need %.0f MiB + %.0f MiB spare + %.0f MiB K/V)",
+            free_b / 1048576.0, need / 1048576.0, kDense8Spare / 1048576.0, kv_bytes / 1048576.0);
     }
     rt->max_ctx = max_ctx;
-    rt->growable = growable;
+    rt->resumed.assign(rt->slots.size(), -1);
     rt->va = va;
     rt->rows_cap = max_tokens;
     rt->d_rows = VramOwned<int32_t>(*va, 2 * static_cast<size_t>(max_tokens), "inkling_state");
@@ -128,20 +131,27 @@ int GraphExecutor::run_inkling_(const InferenceState& state, Tensor& h, int n, c
         std::copy_n(rt.rows.begin() + static_cast<std::ptrdiff_t>(N), N, rt.ids.begin());
     }
     half* hd = static_cast<half*>(h.data);
+    // Every slot reads its K/V through a copy of its row's block table (its captured steps bake the copy).
+    if (ok && !state.block_tables)
+        throw std::runtime_error("inkling2_loop: a forward without KV block tables");
     if (ok && !decode) {
         // One sequence on its request's slot; a forward outside a request may start an unbound slot 0.
         const int s = state.prefill_req_id >= 0 ? rt.table.slot_of(state.prefill_req_id) : 0;
         if (state.prefill_req_id < 0 && (rt.pos[0] != 0 || rt.table.bound(0)))
             throw std::runtime_error("inkling2_loop: a prefill without a request id at position " +
                                      std::to_string(rt.pos[0]) + " (only position 0 of an unbound slot 0)");
-        ok = rt.slots[static_cast<size_t>(s)]->run(hd, n, rt.pos[0], stream, rt.ids.data(),
-                                                   state.vision_embeddings ? state.vision_token_id : -1);
+        InklingForward& f = *rt.slots[static_cast<size_t>(s)];
+        f.set_table(state.block_tables, (rt.pos[0] + n + kKVBlockSize - 1) / kKVBlockSize, stream);
+        ok = f.run(hd, n, rt.pos[0], stream, rt.ids.data(),
+                   state.vision_embeddings ? state.vision_token_id : -1);
     }
     // Decode: one row per sequence, each on the slot its request is bound to.
     for (size_t i = 0; ok && decode && i < N; ++i) {
         const int s = rt.row_slot[i];
-        ok = rt.slots[static_cast<size_t>(s)]->run(hd + i * static_cast<size_t>(h.shape[1]), 1, rt.pos[i],
-                                                   stream, &rt.ids[i]);
+        InklingForward& f = *rt.slots[static_cast<size_t>(s)];
+        const int stride = state.max_blocks_per_seq;
+        f.set_table(state.block_tables + i * static_cast<size_t>(stride), stride, stream);
+        ok = f.run(hd + i * static_cast<size_t>(h.shape[1]), 1, rt.pos[i], stream, &rt.ids[i]);
         if (ok && N == 1)
             inkling_look_logits_(s, stream);
     }
@@ -188,13 +198,50 @@ bool GraphExecutor::inkling_take_logits_(Tensor& lg, cudaStream_t stream) {
                            cudaMemcpyDeviceToDevice, stream) == cudaSuccess;
 }
 
-// Prefix reuse: binds the request to a slot and returns the position its prefill resumes at, -1 when
-// every slot is bound (the caller fails the request; no bound slot is taken from its request).
-int GraphExecutor::inkling_resume(int req, std::span<const int32_t> tokens, cudaStream_t stream) {
-    if (!inkling_)
-        return 0;
-    const int s = inkling_->bind(req, tokens);
-    return s < 0 ? -1 : inkling_->slots[static_cast<size_t>(s)]->rewind(tokens, stream);
+int InklingRuntime::bind_match(int req, std::span<const int32_t> tokens) {
+    const int s = bind(req, tokens);
+    return s < 0 ? -1 : slots[static_cast<size_t>(s)]->match(tokens);
+}
+
+// No bound slot is taken from its request: -1 fails the request.
+int InklingRuntime::resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s,
+                           bool& first) {
+    int slot = table.find(req);
+    first = slot < 0 || resumed[static_cast<size_t>(slot)] != req;
+    if (!first)
+        return offset;  // a later chunk of the same prefill
+    if (slot < 0)
+        slot = bind(req, tokens);
+    if (slot < 0)
+        return -1;
+    resumed[static_cast<size_t>(slot)] = req;
+    return slots[static_cast<size_t>(slot)]->rewind(tokens, s, offset);
+}
+
+bool InklingRuntime::bind_kv(KVCache& kv) {
+    const InklingConfig& c = w.cfg;
+    const InklingKvLayout l = inkling_kv_apps(c, kv.n_layers() > inkling_kv_apps(c, false).n_global);
+    if (kv.accounting_only() || kv.qtype() != QType::F16 || kv.block_size() != kKVBlockSize ||
+        kv.n_kv_heads() != c.n_kv_heads || kv.head_dim() != c.head_dim || kv.n_layers() != l.n_layers()) {
+        IMP_LOG_ERROR(
+            "inkling2_loop: the KV pool (%d layers, %s, %d-row blocks, %d x %d) is not the %d fp16 layers of "
+            "16 rows x %d x %d the forward writes",
+            kv.n_layers(), qtype_name(kv.qtype()), kv.block_size(), kv.n_kv_heads(), kv.head_dim(),
+            l.n_layers(), c.n_kv_heads, c.head_dim);
+        return false;
+    }
+    kv_k.clear(), kv_v.clear();
+    for (int i = 0; i < l.n_layers(); ++i) {
+        kv_k.push_back(static_cast<half*>(kv.k_ptr(i, 0)));
+        kv_v.push_back(static_cast<half*>(kv.v_ptr(i, 0)));
+    }
+    draft_layer = l.draft_layer;
+    for (auto& f : slots)
+        if (!f->bind_kv(kv_k, kv_v))
+            return false;
+    IMP_LOG_INFO("inkling2_loop: %d full-attention applications%s read their K/V from the paged KV pool",
+                 l.n_global, l.draft_layer >= 0 ? " and the draft's context" : "");
+    return true;
 }
 
 // The checkpoint's draft model behind every slot's decode lookahead; without it (no mtp.safetensors,
@@ -205,27 +252,30 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
     const Tensor& emb = model_->token_embedding();
     InklingHeadView head;
     head.vocab = model_->config().vocab_size;
-    if (!inkling_lookahead_ || emb.qtype != QType::F16 || !emb.data ||
+    if (!inkling_lookahead_ || rt.draft_layer < 0 || emb.qtype != QType::F16 || !emb.data ||
         !lm_head_fp8_view(head.w8, head.row_scales)) {
         IMP_LOG_INFO("inkling2_loop: decode lookahead off (%s)",
-                     inkling_lookahead_ ? "needs an fp16 embedding table and the FP8 LM head"
-                                        : "speculative.mtp_k = 0");
+                     !inkling_lookahead_  ? "speculative.mtp_k = 0"
+                     : rt.draft_layer < 0 ? "no draft layer in the KV pool"
+                                          : "needs an fp16 embedding table and the FP8 LM head");
         return;
     }
     auto w = std::make_shared<InklingDraftWeights>();
     if (!w->load(model_->inkling_dir, *vram_alloc_, rt.w.embed_norm, head, stream))
         return;
     rt.draft_w = w;
-    // A draft context holds 397 MiB at 32768 positions: two slots get one (4 slots with a context each
-    // reached 31983 MiB on the 32 GB card).
+    // Two slots get a draft context (its full-context layer in the pool, two local rings here; 4 slots with
+    // a context each reached 31983 MiB on the 32 GB card when it was 397 MiB at 32768 positions).
     constexpr size_t kLookaheadSlots = 2;
+    const size_t dl = static_cast<size_t>(rt.draft_layer);
     int on = 0;
     for (auto& slot : rt.slots) {
         if (rt.drafts.size() >= kLookaheadSlots)
             break;
         auto d = std::make_shared<InklingDraft>();
         if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap, InklingForward::kSeg + InklingForward::kSlack,
-                     rt.growable) ||
+                     /*own_kv=*/false) ||
+            !d->bind_kv(rt.kv_k[dl], rt.kv_v[dl], slot->table()) ||
             !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
             break;
         rt.drafts.push_back(std::move(d));

@@ -815,7 +815,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // unknown yet; assume true, guessing high costs nothing, low exhausts the arena.
         const int kv_bs = config_.kv_block_size > 0 ? config_.kv_block_size : 16;
         const size_t batch_pool_bytes = GPUBatchPool::demand_bytes(
-            config_.max_batch_size, (config_.max_seq_len + kv_bs - 1) / kv_bs, /*with_swa_tables=*/true);
+            config_.max_batch_size, (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs,
+            /*with_swa_tables=*/true);
         // *9/8 for 256-byte alignment padding across the arena's takes (integer
         // identical to t + t/8, just one expression instead of two).
         const size_t cap = std::max(kEngineArenaDefaultBytes, (d.total() + vision_bytes + batch_pool_bytes) * 9 / 8);

@@ -1239,6 +1239,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp
         tests/test_inkling_slot_table.cpp
+        tests/test_inkling_kv_layout.cpp
         tests/test_weight_page_release.cpp
         tests/test_checkpoint_limits.cpp
         tests/test_exit_codes.cpp

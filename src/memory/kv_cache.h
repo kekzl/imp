@@ -65,8 +65,8 @@ public:
     // Exists because CI has no GPU runner: block-accounting tests were written against a
     // real pool and skip when there is none, so the merge gate never ran them. Mutation
     // testing found several real faults this way that `ctest -L unit` never reached.
-    // No model can run on it, it aborts on the first pointer request. In production only where the
-    // K/V live outside this pool and the engine needs the bookkeeping alone (Inkling).
+    // No model can run on it, it aborts on the first pointer request. Tests only (Inkling, its last
+    // production user, writes its K/V into a real pool since B-111 S2b).
     static std::unique_ptr<KVCache> for_accounting(int n_layers, int n_kv_heads, int head_dim, QType dtype,
                                                    int max_blocks, int block_size = kKVBlockSize);
     // Per-layer-shape form (Gemma-4 dual geometry, SWA block group): the same layout
