@@ -1,12 +1,15 @@
 #pragma once
 
 #include "memory/device_owned.h"
+#include "memory/span.h"
 #include "memory/vram_allocator.h"
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <cstdint>
 
 namespace imp {
+
+struct block_q8_1;  // compute/gemm.h
 
 // Activation scale of an FP8 x FP8 GEMM: one device scalar (checkpoint input_scale), or per_row: one
 // scale per activation row (per-token dynamic, quantize_fp8_act_rows). Null d = not quantized.
@@ -29,11 +32,11 @@ struct QuantScratch {
     // --- FP8 activation quantization scratch ---
     DeviceOwned<void> fp8_act;  // max_tokens * max_dim bytes
     size_t fp8_act_size = 0;
-    float* d_act_scale = nullptr;        // 1 float on device
-    float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
-    float* d_fp8_absmax = nullptr;       // pre-allocated absmax scalar
+    StableSpan<float> d_act_scale;        // 1 float on device (T2 arena)
+    StableSpan<float> d_fp8_block_maxes;  // pre-allocated reduction buffer
+    StableSpan<float> d_fp8_absmax;       // pre-allocated absmax scalar
     int fp8_max_grid = 0;                // max grid size for reduction
-    float* d_act_row_scales = nullptr;   // per-token dynamic act scales, act_row_scales_n floats (T2 arena)
+    StableSpan<float> d_act_row_scales;  // per-token dynamic act scales, act_row_scales_n floats (T2 arena)
     int act_row_scales_n = 0;
     DeviceOwned<void> fp8_tile_ws;  // stream-K partials of the own FP8 tile GEMM (SMs x 64 KiB)
     size_t fp8_tile_ws_size = 0;
@@ -64,28 +67,28 @@ struct QuantScratch {
     // dp4a (MMVQ) scratch for quantized input vector (M=1 decode): sized q8_1_rows x
     // q8_1_max_blocks. Production decode uses row 0 only; the spec-verify batched LM head
     // (#847 lever 2) quantizes up to q8_1_rows chunk rows at stride q8_1_max_blocks.
-    void* q8_1_buf = nullptr;  // block_q8_1 array
-    float* d8_buf = nullptr;   // float scale array
+    StableSpan<block_q8_1> q8_1_buf;  // block_q8_1 array
+    StableSpan<float> d8_buf;         // float scale array
     int q8_1_max_blocks = 0;   // max K/32 (per-row stride)
     int q8_1_rows = 1;
 
     // --- dp4a prefill scratch for M>1 dense GEMM (Q4_K/Q5_K) ---
     // Sized for max_tokens * max_k/32 blocks. Eliminates the FP16 weight
     // cache intermediate: reads Q4_K directly (0.55 B/elem vs 2.0 B/elem).
-    void* q8_1_prefill_buf = nullptr;
-    float* d8_prefill_buf = nullptr;
+    StableSpan<block_q8_1> q8_1_prefill_buf;
+    StableSpan<float> d8_prefill_buf;
     size_t q8_1_prefill_bytes = 0;
     size_t d8_prefill_bytes = 0;
 
     // --- Split-K paged attention scratch ---
-    void* splitk = nullptr;
+    StableSpan<std::byte> splitk;
     size_t splitk_size = 0;
 
     // --- Sparse decode attention scratch (attention.sparse_topk_tokens) ---
     // budget_blocks == 0 means the feature is inactive for this engine.
-    float* sparse_scores = nullptr;      // [max_batch, max_ctx_blocks] block scores
-    int* sparse_block_tables = nullptr;  // [max_batch, sparse_table_blocks]
-    int* sparse_context_lens = nullptr;  // [max_batch]
+    StableSpan<float> sparse_scores;      // [max_batch, max_ctx_blocks] block scores
+    StableSpan<int> sparse_block_tables;  // [max_batch, sparse_table_blocks]
+    StableSpan<int> sparse_context_lens;  // [max_batch]
     int sparse_budget_blocks = 0;
     int sparse_sink_blocks = 0;
     int sparse_recent_blocks = 0;
@@ -95,10 +98,10 @@ struct QuantScratch {
     int sparse_max_rows = 0;        // row count of the scratch buffers (batch / chunk rows)
 
     // --- Sparse prefill scratch (attention.sparse_prefill_topk_tokens); budget 0 = off ---
-    float* sp_prefill_scores = nullptr;  // [64, sp_prefill_cap_blocks]
-    float* sp_prefill_agg = nullptr;     // [sp_prefill_cap_blocks]
-    int* sp_prefill_table = nullptr;     // [sp_prefill_cap_blocks]
-    int* sp_prefill_ctx = nullptr;       // [2]
+    StableSpan<float> sp_prefill_scores;  // [64, sp_prefill_cap_blocks]
+    StableSpan<float> sp_prefill_agg;     // [sp_prefill_cap_blocks]
+    StableSpan<int> sp_prefill_table;     // [sp_prefill_cap_blocks]
+    StableSpan<int> sp_prefill_ctx;       // [2]
     int sp_prefill_budget_blocks = 0;
     int sp_prefill_sink_blocks = 0;
     int sp_prefill_recent_blocks = 0;

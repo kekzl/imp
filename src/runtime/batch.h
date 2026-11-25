@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "memory/device_owned.h"
+#include "memory/span.h"
 #include <span>
 #include <vector>
 #include <cstdint>
@@ -89,7 +90,7 @@ public:
     // Free all pool memory.
     void free_pool();
 
-    bool is_allocated() const { return pool_ != nullptr; }
+    bool is_allocated() const { return static_cast<bool>(pool_); }
     int max_blocks_per_seq() const { return max_blocks_per_seq_; }
     void reset_upload_cache() {
         last_upload_block_tables_.clear();
@@ -100,7 +101,7 @@ public:
     int32_t* d_sample_result() const { return d_sample_result_; }
 
 private:
-    void* pool_ = nullptr;
+    StableSpan<std::byte> pool_;  // engine arena slice
     size_t pool_size_ = 0;
 
     // Offsets into pool_

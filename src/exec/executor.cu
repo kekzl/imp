@@ -212,11 +212,12 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     if (state.mirostat == 2) {
         // Mirostat v2: handles temperature + filtering internally, skip min_p
         unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
-        token = d_sample_result_ ? sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
-                                                      state.mirostat_eta, &state.mirostat_mu, seed,
-                                                      d_sample_result_, stream)
-                                 : sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
-                                                      state.mirostat_eta, &state.mirostat_mu, seed, stream);
+        token = d_sample_result_.data()
+                    ? sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
+                                         state.mirostat_eta, &state.mirostat_mu, seed,
+                                         d_sample_result_.data(), stream)
+                    : sample_mirostat_v2(last_logits, state.temperature, state.mirostat_tau,
+                                         state.mirostat_eta, &state.mirostat_mu, seed, stream);
     } else {
         if (state.min_p > 0.0f) {
             apply_min_p(logits_ptr, vocab_size, state.min_p, stream);
@@ -226,12 +227,12 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         }
 
         if (state.temperature <= 0.0f || state.top_k == 1) {
-            if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
-                const bool enqueued = sample_greedy_device(last_logits, d_sample_result_,
+            if (d_sample_result_.data() && h_sample_pinned_.as<int32_t>()) {
+                const bool enqueued = sample_greedy_device(last_logits, d_sample_result_.data(),
                                                            h_sample_pinned_.as<int32_t>(), stream);
                 token = pinned_token_or_throw(enqueued, h_sample_pinned_.as<int32_t>(), stream);
-            } else if (d_sample_result_) {
-                token = sample_greedy(last_logits, d_sample_result_, stream);
+            } else if (d_sample_result_.data()) {
+                token = sample_greedy(last_logits, d_sample_result_.data(), stream);
             } else {
                 token = sample_greedy(last_logits, stream);
             }
@@ -239,14 +240,14 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             int top_k = state.top_k > 0 ? state.top_k : 50;
             float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
             unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
-            if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
+            if (d_sample_result_.data() && h_sample_pinned_.as<int32_t>()) {
                 const bool enqueued = sample_topk_topp_device(last_logits, top_k, top_p, state.temperature,
-                                                              seed, d_sample_result_,
+                                                              seed, d_sample_result_.data(),
                                                               h_sample_pinned_.as<int32_t>(), stream);
                 token = pinned_token_or_throw(enqueued, h_sample_pinned_.as<int32_t>(), stream);
-            } else if (d_sample_result_) {
-                token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
-                                         stream);
+            } else if (d_sample_result_.data()) {
+                token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed,
+                                         d_sample_result_.data(), stream);
             } else {
                 token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed, stream);
             }

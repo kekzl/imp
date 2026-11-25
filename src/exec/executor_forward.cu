@@ -677,7 +677,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Q6_K/Q8_0 output projection at n=1 uses fused RMSNorm->Q8_1 + dp4a GEMV
     // with FP32 output (reads quantized weights directly, saves bandwidth vs cuBLAS FP16).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype);
+    const bool use_dp4a_lm = qscratch_.q8_1_buf.data() && compute_dtype_ == QType::F16 &&
+                             is_dp4a_qtype(out_qtype);
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
@@ -805,12 +806,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 w_fp16_dev.reset();  // stream-ordered, behind the GEMM above
                 IMP_LOG_DEBUG("[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path");
             } else {
-                auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+                auto* q8 = qscratch_.q8_1_buf.data();
                 rmsnorm_quantize_q8_1(static_cast<const half*>(h_last.data),
                                       static_cast<const half*>(model_->output_norm().data), q8,
-                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                      qscratch_.d8_buf.data(), nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
                                       norm_w_off_);
-                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             }
         } else {
@@ -874,11 +875,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             }
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+            auto* q8 = qscratch_.q8_1_buf.data();
             rmsnorm_quantize_q8_1(static_cast<const half*>(h_final.data),
-                                  static_cast<const half*>(model_->output_norm().data), q8, qscratch_.d8_buf,
-                                  nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
-            dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                  static_cast<const half*>(model_->output_norm().data), q8,
+                                  qscratch_.d8_buf.data(), nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                  norm_w_off_);
+            dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n > 1 && lm_is_nvfp4) {
             // Batched-M NVFP4 GEMV LM head for batched decode: reads the ~389 MiB
@@ -959,7 +961,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 gemm_via_handle_(model_->out_proj_id, no_final, lg, ctx);
                 goto lm_head_done;
             }
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+            auto* q8 = qscratch_.q8_1_buf.data();
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
                 Tensor lg_row = lg.slice(row, row + 1);
@@ -968,9 +970,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
 
                 rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
                                       static_cast<const half*>(model_->output_norm().data), q8,
-                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                      qscratch_.d8_buf.data(), nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
                                       norm_w_off_);
-                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf.data(),
                                    static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
             }
         } else {
