@@ -175,6 +175,9 @@ if want launchguards; then
     # #2254: 5 GDN scan kernels read s_reduce[0] and let thread 0 overwrite it with no barrier.
     run "smem reduce slot read behind a barrier" python3 tools/check_smem_reduce_barrier.py
     run "that gate still catches its cases"     python3 tools/check_smem_reduce_barrier.py --selftest
+    # B-108: ERROR/WARN line then a bare `return;` in src/exec, src/compute, src/quant; shrinking list.
+    run "log-and-return exit allowlist"         python3 tools/check_silent_void_returns.py
+    run "that gate still classifies its cases"  python3 tools/check_silent_void_returns.py --selftest
 fi
 
 if want docs; then

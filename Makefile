@@ -671,6 +671,10 @@ check-alloc-sites:
 check-live-vram-queries:
 	@$(PY_RUN) tools/check_live_vram_queries.py
 
+# B-108 gate: ERROR/WARN line then a bare `return;` in src/exec, src/compute, src/quant, shrinking allowlist.
+check-silent-void-returns:
+	@$(PY_RUN) tools/check_silent_void_returns.py
+
 # I3 gate: regrow sites, unkeyed graph captures, unwrapped StableSpan mints, shrinking allowlist.
 check-graph-stability:
 	@$(PY_RUN) tools/check_graph_stability.py
