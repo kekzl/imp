@@ -10,7 +10,6 @@
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/nvfp4_merged_scale_guard.h"
 #include "exec/nvfp4_scratch_key.h"
-#include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
 #include "quant/nvfp4_quant.h"
@@ -639,92 +638,94 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
     // native NVFP4xNVFP4 tile GEMM, amplifying per-block quant noise on long context.
     // Applies uniformly to all NVFP4-prequant models: the CUTLASS non-determinism that once
     // required a format-specific skip-guard here is fixed upstream (PR #165); the guard is gone.
-    if (cutlass_sm120_nvfp4_available()) {
-        int ct_count = 0;
-        // Native-NVFP4 checkpoints: in_proj/out_proj (ssm_in/ssm_out) exist ONLY as NVFP4 bytes
-        // (no FP16 copy, dequant_gpu has no NVFP4 path), so they MUST be registered here or
-        // decode hands raw NVFP4 to gemm(), whose packed-weight guard skips it. GGUF-quant hybrids use the
-        // SSM FP8 sidecar instead (phase 2b). Always register.
-        auto register_prequant = [&](const Tensor& w) {
-            if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
-                return;
-            // These caches feed device kernels: every pointer registered here is dereferenced on the
-            // GPU. A host-resident weight here is an illegal access, not a slow path. Host-resident
-            // MoE experts are served by the expert cache instead (exec/nvfp4_expert_offload.h).
-            if (!w.on_device)
-                return;
-            if (wcache_->nvfp4.contains(w.data))
-                return;
-            NvFP4QuantResult tmp;
-            tmp.packed_data = w.data;
-            tmp.micro_scales = w.scales;
-            tmp.owned = false;  // borrows resident model weight storage — don't cudaFree on teardown
-            tmp.tensor_scale = w.tensor_scale;
-            tmp.N = w.shape[0];
-            tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
-            // Register in NVFP4 cache for decode GEMV (gemv_nvfp4_kpar needs per-16 FP8
-            // micro_scales, not SfAtom). Do NOT build the CUTLASS SfAtom buffer here: Phase 3b
-            // (nvfp4_decode_convert_cutlass_) iterates this same map and unconditionally rebuilds
-            // cutlass_nvfp4[ptr] for every entry, so a SfAtom built here is immediately orphaned
-            // (leaked, never freed) rather than reused. Phase 3b is the authoritative, budget-aware
-            // builder; seeding nvfp4 here is all Phase 0b needs to do.
-            wcache_->nvfp4[w.data] = NvFP4CacheEntry(std::move(tmp));
-            ct_count++;
-        };
+    int ct_count = 0;
+    // Native-NVFP4 checkpoints: in_proj/out_proj (ssm_in/ssm_out) exist ONLY as NVFP4 bytes
+    // (no FP16 copy, dequant_gpu has no NVFP4 path), so they MUST be registered here or
+    // decode hands raw NVFP4 to gemm(), whose packed-weight guard skips it. GGUF-quant hybrids use the
+    // SSM FP8 sidecar instead (phase 2b). Always register.
+    auto register_prequant = [&](const Tensor& w) {
+        if (w.qtype != QType::NVFP4 || !w.data || !w.scales)
+            return;
+        // These caches feed device kernels: every pointer registered here is dereferenced on the
+        // GPU. A host-resident weight here is an illegal access, not a slow path. Host-resident
+        // MoE experts are served by the expert cache instead (exec/nvfp4_expert_offload.h).
+        if (!w.on_device)
+            return;
+        if (wcache_->nvfp4.contains(w.data))
+            return;
+        NvFP4QuantResult tmp;
+        tmp.packed_data = w.data;
+        tmp.micro_scales = w.scales;
+        tmp.owned = false;  // borrows resident model weight storage — don't cudaFree on teardown
+        tmp.tensor_scale = w.tensor_scale;
+        tmp.N = w.shape[0];
+        tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
+        // Register in NVFP4 cache for decode GEMV (gemv_nvfp4_kpar needs per-16 FP8
+        // micro_scales, not SfAtom). Do NOT build the CUTLASS SfAtom buffer here: Phase 3b
+        // (nvfp4_decode_convert_cutlass_) iterates this same map and unconditionally rebuilds
+        // cutlass_nvfp4[ptr] for every entry, so a SfAtom built here is immediately orphaned
+        // (leaked, never freed) rather than reused. Phase 3b is the authoritative, budget-aware
+        // builder; seeding nvfp4 here is all Phase 0b needs to do.
+        wcache_->nvfp4[w.data] = NvFP4CacheEntry(std::move(tmp));
+        ct_count++;
+    };
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = mut_model->layer(i);
+        register_prequant(L.wq);
+        register_prequant(L.wk);
+        register_prequant(L.wv);
+        register_prequant(L.wo);
+        register_prequant(L.w_gate);
+        register_prequant(L.w_up);
+        register_prequant(L.w_down);
+        register_prequant(L.w_gate_shared);
+        register_prequant(L.w_up_shared);
+        register_prequant(L.w_down_shared);
+        register_prequant(L.ssm_in);
+        register_prequant(L.ssm_out);
+        register_prequant(L.gdn_gate);    // Qwen3.5 GDN output gate — native NVFP4
+        register_prequant(L.kda_k_proj);  // Kimi-Linear KDA k / v beside ssm_in (q)
+        register_prequant(L.kda_v_proj);
+        for (const auto& ew : L.expert_w_gate)
+            register_prequant(ew);
+        for (const auto& ew : L.expert_w_up)
+            register_prequant(ew);
+        for (const auto& ew : L.expert_w_down)
+            register_prequant(ew);
+    }
+    register_prequant(mut_model->out_proj_);
+
+    if (ct_count > 0) {
+        // Decode-cache registration only; Phase 3b builds the CUTLASS SfAtom
+        // for these entries (see register_prequant note above).
+        IMP_LOG_INFO(
+            "NVFP4 prequant: registered %d weights in decode cache "
+            "(CUTLASS SfAtom built once in Phase 3b)",
+            ct_count);
+    }
+    {
+        // Report what this loop actually registered, not what the recurrent projections are
+        // assumed to be: on a mixed-precision Modelopt hybrid the projections are FP8 in the
+        // checkpoint, so register_prequant never sees them, phase 1 gives them an FP16 prefill
+        // companion, and phase 3 excludes them from the NVFP4 cache outright.
+        int n_ssm = 0, n_ssm_cached = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = mut_model->layer(i);
-            register_prequant(L.wq);
-            register_prequant(L.wk);
-            register_prequant(L.wv);
-            register_prequant(L.wo);
-            register_prequant(L.w_gate);
-            register_prequant(L.w_up);
-            register_prequant(L.w_down);
-            register_prequant(L.w_gate_shared);
-            register_prequant(L.w_up_shared);
-            register_prequant(L.w_down_shared);
-            register_prequant(L.ssm_in);
-            register_prequant(L.ssm_out);
-            register_prequant(L.gdn_gate);  // Qwen3.5 GDN output gate — native NVFP4
-            register_prequant(L.kda_k_proj);  // Kimi-Linear KDA k / v beside ssm_in (q)
-            register_prequant(L.kda_v_proj);
-            for (const auto& ew : L.expert_w_gate) register_prequant(ew);
-            for (const auto& ew : L.expert_w_up) register_prequant(ew);
-            for (const auto& ew : L.expert_w_down) register_prequant(ew);
-        }
-        register_prequant(mut_model->out_proj_);
-
-        if (ct_count > 0) {
-            // Decode-cache registration only; Phase 3b builds the CUTLASS SfAtom
-            // for these entries (see register_prequant note above).
-            IMP_LOG_INFO("NVFP4 prequant: registered %d weights in decode cache "
-                         "(CUTLASS SfAtom built once in Phase 3b)",
-                         ct_count);
-        }
-        {
-            // Report what this loop actually registered, not what the recurrent projections are
-            // assumed to be: on a mixed-precision Modelopt hybrid the projections are FP8 in the
-            // checkpoint, so register_prequant never sees them, phase 1 gives them an FP16 prefill
-            // companion, and phase 3 excludes them from the NVFP4 cache outright.
-            int n_ssm = 0, n_ssm_cached = 0;
-            for (int i = 0; i < cfg.n_layers; i++) {
-                const auto& L = mut_model->layer(i);
-                if (L.ssm_in.data) {
-                    n_ssm++;
-                    n_ssm_cached += wcache_->nvfp4.contains(L.ssm_in.data) ? 1 : 0;
-                }
-                if (L.ssm_out.data) {
-                    n_ssm++;
-                    n_ssm_cached += wcache_->nvfp4.contains(L.ssm_out.data) ? 1 : 0;
-                }
+            if (L.ssm_in.data) {
+                n_ssm++;
+                n_ssm_cached += wcache_->nvfp4.contains(L.ssm_in.data) ? 1 : 0;
             }
-            if (n_ssm > 0)
-                IMP_LOG_INFO(
-                    "GDN/SSM: %d of %d recurrent projections registered in the NVFP4 "
-                    "decode cache here; the rest keep their source precision and take "
-                    "whatever prefill/decode tier phase 4 assigns",
-                    n_ssm_cached, n_ssm);
+            if (L.ssm_out.data) {
+                n_ssm++;
+                n_ssm_cached += wcache_->nvfp4.contains(L.ssm_out.data) ? 1 : 0;
+            }
         }
+        if (n_ssm > 0)
+            IMP_LOG_INFO(
+                "GDN/SSM: %d of %d recurrent projections registered in the NVFP4 "
+                "decode cache here; the rest keep their source precision and take "
+                "whatever prefill/decode tier phase 4 assigns",
+                n_ssm_cached, n_ssm);
     }
 }
 

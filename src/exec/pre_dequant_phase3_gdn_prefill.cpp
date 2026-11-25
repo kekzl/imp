@@ -131,8 +131,8 @@ void alloc_mxfp8_act_scratch(QuantScratch& qs, VRAMAllocator* alloc, int max_tok
 
 void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream) {
     const auto& gemm_cfg = dispatch_policy().gemm;
-    ProjSelection nv = parse_projection_selection(gemm_cfg.nvfp4_gdn_proj_prefill,
-                                                  "gemm.nvfp4_gdn_proj_prefill");
+    const ProjSelection nv = parse_projection_selection(gemm_cfg.nvfp4_gdn_proj_prefill,
+                                                        "gemm.nvfp4_gdn_proj_prefill");
     // "auto" = "fp8rows": in/gate/out run the MXFP8 GEMM on the FP8 decode sidecar's own rows (no
     // second copy), and Phase 4b frees the F16 sources. Qwen3.6-35B-A3B: 26496 -> 23804 MiB, PPL
     // 6.7998 -> 6.7308, pp2048 -4.7 %.
@@ -143,10 +143,6 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     ProjSelection mx = parse_projection_selection(fp8rows ? "all" : mx_spec, "gemm.mxfp8_gdn_proj_prefill");
     if (!nv.any() && !mx.any())
         return;
-    if (nv.any() && !cutlass_sm120_nvfp4_available()) {
-        IMP_LOG_WARN("gemm.nvfp4_gdn_proj_prefill: CUTLASS sm_120 NVFP4 unavailable, flag ignored");
-        nv = ProjSelection{};
-    }
 
     int n_nv = 0, n_mx = 0;
     size_t nv_bytes = 0, mx_bytes = 0;
