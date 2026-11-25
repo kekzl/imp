@@ -26,19 +26,19 @@ void Engine::embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t s
         return;
     const int d_model = static_cast<int>(model_->config().d_model);
     if (!d_embed_pool_scratch_) {
-        d_embed_pool_scratch_ = static_cast<float*>(
-            vram_alloc_.allocate(static_cast<size_t>(d_model) * sizeof(float), "embed_pool_scratch"));
+        d_embed_pool_scratch_ = VramOwned<float>(vram_alloc_, static_cast<size_t>(d_model),
+                                                 "embed_pool_scratch");
         if (!d_embed_pool_scratch_) {
             IMP_LOG_ERROR("VRAMAllocator failed for embed pool scratch (%d floats)", d_model);
             return;
         }
     }
     if (last_token)
-        executor_->pool_hidden_last(chunk_len, d_embed_pool_scratch_, stream);
+        executor_->pool_hidden_last(chunk_len, d_embed_pool_scratch_.get(), stream);
     else
-        executor_->pool_hidden_sum(chunk_len, d_embed_pool_scratch_, stream);
+        executor_->pool_hidden_sum(chunk_len, d_embed_pool_scratch_.get(), stream);
     std::vector<float> partial(d_model);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(partial.data(), d_embed_pool_scratch_,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(partial.data(), d_embed_pool_scratch_.get(),
                                        static_cast<size_t>(d_model) * sizeof(float), cudaMemcpyDeviceToHost,
                                        stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));

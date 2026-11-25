@@ -184,8 +184,7 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
         // slots in place, so a second forward of the same state cannot be
         // staged.
         if (runtime_config_.diagnostics.spec_capture_fidelity && model_ && !batched_verify) {
-            const bool hybrid_restore = state.ssm_state != nullptr && spec_state_scratch_ != nullptr &&
-                                        rec_slot >= 0;
+            const bool hybrid_restore = state.ssm_state != nullptr && spec_state_scratch_ && rec_slot >= 0;
             const size_t vocab = static_cast<size_t>(model_->config_.vocab_size);
             std::vector<float> eager(vocab), graph(vocab);
             executor_->forward_logits(state, logits_out, stream);
@@ -193,7 +192,7 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
             IMP_CUDA_CHECK_LOG(
                 cudaMemcpy(eager.data(), logits_out.data, vocab * sizeof(float), cudaMemcpyDeviceToHost));
             if (hybrid_restore) {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_.get(),
                                                    ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice,
                                                    stream));
             }

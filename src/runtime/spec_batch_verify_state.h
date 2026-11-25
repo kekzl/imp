@@ -5,6 +5,7 @@
 // engine.h: docs/archive/plans/2026-09-11-batched-mtp-verify.md.
 
 #include "memory/host_pinned.h"
+#include "memory/vram_owned.h"
 #include "runtime/suffix_shadow.h"
 
 #include <algorithm>
@@ -28,9 +29,7 @@ struct BatchVerifyState {
     int yield_every = 1;
     int since_yield = 0;
     SuffixShadow sfx_shadow;  // diagnostics.spec_trace only
-    int32_t* d_stage = nullptr;
-    int32_t* d_row_tables = nullptr;
-    int32_t* d_argmax = nullptr;
+    VramOwned<int32_t> d_stage, d_row_tables, d_argmax;
     PinnedBuffer h_stage, h_row_tables, h_argmax;
     // Drafts per request (rows per request = depth + 1): 1, or speculative.mtp_batch_verify_k on the bound
     // verify; wide_depth from kMtpBoundVerifyWideRows requests up (mtp_bound_verify_step_depth).
@@ -51,14 +50,14 @@ struct BatchVerifyState {
     // Factor rows (docs/archive/plans/2026-09-12-factored-verify-spare.md): a drafted row as (g, k, delta)
     // per (layer, group x level, head) plus one conv tap per (layer, group x level), instead of a second full
     // recurrent slot (3.22 MiB vs 79.5 MiB per row on Qwen3.8-27B).
-    float* d_fac = nullptr;
-    void* d_tap = nullptr;  // half
+    VramOwned<float> d_fac;
+    VramOwned<char> d_tap;  // half
     int fac_stride = 0;     // floats per (row, head)
     int64_t fac_layer_stride = 0;
     int64_t tap_layer_stride = 0;
     // Fold lists (live slot, row, count per group) and their pinned staging: a pageable cudaMemcpyAsync
     // would read the host buffer after it is reused.
-    int* d_clear = nullptr;
+    VramOwned<int> d_clear;
     PinnedBuffer h_clear;
     bool initialized = false;
     mutable const char* last_refusal = nullptr;  // one log line per distinct reason
