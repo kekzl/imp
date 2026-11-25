@@ -553,8 +553,6 @@ void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-bool cutlass_sm120_nvfp4_available() { return true; }
-
 // Reads the clip flag once, from gemm_cleanup() (engine shutdown): a "should never happen"
 // event, checked there to keep it off the hot path. cudaMemcpyFromSymbol synchronises (#1544).
 void nvfp4_report_scale_clipping() {

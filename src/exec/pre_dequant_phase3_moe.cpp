@@ -169,8 +169,6 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         // wcache entries.
         auto register_cutlass = [&](NvFP4MoEQuantResult& r, std::vector<Tensor>& experts,
                                     const std::vector<float>& h_ts) -> bool {
-            if (!cutlass_sm120_nvfp4_available())
-                return false;
             const size_t sf_per_expert =
                 cutlass_nvfp4_sf_size(static_cast<int>(r.N), static_cast<int>(r.K));
             const size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
@@ -707,51 +705,47 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         // source freed); the executor needs valid slice pointers for register_tensor() and the
         // wcache_->cutlass_nvfp4 lookup. Without this, expert_*_ids[e] = kInvalidTensorID and
         // covers_ids() rejects the fast path.
-        if (cutlass_sm120_nvfp4_available()) {
-            size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
-            size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
-            auto sfatom_own = (sfatom_total <= moe_logical_avail)
-                                  ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom",
-                                                                /*force=*/true)
-                                  : DeviceOwned<void>{};
-            void* d_sfatom = sfatom_own.get();
-            if (d_sfatom) {
-                convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N),
-                                                   static_cast<int>(K), stream);
-                // The per-expert slices below are entries without an owner: the slab's owner
-                // lives in owned_sf_slabs (AUDIT B5/L1: it leaked once per layer and projection).
-                wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
-                for (int e = 0; e < ne; ++e) {
-                    auto& w = experts[e];
-                    void* data_slice = static_cast<char*>(d_packed) +
-                                       (static_cast<size_t>(e) * expert_packed_bytes);
-                    w.data = data_slice;
-                    w.scales = static_cast<char*>(d_ms) + (static_cast<size_t>(e) * expert_ms_bytes);
-                    w.on_device = true;
-                    w.tensor_scale = h_ts[e];
-                    void* sf_slice = static_cast<char*>(d_sfatom) + (static_cast<size_t>(e) * sf_per_expert);
-                    CutlassNvFP4Weight cw;
-                    cw.data = data_slice;
-                    cw.scale_factors = sf_slice;
-                    cw.tensor_scale = h_ts[e];
-                    cw.N = N;
-                    cw.K = K;
-                    cw.sf_bytes = sf_per_expert;
-                    cw.sf_borrowed = true;
-                    wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
-                }
-                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-                wcache_->cutlass_nvfp4_bytes += sfatom_total;
-                wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
-                moe_logical_avail = (moe_logical_avail > sfatom_total)
-                                        ? (moe_logical_avail - sfatom_total)
-                                        : 0;
-            } else {
-                IMP_LOG_WARN(
-                    "MoE NVFP4 SfAtom alloc failed (%.1f MiB for %d experts) "
-                    "— prefill stays on dequant→cuBLAS fallback",
-                    sfatom_total / (1024.0 * 1024.0), ne);
+        size_t sf_per_expert = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+        size_t sfatom_total = static_cast<size_t>(ne) * sf_per_expert;
+        auto sfatom_own = (sfatom_total <= moe_logical_avail)
+                              ? DeviceOwned<void>::allocate(vram_alloc_, sfatom_total, "nvfp4_moe_sfatom",
+                                                            /*force=*/true)
+                              : DeviceOwned<void>{};
+        void* d_sfatom = sfatom_own.get();
+        if (d_sfatom) {
+            convert_nvfp4_moe_scales_to_sfatom(d_ms, d_sfatom, ne, static_cast<int>(N), static_cast<int>(K),
+                                               stream);
+            // The per-expert slices below are entries without an owner: the slab's owner
+            // lives in owned_sf_slabs (AUDIT B5/L1: it leaked once per layer and projection).
+            wcache_->owned_sf_slabs.push_back(std::move(sfatom_own));
+            for (int e = 0; e < ne; ++e) {
+                auto& w = experts[e];
+                void* data_slice = static_cast<char*>(d_packed) +
+                                   (static_cast<size_t>(e) * expert_packed_bytes);
+                w.data = data_slice;
+                w.scales = static_cast<char*>(d_ms) + (static_cast<size_t>(e) * expert_ms_bytes);
+                w.on_device = true;
+                w.tensor_scale = h_ts[e];
+                void* sf_slice = static_cast<char*>(d_sfatom) + (static_cast<size_t>(e) * sf_per_expert);
+                CutlassNvFP4Weight cw;
+                cw.data = data_slice;
+                cw.scale_factors = sf_slice;
+                cw.tensor_scale = h_ts[e];
+                cw.N = N;
+                cw.K = K;
+                cw.sf_bytes = sf_per_expert;
+                cw.sf_borrowed = true;
+                wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
             }
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            wcache_->cutlass_nvfp4_bytes += sfatom_total;
+            wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
+            moe_logical_avail = (moe_logical_avail > sfatom_total) ? (moe_logical_avail - sfatom_total) : 0;
+        } else {
+            IMP_LOG_WARN(
+                "MoE NVFP4 SfAtom alloc failed (%.1f MiB for %d experts) "
+                "— prefill stays on dequant→cuBLAS fallback",
+                sfatom_total / (1024.0 * 1024.0), ne);
         }
 
         return true;
