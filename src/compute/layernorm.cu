@@ -2,6 +2,7 @@
 #include "compute/warp_reduce.cuh"
 #include "core/pdl_launch.cuh"
 #include "core/tensor.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -334,9 +335,8 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
     // hyper-connection mixer is the last step before lm_head; its block pre-norms live in the
     // gated residual). Identity, said once. A kernel fed a null weight dies on an illegal access.
     if (weight.data == nullptr) {
-        static bool s_said = false;
-        if (!s_said) {
-            s_said = true;
+        static LogOnce s_said;
+        if (s_said.first()) {
             IMP_LOG_WARN("rmsnorm: null weight, applying the identity (rows=%d d=%d); expected only on "
                          "archs that carry no norm at this site",
                          rows, d_model);

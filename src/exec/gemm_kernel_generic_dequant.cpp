@@ -1,6 +1,7 @@
 #include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "exec/weight_dequant.h"
@@ -35,9 +36,8 @@ static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
     // 1408 MiB FP16) against a 44 MiB scratch wrote past it (#2046).
     const size_t need = static_cast<size_t>(rows) * static_cast<size_t>(cols) * sizeof(uint16_t);
     if (args.dequant_scratch_size > 0 && need > args.dequant_scratch_size) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static LogOnce warned;
+        if (warned.first()) {
             IMP_LOG_WARN(
                 "generic_dequant_kernel: %d x %d %s weight needs %.1f MiB, dequant scratch is %.1f MiB; "
                 "declined",

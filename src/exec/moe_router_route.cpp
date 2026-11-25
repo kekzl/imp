@@ -2,6 +2,7 @@
 
 #include "compute/moe_router_decode.h"
 #include "compute/moe_router_fused.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "exec/executor_debug.h"
@@ -36,8 +37,8 @@ bool router_decode_route(const Tensor& in, const Tensor& gate, int ne, int top_k
                                 static_cast<unsigned int*>(dec.ticket)};
     if (!moe_router_decode(a, stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!std::exchange(logged, true))
+    static LogOnce logged;  // activity proof, once
+    if (logged.first())
         IMP_LOG_INFO("decode MoE router ACTIVE (ne=%d d=%d top_k=%d)", ne, d, top_k);
     return true;
 }
@@ -76,8 +77,8 @@ bool router_fused_route(const Tensor& in, const Tensor& gate, QType compute, int
     a.weights = buf.expert_weights;
     if (!moe_router_fused(a, ws, ws_bytes, stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!std::exchange(logged, true))
+    static LogOnce logged;  // activity proof, once
+    if (logged.first())
         IMP_LOG_INFO("fused MoE router ACTIVE (n=%d ne=%d d=%d top_k=%d)", n, ne, d, top_k);
     return true;
 }

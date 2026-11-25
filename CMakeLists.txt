@@ -166,6 +166,7 @@ set(IMP_CORE_SOURCES
     src/core/qtype.cpp
     src/core/logging.cpp
     src/core/cuda_static_reset.cpp
+    src/core/log_once.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -1102,6 +1103,8 @@ if(IMP_BUILD_TESTS)
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
+        # Log-once latches re-arm on every model load (AUDIT_ARCH_2026_11_24 C-12, D-10).
+        tests/test_log_once.cpp
         # GemmKernelRegistry holds its 10 keys when linked from libimp.a (#2317).
         tests/test_gemm_kernel_registry_link.cpp
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).

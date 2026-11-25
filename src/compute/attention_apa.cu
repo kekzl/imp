@@ -3,6 +3,7 @@
 #include "compute/apa/apa.cuh"
 #include "compute/fp4_attn_geometry.h"
 #include "core/cuda_static_reset.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
@@ -31,13 +32,12 @@ static size_t s_apa_ws_bound = 0;  // planned demand, attention_apa_set_workspac
 
 void attention_apa_set_workspace_bound(size_t bytes) { s_apa_ws_bound = bytes; }
 
-// One INFO line per process at the first served call outside attention_apa_warmup: shows that APA engaged.
+// One INFO line per model load at the first served call outside attention_apa_warmup: shows that APA engaged.
 static bool s_warming = false;
 static void log_first_serve(const char* path, int n, int kv_len, float eps) {
-    static bool done = false;
-    if (done || s_warming)
+    static LogOnce done;
+    if (s_warming || !done.first())
         return;
-    done = true;
     IMP_LOG_INFO("apa prefill: first %s call (n %d, kv %d, eps %g)", path, n, kv_len, eps);
 }
 
@@ -56,13 +56,12 @@ static uint8_t* ensure_apa_workspace(size_t need) {
     const size_t take = std::max(need, s_apa_ws_bound);
     StableSpan<std::byte> slab = engine_arena().take_bytes(take);
     if (slab.empty()) {
-        static bool warned = false;  // once: a default-on tier must not log per layer and chunk
-        if (!warned)
+        static LogOnce warned;  // once: a default-on tier must not log per layer and chunk
+        if (warned.first())
             IMP_LOG_WARN(
                 "apa prefill: workspace %.2f MiB unavailable from the T2 arena (%.1f MiB free), "
                 "declining (FA2 serves)",
                 take / (1024.0 * 1024.0), engine_arena().remaining() / (1024.0 * 1024.0));
-        warned = true;
         return nullptr;
     }
     s_apa_ws = slab.as<uint8_t>();
