@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -125,6 +126,14 @@ public:
     // After the free-VRAM cap refused all growth, try_grow_to and the grow-ahead tick skip the
     // query for `ms` (0 = query every call; the engine sets cfg::kKvGrowRetryMs).
     void set_grow_retry_ms(int ms) { grow_retry_ms_ = ms; }
+    // A fixed growth step in blocks (grow-ahead and decode growth), 0 = the default max(64, 25 %, last
+    // admission). Inkling2-Loop sets 2048 positions: a step sized by the last admission committed a second
+    // 79282-token prompt (5212 -> 10168 blocks, +2.8 GiB).
+    void set_grow_step_blocks(int blocks) { grow_step_blocks_ = blocks; }
+    // The decode growth step of a pool of have blocks: the fixed one, else max(64, have / 4).
+    [[nodiscard]] int decode_grow_step(int have) const {
+        return grow_step_blocks_ > 0 ? grow_step_blocks_ : std::max(64, have / 4);
+    }
     // cudaMemGetInfo readings taken to price growth (one per refused per-block try at retry 0).
     [[nodiscard]] uint64_t free_vram_queries() const {
         return free_vram_queries_.load(std::memory_order_relaxed);
@@ -315,6 +324,7 @@ private:
     [[nodiscard]] int grow_step_cap_blocks_() const;
     static constexpr size_t kGrowAheadStepBytes = size_t{256} << 20;
     int grow_retry_ms_ = 0;
+    int grow_step_blocks_ = 0;               // set_grow_step_blocks
     std::atomic<int> last_admit_blocks_{0};  // reset by the worker's idle release
     int idle_release_ms_ = 0;
     int idle_floor_blocks_ = 0;                 // committed_blocks_ at start_grow_ahead

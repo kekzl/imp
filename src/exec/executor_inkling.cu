@@ -42,62 +42,62 @@ int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
     });
 }
 
+bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
+                                int want) {
+    for (int i = 0; i < want; ++i) {
+        auto f = std::make_unique<InklingForward>();
+        // The first slot's per-call buffers serve every slot: they run one after the other.
+        if (!f->init(wt, alloc, max_tokens, ctx, slots.empty() ? nullptr : slots[0].get(),
+                     /*own_kv=*/false)) {
+            IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
+            break;  // fewer slots than asked for: the engine lowers its batch size
+        }
+        slots.push_back(std::move(f));
+    }
+    if (slots.empty())
+        return false;
+    // I8B32 copies of the dense projections for the decode steps (inkling_dense8_fits; draft contexts,
+    // library reserve and the KV pool's growth come later): 2 slots at 32768 or 81920 take them.
+    size_t need = 0, free_b = 0;
+    for (const InklingLayer& ly : wt.layers)
+        need += (static_cast<size_t>(ly.proj_rows) * wt.cfg.hidden +
+                 static_cast<size_t>(wt.cfg.hidden) * wt.cfg.n_heads * wt.cfg.head_dim) *
+                17 / 16;
+    auto d8 = std::make_unique<InklingDense8>();
+    (void)vram_fits(0, 0, 0, &free_b);
+    if (inkling_dense8_fits(free_b, need) && build_inkling_dense8(wt, alloc, *d8)) {
+        for (auto& f : slots)
+            f->set_dense8(d8.get());
+        dense8 = std::move(d8);
+        IMP_LOG_INFO("inkling2_loop: dense projections of the decode steps as I8B32, %.0f MiB",
+                     need / 1048576.0);
+    } else {
+        IMP_LOG_INFO(
+            "inkling2_loop: decode steps read the fp16 dense projections (%.0f MiB free, I8B32 copies "
+            "need %.0f MiB + %.0f MiB spare)",
+            free_b / 1048576.0, need / 1048576.0, kInklingDense8Spare / 1048576.0);
+    }
+    max_ctx = ctx;
+    resumed.assign(slots.size(), -1);
+    va = &alloc;
+    rows_cap = max_tokens;
+    d_rows = VramOwned<int32_t>(alloc, 2 * static_cast<size_t>(max_tokens), "inkling_state");
+    cap = std::min(max_tokens, InklingForward::kSeg);
+    table = InklingSlotTable(slots.size());
+    return true;
+}
+
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
                                                      int max_ctx, int slots) {
     const std::string& dir = model.inkling_dir;
     if (dir.empty())
         return nullptr;
     auto rt = std::make_unique<InklingRuntime>();
-    bool ok = va && model.token_embedding().data && model.output_proj().data && model.output_norm().data &&
-              load_inkling_weights(dir, rt->w, *va, /*with_vocab=*/false);
-    const int want = slots > 0 ? slots : 2;
-    rt->va = va;
-    for (int i = 0; ok && i < want; ++i) {
-        auto f = std::make_unique<InklingForward>();
-        // The first slot's per-call buffers serve every slot: they run one after the other.
-        if (!f->init(rt->w, *va, max_tokens, max_ctx, rt->slots.empty() ? nullptr : rt->slots[0].get(),
-                     /*own_kv=*/false)) {
-            ok = i > 0;  // fewer slots than asked for: the engine lowers its batch size
-            IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
-            break;
-        }
-        rt->slots.push_back(std::move(f));
-    }
+    const bool ok = va && model.token_embedding().data && model.output_proj().data &&
+                    model.output_norm().data && load_inkling_weights(dir, rt->w, *va, /*with_vocab=*/false) &&
+                    rt->init_slots(rt->w, *va, max_tokens, max_ctx, slots > 0 ? slots : 2);
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
-    // I8B32 copies of the dense projections for the decode steps, when the card keeps kDense8Spare free
-    // behind them and the KV pool the engine reserves next (every slot at max_ctx, kv_bytes; draft contexts
-    // and library reserve come later): 2 slots at 32768 or 81920 take them, a 131072 context decodes on fp16.
-    constexpr size_t kDense8Spare = static_cast<size_t>(3) << 30;
-    size_t need = 0, free_b = 0;
-    for (const InklingLayer& ly : rt->w.layers)
-        need += (static_cast<size_t>(ly.proj_rows) * rt->w.cfg.hidden +
-                 static_cast<size_t>(rt->w.cfg.hidden) * rt->w.cfg.n_heads * rt->w.cfg.head_dim) *
-                17 / 16;
-    auto d8 = std::make_unique<InklingDense8>();
-    const size_t kv_bytes = static_cast<size_t>(inkling_pool_blocks(static_cast<int>(rt->slots.size()),
-                                                                    max_ctx, kKVBlockSize)) *
-                            kKVBlockSize * rt->w.cfg.n_kv_heads * rt->w.cfg.head_dim * sizeof(half) * 2 *
-                            static_cast<size_t>(inkling_kv_apps(rt->w.cfg, true).n_layers());
-    if (vram_fits(need, kDense8Spare + kv_bytes, 0, &free_b) && build_inkling_dense8(rt->w, *va, *d8)) {
-        for (auto& f : rt->slots)
-            f->set_dense8(d8.get());
-        rt->dense8 = std::move(d8);
-        IMP_LOG_INFO("inkling2_loop: dense projections of the decode steps as I8B32, %.0f MiB",
-                     need / 1048576.0);
-    } else {
-        IMP_LOG_INFO(
-            "inkling2_loop: decode steps read the fp16 dense projections (%.0f MiB free, I8B32 copies "
-            "need %.0f MiB + %.0f MiB spare + %.0f MiB K/V)",
-            free_b / 1048576.0, need / 1048576.0, kDense8Spare / 1048576.0, kv_bytes / 1048576.0);
-    }
-    rt->max_ctx = max_ctx;
-    rt->resumed.assign(rt->slots.size(), -1);
-    rt->va = va;
-    rt->rows_cap = max_tokens;
-    rt->d_rows = VramOwned<int32_t>(*va, 2 * static_cast<size_t>(max_tokens), "inkling_state");
-    rt->cap = std::min(max_tokens, InklingForward::kSeg);
-    rt->table = InklingSlotTable(rt->slots.size());
     return rt;
 }
 
@@ -219,7 +219,9 @@ int InklingRuntime::resume(int req, std::span<const int32_t> tokens, int offset,
 }
 
 bool InklingRuntime::bind_kv(KVCache& kv) {
-    const InklingConfig& c = w.cfg;
+    if (slots.empty())
+        return false;
+    const InklingConfig& c = slots.front()->config();  // the weights the slots run (w in the engine)
     const InklingKvLayout l = inkling_kv_apps(c, kv.n_layers() > inkling_kv_apps(c, false).n_global);
     if (kv.accounting_only() || kv.qtype() != QType::F16 || kv.block_size() != kKVBlockSize ||
         kv.n_kv_heads() != c.n_kv_heads || kv.head_dim() != c.head_dim || kv.n_layers() != l.n_layers()) {

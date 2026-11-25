@@ -77,6 +77,16 @@ TEST(InklingPrefixCap, NeverPastSlotMatch) {
     EXPECT_EQ(inkling_prefix_cap_blocks(512, 300, 1000, 24, grid), 0);
 }
 
+// The S2b acceptance start (2 slots x 81920, 32 GB card): 9137 MiB free, the I8B32 copies 655 MiB, the
+// pool's ceiling 5761 MiB. Charging the pool dropped the copies: other texts, decode 236 -> 206 tok/s.
+TEST(InklingDense8, FitDoesNotChargeTheKvPool) {
+    constexpr size_t MiB = size_t{1} << 20;
+    EXPECT_TRUE(inkling_dense8_fits(9137 * MiB, 655 * MiB));
+    EXPECT_FALSE(inkling_dense8_fits(9137 * MiB - 5761 * MiB, 655 * MiB));
+    EXPECT_FALSE(inkling_dense8_fits(655 * MiB + kInklingDense8Spare - 1, 655 * MiB));
+    EXPECT_TRUE(inkling_dense8_fits(655 * MiB + kInklingDense8Spare, 655 * MiB));
+}
+
 TEST(InklingPrefixCap, PoolHoldsEverySlotAtMaxSeqLenPlusTheLookaheadRows) {
     EXPECT_EQ(inkling_pool_blocks(2, 81920, 16), 2 * 5121);
     EXPECT_EQ(inkling_pool_blocks(2, 32768, 16), 2 * 2049);

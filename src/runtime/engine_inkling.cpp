@@ -35,6 +35,7 @@ void Engine::init_inkling_limits_() {
     if (scheduler_)
         scheduler_->clamp_max_batch_size(slots);
     config_.use_cuda_graphs = false;
+    config_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
     // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
     // an explicit speculative.mtp_k = 0 turns it off.
     inkling_lookahead_ = !(runtime_config_.was_set("speculative.mtp_k") &&
@@ -157,10 +158,10 @@ int Engine::inkling_pool_cap_(int kv_bs) const {
 }
 
 int Engine::inkling_initial_blocks_(int max_blocks, int ceiling, int kv_bs) const {
-    // What the slots committed before the pool held their K/V: 2048 positions each; the pool grows.
+    // What the slots committed before the pool held their K/V: one growth step each; the pool grows.
     if (!executor_ || !executor_->inkling_runtime() || ceiling <= 0)
         return max_blocks;
-    return std::min(max_blocks, std::max(16, config_.max_batch_size * 2048 / kv_bs));
+    return std::min(max_blocks, std::max(16, config_.max_batch_size * kInklingKvGrowTokens / kv_bs));
 }
 
 void Engine::inkling_attach_pool_() {
@@ -169,6 +170,7 @@ void Engine::inkling_attach_pool_() {
         return;
     if (!rt->bind_kv(*kv_cache_raw_))
         throw std::runtime_error("inkling2_loop: the KV pool does not hold the forward's layers");
+    kv_cache_raw_->set_grow_step_blocks(kInklingKvGrowTokens / kv_cache_raw_->block_size());
     // A re-plan would move the pool under the slots' bound pointers.
     kv_replan_.armed = false;
     // Reuse stops where the slot can resume: the ring and conv state are per slot (B-111 S3/S4).

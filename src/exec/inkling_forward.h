@@ -55,6 +55,7 @@ public:
     // The table the full-attention K/V are read through (device, table_cap() entries, never moves).
     [[nodiscard]] const int* table() const { return blocks_; }
     [[nodiscard]] int table_cap() const { return n_blocks_; }
+    [[nodiscard]] const InklingConfig& config() const { return w_->cfg; }
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
@@ -296,6 +297,10 @@ struct InklingRuntime {
     // without a checkpoint goes first, then one with the decode lookahead, then the oldest binding.
     // Returns the slot, -1 = every slot is bound.
     [[nodiscard]] int bind(int req, std::span<const int32_t> tokens);
+    // want slots of ctx positions over the weights wt (pool K/V, bind_kv later), the I8B32 dense projections
+    // when inkling_dense8_fits; false = not one slot. make_inkling_runtime and the serve-path test use it.
+    [[nodiscard]] bool init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
+                                  int want);
     // bind, then what that slot can resume of tokens (InklingForward::match); -1 = every slot is bound.
     [[nodiscard]] int bind_match(int req, std::span<const int32_t> tokens);
     // A prefill chunk of req at offset. first: this chunk bound the slot (unless bound) and rewound it to at

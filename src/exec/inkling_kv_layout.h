@@ -6,6 +6,7 @@
 #include "model/inkling_config.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -46,6 +47,17 @@ inline int inkling_prefix_cap_blocks(int slot_match, int cached_blocks, int cap_
                                      static_cast<int64_t>(cap_blocks) * bs});
     return tokens <= 0 ? 0 : static_cast<int>(tokens / grid * grid / bs);
 }
+
+// The decode steps' I8B32 dense projections fit when free_bytes keeps kInklingDense8Spare behind them. The
+// pool is not charged: its ceiling commits as sequences grow (2 x 81920: 9137 MiB free, 655 MiB needed;
+// charging its 5761 MiB dropped them, other texts and -12 % decode).
+inline constexpr size_t kInklingDense8Spare = size_t{3} << 30;
+[[nodiscard]] inline bool inkling_dense8_fits(size_t free_bytes, size_t need) {
+    return free_bytes >= need + kInklingDense8Spare;
+}
+
+// Positions the pool commits per growth step: what the slots' own buffers committed at a time before S2b.
+inline constexpr int kInklingKvGrowTokens = 2048;
 
 // The pool's ceiling: every slot at max_seq_len plus the rows a step writes past it.
 inline int inkling_pool_blocks(int slots, int max_seq_len, int bs) {

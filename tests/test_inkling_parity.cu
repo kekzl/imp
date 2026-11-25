@@ -19,6 +19,8 @@
 #include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
 #include "inkling_fixture.h"
+#include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 #include "vision/inkling_vision.h"
@@ -615,6 +617,90 @@ TEST(InklingPagedKv, ShuffledPoolBlocksAreBitEqual) {
         cudaFree(d);
     EXPECT_EQ(accepted[0], accepted[1]);
     EXPECT_GE(accepted[0], 9);  // three anchors at least (the draft policy rests between probes)
+    EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
+    EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
+}
+
+// The serve path against the pre-S2b one: a slot built by InklingRuntime::init_slots (what
+// make_inkling_runtime runs: pool K/V, its own choice of the I8B32 projections) over a real KVCache whose
+// blocks a KVCacheManager hands out between another sequence's, its table copied before every call as
+// run_inkling_ does, 7 rows ahead as decode_prepare_kv_ holds them; against a forward with its own
+// contiguous K/V and the I8B32 projections, as every slot ran before S2b. Same prompt, same lookahead
+// plan (anchors 13 mod 16, 3 confirmed, 4 rejected): bit-equal rows.
+TEST(InklingServePath, PoolRuntimeIsBitEqualToTheContiguousForward) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> p = read_ids(std::string(oracle) + "/paris_prompt.json");
+    ASSERT_FALSE(p.empty());
+    const int P = 525, N = P + 96, ctx = 4096, kSeq = 1, kOther = 2;
+    ASSERT_EQ(P % 16, 13);
+    std::vector<int32_t> t;
+    while (static_cast<int>(t.size()) < N + 8)
+        t.insert(t.end(), p.begin(), p.end());
+    std::map<int, std::vector<int32_t>> plan;
+    for (int a = P; a + 8 < N; a += 16) {
+        std::vector<int32_t> d(t.begin() + a + 1, t.begin() + a + 8);
+        d[3] = t[0] == d[3] ? t[1] : t[0];
+        plan[a] = d;
+    }
+    const std::vector<int> taps = {5, 23, 41, 48};
+    InklingRuntime rt;
+    ASSERT_TRUE(rt.init_slots(fx.w, fx.va, 512, ctx, 1));
+    ASSERT_TRUE(rt.dense8) << "the serve path decodes on the I8B32 projections when the card has room";
+    InklingForward& slot = *rt.slots[0];
+    const InklingKvLayout l = inkling_kv_apps(fx.w.cfg, false);
+    KVCacheManager kvm(std::make_unique<KVCache>(l.n_layers(), fx.w.cfg.n_kv_heads, fx.w.cfg.head_dim,
+                                                 QType::F16, 2 * slot.table_cap() + 16, kKVBlockSize,
+                                                 &fx.va));
+    ASSERT_TRUE(rt.bind_kv(*kvm.kv_cache()));
+    int* d_tbl = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_tbl, static_cast<size_t>(slot.table_cap()) * sizeof(int)), cudaSuccess);
+    // decode_prepare_kv_: blocks for `rows` positions plus kInklingKvAhead, another sequence's in between.
+    const auto hold = [&](int rows, cudaStream_t s) {
+        const size_t need = static_cast<size_t>((rows + kInklingKvAhead + kKVBlockSize - 1) / kKVBlockSize);
+        while (kvm.block_table(kSeq).size() < need) {
+            ASSERT_GE(kvm.append_block(kOther), 0);
+            ASSERT_GE(kvm.append_block(kSeq), 0);
+        }
+        const std::vector<int>& tbl = kvm.block_table(kSeq);
+        ASSERT_EQ(cudaMemcpy(d_tbl, tbl.data(), tbl.size() * sizeof(int), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        slot.set_table(d_tbl, static_cast<int>(tbl.size()), s);
+    };
+    ASSERT_TRUE(kvm.allocate_blocks(kOther, 1));
+    ASSERT_TRUE(kvm.allocate_blocks(kSeq, 1));
+    InklingForward ref;
+    ASSERT_TRUE(ref.init(fx.w, fx.va, 512, ctx));
+    ref.set_dense8(rt.dense8.get());
+    std::vector<float> rows[2], steps[2];
+    long accepted[2] = {};
+    InklingForward* fwd[2] = {&ref, &slot};
+    for (int g = 0; g < 2; ++g) {
+        InklingForward& f = *fwd[g];
+        ASSERT_TRUE(f.enable_lookahead(planned(plan), taps, fx.w.embed));
+        if (g == 1)
+            hold(P, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        rows[g] = run_rows(f, fx.w, std::vector<int32_t>(t.begin(), t.begin() + P), 0, {256});
+        ASSERT_FALSE(rows[g].empty());
+        Stepper st(fx.w);
+        for (int pos = P; pos < N; ++pos) {
+            if (g == 1)
+                hold(pos + 1, st.s);
+            const std::vector<float> r = st.step(f, t[static_cast<size_t>(pos)], pos);
+            ASSERT_FALSE(r.empty());
+            steps[g].insert(steps[g].end(), r.begin(), r.end());
+        }
+        accepted[g] = f.spec_stats().accepted;
+    }
+    cudaFree(d_tbl);
+    EXPECT_EQ(accepted[0], accepted[1]);
+    EXPECT_GE(accepted[0], 9);
     EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
     EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
 }
