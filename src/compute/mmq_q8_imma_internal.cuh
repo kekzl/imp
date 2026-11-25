@@ -6,7 +6,7 @@
 // Tile constants, cp.async primitives, cross-TU kernel declarations; definitions live in
 // mmq_q8_imma_q4k/_q6k/_q51.cu, dispatch in mmq_q8_imma.cu. Keep byte-identical.
 
-#include "quant/leaked_static.h"
+#include "memory/leaked_static.h"
 
 #include <algorithm>
 #include <mutex>

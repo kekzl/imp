@@ -6,7 +6,7 @@
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 #include "memory/engine_arena.h"
-#include "quant/leaked_static.h"
+#include "memory/leaked_static.h"
 
 #include <algorithm>
 #include <utility>

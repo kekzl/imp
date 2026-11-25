@@ -1,10 +1,10 @@
-// LeakedStatic / StaticDeviceOwned (quant/leaked_static.h, invariant I5): a process-global owner
+// LeakedStatic / StaticDeviceOwned (memory/leaked_static.h, invariant I5): a process-global owner
 // releases in its reset hook and never in a static destructor (the CUDA runtime is gone by then).
 // CPU lane: the driver is replaced by the DeviceOwned release hook, buffers are host addresses.
 
 #include <gtest/gtest.h>
 
-#include "quant/leaked_static.h"
+#include "memory/leaked_static.h"
 
 #include <algorithm>
 #include <type_traits>

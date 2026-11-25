@@ -4,7 +4,7 @@
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
-#include "quant/leaked_static.h"
+#include "memory/leaked_static.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

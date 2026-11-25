@@ -7,7 +7,6 @@
 //   StaticDeviceOwned<int> s_counter_own;            // file scope
 //   s_counter_own.adopt(p, bytes, nullptr);          // lazy acquire
 //   void my_reset() { s_counter_own.reset(); }       // IMP_REGISTER_CUDA_STATIC_RESET(my_reset)
-// Lives in quant/ because compute/ and quant/ both use it (layer order compute > quant > memory).
 
 #include <cstddef>
 #include <utility>

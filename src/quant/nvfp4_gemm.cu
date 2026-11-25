@@ -1,6 +1,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "memory/device_alloc_all.h"
-#include "quant/leaked_static.h"
+#include "memory/leaked_static.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm.h"
 #include "core/cuda_static_reset.h"
