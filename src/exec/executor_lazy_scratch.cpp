@@ -53,8 +53,8 @@ void GraphExecutor::release_nvfp4_dequant_ws_() {
 bool GraphExecutor::take_chunk_capture_scratch_() {
     if (chunk_capture_k_)
         return true;
-    auto k_slab = engine_arena().take_bytes(chunk_capture_bytes_);
-    auto v_slab = engine_arena().take_bytes(chunk_capture_bytes_);
+    StableSpan<std::byte> k_slab = engine_arena().take_bytes(chunk_capture_bytes_);
+    StableSpan<std::byte> v_slab = engine_arena().take_bytes(chunk_capture_bytes_);
     if (k_slab.empty() || v_slab.empty()) {
         IMP_LOG_WARN(
             "chunk-capture scratch unavailable from the T2 arena (2x %.1f MiB, %.1f MiB "
@@ -63,8 +63,8 @@ bool GraphExecutor::take_chunk_capture_scratch_() {
         chunk_capture_ctx_ = 0;
         return false;
     }
-    chunk_capture_k_ = reinterpret_cast<half*>(k_slab.data());
-    chunk_capture_v_ = reinterpret_cast<half*>(v_slab.data());
+    chunk_capture_k_ = k_slab.as<half>();
+    chunk_capture_v_ = v_slab.as<half>();
     IMP_LOG_INFO("chunk-capture K/V scratch: 2x %.1f MiB taken from the engine arena",
                  chunk_capture_bytes_ / (1024.0 * 1024.0));
     return true;

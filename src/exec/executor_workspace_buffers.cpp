@@ -80,20 +80,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // consumers dereference it unconditionally, so a null would fault mid-kernel. Load fails
         // instead: a typed refusal, not a downgrade or crash (MEMORY.md B5.2).
         bool mla_ok = true;
-        auto alloc = [&](void** p, size_t cols, const char* name) {
+        auto alloc = [&](StableSpan<half>* p, size_t cols, const char* name) {
             size_t sz = T * cols * sizeof(half);
-            auto slab = engine_arena().take_bytes(sz);
+            StableSpan<std::byte> slab = engine_arena().take_bytes(sz);
             if (slab.empty()) {
                 IMP_LOG_ERROR("MLA scratch %s (%.1f MiB) unavailable from the T2 arena "
                               "(%.1f MiB of %.1f MiB still free) — the plan under-reserved",
                               name, sz / (1024.0 * 1024.0),
                               engine_arena().remaining() / (1024.0 * 1024.0),
                               engine_arena().capacity() / (1024.0 * 1024.0));
-                *p = nullptr;
+                *p = {};
                 mla_ok = false;
                 return;
             }
-            *p = slab.data();
+            *p = slab.as<half>();
         };
         alloc(&mla_kv_a_buf_, kva_out, "kv_a");
         alloc(&mla_latent_buf_, static_cast<size_t>(cfg.kv_lora_rank), "latent");
@@ -133,17 +133,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // Same tier, opposite contract to the quartet above: both consumers null-check and take
                 // the materialized path, so this one degrades rather than failing the load. Charged only
                 // when mla_absorb is set; n_layers x full max_seq wide, ~1 GiB at ctx 32k.
-                auto cache_slab = engine_arena().take_bytes(cache_bytes);
-                auto scores_slab = engine_arena().take_bytes(scores_bytes);
+                StableSpan<std::byte> cache_slab = engine_arena().take_bytes(cache_bytes);
+                StableSpan<std::byte> scores_slab = engine_arena().take_bytes(scores_bytes);
                 if (cache_slab.empty() || scores_slab.empty()) {
                     IMP_LOG_ERROR("attention.mla_absorb: latent cache (%.1f MiB) unavailable from "
                                   "the T2 arena — falling back to materialized.",
                                   cache_bytes / (1024.0 * 1024.0));
-                    mla_absorb_cache_ = nullptr;
-                    mla_absorb_scores_ = nullptr;
+                    mla_absorb_cache_ = {};
+                    mla_absorb_scores_ = {};
                 } else {
-                    mla_absorb_cache_ = cache_slab.data();
-                    mla_absorb_scores_ = reinterpret_cast<float*>(scores_slab.data());
+                    mla_absorb_cache_ = cache_slab.as<half>();
+                    mla_absorb_scores_ = scores_slab.as<float>();
                     // VRAM comparison vs the materialized per-token KV footprint.
                     const size_t mat_per_tok =
                         static_cast<size_t>(cfg.n_heads) *
@@ -190,14 +190,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // T2 (A7 step 4b.2): max_logit_tokens_ = max(max_batch, 8), the batch not the context,
         // ~1 MiB; exec_t2_demand charges it as sample_scratch. No fallback: a null buffer means
         // "no batched sampling", zeroing sample_slots_ (AUDIT B53).
-        auto slab = engine_arena().take_bytes(2 * static_cast<size_t>(sample_slots_) *
-                                              SAMPLE_SCRATCH_BYTES);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(2 * static_cast<size_t>(sample_slots_) *
+                                                               SAMPLE_SCRATCH_BYTES);
         if (slab.empty()) {
             IMP_LOG_ERROR("Failed to obtain the sampling result buffer from the T2 arena");
-            d_sample_result_ = nullptr;
+            d_sample_result_ = {};
             sample_slots_ = 0;
         } else {
-            d_sample_result_ = reinterpret_cast<int32_t*>(slab.data());
+            d_sample_result_ = slab.as<int32_t>();
         }
     }
 
@@ -220,35 +220,35 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // (AUDIT B47, A7 step 4b.2).
         // A reconfigure strands the superseded slab in the bump arena (bounded, one-time; same
         // trade as the MMVQ tenant): 115 KiB against 120 MiB arena slack.
-        auto slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(2 * sizeof(TopkRowArgs) * sample_slots_);
         h_row_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                             2 * sizeof(TopkRowArgs) * sample_slots_);
         if (h_row_args_.empty() || slab.empty()) {
             IMP_LOG_WARN("row-batched sampler args alloc failed — falling back to per-row sampling");
             h_row_args_.reset();
-            d_row_args_ = nullptr;
+            d_row_args_ = {};
         } else {
-            d_row_args_ = reinterpret_cast<TopkRowArgs*>(slab.data());
+            d_row_args_ = slab.as<TopkRowArgs>();
         }
         // Greedy + penalty row staging (same tier, same fallback contract:
         // an empty slab just means those rows launch per-row as before).
-        auto gslab = engine_arena().take_bytes(2 * sizeof(GreedyRowArgs) * sample_slots_);
+        StableSpan<std::byte> gslab = engine_arena().take_bytes(2 * sizeof(GreedyRowArgs) * sample_slots_);
         h_greedy_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                                2 * sizeof(GreedyRowArgs) * sample_slots_);
         if (h_greedy_args_.empty() || gslab.empty()) {
             h_greedy_args_.reset();
-            d_greedy_args_ = nullptr;
+            d_greedy_args_ = {};
         } else {
-            d_greedy_args_ = reinterpret_cast<GreedyRowArgs*>(gslab.data());
+            d_greedy_args_ = gslab.as<GreedyRowArgs>();
         }
-        auto pslab = engine_arena().take_bytes(2 * sizeof(PenaltyRowArgs) * sample_slots_);
+        StableSpan<std::byte> pslab = engine_arena().take_bytes(2 * sizeof(PenaltyRowArgs) * sample_slots_);
         h_pen_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                             2 * sizeof(PenaltyRowArgs) * sample_slots_);
         if (h_pen_args_.empty() || pslab.empty()) {
             h_pen_args_.reset();
-            d_pen_args_ = nullptr;
+            d_pen_args_ = {};
         } else {
-            d_pen_args_ = reinterpret_cast<PenaltyRowArgs*>(pslab.data());
+            d_pen_args_ = pslab.as<PenaltyRowArgs>();
         }
     }
 
@@ -301,16 +301,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // T2 (A7 step 4b.2): engine-persistent, sized once from max K and batch, reused every
             // decode step. exec_t2_demand charges the dp4a-staging family as quant_scratch. No
             // fallback: consumers null-check and take the FP16 GEMV path (AUDIT B47).
-            auto q8_slab = engine_arena().take_bytes(q8_1_sz);
-            auto d8_slab = engine_arena().take_bytes(d8_sz);
+            StableSpan<std::byte> q8_slab = engine_arena().take_bytes(q8_1_sz);
+            StableSpan<std::byte> d8_slab = engine_arena().take_bytes(d8_sz);
             if (q8_slab.empty() || d8_slab.empty()) {
                 IMP_LOG_WARN("MMVQ scratch unavailable from the T2 arena, dp4a path disabled");
-                qscratch_.q8_1_buf = nullptr;
-                qscratch_.d8_buf = nullptr;
+                qscratch_.q8_1_buf = {};
+                qscratch_.d8_buf = {};
                 qscratch_.q8_1_max_blocks = 0;
             } else {
-                qscratch_.q8_1_buf = q8_slab.data();
-                qscratch_.d8_buf = reinterpret_cast<float*>(d8_slab.data());
+                qscratch_.q8_1_buf = q8_slab.as<block_q8_1>();
+                qscratch_.d8_buf = d8_slab.as<float>();
                 IMP_LOG_INFO(
                     "MMVQ scratch buffers: %.2f KiB (q8_1) + %.2f KiB (d8), max_blocks=%d (max_k=%d, "
                     "moe_down=%d)",
@@ -352,17 +352,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // Third member of the same family. executor_gemm_dispatch.cu
                 // checks both pointers AND both sizes before routing, so a
                 // closed arena degrades to the FP16 weight cache.
-                auto q8_slab = engine_arena().take_bytes(q8_sz);
-                auto d8_slab = engine_arena().take_bytes(d8_sz);
+                StableSpan<std::byte> q8_slab = engine_arena().take_bytes(q8_sz);
+                StableSpan<std::byte> d8_slab = engine_arena().take_bytes(d8_sz);
                 if (q8_slab.empty() || d8_slab.empty()) {
                     IMP_LOG_WARN("dp4a prefill scratch unavailable from the T2 arena (%.1f MiB), "
                                  "FP16 cache fallback",
                                  (q8_sz + d8_sz) / (1024.0 * 1024.0));
-                    qscratch_.q8_1_prefill_buf = nullptr;
-                    qscratch_.d8_prefill_buf = nullptr;
+                    qscratch_.q8_1_prefill_buf = {};
+                    qscratch_.d8_prefill_buf = {};
                 } else {
-                    qscratch_.q8_1_prefill_buf = q8_slab.data();
-                    qscratch_.d8_prefill_buf = reinterpret_cast<float*>(d8_slab.data());
+                    qscratch_.q8_1_prefill_buf = q8_slab.as<block_q8_1>();
+                    qscratch_.d8_prefill_buf = d8_slab.as<float>();
                     qscratch_.q8_1_prefill_bytes = q8_sz;
                     qscratch_.d8_prefill_bytes = d8_sz;
                     IMP_LOG_INFO("dp4a prefill scratch: %.1f KiB (max_m=%d, max_k=%d)",
@@ -389,14 +389,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // T2 (A7 step 4b.2), charged as splitk_scratch: engine-persistent, sized from shape +
         // batch + context. paged_attention_set_splitk_scratch treats null as "no split-K"; the
         // kernel re-checks size before use, so a closed arena only costs the split path.
-        auto slab = engine_arena().take_bytes(sz);
+        StableSpan<std::byte> slab = engine_arena().take_bytes(sz);
         if (slab.empty()) {
             IMP_LOG_WARN("Split-K scratch unavailable from the T2 arena (%zu bytes), split-K "
                          "disabled", sz);
-            qscratch_.splitk = nullptr;
+            qscratch_.splitk = {};
             qscratch_.splitk_size = 0;
         } else {
-            qscratch_.splitk = slab.data();
+            qscratch_.splitk = slab;
             qscratch_.splitk_size = sz;
             IMP_LOG_INFO("Split-K paged attention scratch: %.2f KiB", sz / 1024.0);
         }
@@ -441,17 +441,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             const size_t scores_sz = (size_t)max_batch * max_ctx_blocks * sizeof(float);
             const size_t bt_sz = (size_t)max_batch * table_blocks * sizeof(int);
             const size_t ctx_sz = (size_t)max_batch * sizeof(int);
-            auto scores_slab = engine_arena().take_bytes(scores_sz);
-            auto bt_slab = engine_arena().take_bytes(bt_sz);
-            auto ctx_slab = engine_arena().take_bytes(ctx_sz);
+            StableSpan<std::byte> scores_slab = engine_arena().take_bytes(scores_sz);
+            StableSpan<std::byte> bt_slab = engine_arena().take_bytes(bt_sz);
+            StableSpan<std::byte> ctx_slab = engine_arena().take_bytes(ctx_sz);
             if (scores_slab.empty() || bt_slab.empty() || ctx_slab.empty()) {
                 IMP_LOG_WARN("sparse decode attention scratch unavailable from the T2 arena "
                              "(%.1f KiB) - feature disabled",
                              (scores_sz + bt_sz + ctx_sz) / 1024.0);
             } else {
-                qscratch_.sparse_scores = reinterpret_cast<float*>(scores_slab.data());
-                qscratch_.sparse_block_tables = reinterpret_cast<int*>(bt_slab.data());
-                qscratch_.sparse_context_lens = reinterpret_cast<int*>(ctx_slab.data());
+                qscratch_.sparse_scores = scores_slab.as<float>();
+                qscratch_.sparse_block_tables = bt_slab.as<int>();
+                qscratch_.sparse_context_lens = ctx_slab.as<int>();
                 qscratch_.sparse_budget_blocks = budget_blocks;
                 qscratch_.sparse_sink_blocks = sink_blocks;
                 qscratch_.sparse_recent_blocks = recent_blocks;
@@ -866,12 +866,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // n_experts-sized MoE pointer arrays to move; same tier, same moe_arrays charge. The
                 // fused quantize kernel treats null as "per-expert SFA bases unavailable".
                 size_t sfa_ptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(uint8_t*);
-                if (auto sl = engine_arena().take_bytes(sfa_ptr_bytes); !sl.empty()) {
-                    moe_.cutlass3x_sfa_ptrs = reinterpret_cast<uint8_t**>(sl.data());
+                if (StableSpan<std::byte> sl = engine_arena().take_bytes(sfa_ptr_bytes); !sl.empty()) {
+                    moe_.cutlass3x_sfa_ptrs = sl.as<uint8_t*>();
                     moe_.cutlass3x_sfa_ptrs_count = cfg.n_experts;
                 } else {
                     IMP_LOG_WARN("CUTLASS 3.x SFA pointer array unavailable from the T2 arena");
-                    moe_.cutlass3x_sfa_ptrs = nullptr;
+                    moe_.cutlass3x_sfa_ptrs = {};
                 }
                 IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
                              (packed_sz + sf_sz) / (1024.0 * 1024.0), packed_sz / (1024.0 * 1024.0),
@@ -891,82 +891,82 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // request, and each caller treats null as "this optional path is off". No direct-
             // allocation fallback; exec_t2_demand charges them as moe_arrays (AUDIT B47).
             size_t ptr_bytes = 3 * static_cast<size_t>(cfg.n_experts) * sizeof(void*);
-            if (auto sl = engine_arena().take_bytes(ptr_bytes); !sl.empty()) {
-                moe_.d_work_ptrs = reinterpret_cast<void**>(sl.data());
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(ptr_bytes); !sl.empty()) {
+                moe_.d_work_ptrs = sl.as<void*>();
                 moe_.d_work_ptrs_count = cfg.n_experts;
             } else {
                 IMP_LOG_DEBUG("Optional MoE work ptrs unavailable from the T2 arena");
-                moe_.d_work_ptrs = nullptr;
+                moe_.d_work_ptrs = {};
                 moe_.d_work_ptrs_count = 0;
             }
 
             // Per-expert FP8 scale buffer (trivial: 128 experts × 4 bytes = 512 bytes).
             size_t scale_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(float);
-            if (auto sl = engine_arena().take_bytes(scale_bytes); !sl.empty())
-                moe_.d_fp8_scales = reinterpret_cast<float*>(sl.data());
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(scale_bytes); !sl.empty())
+                moe_.d_fp8_scales = sl.as<float>();
             else
-                moe_.d_fp8_scales = nullptr;
+                moe_.d_fp8_scales = {};
 
             // Per-expert device-resident token-count buffer (n_experts × 4 bytes).
             // Populated each forward by compute_M_per_from_offsets_device, replacing
             // the host D2H+sync+loop pattern in the MoE prefill dispatch path.
             size_t m_per_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(int32_t);
-            if (auto sl = engine_arena().take_bytes(m_per_bytes); !sl.empty()) {
-                moe_.d_M_per = reinterpret_cast<int32_t*>(sl.data());
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(m_per_bytes); !sl.empty()) {
+                moe_.d_M_per = sl.as<int32_t>();
                 moe_.d_M_per_count = cfg.n_experts;
             } else {
-                moe_.d_M_per = nullptr;
+                moe_.d_M_per = {};
                 moe_.d_M_per_count = 0;
             }
 
             // Compact-alpha output buffer + active-expert counter. Populated by
             // compact_alpha_active. Sized for max n_experts (only first d_na
             // entries used at dispatch).
-            if (auto sl = engine_arena().take_bytes(
-                    static_cast<size_t>(cfg.n_experts) * sizeof(float));
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(static_cast<size_t>(cfg.n_experts) *
+                                                                     sizeof(float));
                 !sl.empty())
-                moe_.d_alpha_compact = reinterpret_cast<float*>(sl.data());
+                moe_.d_alpha_compact = sl.as<float>();
             else
-                moe_.d_alpha_compact = nullptr;
-            if (auto sl = engine_arena().take_bytes(sizeof(int32_t)); !sl.empty())
-                moe_.d_na = reinterpret_cast<int32_t*>(sl.data());
+                moe_.d_alpha_compact = {};
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(sizeof(int32_t)); !sl.empty())
+                moe_.d_na = sl.as<int32_t>();
             else
-                moe_.d_na = nullptr;
+                moe_.d_na = {};
 
             // SFA byte-offsets prefix sum (Phase 3 staging). n_experts+1 int64
             // = trivial (<2 KiB for 128 experts).
-            if (auto sl = engine_arena().take_bytes(
-                    static_cast<size_t>(cfg.n_experts + 1) * sizeof(int64_t));
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(static_cast<size_t>(cfg.n_experts + 1) *
+                                                                     sizeof(int64_t));
                 !sl.empty())
-                moe_.d_sfa_offsets = reinterpret_cast<int64_t*>(sl.data());
+                moe_.d_sfa_offsets = sl.as<int64_t>();
             else
-                moe_.d_sfa_offsets = nullptr;
+                moe_.d_sfa_offsets = {};
 
             // Phase 3c-full Step 1 — device-args ptr/alpha caches. n_experts ×
             // (2 × sizeof(void*) + sizeof(float)) ≈ 2.5 KiB for 128 experts.
             const size_t ptr_sz = static_cast<size_t>(cfg.n_experts) * sizeof(const void*);
             const size_t alpha_sz = static_cast<size_t>(cfg.n_experts) * sizeof(float);
-            if (auto sl = engine_arena().take_bytes(ptr_sz); !sl.empty())
-                moe_.d_B_ptrs_cache = reinterpret_cast<const void**>(sl.data());
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(ptr_sz); !sl.empty())
+                moe_.d_B_ptrs_cache = sl.as<const void*>();
             else
-                moe_.d_B_ptrs_cache = nullptr;
-            if (auto sl = engine_arena().take_bytes(ptr_sz); !sl.empty())
-                moe_.d_SFB_ptrs_cache = reinterpret_cast<const void**>(sl.data());
+                moe_.d_B_ptrs_cache = {};
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(ptr_sz); !sl.empty())
+                moe_.d_SFB_ptrs_cache = sl.as<const void*>();
             else
-                moe_.d_SFB_ptrs_cache = nullptr;
-            if (auto sl = engine_arena().take_bytes(alpha_sz); !sl.empty())
-                moe_.d_alpha_full = reinterpret_cast<float*>(sl.data());
+                moe_.d_SFB_ptrs_cache = {};
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(alpha_sz); !sl.empty())
+                moe_.d_alpha_full = sl.as<float>();
             else
-                moe_.d_alpha_full = nullptr;
+                moe_.d_alpha_full = {};
 
             // Device-side weight pointer array for device-grouped GEMM.
-            if (auto sl = engine_arena().take_bytes(
-                    static_cast<size_t>(cfg.n_experts) * sizeof(void*));
+            if (StableSpan<std::byte> sl = engine_arena().take_bytes(static_cast<size_t>(cfg.n_experts) *
+                                                                     sizeof(void*));
                 !sl.empty()) {
-                moe_.d_weight_ptrs = reinterpret_cast<void**>(sl.data());
+                moe_.d_weight_ptrs = sl.as<void*>();
                 moe_.d_weight_ptrs_count = cfg.n_experts;
             } else {
-                moe_.d_weight_ptrs = nullptr;
+                moe_.d_weight_ptrs = {};
                 moe_.d_weight_ptrs_count = 0;
             }
         }
@@ -1077,8 +1077,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // T2 (A7 step 4b.2): engine-lifetime, sized from init-time shapes; each caller degrades
             // on null (the reduction pair falls back to the sync path via its own log line). No
             // direct-allocation fallback; exec_t2_demand charges them as fp8_reduction.
-            auto sl = engine_arena().take_bytes(sizeof(float));
-            qscratch_.d_act_scale = sl.empty() ? nullptr : reinterpret_cast<float*>(sl.data());
+            StableSpan<std::byte> sl = engine_arena().take_bytes(sizeof(float));
+            qscratch_.d_act_scale = sl.as<float>();
             if (!qscratch_.d_act_scale)
                 IMP_LOG_WARN("FP8 act scale unavailable from the T2 arena");
         }
@@ -1088,21 +1088,22 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             int max_n = static_cast<int>(qscratch_.fp8_act_size);   // max elements
             int threads_needed = (max_n + 3) / 4;                   // kElemsPerThread=4
             qscratch_.fp8_max_grid = (threads_needed + 255) / 256;  // kBlockSize=256
-            auto sl_bm = engine_arena().take_bytes(
+            StableSpan<std::byte> sl_bm = engine_arena().take_bytes(
                 static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
-            auto sl_am = engine_arena().take_bytes(sizeof(float));
+            StableSpan<std::byte> sl_am = engine_arena().take_bytes(sizeof(float));
             if (sl_bm.empty() || sl_am.empty()) {
                 IMP_LOG_WARN("FP8 reduction buffers unavailable from the T2 arena — sync path");
-                qscratch_.d_fp8_block_maxes = nullptr;
-                qscratch_.d_fp8_absmax = nullptr;
+                qscratch_.d_fp8_block_maxes = {};
+                qscratch_.d_fp8_absmax = {};
                 qscratch_.fp8_max_grid = 0;
             } else {
-                qscratch_.d_fp8_block_maxes = reinterpret_cast<float*>(sl_bm.data());
-                qscratch_.d_fp8_absmax = reinterpret_cast<float*>(sl_am.data());
+                qscratch_.d_fp8_block_maxes = sl_bm.as<float>();
+                qscratch_.d_fp8_absmax = sl_am.as<float>();
             }
             // Per-token dynamic scales (no checkpoint input_scale): one float per row.
-            auto sl_rs = engine_arena().take_bytes(static_cast<size_t>(max_tokens_) * sizeof(float));
-            qscratch_.d_act_row_scales = sl_rs.empty() ? nullptr : reinterpret_cast<float*>(sl_rs.data());
+            StableSpan<std::byte> sl_rs = engine_arena().take_bytes(static_cast<size_t>(max_tokens_) *
+                                                                    sizeof(float));
+            qscratch_.d_act_row_scales = sl_rs.as<float>();
             qscratch_.act_row_scales_n = sl_rs.empty() ? 0 : max_tokens_;
             IMP_LOG_INFO(
                 "FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
@@ -1423,19 +1424,19 @@ void GraphExecutor::free_buffers() {
     lm_head_cutlass_ready_ = false;
     // MLA quartet and absorbed cache are arena-owned since A7 step 4b.2: no frees here;
     // ~Engine closes the arena after every executor teardown.
-    mla_kv_a_buf_ = nullptr;
-    mla_latent_buf_ = nullptr;
-    mla_k_rope_buf_ = nullptr;
-    mla_kv_b_buf_ = nullptr;
-    mla_q_a_buf_ = nullptr;
-    par_in_buf_ = nullptr;
-    par_attn_buf_ = nullptr;
-    mla_absorb_cache_ = nullptr;
-    mla_absorb_scores_ = nullptr;
+    mla_kv_a_buf_ = {};
+    mla_latent_buf_ = {};
+    mla_k_rope_buf_ = {};
+    mla_kv_b_buf_ = {};
+    mla_q_a_buf_ = {};
+    par_in_buf_ = {};
+    par_attn_buf_ = {};
+    mla_absorb_cache_ = {};
+    mla_absorb_scores_ = {};
     if (d_sample_result_) {
         // Arena-owned since A7 step 4b.2 — no free here; ~Engine closes the arena
         // after every executor teardown.
-        d_sample_result_ = nullptr;
+        d_sample_result_ = {};
     }
     // T5b owners: reset() releases, and doing it twice is a no-op — the
     // hand-written cudaFreeHost pairs are gone (memory/host_pinned.h).
@@ -1443,8 +1444,8 @@ void GraphExecutor::free_buffers() {
     h_row_args_.reset();
     h_greedy_args_.reset();
     h_pen_args_.reset();
-    d_greedy_args_ = nullptr;  // arena-owned, like d_row_args_ below
-    d_pen_args_ = nullptr;
+    d_greedy_args_ = {};  // arena-owned, like d_row_args_ below
+    d_pen_args_ = {};
     n_pending_greedy_rows_ = 0;
     n_pending_pen_rows_ = 0;
     for (auto& e : banned_cache_entries_)
@@ -1453,7 +1454,7 @@ void GraphExecutor::free_buffers() {
     if (d_row_args_) {
         // Arena-owned since A7 step 4b.2 — no free here. The arena is closed by
         // ~Engine, after every executor teardown.
-        d_row_args_ = nullptr;
+        d_row_args_ = {};
     }
     for (int p = 0; p < 2; ++p) {
         sample_gather_evt_[p].reset();
@@ -1464,8 +1465,8 @@ void GraphExecutor::free_buffers() {
     attn_scores_buf_.reset();
     attn_scores_buf_size_ = 0;
     // Arena-owned since A7 step 4b.2 — ~Engine closes the region; re-arm only.
-    chunk_capture_k_ = nullptr;
-    chunk_capture_v_ = nullptr;
+    chunk_capture_k_ = {};
+    chunk_capture_v_ = {};
     chunk_capture_ctx_ = 0;
     // cudaFreeAsync, not cudaFree: the grow path (executor_attention_prefill.cu) allocates
     // these with cudaMallocAsync, and a sync free on a stream-ordered allocation returns
@@ -1686,8 +1687,8 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
     // (engine_spec_capture.cpp clamps the cap to max_seq_len). Both pointers are baked into
     // the captured verify graph, so cudaFree here would hand a replay a freed address (AUDIT B13).
     chunk_capture_ctx_ = 0;
-    chunk_capture_k_ = nullptr;
-    chunk_capture_v_ = nullptr;
+    chunk_capture_k_ = {};
+    chunk_capture_v_ = {};
     chunk_capture_bytes_ = bytes;
     if (engine_arena().lazy() && engine_arena().remaining() >= 2 * bytes + 512) {
         // Taken at the first captured chunk (take_chunk_capture_scratch_): the lazy arena backs

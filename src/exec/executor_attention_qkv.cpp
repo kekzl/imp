@@ -42,14 +42,14 @@
             // kv_a scratch is pre-allocated (mla_*_buf_), NOT cudaMallocAsync'd here:
             // stream-ordered alloc/free is rejected inside CUDA-graph capture (decode loop), silently falling
             // back to eager and degenerating.
-            void* kv_a_buf = mla_kv_a_buf_;
+            void* kv_a_buf = mla_kv_a_buf_.data();
             {
                 int64_t kva_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kva_out)};
                 Tensor kv_a(kv_a_buf, QType::F16, 2, kva_shape, true);
                 gemm_via_handle_(ly.kv_a_proj_id, no, kv_a, ctx);
 
                 // 4. Extract latent [n, kv_lora_rank] — first kv_lora_rank cols of kv_a.
-                void* latent_buf = mla_latent_buf_;
+                void* latent_buf = mla_latent_buf_.data();
                 IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
                     latent_buf,
                     static_cast<size_t>(kv_lora_rank) * sizeof(half),
@@ -60,7 +60,7 @@
                     cudaMemcpyDeviceToDevice, stream));
 
                 // 5. Extract k_rope [n, rope_dim] — last rope_dim cols of kv_a.
-                void* k_rope_buf = mla_k_rope_buf_;
+                void* k_rope_buf = mla_k_rope_buf_.data();
                 IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
                     k_rope_buf,
                     static_cast<size_t>(rope_dim) * sizeof(half),
@@ -78,7 +78,7 @@
                 }
 
                 // 7. kv_b = latent @ kv_b_proj^T   [n, kvb_out]
-                void* kv_b_buf = mla_kv_b_buf_;
+                void* kv_b_buf = mla_kv_b_buf_.data();
                 {
                     int64_t lat_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kv_lora_rank)};
                     int64_t kvb_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(kvb_out)};

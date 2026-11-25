@@ -243,8 +243,8 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
     if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
         input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
-        ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf == nullptr ||
-        qscratch_.d8_buf == nullptr)
+        ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf.data() == nullptr ||
+        qscratch_.d8_buf.data() == nullptr)
         return 0;
     const int64_t K = input.shape[1];
     if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
@@ -274,10 +274,10 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
     }
     if (n < 2)
         return 0;  // nothing to merge: the per-projection route is the same launch count
-    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf, static_cast<int>(K),
-                          stream);
-    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf, static_cast<int>(K), stream))
+    auto* q8 = qscratch_.q8_1_buf.data();
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf.data(),
+                          static_cast<int>(K), stream);
+    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf.data(), static_cast<int>(K), stream))
         throw std::runtime_error("try_gdn_input_dp4a_m1_: gemv_dp4a_multi refused vetted segments");
     static bool logged = false;  // activity proof, once
     if (!logged) {
@@ -291,8 +291,8 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
 bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
                                    const GemmContext& ctx, cudaStream_t stream) {
     if (cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs || ctx.force_mmvq ||
-        input.shape[0] != 1 || input.qtype != QType::F16 || qscratch_.q8_1_buf == nullptr ||
-        qscratch_.d8_buf == nullptr)
+        input.shape[0] != 1 || input.qtype != QType::F16 || qscratch_.q8_1_buf.data() == nullptr ||
+        qscratch_.d8_buf.data() == nullptr)
         return false;
     const int64_t K = input.shape[1];
     if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
@@ -306,10 +306,10 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
             return false;
         segs[i] = {w, qt, static_cast<half*>(outs[i]->data), static_cast<int>(outs[i]->shape[1])};
     }
-    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf, static_cast<int>(K),
-                          stream);
-    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf, static_cast<int>(K), stream))
+    auto* q8 = qscratch_.q8_1_buf.data();
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf.data(),
+                          static_cast<int>(K), stream);
+    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf.data(), static_cast<int>(K), stream))
         throw std::runtime_error("dp4a_multi_m1_: gemv_dp4a_multi refused vetted segments");
     static bool logged = false;  // activity proof, once
     if (!logged) {

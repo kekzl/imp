@@ -62,23 +62,23 @@ namespace imp {
 
 void GraphExecutor::dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv,
                               Tensor& kk, Tensor& vv, float eps, cudaStream_t stream) {
-    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+    auto* q8 = qscratch_.q8_1_buf.data();
     const int K = static_cast<int>(ly.wq.shape[1]);
     // LoRA reads the normed input: side-write norm_out.
     half* lora_no = (lora_ && lora_->has_qkv(layer)) ? static_cast<half*>(no.data) : nullptr;
     rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ly.attn_norm.data), q8,
-                          qscratch_.d8_buf, lora_no, K, eps, stream, norm_w_off_);
+                          qscratch_.d8_buf.data(), lora_no, K, eps, stream, norm_w_off_);
     const int q_rows = static_cast<int>(ly.wq.shape[0]);
     const int k_rows = static_cast<int>(ly.wk.shape[0]);
     const int v_rows = static_cast<int>(ly.wv.shape[0]);
     const bool v_same = ly.wv.qtype == ly.wq.qtype;
     dispatch_gemv_qkv_fused(ly.wq.qtype, ly.wq.data, ly.wk.data, v_same ? ly.wv.data : nullptr, q8,
-                            qscratch_.d8_buf, static_cast<half*>(qv.data), static_cast<half*>(kk.data),
+                            qscratch_.d8_buf.data(), static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                             v_same ? static_cast<half*>(vv.data) : nullptr, q_rows, k_rows,
                             v_same ? v_rows : 0, K, stream);
     if (!v_same)
-        dispatch_dp4a_gemv(ly.wv.qtype, ly.wv.data, q8, qscratch_.d8_buf, static_cast<half*>(vv.data), v_rows,
-                           K, stream);
+        dispatch_dp4a_gemv(ly.wv.qtype, ly.wv.data, q8, qscratch_.d8_buf.data(), static_cast<half*>(vv.data),
+                           v_rows, K, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +208,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
                               (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
-                                 qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
+                                 qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
     // The split-K reduce writes ao as Q8_1 too; quantize_attn_out_q8_ skips the quantize then.
     paged_attention_arm_q8_epilogue(attn_out_q8_epilogue_ok_(will_fuse_o_residual, has_attn_output_gate,
                                                              cfg.is_mla()),
-                                    qscratch_.q8_1_buf, qscratch_.d8_buf);
+                                    qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data());
     // Released wo at n <= 32: the beta = 0 FP8 row GEMV plus the residual add, not a per-call F16 rebuild.
     const bool wo_released_small = n <= 32 && ly.wo_id != kInvalidTensorID &&
                                    registry_.handle(ly.wo_id).source_released;
@@ -479,15 +479,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // MLA absorbed-decode (opt-in): populates the per-layer latent cache with
     // this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH prefill
     // and decode, so the cache is warm before the first decode step. Single-sequence only.
-    const bool mla_absorb_active =
-        dispatch_policy().attention.mla_absorb && cfg.is_mla() && mla_absorb_cache_ != nullptr &&
-        state.n_sequences == 1;
+    const bool mla_absorb_active = dispatch_policy().attention.mla_absorb && cfg.is_mla() &&
+                                   mla_absorb_cache_.data() != nullptr && state.n_sequences == 1;
     if (mla_absorb_active) {
-        half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
+        half* cache_layer = mla_absorb_cache_.data() +
                             (static_cast<size_t>(layer) * mla_absorb_layer_stride_);
-        mla_latent_cache_write(static_cast<const half*>(mla_latent_buf_),
-                               static_cast<const half*>(kk.data), cache_layer, state.positions, n, nh,
-                               hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
+        mla_latent_cache_write(mla_latent_buf_.data(), static_cast<const half*>(kk.data), cache_layer,
+                               state.positions, n, nh, hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank,
+                               mla_absorb_max_seq_, stream);
     }
 
     // Decode attention for `sub_n` one-token rows: historical inline block, now a
@@ -663,10 +662,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Q8_1 of ao (reduce epilogue or a separate quantize), then the K-parallel GEMV + residual.
         const half* residual_ptr = static_cast<const half*>(h.data);
         quantize_attn_out_q8_(ao, K_o, stream);
-        dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
-                               qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
+        dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
+                               static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
-               qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale != nullptr) {
+               qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale.data() != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
         // scales, as q/k/v and the FFN: a batch-wide absmax made a row depend on its neighbours.
         const WeightHandle& wo_h = registry_.handle(ly.wo_id);
