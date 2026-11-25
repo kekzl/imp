@@ -1,5 +1,6 @@
 #pragma once
 
+#include "memory/span.h"
 #include "memory/vram_allocator.h"
 #include "vision/vision_model.h"
 #include "vision/vision_encoder.h"
@@ -58,7 +59,7 @@ public:
     // Accessors
     bool is_available() const noexcept { return encoder_ != nullptr; }
     bool has_input() const noexcept { return has_input_; }
-    half* embeddings() const noexcept { return d_embeddings_; }
+    half* embeddings() const noexcept { return d_embeddings_.data(); }
     int num_image_tokens() const noexcept { return model_ ? model_->config.num_image_tokens : 0; }
     int32_t soft_token_id() const noexcept { return soft_token_id_; }
     const VisionModel* vision_model() const noexcept { return model_.get(); }
@@ -68,8 +69,8 @@ private:
     std::unique_ptr<VisionEncoder> encoder_;
     size_t taken_bytes_ = 0;
 
-    half* d_embeddings_ = nullptr;
-    half* d_pixels_ = nullptr;
+    StableSpan<half> d_embeddings_;  // engine arena slice
+    StableSpan<half> d_pixels_;      // engine arena slice
     size_t d_pixels_size_ = 0;
 
     bool has_input_ = false;

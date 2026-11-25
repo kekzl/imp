@@ -188,12 +188,12 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
 // can reach it: a function-local static went unreset by any teardown, so a second engine
 // in the process read the first one's closed arena (AUDIT_ARCH_2026 B-2).
 namespace {
-int32_t* s_greedy_result = nullptr;              // view: arena slice or s_greedy_result_own
+StableSpan<int32_t> s_greedy_result_view;        // arena slice
 StaticDeviceOwned<int32_t> s_greedy_result_own;  // cudaMalloc fallback (arena closed), released here
 
 void sampling_reset_static_cuda_state() {
     s_greedy_result_own.reset();
-    s_greedy_result = nullptr;
+    s_greedy_result_view = {};
 }
 IMP_REGISTER_CUDA_STATIC_RESET(sampling_reset_static_cuda_state);
 }  // namespace
@@ -207,17 +207,17 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     // reused by every later one: engine-persistent is correct.
     // This overload is the executor's fallback when d_sample_result_ is unavailable;
     // single-engine-per-process (memory/vram_query.h) makes a file-static safe here.
-    int32_t* d_result = s_greedy_result;
+    int32_t* d_result = s_greedy_result_view.data() ? s_greedy_result_view.data() : s_greedy_result_own.get();
     if (!d_result) {
-        if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
-            d_result = reinterpret_cast<int32_t*>(slab.data());
+        if (StableSpan<std::byte> slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
+            s_greedy_result_view = slab.as<int32_t>();
+            d_result = s_greedy_result_view.data();
         } else {
             // cudaMalloc fallback: arena closed in a bare unit test; runs at most once per process.
             cuda_call_or_throw(device_alloc_all(dev_req(d_result, sizeof(int32_t))),
                                "sample_greedy result scratch");
             s_greedy_result_own.adopt(d_result, sizeof(int32_t), nullptr);
         }
-        s_greedy_result = d_result;
     }
 
     sampler_launch_begin("sample_greedy");

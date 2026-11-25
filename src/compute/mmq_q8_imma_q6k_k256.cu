@@ -260,19 +260,18 @@ bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, fl
     const int used = (sblks + per - 1) / per;
     const size_t slice = static_cast<size_t>(M) * N;
     if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
-        ks<<<dim3(n_tiles, 1, used), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
-                                                                                g_imma_act.xscale, w6,
+        ks<<<dim3(n_tiles, 1, used), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8.data(),
+                                                                                g_imma_act.xscale.data(), w6,
                                                                                 out_f16, M, N, K,
-                                                                                g_imma_splitk.buf, per);
+                                                                                g_imma_splitk.buf.data(),
+                                                                                per);
         IMP_CUDA_CHECK_LAUNCH();
         const int total = static_cast<int>(slice);
         imma_splitk_finalize(used, total, out_f16, beta1, stream);
         return true;
     }
-    (beta1 ? k1 : k0)<<<dim3(n_tiles, 1, 1), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
-                                                                                        g_imma_act.xscale, w6,
-                                                                                        out_f16, M, N, K,
-                                                                                        nullptr, 0);
+    (beta1 ? k1 : k0)<<<dim3(n_tiles, 1, 1), kThreads, q6k_k256_smem_bytes(), stream>>>(
+        g_imma_act.xs8.data(), g_imma_act.xscale.data(), w6, out_f16, M, N, K, nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

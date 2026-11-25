@@ -563,21 +563,21 @@ bool launch_big(const uint8_t* w, __half* out_f16, int M, int N, int K, float be
     const ImmaWaveTail t = imma_wave_tail(grid, M, N, K / F::kStepK, device_sm_count_or_0());
     const int n0 = t.nx_big * kBN;
     if (t.used > 0 && imma_ensure_splitk(static_cast<size_t>(M) * (N - n0) * t.used, capturing)) {
-        k<<<dim3(t.nx_big, grid.y), kThreads, smem, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                              g_imma_act.xrowsum, w, out_f16, M, N, K,
+        k<<<dim3(t.nx_big, grid.y), kThreads, smem, stream>>>(g_imma_act.xs8.data(), g_imma_act.xscale.data(),
+                                                              g_imma_act.xrowsum.data(), w, out_f16, M, N, K,
                                                               nullptr, 0);
         IMP_CUDA_CHECK_LAUNCH();
         mmq_imma_gguf_bm128_kernel<F, false, true>
             <<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, smem, stream>>>(
-                g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
-                w + (static_cast<size_t>(n0) * F::row_bytes(K)), out_f16, M, N - n0, K, g_imma_splitk.buf,
-                t.per);
+                g_imma_act.xs8.data(), g_imma_act.xscale.data(), g_imma_act.xrowsum.data(),
+                w + (static_cast<size_t>(n0) * F::row_bytes(K)), out_f16, M, N - n0, K,
+                g_imma_splitk.buf.data(), t.per);
         IMP_CUDA_CHECK_LAUNCH();
         imma_splitk_finalize_cols(t.used, M, N - n0, out_f16 + n0, N, beta1, stream);
         return true;
     }
-    k<<<grid, kThreads, smem, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w, out_f16, M,
-                                        N, K, nullptr, 0);
+    k<<<grid, kThreads, smem, stream>>>(g_imma_act.xs8.data(), g_imma_act.xscale.data(),
+                                        g_imma_act.xrowsum.data(), w, out_f16, M, N, K, nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

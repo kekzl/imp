@@ -8,31 +8,9 @@
 # G1 buffer(s) freed and reallocated in place with no epoch bump: 0 files, 0
 # G1n regrow site(s) marked I3-not-bakeable: 4 files, 4
 # G2 graph capture(s) in a file that reads no generation: 0 files, 0
-# G3 take site(s) not kept as a StableSpan: 22 files, 41
+# G3 take site(s) not kept as a StableSpan: closed at 0, not allowlistable (a hit fails outright)
 
 G1n src/exec/executor_attention_prefill.cpp  # 1
 G1n src/exec/executor_sampling.cu  # 1
 G1n src/quant/nvfp4_gemm.cu  # 1
 G1n src/runtime/engine_scheduler.cpp  # 1
-G3 src/audio/gemma4_audio_encoder.cpp  # 1
-G3 src/audio/gemma4_audio_model.cpp  # 1
-G3 src/compute/attention_apa.cu  # 2
-G3 src/compute/attention_ra2.cu  # 1
-G3 src/compute/gemm.cpp  # 3
-G3 src/compute/gemm_grouped_nvfp4_tile.cu  # 1
-G3 src/compute/gemm_moe_fused_tc.cu  # 1
-G3 src/compute/mmq_q4k_imma_tile.cu  # 3
-G3 src/compute/mmq_q8_imma_scratch.cu  # 4
-G3 src/compute/rowwise_topm.cu  # 2
-G3 src/compute/sampling.cu  # 1
-G3 src/compute/sampling_penalties.cu  # 4
-G3 src/compute/sampling_penalties_history.cu  # 1
-G3 src/compute/sampling_topk_topp.cu  # 6
-G3 src/quant/fp8_quant.cu  # 1
-G3 src/vision/internvl_encoder.cpp  # 1
-G3 src/vision/qwen3vl_encoder.cpp  # 1
-G3 src/vision/qwen3vl_pipeline.cpp  # 1
-G3 src/vision/qwen3vl_vision_upload.cpp  # 1
-G3 src/vision/vision_encoder.cu  # 1
-G3 src/vision/vision_loader.cpp  # 2
-G3 src/vision/vision_pipeline.cpp  # 2

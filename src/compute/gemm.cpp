@@ -66,27 +66,27 @@ static cublasLtHandle_t get_cublaslt_handle() {
 // Shared cuBLASLt workspace, taken once from the engine-persistent (T2) arena via
 // gemm_init(), used by all GEMM calls. cuBLASLt takes the workspace as an argument, so
 // one slice sized at the plan's max serves every call (docs/internals/MEMORY.md A5.3).
-static void* s_workspace = nullptr;
+static StableSpan<std::byte> s_workspace;  // engine arena slice
 static size_t s_workspace_size = 0;
 
 // Bench scratch for algo selection — the C buffer the candidate algos write
 // while being timed. Also T2: the alternative is a cudaMalloc/cudaFree per
 // cache miss, which fragments and can run while serving.
-static void* s_bench_scratch = nullptr;
+static StableSpan<std::byte> s_bench_scratch;  // engine arena slice
 static size_t s_bench_scratch_size = 0;
 // Lazy arena: the scratch is taken by the first algo probe that needs it (bench_scratch_), so a
 // model whose GEMMs never reach the probe keeps the 32 MiB unbacked. The size is set at init.
 static bool s_bench_deferred = false;
 
 static void* bench_scratch_() {
-    if (!s_bench_scratch && s_bench_deferred) {
+    if (!s_bench_scratch.data() && s_bench_deferred) {
         s_bench_deferred = false;
-        auto slab = engine_arena().take_bytes(s_bench_scratch_size);
-        s_bench_scratch = slab.empty() ? nullptr : slab.data();
-        if (!s_bench_scratch)
+        StableSpan<std::byte> slab = engine_arena().take_bytes(s_bench_scratch_size);
+        s_bench_scratch = slab;
+        if (!s_bench_scratch.data())
             s_bench_scratch_size = 0;
     }
-    return s_bench_scratch;
+    return s_bench_scratch.data();
 }
 // Arena generation of both slices. reset()/close() bumps it: a slice from an older generation is
 // handed out again, and a stale workspace aliased the new bench scratch (cuBLASLt hang, #2611).
@@ -98,10 +98,10 @@ void gemm_init() {
 
     const uint64_t gen = engine_arena().generation();
     const size_t prev_workspace_size = s_workspace_size;
-    if ((s_workspace || s_bench_scratch) && s_slices_gen != gen) {
-        s_workspace = nullptr;
+    if ((s_workspace.data() || s_bench_scratch.data()) && s_slices_gen != gen) {
+        s_workspace = {};
         s_workspace_size = 0;
-        s_bench_scratch = nullptr;
+        s_bench_scratch = {};
         s_bench_scratch_size = 0;
         s_bench_deferred = false;
     }
@@ -113,7 +113,7 @@ void gemm_init() {
     // allowlist instead of a cudaMalloc fallback the gate cannot see (AUDIT B47). Outside an
     // Engine (GPU test binaries calling gemm_init() directly), take_bytes() returns empty
     // and both stay null.
-    if (!s_workspace) {
+    if (!s_workspace.data()) {
         // Size ladder kept from the pre-arena code, but degrades against the ARENA rather than
         // free VRAM: exec_t2_demand charges the full kGemmCublasWorkspaceBytes, so anything
         // below it means the plan under-reserved, worth a log line rather than a silent halving.
@@ -124,9 +124,9 @@ void gemm_init() {
             2ULL << 20,                 //  2 MiB
         };
         for (size_t sz : kTrySizes) {
-            auto slab = engine_arena().take_bytes(sz);
+            StableSpan<std::byte> slab = engine_arena().take_bytes(sz);
             if (!slab.empty()) {
-                s_workspace = slab.data();
+                s_workspace = slab;
                 s_workspace_size = sz;
                 break;
             }
@@ -145,12 +145,13 @@ void gemm_init() {
     if (s_workspace_size < prev_workspace_size)
         gemm_cleanup();
 
-    if (!s_bench_scratch && !s_bench_deferred) {
+    if (!s_bench_scratch.data() && !s_bench_deferred) {
         if (engine_arena().lazy() && engine_arena().remaining() >= kGemmBenchScratchBytes) {
             s_bench_deferred = true;
             s_bench_scratch_size = kGemmBenchScratchBytes;
-        } else if (auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes); !slab.empty()) {
-            s_bench_scratch = slab.data();
+        } else if (StableSpan<std::byte> slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
+                   !slab.empty()) {
+            s_bench_scratch = slab;
             s_bench_scratch_size = kGemmBenchScratchBytes;
         }
     }
@@ -185,7 +186,7 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
 // batched-GEMM TU (gemm_batched.cu) via gemm_internal.cuh.
 cublasLtHandle_t gemm_internal_cublaslt_handle() { return get_cublaslt_handle(); }
 cudaDataType_t gemm_internal_dtype_to_cuda(QType dt) { return dtype_to_cuda(dt); }
-void* gemm_internal_workspace() { return s_workspace; }
+void* gemm_internal_workspace() { return s_workspace.data(); }
 size_t gemm_internal_workspace_size() { return s_workspace_size; }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +537,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     // candidates in heuristic order and pick the first that survives: that order is stable.
     int pick = 0;
     if (nresults > 1 && C_bytes <= s_bench_scratch_size && bench_scratch_() != nullptr) {
-        void* temp_c = s_bench_scratch;
+        void* temp_c = s_bench_scratch.data();
         constexpr int kDetWarmupIters = 2;
         pick = -1;
         for (int i = 0; i < nresults && pick < 0; i++) {
@@ -546,7 +547,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             for (int w = 0; w < kDetWarmupIters; w++) {
                 cublasStatus_t wst = cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
                                                     entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c,
-                                                    entry.Cdesc, &results[i].algo, s_workspace,
+                                                    entry.Cdesc, &results[i].algo, s_workspace.data(),
                                                     results[i].workspaceSize, stream);
                 if (wst != CUBLAS_STATUS_SUCCESS) {
                     ok = false;
@@ -686,9 +687,9 @@ void gemm_reset_static_cuda_state() {
     // Arena-owned since A7 step 8 — the region belongs to the T2 arena, which
     // ~Engine closes. Only the pointers are re-armed here, so the next
     // gemm_init() takes a fresh slice.
-    s_workspace = nullptr;
+    s_workspace = {};
     s_workspace_size = 0;
-    s_bench_scratch = nullptr;
+    s_bench_scratch = {};
     s_bench_scratch_size = 0;
     s_bench_deferred = false;
 }
@@ -829,7 +830,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
         int32_t ibeta = (int32_t)beta;
         cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &ialpha, B.data, entry->Bdesc, A.data,
                                            entry->Adesc, &ibeta, C.data, entry->Cdesc, C.data, entry->Cdesc,
-                                           entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                           entry->has_algo ? &entry->algo : nullptr, s_workspace.data(),
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_WARN(
@@ -862,15 +863,16 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                           : static_cast<const void*>(&beta);
         cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data,
                                            entry->Adesc, p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
-                                           entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                           entry->has_algo ? &entry->algo : nullptr, s_workspace.data(),
                                            entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             const bool pin_belongs_to_other_m = keep_pin_chosen_at_other_m(*entry, M, K, N);
             const cublasLtMatmulAlgo_t* retry_algo =
                 (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo;
             st = cublasLtMatmul(lt, entry->opDesc, p_alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-                                p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo, s_workspace,
-                                pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
+                                p_beta, C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo,
+                                s_workspace.data(), pin_belongs_to_other_m ? 0 : entry->workspace_size,
+                                stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
                 static int fallback_count = 0;
                 if (++fallback_count <= 10) {
@@ -1008,7 +1010,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
 
     cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
                                        &beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
-                                       entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                       entry->has_algo ? &entry->algo : nullptr, s_workspace.data(),
                                        entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
@@ -1017,7 +1019,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
         const cublasLtMatmulAlgo_t* retry_algo =
             (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo;
         st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
-                            C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo, s_workspace,
+                            C.data, entry->Cdesc, C.data, entry->Cdesc, retry_algo, s_workspace.data(),
                             pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
 
         if (st != CUBLAS_STATUS_SUCCESS) {
@@ -1029,8 +1031,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                     (int)st, (long)M, (long)K, (long)N);
             }
             set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
-            st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-                                &beta, C.data, entry->Cdesc, C.data, entry->Cdesc, nullptr, s_workspace,
+            st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
+                                C.data, entry->Cdesc, C.data, entry->Cdesc, nullptr, s_workspace.data(),
                                 entry->workspace_size, stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
                 static bool s_fp8_warned = false;
@@ -1121,14 +1123,14 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_dat
     const float beta = 0.0f;
     cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, w_data, entry->Bdesc, a_data, entry->Adesc,
                                        &beta, d_fp16, entry->Cdesc, d_fp16, entry->Cdesc, &entry->algo,
-                                       s_workspace, entry->workspace_size, stream);
+                                       s_workspace.data(), entry->workspace_size, stream);
     if (st != CUBLAS_STATUS_SUCCESS) {
         const bool pin_belongs_to_other_m = keep_pin_chosen_at_other_m(*entry, M, K, N);
         set_scales(entry->opDesc);
         st = cublasLtMatmul(lt, entry->opDesc, &alpha, w_data, entry->Bdesc, a_data, entry->Adesc, &beta,
                             d_fp16, entry->Cdesc, d_fp16, entry->Cdesc,
                             (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo,
-                            s_workspace, pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
+                            s_workspace.data(), pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
     }
     return st == CUBLAS_STATUS_SUCCESS;
 }
