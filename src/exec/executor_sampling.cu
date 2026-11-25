@@ -192,6 +192,8 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
     banned_cache_next_ = (banned_cache_next_ + 1) % kBannedCacheEntries;
     const size_t ban_bytes = static_cast<size_t>(state.n_banned_tokens) * sizeof(int32_t);
     if (e.cap < static_cast<size_t>(state.n_banned_tokens)) {
+        // I3 G1: no graph bakes e.d. Its 2 callers (sample_single_from_logits{,_async}) run eager
+        // after the forward; captured forwards read the engine-owned state.d_banned_tokens instead.
         vram_free(vram_alloc_, e.d);  // the undersized old buffer; nothing reads it after
         e.cap = 0;
         e.d = static_cast<int32_t*>(vram_alloc(vram_alloc_, ban_bytes, "banned_cache"));

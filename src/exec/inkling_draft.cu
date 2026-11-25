@@ -11,6 +11,7 @@
 #include "compute/gemm.h"
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
+#include "core/graph_epoch.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "memory/vram_allocator.h"
@@ -406,6 +407,7 @@ bool InklingDraft::block_(cudaStream_t s) {
 void InklingDraft::capture_(cudaStream_t s) {
     cudaGraph_t g = nullptr;
     cudaGraphExec_t ex = nullptr;
+    exec_epoch_ = graph_epoch();
     graph_ok_ = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) == cudaSuccess;
     if (graph_ok_) {
         const bool body = block_(s);
@@ -443,6 +445,11 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
         cudaMemcpyAsync(emb_, d_emb, static_cast<size_t>(c.hidden) * sizeof(half), cudaMemcpyDeviceToDevice,
                         s) != cudaSuccess)
         return 0;
+    // I3: a block graph of an older epoch is dropped and captured again (the last propose synced).
+    if (exec_.get() && exec_epoch_ != graph_epoch()) {
+        exec_.reset(nullptr);
+        graph_.reset(nullptr);
+    }
     if (graph_ok_ && !exec_.get() && s != nullptr)
         capture_(s);
     if (exec_.get() ? cudaGraphLaunch(exec_.get(), s) != cudaSuccess : !block_(s))

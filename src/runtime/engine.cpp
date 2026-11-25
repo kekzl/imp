@@ -224,6 +224,9 @@ void Engine::clear_recurrent_snapshots() {
 
 void Engine::reset_batch_pool_cache() { decode_batch_pool_.reset_upload_cache(); }
 
+// Request reset, not a forward change: no graph epoch bump, the decode pool and completed prefill
+// graphs stay (inputs upload per step; a pool recapture costs ~100 ms per reset). A changed
+// forward or a moved address goes through invalidate_forward_graphs().
 void Engine::invalidate_graphs() {
     // Exception/reset path: an in-flight pipelined decode step must not be
     // waited on (the context may be poisoned), drop it and release the
@@ -270,6 +273,18 @@ void Engine::invalidate_graphs() {
     abort_stream_capture(prefill_stream());
 }
 
+void Engine::invalidate_forward_graphs(const char* reason) {
+    // I3: the bump is what every capture family checks before replay (8 capture sites). The eager
+    // teardown below covers in-flight state and the 2 runner families that need 1 eager step first.
+    const uint64_t epoch = bump_graph_epoch();
+    invalidate_graphs();
+    prefill_graphs_.invalidate_all();
+    for (auto& g : decode_graph_pool_)
+        g.invalidate();
+    IMP_LOG_INFO("forward graphs invalidated (%s): graph epoch -> %llu", reason,
+                 static_cast<unsigned long long>(epoch));
+}
+
 int Engine::lora_load(const std::string& path) {
     auto a = std::make_unique<LoraAdapter>();
     if (!a->load(path, model_ ? model_->n_layers() : 0))
@@ -300,13 +315,8 @@ bool Engine::lora_set(int id) {
         return true;
     active_lora_ = id;
     executor_->set_lora(id == 0 ? nullptr : lora_adapters_[id - 1].get());
-    // Decode graphs captured the previous forward (with/without the LoRA
-    // kernels and with the old adapter's pointers), drop everything,
-    // including the per-batch pool that invalidate_graphs() preserves.
-    invalidate_graphs();
-    prefill_graphs_.invalidate_all();
-    for (auto& g : decode_graph_pool_)
-        g.invalidate();
+    // Captured graphs hold the previous forward (with/without the LoRA kernels, the old adapter's pointers).
+    invalidate_forward_graphs("lora_set");
     IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");
     return true;
 }
