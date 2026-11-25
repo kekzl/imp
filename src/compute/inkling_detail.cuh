@@ -9,6 +9,18 @@ namespace imp::inkling::detail {
 
 constexpr int kThreads = 256;
 
+// Cache row of key k: k % ring in a ring, else blocks[k / block] * block + k % block (blocks null: k).
+// block 16 (the engine's kKVBlockSize) shifts: one int load per key, the same for 16 keys in a row.
+__device__ __forceinline__ int kv_slot(int k, int ring, const int* blocks, int block) {
+    if (ring > 0)
+        return k % ring;
+    if (blocks == nullptr)
+        return k;
+    if (block == 16)
+        return (__ldg(blocks + (k >> 4)) << 4) | (k & 15);
+    return __ldg(blocks + k / block) * block + k % block;
+}
+
 __device__ inline float warp_sum(float v) {
     for (int o = 16; o > 0; o >>= 1)
         v += __shfl_xor_sync(0xffffffffu, v, o);

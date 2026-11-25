@@ -478,7 +478,7 @@ TEST(InklingAttention, FewRowsFormMatchesTheRowForm) {
                         std::sqrt(num / den));
         }
         // Many rows: the GEMM form against the row form, as one sub-batch and as several.
-        const size_t wb = inkling::attention_rows_bytes(NH, HD, DR, cs.window, cs.ctx, T);
+        const size_t wb = inkling::attention_rows_bytes(NH, NKV, HD, DR, cs.window, cs.ctx, T);
         void* d_work = nullptr;
         ASSERT_EQ(cudaMalloc(&d_work, wb), cudaSuccess);
         for (const size_t bytes : {wb, wb / 7}) {
