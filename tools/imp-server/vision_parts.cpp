@@ -7,6 +7,7 @@
 #include "model/tokenizer.h"
 #include "utils.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 
 #include <bit>
 #include <cstdint>

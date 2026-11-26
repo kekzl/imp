@@ -3,6 +3,7 @@
 // applied (the sampled token's logprob in output_logprobs is the processed one).
 
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/logit_lens.h"

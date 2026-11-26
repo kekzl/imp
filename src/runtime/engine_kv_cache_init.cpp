@@ -67,13 +67,14 @@ void clamp_auto_max_seq_len_to_pool(int& max_seq_len, int pool_blocks, int kv_bs
 }
 
 // Engine state the init_kv_cache phase helpers read; `ec` is written where a phase turns a feature
-// off (prefix caching, StreamingLLM auto, FP8 prefill) or loads the remembered library reserve;
+// off (prefix caching, FP8 prefill) or loads the remembered library reserve, `rt` where it resolves
+// batch, context, KV dtype or turns StreamingLLM auto off (C-9);
 // `rc` only by snapshot_host_budget_bytes (its host-tier default).
 struct KvInitCtx {
     Model& model;
     const ModelConfig& mcfg;
     EngineConfig& ec;
-    const EngineRuntimeState& rt;
+    EngineRuntimeState& rt;
     RuntimeConfig& rc;
 };
 
@@ -118,9 +119,9 @@ const char* swa_sizing_off_reason(const KvInitCtx& c, int n_swa_layers, int n_kv
     const auto& prof = c.model.profile();
     if (n_swa_layers == 0)
         return "model has no sliding-window layers";
-    if (n_swa_layers == n_kv_layers && window_max >= c.ec.max_seq_len)
+    if (n_swa_layers == n_kv_layers && window_max >= c.rt.max_seq_len)
         return "window >= max_seq_len (nothing to save)";
-    if (c.ec.kv_cache_dtype == QType::INT8 || c.ec.kv_cache_dtype == QType::INT4)
+    if (c.rt.kv_cache_dtype == QType::INT8 || c.rt.kv_cache_dtype == QType::INT4)
         return "INT8/INT4 KV lacks the per-layer cache path";
     if (prof.is_ssm || prof.is_gdn)
         return "hybrid recurrent model (conservative)";
@@ -198,7 +199,7 @@ SwaGate resolve_swa_sizing(const KvInitCtx& c, const std::vector<int>& kv_layer_
     }
     // StreamingLLM auto-enable frees middle blocks of the GLOBAL
     // table, redundant and conflicting here.
-    c.ec.streaming_kv_auto = false;
+    c.rt.streaming_kv_auto = false;
     return g;
 }
 
@@ -246,7 +247,7 @@ void load_library_reserve(const KvInitCtx& c, const std::function<uint64_t()>& f
 size_t sparse_minmax_plan_bytes(const KvInitCtx& c, int head_dim, bool swa_active) {
     const auto& at = c.rc.attention;
     if ((at.sparse_topk_tokens > 0 || at.sparse_prefill_topk_tokens > 0) &&
-        !sparse_minmax_refusal(c.ec.kv_cache_dtype, c.mcfg.is_mla() && at.mla_absorb,
+        !sparse_minmax_refusal(c.rt.kv_cache_dtype, c.mcfg.is_mla() && at.mla_absorb,
                                c.rc.speculative.token_recycling, !c.ec.prefix_cache_path.empty()) &&
         c.mcfg.head_dim_per_layer.empty() && !swa_active)
         return KVCache::minmax_block_bytes(c.mcfg.n_kv_heads, head_dim);
@@ -260,7 +261,7 @@ size_t recurrent_snapshot_plan_bytes(const KvInitCtx& c, size_t ssm_footprint_by
     if (c.mcfg.ssm_inner_size <= 0 || !c.ec.use_prefix_caching || c.rc.server.recurrent_snapshot_mb <= 0 ||
         ssm_footprint_bytes == 0)
         return 0;
-    const size_t slots = static_cast<size_t>(c.ec.max_batch_size) +
+    const size_t slots = static_cast<size_t>(c.rt.max_batch_size) +
                          static_cast<size_t>(std::max(0, ssm_reserved_slots));
     const size_t per_seq = slots > 0 ? ssm_footprint_bytes / slots : 0;
     const size_t budget = static_cast<size_t>(c.rc.server.recurrent_snapshot_mb) << 20;
@@ -321,9 +322,9 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
     probe.n_swa_layers = kv.n_swa_layers;
     probe.swa_live_tokens = kv.swa_live_tokens;
     probe.swa_shared_tokens = c.ec.swa_shared_tokens;
-    probe.max_batch_size = c.ec.max_batch_size;
-    probe.kv_seqs = admitted_batch(c.ec.max_batch_size, c.rc.runtime.max_batch_size);
-    probe.max_seq_len = c.ec.max_seq_len;
+    probe.max_batch_size = c.rt.max_batch_size;
+    probe.kv_seqs = admitted_batch(c.rt.max_batch_size, c.rc.runtime.max_batch_size);
+    probe.max_seq_len = c.rt.max_seq_len;
     probe.kv_block_size = kv.kv_bs;
     probe.min_kv_tokens = c.ec.min_kv_tokens;
     probe.kv_block_bytes_per_layer = kv.layer_block_bytes;
@@ -550,7 +551,7 @@ int growable_initial_blocks(const RuntimeConfig& rc, int max_blocks, int kv_ceil
 }
 
 void log_kv_pool_summary(const KvInitCtx& c, const KvShape& kv, int max_blocks) {
-    QType kv_dtype = c.ec.kv_cache_dtype;
+    QType kv_dtype = c.rt.kv_cache_dtype;
     size_t total_kv = static_cast<size_t>(kv.n_kv_layers) * max_blocks * kv.layer_block_bytes;
     IMP_LOG_INFO(
         "KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
@@ -567,8 +568,8 @@ std::unique_ptr<KVCache> make_kv_cache(const KvInitCtx& c, const KvShape& kv, VR
                                        int swa_max_blocks, int blocks, int ceiling) {
     const auto& mcfg = c.mcfg;
     const int n_kv_layers = kv.n_kv_layers;
-    if ((!mcfg.head_dim_per_layer.empty() || kv.swa_active) && c.ec.kv_cache_dtype != QType::INT8 &&
-        c.ec.kv_cache_dtype != QType::INT4) {
+    if ((!mcfg.head_dim_per_layer.empty() || kv.swa_active) && c.rt.kv_cache_dtype != QType::INT8 &&
+        c.rt.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
         std::vector<int> per_layer_hd(n_kv_layers, 0);
         std::vector<char> per_layer_swa(kv.swa_active ? n_kv_layers : 0, 0);
@@ -587,11 +588,11 @@ std::unique_ptr<KVCache> make_kv_cache(const KvInitCtx& c, const KvShape& kv, VR
                 per_layer_swa[k] = layer_swa_window(mcfg, c.model.profile(), l) > 0 ? 1 : 0;
             k++;
         }
-        return std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd, c.ec.kv_cache_dtype,
+        return std::make_unique<KVCache>(n_kv_layers, per_layer_nkv, per_layer_hd, c.rt.kv_cache_dtype,
                                          blocks, kv.kv_bs, alloc, per_layer_swa,
                                          kv.swa_active ? swa_max_blocks : 0, ceiling);
     }
-    return std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, kv.head_dim, c.ec.kv_cache_dtype, blocks,
+    return std::make_unique<KVCache>(n_kv_layers, mcfg.n_kv_heads, kv.head_dim, c.rt.kv_cache_dtype, blocks,
                                      kv.kv_bs, alloc, ceiling);
 }
 
@@ -671,7 +672,7 @@ void enable_sparse_key_minmax(const KvInitCtx& c, KVCache& kv_cache) {
     const auto& at = c.rc.attention;
     if (at.sparse_topk_tokens <= 0 && at.sparse_prefill_topk_tokens <= 0)
         return;
-    const char* refuse = sparse_minmax_refusal(c.ec.kv_cache_dtype, c.mcfg.is_mla() && at.mla_absorb,
+    const char* refuse = sparse_minmax_refusal(c.rt.kv_cache_dtype, c.mcfg.is_mla() && at.mla_absorb,
                                                c.rc.speculative.token_recycling,
                                                !c.ec.prefix_cache_path.empty());
     if (refuse) {
@@ -700,9 +701,9 @@ void enable_prefix_caching(const KvInitCtx& c, KVCacheManager& kvm,
     // hybrids only together with a recurrent-state snapshot, and snapshots
     // are not persisted (the recurrent-snapshot store below must also come up). Inkling: no slot state.
     if (c.mcfg.ssm_inner_size == 0 && c.mcfg.arch != ModelArch::INKLING2 && !c.ec.prefix_cache_path.empty() &&
-        prefix_cache_restore_allowed(c.ec.kv_cache_dtype, c.rc)) {
+        prefix_cache_restore_allowed(c.rt.kv_cache_dtype, c.rc)) {
         int restored = kvm.load_prefix_cache(c.ec.prefix_cache_path,
-                                             prefix_cache_fingerprint(fingerprint(), c.ec.kv_cache_dtype,
+                                             prefix_cache_fingerprint(fingerprint(), c.rt.kv_cache_dtype,
                                                                       c.rc),
                                              stream);
         if (restored > 0)
@@ -729,9 +730,9 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
     // (scheduler admission gate below). The plan above charged the
     // whole slab either way.
     const bool ssm_pool_ok = out.ssm_state->init(
-        n_ssm, c.ec.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
+        n_ssm, c.rt.max_batch_size, conv_ch, mcfg.ssm_conv_kernel, n_heads, hd, mcfg.ssm_state_size,
         c.ec.ssm_state_dtype, alloc, ssm_reserved_slots, c.rc.vram.lazy_commit ? vmm_backend() : nullptr,
-        batch_verify_spare_slots(c.rc, &c.model, c.ec.max_batch_size), c.model.ple_state_bytes());
+        batch_verify_spare_slots(c.rc, &c.model, c.rt.max_batch_size), c.model.ple_state_bytes());
     if (ssm_pool_ok && out.ssm_state->lazy() && scheduler)
         scheduler->set_admission_gate(std::move(gate));
     if (must_refuse_without_ssm_state(n_ssm, ssm_pool_ok)) {
@@ -745,13 +746,13 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
                                  "pool line above for the shortfall and the lever)");
     } else if (ssm_reserved_slots > 0) {
         IMP_LOG_INFO("SSM state: %d verify spare slots past batch %d (lazy), %.1f MiB each",
-                     ssm_reserved_slots, c.ec.max_batch_size, out.ssm_state->per_seq_bytes() / 1048576.0);
+                     ssm_reserved_slots, c.rt.max_batch_size, out.ssm_state->per_seq_bytes() / 1048576.0);
     }
     // Slot table for batched GDN decode. Allocated once and kept at a
     // stable address so a captured decode graph does not have to be
     // rebuilt when the set of active sequences changes.
-    if (out.ssm_state && c.ec.max_batch_size > 0) {
-        const size_t bytes = static_cast<size_t>(c.ec.max_batch_size) * sizeof(int);
+    if (out.ssm_state && c.rt.max_batch_size > 0) {
+        const size_t bytes = static_cast<size_t>(c.rt.max_batch_size) * sizeof(int);
         out.d_seq_slots = alloc ? VramOwned<int>(*alloc, bytes / sizeof(int), "ssm_seq_slots")
                                 : VramOwned<int>();
         if (!out.d_seq_slots) {
@@ -759,7 +760,7 @@ void init_ssm_state_pool(const KvInitCtx& c, int n_ssm, int ssm_reserved_slots, 
         } else {
             // Log only: the scheduler uploads the table before every batched step.
             IMP_CUDA_CHECK_LOG(cudaMemset(out.d_seq_slots.get(), 0, bytes));
-            out.h_seq_slots.assign(static_cast<size_t>(c.ec.max_batch_size), 0);
+            out.h_seq_slots.assign(static_cast<size_t>(c.rt.max_batch_size), 0);
         }
     }
 }
@@ -904,7 +905,7 @@ bool Engine::init_kv_cache() {
     const int kv_bs = *config_.kv_block_size;
     kv.kv_bs = kv_bs;
     // A decode step's table holds kv_ahead_tokens_ more rows (Inkling lookahead).
-    int blocks_per_seq = (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs;
+    int blocks_per_seq = (rt_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs;
 
     const SwaGate swa = resolve_swa_sizing(ctx, kv.layer_map, n_kv_layers, kv_bs, executor_.get(),
                                            [this] { return resolve_prefill_chunk_size_(); });
@@ -918,7 +919,7 @@ bool Engine::init_kv_cache() {
     kv.swa_active = swa_sizing_active_;
     kv.swa_live_tokens = swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
     config_.swa_shared_tokens = swa_sizing_active_ ? swa.chunk_extra_tokens : 0;
-    kv.layer_block_bytes = kv_block_bytes_layer_mean(mcfg, config_.kv_cache_dtype, kv_bs, head_dim,
+    kv.layer_block_bytes = kv_block_bytes_layer_mean(mcfg, rt_.kv_cache_dtype, kv_bs, head_dim,
                                                      kv.swa_active);
 
     // VRAM budget: KV charges the full measured cache demand, phase 3 floors at
@@ -927,15 +928,15 @@ bool Engine::init_kv_cache() {
     load_library_reserve(ctx, fingerprint, library_reserve_key_, library_reserve_cache_path_);
 
     // Reserved pool slots: mc verify W-1 + batched-verify spares (recomputed after the clamp).
-    int ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    int ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), rt_.max_batch_size);
     config_.kv_ceiling_seqs =
-        kv_ceiling_seqs(admitted_batch(config_.max_batch_size, runtime_config_.runtime.max_batch_size),
+        kv_ceiling_seqs(admitted_batch(rt_.max_batch_size, runtime_config_.runtime.max_batch_size),
                         experts_on_host_ && executor_ && executor_->expert_cache_nvfp4_slots());
     // MTP draft workspace: allocated at the end of init (take_planned_mtp_workspace_), so both passes
     // size KV without it; the live pass sees it as already spent.
     mtp_workspace_planned_bytes_ = mtp_workspace_plan_bytes_();
     const size_t live_free = effective_free_vram();
-    EngineConfig plan_cfg = config_;  // the planner prices the graph reserve on what runs (rt_)
+    EngineConfig plan_cfg = resolved_engine_config(config_, rt_);  // the planner prices what runs (rt_)
     plan_cfg.use_cuda_graphs = rt_.cuda_graphs;
     auto vram_budget = compute_vram_budget(*model_, plan_cfg, n_kv_layers, head_dim,
                                            live_free > mtp_workspace_planned_bytes_
@@ -963,11 +964,12 @@ bool Engine::init_kv_cache() {
     apply_plan_to_weight_caches(vram_budget, plan, probe.distributable_bytes, mcfg.is_nvfp4_prequant);
     // Inkling2-Loop: the pool never outgrows every slot at max_seq_len, whatever is free.
     const int ink_cap = inkling_pool_cap_(kv_bs);
-    int max_blocks = std::min(kv_blocks_from_plan(config_, plan, vram_budget), ink_cap);
+    int max_blocks = std::min(kv_blocks_from_plan(resolved_engine_config(config_, rt_), plan, vram_budget),
+                              ink_cap);
     kv_replan_arm(kv_replan_, probe, vram_budget, max_blocks, plan.ok,
                   config_.library_reserve_mb.value_or(-1) < 0 &&
                       config_.kv_cache_max_blocks.value_or(0) <= 0);
-    log_sparse_minmax_pool(config_, kv, max_blocks);
+    log_sparse_minmax_pool(resolved_engine_config(config_, rt_), kv, max_blocks);
 
     // Weight caches build BEFORE the KV pool (A7 step 6.4): caches have bounded
     // demand and go first, KV (elastic) takes what's left - reversed order can
@@ -992,7 +994,7 @@ bool Engine::init_kv_cache() {
     executor_->verify_host_expert_placement();
     if (!executor_->init_device_expert_cache() && experts_on_host_)
         demote_graphs_(GraphDemotionReason::ExpertsOnHost);
-    warn_host_expert_batch(config_, *executor_, experts_on_host_);
+    warn_host_expert_batch(resolved_engine_config(config_, rt_), *executor_, experts_on_host_);
 
     const size_t per_block_total_bytes = cfg::kv_pool_block_bytes(n_kv_layers, kv.n_swa_layers, kv.swa_active,
                                                                   kv.layer_block_bytes);
@@ -1008,10 +1010,11 @@ bool Engine::init_kv_cache() {
     const int kv_blocks_planned = config_.kv_cache_max_blocks.value_or(0) > 0
                                       ? max_blocks
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
-    max_blocks = size_kv_from_residual(vram_budget, config_, kv, per_block_total_bytes, swa_fixed_bytes,
-                                       max_blocks, kv_blocks_planned, max_seq_len_explicit_,
-                                       kv_pool_floored_);
-    if (!kv_pool_fits_vram_budget(config_, kv_bs, per_block_total_bytes, max_blocks, max_seq_len_explicit_))
+    max_blocks = size_kv_from_residual(vram_budget, resolved_engine_config(config_, rt_), kv,
+                                       per_block_total_bytes, swa_fixed_bytes, max_blocks, kv_blocks_planned,
+                                       max_seq_len_explicit_, kv_pool_floored_);
+    if (!kv_pool_fits_vram_budget(resolved_engine_config(config_, rt_), kv_bs, per_block_total_bytes,
+                                  max_blocks, max_seq_len_explicit_))
         return false;
 
     // The clamp above answers "what fits right now"; a growable pool keeps the
@@ -1033,8 +1036,7 @@ bool Engine::init_kv_cache() {
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
     if (!max_seq_len_explicit_)
-        clamp_auto_max_seq_len_to_pool(config_.max_seq_len, std::max(max_blocks, kv_ceiling_effective),
-                                       kv_bs);
+        clamp_auto_max_seq_len_to_pool(rt_.max_seq_len, std::max(max_blocks, kv_ceiling_effective), kv_bs);
     log_kv_pool_residency(*kv_cache_raw_);
     if (swa_sizing_active_) {
         kv_manager_->enable_swa_sizing(swa_window_max_, swa_slack_tokens_);
@@ -1045,8 +1047,7 @@ bool Engine::init_kv_cache() {
     inkling_attach_pool_();
 
     executor_->set_kv_layer_map(kv.layer_map);
-    apply_checkpoint_fp8_kv_scales(*executor_, *model_, kv.layer_map, config_.kv_cache_dtype,
-                                   runtime_config_);
+    apply_checkpoint_fp8_kv_scales(*executor_, *model_, kv.layer_map, rt_.kv_cache_dtype, runtime_config_);
 
     if (offload_mgr_)
         executor_->set_offload_manager(offload_mgr_.get());
@@ -1066,10 +1067,10 @@ bool Engine::init_kv_cache() {
 
     check_moe_decode_cache_coverage_();
 
-    build_post_cache_gemm_buffers(config_, *executor_, stream_);
+    build_post_cache_gemm_buffers(resolved_engine_config(config_, rt_), *executor_, stream_);
 
     // Pre-allocate decode batch pool + penalty buffer
-    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq,
+    decode_batch_pool_.allocate(rt_.max_batch_size, blocks_per_seq,
                                 /*with_swa_tables=*/swa_sizing_active_);
     // The "can the verify run" gate lives inside the callee: gating here on the
     // spare slot count left speculative.factored_spare permanently disabled
@@ -1077,7 +1078,7 @@ bool Engine::init_kv_cache() {
     if (!ensure_batch_verify_bufs_(stream_))  // init-time staging
         IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
-        d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
+        d_penalty_tokens_capacity_ = static_cast<size_t>(rt_.max_seq_len);
         d_penalty_tokens_ = VramOwned<int32_t>(vram_alloc_, d_penalty_tokens_capacity_, "penalty_tokens");
         if (!d_penalty_tokens_) {
             IMP_LOG_WARN("Failed to pre-allocate penalty token buffer");
@@ -1085,9 +1086,8 @@ bool Engine::init_kv_cache() {
         }
         // Batched-decode penalty histories (see engine.h). max_batch_size
         // slots x max_seq_len tokens; 32 x 4096 = 512 KiB, 64 x 131072 = 32 MiB.
-        penalty_hist_slots_ =
-            std::min(config_.max_batch_size, (int)imp::PenaltyAppendArgs::kMaxRows);
-        penalty_hist_cap_ = config_.max_seq_len;
+        penalty_hist_slots_ = std::min(rt_.max_batch_size, (int)imp::PenaltyAppendArgs::kMaxRows);
+        penalty_hist_cap_ = rt_.max_seq_len;
         if (penalty_hist_slots_ > 1 && penalty_hist_cap_ > 0) {
             d_penalty_hist_ = VramOwned<int32_t>(vram_alloc_, (size_t)penalty_hist_slots_ * penalty_hist_cap_,
                                                  "penalty_hist");
@@ -1108,10 +1108,9 @@ bool Engine::init_kv_cache() {
         // T5b: an empty buffer means "no staging", which the prefill path
         // already tests for (memory/host_pinned.h).
         h_pf_positions_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
-                                                static_cast<size_t>(config_.max_seq_len) * sizeof(int));
-        h_pf_token_ids_ = PinnedBuffer::acquire(
-            cuda_host_pinned_allocator(),
-            static_cast<size_t>(config_.max_seq_len) * sizeof(int32_t));
+                                                static_cast<size_t>(rt_.max_seq_len) * sizeof(int));
+        h_pf_token_ids_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                static_cast<size_t>(rt_.max_seq_len) * sizeof(int32_t));
         (void)pf_staging_evt_.create(cudaEventDisableTiming);  // stays null on failure
         // The constrained pipeline's pinned landing for the sampled token and
         // its ready event: engine-lifetime, so a first json request does not
@@ -1140,10 +1139,9 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     // pool grows past its initial commit. The async loop sizes from the
     // request's max_tokens ceiling (bounded by max_seq_len, not the pool).
     // Four bytes per block of a pool that may not exist: cheap to over-allocate.
-    const int bt_cap = std::max(
-        {max_blocks, kv_ceiling_effective, (config_.max_seq_len + kv_bs - 1) / kv_bs});
-    const int seq_cap = std::max(1, config_.max_batch_size);
-    const auto lay = ServingMetadataLayout::compute(config_.max_seq_len, seq_cap, bt_cap, swa_sizing_active_,
+    const int bt_cap = std::max({max_blocks, kv_ceiling_effective, (rt_.max_seq_len + kv_bs - 1) / kv_bs});
+    const int seq_cap = std::max(1, rt_.max_batch_size);
+    const auto lay = ServingMetadataLayout::compute(rt_.max_seq_len, seq_cap, bt_cap, swa_sizing_active_,
                                                     SAMPLE_SCRATCH_BYTES);
     prefill_pool_size_ = lay.total;
     prefill_pool_ = VramOwned<char>(vram_alloc_, prefill_pool_size_, "prefill_pool");
@@ -1174,20 +1172,20 @@ void Engine::init_serving_metadata_pool_(int max_blocks, int kv_ceiling_effectiv
     }
     // diagnostics.graph_slot_pool=false: capacity 0, so both graph runners take their per-burst fallback.
     pool_bt_cap_ = runtime_config_.diagnostics.graph_slot_pool ? bt_cap : 0;
-    rg_rows_cap_ = config_.max_seq_len;
+    rg_rows_cap_ = rt_.max_seq_len;
     rg_seq_cap_ = seq_cap;
     // M-RoPE position uploads (engine_qwen3vl.cpp) are sized once here, up to
     // what bind_mrope_ can be asked for: prefill rows to the executor's chunk
     // ceiling, decode rows to the batch ceiling. bind_mrope_ never regrows a fitting buffer.
     if (model_->config_.has_mrope()) {
-        const int rows = std::max(1, executor_ ? executor_->max_tokens() : config_.max_seq_len);
+        const int rows = std::max(1, executor_ ? executor_->max_tokens() : rt_.max_seq_len);
         d_mrope_prefill_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(3) * rows, "mrope_positions");
         mrope_prefill_cap_ = d_mrope_prefill_ ? rows : 0;
         d_mrope_decode_ = VramOwned<int32_t>(vram_alloc_, static_cast<size_t>(seq_cap), "mrope_delta");
         mrope_decode_cap_ = d_mrope_decode_ ? seq_cap : 0;
     }
     IMP_LOG_INFO("Serving metadata pool: %.1f MiB (rows %d, %d tables x %d blocks)",
-                 prefill_pool_size_ / (1024.0 * 1024.0), config_.max_seq_len, seq_cap + 4, bt_cap);
+                 prefill_pool_size_ / (1024.0 * 1024.0), rt_.max_seq_len, seq_cap + 4, bt_cap);
 }
 
 }  // namespace imp

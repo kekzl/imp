@@ -379,7 +379,8 @@ struct InklingRuntime {
     // when inkling_dense8_fits; false = not one slot. slab: allocated here, holds each slot's conv state and
     // sliding rings; it must outlive the slots. make_inkling_runtime and the serve-path test use it.
     // draft (null = no lookahead): the slab also holds a lookahead region of vocab logits per row for the
-    // first kInklingLookaheadSlots slots (draft rings, lookahead planes; inkling_attach_draft_ views them).
+    // first kInklingLookaheadSlots slots (draft rings, lookahead planes; GraphExecutor::inkling_attach_draft
+    // views them).
     [[nodiscard]] bool init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
                                   int want, InklingSlab& slab, const InklingDraftConfig* draft = nullptr,
                                   int vocab = 0);

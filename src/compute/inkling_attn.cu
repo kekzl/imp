@@ -611,12 +611,10 @@ __global__ void attn_reduce_k(AttnArgs a, int S, int CK, bool rows, bool batched
 
 void attention(const AttnArgs& a, cudaStream_t s) {
     if (a.hd > kAttnMaxHd || a.d_rel > 32 ||
-        (a.blocks && (a.ring > 0 || a.kv_block < 16 || a.kv_block % 16 != 0))) {
-        IMP_LOG_ERROR(
+        (a.blocks && (a.ring > 0 || a.kv_block < 16 || a.kv_block % 16 != 0)))
+        throw_runtime_error(
             "inkling attention: head_dim %d, d_rel %d or block table (ring %d, block %d) out of range", a.hd,
             a.d_rel, a.ring, a.kv_block);
-        return;
-    }
     // Few rows (decode, lookahead, paced prefill): the rows and the heads of a KV head share the key loads.
     static const bool rows_smem = cudaFuncSetAttribute(attn_part_rows_k,
                                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
