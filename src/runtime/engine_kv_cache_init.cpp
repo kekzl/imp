@@ -290,6 +290,13 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
     probe.ssm_state_bytes = vb.ssm_footprint_bytes;
     probe.recurrent_snapshot_bytes = recurrent_snapshot_plan_bytes(c, vb.ssm_footprint_bytes,
                                                                    ssm_reserved_slots);
+    // Inkling2-Loop: the cross-slot snapshot store's device slots (Engine::inkling_init_snapshots_).
+    if (const InklingRuntime* rt = executor ? executor->inkling_runtime() : nullptr;
+        rt && !rt->slots.empty() && c.ec.use_prefix_caching && c.rc.server.recurrent_snapshot_mb > 0) {
+        const size_t e = rt->slots[0]->snapshot_bytes(),
+                     budget = static_cast<size_t>(c.rc.server.recurrent_snapshot_mb) << 20;
+        probe.recurrent_snapshot_bytes = e > 0 ? budget / e * e : 0;
+    }
     // Hybrid verify state scratch (#2452): 2 x one sequence's recurrent state, taken at init.
     probe.spec_decode_bytes = spec_decode_bytes;
     probe.mtp_workspace_bytes = mtp_workspace_bytes;

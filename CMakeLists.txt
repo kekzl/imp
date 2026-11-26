@@ -585,6 +585,7 @@ set(IMP_EXEC_SOURCES
     src/exec/inkling_draft_head.cu
     src/exec/inkling_forward.cu
     src/exec/inkling_forward_spec.cu
+    src/exec/inkling_forward_snapshot.cpp
     src/exec/inkling_forward_moe.cu
     src/exec/inkling_forward_attn.cu
     src/exec/executor_gated_residual.cpp
@@ -1447,6 +1448,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_inkling_parity.cu
+        tests/test_inkling_cross_slot.cu
         tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
         tests/test_inkling_attn_paged.cu

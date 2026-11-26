@@ -371,6 +371,41 @@ bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void*
     return true;
 }
 
+bool RecurrentSnapshotStore::save_gather(size_t key, int n_tokens, std::span<const SnapshotPiece> pieces,
+                                         cudaStream_t stream, std::vector<KvChainLink> kv_chain) {
+    if (!enabled() || n_tokens <= 0 || pieces.empty())
+        return false;
+    for (const SnapshotPiece& p : pieces)
+        if (p.src == nullptr || p.off > buf_bytes_ || p.bytes > buf_bytes_ - p.off)
+            return false;
+    if (contains(key))
+        return true;
+    void* buf = acquire_buffer_(stream);
+    const bool on_host = buf == nullptr;
+    if (on_host && host_capacity_ > 0)
+        buf = acquire_host_buffer_();
+    if (!buf) {
+        ++dropped_saves_;
+        return false;
+    }
+    for (const SnapshotPiece& p : pieces)
+        if (cudaMemcpyAsync(static_cast<char*>(buf) + p.off, p.src, p.bytes, cudaMemcpyDefault, stream) !=
+            cudaSuccess) {
+            std::lock_guard<std::mutex> lk(pool_->mu);
+            (on_host ? pool_->free_host_bufs : pool_->free_bufs).push_back(buf);
+            return false;
+        }
+    auto& map = on_host ? host_entries_ : entries_;
+    auto& lru = on_host ? host_lru_ : lru_;
+    auto& lru_map = on_host ? host_lru_map_ : lru_map_;
+    map[key] = make_entry_(key, n_tokens, buf, on_host, std::move(kv_chain));
+    lru.push_back(key);
+    lru_map[key] = std::prev(lru.end());
+    host_direct_saves_ += on_host ? 1 : 0;
+    ++saves_;
+    return true;
+}
+
 void RecurrentSnapshotStore::erase(size_t key) {
     if (auto lit = lru_map_.find(key); lit != lru_map_.end()) {
         lru_.erase(lit->second);
