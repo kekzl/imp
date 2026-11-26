@@ -72,8 +72,9 @@ void GraphExecutor::mla_q_projection_(const TransformerLayer& ly, const Tensor& 
     gemm_via_handle_(ly.wq_id, q_a, qv, ctx);
 }
 
-void GraphExecutor::quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream) {
-    if (paged_attention_take_q8_epilogue())
+void GraphExecutor::quantize_attn_out_q8_(const Tensor& ao, int K, bool epilogue_written,
+                                          cudaStream_t stream) {
+    if (epilogue_written)
         return;
     quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), qscratch_.q8_1_buf.data(),
                           qscratch_.d8_buf.data(), K, stream);

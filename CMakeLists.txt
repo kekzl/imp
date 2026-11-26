@@ -1293,6 +1293,8 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_fallback_fails_loud.cpp
         # B-112: one LM-head route for serving, perplexity, prompt logprobs and the draft argmax head.
         tests/test_lm_head_route.cpp
+        # B-115: the split-K reduce's Q8_1 epilogue is a per-call argument, taken once per call.
+        tests/test_paged_q8_epilogue.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
         tests/test_fmha_sm120_tile_select.cpp

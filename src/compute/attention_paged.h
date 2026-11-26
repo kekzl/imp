@@ -8,6 +8,23 @@
 
 namespace imp {
 
+// Q8_1 epilogue of the split-K reduce (batch 1, head_dim % 32 == 0): the reduce also writes O as
+// Q8_1 blocks (q8, d8), bit-identical to quantize_fp16_to_q8_1(O), and sets `written`. A launcher
+// argument per call (audit D-9): no armed state outlives the call that was handed it.
+struct PagedQ8Epilogue {
+    void* q8 = nullptr;  // block_q8_1 [head_dim * n_heads / 32]
+    float* d8 = nullptr;
+    bool written = false;
+};
+
+// The reduce takes it at most once per call, at batch 1 and head_dim % 32 == 0; marks it written.
+[[nodiscard]] inline bool paged_q8_epilogue_take(PagedQ8Epilogue* e, int batch_size, int head_dim) {
+    if (e == nullptr || e->q8 == nullptr || e->written || batch_size != 1 || head_dim % 32 != 0)
+        return false;
+    e->written = true;
+    return true;
+}
+
 // Paged attention decode (single query/sequence). Q:[batch,1,n_heads,hd]. block_tables:
 // [batch,max_blocks] int32. context_lens:[batch] int32. sliding_window: 0=off, >0=last N KV.
 // n_sinks (StreamingLLM): >0 also attends [0,n_sinks); needs sliding_window>0 and
@@ -20,7 +37,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                             const int* block_tables, const int* context_lens, int block_size, float scale,
                             int max_context_len, int sliding_window = 0, float softcap = 0.0f,
                             cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0,
-                            const void* attn_sinks = nullptr, int v_head_dim = 0);
+                            const void* attn_sinks = nullptr, int v_head_dim = 0,
+                            PagedQ8Epilogue* q8_epi = nullptr);
 
 // Sets the split-K scratch buffer; must be called before paged_attention_decode if split-K is
 // wanted. Size = batch * n_heads * num_splits * (2 + head_dim) * sizeof(float). nullptr disables it.
@@ -175,8 +193,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                 const int* block_tables, const int* context_lens, int block_size, float scale,
                                 float kv_scale, int max_context_len, int sliding_window = 0,
                                 float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                int max_blocks_per_seq = 0, int n_sinks = 0,
-                                const void* attn_sinks = nullptr);
+                                int max_blocks_per_seq = 0, int n_sinks = 0, const void* attn_sinks = nullptr,
+                                PagedQ8Epilogue* q8_epi = nullptr);
 
 // INT8 dp4a paged attention decode, per-head scales. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,block_size,n_kv_heads,hd] INT8. K/V_scales:[...,n_kv_heads] FP16.
@@ -185,7 +203,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
                                  int max_blocks_per_seq = 0, int n_sinks = 0,
-                                 const void* attn_sinks = nullptr);
+                                 const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
 
 // INT4 paged attention decode, packed 2/byte, per-head scales. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,block_size,n_kv_heads,hd/2] packed uint8. K/V_scales FP16.
@@ -194,7 +212,7 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
                                  int max_blocks_per_seq = 0, int n_sinks = 0,
-                                 const void* attn_sinks = nullptr);
+                                 const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
 
 // NVFP4 paged attention decode: packed FP4 (E2M1), per-token-head-group_of_16 UE4M3 scales.
 // Q:[batch,1,n_heads,hd] FP16. K/V_cache:[num_blocks,block_size,n_kv_heads,hd/2] packed uint8.
@@ -204,7 +222,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   const int* context_lens, int block_size, float scale, int max_context_len,
                                   int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
                                   int max_blocks_per_seq = 0, int n_sinks = 0,
-                                  const void* attn_sinks = nullptr);
+                                  const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
 
 // MXFP4-KV paged attention decode: same layout as NVFP4 but scales are UE8M0 instead of E4M3
 // (design memo 3.1.2). Q:[batch,1,n_heads,hd] FP16. K/V_cache packed uint8 [.../hd/2].
@@ -215,7 +233,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      float scale, int max_context_len, int sliding_window = 0,
                                      float softcap = 0.0f, cudaStream_t stream = nullptr,
                                      int max_blocks_per_seq = 0, int n_sinks = 0,
-                                     const void* attn_sinks = nullptr);
+                                     const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
 
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.
@@ -241,16 +259,10 @@ constexpr bool paged_fp8_decode_has_fast_kernel(int head_dim) { return head_dim 
 // the 17 sites are one line each and the message is written once.
 [[noreturn]] void paged_attention_unsupported_head_dim(const char* fn, int head_dim);
 
-// Launch the split-K reduce kernel (shared across FP16/FP8/INT8).
+// Launch the split-K reduce kernel (shared across FP16/FP8/INT8). q8_epi: PagedQ8Epilogue, taken
+// when eligible.
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
-                                   int num_splits, cudaStream_t stream,
-                                   const half* attn_sinks = nullptr);
-
-// One-shot Q8_1 epilogue for the next reduce launch (batch 1, head_dim % 32 == 0): the reduce also
-// writes O as Q8_1 blocks (qs, d) + d8, bit-identical to quantize_fp16_to_q8_1(O). arm=false clears.
-// Process-global like paged_attention_set_splitk_scratch: the decode caller arms and takes per layer.
-void paged_attention_arm_q8_epilogue(bool arm, void* q8_1_out, float* d8_out);
-// True when a reduce launch since the last arm wrote the Q8_1 epilogue; disarms.
-[[nodiscard]] bool paged_attention_take_q8_epilogue();
+                                   int num_splits, cudaStream_t stream, const half* attn_sinks = nullptr,
+                                   PagedQ8Epilogue* q8_epi = nullptr);
 
 }  // namespace imp
