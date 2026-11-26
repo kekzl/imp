@@ -101,7 +101,7 @@ Where gates run:
 |---|---|
 | required (`Build`) | all 26 gates of `scripts/ci_static_gates.sh`, Kernel resources, `ctest -L unit`; the same script runs in preflight on every commit and push |
 | advisory | clang-tidy, Sanitizers (path-filtered), PTX fallback, Mock / Real API contract, Lint, CodeQL, the named gate jobs, Roofline (triggers only on `tools/roofline/**`) |
-| local only | `check-alloc-interpose` (otherwise only `check-release.sh`), `verify`, `verify-fast`, `verify-ab`, `verify-chunked`, `verify-north-star`, `test-gpu`, `test-e2e`, `test-vision`, `test-quantize`, `test-server`, `test-agents`, `test-niah`, `sanitize`, `vram-touch-audit` |
+| local only | `check-alloc-interpose` (otherwise only `check-release.sh`; a row of `verify` and `verify-fast` since 2026-11-26), `verify`, `verify-fast`, `verify-ab`, `verify-chunked`, `verify-north-star`, `test-gpu`, `test-e2e`, `test-vision`, `test-quantize`, `test-server`, `test-agents`, `test-niah`, `sanitize`, `vram-touch-audit` |
 | scheduled | the nightly run (includes Fuzz) 10 of 10 green; 1 of the 8 main failures was a network flake in Real API contract (run 45320504156, curl exit 35) |
 
 Include graph, `rg -c '^\s*#\s*include\s+"<to>/' src/<from>`; `^` = upward edge; rank core < memory <
