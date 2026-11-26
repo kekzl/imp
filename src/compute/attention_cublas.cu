@@ -293,13 +293,29 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     // S = scale * Q x K^T
     for (int g = 0; g < groups; g++) {
         const long long h0 = static_cast<long long>(g) * per_group;
-        IMP_CUBLAS_CHECK_LOG(
-            lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f,
-                                    K_base + (static_cast<ptrdiff_t>(g) * head_dim), CUDA_R_16F, ld_k,
-                                    kv_stride, Q_base + (h0 * head_dim), CUDA_R_16F, ld_q, head_dim, &beta_f,
-                                    static_cast<char*>(S_qk) +
-                                        (h0 * strideS * static_cast<long long>(s_elem)),
-                                    s_type, ld_s, strideS, per_group, CUBLAS_COMPUTE_32F, stream));
+        IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(
+            {.transa = CUBLAS_OP_T,
+             .transb = CUBLAS_OP_N,
+             .m = kv_len,
+             .n = q_len,
+             .k = head_dim,
+             .alpha = &alpha_f,
+             .A = K_base + (static_cast<ptrdiff_t>(g) * head_dim),
+             .a_type = CUDA_R_16F,
+             .lda = ld_k,
+             .stride_a = kv_stride,
+             .B = Q_base + (h0 * head_dim),
+             .b_type = CUDA_R_16F,
+             .ldb = ld_q,
+             .stride_b = head_dim,
+             .beta = &beta_f,
+             .C = static_cast<char*>(S_qk) + (h0 * strideS * static_cast<long long>(s_elem)),
+             .c_type = s_type,
+             .ldc = ld_s,
+             .stride_c = strideS,
+             .batch = per_group,
+             .compute = CUBLAS_COMPUTE_32F,
+             .stream = stream}));
     }
 
     // Softcap (if enabled) on the buffer the softmax reads; Gemma-2 sets softcap=50.
@@ -336,12 +352,28 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     // O = P x V (FP16), P read from S_prob (#677).
     for (int g = 0; g < groups; g++) {
         const long long h0 = static_cast<long long>(g) * per_group;
-        IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len,
-                                                     &one_f, V_base + (static_cast<ptrdiff_t>(g) * head_dim),
-                                                     CUDA_R_16F, ld_k, kv_stride, S_prob + (h0 * strideS),
-                                                     CUDA_R_16F, ld_s, strideS, &zero_f,
-                                                     O_base + (h0 * head_dim), CUDA_R_16F, ld_o, head_dim,
-                                                     per_group, CUBLAS_COMPUTE_32F, stream));
+        IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_N,
+                                                      .transb = CUBLAS_OP_N,
+                                                      .m = head_dim,
+                                                      .n = q_len,
+                                                      .k = kv_len,
+                                                      .alpha = &one_f,
+                                                      .A = V_base + (static_cast<ptrdiff_t>(g) * head_dim),
+                                                      .a_type = CUDA_R_16F,
+                                                      .lda = ld_k,
+                                                      .stride_a = kv_stride,
+                                                      .B = S_prob + (h0 * strideS),
+                                                      .b_type = CUDA_R_16F,
+                                                      .ldb = ld_s,
+                                                      .stride_b = strideS,
+                                                      .beta = &zero_f,
+                                                      .C = O_base + (h0 * head_dim),
+                                                      .c_type = CUDA_R_16F,
+                                                      .ldc = ld_o,
+                                                      .stride_c = head_dim,
+                                                      .batch = per_group,
+                                                      .compute = CUBLAS_COMPUTE_32F,
+                                                      .stream = stream}));
     }
 }
 

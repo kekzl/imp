@@ -29,13 +29,24 @@ static void vision_gemm(const half* A, const half* B, half* C, int M, int N, int
 
     // cuBLAS uses column-major, so we compute C^T = B @ A^T
     // C^T [N, M] = B [N, K] @ A^T [K, M]
-    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T,                 // A^T
-                                    CUBLAS_OP_N,                 // B
-                                    N, M, K,                     // m, n, k in col-major terms
-                                    &f_alpha, B, CUDA_R_16F, K,  // B [N, K] col-major stride = K
-                                    A, CUDA_R_16F, K,            // A [M, K] col-major stride = K
-                                    &f_beta, C, CUDA_R_16F, N,   // C [M, N] col-major stride = N
-                                    CUBLAS_COMPUTE_32F, stream));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex({.transa = CUBLAS_OP_T,  // A^T
+                                     .transb = CUBLAS_OP_N,  // B
+                                     .m = N,                 // m, n, k in col-major terms
+                                     .n = M,
+                                     .k = K,
+                                     .alpha = &f_alpha,
+                                     .A = B,  // B [N, K] col-major stride = K
+                                     .a_type = CUDA_R_16F,
+                                     .lda = K,
+                                     .B = A,  // A [M, K] col-major stride = K
+                                     .b_type = CUDA_R_16F,
+                                     .ldb = K,
+                                     .beta = &f_beta,
+                                     .C = C,  // C [M, N] col-major stride = N
+                                     .c_type = CUDA_R_16F,
+                                     .ldc = N,
+                                     .compute = CUBLAS_COMPUTE_32F,
+                                     .stream = stream}));
 }
 
 // ======================================================================
@@ -598,17 +609,28 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
             // In col-major for cuBLAS: computing S^T[np, np] = K @ Q^T
             // where Q, K have leading dim nh*hd and batch stride hd
-            IMP_CUBLAS_CHECK_LOG(
-                lt_gemm_strided_batched(CUBLAS_OP_T,                                       // K^T
-                                        CUBLAS_OP_N,                                       // Q
-                                        np, np, head_dim,                                  // m, n, k
-                                        &h_alpha, d_k_.data(), CUDA_R_16F, nh * head_dim,  // lda for K
-                                        head_dim,  // batch stride for K (next head)
-                                        d_q_.data(), CUDA_R_16F, nh * head_dim,          // ldb for Q
-                                        head_dim,                                        // batch stride for Q
-                                        &h_beta, d_attn_scores_.data(), CUDA_R_16F, np,  // ldc for scores
-                                        static_cast<long long>(np) * np,  // batch stride for scores
-                                        nh, CUBLAS_COMPUTE_16F, stream));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_T,  // K^T
+                                                          .transb = CUBLAS_OP_N,  // Q
+                                                          .m = np,
+                                                          .n = np,
+                                                          .k = head_dim,
+                                                          .alpha = &h_alpha,
+                                                          .A = d_k_.data(),
+                                                          .a_type = CUDA_R_16F,
+                                                          .lda = nh * head_dim,
+                                                          .stride_a = head_dim,  // next head
+                                                          .B = d_q_.data(),
+                                                          .b_type = CUDA_R_16F,
+                                                          .ldb = nh * head_dim,
+                                                          .stride_b = head_dim,
+                                                          .beta = &h_beta,
+                                                          .C = d_attn_scores_.data(),
+                                                          .c_type = CUDA_R_16F,
+                                                          .ldc = np,
+                                                          .stride_c = static_cast<long long>(np) * np,
+                                                          .batch = nh,
+                                                          .compute = CUBLAS_COMPUTE_16F,
+                                                          .stream = stream}));
         }
 
         // Non-causal softmax
@@ -627,18 +649,29 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
             // out_h[i, d] = d_attn_out_[i * nh*hd + h*hd + d]
 
             // Col-major: out^T[hd, np] = V^T[hd, np] @ scores^T[np, np]
-            IMP_CUBLAS_CHECK_LOG(
-                lt_gemm_strided_batched(CUBLAS_OP_N,       // V^T is what we want, but V stored row-major...
-                                        CUBLAS_OP_N,       // scores
-                                        head_dim, np, np,  // m, n, k
-                                        &h_one, d_v_.data(), CUDA_R_16F, nh * head_dim,  // V: lda = nh*hd
-                                        head_dim,                                        // batch stride
-                                        d_attn_scores_.data(), CUDA_R_16F, np,           // scores: lda = np
-                                        static_cast<long long>(np) * np,                 // batch stride
-                                        &h_zero, d_attn_out_.data(), CUDA_R_16F,
-                                        nh * head_dim,  // out: lda = nh*hd
-                                        head_dim,       // batch stride
-                                        nh, CUBLAS_COMPUTE_16F, stream));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(
+                {.transa = CUBLAS_OP_N,  // V^T is what we want, but V stored row-major...
+                 .transb = CUBLAS_OP_N,  // scores
+                 .m = head_dim,
+                 .n = np,
+                 .k = np,
+                 .alpha = &h_one,
+                 .A = d_v_.data(),
+                 .a_type = CUDA_R_16F,
+                 .lda = nh * head_dim,
+                 .stride_a = head_dim,
+                 .B = d_attn_scores_.data(),
+                 .b_type = CUDA_R_16F,
+                 .ldb = np,
+                 .stride_b = static_cast<long long>(np) * np,
+                 .beta = &h_zero,
+                 .C = d_attn_out_.data(),
+                 .c_type = CUDA_R_16F,
+                 .ldc = nh * head_dim,
+                 .stride_c = head_dim,
+                 .batch = nh,
+                 .compute = CUBLAS_COMPUTE_16F,
+                 .stream = stream}));
         }
 
         // Output projection: attn_out @ wo^T + bo
@@ -840,21 +873,56 @@ bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cu
         {
             float f_alpha = 1.0f;  // kq_scale = 1.0; FP32 accumulate to avoid FP16 overflow
             float f_beta = 0.0f;
-            IMP_CUBLAS_CHECK_LOG(
-                lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, np, np, head_dim, &f_alpha, d_k_.data(),
-                                        CUDA_R_16F, nh * head_dim, head_dim, d_q_.data(), CUDA_R_16F,
-                                        nh * head_dim, head_dim, &f_beta, d_attn_scores_.data(), CUDA_R_16F,
-                                        np, static_cast<long long>(np) * np, nh, CUBLAS_COMPUTE_32F, stream));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_T,
+                                                          .transb = CUBLAS_OP_N,
+                                                          .m = np,
+                                                          .n = np,
+                                                          .k = head_dim,
+                                                          .alpha = &f_alpha,
+                                                          .A = d_k_.data(),
+                                                          .a_type = CUDA_R_16F,
+                                                          .lda = nh * head_dim,
+                                                          .stride_a = head_dim,
+                                                          .B = d_q_.data(),
+                                                          .b_type = CUDA_R_16F,
+                                                          .ldb = nh * head_dim,
+                                                          .stride_b = head_dim,
+                                                          .beta = &f_beta,
+                                                          .C = d_attn_scores_.data(),
+                                                          .c_type = CUDA_R_16F,
+                                                          .ldc = np,
+                                                          .stride_c = static_cast<long long>(np) * np,
+                                                          .batch = nh,
+                                                          .compute = CUBLAS_COMPUTE_32F,
+                                                          .stream = stream}));
         }
         softmax_2d_kernel<<<nh * np, 256, 0, stream>>>(d_attn_scores_.data(), np);
         IMP_CUDA_CHECK_LAUNCH();
         {
             float f_one = 1.0f;
             float f_zero = 0.0f;
-            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(
-                CUBLAS_OP_N, CUBLAS_OP_N, head_dim, np, np, &f_one, d_v_.data(), CUDA_R_16F, nh * head_dim,
-                head_dim, d_attn_scores_.data(), CUDA_R_16F, np, static_cast<long long>(np) * np, &f_zero,
-                d_attn_out_.data(), CUDA_R_16F, nh * head_dim, head_dim, nh, CUBLAS_COMPUTE_32F, stream));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_N,
+                                                          .transb = CUBLAS_OP_N,
+                                                          .m = head_dim,
+                                                          .n = np,
+                                                          .k = np,
+                                                          .alpha = &f_one,
+                                                          .A = d_v_.data(),
+                                                          .a_type = CUDA_R_16F,
+                                                          .lda = nh * head_dim,
+                                                          .stride_a = head_dim,
+                                                          .B = d_attn_scores_.data(),
+                                                          .b_type = CUDA_R_16F,
+                                                          .ldb = np,
+                                                          .stride_b = static_cast<long long>(np) * np,
+                                                          .beta = &f_zero,
+                                                          .C = d_attn_out_.data(),
+                                                          .c_type = CUDA_R_16F,
+                                                          .ldc = nh * head_dim,
+                                                          .stride_c = head_dim,
+                                                          .batch = nh,
+                                                          .compute = CUBLAS_COMPUTE_32F,
+                                                          .stream = stream}));
         }
 
         // output projection (no bias) → d_residual_

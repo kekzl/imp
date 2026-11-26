@@ -27,8 +27,24 @@ void gemm_nt(const half* A, const half* B, half* C, int M, int N, int K, float a
              cudaStream_t stream) {
     // FP32 accumulation: the FFN down-projection sums 4096 terms, and FP16
     // accumulation overflows there for high-magnitude tokens.
-    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, B, CUDA_R_16F, K, A,
-                                    CUDA_R_16F, K, &beta, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F, stream));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                     .transb = CUBLAS_OP_N,
+                                     .m = N,
+                                     .n = M,
+                                     .k = K,
+                                     .alpha = &alpha,
+                                     .A = B,
+                                     .a_type = CUDA_R_16F,
+                                     .lda = K,
+                                     .B = A,
+                                     .b_type = CUDA_R_16F,
+                                     .ldb = K,
+                                     .beta = &beta,
+                                     .C = C,
+                                     .c_type = CUDA_R_16F,
+                                     .ldc = N,
+                                     .compute = CUBLAS_COMPUTE_32F,
+                                     .stream = stream}));
 }
 
 }  // namespace
@@ -155,11 +171,28 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
         const int rows = std::min(kAttnChunk, tokens - c0);
 
         // scores[h] = Q[h][c0 : c0+rows] @ K[h]^T * scale   -> [rows, tokens]
-        cublasStatus_t st = lt_gemm_strided_batched(
-            CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_.data(), CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, d_q_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F,
-            hd, static_cast<long long>(tokens) * hd, &zero, d_scores_.data(), CUDA_R_16F, tokens,
-            static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, stream);
+        cublasStatus_t st = lt_gemm_strided_batched({.transa = CUBLAS_OP_T,
+                                                     .transb = CUBLAS_OP_N,
+                                                     .m = tokens,
+                                                     .n = rows,
+                                                     .k = hd,
+                                                     .alpha = &scale,
+                                                     .A = d_k_.data(),
+                                                     .a_type = CUDA_R_16F,
+                                                     .lda = hd,
+                                                     .stride_a = static_cast<long long>(tokens) * hd,
+                                                     .B = d_q_.data() + (static_cast<int64_t>(c0) * hd),
+                                                     .b_type = CUDA_R_16F,
+                                                     .ldb = hd,
+                                                     .stride_b = static_cast<long long>(tokens) * hd,
+                                                     .beta = &zero,
+                                                     .C = d_scores_.data(),
+                                                     .c_type = CUDA_R_16F,
+                                                     .ldc = tokens,
+                                                     .stride_c = static_cast<long long>(rows) * tokens,
+                                                     .batch = heads,
+                                                     .compute = CUBLAS_COMPUTE_32F,
+                                                     .stream = stream});
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: QK^T failed (%d)", static_cast<int>(st));
             return false;
@@ -170,11 +203,28 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
 
         // out[h][c0 : c0+rows] = scores[h] @ V[h]   -> [rows, head_dim]
         const float one = 1.0f;
-        st = lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_.data(),
-                                     CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_.data(),
-                                     CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
-                                     d_attn_.data() + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
-                                     static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F, stream);
+        st = lt_gemm_strided_batched({.transa = CUBLAS_OP_N,
+                                      .transb = CUBLAS_OP_N,
+                                      .m = hd,
+                                      .n = rows,
+                                      .k = tokens,
+                                      .alpha = &one,
+                                      .A = d_v_.data(),
+                                      .a_type = CUDA_R_16F,
+                                      .lda = hd,
+                                      .stride_a = static_cast<long long>(tokens) * hd,
+                                      .B = d_scores_.data(),
+                                      .b_type = CUDA_R_16F,
+                                      .ldb = tokens,
+                                      .stride_b = static_cast<long long>(rows) * tokens,
+                                      .beta = &zero,
+                                      .C = d_attn_.data() + (static_cast<int64_t>(c0) * hd),
+                                      .c_type = CUDA_R_16F,
+                                      .ldc = hd,
+                                      .stride_c = static_cast<long long>(tokens) * hd,
+                                      .batch = heads,
+                                      .compute = CUBLAS_COMPUTE_32F,
+                                      .stream = stream});
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_ERROR("Qwen3-VL encoder: attn@V failed (%d)", static_cast<int>(st));
             return false;
