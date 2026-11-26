@@ -28,14 +28,17 @@ bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is
         return false;
     *layer = parse_index(key.substr(num_start, num_end - num_start));
 
+    // HF names, then Inkling2-Loop's model.llm.layers.{i}.attn.{wq_du, wk_dv, wv_dv, wo_ud}.
     struct {
         const char* needle;
         LoraProj p;
     } kMap[] = {
-        {".self_attn.q_proj.", LoraProj::Q},   {".self_attn.k_proj.", LoraProj::K},
-        {".self_attn.v_proj.", LoraProj::V},   {".self_attn.o_proj.", LoraProj::O},
-        {".mlp.gate_proj.", LoraProj::GATE},   {".mlp.up_proj.", LoraProj::UP},
-        {".mlp.down_proj.", LoraProj::DOWN},
+        {".self_attn.q_proj.", LoraProj::Q}, {".self_attn.k_proj.", LoraProj::K},
+        {".self_attn.v_proj.", LoraProj::V}, {".self_attn.o_proj.", LoraProj::O},
+        {".mlp.gate_proj.", LoraProj::GATE}, {".mlp.up_proj.", LoraProj::UP},
+        {".mlp.down_proj.", LoraProj::DOWN}, {".attn.wq_du.", LoraProj::Q},
+        {".attn.wk_dv.", LoraProj::K},       {".attn.wv_dv.", LoraProj::V},
+        {".attn.wo_ud.", LoraProj::O},
     };
     bool found = false;
     for (const auto& m : kMap) {
@@ -57,6 +60,19 @@ bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is
         return true;
     }
     return false;
+}
+
+std::string lora_key_refusal(const std::string& key, const LoraTargets& t) {
+    if (!t.strict || !key.contains("lora"))
+        return {};
+    int layer = -1;
+    LoraProj proj{};
+    bool is_A = false;
+    if (!lora_parse_key(key, &layer, &proj, &is_A))
+        return "tensor '" + key + "' adapts a module this forward does not (q/k/v/o only)";
+    if ((t.mask & lora_proj_bit(proj)) == 0)
+        return "tensor '" + key + "' adapts a projection this forward does not (q/k/v/o only)";
+    return {};
 }
 
 namespace {
@@ -134,23 +150,11 @@ bool LoraAdapter::check_dims(const LoraDims& d, std::string* why) const {
     return true;
 }
 
-bool LoraAdapter::load(const std::string& path, int n_layers) {
-    namespace fs = std::filesystem;
-    std::string st_path = path;
-    std::string cfg_path;
-    if (fs::is_directory(path)) {
-        st_path = path + "/adapter_model.safetensors";
-        cfg_path = path + "/adapter_config.json";
-    }
-    if (!fs::exists(st_path)) {
-        IMP_LOG_ERROR("LoRA: %s not found", st_path.c_str());
-        return false;
-    }
+namespace {
 
-    // ---- adapter_config.json: r, lora_alpha, use_rslora ----
-    int cfg_r = 0;
-    float alpha = 0.0f;
-    bool rslora = false;
+// adapter_config.json: r, lora_alpha, use_rslora; a missing file or key leaves the default.
+void read_adapter_config(const std::string& cfg_path, int& cfg_r, float& alpha, bool& rslora) {
+    namespace fs = std::filesystem;
     if (!cfg_path.empty() && fs::exists(cfg_path)) {
         std::ifstream f(cfg_path);
         std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -167,6 +171,34 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
             }
         }
     }
+}
+
+std::string first_key_refusal(const JValue& header, const LoraTargets& t) {
+    for (const auto& [key, tv] : header.obj)
+        if (std::string why = lora_key_refusal(key, t); !why.empty())
+            return why;
+    return {};
+}
+
+}  // namespace
+
+bool LoraAdapter::load(const std::string& path, int n_layers) {
+    namespace fs = std::filesystem;
+    std::string st_path = path;
+    std::string cfg_path;
+    if (fs::is_directory(path)) {
+        st_path = path + "/adapter_model.safetensors";
+        cfg_path = path + "/adapter_config.json";
+    }
+    if (!fs::exists(st_path)) {
+        IMP_LOG_ERROR("LoRA: %s not found", st_path.c_str());
+        return false;
+    }
+
+    int cfg_r = 0;
+    float alpha = 0.0f;
+    bool rslora = false;
+    read_adapter_config(cfg_path, cfg_r, alpha, rslora);
 
     // ---- adapter_model.safetensors ----
     std::ifstream f(st_path, std::ios::binary);
@@ -195,6 +227,11 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
         return false;
     }
 
+    // Before any upload: a strict forward refuses the whole adapter, not the tensors it would skip.
+    if (const std::string why = first_key_refusal(root, targets_); !why.empty()) {
+        IMP_LOG_ERROR("LoRA: %s refused: %s", st_path.c_str(), why.c_str());
+        return false;
+    }
     layers_.assign(static_cast<size_t>(n_layers), {});
 
     for (auto& [key, tv] : root.obj) {

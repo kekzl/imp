@@ -6,6 +6,7 @@
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
 #include "exec/inkling_kv_layout.h"
+#include "exec/inkling_registry.h"
 #include "exec/inkling_slab_layout.h"
 #include "exec/inkling_slot_table.h"
 #include "memory/host_pinned.h"
@@ -39,6 +40,13 @@ struct InklingSpecHooks {
     // empty.
     std::function<bool(int pos, size_t off, std::vector<SnapshotPiece>& out, cudaStream_t s)> save;
     std::function<bool(int pos, const std::byte* entry, size_t off, cudaStream_t s)> load;
+};
+
+// The active LoRA adapter on q / k / v / o (B-111 S5): t = fp32 rank scratch [rows][max_rank] of the q, k
+// and v streams (o reuses t[0]). a == null: no delta kernel runs.
+struct InklingLora {
+    const LoraAdapter* a = nullptr;
+    float* t[3] = {};
 };
 
 class InklingForward {
@@ -149,6 +157,9 @@ public:
     // Calls of up to 8 rows read the dense projections as I8B32 from d (set before the first run();
     // null = fp16). d must outlive this forward.
     void set_dense8(const InklingDense8* d) { dense8_ = d; }
+    // Deltas of l's adapter on every application's q / k / v / o (null = none); l must outlive this
+    // forward, a change of its adapter needs a graph epoch bump (captured steps bake the kernels).
+    void set_lora(const InklingLora* l) { lora_ = l; }
     // Tests: off = many-row calls run the experts slot by slot.
     void set_grouped_experts(bool on) { grouped_ = on; }
     // Tests: off = many-row calls run the row attention kernel.
@@ -175,6 +186,10 @@ private:
     [[nodiscard]] bool moe_small_(const InklingLayer& ly, int T, cudaStream_t s);
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     [[nodiscard]] bool own_projections_(const InklingLayer& ly, int T) const;
+    // y[T][ldy] (first N columns) += the adapter's delta of projection p of layer over x [T][ldx], on s
+    // with rank scratch t[plane]; nothing without an adapter or a pair for (layer, p).
+    void delta_(int layer, LoraProj p, int plane, const half* x, int ldx, half* y, int ldy, int T,
+                cudaStream_t s);
     void* alloc_(size_t bytes);
     // inkling_forward_attn.cu: the block table and, own_kv, the full-attention K/V behind it; the
     // attention of application app over the q, rel, sink, gate rows in proj_h_ (q_stride halves apart).
@@ -214,6 +229,7 @@ private:
 
     const InklingWeights* w_ = nullptr;
     const InklingDense8* dense8_ = nullptr;
+    const InklingLora* lora_ = nullptr;
     VRAMAllocator* va_ = nullptr;
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
@@ -319,6 +335,10 @@ struct InklingRuntime {
     // I8B32 dense projections of the decode steps (before the slots that point at them); null when
     // the card has no room.
     std::unique_ptr<InklingDense8> dense8;
+    // The active LoRA adapter every slot reads (GraphExecutor::set_lora wires it), and the handles of
+    // w's projections in the executor's WeightRegistry (register_inkling_weights, one per layer).
+    InklingLora lora;
+    std::vector<InklingProjIds> proj_ids;
     std::vector<std::unique_ptr<InklingForward>> slots;
     // Request id -> slot, the key of every row (InferenceState::h_seq_ids, prefill_req_id).
     InklingSlotTable table;
