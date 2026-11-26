@@ -242,10 +242,9 @@ __global__ void mtp_mrope_kernel(
 // Host wrapper: apply YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim] and
 // K[n_kv_heads,head_dim] in place. Text-only, so the 3 mrope components collapse to `pos`.
 // Shared by the draft step and the rope-parity unit test (#897).
-void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
-                     float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
-                     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                     cudaStream_t stream, int n_rows, const int* d_row_pos) {
+void mtp_apply_mrope(const MtpMropeArgs& a) {
+    const auto& [d_q, n_heads, d_k, n_kv_heads, head_dim, rope_dim, theta, sec0, sec1, sec2, pos, inv_scaling,
+                 ext_factor, attn_factor, corr_dim_0, corr_dim_1, stream, n_rows, d_row_pos] = a;
     if (rope_dim <= 0 || sec0 + sec1 + sec2 != rope_dim / 2 || n_rows <= 0) return;
     const int kBlock = 128;
     if (n_heads > 0 && d_q) {
@@ -813,10 +812,23 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
             // RoPE-scaling params mirrored from the main forward (issue #897):
             // inv_scaling = 1/freq_scale; ext_factor>0 → YaRN. Defaults leave
             // the base (unscaled) rope unchanged. Text-only → single position.
-            mtp_apply_mrope(ws.d_q_attn, nh, ws.d_k_proj, nkv, hdh, ws.rope_dim, ws.rope_theta,
-                            ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2, ws.mtp_pos,
-                            1.0f / ws.rope_freq_scale, ws.yarn_ext_factor, ws.yarn_attn_factor,
-                            ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream);
+            mtp_apply_mrope({.d_q = ws.d_q_attn,
+                             .n_heads = nh,
+                             .d_k = ws.d_k_proj,
+                             .n_kv_heads = nkv,
+                             .head_dim = hdh,
+                             .rope_dim = ws.rope_dim,
+                             .theta = ws.rope_theta,
+                             .sec0 = ws.mrope_sec0,
+                             .sec1 = ws.mrope_sec1,
+                             .sec2 = ws.mrope_sec2,
+                             .pos = ws.mtp_pos,
+                             .inv_scaling = 1.0f / ws.rope_freq_scale,
+                             .ext_factor = ws.yarn_ext_factor,
+                             .attn_factor = ws.yarn_attn_factor,
+                             .corr_dim_0 = ws.yarn_corr_dim_0,
+                             .corr_dim_1 = ws.yarn_corr_dim_1,
+                             .stream = stream});
         }
         const int pos = ws.mtp_pos;
         // 5.A.4.a — append k_step, v_step into cache at pos
@@ -1504,14 +1516,44 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
             imp::rmsnorm(k_v, mtp.k_norm, k_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
         }
         if (mtp.attn_rope && ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
-            mtp_apply_mrope(nullptr, nh, ws.d_b_k, nkv, hdh, ws.rope_dim, ws.rope_theta, ws.mrope_sec0,
-                            ws.mrope_sec1, ws.mrope_sec2, rope_pos, 1.0f / ws.rope_freq_scale,
-                            ws.yarn_ext_factor, ws.yarn_attn_factor, ws.yarn_corr_dim_0, ws.yarn_corr_dim_1,
-                            stream, n, d_rope_pos);
-            mtp_apply_mrope(ws.d_b_q_attn, nh, nullptr, nkv, hdh, ws.rope_dim, ws.rope_theta, ws.mrope_sec0,
-                            ws.mrope_sec1, ws.mrope_sec2, rope_pos + off, 1.0f / ws.rope_freq_scale,
-                            ws.yarn_ext_factor, ws.yarn_attn_factor, ws.yarn_corr_dim_0, ws.yarn_corr_dim_1,
-                            stream, m, d_rope_pos != nullptr ? d_rope_pos + off : nullptr);
+            mtp_apply_mrope({.d_q = nullptr,
+                             .n_heads = nh,
+                             .d_k = ws.d_b_k,
+                             .n_kv_heads = nkv,
+                             .head_dim = hdh,
+                             .rope_dim = ws.rope_dim,
+                             .theta = ws.rope_theta,
+                             .sec0 = ws.mrope_sec0,
+                             .sec1 = ws.mrope_sec1,
+                             .sec2 = ws.mrope_sec2,
+                             .pos = rope_pos,
+                             .inv_scaling = 1.0f / ws.rope_freq_scale,
+                             .ext_factor = ws.yarn_ext_factor,
+                             .attn_factor = ws.yarn_attn_factor,
+                             .corr_dim_0 = ws.yarn_corr_dim_0,
+                             .corr_dim_1 = ws.yarn_corr_dim_1,
+                             .stream = stream,
+                             .n_rows = n,
+                             .d_row_pos = d_rope_pos});
+            mtp_apply_mrope({.d_q = ws.d_b_q_attn,
+                             .n_heads = nh,
+                             .d_k = nullptr,
+                             .n_kv_heads = nkv,
+                             .head_dim = hdh,
+                             .rope_dim = ws.rope_dim,
+                             .theta = ws.rope_theta,
+                             .sec0 = ws.mrope_sec0,
+                             .sec1 = ws.mrope_sec1,
+                             .sec2 = ws.mrope_sec2,
+                             .pos = rope_pos + off,
+                             .inv_scaling = 1.0f / ws.rope_freq_scale,
+                             .ext_factor = ws.yarn_ext_factor,
+                             .attn_factor = ws.yarn_attn_factor,
+                             .corr_dim_0 = ws.yarn_corr_dim_0,
+                             .corr_dim_1 = ws.yarn_corr_dim_1,
+                             .stream = stream,
+                             .n_rows = m,
+                             .d_row_pos = d_rope_pos != nullptr ? d_rope_pos + off : nullptr});
         }
         kv_attn();
         if (mtp.attn_output_gate) {

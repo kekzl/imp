@@ -242,9 +242,22 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             int64_t y_shape[1] = {static_cast<int64_t>(inner)};
             Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
 
-            ssm_scan_decode(x_t, B_t, C_t, dt_t, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_t,
-                            static_cast<const half*>(z_buf.data), n_heads, head_dim_ssm, ssize, n_groups,
-                            h_dtype, stream);
+            ssm_scan_decode({.x = &x_t,
+                             .B = &B_t,
+                             .C = &C_t,
+                             .dt = &dt_t,
+                             .A_log = &ly.ssm_a,
+                             .D = &ly.ssm_d,
+                             .dt_bias = &ly.ssm_dt_b,
+                             .h_state = h_st,
+                             .y = &y_t,
+                             .z = static_cast<const half*>(z_buf.data),
+                             .n_heads = n_heads,
+                             .head_dim_ssm = head_dim_ssm,
+                             .state_size = ssize,
+                             .n_groups = n_groups,
+                             .h_dtype = h_dtype,
+                             .stream = stream});
         } else {
             // Prefill: the scan takes contiguous planes, x in ssm_y_buf_ (overwritten by the
             // scan output), B then C in ssm_xBC_buf_ (conv1d is done with it). The fused front
@@ -270,11 +283,25 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
 
             if (batched_dec)
-                ssm_scan_decode_batched(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b,
-                                        state.ssm_state->h_state(0, ssm_idx), state.ssm_seq_slots,
-                                        state.ssm_state->slot_stride_bytes(), y_all,
-                                        static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
-                                        n_groups, h_dtype, stream);
+                ssm_scan_decode_batched({.x = &x_all,
+                                         .B = &B_all,
+                                         .C = &C_all,
+                                         .dt = &dt_all,
+                                         .A_log = &ly.ssm_a,
+                                         .D = &ly.ssm_d,
+                                         .dt_bias = &ly.ssm_dt_b,
+                                         .h_state_pool = state.ssm_state->h_state(0, ssm_idx),
+                                         .seq_slots = state.ssm_seq_slots,
+                                         .h_slot_stride_bytes = state.ssm_state->slot_stride_bytes(),
+                                         .y = &y_all,
+                                         .z = static_cast<const half*>(z_buf.data),
+                                         .n_seq = n,
+                                         .n_heads = n_heads,
+                                         .head_dim_ssm = head_dim_ssm,
+                                         .state_size = ssize,
+                                         .n_groups = n_groups,
+                                         .h_dtype = h_dtype,
+                                         .stream = stream});
             else
                 ssm_scan_prefill({.x = &x_all,
                                   .B = &B_all,
@@ -448,12 +475,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // by group: a partial accept folds them (ssm_conv_tap_fold).
             const bool per_group = state.ssm_out_slots != nullptr && state.ssm_snap_slots != nullptr;
             ssm_conv1d_prefill_f32_silu_grouped(
-                state.ssm_state->conv_state(0, ssm_idx), state.ssm_seq_slots,
-                static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)), state.ssm_n_seq,
-                xBC_g, ly.ssm_conv1d_w, ly.ssm_conv1d_b, conv_f32, conv_kernel, stream, state.d_chunk_len,
-                (conv_prev && !per_group) ? conv_snap : nullptr,
-                (conv_prev || per_group) ? state.d_snap_n : nullptr, per_group ? nullptr : conv_prev,
-                state.ssm_out_slots, per_group ? state.ssm_snap_slots : nullptr);
+                {.conv_state_pool = state.ssm_state->conv_state(0, ssm_idx),
+                 .seq_slots = state.ssm_seq_slots,
+                 .slot_stride = static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
+                 .n_seq = state.ssm_n_seq,
+                 .x_in = &xBC_g,
+                 .weight = &ly.ssm_conv1d_w,
+                 .bias = &ly.ssm_conv1d_b,
+                 .x_out_f32 = conv_f32,
+                 .conv_kernel = conv_kernel,
+                 .stream = stream,
+                 .d_real_n = state.d_chunk_len,
+                 .conv_snap = (conv_prev && !per_group) ? conv_snap : nullptr,
+                 .d_snap_n = (conv_prev || per_group) ? state.d_snap_n : nullptr,
+                 .conv_prev = per_group ? nullptr : conv_prev,
+                 .out_slots = state.ssm_out_slots,
+                 .snap_slots = per_group ? state.ssm_snap_slots : nullptr});
             void* const tap_out = state.ssm_tap_out == nullptr
                                       ? nullptr
                                       : static_cast<char*>(state.ssm_tap_out) +

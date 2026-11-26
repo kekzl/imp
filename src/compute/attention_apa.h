@@ -19,11 +19,30 @@ namespace imp {
 // (block_size slots of [nkv][hd]), keys [tail, kv_len) from k_tail / v_tail [kv_len - tail, nkv*hd]; tiles of
 // earlier chunks come from layer kv_layer's cache when owner (request id, >= 0) quantized them; owner -1
 // runs uncached, another owner restarts the cache.
-[[nodiscard]] bool attention_apa_prefill_paged(const Tensor& q, const half* k_pool, const half* v_pool,
-                                               const int* block_table, int block_size, const Tensor& k_tail,
-                                               const Tensor& v_tail, int tail, Tensor& o, int n, int kv_len,
-                                               int nh, int nkv, int hd, float scale, int q_offset, float eps,
-                                               int kv_layer, int owner, cudaStream_t stream);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, all required (owner -1 = uncached).
+struct AttnApaPagedArgs {
+    const Tensor* q = nullptr;
+    const half* k_pool = nullptr;
+    const half* v_pool = nullptr;
+    const int* block_table = nullptr;
+    int block_size = 0;
+    const Tensor* k_tail = nullptr;
+    const Tensor* v_tail = nullptr;
+    int tail = 0;
+    Tensor* o = nullptr;
+    int n = 0;
+    int kv_len = 0;
+    int nh = 0;
+    int nkv = 0;
+    int hd = 0;
+    float scale = 0.0f;
+    int q_offset = 0;
+    float eps = 0.0f;
+    int kv_layer = 0;
+    int owner = -1;
+    cudaStream_t stream = nullptr;
+};
+[[nodiscard]] bool attention_apa_prefill_paged(const AttnApaPagedArgs& a);
 
 // Planned T2 demand (ExecT2Demand::apa_scratch), set at engine init: the first call takes this many bytes
 // once, larger needs decline. 0 = unplanned (take what the call needs, grow on demand).

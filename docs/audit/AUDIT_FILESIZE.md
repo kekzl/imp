@@ -444,3 +444,14 @@ The 2026-06-24 split row `gdn.cu` -> `gdn_scan` + `gdn_scan_tc` now ends in one 
 | `src/compute/gdn_scan_tc.cu` | 660 | deleted | none |
 | `src/compute/gdn_scan.cu` | 498 | 243 | none |
 | `tests/test_gdn.cu` | 1696 | 1374 | 1399 -> 1133 (`--update`) |
+
+## 2026-11-27: B-133 slice 6 call sites (D-11)
+
+Seven launchers take one args struct; clang-format breaks a wrapped designated list one field per line.
+
+| file | raw LOC before | raw LOC after | `[allow]` pin (code LOC) |
+|---|---:|---:|---|
+| `src/exec/executor_ssm_gdn.cu` | 848 | 885 | new, 630 (was 593, kernel hard line 600) |
+| `tests/test_gdn_batched.cu` | 937 | 962 | new, 813 (was 788, TU hard line 800) |
+| `src/compute/mtp_forward.cu` | 1720 | 1762 | 1393 -> 1435 |
+| `tests/test_sparse_attn_select.cu` | 982 | 998 | 844 -> 860 |

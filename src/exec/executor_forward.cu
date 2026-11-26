@@ -643,11 +643,24 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             (k_sc != nullptr && n_kv > 1)
                 ? static_cast<char*>(kvc->k_scale_ptr(1, 0)) - static_cast<char*>(k_sc)
                 : 0;
-        sparse_update_key_minmax_all_layers(kvc->qtype(), kvc->k_ptr(0, 0), k_stride, k_sc, sc_stride,
-                                            kvc->key_minmax_ptr(0, 0), mm_stride, state.positions,
-                                            state.block_tables, state.seq_offsets, n_kv, kvc->n_kv_heads(),
-                                            kvc->head_dim(), kvc->block_size(), state.n_tokens,
-                                            state.max_blocks_per_seq, state.n_sequences, stream);
+        sparse_update_key_minmax_all_layers({.cache_dtype = kvc->qtype(),
+                                             .k_base = kvc->k_ptr(0, 0),
+                                             .k_layer_stride_bytes = k_stride,
+                                             .k_scale_base = k_sc,
+                                             .sc_layer_stride_bytes = sc_stride,
+                                             .minmax_base = kvc->key_minmax_ptr(0, 0),
+                                             .mm_layer_stride_bytes = mm_stride,
+                                             .positions = state.positions,
+                                             .block_tables = state.block_tables,
+                                             .seq_offsets = state.seq_offsets,
+                                             .n_layers = n_kv,
+                                             .n_kv_heads = kvc->n_kv_heads(),
+                                             .head_dim = kvc->head_dim(),
+                                             .block_size = kvc->block_size(),
+                                             .n_tokens = state.n_tokens,
+                                             .max_blocks_per_seq = state.max_blocks_per_seq,
+                                             .n_sequences = state.n_sequences,
+                                             .stream = stream});
     }
 
     join_expert_prefetch_(stream);  // a skipped or exited layer left its prefetch unconsumed

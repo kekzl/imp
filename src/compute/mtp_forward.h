@@ -341,16 +341,34 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot);
 // dst[r] = src[d_idx[r]], rows of `cols` FP16 (device index array).
 void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols, int n_rows, cudaStream_t stream);
 
-
 // Applies YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim]/K[n_kv_heads,
 // head_dim] FP16 in place at `pos`; mirrors main forward's rope_forward math so draft
 // and verifier rotate identically on rope-scaled models (#897).
 // n_rows>1: Q/K hold n_rows consecutive steps; row r rotates at pos+r (or d_row_pos[r]
 // if given). Pass null d_q or d_k to skip that side.
-void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head_dim, int rope_dim,
-                     float theta, int sec0, int sec1, int sec2, int pos, float inv_scaling,
-                     float ext_factor, float attn_factor, float corr_dim_0, float corr_dim_1,
-                     cudaStream_t stream, int n_rows = 1, const int* d_row_pos = nullptr);
+// Arguments in the old parameter order (audit D-11); required up to stream.
+struct MtpMropeArgs {
+    void* d_q = nullptr;
+    int n_heads = 0;
+    void* d_k = nullptr;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    int rope_dim = 0;
+    float theta = 0.0f;
+    int sec0 = 0;
+    int sec1 = 0;
+    int sec2 = 0;
+    int pos = 0;
+    float inv_scaling = 0.0f;
+    float ext_factor = 0.0f;
+    float attn_factor = 0.0f;
+    float corr_dim_0 = 0.0f;
+    float corr_dim_1 = 0.0f;
+    cudaStream_t stream = nullptr;
+    int n_rows = 1;
+    const int* d_row_pos = nullptr;
+};
+void mtp_apply_mrope(const MtpMropeArgs& a);
 
 // Allocates the workspace from the VRAM allocator; caller keeps ws alive (typically
 // Engine, session lifetime). MoE buffers sized from n_experts/top_k/expert_d_ff/
