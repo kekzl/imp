@@ -118,13 +118,13 @@
         // NVFP4 decode path uses FP16 input (no Q8_1 quantization). Two sources:
         // primary NVFP4 storage tier (native models), and the secondary NVFP4
         // decode cache for Q8_0/Q6_K/Q5_K models (c8763ad regressed this fallback; restored by also probing
-        // wcache_.nvfp4).
-        auto nv_q_it = wcache_.nvfp4.find(ly.wq.data);
-        auto nv_k_it = wcache_.nvfp4.find(ly.wk.data);
-        auto nv_v_it = wcache_.nvfp4.find(ly.wv.data);
-        const bool nv_q_secondary = (nv_q_it != wcache_.nvfp4.end());
-        const bool nv_k_secondary = (nv_k_it != wcache_.nvfp4.end());
-        const bool nv_v_secondary = (nv_v_it != wcache_.nvfp4.end());
+        // wcache_.nvfp4, now the handle's entry).
+        const NvFP4CacheEntry* nv_q_e = nvfp4_entry_of(mxfp4_hwq);
+        const NvFP4CacheEntry* nv_k_e = nvfp4_entry_of(mxfp4_hwk);
+        const NvFP4CacheEntry* nv_v_e = nvfp4_entry_of(mxfp4_hwv);
+        const bool nv_q_secondary = (nv_q_e != nullptr);
+        const bool nv_k_secondary = (nv_k_e != nullptr);
+        const bool nv_v_secondary = (nv_v_e != nullptr);
         const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
                                  nv_q_secondary;
         const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
@@ -185,9 +185,9 @@
                 tmp.K = static_cast<int>(hw->shape[1]) * 2;
                 return tmp;
             };
-            NvFP4QuantResult nv_q = nv_q_secondary ? nv_q_it->second : from_handle(mxfp4_hwq);
-            NvFP4QuantResult nv_k = nv_k_secondary ? nv_k_it->second : from_handle(mxfp4_hwk);
-            NvFP4QuantResult nv_v = nv_v_secondary ? nv_v_it->second : from_handle(mxfp4_hwv);
+            NvFP4QuantResult nv_q = nv_q_secondary ? NvFP4QuantResult(*nv_q_e) : from_handle(mxfp4_hwq);
+            NvFP4QuantResult nv_k = nv_k_secondary ? NvFP4QuantResult(*nv_k_e) : from_handle(mxfp4_hwk);
+            NvFP4QuantResult nv_v = nv_v_secondary ? NvFP4QuantResult(*nv_v_e) : from_handle(mxfp4_hwv);
             int q_rows = nv_q.N;
             int k_rows = nv_k.N;
             int v_rows = nv_v.N;

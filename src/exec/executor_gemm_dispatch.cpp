@@ -442,10 +442,10 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
     // MXFP8 prefill copy of an F16 GDN projection (gemm.mxfp8_gdn_proj_prefill): the same
     // gate as the NVFP4 copy below, checked first. Quantizes the activation into the MXFP8
     // scratch on every call (ssm_in and gdn_gate share one input; the dedupe is a later lever).
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.mxfp8_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
         const int Kp = static_cast<int>(input.shape[1]);
-        const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
+        const auto& cw = *h.entries.mxfp8_prefill;
         const auto& qs = qscratch_;
         bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                       !ctx.mode.spec_verify && h.source_qtype == QType::F16 &&
@@ -467,12 +467,11 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
     // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and
     // ssm_out carries the FP8 sidecar (tier FP16). Declines (beta=1, M<=32, spec verify, no
     // scratch) fall through to the route the handle had before.
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.contains(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && h.entries.nvfp4_prefill != nullptr) {
         const int Mp = static_cast<int>(input.shape[0]);
-        auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
                             nvfp4_prefill_copy_routes(h, Mp, ctx.mode.spec_verify, wcache_, qscratch_) &&
-                            dispatch_cutlass_nvfp4_prefill(it->second, input, output, ctx, Mp);
+                            dispatch_cutlass_nvfp4_prefill(*h.entries.nvfp4_prefill, input, output, ctx, Mp);
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
             return DensePath::NVFP4_PREFILL_COPY;
@@ -708,7 +707,7 @@ DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& i
         // cuBLAS call). Other qtypes decline there; M = 1 keeps its route.
         const bool k_quant = h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K;
         if (prefill == StorageTier::FP16 && M <= 32 && (M >= 2 || k_quant) && h.source_data != nullptr &&
-            !wcache_.q8_planes_only.contains(h.source_data)) {  // dropped Q8_0 source
+            !h.entries.q8_planes_only) {  // dropped Q8_0 source
             Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
             if (gemm_uncached_in_place(input, w, output, ctx, ctx.mode.decode_rows))
                 return DensePath::GGUF_IN_PLACE;

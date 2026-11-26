@@ -9,6 +9,7 @@
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/quant_scratch.h"
 #include "exec/weight_caches.h"
+#include "exec/weight_tier_entries.h"
 #include "quant/dequant_gpu.h"
 #include "scoped_engine_arena.h"
 
@@ -125,6 +126,7 @@ TEST(Q8PlanesOnly, DeclineFallbackComputesFromThePlanes) {
     h.source_qtype = QType::Q8_0;
     h.shape[0] = kN;
     h.shape[1] = kK;
+    bind_cache_entries(h, wc);  // Phase 4c's rebind: entries.q8_planes_only
     const int64_t xs[2] = {kM, kK}, ys[2] = {kM, kN}, ws[2] = {kN, kK};
     const Tensor tx(x, QType::F16, 2, xs, true);
     Tensor ty(y, QType::F16, 2, ys, true), tyref(yref, QType::F16, 2, ys, true);

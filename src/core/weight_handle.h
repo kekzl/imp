@@ -15,9 +15,12 @@
 
 namespace imp {
 
-struct Fp16CacheEntry;   // exec/weight_cache_entries.h
-struct FP8CacheEntry;    // exec/weight_caches.h
-struct NvFP4CacheEntry;  // exec/weight_cache_entries.h
+struct Fp16CacheEntry;          // exec/weight_cache_entries.h
+struct FP8CacheEntry;           // exec/weight_caches.h
+struct NvFP4CacheEntry;         // exec/weight_cache_entries.h
+struct CutlassNvFP4CacheEntry;  // exec/weight_cache_entries.h
+struct CutlassMxFP8CacheEntry;  // exec/weight_cache_entries.h
+struct CutlassMxFP4CacheEntry;  // exec/weight_cache_entries.h
 
 // The WeightCaches entries keyed by a handle's source_data (audit D-3), bound by
 // bind_cache_entries (exec/weight_tier_entries.h); null = that map holds none.
@@ -25,6 +28,12 @@ struct WeightCacheRefs {
     const Fp16CacheEntry* fp16 = nullptr;
     const FP8CacheEntry* fp8 = nullptr;
     const NvFP4CacheEntry* nvfp4 = nullptr;
+    const CutlassNvFP4CacheEntry* cutlass_nvfp4 = nullptr;
+    const CutlassNvFP4CacheEntry* nvfp4_prefill = nullptr;  // cutlass_nvfp4_prefill
+    const CutlassMxFP8CacheEntry* mxfp8_prefill = nullptr;  // cutlass_mxfp8_prefill
+    const CutlassMxFP4CacheEntry* cutlass_mxfp4 = nullptr;
+    const FP8CacheEntry* released_fp8 = nullptr;  // released_fp8_view (Phase 4b)
+    bool q8_planes_only = false;                  // Phase 4c freed the Q8_0 source
 };
 
 struct WeightHandle {

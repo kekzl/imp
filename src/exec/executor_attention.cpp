@@ -9,6 +9,7 @@
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_debug.h"
 #include "exec/gemm_context.h"
+#include "exec/weight_tier_entries.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -206,7 +207,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                : StorageTier::Undefined;
     // NVFP4 wo: primary tier OR Phase-3 secondary NVFP4 decode cache
     // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
-    const bool wo_nvfp4_secondary = (wcache_.nvfp4.contains(ly.wo.data));
+    const NvFP4CacheEntry* wo_nv_e = (ly.wo_id != kInvalidTensorID) ? registry_.handle(ly.wo_id).entries.nvfp4
+                                                                    : nullptr;
+    const bool wo_nvfp4_secondary = (wo_nv_e != nullptr);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
                               (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
@@ -655,7 +658,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // primary-tier handle needs reconstruction.
         NvFP4QuantResult wo_nvfp4;
         if (wo_nvfp4_secondary) {
-            wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
+            wo_nvfp4 = *wo_nv_e;
         } else {
             const WeightHandle& wo_h = registry_.handle(ly.wo_id);
             wo_nvfp4.packed_data = wo_h.payload.nvfp4.data;

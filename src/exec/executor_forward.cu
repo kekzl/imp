@@ -180,14 +180,17 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
     // single-stream (n==1) keeps the weight-bound M=1 GEMV.
     if (!dispatch_policy().gemm.nvfp4_lm_head_cutlass)
         return;
-    auto it = wcache_.nvfp4.find(model_->output_proj().data);
-    if (it == wcache_.nvfp4.end())
+    // No handle = no head data (Phase 4 registers every non-null tensor).
+    if (model_->out_proj_id == kInvalidTensorID)
+        return;
+    const WeightCacheRefs& lm_e = registry_.handle(model_->out_proj_id).entries;
+    if (lm_e.nvfp4 == nullptr)
         return;  // LM head is not in the NVFP4 decode cache (nvfp4_lm_head off / GDN)
     // Phase 3b's prefill cache may already hold the head's SfAtom: borrow it (both freed in
     // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
-    if (const auto ct = wcache_.cutlass_nvfp4.find(model_->output_proj().data);
-        ct != wcache_.cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) {
-        CutlassNvFP4Weight view = ct->second;  // a sliced copy of an entry is a view
+    if (const CutlassNvFP4CacheEntry* ct = lm_e.cutlass_nvfp4;
+        ct != nullptr && ct->scale_factors != nullptr) {
+        CutlassNvFP4Weight view = *ct;  // a sliced copy of an entry is a view
         lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(view));
         lm_head_cutlass_ready_ = lm_head_cutlass_.data != nullptr;
         IMP_LOG_INFO(
@@ -197,7 +200,7 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
     }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
     CutlassNvFP4Owned built;
-    convert_nvfp4_to_cutlass(it->second, built, stream);
+    convert_nvfp4_to_cutlass(*lm_e.nvfp4, built, stream);
     lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(built));  // owns the SfAtom scales
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {
         IMP_LOG_WARN("LM head: CUTLASS NVFP4 conversion failed (%s), GEMV path stays",
@@ -342,9 +345,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     Tensor h = view_tokens(hidden_, n);
     // Native MXFP4 table: unpacked in place, scales in its cache entry (without one the MXFP4 overload
     // throws).
-    if (const auto it = wcache_.cutlass_mxfp4.find(model_->token_embedding().data);
-        model_->tok_emb_.qtype == QType::MXFP4 && it != wcache_.cutlass_mxfp4.end())
-        embedding_lookup_mxfp4(it->second.data, it->second.linear_scales, state.token_ids, n, h, stream);
+    const CutlassMxFP4CacheEntry* emb_mx = model_->tok_emb_id != kInvalidTensorID
+                                               ? registry_.handle(model_->tok_emb_id).entries.cutlass_mxfp4
+                                               : nullptr;
+    if (model_->tok_emb_.qtype == QType::MXFP4 && emb_mx != nullptr)
+        embedding_lookup_mxfp4(emb_mx->data, emb_mx->linear_scales, state.token_ids, n, h, stream);
     else
         embedding_lookup(model_->token_embedding(), state.token_ids, n, h, model_->tok_emb_.qtype, stream);
 
@@ -745,10 +750,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         } else if (route == LmHeadRoute::Fp8Cache) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
-            auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
+            const FP8CacheEntry& lm_fp8 = *lm_h->entries.fp8;  // route Fp8Cache: lm_facts.fp8_cache
             int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
-            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-            gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
+            Tensor fp8_w(lm_fp8.weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, lm_fp8.d_scale, stream);
         } else if (route == LmHeadRoute::Nvfp4) {
             Tensor no_last = block_norm_view_(1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_last, model_->output_norm(), no_last,
@@ -833,10 +838,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         } else if (route == LmHeadRoute::Fp8Cache) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-            auto fp8_it = wcache_.fp8.find(model_->output_proj().data);
+            const FP8CacheEntry& lm_fp8 = *lm_h->entries.fp8;  // route Fp8Cache: lm_facts.fp8_cache
             int64_t wshape[2] = {static_cast<int64_t>(cfg.vocab_size), static_cast<int64_t>(cfg.d_model)};
-            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-            gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
+            Tensor fp8_w(lm_fp8.weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, lm_fp8.d_scale, stream);
         } else if (n == 1 && route == LmHeadRoute::Nvfp4) {
             Tensor no_final = block_norm_view_(1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_final, model_->output_norm(), no_final,

@@ -279,7 +279,7 @@ bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tenso
             return false;
         const auto& h = registry_.handle(id);
         if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.payload.cutlass_nvfp4.sf == nullptr ||
-            wcache_.cutlass_mxfp8_prefill.contains(h.source_data))
+            h.entries.mxfp8_prefill != nullptr)
             return false;
     }
     const auto& hu = registry_.handle(ly.w_up_id);

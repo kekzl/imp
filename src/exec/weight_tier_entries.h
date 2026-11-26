@@ -5,20 +5,35 @@
 #include "core/weight_handle.h"
 #include "exec/weight_caches.h"
 
+#include <type_traits>
+
 namespace imp {
 
-// Binds h.entries to the fp16 / fp8 / nvfp4 entries keyed by h.source_data (null where a map has
-// none). The map nodes are stable after Phase 4 (they change only in free_buffers).
+// Binds h.entries to the entries the source-keyed maps hold under h.source_data (null / false
+// where a map has none). Map nodes are stable after Phase 4c (they change only in free_buffers);
+// Phase 4b / 4c fill released_fp8_view / q8_planes_only after registration and rebind.
 inline void bind_cache_entries(WeightHandle& h, const WeightCaches& wc) {
     h.entries = {};
     if (h.source_data == nullptr)
         return;
-    if (const auto it = wc.fp16.find(h.source_data); it != wc.fp16.end())
-        h.entries.fp16 = &it->second;
-    if (const auto it = wc.fp8.find(h.source_data); it != wc.fp8.end())
-        h.entries.fp8 = &it->second;
-    if (const auto it = wc.nvfp4.find(h.source_data); it != wc.nvfp4.end())
-        h.entries.nvfp4 = &it->second;
+    const auto entry = [&](const auto& map) -> const typename std::decay_t<decltype(map)>::mapped_type* {
+        const auto it = map.find(h.source_data);
+        return it != map.end() ? &it->second : nullptr;
+    };
+    h.entries.fp16 = entry(wc.fp16);
+    h.entries.fp8 = entry(wc.fp8);
+    h.entries.nvfp4 = entry(wc.nvfp4);
+    h.entries.cutlass_nvfp4 = entry(wc.cutlass_nvfp4);
+    h.entries.nvfp4_prefill = entry(wc.cutlass_nvfp4_prefill);
+    h.entries.mxfp8_prefill = entry(wc.cutlass_mxfp8_prefill);
+    h.entries.cutlass_mxfp4 = entry(wc.cutlass_mxfp4);
+    h.entries.released_fp8 = entry(wc.released_fp8_view);
+    h.entries.q8_planes_only = wc.q8_planes_only.contains(h.source_data);
+}
+
+// The NVFP4 decode-cache entry of a handle that may be absent (no handle = no data = no entry).
+[[nodiscard]] inline const NvFP4CacheEntry* nvfp4_entry_of(const WeightHandle* h) {
+    return h != nullptr ? h->entries.nvfp4 : nullptr;
 }
 
 // The first tier of `h` whose dispatch reads a cache entry that h.entries lacks, or nullptr.
