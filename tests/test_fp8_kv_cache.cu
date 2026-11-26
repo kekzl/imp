@@ -381,17 +381,27 @@ TEST(FP8KVCache, SplitKGqaTileConsistency) {
 
     auto run_tile = [&](bool gqa, void* d_o) {
         cudaMemset(d_partial, 0, scratch_size);
-        if (gqa) {
-            paged_attention_splitk_fp8_tile_gqa_launch(
-                static_cast<const half*>(d_q), static_cast<const uint8_t*>(d_k_fp8),
-                static_cast<const uint8_t*>(d_v_fp8), d_partial, d_bt, d_ctx, batch_size, n_heads,
-                n_kv_heads, block_size, scale, kv_scale, num_blocks, num_splits, 0, 0.0f, nullptr);
-        } else {
-            paged_attention_splitk_fp8_tile_launch(
-                static_cast<const half*>(d_q), static_cast<const uint8_t*>(d_k_fp8),
-                static_cast<const uint8_t*>(d_v_fp8), d_partial, d_bt, d_ctx, batch_size, n_heads,
-                n_kv_heads, block_size, scale, kv_scale, num_blocks, num_splits, 0, 0.0f, nullptr);
-        }
+        const PagedDecodeArgs a{
+            .Q = static_cast<const half*>(d_q),
+            .K_cache = d_k_fp8,
+            .V_cache = d_v_fp8,
+            .partial = d_partial,
+            .block_tables = d_bt,
+            .context_lens = d_ctx,
+            .batch_size = batch_size,
+            .n_heads = n_heads,
+            .n_kv_heads = n_kv_heads,
+            .head_dim = head_dim,
+            .block_size = block_size,
+            .scale = scale,
+            .kv_scale = kv_scale,
+            .max_num_blocks = num_blocks,
+            .num_splits = num_splits,
+        };
+        if (gqa)
+            paged_attention_splitk_fp8_tile_gqa_launch(a);
+        else
+            paged_attention_splitk_fp8_tile_launch(a);
         paged_attention_launch_reduce(d_partial, static_cast<half*>(d_o), batch_size, n_heads, head_dim,
                                       num_splits, nullptr);
         cudaDeviceSynchronize();

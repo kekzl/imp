@@ -237,7 +237,6 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             mw.N = N;
             mw.K = K;
             mw.sf_bytes = cutlass_mxfp4_sf_size(N, K);
-            mw.owns_data = false;
             mw.hadamard_bs = w.payload.mxfp4.hadamard_bs;
 
             if (M == 1) {
@@ -353,7 +352,6 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             mw.N = w.shape[0];
             mw.K = w.shape[1];
             mw.sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(w.shape[0]), static_cast<int>(w.shape[1]));
-            mw.owns_data = false;
             mw.hadamard_bs = w.payload.mxfp4.hadamard_bs;
 
             if (mw.linear_scales == nullptr)

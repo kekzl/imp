@@ -61,7 +61,7 @@ void* InklingForward::alloc_(size_t bytes) {
 }
 
 bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                          const InklingForward* scratch, bool own_kv) {
+                          const InklingForward* scratch, bool own_kv, std::byte* state) {
     w_ = &w;
     va_ = &va;
     share_ = scratch && scratch->max_tokens_ == max_tokens && scratch->max_ctx_ == max_ctx ? scratch
@@ -72,7 +72,8 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     max_tokens_ = max_tokens;
     max_ctx_ = max_ctx;
     seg_ = std::min(max_tokens, kSeg);
-    ring_ = c.window + seg_ + kSlack;
+    const InklingSlabLayout sl = inkling_slab_layout(c, max_tokens);
+    ring_ = sl.ring;  // window + seg_ + kSlack
     const size_t Tm = static_cast<size_t>(seg_), H = static_cast<size_t>(c.hidden);
     const size_t QD = static_cast<size_t>(c.n_heads) * c.head_dim,
                  KD = static_cast<size_t>(c.n_kv_heads) * c.head_dim;
@@ -114,18 +115,23 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     perm_ = static_cast<int32_t*>(alloc_(slots * sizeof(int32_t)));
     grp_ = static_cast<int32_t*>(alloc_(kMoeSmallGroupInts * sizeof(int32_t)));
     off_ = static_cast<int32_t*>(alloc_((static_cast<size_t>(c.n_experts) + 1) * sizeof(int32_t)));
-    conv_state_floats_ = 3 * (2 * KD + 2 * H);
+    conv_state_floats_ = sl.conv_app_floats;
     ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     scratch_on_ = false;
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     dec_h_ = Hf_(H * kGraphRows);
-    conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
-    // Sliding applications keep a ring here; the full-attention ones read the K/V init_kv_ binds.
-    for (int a = 0; a < c.n_apps() && ok_; ++a) {
-        const bool global = c.global[static_cast<size_t>(c.app_layer(a))];
-        k_.push_back(global ? nullptr : Hf_(static_cast<size_t>(ring_) * KD));
-        v_.push_back(global ? nullptr : Hf_(static_cast<size_t>(ring_) * KD));
-        conv_state_.push_back(conv_all_ + conv_state_floats_ * static_cast<size_t>(a));
+    // Conv state and sliding rings in the slot's slab region; the full-attention applications read the
+    // K/V init_kv_ binds.
+    std::byte* st = state ? state : static_cast<std::byte*>(alloc_(sl.slot_bytes));
+    conv_all_ = reinterpret_cast<float*>(st);
+    const auto view = [st](size_t off) {
+        return st && off != InklingSlabLayout::kNone ? reinterpret_cast<half*>(st + off) : nullptr;
+    };
+    for (int a = 0; a < c.n_apps() && ok_ && st; ++a) {
+        const size_t i = static_cast<size_t>(a);
+        k_.push_back(view(sl.k_off[i]));
+        v_.push_back(view(sl.v_off[i]));
+        conv_state_.push_back(conv_all_ + conv_state_floats_ * i);
     }
     ok_ = ok_ && init_kv_(own_kv);
     if (ok_)

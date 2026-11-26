@@ -20,7 +20,8 @@
 
 namespace imp {
 
-// One kept sequence per slot (exec/inkling_forward.h): conv state and 40 sliding rings (1120 MiB) per slot,
+// One kept sequence per slot (exec/inkling_forward.h): conv state and 40 sliding rings (1124 MiB) per slot
+// in the engine's slab (inkling_slab_, exec/inkling_slab.h, one allocation for every slot),
 // full-attention K/V in the paged pool at 36 KiB per position (8 x 4 KiB + the draft's), capped at slots x
 // max_seq_len. Context 32768 unless set, up to model_max_length (1048576); 2 slots by default, 4 at most.
 void Engine::init_inkling_limits_() {

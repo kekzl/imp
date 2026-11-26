@@ -2,6 +2,7 @@
 // expert FFN and the miss gather run beside the
 // routed GEMVs; joins keep the add order, so output bits match the serial path.
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
 #include "core/logging.h"

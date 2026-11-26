@@ -18,8 +18,7 @@ struct CutlassMxFP4Weight {
     int64_t N = 0;
     int64_t K = 0;
     size_t sf_bytes = 0;
-    bool owns_data = false;  // true if data was allocated (Hadamard path)
-    int hadamard_bs = 0;     // Hadamard block size for online rotation (0=disabled)
+    int hadamard_bs = 0;  // Hadamard block size for online rotation (0=disabled)
 };
 
 }  // namespace imp

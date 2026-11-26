@@ -40,6 +40,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "core/pdl.h"
@@ -84,6 +85,8 @@ __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
 }
 
 namespace {
+
+FallbackSite s_fb_calib_moe{"calib_moe_experts"};
 
 // host_pool_ok lets host-resident experts through: fused decode kernels
 // address base+idx*stride, and the expert cache's per-layer slot pool is
@@ -606,10 +609,10 @@ void GraphExecutor::calibrate_moe_experts_(int layer, cudaStream_t stream, const
     if (!calib_)
         return;
     if (!ctx.experts_sorted_fp16 || compute_dtype_ != QType::F16 || ctx.expanded <= 0) {
-        if (layer == 0)
-            IMP_LOG_WARN(
-                "calibration: MoE prefill path leaves no expert-sorted FP16 buffers, "
-                "experts get no statistic");
+        IMP_FALLBACK_WARN(s_fb_calib_moe,
+                          "calibration: MoE prefill path leaves no expert-sorted FP16 buffers (layer %d): "
+                          "experts get no statistic, AWQ leaves the expert sites unscaled",
+                          layer);
         return;
     }
     const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
