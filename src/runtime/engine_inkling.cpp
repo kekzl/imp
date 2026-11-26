@@ -293,6 +293,9 @@ void Engine::inkling_attach_pool_() {
     kv_cache_raw_->set_grow_step_blocks(kInklingKvGrowTokens / kv_cache_raw_->block_size());
     // A re-plan would move the pool under the slots' bound pointers.
     kv_replan_.armed = false;
+    // Draft weights and contexts now, not at the first forward (B-111): Phase 4 built the FP8 LM head they
+    // read, the draft's full-context layer is the pool layer bound above.
+    executor_->inkling_attach_draft(stream_);
     // Reuse stops where the slot can resume, or where a snapshot of any slot's state does (B-111 S4).
     if (kv_manager_->prefix_caching_enabled()) {
         inkling_init_snapshots_();
