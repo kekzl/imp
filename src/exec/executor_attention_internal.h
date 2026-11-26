@@ -131,19 +131,40 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
 // APA on the paged FP16 cache in chunked prefill, no gather: past keys [0, att_off) through past_bt, the
 // current chunk from kk / vv. Gates as try_fp4_prefill's APA arm, plus FP16 cache and no capture replay.
 // owner: request id whose tile cache this chunk may continue (-1 = uncached: compacted past, multi-seq).
-[[nodiscard]] static bool try_apa_paged_prefill(const DispatchPolicy& rcfg, bool cap_replay, const Tensor& q,
-                                                KVCache* cache, int kv_layer, const int* past_bt, int kv_bs,
-                                                const Tensor& kk, const Tensor& vv, int att_off, Tensor& o,
-                                                int n, int nh, int nkv, int hd, float scale,
-                                                int sliding_window, float softcap, cudaStream_t stream,
-                                                const void* sinks, int owner) {
-    const auto& a = rcfg.attention;
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, all required.
+struct ApaPagedPrefillArgs {
+    const DispatchPolicy* rcfg = nullptr;
+    bool cap_replay = false;
+    const Tensor* q = nullptr;
+    KVCache* cache = nullptr;
+    int kv_layer = 0;
+    const int* past_bt = nullptr;
+    int kv_bs = 0;
+    const Tensor* kk = nullptr;
+    const Tensor* vv = nullptr;
+    int att_off = 0;
+    Tensor* o = nullptr;
+    int n = 0;
+    int nh = 0;
+    int nkv = 0;
+    int hd = 0;
+    float scale = 0.0f;
+    int sliding_window = 0;
+    float softcap = 0.0f;
+    cudaStream_t stream = nullptr;
+    const void* sinks = nullptr;
+    int owner = -1;
+};
+[[nodiscard]] static bool try_apa_paged_prefill(const ApaPagedPrefillArgs& args) {
+    const auto& [rcfg, cap_replay, q, cache, kv_layer, past_bt, kv_bs, kk, vv, att_off, o, n, nh, nkv, hd,
+                 scale, sliding_window, softcap, stream, sinks, owner] = args;
+    const auto& a = rcfg->attention;
     if (cap_replay || cache->qtype() != QType::F16 || !apa_serves(a, n, att_off + n) || sliding_window > 0 ||
         softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
         return false;
-    return attention_apa_prefill_paged(q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
+    return attention_apa_prefill_paged(*q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
                                        static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, kv_bs,
-                                       kk, vv, att_off, o, n, att_off + n, nh, nkv, hd, scale, att_off,
+                                       *kk, *vv, att_off, *o, n, att_off + n, nh, nkv, hd, scale, att_off,
                                        a.apa_eps, kv_layer, owner, stream);
 }
 

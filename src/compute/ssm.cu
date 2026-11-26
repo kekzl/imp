@@ -767,15 +767,13 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
                     stream);
 }
 
-void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
-                      const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
-                      const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
-                      int n_groups, QType h_dtype, cudaStream_t stream, const int* d_real_n, void* h_snap,
-                      const int* d_snap_n, bool ssd) {
-    ssm_scan_launch(static_cast<const half*>(x.data), static_cast<const half*>(B.data),
-                    static_cast<const half*>(C.data), static_cast<const half*>(dt.data),
-                    static_cast<const float*>(A_log.data), static_cast<const float*>(D.data),
-                    static_cast<const float*>(dt_bias.data), h_state, static_cast<half*>(y.data),
+void ssm_scan_prefill(const SsmScanPrefillArgs& a) {
+    const auto& [x, B, C, dt, A_log, D, dt_bias, h_state, y, z, n_tokens, n_heads, head_dim_ssm, state_size,
+                 n_groups, h_dtype, stream, d_real_n, h_snap, d_snap_n, ssd] = a;
+    ssm_scan_launch(static_cast<const half*>(x->data), static_cast<const half*>(B->data),
+                    static_cast<const half*>(C->data), static_cast<const half*>(dt->data),
+                    static_cast<const float*>(A_log->data), static_cast<const float*>(D->data),
+                    static_cast<const float*>(dt_bias->data), h_state, static_cast<half*>(y->data),
                     static_cast<const half*>(z), n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
                     h_dtype, stream, d_real_n, h_snap, d_snap_n, ssd);
 }

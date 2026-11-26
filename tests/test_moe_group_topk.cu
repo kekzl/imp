@@ -36,7 +36,7 @@ TEST(MoeGroupTopk, KernelMatchesLingGate) {
     int64_t shape[2] = {gold::kTokens, gold::kExperts};
     Tensor t(d_logits, QType::F32, 2, shape, true);
 
-    MoeRoutingResult r;
+    MoeRoutingOwned r;
     moe_topk_gating(t, gold::kTopK, r, nullptr, /*use_sigmoid=*/true, /*normalize_weights=*/true, d_bias,
                     MoeGroupLimit{gold::kNGroup, gold::kTopkGroup});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -56,8 +56,6 @@ TEST(MoeGroupTopk, KernelMatchesLingGate) {
             EXPECT_NEAR(row[k].second * gold::kScale, gold::kWeight[(tk * gold::kTopK) + k], 1e-5);
         }
     }
-    cudaFree(r.expert_indices.data), cudaFree(r.expert_weights.data);
-    cudaFree(r.sorted_token_ids.data), cudaFree(r.expert_offsets.data);
     cudaFree(d_logits), cudaFree(d_bias);
 }
 

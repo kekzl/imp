@@ -2,7 +2,7 @@
 
 #include "core/tensor.h"
 #include "core/qtype.h"          // QType
-#include "compute/moe_routing.h"  // MoeRoutingResult
+#include "compute/moe_routing.h"         // MoeRoutingOwned
 #include "exec/expert_cache.h"           // kExpertProjCount
 #include "exec/nvfp4_expert_offload.h"  // StagedProj
 #include <cstddef>
@@ -35,13 +35,14 @@ struct MoeFfnContext {
     bool moe_use_fp32_residual = false;
     bool moe_fused_norm_q8 = false;
     bool fp32_gate_logits_ready = false;
+    bool router_prenormed = false;  // fp32_post_attn_fused_ wrote the router input (moe_take_prenorm_)
     bool will_decode_fast = false;
     bool non_gated_experts = false;
     bool use_packed_dequant = false;
     QType up_qtype = QType::F16;
 
     // Routing result + transient buffers carried across phases
-    MoeRoutingResult routing{};
+    MoeRoutingOwned routing;      // owners filled only by the allocating moe_topk_gating (no routing pool)
     bool residual_fused = false;  // true when decode-fast / fused scatter already added residual
     // gpt-oss down bias [ne,d] the expert path left for the fused scatter to add (#2466); null = none.
     const void* scatter_down_bias = nullptr;

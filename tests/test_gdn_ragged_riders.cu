@@ -184,10 +184,39 @@ TEST_F(GdnRaggedRidersTest, RidersMatchSeparateDecodeAndPromptsMatchSolo) {
         const half* as = d_alpha + (static_cast<size_t>(offs[s]) * kH);
         const half* bs = d_beta + (static_cast<size_t>(offs[s]) * kH);
         if (rows_of[s] >= 128)
-            gdn_scan_chunkpar_f32(cs, kC, as, bs, d_alog, d_dtb, hs, ys, rows_of[s], kH, kD, kS, kG, nullptr,
-                                  1, d_ws, ws_bytes);
+            gdn_scan_chunkpar_f32({.conv_f32 = cs,
+                                   .conv_channels = kC,
+                                   .alpha = as,
+                                   .beta = bs,
+                                   .A_log = d_alog,
+                                   .dt_bias = d_dtb,
+                                   .h_state = hs,
+                                   .y = ys,
+                                   .n_tokens = rows_of[s],
+                                   .n_heads = kH,
+                                   .head_dim_ssm = kD,
+                                   .state_size = kS,
+                                   .n_groups = kG,
+                                   .stream = nullptr,
+                                   .grouped_layout = 1,
+                                   .ws = d_ws,
+                                   .ws_bytes = ws_bytes});
         else
-            gdn_scan_fused_f32(cs, kC, as, bs, d_alog, d_dtb, hs, ys, rows_of[s], kH, kD, kS, kG, nullptr, 1);
+            gdn_scan_fused_f32({.conv_f32 = cs,
+                                .conv_channels = kC,
+                                .alpha = as,
+                                .beta = bs,
+                                .A_log = d_alog,
+                                .dt_bias = d_dtb,
+                                .h_state = hs,
+                                .y = ys,
+                                .n_tokens = rows_of[s],
+                                .n_heads = kH,
+                                .head_dim_ssm = kD,
+                                .state_size = kS,
+                                .n_groups = kG,
+                                .stream = nullptr,
+                                .grouped_layout = 1});
     }
     half* d_rx = nullptr;
     float* d_rconv = nullptr;

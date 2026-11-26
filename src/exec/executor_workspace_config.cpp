@@ -205,7 +205,18 @@ Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
     // buf is always [max_tokens_, cols] from allocate_buffers.
     // Return a [n_tokens, cols] view. The view may be a writer: a small-M producer stamp on buf retires.
     smallm_xq_tag_.touch(buf.data);
+    prenorm_.touch(buf.data);
+    norm_fold_.touch(buf.data);
     return slice_rows(buf, n_tokens);
+}
+
+Tensor GraphExecutor::block_norm_view_(int n) {
+    const bool pre = prenorm_.live();
+    const bool fold = norm_fold_.live();
+    Tensor no = view_tokens(norm_out_, n);
+    prenorm_.carry(pre);
+    norm_fold_.carry(fold);
+    return no;
 }
 
 void GraphExecutor::ensure_logits_pinned(int total_floats) {

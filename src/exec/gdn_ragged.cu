@@ -85,19 +85,77 @@ bool gdn_ragged_scan_split(const GdnRaggedRows& g, SSMState& st, int ssm_idx, co
         half* y_s = io.y + (static_cast<size_t>(r0) * inner);
         void* h_s = st.h_state(g.h_ssm_slots[s], ssm_idx);
         if (rows >= 128 && bf16)
-            gdn_scan_chunkpar_bf16(conv_s, C, alpha_s, beta_s, io.A_log, io.dt_bias,
-                                   static_cast<__nv_bfloat16*>(h_s), y_s, rows, H, D, S, G, stream, gl,
-                                   io.chunkpar_ws, io.chunkpar_bytes, io.chunkpar_strip);
+            gdn_scan_chunkpar_bf16({.conv_f32 = conv_s,
+                                    .conv_channels = C,
+                                    .alpha = alpha_s,
+                                    .beta = beta_s,
+                                    .A_log = io.A_log,
+                                    .dt_bias = io.dt_bias,
+                                    .h_state = static_cast<__nv_bfloat16*>(h_s),
+                                    .y = y_s,
+                                    .n_tokens = rows,
+                                    .n_heads = H,
+                                    .head_dim_ssm = D,
+                                    .state_size = S,
+                                    .n_groups = G,
+                                    .stream = stream,
+                                    .grouped_layout = gl,
+                                    .ws = io.chunkpar_ws,
+                                    .ws_bytes = io.chunkpar_bytes,
+                                    .strip_chunks = io.chunkpar_strip});
         else if (rows >= 128)
-            gdn_scan_chunkpar_f32(conv_s, C, alpha_s, beta_s, io.A_log, io.dt_bias, static_cast<float*>(h_s),
-                                  y_s, rows, H, D, S, G, stream, gl, io.chunkpar_ws, io.chunkpar_bytes,
-                                  io.chunkpar_strip);
+            gdn_scan_chunkpar_f32({.conv_f32 = conv_s,
+                                   .conv_channels = C,
+                                   .alpha = alpha_s,
+                                   .beta = beta_s,
+                                   .A_log = io.A_log,
+                                   .dt_bias = io.dt_bias,
+                                   .h_state = static_cast<float*>(h_s),
+                                   .y = y_s,
+                                   .n_tokens = rows,
+                                   .n_heads = H,
+                                   .head_dim_ssm = D,
+                                   .state_size = S,
+                                   .n_groups = G,
+                                   .stream = stream,
+                                   .grouped_layout = gl,
+                                   .ws = io.chunkpar_ws,
+                                   .ws_bytes = io.chunkpar_bytes,
+                                   .strip_chunks = io.chunkpar_strip});
         else if (bf16)
-            gdn_scan_fused_bf16(conv_s, C, alpha_s, beta_s, io.A_log, io.dt_bias,
-                                static_cast<__nv_bfloat16*>(h_s), y_s, rows, H, D, S, G, stream, gl, nullptr);
+            gdn_scan_fused_bf16({.conv_f32 = conv_s,
+                                 .conv_channels = C,
+                                 .alpha = alpha_s,
+                                 .beta = beta_s,
+                                 .A_log = io.A_log,
+                                 .dt_bias = io.dt_bias,
+                                 .h_state = static_cast<__nv_bfloat16*>(h_s),
+                                 .y = y_s,
+                                 .n_tokens = rows,
+                                 .n_heads = H,
+                                 .head_dim_ssm = D,
+                                 .state_size = S,
+                                 .n_groups = G,
+                                 .stream = stream,
+                                 .grouped_layout = gl,
+                                 .d_real_n = nullptr});
         else
-            gdn_scan_fused_f32(conv_s, C, alpha_s, beta_s, io.A_log, io.dt_bias, static_cast<float*>(h_s),
-                               y_s, rows, H, D, S, G, stream, gl, nullptr);
+            gdn_scan_fused_f32({.conv_f32 = conv_s,
+                                .conv_channels = C,
+                                .alpha = alpha_s,
+                                .beta = beta_s,
+                                .A_log = io.A_log,
+                                .dt_bias = io.dt_bias,
+                                .h_state = static_cast<float*>(h_s),
+                                .y = y_s,
+                                .n_tokens = rows,
+                                .n_heads = H,
+                                .head_dim_ssm = D,
+                                .state_size = S,
+                                .n_groups = G,
+                                .stream = stream,
+                                .grouped_layout = gl,
+                                .d_real_n = nullptr});
     }
     if (g.n_riders == 0)
         return true;

@@ -35,11 +35,11 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
     const auto& ly = model_->layer(layer);
     // The previous layer's tail already wrote no (and the Q GEMM's quantize) for this norm.
     const bool pre = prenorm_matches_(ly.attn_norm, no, n);
-    prenorm_out_ = nullptr;
-    if (pre) {
-        smallm_xq_tag_.adopt(no.data, prenorm_xq_gen_);
+    if (pre)
+        smallm_xq_tag_.adopt(no.data, prenorm_.payload.xq_gen);
+    prenorm_.clear();
+    if (pre)
         return;
-    }
     Tensor fp32_h = view_tokens(fp32_hidden_, n);
     const int d = model_->config().d_model;
     if (fp32_resid_fuse_ok_(n) && f16_weight(ly.attn_norm) &&
@@ -101,13 +101,8 @@ bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cu
     }
     if (!fp32_residual_norm(Fp32ResidMode::kPostAttn, a, n, stream))
         return false;
-    router_prenorm_ = router ? moe_.scatter_out.data : nullptr;
-    router_prenorm_n_ = n;
-    // moe_ffn_phase2_state_and_norm_ skips its residual copy and norm on this match.
-    prenorm_out_ = no.data;
-    prenorm_w_ = ly.ffn_pre_norm_2.data;
-    prenorm_n_ = n;
-    prenorm_xq_gen_ = 0;
+    // moe_ffn_phase2_state_and_norm_ skips its residual copy and norm on this match, the router its norm.
+    prenorm_.stamp(no.data, ly.ffn_pre_norm_2.data, n, {0, router ? moe_.scatter_out.data : nullptr});
     return true;
 }
 
@@ -122,11 +117,13 @@ void GraphExecutor::fp32_post_attn_(int layer, const Tensor& po, Tensor& h, Tens
                                model_->config().d_model, eps, norm_w_off_, stream);
 }
 
-bool GraphExecutor::moe_take_prenorm_(const Tensor& norm_w, const MoeFfnContext& ctx) {
+bool GraphExecutor::moe_take_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx) {
     if (!model_->profile().fp32_residual_norms || fp32_accum_buf_.get() == nullptr ||
         !prenorm_matches_(norm_w, ctx.no, ctx.n))
         return false;
-    prenorm_out_ = nullptr;
+    ctx.router_prenormed = prenorm_.payload.router != nullptr &&
+                           prenorm_.payload.router == moe_.scatter_out.data;
+    prenorm_.clear();
     return true;
 }
 
@@ -200,10 +197,8 @@ void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int
         return;
     if (xp != nullptr)
         smallm_xq_tag_.stamp_producer(no.data, n, d, a.act_scale);
-    prenorm_out_ = no.data;
-    prenorm_w_ = model_->layer(nl).attn_norm.data;
-    prenorm_n_ = n;
-    prenorm_xq_gen_ = xp != nullptr ? smallm_xq_tag_.producer_gen : 0;
+    prenorm_.stamp(no.data, model_->layer(nl).attn_norm.data, n,
+                   {xp != nullptr ? smallm_xq_tag_.producer_gen : 0, nullptr});
 }
 
 }  // namespace imp

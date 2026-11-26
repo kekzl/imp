@@ -129,7 +129,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Sized views for this call (never mutates member tensors).
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
 
     // Qwen3.5 attention: Q projection has ×2 output (Q + output_gate fused).
     // Detect by checking if wq output dim > n_heads * head_dim.

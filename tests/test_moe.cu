@@ -73,12 +73,8 @@ void free_tensor(Tensor& t) {
     }
 }
 
-void free_routing(MoeRoutingResult& r) {
-    free_tensor(r.expert_indices);
-    free_tensor(r.expert_weights);
-    free_tensor(r.sorted_token_ids);
-    free_tensor(r.expert_offsets);
-}
+// The owners release the four buffers; a hand cudaFree here would free them twice (I5).
+void free_routing(MoeRoutingOwned& r) { r = MoeRoutingOwned{}; }
 
 // ---------------------------------------------------------------------------
 // CPU reference: top-k gating with softmax over selected logits
@@ -165,7 +161,7 @@ protected:
     };
 
     Tensor d_gate;
-    MoeRoutingResult routing{};
+    MoeRoutingOwned routing;
 
     void SetUp() override {
         int64_t shape[2] = {kNTokens, kNExperts};
@@ -255,7 +251,7 @@ TEST(MoERoutingWideTest, ExpertsAbove256AreCandidates) {
             logits[static_cast<size_t>(t) * n_experts + winners[t][k]] = 2.0f - 0.1f * k;
     int64_t shape[2] = {n_tokens, n_experts};
     Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
-    MoeRoutingResult routing{};
+    MoeRoutingOwned routing;
     moe_topk_gating(d_gate, top_k, routing, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto h_indices = to_host<int32_t>(routing.expert_indices);
@@ -294,7 +290,7 @@ TEST(MoERoutingWideTest, SoftmaxTopKMatchesTheReferenceOnEveryLaunch) {
     Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
     int wrong_tokens = 0, first_launch = -1;
     for (int l = 0; l < launches; ++l) {
-        MoeRoutingResult routing{};
+        MoeRoutingOwned routing;
         moe_topk_gating(d_gate, top_k, routing, /*stream=*/nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         auto h_indices = to_host<int32_t>(routing.expert_indices);
@@ -517,7 +513,7 @@ TEST(MoERoutingEdgeTest, EmptyExpert) {
     int64_t shape[2] = {kN, kE};
     Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
 
-    MoeRoutingResult routing{};
+    MoeRoutingOwned routing;
     moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
@@ -564,7 +560,7 @@ TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
     int64_t shape[2] = {kN, kE};
     Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
 
-    MoeRoutingResult routing{};
+    MoeRoutingOwned routing;
     moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
@@ -682,7 +678,7 @@ TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
     Tensor d_logits = make_device_tensor(logits.data(), QType::F32, 2, lshape);
 
     DeterministicGemmScope det;
-    MoeRoutingResult r{};
+    MoeRoutingOwned r;
     moe_topk_gating(d_logits, top_k, r, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 

@@ -31,7 +31,7 @@ void GraphExecutor::run_shortconv(int layer, const InferenceState& state, cudaSt
     const int hidden = cfg.ssm_inner_size;
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, stream, norm_w_off_);
