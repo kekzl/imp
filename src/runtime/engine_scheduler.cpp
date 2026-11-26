@@ -819,10 +819,9 @@ void Engine::step_decode(cudaStream_t dec_stream) {
         } else {
             // One-time diagnosis: say WHY speculation is inactive (gates are
             // silent otherwise and a misconfigured request looks identical
-            // to a draft-poor one).
-            static bool s_gate_logged = false;
-            if (!s_gate_logged && !decode_batch[0]->spec_ngram_given_up) {
-                s_gate_logged = true;
+            // to a draft-poor one). Once per engine.
+            if (!log_latch_.spec_gate && !decode_batch[0]->spec_ngram_given_up) {
+                log_latch_.spec_gate = true;
                 const auto& r = *decode_batch[0];
                 // Name the gate. The field dump below stays because a reader
                 // usually wants the neighbouring values too, but it is no
@@ -1468,9 +1467,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         if (!needs_logprobs && !needs_constrained && pipeline_batch_eligible_(valid_decode)) {
             piped = pipeline_enter_(valid_decode, gpu_batch, graph_idx, state, logits_out,
                                     dec_stream, tokens);
-            static bool entered_logged = false;
-            if (!entered_logged) {
-                entered_logged = true;
+            if (!log_latch_.pipeline_entered) {
+                log_latch_.pipeline_entered = true;
                 IMP_LOG_INFO("decode-pipeline: first eligible batch n=%d -> %s",
                              (int)valid_decode.size(), piped ? "ENTERED" : "enter DECLINED");
             }

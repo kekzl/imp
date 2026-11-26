@@ -834,6 +834,13 @@ private:
     // the current batch when full. Returns -1 only if the pool is absent.
     int penalty_hist_slot_(int req_id, const std::vector<std::shared_ptr<Request>>& batch);
     void log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>& rows);
+    // One-time diagnoses per engine (audit C-12): a swapped-in model logs them again.
+    struct LogLatches {
+        bool spec_gate = false;           // why n-gram speculation is off (engine_scheduler.cpp)
+        bool pipeline_entered = false;    // first eligible batch entered or declined the pipeline
+        bool no_prefill_capture = false;  // which condition kept the prefill graph off (engine_prefill.cpp)
+    };
+    LogLatches log_latch_;
     // Embedding pooling scratch (#1005): [d_model] fp32 chunk partial sums,
     // consumed synchronously per chunk (host accumulation on the request) so
     // interleaved chunks of concurrent embedding requests can share it.

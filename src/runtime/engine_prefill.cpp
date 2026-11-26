@@ -686,10 +686,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         } else {
             // `runtime.prefill_graph` defaults to true, but seven conditions
             // gate the capture with no logging, so a model that never captures
-            // looked identical to one that does. Report the failing condition once per process.
-            static bool logged_no_prefill_capture = false;
-            if (prefill_graph_enabled && !can_capture && !logged_no_prefill_capture) {
-                logged_no_prefill_capture = true;
+            // looked identical to one that does. Report the failing condition once per engine.
+            if (prefill_graph_enabled && !can_capture && !log_latch_.no_prefill_capture) {
+                log_latch_.no_prefill_capture = true;
                 IMP_LOG_INFO(
                     "prefill graph: not capturing (runtime.prefill_graph=true) — "
                     "pf_pool=%d cuda_graphs=%d kv_append_capturable=%d offset0=%d "
