@@ -11,6 +11,7 @@
 #include "runtime/request.h"
 #include "runtime/dspark_drafter.h"
 #include "lora/lora_adapter.h"
+#include "exec/inkling_forward.h"  // InklingRuntime, kInklingLoraTargets
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
 #include "runtime/config.h"
@@ -392,8 +393,12 @@ int Engine::lora_load(const std::string& path) {
         IMP_LOG_ERROR("lora: %s refused, the loaded forward applies no adapter", path.c_str());
         return 0;
     }
+    // Inkling's forward adapts q / k / v / o of its own layers (exec/inkling_registry.h), nothing else.
+    const InklingRuntime* ink = executor_ ? executor_->inkling_runtime() : nullptr;
+    const int n_layers = ink ? ink->w.cfg.n_layers : (model_ ? model_->n_layers() : 0);
     auto a = std::make_unique<LoraAdapter>();
-    if (!a->load(path, model_ ? model_->n_layers() : 0))
+    a->set_targets(ink ? kInklingLoraTargets : LoraTargets{});
+    if (!a->load(path, n_layers))
         return 0;
     // The adapter's declared widths become kernel extents (K is read from the
     // projection input, N written to its output), so they are held against
@@ -401,12 +406,18 @@ int Engine::lora_load(const std::string& path) {
     if (model_) {
         const auto& cfg = model_->config();
         const int hd = cfg.head_dim > 0 ? cfg.head_dim : cfg.d_model / std::max(cfg.n_heads, 1);
-        const LoraDims dims{cfg.d_model, cfg.n_heads * hd, cfg.n_kv_heads * hd, cfg.d_ff};
+        const LoraDims dims = ink ? inkling_lora_dims(ink->w.cfg)
+                                  : LoraDims{cfg.d_model, cfg.n_heads * hd, cfg.n_kv_heads * hd, cfg.d_ff};
         std::string why;
         if (!a->check_dims(dims, &why)) {
             IMP_LOG_ERROR("LoRA: %s refused: %s", path.c_str(), why.c_str());
             return 0;
         }
+    }
+    // I2: the rank scratch now, not when a request switches to the adapter.
+    if (executor_ && !executor_->reserve_lora_scratch(a->max_rank())) {
+        IMP_LOG_ERROR("LoRA: %s refused: no VRAM for its rank scratch", path.c_str());
+        return 0;
     }
     lora_adapters_.push_back(std::move(a));
     return static_cast<int>(lora_adapters_.size());  // 1-based id
@@ -983,6 +994,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // An Inkling2-Loop executor holds its sequence slots: its forward replaces the layer loop.
     caps_ = derive_capabilities({.model_loaded = true,
                                  .layer_loop_replaced = executor_->inkling_slots() != nullptr,
+                                 .own_forward_lora = executor_->inkling_slots() != nullptr,
                                  .gated_residual = model_->profile().gated_residual,
                                  .recurrent_state = ssm_state_ != nullptr,
                                  .batched_recurrent_decode = static_cast<bool>(d_ssm_seq_slots_)});

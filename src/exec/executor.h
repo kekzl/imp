@@ -615,6 +615,8 @@ public:
     // holds the adapter's kernel launches/pointers.
     void set_lora(const LoraAdapter* adapter);
     const LoraAdapter* lora() const { return lora_; }
+    // I2: rank scratch for an adapter of max_rank, sized when it loads so set_lora allocates nothing.
+    [[nodiscard]] bool reserve_lora_scratch(int max_rank);
 
     // Control vector (roadmap row 114): h += scale * v_l after layer l on every forward;
     // nullptr = off. Caller (Engine) invalidates captured graphs around a change: the
@@ -746,6 +748,7 @@ private:
     DeviceOwned<void> lora_scratch_;  // fp32[max_rank] + fp16[max_tokens*max_rank]
     size_t lora_scratch_sz_ = 0;
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
+    void wire_inkling_lora_();  // InklingRuntime::lora = the active adapter + its scratch planes
     const ControlVectorDevice* cvec_ = nullptr;
     float cvec_scale_ = 0.0f;
     void control_vector_add_(int layer, int n, cudaStream_t stream);

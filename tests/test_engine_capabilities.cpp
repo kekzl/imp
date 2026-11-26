@@ -19,7 +19,7 @@ using imp::ForwardFacts;
 
 constexpr ForwardFacts kDense{.model_loaded = true};
 // Engine::init on an Inkling2-Loop checkpoint: the executor holds sequence slots, no ssm_state_.
-constexpr ForwardFacts kInkling{.model_loaded = true, .layer_loop_replaced = true};
+constexpr ForwardFacts kInkling{.model_loaded = true, .layer_loop_replaced = true, .own_forward_lora = true};
 
 }  // namespace
 
@@ -37,11 +37,24 @@ TEST(EngineCapabilities, InklingForwardRefusesWhatHooksIntoTheLayerLoop) {
     const EngineCapabilities c = derive_capabilities(kInkling);
     EXPECT_FALSE(c.logit_lens);
     EXPECT_FALSE(c.sae);
-    EXPECT_FALSE(c.lora);
     EXPECT_FALSE(c.control_vector);
     EXPECT_FALSE(c.phrase_ban);
     // Each guidance row decodes on its own sequence slot: the pair works.
     EXPECT_TRUE(c.cfg);
+    // B-111 S5: InklingForward::delta_ applies an adapter's q / k / v / o deltas.
+    EXPECT_TRUE(c.lora);
+}
+
+TEST(EngineCapabilities, OwnForwardWithoutLoraDeltasRefusesLora) {
+    ForwardFacts f = kInkling;
+    f.own_forward_lora = false;
+    EXPECT_FALSE(derive_capabilities(f).lora);
+    // The flag means nothing for the generic loop, which applies lora_delta_ itself.
+    f = kDense;
+    f.own_forward_lora = true;
+    EXPECT_EQ(derive_capabilities(f), derive_capabilities(kDense));
+    f.model_loaded = false;
+    EXPECT_FALSE(derive_capabilities(f).lora);
 }
 
 TEST(EngineCapabilities, GatedResidualRefusesResidualReaders) {
