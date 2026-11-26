@@ -565,9 +565,9 @@ public:
     // cannot be served; caller must reject the request.
     int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
     // executor_inkling.cu: Inkling2-Loop sequence slots by request id (null for every other arch).
-    int inkling_resume(int req, std::span<const int32_t> tokens, cudaStream_t stream);
+    InklingRuntime* inkling_runtime() const { return inkling_.get(); }
     InklingSlotTable* inkling_slots() const { return inkling_ ? &inkling_->table : nullptr; }
-    void set_inkling_lookahead(bool on, bool lazy) { inkling_lookahead_ = on, inkling_lazy_ = lazy; }
+    void set_inkling_lookahead(bool on) { inkling_lookahead_ = on; }
 
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
@@ -1477,7 +1477,7 @@ private:
     void inkling_look_logits_(int slot, cudaStream_t stream);
     [[nodiscard]] bool inkling_take_logits_(Tensor& lg, cudaStream_t stream);
     std::unique_ptr<InklingRuntime> inkling_;
-    bool inkling_lookahead_ = true, inkling_lazy_ = false;  // lazy: context K/V commit as sequences grow
+    bool inkling_lookahead_ = true;
     void inkling_attach_draft_(cudaStream_t stream);  // once, at the first forward: the FP8 head exists then
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.

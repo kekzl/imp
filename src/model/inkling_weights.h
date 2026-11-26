@@ -2,6 +2,7 @@
 // Inkling2-Loop checkpoint on the device, under the vendor tensor names (model.llm.*).
 
 #include "memory/vram_owned.h"
+#include "model/inkling_config.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -14,25 +15,6 @@
 namespace imp {
 
 class VRAMAllocator;
-
-struct InklingConfig {
-    int n_layers = 24, hidden = 2304, n_heads = 24, n_kv_heads = 8, head_dim = 128;
-    int d_rel = 16, rel_extent = 1024, window = 1024, sconv_kernel = 4;
-    int vocab = 200058, vocab_padded = 201024;
-    int n_experts = 128, top_k = 8, inter = 1152;
-    int loop_start = 6, loop_end = 18, passes = 3, gate_rank = 64, block_layers = 6;
-    float eps = 1e-6f, qk_clip = 22.627417f, rel_clip = 8.0f;
-    float log_alpha = 0.1f, log_floor = 8192.0f;
-    float gate_cap = 4.0f, up_cap = 25.0f, route_scale = 8.0f, logit_cap = 30.0f;
-    std::vector<bool> global;  // full attention layers; the rest attend the last `window` tokens
-
-    // Layer applications per token, and the KV / conv cache index of (layer, pass).
-    int n_apps() const { return n_layers + (passes - 1) * (loop_end - loop_start); }
-    int app_index(int layer, int pass) const {
-        return pass == 0 ? layer : n_layers + (pass - 1) * (loop_end - loop_start) + (layer - loop_start);
-    }
-    bool is_loop(int layer) const { return layer >= loop_start && layer < loop_end; }
-};
 
 struct InklingConv {
     float* w = nullptr;         // static: [C, 4], tap 3 = current token

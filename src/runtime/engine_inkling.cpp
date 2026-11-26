@@ -4,23 +4,25 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"
+#include "runtime/prompt_tail.h"
 #include "runtime/request.h"
 #include "vision/image_decode.h"
 #include "vision/image_processor.h"
 #include "vision/vision_family.h"
 
+#include <climits>
 #include <cmath>
+#include <filesystem>
+#include <stdexcept>
 
 #include <algorithm>
+#include <vector>
 
 namespace imp {
 
-// Eager, one kept sequence per slot: exec/inkling_forward.h keeps K/V and conv state outside the
-// paged KV cache and reuses a prefix itself (inkling_resume_), so the engine's prefix cache is off.
-// Context: 32768 unless the operator sets max_seq_len, then up to the checkpoint's model_max_length
-// (1048576). A position costs 32 KiB of global K/V per slot (8 full-attention applications) and
-// 12 KiB of draft context; a slot costs 2288 MiB at 32768, so 2 by default and 4 at most
-// (inkling_fit_slots_ lowers it to what the card took).
+// One kept sequence per slot (exec/inkling_forward.h): conv state and 40 sliding rings (1120 MiB) per slot,
+// full-attention K/V in the paged pool at 36 KiB per position (8 x 4 KiB + the draft's), capped at slots x
+// max_seq_len. Context 32768 unless set, up to model_max_length (1048576); 2 slots by default, 4 at most.
 void Engine::init_inkling_limits_() {
     if (model_->config().arch != ModelArch::INKLING2)
         return;
@@ -33,7 +35,7 @@ void Engine::init_inkling_limits_() {
     if (scheduler_)
         scheduler_->clamp_max_batch_size(slots);
     config_.use_cuda_graphs = false;
-    config_.use_prefix_caching = false;
+    config_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
     // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
     // an explicit speculative.mtp_k = 0 turns it off.
     inkling_lookahead_ = !(runtime_config_.was_set("speculative.mtp_k") &&
@@ -50,7 +52,14 @@ void Engine::init_inkling_limits_() {
     const int asked = config_.max_seq_len > 0 ? config_.max_seq_len : runtime_config_.runtime.max_seq_len;
     config_.max_seq_len = std::min(asked > 0 ? asked : kInklingDefaultCtx, model_ctx);
     runtime_config_.runtime.max_seq_len = config_.max_seq_len;
-    IMP_LOG_INFO("inkling2_loop: up to %d sequences, prefix reuse in the forward, no speculation, context %d",
+    kv_ahead_tokens_ = kInklingKvAhead;
+    // The forward writes its pool K/V as fp16: no other dtype (before the dtype resolver reads either).
+    const std::string& kv_dt = runtime_config_.kv_cache.dtype;
+    if (config_.kv_cache_dtype != QType::F16 || (kv_dt != "auto" && kv_dt != "fp16" && !kv_dt.empty()))
+        IMP_LOG_WARN("inkling2_loop: KV cache fp16, kv_cache.dtype %s ignored", kv_dt.c_str());
+    config_.kv_cache_dtype = QType::F16;
+    runtime_config_.kv_cache.dtype = "fp16";
+    IMP_LOG_INFO("inkling2_loop: up to %d sequences, K/V in the paged pool, no speculation, context %d",
                  slots, config_.max_seq_len);
 }
 
@@ -67,34 +76,106 @@ void Engine::inkling_fit_slots_() {
         scheduler_->clamp_max_batch_size(got);
 }
 
+void Engine::inkling_unbind_stale_() {
+    InklingSlotTable* t = executor_ ? executor_->inkling_slots() : nullptr;
+    for (size_t i = 0; t && i < t->size(); ++i)
+        if (const int id = t->req_of(i); id >= 0 && !held_request_(id)) {
+            IMP_LOG_ERROR("inkling2_loop: slot %zu still bound to ended request %d, unbound", i, id);
+            t->release(id);
+        }
+}
+
+// The slot's ring and conv state resume only its own sequence (InklingForward::match), the pool holds the
+// full-attention K/V of the cached blocks: reuse the shorter, on the checkpoint grid. Binds the slot now so
+// the first prefill chunk rewinds the same one (inkling_resume_).
+int Engine::inkling_prefix_reuse_limit_(Request& req) {
+    InklingRuntime* rt = executor_ ? executor_->inkling_runtime() : nullptr;
+    if (req.bypass_prefix_cache || ppl_capture_.active || !rt || !kv_manager_)
+        return 0;
+    const std::span<const int32_t> key = req.key_tokens();
+    int match = rt->bind_match(req.id, key);
+    if (match < 0) {
+        inkling_unbind_stale_();
+        match = rt->bind_match(req.id, key);
+    }
+    if (match <= 0)
+        return 0;
+    const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    std::vector<size_t> hashes;
+    const int cached = kv_manager_->longest_cached_prefix_blocks(key, hashes, req.prefix_salt);
+    return inkling_prefix_cap_blocks(match, cached,
+                                     prompt_reuse_cap_blocks(static_cast<int>(req.input_tokens.size()), bs),
+                                     bs, InklingForward::kGrid);
+}
+
 int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
-    if (offset != 0 || model_->config().arch != ModelArch::INKLING2 || !executor_)
+    InklingRuntime* rt = executor_ ? executor_->inkling_runtime() : nullptr;
+    if (!rt)
         return offset;
-    // A slot is busy while a request is bound to it: the request_tables row "inkling_slot" unbinds it
-    // on finish and cancel. Always called at offset 0: an empty span makes the slot forget its sequence.
+    // A slot is busy while a request is bound to it: the request_tables row "inkling_slot" unbinds it on
+    // finish and cancel. An empty span makes the slot forget its sequence.
     const bool reuse = req.prefix_reuse_allowed() && !ppl_capture_.active;
     const std::span<const int32_t> key = reuse ? req.key_tokens() : std::span<const int32_t>();
-    int r = executor_->inkling_resume(req.id, key, stream);
-    if (InklingSlotTable* t = executor_->inkling_slots(); r < 0 && t) {
-        // Every slot bound: a binding whose request the engine no longer holds skipped its teardown.
-        for (size_t i = 0; i < t->size(); ++i)
-            if (const int id = t->req_of(i); id >= 0 && !held_request_(id)) {
-                IMP_LOG_ERROR("inkling2_loop: slot %zu still bound to ended request %d, unbound", i, id);
-                t->release(id);
-            }
-        r = executor_->inkling_resume(req.id, key, stream);
+    bool first = false;
+    int r = rt->resume(req.id, key, offset, stream, first);
+    if (r < 0) {
+        inkling_unbind_stale_();
+        r = rt->resume(req.id, key, offset, stream, first);
     }
     if (r < 0) {
         IMP_LOG_ERROR("inkling2_loop: no free sequence slot for request %d, cancelled", req.id);
         return -1;
     }
-    if (r > 0) {
-        IMP_LOG_INFO("inkling2_loop: seq %d resumes at %d of %zu prompt tokens", req.id, r,
-                     req.input_tokens.size());
+    if (!first)
+        return offset;
+    if (r < offset) {
+        // The cached blocks below offset get rewritten with the same tokens' K/V (scheduler.cpp F-A10).
+        IMP_LOG_WARN("inkling2_loop: seq %d slot resumes at %d, below the %d cached tokens", req.id, r,
+                     offset);
         req.prefill_offset = req.cached_tokens = r;
     }
+    if (r > 0)
+        IMP_LOG_INFO("inkling2_loop: seq %d resumes at %d of %zu prompt tokens", req.id, r,
+                     req.input_tokens.size());
     inkling_encode_images_(req, r, stream);
     return r;
+}
+
+int Engine::inkling_kv_layers_() const {
+    const InklingRuntime* rt = executor_ ? executor_->inkling_runtime() : nullptr;
+    if (!rt)
+        return -1;
+    // The draft's layer only when it can run (InklingForward lookahead, the checkpoint's mtp.safetensors).
+    const bool draft = inkling_lookahead_ &&
+                       std::filesystem::exists(model_->inkling_dir + "/mtp.safetensors");
+    return inkling_kv_apps(rt->w.cfg, draft).n_layers();
+}
+
+int Engine::inkling_pool_cap_(int kv_bs) const {
+    return executor_ && executor_->inkling_runtime()
+               ? inkling_pool_blocks(config_.max_batch_size, config_.max_seq_len, kv_bs)
+               : INT_MAX;
+}
+
+int Engine::inkling_initial_blocks_(int max_blocks, int ceiling, int kv_bs) const {
+    // What the slots committed before the pool held their K/V: one growth step each; the pool grows.
+    if (!executor_ || !executor_->inkling_runtime() || ceiling <= 0)
+        return max_blocks;
+    return std::min(max_blocks, std::max(16, config_.max_batch_size * kInklingKvGrowTokens / kv_bs));
+}
+
+void Engine::inkling_attach_pool_() {
+    InklingRuntime* rt = executor_ ? executor_->inkling_runtime() : nullptr;
+    if (!rt)
+        return;
+    if (!rt->bind_kv(*kv_cache_raw_))
+        throw std::runtime_error("inkling2_loop: the KV pool does not hold the forward's layers");
+    kv_cache_raw_->set_grow_step_blocks(kInklingKvGrowTokens / kv_cache_raw_->block_size());
+    // A re-plan would move the pool under the slots' bound pointers.
+    kv_replan_.armed = false;
+    // Reuse stops where the slot can resume: the ring and conv state are per slot (B-111 S3/S4).
+    if (kv_manager_->prefix_caching_enabled())
+        scheduler_->set_prefix_reuse_limit([this](Request& r) { return inkling_prefix_reuse_limit_(r); });
 }
 
 void Engine::inkling_load_vision_() {

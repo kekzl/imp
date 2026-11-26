@@ -10,6 +10,7 @@
 #include "memory/kv_cache.h"
 #include "memory/mem_account.h"  // trim_device_mempool
 
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "runtime/request.h"
 
@@ -395,6 +396,9 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
             "(sequential create/free/create is supported), or run a second process. (#1629)");
         return IMP_ERROR_INVALID_ARG;
     }
+
+    // Every model load logs its own fallbacks (C-12/D-10); after the live check, before the model one.
+    imp::log_once_rearm_all();
 
     if (!model->model) {
         return IMP_ERROR_INVALID_MODEL;

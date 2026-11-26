@@ -1,6 +1,7 @@
 #include "exec/gemm_scratch.h"
 #include "memory/device_alloc_all.h"
 
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "memory/span.h"
@@ -97,8 +98,8 @@ void mmvq_scratch_get_or_grow(std::size_t need, void** out_buf, std::size_t* out
     }
     // Cold path: prewarm missed (or model dim changed mid-run). Re-grow.
     // Capture-unsafe; emits one ERROR log so the missing prewarm is visible.
-    static std::atomic<bool> s_warned{false};
-    if (!s_warned.exchange(true)) {
+    static LogOnce s_warned;
+    if (s_warned.first()) {
         IMP_LOG_ERROR(
             "mmvq_scratch_get_or_grow: hot-path grow fired (need=%zu, have=%zu) — "
             "engine init did not call prewarm_mmvq_scratch() with the model's "

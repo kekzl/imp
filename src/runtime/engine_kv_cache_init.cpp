@@ -89,21 +89,21 @@ struct KvShape {
     size_t minmax_bytes_per_layer = 0;  // sparse decode key min/max metadata per block
 };
 
-std::vector<int> map_kv_layers(const Model& model, int& n_attn_layers) {
+// inkling_layers >= 0: Inkling2-Loop, whose own forward writes that many pool layers
+// (exec/inkling_kv_layout.h) and no model layer reaches the executor's attention.
+std::vector<int> map_kv_layers(const Model& model, int inkling_layers, int& n_attn_layers) {
     const auto& mcfg = model.config();
     n_attn_layers = 0;
     std::vector<int> kv_layer_map(mcfg.n_layers, -1);
-    for (int i = 0; i < mcfg.n_layers; i++) {
+    for (int i = 0; i < mcfg.n_layers && inkling_layers < 0; i++) {
         if (model.layer(i).wq.data == nullptr || model.layer(i).gdn_gate.data != nullptr)
             continue;
         // Gemma-4 KV sharing: the shared layer reads its source's slot and owns none.
         const int src = mcfg.kv_source(i);
         kv_layer_map[i] = (src >= 0 && src < i) ? kv_layer_map[src] : n_attn_layers++;
     }
-    if (mcfg.arch == ModelArch::INKLING2) {
-        // K/V live in exec/inkling_forward.h; the paged cache only carries the block bookkeeping.
-        n_attn_layers = 1;
-        std::fill(kv_layer_map.begin(), kv_layer_map.end(), 0);
+    if (inkling_layers >= 0) {
+        n_attn_layers = inkling_layers;
     } else if (n_attn_layers == 0) {
         n_attn_layers = mcfg.n_layers;
         for (int i = 0; i < mcfg.n_layers; i++)
@@ -559,11 +559,6 @@ std::unique_ptr<KVCache> make_kv_cache(const KvInitCtx& c, const KvShape& kv, VR
                                        int swa_max_blocks, int blocks, int ceiling) {
     const auto& mcfg = c.mcfg;
     const int n_kv_layers = kv.n_kv_layers;
-    // Inkling's K/V live in its own forward (exec/inkling_forward.h): the block ids and ref counts are
-    // all the engine needs, a pool would be 4096 bytes per context token that nothing reads.
-    if (mcfg.arch == ModelArch::INKLING2)
-        return KVCache::for_accounting(n_kv_layers, mcfg.n_kv_heads, kv.head_dim, c.ec.kv_cache_dtype,
-                                       std::max(blocks, ceiling), kv.kv_bs);
     if ((!mcfg.head_dim_per_layer.empty() || kv.swa_active) && c.ec.kv_cache_dtype != QType::INT8 &&
         c.ec.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
@@ -695,8 +690,8 @@ void enable_prefix_caching(const KvInitCtx& c, KVCacheManager& kvm,
     IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
     // Persistent cache is dense-only: restored KV blocks are usable for
     // hybrids only together with a recurrent-state snapshot, and snapshots
-    // are not persisted (the recurrent-snapshot store below must also come up).
-    if (c.mcfg.ssm_inner_size == 0 && !c.ec.prefix_cache_path.empty() &&
+    // are not persisted (the recurrent-snapshot store below must also come up). Inkling: no slot state.
+    if (c.mcfg.ssm_inner_size == 0 && c.mcfg.arch != ModelArch::INKLING2 && !c.ec.prefix_cache_path.empty() &&
         prefix_cache_restore_allowed(c.ec.kv_cache_dtype, c.rc)) {
         int restored = kvm.load_prefix_cache(c.ec.prefix_cache_path,
                                              prefix_cache_fingerprint(fingerprint(), c.ec.kv_cache_dtype,
@@ -889,7 +884,7 @@ bool Engine::init_kv_cache() {
     const KvInitCtx ctx{*model_, mcfg, config_, runtime_config_};
     KvShape kv;
     kv.head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-    kv.layer_map = map_kv_layers(*model_, kv.n_kv_layers);
+    kv.layer_map = map_kv_layers(*model_, inkling_kv_layers_(), kv.n_kv_layers);
     const int n_kv_layers = kv.n_kv_layers;
     const int head_dim = kv.head_dim;
 
@@ -900,7 +895,8 @@ bool Engine::init_kv_cache() {
         config_.kv_block_size = kKVBlockSize;
     const int kv_bs = config_.kv_block_size;
     kv.kv_bs = kv_bs;
-    int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
+    // A decode step's table holds kv_ahead_tokens_ more rows (Inkling lookahead).
+    int blocks_per_seq = (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs;
 
     const SwaGate swa = resolve_swa_sizing(ctx, kv.layer_map, n_kv_layers, kv_bs, executor_.get(),
                                            [this] { return resolve_prefill_chunk_size_(); });
@@ -955,7 +951,9 @@ bool Engine::init_kv_cache() {
     clamp_max_batch_to_plan_(probe, plan, ssm_reserved_slots, vram_budget);
     // Mode-2 weight caches stop at the plan's grant and leave its KV pool free (vram_budget.h).
     apply_plan_to_weight_caches(vram_budget, plan, probe.distributable_bytes, mcfg.is_nvfp4_prequant);
-    int max_blocks = kv_blocks_from_plan(config_, plan, vram_budget);
+    // Inkling2-Loop: the pool never outgrows every slot at max_seq_len, whatever is free.
+    const int ink_cap = inkling_pool_cap_(kv_bs);
+    int max_blocks = std::min(kv_blocks_from_plan(config_, plan, vram_budget), ink_cap);
     kv_replan_arm(kv_replan_, probe, vram_budget, max_blocks, plan.ok,
                   config_.library_reserve_mb < 0 && config_.kv_cache_max_blocks <= 0);
     log_sparse_minmax_pool(config_, kv, max_blocks);
@@ -1008,11 +1006,14 @@ bool Engine::init_kv_cache() {
     // The clamp above answers "what fits right now"; a growable pool keeps the
     // pre-clamp number as its ceiling and commits the clamped one, so a reading
     // skewed by another process still releasing VRAM is not final.
-    const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
+    const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? std::min(kv_blocks_planned, ink_cap)
+                                                                    : 0;
     // What the pool was actually built with; the retry loop below may lower it.
     int kv_ceiling_effective = kv_ceiling_blocks;
-    max_blocks = growable_initial_blocks(runtime_config_, max_blocks, kv_ceiling_blocks, kv_bs,
-                                         per_block_total_bytes);
+    max_blocks = inkling_initial_blocks_(growable_initial_blocks(runtime_config_, max_blocks,
+                                                                 kv_ceiling_blocks, kv_bs,
+                                                                 per_block_total_bytes),
+                                         kv_ceiling_blocks, kv_bs);
     log_kv_pool_summary(ctx, kv, max_blocks);
 
     std::unique_ptr<KVCache> kv_cache = allocate_kv_pool(ctx, kv, &vram_alloc_, vram_budget.swa_max_blocks,
@@ -1030,6 +1031,7 @@ bool Engine::init_kv_cache() {
     }
     enable_sparse_key_minmax(ctx, *kv_cache_raw_);
     enable_prefix_caching(ctx, *kv_manager_, fingerprint, stream_);
+    inkling_attach_pool_();
 
     executor_->set_kv_layer_map(kv.layer_map);
     apply_checkpoint_fp8_kv_scales(*executor_, *model_, kv.layer_map, config_.kv_cache_dtype,

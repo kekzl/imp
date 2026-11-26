@@ -6,6 +6,7 @@
 #include "memory/vram_query.h"
 #include "core/graph_diag.h"
 #include "core/kv_dtype.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -424,11 +425,10 @@ int KVCache::commit_blocks_(int blocks) {
             // capacity is the one that was fully committed before this.
             const size_t added = region_.committed() - before;
             MemAccount::instance().note("kv_cache", static_cast<std::ptrdiff_t>(added));
-            // Once per process: a refused commit is why a growable pool stays at its
+            // Once per model load: a refused commit is why a growable pool stays at its
             // start size and the prefix cache gets reclaimed under load.
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
+            static LogOnce warned;
+            if (warned.first()) {
                 IMP_LOG_WARN(
                     "KV cache: growth to %d blocks refused, the driver would not back layer %d "
                     "(%.0f MiB committed); the pool stays at %d blocks and cached prefixes are "
