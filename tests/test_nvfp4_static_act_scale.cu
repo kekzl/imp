@@ -4,6 +4,7 @@
 // mutants that drop the scale on either side are red; every producer matches the reference quantizer.
 
 #include "compute/activation.h"
+#include "compute/cutlass_nvfp4_owned.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/layernorm.h"
 #include "core/tensor.h"
@@ -184,7 +185,7 @@ std::vector<float> tile_y(const std::vector<half>& x, const Weight& w, int M, in
                           Arm arm) {
     const float qs = (arm == Arm::kScaled || arm == Arm::kMutantAlphaDropsScale) ? s : 1.0f;
     const float as = (arm == Arm::kScaled || arm == Arm::kMutantQuantDropsScale) ? s : 1.0f;
-    CutlassNvFP4Weight cw;
+    CutlassNvFP4Owned cw;
     convert_nvfp4_to_cutlass(w.nv, cw, nullptr);
     half* dx = dev_upload(x);
     void *ad = nullptr, *asf = nullptr;
@@ -202,7 +203,6 @@ std::vector<float> tile_y(const std::vector<half>& x, const Weight& w, int M, in
     std::vector<float> y(yh.size());
     for (size_t i = 0; i < y.size(); ++i)
         y[i] = __half2float(yh[i]);
-    free_cutlass_nvfp4_weight(cw);
     cudaFree(dx);
     cudaFree(ad);
     cudaFree(asf);

@@ -4,18 +4,22 @@
 // plain struct the kernels read (raw pointers, no indirection added on a lookup), its DeviceOwned
 // members are the buffers the entry allocated. A pointer of the base with an empty owner beside
 // it is a view: a slice of a WeightCaches slab, of another entry or of the model's weights.
-// The ownership flags of the base structs (owned, borrowed, sf_borrowed, borrowed_data) always
+// The ownership flags of the base structs (borrowed, borrowed_data) always
 // read "not mine" inside an entry, so a sliced copy of the base is a view
-// and the src/quant free functions release nothing when handed one.
+// and the src/quant free functions release nothing when handed one. NvFP4CacheEntry and
+// CutlassNvFP4CacheEntry are the producer owners (quant/nvfp4_owned.h, compute/cutlass_nvfp4_owned.h)
+// that can also hold a view.
 
 #include <cstddef>
 #include <utility>
 
-#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight
+#include "compute/cutlass_nvfp4_owned.h"  // CutlassNvFP4Owned
+#include "compute/gemm_cutlass_sm120.h"   // CutlassNvFP4Weight
 #include "core/tensor.h"
 #include "memory/device_owned.h"
 #include "quant/cutlass_mxfp4_weight.h"  // CutlassMxFP4Weight
 #include "quant/mxfp8_sfatom.h"          // CutlassMxFP8Weight
+#include "quant/nvfp4_owned.h"           // NvFP4Owned, NvFP4MoEOwned
 #include "quant/nvfp4_quant.h"           // NvFP4QuantResult, NvFP4MoEQuantResult
 
 namespace imp {
@@ -50,42 +54,13 @@ struct Fp16CacheEntry : Tensor {
 
 // NVFP4 decode copy. Empty owners: packed_data / micro_scales are the model's weights or slices
 // of an nvfp4_moe entry.
-struct NvFP4CacheEntry : NvFP4QuantResult {
-    DeviceOwned<void> packed_owned;
-    DeviceOwned<void> scales_owned;
-
-    NvFP4CacheEntry() { owned = false; }
-    // Takes over a quantize_* result (plain family) when it owns its buffers, else views it.
-    // Empties `r`: a later free_nvfp4_result(r) releases nothing.
-    explicit NvFP4CacheEntry(NvFP4QuantResult&& r) noexcept : NvFP4QuantResult(r) {
-        if (r.owned) {
-            packed_owned.adopt(r.packed_data, static_cast<size_t>(r.N) * r.K / 2, nullptr);
-            scales_owned.adopt(r.micro_scales, static_cast<size_t>(r.N) * (r.K / 16), nullptr);
-        }
-        owned = false;
-        r = NvFP4QuantResult{};
-        r.owned = false;
-    }
-
-    NvFP4CacheEntry(NvFP4CacheEntry&& o) noexcept
-        : NvFP4QuantResult(take_(o)),
-          packed_owned(std::move(o.packed_owned)),
-          scales_owned(std::move(o.scales_owned)) {}
-    NvFP4CacheEntry& operator=(NvFP4CacheEntry&& o) noexcept {
-        if (this != &o) {
-            NvFP4QuantResult::operator=(take_(o));
-            packed_owned = std::move(o.packed_owned);
-            scales_owned = std::move(o.scales_owned);
-        }
-        return *this;
-    }
-
-private:
-    static NvFP4QuantResult take_(NvFP4QuantResult& v) noexcept {
-        NvFP4QuantResult out = detail::take_view(v);
-        v.owned = false;
-        return out;
-    }
+struct NvFP4CacheEntry : NvFP4Owned {
+    NvFP4CacheEntry() = default;
+    // A view: owns nothing.
+    explicit NvFP4CacheEntry(const NvFP4QuantResult& view) noexcept { NvFP4QuantResult::operator=(view); }
+    // Takes over a quantize_* owner (plain family). Empties `r`.
+    explicit NvFP4CacheEntry(NvFP4Owned&& r) noexcept : NvFP4Owned(std::move(r)) {}
+    NvFP4CacheEntry(const NvFP4Owned&) = delete;  // an owner passed without std::move would become a view
 };
 
 // Contiguous per-expert NVFP4. Empty owners: the pointers are the model's contiguous upload.
@@ -117,6 +92,13 @@ struct NvFP4MoECacheEntry : NvFP4MoEQuantResult {
           tscales_owned(std::move(ts)) {
         borrowed = true;
     }
+    // Takes over a quantize_packed_experts_to_nvfp4 owner. Empties `r`.
+    explicit NvFP4MoECacheEntry(NvFP4MoEOwned&& r) noexcept
+        : NvFP4MoECacheEntry(r, std::move(r.packed_owned), std::move(r.scales_owned),
+                             std::move(r.tscales_owned)) {
+        static_cast<NvFP4MoEQuantResult&>(r) = NvFP4MoEQuantResult{};
+        r.borrowed = true;
+    }
 
     NvFP4MoECacheEntry(NvFP4MoECacheEntry&& o) noexcept
         : NvFP4MoEQuantResult(take_(o)),
@@ -143,35 +125,16 @@ private:
 
 // SfAtom scale factors of an NVFP4 weight. `data` is always a view (an nvfp4 entry's packed
 // data or the model's). `sf_owned` empty: scale_factors is a slab slice or null (G3 SfAtom-less).
-struct CutlassNvFP4CacheEntry : CutlassNvFP4Weight {
-    DeviceOwned<void> sf_owned;
-
-    CutlassNvFP4CacheEntry() { sf_borrowed = true; }
-    // Takes over the SfAtom buffer of convert_nvfp4_to_cutlass (plain family) unless it is
-    // marked sf_borrowed. Empties `w`.
-    explicit CutlassNvFP4CacheEntry(CutlassNvFP4Weight&& w) noexcept : CutlassNvFP4Weight(w) {
-        if (!w.sf_borrowed)
-            sf_owned.adopt(w.scale_factors, w.sf_bytes, nullptr);
-        sf_borrowed = true;
-        w = CutlassNvFP4Weight{};
+struct CutlassNvFP4CacheEntry : CutlassNvFP4Owned {
+    CutlassNvFP4CacheEntry() = default;
+    // A view: a slab slice, another entry's SfAtom or none (G3 SfAtom-less).
+    explicit CutlassNvFP4CacheEntry(const CutlassNvFP4Weight& view) noexcept {
+        CutlassNvFP4Weight::operator=(view);
     }
-
-    CutlassNvFP4CacheEntry(CutlassNvFP4CacheEntry&& o) noexcept
-        : CutlassNvFP4Weight(take_(o)), sf_owned(std::move(o.sf_owned)) {}
-    CutlassNvFP4CacheEntry& operator=(CutlassNvFP4CacheEntry&& o) noexcept {
-        if (this != &o) {
-            CutlassNvFP4Weight::operator=(take_(o));
-            sf_owned = std::move(o.sf_owned);
-        }
-        return *this;
-    }
-
-private:
-    static CutlassNvFP4Weight take_(CutlassNvFP4Weight& v) noexcept {
-        CutlassNvFP4Weight out = detail::take_view(v);
-        v.sf_borrowed = true;
-        return out;
-    }
+    // Takes over a convert_nvfp4_to_cutlass owner (plain family). Empties `w`.
+    explicit CutlassNvFP4CacheEntry(CutlassNvFP4Owned&& w) noexcept : CutlassNvFP4Owned(std::move(w)) {}
+    CutlassNvFP4CacheEntry(const CutlassNvFP4Owned&) =
+        delete;  // an owner passed without std::move would become a view
 };
 
 // MXFP8 prefill copy. `data_owned` empty: data is rows of an FP8 row-scale sidecar

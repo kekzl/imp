@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
@@ -40,7 +41,7 @@ float host_dequant(const std::vector<uint8_t>& packed, const std::vector<uint8_t
 }
 
 struct DeviceQuant {
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     std::vector<uint8_t> packed_h, scales_h;
     void quantize(const std::vector<__half>& src, int rows, int K) {
         void* d = nullptr;
@@ -664,7 +665,6 @@ TEST_F(NvFP4SmallMV2Test, RingSweepQwen3_14B) {
         imp::NvFP4QuantResult ring[kRing];
         for (auto& r : ring) {
             r = W.q;
-            r.owned = false;
             ASSERT_EQ(cudaMalloc(&r.packed_data, pb), cudaSuccess);
             ASSERT_EQ(cudaMalloc(&r.micro_scales, sb), cudaSuccess);
             ASSERT_EQ(cudaMemcpy(r.packed_data, W.q.packed_data, pb, cudaMemcpyDeviceToDevice), cudaSuccess);

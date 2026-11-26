@@ -811,7 +811,6 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         nv.tensor_scale = h.source_tensor_scale;
         nv.N = h.shape[0];
         nv.K = h.shape[1] * 2;  // packed K/2 → logical K
-        nv.owned = false;       // borrows resident weight storage
         gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta, ctx.nvfp4_dequant_ws());
         return;
     }

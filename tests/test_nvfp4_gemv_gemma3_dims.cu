@@ -4,6 +4,7 @@
 // Exercises every NVFP4 decode-GEMV entry at real gemma-3-12b dims; run under
 // compute-sanitizer to pin the out-of-bounds access.
 
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
@@ -36,7 +37,7 @@ protected:
     }
 
     // Deterministic synthetic FP16 weight [N, K], quantized to NVFP4.
-    void make_weight(int N, int K, half** d_w, NvFP4QuantResult& qr) {
+    void make_weight(int N, int K, half** d_w, NvFP4Owned& qr) {
         std::vector<half> h_w(static_cast<size_t>(N) * K);
         for (size_t i = 0; i < h_w.size(); ++i)
             h_w[i] = __float2half(((static_cast<int>(i * 17u) % 31) - 15) * 0.01f);
@@ -97,7 +98,7 @@ TEST_F(NvFP4GemvGemma3Dims, KparPerProjectionShapes) {
     for (const auto& s : shapes) {
         SCOPED_TRACE(s.name);
         half* d_w = nullptr;
-        NvFP4QuantResult qr;
+        NvFP4Owned qr;
         make_weight(s.N, s.K, &d_w, qr);
         half* d_x = make_vec(s.K, 0.02f);
         half* d_y = nullptr;
@@ -107,7 +108,6 @@ TEST_F(NvFP4GemvGemma3Dims, KparPerProjectionShapes) {
         gemv_nvfp4_kpar(qr, d_x, d_y, s.N, s.K, stream_);
         check_output(s.name, d_y, s.N);
 
-        free_nvfp4_result(qr);
         cudaFree(d_w);
         cudaFree(d_x);
         cudaFree(d_y);
@@ -117,7 +117,7 @@ TEST_F(NvFP4GemvGemma3Dims, KparPerProjectionShapes) {
 // The fused QKV projection at gemma-3 head geometry (hd=256: q=4096, kv=2048).
 TEST_F(NvFP4GemvGemma3Dims, QkvFusedAtGemma3Heads) {
     half *d_wq = nullptr, *d_wk = nullptr, *d_wv = nullptr;
-    NvFP4QuantResult qq, qk, qv;
+    NvFP4Owned qq, qk, qv;
     make_weight(kQRows, kDModel, &d_wq, qq);
     make_weight(kKVRows, kDModel, &d_wk, qk);
     make_weight(kKVRows, kDModel, &d_wv, qv);
@@ -132,9 +132,6 @@ TEST_F(NvFP4GemvGemma3Dims, QkvFusedAtGemma3Heads) {
     check_output("qkv_fused k", d_yk, kKVRows);
     check_output("qkv_fused v", d_yv, kKVRows);
 
-    free_nvfp4_result(qq);
-    free_nvfp4_result(qk);
-    free_nvfp4_result(qv);
     for (auto* p : {d_wq, d_wk, d_wv, d_x, d_yq, d_yk, d_yv})
         cudaFree(p);
 }
@@ -142,7 +139,7 @@ TEST_F(NvFP4GemvGemma3Dims, QkvFusedAtGemma3Heads) {
 // Fused gate+up + the GeGLU-residual down projection — the gemma-3-only path.
 TEST_F(NvFP4GemvGemma3Dims, GateUpFusedAndGegluResidualDown) {
     half *d_wg = nullptr, *d_wu = nullptr, *d_wd = nullptr;
-    NvFP4QuantResult qg, qu, qd;
+    NvFP4Owned qg, qu, qd;
     make_weight(kFfn, kDModel, &d_wg, qg);
     make_weight(kFfn, kDModel, &d_wu, qu);
     make_weight(kDModel, kFfn, &d_wd, qd);
@@ -160,9 +157,6 @@ TEST_F(NvFP4GemvGemma3Dims, GateUpFusedAndGegluResidualDown) {
     gemv_nvfp4_geglu_residual(qd, d_yg, d_yu, d_y, d_res, kDModel, kFfn, stream_);
     check_output("geglu_residual down", d_y, kDModel);
 
-    free_nvfp4_result(qg);
-    free_nvfp4_result(qu);
-    free_nvfp4_result(qd);
     for (auto* p : {d_wg, d_wu, d_wd, d_x, d_res, d_yg, d_yu, d_y})
         cudaFree(p);
 }

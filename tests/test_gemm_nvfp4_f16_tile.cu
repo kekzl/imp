@@ -7,6 +7,7 @@
 #include "compute/gemm_grouped_nvfp4_f16_tile.h"
 #include "compute/gemm_nvfp4_f16_tile.h"
 #include "core/tensor.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -161,7 +162,7 @@ TEST(GemmNvfp4TileQuant, MatchesDequantizeNvfp4) {
     fill_act_kernel<<<1024, 256, 0, s>>>(a, size_t(M) * K, 0x51u);
     int64_t ws[2] = {N, K};
     Tensor tw(wsrc, QType::F16, 2, ws, true);
-    NvFP4QuantResult q;
+    NvFP4Owned q;
     quantize_fp16_to_nvfp4(tw, q, s);
     dequantize_nvfp4_to_fp16(q, wdq, s);
     ASSERT_TRUE(gemm_f16_tile(a, wdq, ref, M, N, K, 1.0f, 0.0f, false, s, -1));
@@ -183,7 +184,6 @@ TEST(GemmNvfp4TileQuant, MatchesDequantizeNvfp4) {
                  K, rel);
     EXPECT_GT(den, 0.0);
     EXPECT_LT(rel, 2e-3);
-    free_nvfp4_result(q);
     cudaFree(wsrc);
     cudaFree(wdq);
     cudaFree(a);

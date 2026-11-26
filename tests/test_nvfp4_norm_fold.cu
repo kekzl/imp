@@ -3,6 +3,7 @@
 #include "compute/layernorm.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -27,8 +28,7 @@ protected:
         cudaStreamCreate(&stream_);
     }
     void TearDown() override {
-        for (auto& q : quants_)
-            free_nvfp4_result(q);
+        quants_.clear();  // owners release before the input buffers, as before
         for (void* p : bufs_)
             cudaFree(p);
         if (stream_)
@@ -57,11 +57,12 @@ protected:
         half* d_w = upload(w);
         int64_t shape[2] = {N, K};
         Tensor t(d_w, QType::F16, 2, shape, true);
-        NvFP4QuantResult q;
+        NvFP4Owned q;
         quantize_fp16_to_nvfp4(t, q, stream_);
         EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
-        quants_.push_back(q);
-        return q;
+        const NvFP4QuantResult view = q;
+        quants_.push_back(std::move(q));
+        return view;
     }
     template <typename T>
     std::vector<float> fetch(const T* d, size_t n) {
@@ -139,7 +140,7 @@ protected:
 
     cudaStream_t stream_ = nullptr;
     std::vector<void*> bufs_;
-    std::vector<NvFP4QuantResult> quants_;
+    std::vector<NvFP4Owned> quants_;
 };
 
 TEST_F(NvFP4NormFold, MatchesRmsnormThenGemv) { run(0.0f); }

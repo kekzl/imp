@@ -17,6 +17,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/gpt_oss_mxfp4_convert.h"
 #include "quant/fp8_quant.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
@@ -80,7 +81,7 @@ bool alloc_scale_scratch(ScaleScratch& s, size_t a_count, size_t b_count, const 
 }
 
 // FP16 [rows, cols] device head -> NVFP4 with its own tensor scale; false = scratch alloc failed.
-bool quantize_head_nvfp4(const Tensor& lm, NvFP4QuantResult& out, const char* pass, cudaStream_t stream) {
+bool quantize_head_nvfp4(const Tensor& lm, NvFP4Owned& out, const char* pass, cudaStream_t stream) {
     ScaleScratch scratch;
     if (!alloc_scale_scratch(scratch, 1, 1, pass))
         return false;
@@ -241,7 +242,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         }
     }
 
-    NvFP4QuantResult result;
+    NvFP4Owned result;
     if (!quantize_head_nvfp4(lm, result, "NVFP4 LM head", stream))
         return;
     wcache_->nvfp4[lm.data] = NvFP4CacheEntry(std::move(result));
@@ -277,7 +278,7 @@ void QuantPipeline::mtp_draft_lm_head_nvfp4_(cudaStream_t stream) {
     Tensor rows(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
     rows.shape[0] = mtp_draft_copy_rows(static_cast<int>(lm.shape[0]),
                                         dispatch_policy().speculative.mtp_draft_vocab);
-    NvFP4QuantResult q;
+    NvFP4Owned q;
     if (!quantize_head_nvfp4(rows, q, "MTP draft NVFP4 LM head", stream))
         return;
     wcache_->mtp_lm_head_nvfp4 = NvFP4CacheEntry(std::move(q));
@@ -469,7 +470,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
 
         Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
 
-        NvFP4QuantResult result;
+        NvFP4Owned result;
         quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
 
         // Sync immediately so we can read tensor_scale and free FP16
@@ -586,7 +587,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
 
         Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
 
-        NvFP4QuantResult result;
+        NvFP4Owned result;
         quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscales_all + i, stream);
         wcache_->nvfp4[e.orig_ptr] = NvFP4CacheEntry(std::move(result));
     }
@@ -664,7 +665,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
 
         Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2, e.weight.shape, true);
-        NvFP4QuantResult result;
+        NvFP4Owned result;
         quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf2, d_tscale_buf2, stream);
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 

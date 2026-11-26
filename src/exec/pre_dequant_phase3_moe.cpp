@@ -199,7 +199,6 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 NvFP4QuantResult nv;
                 nv.packed_data = data_slice;
                 nv.micro_scales = ms_slice;
-                nv.owned = false;  // slices into the contiguous conversion result
                 nv.tensor_scale = h_ts[e];
                 nv.N = r.N;
                 nv.K = r.K;
@@ -212,7 +211,6 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 cw.N = r.N;
                 cw.K = r.K;
                 cw.sf_bytes = sf_per_expert;
-                cw.sf_borrowed = true;
                 wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
             }
             wcache_->cutlass_nvfp4_bytes += sfatom_total;
@@ -731,7 +729,6 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 cw.N = N;
                 cw.K = K;
                 cw.sf_bytes = sf_per_expert;
-                cw.sf_borrowed = true;
                 wcache_->cutlass_nvfp4[data_slice] = CutlassNvFP4CacheEntry(std::move(cw));
             }
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
@@ -788,7 +785,7 @@ void QuantPipeline::cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3
         if (!st[p].cacheable)
             continue;
         const Tensor& t = *gud[p];
-        NvFP4MoEQuantResult result;
+        NvFP4MoEOwned result;
         quantize_packed_experts_to_nvfp4(t.data, t.qtype, static_cast<int>(t.shape[0]),
                                          static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]),
                                          qscratch_->dequant.get(), result, stream);

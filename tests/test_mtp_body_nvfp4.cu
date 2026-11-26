@@ -14,6 +14,7 @@
 #include "compute/mtp_forward_internal.h"
 #include "core/tensor.h"
 #include "model/mtp_head.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 namespace {
@@ -157,7 +158,7 @@ TEST_F(MtpBodyNvfp4Test, CopyIsTheDirectQuantizeOfEachWeightAndThePlanPricesIt) 
 
     const auto body = s.body();
     for (int i = 0; i < 8; i++) {
-        imp::NvFP4QuantResult ref;
+        imp::NvFP4Owned ref;
         imp::quantize_fp16_to_nvfp4(*body[i], ref, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         const size_t n = static_cast<size_t>(ref.N);
@@ -166,7 +167,6 @@ TEST_F(MtpBodyNvfp4Test, CopyIsTheDirectQuantizeOfEachWeightAndThePlanPricesIt) 
         EXPECT_EQ(ws.nv_ts[i], ref.tensor_scale) << i;
         EXPECT_EQ(bytes(ws.nv_p[i], n * (k / 2)), bytes(ref.packed_data, n * (k / 2))) << "weight " << i;
         EXPECT_EQ(bytes(ws.nv_m[i], n * (k / 16)), bytes(ref.micro_scales, n * (k / 16))) << "weight " << i;
-        imp::free_nvfp4_result(ref);
     }
     EXPECT_FALSE(imp::mtp_body_nvfp4_allocate(s.head, ws, nullptr)) << "a second copy is refused";
     imp::mtp_workspace_free(ws);

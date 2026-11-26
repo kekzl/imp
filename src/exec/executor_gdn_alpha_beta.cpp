@@ -120,7 +120,6 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
         if (it == wcache_.nvfp4.end())
             return false;
         out = it->second;
-        out.owned = false;
         return true;
     }
     if (decode == StorageTier::CUTLASS_NVFP4 && h.source_data && h.source_scales) {
@@ -129,7 +128,6 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
         out.tensor_scale = h.source_tensor_scale;
         out.N = h.shape[0];
         out.K = h.shape[1] * 2;
-        out.owned = false;
         return true;
     }
     return false;

@@ -6,6 +6,8 @@
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
 #include "nvfp4_fp64_ref.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -72,9 +74,9 @@ struct Grouped {
                                             0.05f * static_cast<float>(1 + (e % 4)));
             int64_t ws[2] = {N, K};
             Tensor wt(w, QType::F16, 2, ws, true);
-            NvFP4QuantResult q;
+            NvFP4Owned q;
             quantize_fp16_to_nvfp4(wt, q, s);
-            CutlassNvFP4Weight cw;
+            CutlassNvFP4Owned cw;
             convert_nvfp4_to_cutlass(q, cw, s);
             cudaMemcpyAsync(static_cast<char*>(b) + e * b_stride, cw.data, b_stride, cudaMemcpyDeviceToDevice,
                             s);
@@ -82,8 +84,6 @@ struct Grouped {
                             cudaMemcpyDeviceToDevice, s);
             alpha[e] = cw.tensor_scale;
             cudaStreamSynchronize(s);
-            free_cutlass_nvfp4_weight(cw);
-            free_nvfp4_result(q);
         }
         half* x = nullptr;
         cudaMalloc(&x, size_t(M_total) * K * sizeof(half));

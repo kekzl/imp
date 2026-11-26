@@ -5,6 +5,8 @@
 #include "core/tensor.h"
 #include "exec/weight_handle.h"
 #include "quant/fp8_quant.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
@@ -349,7 +351,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     // Quantize to NVFP4
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -396,7 +398,6 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     }
 
     qr.tensor_scale = saved_ts;  // restore before free
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_y_direct);
@@ -423,7 +424,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
     int64_t wshape[2] = {N_OUT, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
     float saved_ts = qr.tensor_scale;
@@ -463,7 +464,6 @@ TEST_F(WeightDispatchTest, NVFP4_GemmPackedShapeMatchesDirect) {
             << "NVFP4 packed-shape GEMM dispatch mismatch at i=" << i;
 
     qr.tensor_scale = saved_ts;
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_y_direct);
@@ -487,7 +487,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     int64_t wshape[2] = {M, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -529,7 +529,6 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     }
 
     qr.tensor_scale = saved_ts;
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_y_direct);
@@ -558,11 +557,11 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
-    CutlassNvFP4Weight cw;
+    CutlassNvFP4Owned cw;
     convert_nvfp4_to_cutlass(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -623,8 +622,6 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
             << "CUTLASS_NVFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
-    free_nvfp4_result(qr);
-    free_cutlass_nvfp4_weight(cw);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_act_data);

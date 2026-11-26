@@ -10,6 +10,7 @@
 // MXFP8 (checked first at dispatch).
 
 #include "quant/mxfp8_sfatom.h"
+#include "compute/cutlass_nvfp4_owned.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
@@ -17,6 +18,7 @@
 #include "exec/executor_helpers.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -153,19 +155,17 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
             return;
         Tensor fp16_view(w.data, QType::F16, 2, w.shape, /*on_device=*/true);
         const float tscale = calibrate_nvfp4_scales(fp16_view, stream);
-        NvFP4QuantResult result;
+        NvFP4Owned result;
         quantize_fp16_to_nvfp4_with_scale(fp16_view, tscale, result, stream);
         result.tensor_scale = tscale;
         result.N = static_cast<int>(w.shape[0]);
         result.K = static_cast<int>(w.shape[1]);
 
-        CutlassNvFP4Weight cw;
+        CutlassNvFP4Owned cw;
         convert_nvfp4_to_cutlass(result, cw, stream);  // owns the SfAtom buffer, borrows packed data
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         // The linear micro-scales only feed the SfAtom conversion; no GEMV reads this copy.
-        NvFP4QuantResult micro;
-        micro.micro_scales = result.micro_scales;
-        free_nvfp4_result(micro);
+        result.scales_owned.reset();
         result.micro_scales = nullptr;
         nv_bytes += (static_cast<size_t>(w.shape[0]) * w.shape[1] / 2) + cw.sf_bytes;
         wcache_->cutlass_nvfp4_prefill_src.emplace_back(std::move(result));

@@ -5,6 +5,7 @@
 #include "compute/gemm.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
@@ -98,7 +99,7 @@ TEST(LmHeadDraftRows, Nvfp4MultiRowIsRowCountInvariantAndPriced) {
     ASSERT_EQ(cudaMalloc(&d_q8, n_w), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_s8, V * sizeof(float)), cudaSuccess);
     quantize_fp8_rows_async(d_w, d_q8, V, K, d_s8, st);
-    NvFP4QuantResult q4{};
+    NvFP4Owned q4{};
     int64_t shp[2] = {V, K};
     Tensor wt(d_w, QType::F16, 2, shp, /*on_device=*/true);
     quantize_fp16_to_nvfp4(wt, q4, st);
@@ -188,7 +189,6 @@ TEST(LmHeadDraftRows, Nvfp4MultiRowIsRowCountInvariantAndPriced) {
     EXPECT_EQ(cudaStreamSynchronize(st), cudaSuccess);
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);
-    free_nvfp4_result(q4);
     for (void* p : {static_cast<void*>(d_q8), static_cast<void*>(d_s8), static_cast<void*>(d_x),
                     static_cast<void*>(d_y), static_cast<void*>(d_y1)})
         cudaFree(p);

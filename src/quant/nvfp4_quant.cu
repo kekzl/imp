@@ -1,4 +1,5 @@
 #include "quant/nvfp4_quant.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_utils.cuh"
 #include "quant/nvfp4_pack.cuh"
@@ -345,7 +346,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     return tensor_scale;
 }
 
-void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4QuantResult& result,
+void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4Owned& result,
                                        cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4_with_scale: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4_with_scale: input must be FP16");
@@ -366,6 +367,8 @@ void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, 
     cuda_alloc_or_throw(device_alloc_all(dev_req(d_packed, N * (K / 2)),
                                          dev_req(d_micro_scales, N * (K / kMicroBlockSize))),
                         "quantize_fp16_to_nvfp4_with_scale");
+    result.packed_owned.adopt(d_packed, static_cast<size_t>(N * (K / 2)), nullptr);
+    result.scales_owned.adopt(d_micro_scales, static_cast<size_t>(N * (K / kMicroBlockSize)), nullptr);
 
     const int64_t total_micro_blocks = N * (K / kMicroBlockSize);
     const int num_blocks = (int)((total_micro_blocks + kBlockSize - 1) / kBlockSize);
@@ -395,7 +398,7 @@ void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream) {
+void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4Owned& result, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4: input must be FP16, got qtype=%d",
               std::to_underlying(input.qtype));
@@ -420,7 +423,7 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaS
         (long long)N, (long long)K, tensor_scale, (long long)packed_bytes, (long long)micro_scale_bytes);
 }
 
-void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result, float* d_absmax_buf,
+void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4Owned& result, float* d_absmax_buf,
                                   float* d_tensor_scale_buf, cudaStream_t stream) {
     IMP_CHECK(input.on_device, "quantize_fp16_to_nvfp4_async: input must be on device");
     IMP_CHECK(input.qtype == QType::F16, "quantize_fp16_to_nvfp4_async: input must be FP16, got qtype=%d",
@@ -452,6 +455,8 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
     cuda_alloc_or_throw(device_alloc_all(dev_req(d_packed, packed_bytes),
                                          dev_req(d_micro_scales, micro_scale_bytes)),
                         "quantize_fp16_to_nvfp4_async");
+    result.packed_owned.adopt(d_packed, static_cast<size_t>(packed_bytes), nullptr);
+    result.scales_owned.adopt(d_micro_scales, static_cast<size_t>(micro_scale_bytes), nullptr);
 
     // Step 3: Fused quantize that reads absmax from device (no host sync!)
     int64_t total_micro_blocks = N * (K / kMicroBlockSize);
@@ -554,29 +559,12 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* outpu
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void free_nvfp4_result(NvFP4QuantResult& result) {
-    // Borrowed results (data-borrow decode cache) point packed_data/micro_scales
-    // at resident model weights owned elsewhere — cudaFree'ing those is an
-    // invalid-argument error. Only free storage this result allocated.
-    if (result.owned) {
-        if (result.packed_data)
-            device_free_all(result.packed_data);
-        if (result.micro_scales)
-            device_free_all(result.micro_scales);
-    }
-    result.packed_data = nullptr;
-    result.micro_scales = nullptr;
-    result.tensor_scale = 1.0f;
-    result.N = 0;
-    result.K = 0;
-}
-
 // ---------------------------------------------------------------------------
 // MoE per-expert quantization
 // ---------------------------------------------------------------------------
 
 void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype, int n_experts, int eff,
-                                      int K, void* dequant_scratch, NvFP4MoEQuantResult& result,
+                                      int K, void* dequant_scratch, NvFP4MoEOwned& result,
                                       cudaStream_t stream) {
     IMP_CHECK(packed_ggml_data != nullptr, "quantize_packed_experts_to_nvfp4: packed_ggml_data is null");
     IMP_CHECK(dequant_scratch != nullptr, "quantize_packed_experts_to_nvfp4: dequant_scratch is null");
@@ -600,6 +588,9 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
                         "quantize_packed_experts_to_nvfp4");
     DeviceOwned<float> max_own;  // scratch only; the three outputs go to `result`
     max_own.adopt(d_global_max, sizeof(float), nullptr);
+    result.packed_owned.adopt(d_packed, total_packed, nullptr);
+    result.scales_owned.adopt(d_micro_scales, total_ms, nullptr);
+    result.tscales_owned.adopt(d_tensor_scales, n_experts * sizeof(float), nullptr);
 
     // Compute expert stride in source GGML data
     size_t src_expert_stride = static_cast<size_t>(eff) * qtype_row_bytes(qtype, K);
@@ -661,35 +652,6 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
         "quantize_packed_experts_to_nvfp4: %d experts, eff=%d K=%d, "
         "packed=%.2f MiB, ms=%.2f MiB",
         n_experts, eff, K, total_packed / (1024.0 * 1024.0), total_ms / (1024.0 * 1024.0));
-}
-
-void free_nvfp4_moe_result(NvFP4MoEQuantResult& result) {
-    if (result.borrowed) {
-        // Borrowed (model weights / VRAMAllocator sub-allocations) — the owner
-        // reclaims this memory; cudaFree here would be invalid / a double-free.
-        result.packed_data = nullptr;
-        result.micro_scales = nullptr;
-        result.tensor_scales = nullptr;
-        result.n_experts = 0;
-        return;
-    }
-    if (result.packed_data) {
-        device_free_all(result.packed_data);
-        result.packed_data = nullptr;
-    }
-    if (result.micro_scales) {
-        device_free_all(result.micro_scales);
-        result.micro_scales = nullptr;
-    }
-    if (result.tensor_scales) {
-        device_free_all(result.tensor_scales);
-        result.tensor_scales = nullptr;
-    }
-    result.n_experts = 0;
-    result.N = 0;
-    result.K = 0;
-    result.expert_stride_packed = 0;
-    result.expert_stride_ms = 0;
 }
 
 }  // namespace imp

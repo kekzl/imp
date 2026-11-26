@@ -80,7 +80,6 @@ struct Dev {
         r.tensor_scale = ts;
         r.N = rows;
         r.K = K;
-        r.owned = false;
         return r;
     }
     void free_all() {
