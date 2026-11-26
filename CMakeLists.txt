@@ -168,6 +168,7 @@ set(IMP_CORE_SOURCES
     src/core/cuda_static_reset.cpp
     src/core/log_once.cpp
     src/core/fallback_site.cpp
+    src/core/dispatch_policy.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -1064,6 +1065,8 @@ if(IMP_BUILD_TESTS)
         tests/test_config_bindings.cpp
         # C-9: an explicit EngineConfig value, default included, wins over imp.conf; unset falls through.
         tests/test_engine_config_bridge.cpp
+        # C-11: Engine::init refuses a failed stream create (no device in the CPU lane).
+        tests/test_engine_stream_open.cpp
         tests/test_mtp_auto.cpp
         tests/test_mtp_draft_rows.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull

@@ -1,11 +1,13 @@
 #pragma once
 
-#include "runtime/config.h"
-
 #include "common/args_common.h"
 
 #include <string>
 #include <vector>
+
+namespace imp {
+struct RuntimeConfig;  // runtime/config.h (audit X-4: apply_config_pins takes a reference)
+}  // namespace imp
 
 struct CliArgs : CommonArgs {
     // Shared flags live in CommonArgs (#1209). Inherited, not composed, so

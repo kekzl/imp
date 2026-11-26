@@ -785,13 +785,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                            ? std::min(cfg::kSpecCaptureCtxCap, config_.max_seq_len)
                                            : cfg::kSpecCaptureCtxCap)
                                     : 0;
-        const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
-                                      fp8_act_scratch_needed(*model_, config_.use_fp8_prefill),
-                                      runtime_config_.attention.mla_absorb, capture_cap,
-                                      config_.kv_block_size, runtime_config_.attention.ra2_prefill,
-                                      engine_internal::apa_eps_for(*model_,
-                                                                   runtime_config_.attention.apa_eps) > 0.0f,
-                                      runtime_config_.attention.apa_tile_cache);
+        const auto d = exec_t2_demand(
+            *model_, config_.max_seq_len, config_.max_batch_size,
+            fp8_act_scratch_needed(*model_, config_.use_fp8_prefill), runtime_config_.attention.mla_absorb,
+            capture_cap, config_.kv_block_size.value_or(0), runtime_config_.attention.ra2_prefill,
+            engine_internal::apa_eps_for(*model_, runtime_config_.attention.apa_eps) > 0.0f,
+            runtime_config_.attention.apa_tile_cache);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant but uploads
         // during warmup, so its demand must be read off the model's shapes here.
         // Gemma's mmproj tower stays outside the arena for now (docs/audit/SETTLED.md F-12).
@@ -799,14 +798,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             model_->vision_tower ? qwen3vl_vision_arena_bytes(*model_->vision_tower,
                                                               runtime_config_.runtime.vision_max_patches)
                                  : 0;
-        if (!config_.mmproj_path.empty())
-            vision_bytes += vision_mmproj_arena_bytes(config_.mmproj_path, model_->config_.d_model);
+        if (!config_.mmproj_path.value_or("").empty())
+            vision_bytes += vision_mmproj_arena_bytes(*config_.mmproj_path, model_->config_.d_model);
         // Gemma-4 audio tower + clip scratch: uploaded at warmup, an arena tenant like the Qwen3-VL tower.
         vision_bytes += engine_internal::audio_arena_bytes(*model_);
         // The decode batch pool is engine-lifetime and config-sized but
         // allocated after KV sizing, so reserve for it here. with_swa_tables is
         // unknown yet; assume true, guessing high costs nothing, low exhausts the arena.
-        const int kv_bs = config_.kv_block_size > 0 ? config_.kv_block_size : 16;
+        const int kv_bs = config_.kv_block_size.value_or(0) > 0 ? *config_.kv_block_size : 16;
         const size_t batch_pool_bytes = GPUBatchPool::demand_bytes(
             config_.max_batch_size, (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs,
             /*with_swa_tables=*/true);
@@ -880,7 +879,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             admit_cap, config_.max_batch_size);
     }
     scheduler_ = std::make_unique<Scheduler>(admit_cap);
-    (void)stream_.create(cudaStreamNonBlocking);
+    if (!engine_internal::open_engine_stream(stream_))
+        return false;
     MemAccount::instance().checkpoint("01_prewarm_gemm");
 
     // Encoder-only embedder (#836): no executor, KV cache, decoder features,

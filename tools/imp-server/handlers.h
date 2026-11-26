@@ -8,7 +8,6 @@
 #include "output_markers.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
-#include "runtime/config.h"
 #include "runtime/presets.h"
 
 #include <imp/imp.h>
@@ -31,6 +30,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace imp {
+struct RuntimeConfig;  // runtime/config.h, included by the TUs that read it (audit X-4)
+}  // namespace imp
 
 using json = nlohmann::ordered_json;
 
@@ -222,6 +225,11 @@ struct ServerMetrics {
 };
 
 struct ServerState {
+    ServerState();  // handlers.cpp: owns the RuntimeConfig, so this header needs no runtime/config.h
+    ~ServerState();
+    ServerState(const ServerState&) = delete;
+    ServerState& operator=(const ServerState&) = delete;
+
     ImpModel model = nullptr;
     // OTLP span exporter (server.otlp_endpoint); one span set per request.
     Tracer tracer;
@@ -253,10 +261,11 @@ struct ServerState {
     // Loaded once at startup (imp.conf + --set overrides). load_model_into_state
     // re-stashes this via set_pending_runtime_config() before each Engine
     // construction (server may swap models at runtime via /v1/models POST).
-    imp::RuntimeConfig runtime_config;
+    std::unique_ptr<imp::RuntimeConfig> runtime_config_owner;
+    imp::RuntimeConfig& runtime_config;  // = *runtime_config_owner, bound in ServerState()
     // runtime_config as the first load found it: each load resolves speculative.mtp_k=auto against this,
-    // not against the keys the previous load resolved (mtp_auto_restore_startup).
-    std::optional<imp::RuntimeConfig> startup_runtime_config;
+    // not against the keys the previous load resolved (mtp_auto_restore_startup). Null: no load yet.
+    std::unique_ptr<imp::RuntimeConfig> startup_runtime_config;
     std::timed_mutex mtx;
     int default_max_tokens = 0;  // 0 = the request's remaining context (--max-tokens sets a fixed default)
     int max_seq_len = 0;

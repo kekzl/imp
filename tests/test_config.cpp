@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "runtime/config.h"
+#include "core/dispatch_policy_fwd.h"
 #include "runtime/model_source_bytes.h"
 #include "core/process_diag.h"
 #include "model/model_arch.h"
@@ -494,4 +495,14 @@ TEST(ConfigBinding, PrefillChunkSizeIsBound) {
     EXPECT_EQ(cfg.runtime.prefill_chunk_size, 0);
     // And it is still a number, not anything (#1627).
     EXPECT_EQ(cfg.apply_overrides({"runtime.prefill_chunk_size=large"}).size(), 1u);
+}
+
+// X-4: the executor and quant pipeline accessors share one out-of-line fallback; a bare
+// executor (no set_dispatch_policy) reads one default-constructed policy.
+TEST(DispatchPolicyFwd, NullReadsOneDefaultAndAWiredPolicyIsItself) {
+    const imp::DispatchPolicy& a = imp::dispatch_policy_or_default(nullptr);
+    EXPECT_EQ(&a, &imp::dispatch_policy_or_default(nullptr));
+    EXPECT_EQ(a.attention.fmha_prefill_threshold, imp::DispatchPolicy{}.attention.fmha_prefill_threshold);
+    imp::DispatchPolicy wired;
+    EXPECT_EQ(&imp::dispatch_policy_or_default(&wired), &wired);
 }

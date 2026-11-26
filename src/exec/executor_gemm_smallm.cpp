@@ -5,6 +5,7 @@
 // chain.
 
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "exec/gemm_context.h"
 #include "quant/nvfp4_gemm.h"
 #include "exec/smallm_policy.h"
