@@ -560,14 +560,14 @@ TEST_F(NvFP4SmallMV2Test, RepeatedLaunchesBitwiseStable) {
         }
         cudaFree(d_y);
         cudaFree(d_ws);
+        // NvFP4Owned releases its own buffers: a hand cudaFree of q.packed_data is a double free.
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "before the owner release, M=" << s.M << " K=" << s.K;
         for (int set = 0; set < 2; ++set) {
-            cudaFree(X[set].q.packed_data);
-            cudaFree(X[set].q.micro_scales);
-            for (int i = 0; i < s.count; ++i) {
-                cudaFree(W[set][i].q.packed_data);
-                cudaFree(W[set][i].q.micro_scales);
-            }
+            X[set].q = imp::NvFP4Owned{};
+            for (auto& w : W[set])
+                w.q = imp::NvFP4Owned{};
         }
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "owner release, M=" << s.M << " K=" << s.K;
     }
 }
 
