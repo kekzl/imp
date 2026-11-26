@@ -353,6 +353,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_cublas.cu
     src/compute/attention_dispatch.cpp
     src/compute/rope.cu
+    src/compute/head_norm_rope.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
     src/compute/fp32_residual_norm.cu
