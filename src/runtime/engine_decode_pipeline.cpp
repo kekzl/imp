@@ -59,15 +59,10 @@ inline int pipeline_bucket_pow2(int x) {
 }  // namespace
 
 bool Engine::pipeline_row_eligible_(const Request& r) const {
-    if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
-        !r.grammar.empty() || r.constraints)
-        return false;
-    if (r.mirostat != 0 || r.host_logit_shaping() || r.forcing())
-        return false;
     // rep/freq/presence penalties ARE supported (device-side history — the
     // server takes the model's repetition_penalty (1.05 on Gemma-4 channel models), so a serving row
     // carries them). DRY needs the host-side token array — excluded.
-    if (r.dry_multiplier > 0.0f)
+    if ((r.lane_needs_now() & lane_refuses::kPipelineRow) != 0 || r.constraints)
         return false;
     const bool greedy = (r.temperature <= 0.0f || r.top_k == 1);
     if (!greedy) {

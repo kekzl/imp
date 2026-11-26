@@ -289,7 +289,7 @@ TEST_F(WeightCacheEntriesTest, Mxfp4InPlaceDataIsAViewBothScaleLayoutsAreOwned) 
         CutlassMxFP4CacheEntry e(std::move(w));
         EXPECT_EQ(w.scale_factors, nullptr);  // NOLINT(bugprone-use-after-move): emptied by the hand-off
         EXPECT_EQ(e.hadamard_bs, 7);
-        EXPECT_FALSE(e.data_owned);
+        EXPECT_EQ(e.data, at(0));
     }
     EXPECT_EQ(log().size(), 2u);
     EXPECT_EQ(released(at(0)), 0);

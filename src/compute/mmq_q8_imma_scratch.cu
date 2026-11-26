@@ -9,6 +9,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "memory/device_alloc_all.h"
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "memory/mem_account.h"
@@ -300,6 +301,8 @@ bool imma_act_holds(const __half* x, int M, int K, cudaStream_t stream) {
 
 void imma_act_forget() { g_last_quant = LastQuant{}; }
 
+static FallbackSite s_fb_imma_act{"imma_act_prealloc"};
+
 // Takes activation triple + split-K slice ONCE at the exec_t2_demand bound (A7 step 8),
 // called from Engine::init after the T2 arena opens. Without it, imma_ensure_act/
 // imma_ensure_splitk climb a staircase of ever-larger takes; a bump arena has no free,
@@ -309,9 +312,10 @@ void mmq_q8_imma_preallocate(int rows, int k) {
         return;
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     if (!imma_ensure_act(rows, k, /*capturing=*/false)) {
-        IMP_LOG_WARN("mmq_q8_imma: could not preallocate the %dx%d activation scratch — the IMMA "
-                     "prefill path will fall back to dequant",
-                     rows, k);
+        IMP_FALLBACK_WARN(s_fb_imma_act,
+                          "mmq_q8_imma: %dx%d activation scratch not preallocated (T2 arena short): "
+                          "Q8 IMMA prefill off, dequant + FP16 GEMM instead",
+                          rows, k);
         return;
     }
     // kExecImmaSplitkBytes / sizeof(float), mirrored here so this TU stays free

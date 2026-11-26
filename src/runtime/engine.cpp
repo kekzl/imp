@@ -1005,20 +1005,13 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         if (!req->trace_id.empty())
             IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
         embed_prepare_(*req);
-        // Logit lens rides the logprobs path: eager decode, no ragged prefill, no speculation.
-        if (req->logit_lens > 0) {
-            if (caps_.logit_lens)
-                req->logprobs = true;
-            else
-                req->logit_lens = 0;
-        }
-        if (req->sae_top > 0 || !req->sae_clamp.empty()) {  // SAE (row 116): same eager path
-            if (sae_) {
-                req->logprobs = true;
-            } else {
-                req->sae_top = 0;
-                req->sae_clamp.clear();
-            }
+        // Logit lens and SAE (row 116) the load cannot serve are dropped; the rest set kReadout below
+        // (eager decode, no ragged prefill, no speculation).
+        if (req->logit_lens > 0 && !caps_.logit_lens)
+            req->logit_lens = 0;
+        if ((req->sae_top > 0 || !req->sae_clamp.empty()) && !sae_) {
+            req->sae_top = 0;
+            req->sae_clamp.clear();
         }
         // Seed think state from the prompt tail: chat templates (Qwen3.x,
         // DeepSeek-R1) inject `<think>\n` by default, so without this a model
@@ -1070,6 +1063,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         phrase_ban_init_(*req);  // banned phrases: think seed and own logit_bias, after the seeding above
         bind_cache_key_tokens_(*req);  // after the fold: keys see the GPU-path pad ids
         req->prefix_salt = prefix_salt_(*req);
+        req->lane_needs = req->admission_lane_needs();  // the lanes' one table (runtime/lane_needs.h)
         cfg_admit_(std::move(req));  // the scheduler, or held until its guidance shadow prefilled
     }
 }

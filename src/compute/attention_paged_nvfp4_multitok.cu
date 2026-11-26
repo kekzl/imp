@@ -263,25 +263,29 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
 // Launch for head_dim 128 / 256 (E4M3 scales). Returns false for other shapes
 // so the caller falls back to the scalar kernels. num_splits > 1 launches the
 // split-K kernel into `partial` (the caller runs the reduce).
-bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* K_cache,
-                                                  const uint8_t* V_cache, const uint8_t* K_scales,
-                                                  const uint8_t* V_scales, half* O, float* partial,
-                                                  const int* block_tables, const int* context_lens,
-                                                  int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                  int block_size, float scale, int max_num_blocks,
-                                                  int num_splits, int sliding_window, float softcap,
-                                                  const half* attn_sinks, cudaStream_t stream) {
+bool paged_attention_decode_nvfp4_multitok_launch(const PagedDecodeArgs& a) {
+    const half* Q = a.Q;
+    const auto* K_cache = static_cast<const uint8_t*>(a.K_cache);
+    const auto* V_cache = static_cast<const uint8_t*>(a.V_cache);
+    const uint8_t *K_scales = a.K_scales, *V_scales = a.V_scales;
+    half* O = a.O;
+    float* partial = a.partial;
+    const int *block_tables = a.block_tables, *context_lens = a.context_lens;
+    const int batch_size = a.batch_size, n_heads = a.n_heads, n_kv_heads = a.n_kv_heads,
+              head_dim = a.head_dim;
+    const int block_size = a.block_size, max_num_blocks = a.max_num_blocks, num_splits = a.num_splits;
+    const int sliding_window = a.sliding_window;
+    const float scale = a.scale, softcap = a.softcap;
+    const half* attn_sinks = a.attn_sinks;
+    cudaStream_t stream = a.stream;
     if (head_dim != 128 && head_dim != 256)
         return false;
     // Q-head grouping (attention_paged_nvfp4_multitok_gqa.cu): a CTA converts
     // each K/V row once for up to four Q heads of its KV head. 1 forces the
     // per-head kernels below (tests, A/B).
-    if (process_diag_paged_nvfp4_hpc() != 1 &&
-        paged_attention_nvfp4_multitok_gqa_launch(Q, K_cache, V_cache, K_scales, V_scales, O, partial,
-                                                  block_tables, context_lens, batch_size, n_heads, n_kv_heads,
-                                                  head_dim, block_size, scale, max_num_blocks, num_splits,
-                                                  sliding_window, softcap, attn_sinks,
-                                                  process_diag_paged_nvfp4_hpc(), stream))
+    PagedDecodeArgs grouped = a;
+    grouped.heads_per_cta = process_diag_paged_nvfp4_hpc();
+    if (grouped.heads_per_cta != 1 && paged_attention_nvfp4_multitok_gqa_launch(grouped))
         return true;
     const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
                               (static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float));

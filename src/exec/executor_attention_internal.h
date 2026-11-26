@@ -15,6 +15,7 @@
 #include "compute/attention_ra2.h"
 #include "compute/dispatch_paths.h"  // AttnPrefillOuter
 #include "compute/kv_gather.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "memory/kv_cache.h"
@@ -260,6 +261,8 @@ static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_
 // dispatch_gemv_residual: from executor_gemv_helpers.h
 // get_kv_layer: from executor_helpers.h
 
+inline FallbackSite g_fb_l2_persist{"l2_persist_query"};  // inline: one site for every includer
+
 // Set L2 persistence hint for KV cache data on the given stream.
 // Tells the GPU to prioritize keeping this address range in L2 cache.
 // Resets automatically when the stream attribute is overwritten next layer.
@@ -275,7 +278,10 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
     if (max_persist == 0) {
         cudaDeviceProp prop{};
         if (const cudaError_t err = cudaGetDeviceProperties(&prop, 0); err != cudaSuccess) {
-            IMP_LOG_WARN("set_l2_persist_kv: device query failed (%s), no L2 hint", cudaGetErrorString(err));
+            IMP_FALLBACK_WARN(g_fb_l2_persist,
+                              "set_l2_persist_kv: device query failed (%s): no KV L2-persistence hint, "
+                              "decode attention reads KV through plain L2 (output unchanged)",
+                              cudaGetErrorString(err));
             return;  // uncached: max_persist stays 0 (hint only, output unchanged)
         }
         max_persist = prop.persistingL2CacheMaxSize;

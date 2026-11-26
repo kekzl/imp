@@ -2,13 +2,16 @@
 // static bool kept model B silent about a fallback model A had tripped. CPU only: the C-API
 // case refuses at the model check, after the re-arm.
 #include "core/cuda_static_reset.h"
+#include "core/fallback_site.h"
 #include "core/log_once.h"
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <thread>
 #include <vector>
 
@@ -77,4 +80,45 @@ TEST(LogOnce, ContextCreateRearmsBeforeTheModelCheck) {
 // ~Engine and imp_gpu_release() run the pre-cudaDeviceReset registry; the re-arm is one hook.
 TEST(LogOnce, RearmIsARegisteredStaticResetHook) {
     EXPECT_TRUE(imp::cuda_static_reset_has_hook(&imp::log_once_rearm_all));
+}
+
+namespace {
+
+uint64_t fallback_total(const char* site) {
+    for (const auto& c : imp::fallback_counts())
+        if (c.site == site)
+            return c.count;
+    return 0;
+}
+
+}  // namespace
+
+// Designed fallbacks (ROADMAP B-108): every hit counts into imp_fallback_total{site}, the WARN
+// fires once per model load and re-arms with the LogOnce latches.
+TEST(FallbackSite, CountsEveryHitAndLogsOncePerLoad) {
+    static imp::FallbackSite site{"test_fb_counts"};
+    EXPECT_EQ(fallback_total("test_fb_counts"), 0u);
+    EXPECT_TRUE(site.hit());
+    EXPECT_FALSE(site.hit());
+    EXPECT_EQ(fallback_total("test_fb_counts"), 2u);
+    imp::log_once_rearm_all();
+    EXPECT_TRUE(site.hit()) << "a model load did not re-arm the fallback WARN";
+    EXPECT_FALSE(site.hit());
+    EXPECT_EQ(site.count(), 4u);
+    EXPECT_EQ(fallback_total("test_fb_counts"), 4u) << "rearm must not reset the /metrics counter";
+}
+
+TEST(FallbackSite, MacroCountsAndSitesSharingANameSum) {
+    static imp::FallbackSite a{"test_fb_shared"};
+    static imp::FallbackSite b{"test_fb_shared"};
+    for (int i = 0; i < 3; ++i)
+        IMP_FALLBACK_WARN(a, "test fallback a %d: nothing skipped, unit test", i);
+    IMP_FALLBACK_WARN(b, "test fallback b: nothing skipped, unit test");
+    EXPECT_EQ(a.count(), 3u);
+    EXPECT_EQ(fallback_total("test_fb_shared"), 4u);
+    const auto all = imp::fallback_counts();
+    EXPECT_TRUE(
+        std::is_sorted(all.begin(), all.end(), [](const imp::FallbackCount& x, const imp::FallbackCount& y) {
+            return x.site < y.site;
+        }));
 }

@@ -1094,8 +1094,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     for (const auto& r : valid_decode) {
         if (r->logprobs)
             needs_logprobs = true;
-        if (r->json_mode || !r->json_schema.empty() || !r->tool_constraint_tools.empty() ||
-            !r->regex_pattern.empty() || !r->grammar.empty())
+        if ((r->lane_needs_now() & lane_need::kConstrained) != 0)
             needs_constrained = true;
     }
 
@@ -1760,16 +1759,13 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // A PARKED runner (burst-hybrid speculation) is setup but idle: it
         // must be allowed back in here, or bursts only ever fire once. A park
         // for a DIFFERENT request is torn down inside the launch.
-        (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0) && !needs_logprobs &&
-        !needs_constrained) {
+        (!async_graph_runner_.is_setup() || async_parked_req_id_ >= 0)) {
         auto& dreq = valid_decode[0];
         // forward_decode_async only implements banned_tokens + rep/freq/presence
         // penalties device-side. Any sampling feature that requires host-side
         // logic (logit_bias, mirostat, typical_p, min_p, DRY) would be silently
         // skipped inside the captured graph — stay on the eager path instead.
-        const bool async_compatible = !dreq->host_logit_shaping() && dreq->mirostat == 0 &&
-                                      dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
-                                      dreq->typical_p >= 1.0f &&
+        const bool async_compatible = (dreq->lane_needs_now() & lane_refuses::kGraphLoop) == 0 &&
                                       // MTP feed + telemetry hook the per-step path; the async
                                       // conditional-graph loop bypasses it. Stay eager while the head
                                       // is bound to this request (a never-verifying one is not bound).
@@ -1864,16 +1860,15 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // feature stays on the eager path.
     if (allow_loop && decode_graph_pool_[0].graph_path_available() && valid_decode.size() == 1 &&
         !offload_mgr_ && rt_.cuda_graphs && !async_graph_runner_.is_setup() && !cpipe_.active &&
-        !needs_logprobs && needs_constrained) {
+        needs_constrained) {
         auto& dreq = valid_decode[0];
         // rep/freq/presence penalties and think_budget ARE supported (uploaded
         // or forced per tick like the eager path): the server defaults
         // (repetition_penalty 1.05, think_budget 0.5) must not block the
         // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
         const bool pipeline_compatible =
-            !dreq->host_logit_shaping() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
-            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_holds_eager_(*dreq) && dreq->constraints &&
-            dreq->constraints->is_active() &&
+            (dreq->lane_needs_now() & lane_refuses::kConstrainedPipeline) == 0 && !mtp_holds_eager_(*dreq) &&
+            dreq->constraints && dreq->constraints->is_active() &&
             // The pipeline enqueues the next forward before the host sees the token: a
             // PLE model needs the token on the host first, host-resident experts need the
             // device cache's take-over before each step (both in prepare_decode_step_host).
