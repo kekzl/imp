@@ -7,13 +7,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace imp {
 
 bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                       int64_t n_rows_total, int64_t K, int row_offset, int row_stride,
-                                      NvFP4MoEQuantResult& out, float extra_scale,
+                                      NvFP4MoEOwned& out, float extra_scale,
                                       std::vector<float>* h_tscales_out) {
     const int64_t N = n_rows_total / row_stride;  // rows per expert in the output
     const int64_t kb32 = K / 32;                  // MXFP4 blocks per row
@@ -79,13 +80,21 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     if (device_alloc_all(dev_req(d_packed, packed.size()), dev_req(d_ms, mscales.size()),
                          dev_req(d_ts, sizeof(float) * ne)) != cudaSuccess)
         return false;
+    // Owned from here: a failed upload releases all three when these die.
+    DeviceOwned<void> packed_own;
+    DeviceOwned<void> ms_own;
+    DeviceOwned<float> ts_own;
+    packed_own.adopt(d_packed, packed.size(), nullptr);
+    ms_own.adopt(d_ms, mscales.size(), nullptr);
+    ts_own.adopt(d_ts, sizeof(float) * ne, nullptr);
     if (cudaMemcpy(d_packed, packed.data(), packed.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ms, mscales.data(), mscales.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(d_ts, tscales.data(), sizeof(float) * ne, cudaMemcpyHostToDevice) != cudaSuccess) {
-        device_free_all(d_packed, d_ms, d_ts);  // not handed to `out` yet
+        cudaMemcpy(d_ts, tscales.data(), sizeof(float) * ne, cudaMemcpyHostToDevice) != cudaSuccess)
         return false;
-    }
 
+    out.packed_owned = std::move(packed_own);
+    out.scales_owned = std::move(ms_own);
+    out.tscales_owned = std::move(ts_own);
     out.packed_data = d_packed;
     out.micro_scales = d_ms;
     out.tensor_scales = d_ts;
@@ -94,7 +103,6 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     out.K = K;
     out.expert_stride_packed = static_cast<size_t>(N) * row_bytes;
     out.expert_stride_ms = static_cast<size_t>(N) * ms_per_row;
-    out.borrowed = false;
     if (h_tscales_out)
         *h_tscales_out = std::move(tscales);
     return true;

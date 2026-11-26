@@ -17,7 +17,34 @@ struct MoeRoutingResult {
     Tensor sorted_token_ids;               // tokens sorted by expert
     Tensor expert_offsets;                 // [n_experts+1] scan offsets
     int32_t* token_to_expanded = nullptr;  // [n_tokens * top_k] inverse map: flat_idx -> expanded row
-    bool owns_memory = true;               // if true, caller must cudaFree tensors
+};
+
+// The allocating moe_topk_gating's result (MEMORY.md I5): the view as the base, its four buffers as
+// owners (plain family). Move-only; a moved-from owner holds no address, a sliced copy is a view.
+struct MoeRoutingOwned : MoeRoutingResult {
+    DeviceOwned<void> indices_owned;
+    DeviceOwned<void> weights_owned;
+    DeviceOwned<void> sorted_owned;
+    DeviceOwned<void> offsets_owned;
+
+    MoeRoutingOwned() = default;
+    MoeRoutingOwned(MoeRoutingOwned&& o) noexcept
+        : MoeRoutingResult(std::exchange(static_cast<MoeRoutingResult&>(o), MoeRoutingResult{})),
+          indices_owned(std::move(o.indices_owned)),
+          weights_owned(std::move(o.weights_owned)),
+          sorted_owned(std::move(o.sorted_owned)),
+          offsets_owned(std::move(o.offsets_owned)) {}
+    MoeRoutingOwned& operator=(MoeRoutingOwned&& o) noexcept {
+        if (this != &o) {
+            MoeRoutingResult::operator=(std::exchange(static_cast<MoeRoutingResult&>(o), MoeRoutingResult{}));
+            indices_owned = std::move(o.indices_owned);
+            weights_owned = std::move(o.weights_owned);
+            sorted_owned = std::move(o.sorted_owned);
+            offsets_owned = std::move(o.offsets_owned);
+        }
+        return *this;
+    }
+    ~MoeRoutingOwned() = default;
 };
 
 // Pre-allocated buffer pool for MoE routing temporaries.
@@ -61,9 +88,9 @@ void moe_permute(const int32_t* expert_indices, int n_tokens, int top_k, int n_e
                  int32_t* sorted_token_ids, int32_t* sorted_flat_idx, int32_t* expert_offsets,
                  int32_t* token_to_expanded, int32_t* scratch, cudaStream_t stream = nullptr);
 
-// grp: group-limited selection (moe_group_limit.h) on the (biased) selection scores; a geometry
-// the kernel cannot serve throws.
-void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result,
+// Allocates the four routing buffers into result's owners. grp: group-limited selection
+// (moe_group_limit.h) on the (biased) selection scores; a geometry the kernel cannot serve throws.
+void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingOwned& result,
                      cudaStream_t stream = nullptr, bool use_sigmoid = false, bool normalize_weights = true,
                      const void* score_bias = nullptr, MoeGroupLimit grp = {});
 

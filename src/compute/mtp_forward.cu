@@ -348,6 +348,9 @@ bool mtp_dev_alloc(MtpDraftWorkspace& ws, void** p, size_t bytes) {
     DeviceAllocReq req{p, bytes};
     if (device_alloc_all_n(&req, 1, /*async=*/false, nullptr) != cudaSuccess)
         return false;
+    DeviceOwned<void> own;
+    own.adopt(*p, bytes, nullptr);  // owned before the push_back can throw
+    ws.owned.push_back(std::move(own));
     const size_t footprint = mtp_alloc_footprint(bytes);
     ws.device_bytes += footprint;
     MemAccount::instance().note("mtp_workspace", static_cast<std::ptrdiff_t>(footprint));
@@ -620,10 +623,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
 }
 
 void mtp_workspace_free(MtpDraftWorkspace& ws) {
-    auto frfn = [](void*& p) {
-        device_free_all(p);
-        p = nullptr;
-    };
+    ws.owned.clear();  // every mtp_dev_alloc buffer; the members below are views of them
+    auto frfn = [](void*& p) { p = nullptr; };
     frfn(ws.d_emb_norm);
     frfn(ws.d_h_norm);
     frfn(ws.d_fc_in);
@@ -633,7 +634,6 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_logits_f32);
     frfn(ws.d_q8_1);
     frfn(ws.d_d8);
-    device_free_all(ws.d_chain_tokens, ws.d_argmax, ws.d_tok);
     ws.d_chain_tokens = nullptr;
     ws.d_argmax = nullptr;
     ws.d_tok = nullptr;
@@ -670,7 +670,6 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     frfn(ws.d_v_proj);
     frfn(ws.d_attn_out);
     frfn(ws.d_attn_residual);
-    device_free_all(ws.d_mtp_position);
     ws.d_mtp_position = nullptr;
     ws.d_scan_part = nullptr;  // alias into the d_mtp_position allocation
     mtp_kv_release(ws);        // d_k_cache / d_v_cache are views into the slot allocation
@@ -688,7 +687,6 @@ void mtp_workspace_free(MtpDraftWorkspace& ws) {
     ws.h_pass_tables.reset();
     ws.pass_tables_copied.reset();
     ws.d_b_gather = ws.d_b_h_final = nullptr;
-    device_free_all(ws.d_feed_tokens);
     ws.d_feed_tokens = nullptr;
     frfn(ws.d_b_emb);
     frfn(ws.d_b_h_norm);

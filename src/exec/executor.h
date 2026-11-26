@@ -1395,11 +1395,11 @@ private:
     // already done by caller, signaled via fp32_gate_logits_ready) + topk
     // gating + per-expert weight scaling (Nemotron, Gemma-4). Caller passes
     // pre-normalized router_in if !fp32_gate_logits_ready.
-    void compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
-                             int top_k, const Tensor& router_in,
-                             bool fp32_gate_logits_ready, bool will_decode_fast,
-                             const void* router_bias_ptr, bool use_sigmoid,
-                             bool norm_weights, MoeRoutingResult& routing);
+    void compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k,
+                             const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast,
+                             const void* router_bias_ptr, bool use_sigmoid, bool norm_weights,
+                             MoeRoutingOwned& routing);
+
 public:
     // Per-layer expert imbalance, readable while serving (#1548). peak = worst
     // max(M_e) on that layer; mean_max = average per-launch maxima; mean_rows
