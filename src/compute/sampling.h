@@ -229,7 +229,8 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
 // Pre-allocate DRY penalty GPU buffers at engine init time to avoid
 // cudaStreamSynchronize on first use during inference.
 // max_seq_len: maximum sequence length (context + generation tokens).
-void sampling_preallocate_dry(int max_seq_len, cudaStream_t stream = nullptr);
+// False when the T2 arena cannot hold the slots: init fails, a DRY request is never served without DRY.
+[[nodiscard]] bool sampling_preallocate_dry(int max_seq_len, cudaStream_t stream = nullptr);
 
 // logit_bias: adds a per-token bias before sampling. host_pairs is a HOST array of
 // (token_id, bias); out-of-range ids skipped. atomicAdd handles duplicate token ids

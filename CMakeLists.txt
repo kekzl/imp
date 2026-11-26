@@ -353,6 +353,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_cublas.cu
     src/compute/attention_dispatch.cpp
     src/compute/rope.cu
+    src/compute/head_norm_rope.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
     src/compute/fp32_residual_norm.cu
@@ -1290,6 +1291,8 @@ if(IMP_BUILD_TESTS)
         # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
         # (no kernel launches on these arms, so the CPU lane holds it).
         tests/test_gemm_fallback_fails_loud.cpp
+        # B-112: one LM-head route for serving, perplexity, prompt logprobs and the draft argmax head.
+        tests/test_lm_head_route.cpp
         # B-115: the split-K reduce's Q8_1 epilogue is a per-call argument, taken once per call.
         tests/test_paged_q8_epilogue.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
