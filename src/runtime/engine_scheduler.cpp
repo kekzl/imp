@@ -249,6 +249,8 @@ void Engine::log_resolved_dispatch_once_() {
 
     IMP_LOG_INFO("Resolved dispatch: attn_prefill=%s attn_decode=%s moe_prefill=%s graphs=%s", prefill,
                  attn_decode_path_name(r.attn_decode), moe, graphs);
+    const std::string dense = dispatch_record::dense_summary(r);
+    IMP_LOG_INFO("Resolved dense GEMM: %s", dense.empty() ? "none" : dense.c_str());
 }
 
 // =====================================================================

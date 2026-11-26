@@ -61,10 +61,46 @@ enum class MoePrefillPath {
     LEGACY,       // per-expert legacy fallback (gather + serial GEMM)
 };
 
+// Exits of the dense GEMM ladder GraphExecutor::gemm_via_handle_ (exec/executor_gemm_dispatch.cpp),
+// in ladder order. The ladder returns one per exit, so a new rung must name its path to compile.
+enum class DensePath : unsigned char {
+    UNSET,
+    MXFP8_PREFILL_COPY,     // MXFP8 copy of an F16 GDN projection, M > 32
+    NVFP4_PREFILL_COPY,     // NVFP4 copy of an F16 GDN projection, M > 32
+    RELEASED_SOURCE,        // released_source_gemm_ (Phase 4b dropped the source)
+    SOURCE_GEMV,            // source_gemv: M=1 on the quantized source (dp4a / MMVQ)
+    UNCACHED_FALLBACK,      // gemm_dispatch_uncached_fallback: no tier entry, the source is the weight
+    GEMV_NVFP4,             // M=1 gemv_nvfp4_kpar on the NVFP4 cache entry
+    GEMV_FP8,               // M=1 gemv_fp8, per-tensor scale
+    GEMV_FP8_ROWSCALE,      // M=1 gemv_fp8_rowscale
+    GEMV_NVFP4_SOURCE,      // M=1 gemv_nvfp4_kpar on the native NVFP4 source
+    GEMV_DISPATCH,          // M=1 gemv_dispatch (MXFP4, FP16 cache, other tiers)
+    VERIFY_NVFP4_OVERLAY,   // spec-verify gemm_nvfp4_batched{,_acc} on the GGUF source's NVFP4 overlay
+    VERIFY_NVFP4_SOURCE,    // spec-verify gemm_nvfp4_batched{,_acc} on the native NVFP4 source, M <= 4
+    SMALLM_A16,             // small-M gemm_nvfp4_smallm, FP16 activations
+    SMALLM_A4,              // small-M smallm_launch_a4, NVFP4 activations
+    GGUF_IN_PLACE,          // gemm_uncached_in_place on a GGUF source, M <= 32
+    DP4A_Q4K,               // gemm_q4k_dp4a_dense, M <= 64
+    DP4A_Q5K,               // gemm_q5k_dp4a_dense, M <= 64
+    FP16_CACHE,             // gemm() on the FP16 cache entry (cuBLASLt)
+    FP8_PREFILL,            // gemm_fp8_prefill_ on the FP8 cache entry
+    IMMA_SOURCE,            // imma_source_prefill on a GGUF source with an NVFP4 overlay
+    GGUF_SOURCE_DEQUANT,    // gguf_source_fallback on a GGUF source with an NVFP4 overlay
+    NVFP4_PROMPT_A16,       // gemm_nvfp4_f16_tile (gemm.nvfp4_prompt_a16_attn)
+    NVFP4_TILE,             // CUTLASS_NVFP4 tier own tile GEMM via the kernel registry
+    NVFP4_TIER_FP8,         // CUTLASS_NVFP4 tier FP8 cache entry via gemm_cublaslt
+    NVFP4_DEQUANT,          // gemm_nvfp4 dequant safety net (native NVFP4 source)
+    MXFP4_PREFILL,          // mxfp4_prefill_gemm
+    GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less CUTLASS_NVFP4 entry, gguf_source_fallback
+    GENERIC_DISPATCH,       // last route: gemm_dispatch
+    COUNT,
+};
+
 const char* attn_prefill_path_name(AttnPrefillPath p);
 const char* attn_prefill_outer_name(AttnPrefillOuter p);
 const char* attn_decode_path_name(AttnDecodePath p);
 const char* moe_prefill_outer_name(MoePrefillOuter p);
 const char* moe_prefill_path_name(MoePrefillPath p);
+const char* dense_path_name(DensePath p);
 
 }  // namespace imp

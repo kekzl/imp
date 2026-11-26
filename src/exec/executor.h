@@ -13,6 +13,7 @@
 #include "memory/span.h"
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
+#include "compute/dispatch_paths.h"
 #include "compute/moe_routing.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
@@ -1175,6 +1176,9 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // The ladder itself: every exit returns the DensePath it ran (dispatch_record::set_dense).
+    DensePath gemm_via_handle_(const WeightHandle& h, const Tensor& input, Tensor& output,
+                               const GemmContext& ctx);
     // FP16 input -> qscratch_.fp8_act for an FP8-tier weight: the weight's static input scale
     // (gemm.fp8_static_act_scale), else per-token dynamic scales; a row never depends on its neighbours.
     // Null = no scratch.

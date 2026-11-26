@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,47 @@ TEST(DispatchRecord, StartsUnsetAndGatesTheDump) {
     dispatch_record::reset();
     EXPECT_FALSE(dispatch_record::current().has_prefill());
     EXPECT_FALSE(dispatch_record::current().has_decode());
+}
+
+// Dense GEMM ladder (D-2): every DensePath exit is named and distinct, or the
+// "Resolved dense GEMM" line prints '?' or two exits under one name.
+TEST(DispatchPaths, EveryDensePathHasADistinctName) {
+    std::vector<std::string> seen;
+    for (int p = 0; p < static_cast<int>(DensePath::COUNT); ++p) {
+        const char* name = dense_path_name(static_cast<DensePath>(p));
+        expect_named(name);
+        for (const auto& s : seen)
+            EXPECT_NE(s, name) << "duplicate dense path name: " << name;
+        seen.emplace_back(name);
+    }
+    EXPECT_EQ(seen.size(), 29u)
+        << "UNSET + 28 exits: DensePath gained or lost an exit, update the ladder and this count";
+}
+
+// set_dense keeps the last exit per kind and a bit per exit ever taken; a kind
+// out of range is dropped, not written past the arrays.
+TEST(DispatchRecord, DenseKeepsLastAndEverySeenExitPerKind) {
+    dispatch_record::reset();
+    const auto& r = dispatch_record::current();
+    const int wq = static_cast<int>(TensorKind::WQ);
+    const int down = static_cast<int>(TensorKind::W_DOWN);
+    EXPECT_EQ(r.dense_last[wq], DensePath::UNSET);
+    EXPECT_EQ(r.dense_seen[wq], 0u);
+    EXPECT_EQ(dispatch_record::dense_summary(r), "");
+
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::NVFP4_TILE);
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::GEMV_NVFP4);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::SMALLM_A4);
+    dispatch_record::set_dense(TensorKind::COUNT, DensePath::FP16_CACHE);
+    EXPECT_EQ(r.dense_last[wq], DensePath::GEMV_NVFP4);
+    EXPECT_EQ(r.dense_last[down], DensePath::SMALLM_A4);
+    EXPECT_EQ(r.dense_seen[wq], (uint64_t{1} << static_cast<int>(DensePath::NVFP4_TILE)) |
+                                    (uint64_t{1} << static_cast<int>(DensePath::GEMV_NVFP4)));
+    // Kinds in TensorKind order, exits in DensePath order.
+    EXPECT_EQ(dispatch_record::dense_summary(r), "WQ=gemv_nvfp4+nvfp4_tile W_DOWN=smallm_a4");
+
+    dispatch_record::reset();
+    EXPECT_EQ(dispatch_record::dense_summary(dispatch_record::current()), "");
 }
 
 // The two-level paths (outer → tier) must report the tier only once it was

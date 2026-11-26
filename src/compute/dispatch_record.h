@@ -11,8 +11,15 @@
 // the sole caller of Engine::step()/forward, so per-thread state is per-engine state here.
 
 #include "compute/dispatch_paths.h"
+#include "core/tensor_kind.h"
+
+#include <cstdint>
+#include <string>
 
 namespace imp::dispatch_record {
+
+constexpr int kDenseKinds = static_cast<int>(TensorKind::COUNT);
+static_assert(static_cast<int>(DensePath::COUNT) <= 64, "dense_seen is one uint64_t bit per DensePath");
 
 struct Record {
     AttnPrefillOuter attn_prefill_outer = AttnPrefillOuter::UNSET;
@@ -26,6 +33,10 @@ struct Record {
     // Only meaningful when moe_prefill_outer == CUTLASS3X.
     MoePrefillPath moe_prefill_tier = MoePrefillPath::LEGACY;
     bool moe_prefill_tier_set = false;
+
+    // Dense GEMM ladder per weight kind: the last exit taken and a bit per exit ever taken.
+    DensePath dense_last[kDenseKinds] = {};
+    uint64_t dense_seen[kDenseKinds] = {};
 
     bool has_prefill() const { return attn_prefill_outer != AttnPrefillOuter::UNSET; }
     bool has_decode() const { return attn_decode != AttnDecodePath::UNSET; }
@@ -50,6 +61,17 @@ inline void set_moe_prefill_tier(MoePrefillPath p) {
     g_record.moe_prefill_tier = p;
     g_record.moe_prefill_tier_set = true;
 }
+
+inline void set_dense(TensorKind kind, DensePath p) {
+    const auto k = static_cast<unsigned>(kind);
+    if (k >= static_cast<unsigned>(kDenseKinds))
+        return;
+    g_record.dense_last[k] = p;
+    g_record.dense_seen[k] |= uint64_t{1} << static_cast<unsigned>(p);
+}
+
+// "kind=path+path ..." over every kind with a recorded exit, paths in DensePath order; "" if none.
+std::string dense_summary(const Record& r);
 
 inline void reset() { g_record = Record{}; }
 
