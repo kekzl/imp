@@ -2,6 +2,7 @@
 // in_proj 10240 rows multirow, gate 6144 128-thread K-par, alpha/beta 48 each gemv_fp16 sum):
 // all four reproduced bit-for-bit, plus an fp32 host reference per segment.
 
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "compute/gemm.h"
@@ -59,7 +60,7 @@ protected:
         return d;
     }
 
-    void quantize(half* d_w, int N, int K, NvFP4QuantResult& qr) {
+    void quantize(half* d_w, int N, int K, NvFP4Owned& qr) {
         int64_t wshape[2] = {N, K};
         Tensor w_t(d_w, QType::F16, 2, wshape, true);
         quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -113,7 +114,7 @@ TEST_F(NvFP4GemvGdnInput, MatchesTheFourLaunchesAtQwen38Dims) {
     half* d_a = upload(h_a);
     half* d_b = upload(h_b);
     half* d_x = upload(h_x);
-    NvFP4QuantResult q_in, q_gate;
+    NvFP4Owned q_in, q_gate;
     quantize(d_in, kInRows, kK, q_in);
     quantize(d_gate, kGateRows, kK, q_gate);
 
@@ -187,9 +188,6 @@ TEST_F(NvFP4GemvGdnInput, MatchesTheFourLaunchesAtQwen38Dims) {
     expect_close("gate", g_gate, ref_nvfp4(q_gate, kGateRows), 0.05f);
     expect_close("alpha", g_a, ref_fp16(h_a, kAbRows), 0.05f);
     expect_close("beta", g_b, ref_fp16(h_b, kAbRows), 0.05f);
-
-    free_nvfp4_result(q_in);
-    free_nvfp4_result(q_gate);
 }
 
 TEST_F(NvFP4GemvGdnInput, DeclinesShapesTheKernelCannotServe) {

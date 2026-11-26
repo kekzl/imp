@@ -11,6 +11,7 @@
 #include "core/tensor.h"
 #include "quant/awq_norm_fold.h"
 #include "quant/awq_transform.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -70,7 +71,7 @@ Packed quantize_like_the_exporter(const std::vector<uint16_t>& h_fp16, int64_t N
     int64_t shape[2] = {N, K};
     Tensor in(d_in, QType::F16, 2, shape, /*on_device=*/true);
     const float scale = quantize::export_tensor_scale(quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
-    NvFP4QuantResult q;
+    NvFP4Owned q;
     quantize_fp16_to_nvfp4_with_scale(in, scale, q);
     dequantize_nvfp4_to_fp16(q, d_deq);
     EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -84,7 +85,6 @@ Packed quantize_like_the_exporter(const std::vector<uint16_t>& h_fp16, int64_t N
     EXPECT_EQ(cudaMemcpy(out.micro.data(), q.micro_scales, out.micro.size(), cudaMemcpyDeviceToHost),
               cudaSuccess);
     EXPECT_EQ(cudaMemcpy(out.dequantized.data(), d_deq, bytes, cudaMemcpyDeviceToHost), cudaSuccess);
-    free_nvfp4_result(q);
     cudaFree(d_in);
     cudaFree(d_deq);
     return out;

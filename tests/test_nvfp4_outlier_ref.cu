@@ -7,6 +7,7 @@
 // no-NaN/Inf gate on every distribution's output.
 
 #include <gtest/gtest.h>
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
@@ -118,7 +119,7 @@ void run_pipeline(cudaStream_t stream, const Dist& d, std::vector<float>& dq_out
     Tensor w(d_w, QType::F16, 2, shape, true);
 
     // REAL production quantizer (the mode-2 conversion calls this exact path).
-    NvFP4QuantResult q;
+    NvFP4Owned q;
     quantize_fp16_to_nvfp4(w, q, stream);
 
     // Dequant back to FP16 via the production dequant kernel.
@@ -144,7 +145,6 @@ void run_pipeline(cudaStream_t stream, const Dist& d, std::vector<float>& dq_out
     for (size_t i = 0; i < gemv_out.size(); i++)
         gemv_out[i] = __half2float(h_y[i]);
 
-    free_nvfp4_result(q);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_dq);

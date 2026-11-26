@@ -6,6 +6,8 @@
 #include "exec/gemm_scratch.h"      // prewarm_mmvq_scratch
 #include "quant/dequant_gpu.h"      // generic-dequant parity test
 #include "quant/nvfp4_gemm_tile.h"  // gemm_tile_streamk_workspace_bytes
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -141,9 +143,9 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
 
     // Quantize weight to NVFP4, then convert to CUTLASS block-scaled layout
     // (SfAtom). The adapter consumes the CutlassNvFP4Weight verbatim.
-    NvFP4QuantResult nv4{};
+    NvFP4Owned nv4{};
     quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
-    CutlassNvFP4Weight cw{};
+    CutlassNvFP4Owned cw{};
     convert_nvfp4_to_cutlass(nv4, cw, stream_);
 
     // Allocate activation quantization scratch + GEMM workspace.
@@ -192,8 +194,6 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     }
     EXPECT_GT(nonzero_count, 0) << "Registry CUTLASS_NVFP4 dispatch wrote all-zero output";
 
-    free_cutlass_nvfp4_weight(cw);
-    free_nvfp4_result(nv4);
     cudaFree(d_act_data);
     cudaFree(d_act_sf);
     if (d_ws) cudaFree(d_ws);

@@ -17,15 +17,15 @@ struct NvFP4QuantResult {
     float tensor_scale = 1.0f;     // global tensor scale
     int64_t N = 0;
     int64_t K = 0;
-    // True when packed_data/micro_scales were allocated by this result (quantize_* paths) and
-    // must be cudaFree'd on teardown. False when they BORROW resident model weight storage (the
-    // data-borrow decode cache): cudaFree on a borrowed pointer fails with "invalid argument".
-    bool owned = true;
 };
+
+// Owners of the producer results below, quant/nvfp4_owned.h (I5): this struct is a view.
+struct NvFP4Owned;
+struct NvFP4MoEOwned;
 
 // Quantize FP16 tensor to NVFP4 with two-level scaling.
 // input: [N, K] FP16 on device. K must be multiple of 16.
-void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result, cudaStream_t stream = nullptr);
+void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4Owned& result, cudaStream_t stream = nullptr);
 
 // Same, with a CALLER-SUPPLIED tensor scale instead of one calibrated from this tensor
 // alone (an offline-export need the load-time path lacks). Fused layers must SHARE a scale:
@@ -39,7 +39,7 @@ void quantize_fp16_to_nvfp4_into(const void* d_input_fp16, int M, int K, uint8_t
                                  uint8_t* d_micro_scales, float tensor_scale,
                                  cudaStream_t stream = nullptr);
 
-void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4QuantResult& result,
+void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, NvFP4Owned& result,
                                        cudaStream_t stream = nullptr);
 
 // Calibrate optimal tensor scale and micro-scales.
@@ -50,15 +50,12 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream = nullptr,
 
 // Fully async variant: no host sync. Caller provides reusable device buffers.
 // tensor_scale is written to d_tensor_scale_buf and must be read back after sync.
-void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result, float* d_absmax_buf,
+void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4Owned& result, float* d_absmax_buf,
                                   float* d_tensor_scale_buf, cudaStream_t stream = nullptr);
 
 // Dequantize NVFP4 back to FP16 (for verification).
 void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant, void* output_fp16,
                               cudaStream_t stream = nullptr);
-
-// Free NVFP4 result device memory.
-void free_nvfp4_result(NvFP4QuantResult& result);
 
 // NVFP4 MoE: per-expert quantization with independent tensor scales. Packed expert weights
 // [n_experts,eff,K] are quantized expert-by-expert into contiguous NVFP4 buffers with one
@@ -74,24 +71,21 @@ struct NvFP4MoEQuantResult {
     size_t expert_stride_packed = 0;  // N * K/2 bytes per expert
     size_t expert_stride_ms = 0;      // N * K/16 bytes per expert
     // When true, packed_data/micro_scales/tensor_scales are BORROWED (model
-    // weights or VRAMAllocator sub-allocations), not cudaMalloc'd — so
-    // free_nvfp4_moe_result must NOT cudaFree them (the owner reclaims them).
+    // weights or VRAMAllocator sub-allocations): NvFP4MoECacheEntry adopts only
+    // an unborrowed result (the gpt-oss MXFP4 converter's).
     bool borrowed = false;
 };
 
 // Quantize packed 3D expert weights (raw GGML format) to NVFP4.
 // dequant_scratch: [eff, K] FP16 scratch buffer on device (reused per expert).
 void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype, int n_experts, int eff,
-                                      int K, void* dequant_scratch, NvFP4MoEQuantResult& result,
+                                      int K, void* dequant_scratch, NvFP4MoEOwned& result,
                                       cudaStream_t stream);
 
 // Dequantize all experts from NVFP4 MoE back to FP16.
 // Output layout: [n_experts, N, K] contiguous FP16 (same as dequant_gpu output).
 void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result, void* output_fp16,
                                   cudaStream_t stream = nullptr);
-
-// Free NvFP4MoEQuantResult device memory.
-void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
 
 // Defensive promotion of weight_scale_2 into the GEMM-internal tensor_scale.
 //   Modelopt:       val = fp4 * micro_scale * weight_scale_2   (multiply)

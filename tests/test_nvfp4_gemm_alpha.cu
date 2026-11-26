@@ -9,6 +9,8 @@
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/fp8_utils.cuh"
@@ -110,13 +112,13 @@ TEST_F(Nvfp4GemmAlphaTest, AlphaIsActuallyApplied) {
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
     const float baseline_tensor_scale = qr.tensor_scale;
     ASSERT_GT(baseline_tensor_scale, 0.0f) << "quantize produced zero tensor_scale";
 
-    CutlassNvFP4Weight cw;
+    CutlassNvFP4Owned cw;
     convert_nvfp4_to_cutlass(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -194,8 +196,6 @@ TEST_F(Nvfp4GemmAlphaTest, AlphaIsActuallyApplied) {
         << "alpha appears NOT to be applied: outputs unchanged when tensor_scale changed by " << kRatio
         << "×. Mean observed output ratio: " << mean_ratio;
 
-    free_nvfp4_result(qr);
-    free_cutlass_nvfp4_weight(cw);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_act_data);
@@ -238,13 +238,13 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0Reproducer) {
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
     fprintf(stderr, "[MISTRAL-REPRO] auto-tensor_scale=%.6g (Modelopt-convention multiplier)\n",
             qr.tensor_scale);
 
-    CutlassNvFP4Weight cw;
+    CutlassNvFP4Owned cw;
     convert_nvfp4_to_cutlass(qr, cw, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -339,8 +339,6 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0Reproducer) {
     EXPECT_EQ(n_nan, 0) << "GEMM output contains NaN";
     EXPECT_LE(max_abs, ref_max * 5.0) << "GEMM output magnitudes wildly exceed reference";
 
-    free_nvfp4_result(qr);
-    free_cutlass_nvfp4_weight(cw);
     cudaFree(d_w);
     cudaFree(d_x);
     cudaFree(d_act_data);
@@ -483,7 +481,7 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     qr_pq.K = K;
 
     // 5. Convert to SfAtom format (this is the same path Phase-0b registers)
-    CutlassNvFP4Weight cw;
+    CutlassNvFP4Owned cw;
     convert_nvfp4_to_cutlass(qr_pq, cw, stream_);
     cudaStreamSynchronize(stream_);
     fprintf(stderr, "[PREQ] cw.tensor_scale=%.6g  (used as alpha)\n", cw.tensor_scale);
@@ -580,7 +578,6 @@ TEST_F(Nvfp4GemmAlphaTest, MistralL0PrequantByteLayout) {
     EXPECT_LE(max_abs, ref_max * 5.0)
         << "GEMM prequant magnitudes exceed reference 5x - likely the in-the-wild bug";
 
-    free_cutlass_nvfp4_weight(cw);
     cudaFree(d_packed);
     cudaFree(d_micro);
     cudaFree(d_x);

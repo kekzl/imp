@@ -2,6 +2,7 @@
 
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -177,7 +178,7 @@ std::expected<SearchResult, std::string> search_group_scale(const std::vector<Gr
 
             int64_t shape[2] = {rows, K};
             Tensor scaled(d_scaled.p, QType::F16, 2, shape, /*on_device=*/true);
-            NvFP4QuantResult q;
+            NvFP4Owned q;
             quantize_fp16_to_nvfp4(scaled, q);
             dequantize_nvfp4_to_fp16(q, d_deq.p);
 
@@ -188,7 +189,6 @@ std::expected<SearchResult, std::string> search_group_scale(const std::vector<Gr
             const bool ok = cudaDeviceSynchronize() == cudaSuccess &&
                             cudaMemcpy(h_partial.data(), d_partial.p, h_partial.size() * sizeof(double),
                                        cudaMemcpyDeviceToHost) == cudaSuccess;
-            free_nvfp4_result(q);
             if (!ok) {
                 return std::unexpected("search_group_scale: quantize/reduce failed");
             }

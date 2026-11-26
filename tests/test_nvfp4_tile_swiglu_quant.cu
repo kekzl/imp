@@ -6,6 +6,8 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm_tile.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -67,8 +69,8 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
     int64_t wshape[2] = {N, K};
     Tensor wt(w.p, QType::F16, 2, wshape, true);
-    NvFP4QuantResult qr;
-    CutlassNvFP4Weight cw;
+    NvFP4Owned qr;
+    CutlassNvFP4Owned cw;
     quantize_fp16_to_nvfp4(wt, qr, s);
     convert_nvfp4_to_cutlass(qr, cw, s);
     Dev<uint8_t> act(size_t(M) * K / 2), act_sf(cutlass_nvfp4_sf_size(M, K));
@@ -108,9 +110,8 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
         }
     }
     EXPECT_GT(clamp_blocks, 0) << "no block reached the 2^-9 clamp";
-    free_cutlass_nvfp4_weight(cw);
-    cudaFree(qr.packed_data);
-    cudaFree(qr.micro_scales);
+    cw = CutlassNvFP4Owned{};
+    qr = NvFP4Owned{};
     cudaStreamDestroy(s);
 }
 

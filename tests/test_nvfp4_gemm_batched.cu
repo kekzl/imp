@@ -4,6 +4,7 @@
 // (batched FP32 GEMV at M<=16, dequant->gemm() cuBLASLt above) on identical weights, must agree
 // within FP16 accumulation-order noise.
 
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
@@ -42,7 +43,7 @@ protected:
 
         int64_t wshape[2] = {N, K};
         Tensor w_t(d_w, QType::F16, 2, wshape, /*on_device=*/true);
-        NvFP4QuantResult qr;
+        NvFP4Owned qr;
         quantize_fp16_to_nvfp4(w_t, qr, stream_);
         cudaStreamSynchronize(stream_);
 
@@ -79,7 +80,6 @@ protected:
         EXPECT_LT(max_abs_diff, 0.5f)
             << "gemm_nvfp4_batched diverges from gemm_nvfp4 (N=" << N << " K=" << K << " M=" << M << ")";
 
-        free_nvfp4_result(qr);
         cudaFree(d_w);
         cudaFree(d_a);
         cudaFree(d_y);
@@ -133,7 +133,7 @@ TEST_F(GemmNvfp4Batched, AccumulateAddsIntoOutput) {
 
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -158,7 +158,6 @@ TEST_F(GemmNvfp4Batched, AccumulateAddsIntoOutput) {
     }
     EXPECT_LT(max_abs_diff, 0.05f) << "accumulate variant diverges from ref + residual";
 
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_a);
     cudaFree(d_y);

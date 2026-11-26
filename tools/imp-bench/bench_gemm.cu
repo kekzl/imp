@@ -2,6 +2,8 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/quant_gemm.h"
 #include "quant/nvfp4_gemm_tile.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/logging.h"
 #include "core/tensor.h"
@@ -227,9 +229,9 @@ static float bench_nvfp4_tile_gemm(const GemmSize& sz) {
     IMP_CUDA_CHECK_LOG(cudaMemcpy(d_B_fp16, h_B.data(), h_B.size() * sizeof(half), cudaMemcpyHostToDevice));
     int64_t bshape[2] = {N, K};
     Tensor b_t(d_B_fp16, QType::F16, 2, bshape, /*on_device=*/true);
-    NvFP4QuantResult qr{};
+    NvFP4Owned qr{};
     quantize_fp16_to_nvfp4(b_t, qr, nullptr);
-    CutlassNvFP4Weight cw{};
+    CutlassNvFP4Owned cw{};
     convert_nvfp4_to_cutlass(qr, cw, nullptr);
 
     // --- Output + workspace ---
@@ -269,8 +271,6 @@ static float bench_nvfp4_tile_gemm(const GemmSize& sz) {
 
     IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
     IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
-    free_cutlass_nvfp4_weight(cw);
-    free_nvfp4_result(qr);
     if (ws)
         IMP_CUDA_CHECK_LOG(cudaFree(ws));
     IMP_CUDA_CHECK_LOG(cudaFree(d_D));

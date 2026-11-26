@@ -59,7 +59,6 @@ G3 g3_classify(const StoragePlan& plan, WeightCaches& wc, const void* ptr, const
     cw.tensor_scale = nvfp4.tensor_scale;
     cw.N = nvfp4.N;
     cw.K = nvfp4.K;
-    cw.sf_borrowed = true;  // scale_factors stays null: nothing to free
     wc.cutlass_nvfp4[ptr] = CutlassNvFP4CacheEntry(std::move(cw));
     return G3::SfLess;
 }
@@ -238,7 +237,6 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
                 cw.N = g.N;
                 cw.K = g.K;
                 cw.sf_bytes = g.sf_per_expert;
-                cw.sf_borrowed = true;
                 wcache_->cutlass_nvfp4[g.data_ptrs[e]] = CutlassNvFP4CacheEntry(std::move(cw));
                 ++ct_count;
             }

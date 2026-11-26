@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
@@ -40,7 +41,7 @@ float host_dequant(const std::vector<uint8_t>& packed, const std::vector<uint8_t
 }
 
 struct DeviceQuant {
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     std::vector<uint8_t> packed_h, scales_h;
     void quantize(const std::vector<__half>& src, int rows, int K) {
         void* d = nullptr;
@@ -559,14 +560,14 @@ TEST_F(NvFP4SmallMV2Test, RepeatedLaunchesBitwiseStable) {
         }
         cudaFree(d_y);
         cudaFree(d_ws);
+        // NvFP4Owned releases its own buffers: a hand cudaFree of q.packed_data is a double free.
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "before the owner release, M=" << s.M << " K=" << s.K;
         for (int set = 0; set < 2; ++set) {
-            cudaFree(X[set].q.packed_data);
-            cudaFree(X[set].q.micro_scales);
-            for (int i = 0; i < s.count; ++i) {
-                cudaFree(W[set][i].q.packed_data);
-                cudaFree(W[set][i].q.micro_scales);
-            }
+            X[set].q = imp::NvFP4Owned{};
+            for (auto& w : W[set])
+                w.q = imp::NvFP4Owned{};
         }
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "owner release, M=" << s.M << " K=" << s.K;
     }
 }
 
@@ -664,7 +665,6 @@ TEST_F(NvFP4SmallMV2Test, RingSweepQwen3_14B) {
         imp::NvFP4QuantResult ring[kRing];
         for (auto& r : ring) {
             r = W.q;
-            r.owned = false;
             ASSERT_EQ(cudaMalloc(&r.packed_data, pb), cudaSuccess);
             ASSERT_EQ(cudaMalloc(&r.micro_scales, sb), cudaSuccess);
             ASSERT_EQ(cudaMemcpy(r.packed_data, W.q.packed_data, pb, cudaMemcpyDeviceToDevice), cudaSuccess);

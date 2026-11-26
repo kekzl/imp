@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
@@ -57,7 +58,7 @@ TEST_F(NvFP4SmallMTest, MatchesHostReference) {
     ASSERT_EQ(cudaMalloc(&d_w, w_h.size() * sizeof(__half)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_w, w_h.data(), w_h.size() * sizeof(__half), cudaMemcpyHostToDevice),
               cudaSuccess);
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     {
         int64_t shp[2] = {N, K};
         imp::Tensor wt(d_w, imp::QType::F16, 2, shp, /*on_device=*/true);
@@ -121,7 +122,7 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
     ASSERT_EQ(cudaMalloc(&d_w, w_h.size() * sizeof(__half)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_w, w_h.data(), w_h.size() * sizeof(__half), cudaMemcpyHostToDevice),
               cudaSuccess);
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     {
         int64_t shp[2] = {N, K};
         imp::Tensor wt(d_w, imp::QType::F16, 2, shp, /*on_device=*/true);
@@ -206,10 +207,9 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
     EXPECT_GT(best_gbs, bar);
 }
 
-
-// Quantize an FP16 host matrix on device into a plain NvFP4QuantResult.
+// Quantize an FP16 host matrix on device into an NvFP4Owned (released with the buffer).
 struct QuantBuf {
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     void quantize(const std::vector<__half>& src, int rows, int K) {
         void* d = nullptr;
         ASSERT_EQ(cudaMalloc(&d, src.size() * sizeof(__half)), cudaSuccess);

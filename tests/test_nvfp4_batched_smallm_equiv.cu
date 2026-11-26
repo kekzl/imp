@@ -7,6 +7,7 @@
 
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -36,9 +37,8 @@ constexpr int kK = 5120;
 constexpr int kN = 512;  // one N tile; the kernel walks N in blocks anyway
 
 struct Fixture {
-    imp::NvFP4QuantResult w{};
+    imp::NvFP4Owned w{};
     std::vector<half> w_fp16;  // dequantised reference weight, [kN, kK]
-    ~Fixture() { imp::free_nvfp4_result(w); }
 };
 
 // Quantise a random weight and keep its dequantised form as the reference.
@@ -177,14 +177,14 @@ TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
                   cudaSuccess);
         int64_t shape[2] = {n_rows, kPK};
         imp::Tensor wt(d_w, imp::QType::F16, 2, shape, true);
-        imp::NvFP4QuantResult w{};
+        imp::NvFP4Owned w{};
         imp::quantize_fp16_to_nvfp4(wt, w, nullptr);
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         cudaFree(d_w);
         return w;
     };
-    imp::NvFP4QuantResult w1 = make_w(kN1);
-    imp::NvFP4QuantResult w2 = make_w(kN2);
+    imp::NvFP4Owned w1 = make_w(kN1);
+    imp::NvFP4Owned w2 = make_w(kN2);
 
     for (int m : {2, 7, 32}) {
         // One quantized activation, shared by every call — exactly the
@@ -198,7 +198,7 @@ TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
                   cudaSuccess);
         int64_t xshape[2] = {m, kPK};
         imp::Tensor xt(d_x, imp::QType::F16, 2, xshape, true);
-        imp::NvFP4QuantResult xq{};
+        imp::NvFP4Owned xq{};
         imp::quantize_fp16_to_nvfp4(xt, xq, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         cudaFree(d_x);
@@ -230,10 +230,7 @@ TEST(SmallMV2Pair, PairMatchesTwoSingleCallsBitExact) {
         const std::vector<half> a2 = fetch(y2s, kN2), b2 = fetch(y2p, kN2);
         ASSERT_EQ(std::memcmp(a1.data(), b1.data(), a1.size() * sizeof(half)), 0) << "m=" << m << " W1";
         ASSERT_EQ(std::memcmp(a2.data(), b2.data(), a2.size() * sizeof(half)), 0) << "m=" << m << " W2";
-        imp::free_nvfp4_result(xq);
     }
-    imp::free_nvfp4_result(w1);
-    imp::free_nvfp4_result(w2);
 }
 
 // DISABLED: measurement not assertion (run --gtest_also_run_disabled_tests
@@ -254,7 +251,7 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
     // kCopies quantized copies so consecutive iterations never re-hit.
     constexpr int kCopies = 4;
     for (const auto& sh : shapes) {
-        imp::NvFP4QuantResult wcp[kCopies]{};
+        imp::NvFP4Owned wcp[kCopies]{};
         for (int c = 0; c < kCopies; ++c) {
             std::vector<half> wh(static_cast<size_t>(sh.n) * sh.k);
             for (auto& h : wh) h = __float2half(dist(rng));
@@ -278,7 +275,7 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
                   cudaSuccess);
         int64_t xshape[2] = {1, sh.k};
         imp::Tensor xt(d_x, imp::QType::F16, 2, xshape, true);
-        imp::NvFP4QuantResult xq{};
+        imp::NvFP4Owned xq{};
         imp::quantize_fp16_to_nvfp4(xt, xq, nullptr);
         cudaDeviceSynchronize();
         half* d_y = nullptr;
@@ -312,9 +309,6 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
         }
         cudaEventDestroy(t0); cudaEventDestroy(t1);
         cudaFree(d_x); cudaFree(d_y);
-        for (int c = 0; c < kCopies; ++c)
-            imp::free_nvfp4_result(wcp[c]);
-        imp::free_nvfp4_result(xq);
     }
 }
 
@@ -348,7 +342,7 @@ TEST_F(BatchedSmallM, DISABLED_MarginalRowCost) {
     // a 170-SM card and the kernel is latency-bound, which is not the regime a
     // verify chunk runs in.
     constexpr int kBenchN = 5120;
-    imp::NvFP4QuantResult bw{};
+    imp::NvFP4Owned bw{};
     {
         std::vector<half> hw(static_cast<size_t>(kBenchN) * kK);
         std::normal_distribution<float> wd(0.0f, 0.05f);
@@ -395,7 +389,6 @@ TEST_F(BatchedSmallM, DISABLED_MarginalRowCost) {
     }
     cudaEventDestroy(a); cudaEventDestroy(b);
     cudaFree(d_x); cudaFree(d_y);
-    imp::free_nvfp4_result(bw);
 }
 
 }  // namespace
