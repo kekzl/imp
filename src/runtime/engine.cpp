@@ -880,7 +880,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             admit_cap, config_.max_batch_size);
     }
     scheduler_ = std::make_unique<Scheduler>(admit_cap);
-    (void)stream_.create(cudaStreamNonBlocking);
+    if (!engine_internal::open_engine_stream(stream_))
+        return false;
     MemAccount::instance().checkpoint("01_prewarm_gemm");
 
     // Encoder-only embedder (#836): no executor, KV cache, decoder features,
