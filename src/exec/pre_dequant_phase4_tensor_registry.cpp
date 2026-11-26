@@ -10,6 +10,7 @@
 #include "core/logging.h"
 #include "quant/dequant_gpu.h"
 #include "exec/storage_planner.h"
+#include "exec/weight_tier_entries.h"
 #include "memory/mem_account.h"
 
 #include <cuda_runtime.h>
@@ -30,6 +31,19 @@ static float static_act_scale(const Tensor& t) { return t.qtype == QType::NVFP4 
 
 // Per-layer MoE static act scales (1.0 without a checkpoint scale): the max over the experts,
 // so the shared quantize clips no expert's calibrated range. gu = gate|up input, dn = down input.
+// Every decode / prefill tier has the entry its dispatch reads (audit D-3): a miss used to fall
+// through to another route silently.
+static void require_tier_entries(const WeightRegistry& reg) {
+    for (size_t id = 0; id < reg.size(); ++id) {
+        const WeightHandle& h = reg.handle(static_cast<TensorID>(id));
+        if (const char* map = missing_tier_entry(h))
+            throw_runtime_error(
+                "Phase 4: handle %zu (%s) has tier %d / decode %d / prefill %d but no %s entry", id,
+                tensor_kind_name(h.kind), static_cast<int>(h.primary_tier), static_cast<int>(h.decode_tier),
+                static_cast<int>(h.prefill_tier), map);
+    }
+}
+
 static void fill_moe_act_scales(const Model& model, const WeightRegistry& reg, int n_layers,
                                 std::vector<MoEWorkspace::ActScales>& out) {
     auto widest = [&](const std::vector<TensorID>& ids, float s) {
@@ -96,6 +110,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         h.source_tensor_scale = t.tensor_scale;
         h.act_scale = static_act_scale(t);
         borrow_payload_from_wcache(h, *wcache_, t.data);
+        bind_cache_entries(h, *wcache_);
 
         // Dual-tier dispatch: pick the best tier per operation type.
         //   Prefill (M>1): FP16 > FP8 > CUTLASS_NVFP4 tier (own tile GEMM) > source dequant
@@ -228,6 +243,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     wcache_->fused_gate_up.clear();
 
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)", registry_->size());
+    require_tier_entries(*registry_);
 
     // Phase 4 (Option C) overlay diagnostic: report ideal (plan-enumerated) vs actual
     // (runtime-cached) overlay population. Native GGUF blocks bypass the overlay layer
