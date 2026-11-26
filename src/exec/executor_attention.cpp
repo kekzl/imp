@@ -240,8 +240,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     // QKV projections [n,d]@W^T -> [n,proj_dim]. Decode (n=1) with matching
     // quant types: fused RMSNorm->Q8_1->QKV GEMV, skipping the intermediate
@@ -398,28 +397,39 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate launches per layer.
         // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
         // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
+        auto qknorm_rope = [&](half* K, const Tensor& k_norm, int n_kv) {
+            qknorm_rope_fused({.Q = static_cast<half*>(qv.data),
+                               .K = K,
+                               .q_norm_weight = static_cast<const half*>(ly.attn_q_norm.data),
+                               .k_norm_weight = static_cast<const half*>(k_norm.data),
+                               .n_heads = nh,
+                               .n_kv_heads = n_kv,
+                               .head_dim = hd,
+                               .eps = eps,
+                               .positions = state.positions,
+                               .theta = layer_rope_theta,
+                               .scaling = layer_rope_freq_scale,
+                               .rope_dim = fused_rope_dim,
+                               .neox = cfg.rope_neox,
+                               .stream = stream,
+                               .weight_offset = norm_w_off_,
+                               .ext_factor = cfg.yarn_ext_factor,
+                               .attn_factor = cfg.yarn_attn_factor,
+                               .corr_dims = cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
+                               .longrope_inv_freqs = longrope_freqs,
+                               .mrope = state.mrope,
+                               .n_tokens = n});
+        };
         if (kv_shared && ly.attn_q_norm.data != nullptr && n <= 65535 && qv.qtype == QType::F16) {
             // q_norm + RoPE on Q only (n_kv_heads 0); the shared K/V are normed and rotated.
-            qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(qv.data),
-                              static_cast<const half*>(ly.attn_q_norm.data),
-                              static_cast<const half*>(ly.attn_q_norm.data), nh, 0, hd, eps, state.positions,
-                              layer_rope_theta, layer_rope_freq_scale, fused_rope_dim, cfg.rope_neox, stream,
-                              norm_w_off_, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs,
-                              state.mrope, n);
+            qknorm_rope(static_cast<half*>(qv.data), ly.attn_q_norm, 0);
         } else if (kv_shared) {
             throw std::runtime_error("Gemma 4 KV-shared layer needs q_norm and FP16 Q");
         } else if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
                    layer_rope) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.
-            qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
-                              static_cast<const half*>(ly.attn_q_norm.data),
-                              static_cast<const half*>(ly.attn_k_norm.data), nh, nkv, hd, eps,
-                              state.positions, layer_rope_theta, layer_rope_freq_scale, fused_rope_dim,
-                              cfg.rope_neox, stream, norm_w_off_, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, longrope_freqs,
-                              state.mrope, n);
+            qknorm_rope(static_cast<half*>(kk.data), ly.attn_k_norm, nkv);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = fused_rope_dim;
@@ -668,7 +678,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         quantize_attn_out_q8_(ao, K_o, q8_epi.written, stream);
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
                                static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
-    } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
+    } else if (will_fuse_o_beta1 && !ctx.mode.force_fp16 && wo_tier == StorageTier::FP8 &&
                qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale.data() != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
         // scales, as q/k/v and the FFN: a batch-wide absmax made a row depend on its neighbours.

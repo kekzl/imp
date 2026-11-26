@@ -19,6 +19,7 @@
 #include <cuda_fp16.h>
 
 #include <stdexcept>
+#include <type_traits>
 
 namespace imp {
 
@@ -130,13 +131,12 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
-    // cur_spec_verify_ is load-bearing here (missing until 2026-08-18): without
+    // The verify mode in gemm_ctx_ is load-bearing here (missing until 2026-08-18): without
     // it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV branch
     // (#998/#1055) is unreachable, and every GDN projection in a speculative
     // verify chunk took the CUTLASS prefill path instead. FFN and attention
     // already threaded it; on a GDN hybrid this is 48 of 64 layers.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
@@ -324,8 +324,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
@@ -552,8 +551,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // scratch with no GEMM dispatches in between, so mark it shared (the
             // dispatch verifies against its scratch tag before skipping).
             GemmContext gate_ctx = q8_reuse_ctx;
-            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
-                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
+            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n, ctx.mode) &&
+                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n, ctx.mode))
                 gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
             gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
         }
@@ -684,28 +683,42 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             }
             auto scan = [&](const int* rows_n, void* snap_p, const int* snap_p_n, const int* outs,
                             const int* snaps) {
-                if (state_bf16) {
-                    gdn_scan_fused_bf16_batched(
-                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                        static_cast<const half*>(beta_proj_out.data),
-                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
-                        static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)),
-                        state.ssm_seq_slots,
-                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
-                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<__nv_bfloat16*>(snap_p),
-                        snap_p_n, outs, snaps, fac_out, state.ssm_fac_stride);
-                } else {
-                    gdn_scan_fused_f32_batched(
-                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                        static_cast<const half*>(beta_proj_out.data),
-                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
-                        static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
-                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<float*>(snap_p), snap_p_n,
-                        outs, snaps, fac_out, state.ssm_fac_stride);
-                }
+                // tag: a null StateT* picking the state element type (float or BF16).
+                auto args = [&](auto* tag) {
+                    using S = std::remove_pointer_t<decltype(tag)>;
+                    return GdnScanBatchedArgs<S>{.conv_f32 = conv_f32,
+                                                 .conv_channels = conv_channels,
+                                                 .alpha = static_cast<const half*>(alpha_proj_out.data),
+                                                 .beta = static_cast<const half*>(beta_proj_out.data),
+                                                 .A_log = static_cast<const float*>(ly.ssm_a.data),
+                                                 .dt_bias = static_cast<const float*>(ly.ssm_dt_b.data),
+                                                 .h_state_pool = static_cast<S*>(
+                                                     state.ssm_state->h_state(0, ssm_idx)),
+                                                 .seq_slots = state.ssm_seq_slots,
+                                                 .h_state_seq_stride = static_cast<int64_t>(
+                                                     state.ssm_state->slot_stride_bytes() / sizeof(S)),
+                                                 .y = static_cast<half*>(y_buf.data),
+                                                 .n_seq = state.ssm_n_seq,
+                                                 .n_tokens = scan_n_tokens,
+                                                 .n_heads = n_heads,
+                                                 .head_dim_ssm = head_dim_ssm,
+                                                 .state_size = ssize,
+                                                 .n_groups = n_groups,
+                                                 .stream = stream,
+                                                 .grouped_layout = gl,
+                                                 .d_real_n = rows_n,
+                                                 .seq_row_offsets = row_offs,
+                                                 .h_snap = static_cast<S*>(snap_p),
+                                                 .d_snap_n = snap_p_n,
+                                                 .out_slots = outs,
+                                                 .snap_slots = snaps,
+                                                 .fac_out = fac_out,
+                                                 .fac_stride = state.ssm_fac_stride};
+                };
+                if (state_bf16)
+                    gdn_scan_fused_bf16_batched(args(static_cast<__nv_bfloat16*>(nullptr)));
+                else
+                    gdn_scan_fused_f32_batched(args(static_cast<float*>(nullptr)));
             };
             if (!ragged_split)
                 scan(real_n, snap, snap_n, grouped ? state.ssm_out_slots : nullptr,

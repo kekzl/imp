@@ -31,13 +31,12 @@ namespace {
 // Undefined: Qwen3.8 alpha/beta are dequantized NVFP4->F16 at load and sit
 // in no cache, so gemm_via_handle_ runs them through the uncached
 // fallback). nullptr = not FP16-resident, or a different shape than expected.
-const half* fp16_weight_ptr(const WeightCaches& wcache, const WeightHandle& h, int64_t N, int64_t K) {
+const half* fp16_weight_ptr(const WeightHandle& h, int64_t N, int64_t K) {
     if ((h.primary_tier != StorageTier::FP16 && h.primary_tier != StorageTier::Undefined) ||
         h.shape[0] != N || h.shape[1] != K)
         return nullptr;
-    auto it = wcache.fp16.find(h.source_data);
-    if (it != wcache.fp16.end() && it->second.qtype == QType::F16 && it->second.data)
-        return static_cast<const half*>(it->second.data);
+    if (const Fp16CacheEntry* e = h.entries.fp16; e != nullptr && e->qtype == QType::F16 && e->data)
+        return static_cast<const half*>(e->data);
     if (h.source_qtype == QType::F16 && h.source_data)
         return static_cast<const half*>(h.source_data);
     return nullptr;
@@ -69,8 +68,8 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         return false;
     const int64_t K = input.shape[1];
     const int64_t N = alpha_out.shape[1];
-    const half* wa = fp16_weight_ptr(wcache_, registry_.handle(alpha_id), N, K);
-    const half* wb = fp16_weight_ptr(wcache_, registry_.handle(beta_id), N, K);
+    const half* wa = fp16_weight_ptr(registry_.handle(alpha_id), N, K);
+    const half* wb = fp16_weight_ptr(registry_.handle(beta_id), N, K);
     if (!wa || !wb) {
         if (!gdn_ws_.ab_narrow_logged) {
             gdn_ws_.ab_narrow_logged = true;
@@ -79,8 +78,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
                 "gdn alpha/beta narrow GEMM declined: alpha tier=%d source_qtype=%d shape=[%lld,%lld] "
                 "expected [%lld,%lld] fp16_cache=%d (two-call route)",
                 static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype), (long long)h.shape[0],
-                (long long)h.shape[1], (long long)N, (long long)K,
-                wcache_.fp16.contains(h.source_data) ? 1 : 0);
+                (long long)h.shape[1], (long long)N, (long long)K, h.entries.fp16 != nullptr ? 1 : 0);
         }
         return false;
     }
@@ -116,10 +114,9 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
     const WeightHandle& h = registry_.handle(id);
     const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
     if (decode == StorageTier::NVFP4) {
-        auto it = wcache_.nvfp4.find(h.source_data);
-        if (it == wcache_.nvfp4.end())
+        if (h.entries.nvfp4 == nullptr)
             return false;
-        out = it->second;
+        out = *h.entries.nvfp4;
         return true;
     }
     if (decode == StorageTier::CUTLASS_NVFP4 && h.source_data && h.source_scales) {
@@ -136,9 +133,9 @@ bool GraphExecutor::nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) con
 // FP16 alpha/beta rows [N, K] for the fused M=1 input GEMV. Mixed checkpoints (NVFP4 in/gate beside
 // unquantized alpha/beta, Qwen3.8-27B-NVFP4-QAD) carry the alpha|beta pack [2 * N, K], alpha rows first:
 // its halves are the rows. Without a pack: the two handles' FP16 weights.
-template <class Caches, class Registry>
-static bool gdn_ab_rows(const TransformerLayer& ly, const Caches& wc, const Registry& reg, int64_t N,
-                        int64_t K, const half*& wa, const half*& wb) {
+template <class Registry>
+static bool gdn_ab_rows(const TransformerLayer& ly, const Registry& reg, int64_t N, int64_t K,
+                        const half*& wa, const half*& wb) {
     const Tensor& ab = ly.gdn_alpha_beta_packed;
     if (ab.data) {
         if (ab.qtype != QType::F16 || ab.shape[0] != 2 * N || ab.shape[1] != K)
@@ -149,15 +146,15 @@ static bool gdn_ab_rows(const TransformerLayer& ly, const Caches& wc, const Regi
     }
     if (ly.gdn_alpha_id == kInvalidTensorID || ly.gdn_beta_id == kInvalidTensorID)
         return false;
-    wa = fp16_weight_ptr(wc, reg.handle(ly.gdn_alpha_id), N, K);
-    wb = fp16_weight_ptr(wc, reg.handle(ly.gdn_beta_id), N, K);
+    wa = fp16_weight_ptr(reg.handle(ly.gdn_alpha_id), N, K);
+    wb = fp16_weight_ptr(reg.handle(ly.gdn_beta_id), N, K);
     return wa && wb;
 }
 
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                             Tensor& gate_out, int n_heads, cudaStream_t stream,
                                             const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_ || n_heads <= 0)
+    if (cur_mode_.spec_verify || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -171,7 +168,7 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
     const int64_t N = n_heads;
     const half* wa = nullptr;
     const half* wb = nullptr;
-    if (!gdn_ab_rows(ly, wcache_, registry_, N, K, wa, wb))
+    if (!gdn_ab_rows(ly, registry_, N, K, wa, wb))
         return false;
     half* alpha_out = static_cast<half*>(ssm_dt_buf_.data);
     half* beta_out = reinterpret_cast<half*>(static_cast<char*>(ssm_dt_buf_.data) +
@@ -229,8 +226,8 @@ const void* GraphExecutor::dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QT
     const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
     if ((decode != StorageTier::FP16 && decode != StorageTier::Undefined) || h.source_released ||
         h.source_data == nullptr || h.shape[0] != N || h.shape[1] != K ||
-        !gemv_dp4a_multi_supports(h.source_qtype, static_cast<int>(K)) ||
-        wcache_.nvfp4.contains(h.source_data) || wcache_.fp8.contains(h.source_data))
+        !gemv_dp4a_multi_supports(h.source_qtype, static_cast<int>(K)) || h.entries.nvfp4 != nullptr ||
+        h.entries.fp8 != nullptr)
         return nullptr;
     qtype = h.source_qtype;
     return h.source_data;
@@ -239,7 +236,7 @@ const void* GraphExecutor::dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QT
 int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                           Tensor& gate_out, int n_heads, const GemmContext& ctx,
                                           cudaStream_t stream) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
+    if (ctx.mode.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
         input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
         ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf.data() == nullptr ||
@@ -288,9 +285,9 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
 
 bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
                                    const GemmContext& ctx, cudaStream_t stream) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs || ctx.force_mmvq ||
-        input.shape[0] != 1 || input.qtype != QType::F16 || qscratch_.q8_1_buf.data() == nullptr ||
-        qscratch_.d8_buf.data() == nullptr)
+    if (ctx.mode.spec_verify || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs ||
+        ctx.force_mmvq || input.shape[0] != 1 || input.qtype != QType::F16 ||
+        qscratch_.q8_1_buf.data() == nullptr || qscratch_.d8_buf.data() == nullptr)
         return false;
     const int64_t K = input.shape[1];
     if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
@@ -320,7 +317,7 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
 bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {
     if (n != 1 || h.qtype != QType::F16)
         return false;
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr)
+    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr)
         return false;
     NvFP4QuantResult w;
     if (nvfp4_decode_weight_(ly.ssm_out_id, w))
@@ -337,12 +334,12 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
     const StorageTier decode = (h.decode_tier == StorageTier::Undefined) ? h.primary_tier : h.decode_tier;
     if (decode != StorageTier::FP8)
         return false;
-    const auto it = wcache_.fp8.find(h.source_data);
-    if (it == wcache_.fp8.end() || it->second.weight.data == nullptr)
+    const FP8CacheEntry* e = h.entries.fp8;
+    if (e == nullptr || e->weight.data == nullptr)
         return false;
-    out.data = it->second.weight.data;
-    out.scale = it->second.host_scale;
-    out.row_scales = it->second.d_row_scales;
+    out.data = e->weight.data;
+    out.scale = e->host_scale;
+    out.row_scales = e->d_row_scales;
     out.N = h.shape[0];
     out.K = (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1];
     return true;
@@ -351,7 +348,7 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
 bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                                Tensor& gate_out, int n_heads, cudaStream_t stream,
                                                const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0)
+    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -365,7 +362,7 @@ bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const
     const int64_t N = n_heads;
     const half* wa = nullptr;
     const half* wb = nullptr;
-    if (!gdn_ab_rows(ly, wcache_, registry_, N, K, wa, wb))
+    if (!gdn_ab_rows(ly, registry_, N, K, wa, wb))
         return false;
     Fp8GdnInputArgs a;
     a.w_in = static_cast<const uint8_t*>(w_in.data);
@@ -433,7 +430,7 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
                                            Tensor& k_out, Tensor& v_out, cudaStream_t stream,
                                            const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_)
+    if (cur_mode_.spec_verify || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
         k_out.qtype != QType::F16 || v_out.qtype != QType::F16)
@@ -464,7 +461,8 @@ GemmContext GraphExecutor::gdn_q8_reuse_ctx_(int layer, const Tensor& no, const 
     const auto& ly = model_->layer(layer);
     auto raw_q8 = [&](TensorID id) {
         return id >= 0 && id < static_cast<TensorID>(registry_.size()) &&
-               registry_.handle(id).source_qtype == QType::Q8_0 && !prefill_routes_cutlass_nvfp4_(id, n);
+               registry_.handle(id).source_qtype == QType::Q8_0 &&
+               !prefill_routes_cutlass_nvfp4_(id, n, ctx.mode);
     };
     if (n < 2 || n > 32 || !raw_q8(ly.gdn_gate_id) || !raw_q8(ly.gdn_alpha_id) || !raw_q8(ly.gdn_beta_id))
         return ctx;

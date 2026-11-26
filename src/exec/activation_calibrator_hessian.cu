@@ -44,10 +44,24 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
     // Row-major X [rows, K] (ld row_stride) is column-major X^T [K, rows]: H = X^T (X^T)^T.
     const float one = 1.0f;
     const auto ld = static_cast<int>(row_stride);
-    const cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_T, static_cast<int>(K), static_cast<int>(K),
-                                         static_cast<int>(rows), &one, input.data, CUDA_R_16F, ld, input.data,
-                                         CUDA_R_16F, ld, &one, it->second.d_H.get(), CUDA_R_32F,
-                                         static_cast<int>(K), CUBLAS_COMPUTE_32F, stream);
+    const cublasStatus_t st = lt_gemm_ex({.transa = CUBLAS_OP_N,
+                                          .transb = CUBLAS_OP_T,
+                                          .m = static_cast<int>(K),
+                                          .n = static_cast<int>(K),
+                                          .k = static_cast<int>(rows),
+                                          .alpha = &one,
+                                          .A = input.data,
+                                          .a_type = CUDA_R_16F,
+                                          .lda = ld,
+                                          .B = input.data,
+                                          .b_type = CUDA_R_16F,
+                                          .ldb = ld,
+                                          .beta = &one,
+                                          .C = it->second.d_H.get(),
+                                          .c_type = CUDA_R_32F,
+                                          .ldc = static_cast<int>(K),
+                                          .compute = CUBLAS_COMPUTE_32F,
+                                          .stream = stream});
     if (st != CUBLAS_STATUS_SUCCESS)
         throw_runtime_error("calibration: Hessian GEMM failed (status %d) at layer %d kind %s",
                             static_cast<int>(st), layer, tensor_kind_name(kind));

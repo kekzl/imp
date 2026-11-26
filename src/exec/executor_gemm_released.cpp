@@ -18,21 +18,21 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
                                           const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
     if (M <= 32 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
-        const FP8CacheEntry* e = nullptr;
-        if (const auto fp8 = wcache_.fp8.find(h.source_data); fp8 != wcache_.fp8.end())
-            e = &fp8->second;
-        else if (const auto v = wcache_.released_fp8_view.find(h.source_data);
-                 v != wcache_.released_fp8_view.end())
-            e = &v->second;
+        const FP8CacheEntry* e = h.entries.fp8;
+        if (e == nullptr) {
+            if (const auto v = wcache_.released_fp8_view.find(h.source_data);
+                v != wcache_.released_fp8_view.end())
+                e = &v->second;
+        }
         const int64_t K = input.shape[1], N = output.shape[1];
         // Decode and spec verify (M <= 8): the M=1 GEMV per row, same bits as decode. Batch decode and
         // short prefill: one weight pass for all M rows.
-        if (e && e->d_row_scales && M > 1 && !(cur_spec_verify_ && M <= 8) &&
+        if (e && e->d_row_scales && M > 1 && !(ctx.mode.spec_verify && M <= 8) &&
             gemv_fp8_rowscale_f16(e->weight.data, e->d_row_scales, static_cast<const half*>(input.data),
                                   static_cast<half*>(output.data), static_cast<int>(N), static_cast<int>(K),
                                   M, ctx.stream))
             return;
-        if (e && e->d_row_scales && (M <= 4 || (cur_spec_verify_ && M <= 8))) {
+        if (e && e->d_row_scales && (M <= 4 || (ctx.mode.spec_verify && M <= 8))) {
             for (int r = 0; r < M; ++r) {
                 const int64_t xs[2] = {1, K}, ys[2] = {1, N};
                 const Tensor x(static_cast<char*>(input.data) + (r * K * sizeof(half)), QType::F16, 2, xs,

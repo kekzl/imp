@@ -25,7 +25,7 @@ bool f16_weight(const Tensor& t) { return t.data != nullptr && t.qtype == QType:
 
 bool GraphExecutor::fp32_resid_fuse_ok_(int n) const {
     // Decode rows only (n == 1 or batched decode / verify); prefill keeps the unfused chain.
-    return n >= 1 && (n == 1 || cur_decode_rows_) && fp32_accum_buf_.get() != nullptr &&
+    return n >= 1 && (n == 1 || cur_mode_.decode_rows) && fp32_accum_buf_.get() != nullptr &&
            model_->profile().fp32_residual_norms && compute_dtype_ == QType::F16 && !calib_ &&
            lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() && !debug_forward_enabled() &&
            !model_->config().parallel_block && !model_->profile().gated_residual;
@@ -36,8 +36,10 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
     // The previous layer's tail already wrote no (and the Q GEMM's quantize) for this norm.
     const bool pre = prenorm_matches_(ly.attn_norm, no, n);
     prenorm_out_ = nullptr;
-    if (pre)
+    if (pre) {
+        smallm_xq_tag_.adopt(no.data, prenorm_xq_gen_);
         return;
+    }
     Tensor fp32_h = view_tokens(fp32_hidden_, n);
     const int d = model_->config().d_model;
     if (fp32_resid_fuse_ok_(n) && f16_weight(ly.attn_norm) &&
@@ -57,14 +59,11 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
         a.act_scale = as;
         if (fp32_residual_norm(Fp32ResidMode::kNorm, a, n, stream)) {
             if (xp != nullptr)
-                smallm_producer_tag_(no.data, n, d, as);
-            else
-                smallm_xq_forget_(no.data);
+                smallm_xq_tag_.stamp_producer(no.data, n, d, as);
             return;
         }
     }
     rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
-    smallm_xq_forget_(no.data);
 }
 
 bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cudaStream_t stream) {
@@ -104,11 +103,11 @@ bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cu
         return false;
     router_prenorm_ = router ? moe_.scatter_out.data : nullptr;
     router_prenorm_n_ = n;
-    smallm_xq_forget_(no.data);
     // moe_ffn_phase2_state_and_norm_ skips its residual copy and norm on this match.
     prenorm_out_ = no.data;
     prenorm_w_ = ly.ffn_pre_norm_2.data;
     prenorm_n_ = n;
+    prenorm_xq_gen_ = 0;
     return true;
 }
 
@@ -137,7 +136,6 @@ void GraphExecutor::moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, 
     if (!prenormed) {
         Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);
         rmsnorm_fp32_to_fp16(fp32_h, norm_w, ctx.no, ctx.eps, stream, norm_w_off_);
-        smallm_xq_forget_(ctx.no.data);
     }
     // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
     if (ctx.n == 1 && qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr) {
@@ -201,12 +199,11 @@ void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int
     if (!next)
         return;
     if (xp != nullptr)
-        smallm_producer_tag_(no.data, n, d, a.act_scale);
-    else
-        smallm_xq_forget_(no.data);
+        smallm_xq_tag_.stamp_producer(no.data, n, d, a.act_scale);
     prenorm_out_ = no.data;
     prenorm_w_ = model_->layer(nl).attn_norm.data;
     prenorm_n_ = n;
+    prenorm_xq_gen_ = xp != nullptr ? smallm_xq_tag_.producer_gen : 0;
 }
 
 }  // namespace imp

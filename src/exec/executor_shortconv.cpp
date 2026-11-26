@@ -35,8 +35,7 @@ void GraphExecutor::run_shortconv(int layer, const InferenceState& state, cudaSt
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, stream, norm_w_off_);
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_, cfg.overrides.gemma4.force_mmvq,
-                                 cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
     Tensor bcx = view_tokens(ssm_proj_buf_, n);  // [n, 3 * hidden]
     gemm_via_handle_(ly.ssm_in_id, no, bcx, ctx);
 
