@@ -13,6 +13,8 @@
 
 namespace imp {
 
+struct PagedQ8Epilogue;  // compute/attention_paged.h
+
 // Scatters kv_b + k_rope into K and V buffers.
 //   kv_b: [n_tokens,n_heads*(nope_dim+v_head_dim)] FP16; k_rope: [n_tokens,rope_dim] FP16
 //   (shared MQA-style); K_out: [n_tokens,n_heads,rope_dim+nope_dim] FP16 [pe|nope];
@@ -52,12 +54,14 @@ void head_gate_sigmoid_mul(half* out, const half* gate, int n_tokens, int n_head
 
 // F16 paged decode; MLA (v_head_dim < head_dim, V zero-padded to head_dim, n_heads == n_kv_heads,
 // o_full >= batch*n_heads*head_dim halfs, not aliasing O or Q): symmetric decode into o_full, then
-// compaction to O [batch,1,n_heads,v_head_dim] (#2374). Otherwise forwards to paged_attention_decode.
+// compaction to O [batch,1,n_heads,v_head_dim] (#2374). Otherwise forwards to paged_attention_decode,
+// the only arm q8_epi reaches (the compaction reorders O).
 void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
                                        Tensor& O, half* o_full, int64_t o_full_elems, const int* block_tables,
                                        const int* context_lens, int block_size, float scale,
                                        int max_context_len, int sliding_window, float softcap,
                                        cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                       const void* attn_sinks, int v_head_dim);
+                                       const void* attn_sinks, int v_head_dim,
+                                       PagedQ8Epilogue* q8_epi = nullptr);
 
 }  // namespace imp
