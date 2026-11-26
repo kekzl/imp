@@ -297,8 +297,11 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         if (own)
             sk = fork_(s, 0), sv = fork_(s, 1);
         lin_(xq_, T, H, ly.wq, q_rows, proj_h_, s);
+        delta_(layer, LoraProj::Q, 0, xq_, H, proj_h_, q_rows, T, s);
         lin_(xk_, T, H, ly.wk, kv_rows, pk_, sk);
+        delta_(layer, LoraProj::K, 1, xk_, H, pk_, kv_rows, T, sk);
         lin_(xv_, T, H, ly.wv, kv_rows, pv_, sv);
+        delta_(layer, LoraProj::V, 2, xv_, H, pv_, kv_rows, T, sv);
         if (!own)
             sk = fork_(s, 0), sv = fork_(s, 1);
     } else {
@@ -306,6 +309,10 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
         q_stride = kv_stride = ly.proj_rows;
         kx = proj_h_ + q_rows;
         vx = kx + kv_rows;
+        // One normed input for the whole block: the deltas land in its q, k and v rows before the fork.
+        delta_(layer, LoraProj::Q, 0, xq_, H, proj_h_, ly.proj_rows, T, s);
+        delta_(layer, LoraProj::K, 1, xq_, H, proj_h_ + q_rows, ly.proj_rows, T, s);
+        delta_(layer, LoraProj::V, 2, xq_, H, proj_h_ + q_rows + kv_rows, ly.proj_rows, T, s);
         sv = fork_(s, 1);
     }
     float* cs = conv_state_[app];
@@ -331,6 +338,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
 
     attend_(ly, app, global, T, q_stride, s);
     lin_(ao_h_, T, QD, ly.wo, H, o_h_, s);
+    delta_(layer, LoraProj::O, 0, ao_h_, QD, o_h_, H, T, s);
 
     // Block boundary: the layer input joins the block states and the residual restarts at the conv output.
     float* as = cs + static_cast<size_t>(6) * KD;

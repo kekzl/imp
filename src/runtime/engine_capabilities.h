@@ -14,6 +14,8 @@ struct ForwardFacts {
     // GraphExecutor::run_inkling_ ran every layer and returns 0: the generic layer loop runs no
     // iteration, so nothing hooked into it (taps, deltas, per-layer adds) runs.
     bool layer_loop_replaced = false;
+    // That forward applies an adapter's q / k / v / o deltas itself (InklingForward::delta_, B-111 S5).
+    bool own_forward_lora = false;
     bool gated_residual = false;            // ModelProfile::gated_residual: hc_count x d_model stream
     bool recurrent_state = false;           // engine-owned GDN / SSM state (Engine::ssm_state_)
     bool batched_recurrent_decode = false;  // per-row recurrent slots (Engine::d_ssm_seq_slots_)
@@ -22,7 +24,7 @@ struct ForwardFacts {
 struct EngineCapabilities {
     bool logit_lens = false;      // "logit_lens": post_layer_taps_ inside the layer loop
     bool sae = false;             // "sae_features", "sae_clamp": sae_apply_ inside the layer loop
-    bool lora = false;            // "lora": lora_delta_ in the loop's attention / FFN projections
+    bool lora = false;            // "lora": lora_delta_ in the loop, InklingForward::delta_
     bool control_vector = false;  // "control_vector": control_vector_add_ inside the layer loop
     bool phrase_ban = false;      // "banned_strings", "banned_regex": rewind of paged KV + recurrent slabs
     bool cfg = false;             // "cfg_scale": the guidance pair decodes as two rows of one step
@@ -60,7 +62,7 @@ inline constexpr CapabilityName kCapabilityNames[] = {
     return {
         .logit_lens = residual,
         .sae = residual,
-        .lora = loop,
+        .lora = f.model_loaded && (!f.layer_loop_replaced || f.own_forward_lora),
         .control_vector = residual,
         // Rewind = KVCacheManager::rollback + ssm_state_ slabs; an own forward keeps its own sliding K/V and
         // conv state, which InklingForward::run refuses to step back into (pos0 != pos_).
