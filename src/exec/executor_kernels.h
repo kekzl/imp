@@ -25,12 +25,34 @@ void attn_gate_split_interleaved(const void* src, void* q_dst, void* gate_dst, i
 // rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256>>>.
 void rmsnorm_fp32_accum_to_fp16(const half* input, const half* norm_w, float* fp32_accum, half* output, int n,
                                 int d_model, float eps, float weight_offset, cudaStream_t stream);
+// Arguments of write_kv_cache_rope_fused (audit D-11): designated initializers keep the eight
+// adjacent ints (block_stride .. head_dim) from swapping silently.
+struct KvWriteRopeArgs {
+    dim3 grid = dim3();  // 1 x 1 x 1
+    int threads = 0;
+    cudaStream_t stream = nullptr;
+    const half* k_in = nullptr;
+    const half* v_in = nullptr;
+    const int* positions = nullptr;
+    const int* block_tables = nullptr;
+    half* k_cache_base = nullptr;
+    half* v_cache_base = nullptr;
+    int block_stride = 0;
+    int row_elems = 0;
+    int block_size = 0;
+    int n_tokens = 0;
+    int max_blocks_per_seq = 0;
+    int n_sequences = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    float theta = 0.0f;
+    float inv_scaling = 1.0f;
+    int rope_pairs = 0;
+    bool neox = false;
+    const float* longrope_inv_freqs = nullptr;
+};
 // write_kv_cache_rope_fused_kernel<<<grid, threads>>>.
-void write_kv_cache_rope_fused(dim3 grid, int threads, cudaStream_t stream, const half* k_in, const half* v_in,
-                               const int* positions, const int* block_tables, half* k_cache_base,
-                               half* v_cache_base, int block_stride, int row_elems, int block_size, int n_tokens,
-                               int max_blocks_per_seq, int n_sequences, int n_kv_heads, int head_dim, float theta,
-                               float inv_scaling, int rope_pairs, bool neox, const float* longrope_inv_freqs);
+void write_kv_cache_rope_fused(const KvWriteRopeArgs& a);
 // rope_q_only_fp16_kernel<<<dim3(1, n_heads), rope_pairs>>>.
 void rope_q_only_fp16(half* Q, const int* positions, int n_heads, int head_dim, float theta, float inv_scaling,
                       int rope_pairs, bool neox, const float* longrope_inv_freqs, cudaStream_t stream);

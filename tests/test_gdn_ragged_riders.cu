@@ -206,8 +206,23 @@ TEST_F(GdnRaggedRidersTest, RidersMatchSeparateDecodeAndPromptsMatchSolo) {
     const int64_t slot_stride = static_cast<int64_t>(st.slot_stride_bytes() / sizeof(float));
     ssm_conv1d_decode_f32_silu_batched(st.conv_state(0, 0), d_rider_slots, slot_stride, d_rx, w, b, d_rconv,
                                        n_riders, kC, kK, nullptr);
-    gdn_scan_fused_f32_batched(d_rconv, kC, d_ra, d_rb, d_alog, d_dtb, static_cast<float*>(st.h_state(0, 0)),
-                               d_rider_slots, slot_stride, d_ry, n_riders, 1, kH, kD, kS, kG, nullptr, 1);
+    gdn_scan_fused_f32_batched({.conv_f32 = d_rconv,
+                                .conv_channels = kC,
+                                .alpha = d_ra,
+                                .beta = d_rb,
+                                .A_log = d_alog,
+                                .dt_bias = d_dtb,
+                                .h_state_pool = static_cast<float*>(st.h_state(0, 0)),
+                                .seq_slots = d_rider_slots,
+                                .h_state_seq_stride = slot_stride,
+                                .y = d_ry,
+                                .n_seq = n_riders,
+                                .n_tokens = 1,
+                                .n_heads = kH,
+                                .head_dim_ssm = kD,
+                                .state_size = kS,
+                                .n_groups = kG,
+                                .grouped_layout = 1});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto conv_b = download(d_conv, cn);
     auto y_b = download(d_y, yn);
@@ -251,9 +266,24 @@ TEST_F(GdnRaggedRidersTest, RidersMatchSeparateDecodeAndPromptsMatchSolo) {
     GdnRaggedRows g_old = g;
     g_old.n_riders = 0;
     gdn_ragged_conv(g_old, st, 0, x, w, b, d_conv, kK, nullptr);
-    gdn_scan_fused_f32_batched(d_conv, kC, d_alpha, d_beta, d_alog, d_dtb,
-                               static_cast<float*>(st.h_state(0, 0)), d_slots, slot_stride, d_y, n_seq, 1, kH,
-                               kD, kS, kG, nullptr, 1, nullptr, d_offs);
+    gdn_scan_fused_f32_batched({.conv_f32 = d_conv,
+                                .conv_channels = kC,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_alog,
+                                .dt_bias = d_dtb,
+                                .h_state_pool = static_cast<float*>(st.h_state(0, 0)),
+                                .seq_slots = d_slots,
+                                .h_state_seq_stride = slot_stride,
+                                .y = d_y,
+                                .n_seq = n_seq,
+                                .n_tokens = 1,
+                                .n_heads = kH,
+                                .head_dim_ssm = kD,
+                                .state_size = kS,
+                                .n_groups = kG,
+                                .grouped_layout = 1,
+                                .seq_row_offsets = d_offs});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     const auto conv_c = download(d_conv, cn);
     const auto y_c = download(d_y, yn);

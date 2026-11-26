@@ -8,6 +8,7 @@
 #include <cuda_bf16.h>
 
 #include <stdexcept>
+#include <type_traits>
 
 namespace imp {
 
@@ -104,17 +105,33 @@ bool gdn_ragged_scan_split(const GdnRaggedRows& g, SSMState& st, int ssm_idx, co
     // the prompt members), so a mixed step decodes them with the same kernel.
     const size_t r0 = static_cast<size_t>(g.rider_row0());
     const int* slots = g.d_ssm_slots + g.n_prompt();
+    // tag: a null StateT* picking the state element type (float or BF16).
+    auto riders = [&](auto* tag) {
+        using StateT = std::remove_pointer_t<decltype(tag)>;
+        return GdnScanBatchedArgs<StateT>{.conv_f32 = io.conv_f32 + (r0 * C),
+                                          .conv_channels = C,
+                                          .alpha = io.alpha + (r0 * H),
+                                          .beta = io.beta + (r0 * H),
+                                          .A_log = io.A_log,
+                                          .dt_bias = io.dt_bias,
+                                          .h_state_pool = static_cast<StateT*>(st.h_state(0, ssm_idx)),
+                                          .seq_slots = slots,
+                                          .h_state_seq_stride = static_cast<int64_t>(st.slot_stride_bytes() /
+                                                                                     sizeof(StateT)),
+                                          .y = io.y + (r0 * inner),
+                                          .n_seq = g.n_riders,
+                                          .n_tokens = 1,
+                                          .n_heads = H,
+                                          .head_dim_ssm = D,
+                                          .state_size = S,
+                                          .n_groups = G,
+                                          .stream = stream,
+                                          .grouped_layout = gl};
+    };
     if (bf16)
-        gdn_scan_fused_bf16_batched(io.conv_f32 + (r0 * C), C, io.alpha + (r0 * H), io.beta + (r0 * H),
-                                    io.A_log, io.dt_bias, static_cast<__nv_bfloat16*>(st.h_state(0, ssm_idx)),
-                                    slots,
-                                    static_cast<int64_t>(st.slot_stride_bytes() / sizeof(__nv_bfloat16)),
-                                    io.y + (r0 * inner), g.n_riders, 1, H, D, S, G, stream, gl);
+        gdn_scan_fused_bf16_batched(riders(static_cast<__nv_bfloat16*>(nullptr)));
     else
-        gdn_scan_fused_f32_batched(io.conv_f32 + (r0 * C), C, io.alpha + (r0 * H), io.beta + (r0 * H),
-                                   io.A_log, io.dt_bias, static_cast<float*>(st.h_state(0, ssm_idx)), slots,
-                                   static_cast<int64_t>(st.slot_stride_bytes() / sizeof(float)),
-                                   io.y + (r0 * inner), g.n_riders, 1, H, D, S, G, stream, gl);
+        gdn_scan_fused_f32_batched(riders(static_cast<float*>(nullptr)));
     return true;
 }
 
