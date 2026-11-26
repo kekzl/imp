@@ -1,6 +1,7 @@
 // DSpark block drafter (speculative.dspark_model): load, context feed from the executor feature tap,
 // draft per verify step. Drafter: runtime/dspark_drafter.h; reference: tools/analysis/dspark_reference.py.
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"

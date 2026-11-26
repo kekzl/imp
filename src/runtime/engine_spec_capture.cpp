@@ -26,6 +26,7 @@
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 
 #include <algorithm>
 #include <chrono>

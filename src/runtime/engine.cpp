@@ -82,7 +82,8 @@ void start_kv_grow_ahead(KVCache* kv, int idle_release_s) {
 void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
-Engine::Engine() = default;
+Engine::Engine()
+    : runtime_config_owner_(std::make_unique<RuntimeConfig>()), runtime_config_(*runtime_config_owner_) {}
 
 Engine::~Engine() {
     // The last step's work can still be queued (a pipelined decode step), and VMM-backed

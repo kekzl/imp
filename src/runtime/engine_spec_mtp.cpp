@@ -16,6 +16,7 @@
 #include "exec/executor.h"
 #include "model/model.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/engine_internal.h"
 #include "runtime/request.h"
 #include "runtime/spec_batch_verify_state.h"  // mtp_bound_verify_rows

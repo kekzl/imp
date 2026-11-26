@@ -6,6 +6,7 @@
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"

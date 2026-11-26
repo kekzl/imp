@@ -12,7 +12,6 @@
 #include "vision/vision_pipeline.h"
 #include "vision/qwen3vl_pipeline.h"
 #include "audio/audio_pipeline.h"
-#include "runtime/config.h"
 #include "runtime/engine_config.h"
 #include "runtime/engine_capabilities.h"
 #include "runtime/engine_metrics_snapshot.h"
@@ -71,6 +70,7 @@ class TokenRecycleTable;       // src/runtime/token_recycle_draft.h
 class ConstraintManager;       // src/runtime/constraint_manager.h
 struct MtpRequestState;        // src/runtime/spec_request.h
 class RecurrentSnapshotStore;  // src/memory/recurrent_snapshot_store.h
+struct RuntimeConfig;          // src/runtime/config.h: complete only in the TUs that read a key
 
 // Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
 struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
@@ -358,7 +358,10 @@ private:
     // set_pending_runtime_config() first, embeddings without one get an
     // env-seeded default. Mutated in-place afterward by engine_init_resolver
     // helpers for arch-specific defaults (deterministic_gemm, prefill_graph).
-    RuntimeConfig runtime_config_;
+    // Owned through a pointer so engine.h needs no runtime/config.h (X-4): a TU that reads a key
+    // includes it. runtime_config_ = *runtime_config_owner_, bound in Engine().
+    std::unique_ptr<RuntimeConfig> runtime_config_owner_;
+    RuntimeConfig& runtime_config_;
     // Snapshot of the nine sections src/exec reads, filled once in init_weights()
     // after the init resolvers have run (F-10). exec/ holds a pointer to THIS,
     // which is what lets it stop including runtime/config.h.

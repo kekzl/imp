@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 
 #include <algorithm>

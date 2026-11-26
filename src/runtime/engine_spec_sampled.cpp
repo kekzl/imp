@@ -8,6 +8,7 @@
 
 #include "core/log_once.h"
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/engine_internal.h"
 
 namespace imp {
