@@ -28,6 +28,7 @@ const GraphDemotionReason kAll[] = {
     GraphDemotionReason::PinnedSampleBufUnavailable,
     GraphDemotionReason::MoeDecodeCacheIncomplete,
     GraphDemotionReason::LayerOffload,
+    GraphDemotionReason::InklingOwnForward,
     GraphDemotionReason::StreamingKvKvPressure,
 };
 
@@ -70,6 +71,18 @@ TEST(GraphEligibility, OnlyKvPressureIsMidRun) {
 TEST(GraphEligibility, NoneIsNotMidRunAndNamesItself) {
     EXPECT_FALSE(graph_demotion_is_mid_run(GraphDemotionReason::None));
     EXPECT_STREQ(graph_demotion_reason_name(GraphDemotionReason::None), "none");
+}
+
+// C-10: Inkling turned graphs off by writing the flag, so the summary printed graphs=0(none).
+// Through the step the reason is recorded, and a later site keeps the first one.
+TEST(GraphEligibility, DemoteStepRecordsTheFirstReason) {
+    bool on = true;
+    GraphDemotionReason recorded = GraphDemotionReason::None;
+    EXPECT_TRUE(demote_graphs_step(on, recorded, GraphDemotionReason::InklingOwnForward));
+    EXPECT_FALSE(on);
+    EXPECT_STREQ(graph_demotion_reason_name(recorded), "inkling_own_forward");
+    EXPECT_FALSE(demote_graphs_step(on, recorded, GraphDemotionReason::ConfigNever));
+    EXPECT_EQ(recorded, GraphDemotionReason::InklingOwnForward);
 }
 
 // The decision itself, not only the enum (AUDIT_ARCH_2026 C-4). The #1879

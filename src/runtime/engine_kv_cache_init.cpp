@@ -73,6 +73,7 @@ struct KvInitCtx {
     Model& model;
     const ModelConfig& mcfg;
     EngineConfig& ec;
+    const EngineRuntimeState& rt;
     RuntimeConfig& rc;
 };
 
@@ -125,7 +126,7 @@ const char* swa_sizing_off_reason(const KvInitCtx& c, int n_swa_layers, int n_kv
         return "hybrid recurrent model (conservative)";
     if (c.mcfg.is_mla())
         return "MLA attention";
-    if (c.ec.streaming_kv_enabled)
+    if (c.rt.streaming_kv)
         return "StreamingLLM is enabled";
     if (c.rc.runtime.deterministic)
         return "deterministic mode (unbounded graph loop would be burst-chunked)";
@@ -380,7 +381,7 @@ void log_sparse_minmax_pool(const EngineConfig& ec, const KvShape& kv, int max_b
 void apply_gdn_precision_gates(const KvInitCtx& c, GraphExecutor* executor) {
     if (!c.model.profile().is_gdn)
         return;
-    if (c.ec.use_cuda_graphs) {
+    if (c.rt.cuda_graphs) {
         IMP_LOG_INFO("GDN model: CUDA graphs enabled (recurrent state in-place)");
     } else {
         IMP_LOG_INFO("GDN model: CUDA graphs disabled (disabled earlier by caller or expert offload)");
@@ -684,7 +685,7 @@ void enable_prefix_caching(const KvInitCtx& c, KVCacheManager& kvm,
     kvm.set_prefix_caching_enabled(true);
     // cache_control/cache_prompt pin budget: percent of the pool,
     // floor of 1 block when enabled at all.
-    int pin_pct = std::min(std::max(c.ec.prefix_pin_budget_pct, 0), 100);
+    int pin_pct = std::clamp(c.ec.prefix_pin_budget_pct.value_or(kPrefixPinBudgetPctDefault), 0, 100);
     int pin_budget = pin_pct > 0 ? std::max(1, kvm.kv_cache()->total_blocks() * pin_pct / 100) : 0;
     kvm.set_pin_budget_blocks(pin_budget);
     IMP_LOG_INFO("Prefix caching enabled (pin budget %d blocks)", pin_budget);
@@ -881,7 +882,7 @@ void log_gpu_memory(VRAMAllocator& alloc) {
 // (layer map, SWA gate, budget, plan, weight caches, measured residual, pool, state).
 bool Engine::init_kv_cache() {
     const auto& mcfg = model_->config();
-    const KvInitCtx ctx{*model_, mcfg, config_, runtime_config_};
+    const KvInitCtx ctx{*model_, mcfg, config_, rt_, runtime_config_};
     KvShape kv;
     kv.head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
     kv.layer_map = map_kv_layers(*model_, inkling_kv_layers_(), kv.n_kv_layers);
@@ -927,7 +928,9 @@ bool Engine::init_kv_cache() {
     // size KV without it; the live pass sees it as already spent.
     mtp_workspace_planned_bytes_ = mtp_workspace_plan_bytes_();
     const size_t live_free = effective_free_vram();
-    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim,
+    EngineConfig plan_cfg = config_;  // the planner prices the graph reserve on what runs (rt_)
+    plan_cfg.use_cuda_graphs = rt_.cuda_graphs;
+    auto vram_budget = compute_vram_budget(*model_, plan_cfg, n_kv_layers, head_dim,
                                            live_free > mtp_workspace_planned_bytes_
                                                ? live_free - mtp_workspace_planned_bytes_
                                                : 0,

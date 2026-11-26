@@ -4,10 +4,11 @@
 # prompts on real models (degeneration detector). Steps 3/4 plus peak-VRAM/CUDA-graph gates need
 # real checkpoints under $MODELS and skip individually when absent; a run where no model-backed
 # gate measured anything fails rather than reporting OK.
-# Modes: verify.sh fast (unit tests + perf + 1 smoke ~90s, + Inkling serve smoke), verify.sh full (full ctest + perf +
+# Modes: verify.sh fast (unit tests + perf + 1 smoke ~90s, + Inkling serve smoke + I2 row), verify.sh full (full ctest + perf +
 # 2 smoke, ~5min).
 # Env: IMP_VERIFY_BIN, IMP_VERIFY_TESTS, IMP_VERIFY_MODELS, IMP_VERIFY_MODEL_STORE, IMP_VERIFY_BASELINE,
-# IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_INKLING=1, IMP_VERIFY_SKIP_PERF=1
+# IMP_VERIFY_CHUNK_SIZE (0=single-chunk), IMP_VERIFY_SKIP_BUILD=1, IMP_VERIFY_SKIP_INKLING=1,
+# IMP_VERIFY_SKIP_INTERPOSE=1 (I2 row), IMP_VERIFY_SKIP_PERF=1
 # (stale baseline; refresh via gen_perf_baseline.sh), IMP_VERIFY_TRIALS=3 (processes the perf
 # gate medians over), IMP_VERIFY_IN_DOCKER=1 (internal re-exec sentinel, do not set manually).
 # Auto-Docker fallback: re-execs inside the worktree image (scripts/image_tag.sh) when cmake is
@@ -21,6 +22,32 @@ cd "$ROOT" || exit 1
 # history, so the host builds it before any re-exec.
 [ -f "$ROOT/tools/analysis/ppl_corpus_45k.txt" ] ||
     bash "$ROOT/tools/analysis/make_ppl_corpus.sh" "$ROOT/tools/analysis/ppl_corpus_45k.txt" >/dev/null 2>&1 || true
+
+# I2 row (docs/internals/MEMORY.md): check_alloc_interpose.sh starts its own container and reads host
+# nvidia-smi, so it runs here on the host, before any re-exec; its verdict rides in as
+# IMP_VERIFY_INTERPOSE_RESULT and prints as a row with the others. Binary: make interpose-build.
+if [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]; then
+    INTERPOSE_MODEL_DIR="${MODELS_DIR:-$HOME/models}/$(basename "${INTERPOSE_MODEL:-Qwen3.8-27B-NVFP4-vllm}")"
+    if [ "${IMP_VERIFY_SKIP_INTERPOSE:-0}" = "1" ]; then
+        IMP_VERIFY_INTERPOSE_RESULT="SKIP (IMP_VERIFY_SKIP_INTERPOSE=1)"
+    elif [ ! -d "$INTERPOSE_MODEL_DIR" ] || ! command -v docker >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        IMP_VERIFY_INTERPOSE_RESULT="SKIP ($INTERPOSE_MODEL_DIR, docker or jq missing)"
+    else
+        echo "verify: I2 alloc-interpose row (scripts/check_alloc_interpose.sh, 2 server boots)"
+        interpose_t0=$SECONDS
+        interpose_log=$(mktemp /tmp/imp_verify_interpose.XXXXXX.log)
+        bash "$ROOT/scripts/check_alloc_interpose.sh" >"$interpose_log" 2>&1
+        interpose_rc=$?
+        grep -E '^(PASS|FAIL|FATAL)' "$interpose_log" | sed 's/^/  /'
+        interpose_detail="$((SECONDS - interpose_t0)) s, log $interpose_log"
+        if [ "$interpose_rc" -eq 0 ]; then
+            IMP_VERIFY_INTERPOSE_RESULT="PASS ($interpose_detail)"
+        else
+            IMP_VERIFY_INTERPOSE_RESULT="FAIL (rc $interpose_rc, $interpose_detail)"
+        fi
+    fi
+    export IMP_VERIFY_INTERPOSE_RESULT
+fi
 
 # Auto re-exec into the worktree image when cmake is unavailable on the host (Clean-Host);
 # points IMP_VERIFY_BIN/TESTS at the image's prebuilt /usr/local/bin binaries. Refuses an image
@@ -44,6 +71,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_SKIP_SERVER="${IMP_VERIFY_SKIP_SERVER:-0}" \
         -e IMP_VERIFY_SKIP_DRIFT="${IMP_VERIFY_SKIP_DRIFT:-0}" \
         -e IMP_VERIFY_SKIP_INKLING="${IMP_VERIFY_SKIP_INKLING:-0}" \
+        -e IMP_VERIFY_INTERPOSE_RESULT \
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
@@ -823,6 +851,18 @@ inkling_smoke() {
     fi
 }
 inkling_smoke
+
+# The I2 verdict computed on the host at the top (no device allocation while serving).
+interpose_row() {
+    local label="I2 alloc-interpose (Qwen3.8-27B, 0 / 3 pinned serving allocations in phase A / B)"
+    local r="${IMP_VERIFY_INTERPOSE_RESULT:-SKIP (not run: verify.sh started inside a container)}"
+    case "$r" in
+        PASS*) model_gate_ran; pass "$label ${r#PASS }" ;;
+        SKIP*) skip "$label ${r#SKIP }" ;;
+        *) model_gate_ran; fail "$label ${r#FAIL }" ;;
+    esac
+}
+interpose_row
 
 if [ "$MODE" = "full" ]; then
     smoke_prompt "Qwen3.8-27B NVFP4 (GDN)" \

@@ -85,7 +85,7 @@ ImpConfig imp_config_default(void) {
     config.min_kv_tokens = 0;                 // auto (pick reasonable minimum based on model)
     config.use_prefix_caching = 0;            // off by default
     config.prefix_cache_path[0] = '\0';       // no persistence by default
-    config.prefix_pin_budget_pct = 25;        // cache_control pins capped at 25% of the KV pool
+    config.prefix_pin_budget_pct = imp::kPrefixPinBudgetPctDefault;  // 25 % of the KV pool, = take imp.conf
     config.mmproj_path = nullptr;             // no vision model
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
     config.streaming_kv_auto = 1;             // auto-enable when KV cache >90% full
@@ -416,7 +416,9 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ecfg.gpu_layers = config->gpu_layers;
         ecfg.kv_cache_dtype = map_dtype(config->kv_cache_dtype);
         ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
-        ecfg.vram_budget_mb = config->vram_budget_mb;
+        // ImpConfig has no "unset" (ABI): its defaults, budget 0 and pin 25 %, still mean "take imp.conf".
+        if (config->vram_budget_mb > 0)
+            ecfg.vram_budget_mb = config->vram_budget_mb;
         ecfg.temperature = config->temperature;
         ecfg.top_p = config->top_p;
         ecfg.top_k = config->top_k;
@@ -428,7 +430,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;
-        ecfg.prefix_pin_budget_pct = config->prefix_pin_budget_pct;
+        if (config->prefix_pin_budget_pct != imp::kPrefixPinBudgetPctDefault)
+            ecfg.prefix_pin_budget_pct = config->prefix_pin_budget_pct;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
         ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);
@@ -911,6 +914,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         req->logprobs = (params->logprobs != 0);
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
         req->json_mode = (params->json_mode != 0);
+        req->lane_needs = req->admission_lane_needs();  // the per-step params above re-admit the lanes
 
         // A step may legitimately yield zero new tokens (async graph-loop burst,
         // n-gram speculation miss path); its tokens arrive on the next drain.
