@@ -147,9 +147,21 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
     MtpDraftWorkspace& ws = in.ws;
     const int hidden_dim = model.config_.d_model;
     const int m = tab.m;
-    if (!mtp_feed_rows_multislot_dev(tab.tokens, in.hidden, tab.src, tab.n, tab.slots, tab.pos, feed_max,
-                                     *model.mtp_, model.tok_emb_, ws, hidden_dim, stream, in.post_norm,
-                                     model.config_.rms_norm_eps, model.config_.norm_weight_offset))
+    if (!mtp_feed_rows_multislot_dev({.d_tokens = tab.tokens,
+                                      .d_hidden_all = in.hidden,
+                                      .d_src_rows = tab.src,
+                                      .n_rows = tab.n,
+                                      .d_slots = tab.slots,
+                                      .d_pos = tab.pos,
+                                      .max_pos = feed_max,
+                                      .mtp = model.mtp_.get(),
+                                      .main_tok_emb = &model.tok_emb_,
+                                      .ws = &ws,
+                                      .hidden_dim = hidden_dim,
+                                      .stream = stream,
+                                      .post_norm = in.post_norm,
+                                      .post_norm_eps = model.config_.rms_norm_eps,
+                                      .post_norm_offset = model.config_.norm_weight_offset}))
         return -1;
     // The next draft per request: LM head over the last fed row of each.
     mtp_gather_rows(ws.d_b_h_final, tab.last, ws.d_b_gather, hidden_dim, m, stream);
@@ -160,11 +172,19 @@ int run_head_pass(const HeadPassInputs& in, const MtpPassTables& tab, int chain,
     // position in one more ragged pass, the device chain of mtp_feed_pairs_ batched over requests (drafts
     // never leave the device). Level 1 reads the last fed row, levels 2+ the chain's own rows 0..m-1.
     for (int lv = 1; lv <= chain; ++lv) {
-        const bool ok = mtp_feed_rows_multislot_dev(ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv - 1) * m),
-                                                    ws.d_b_h_final, lv == 1 ? tab.last : tab.chain_rows, m,
-                                                    tab.chain_slots, tab.chain_pos[lv - 1],
-                                                    chain_max + lv - 1, *model.mtp_, model.tok_emb_, ws,
-                                                    hidden_dim, stream) &&
+        const bool ok = mtp_feed_rows_multislot_dev(
+                            {.d_tokens = ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv - 1) * m),
+                             .d_hidden_all = ws.d_b_h_final,
+                             .d_src_rows = lv == 1 ? tab.last : tab.chain_rows,
+                             .n_rows = m,
+                             .d_slots = tab.chain_slots,
+                             .d_pos = tab.chain_pos[lv - 1],
+                             .max_pos = chain_max + lv - 1,
+                             .mtp = model.mtp_.get(),
+                             .main_tok_emb = &model.tok_emb_,
+                             .ws = &ws,
+                             .hidden_dim = hidden_dim,
+                             .stream = stream}) &&
                         in.executor.lm_head_rows_argmax(ws.d_b_h_final, m,
                                                         ws.d_chain_tokens + (static_cast<ptrdiff_t>(lv) * m),
                                                         stream, in.head, in.draft_vocab, lv * m,

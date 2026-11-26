@@ -610,8 +610,18 @@ void DSparkDrafter::Impl::enqueue_propose(cudaStream_t st_) {
         dspark_store_rows_kernel<<<(kv_elems + 255) / 256, 256, 0, st_>>>(L.v_cache, vb, d_ctx, kvd,
                                                                           kv_elems);
         IMP_CUDA_CHECK_LAUNCH();
-        IMP_CUDA_CHECK_LOG(
-            dspark_attention_dev(q, L.k_cache, L.v_cache, o, s, b, nh, nkv, d_ctx, cap, scale, st_));
+        IMP_CUDA_CHECK_LOG(dspark_attention_dev({.q = q,
+                                                 .k = L.k_cache,
+                                                 .v = L.v_cache,
+                                                 .o = o,
+                                                 .work = s,
+                                                 .rows = b,
+                                                 .n_heads = nh,
+                                                 .n_kv_heads = nkv,
+                                                 .d_ctx = d_ctx,
+                                                 .max_kv_len = cap,
+                                                 .scale = scale,
+                                                 .stream = st_}));
         proj(o, qd, L.wo, L.o8, h, d, true, st_);
         rmsnorm(ht, Tensor(L.post_norm, QType::F16, 1, dshape, true), xt, eps, st_);
         proj(xn, d, L.gate, L.gate8, gate, ff, false, st_);

@@ -223,9 +223,9 @@ cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* 
                                    stream);
 }
 
-cudaError_t dspark_attention_dev(const half* q, const half* k, const half* v, half* o, float* work, int rows,
-                                 int n_heads, int n_kv_heads, const int* d_ctx, int max_kv_len, float scale,
-                                 cudaStream_t stream, const int* d_first, const int* blocks) {
+cudaError_t dspark_attention_dev(const DsparkAttentionDevArgs& a) {
+    const auto& [q, k, v, o, work, rows, n_heads, n_kv_heads, d_ctx, max_kv_len, scale, stream, d_first,
+                 blocks] = a;
     if (!d_ctx)
         return cudaErrorInvalidValue;
     return launch_dspark_attention(q, k, v, o, work, rows, n_heads, n_kv_heads, d_ctx, max_kv_len, scale,

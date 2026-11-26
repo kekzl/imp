@@ -234,8 +234,17 @@ TEST_F(MtpFeedBatchTest, MultiSlotFeedMatchesPerSlotBatches) {
     imp::mtp_select_slot(ws_ref, 0);
 
     // Multi-slot: one launch. The row order above is not slot-major on purpose.
-    ASSERT_TRUE(imp::mtp_feed_rows_multislot(row_tok, s.d_hidden, row_src, n, row_slot, row_pos, s.head, s.tok_emb,
-                                             ws_ms, kH, stream));
+    ASSERT_TRUE(imp::mtp_feed_rows_multislot({.h_tokens = row_tok,
+                                              .d_hidden_all = s.d_hidden,
+                                              .h_src_rows = row_src,
+                                              .n_rows = n,
+                                              .h_slots = row_slot,
+                                              .h_pos = row_pos,
+                                              .mtp = &s.head,
+                                              .main_tok_emb = &s.tok_emb,
+                                              .ws = &ws_ms,
+                                              .hidden_dim = kH,
+                                              .stream = stream}));
     ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
 
     const size_t row_elems = static_cast<size_t>(kNkv) * kHd;
@@ -291,20 +300,57 @@ TEST_F(MtpFeedBatchTest, PackedPassTablesMatchHostTablesBytewise) {
         int32_t* d_ctok = nullptr;
         ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
         ASSERT_EQ(cudaMemcpy(d_ctok, ctok, sizeof(ctok), cudaMemcpyHostToDevice), cudaSuccess);
-        ASSERT_TRUE(imp::mtp_feed_rows_multislot(tok, s.d_hidden, src, n, slot, pos, s.head, s.tok_emb,
-                                                 ws_host, kH, stream));
-        ASSERT_TRUE(imp::mtp_feed_rows_multislot(d_ctok, ws_host.d_b_h_final, last, m, cslot, cpos, s.head,
-                                                 s.tok_emb, ws_host, kH, stream));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot({.h_tokens = tok,
+                                                  .d_hidden_all = s.d_hidden,
+                                                  .h_src_rows = src,
+                                                  .n_rows = n,
+                                                  .h_slots = slot,
+                                                  .h_pos = pos,
+                                                  .mtp = &s.head,
+                                                  .main_tok_emb = &s.tok_emb,
+                                                  .ws = &ws_host,
+                                                  .hidden_dim = kH,
+                                                  .stream = stream}));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot({.h_tokens = d_ctok,
+                                                  .d_hidden_all = ws_host.d_b_h_final,
+                                                  .h_src_rows = last,
+                                                  .n_rows = m,
+                                                  .h_slots = cslot,
+                                                  .h_pos = cpos,
+                                                  .mtp = &s.head,
+                                                  .main_tok_emb = &s.tok_emb,
+                                                  .ws = &ws_host,
+                                                  .hidden_dim = kH,
+                                                  .stream = stream}));
         imp::MtpPassTables tab;
         ASSERT_TRUE(
             imp::mtp_head_pass_upload(ws_pass, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab));
         EXPECT_EQ(tab.max_pos, 1);
         EXPECT_EQ(tab.chain_max_pos, 2);
-        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
-                                                     tab.max_pos, s.head, s.tok_emb, ws_pass, kH, stream));
-        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev(d_ctok, ws_pass.d_b_h_final, tab.last, m,
-                                                     tab.chain_slots, tab.chain_pos[0], tab.chain_max_pos,
-                                                     s.head, s.tok_emb, ws_pass, kH, stream));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev({.d_tokens = tab.tokens,
+                                                      .d_hidden_all = s.d_hidden,
+                                                      .d_src_rows = tab.src,
+                                                      .n_rows = n,
+                                                      .d_slots = tab.slots,
+                                                      .d_pos = tab.pos,
+                                                      .max_pos = tab.max_pos,
+                                                      .mtp = &s.head,
+                                                      .main_tok_emb = &s.tok_emb,
+                                                      .ws = &ws_pass,
+                                                      .hidden_dim = kH,
+                                                      .stream = stream}));
+        ASSERT_TRUE(imp::mtp_feed_rows_multislot_dev({.d_tokens = d_ctok,
+                                                      .d_hidden_all = ws_pass.d_b_h_final,
+                                                      .d_src_rows = tab.last,
+                                                      .n_rows = m,
+                                                      .d_slots = tab.chain_slots,
+                                                      .d_pos = tab.chain_pos[0],
+                                                      .max_pos = tab.chain_max_pos,
+                                                      .mtp = &s.head,
+                                                      .main_tok_emb = &s.tok_emb,
+                                                      .ws = &ws_pass,
+                                                      .hidden_dim = kH,
+                                                      .stream = stream}));
         ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
         int back[m];
         ASSERT_EQ(cudaMemcpy(back, tab.chain_pos[0], sizeof(back), cudaMemcpyDeviceToHost), cudaSuccess);
@@ -379,11 +425,30 @@ TEST_F(MtpFeedBatchTest, CapturedHeadPassMatchesEagerBytewise) {
     ASSERT_EQ(cudaMalloc(&d_ctok, sizeof(ctok)), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_ctok, ctok, sizeof(ctok), cudaMemcpyHostToDevice), cudaSuccess);
     auto pass = [&](imp::MtpDraftWorkspace& ws, const imp::MtpPassTables& tab, int feed_max, int chain_max) {
-        return imp::mtp_feed_rows_multislot_dev(tab.tokens, s.d_hidden, tab.src, n, tab.slots, tab.pos,
-                                                feed_max, s.head, s.tok_emb, ws, kH, stream) &&
-               imp::mtp_feed_rows_multislot_dev(d_ctok, ws.d_b_h_final, tab.last, m, tab.chain_slots,
-                                                tab.chain_pos[0], chain_max, s.head, s.tok_emb, ws, kH,
-                                                stream);
+        return imp::mtp_feed_rows_multislot_dev({.d_tokens = tab.tokens,
+                                                 .d_hidden_all = s.d_hidden,
+                                                 .d_src_rows = tab.src,
+                                                 .n_rows = n,
+                                                 .d_slots = tab.slots,
+                                                 .d_pos = tab.pos,
+                                                 .max_pos = feed_max,
+                                                 .mtp = &s.head,
+                                                 .main_tok_emb = &s.tok_emb,
+                                                 .ws = &ws,
+                                                 .hidden_dim = kH,
+                                                 .stream = stream}) &&
+               imp::mtp_feed_rows_multislot_dev({.d_tokens = d_ctok,
+                                                 .d_hidden_all = ws.d_b_h_final,
+                                                 .d_src_rows = tab.last,
+                                                 .n_rows = m,
+                                                 .d_slots = tab.chain_slots,
+                                                 .d_pos = tab.chain_pos[0],
+                                                 .max_pos = chain_max,
+                                                 .mtp = &s.head,
+                                                 .main_tok_emb = &s.tok_emb,
+                                                 .ws = &ws,
+                                                 .hidden_dim = kH,
+                                                 .stream = stream});
     };
     imp::MtpPassTables tab_e, tab_g;
     ASSERT_TRUE(imp::mtp_head_pass_upload(ws_e, tok, src, slot, pos, n, last, cslot, cpos, m, stream, tab_e));
@@ -721,9 +786,22 @@ TEST_F(MtpFeedBatchTest, AttnScanRingWindowMatchesReference) {
                 std::vector<__half> out(q.size());
                 const imp::Tensor dout = upload(out, {1, nh * hd});
                 if (mode >= 2)
-                    imp::mtp_attn_scan_slots(dq.data, dk.data, dv.data, dout.data, d_hi + 2, d_hi + 3,
-                                             static_cast<int64_t>(ring) * row, p, 1, nh, nkv, hd, nullptr,
-                                             ring, d_hi, mode == 3 ? part : nullptr);
+                    imp::mtp_attn_scan_slots({.q = dq.data,
+                                              .k_base = dk.data,
+                                              .v_base = dv.data,
+                                              .out = dout.data,
+                                              .d_slots = d_hi + 2,
+                                              .d_pos = d_hi + 3,
+                                              .slot_elems = static_cast<int64_t>(ring) * row,
+                                              .max_pos = p,
+                                              .n_rows = 1,
+                                              .num_heads = nh,
+                                              .num_kv_heads = nkv,
+                                              .head_dim = hd,
+                                              .stream = nullptr,
+                                              .ring = ring,
+                                              .d_hi = d_hi,
+                                              .split_part = mode == 3 ? part : nullptr});
                 else
                     imp::mtp_attn_scan(dq.data, k1, v1, dout.data, p, 1, nh, nkv, hd, nullptr,
                                        mode == 1 ? part : nullptr, ring, d_hi + 1);
@@ -778,9 +856,22 @@ TEST_F(MtpFeedBatchTest, AttnScanSlotsSplitMatchesDirect) {
         std::vector<__half> direct(q.size()), split(q.size());
         for (const bool use_split : {false, true}) {
             const imp::Tensor dout = upload(direct, {rows, nh * hd});
-            imp::mtp_attn_scan_slots(dq.data, dk.data, dv.data, dout.data, d_tab + 2, d_tab + 2 + rows,
-                                     slot_elems, max_pos, rows, nh, nkv, hd, nullptr, ring, d_tab,
-                                     use_split ? part : nullptr);
+            imp::mtp_attn_scan_slots({.q = dq.data,
+                                      .k_base = dk.data,
+                                      .v_base = dv.data,
+                                      .out = dout.data,
+                                      .d_slots = d_tab + 2,
+                                      .d_pos = d_tab + 2 + rows,
+                                      .slot_elems = slot_elems,
+                                      .max_pos = max_pos,
+                                      .n_rows = rows,
+                                      .num_heads = nh,
+                                      .num_kv_heads = nkv,
+                                      .head_dim = hd,
+                                      .stream = nullptr,
+                                      .ring = ring,
+                                      .d_hi = d_tab,
+                                      .split_part = use_split ? part : nullptr});
             ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
             auto& dst = use_split ? split : direct;
             ASSERT_EQ(cudaMemcpy(dst.data(), dout.data, dst.size() * sizeof(__half), cudaMemcpyDeviceToHost),

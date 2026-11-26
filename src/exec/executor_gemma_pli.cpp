@@ -114,9 +114,20 @@ void GraphExecutor::pli_inputs_run_(const InferenceState& state, int n, cudaStre
     // HF Gemma4Model.forward: placeholder ids -> text pad id for the table lookup only; the
     // projection reads the merged embedding (encoder rows), which hidden_ holds here.
     const int32_t mm_id = state.n_vision_tokens > 0 ? state.vision_token_id : -1;
-    pli_project_combine(proj.data, model_->pli_table().data, state.token_ids, model_->pli_proj_norm().data, n,
-                        cfg.n_layers, cfg.pli_dim, cfg.pli_vocab, mm_id, cfg.pli_pad_id, cfg.rms_norm_eps,
-                        std::sqrt(static_cast<float>(cfg.pli_dim)), 1.0f / std::sqrt(2.0f), stream);
+    pli_project_combine({.proj = proj.data,
+                         .table = model_->pli_table().data,
+                         .ids = state.token_ids,
+                         .norm_w = model_->pli_proj_norm().data,
+                         .n = n,
+                         .n_layers = cfg.n_layers,
+                         .dim = cfg.pli_dim,
+                         .vocab = cfg.pli_vocab,
+                         .mm_token_id = mm_id,
+                         .pad_id = cfg.pli_pad_id,
+                         .eps = cfg.rms_norm_eps,
+                         .tok_scale = std::sqrt(static_cast<float>(cfg.pli_dim)),
+                         .out_scale = 1.0f / std::sqrt(2.0f),
+                         .stream = stream});
 }
 
 void GraphExecutor::pli_layer_run_(int layer, int n, cudaStream_t stream) {

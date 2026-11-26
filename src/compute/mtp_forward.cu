@@ -1677,11 +1677,12 @@ bool mtp_feed_multislot_ready(const MtpHead& mtp, const MtpDraftWorkspace& ws, i
 }
 }  // namespace
 
-bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
-                             int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
-                             const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
-                             cudaStream_t stream, const Tensor* post_norm, float post_norm_eps,
-                             float post_norm_offset) {
+bool mtp_feed_rows_multislot(const MtpFeedRowsArgs& a) {
+    const auto& [h_tokens, d_hidden_all, h_src_rows, n_rows, h_slots, h_pos, mtp_p, emb_p, ws_p, hidden_dim,
+                 stream, post_norm, post_norm_eps, post_norm_offset] = a;
+    const MtpHead& mtp = *mtp_p;
+    const Tensor& main_tok_emb = *emb_p;
+    MtpDraftWorkspace& ws = *ws_p;
     int max_pos = 0;
     if (h_tokens == nullptr || h_src_rows == nullptr || h_slots == nullptr || h_pos == nullptr ||
         !mtp_feed_multislot_ready(mtp, ws, n_rows, d_hidden_all, main_tok_emb) ||
@@ -1694,16 +1695,29 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
         cudaMemcpyAsync(ws.d_row_pos, h_pos, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess ||
         cudaMemcpyAsync(ws.d_row_src, h_src_rows, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess)
         return false;
-    return mtp_feed_rows_multislot_dev(ws.d_feed_tokens, d_hidden_all, ws.d_row_src, n_rows, ws.d_row_slots,
-                                       ws.d_row_pos, max_pos, mtp, main_tok_emb, ws, hidden_dim, stream,
-                                       post_norm, post_norm_eps, post_norm_offset);
+    return mtp_feed_rows_multislot_dev({.d_tokens = ws.d_feed_tokens,
+                                        .d_hidden_all = d_hidden_all,
+                                        .d_src_rows = ws.d_row_src,
+                                        .n_rows = n_rows,
+                                        .d_slots = ws.d_row_slots,
+                                        .d_pos = ws.d_row_pos,
+                                        .max_pos = max_pos,
+                                        .mtp = mtp_p,
+                                        .main_tok_emb = emb_p,
+                                        .ws = ws_p,
+                                        .hidden_dim = hidden_dim,
+                                        .stream = stream,
+                                        .post_norm = post_norm,
+                                        .post_norm_eps = post_norm_eps,
+                                        .post_norm_offset = post_norm_offset});
 }
 
-bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_all, const int* d_src_rows,
-                                 int n_rows, const int* d_slots, const int* d_pos, int max_pos,
-                                 const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws,
-                                 int hidden_dim, cudaStream_t stream, const Tensor* post_norm,
-                                 float post_norm_eps, float post_norm_offset) {
+bool mtp_feed_rows_multislot_dev(const MtpFeedRowsDevArgs& a) {
+    const auto& [d_tokens, d_hidden_all, d_src_rows, n_rows, d_slots, d_pos, max_pos, mtp_p, emb_p, ws_p,
+                 hidden_dim, stream, post_norm, post_norm_eps, post_norm_offset] = a;
+    const MtpHead& mtp = *mtp_p;
+    const Tensor& main_tok_emb = *emb_p;
+    MtpDraftWorkspace& ws = *ws_p;
     if (d_tokens == nullptr || d_src_rows == nullptr || d_slots == nullptr || d_pos == nullptr ||
         !mtp_feed_multislot_ready(mtp, ws, n_rows, d_hidden_all, main_tok_emb))
         return false;
@@ -1742,9 +1756,22 @@ bool mtp_feed_rows_multislot_dev(const int32_t* d_tokens, const void* d_hidden_a
                 d_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n, ws.max_seq_len, ws.d_slot_hi);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        mtp_attn_scan_slots(ws.d_b_q_attn, ws.d_k_cache_base, ws.d_v_cache_base, ws.d_b_attn_out, d_slots,
-                            d_pos, static_cast<int64_t>(ws.kv_slot_elems), max_pos, n, nh, nkv, hdh, stream,
-                            ws.max_seq_len, ws.d_slot_hi, ws.d_scan_part);
+        mtp_attn_scan_slots({.q = ws.d_b_q_attn,
+                             .k_base = ws.d_k_cache_base,
+                             .v_base = ws.d_v_cache_base,
+                             .out = ws.d_b_attn_out,
+                             .d_slots = d_slots,
+                             .d_pos = d_pos,
+                             .slot_elems = static_cast<int64_t>(ws.kv_slot_elems),
+                             .max_pos = max_pos,
+                             .n_rows = n,
+                             .num_heads = nh,
+                             .num_kv_heads = nkv,
+                             .head_dim = hdh,
+                             .stream = stream,
+                             .ring = ws.max_seq_len,
+                             .d_hi = ws.d_slot_hi,
+                             .split_part = ws.d_scan_part});
     };
     if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*m=*/n, /*rope_pos=*/0, d_pos, stream,
                              kv_attn))

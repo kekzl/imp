@@ -126,9 +126,13 @@ void ple_gate_value(const Tensor& key, Tensor& q_gv, const Tensor& value, int hc
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* conv_state, int64_t slot_stride,
-                  const int* slots, int n_seq, Tensor& hidden, int channels, int kernel, int dilation,
-                  cudaStream_t stream, void* snap_state, const int* d_snap_n, const int* d_real_n) {
+void ple_conv_add(const PleConvAddArgs& a) {
+    const auto& [gv_p, gvn_p, w_p, conv_state, slot_stride, slots, n_seq, hidden_p, channels, kernel,
+                 dilation, stream, snap_state, d_snap_n, d_real_n] = a;
+    const Tensor& gv = *gv_p;
+    const Tensor& gvn = *gvn_p;
+    const Tensor& w = *w_p;
+    Tensor& hidden = *hidden_p;
     const int n = static_cast<int>(gv.shape[0]);
     const int state_len = (kernel - 1) * dilation;
     if (n == 0 || n_seq <= 0)

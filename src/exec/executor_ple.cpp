@@ -163,9 +163,21 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
                                         : 0;
     // Verify chunk: row-0 snapshot with the GDN state (spec_snap_slab), commit only the real rows.
     void* snap = (!batched && state.spec_snap_slab) ? ss->extra_state_in(state.spec_snap_slab) : nullptr;
-    ple_conv_add(key, keyn, L.ple_conv1d, conv_state, slot_stride, batched ? state.ssm_seq_slots : nullptr,
-                 n_seq, hw, channels, kernel, tab->ngram_size(), stream, snap, state.d_snap_n,
-                 batched ? nullptr : state.d_chunk_len);
+    ple_conv_add({.gv = &key,
+                  .gvn = &keyn,
+                  .w = &L.ple_conv1d,
+                  .conv_state = conv_state,
+                  .slot_stride = slot_stride,
+                  .slots = batched ? state.ssm_seq_slots : nullptr,
+                  .n_seq = n_seq,
+                  .hidden = &hw,
+                  .channels = channels,
+                  .kernel = kernel,
+                  .dilation = tab->ngram_size(),
+                  .stream = stream,
+                  .snap_state = snap,
+                  .d_snap_n = state.d_snap_n,
+                  .d_real_n = batched ? nullptr : state.d_chunk_len});
 }
 
 void GraphExecutor::ple_prepare_host_(const int32_t* ids, int n, int n_seq, const int32_t* ctx,

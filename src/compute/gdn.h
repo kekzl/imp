@@ -145,9 +145,25 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
 // ---------------------------------------------------------------------------
 // Legacy per-token interfaces (kept for fallback / testing)
 // ---------------------------------------------------------------------------
-void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
-                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                         int grouped_layout = 0);
+// Arguments in the old parameter order (audit D-11); z nullptr = no gate, grouped_layout 0 = tiled.
+struct GdnScanDecodeArgs {
+    const float* x = nullptr;
+    const float* B = nullptr;
+    const float* C = nullptr;
+    const half* alpha = nullptr;
+    const half* beta = nullptr;
+    const float* A_log = nullptr;
+    const float* dt_bias = nullptr;
+    float* h_state = nullptr;
+    half* y = nullptr;
+    const half* z = nullptr;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    cudaStream_t stream = nullptr;
+    int grouped_layout = 0;
+};
+void gdn_scan_decode_f32(const GdnScanDecodeArgs& a);
 
 }  // namespace imp
