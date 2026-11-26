@@ -994,6 +994,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     caps_ = derive_capabilities({.model_loaded = true,
                                  .layer_loop_replaced = executor_->inkling_slots() != nullptr,
                                  .own_forward_lora = executor_->inkling_slots() != nullptr,
+                                 .own_forward_rewind = executor_->inkling_slots() != nullptr,
                                  .gated_residual = model_->profile().gated_residual,
                                  .recurrent_state = ssm_state_ != nullptr,
                                  .batched_recurrent_decode = static_cast<bool>(d_ssm_seq_slots_)});

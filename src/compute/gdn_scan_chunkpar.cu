@@ -518,10 +518,9 @@ size_t gdn_scan_chunkpar_workspace_bytes(int n_heads) {
     return ((5 * slots * kChunk * 128) + slots + (static_cast<size_t>(n_heads) * 128 * 128)) * sizeof(float);
 }
 
-void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                           const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                           int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                           int grouped_layout, float* ws, size_t ws_bytes, int strip_chunks) {
+void gdn_scan_chunkpar_f32(const GdnChunkparArgs<float>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                 head_dim_ssm, state_size, n_groups, stream, grouped_layout, ws, ws_bytes, strip_chunks] = a;
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_chunkpar_f32: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));
@@ -532,11 +531,9 @@ void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half*
                            chunkpar_strip_chunks(n_heads, strip_chunks));
 }
 
-void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout, float* ws, size_t ws_bytes,
-                            int strip_chunks) {
+void gdn_scan_chunkpar_bf16(const GdnChunkparArgs<__nv_bfloat16>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                 head_dim_ssm, state_size, n_groups, stream, grouped_layout, ws, ws_bytes, strip_chunks] = a;
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_chunkpar_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));

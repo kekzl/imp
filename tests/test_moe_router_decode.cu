@@ -57,7 +57,7 @@ void run_case(int ne, int K, int top_k, bool bias, bool normalize, int launches)
                        static_cast<float*>(ref_logits.p), ne, K);
         int64_t shape[2] = {1, ne};
         Tensor t(ref_logits.p, QType::F32, 2, shape, true);
-        MoeRoutingResult r;
+        MoeRoutingOwned r;
         moe_topk_gating(t, top_k, r, nullptr, /*use_sigmoid=*/true, normalize, bias_p);
 
         MoeRouterDecodeArgs a{static_cast<const half*>(dw.p),
@@ -83,8 +83,6 @@ void run_case(int ne, int K, int top_k, bool bias, bool normalize, int launches)
             EXPECT_EQ(std::memcmp(&wr[k], &wn[k], sizeof(float)), 0) << "weight " << k << " launch " << l;
         }
         EXPECT_EQ(to_host<unsigned int>(ticket.p, 1)[0], 0U) << "ticket not re-armed";
-        cudaFree(r.expert_indices.data), cudaFree(r.expert_weights.data);
-        cudaFree(r.sorted_token_ids.data), cudaFree(r.expert_offsets.data);
     }
 }
 

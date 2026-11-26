@@ -4,8 +4,10 @@
 
 #include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
+#include "core/logging.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <vector>
 
@@ -81,6 +83,43 @@ int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s, int 
     if (spec_.restart)
         spec_.restart(pos_);
     return pos_;
+}
+
+void InklingForward::conv_snapshot(float* dst, cudaStream_t s) {
+    const int last = look_pos0_ >= 0 ? pos_ - 1 - look_pos0_ : INT_MAX;
+    if (last < look_n_ - 1) {  // conv_all_ holds the stored call's draft rows too
+        conv_at_(last, dst, s);
+        return;
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dst, conv_all_, conv_state_bytes(), cudaMemcpyDeviceToDevice, s));
+}
+
+bool InklingForward::reaches(int pos) const {
+    // Ring rows of [pos - window, pos) are intact while no position from pos - window + ring_ on was written;
+    // after a cross-slot restore at checkpoint ckpt_lo_ the rows before it are another sequence's.
+    return conv_all_ && pos >= 0 && pos <= pos_ && pos >= (ckpt_lo_ > 1 ? ckpt_lo_ * kGrid : 0) &&
+           hw_ - pos <= ring_ - w_->cfg.window;
+}
+
+const float* InklingForward::checkpoint_state(int pos) const {
+    return pos > 0 && pos % kGrid == 0 && held_(pos / kGrid) ? ckpt_at_(pos / kGrid) : nullptr;
+}
+
+bool InklingForward::seek(int pos, const float* conv, cudaStream_t s) {
+    if (!conv || !reaches(pos) ||
+        cudaMemcpyAsync(conv_all_, conv, conv_state_bytes(), cudaMemcpyDefault, s) != cudaSuccess)
+        return false;
+    // Rows from pos on are void: the stored lookahead call, the history and checkpoints past pos, the
+    // draft's.
+    look_pos0_ = look_row_ = -1;
+    armed_ = false;
+    pos_ = pos;
+    if (hist_.size() > static_cast<size_t>(pos))
+        hist_.resize(static_cast<size_t>(pos));
+    ckpt_valid_ = std::min(ckpt_valid_, pos / kGrid);
+    if (spec_.restart)
+        spec_.restart(pos);
+    return true;
 }
 
 void InklingForward::set_snapshot_draft(const InklingDraftConfig* d) {

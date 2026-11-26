@@ -52,12 +52,12 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
     int converted = 0;
 
     // GGUF path helper: converts one host-resident ggml-MXFP4 expert tensor into a device
-    // NvFP4MoEQuantResult. ggml type-39 packs [scale(1)|qs(16)] with SPLIT nibble order
+    // NvFP4MoEOwned. ggml type-39 packs [scale(1)|qs(16)] with SPLIT nibble order
     // (element j = low nibble of qs[j], j+16 = high nibble); type-31 packs [qs(16)|scale(1)]
     // in LINEAR pair order. Normalize to linear pairs + a separate ue8m0 scale plane
     // (mirrors weight_upload.cpp's upload_qtype_mxfp4_). stride=1: GGUF stores gate/up as
     // distinct tensors (HF interleaves them, stride=2).
-    auto gguf_convert = [&](const Tensor& t, float extra_scale, NvFP4MoEQuantResult& r,
+    auto gguf_convert = [&](const Tensor& t, float extra_scale, NvFP4MoEOwned& r,
                             std::vector<float>& ts) -> bool {
         if (!t.data || t.ndim < 3)
             return false;
@@ -95,7 +95,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
 
         int ne = 0;
-        NvFP4MoEQuantResult g{}, u{}, d{};
+        NvFP4MoEOwned g, u, d;
         std::vector<float> g_ts, u_ts, d_ts;
 
         const Tensor& gu_b = L.expert_gate_up_packed_blocks;
@@ -142,16 +142,15 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             continue;  // no convertible expert source on this layer
         }
 
-        auto install = [&](NvFP4MoEQuantResult& r, Tensor& packed_slot) {
+        auto install = [&](NvFP4MoEOwned& r, Tensor& packed_slot) {
             int64_t shp[3] = {r.n_experts, r.N, r.K};
             packed_slot = Tensor(r.packed_data, QType::NVFP4, 3, shp, /*on_device=*/true);
-            // The wcache_ entry is the single owner (plain family). Also registering these pointers
+            // The wcache_ entry takes r's owners (plain family). Also registering these pointers
             // in Model::gpu_allocations_ double-frees them at teardown (harmless standalone, but a
             // SIGSEGV under nsys's CUDA interception). `r` keeps its layout as a view for the code below.
-            const void* key = r.packed_data;
-            NvFP4MoEQuantResult owned = r;
-            r.borrowed = true;
-            wcache_->nvfp4_moe[key] = NvFP4MoECacheEntry(std::move(owned));
+            wcache_->nvfp4_moe[r.packed_data] = NvFP4MoECacheEntry(r, std::move(r.packed_owned),
+                                                                   std::move(r.scales_owned),
+                                                                   std::move(r.tscales_owned));
         };
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);

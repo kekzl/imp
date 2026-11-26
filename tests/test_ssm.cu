@@ -635,8 +635,24 @@ TEST(SSMScanTest, PrefillPaddedChunkDeviceLength) {
         float* d_h;
         cudaMalloc(&d_h, h_elems * sizeof(float));
         cudaMemset(d_h, 0, h_elems * sizeof(float));
-        ssm_scan_prefill(d_x, d_B, d_C, d_dt, t_A, t_D, t_dtb, d_h, d_y, d_z.data, n_tokens,
-                         n_heads, head_dim, state_size, n_groups, QType::F32, nullptr, d_real_n);
+        ssm_scan_prefill({.x = &d_x,
+                          .B = &d_B,
+                          .C = &d_C,
+                          .dt = &d_dt,
+                          .A_log = &t_A,
+                          .D = &t_D,
+                          .dt_bias = &t_dtb,
+                          .h_state = d_h,
+                          .y = &d_y,
+                          .z = d_z.data,
+                          .n_tokens = n_tokens,
+                          .n_heads = n_heads,
+                          .head_dim_ssm = head_dim,
+                          .state_size = state_size,
+                          .n_groups = n_groups,
+                          .h_dtype = QType::F32,
+                          .stream = nullptr,
+                          .d_real_n = d_real_n});
         cudaDeviceSynchronize();
         y_out = read_fp16(d_y);
         h_out.resize(h_elems);
@@ -742,8 +758,26 @@ TEST(SSMScanTest, PrefillSnapshotIsStateAtSnapRow) {
             std::vector<float> poison(h_elems, 12345.0f);
             cudaMemcpy(d_snap, poison.data(), h_elems * sizeof(float), cudaMemcpyHostToDevice);
         }
-        ssm_scan_prefill(d_x, d_B, d_C, d_dt, t_A, t_D, t_dtb, d_h, d_y, d_z.data, n_tokens, n_heads,
-                         head_dim, state_size, n_groups, QType::F32, nullptr, nullptr, d_snap, d_snap_n);
+        ssm_scan_prefill({.x = &d_x,
+                          .B = &d_B,
+                          .C = &d_C,
+                          .dt = &d_dt,
+                          .A_log = &t_A,
+                          .D = &t_D,
+                          .dt_bias = &t_dtb,
+                          .h_state = d_h,
+                          .y = &d_y,
+                          .z = d_z.data,
+                          .n_tokens = n_tokens,
+                          .n_heads = n_heads,
+                          .head_dim_ssm = head_dim,
+                          .state_size = state_size,
+                          .n_groups = n_groups,
+                          .h_dtype = QType::F32,
+                          .stream = nullptr,
+                          .d_real_n = nullptr,
+                          .h_snap = d_snap,
+                          .d_snap_n = d_snap_n});
         cudaDeviceSynchronize();
         h_out.resize(h_elems);
         cudaMemcpy(h_out.data(), d_h, h_elems * sizeof(float), cudaMemcpyDeviceToHost);

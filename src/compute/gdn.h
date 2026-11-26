@@ -59,33 +59,43 @@ struct GdnScanBatchedArgs {
 
 void gdn_scan_fused_f32_batched(const GdnScanBatchedArgs<float>& a);
 
-void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                        const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                        int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                        int grouped_layout = 0, const int* d_real_n = nullptr, float* h_snap = nullptr,
-                        const int* d_snap_n = nullptr,
-                        // Bytes from h_snap to a second slab: state at d_snap_n + 1 rows. 0 = none.
-                        int64_t snap2_off = 0);
+// Arguments of the single-sequence scans (fused f32 / bf16, chunkwise f32; audit D-11), in the old
+// parameter order. StateT float or __nv_bfloat16.
+template <typename StateT>
+struct GdnScanArgs {
+    const float* conv_f32 = nullptr;
+    int conv_channels = 0;
+    const half* alpha = nullptr;
+    const half* beta = nullptr;
+    const float* A_log = nullptr;
+    const float* dt_bias = nullptr;
+    StateT* h_state = nullptr;
+    half* y = nullptr;
+    int n_tokens = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    cudaStream_t stream = nullptr;
+    int grouped_layout = 0;
+    const int* d_real_n = nullptr;
+    StateT* h_snap = nullptr;
+    const int* d_snap_n = nullptr;
+    int64_t snap2_off = 0;  // bytes from h_snap to a second slab: state at d_snap_n + 1 rows; 0 = none
+};
+
+void gdn_scan_fused_f32(const GdnScanArgs<float>& a);
 
 // BF16-state twins (gdn.state_bf16): h_state as __nv_bfloat16, all arithmetic FP32 in
 // registers, halves the state traffic dominating batched decode. HD=SS=128 only; init
 // resolver refuses BF16 state elsewhere and for ref/chunkwise routes. Stride in BF16 elements.
 void gdn_scan_fused_bf16_batched(const GdnScanBatchedArgs<__nv_bfloat16>& a);
-void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
-                         int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                         cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
-                         __nv_bfloat16* h_snap = nullptr, const int* d_snap_n = nullptr,
-                         int64_t snap2_off = 0);
+void gdn_scan_fused_bf16(const GdnScanArgs<__nv_bfloat16>& a);
 
 // EXPERIMENTAL scaffolding for chunkwise SSD scan (Mamba2 SSD adapted to GDN's rank-1
 // (I - beta k k^T) update, unlike standard scalar-decay SSD; cf. Yang et al. 2024 delta rule).
-// Same signature as gdn_scan_fused_f32, functionally identical; validated by ChunkBoundaryHandoff.
-void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                            int chunk_size = 64, int grouped_layout = 0, const int* d_real_n = nullptr,
-                            float* h_snap = nullptr, const int* d_snap_n = nullptr, int64_t snap2_off = 0);
+// Same arguments as gdn_scan_fused_f32, functionally identical; validated by ChunkBoundaryHandoff.
+void gdn_scan_chunkwise_f32(const GdnScanArgs<float>& a, int chunk_size = 64);
 
 // Chunk-parallel prefill scan (gdn.chunkpar_scan): WY-rep delta rule (Yang et al. 2024); grid
 // (chunks x heads), only a short matmul chain stays sequential. HD=SS=128 only; needs
@@ -93,15 +103,30 @@ void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half
 // chunks use the fused kernel). StateT float or BF16, rounds to BF16 once at commit.
 // strip_chunks (kGdnChunkparStrip): 0 = auto, else clamped to [1, 16].
 size_t gdn_scan_chunkpar_workspace_bytes(int n_heads);
-void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                           const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                           int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                           int grouped_layout, float* ws, size_t ws_bytes, int strip_chunks = 0);
-void gdn_scan_chunkpar_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
-                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                            cudaStream_t stream, int grouped_layout, float* ws, size_t ws_bytes,
-                            int strip_chunks = 0);
+// Arguments of the chunk-parallel scans (audit D-11), in the old parameter order.
+template <typename StateT>
+struct GdnChunkparArgs {
+    const float* conv_f32 = nullptr;
+    int conv_channels = 0;
+    const half* alpha = nullptr;
+    const half* beta = nullptr;
+    const float* A_log = nullptr;
+    const float* dt_bias = nullptr;
+    StateT* h_state = nullptr;
+    half* y = nullptr;
+    int n_tokens = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    cudaStream_t stream = nullptr;
+    int grouped_layout = 0;
+    float* ws = nullptr;
+    size_t ws_bytes = 0;
+    int strip_chunks = 0;
+};
+void gdn_scan_chunkpar_f32(const GdnChunkparArgs<float>& a);
+void gdn_scan_chunkpar_bf16(const GdnChunkparArgs<__nv_bfloat16>& a);
 
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.

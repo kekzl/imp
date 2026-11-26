@@ -27,6 +27,9 @@ struct MtpDraftWorkspace {
     // Device footprint of the mtp_dev_alloc sites (mtp_alloc_footprint each); equals mtp_workspace_bytes() of
     // the shape.
     size_t device_bytes = 0;
+    // One owner per mtp_dev_alloc buffer (I5, plain family); the void* members below are views of these.
+    // mtp_workspace_free releases them all.
+    std::vector<DeviceOwned<void>> owned;
     // ---- Phase 2.1 reduced-forward scratch ----
     // [hidden_dim] FP16 — normalized embedding input
     void* d_emb_norm = nullptr;
