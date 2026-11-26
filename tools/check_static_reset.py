@@ -134,7 +134,8 @@ def device_relevant(typ: str, stars: str) -> bool:
     if PRIMITIVES.match(t):
         return False
     head = t.split("<", 1)[0].split("::")[-1]
-    return head[:1].isupper() and head != "LogOnce"  # host latch, core/log_once.h re-arms it
+    # Host latches re-armed by core/log_once.h (FallbackSite holds a LogOnce plus a counter).
+    return head[:1].isupper() and head not in ("LogOnce", "FallbackSite")
 
 
 def candidates(text: str) -> list[str]:
@@ -415,6 +416,9 @@ def selftest() -> int:
          "not-candidate"),
         ("a LogOnce latch is host state, not a device static",
          "static LogOnce s_warned;\nvoid f() { cudaMalloc(&p, 4); }\n",
+         "not-candidate"),
+        ("a FallbackSite is host state, not a device static",
+         "static FallbackSite s_fb{\"x\"};\nvoid f() { cudaMalloc(&p, 4); }\n",
          "not-candidate"),
         ("static function declaration is not a variable",
          "static void ensure_ptr_arrays(int n);\nstatic int* make(int n) { return nullptr; }\n"

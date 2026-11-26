@@ -10,6 +10,7 @@
 #include "compute/attention_paged.h"
 #include "compute/gemm.h"
 #include "compute/qsa_indexer.h"
+#include "core/fallback_site.h"
 #include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -23,6 +24,7 @@ namespace imp {
 
 namespace {
 
+FallbackSite s_fb_qsa_debug{"qsa_debug_scratch"};
 }
 
 bool GraphExecutor::qsa_layer_(int layer) const {
@@ -300,7 +302,12 @@ void GraphExecutor::qsa_debug_rows_(int layer, const InferenceState& state, cons
     int *d_bt = bt_own.get(), *d_ctx = ctx_own.get();
     half *d_o = o_own.get(), *d_o2 = o2_own.get();
     if (!d_bt || !d_ctx || !d_o || !d_o2) {
-        IMP_LOG_WARN("[qsa-debug] scratch allocation failed, skipping the comparison");
+        IMP_FALLBACK_WARN(s_fb_qsa_debug,
+                          "[qsa-debug] %.1f MiB scratch not allocated: this comparison is skipped, the "
+                          "attention output is unaffected",
+                          static_cast<double>(((h_bt.size() + h_ctx.size()) * sizeof(int)) +
+                                              (2 * o_elems * sizeof(half))) /
+                              (1024.0 * 1024.0));
         return;
     }
     IMP_CUDA_CHECK_LOG(cudaMemcpy(d_bt, h_bt.data(), h_bt.size() * sizeof(int), cudaMemcpyHostToDevice));

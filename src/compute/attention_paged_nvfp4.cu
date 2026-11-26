@@ -426,11 +426,25 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
         const int mma_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len,
                                                      block_size, &scratch_ptr, batch_size * n_kv_heads,
                                                      mma_max_splits, 64);
-        if (paged_attention_nvfp4_mma_launch(
-                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
-                reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales,
-                static_cast<float*>(scratch_ptr), block_tables, context_lens, batch_size, n_heads, n_kv_heads,
-                head_dim, block_size, scale, max_num_blocks, mma_splits, sliding_window, softcap, stream)) {
+        if (paged_attention_nvfp4_mma_launch({.Q = reinterpret_cast<const half*>(Q.data),
+                                              .K_cache = K_cache.data,
+                                              .V_cache = V_cache.data,
+                                              .K_scales = K_scales,
+                                              .V_scales = V_scales,
+                                              .partial = static_cast<float*>(scratch_ptr),
+                                              .block_tables = block_tables,
+                                              .context_lens = context_lens,
+                                              .batch_size = batch_size,
+                                              .n_heads = n_heads,
+                                              .n_kv_heads = n_kv_heads,
+                                              .head_dim = head_dim,
+                                              .block_size = block_size,
+                                              .scale = scale,
+                                              .max_num_blocks = max_num_blocks,
+                                              .num_splits = mma_splits,
+                                              .sliding_window = sliding_window,
+                                              .softcap = softcap,
+                                              .stream = stream})) {
             paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
                                           batch_size, n_heads, head_dim, mma_splits, stream, sinks_h, q8_epi);
             return;
@@ -442,12 +456,27 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     // process_diag_paged_nvfp4_multitok: four tokens per warp iteration for
     // HD=128/256 (attention_paged_nvfp4_multitok.cu), both routes.
     if (process_diag_paged_nvfp4_multitok() > 1 &&
-        paged_attention_decode_nvfp4_multitok_launch(
-            reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
-            reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales,
-            reinterpret_cast<half*>(O.data), static_cast<float*>(scratch_ptr), block_tables, context_lens,
-            batch_size, n_heads, n_kv_heads, head_dim, block_size, scale, max_num_blocks, num_splits,
-            sliding_window, softcap, sinks_h, stream)) {
+        paged_attention_decode_nvfp4_multitok_launch({.Q = reinterpret_cast<const half*>(Q.data),
+                                                      .K_cache = K_cache.data,
+                                                      .V_cache = V_cache.data,
+                                                      .K_scales = K_scales,
+                                                      .V_scales = V_scales,
+                                                      .O = reinterpret_cast<half*>(O.data),
+                                                      .partial = static_cast<float*>(scratch_ptr),
+                                                      .block_tables = block_tables,
+                                                      .context_lens = context_lens,
+                                                      .batch_size = batch_size,
+                                                      .n_heads = n_heads,
+                                                      .n_kv_heads = n_kv_heads,
+                                                      .head_dim = head_dim,
+                                                      .block_size = block_size,
+                                                      .scale = scale,
+                                                      .max_num_blocks = max_num_blocks,
+                                                      .num_splits = num_splits,
+                                                      .sliding_window = sliding_window,
+                                                      .softcap = softcap,
+                                                      .attn_sinks = sinks_h,
+                                                      .stream = stream})) {
         if (num_splits > 1)
             paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
                                           batch_size, n_heads, head_dim, num_splits, stream, sinks_h, q8_epi);

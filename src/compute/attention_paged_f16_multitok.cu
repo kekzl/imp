@@ -459,12 +459,19 @@ int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
     return hpc;
 }
 
-bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
-                                                half* O, const int* block_tables, const int* context_lens,
-                                                int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                int block_size, float scale, int max_num_blocks,
-                                                int sliding_window, float softcap, const half* attn_sinks,
-                                                int heads_per_cta, cudaStream_t stream) {
+bool paged_attention_decode_f16_multitok_launch(const PagedDecodeArgs& a) {
+    const half* Q = a.Q;
+    const auto* K_cache = static_cast<const half*>(a.K_cache);
+    const auto* V_cache = static_cast<const half*>(a.V_cache);
+    half* O = a.O;
+    const int *block_tables = a.block_tables, *context_lens = a.context_lens;
+    const int batch_size = a.batch_size, n_heads = a.n_heads, n_kv_heads = a.n_kv_heads,
+              head_dim = a.head_dim;
+    const int block_size = a.block_size, max_num_blocks = a.max_num_blocks, sliding_window = a.sliding_window;
+    const float scale = a.scale, softcap = a.softcap;
+    const half* attn_sinks = a.attn_sinks;
+    const int heads_per_cta = a.heads_per_cta;
+    cudaStream_t stream = a.stream;
     const int n_q_per_kv = n_heads / n_kv_heads;
     const int hpc = paged_attention_f16_multitok_heads_per_cta(head_dim, n_q_per_kv, heads_per_cta);
     if (hpc == 0)
@@ -550,12 +557,18 @@ int paged_attention_f16_multitok_splitk_ctas_per_sm(int head_dim, int hpc) {
     }
 }
 
-bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
-                                                float* partial, const int* block_tables,
-                                                const int* context_lens, int batch_size, int n_heads,
-                                                int n_kv_heads, int head_dim, int block_size, float scale,
-                                                int max_num_blocks, int num_splits, int sliding_window,
-                                                float softcap, int heads_per_cta, cudaStream_t stream) {
+bool paged_attention_splitk_f16_multitok_launch(const PagedDecodeArgs& a) {
+    const half* Q = a.Q;
+    const auto* K_cache = static_cast<const half*>(a.K_cache);
+    const auto* V_cache = static_cast<const half*>(a.V_cache);
+    float* partial = a.partial;
+    const int *block_tables = a.block_tables, *context_lens = a.context_lens;
+    const int batch_size = a.batch_size, n_heads = a.n_heads, n_kv_heads = a.n_kv_heads,
+              head_dim = a.head_dim;
+    const int block_size = a.block_size, max_num_blocks = a.max_num_blocks, num_splits = a.num_splits;
+    const int sliding_window = a.sliding_window, heads_per_cta = a.heads_per_cta;
+    const float scale = a.scale, softcap = a.softcap;
+    cudaStream_t stream = a.stream;
     const int n_q_per_kv = n_heads / n_kv_heads;
     const int hpc = paged_attention_f16_multitok_heads_per_cta(head_dim, n_q_per_kv, heads_per_cta);
     if (hpc == 0 || num_splits < 1)
