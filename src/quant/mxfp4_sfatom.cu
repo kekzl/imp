@@ -124,7 +124,6 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
     dst.N = N;
     dst.K = K;
     dst.sf_bytes = sf_bytes;
-    dst.owns_data = false;
 
     IMP_LOG_DEBUG("unpack_mxfp4_gguf: N=%lld K=%lld sf=%.2f MiB (pre-split)", (long long)N, (long long)K,
                   sf_bytes / (1024.0 * 1024.0));
@@ -228,24 +227,6 @@ void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, voi
                                                              static_cast<int>(N), static_cast<int>(K),
                                                              blocks_per_row);
     IMP_CUDA_CHECK_LAUNCH();
-}
-
-void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {
-    if (w.owns_data && w.data) {
-        device_free_all(const_cast<void*>(w.data));
-    }
-    w.data = nullptr;
-    if (w.scale_factors) {
-        device_free_all(w.scale_factors);
-        w.scale_factors = nullptr;
-    }
-    if (w.linear_scales) {
-        device_free_all(w.linear_scales);
-        w.linear_scales = nullptr;
-    }
-    w.N = w.K = 0;
-    w.sf_bytes = 0;
-    w.owns_data = false;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@
 // plain struct the kernels read (raw pointers, no indirection added on a lookup), its DeviceOwned
 // members are the buffers the entry allocated. A pointer of the base with an empty owner beside
 // it is a view: a slice of a WeightCaches slab, of another entry or of the model's weights.
-// The ownership flags of the base structs (owned, borrowed, sf_borrowed, owns_data,
-// borrowed_data) always read "not mine" inside an entry, so a sliced copy of the base is a view
+// The ownership flags of the base structs (owned, borrowed, sf_borrowed, borrowed_data) always
+// read "not mine" inside an entry, so a sliced copy of the base is a view
 // and the src/quant free functions release nothing when handed one.
 
 #include <cstddef>
@@ -199,34 +199,27 @@ struct CutlassMxFP8CacheEntry : CutlassMxFP8Weight {
     }
 };
 
-// MXFP4 weight. `data_owned` empty: the packed nibbles were compacted in place in the model's
-// own buffer (native GGUF). Both scale layouts are the entry's.
+// MXFP4 weight. `data` is always a view: unpack_mxfp4_gguf compacts the packed nibbles in place
+// in the model's own buffer (native GGUF). Both scale layouts are the entry's.
 struct CutlassMxFP4CacheEntry : CutlassMxFP4Weight {
-    DeviceOwned<void> data_owned;
     DeviceOwned<void> sf_owned;
     DeviceOwned<void> linear_owned;
 
     CutlassMxFP4CacheEntry() = default;
-    // Takes over the buffers of unpack_mxfp4_gguf / the Hadamard converter (plain family).
-    // Empties `w`.
+    // Takes over the two scale buffers of unpack_mxfp4_gguf (plain family). Empties `w`.
     explicit CutlassMxFP4CacheEntry(CutlassMxFP4Weight&& w) noexcept : CutlassMxFP4Weight(w) {
-        if (w.owns_data)
-            data_owned.adopt(const_cast<void*>(w.data), static_cast<size_t>(w.N) * w.K / 2, nullptr);
         sf_owned.adopt(w.scale_factors, w.sf_bytes, nullptr);
         linear_owned.adopt(w.linear_scales, static_cast<size_t>(w.N) * (w.K / 32), nullptr);
-        owns_data = false;
         w = CutlassMxFP4Weight{};
     }
 
     CutlassMxFP4CacheEntry(CutlassMxFP4CacheEntry&& o) noexcept
         : CutlassMxFP4Weight(detail::take_view<CutlassMxFP4Weight>(o)),
-          data_owned(std::move(o.data_owned)),
           sf_owned(std::move(o.sf_owned)),
           linear_owned(std::move(o.linear_owned)) {}
     CutlassMxFP4CacheEntry& operator=(CutlassMxFP4CacheEntry&& o) noexcept {
         if (this != &o) {
             CutlassMxFP4Weight::operator=(detail::take_view<CutlassMxFP4Weight>(o));
-            data_owned = std::move(o.data_owned);
             sf_owned = std::move(o.sf_owned);
             linear_owned = std::move(o.linear_owned);
         }
