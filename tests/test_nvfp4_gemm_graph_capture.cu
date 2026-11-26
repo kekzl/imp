@@ -1,6 +1,6 @@
 // gemm_nvfp4 M>1 uses one scratch (M<=16: batched-GEMV y32; else dequant to FP16 + cuBLASLt); that scratch
 // buffer used to lazy-cudaMalloc on first use, crashing inside a captured CUDA stream. Fix:
-// pre-allocated workspace (set_nvfp4_dequant_workspace); missing workspace + capture mode
+// the caller's Nvfp4DequantWorkspace, passed per call; missing workspace + capture mode
 // now fails loud instead of crashing. Does NOT cover cuBLASLt's own graph-safety (algo reselect).
 
 #include "quant/nvfp4_quant.h"
@@ -25,8 +25,6 @@ protected:
     void TearDown() override {
         if (stream_)
             cudaStreamDestroy(stream_);
-        // Always clear workspace so tests don't pollute each other.
-        set_nvfp4_dequant_workspace(nullptr, 0);
         // Drain any sticky CUDA error state from this test (e.g. abandoned
         // captures) so subsequent test suites start with a clean runtime.
         cudaGetLastError();
@@ -83,7 +81,7 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
     size_t ws_bytes = static_cast<size_t>(tw.N) * tw.K * sizeof(half);
     void* ws = nullptr;
     ASSERT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
-    set_nvfp4_dequant_workspace(ws, ws_bytes);
+    Nvfp4DequantWorkspace dws{.buf = ws, .size = ws_bytes};
 
     size_t lazy_before = nvfp4_lazy_dequant_buf_size_for_testing();
 
@@ -92,7 +90,7 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
     Tensor a_t(tw.d_a, QType::F16, 2, ashape, /*on_device=*/true);
     Tensor c_t(tw.d_c, QType::F16, 2, cshape, /*on_device=*/true);
     cudaMemsetAsync(tw.d_c, 0, static_cast<size_t>(tw.M) * tw.N * sizeof(half), stream_);
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &dws);
     cudaStreamSynchronize(stream_);
 
     size_t lazy_after = nvfp4_lazy_dequant_buf_size_for_testing();
@@ -112,7 +110,6 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
     }
     EXPECT_GT(n_nonzero, 0) << "GEMM via workspace produced all-zero output";
 
-    set_nvfp4_dequant_workspace(nullptr, 0);
     cudaFree(ws);
     tw.destroy();
 }
@@ -123,9 +120,6 @@ TEST_F(NvFP4GemmGraphCapture, WorkspaceIsPreferredOverLazyAlloc) {
 TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
     TinyNvFP4 tw;
     tw.create(stream_);
-
-    // Explicitly clear any previously-set workspace.
-    set_nvfp4_dequant_workspace(nullptr, 0);
 
     ASSERT_EQ(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeRelaxed), cudaSuccess);
 
@@ -163,8 +157,6 @@ TEST_F(NvFP4GemmGraphCapture, FallbackInsideCaptureWithoutWorkspaceFailsLoud) {
 TEST_F(NvFP4GemmGraphCapture, FallbackOutsideCaptureUsesLazyAllocAsBefore) {
     TinyNvFP4 tw;
     tw.create(stream_);
-
-    set_nvfp4_dequant_workspace(nullptr, 0);
 
     int64_t ashape[2] = {tw.M, tw.K};
     int64_t cshape[2] = {tw.M, tw.N};
@@ -217,12 +209,11 @@ TEST_F(NvFP4GemmGraphCapture, DeferredWorkspaceIsTakenInsideCaptureAndTheGraphRe
     const size_t ws_bytes = size_t{8} << 20;
     void* ws = nullptr;
     ASSERT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
-    set_nvfp4_dequant_workspace(ws, ws_bytes);
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    Nvfp4DequantWorkspace plain{.buf = ws, .size = ws_bytes};
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &plain);
     ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
     std::vector<half> ref(static_cast<size_t>(tw.M) * tw.N), got(ref.size());
     ASSERT_EQ(cudaMemcpy(ref.data(), tw.d_c, out_bytes, cudaMemcpyDeviceToHost), cudaSuccess);
-    set_nvfp4_dequant_workspace(nullptr, 0);
     cudaFree(ws);
 
     LazyWs lw;
@@ -232,11 +223,11 @@ TEST_F(NvFP4GemmGraphCapture, DeferredWorkspaceIsTakenInsideCaptureAndTheGraphRe
     ASSERT_TRUE(lw.arena.lazy());
     const size_t committed_before = lw.arena.committed();
     EXPECT_LT(committed_before, ws_bytes);
-    set_nvfp4_dequant_workspace_provider(&LazyWs::provide, &lw, ws_bytes);
+    Nvfp4DequantWorkspace deferred{.size = ws_bytes, .provide = &LazyWs::provide, .ctx = &lw};
     EXPECT_EQ(lw.calls, 0);
 
     ASSERT_EQ(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeRelaxed), cudaSuccess);
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &deferred);
     cudaGraph_t graph = nullptr;
     ASSERT_EQ(cudaStreamEndCapture(stream_, &graph), cudaSuccess);
     ASSERT_NE(graph, nullptr);
@@ -252,13 +243,12 @@ TEST_F(NvFP4GemmGraphCapture, DeferredWorkspaceIsTakenInsideCaptureAndTheGraphRe
     EXPECT_EQ(std::memcmp(ref.data(), got.data(), out_bytes), 0);
 
     // A second fallback reuses the buffer: no second take.
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &deferred);
     ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
     EXPECT_EQ(lw.calls, 1);
 
     cudaGraphExecDestroy(exec);
     cudaGraphDestroy(graph);
-    set_nvfp4_dequant_workspace(nullptr, 0);
     lw.arena.close();
     tw.destroy();
 }
@@ -274,14 +264,12 @@ TEST_F(NvFP4GemmGraphCapture, DeferredWorkspaceThatCannotBeTakenFallsBackOnce) {
     Tensor c_t(tw.d_c, QType::F16, 2, cshape, /*on_device=*/true);
     static int calls;
     calls = 0;
-    set_nvfp4_dequant_workspace_provider(
-        [](void*) -> void* {
-            ++calls;
-            return nullptr;
-        },
-        nullptr, size_t{8} << 20);
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
-    gemm_nvfp4(tw.qr, a_t, c_t, stream_);
+    Nvfp4DequantWorkspace none{.size = size_t{8} << 20, .provide = [](void*) -> void* {
+                                   ++calls;
+                                   return nullptr;
+                               }};
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &none);
+    gemm_nvfp4(tw.qr, a_t, c_t, stream_, 0.0f, &none);
     ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
     EXPECT_EQ(calls, 1);
     EXPECT_GT(nvfp4_lazy_dequant_buf_size_for_testing(), 0u);

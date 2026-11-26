@@ -1,8 +1,8 @@
 #pragma once
 
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"  // X-4: readers include core/dispatch_policy.h
 
-#include "core/tensor.h"            // Tensor, QType (used by Nvfp4DecodeContext + signatures)
+#include "core/tensor.h"               // Tensor, QType (used by Nvfp4DecodeContext + signatures)
 #include "core/config/lm_head_mode.h"  // LmHeadMode
 #include "exec/storage_planner.h"   // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
@@ -90,13 +90,10 @@ private:
     MoEWorkspace* moe_ = nullptr;
     int max_tokens_ = 0;   // workspace max token count (build-time scratch sizing)
 
-    // Accessor mirroring GraphExecutor::dispatch_policy() so the moved phase methods read
-    // config exactly as before. DELIBERATE DUPLICATION (behaviour-neutral verbatim move):
-    // keeps the moved phases' dispatch_policy() call sites byte-identical. When a 3rd copy
-    // is needed, hoist to a shared free helper next to core/dispatch_policy.h instead.
+    // Accessor mirroring GraphExecutor::dispatch_policy(): both call the shared helper of
+    // core/dispatch_policy_fwd.h, so the moved phases' call sites stay byte-identical.
     const DispatchPolicy& dispatch_policy() const noexcept {
-        static const DispatchPolicy kDefault;
-        return dispatch_policy_ ? *dispatch_policy_ : kDefault;
+        return dispatch_policy_or_default(dispatch_policy_);
     }
 
     // Owned build-only state.

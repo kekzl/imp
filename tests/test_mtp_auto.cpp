@@ -215,7 +215,7 @@ TEST(MtpAuto, AfterLoadTakesTheServingOfTheEngineBatch) {
 // A reload (resume, idle unload, swap) resolves auto again: plain probe 179.66 -> 133.63 tok/s without.
 TEST(MtpAuto, ReloadResolvesAgainstTheStartupConfig) {
     RuntimeConfig cfg;
-    std::optional<RuntimeConfig> startup;
+    std::unique_ptr<RuntimeConfig> startup;
     auto load = [&](bool gdn_hybrid, bool head_loaded) {
         tools::mtp_auto_restore_startup(cfg, startup);
         EXPECT_EQ(cfg.speculative.mtp_k, -1) << "auto again, not the previous load's depth";

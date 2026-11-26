@@ -1,10 +1,12 @@
 #pragma once
 // Inkling2-Loop text forward for one sequence: 48 layer applications per token, conv state and sliding K/V
-// of its own, the full-attention K/V in the engine's paged pool (or its own, standalone).
+// in its slot of the engine's slab (or a slab of its own, standalone), the full-attention K/V in the
+// engine's paged pool (or its own, standalone).
 
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
 #include "exec/inkling_kv_layout.h"
+#include "exec/inkling_slab_layout.h"
 #include "exec/inkling_slot_table.h"
 #include "model/inkling_weights.h"
 
@@ -44,8 +46,11 @@ public:
     // runtime run one after the other on one stream); it must outlive this one.
     // own_kv: the full-attention K/V live in max_ctx rows of this forward behind an identity block table
     // (tests, tools); false = the engine's paged pool, bind_kv() and set_table() before run().
+    // state: this slot's region of the engine's slab (inkling_slab_layout(w.cfg, max_tokens)), holding the
+    // conv state and the sliding rings; null = a one-slot slab of its own.
     [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                            const InklingForward* scratch = nullptr, bool own_kv = true);
+                            const InklingForward* scratch = nullptr, bool own_kv = true,
+                            std::byte* state = nullptr);
     // Pool K/V: k[l] / v[l] = base of pool layer l (inkling_kv_apps order, kKVBlockSize positions per
     // block, [pos][n_kv][hd] within one). The regions must outlive this forward and never move.
     [[nodiscard]] bool bind_kv(std::span<half* const> k, std::span<half* const> v);
@@ -71,11 +76,11 @@ public:
     [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
-    static constexpr int kGraphRows = 8;  // rows of the largest captured call = anchor + drafts
+    static constexpr int kGraphRows = kInklingGraphRows;  // rows of the largest call = anchor + drafts
     static constexpr int kGrid = 256;     // checkpoint distance
     // Rows per forward segment: a 3111-token prefill ran 2590 tok/s at 256 and 3688 at 1024.
-    static constexpr int kSeg = 1024;
-    static constexpr int kSlack = 5120;  // sliding K/V kept behind the window: how far rewind may go back
+    static constexpr int kSeg = kInklingSeg;
+    static constexpr int kSlack = kInklingSlack;  // sliding K/V behind the window: how far rewind may go
 
     // Runs T tokens at positions [position(), position() + T). logits: device fp32 [vocab], softcapped,
     // for the last token; may be null.
@@ -92,8 +97,10 @@ public:
     // serves the following one-row calls from it while their tokens equal the drafts; the first other
     // token puts the conv state back to the last confirmed row. taps: visit indices whose input
     // stream is a feature plane (the last entry stands for the normed final state); embed: the token
-    // embedding table [vocab, hidden] the draft rows are read from.
-    [[nodiscard]] bool enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed);
+    // embedding table [vocab, hidden] the draft rows are read from. look: this slot's lookahead region of
+    // the engine's slab (planned for taps.size() taps and this segment), empty = allocated here.
+    [[nodiscard]] bool enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed,
+                                        const InklingLookRegion& look = {});
     // Lookahead steps, draft rows run, draft rows confirmed since init.
     struct SpecStats {
         long steps = 0, drafted = 0, accepted = 0;
@@ -192,10 +199,10 @@ private:
     bool scratch_on_ = false, attn_gemm_ = true;
     float* ckpt_stage_ = nullptr;  // conv states at up to 3 grid rows inside a segment
     int marks_n_ = 0, marks_row_[3] = {};
-    std::vector<half*> k_, v_;        // per application
+    std::vector<half*> k_, v_;        // per application, views of the slot's rings (null: full attention)
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
-    float* conv_all_ = nullptr;             // the n_apps conv states, contiguous
+    float* conv_all_ = nullptr;             // the n_apps conv states, contiguous at the slot's offset 0
     std::vector<std::vector<float>> ckpt_;  // [g - 1] = conv state at position g * kGrid
     int ckpt_valid_ = 0;                    // checkpoints 1..ckpt_valid_ belong to this sequence
     int ckpt_free_ = 0;                     // checkpoints 1..ckpt_free_ are freed: too far back to resume
@@ -257,6 +264,7 @@ static_assert(kInklingKvAhead == InklingForward::kGraphRows - 1, "a lookahead ca
 // Weights and the forwards that point into them (destroyed first): one kept sequence per slot.
 class InklingDraft;
 class KVCache;
+class InklingSlab;
 struct InklingDraftWeights;
 struct InklingRuntime {
     InklingWeights w;
@@ -284,8 +292,9 @@ struct InklingRuntime {
     int rows_cap = 0;
     std::vector<int32_t> rows;
     // Lookahead slots: logits of every row of the slot's stored call ([kGraphRows][vocab], one LM-head
-    // pass for all of them), and the row the running decode step takes instead of its own head pass.
-    std::vector<VramOwned<float>> look_logits;
+    // pass for all of them, in the slot's lookahead region of the slab), and the row the running decode
+    // step takes instead of its own head pass.
+    std::vector<float*> look_logits;
     std::vector<long> look_serial;  // the stored call (its lookahead step count) the slot's logits belong to
     const float* logit_src = nullptr;
     VRAMAllocator* va = nullptr;
@@ -298,9 +307,13 @@ struct InklingRuntime {
     // Returns the slot, -1 = every slot is bound.
     [[nodiscard]] int bind(int req, std::span<const int32_t> tokens);
     // want slots of ctx positions over the weights wt (pool K/V, bind_kv later), the I8B32 dense projections
-    // when inkling_dense8_fits; false = not one slot. make_inkling_runtime and the serve-path test use it.
+    // when inkling_dense8_fits; false = not one slot. slab: allocated here, holds each slot's conv state and
+    // sliding rings; it must outlive the slots. make_inkling_runtime and the serve-path test use it.
+    // draft (null = no lookahead): the slab also holds a lookahead region of vocab logits per row for the
+    // first kInklingLookaheadSlots slots (draft rings, lookahead planes; inkling_attach_draft_ views them).
     [[nodiscard]] bool init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
-                                  int want);
+                                  int want, InklingSlab& slab, const InklingDraftConfig* draft = nullptr,
+                                  int vocab = 0);
     // bind, then what that slot can resume of tokens (InklingForward::match); -1 = every slot is bound.
     [[nodiscard]] int bind_match(int req, std::span<const int32_t> tokens);
     // A prefill chunk of req at offset. first: this chunk bound the slot (unless bound) and rewound it to at
@@ -315,8 +328,11 @@ class Model;
 // Null for every other arch; throws when an Inkling2-Loop checkpoint cannot be loaded.
 // Up to slots (<= 0: two) sequences of max_ctx positions, max_tokens rows per call; fewer when the
 // card does not take them all, at least one. Their full-attention K/V live in the engine's paged pool
-// (InklingRuntime::bind_kv before the first forward).
+// (InklingRuntime::bind_kv before the first forward), their conv state and sliding rings in slab (the
+// engine's, Engine::inkling_slab_); null throws. lookahead (speculative.mtp_k != 0) with mtp.safetensors and
+// its mtp_config: the slab also holds the draft rings and lookahead planes, before serving.
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots);
+                                                     int max_ctx, int slots, InklingSlab* slab,
+                                                     bool lookahead);
 
 }  // namespace imp

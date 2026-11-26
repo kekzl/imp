@@ -236,7 +236,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                             const_cast<void*>(static_cast<const void*>(a.data)),
                             QType::F16, 2, a_shape, true);
                         Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                        gemm_nvfp4(nw, a_t, c_t, stream);
+                        gemm_nvfp4(nw, a_t, c_t, stream, 0.0f, &nvfp4_dequant_ws_);
                     }
                     return;
                 }
@@ -285,7 +285,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                             Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
                                        QType::F16, 2, a_shape, true);
                             Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                            gemm_nvfp4(nw, a_t, c_t, stream);
+                            gemm_nvfp4(nw, a_t, c_t, stream, 0.0f, &nvfp4_dequant_ws_);
                         }
                         return;
                     }
@@ -335,7 +335,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                             Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
                                        QType::F16, 2, a_shape, true);
                             Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                            gemm_nvfp4(nw, a_t, c_t, stream);
+                            gemm_nvfp4(nw, a_t, c_t, stream, 0.0f, &nvfp4_dequant_ws_);
                         }
                         return;
                     }
@@ -392,7 +392,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
                                QType::F16, 2, a_shape, true);
                     Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                    gemm_nvfp4(nw, a_t, c_t, stream);
+                    gemm_nvfp4(nw, a_t, c_t, stream, 0.0f, &nvfp4_dequant_ws_);
                 }
                 return;
             }
@@ -458,7 +458,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
                                    QType::F16, 2, a_shape, true);
                         Tensor c_t(c.data, QType::F16, 2, c_shape, true);
-                        gemm_nvfp4(nw, a_t, c_t, stream);
+                        gemm_nvfp4(nw, a_t, c_t, stream, 0.0f, &nvfp4_dequant_ws_);
                     }
                     return;
                 }

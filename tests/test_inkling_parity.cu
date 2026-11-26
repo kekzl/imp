@@ -17,7 +17,9 @@
 #include <vector>
 
 #include "compute/inkling_ops.h"
+#include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
+#include "exec/inkling_slab.h"
 #include "inkling_fixture.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -626,7 +628,9 @@ TEST(InklingPagedKv, ShuffledPoolBlocksAreBitEqual) {
 // blocks a KVCacheManager hands out between another sequence's, its table copied before every call as
 // run_inkling_ does, 7 rows ahead as decode_prepare_kv_ holds them; against a forward with its own
 // contiguous K/V and the I8B32 projections, as every slot ran before S2b. Same prompt, same lookahead
-// plan (anchors 13 mod 16, 3 confirmed, 4 rejected): bit-equal rows.
+// plan (anchors 13 mod 16, 3 confirmed, 4 rejected): bit-equal rows. The slot is the second of two in the
+// engine's slab (B-111 S3): its conv state and rings sit one slot stride in, its lookahead planes in the
+// second lookahead region after both slots (S3b).
 TEST(InklingServePath, PoolRuntimeIsBitEqualToTheContiguousForward) {
     const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
     const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
@@ -649,10 +653,16 @@ TEST(InklingServePath, PoolRuntimeIsBitEqualToTheContiguousForward) {
         plan[a] = d;
     }
     const std::vector<int> taps = {5, 23, 41, 48};
+    InklingSlab slab;  // the engine's: outlives the runtime
     InklingRuntime rt;
-    ASSERT_TRUE(rt.init_slots(fx.w, fx.va, 512, ctx, 1));
+    InklingDraftConfig dc;  // plans the lookahead regions, as make_inkling_runtime does
+    ASSERT_TRUE(parse_inkling_draft_config(model, dc));
+    ASSERT_TRUE(rt.init_slots(fx.w, fx.va, 512, ctx, 2, slab, &dc, fx.w.cfg.vocab_padded));
+    ASSERT_EQ(slab.slots(), 2);
+    ASSERT_EQ(slab.look_slots(), 2);
+    ASSERT_EQ(rt.slots.size(), 2u);
     ASSERT_TRUE(rt.dense8) << "the serve path decodes on the I8B32 projections when the card has room";
-    InklingForward& slot = *rt.slots[0];
+    InklingForward& slot = *rt.slots[1];
     const InklingKvLayout l = inkling_kv_apps(fx.w.cfg, false);
     KVCacheManager kvm(std::make_unique<KVCache>(l.n_layers(), fx.w.cfg.n_kv_heads, fx.w.cfg.head_dim,
                                                  QType::F16, 2 * slot.table_cap() + 16, kKVBlockSize,
@@ -682,7 +692,9 @@ TEST(InklingServePath, PoolRuntimeIsBitEqualToTheContiguousForward) {
     InklingForward* fwd[2] = {&ref, &slot};
     for (int g = 0; g < 2; ++g) {
         InklingForward& f = *fwd[g];
-        ASSERT_TRUE(f.enable_lookahead(planned(plan), taps, fx.w.embed));
+        // The slot's lookahead planes in its region of the slab (B-111 S3b), the reference's its own.
+        ASSERT_TRUE(
+            f.enable_lookahead(planned(plan), taps, fx.w.embed, g == 1 ? slab.look(1) : InklingLookRegion{}));
         if (g == 1)
             hold(P, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);

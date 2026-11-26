@@ -1417,7 +1417,7 @@ void GraphExecutor::free_buffers() {
     dev_expert_cache_.destroy();
     expert_cache_.destroy();
 
-    // Free gemm_nvfp4 dequant workspace and unregister from the free function.
+    // Free gemm_nvfp4 dequant workspace.
     release_nvfp4_dequant_ws_();
     // Releases only SfAtom scales it built itself; .data and a borrowed SfAtom are cache views.
     lm_head_cutlass_ = CutlassNvFP4CacheEntry{};

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "exec/quant_scratch.h"
-#include "core/dispatch_policy.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -52,6 +51,9 @@ struct GemmContext {
         ctx.spec_verify_small_m = spec_verify;
         return ctx;
     }
+
+    // gemm_nvfp4's M>1 fallback workspace of this call (audit D-9); null without a qscratch.
+    Nvfp4DequantWorkspace* nvfp4_dequant_ws() const { return qscratch ? qscratch->nvfp4_dequant : nullptr; }
 
     // Convenience: set beta for residual-add pattern
     GemmContext with_beta(float b) const {

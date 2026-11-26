@@ -18,13 +18,8 @@ namespace imp {
 
 class VRAMAllocator;
 
-struct InklingDraftConfig {
-    int hidden = 2304, layers = 3, heads = 24, kv_heads = 8, head_dim = 128, inter = 9216;
-    int block = 8, rank = 256, window = 1024, vocab_padded = 201024;
-    float eps = 1e-6f, theta = 1e6f;
-    std::vector<int> taps;    // target visits whose input stream is a feature; the last = final state
-    std::vector<bool> local;  // per layer: attends the last window positions before the block only
-};
+// dir/config.json's mtp_config (InklingDraftConfig in model/inkling_config.h); false = none or unusable.
+[[nodiscard]] bool parse_inkling_draft_config(const std::string& dir, InklingDraftConfig& c);
 
 // The target's LM head as per-row E4M3 with fp32 row scales (GraphExecutor::lm_head_fp8_view).
 struct InklingHeadView {
@@ -84,8 +79,11 @@ public:
     // layer keeps one K/V row per position.
     // own_kv: the full-context layer keeps max_ctx + block rows here; false = a pool layer (bind_kv), the
     // local layers then always keep a ring.
+    // look: a lookahead region of the engine's slab; the local rings live there (its draft_ring must be
+    // this ring), empty = allocated here.
     [[nodiscard]] bool init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap,
-                            int back = InklingForward::kSeg + InklingForward::kSlack, bool own_kv = true);
+                            int back = InklingForward::kSeg + InklingForward::kSlack, bool own_kv = true,
+                            const InklingLookRegion& look = {});
     // The full-context layer in the engine's pool: k / v its bases, table the slot's block table
     // (InklingForward::table()). False: not exactly one such layer, the draft stays off.
     [[nodiscard]] bool bind_kv(half* k, half* v, const int* table);

@@ -2,7 +2,7 @@
 
 #include "core/cuda_raii.h"
 #include "core/kv_fp8_scale.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"  // X-4: readers include core/dispatch_policy.h
 
 #include "model/model.h"
 #include "memory/device_owned.h"
@@ -569,6 +569,8 @@ public:
     InklingRuntime* inkling_runtime() const { return inkling_.get(); }
     InklingSlotTable* inkling_slots() const { return inkling_ ? &inkling_->table : nullptr; }
     void set_inkling_lookahead(bool on) { inkling_lookahead_ = on; }
+    // The engine's per-slot recurrent slab (Engine::inkling_slab_), set before allocate_workspaces().
+    void set_inkling_slab(InklingSlab* slab) { inkling_slab_ = slab; }
 
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
@@ -673,8 +675,7 @@ public:
     const DispatchPolicy& dispatch_policy() const noexcept {
         // CRITICAL: set_dispatch_policy() must be called before any forward.
         // Hard-failing here would crash unit tests; cold default is acceptable.
-        static const DispatchPolicy kDefault;
-        return dispatch_policy_ ? *dispatch_policy_ : kDefault;
+        return dispatch_policy_or_default(dispatch_policy_);
     }
 
 private:
@@ -971,14 +972,14 @@ private:
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only): a view of the
     // engine-persistent arena (freed wholesale) or a private allocation (arena closed or short).
-    // Set up by allocate_nvfp4_dequant_workspace() and registered with the
-    // free function via set_nvfp4_dequant_workspace(). Allows the fallback
-    // path to run inside CUDA stream capture without crashing on cudaMalloc.
+    // Set up by allocate_nvfp4_dequant_workspace(); nvfp4_dequant_ws_ hands it to gemm_nvfp4 per
+    // call (qscratch_.nvfp4_dequant, audit D-9). Lets the fallback run inside CUDA stream capture.
     ViewOrOwned<void> nvfp4_dequant_ws_buf_;
     size_t nvfp4_dequant_ws_size_ = 0;
     // Lazy engine arena: the workspace is taken at the first fallback that needs it
-    // (set_nvfp4_dequant_workspace_provider); until then the buffer is null and the size is set.
+    // (nvfp4_dequant_ws_.provide); until then the buffer is null and the size is set.
     bool nvfp4_dequant_ws_deferred_ = false;
+    Nvfp4DequantWorkspace nvfp4_dequant_ws_;
     static void* provide_nvfp4_dequant_ws_(void* self);
     [[nodiscard]] bool acquire_nvfp4_dequant_ws_(size_t covered_bytes);
     void release_nvfp4_dequant_ws_();
@@ -1483,6 +1484,7 @@ private:
     [[nodiscard]] bool inkling_take_logits_(Tensor& lg, cudaStream_t stream);
     std::unique_ptr<InklingRuntime> inkling_;
     bool inkling_lookahead_ = true;
+    InklingSlab* inkling_slab_ = nullptr;             // not owned: the engine's
     void inkling_attach_draft_(cudaStream_t stream);  // once, at the first forward: the FP8 head exists then
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.
