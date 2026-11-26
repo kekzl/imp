@@ -547,36 +547,29 @@ int paged_attention_fp8_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
     return hpc;
 }
 
-bool paged_attention_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                             half* O, const int* block_tables, const int* context_lens,
-                                             int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                             int block_size, float scale, float kv_scale, int max_num_blocks,
-                                             int sliding_window, float softcap, const half* attn_sinks,
-                                             int heads_per_cta, cudaStream_t stream) {
-    const int n_q_per_kv = (n_kv_heads > 0) ? n_heads / n_kv_heads : 0;
-    const int hpc = paged_attention_fp8_multitok_heads_per_cta(head_dim, n_q_per_kv, heads_per_cta);
+bool paged_attention_fp8_multitok_gqa_launch(const PagedDecodeArgs& a) {
+    const int n_q_per_kv = (a.n_kv_heads > 0) ? a.n_heads / a.n_kv_heads : 0;
+    const int hpc = paged_attention_fp8_multitok_heads_per_cta(a.head_dim, n_q_per_kv, a.heads_per_cta);
     if (hpc == 0)
         return false;
-    launch_gqa_hpc<false>(hpc, Q, K_cache, V_cache, O, nullptr, block_tables, context_lens, batch_size,
-                          n_heads, n_kv_heads, n_q_per_kv, block_size, scale, kv_scale, max_num_blocks, 1,
-                          sliding_window, softcap, attn_sinks, stream);
+    launch_gqa_hpc<false>(hpc, a.Q, static_cast<const uint8_t*>(a.K_cache),
+                          static_cast<const uint8_t*>(a.V_cache), a.O, nullptr, a.block_tables,
+                          a.context_lens, a.batch_size, a.n_heads, a.n_kv_heads, n_q_per_kv, a.block_size,
+                          a.scale, a.kv_scale, a.max_num_blocks, 1, a.sliding_window, a.softcap, a.attn_sinks,
+                          a.stream);
     return true;
 }
 
-bool paged_attention_splitk_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache,
-                                                    const uint8_t* V_cache, float* partial,
-                                                    const int* block_tables, const int* context_lens,
-                                                    int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                    int block_size, float scale, float kv_scale,
-                                                    int max_num_blocks, int num_splits, int sliding_window,
-                                                    float softcap, int heads_per_cta, cudaStream_t stream) {
-    const int n_q_per_kv = (n_kv_heads > 0) ? n_heads / n_kv_heads : 0;
-    const int hpc = paged_attention_fp8_multitok_heads_per_cta(head_dim, n_q_per_kv, heads_per_cta);
-    if (hpc == 0 || partial == nullptr || num_splits < 1)
+bool paged_attention_splitk_fp8_multitok_gqa_launch(const PagedDecodeArgs& a) {
+    const int n_q_per_kv = (a.n_kv_heads > 0) ? a.n_heads / a.n_kv_heads : 0;
+    const int hpc = paged_attention_fp8_multitok_heads_per_cta(a.head_dim, n_q_per_kv, a.heads_per_cta);
+    if (hpc == 0 || a.partial == nullptr || a.num_splits < 1)
         return false;
-    launch_gqa_hpc<true>(hpc, Q, K_cache, V_cache, nullptr, partial, block_tables, context_lens, batch_size,
-                         n_heads, n_kv_heads, n_q_per_kv, block_size, scale, kv_scale, max_num_blocks,
-                         num_splits, sliding_window, softcap, nullptr, stream);
+    launch_gqa_hpc<true>(hpc, a.Q, static_cast<const uint8_t*>(a.K_cache),
+                         static_cast<const uint8_t*>(a.V_cache), nullptr, a.partial, a.block_tables,
+                         a.context_lens, a.batch_size, a.n_heads, a.n_kv_heads, n_q_per_kv, a.block_size,
+                         a.scale, a.kv_scale, a.max_num_blocks, a.num_splits, a.sliding_window, a.softcap,
+                         nullptr, a.stream);
     return true;
 }
 

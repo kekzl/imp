@@ -954,6 +954,25 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                            ? paged_attention_f16_multitok_heads_per_cta(head_dim, n_q_per_kv_mt,
                                                                         process_diag_paged_f16_hpc())
                            : 0;
+    // Both F16 multitok launches; the split-K one adds partial + num_splits on a copy.
+    const PagedDecodeArgs mt_args{.Q = reinterpret_cast<const half*>(Q.data),
+                                  .K_cache = K_cache.data,
+                                  .V_cache = V_cache.data,
+                                  .O = reinterpret_cast<half*>(O.data),
+                                  .block_tables = block_tables,
+                                  .context_lens = context_lens,
+                                  .batch_size = batch_size,
+                                  .n_heads = n_heads,
+                                  .n_kv_heads = n_kv_heads,
+                                  .head_dim = head_dim,
+                                  .block_size = block_size,
+                                  .scale = scale,
+                                  .max_num_blocks = max_num_blocks,
+                                  .sliding_window = sliding_window,
+                                  .softcap = softcap,
+                                  .attn_sinks = sinks_h,
+                                  .heads_per_cta = mt_hpc,
+                                  .stream = stream};
     int total_blocks_nosplit = (mt_hpc > 0) ? batch_size * n_kv_heads * (n_q_per_kv_mt / mt_hpc)
                                             : batch_size * n_heads;
     // Without multitok the no-split kernel is paged_attention_gqa_kernel: batch * n_kv_heads CTAs,
@@ -1023,14 +1042,10 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
-        const bool mt_splitk_done = (mt_hpc > 0) &&
-                                    paged_attention_splitk_f16_multitok_launch(
-                                        reinterpret_cast<const half*>(Q.data),
-                                        reinterpret_cast<const half*>(K_cache.data),
-                                        reinterpret_cast<const half*>(V_cache.data), partial, block_tables,
-                                        context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size,
-                                        scale, max_num_blocks, num_splits, sliding_window, softcap, mt_hpc,
-                                        stream);
+        PagedDecodeArgs mt_split = mt_args;
+        mt_split.partial = partial;
+        mt_split.num_splits = num_splits;
+        const bool mt_splitk_done = (mt_hpc > 0) && paged_attention_splitk_f16_multitok_launch(mt_split);
         if (mt_splitk_done) {
             // one (m, l, o) partial per head; the reduce below is shared
         } else {
@@ -1099,11 +1114,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         if (n_q_per_kv <= MAX_Q_PER_KV) {
             bool f16_mt_done = false;
             if (mt_hpc > 0)
-                f16_mt_done = paged_attention_decode_f16_multitok_launch(
-                    reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
-                    reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
-                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size, scale,
-                    max_num_blocks, sliding_window, softcap, sinks_h, mt_hpc, stream);
+                f16_mt_done = paged_attention_decode_f16_multitok_launch(mt_args);
             if (!f16_mt_done) {
                 // GQA-aware kernel (cooperative, one CTA per KV head)
                 // Use 4 warps per Q head for ratio<=8 (1024 threads max),
