@@ -276,10 +276,27 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                                         static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
                                         n_groups, h_dtype, stream);
             else
-                ssm_scan_prefill(x_all, B_all, C_all, dt_all, ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st, y_all,
-                                 static_cast<const half*>(z_buf.data), n, n_heads, head_dim_ssm, ssize,
-                                 n_groups, h_dtype, stream, state.d_chunk_len, h_snap,
-                                 h_snap ? state.d_snap_n : nullptr, dispatch_policy().gdn.ssd_scan);
+                ssm_scan_prefill({.x = &x_all,
+                                  .B = &B_all,
+                                  .C = &C_all,
+                                  .dt = &dt_all,
+                                  .A_log = &ly.ssm_a,
+                                  .D = &ly.ssm_d,
+                                  .dt_bias = &ly.ssm_dt_b,
+                                  .h_state = h_st,
+                                  .y = &y_all,
+                                  .z = static_cast<const half*>(z_buf.data),
+                                  .n_tokens = n,
+                                  .n_heads = n_heads,
+                                  .head_dim_ssm = head_dim_ssm,
+                                  .state_size = ssize,
+                                  .n_groups = n_groups,
+                                  .h_dtype = h_dtype,
+                                  .stream = stream,
+                                  .d_real_n = state.d_chunk_len,
+                                  .h_snap = h_snap,
+                                  .d_snap_n = h_snap ? state.d_snap_n : nullptr,
+                                  .ssd = dispatch_policy().gdn.ssd_scan});
         }
     }
 
@@ -732,56 +749,65 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
                                       state.d_chunk_len == nullptr && gdn_ws_.chunkpar.get() != nullptr &&
                                       head_dim_ssm == 128 && ssize == 128 && h_snap == nullptr;
+            // The fields every route below passes; StateT follows the state pointer (FP32 or BF16 state).
+            auto scan_args = [&](auto* h_state, auto* snap) {
+                return GdnScanArgs<std::remove_pointer_t<decltype(h_state)>>{
+                    .conv_f32 = conv_f32,
+                    .conv_channels = conv_channels,
+                    .alpha = static_cast<const half*>(alpha_proj_out.data),
+                    .beta = static_cast<const half*>(beta_proj_out.data),
+                    .A_log = static_cast<const float*>(ly.ssm_a.data),
+                    .dt_bias = static_cast<const float*>(ly.ssm_dt_b.data),
+                    .h_state = h_state,
+                    .y = static_cast<half*>(y_buf.data),
+                    .n_tokens = n,
+                    .n_heads = n_heads,
+                    .head_dim_ssm = head_dim_ssm,
+                    .state_size = ssize,
+                    .n_groups = n_groups,
+                    .stream = stream,
+                    .grouped_layout = gl,
+                    .d_real_n = state.d_chunk_len,
+                    .h_snap = snap,
+                    .d_snap_n = h_snap ? state.d_snap_n : nullptr,
+                    .snap2_off = state.spec_snap2_off};
+            };
+            auto chunkpar_args = [&](auto* h_state) {
+                return GdnChunkparArgs<std::remove_pointer_t<decltype(h_state)>>{
+                    .conv_f32 = conv_f32,
+                    .conv_channels = conv_channels,
+                    .alpha = static_cast<const half*>(alpha_proj_out.data),
+                    .beta = static_cast<const half*>(beta_proj_out.data),
+                    .A_log = static_cast<const float*>(ly.ssm_a.data),
+                    .dt_bias = static_cast<const float*>(ly.ssm_dt_b.data),
+                    .h_state = h_state,
+                    .y = static_cast<half*>(y_buf.data),
+                    .n_tokens = n,
+                    .n_heads = n_heads,
+                    .head_dim_ssm = head_dim_ssm,
+                    .state_size = ssize,
+                    .n_groups = n_groups,
+                    .stream = stream,
+                    .grouped_layout = gl,
+                    .ws = static_cast<float*>(gdn_ws_.chunkpar.get()),
+                    .ws_bytes = gdn_ws_.chunkpar_bytes,
+                    .strip_chunks = imp::cfg::kGdnChunkparStrip};
+            };
             if (use_chunkpar) {
-                if (state_bf16) {
-                    gdn_scan_chunkpar_bf16(conv_f32, conv_channels,
-                                           static_cast<const half*>(alpha_proj_out.data),
-                                           static_cast<const half*>(beta_proj_out.data),
-                                           static_cast<const float*>(ly.ssm_a.data),
-                                           static_cast<const float*>(ly.ssm_dt_b.data),
-                                           static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data),
-                                           n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
-                                           static_cast<float*>(gdn_ws_.chunkpar.get()),
-                                           gdn_ws_.chunkpar_bytes, imp::cfg::kGdnChunkparStrip);
-                } else {
-                    gdn_scan_chunkpar_f32(conv_f32, conv_channels,
-                                          static_cast<const half*>(alpha_proj_out.data),
-                                          static_cast<const half*>(beta_proj_out.data),
-                                          static_cast<const float*>(ly.ssm_a.data),
-                                          static_cast<const float*>(ly.ssm_dt_b.data),
-                                          static_cast<float*>(h_st), static_cast<half*>(y_buf.data), n,
-                                          n_heads, head_dim_ssm, ssize, n_groups, stream, gl,
-                                          static_cast<float*>(gdn_ws_.chunkpar.get()), gdn_ws_.chunkpar_bytes,
-                                          imp::cfg::kGdnChunkparStrip);
-                }
+                if (state_bf16)
+                    gdn_scan_chunkpar_bf16(chunkpar_args(static_cast<__nv_bfloat16*>(h_st)));
+                else
+                    gdn_scan_chunkpar_f32(chunkpar_args(static_cast<float*>(h_st)));
             } else if (use_chunkwise) {
-                gdn_scan_chunkwise_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                                       static_cast<const half*>(beta_proj_out.data),
-                                       static_cast<const float*>(ly.ssm_a.data),
-                                       static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                                       static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize,
-                                       n_groups, stream, /*chunk_size=*/64, gl, state.d_chunk_len,
-                                       static_cast<float*>(h_snap), h_snap ? state.d_snap_n : nullptr,
-                                       state.spec_snap2_off);
+                gdn_scan_chunkwise_f32(scan_args(static_cast<float*>(h_st), static_cast<float*>(h_snap)),
+                                       /*chunk_size=*/64);
             } else if (state_bf16) {
-                gdn_scan_fused_bf16(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                                    static_cast<const half*>(beta_proj_out.data),
-                                    static_cast<const float*>(ly.ssm_a.data),
-                                    static_cast<const float*>(ly.ssm_dt_b.data),
-                                    static_cast<__nv_bfloat16*>(h_st), static_cast<half*>(y_buf.data), n,
-                                    n_heads, head_dim_ssm, ssize, n_groups, stream, gl, state.d_chunk_len,
-                                    static_cast<__nv_bfloat16*>(h_snap), h_snap ? state.d_snap_n : nullptr,
-                                    state.spec_snap2_off);
+                gdn_scan_fused_bf16(
+                    scan_args(static_cast<__nv_bfloat16*>(h_st), static_cast<__nv_bfloat16*>(h_snap)));
             } else {
                 // The verify snapshot (h_snap) goes to every default-path scan: without it a
                 // matched==0 verify adopted an unwritten slab.
-                gdn_scan_fused_f32(conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                                   static_cast<const half*>(beta_proj_out.data),
-                                   static_cast<const float*>(ly.ssm_a.data),
-                                   static_cast<const float*>(ly.ssm_dt_b.data), static_cast<float*>(h_st),
-                                   static_cast<half*>(y_buf.data), n, n_heads, head_dim_ssm, ssize, n_groups,
-                                   stream, gl, state.d_chunk_len, static_cast<float*>(h_snap),
-                                   h_snap ? state.d_snap_n : nullptr, state.spec_snap2_off);
+                gdn_scan_fused_f32(scan_args(static_cast<float*>(h_st), static_cast<float*>(h_snap)));
             }
         }
     }

@@ -113,14 +113,66 @@ void check_snapshot_is_row_state(int variant, int rows = kRows, int snap_row = 1
     auto scan = [&](int v, StateT* h, int n, StateT* snap, const int* snap_n, int64_t off = 0) {
         if constexpr (std::is_same_v<StateT, float>) {
             if (v == kFusedF32)
-                gdn_scan_fused_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
-                                   kHeadDim, kStateSize, kGroups, 0, 0, nullptr, snap, snap_n, off);
+                gdn_scan_fused_f32({.conv_f32 = d_conv,
+                                    .conv_channels = conv_channels,
+                                    .alpha = d_a,
+                                    .beta = d_b,
+                                    .A_log = d_Alog,
+                                    .dt_bias = d_dtb,
+                                    .h_state = h,
+                                    .y = y16,
+                                    .n_tokens = n,
+                                    .n_heads = kHeads,
+                                    .head_dim_ssm = kHeadDim,
+                                    .state_size = kStateSize,
+                                    .n_groups = kGroups,
+                                    .stream = 0,
+                                    .grouped_layout = 0,
+                                    .d_real_n = nullptr,
+                                    .h_snap = snap,
+                                    .d_snap_n = snap_n,
+                                    .snap2_off = off});
             else
-                gdn_scan_chunkwise_f32(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads,
-                                       kHeadDim, kStateSize, kGroups, 0, 64, 0, nullptr, snap, snap_n, off);
+                gdn_scan_chunkwise_f32({.conv_f32 = d_conv,
+                                        .conv_channels = conv_channels,
+                                        .alpha = d_a,
+                                        .beta = d_b,
+                                        .A_log = d_Alog,
+                                        .dt_bias = d_dtb,
+                                        .h_state = h,
+                                        .y = y16,
+                                        .n_tokens = n,
+                                        .n_heads = kHeads,
+                                        .head_dim_ssm = kHeadDim,
+                                        .state_size = kStateSize,
+                                        .n_groups = kGroups,
+                                        .stream = 0,
+                                        .grouped_layout = 0,
+                                        .d_real_n = nullptr,
+                                        .h_snap = snap,
+                                        .d_snap_n = snap_n,
+                                        .snap2_off = off},
+                                       64);
         } else {
-            gdn_scan_fused_bf16(d_conv, conv_channels, d_a, d_b, d_Alog, d_dtb, h, y16, n, kHeads, kHeadDim,
-                                kStateSize, kGroups, 0, 0, nullptr, snap, snap_n, off);
+            gdn_scan_fused_bf16({.conv_f32 = d_conv,
+                                 .conv_channels = conv_channels,
+                                 .alpha = d_a,
+                                 .beta = d_b,
+                                 .A_log = d_Alog,
+                                 .dt_bias = d_dtb,
+                                 .h_state = h,
+                                 .y = y16,
+                                 .n_tokens = n,
+                                 .n_heads = kHeads,
+                                 .head_dim_ssm = kHeadDim,
+                                 .state_size = kStateSize,
+                                 .n_groups = kGroups,
+                                 .stream = 0,
+                                 .grouped_layout = 0,
+                                 .d_real_n = nullptr,
+                                 .h_snap = snap,
+                                 .d_snap_n = snap_n,
+                                 .snap2_off = off});
         }
     };
     scan(variant, d_chunk_h, rows, d_snap, d_snap_n, snap2_off);

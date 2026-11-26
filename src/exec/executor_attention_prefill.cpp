@@ -107,10 +107,13 @@
                                                                  layer_sliding_window, attn_sinks, stream);
             // APA straight from the FP16 paged cache: no gather, no K/V scratch (FP16 cache only). Tile
             // cache only over the uncompacted past.
-            if (try_apa_paged_prefill(dispatch_policy(), cap_replay, seq_q, cache, kv_layer, past_bt, kv_bs, seq_k,
-                                      seq_v, att_off, seq_ao, seq_n, nh, nkv, hd, scale, layer_sliding_window,
-                                      cfg.attn_logit_softcap, stream, attn_sinks,
-                                      att_off == q_offset ? state.prefill_req_id : -1)) {
+            if (try_apa_paged_prefill({.rcfg = &dispatch_policy(), .cap_replay = cap_replay, .q = &seq_q,
+                                       .cache = cache, .kv_layer = kv_layer, .past_bt = past_bt, .kv_bs = kv_bs,
+                                       .kk = &seq_k, .vv = &seq_v, .att_off = att_off, .o = &seq_ao, .n = seq_n,
+                                       .nh = nh, .nkv = nkv, .hd = hd, .scale = scale,
+                                       .sliding_window = layer_sliding_window, .softcap = cfg.attn_logit_softcap,
+                                       .stream = stream, .sinks = attn_sinks,
+                                       .owner = att_off == q_offset ? state.prefill_req_id : -1})) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::APA);
                 write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
                 return;

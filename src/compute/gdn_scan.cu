@@ -216,28 +216,31 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
     }
 }
 
-void gdn_scan_chunkwise_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                            int chunk_size, int grouped_layout, const int* d_real_n, float* h_snap,
-                            const int* d_snap_n, int64_t snap2_off) {
+void gdn_scan_chunkwise_f32(const GdnScanArgs<float>& a, int chunk_size) {
     // Snapshot row d_snap_n is in whole-range coordinates and the chunkwise kernel has no snapshot
     // write: a snapshot request runs the whole range as one fused scan (#2214).
-    if (h_snap) {
-        gdn_scan_fused_f32(conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
-                           n_heads, head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n,
-                           h_snap, d_snap_n, snap2_off);
+    if (a.h_snap) {
+        gdn_scan_fused_f32(a);
         return;
     }
-    gdn_scan_chunkwise_dispatch<half>(
-        conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads, head_dim_ssm,
-        state_size, n_groups, stream, chunk_size, grouped_layout, d_real_n,
-        [&](const float* row_conv, const half* row_alpha, const half* row_beta, float* h_state_, half* y_,
-            int n_tok_chunk, const int* d_real_n_chunk) {
-            gdn_scan_fused_f32(row_conv, conv_channels, row_alpha, row_beta, A_log, dt_bias, h_state_, y_,
-                               n_tok_chunk, n_heads, head_dim_ssm, state_size, n_groups, stream,
-                               grouped_layout, d_real_n_chunk, h_snap, d_snap_n);
-        });
+    // One chunk: a's shape with the chunk's rows; snap2_off 0 as in the old call (h_snap is null here).
+    auto fused_chunk = [&](const float* row_conv, const half* row_alpha, const half* row_beta,
+                           float* h_state_, half* y_, int n_tok_chunk, const int* d_real_n_chunk) {
+        GdnScanArgs<float> c = a;
+        c.conv_f32 = row_conv;
+        c.alpha = row_alpha;
+        c.beta = row_beta;
+        c.h_state = h_state_;
+        c.y = y_;
+        c.n_tokens = n_tok_chunk;
+        c.d_real_n = d_real_n_chunk;
+        c.snap2_off = 0;
+        gdn_scan_fused_f32(c);
+    };
+    gdn_scan_chunkwise_dispatch<half>(a.conv_f32, a.conv_channels, a.alpha, a.beta, a.A_log, a.dt_bias,
+                                      a.h_state, a.y, a.n_tokens, a.n_heads, a.head_dim_ssm, a.state_size,
+                                      a.n_groups, a.stream, chunk_size, a.grouped_layout, a.d_real_n,
+                                      fused_chunk);
 }
 
 }  // namespace imp

@@ -414,11 +414,10 @@ void gdn_scan_fused_bf16_batched(const GdnScanBatchedArgs<__nv_bfloat16>& a) {
 // (g=h/n_v_per_k). Single-sequence HD=SS=128 launches run SPLIT=2 (255 regs+88-96B local frame
 // at SPLIT=1 vs 180 regs, none, at SPLIT=2); launched through launch_scan128.
 
-void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                        const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
-                        int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                        int grouped_layout, const int* d_real_n, float* h_snap, const int* d_snap_n,
-                        int64_t snap2_off) {
+void gdn_scan_fused_f32(const GdnScanArgs<float>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                 head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n, h_snap, d_snap_n,
+                 snap2_off] = a;
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
     size_t smem = ((2 * state_size) + head_dim_ssm) * sizeof(float);
 
@@ -463,11 +462,10 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 
 // BF16-state twin of gdn_scan_fused_f32 (prefill / single-sequence path).
 // HD=SS=128 only — see the batched twin's comment.
-void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
-                         int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                         cudaStream_t stream, int grouped_layout, const int* d_real_n, __nv_bfloat16* h_snap,
-                         const int* d_snap_n, int64_t snap2_off) {
+void gdn_scan_fused_bf16(const GdnScanArgs<__nv_bfloat16>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state, y, n_tokens, n_heads,
+                 head_dim_ssm, state_size, n_groups, stream, grouped_layout, d_real_n, h_snap, d_snap_n,
+                 snap2_off] = a;
     if (head_dim_ssm != 128 || state_size != 128)
         throw std::runtime_error("gdn_scan_fused_bf16: no kernel for HD=" + std::to_string(head_dim_ssm) +
                                  " SS=" + std::to_string(state_size));
