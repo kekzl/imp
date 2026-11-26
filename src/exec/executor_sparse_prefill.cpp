@@ -2,6 +2,7 @@
 // per-chunk past-page pick the chunked prefill path calls. Kernels: sparse_attn_select.cu.
 
 #include "core/dispatch_policy.h"
+#include "core/fallback_site.h"
 #include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -14,6 +15,7 @@ namespace imp {
 
 namespace {
 constexpr int kPrefillRows = 64;  // kMaxPrefillRows in sparse_attn_select.cu
+FallbackSite s_fb_sparse_prefill{"sparse_prefill_scratch"};
 }  // namespace
 
 void GraphExecutor::allocate_sparse_prefill_scratch_() {
@@ -31,7 +33,13 @@ void GraphExecutor::allocate_sparse_prefill_scratch_() {
     StableSpan<std::byte> ctx = engine_arena().take_bytes(2 *
                                                           sizeof(int));  // [past len in, selected len out]
     if (sc.empty() || agg.empty() || tbl.empty() || ctx.empty()) {
-        IMP_LOG_WARN("sparse prefill scratch unavailable from the T2 arena - feature disabled");
+        IMP_FALLBACK_WARN(
+            s_fb_sparse_prefill,
+            "sparse prefill scratch (%.2f MiB) not taken from the T2 arena: sparse prefill off, "
+            "dense prefill attention instead",
+            static_cast<double>((static_cast<size_t>(kPrefillRows + 1) * cap * sizeof(float)) +
+                                (static_cast<size_t>(cap) * sizeof(int)) + (2 * sizeof(int))) /
+                (1024.0 * 1024.0));
         return;
     }
     qscratch_.sp_prefill_scores = sc.as<float>();

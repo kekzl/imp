@@ -158,7 +158,6 @@
                 mw.N = static_cast<int>(wh->shape[0]);
                 mw.K = static_cast<int>(wh->shape[1]);
                 mw.sf_bytes = cutlass_mxfp4_sf_size(mw.N, mw.K);
-                mw.owns_data = false;
                 return mw;
             };
             auto mw_q = make_mxfp4(mxfp4_hwq);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>

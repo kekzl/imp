@@ -9,6 +9,7 @@
 #include "compute/layernorm.h"
 #include "core/logging.h"
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "exec/executor_debug.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"

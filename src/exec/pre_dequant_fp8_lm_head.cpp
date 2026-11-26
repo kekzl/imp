@@ -5,6 +5,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/config/lm_head_mode.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "core/qtype.h"
 #include "quant/dequant_gpu.h"
@@ -16,6 +17,8 @@
 #include <cstdint>
 
 namespace imp {
+
+static FallbackSite s_fb_fp8_lm_head{"fp8_lm_head"};
 
 void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     const LmHeadMode mode = lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head);
@@ -57,8 +60,10 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     auto bulk_own = DeviceOwned<uint8_t>::allocate(vram_alloc_, total, "fp8_lm_head", /*force=*/true);
     uint8_t* bulk = bulk_own.get();
     if (!bulk) {
-        IMP_LOG_WARN("FP8 LM head: alloc of %.1f MiB failed; the head keeps its source path",
-                     total / (1024.0 * 1024.0));
+        IMP_FALLBACK_WARN(
+            s_fb_fp8_lm_head,
+            "FP8 LM head: alloc of %.1f MiB failed: FP8 head off, the head keeps its %s source path",
+            total / (1024.0 * 1024.0), qtype_name(q));
         return;
     }
     auto* scales = reinterpret_cast<float*>(bulk + code_bytes);
@@ -71,7 +76,11 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
             std::min<size_t>(rows, qscratch_->dequant_size / (static_cast<size_t>(cols) * sizeof(half))));
         if (slab <= 0) {
             bulk_own.reset();
-            IMP_LOG_WARN("FP8 LM head: dequant scratch below one row; the head keeps its source path");
+            IMP_FALLBACK_WARN(
+                s_fb_fp8_lm_head,
+                "FP8 LM head: dequant scratch below one %d-column row: FP8 head off, the head keeps "
+                "its %s source path",
+                cols, qtype_name(q));
             return;
         }
         // Serialized on `stream`: each slab's quantize finishes before the next dequant reuses the scratch.

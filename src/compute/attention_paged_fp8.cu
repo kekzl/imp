@@ -425,10 +425,25 @@ static bool fp8_gqa_decode(const Tensor& Q, const Tensor& K_cache, const Tensor&
     if (s <= 1 || (num_ctx_blocks + s - 1) / s < NUM_WARPS || sk_ptr == nullptr || needed > sk_size)
         return false;
     float* partial = static_cast<float*>(sk_ptr);
-    if (!paged_attention_splitk_fp8_multitok_gqa_launch(q, k, v, partial, block_tables, context_lens,
-                                                        batch_size, n_heads, n_kv_heads, head_dim, block_size,
-                                                        scale, kv_scale, max_num_blocks, s, sliding_window,
-                                                        softcap, hpc, stream))
+    if (!paged_attention_splitk_fp8_multitok_gqa_launch({.Q = q,
+                                                         .K_cache = k,
+                                                         .V_cache = v,
+                                                         .partial = partial,
+                                                         .block_tables = block_tables,
+                                                         .context_lens = context_lens,
+                                                         .batch_size = batch_size,
+                                                         .n_heads = n_heads,
+                                                         .n_kv_heads = n_kv_heads,
+                                                         .head_dim = head_dim,
+                                                         .block_size = block_size,
+                                                         .scale = scale,
+                                                         .kv_scale = kv_scale,
+                                                         .max_num_blocks = max_num_blocks,
+                                                         .num_splits = s,
+                                                         .sliding_window = sliding_window,
+                                                         .softcap = softcap,
+                                                         .heads_per_cta = hpc,
+                                                         .stream = stream}))
         return false;
     paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim, s,
                                   stream, sinks_h, q8_epi);
@@ -479,11 +494,24 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
             // Q heads from one shared smem tile, cutting KV L2 traffic by G). Split count re-derived nearby.
             num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads,
                                                                     head_dim, block_size, max_context_len);
-            paged_attention_splitk_fp8_tile_gqa_launch(
-                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
-                reinterpret_cast<const uint8_t*>(V_cache.data), partial, block_tables, context_lens,
-                batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
-                sliding_window, softcap, stream);
+            paged_attention_splitk_fp8_tile_gqa_launch({.Q = reinterpret_cast<const half*>(Q.data),
+                                                        .K_cache = K_cache.data,
+                                                        .V_cache = V_cache.data,
+                                                        .partial = partial,
+                                                        .block_tables = block_tables,
+                                                        .context_lens = context_lens,
+                                                        .batch_size = batch_size,
+                                                        .n_heads = n_heads,
+                                                        .n_kv_heads = n_kv_heads,
+                                                        .head_dim = head_dim,
+                                                        .block_size = block_size,
+                                                        .scale = scale,
+                                                        .kv_scale = kv_scale,
+                                                        .max_num_blocks = max_num_blocks,
+                                                        .num_splits = num_splits,
+                                                        .sliding_window = sliding_window,
+                                                        .softcap = softcap,
+                                                        .stream = stream});
         } else if (paged_attention_splitk_fp8_tile_supported(head_dim, block_size)) {
             // Token-tiled variant (attention_paged_fp8_tile.cu): bulk-staged KV pages instead of per-token
             // latency chain. hd=128, block_size multiple of 16.
@@ -502,11 +530,24 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
                 }
                 num_splits = best_s;
             }
-            paged_attention_splitk_fp8_tile_launch(
-                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
-                reinterpret_cast<const uint8_t*>(V_cache.data), partial, block_tables, context_lens,
-                batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
-                sliding_window, softcap, stream);
+            paged_attention_splitk_fp8_tile_launch({.Q = reinterpret_cast<const half*>(Q.data),
+                                                    .K_cache = K_cache.data,
+                                                    .V_cache = V_cache.data,
+                                                    .partial = partial,
+                                                    .block_tables = block_tables,
+                                                    .context_lens = context_lens,
+                                                    .batch_size = batch_size,
+                                                    .n_heads = n_heads,
+                                                    .n_kv_heads = n_kv_heads,
+                                                    .head_dim = head_dim,
+                                                    .block_size = block_size,
+                                                    .scale = scale,
+                                                    .kv_scale = kv_scale,
+                                                    .max_num_blocks = max_num_blocks,
+                                                    .num_splits = num_splits,
+                                                    .sliding_window = sliding_window,
+                                                    .softcap = softcap,
+                                                    .stream = stream});
         } else {
             size_t pipe_smem = static_cast<int64_t>(NUM_WARPS * 3) * head_dim;
             size_t launch_smem = (pipe_smem > smem_bytes) ? pipe_smem : smem_bytes;
@@ -574,22 +615,28 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
                     // The grouped kernel first (hpc -1 = the per-head
                     // four-token kernel below, for tests), the four-token
                     // kernel for the shapes it does not serve.
-                    if (process_diag_paged_fp8_hpc() >= 0 &&
-                        paged_attention_fp8_multitok_gqa_launch(
-                            reinterpret_cast<const half*>(Q.data),
-                            reinterpret_cast<const uint8_t*>(K_cache.data),
-                            reinterpret_cast<const uint8_t*>(V_cache.data), reinterpret_cast<half*>(O.data),
-                            block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, block_size,
-                            scale, kv_scale, max_num_blocks, sliding_window, softcap, sinks_h,
-                            process_diag_paged_fp8_hpc(), stream))
+                    PagedDecodeArgs mt{.Q = reinterpret_cast<const half*>(Q.data),
+                                       .K_cache = K_cache.data,
+                                       .V_cache = V_cache.data,
+                                       .O = reinterpret_cast<half*>(O.data),
+                                       .block_tables = block_tables,
+                                       .context_lens = context_lens,
+                                       .batch_size = batch_size,
+                                       .n_heads = n_heads,
+                                       .n_kv_heads = n_kv_heads,
+                                       .head_dim = head_dim,
+                                       .block_size = block_size,
+                                       .scale = scale,
+                                       .kv_scale = kv_scale,
+                                       .max_num_blocks = max_num_blocks,
+                                       .sliding_window = sliding_window,
+                                       .softcap = softcap,
+                                       .attn_sinks = sinks_h,
+                                       .heads_per_cta = process_diag_paged_fp8_hpc(),
+                                       .stream = stream};
+                    if (mt.heads_per_cta >= 0 && paged_attention_fp8_multitok_gqa_launch(mt))
                         break;
-                    paged_attention_decode_fp8_multitok_hd128(reinterpret_cast<const half*>(Q.data),
-                                                              reinterpret_cast<const uint8_t*>(K_cache.data),
-                                                              reinterpret_cast<const uint8_t*>(V_cache.data),
-                                                              reinterpret_cast<half*>(O.data), block_tables,
-                                                              context_lens, batch_size, n_heads, n_kv_heads,
-                                                              block_size, scale, kv_scale, max_num_blocks,
-                                                              sliding_window, softcap, sinks_h, stream);
+                    paged_attention_decode_fp8_multitok_hd128(mt);  // per head: ignores heads_per_cta
                 } else {
                     LAUNCH_FP8_FALLBACK(128);
                 }

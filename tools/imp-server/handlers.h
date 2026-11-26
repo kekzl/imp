@@ -454,6 +454,8 @@ void append_memory_metrics(std::string& out, imp::Engine* engine, const imp::Eng
 // from start_power_metrics() (server start).
 void start_power_metrics();
 void append_power_metrics(std::string& out);
+// imp_fallback_total{site=...}: hits of every designed fallback (core/fallback_site.h, B-108).
+void append_fallback_metrics(std::string& out);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
 // POST /v1/rerank (also /rerank) — Cohere/Jina/vLLM-compatible reranking.

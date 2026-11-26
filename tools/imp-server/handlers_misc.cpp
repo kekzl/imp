@@ -297,6 +297,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
 
     append_memory_metrics(out, scrape.engine, es);
     append_power_metrics(out);
+    append_fallback_metrics(out);
 
     // Emits a Prometheus histogram (cumulative _bucket{le=...}, _sum, _count; seconds). `labels` is
     // the label set without the trailing `le` (empty for the unlabelled totals).

@@ -396,6 +396,7 @@ bool Engine::init_weights() {
     // Phase 2: allocate GPU workspace
     inkling_load_vision_();
     executor_->set_inkling_lookahead(inkling_lookahead_);
+    executor_->set_inkling_slab(&inkling_slab_);
     if (!executor_->allocate_workspaces(experts_on_host_)) {
         IMP_LOG_ERROR("executor workspace allocation failed, refusing to load (audit C-11)");
         return false;

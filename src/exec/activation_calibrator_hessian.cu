@@ -3,6 +3,7 @@
 
 #include "exec/activation_calibrator.h"
 #include "compute/gemm_lt_ex.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "quant/calibration_hessian.h"
 
@@ -12,6 +13,8 @@
 #include <vector>
 
 namespace imp {
+
+static FallbackSite s_fb_calib_hessian{"calib_hessian_vram"};
 
 void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const Tensor& input,
                                                int64_t row_stride, cudaStream_t stream) {
@@ -27,8 +30,10 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
         const size_t bytes = static_cast<size_t>(K) * static_cast<size_t>(K) * sizeof(float);
         e.d_H = VramOwned<float>(*alloc_, bytes / sizeof(float), "calibration_hessian");
         if (!e.d_H) {
-            IMP_LOG_WARN("calibration: no VRAM for the %.1f MiB Hessian of layer %d kind %s",
-                         bytes / 1048576.0, layer, tensor_kind_name(kind));
+            IMP_FALLBACK_WARN(s_fb_calib_hessian,
+                              "calibration: no VRAM for the %.1f MiB Hessian of layer %d kind %s: no Hessian "
+                              "written, imp-quantize rounds that weight RTN instead of GPTQ",
+                              bytes / 1048576.0, layer, tensor_kind_name(kind));
             return;
         }
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_H.get(), 0, bytes, stream));

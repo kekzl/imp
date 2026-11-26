@@ -11,6 +11,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_quant.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 
@@ -24,6 +25,8 @@ using imp::pre_dequant_internal::deduct_budget;
 using imp::pre_dequant_internal::for_each_dense_weight;
 
 namespace imp {
+
+static FallbackSite s_fb_fp8_ssm{"fp8_ssm_sidecar"};
 
 void QuantPipeline::pre_dequant_phase2_fp8_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
@@ -304,8 +307,10 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     uint8_t* d_bulk = bulk_own.get();
     if (!d_bulk) {
         cudaError_t e = cudaGetLastError();
-        IMP_LOG_WARN("fp8_ssm_proj: sidecar alloc failed (%.1f MiB): %s — decode keeps FP16",
-                     total_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
+        IMP_FALLBACK_WARN(s_fb_fp8_ssm,
+                          "fp8_ssm_proj: sidecar alloc failed (%.1f MiB): %s: FP8 SSM projections off, "
+                          "decode reads the FP16 weights (2x the bytes)",
+                          total_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
         return;
     }
 
@@ -319,7 +324,11 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     float* d_row_scales = row_scales_own.get();
     if (!d_row_scales) {
         bulk_own.reset();
-        IMP_LOG_WARN("fp8_ssm_proj: row-scale alloc failed — decode keeps FP16");
+        IMP_FALLBACK_WARN(
+            s_fb_fp8_ssm,
+            "fp8_ssm_proj: row-scale alloc failed (%.1f KiB): FP8 SSM projections off, decode reads "
+            "the FP16 weights (2x the bytes)",
+            (total_rows * sizeof(float)) / 1024.0);
         return;
     }
 
