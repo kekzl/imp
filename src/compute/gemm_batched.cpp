@@ -57,16 +57,28 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
         return;
     }
 
-    cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, M,
-                                                K,                              // cuBLAS m, n, k
-                                                &alpha, weight_kv.data, dt, K,  // A (weight), lda=K
-                                                weight_stride,                  // strideA: offset to wv
-                                                input.data, dt, K,              // B (input), ldb=K
-                                                0,                         // strideB: 0 (same input for both)
-                                                &beta, k_out.data, dt, N,  // C (output), ldc=N
-                                                output_stride,             // strideC: offset to v_out
-                                                2,                         // batch_count = 2 (K and V)
-                                                lt_compute_32f(dt), stream);
+    cublasStatus_t st = lt_gemm_strided_batched({.transa = CUBLAS_OP_T,
+                                                 .transb = CUBLAS_OP_N,
+                                                 .m = N,
+                                                 .n = M,
+                                                 .k = K,
+                                                 .alpha = &alpha,
+                                                 .A = weight_kv.data,  // weight
+                                                 .a_type = dt,
+                                                 .lda = K,
+                                                 .stride_a = weight_stride,  // offset to wv
+                                                 .B = input.data,
+                                                 .b_type = dt,
+                                                 .ldb = K,
+                                                 .stride_b = 0,  // same input for both
+                                                 .beta = &beta,
+                                                 .C = k_out.data,
+                                                 .c_type = dt,
+                                                 .ldc = N,
+                                                 .stride_c = output_stride,  // offset to v_out
+                                                 .batch = 2,                 // K and V
+                                                 .compute = lt_compute_32f(dt),
+                                                 .stream = stream});
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_ERROR("imp::gemm_kv_batched: lt_gemm_strided_batched failed (status %d)", (int)st);
@@ -87,9 +99,28 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     long long output_stride = (static_cast<const char*>(out2.data) - static_cast<const char*>(out1.data)) /
                               dtype_size(input.qtype);
 
-    cublasStatus_t st = lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, weight_fused.data,
-                                                dt, K, weight_stride, input.data, dt, K, 0, &beta, out1.data,
-                                                dt, N, output_stride, 2, lt_compute_32f(dt), stream);
+    cublasStatus_t st = lt_gemm_strided_batched({.transa = CUBLAS_OP_T,
+                                                 .transb = CUBLAS_OP_N,
+                                                 .m = N,
+                                                 .n = M,
+                                                 .k = K,
+                                                 .alpha = &alpha,
+                                                 .A = weight_fused.data,
+                                                 .a_type = dt,
+                                                 .lda = K,
+                                                 .stride_a = weight_stride,
+                                                 .B = input.data,
+                                                 .b_type = dt,
+                                                 .ldb = K,
+                                                 .stride_b = 0,
+                                                 .beta = &beta,
+                                                 .C = out1.data,
+                                                 .c_type = dt,
+                                                 .ldc = N,
+                                                 .stride_c = output_stride,
+                                                 .batch = 2,
+                                                 .compute = lt_compute_32f(dt),
+                                                 .stream = stream});
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_ERROR("imp::gemm_pair_batched: lt_gemm_strided_batched failed (status %d)", (int)st);

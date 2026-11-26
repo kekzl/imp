@@ -66,9 +66,28 @@ TEST(LtGemmEx, StridedBatchSharedAOddLd) {
     float* dc = nullptr;
     ASSERT_EQ(cudaMalloc(&dc, sizeof(float) * m * n * batch), cudaSuccess);
     const float one = 1.0f, zero = 0.0f;
-    ASSERT_EQ(lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &one, da, CUDA_R_16F, lda, 0, db,
-                                      CUDA_R_16F, k, static_cast<long long>(k) * n, &zero, dc, CUDA_R_32F, m,
-                                      static_cast<long long>(m) * n, batch, CUBLAS_COMPUTE_32F, nullptr),
+    ASSERT_EQ(lt_gemm_strided_batched({.transa = CUBLAS_OP_N,
+                                       .transb = CUBLAS_OP_N,
+                                       .m = m,
+                                       .n = n,
+                                       .k = k,
+                                       .alpha = &one,
+                                       .A = da,
+                                       .a_type = CUDA_R_16F,
+                                       .lda = lda,
+                                       .stride_a = 0,
+                                       .B = db,
+                                       .b_type = CUDA_R_16F,
+                                       .ldb = k,
+                                       .stride_b = static_cast<long long>(k) * n,
+                                       .beta = &zero,
+                                       .C = dc,
+                                       .c_type = CUDA_R_32F,
+                                       .ldc = m,
+                                       .stride_c = static_cast<long long>(m) * n,
+                                       .batch = batch,
+                                       .compute = CUBLAS_COMPUTE_32F,
+                                       .stream = nullptr}),
               CUBLAS_STATUS_SUCCESS);
     const auto c = download(dc, static_cast<size_t>(m) * n * batch);
     double worst = 0.0;

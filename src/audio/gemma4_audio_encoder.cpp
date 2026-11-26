@@ -18,8 +18,24 @@ namespace {
 void gemm_nt(const half* A, const half* B, half* C, int M, int N, int K, cudaStream_t stream) {
     const float one = 1.0f;
     const float zero = 0.0f;
-    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &one, B, CUDA_R_16F, K, A, CUDA_R_16F,
-                                    K, &zero, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F, stream));
+    IMP_CUBLAS_CHECK_LOG(lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                     .transb = CUBLAS_OP_N,
+                                     .m = N,
+                                     .n = M,
+                                     .k = K,
+                                     .alpha = &one,
+                                     .A = B,
+                                     .a_type = CUDA_R_16F,
+                                     .lda = K,
+                                     .B = A,
+                                     .b_type = CUDA_R_16F,
+                                     .ldb = K,
+                                     .beta = &zero,
+                                     .C = C,
+                                     .c_type = CUDA_R_16F,
+                                     .ldc = N,
+                                     .compute = CUBLAS_COMPUTE_32F,
+                                     .stream = stream}));
 }
 
 int half_len(int n) { return ((n - 1) / 2) + 1; }  // Conv k3 s2 p1 output length

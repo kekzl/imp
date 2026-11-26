@@ -207,9 +207,24 @@ struct InverseCholesky {
     static int64_t split(int64_t n) { return (n / 2 + kDiag - 1) / kDiag * kDiag; }
     bool gemm(cublasOperation_t ta, cublasOperation_t tb, int64_t m, int64_t n, int64_t k, float alpha,
               const float* A, int lda, const float* B, int ldb, float beta, float* C, int ldc) const {
-        return lt_gemm_ex(ta, tb, static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), &alpha, A,
-                          CUDA_R_32F, lda, B, CUDA_R_32F, ldb, &beta, C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F,
-                          nullptr) == CUBLAS_STATUS_SUCCESS;
+        return lt_gemm_ex({.transa = ta,
+                           .transb = tb,
+                           .m = static_cast<int>(m),
+                           .n = static_cast<int>(n),
+                           .k = static_cast<int>(k),
+                           .alpha = &alpha,
+                           .A = A,
+                           .a_type = CUDA_R_32F,
+                           .lda = lda,
+                           .B = B,
+                           .b_type = CUDA_R_32F,
+                           .ldb = ldb,
+                           .beta = &beta,
+                           .C = C,
+                           .c_type = CUDA_R_32F,
+                           .ldc = ldc,
+                           .compute = CUBLAS_COMPUTE_32F,
+                           .stream = nullptr}) == CUBLAS_STATUS_SUCCESS;
     }
 
     bool run(int64_t j0, int64_t n) const {
@@ -275,12 +290,42 @@ double quad_loss(const float* e, const float* H, float* eh, float* d_dot, int64_
     // Column-major view: E^T [K, N]; (E H)^T = H E^T (H symmetric); the dot as a 1 x 1 GEMM.
     float dot = 0.0f;
     const bool ok = N * K <= INT32_MAX &&
-                    lt_gemm_ex(CUBLAS_OP_N, CUBLAS_OP_N, k, static_cast<int>(N), k, &one, H, CUDA_R_32F, k, e,
-                               CUDA_R_32F, k, &zero, eh, CUDA_R_32F, k, CUBLAS_COMPUTE_32F,
-                               nullptr) == CUBLAS_STATUS_SUCCESS &&
-                    lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, 1, 1, nk, &one, e, CUDA_R_32F, nk, eh, CUDA_R_32F,
-                               nk, &zero, d_dot, CUDA_R_32F, 1, CUBLAS_COMPUTE_32F,
-                               nullptr) == CUBLAS_STATUS_SUCCESS &&
+                    lt_gemm_ex({.transa = CUBLAS_OP_N,
+                                .transb = CUBLAS_OP_N,
+                                .m = k,
+                                .n = static_cast<int>(N),
+                                .k = k,
+                                .alpha = &one,
+                                .A = H,
+                                .a_type = CUDA_R_32F,
+                                .lda = k,
+                                .B = e,
+                                .b_type = CUDA_R_32F,
+                                .ldb = k,
+                                .beta = &zero,
+                                .C = eh,
+                                .c_type = CUDA_R_32F,
+                                .ldc = k,
+                                .compute = CUBLAS_COMPUTE_32F,
+                                .stream = nullptr}) == CUBLAS_STATUS_SUCCESS &&
+                    lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                .transb = CUBLAS_OP_N,
+                                .m = 1,
+                                .n = 1,
+                                .k = nk,
+                                .alpha = &one,
+                                .A = e,
+                                .a_type = CUDA_R_32F,
+                                .lda = nk,
+                                .B = eh,
+                                .b_type = CUDA_R_32F,
+                                .ldb = nk,
+                                .beta = &zero,
+                                .C = d_dot,
+                                .c_type = CUDA_R_32F,
+                                .ldc = 1,
+                                .compute = CUBLAS_COMPUTE_32F,
+                                .stream = nullptr}) == CUBLAS_STATUS_SUCCESS &&
                     cudaMemcpy(&dot, d_dot, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess;
     return ok ? static_cast<double>(dot) : -1.0;
 }
@@ -382,10 +427,24 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
             // W[:, b1:] -= Err [N, B] * U(b0:b1, b1:). Column-major: C [K-b1, N] (ld K) -= A^T E with
             // A = U(b0:b1, b1:) as [B, K-b1] (ld K) and E = Err^T [B, N] (ld kBlock).
             const float minus = -1.0f, one = 1.0f;
-            if (lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(K - b1), static_cast<int>(N),
-                           static_cast<int>(b1 - b0), &minus, du.p + b1 * K + b0, CUDA_R_32F, k, derr.p,
-                           CUDA_R_32F, kBlock, &one, dw.p + b1, CUDA_R_32F, k, CUBLAS_COMPUTE_32F,
-                           nullptr) != CUBLAS_STATUS_SUCCESS)
+            if (lt_gemm_ex({.transa = CUBLAS_OP_T,
+                            .transb = CUBLAS_OP_N,
+                            .m = static_cast<int>(K - b1),
+                            .n = static_cast<int>(N),
+                            .k = static_cast<int>(b1 - b0),
+                            .alpha = &minus,
+                            .A = du.p + b1 * K + b0,
+                            .a_type = CUDA_R_32F,
+                            .lda = k,
+                            .B = derr.p,
+                            .b_type = CUDA_R_32F,
+                            .ldb = kBlock,
+                            .beta = &one,
+                            .C = dw.p + b1,
+                            .c_type = CUDA_R_32F,
+                            .ldc = k,
+                            .compute = CUBLAS_COMPUTE_32F,
+                            .stream = nullptr}) != CUBLAS_STATUS_SUCCESS)
                 return std::unexpected("tail update GEMM failed");
         }
     }
