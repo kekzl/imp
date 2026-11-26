@@ -27,7 +27,8 @@ void Engine::apply_measured_library_reserve_() {
     }
     const int commit_after = kv_cache_raw_->try_grow_to(r.commit_blocks);
     if (config_.use_prefix_caching) {
-        const int pin_pct = std::clamp(config_.prefix_pin_budget_pct, 0, 100);
+        const int pin_cfg = config_.prefix_pin_budget_pct.value_or(kPrefixPinBudgetPctDefault);
+        const int pin_pct = std::clamp(pin_cfg, 0, 100);
         if (pin_pct > 0)
             kv_manager_->set_pin_budget_blocks(std::max(1, commit_after * pin_pct / 100));
     }

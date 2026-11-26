@@ -537,7 +537,8 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
                 kv_manager_->pin_prefix(req->id, full_blocks);
         }
         // session_id (#2407): the prompt's full blocks become the session's pin. Pin budget 0 = off.
-        if (!req->session_id.empty() && config_.prefix_pin_budget_pct > 0) {
+        if (!req->session_id.empty() &&
+            config_.prefix_pin_budget_pct.value_or(kPrefixPinBudgetPctDefault) > 0) {
             const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                        std::chrono::steady_clock::now().time_since_epoch())
                                        .count();
@@ -683,6 +684,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     model_ = std::move(model);
     config_ = config;
+    rt_ = {.cuda_graphs = config_.use_cuda_graphs,
+           .streaming_kv = config_.streaming_kv_enabled,
+           .streaming_kv_window = config_.streaming_kv_window};
 
     // Takes the pending RuntimeConfig stashed by tool main (imp-cli/imp-server)
     // via set_pending_runtime_config(), or a freshly loaded env-seeded default
@@ -699,27 +703,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // default to true, OR-ing would silently override an explicit
     // `use_prefix_caching=0` embedder choice. Both shipped tools already pass
     // their own resolved value, so nothing that ships loses caching (#1299/#1314).
-    if (config_.prefix_pin_budget_pct == 25)  // EngineConfig default untouched → take imp.conf
-        config_.prefix_pin_budget_pct = runtime_config_.server.prefix_pin_budget_pct;
-    if (config_.mmproj_path.empty())
-        config_.mmproj_path = runtime_config_.paths.mmproj;
-    if (config_.vram_budget_mb == 0 && runtime_config_.runtime.vram_budget_mb > 0)
-        config_.vram_budget_mb = static_cast<size_t>(runtime_config_.runtime.vram_budget_mb);
-    if (config_.kv_fraction == 1.0f)  // EngineConfig default untouched → take imp.conf
-        config_.kv_fraction = runtime_config_.vram.kv_fraction;
-    if (config_.vram_reserve_floor_pct == 0)
-        config_.vram_reserve_floor_pct = runtime_config_.vram.reserve_floor_pct;
-    if (config_.library_reserve_mb < 0)
-        config_.library_reserve_mb = runtime_config_.vram.library_reserve_mb;
-    if (config_.kv_cache_max_blocks == 0 && runtime_config_.kv_cache.max_blocks > 0)
-        config_.kv_cache_max_blocks = runtime_config_.kv_cache.max_blocks;
-    if (config_.kv_block_size == 0 && runtime_config_.kv_cache.block_size > 0)
-        config_.kv_block_size = runtime_config_.kv_cache.block_size;
+    bridge_runtime_config(config_, runtime_config_);
 
     // Install the process-wide VRAM budget view BEFORE any sizing runs: every
     // cudaMemGetInfo-based decision below (weight upload gates, cache budgets,
     // KV clamp, workspaces) reads through vram_budget_mem_get_info.
-    vram_budget_install(config_.vram_budget_mb);
+    vram_budget_install(config_.vram_budget_mb.value_or(0));
     vram_i4_probe_enable(runtime_config_.diagnostics.i4_probe);
 
     // Publishes THIS engine's RuntimeConfig to the process_diag snapshot that
@@ -937,7 +926,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     (void)kv_manager_->enable_host_spill(
         static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb)) << 20, spill_auto);
     wire_kv_swap_();
-    executor_->set_ffn_graphs_enabled(config_.use_cuda_graphs);
+    executor_->set_ffn_graphs_enabled(rt_.cuda_graphs);
     prefill_graphs_.set_short_max(runtime_config_.runtime.prefill_graph_prewarm);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate
@@ -1016,20 +1005,13 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         if (!req->trace_id.empty())
             IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
         embed_prepare_(*req);
-        // Logit lens rides the logprobs path: eager decode, no ragged prefill, no speculation.
-        if (req->logit_lens > 0) {
-            if (caps_.logit_lens)
-                req->logprobs = true;
-            else
-                req->logit_lens = 0;
-        }
-        if (req->sae_top > 0 || !req->sae_clamp.empty()) {  // SAE (row 116): same eager path
-            if (sae_) {
-                req->logprobs = true;
-            } else {
-                req->sae_top = 0;
-                req->sae_clamp.clear();
-            }
+        // Logit lens and SAE (row 116) the load cannot serve are dropped; the rest set kReadout below
+        // (eager decode, no ragged prefill, no speculation).
+        if (req->logit_lens > 0 && !caps_.logit_lens)
+            req->logit_lens = 0;
+        if ((req->sae_top > 0 || !req->sae_clamp.empty()) && !sae_) {
+            req->sae_top = 0;
+            req->sae_clamp.clear();
         }
         // Seed think state from the prompt tail: chat templates (Qwen3.x,
         // DeepSeek-R1) inject `<think>\n` by default, so without this a model
@@ -1081,6 +1063,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         phrase_ban_init_(*req);  // banned phrases: think seed and own logit_bias, after the seeding above
         bind_cache_key_tokens_(*req);  // after the fold: keys see the GPU-path pad ids
         req->prefix_salt = prefix_salt_(*req);
+        req->lane_needs = req->admission_lane_needs();  // the lanes' one table (runtime/lane_needs.h)
         cfg_admit_(std::move(req));  // the scheduler, or held until its guidance shadow prefilled
     }
 }

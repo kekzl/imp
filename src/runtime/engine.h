@@ -363,7 +363,8 @@ private:
     // which is what lets it stop including runtime/config.h.
     DispatchPolicy dispatch_policy_;
     std::shared_ptr<Model> model_;
-    EngineConfig config_;
+    EngineConfig config_;    // what the operator set, plus init-time resolution
+    EngineRuntimeState rt_;  // graph and StreamingLLM flags flipped while serving
 
     // compute_native_cache_demand(*model_) is a pure function of the
     // checkpoint's tensor shapes (stable pre- and post-upload by contract).

@@ -239,8 +239,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     const size_t total_vram = vram_budget_total_bytes();  // 0 on a failed query: no floor
     // Budget-planner knobs (imp.conf [vram]): clamp once here so direct
     // EngineConfig embedders (tests, C-API) get the same envelope.
-    const float kv_fraction = std::clamp(config.kv_fraction, 0.05f, 1.0f);
-    const int reserve_floor_pct = std::clamp(config.vram_reserve_floor_pct, 0, 50);
+    const float kv_fraction = std::clamp(config.kv_fraction.value_or(1.0f), 0.05f, 1.0f);
+    const int reserve_floor_pct = std::clamp(config.vram_reserve_floor_pct.value_or(0), 0, 50);
     if (config.use_nvfp4_decode != 2) {
         budget.reserve_bytes =
             std::max(budget.reserve_bytes, vram_reserve_floor(total_vram, reserve_floor_pct));
