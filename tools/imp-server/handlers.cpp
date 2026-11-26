@@ -46,6 +46,10 @@ void signal_handler(int /*sig*/) {
         svr->stop();
 }
 
+ServerState::ServerState()
+    : runtime_config_owner(std::make_unique<imp::RuntimeConfig>()), runtime_config(*runtime_config_owner) {}
+ServerState::~ServerState() = default;
+
 std::string make_completion_id(ServerState& state) {
     return "imp-" + std::to_string(state.next_id.fetch_add(1));
 }

@@ -7,9 +7,12 @@
 // only ever sees a plain 0 or >0. Rule and evidence: cfg::Speculative::mtp_k.
 
 #include "model/model.h"
-#include "runtime/config.h"
 
-#include <optional>
+#include <memory>
+
+namespace imp {
+struct RuntimeConfig;  // runtime/config.h (audit X-4: this header reaches 6 TUs)
+}  // namespace imp
 
 namespace imp::tools {
 
@@ -30,7 +33,7 @@ int mtp_auto_engine_batch(RuntimeConfig& cfg, int configured_batch, bool gdn_hyb
 
 // Top of every server model load: the phases below write resolved keys into cfg, and a reload (resume,
 // idle unload, swap) would read them as explicit. First call snapshots cfg, later calls restore it.
-void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& startup);
+void mtp_auto_restore_startup(RuntimeConfig& cfg, std::unique_ptr<RuntimeConfig>& startup);
 
 // Phase 1, before model load: how many rows to ask for, i.e. whether the head is worth
 // loading at all (host mmap only; the upload is Engine::init's). Returns the configured value
