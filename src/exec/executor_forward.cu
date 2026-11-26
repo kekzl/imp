@@ -889,8 +889,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                     }
                     normed = true;
                     // The scratch now holds the final-norm rows, not a layer input.
-                    smallm_xq_src_ = nullptr;
-                    smallm_xq_from_producer_ = false;
+                    smallm_xq_tag_.clear();
                     NvFP4QuantResult xq;
                     xq.packed_data = xq_packed;
                     xq.micro_scales = xq_scales;

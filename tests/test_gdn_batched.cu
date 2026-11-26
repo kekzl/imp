@@ -119,9 +119,23 @@ void run_and_compare(const ScanShape& s, const std::vector<int>& slots) {
     // ---- arm B: all sequences in one launch
     cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, rows * inner * sizeof(half));
-    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_slots,
-                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
-                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1);
+    gdn_scan_fused_f32_batched({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_Alog,
+                                .dt_bias = d_dtb,
+                                .h_state_pool = d_pool,
+                                .seq_slots = d_slots,
+                                .h_state_seq_stride = static_cast<int64_t>(state_elems),
+                                .y = d_y,
+                                .n_seq = s.n_seq,
+                                .n_tokens = s.n_tokens,
+                                .n_heads = s.n_heads,
+                                .head_dim_ssm = s.head_dim,
+                                .state_size = s.state_size,
+                                .n_groups = s.n_groups,
+                                .grouped_layout = 1});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pool_batched(pool_elems);
     std::vector<half> y_batched(rows * inner);
@@ -268,9 +282,23 @@ TEST_F(GdnBatchedScanTest, BatchedArmIsReproducible) {
     for (int rep=0; rep<2; rep++) {
         cudaMemcpy(d_pool,h_pool_init.data(),pool_elems*sizeof(float),cudaMemcpyHostToDevice);
         cudaMemset(d_y,0,rows*inner*sizeof(half));
-        gdn_scan_fused_f32_batched(d_conv,conv_channels,d_alpha,d_beta,d_Alog,d_dtb,d_pool,d_slots,
-                                   static_cast<int64_t>(state_elems),d_y,n_seq,n_tokens,n_heads,
-                                   head_dim,state_size,n_groups,nullptr,1);
+        gdn_scan_fused_f32_batched({.conv_f32 = d_conv,
+                                    .conv_channels = conv_channels,
+                                    .alpha = d_alpha,
+                                    .beta = d_beta,
+                                    .A_log = d_Alog,
+                                    .dt_bias = d_dtb,
+                                    .h_state_pool = d_pool,
+                                    .seq_slots = d_slots,
+                                    .h_state_seq_stride = static_cast<int64_t>(state_elems),
+                                    .y = d_y,
+                                    .n_seq = n_seq,
+                                    .n_tokens = n_tokens,
+                                    .n_heads = n_heads,
+                                    .head_dim_ssm = head_dim,
+                                    .state_size = state_size,
+                                    .n_groups = n_groups,
+                                    .grouped_layout = 1});
         ASSERT_EQ(cudaDeviceSynchronize(),cudaSuccess);
         pools[rep].resize(pool_elems);
         cudaMemcpy(pools[rep].data(),d_pool,pool_elems*sizeof(float),cudaMemcpyDeviceToHost);
@@ -464,10 +492,26 @@ TEST_F(GdnBatchedScanTest, GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero) {
     cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemset(d_snap, 0, state_elems * sizeof(float));
     cudaMemset(d_y, 0, rows * inner * sizeof(half));
-    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_slots,
-                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
-                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
-                               /*d_real_n=*/d_lens, /*seq_row_offsets=*/nullptr, d_snap, d_lens + 1);
+    gdn_scan_fused_f32_batched({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_Alog,
+                                .dt_bias = d_dtb,
+                                .h_state_pool = d_pool,
+                                .seq_slots = d_slots,
+                                .h_state_seq_stride = static_cast<int64_t>(state_elems),
+                                .y = d_y,
+                                .n_seq = s.n_seq,
+                                .n_tokens = s.n_tokens,
+                                .n_heads = s.n_heads,
+                                .head_dim_ssm = s.head_dim,
+                                .state_size = s.state_size,
+                                .n_groups = s.n_groups,
+                                .grouped_layout = 1,
+                                .d_real_n = d_lens,
+                                .h_snap = d_snap,
+                                .d_snap_n = d_lens + 1});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> pool_grp(pool_elems), snap_grp(state_elems);
     std::vector<half> y_grp(rows * inner);
@@ -687,11 +731,27 @@ TEST_F(GdnBatchedScanTest, VerifyGroupsCommitToSpareAndSnapshotInPlace) {
     // ---- batched: one launch, out_slots = spare, snap_slots = live (in place), snap at 1 row
     cudaMemcpy(d_pool, h_pool_init.data(), pool_elems * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, rows * inner * sizeof(half));
-    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_Alog, d_dtb, d_pool, d_live,
-                               static_cast<int64_t>(state_elems), d_y, s.n_seq, s.n_tokens, s.n_heads,
-                               s.head_dim, s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1,
-                               /*d_real_n=*/d_lens, /*seq_row_offsets=*/nullptr, /*h_snap=*/nullptr,
-                               /*d_snap_n=*/d_lens + 1, /*out_slots=*/d_spare, /*snap_slots=*/d_live);
+    gdn_scan_fused_f32_batched({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_Alog,
+                                .dt_bias = d_dtb,
+                                .h_state_pool = d_pool,
+                                .seq_slots = d_live,
+                                .h_state_seq_stride = static_cast<int64_t>(state_elems),
+                                .y = d_y,
+                                .n_seq = s.n_seq,
+                                .n_tokens = s.n_tokens,
+                                .n_heads = s.n_heads,
+                                .head_dim_ssm = s.head_dim,
+                                .state_size = s.state_size,
+                                .n_groups = s.n_groups,
+                                .grouped_layout = 1,
+                                .d_real_n = d_lens,
+                                .d_snap_n = d_lens + 1,
+                                .out_slots = d_spare,
+                                .snap_slots = d_live});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<float> got(pool_elems);
     cudaMemcpy(got.data(), d_pool, pool_elems * sizeof(float), cudaMemcpyDeviceToHost);
