@@ -16,6 +16,8 @@ struct ForwardFacts {
     bool layer_loop_replaced = false;
     // That forward applies an adapter's q / k / v / o deltas itself (InklingForward::delta_, B-111 S5).
     bool own_forward_lora = false;
+    // That forward steps its own state back to a confirmed position (InklingForward::seek, B-111 S6).
+    bool own_forward_rewind = false;
     bool gated_residual = false;            // ModelProfile::gated_residual: hc_count x d_model stream
     bool recurrent_state = false;           // engine-owned GDN / SSM state (Engine::ssm_state_)
     bool batched_recurrent_decode = false;  // per-row recurrent slots (Engine::d_ssm_seq_slots_)
@@ -26,7 +28,7 @@ struct EngineCapabilities {
     bool sae = false;             // "sae_features", "sae_clamp": sae_apply_ inside the layer loop
     bool lora = false;            // "lora": lora_delta_ in the loop, InklingForward::delta_
     bool control_vector = false;  // "control_vector": control_vector_add_ inside the layer loop
-    bool phrase_ban = false;      // "banned_strings", "banned_regex": rewind of paged KV + recurrent slabs
+    bool phrase_ban = false;      // "banned_strings", "banned_regex": rewind of paged KV + recurrent state
     bool cfg = false;             // "cfg_scale": the guidance pair decodes as two rows of one step
 
     friend bool operator==(const EngineCapabilities&, const EngineCapabilities&) = default;
@@ -65,8 +67,8 @@ inline constexpr CapabilityName kCapabilityNames[] = {
         .lora = f.model_loaded && (!f.layer_loop_replaced || f.own_forward_lora),
         .control_vector = residual,
         // Rewind = KVCacheManager::rollback + ssm_state_ slabs; an own forward keeps its own sliding K/V and
-        // conv state, which InklingForward::run refuses to step back into (pos0 != pos_).
-        .phrase_ban = loop,
+        // conv state and must seek them back itself (engine_phrase_ban.cpp, InklingForward::seek).
+        .phrase_ban = loop || (f.model_loaded && f.layer_loop_replaced && f.own_forward_rewind),
         // Two rows of one step: each row needs its own recurrent slot; an own forward binds one slot
         // per sequence (run_inkling_ decodes each row on the slot its request id is bound to).
         .cfg = f.model_loaded && (f.layer_loop_replaced || !f.recurrent_state || f.batched_recurrent_decode),

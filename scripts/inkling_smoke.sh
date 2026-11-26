@@ -3,7 +3,8 @@
 # inkling_smoke.sh <imp-server> <model-dir> [port]: Inkling-2-Mini serving smoke (audit D-4, #3272).
 # 2 sequence slots at runtime.max_seq_len=81920: 2 concurrent chats whose replies run past 256
 # tokens, then 9 new chats in 3 waves of 3 (more requests than slots), temperature 0. Each reply
-# must be served (HTTP 200, finish_reason) and pass scripts/degen_verdict.sh on its words.
+# must be served (HTTP 200, finish_reason) and pass scripts/degen_verdict.sh on its words; a banned word
+# (banned_strings, B-111 S6) never appears and the reply before it equals the unbanned one.
 # Prints one line per request; exit 0 = 11 of 11 served and coherent and a logit_lens request
 # refused with 400 unsupported_feature (audit C-6). verify.sh and `make verify-inkling` run it.
 set -uo pipefail
@@ -75,6 +76,28 @@ chat long2 384 "Explain in detail, step by step, how a refrigerator moves heat o
 wait $(jobs -p | grep -v "^$PID$") 2>/dev/null
 judge long1 257
 judge long2 257
+# B-111 S6: a banned word never appears, and the reply before its first place in the unbanned reply is kept.
+# Both requests alone, one after the other: two decoding rows take another LM-head path.
+text_of() { jq -r '(.choices[0].message.reasoning_content // "") + "\n" + (.choices[0].message.content // "")' \
+    "$TMP/$1.json" 2>/dev/null; }
+BANP="Describe a sunrise over the sea in four sentences."
+chat ban0 160 "$BANP"
+text0=$(text_of ban0)
+word=$(printf '%s' "$text0" | tr -cs '[:alpha:]' '\n' | awk 'length($0) >= 6' | sed -n 8p)
+jq -nc --arg m "$M" --arg p "$BANP" --arg w "$word" \
+    '{model:$m,messages:[{role:"user",content:$p}],max_tokens:160,temperature:0,banned_strings:[$w]}' >"$TMP/ban1.req"
+code=$(curl -s -m 600 -o "$TMP/ban1.json" -w '%{http_code}' "http://127.0.0.1:$PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d @"$TMP/ban1.req")
+text1=$(text_of ban1)
+pre="${text0%%"$word"*}"
+if [ "$(cat "$TMP/ban0.code")" = "200" ] && [ "$code" = "200" ] && [ -n "$word" ] &&
+    [[ "$text1" != *"$word"* ]] && [ "${text1:0:${#pre}}" = "$pre" ]; then
+    echo "ok   ban: '$word' absent, the first ${#pre} characters equal the unbanned reply"
+else
+    echo "FAIL ban: HTTP ${code:-none}, word '$word', present $([[ "$text1" == *"$word"* ]] && echo yes || echo no)," \
+        "kept prefix $([ "${text1:0:${#pre}}" = "$pre" ] && echo yes || echo no): $(head -c 300 "$TMP/ban1.json")"
+    FAILS=$((FAILS + 1))
+fi
 # Waves 2-4: 9 new requests on slots whose previous requests ended.
 TOPICS=(volcanoes honeybees "the Moon" glaciers "the printing press" octopuses rainbows "the Roman roads" coffee)
 for w in 0 1 2; do

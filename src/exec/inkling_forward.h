@@ -109,6 +109,18 @@ public:
     [[nodiscard]] bool restore(std::span<const int32_t> tokens, const void* entry, int pos, cudaStream_t s,
                                bool with_draft = true);
     [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
+    // Banned-phrase rewind (B-111 S6). conv_snapshot: the conv state at position() into dst (device,
+    // conv_state_bytes()), a stored lookahead call's last confirmed row, not its drafts. seek: the sequence
+    // goes on at pos <= position() from conv, a state taken at pos (device or pinned host); false = the
+    // sliding rings no longer hold the window before pos (reaches), nothing changed.
+    [[nodiscard]] size_t conv_state_bytes() const {
+        return conv_state_floats_ * conv_state_.size() * sizeof(float);
+    }
+    void conv_snapshot(float* dst, cudaStream_t s);
+    [[nodiscard]] bool reaches(int pos) const;
+    [[nodiscard]] bool seek(int pos, const float* conv, cudaStream_t s);
+    // The own checkpoint at pos (on the grid, still held), pinned host; null = none.
+    [[nodiscard]] const float* checkpoint_state(int pos) const;
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
     static constexpr int kGraphRows = kInklingGraphRows;  // rows of the largest call = anchor + drafts
