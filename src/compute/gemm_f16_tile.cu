@@ -9,6 +9,7 @@
 
 #include "compute/gemm_f16_tile_core.cuh"
 #include "core/device_info.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 
@@ -284,9 +285,8 @@ bool gemm_f16_tile_route(const Tensor& A, const Tensor& B, Tensor& C, float alph
         !gemm_f16_tile(A.data, B.data, C.data, static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
                        alpha, beta, /*acc_fp16=*/true, stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("f16_tile: own FP16 GEMM ACTIVE (M=%ld N=%ld K=%ld)", (long)M, (long)N, (long)K);
     }
     return true;

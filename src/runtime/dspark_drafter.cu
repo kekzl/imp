@@ -5,6 +5,7 @@
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
 #include "core/graph_epoch.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "model/json_util.h"
@@ -709,9 +710,8 @@ std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_
     const auto bad = std::find_if(out.begin(), out.end(),
                                   [&](int32_t id) { return id < 0 || id >= P.vocab; });
     if (bad != out.end()) {
-        static bool s_said = false;
-        if (!s_said) {
-            s_said = true;
+        static LogOnce s_said;
+        if (s_said.first()) {
             IMP_LOG_WARN("dspark: drafter produced token %d outside the vocabulary (non-finite logits)",
                          *bad);
         }

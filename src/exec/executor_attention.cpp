@@ -40,6 +40,7 @@
 #include "compute/mla_absorb.h"
 #include "exec/sparse_attn_select.h"
 #include "core/cuda_errors.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "core/pdl.h"
@@ -788,9 +789,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             if (!has_post_attn_norm) {
                 lora_delta_(*w, ao.data, h.data, n, stream);
             } else {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
+                static LogOnce warned;
+                if (warned.first()) {
                     IMP_LOG_WARN("LoRA: o_proj adapter on a post-attn-norm arch is unsupported (v1) — "
                                  "delta skipped");
                 }

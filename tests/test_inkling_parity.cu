@@ -12,13 +12,15 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
 #include "inkling_fixture.h"
-#include "memory/vram_query.h"
+#include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 #include "vision/inkling_vision.h"
@@ -538,54 +540,169 @@ TEST(InklingRewind, CheckpointsBehindTheResumeWindowAreFreed) {
               0);
 }
 
-// Context K/V that commit their rows as the sequence grows (growable backend): 5000 positions in calls
-// of 512 and one-row steps cross two commit steps and give the rows of a forward that holds all 8192.
-TEST(InklingRewind, GrowableContextIsBitEqual) {
+// Full-attention K/V in pool blocks behind a SHUFFLED table (B-111 S2b) against the forward's own rows
+// behind the identity table: a 2061-token prompt in calls of 512, then lookahead steps anchored at
+// positions 13 mod 16 whose eight rows cross a block boundary, three drafts confirmed and four rejected
+// (their rows rewritten in the next block). Same kernels, other addresses: bit-equal rows.
+TEST(InklingPagedKv, ShuffledPoolBlocksAreBitEqual) {
     const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
     const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
     if (!model || !oracle)
         GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
-    Backend* vmm = vmm_backend();
-    if (!vmm)
-        GTEST_SKIP() << "no growable backend on this device";
     Fixture& fx = fixture();
     if (!fx.loaded)
         ASSERT_TRUE(fx.load(model));
     const std::vector<int32_t> p = read_ids(std::string(oracle) + "/sky_prompt.json");
     ASSERT_FALSE(p.empty());
-    std::vector<int32_t> ids;
-    while (ids.size() < 5000)
-        ids.insert(ids.end(), p.begin(), p.end());
-    ids.resize(5000);
-    const int P = 4990;
-    const size_t pending0 = vram_reserved_uncommitted_bytes();
+    const int P = 2061, N = P + 160, ctx = 4096;
+    ASSERT_EQ(P % 16, 13);
+    std::vector<int32_t> t;
+    while (static_cast<int>(t.size()) < N + 8)
+        t.insert(t.end(), p.begin(), p.end());
+    std::map<int, std::vector<int32_t>> plan;
+    for (int a = P; a + 8 < N; a += 16) {
+        std::vector<int32_t> d(t.begin() + a + 1, t.begin() + a + 8);
+        d[3] = t[0] == d[3] ? t[1] : t[0];  // rows a+1..a+3 confirmed (a+3 opens a block), a+4.. rejected
+        plan[a] = d;
+    }
     std::vector<int> cuts;
     for (int c = 512; c < P; c += 512)
         cuts.push_back(c);
+    const std::vector<int> taps = {5, 23, 41, 48};
+    const InklingKvLayout l = inkling_kv_apps(fx.w.cfg, false);
+    const size_t KD = static_cast<size_t>(fx.w.cfg.n_kv_heads) * fx.w.cfg.head_dim;
     std::vector<float> rows[2], steps[2];
-    size_t held[2] = {};
+    long accepted[2] = {};
+    std::vector<void*> owned;
     for (int g = 0; g < 2; ++g) {
         InklingForward f;
-        ASSERT_TRUE(f.init(fx.w, fx.va, 512, 8192, nullptr, g ? vmm : nullptr));
-        held[g] = f.context_rows();
-        rows[g] = run_rows(f, fx.w, std::vector<int32_t>(ids.begin(), ids.begin() + P), 0, cuts);
+        ASSERT_TRUE(f.init(fx.w, fx.va, 512, ctx, nullptr, /*own_kv=*/g == 0));
+        if (g == 1) {
+            // Pool of table_cap + 7 blocks per layer handed out shuffled (37 prime to the pool: a
+            // permutation).
+            const int nb = f.table_cap(), pool = nb + 7;
+            ASSERT_EQ(std::gcd(37, pool), 1);
+            std::vector<int> tbl(static_cast<size_t>(nb));
+            for (int i = 0; i < nb; ++i)
+                tbl[static_cast<size_t>(i)] = (i * 37 + 5) % pool;
+            std::vector<half*> k, v;
+            for (int i = 0; i < 2 * l.n_global; ++i) {
+                void* d = nullptr;
+                ASSERT_EQ(cudaMalloc(&d, static_cast<size_t>(pool) * 16 * KD * sizeof(half)), cudaSuccess);
+                ASSERT_EQ(cudaMemset(d, 0x7b, static_cast<size_t>(pool) * 16 * KD * sizeof(half)),
+                          cudaSuccess);
+                owned.push_back(d);
+                (i % 2 ? v : k).push_back(static_cast<half*>(d));
+            }
+            int* d_tbl = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_tbl, tbl.size() * sizeof(int)), cudaSuccess);
+            owned.push_back(d_tbl);
+            cudaMemcpy(d_tbl, tbl.data(), tbl.size() * sizeof(int), cudaMemcpyHostToDevice);
+            ASSERT_TRUE(f.bind_kv(k, v));
+            f.set_table(d_tbl, nb, nullptr);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        }
+        ASSERT_TRUE(f.enable_lookahead(planned(plan), taps, fx.w.embed));
+        rows[g] = run_rows(f, fx.w, std::vector<int32_t>(t.begin(), t.begin() + P), 0, cuts);
         ASSERT_FALSE(rows[g].empty());
         Stepper st(fx.w);
-        for (int pos = P; pos < 5000; ++pos) {
-            const std::vector<float> r = st.step(f, ids[static_cast<size_t>(pos)], pos);
+        for (int pos = P; pos < N; ++pos) {
+            const std::vector<float> r = st.step(f, t[static_cast<size_t>(pos)], pos);
             ASSERT_FALSE(r.empty());
             steps[g].insert(steps[g].end(), r.begin(), r.end());
         }
-        if (g) {
-            EXPECT_EQ(held[g], static_cast<size_t>(InklingForward::kCtxStep));
-            EXPECT_EQ(f.context_rows(), static_cast<size_t>(3 * InklingForward::kCtxStep));
-        } else {
-            EXPECT_EQ(f.context_rows(), 8192u);
-        }
+        accepted[g] = f.spec_stats().accepted;
     }
+    for (void* d : owned)
+        cudaFree(d);
+    EXPECT_EQ(accepted[0], accepted[1]);
+    EXPECT_GE(accepted[0], 9);  // three anchors at least (the draft policy rests between probes)
     EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
     EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
-    EXPECT_EQ(vram_reserved_uncommitted_bytes(), pending0);
+}
+
+// The serve path against the pre-S2b one: a slot built by InklingRuntime::init_slots (what
+// make_inkling_runtime runs: pool K/V, its own choice of the I8B32 projections) over a real KVCache whose
+// blocks a KVCacheManager hands out between another sequence's, its table copied before every call as
+// run_inkling_ does, 7 rows ahead as decode_prepare_kv_ holds them; against a forward with its own
+// contiguous K/V and the I8B32 projections, as every slot ran before S2b. Same prompt, same lookahead
+// plan (anchors 13 mod 16, 3 confirmed, 4 rejected): bit-equal rows.
+TEST(InklingServePath, PoolRuntimeIsBitEqualToTheContiguousForward) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    const char* oracle = std::getenv("IMP_TEST_INKLING_ORACLE");
+    if (!model || !oracle)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING / IMP_TEST_INKLING_ORACLE not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const std::vector<int32_t> p = read_ids(std::string(oracle) + "/paris_prompt.json");
+    ASSERT_FALSE(p.empty());
+    const int P = 525, N = P + 96, ctx = 4096, kSeq = 1, kOther = 2;
+    ASSERT_EQ(P % 16, 13);
+    std::vector<int32_t> t;
+    while (static_cast<int>(t.size()) < N + 8)
+        t.insert(t.end(), p.begin(), p.end());
+    std::map<int, std::vector<int32_t>> plan;
+    for (int a = P; a + 8 < N; a += 16) {
+        std::vector<int32_t> d(t.begin() + a + 1, t.begin() + a + 8);
+        d[3] = t[0] == d[3] ? t[1] : t[0];
+        plan[a] = d;
+    }
+    const std::vector<int> taps = {5, 23, 41, 48};
+    InklingRuntime rt;
+    ASSERT_TRUE(rt.init_slots(fx.w, fx.va, 512, ctx, 1));
+    ASSERT_TRUE(rt.dense8) << "the serve path decodes on the I8B32 projections when the card has room";
+    InklingForward& slot = *rt.slots[0];
+    const InklingKvLayout l = inkling_kv_apps(fx.w.cfg, false);
+    KVCacheManager kvm(std::make_unique<KVCache>(l.n_layers(), fx.w.cfg.n_kv_heads, fx.w.cfg.head_dim,
+                                                 QType::F16, 2 * slot.table_cap() + 16, kKVBlockSize,
+                                                 &fx.va));
+    ASSERT_TRUE(rt.bind_kv(*kvm.kv_cache()));
+    int* d_tbl = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_tbl, static_cast<size_t>(slot.table_cap()) * sizeof(int)), cudaSuccess);
+    // decode_prepare_kv_: blocks for `rows` positions plus kInklingKvAhead, another sequence's in between.
+    const auto hold = [&](int rows, cudaStream_t s) {
+        const size_t need = static_cast<size_t>((rows + kInklingKvAhead + kKVBlockSize - 1) / kKVBlockSize);
+        while (kvm.block_table(kSeq).size() < need) {
+            ASSERT_GE(kvm.append_block(kOther), 0);
+            ASSERT_GE(kvm.append_block(kSeq), 0);
+        }
+        const std::vector<int>& tbl = kvm.block_table(kSeq);
+        ASSERT_EQ(cudaMemcpy(d_tbl, tbl.data(), tbl.size() * sizeof(int), cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        slot.set_table(d_tbl, static_cast<int>(tbl.size()), s);
+    };
+    ASSERT_TRUE(kvm.allocate_blocks(kOther, 1));
+    ASSERT_TRUE(kvm.allocate_blocks(kSeq, 1));
+    InklingForward ref;
+    ASSERT_TRUE(ref.init(fx.w, fx.va, 512, ctx));
+    ref.set_dense8(rt.dense8.get());
+    std::vector<float> rows[2], steps[2];
+    long accepted[2] = {};
+    InklingForward* fwd[2] = {&ref, &slot};
+    for (int g = 0; g < 2; ++g) {
+        InklingForward& f = *fwd[g];
+        ASSERT_TRUE(f.enable_lookahead(planned(plan), taps, fx.w.embed));
+        if (g == 1)
+            hold(P, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        rows[g] = run_rows(f, fx.w, std::vector<int32_t>(t.begin(), t.begin() + P), 0, {256});
+        ASSERT_FALSE(rows[g].empty());
+        Stepper st(fx.w);
+        for (int pos = P; pos < N; ++pos) {
+            if (g == 1)
+                hold(pos + 1, st.s);
+            const std::vector<float> r = st.step(f, t[static_cast<size_t>(pos)], pos);
+            ASSERT_FALSE(r.empty());
+            steps[g].insert(steps[g].end(), r.begin(), r.end());
+        }
+        accepted[g] = f.spec_stats().accepted;
+    }
+    cudaFree(d_tbl);
+    EXPECT_EQ(accepted[0], accepted[1]);
+    EXPECT_GE(accepted[0], 9);
+    EXPECT_EQ(std::memcmp(rows[0].data(), rows[1].data(), rows[0].size() * sizeof(float)), 0);
+    EXPECT_EQ(std::memcmp(steps[0].data(), steps[1].data(), steps[0].size() * sizeof(float)), 0);
 }
 
 // A real stream turns the side streams on (k / v chains, message mix): rows of every call size must

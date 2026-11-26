@@ -17,3 +17,13 @@ src/quant/nvfp4_gemm.cu::s_nvfp4_dequant_ws_provide  reset-by=release_nvfp4_dequ
 src/quant/nvfp4_gemm.cu::s_nvfp4_dequant_ws_ctx  reset-by=release_nvfp4_dequant_ws_  the executor pointer handed to the provider, cleared by the same set_nvfp4_dequant_workspace(nullptr, 0)
 src/runtime/engine_scheduler.cpp::g_ot  host timing sums (diagnostics.step_timing), holds no device resource
 src/runtime/engine_scheduler.cpp::g_step_timing  host timing sums (diagnostics.step_timing), holds no device resource
+
+# Log-once rule (C-12/D-10): a process-static flag named *logged*/*warned*/*once*/*said*/*noted*/*reported*.
+#   <path>::<name><two spaces>log-once: <reason>
+src/compute/gdn_scan_chunkpar.cu::attr_once  log-once: not a log latch, sets the kernel smem attribute once per process
+src/compute/gdn_scan_chunkpar_pass.cu::attr_once  log-once: not a log latch, sets the kernel smem attribute once per process
+src/model/hf_fetch.cpp::once  log-once: not a log latch, curl_global_init once per process
+src/compute/json_constrain.cu::once  log-once: follow-up, as LogOnce its ERROR + return trips the log-and-return gate (B-108, list only shrinks)
+src/runtime/engine_prefill.cpp::logged_no_prefill_capture  log-once: follow-up, file owned by the in-flight Inkling KV slice
+src/runtime/engine_scheduler.cpp::entered_logged  log-once: follow-up, file owned by the in-flight Inkling KV slice
+src/runtime/engine_scheduler.cpp::s_gate_logged  log-once: follow-up, file owned by the in-flight Inkling KV slice

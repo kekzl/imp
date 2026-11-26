@@ -417,8 +417,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
 bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     if (!initialized_ || !model_)
         return false;
-    inkling_ = make_inkling_runtime(*model_, vram_alloc_, max_tokens_, kv_ctx_tokens_, kv_ctx_batch_,
-                                    inkling_lazy_ ? vmm_backend() : nullptr);
+    inkling_ = make_inkling_runtime(*model_, vram_alloc_, max_tokens_, kv_ctx_tokens_, kv_ctx_batch_);
 
     if (!ws_.allocate_persistent_workspace(max_tokens_)) {
         IMP_LOG_ERROR("Persistent workspace allocation failed — cannot run inference");

@@ -53,6 +53,12 @@ reason. A static that another TU resets names the function:
 under src/ outside that TU. A name entry is stale when the static is gone or
 covered, or when its reset-by function no longer exists.
 
+Log-once latches (AUDIT_ARCH_2026_11_24 C-12, D-10): a `static bool`, `std::atomic<bool>`
+or `std::once_flag` named *logged* / *warned* / *once* / *said* / *noted* / *reported*
+anywhere under src/ stays set across a model swap, so model B never logs the fallback model
+A tripped. Use core/log_once.h `LogOnce`, which every model load re-arms. A remaining one
+needs `<path>::<name>  log-once: <reason>` in the allowlist; a listed latch that is gone fails.
+
 Usage:
     python3 tools/check_static_reset.py             # check (CI)
     python3 tools/check_static_reset.py --list      # every candidate TU + status
@@ -106,6 +112,12 @@ HANDLE_TYPES = re.compile(
     r"\b(cublasHandle_t|cublasLtHandle_t|cudaStream_t|cudaEvent_t|cudaGraphExec_t|cudaGraph_t"
     r"|CUtensorMap|cudnnHandle_t)\b"
 )
+LOG_ONCE_LATCH = re.compile(
+    r"^\s*static\s+(?:std::atomic<bool>|std::atomic_bool|bool|std::once_flag)\s+"
+    r"(?P<name>\w*(?:logged|warned|once|said|noted|reported)\w*)\b",
+    re.M,
+)
+LOG_ONCE_TAG = "log-once:"
 PRIMITIVES = re.compile(
     r"^(unsigned\s+)?(int|bool|float|double|size_t|char|long|short|uint\d+_t|int\d+_t|uintptr_t"
     r"|ptrdiff_t|std::\w+(<.*>)?)$"
@@ -122,7 +134,7 @@ def device_relevant(typ: str, stars: str) -> bool:
     if PRIMITIVES.match(t):
         return False
     head = t.split("<", 1)[0].split("::")[-1]
-    return head[:1].isupper()
+    return head[:1].isupper() and head != "LogOnce"  # host latch, core/log_once.h re-arms it
 
 
 def candidates(text: str) -> list[str]:
@@ -281,11 +293,53 @@ def name_verdict(results: dict[str, tuple[str, list[str], list[str]]], allowed: 
     return fails
 
 
+def log_once_latches(text: str) -> list[str]:
+    """Names of the process-static log-once flags in comment-stripped text."""
+    return sorted({m.group("name") for m in LOG_ONCE_LATCH.finditer(strip_comments(text))})
+
+
+def scan_log_once() -> dict[str, list[str]]:
+    out = {}
+    for p in sorted(SRC.rglob("*")):
+        if p.suffix not in SUFFIXES + (".h", ".cuh") or not p.is_file():
+            continue
+        names = log_once_latches(p.read_text(encoding="utf-8", errors="replace"))
+        if names:
+            out[p.relative_to(REPO).as_posix()] = names
+    return out
+
+
+def log_once_verdict(found: dict[str, list[str]], allowed: dict[str, str]) -> list[str]:
+    """Failure lines: an unlisted latch, a listed one that is gone, a listed one without a reason."""
+    fails = [f"{rel}::{nm}: process-static log-once flag, use core/log_once.h LogOnce (re-armed per model load)"
+             for rel, names in sorted(found.items()) for nm in names if f"{rel}::{nm}" not in allowed]
+    for key, reason in sorted(allowed.items()):
+        rel, _, name = key.partition("::")
+        if name not in found.get(rel, []):
+            fails.append(f"{key}: stale allowlist entry (the log-once flag is gone)")
+        elif not reason[len(LOG_ONCE_TAG):].strip():
+            fails.append(f"{key}: allowlist entry without a reason")
+    return fails
+
+
+def check_log_once(allowed: dict[str, str]) -> tuple[int, str]:
+    """-> (failures, summary) of the log-once rule; prints the failure lines."""
+    found = scan_log_once()
+    fails = log_once_verdict(found, allowed)
+    if fails:
+        print("check_static_reset: log-once rule (C-12/D-10):")
+        for line in fails:
+            print(f"  {line}")
+    n = sum(len(v) for v in found.values())
+    return len(fails), f"log-once flags: {n}, listed {len(allowed)}"
+
+
 def check(list_all: bool) -> int:
     results = scan()
     everything = read_allowlist()
     allowed = {k: v for k, v in everything.items() if "::" not in k}
-    by_name = {k: v for k, v in everything.items() if "::" in k}
+    log_once = {k: v for k, v in everything.items() if "::" in k and v.startswith(LOG_ONCE_TAG)}
+    by_name = {k: v for k, v in everything.items() if "::" in k and k not in log_once}
     if list_all:
         for rel, (status, names, missing) in results.items():
             tag = status if rel not in allowed else f"{status} (allowlisted)"
@@ -325,8 +379,10 @@ def check(list_all: bool) -> int:
     n_cand = len(results)
     n_names = sum(len(names) for s, names, _ in results.values() if s == "ok")
     n_missing = sum(len(missing) for _, _, missing in results.values())
+    log_once_fails, log_once_tail = check_log_once(log_once)
+    failures += log_once_fails
     tail = (f"{n_ok}/{n_cand} candidate TUs re-arm; {n_names} statics in them, {n_names - n_missing} "
-            f"covered by a hook or a generation check, {n_missing} not")
+            f"covered by a hook or a generation check, {n_missing} not; {log_once_tail}")
     if failures:
         print(f"check_static_reset: {failures} failure(s) ({tail})")
         return 1
@@ -356,6 +412,9 @@ def selftest() -> int:
          "no-rearm"),
         ("host-only static (counter, string) is not a candidate",
          "static int s_calls = 0;\nstatic std::string s_name;\nvoid f() { cudaMalloc(&p, 4); }\n",
+         "not-candidate"),
+        ("a LogOnce latch is host state, not a device static",
+         "static LogOnce s_warned;\nvoid f() { cudaMalloc(&p, 4); }\n",
          "not-candidate"),
         ("static function declaration is not a variable",
          "static void ensure_ptr_arrays(int n);\nstatic int* make(int n) { return nullptr; }\n"
@@ -437,9 +496,48 @@ def selftest() -> int:
         ok = got == want
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} {label}: {got} failure(s)" + ("" if ok else f" (want {want})"))
-    total = len(cases) + len(name_cases) + len(list_cases)
+    n_log_once, log_once_failures = selftest_log_once()
+    failures += log_once_failures
+    total = len(cases) + len(name_cases) + len(list_cases) + n_log_once
     print(f"selftest: {total - failures}/{total} cases")
     return 1 if failures else 0
+
+
+def selftest_log_once() -> tuple[int, int]:
+    """-> (cases, failures) of the log-once rule."""
+    latch_cases = [
+        # (label, text, expected names)
+        ("plain static bool", "void f() {\n    static bool logged = false;\n}\n", ["logged"]),
+        ("atomic, braced init", "    static std::atomic<bool> s_warned{false};\n", ["s_warned"]),
+        ("per-key array", "    static bool s_logged[128] = {};  // once per qtype\n", ["s_logged"]),
+        ("once_flag", "    static std::once_flag attr_once;\n", ["attr_once"]),
+        ("prefix and suffix around the word", "static bool logged_sparse_active = false;\n",
+         ["logged_sparse_active"]),
+        ("LogOnce is the fix, not a finding", "    static LogOnce logged;\n", []),
+        ("unrelated static bool", "    static bool smem_configured = false;\n", []),
+        ("commented out", "// the previous plain `static bool warned` raced\n", []),
+        ("non-static local", "    bool logged = false;\n", []),
+    ]
+    failures = 0
+    for label, text, want in latch_cases:
+        got = log_once_latches(text)
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} log-once {label}: {got}" + ("" if ok else f" (want {want})"))
+    found = {"src/a.cu": ["logged"]}
+    verdict_cases = [
+        # (label, found, allowlist, expected failure count)
+        ("unlisted latch", found, {}, 1),
+        ("listed with a reason", found, {"src/a.cu::logged": "log-once: owned by another slice"}, 0),
+        ("listed without a reason", found, {"src/a.cu::logged": "log-once:"}, 1),
+        ("stale: the latch is gone", {}, {"src/a.cu::logged": "log-once: x"}, 1),
+    ]
+    for label, fnd, allowed, want in verdict_cases:
+        got = len(log_once_verdict(fnd, allowed))
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} log-once {label}: {got} failure(s)" + ("" if ok else f" (want {want})"))
+    return len(latch_cases) + len(verdict_cases), failures
 
 
 def main() -> int:

@@ -1,6 +1,7 @@
 #include "memory/kv_host_spill.h"
 #include "memory/host_pinned.h"
 
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 
@@ -87,9 +88,9 @@ namespace {
 bool copy_ok(cudaError_t e, const char* dir, int block_id, size_t off, size_t pitch, size_t width, int rows) {
     if (e == cudaSuccess)
         return true;
-    static std::atomic<bool> logged{false};
+    static LogOnce logged;
     (void)cudaGetLastError();
-    if (!logged.exchange(true))
+    if (logged.first())
         IMP_LOG_ERROR(
             "KV host spill: %s copy of block %d failed (%s): host off %zu, pitch %zu, width %zu, rows %d",
             dir, block_id, cudaGetErrorString(e), off, pitch, width, rows);

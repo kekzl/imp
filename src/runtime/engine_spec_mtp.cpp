@@ -11,6 +11,7 @@
 #include "memory/backend.h"
 #include "compute/layernorm.h"
 #include "compute/mtp_forward.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "model/model.h"
@@ -838,9 +839,8 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     imp::NvFP4QuantResult lm_nvfp4;
     const imp::NvFP4QuantResult* lm_nvfp4_p = mtp_draft_lm_head_nvfp4_(lm_nvfp4);
     if (lm_nvfp4_p != nullptr) {
-        static bool logged = false;  // once-per-process path attribution
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // once-per-model-load path attribution
+        if (logged.first()) {
             IMP_LOG_INFO("MTP chain lm_head: NVFP4 decode-cache view engaged (N=%lld K=%lld)",
                          static_cast<long long>(lm_nvfp4.N), static_cast<long long>(lm_nvfp4.K));
         }
