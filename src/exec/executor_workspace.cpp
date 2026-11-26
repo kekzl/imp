@@ -1,4 +1,5 @@
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "memory/device_alloc_all.h"
 #include "exec/workspace.h"
 #include "exec/workspace_sizes.h"

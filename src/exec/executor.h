@@ -2,7 +2,7 @@
 
 #include "core/cuda_raii.h"
 #include "core/kv_fp8_scale.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"  // X-4: readers include core/dispatch_policy.h
 
 #include "model/model.h"
 #include "memory/device_owned.h"
@@ -673,8 +673,7 @@ public:
     const DispatchPolicy& dispatch_policy() const noexcept {
         // CRITICAL: set_dispatch_policy() must be called before any forward.
         // Hard-failing here would crash unit tests; cold default is acceptable.
-        static const DispatchPolicy kDefault;
-        return dispatch_policy_ ? *dispatch_policy_ : kDefault;
+        return dispatch_policy_or_default(dispatch_policy_);
     }
 
 private:

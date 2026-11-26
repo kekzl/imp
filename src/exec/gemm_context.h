@@ -1,7 +1,6 @@
 #pragma once
 
 #include "exec/quant_scratch.h"
-#include "core/dispatch_policy.h"
 #include <cuda_runtime.h>
 
 namespace imp {
