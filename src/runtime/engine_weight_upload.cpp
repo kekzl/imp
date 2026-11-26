@@ -340,7 +340,8 @@ bool Engine::init_weights() {
     // runtime.cuda_graphs=="never" is checked HERE, unconditionally, not nested
     // in the MoE block below: SSM/GDN models have no experts, so nesting it there
     // silently ignored an explicit "never" for exactly those models.
-    // Runs first so its reason wins in demote_graphs_ (keeps the first reason).
+    // Runs first of the upload-time sites so its reason wins in demote_graphs_ (keeps the first
+    // reason); only Inkling's init_inkling_limits_ demotes earlier.
     // Unknown values now warn instead of silently resolving to "auto" (AUDIT.md G1).
     {
         const std::string& g = runtime_config_.runtime.cuda_graphs;

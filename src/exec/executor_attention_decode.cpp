@@ -149,7 +149,7 @@
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         sub_block_tables, sub_state.context_lens, kv_bs, scale,
                                         sub_state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                        stream, sub_state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
+                                        stream, sub_state.max_blocks_per_seq, layer_n_sinks, attn_sinks, &q8_epi);
         } else if (cache_dtype == QType::NVFP4) {
             dispatch_record::set_attn_decode(AttnDecodePath::NVFP4);
             // NVFP4 paged attention: packed FP4 + UE4M3 per-group_of_16 scales (Split-K enabled)
@@ -159,7 +159,7 @@
                                          static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
                                          attn_bt, attn_ctx_lens, kv_bs, scale, attn_max_ctx,
                                          layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                         attn_max_blocks, layer_n_sinks, attn_sinks);
+                                         attn_max_blocks, layer_n_sinks, attn_sinks, &q8_epi);
         } else if (cache_dtype == QType::MXFP4_KV) {
             dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);
             // MXFP4-KV paged attention: same kernel as NVFP4 but with UE8M0 scale decode.
@@ -170,7 +170,7 @@
                                             sub_block_tables, sub_state.context_lens, kv_bs, scale,
                                             sub_state.max_context_len, layer_sliding_window,
                                             cfg.attn_logit_softcap, stream, sub_state.max_blocks_per_seq,
-                                            layer_n_sinks, attn_sinks);
+                                            layer_n_sinks, attn_sinks, &q8_epi);
         } else if (cache_dtype == QType::INT8) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT8);
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
@@ -180,7 +180,7 @@
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         sub_block_tables, sub_state.context_lens, kv_bs, scale,
                                         sub_state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                        stream, sub_state.max_blocks_per_seq, layer_n_sinks, attn_sinks);
+                                        stream, sub_state.max_blocks_per_seq, layer_n_sinks, attn_sinks, &q8_epi);
         } else if (cache_dtype == QType::FP8_E4M3) {
             dispatch_record::set_attn_decode(AttnDecodePath::FP8);
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
@@ -191,7 +191,7 @@
             paged_attention_decode_fp8(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, ds.softmax_scale,
                                        ds.kv_scale, sub_state.max_context_len, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, attn_max_blocks,
-                                       layer_n_sinks, attn_sinks);
+                                       layer_n_sinks, attn_sinks, &q8_epi);
         } else {
             dispatch_record::set_attn_decode(AttnDecodePath::FP16);
             paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
@@ -200,7 +200,7 @@
             paged_attention_decode_mla_padded(q4, k_c, v_c, o4, static_cast<half*>(sub_k.data), sub_k.numel(),
                                               attn_bt, attn_ctx_lens, kv_bs, scale, sub_state.max_context_len,
                                               layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                              attn_max_blocks, layer_n_sinks, attn_sinks, vhd);
+                                              attn_max_blocks, layer_n_sinks, attn_sinks, vhd, &q8_epi);
         }
         if (attn_sinks && !paged_attention_applies_sinks(cache_dtype)) {
             static LogOnce warned_sinks_kv;

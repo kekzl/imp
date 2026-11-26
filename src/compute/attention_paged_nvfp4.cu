@@ -390,7 +390,8 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                                   const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
                                   const int* context_lens, int block_size, float scale, int max_context_len,
                                   int sliding_window, float softcap, cudaStream_t stream,
-                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks,
+                                  PagedQ8Epilogue* q8_epi) {
     // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
     // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
     if (n_sinks > 0)
@@ -431,7 +432,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
                 static_cast<float*>(scratch_ptr), block_tables, context_lens, batch_size, n_heads, n_kv_heads,
                 head_dim, block_size, scale, max_num_blocks, mma_splits, sliding_window, softcap, stream)) {
             paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
-                                          batch_size, n_heads, head_dim, mma_splits, stream, sinks_h);
+                                          batch_size, n_heads, head_dim, mma_splits, stream, sinks_h, q8_epi);
             return;
         }
     }
@@ -449,7 +450,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
             sliding_window, softcap, sinks_h, stream)) {
         if (num_splits > 1)
             paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
-                                          batch_size, n_heads, head_dim, num_splits, stream, sinks_h);
+                                          batch_size, n_heads, head_dim, num_splits, stream, sinks_h, q8_epi);
         return;
     }
     if (num_splits > 1) {
@@ -487,7 +488,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
 #undef LAUNCH_SPLITK_NVFP4
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream, sinks_h);
+                                      num_splits, stream, sinks_h, q8_epi);
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
@@ -528,7 +529,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                                      const int* block_tables, const int* context_lens, int block_size,
                                      float scale, int max_context_len, int sliding_window, float softcap,
                                      cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                     const void* attn_sinks) {
+                                     const void* attn_sinks, PagedQ8Epilogue* q8_epi) {
     // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
     // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
     if (n_sinks > 0)
@@ -584,7 +585,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
 #undef LAUNCH_SPLITK_MXFP4KV
 
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream, sinks_h);
+                                      num_splits, stream, sinks_h, q8_epi);
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);

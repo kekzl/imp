@@ -31,10 +31,8 @@ void Engine::init_inkling_limits_() {
                                                            : kInklingDefaultCtx;
     const int slots = config_.max_batch_size > 0 ? std::min(config_.max_batch_size, kInklingMaxSlots) : 2;
     config_.max_batch_size = slots;
-    runtime_config_.runtime.max_batch_size = slots;
-    if (scheduler_)
-        scheduler_->clamp_max_batch_size(slots);
-    rt_.cuda_graphs = false;
+    runtime_config_.runtime.max_batch_size = slots;  // runs before Engine::init creates the scheduler
+    demote_graphs_(GraphDemotionReason::InklingOwnForward);
     config_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
     // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
     // an explicit speculative.mtp_k = 0 turns it off.

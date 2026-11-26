@@ -184,13 +184,8 @@ bool Engine::step_impl_() {
 // reason survives and prints in the resolved-dispatch summary instead of
 // scrolling past in an init transcript.
 void Engine::demote_graphs_(GraphDemotionReason reason) {
-    if (!rt_.cuda_graphs) {
-        // Already off. Keep the first reason: it is the one that describes the
-        // model, and a later demotion could not have taken effect anyway.
+    if (!demote_graphs_step(rt_.cuda_graphs, graph_demotion_, reason))
         return;
-    }
-    rt_.cuda_graphs = false;
-    graph_demotion_ = reason;
     IMP_LOG_INFO("CUDA graphs disabled: %s%s", graph_demotion_reason_name(reason),
                  graph_demotion_is_mid_run(reason) ? " (mid-run, lifted when the pressure clears)" : "");
 }

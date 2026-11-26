@@ -475,7 +475,8 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                  const half* K_scales, const half* V_scales, const int* block_tables,
                                  const int* context_lens, int block_size, float scale, int max_context_len,
                                  int sliding_window, float softcap, cudaStream_t stream,
-                                 int max_blocks_per_seq, int n_sinks, const void* attn_sinks) {
+                                 int max_blocks_per_seq, int n_sinks, const void* attn_sinks,
+                                 PagedQ8Epilogue* q8_epi) {
     // StreamingLLM (n_sinks > 0): these kernels have no sink range, so attend every live block and let
     // the -1 sentinels of evict_middle_blocks define sinks + window. Learned sinks (attn_sinks,
     // gpt-oss) wired since #1345 (same as FP8, #1346).
@@ -534,7 +535,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
 
         // Phase 2: reuse shared reduce launcher
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
-                                      num_splits, stream, sinks_h);
+                                      num_splits, stream, sinks_h, q8_epi);
     } else {
         // Non-Split-K INT8 fallback (templated + vectorized dp4a)
         dim3 grid(batch_size, n_heads);

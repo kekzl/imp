@@ -925,7 +925,8 @@ static void launch_paged_decode_mha(const Tensor& Q, const Tensor& K_cache, cons
 void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                             const int* block_tables, const int* context_lens, int block_size, float scale,
                             int max_context_len, int sliding_window, float softcap, cudaStream_t stream,
-                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks, int v_head_dim) {
+                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks, int v_head_dim,
+                            PagedQ8Epilogue* q8_epi) {
     const half* sinks_h = static_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -1088,7 +1089,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         } else {
             // Phase 2: reduce partials
             paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads,
-                                          head_dim, num_splits, stream, sinks_h);
+                                          head_dim, num_splits, stream, sinks_h, q8_epi);
         }
     }
 
