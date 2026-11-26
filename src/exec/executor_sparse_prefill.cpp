@@ -2,6 +2,7 @@
 // per-chunk past-page pick the chunked prefill path calls. Kernels: sparse_attn_select.cu.
 
 #include "core/dispatch_policy.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/sparse_attn_geometry.h"
@@ -72,9 +73,8 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
     if (past <= 0)
         return dense;
     // Activity proof (prefill is not graph-captured, so this fires where the selection runs).
-    static bool logged_active = false;
-    if (!logged_active) {
-        logged_active = true;
+    static LogOnce logged_active;
+    if (logged_active.first()) {
         IMP_LOG_INFO("sparse prefill attention ACTIVE: past %d -> %d tokens at L%d", q_offset, past,
                      kv_layer);
     }

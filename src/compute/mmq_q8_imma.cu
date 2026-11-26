@@ -9,6 +9,7 @@
 #include "memory/device_alloc_all.h"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/device_info.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "memory/mem_account.h"
@@ -672,9 +673,8 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
                                 d_offsets, h_max_rows, expanded, ne, rows_hint);
     imma_act_reuse_next(false);  // gemm_common may return before quantizing
-    static bool logged = false;
-    if (ok && !logged) {
-        logged = true;
+    static LogOnce logged;
+    if (ok && logged.first()) {
         IMP_LOG_INFO("MoE IMMA prefill ACTIVE (%s, ne=%d N=%d K=%d max_rows=%d)",
                      qkind == 1   ? "Q4_K"
                      : qkind == 2 ? "Q6_K"

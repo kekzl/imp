@@ -8,6 +8,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace imp {
 
@@ -134,7 +136,13 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
         make_workspace_tensor(ptr, compute_dtype_, max_tokens, fused_total_out, fused_bytes);
 }
 
-bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+void Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+    if (!try_resize_workspace(new_max_tokens, stream))
+        throw std::runtime_error("shared workspace: grow to " + std::to_string(new_max_tokens) +
+                                 " rows failed, the forward would overrun the old buffer");
+}
+
+bool Workspace::try_resize_workspace(int new_max_tokens, cudaStream_t stream) {
     // Grow branch routes through vram_alloc/vram_free (not stream-ordered), so nothing here
     // needs `stream`. Parameter stays: eight call sites pass it, matching the stream-ordered
     // variant this branch would take if it ever goes live.
@@ -143,11 +151,14 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         return true;
     new_max_tokens = std::min(new_max_tokens, *max_tokens_);  // never exceed init-time max
 
-    // Recompute shared sizes for the new token count
-    int saved_max = *max_tokens_;
-    *max_tokens_ = new_max_tokens;
-    compute_shared_sizes(new_max_tokens);
-    *max_tokens_ = saved_max;
+    // Phase sizes at a token count; *max_tokens_ reads as that count while they are computed.
+    const auto size_phases_at = [this](int rows) {
+        const int saved_max = *max_tokens_;
+        *max_tokens_ = rows;
+        compute_shared_sizes(rows);
+        *max_tokens_ = saved_max;
+    };
+    size_phases_at(new_max_tokens);
 
     size_t new_shared = std::max({attn_shared_size_, ffn_shared_size_, moe_shared_size_, ssm_shared_size_});
     if (new_shared == 0)
@@ -160,15 +171,15 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         // The branch is unreachable today (allocate_shared_workspace sizes at max_tokens_, this
         // clamps to it, every phase term monotone in T); fixed rather than deleted because that
         // argument depends on surrounding code, not this branch.
-        shared_workspace_.reset();
-        bump_generation();  // arena moves: every captured graph recaptures
-        shared_workspace_ = DeviceOwned<void>::allocate(vram_alloc_, new_shared, "shared_workspace");
-        if (!shared_workspace_.get()) {
+        const auto take = [this](size_t b) {
+            return DeviceOwned<void>::allocate(vram_alloc_, b, "shared_workspace");
+        };
+        if (!grow_keeping_old(shared_workspace_, shared_workspace_size_, new_shared, take)) {
             IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes", new_shared);
-            shared_workspace_size_ = 0;
+            size_phases_at(shared_workspace_max_tokens_);  // back to the kept rows
             return false;
         }
-        shared_workspace_size_ = new_shared;
+        bump_generation();  // arena moved: every captured graph recaptures
     }
     shared_workspace_max_tokens_ = new_max_tokens;
     return true;

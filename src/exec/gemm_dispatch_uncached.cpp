@@ -11,6 +11,7 @@
 #include "compute/gemm_q8_0_dense.h"
 #include "compute/gemv_dp4a_rows.h"
 #include "compute/mmq_q8_imma.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "core/tensor_kind.h"
@@ -34,9 +35,8 @@ static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
                         sizeof(uint16_t);
     if (need <= qs->dequant_size)
         return true;
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
+    static LogOnce warned;
+    if (warned.first()) {
         IMP_LOG_WARN(
             "gemm_dispatch_uncached_fallback: %ld x %ld %s weight needs %.1f MiB, dequant scratch is "
             "%.1f MiB; whole-weight dequant declined",
@@ -66,9 +66,8 @@ static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& 
                                                qs->d8_prefill_buf.data(), M, N, K, ctx.beta, ctx.stream)
                         : gemm_q4k_dp4a_dense_rows(weight.data, x, y, qs->q8_1_prefill_buf.data(),
                                                    qs->d8_prefill_buf.data(), M, N, K, ctx.beta, ctx.stream);
-    static bool s_logged[2] = {};  // activity proof per outcome, once each
-    if (!s_logged[ok]) {
-        s_logged[ok] = true;
+    static LogOnce s_logged[2];  // activity proof per outcome, once each
+    if (s_logged[ok].first()) {
         IMP_LOG_INFO("uncached %s decode rows M=%d N=%d K=%d beta=%.0f: %s", qtype_name(weight.qtype), M, N,
                      K, ctx.beta, ok ? "dp4a in place" : "declined");
     }
@@ -89,9 +88,8 @@ static bool gguf_imma_rows(const Tensor& input, const Tensor& weight, Tensor& ou
                                    static_cast<int>(weight.shape[0]), K, ctx.stream, ctx.beta,
                                    ctx.act_quant_hint_matches(input.data, M, K)))
         return false;
-    static bool s_logged[128] = {};  // activity proof, once per qtype
-    if (!s_logged[std::to_underlying(weight.qtype) & 127]) {
-        s_logged[std::to_underlying(weight.qtype) & 127] = true;
+    static LogOnce s_logged[128];  // activity proof, once per qtype
+    if (s_logged[std::to_underlying(weight.qtype) & 127].first()) {
         IMP_LOG_INFO("uncached %s rows M=%d N=%ld K=%d: raw IMMA in place", qtype_name(weight.qtype), M,
                      (long)weight.shape[0], K);
     }
@@ -146,9 +144,8 @@ static bool q6k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& out
         !gemm_q6k_f16_tile(input.data, weight.data, output.data, M, N, static_cast<int>(weight.shape[1]),
                            1.0f, ctx.beta, process_diag_cublas_fp16_acc(), ctx.stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("q6k_tile: fused Q6_K prompt GEMM ACTIVE (M=%d N=%d K=%ld)", M, N,
                      (long)weight.shape[1]);
     }
@@ -167,9 +164,8 @@ bool gemm_q45k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& outp
         !gemm_q45k_f16_tile(q5, input.data, weight.data, output.data, M, static_cast<int>(weight.shape[0]),
                             static_cast<int>(weight.shape[1]), 1.0f, ctx.beta, true, ctx.stream))
         return false;
-    static bool s_logged[2] = {};  // activity proof, once per qtype
-    if (!s_logged[q5]) {
-        s_logged[q5] = true;
+    static LogOnce s_logged[2];  // activity proof, once per qtype
+    if (s_logged[q5].first()) {
         IMP_LOG_INFO("q45k_tile: fused %s prompt GEMM ACTIVE (M=%d N=%ld K=%ld)", qtype_name(weight.qtype), M,
                      (long)weight.shape[0], (long)weight.shape[1]);
     }
@@ -246,9 +242,8 @@ static bool dp4a_token_gemv(const Tensor& input, const Tensor& weight, Tensor& o
         dispatch_gemv_residual(weight.qtype, weight.data, q8, qs->d8_buf.data(), y, y, N, K, ctx.stream);
     else
         dispatch_dp4a_gemv(weight.qtype, weight.data, q8, qs->d8_buf.data(), y, N, K, ctx.stream);
-    static bool s_logged[2] = {};  // activity proof per beta, once each
-    if (!s_logged[ctx.beta == 1.0f]) {
-        s_logged[ctx.beta == 1.0f] = true;
+    static LogOnce s_logged[2];  // activity proof per beta, once each
+    if (s_logged[ctx.beta == 1.0f].first()) {
         IMP_LOG_INFO("uncached %s token GEMV N=%d K=%d beta=%.0f: dp4a in place", qtype_name(weight.qtype), N,
                      K, ctx.beta);
     }
@@ -282,11 +277,10 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
             int cols = static_cast<int>(weight.shape[1]);
             // The one degradation landing on the per-token path was silent
             // (AUDIT_ARCH_2026 A2-8): every decode step here dequantizes and copies
-            // the whole weight before the GEMM. Warned once per process, with the size, so a trace can catch
-            // it.
-            static bool s_warned_full_dequant = false;
-            if (!s_warned_full_dequant) {
-                s_warned_full_dequant = true;
+            // the whole weight before the GEMM. Warned once per model load, with the size, so a trace can
+            // catch it.
+            static LogOnce s_warned_full_dequant;
+            if (s_warned_full_dequant.first()) {
                 IMP_LOG_WARN(
                     "gemm_dispatch_uncached_fallback: beta=%.3f on a %s weight without a cached FP16 "
                     "copy: the whole %d x %d weight (%.1f MiB dequantised) is materialised per "
@@ -310,9 +304,8 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
 
     // Generic dequant catch-all (M>1 prefill for uncached weights)
     if (M > 1 && input.qtype == QType::F16 && !weight.dropped_source) {
-        static bool s_logged[128] = {};  // which in-place route declined, once per qtype
-        if (!s_logged[std::to_underlying(qtype) & 127]) {
-            s_logged[std::to_underlying(qtype) & 127] = true;
+        static LogOnce s_logged[128];  // which in-place route declined, once per qtype
+        if (s_logged[std::to_underlying(qtype) & 127].first()) {
             IMP_LOG_INFO("uncached %s M=%d N=%ld K=%ld: per-call dequant (in stride %ld, out stride %ld)",
                          qtype_name(qtype), M, (long)weight.shape[0], (long)weight.shape[1],
                          (long)input.stride[0], (long)output.stride[0]);
@@ -361,9 +354,8 @@ void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& ou
         gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
         return;
     }
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;
+    if (logged.first()) {
         IMP_LOG_INFO(
             "gemm: IMMA declined a Q8_0 weight without source (M=%lld beta=%.0f), FP16 from its planes",
             static_cast<long long>(input.shape[0]), ctx.beta);

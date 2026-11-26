@@ -43,11 +43,9 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
                                          static_cast<int>(rows), &one, input.data, CUDA_R_16F, ld, input.data,
                                          CUDA_R_16F, ld, &one, it->second.d_H.get(), CUDA_R_32F,
                                          static_cast<int>(K), CUBLAS_COMPUTE_32F, stream);
-    if (st != CUBLAS_STATUS_SUCCESS) {
-        IMP_LOG_WARN("calibration: Hessian GEMM failed (status %d) at layer %d kind %s", static_cast<int>(st),
-                     layer, tensor_kind_name(kind));
-        return;
-    }
+    if (st != CUBLAS_STATUS_SUCCESS)
+        throw_runtime_error("calibration: Hessian GEMM failed (status %d) at layer %d kind %s",
+                            static_cast<int>(st), layer, tensor_kind_name(kind));
     it->second.rows += static_cast<uint64_t>(rows);
 }
 

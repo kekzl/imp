@@ -62,11 +62,11 @@ inline constexpr CapabilityName kCapabilityNames[] = {
         .sae = residual,
         .lora = loop,
         .control_vector = residual,
-        // Rewind = KVCacheManager::rollback + ssm_state_ slabs; an own forward keeps its own K/V and
+        // Rewind = KVCacheManager::rollback + ssm_state_ slabs; an own forward keeps its own sliding K/V and
         // conv state, which InklingForward::run refuses to step back into (pos0 != pos_).
         .phrase_ban = loop,
         // Two rows of one step: each row needs its own recurrent slot; an own forward binds one slot
-        // per sequence (run_inkling_ decodes each row on the slot of its first KV block).
+        // per sequence (run_inkling_ decodes each row on the slot its request id is bound to).
         .cfg = f.model_loaded && (f.layer_loop_replaced || !f.recurrent_state || f.batched_recurrent_decode),
     };
 }

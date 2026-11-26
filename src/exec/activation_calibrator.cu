@@ -96,13 +96,10 @@ void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const 
         const size_t sum_bytes = static_cast<size_t>(ne) * static_cast<size_t>(2 * K) * sizeof(double);
         e.d_sum = VramOwned<double>(*alloc_, sum_bytes / sizeof(double), "activation_calibration");
         e.d_rows = VramOwned<uint64_t>(*alloc_, static_cast<size_t>(ne), "activation_calibration");
-        if (!e.d_sum || !e.d_rows) {
-            IMP_LOG_WARN("calibration: allocation failed for layer %d kind %s (%d experts, K=%lld)", layer,
-                         tensor_kind_name(kind), ne, static_cast<long long>(K));
-            e.d_sum.reset();
-            e.d_rows.reset();
-            return;
-        }
+        // A skipped entry would write a calibration file with this layer silently missing.
+        if (!e.d_sum || !e.d_rows)
+            throw_runtime_error("calibration: allocation failed for layer %d kind %s (%d experts, K=%lld)",
+                                layer, tensor_kind_name(kind), ne, static_cast<long long>(K));
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(e.d_sum.get(), 0, sum_bytes, stream));
         IMP_CUDA_CHECK_LOG(
             cudaMemsetAsync(e.d_rows.get(), 0, static_cast<size_t>(ne) * sizeof(uint64_t), stream));
@@ -142,11 +139,9 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
         // capture is an error). One buffer of 3K: [0,K) sum|x|, [K,2K) sum x^2,
         // [2K,3K) max|x|, avoiding three allocations per entry.
         e.d_sum = VramOwned<double>(*alloc_, static_cast<size_t>(3 * K), "activation_calibration");
-        if (!e.d_sum) {
-            IMP_LOG_WARN("calibration: allocation failed for layer %d kind %s (K=%lld)", layer,
-                         tensor_kind_name(kind), static_cast<long long>(K));
-            return;
-        }
+        if (!e.d_sum)
+            throw_runtime_error("calibration: allocation failed for layer %d kind %s (K=%lld)", layer,
+                                tensor_kind_name(kind), static_cast<long long>(K));
         IMP_CUDA_CHECK_LOG(
             cudaMemsetAsync(e.d_sum.get(), 0, static_cast<size_t>(3 * K) * sizeof(double), stream));
         it = entries_.emplace(key, std::move(e)).first;

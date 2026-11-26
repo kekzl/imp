@@ -11,6 +11,7 @@
 // Attention rows take the decode-attention route with per-row block tables
 // and context lengths, the same shape as the multi-candidate chunk.
 
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
@@ -621,7 +622,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     // Workspace pinned to the largest batch: every N's graph then bakes the
     // same activation carve, and growing N never reallocates (which would
     // drop every cached graph).
-    if (!executor_->resize_workspace(bv_.cap_rows, stream)) {
+    if (!executor_->try_resize_workspace(bv_.cap_rows, stream)) {
         rollback_all(N);
         return false;
     }
@@ -803,9 +804,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         any_mtp, drafted_total, acc_total, emit_total,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count(),
         /*sampled=*/!row_draw.empty());
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;
+    if (logged.first()) {
         IMP_LOG_INFO("spec-batch: first batched verify n=%d rows=%d drafted=%lld accepted=%lld emitted=%lld",
                      N, n_rows, drafted_total, acc_total, emit_total);
     }

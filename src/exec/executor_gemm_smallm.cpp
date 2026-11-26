@@ -16,6 +16,7 @@
 #include "compute/activation.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
@@ -331,9 +332,8 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
                                          n, N, K, ctx.stream,
                                          no_ws ? nullptr : qscratch_.cutlass_workspace.get(),
                                          qscratch_.cutlass_workspace_size)) {
-            static bool logged = false;  // activity proof, once
-            if (!logged) {
-                logged = true;
+            static LogOnce logged;  // activity proof, once
+            if (logged.first()) {
                 IMP_LOG_INFO(
                     "swiglu_quant_epilogue: SwiGLU + down NVFP4 quantize in the up GEMM ACTIVE "
                     "(M=%d N=%d K=%d)",

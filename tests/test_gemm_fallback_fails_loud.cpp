@@ -8,8 +8,10 @@
 #include <stdexcept>
 #include <string>
 
+#include "compute/sampling.h"
 #include "core/logging.h"
 #include "core/tensor.h"
+#include "memory/engine_arena.h"
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/quant_scratch.h"
 #include "exec/weight_caches.h"
@@ -96,4 +98,13 @@ TEST(GemmFallbackFailsLoud, ThrowHelperFormatsAndTruncates) {
         return;
     }
     FAIL() << "throw_runtime_error returned";
+}
+
+// DRY slots the arena cannot give fail init; before, init went on and every DRY request was
+// served without the penalty behind one WARN. A closed arena gives no take, no CUDA call.
+TEST(GemmFallbackFailsLoud, DryPreallocateReportsAMissingTake) {
+    if (imp::engine_arena().is_open())
+        GTEST_SKIP() << "engine arena open in this process";
+    EXPECT_FALSE(imp::sampling_preallocate_dry(64));
+    EXPECT_TRUE(imp::sampling_preallocate_dry(0));  // nothing to hold
 }

@@ -38,7 +38,7 @@ bool InklingForward::draft_due_() {
     if (look_pos0_ >= 0)
         ++stats_.confirmed[look_hits_];
     look_hits_ = 0;
-    const bool due = pause_ == 0 && pos_ + kGraphRows <= max_ctx_;
+    const bool due = pause_ == 0 && pos_ + kGraphRows <= std::min(max_ctx_, table_rows_);
     if (pause_ > 0) {
         ++stats_.paused;
         if (--pause_ == 0)

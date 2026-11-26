@@ -14,9 +14,8 @@
             // the latent kv_a/kv_b projections have no LoRA wiring); a LoRA adapter on
             // a DeepSeek MLA model is silently ignored except for a one-time warning.
             if (lora_ && lora_->has_any()) {
-                static bool mla_lora_warned = false;
-                if (!mla_lora_warned) {
-                    mla_lora_warned = true;
+                static LogOnce mla_lora_warned;
+                if (mla_lora_warned.first()) {
                     IMP_LOG_WARN("LoRA: adapter is loaded but the MLA attention path "
                                  "(DeepSeek-V2/V3) does not apply Q/kv_a/kv_b LoRA deltas "
                                  "— adapter ignored for attention projections");

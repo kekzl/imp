@@ -7,6 +7,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
 #include "quant/nvfp4_gemm_tile.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
@@ -63,9 +64,8 @@ static void mxfp4_prefill_gemm(const CutlassMxFP4Weight& mw, const Tensor& x, Te
                             stream,
                             /*variant=*/-1, sk ? static_cast<uint8_t*>(workspace) + sk_off : nullptr,
                             sk ? workspace_bytes - sk_off : 0)) {
-            static bool logged = false;  // activity proof, once
-            if (!logged) {
-                logged = true;
+            static LogOnce logged;  // activity proof, once
+            if (logged.first()) {
                 IMP_LOG_INFO("gemm_dispatch MXFP4: own tile GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
             }
             return;

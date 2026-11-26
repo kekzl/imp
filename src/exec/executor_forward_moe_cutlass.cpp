@@ -17,6 +17,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/pdl.h"
 #include <cuda_runtime.h>
@@ -41,10 +42,9 @@ static void verify_against_moe_routing_model(bool expert_bias_glu, const MoePref
     const MoePrefillPath modeled = select_moe_prefill_path(expert_bias_glu, obs);
     if (modeled == chosen)
         return;
-    static bool warned = false;
-    if (warned)
+    static LogOnce warned;
+    if (!warned.first())
         return;
-    warned = true;
     IMP_LOG_ERROR(
         "MoE routing model disagrees with the dispatch: dispatch ran %s, "
         "select_moe_prefill_path() says %s. executor_forward_moe_cutlass.cu and "
@@ -155,8 +155,8 @@ static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t st
                                                               : MoeDecodeEpi::kSwiglu;
     if (!launch_moe_decode_grouped(in.da, in.moe, in.d_offsets, in.ne, in.d, in.eff, in.expanded, epi,
                                    in.down_out, in.down_act_scale, stream)) {
-        static std::atomic<bool> s_refused{false};
-        if (!s_refused.exchange(true))
+        static LogOnce s_refused;
+        if (s_refused.first())
             IMP_LOG_WARN(
                 "MoE decode rows: grouped NVFP4 decode GEMM refused (n=%d ne=%d d=%d eff=%d, down input "
                 "%zu B vs up buffer %zu B), tile path",
@@ -164,8 +164,8 @@ static bool run_moe_decode_grouped(const MoeDecodeGroupedIn& in, cudaStream_t st
                 in.moe.expert_up.nbytes());
         return false;
     }
-    static std::atomic<bool> s_logged{false};  // activity proof, once
-    if (!s_logged.exchange(true))
+    static LogOnce s_logged;  // activity proof, once
+    if (s_logged.first())
         IMP_LOG_INFO("MoE decode rows: grouped NVFP4 decode GEMM ACTIVE (gate+up+act fused, n=%d, epi=%d)",
                      in.n, static_cast<int>(epi));
     return true;
@@ -230,9 +230,8 @@ static bool run_moe_prompt_a16(const MoePromptA16In& in, bool& gather_done, cuda
     swiglu(gate_t, up_t, gate_t, stream);
     IMP_CHECK(grouped(*in.down, in.gate_out, in.down_out, in.d, in.eff),
               "nvfp4_prompt_a16_moe: grouped W4A16 down refused (expanded=%d)", in.expanded);
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("nvfp4_prompt_a16_moe: W4A16 grouped expert GEMMs ACTIVE (expanded=%d ne=%d)",
                      in.expanded, in.ne);
     }
@@ -329,11 +328,11 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                                      moe_.cutlass3x_packed.get() && moe_.cutlass3x_sf.get() &&
                                      moe_.cutlass3x_sfa_ptrs.data() && moe_.cutlass3x_sfa_ptrs_count >= ne;
         if (use_device_args) {
-            // Log once per process; layer==0 fires on every
+            // Log once per model load; layer==0 fires on every
             // forward, but only the first ever needs to flag
             // the path choice.
-            static std::atomic<bool> s_da_logged{false};
-            if (layer == 0 && !s_da_logged.exchange(true))
+            static LogOnce s_da_logged;
+            if (layer == 0 && s_da_logged.first())
                 IMP_LOG_INFO(
                     "MoE prefill: CUTLASS 3.x device-args full path "
                     "(default)");

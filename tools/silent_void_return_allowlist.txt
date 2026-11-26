@@ -4,15 +4,15 @@
 # a new exit that leaves an output unwritten throws (imp::throw_runtime_error) or returns a
 # status its caller checks; it does not log and return (src/compute/CLAUDE.md, ROADMAP B-108).
 #
-# remaining: 18 files, 29 exits
+# remaining: 17 files, 24 exits
 
 src/compute/inkling_attn.cu  # 1
 src/compute/inkling_fused.cu  # 3
 src/compute/inkling_ops.cu  # 1
 src/compute/mmq_q8_imma_scratch.cu  # 1
-src/compute/sampling_penalties.cu  # 2
-src/exec/activation_calibrator.cu  # 3
-src/exec/activation_calibrator_hessian.cu  # 2
+src/compute/sampling_penalties.cu  # 1
+src/exec/activation_calibrator.cu  # 2
+src/exec/activation_calibrator_hessian.cu  # 1
 src/exec/executor_attention_internal.h  # 1
 src/exec/executor_debug.h  # 3
 src/exec/executor_forward_moe.cu  # 1
@@ -23,4 +23,3 @@ src/exec/pre_dequant_fp8_lm_head.cpp  # 2
 src/exec/pre_dequant_phase1_fp16_cache.cpp  # 1
 src/exec/pre_dequant_phase2_fp8_cache.cpp  # 2
 src/exec/pre_dequant_phase3_cutlass.cpp  # 1
-src/exec/pre_dequant_phase3_moe.cpp  # 2

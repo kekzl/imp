@@ -84,7 +84,7 @@ Two of these do not switch off the way the field name suggests:
 
 - Zero and "unset" both land on 50.
 - Disabling top-k needs a value at or above the vocabulary size.
-- The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:75 eff_top_k`).
+- The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:76 eff_top_k`).
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
   client cannot switch it off. Sending the non-OpenAI field with value `1.0`
   disables it: the engine skips the penalty pass when all three penalties are

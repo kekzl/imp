@@ -37,7 +37,7 @@ int GraphExecutor::ffn_graph_begin_(const InferenceState& state, int n, cudaStre
     if (cudaStreamIsCapturing(stream, &cs) != cudaSuccess || cs != cudaStreamCaptureStatusNone)
         return 0;
     // Phase views are carved from the row count: carve at `rows` so a bucket keeps its addresses.
-    if (!ws_.resize_workspace(rows, stream))
+    if (!ws_.try_resize_workspace(rows, stream))
         return 0;
     // Pad rows feed norms, routing and GEMMs but no output; zeroed so they stay finite.
     if (rows > n) {

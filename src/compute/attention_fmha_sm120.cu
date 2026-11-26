@@ -10,6 +10,7 @@
 #include "compute/fmha_sm120_tile_select.h"
 #include "core/cuda_static_reset.h"
 #include "core/device_info.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -1302,9 +1303,8 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (aerr != cudaSuccess)
         return false;
 
-    static bool logged_once = false;
-    if (!logged_once) {
-        logged_once = true;
+    static LogOnce logged_once;
+    if (logged_once.first()) {
         IMP_LOG_INFO(
             "FMHA FA2 register-resident kernel ACTIVE (hd=%d, Bq=%d, Bkv=%d, qk=f16, qk_acc=%s, "
             "pv_acc=%s, kv_buf=%s, smem=%zu B, seq_q=%d seq_kv=%d)",

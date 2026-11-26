@@ -526,11 +526,10 @@ public:
     void set_ffn_graphs_enabled(bool cuda_graphs);
     [[nodiscard]] uint64_t ffn_graph_replays() const { return ffn_graphs_.replays(); }
 
-    // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
-    // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
-    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream) {
-        return ws_.resize_workspace(new_max_tokens, stream);
-    }
+    // Carve the shared workspace for a token count. try_: false on a failed grow, old carve kept;
+    // resize_workspace throws there instead (a caller that cannot fall back, audit C-11).
+    [[nodiscard]] bool try_resize_workspace(int n, cudaStream_t s) { return ws_.try_resize_workspace(n, s); }
+    void resize_workspace(int rows, cudaStream_t s) { ws_.resize_workspace(rows, s); }
     int max_tokens() const { return max_tokens_; }
 
     // Takes the small-M NVFP4 workspace + activation scratch for the largest
@@ -566,9 +565,9 @@ public:
     // cannot be served; caller must reject the request.
     int max_safe_prefill_chunk(int offset, int desired, int kv_bs) const;
     // executor_inkling.cu: Inkling2-Loop sequence slots by request id (null for every other arch).
-    int inkling_resume(int req, std::span<const int32_t> tokens, cudaStream_t stream);
+    InklingRuntime* inkling_runtime() const { return inkling_.get(); }
     InklingSlotTable* inkling_slots() const { return inkling_ ? &inkling_->table : nullptr; }
-    void set_inkling_lookahead(bool on, bool lazy) { inkling_lookahead_ = on, inkling_lazy_ = lazy; }
+    void set_inkling_lookahead(bool on) { inkling_lookahead_ = on; }
 
     // Graph-captured verify chunk (#847): the chunked continuation forward is
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
@@ -1478,7 +1477,7 @@ private:
     void inkling_look_logits_(int slot, cudaStream_t stream);
     [[nodiscard]] bool inkling_take_logits_(Tensor& lg, cudaStream_t stream);
     std::unique_ptr<InklingRuntime> inkling_;
-    bool inkling_lookahead_ = true, inkling_lazy_ = false;  // lazy: context K/V commit as sequences grow
+    bool inkling_lookahead_ = true;
     void inkling_attach_draft_(cudaStream_t stream);  // once, at the first forward: the FP8 head exists then
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // GDN-slot layer: Kimi Delta Attention when cfg.gdn_kda (executor_kda.cu), else run_gdn.

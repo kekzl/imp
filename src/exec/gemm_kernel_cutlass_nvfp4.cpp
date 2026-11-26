@@ -4,6 +4,7 @@
 #include "compute/gemm_cutlass_sm120.h"        // CutlassNvFP4Weight, quantize_fp16_to_nvfp4_cutlass
 #include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
 #include "core/config/gemm.h"            // kNvfp4TileMinM
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "core/tensor.h"
@@ -61,9 +62,8 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
                             ? nullptr
                             : args.cutlass_workspace,
                         args.cutlass_workspace_size)) {
-        static bool logged = false;  // activity proof, once
-        if (!logged) {
-            logged = true;
+        static LogOnce logged;  // activity proof, once
+        if (logged.first()) {
             IMP_LOG_INFO("nvfp4_tile: own NVFP4 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
         }
         return GemmDispatchResult::Ok;
