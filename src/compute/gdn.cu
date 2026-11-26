@@ -345,13 +345,11 @@ void launch_scan128(int n_heads, int n_seq, cudaStream_t stream, Args... args) {
 // h_state_pool: base of the recurrent-state pool; seq_slots[i] selects sequence i's slot;
 // h_state_seq_stride is the distance between slots in floats. conv_f32/alpha/beta/y are
 // [n_seq*n_tokens,...] sequence-major (the layout a batched decode step already produces).
-void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                                const float* A_log, const float* dt_bias, float* h_state_pool,
-                                const int* seq_slots, int64_t h_state_seq_stride, half* y, int n_seq,
-                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                                cudaStream_t stream, int grouped_layout, const int* d_real_n,
-                                const int* seq_row_offsets, float* h_snap, const int* d_snap_n,
-                                const int* out_slots, const int* snap_slots, float* fac_out, int fac_stride) {
+void gdn_scan_fused_f32_batched(const GdnScanBatchedArgs<float>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state_pool, seq_slots,
+                 h_state_seq_stride, y, n_seq, n_tokens, n_heads, head_dim_ssm, state_size, n_groups, stream,
+                 grouped_layout, d_real_n, seq_row_offsets, h_snap, d_snap_n, out_slots, snap_slots, fac_out,
+                 fac_stride] = a;
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)
@@ -388,14 +386,11 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
 // BF16-state twin (gdn.state_bf16). h_state_seq_stride is in BF16 ELEMENTS.
 // HD=SS=128 only — the init resolver refuses BF16 state for other shapes,
 // so reaching the else here is a wiring bug, not a serving condition.
-void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const half* alpha,
-                                 const half* beta, const float* A_log, const float* dt_bias,
-                                 __nv_bfloat16* h_state_pool, const int* seq_slots,
-                                 int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
-                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout, const int* d_real_n, const int* seq_row_offsets,
-                                 __nv_bfloat16* h_snap, const int* d_snap_n, const int* out_slots,
-                                 const int* snap_slots, float* fac_out, int fac_stride) {
+void gdn_scan_fused_bf16_batched(const GdnScanBatchedArgs<__nv_bfloat16>& a) {
+    const auto& [conv_f32, conv_channels, alpha, beta, A_log, dt_bias, h_state_pool, seq_slots,
+                 h_state_seq_stride, y, n_seq, n_tokens, n_heads, head_dim_ssm, state_size, n_groups, stream,
+                 grouped_layout, d_real_n, seq_row_offsets, h_snap, d_snap_n, out_slots, snap_slots, fac_out,
+                 fac_stride] = a;
     if (n_seq <= 0)
         return;
     if (seq_row_offsets && d_real_n)

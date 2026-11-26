@@ -574,24 +574,16 @@ static void qknorm_rope_launch(bool allow_warp, half* Q, half* K, const half* q_
                 longrope_inv_freqs, mrope);
 }
 
-void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight, int n_heads,
-                       int n_kv_heads, int head_dim, float eps, const int* positions, float theta,
-                       float scaling, int rope_dim, bool neox, cudaStream_t stream, float weight_offset,
-                       float ext_factor, float attn_factor, const float* corr_dims,
-                       const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
-    qknorm_rope_launch(true, Q, K, q_norm_weight, k_norm_weight, n_heads, n_kv_heads, head_dim, eps,
-                       positions, theta, scaling, rope_dim, neox, stream, weight_offset, ext_factor,
-                       attn_factor, corr_dims, longrope_inv_freqs, mrope, n_tokens);
+void qknorm_rope_fused(const QknormRopeArgs& a) {
+    qknorm_rope_launch(true, a.Q, a.K, a.q_norm_weight, a.k_norm_weight, a.n_heads, a.n_kv_heads, a.head_dim,
+                       a.eps, a.positions, a.theta, a.scaling, a.rope_dim, a.neox, a.stream, a.weight_offset,
+                       a.ext_factor, a.attn_factor, a.corr_dims, a.longrope_inv_freqs, a.mrope, a.n_tokens);
 }
 
-void qknorm_rope_fused_cta(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight,
-                           int n_heads, int n_kv_heads, int head_dim, float eps, const int* positions,
-                           float theta, float scaling, int rope_dim, bool neox, cudaStream_t stream,
-                           float weight_offset, float ext_factor, float attn_factor, const float* corr_dims,
-                           const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens) {
-    qknorm_rope_launch(false, Q, K, q_norm_weight, k_norm_weight, n_heads, n_kv_heads, head_dim, eps,
-                       positions, theta, scaling, rope_dim, neox, stream, weight_offset, ext_factor,
-                       attn_factor, corr_dims, longrope_inv_freqs, mrope, n_tokens);
+void qknorm_rope_fused_cta(const QknormRopeArgs& a) {
+    qknorm_rope_launch(false, a.Q, a.K, a.q_norm_weight, a.k_norm_weight, a.n_heads, a.n_kv_heads, a.head_dim,
+                       a.eps, a.positions, a.theta, a.scaling, a.rope_dim, a.neox, a.stream, a.weight_offset,
+                       a.ext_factor, a.attn_factor, a.corr_dims, a.longrope_inv_freqs, a.mrope, a.n_tokens);
 }
 
 // --------------------------------------------------------------------------
