@@ -199,7 +199,7 @@ void run_case(const char* name, int ne, int64_t n_rows_total, int64_t K, int row
     SCOPED_TRACE(name);
     MxfpBuf b = build_mxfp4(ne, n_rows_total, K, g, exp_lo, exp_hi, outlier_u);
 
-    NvFP4MoEQuantResult res{};
+    NvFP4MoEOwned res;
     std::vector<float> h_tscales;
     ASSERT_TRUE(gpt_oss_convert_experts_to_nvfp4(b.blocks.data(), b.scales.data(), ne, n_rows_total, K,
                                                  row_offset, row_stride, res, extra_scale, &h_tscales))
@@ -334,7 +334,7 @@ TEST(GptOssMxfp4ConvertRef, AllZeroNibbles) {
     const int64_t kb32 = K / 32, row_bytes = K / 2;
     b.blocks.assign(static_cast<size_t>(ne) * n_rows * row_bytes, 0);  // all nibbles 0 -> e2m1 code 0
     b.scales.assign(static_cast<size_t>(ne) * n_rows * kb32, 128);     // uniform exponent
-    NvFP4MoEQuantResult res{};
+    NvFP4MoEOwned res;
     ASSERT_TRUE(gpt_oss_convert_experts_to_nvfp4(b.blocks.data(), b.scales.data(), ne, n_rows, K, 0, 1, res));
     const size_t elems = static_cast<size_t>(ne) * n_rows * K;
     half* d_out = nullptr;

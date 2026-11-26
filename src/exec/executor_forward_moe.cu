@@ -697,13 +697,8 @@ void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnC
     } else {
         moe_ffn_phase8_unfused_(layer, stream, ctx);
     }
-
-    // 10. Free routing result tensors only if allocated by moe_topk_gating.
-    //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
-    if (ctx.routing.owns_memory) {
-        device_free_all(ctx.routing.expert_indices.data, ctx.routing.expert_weights.data,
-                        ctx.routing.sorted_token_ids.data, ctx.routing.expert_offsets.data);
-    }
+    // 10. Routing buffers of the allocating moe_topk_gating: released with ctx.routing when
+    //     run_moe_ffn returns (this is its last phase); pool buffers belong to moe_.routing_buffers.
 }
 
 void GraphExecutor::moe_ffn_phase8_unfused_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {

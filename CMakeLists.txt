@@ -1179,6 +1179,8 @@ if(IMP_BUILD_TESTS)
         tests/test_view_or_owned.cpp
         # Weight-cache entries: owned buffers released once, a viewed slab slice never (I5).
         tests/test_weight_cache_entries.cpp
+        # MoE routing result and MTP workspace: DeviceOwned owners, each buffer released once (I5).
+        tests/test_routing_mtp_owners.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
         # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).
