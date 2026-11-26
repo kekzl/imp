@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -65,6 +66,28 @@ inline int phrase_pick_snapshot(const std::array<int, kPhraseSnapSlots>& consume
             (best < 0 || consumed[i] > consumed[best]))
             best = i;
     return best;
+}
+
+// Inkling (B-111 S6): the state a rewind to output position pos restores, the most output tokens folded in
+// at or before pos - 1 (0 for pos 0): slab `slot`, or (slot -1) the forward's own checkpoint, one every
+// `grid` positions, at prompt length n_in + consumed. reach(c) / held(c): the slab / own checkpoint after c
+// output tokens is still usable. consumed -1: none, the phrase is let through.
+struct PhraseRestore {
+    int slot = -1;
+    int consumed = -1;
+};
+inline PhraseRestore phrase_pick_restore(const std::array<int, kPhraseSnapSlots>& consumed, size_t pos,
+                                         int n_in, int grid, const std::function<bool(int)>& reach,
+                                         const std::function<bool(int)>& held) {
+    const int lim = pos > 0 ? static_cast<int>(pos) - 1 : 0;
+    PhraseRestore r;
+    for (int i = 0; i < kPhraseSnapSlots; i++)
+        if (consumed[i] >= 0 && consumed[i] <= lim && consumed[i] > r.consumed && reach(consumed[i]))
+            r = {i, consumed[i]};
+    const int own = grid > 0 ? (n_in + lim) / grid * grid - n_in : -1;
+    if (own >= 0 && own > r.consumed && held(own))
+        r = {-1, own};
+    return r;
 }
 
 // Slot a periodic snapshot overwrites: never slot 0, an empty one first, else the oldest.

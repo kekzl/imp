@@ -1457,6 +1457,7 @@ if(IMP_BUILD_TESTS)
         tests/test_shortconv.cu
         tests/test_inkling_parity.cu
         tests/test_inkling_cross_slot.cu
+        tests/test_inkling_phrase_rewind.cu
         tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
         tests/test_inkling_lora.cu
