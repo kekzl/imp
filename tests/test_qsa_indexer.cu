@@ -87,11 +87,19 @@ TEST(QsaIndexer, AllTrueSelectionMatchesDensePaged) {
     cudaMalloc(&dO_dense, Q.size() * sizeof(half));
     cudaMalloc(&dO_sel, Q.size() * sizeof(half));
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    paged_attention_set_splitk_scratch(nullptr, 0);
     Tensor tQ = f16(dQ, {rows, 1, nh, hd}), tK = f16(dK, {num_blocks, bs, nkv, hd}),
            tV = f16(dV, {num_blocks, bs, nkv, hd}), tOd = f16(dO_dense, {rows, 1, nh, hd});
-    paged_attention_decode(tQ, tK, tV, tOd, dbt, dctx, bs, scale, max_ctx, 0, 0.0f, nullptr, num_blocks, 0,
-                           nullptr, hd);
+    paged_attention_decode({.Q = &tQ,
+                            .K_cache = &tK,
+                            .V_cache = &tV,
+                            .O = &tOd,
+                            .block_tables = dbt,
+                            .context_lens = dctx,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = max_ctx,
+                            .max_blocks_per_seq = num_blocks,
+                            .v_head_dim = hd});
 
     // Selected path.
     const int nb_max = max_ctx / g.ratio + 1;
@@ -113,8 +121,17 @@ TEST(QsaIndexer, AllTrueSelectionMatchesDensePaged) {
     qsa_gather_kv(dK, dV, dbt, bs, nkv, hd, d_sel, d_cnt, cap, dKs, dVs, bpr, d_sctx, rows, nullptr);
     Tensor tKs = f16(dKs, {rows * bpr, bs, nkv, hd}), tVs = f16(dVs, {rows * bpr, bs, nkv, hd}),
            tOs = f16(dO_sel, {rows, 1, nh, hd});
-    paged_attention_decode(tQ, tKs, tVs, tOs, d_sbt, d_sctx, bs, scale, cap, 0, 0.0f, nullptr, bpr, 0, nullptr,
-                           hd);
+    paged_attention_decode({.Q = &tQ,
+                            .K_cache = &tKs,
+                            .V_cache = &tVs,
+                            .O = &tOs,
+                            .block_tables = d_sbt,
+                            .context_lens = d_sctx,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = cap,
+                            .max_blocks_per_seq = bpr,
+                            .v_head_dim = hd});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     auto cnt = down(d_cnt, rows);
@@ -278,9 +295,18 @@ TEST(QsaIndexer, SplitKBelowBudgetMatchesDensePaged) {
 
     Tensor tQ = f16(dQ, {rows, 1, nh, hd}), tK = f16(dK, {num_blocks, bs, nkv, hd}),
            tV = f16(dV, {num_blocks, bs, nkv, hd}), tOd = f16(dO_dense, {rows, 1, nh, hd});
-    paged_attention_set_splitk_scratch(splitk, splitk_sz);
-    paged_attention_decode(tQ, tK, tV, tOd, dbt, dctx, bs, scale, max_ctx, 0, 0.0f, nullptr, num_blocks, 0,
-                           nullptr, hd);
+    paged_attention_decode({.Q = &tQ,
+                            .K_cache = &tK,
+                            .V_cache = &tV,
+                            .O = &tOd,
+                            .block_tables = dbt,
+                            .context_lens = dctx,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = max_ctx,
+                            .max_blocks_per_seq = num_blocks,
+                            .v_head_dim = hd,
+                            .splitk = {.ptr = splitk, .size = splitk_sz}});
 
     const int nb_max = max_ctx / g.ratio + 1;
     float* d_scores = nullptr;
@@ -299,14 +325,22 @@ TEST(QsaIndexer, SplitKBelowBudgetMatchesDensePaged) {
     qsa_gather_kv(dK, dV, dbt, bs, nkv, hd, d_sel, d_cnt, cap, dKs, dVs, bpr, d_sctx, rows, nullptr);
     Tensor tKs = f16(dKs, {rows * bpr, bs, nkv, hd}), tVs = f16(dVs, {rows * bpr, bs, nkv, hd}),
            tOs = f16(dO_sel, {rows, 1, nh, hd});
-    paged_attention_set_splitk_scratch(splitk, splitk_sz);
-    paged_attention_decode(tQ, tKs, tVs, tOs, d_sbt, d_sctx, bs, scale, std::min(cap, max_ctx), 0, 0.0f,
-                           nullptr, bpr, 0, nullptr, hd);
+    paged_attention_decode({.Q = &tQ,
+                            .K_cache = &tKs,
+                            .V_cache = &tVs,
+                            .O = &tOs,
+                            .block_tables = d_sbt,
+                            .context_lens = d_sctx,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = std::min(cap, max_ctx),
+                            .max_blocks_per_seq = bpr,
+                            .v_head_dim = hd,
+                            .splitk = {.ptr = splitk, .size = splitk_sz}});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     // The scratch pointer is global state: leaving it set hands a foreign buffer to
     // whatever test runs next in this binary.
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(splitk);
 
     ASSERT_EQ(down(d_cnt, rows)[0], pos + 1);
@@ -338,15 +372,25 @@ TEST(QsaIndexer, SixteenRowGqaSplitKMatchesGqaKernel) {
     Tensor tQ = f16(dQ, {rows, 1, nh, hd}), tK = f16(dK, {rows * nblk, bs, nkv, hd}),
            tV = f16(dV, {rows * nblk, bs, nkv, hd}), tOg = f16(dOg, {rows, 1, nh, hd}),
            tOs = f16(dOs, {rows, 1, nh, hd});
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode(tQ, tK, tV, tOg, dbt, dcl, bs, scale, ctx, 0, 0.0f, nullptr, nblk, 0, nullptr, hd);
+    PagedDecodeTensorArgs args{.Q = &tQ,
+                               .K_cache = &tK,
+                               .V_cache = &tV,
+                               .O = &tOg,
+                               .block_tables = dbt,
+                               .context_lens = dcl,
+                               .block_size = bs,
+                               .scale = scale,
+                               .max_context_len = ctx,
+                               .max_blocks_per_seq = nblk,
+                               .v_head_dim = hd};
+    paged_attention_decode(args);
     const size_t splitk_sz = static_cast<size_t>(rows) * nh * 64 * (2 + hd) * sizeof(float);
     void* splitk = nullptr;
     cudaMalloc(&splitk, splitk_sz);
-    paged_attention_set_splitk_scratch(splitk, splitk_sz);
-    paged_attention_decode(tQ, tK, tV, tOs, dbt, dcl, bs, scale, ctx, 0, 0.0f, nullptr, nblk, 0, nullptr, hd);
+    args.O = &tOs;
+    args.splitk = {.ptr = splitk, .size = splitk_sz};
+    paged_attention_decode(args);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(splitk);
     auto og = down(dOg, Q.size());
     auto os = down(dOs, Q.size());

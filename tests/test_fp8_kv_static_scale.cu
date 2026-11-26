@@ -297,9 +297,16 @@ TEST(Fp8KvStaticScale, SplitScalesDecodeFoldMatchesReference) {
     Tensor tv(cache.vc, QType::FP8_E4M3, 4, kv_shape, true);
     const Fp8KvDecodeScales ds = fp8_kv_decode_scales(softmax_scale, s);
     EXPECT_EQ(ds.softmax_scale * ds.kv_scale, softmax_scale * s.k);  // exact: power-of-two ratio
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_fp8(tq, tk, tv, to, cache.bt, d_ctx, kBlockSize, ds.softmax_scale, ds.kv_scale,
-                               kTokens);
+    paged_attention_decode_fp8({.Q = &tq,
+                                .K_cache = &tk,
+                                .V_cache = &tv,
+                                .O = &to,
+                                .block_tables = cache.bt,
+                                .context_lens = d_ctx,
+                                .block_size = kBlockSize,
+                                .scale = ds.softmax_scale,
+                                .kv_scale = ds.kv_scale,
+                                .max_context_len = kTokens});
     std::vector<half> o(q.size());
     cudaMemcpy(o.data(), d_o, o.size() * sizeof(half), cudaMemcpyDeviceToHost);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);

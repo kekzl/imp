@@ -779,26 +779,6 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                                       split_idx);
 }
 
-// ---------------------------------------------------------------------------
-// Scratch buffer management for split-K
-// ---------------------------------------------------------------------------
-
-// Thread-local scratch buffer (managed by the caller — GraphExecutor)
-static thread_local void* s_splitk_scratch = nullptr;
-static thread_local size_t s_splitk_scratch_size = 0;
-
-void paged_attention_set_splitk_scratch(void* ptr, size_t size) {
-    s_splitk_scratch = ptr;
-    s_splitk_scratch_size = size;
-}
-
-void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size) {
-    if (out_ptr)
-        *out_ptr = s_splitk_scratch;
-    if (out_size)
-        *out_size = s_splitk_scratch_size;
-}
-
 bool paged_attention_applies_sinks(QType kv_dtype) {
     // Every paged decode kernel that takes an attn_sinks pointer.
     switch (kv_dtype) {
@@ -922,11 +902,25 @@ static void launch_paged_decode_mha(const Tensor& Q, const Tensor& K_cache, cons
 // ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
-void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                            const int* block_tables, const int* context_lens, int block_size, float scale,
-                            int max_context_len, int sliding_window, float softcap, cudaStream_t stream,
-                            int max_blocks_per_seq, int n_sinks, const void* attn_sinks, int v_head_dim,
-                            PagedQ8Epilogue* q8_epi) {
+void paged_attention_decode(const PagedDecodeTensorArgs& a) {
+    const Tensor& Q = *a.Q;
+    const Tensor& K_cache = *a.K_cache;
+    const Tensor& V_cache = *a.V_cache;
+    Tensor& O = *a.O;
+    const int* block_tables = a.block_tables;
+    const int* context_lens = a.context_lens;
+    const int block_size = a.block_size;
+    const float scale = a.scale;
+    const int max_context_len = a.max_context_len;
+    const int sliding_window = a.sliding_window;
+    const float softcap = a.softcap;
+    cudaStream_t stream = a.stream;
+    const int max_blocks_per_seq = a.max_blocks_per_seq;
+    const int n_sinks = a.n_sinks;
+    const void* attn_sinks = a.attn_sinks;
+    const int v_head_dim = a.v_head_dim;
+    PagedQ8Epilogue* q8_epi = a.q8_epi;
+    const PagedSplitKScratch& splitk = a.splitk;
     const half* sinks_h = static_cast<const half*>(attn_sinks);
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
@@ -986,7 +980,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
     // aggressively even when SMs aren't underutilized - beneficial for batch=1 long-context decode.
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     static int num_sms = kpar_n_sms();  // cached SM count query
-    if (!is_mla_asymmetric && num_ctx_blocks >= 4 && s_splitk_scratch != nullptr) {
+    if (!is_mla_asymmetric && num_ctx_blocks >= 4 && splitk.ptr != nullptr) {
         // Flash-decode heuristic: split when SMs are underutilized AND
         // each split gets enough KV blocks to amortize the merge overhead.
         // The Phase 2 merge kernel costs ~5µs — need ≥4 KV blocks/split to break even.
@@ -1014,16 +1008,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             num_splits = max(num_splits, 1);
         }
 
-        // Check scratch buffer is large enough
-        int partial_stride = 2 + head_dim;
-        size_t needed = (size_t)batch_size * n_heads * num_splits * partial_stride * sizeof(float);
-        if (needed > s_splitk_scratch_size) {
-            // Try with fewer splits
-            int max_splits = static_cast<int>(
-                s_splitk_scratch_size / ((size_t)batch_size * n_heads * partial_stride * sizeof(float)));
-            num_splits = min(num_splits, max(max_splits, 1));
-            num_splits = std::max(num_splits, 1);
-        }
+        // Fewer splits when the scratch is too small for these.
+        num_splits = paged_splitk_cap(splitk, batch_size, n_heads, head_dim, num_splits);
     }
 
     // Dispatch priority: split-K > GQA > MHA fallback
@@ -1033,7 +1019,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
 
     if (num_splits > 1) {
         // Split-K path: Phase 1 + Phase 2 (handles both GQA and MHA)
-        float* partial = static_cast<float*>(s_splitk_scratch);
+        float* partial = static_cast<float*>(splitk.ptr);
 
         // Clears any inherited CUDA error so the post-Phase-1 check reflects only THIS launch, letting
         // a real split-K failure fall back to the single-split path instead of emitting garbage.

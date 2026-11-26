@@ -242,8 +242,26 @@ struct PathCtx {
     int sliding_window = 0;  // 0 = full attention
     int n_sinks = 0;         // StreamingLLM sinks; > 0 needs sliding_window > 0
     float softcap = 0.0f;    // NVFP4 path only (no softcap in the fp64 reference)
+    PagedSplitKScratch splitk;  // null = no split-K
     void clear_o() const { cudaMemset(d_o, 0, q_elems * sizeof(half)); }
     Tensor O() const { return f16_tensor(d_o, {1, 1, n_heads, head_dim}); }
+    // The decode fields every policy shares; a policy adds its scales (and softcap).
+    PagedDecodeTensorArgs args(const Tensor& K, const Tensor& V, Tensor& o) const {
+        return {.Q = &Q,
+                .K_cache = &K,
+                .V_cache = &V,
+                .O = &o,
+                .block_tables = d_bt,
+                .context_lens = d_ctx,
+                .block_size = BLOCK_SIZE,
+                .scale = scale,
+                .max_context_len = kv_len,
+                .sliding_window = sliding_window,
+                .stream = stream,
+                .max_blocks_per_seq = num_blocks,
+                .n_sinks = n_sinks,
+                .splitk = splitk};
+    }
 };
 
 // KV-dtype policies expose name()/envelope()/strict()/run(ctx); run() quantizes into the
@@ -263,8 +281,7 @@ struct PathF16 {
         Tensor V = f16_tensor(d_v, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window,
-                               0.0f, c.stream, c.num_blocks, c.n_sinks);
+        paged_attention_decode(c.args(K, V, O));
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "F16 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -310,8 +327,9 @@ struct PathFP8 {
         Tensor V = raw_tensor(d_v, QType::FP8_E4M3, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_fp8(c.Q, K, V, O, c.d_bt, c.d_ctx, BLOCK_SIZE, c.scale, kv_scale, c.kv_len,
-                                   c.sliding_window, 0.0f, c.stream, c.num_blocks, c.n_sinks);
+        PagedDecodeTensorArgs a = c.args(K, V, O);
+        a.kv_scale = kv_scale;
+        paged_attention_decode_fp8(a);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "FP8 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -362,9 +380,10 @@ struct PathINT8 {
         Tensor V = raw_tensor(d_v, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, c.head_dim});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_int8(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
-                                    BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f, c.stream,
-                                    c.num_blocks, c.n_sinks);
+        PagedDecodeTensorArgs a = c.args(K, V, O);
+        a.K_scales = d_ks;
+        a.V_scales = d_vs;
+        paged_attention_decode_int8(a);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT8 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -421,9 +440,10 @@ struct PathINT4 {
         Tensor V = raw_tensor(d_v, QType::INT8, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_int4(c.Q, K, V, O, (const half*)d_ks, (const half*)d_vs, c.d_bt, c.d_ctx,
-                                    BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f, c.stream,
-                                    c.num_blocks, c.n_sinks);
+        PagedDecodeTensorArgs a = c.args(K, V, O);
+        a.K_scales = d_ks;
+        a.V_scales = d_vs;
+        paged_attention_decode_int4(a);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -492,9 +512,11 @@ struct PathNVFP4 {
         Tensor V = raw_tensor(d_v, QType::FP4_E2M1, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_nvfp4(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                     c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, c.softcap,
-                                     c.stream, c.num_blocks, c.n_sinks);
+        PagedDecodeTensorArgs a = c.args(K, V, O);
+        a.K_scales = d_ks;
+        a.V_scales = d_vs;
+        a.softcap = c.softcap;
+        paged_attention_decode_nvfp4(a);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "NVFP4 scalar paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -526,9 +548,10 @@ struct PathMXFP4KV {
         Tensor V = raw_tensor(d_v, QType::MXFP4_KV, {c.num_blocks, BLOCK_SIZE, c.n_kv_heads, half_hd});
         Tensor O = c.O();
         c.clear_o();
-        paged_attention_decode_mxfp4_kv(c.Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, c.d_bt,
-                                        c.d_ctx, BLOCK_SIZE, c.scale, c.kv_len, c.sliding_window, 0.0f,
-                                        c.stream, c.num_blocks, c.n_sinks);
+        PagedDecodeTensorArgs a = c.args(K, V, O);
+        a.K_scales = d_ks;
+        a.V_scales = d_vs;
+        paged_attention_decode_mxfp4_kv(a);
         cudaStreamSynchronize(c.stream);
         EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "MXFP4-KV paged launch";
         ErrStats e = err_stats(read_o(c.d_o, c.q_elems), *c.ref);
@@ -872,7 +895,6 @@ TEST(PagedFp8Multitok, GroupedSplitRowsMatchReferenceAndIgnoreNeighbours) {
     size_t scratch_bytes = (size_t)batch * 40 * 64 * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     // Physical block of (row, logical block): a fixed shuffle of batch x max_blocks.
     std::vector<int> bt((size_t)batch * max_blocks);
     for (int i = 0; i < (int)bt.size(); i++)
@@ -930,12 +952,22 @@ TEST(PagedFp8Multitok, GroupedSplitRowsMatchReferenceAndIgnoreNeighbours) {
                                   {batch * max_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
             cudaMemset(d_o, 0, Qh.size() * sizeof(half));
             // No split-K scratch = one split (the FP8 launcher ignores force_splitk_fallback).
-            paged_attention_set_splitk_scratch(force_unsplit ? nullptr : d_scratch,
-                                               force_unsplit ? 0 : scratch_bytes);
-            paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_scale, ctx[0], 0, 0.0f,
-                                       stream, max_blocks);
+            paged_attention_decode_fp8(
+                {.Q = &Q,
+                 .K_cache = &K,
+                 .V_cache = &V,
+                 .O = &O,
+                 .block_tables = d_bt,
+                 .context_lens = d_ctx,
+                 .block_size = BLOCK_SIZE,
+                 .scale = scale,
+                 .kv_scale = kv_scale,
+                 .max_context_len = ctx[0],
+                 .stream = stream,
+                 .max_blocks_per_seq = max_blocks,
+                 .splitk = force_unsplit ? PagedSplitKScratch{}
+                                         : PagedSplitKScratch{.ptr = d_scratch, .size = scratch_bytes}});
             cudaStreamSynchronize(stream);
-            paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
             EXPECT_EQ(cudaGetLastError(), cudaSuccess);
             std::vector<half> o_h(Qh.size());
             cudaMemcpy(o_h.data(), d_o, o_h.size() * sizeof(half), cudaMemcpyDeviceToHost);
@@ -969,7 +1001,6 @@ TEST(PagedFp8Multitok, GroupedSplitRowsMatchReferenceAndIgnoreNeighbours) {
         cudaFree(d_q);
         cudaFree(d_o);
     }
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaFree(d_bt);
     cudaStreamDestroy(stream);
@@ -986,7 +1017,6 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)16 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     for (int force_fallback : {0, 1}) {
         process_diag_set_force_splitk_fallback(force_fallback != 0);
         for (int kv_len : {16, 64, 333, 1024}) {
@@ -1012,6 +1042,7 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
                       head_dim, num_blocks, scale,   q_elems,
                       &Kh,      &Vh,        &ref,    f16_tensor(d_q, {1, 1, n_heads, head_dim}),
                       d_o,      d_bt,       d_ctx};
+            c.splitk = {.ptr = d_scratch, .size = scratch_bytes};
             process_diag_set_paged_nvfp4_mma(0);  // scalar + hpc sweep: the non-MMA kernels
             process_diag_set_paged_nvfp4_multitok(1);
             ErrStats e_plain = PathNVFP4::run(c);
@@ -1051,7 +1082,6 @@ TEST(PagedNvfp4Multitok, MatchesReferenceBothRoutes) {
     process_diag_set_paged_nvfp4_multitok(4);
     process_diag_set_paged_nvfp4_hpc(0);
     process_diag_set_paged_nvfp4_mma(64);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
@@ -1066,7 +1096,6 @@ TEST(PagedNvfp4Mma, MatchesReferenceAndMultitok) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)16 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     struct Shape {
         int nh, nkv, hd;
     };
@@ -1116,6 +1145,7 @@ TEST(PagedNvfp4Mma, MatchesReferenceAndMultitok) {
                 PathCtx c{stream, kv_len,  sh.nh, sh.nkv, sh.hd, num_blocks,
                           scale,  q_elems, &Kh,   &Vh,    &ref,  f16_tensor(d_q, {1, 1, sh.nh, sh.hd}),
                           d_o,    d_bt,    d_ctx};
+                c.splitk = {.ptr = d_scratch, .size = scratch_bytes};
                 c.sliding_window = window;
                 c.n_sinks = n_sinks;
                 c.softcap = (kase == 3) ? 30.0f : 0.0f;
@@ -1152,7 +1182,6 @@ TEST(PagedNvfp4Mma, MatchesReferenceAndMultitok) {
         }
     }
     process_diag_set_paged_nvfp4_mma(64);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
@@ -1165,7 +1194,6 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)16 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     struct Shape {
         int n_heads, n_kv_heads, head_dim;
     };
@@ -1198,6 +1226,7 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
                           scale,         q_elems,     &Kh,
                           &Vh,           &ref,        f16_tensor(d_q, {1, 1, sh.n_heads, sh.head_dim}),
                           d_o,           d_bt,        d_ctx};
+                c.splitk = {.ptr = d_scratch, .size = scratch_bytes};
                 process_diag_set_paged_f16_multitok(1);
                 ErrStats e_plain = PathF16::run(c);
                 EXPECT_EQ(e_plain.nan_count, 0) << "kv_len " << kv_len;
@@ -1225,7 +1254,6 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     process_diag_set_force_splitk_fallback(false);
     process_diag_set_paged_f16_multitok(4);
     process_diag_set_paged_f16_hpc(0);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
@@ -1274,10 +1302,19 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)64 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     auto launch = [&]() {
-        paged_attention_decode(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream,
-                               blocks_per_seq);
+        paged_attention_decode({.Q = &Q,
+                                .K_cache = &K,
+                                .V_cache = &V,
+                                .O = &O,
+                                .block_tables = d_bt,
+                                .context_lens = d_ctx,
+                                .block_size = BLOCK_SIZE,
+                                .scale = scale,
+                                .max_context_len = kv_len,
+                                .stream = stream,
+                                .max_blocks_per_seq = blocks_per_seq,
+                                .splitk = {.ptr = d_scratch, .size = scratch_bytes}});
     };
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
@@ -1322,7 +1359,6 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
     cudaFree(d_bt);
     cudaFree(d_ctx);
     cudaFree(d_o);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
@@ -1406,12 +1442,23 @@ TEST(PagedNvfp4Decode, LongContextMicrobench) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)64 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     auto launch = [&]() {
         d_bt = d_bt_ring + (size_t)ring_pos * batch * blocks_per_seq;
         ring_pos = (ring_pos + 1) % ring;
-        paged_attention_decode_nvfp4(Q, K, V, O, (const uint8_t*)d_ks, (const uint8_t*)d_vs, d_bt, d_ctx,
-                                     BLOCK_SIZE, scale, kv_len, 0, 0.0f, stream, blocks_per_seq);
+        paged_attention_decode_nvfp4({.Q = &Q,
+                                      .K_cache = &K,
+                                      .V_cache = &V,
+                                      .O = &O,
+                                      .K_scales = (const uint8_t*)d_ks,
+                                      .V_scales = (const uint8_t*)d_vs,
+                                      .block_tables = d_bt,
+                                      .context_lens = d_ctx,
+                                      .block_size = BLOCK_SIZE,
+                                      .scale = scale,
+                                      .max_context_len = kv_len,
+                                      .stream = stream,
+                                      .max_blocks_per_seq = blocks_per_seq,
+                                      .splitk = {.ptr = d_scratch, .size = scratch_bytes}});
     };
     cudaEvent_t t0, t1;
     cudaEventCreate(&t0);
@@ -1467,7 +1514,6 @@ TEST(PagedNvfp4Decode, LongContextMicrobench) {
     cudaFree(d_ctx);
     cudaFree(d_o);
     process_diag_set_paged_nvfp4_mma(64);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }
@@ -1530,11 +1576,20 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = (size_t)64 << 20;
     cudaMalloc(&d_scratch, scratch_bytes);
-    paged_attention_set_splitk_scratch(d_scratch,
-                                       scratch_bytes);  // batch-1 shapes take split-K like the engine
     auto launch = [&]() {
-        paged_attention_decode_fp8(Q, K, V, O, d_bt, d_ctx, BLOCK_SIZE, scale, 1.0f, kv_len, 0, 0.0f, stream,
-                                   blocks_per_seq);
+        paged_attention_decode_fp8({.Q = &Q,
+                                    .K_cache = &K,
+                                    .V_cache = &V,
+                                    .O = &O,
+                                    .block_tables = d_bt,
+                                    .context_lens = d_ctx,
+                                    .block_size = BLOCK_SIZE,
+                                    .scale = scale,
+                                    .kv_scale = 1.0f,
+                                    .max_context_len = kv_len,
+                                    .stream = stream,
+                                    .max_blocks_per_seq = blocks_per_seq,
+                                    .splitk = {.ptr = d_scratch, .size = scratch_bytes}});
     };
     // Warm >1 s (idle downclock ramps in ~1 s on this box): batches of 500
     // launches until a second has passed, whatever the kernel's speed.
@@ -1581,7 +1636,6 @@ TEST(PagedFp8Decode, ServingShapeMicrobench) {
     cudaFree(d_bt);
     cudaFree(d_ctx);
     cudaFree(d_o);
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaStreamDestroy(stream);
 }

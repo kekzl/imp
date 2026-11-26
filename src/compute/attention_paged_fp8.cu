@@ -397,7 +397,8 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
 static bool fp8_gqa_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                            const int* block_tables, const int* context_lens, int block_size, float scale,
                            float kv_scale, int max_context_len, int max_num_blocks, int sliding_window,
-                           float softcap, const half* sinks_h, cudaStream_t stream, PagedQ8Epilogue* q8_epi) {
+                           float softcap, const half* sinks_h, cudaStream_t stream, PagedQ8Epilogue* q8_epi,
+                           const PagedSplitKScratch& splitk) {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads = static_cast<int>(Q.shape[2]);
     const int head_dim = static_cast<int>(Q.shape[3]);
@@ -413,9 +414,8 @@ static bool fp8_gqa_decode(const Tensor& Q, const Tensor& K_cache, const Tensor&
     const auto* q = reinterpret_cast<const half*>(Q.data);
     const auto* k = reinterpret_cast<const uint8_t*>(K_cache.data);
     const auto* v = reinterpret_cast<const uint8_t*>(V_cache.data);
-    void* sk_ptr = nullptr;
-    size_t sk_size = 0;
-    paged_attention_get_splitk_scratch(&sk_ptr, &sk_size);
+    void* sk_ptr = splitk.ptr;
+    const size_t sk_size = splitk.size;
     const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     const int s = paged_attention_f16_multitok_split_count(batch_size * (n_heads / hpc), 2, kpar_n_sms(),
                                                            num_ctx_blocks);
@@ -457,7 +457,8 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
                               const int* block_tables, const int* context_lens, int block_size, float scale,
                               float kv_scale, int max_context_len, int sliding_window, float softcap,
                               cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                              const void* attn_sinks, PagedQ8Epilogue* q8_epi) {
+                              const void* attn_sinks, PagedQ8Epilogue* q8_epi,
+                              const PagedSplitKScratch& splitk) {
     // StreamingLLM (n_sinks > 0): these kernels have no sink range, so attend every live block and let
     // the -1 sentinels of evict_middle_blocks define sinks + window. Learned sinks (attn_sinks,
     // gpt-oss) are wired since #1345.
@@ -479,7 +480,7 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
     // batch x n_heads on purpose, not the grouped hd128 kernel's batch x n_kv CTAs: counting those
     // splits batch 9..42 too: Qwen3-14B 32 streams -4.5 % (947-token prompts), -2.3 % (38), 3/3 pairs.
     void* scratch_ptr = nullptr;
-    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size, splitk,
                                            &scratch_ptr);
 
     if (num_splits > 1) {
@@ -492,8 +493,8 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
         if (paged_attention_splitk_fp8_tile_gqa_supported(head_dim, block_size, n_heads, n_kv_heads)) {
             // GQA-batched tile variant: grid.y = n_kv_heads instead of n_heads (each block computes all G
             // Q heads from one shared smem tile, cutting KV L2 traffic by G). Split count re-derived nearby.
-            num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads,
-                                                                    head_dim, block_size, max_context_len);
+            num_splits = paged_attention_splitk_fp8_tile_gqa_splits(batch_size, n_heads, n_kv_heads, head_dim,
+                                                                    block_size, max_context_len, splitk);
             paged_attention_splitk_fp8_tile_gqa_launch({.Q = reinterpret_cast<const half*>(Q.data),
                                                         .K_cache = K_cache.data,
                                                         .V_cache = V_cache.data,
@@ -654,21 +655,19 @@ static void fp8_decode_routes(const Tensor& Q, const Tensor& K_cache, const Tens
     }
 }
 
-void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                const int* block_tables, const int* context_lens, int block_size, float scale,
-                                float kv_scale, int max_context_len, int sliding_window, float softcap,
-                                cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                const void* attn_sinks, PagedQ8Epilogue* q8_epi) {
+void paged_attention_decode_fp8(const PagedDecodeTensorArgs& a) {
     // n_sinks > 0 (StreamingLLM): every live block, as in fp8_decode_routes.
-    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
-                                                        : (max_context_len + block_size - 1) / block_size;
-    if (fp8_gqa_decode(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale, kv_scale,
-                       max_context_len, max_num_blocks, n_sinks > 0 ? 0 : sliding_window, softcap,
-                       reinterpret_cast<const half*>(attn_sinks), stream, q8_epi))
+    const int max_num_blocks = (a.max_blocks_per_seq > 0)
+                                   ? a.max_blocks_per_seq
+                                   : (a.max_context_len + a.block_size - 1) / a.block_size;
+    if (fp8_gqa_decode(*a.Q, *a.K_cache, *a.V_cache, *a.O, a.block_tables, a.context_lens, a.block_size,
+                       a.scale, a.kv_scale, a.max_context_len, max_num_blocks,
+                       a.n_sinks > 0 ? 0 : a.sliding_window, a.softcap,
+                       reinterpret_cast<const half*>(a.attn_sinks), a.stream, a.q8_epi, a.splitk))
         return;
-    fp8_decode_routes(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale, kv_scale,
-                      max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
-                      attn_sinks, q8_epi);
+    fp8_decode_routes(*a.Q, *a.K_cache, *a.V_cache, *a.O, a.block_tables, a.context_lens, a.block_size,
+                      a.scale, a.kv_scale, a.max_context_len, a.sliding_window, a.softcap, a.stream,
+                      a.max_blocks_per_seq, a.n_sinks, a.attn_sinks, a.q8_epi, a.splitk);
 }
 
 }  // namespace imp

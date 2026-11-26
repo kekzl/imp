@@ -160,31 +160,26 @@ void head_gate_sigmoid_mul(half* out, const half* gate, int n_tokens, int n_head
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
-                                       Tensor& O, half* o_full, int64_t o_full_elems, const int* block_tables,
-                                       const int* context_lens, int block_size, float scale,
-                                       int max_context_len, int sliding_window, float softcap,
-                                       cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                       const void* attn_sinks, int v_head_dim, PagedQ8Epilogue* q8_epi) {
-    const int64_t batch = Q.shape[0];
-    const int64_t n_heads = Q.shape[2];
-    const int64_t head_dim = Q.shape[3];
-    const bool padded = v_head_dim > 0 && v_head_dim != head_dim && n_heads == K_cache.shape[2] &&
+void paged_attention_decode_mla_padded(const PagedDecodeTensorArgs& a, half* o_full, int64_t o_full_elems) {
+    const int64_t batch = a.Q->shape[0];
+    const int64_t n_heads = a.Q->shape[2];
+    const int64_t head_dim = a.Q->shape[3];
+    const int v_head_dim = a.v_head_dim;
+    const bool padded = v_head_dim > 0 && v_head_dim != head_dim && n_heads == a.K_cache->shape[2] &&
                         o_full != nullptr && o_full_elems >= batch * n_heads * head_dim;
     if (!padded) {
-        paged_attention_decode(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale,
-                               max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
-                               attn_sinks, v_head_dim, q8_epi);
+        paged_attention_decode(a);
         return;
     }
     int64_t fd[4] = {batch, 1, n_heads, head_dim};
-    Tensor o_sym(o_full, O.qtype, 4, fd, /*on_device=*/true);
-    paged_attention_decode(Q, K_cache, V_cache, o_sym, block_tables, context_lens, block_size, scale,
-                           max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
-                           attn_sinks,
-                           /*v_head_dim=*/0);
-    mla_compact_attn_output(o_full, static_cast<half*>(O.data), static_cast<int>(batch),
-                            static_cast<int>(n_heads), static_cast<int>(head_dim), v_head_dim, stream);
+    Tensor o_sym(o_full, a.O->qtype, 4, fd, /*on_device=*/true);
+    PagedDecodeTensorArgs sym = a;  // symmetric decode into o_sym: no q8 epilogue (compaction follows)
+    sym.O = &o_sym;
+    sym.v_head_dim = 0;
+    sym.q8_epi = nullptr;
+    paged_attention_decode(sym);
+    mla_compact_attn_output(o_full, static_cast<half*>(a.O->data), static_cast<int>(batch),
+                            static_cast<int>(n_heads), static_cast<int>(head_dim), v_head_dim, a.stream);
 }
 
 }  // namespace imp

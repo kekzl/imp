@@ -226,7 +226,6 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     void* d_scratch = nullptr;
     size_t scratch_size = (size_t)batch * cfg.n_heads * 128 * (2 + cfg.head_dim) * sizeof(float);
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scratch, scratch_size));
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
 
     // Tensor wrappers
     int64_t q_shape[4] = {batch, 1, cfg.n_heads, cfg.head_dim};
@@ -239,8 +238,17 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     Tensor O(d_o, QType::F16, 4, o_shape, true);
 
     auto run = [&]() {
-        paged_attention_decode(Q, K, V, O, d_block_tables, d_context_lens, block_size, attn_scale,
-                               max_context_len, 0, 0.0f, stream);
+        paged_attention_decode({.Q = &Q,
+                                .K_cache = &K,
+                                .V_cache = &V,
+                                .O = &O,
+                                .block_tables = d_block_tables,
+                                .context_lens = d_context_lens,
+                                .block_size = block_size,
+                                .scale = attn_scale,
+                                .max_context_len = max_context_len,
+                                .stream = stream,
+                                .splitk = {.ptr = d_scratch, .size = scratch_size}});
     };
 
     // Warmup
@@ -265,7 +273,6 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
 
     IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
     IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
-    paged_attention_set_splitk_scratch(nullptr, 0);
     IMP_CUDA_CHECK_LOG(cudaFree(d_scratch));
     IMP_CUDA_CHECK_LOG(cudaFree(d_block_tables));
     IMP_CUDA_CHECK_LOG(cudaFree(d_context_lens));
@@ -424,7 +431,6 @@ static double bench_paged_decode_batched_kernel(const BatchedDecodeShape& s, boo
     const size_t scratch_size = static_cast<size_t>(s.batch) * s.n_heads * 128 * (2 + s.head_dim) *
                                 sizeof(float);
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scratch, scratch_size));
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
 
     int64_t q_shape[4] = {s.batch, 1, s.n_heads, s.head_dim};
     int64_t kv_shape[4] = {n_blocks, kBlock, s.n_kv_heads, s.head_dim};
@@ -438,11 +444,34 @@ static double bench_paged_decode_batched_kernel(const BatchedDecodeShape& s, boo
         const int set = it % n_sets;
         const int* bt = d_bt + (static_cast<int64_t>(set) * s.batch * blocks_per_row);
         if (fp8)
-            paged_attention_decode_fp8(Q, K, V, O, bt, d_ctx, kBlock, scale, 0.05f, s.ctx, s.sliding_window,
-                                       0.0f, stream, blocks_per_row);
+            paged_attention_decode_fp8({.Q = &Q,
+                                        .K_cache = &K,
+                                        .V_cache = &V,
+                                        .O = &O,
+                                        .block_tables = bt,
+                                        .context_lens = d_ctx,
+                                        .block_size = kBlock,
+                                        .scale = scale,
+                                        .kv_scale = 0.05f,
+                                        .max_context_len = s.ctx,
+                                        .sliding_window = s.sliding_window,
+                                        .stream = stream,
+                                        .max_blocks_per_seq = blocks_per_row,
+                                        .splitk = {.ptr = d_scratch, .size = scratch_size}});
         else
-            paged_attention_decode(Q, K, V, O, bt, d_ctx, kBlock, scale, s.ctx, s.sliding_window, 0.0f,
-                                   stream, blocks_per_row);
+            paged_attention_decode({.Q = &Q,
+                                    .K_cache = &K,
+                                    .V_cache = &V,
+                                    .O = &O,
+                                    .block_tables = bt,
+                                    .context_lens = d_ctx,
+                                    .block_size = kBlock,
+                                    .scale = scale,
+                                    .max_context_len = s.ctx,
+                                    .sliding_window = s.sliding_window,
+                                    .stream = stream,
+                                    .max_blocks_per_seq = blocks_per_row,
+                                    .splitk = {.ptr = d_scratch, .size = scratch_size}});
     };
     // Warm > 1 s (idle downclock), then 400 timed calls.
     cudaEvent_t e0, e1;
@@ -494,7 +523,6 @@ static double bench_paged_decode_batched_kernel(const BatchedDecodeShape& s, boo
         *out_hash = hash;
     }
 
-    paged_attention_set_splitk_scratch(nullptr, 0);
     IMP_CUDA_CHECK_LOG(cudaFree(d_scratch));
     IMP_CUDA_CHECK_LOG(cudaFree(d_bt));
     IMP_CUDA_CHECK_LOG(cudaFree(d_ctx));

@@ -543,7 +543,8 @@ void paged_attention_splitk_fp8_tile_launch(const PagedDecodeArgs& a) {
 // Split count for the GQA variant: grid.y=n_kv_heads (G x fewer head-blocks) with multi-resident
 // blocks, targets 2*SMs concurrent blocks, capped by page count and split-K scratch size.
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                               int block_size, int max_context_len) {
+                                               int block_size, int max_context_len,
+                                               const PagedSplitKScratch& splitk) {
     const int sms = kpar_n_sms();
     const int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
     const int bh_kv = batch_size * n_kv_heads;
@@ -553,9 +554,7 @@ int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int 
     // known-issues before retrying either direction.
     int s = ((2 * sms) + bh_kv - 1) / bh_kv;
     s = min(s, num_ctx_blocks);
-    void* sk_ptr = nullptr;
-    size_t sk_size = 0;
-    paged_attention_get_splitk_scratch(&sk_ptr, &sk_size);
+    const size_t sk_size = splitk.size;
     const size_t per_split = (size_t)batch_size * n_heads * (2 + head_dim) * sizeof(float);
     s = min(s, (int)(sk_size / per_split));
     return max(s, 1);
