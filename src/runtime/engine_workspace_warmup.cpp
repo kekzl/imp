@@ -565,7 +565,7 @@ void Engine::warmup() {
                          committed, prewarm_n, committed);
         prewarm_n = committed;
     }
-    if (config_.use_cuda_graphs && prewarm_n > 1) {
+    if (rt_.cuda_graphs && prewarm_n > 1) {
         const auto t0 = std::chrono::steady_clock::now();
         const int n = prewarm_n;
         const int anchor_budget = (3 * n) + 8;
@@ -654,7 +654,7 @@ void Engine::prewarm_prefill_graphs_(int32_t token_id) {
     const int n_max = std::min({runtime_config_.runtime.prefill_graph_prewarm, prefill_graphs_.short_max(),
                                 config_.max_seq_len - 2});
     // F16 KV only: an FP8 pool captures once calibrated, and these synthetic prompts must not calibrate it.
-    if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !config_.use_cuda_graphs ||
+    if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !rt_.cuda_graphs ||
         config_.kv_cache_dtype != QType::F16)
         return;
     const auto t0 = std::chrono::steady_clock::now();

@@ -515,7 +515,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // (#1646). Not clamped here: the value also bounds admission and KV
     // sizing, and silently serving fewer requests than asked is its own
     // defect. Warned once instead, at the point the number is resolved.
-    if (config_.use_cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
+    if (rt_.cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
         IMP_LOG_WARN(
             "max_batch_size %d exceeds the decode-graph pool (%d): any step with more than "
             "%d sequences runs eager, which measured 2.4x slower decode on this box. "
@@ -933,7 +933,7 @@ void Engine::init_compute_max_seq_len_() {
         // free VRAM for KV. Cap the auto-detect at 0.75x that so it doesn't
         // undershoot what the planner can afford and stays tracking a tuned
         // vram.kv_fraction.
-        float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 1.0f);
+        float kv_fraction = std::clamp(config_.kv_fraction.value_or(1.0f), 0.05f, 1.0f);
         // Native-NVFP4 models: weights plus the mandatory decode caches
         // (CUTLASS SfAtom slab + nvfp4_moe, reserved right after upload) will
         // consume most of the card; subtract them so the auto context

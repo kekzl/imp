@@ -648,7 +648,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // into attention launches, so a replay only fits that exact offset,
         // which never repeats within a request. Replaying chunk 1's graph for
         // chunk 2+ silently truncated long-context prefill (#981). Capture only the offset-0 chunk; continuations run eager.
-        const bool can_capture = prefill_graph_enabled && pf_pool_used && config_.use_cuda_graphs &&
+        const bool can_capture = prefill_graph_enabled && pf_pool_used && rt_.cuda_graphs &&
                                  kv_append_capturable && offset == 0 && !ends_at_snapshot &&
                                  !executor_->nvfp4_dequant_uncapturable() &&
                                  !executor_->moe_prefill_uncapturable() &&
@@ -694,8 +694,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                     "prefill graph: not capturing (runtime.prefill_graph=true) — "
                     "pf_pool=%d cuda_graphs=%d kv_append_capturable=%d offset0=%d "
                     "not_snapshot_end=%d nvfp4_dequant_capturable=%d moe_capturable=%d no_ple=%d",
-                    (int)pf_pool_used, (int)config_.use_cuda_graphs, (int)kv_append_capturable,
-                    (int)(offset == 0), (int)!ends_at_snapshot, (int)!executor_->nvfp4_dequant_uncapturable(),
+                    (int)pf_pool_used, (int)rt_.cuda_graphs, (int)kv_append_capturable, (int)(offset == 0),
+                    (int)!ends_at_snapshot, (int)!executor_->nvfp4_dequant_uncapturable(),
                     (int)!executor_->moe_prefill_uncapturable(), (int)(model_->ngram_table() == nullptr));
             }
             executor_->forward_logits(state, logits_out, pf_stream);

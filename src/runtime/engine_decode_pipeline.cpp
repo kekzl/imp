@@ -84,7 +84,7 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
     const int n = static_cast<int>(rows.size());
     if (n < 2 || n > kMaxGraphPoolSize)
         return false;
-    if (!config_.use_cuda_graphs || runtime_config_.diagnostics.profile)
+    if (!rt_.cuda_graphs || runtime_config_.diagnostics.profile)
         return false;
     if (!decode_batch_pool_.is_allocated())
         return false;
@@ -96,7 +96,7 @@ bool Engine::pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>
     // PLE: step N+1 needs step N's token on the host for its n-gram rows.
     if (model_->ngram_table() != nullptr)
         return false;
-    if (swa_sizing_active_ || config_.streaming_kv_enabled)
+    if (swa_sizing_active_ || rt_.streaming_kv)
         return false;
     if (!executor_->sample_pipeline_ready())
         return false;
@@ -123,9 +123,9 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
     IMP_LOG_INFO(
         "decode-pipeline: not entering — n=%d graphs=%d profile=%d pool=%d offload=%d "
         "ple=%d swa=%d streaming_kv=%d sampler_ready=%d rows_ok=%d",
-        (int)rows.size(), (int)config_.use_cuda_graphs, (int)runtime_config_.diagnostics.profile,
+        (int)rows.size(), (int)rt_.cuda_graphs, (int)runtime_config_.diagnostics.profile,
         (int)decode_batch_pool_.is_allocated(), (int)(offload_mgr_ != nullptr),
-        (int)(model_->ngram_table() != nullptr), (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
+        (int)(model_->ngram_table() != nullptr), (int)swa_sizing_active_, (int)rt_.streaming_kv,
         (int)executor_->sample_pipeline_ready(), (int)rows_ok);
 }
 

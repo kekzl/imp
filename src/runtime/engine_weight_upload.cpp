@@ -233,12 +233,12 @@ bool Engine::init_weights() {
             demote_graphs_(GraphDemotionReason::CalibrationActive);
         }
 
-        if (config_.streaming_kv_enabled) {
+        if (rt_.streaming_kv) {
             // Every KV dtype's decode kernels skip the -1 sentinels evict_middle_blocks
             // leaves (#1704); the quantised kernels attend every live block under sinks.
             int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;
-            int win = (config_.streaming_kv_window > 0) ? config_.streaming_kv_window
-                                                        : model_->config().sliding_window;
+            int win = (rt_.streaming_kv_window > 0) ? rt_.streaming_kv_window
+                                                    : model_->config().sliding_window;
             executor_->set_streaming_kv(n_sinks, win);
             if (n_sinks > 0 && win > 0) {
                 IMP_LOG_INFO("StreamingLLM smart KV cache enabled: %d sinks + %d-token window", n_sinks, win);
@@ -251,7 +251,7 @@ bool Engine::init_weights() {
                     "StreamingLLM enabled but no sliding window configured "
                     "(n_sinks=%d, window=%d) - disabling streaming.",
                     n_sinks, win);
-                config_.streaming_kv_enabled = false;
+                rt_.streaming_kv = false;
             }
         }
     }
@@ -377,7 +377,7 @@ bool Engine::init_weights() {
         // Device expert cache (NVFP4 prequant or GGUF packed experts): routing, residency and the
         // miss copies resolve on the device, so the captured decode replays correctly.
         // init_device_expert_cache() demotes later if a host-resident layer stays on the host path.
-        if (experts_on_host_ && config_.use_cuda_graphs) {
+        if (experts_on_host_ && rt_.cuda_graphs) {
             IMP_LOG_INFO("Experts on host: CUDA graphs stay on, the device expert cache serves decode "
                          "(demoted after init if it cannot cover every host-resident layer)");
         }
