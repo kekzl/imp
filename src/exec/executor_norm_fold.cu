@@ -24,9 +24,7 @@ __global__ void norm_fold_zero_kernel(unsigned long long* p, int n) {
 
 void GraphExecutor::norm_fold_begin_(int n, cudaStream_t stream) {
     norm_fold_slot_ = 0;
-    norm_fold_gamma_ = nullptr;
-    norm_fold_out_ = nullptr;
-    norm_fold_pending_ = nullptr;
+    norm_fold_.clear();
     norm_fold_on_ = n == 1 && !calib_ && lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() &&
                     compute_dtype_ == QType::F16 && !model_->config().parallel_block;
     if (!norm_fold_on_)
@@ -48,9 +46,7 @@ void GraphExecutor::norm_fold_begin_(int n, cudaStream_t stream) {
 }
 
 NvFP4NormFoldOut GraphExecutor::norm_fold_arm_(int layer, bool after_ffn, const Tensor& no) {
-    norm_fold_gamma_ = nullptr;
-    norm_fold_out_ = nullptr;
-    norm_fold_pending_ = nullptr;
+    norm_fold_.clear();
     if (!norm_fold_on_ || norm_fold_slot_ >= norm_fold_slots(model_->config().n_layers))
         return {};
     const int n_layers = model_->config().n_layers;
@@ -69,24 +65,19 @@ NvFP4NormFoldOut GraphExecutor::norm_fold_arm_(int layer, bool after_ffn, const 
     f.offset = norm_w_off_;
     f.out = static_cast<half*>(no.data);
     f.ssq = norm_fold_ssq_.data() + norm_fold_slot_++;
-    norm_fold_gamma_ = gamma->data;
-    norm_fold_out_ = no.data;
-    norm_fold_pending_ = f.ssq;
+    norm_fold_.stamp(no.data, gamma->data, 1, f.ssq);
     return f;
 }
 
 NvFP4NormFoldIn GraphExecutor::norm_fold_take_(const Tensor& norm_w, const Tensor& no, const Tensor& h,
                                                float eps) {
     NvFP4NormFoldIn f;
-    if (norm_fold_pending_ != nullptr && norm_fold_gamma_ == norm_w.data && norm_fold_out_ == no.data &&
-        h.shape[0] == 1) {
-        f.ssq = norm_fold_pending_;
+    if (norm_fold_.matches(no.data, norm_w.data, 1) && h.shape[0] == 1) {
+        f.ssq = norm_fold_.payload;
         f.d = static_cast<float>(h.shape[h.ndim - 1]);
         f.eps = eps;
     }
-    norm_fold_gamma_ = nullptr;
-    norm_fold_out_ = nullptr;
-    norm_fold_pending_ = nullptr;
+    norm_fold_.clear();
     return f;
 }
 

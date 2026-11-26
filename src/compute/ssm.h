@@ -117,12 +117,31 @@ void ssm_scan_decode_batched(const Tensor& x, const Tensor& B, const Tensor& C, 
 // (mirrors the GDN scan's snapshot, gdn.cu) - needed when a rejected speculative draft
 // falls back to the state after the chunk's first row.
 // ssd: chunked SSD tensor-core scan where it covers the shape (gdn.ssd_scan, ssm_scan_ssd.h).
-void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
-                      const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
-                      const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
-                      int n_groups, QType h_dtype = QType::F32, cudaStream_t stream = nullptr,
-                      const int* d_real_n = nullptr, void* h_snap = nullptr, const int* d_snap_n = nullptr,
-                      bool ssd = false);
+// Arguments in the old parameter order (audit D-11); Tensors by pointer, all required.
+struct SsmScanPrefillArgs {
+    const Tensor* x = nullptr;
+    const Tensor* B = nullptr;
+    const Tensor* C = nullptr;
+    const Tensor* dt = nullptr;
+    const Tensor* A_log = nullptr;
+    const Tensor* D = nullptr;
+    const Tensor* dt_bias = nullptr;
+    void* h_state = nullptr;
+    Tensor* y = nullptr;
+    const void* z = nullptr;
+    int n_tokens = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    QType h_dtype = QType::F32;
+    cudaStream_t stream = nullptr;
+    const int* d_real_n = nullptr;
+    void* h_snap = nullptr;
+    const int* d_snap_n = nullptr;
+    bool ssd = false;
+};
+void ssm_scan_prefill(const SsmScanPrefillArgs& a);
 
 // Group RMSNorm: normalizes each of n_groups groups independently. x:[n_tokens,dim]
 // (dim=n_groups*group_size); weight:[dim]; out same shape as x.

@@ -445,7 +445,7 @@ static void check_group_limit(int n_experts, MoeGroupLimit grp) {
                                  " experts into groups of >= 2");
 }
 
-void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result, cudaStream_t stream,
+void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingOwned& result, cudaStream_t stream,
                      bool use_sigmoid, bool normalize_weights, const void* score_bias, MoeGroupLimit grp) {
     const int n_tokens = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
@@ -479,6 +479,13 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
                          dev_req(d_expert_offsets, offsets_ints * sizeof(int32_t))),
                      "routing result"))
         return;
+    result.indices_owned.adopt(d_expert_indices, static_cast<size_t>(total_assignments) * sizeof(int32_t),
+                               nullptr);
+    result.weights_owned.adopt(d_expert_weights, static_cast<size_t>(total_assignments) * sizeof(float),
+                               nullptr);
+    result.sorted_owned.adopt(d_sorted_token_ids,
+                              static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t), nullptr);
+    result.offsets_owned.adopt(d_expert_offsets, offsets_ints * sizeof(int32_t), nullptr);
     int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
 
     // ---- Kernel 1: Softmax + top-k selection per token ----
@@ -638,7 +645,6 @@ void moe_topk_finish(int n_tokens, int n_experts, int top_k, MoeRoutingBuffers& 
     }
 
     // Fill result struct (no ownership -- memory belongs to buffers)
-    result.owns_memory = false;
     result.token_to_expanded = buffers.token_to_expanded;
     result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32, n_tokens, top_k, true);
     result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32, n_tokens, top_k, true);
@@ -671,7 +677,6 @@ void moe_gate_topk_fused(const void* W_gate, const void* x, int n_experts, int d
     IMP_CUDA_CHECK_LAUNCH();
 
     // Fill result struct (no ownership — memory belongs to buffers)
-    result.owns_memory = false;
     result.expert_indices = make_tensor_2d(buffers.expert_indices, QType::INT32, 1, top_k, true);
     result.expert_weights = make_tensor_2d(buffers.expert_weights, QType::F32, 1, top_k, true);
     result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, QType::INT32, top_k, true);

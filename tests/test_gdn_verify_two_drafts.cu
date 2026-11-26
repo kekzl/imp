@@ -64,11 +64,37 @@ template <typename StateT>
 void scan_single(const float* conv, int conv_channels, const half* alpha, const half* beta,
                  const float* A_log, const float* dt_bias, StateT* h, half* y, int n, const ScanShape& s) {
     if constexpr (std::is_same_v<StateT, float>)
-        gdn_scan_fused_f32(conv, conv_channels, alpha, beta, A_log, dt_bias, h, y, n, s.n_heads, s.head_dim,
-                           s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1);
+        gdn_scan_fused_f32({.conv_f32 = conv,
+                            .conv_channels = conv_channels,
+                            .alpha = alpha,
+                            .beta = beta,
+                            .A_log = A_log,
+                            .dt_bias = dt_bias,
+                            .h_state = h,
+                            .y = y,
+                            .n_tokens = n,
+                            .n_heads = s.n_heads,
+                            .head_dim_ssm = s.head_dim,
+                            .state_size = s.state_size,
+                            .n_groups = s.n_groups,
+                            .stream = nullptr,
+                            .grouped_layout = 1});
     else
-        gdn_scan_fused_bf16(conv, conv_channels, alpha, beta, A_log, dt_bias, h, y, n, s.n_heads, s.head_dim,
-                            s.state_size, s.n_groups, nullptr, /*grouped_layout=*/1);
+        gdn_scan_fused_bf16({.conv_f32 = conv,
+                             .conv_channels = conv_channels,
+                             .alpha = alpha,
+                             .beta = beta,
+                             .A_log = A_log,
+                             .dt_bias = dt_bias,
+                             .h_state = h,
+                             .y = y,
+                             .n_tokens = n,
+                             .n_heads = s.n_heads,
+                             .head_dim_ssm = s.head_dim,
+                             .state_size = s.state_size,
+                             .n_groups = s.n_groups,
+                             .stream = nullptr,
+                             .grouped_layout = 1});
 }
 
 template <typename StateT>

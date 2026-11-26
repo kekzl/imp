@@ -278,8 +278,20 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
     cudaMemset(d_state2, 0, n_heads * state_size * head_dim * sizeof(float));
 
     // Fused: single kernel for all tokens
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state1, d_y1, n_tok, n_heads,
-                       head_dim, state_size, n_groups, nullptr);
+    gdn_scan_fused_f32({.conv_f32 = d_conv,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha,
+                        .beta = d_beta,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state1,
+                        .y = d_y1,
+                        .n_tokens = n_tok,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
     cudaDeviceSynchronize();
 
     // Legacy: per-token reference.
@@ -384,20 +396,55 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
 
     // === Run A: monolithic full scan ===
     cudaMemset(d_state_full, 0, state_floats * sizeof(float));
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_full, d_y_full, n_tok,
-                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_fused_f32({.conv_f32 = d_conv,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha,
+                        .beta = d_beta,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state_full,
+                        .y = d_y_full,
+                        .n_tokens = n_tok,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
     cudaDeviceSynchronize();
 
     // === Run B: chunked scan with mid-state handoff ===
     cudaMemset(d_state_mid, 0, state_floats * sizeof(float));
     // Chunk 1: tokens [0..chunk), uses zero state. d_state_mid mutates in-place.
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_mid, d_y_chunk1, chunk,
-                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_fused_f32({.conv_f32 = d_conv,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha,
+                        .beta = d_beta,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state_mid,
+                        .y = d_y_chunk1,
+                        .n_tokens = chunk,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
     // Chunk 2: tokens [chunk..n_tok), uses d_state_mid carried from chunk 1.
     // Offset alpha/beta by chunk * n_heads; conv_f32 by chunk * conv_channels.
-    gdn_scan_fused_f32(d_conv + static_cast<size_t>(chunk) * conv_channels, conv_channels,
-                       d_alpha + chunk * n_heads, d_beta + chunk * n_heads, d_A, d_dt, d_state_mid,
-                       d_y_chunk2, chunk, n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_fused_f32({.conv_f32 = d_conv + static_cast<size_t>(chunk) * conv_channels,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha + chunk * n_heads,
+                        .beta = d_beta + chunk * n_heads,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state_mid,
+                        .y = d_y_chunk2,
+                        .n_tokens = chunk,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
     cudaDeviceSynchronize();
 
     // === Compare ===
@@ -448,9 +495,22 @@ TEST(GDNScanTest, ChunkBoundaryHandoff) {
     cudaMalloc(&d_state_cw, state_floats * sizeof(float));
     cudaMalloc(&d_y_cw, n_tok * inner * sizeof(half));
     cudaMemset(d_state_cw, 0, state_floats * sizeof(float));
-    gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cw, d_y_cw, n_tok,
-                           n_heads, head_dim, state_size, n_groups, nullptr,
-                           /*chunk_size=*/chunk, /*grouped_layout=*/0);
+    gdn_scan_chunkwise_f32({.conv_f32 = d_conv,
+                            .conv_channels = conv_channels,
+                            .alpha = d_alpha,
+                            .beta = d_beta,
+                            .A_log = d_A,
+                            .dt_bias = d_dt,
+                            .h_state = d_state_cw,
+                            .y = d_y_cw,
+                            .n_tokens = n_tok,
+                            .n_heads = n_heads,
+                            .head_dim_ssm = head_dim,
+                            .state_size = state_size,
+                            .n_groups = n_groups,
+                            .stream = nullptr,
+                            .grouped_layout = 0},
+                           chunk);
     cudaDeviceSynchronize();
 
     std::vector<half> y_cw(n_tok * inner);
@@ -542,12 +602,37 @@ TEST(GDNScanTest, ChunkwiseProtoMatchesFused) {
     cudaMemset(d_state_cw, 0, state_floats * sizeof(float));
 
     // Reference: monolithic sequential fused scan.
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
-                       n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_fused_f32({.conv_f32 = d_conv,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha,
+                        .beta = d_beta,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state_ref,
+                        .y = d_y_ref,
+                        .n_tokens = n_tok,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
     // Prototype: chunkwise SSD kernel (chunk_size=64 hits the new kernel path).
-    gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cw, d_y_cw, n_tok,
-                           n_heads, head_dim, state_size, n_groups, nullptr,
-                           /*chunk_size=*/chunk_size, /*grouped_layout=*/0);
+    gdn_scan_chunkwise_f32({.conv_f32 = d_conv,
+                            .conv_channels = conv_channels,
+                            .alpha = d_alpha,
+                            .beta = d_beta,
+                            .A_log = d_A,
+                            .dt_bias = d_dt,
+                            .h_state = d_state_cw,
+                            .y = d_y_cw,
+                            .n_tokens = n_tok,
+                            .n_heads = n_heads,
+                            .head_dim_ssm = head_dim,
+                            .state_size = state_size,
+                            .n_groups = n_groups,
+                            .stream = nullptr,
+                            .grouped_layout = 0},
+                           chunk_size);
     cudaDeviceSynchronize();
 
     std::vector<half> y_ref(n_tok * inner), y_cw(n_tok * inner);
@@ -648,11 +733,37 @@ static void chunkpar_matches_fused(const int n_heads) {
     cudaMemcpy(d_state_ref, h_state0.data(), state_floats * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_state_cp, h_state0.data(), state_floats * sizeof(float), cudaMemcpyHostToDevice);
 
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_ref, d_y_ref, n_tok,
-                       n_heads, head_dim, state_size, n_groups, nullptr);
-    gdn_scan_chunkpar_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_cp, d_y_cp, n_tok,
-                          n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_ws,
-                          ws_bytes);
+    gdn_scan_fused_f32({.conv_f32 = d_conv,
+                        .conv_channels = conv_channels,
+                        .alpha = d_alpha,
+                        .beta = d_beta,
+                        .A_log = d_A,
+                        .dt_bias = d_dt,
+                        .h_state = d_state_ref,
+                        .y = d_y_ref,
+                        .n_tokens = n_tok,
+                        .n_heads = n_heads,
+                        .head_dim_ssm = head_dim,
+                        .state_size = state_size,
+                        .n_groups = n_groups,
+                        .stream = nullptr});
+    gdn_scan_chunkpar_f32({.conv_f32 = d_conv,
+                           .conv_channels = conv_channels,
+                           .alpha = d_alpha,
+                           .beta = d_beta,
+                           .A_log = d_A,
+                           .dt_bias = d_dt,
+                           .h_state = d_state_cp,
+                           .y = d_y_cp,
+                           .n_tokens = n_tok,
+                           .n_heads = n_heads,
+                           .head_dim_ssm = head_dim,
+                           .state_size = state_size,
+                           .n_groups = n_groups,
+                           .stream = nullptr,
+                           .grouped_layout = 0,
+                           .ws = d_ws,
+                           .ws_bytes = ws_bytes});
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<half> y_ref(static_cast<size_t>(n_tok) * inner), y_cp(y_ref.size());
@@ -689,11 +800,37 @@ static void chunkpar_matches_fused(const int n_heads) {
                    cudaMemcpyHostToDevice);
         cudaMemcpy(d_scp, h_state0_bf.data(), state_floats * sizeof(__nv_bfloat16),
                    cudaMemcpyHostToDevice);
-        gdn_scan_fused_bf16(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_sref, d_y_ref, n_tok,
-                            n_heads, head_dim, state_size, n_groups, nullptr);
-        gdn_scan_chunkpar_bf16(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_scp, d_y_cp, n_tok,
-                               n_heads, head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0,
-                               d_ws, ws_bytes);
+        gdn_scan_fused_bf16({.conv_f32 = d_conv,
+                             .conv_channels = conv_channels,
+                             .alpha = d_alpha,
+                             .beta = d_beta,
+                             .A_log = d_A,
+                             .dt_bias = d_dt,
+                             .h_state = d_sref,
+                             .y = d_y_ref,
+                             .n_tokens = n_tok,
+                             .n_heads = n_heads,
+                             .head_dim_ssm = head_dim,
+                             .state_size = state_size,
+                             .n_groups = n_groups,
+                             .stream = nullptr});
+        gdn_scan_chunkpar_bf16({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_A,
+                                .dt_bias = d_dt,
+                                .h_state = d_scp,
+                                .y = d_y_cp,
+                                .n_tokens = n_tok,
+                                .n_heads = n_heads,
+                                .head_dim_ssm = head_dim,
+                                .state_size = state_size,
+                                .n_groups = n_groups,
+                                .stream = nullptr,
+                                .grouped_layout = 0,
+                                .ws = d_ws,
+                                .ws_bytes = ws_bytes});
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         cudaMemcpy(y_ref.data(), d_y_ref, y_ref.size() * sizeof(half), cudaMemcpyDeviceToHost);
         cudaMemcpy(y_cp.data(), d_y_cp, y_cp.size() * sizeof(half), cudaMemcpyDeviceToHost);
@@ -811,16 +948,41 @@ TEST(GDNScanTest, ChunkwiseProtoMicrobench) {
 
     float ms_fused = bench(
         [&]() {
-            gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
-                               n_heads, head_dim, state_size, n_groups, nullptr);
+            gdn_scan_fused_f32({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_A,
+                                .dt_bias = d_dt,
+                                .h_state = d_state,
+                                .y = d_y,
+                                .n_tokens = n_tok,
+                                .n_heads = n_heads,
+                                .head_dim_ssm = head_dim,
+                                .state_size = state_size,
+                                .n_groups = n_groups,
+                                .stream = nullptr});
         },
         "gdn_scan_fused_f32 (sequential)");
 
     float ms_chunkwise = bench(
         [&]() {
-            gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
-                                   n_heads, head_dim, state_size, n_groups, nullptr,
-                                   /*chunk_size=*/chunk_size, /*grouped_layout=*/0);
+            gdn_scan_chunkwise_f32({.conv_f32 = d_conv,
+                                    .conv_channels = conv_channels,
+                                    .alpha = d_alpha,
+                                    .beta = d_beta,
+                                    .A_log = d_A,
+                                    .dt_bias = d_dt,
+                                    .h_state = d_state,
+                                    .y = d_y,
+                                    .n_tokens = n_tok,
+                                    .n_heads = n_heads,
+                                    .head_dim_ssm = head_dim,
+                                    .state_size = state_size,
+                                    .n_groups = n_groups,
+                                    .stream = nullptr,
+                                    .grouped_layout = 0},
+                                   chunk_size);
         },
         "gdn_scan_chunkwise_f32 (Phase 1b.1 proto)");
 
@@ -1055,13 +1217,41 @@ TEST(GDNScanTest, PaddedChunkDeviceLength) {
     };
 
     check_variant("fused", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
-        gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok, n_heads,
-                           head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/0, d_rn);
+        gdn_scan_fused_f32({.conv_f32 = d_conv,
+                            .conv_channels = conv_channels,
+                            .alpha = d_alpha,
+                            .beta = d_beta,
+                            .A_log = d_A,
+                            .dt_bias = d_dt,
+                            .h_state = d_state,
+                            .y = d_y,
+                            .n_tokens = n_tok,
+                            .n_heads = n_heads,
+                            .head_dim_ssm = head_dim,
+                            .state_size = state_size,
+                            .n_groups = n_groups,
+                            .stream = nullptr,
+                            .grouped_layout = 0,
+                            .d_real_n = d_rn});
     });
     check_variant("chunkwise", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
-        gdn_scan_chunkwise_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
-                               n_heads, head_dim, state_size, n_groups, nullptr, /*chunk_size=*/64,
-                               /*grouped_layout=*/0, d_rn);
+        gdn_scan_chunkwise_f32({.conv_f32 = d_conv,
+                                .conv_channels = conv_channels,
+                                .alpha = d_alpha,
+                                .beta = d_beta,
+                                .A_log = d_A,
+                                .dt_bias = d_dt,
+                                .h_state = d_state,
+                                .y = d_y,
+                                .n_tokens = n_tok,
+                                .n_heads = n_heads,
+                                .head_dim_ssm = head_dim,
+                                .state_size = state_size,
+                                .n_groups = n_groups,
+                                .stream = nullptr,
+                                .grouped_layout = 0,
+                                .d_real_n = d_rn},
+                               /*chunk_size=*/64);
     });
     check_variant("reference", [&](int n_tok, const int* d_rn, float* d_state, half* d_y) {
         gdn_scan_reference_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state, d_y, n_tok,
@@ -1247,12 +1437,36 @@ TEST(GDNScanTest, BF16StateTracksFP32State) {
     std::vector<half> ya(inner), yb(inner);
     for (int t = 0; t < steps; t++) {
         const float* conv_t = d_conv + (size_t)t * conv_channels;
-        gdn_scan_fused_f32(conv_t, conv_channels, d_alpha + t * n_heads, d_beta + t * n_heads, d_A, d_dt,
-                           d_state_f32, d_y_f32arm, 1, n_heads, head_dim, state_size, n_groups, nullptr,
-                           /*grouped_layout=*/1);
-        gdn_scan_fused_bf16(conv_t, conv_channels, d_alpha + t * n_heads, d_beta + t * n_heads, d_A, d_dt,
-                            d_state_bf16, d_y_bf16arm, 1, n_heads, head_dim, state_size, n_groups, nullptr,
-                            /*grouped_layout=*/1);
+        gdn_scan_fused_f32({.conv_f32 = conv_t,
+                            .conv_channels = conv_channels,
+                            .alpha = d_alpha + t * n_heads,
+                            .beta = d_beta + t * n_heads,
+                            .A_log = d_A,
+                            .dt_bias = d_dt,
+                            .h_state = d_state_f32,
+                            .y = d_y_f32arm,
+                            .n_tokens = 1,
+                            .n_heads = n_heads,
+                            .head_dim_ssm = head_dim,
+                            .state_size = state_size,
+                            .n_groups = n_groups,
+                            .stream = nullptr,
+                            .grouped_layout = 1});
+        gdn_scan_fused_bf16({.conv_f32 = conv_t,
+                             .conv_channels = conv_channels,
+                             .alpha = d_alpha + t * n_heads,
+                             .beta = d_beta + t * n_heads,
+                             .A_log = d_A,
+                             .dt_bias = d_dt,
+                             .h_state = d_state_bf16,
+                             .y = d_y_bf16arm,
+                             .n_tokens = 1,
+                             .n_heads = n_heads,
+                             .head_dim_ssm = head_dim,
+                             .state_size = state_size,
+                             .n_groups = n_groups,
+                             .stream = nullptr,
+                             .grouped_layout = 1});
         if (t % 32 == 31 || t == steps - 1) {
             ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
             cudaMemcpy(ya.data(), d_y_f32arm, inner * sizeof(half), cudaMemcpyDeviceToHost);

@@ -4,11 +4,8 @@
 # a new allocation gets a move-only owner instead (VramOwned or DeviceOwned, src/memory/;
 # docs/internals/MEMORY.md, invariant I5).
 #
-# remaining: 6 release sites in 3 files, 0 owner-or-view flags in 0 files
+# remaining: 0 release sites in 0 files, 0 owner-or-view flags in 0 files
 
 [release sites]
-src/compute/mtp_forward.cu  # 4
-src/exec/executor_forward_moe.cu  # 1
-src/quant/gpt_oss_mxfp4_convert.cpp  # 1
 
 [owner-or-view flags]

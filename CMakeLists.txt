@@ -1179,6 +1179,8 @@ if(IMP_BUILD_TESTS)
         tests/test_view_or_owned.cpp
         # Weight-cache entries: owned buffers released once, a viewed slab slice never (I5).
         tests/test_weight_cache_entries.cpp
+        # MoE routing result and MTP workspace: DeviceOwned owners, each buffer released once (I5).
+        tests/test_routing_mtp_owners.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
         # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).
@@ -1307,6 +1309,8 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_dispatch_rules.cpp
         # D-6: a small-M producer stamp retires when its buffer is viewed; prenorm consumers adopt it.
         tests/test_smallm_xq_tag.cpp
+        # D-6 rest: prenorm / norm-fold stamps retire on a view of their buffer; a block entry carries them.
+        tests/test_buffer_stamp.cpp
         # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
         # (no kernel launches on these arms, so the CPU lane holds it).
         tests/test_gemm_fallback_fails_loud.cpp

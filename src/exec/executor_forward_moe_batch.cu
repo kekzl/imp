@@ -642,11 +642,10 @@ static void router_logits_gemm(const Tensor& in, const Tensor& gate, void* scrat
     }
 }
 
-void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
-                                        int top_k, const Tensor& router_in,
-                                        bool fp32_gate_logits_ready, bool will_decode_fast,
-                                        const void* router_bias_ptr, bool use_sigmoid,
-                                        bool norm_weights, MoeRoutingResult& routing) {
+void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k,
+                                        const Tensor& router_in, bool fp32_gate_logits_ready,
+                                        bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid,
+                                        bool norm_weights, MoeRoutingOwned& routing) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
     const MoeGroupLimit grp{cfg.moe_n_group, cfg.moe_topk_group};
