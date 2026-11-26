@@ -190,6 +190,20 @@ void apply_upload_batch_fit(int fitted, int& engine_batch, int& runtime_batch, S
     if (sched)
         sched->clamp_max_batch_size(fitted);
 }
+
+// True when a layer's experts stay host-resident: the packed tensor (most MoE archs) or the
+// per-expert 2D views (DeepSeek-V2 SafeTensors: only expert_w_up[e]). The decode MoE then takes
+// the D2H-sync host path, which is not graph-capturable.
+bool any_experts_on_host(const Model& model) {
+    for (int i = 0; i < model.config().n_layers; i++) {
+        const auto& L = model.layer(i);
+        const bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
+        const bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data && !L.expert_w_up[0].on_device;
+        if (packed_host || view_host)
+            return true;
+    }
+    return false;
+}
 }  // namespace
 
 bool Engine::init_weights() {
@@ -361,19 +375,8 @@ bool Engine::init_weights() {
     // not host-offloaded at decode; treating them as on-host would read post-convert device pointers as host
     // MXFP4 (garbage) and wrongly disable CUDA graphs.
     if (mcfg.n_experts > 0 && !model_->profile().experts_convert_at_predequant) {
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            // Packed-tensor path (most MoE archs) OR per-expert 2D views
-            // (DeepSeek-V2 SafeTensors: only expert_w_up[e], no expert_*_packed).
-            // Either being host-resident means the decode MoE uses the D2H-sync host path, which is NOT graph-capturable.
-            bool packed_host = L.expert_up_packed.data && !L.expert_up_packed.on_device;
-            bool view_host = !L.expert_w_up.empty() && L.expert_w_up[0].data &&
-                             !L.expert_w_up[0].on_device;
-            if (packed_host || view_host) {
-                experts_on_host_ = true;
-                break;
-            }
-        }
+        if (any_experts_on_host(*model_))
+            experts_on_host_ = true;
         // Device expert cache (NVFP4 prequant or GGUF packed experts): routing, residency and the
         // miss copies resolve on the device, so the captured decode replays correctly.
         // init_device_expert_cache() demotes later if a host-resident layer stays on the host path.
@@ -393,7 +396,10 @@ bool Engine::init_weights() {
     // Phase 2: allocate GPU workspace
     inkling_load_vision_();
     executor_->set_inkling_lookahead(inkling_lookahead_);
-    (void)executor_->allocate_workspaces(experts_on_host_);
+    if (!executor_->allocate_workspaces(experts_on_host_)) {
+        IMP_LOG_ERROR("executor workspace allocation failed, refusing to load (audit C-11)");
+        return false;
+    }
     inkling_fit_slots_();
 
     // Layer offloading: one forward at a time owns the two staging slots, none captured.

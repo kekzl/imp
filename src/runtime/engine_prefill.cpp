@@ -244,7 +244,7 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                     is_last_chunk = false;
                 }
                 ctx_len = offset + chunk_len;
-                (void)executor_->resize_workspace(chunk_len, pf_stream);
+                executor_->resize_workspace(chunk_len, pf_stream);
             }
         }
 
@@ -459,7 +459,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     int ctx_len = offset + chunk_len;
-    (void)executor_->resize_workspace(chunk_len, pf_stream);
+    executor_->resize_workspace(chunk_len, pf_stream);
 
     if (!prefill_allocate_kv_blocks_(req, kv_bs, total_input, effective_chunk, offset, chunk_len,
                                      is_last_chunk, ctx_len, pf_stream)) {
