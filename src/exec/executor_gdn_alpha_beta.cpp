@@ -159,7 +159,7 @@ static bool gdn_ab_rows(const TransformerLayer& ly, const Caches& wc, const Regi
 bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                             Tensor& gate_out, int n_heads, cudaStream_t stream,
                                             const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_ || n_heads <= 0)
+    if (cur_mode_.spec_verify || calib_ || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -241,7 +241,7 @@ const void* GraphExecutor::dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QT
 int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                           Tensor& gate_out, int n_heads, const GemmContext& ctx,
                                           cudaStream_t stream) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
+    if (ctx.mode.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0 || ctx.force_mmvq ||
         input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || ssm_dt_buf_.data == nullptr ||
         ly.gdn_alpha_beta_packed.data != nullptr || qscratch_.q8_1_buf.data() == nullptr ||
@@ -290,9 +290,9 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
 
 bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
                                    const GemmContext& ctx, cudaStream_t stream) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs || ctx.force_mmvq ||
-        input.shape[0] != 1 || input.qtype != QType::F16 || qscratch_.q8_1_buf.data() == nullptr ||
-        qscratch_.d8_buf.data() == nullptr)
+    if (ctx.mode.spec_verify || calib_ || lora_ != nullptr || n < 2 || n > kDp4aMultiMaxSegs ||
+        ctx.force_mmvq || input.shape[0] != 1 || input.qtype != QType::F16 ||
+        qscratch_.q8_1_buf.data() == nullptr || qscratch_.d8_buf.data() == nullptr)
         return false;
     const int64_t K = input.shape[1];
     if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
@@ -322,7 +322,7 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
 bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {
     if (n != 1 || h.qtype != QType::F16)
         return false;
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr)
+    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr)
         return false;
     NvFP4QuantResult w;
     if (nvfp4_decode_weight_(ly.ssm_out_id, w))
@@ -353,7 +353,7 @@ bool GraphExecutor::fp8_decode_weight_(TensorID id, Fp8M1Weight& out) const {
 bool GraphExecutor::try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                                Tensor& gate_out, int n_heads, cudaStream_t stream,
                                                const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_ || lora_ != nullptr || n_heads <= 0)
+    if (cur_mode_.spec_verify || calib_ || lora_ != nullptr || n_heads <= 0)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || proj.qtype != QType::F16 ||
         gate_out.qtype != QType::F16 || compute_dtype_ != QType::F16 || ssm_dt_buf_.data == nullptr)
@@ -435,7 +435,7 @@ void GraphExecutor::gdn_out_residual_m1_(int layer, const TransformerLayer& ly, 
 bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
                                            Tensor& k_out, Tensor& v_out, cudaStream_t stream,
                                            const NvFP4NormFoldIn& fold) {
-    if (cur_spec_verify_ || calib_)
+    if (cur_mode_.spec_verify || calib_)
         return false;
     if (input.shape[0] != 1 || input.qtype != QType::F16 || q_out.qtype != QType::F16 ||
         k_out.qtype != QType::F16 || v_out.qtype != QType::F16)
@@ -466,7 +466,8 @@ GemmContext GraphExecutor::gdn_q8_reuse_ctx_(int layer, const Tensor& no, const 
     const auto& ly = model_->layer(layer);
     auto raw_q8 = [&](TensorID id) {
         return id >= 0 && id < static_cast<TensorID>(registry_.size()) &&
-               registry_.handle(id).source_qtype == QType::Q8_0 && !prefill_routes_cutlass_nvfp4_(id, n);
+               registry_.handle(id).source_qtype == QType::Q8_0 &&
+               !prefill_routes_cutlass_nvfp4_(id, n, ctx.mode);
     };
     if (n < 2 || n > 32 || !raw_q8(ly.gdn_gate_id) || !raw_q8(ly.gdn_alpha_id) || !raw_q8(ly.gdn_beta_id))
         return ctx;

@@ -140,8 +140,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     }
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
     swiglu_epi_ = {};  // set by gate_up_prefill_ when the up epilogue wrote the down input
 
     // 3. Gate and Up projections
@@ -241,7 +240,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            const bool fp8_ffn = (n >= fp8x8_min_rows_ && !cur_force_fp16_ && hwg &&
+            const bool fp8_ffn = (n >= fp8x8_min_rows_ && !ctx.mode.force_fp16 && hwg &&
                                   hwg->primary_tier == StorageTier::FP8 && hwu &&
                                   hwu->primary_tier == StorageTier::FP8);
             const Fp8ActScale fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : Fp8ActScale{};
@@ -453,7 +452,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
                     break;
             }
-            const Fp8ActScale down_a_scale = (will_fuse_down_beta1 && !cur_force_fp16_ &&
+            const Fp8ActScale down_a_scale = (will_fuse_down_beta1 && !ctx.mode.force_fp16 &&
                                               wd_tier == StorageTier::FP8)
                                                  ? quantize_act_fp8_(*hwd, so, stream)
                                                  : Fp8ActScale{};

@@ -270,9 +270,9 @@
                     // quantize once (Q's dispatch) into the activation scratch, K/V skip the
                     // re-quantize via the act-quant hint. Bit-identical reuse.
                     GemmContext kv_ctx = ctx;
-                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id, n) &&
-                        prefill_routes_cutlass_nvfp4_(ly.wk_id, n) &&
-                        (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n))) {
+                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id, n, ctx.mode) &&
+                        prefill_routes_cutlass_nvfp4_(ly.wk_id, n, ctx.mode) &&
+                        (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n, ctx.mode))) {
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
                     } else if (n > 32 && ly.wv.data != nullptr &&

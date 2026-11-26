@@ -25,7 +25,7 @@ bool f16_weight(const Tensor& t) { return t.data != nullptr && t.qtype == QType:
 
 bool GraphExecutor::fp32_resid_fuse_ok_(int n) const {
     // Decode rows only (n == 1 or batched decode / verify); prefill keeps the unfused chain.
-    return n >= 1 && (n == 1 || cur_decode_rows_) && fp32_accum_buf_.get() != nullptr &&
+    return n >= 1 && (n == 1 || cur_mode_.decode_rows) && fp32_accum_buf_.get() != nullptr &&
            model_->profile().fp32_residual_norms && compute_dtype_ == QType::F16 && !calib_ &&
            lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() && !debug_forward_enabled() &&
            !model_->config().parallel_block && !model_->profile().gated_residual;
