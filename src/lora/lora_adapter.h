@@ -67,7 +67,22 @@ struct LoraDims {
 
 // PEFT key "...layers.{i}.<proj>.lora_{A,B}..." -> (layer, proj, is_A); false for keys that
 // are not per-layer pairs. A malformed i ("x", "3x", overflow) yields layer -1: load() refuses.
+// <proj>: self_attn.{q,k,v,o}_proj, mlp.{gate,up,down}_proj, Inkling attn.{wq_du,wk_dv,wv_dv,wo_ud}.
 [[nodiscard]] bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A);
+
+[[nodiscard]] constexpr uint8_t lora_proj_bit(LoraProj p) {
+    return static_cast<uint8_t>(1u << std::to_underlying(p));
+}
+
+// The projections a forward applies an adapter to. strict: a lora tensor outside them refuses the
+// load (Inkling); otherwise an unmapped tensor is skipped with a WARN (#522 v1).
+struct LoraTargets {
+    uint8_t mask = 0x7F;  // every LoraProj
+    bool strict = false;
+};
+
+// Why load() refuses this safetensors key under t; empty = loaded, skipped or not a lora tensor.
+[[nodiscard]] std::string lora_key_refusal(const std::string& key, const LoraTargets& t);
 
 class LoraAdapter {
 public:
@@ -80,6 +95,8 @@ public:
     // case alpha/r fall back to the tensor shapes with scale=1). Returns
     // false with a logged reason on any parse/shape problem.
     [[nodiscard]] bool load(const std::string& path, int n_layers);
+    // Before load(): a key lora_key_refusal names under t refuses the load before any device upload.
+    void set_targets(const LoraTargets& t) { targets_ = t; }
     // Every loaded pair must match the base model's widths; `why` names the
     // first mismatch. Call after load(), before the adapter can be selected.
     [[nodiscard]] bool check_dims(const LoraDims& d, std::string* why) const;
@@ -104,6 +121,7 @@ private:
     };
     std::vector<LayerSlots> layers_;
     std::vector<DeviceOwned<void>> device_allocs_;  // plain family, released in ~LoraAdapter
+    LoraTargets targets_;
     float scale_ = 1.0f;
     int max_rank_ = 0;
     int n_tensors_ = 0;

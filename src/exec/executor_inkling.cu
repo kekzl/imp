@@ -61,6 +61,7 @@ bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, 
             IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
             break;  // fewer slots than asked for: the engine lowers its batch size
         }
+        f->set_lora(&lora);
         f->set_snapshot_draft(draft);  // every slot's entries hold the draft part: any slot restores them
         slots.push_back(std::move(f));
     }
