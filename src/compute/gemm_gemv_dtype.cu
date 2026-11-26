@@ -66,9 +66,24 @@ bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, fl
     const int64_t N = B.shape[0];
 
     // TF32, as cublasSgemm under the former CUBLAS_TF32_TENSOR_OP_MATH handle.
-    cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha, B.data,
-                                   CUDA_R_32F, (int)K, A.data, CUDA_R_32F, (int)K, &beta, C.data, CUDA_R_32F,
-                                   (int)N, lt_compute_32f(CUDA_R_32F), stream);
+    cublasStatus_t st = lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                    .transb = CUBLAS_OP_N,
+                                    .m = (int)N,
+                                    .n = (int)M,
+                                    .k = (int)K,
+                                    .alpha = &alpha,
+                                    .A = B.data,
+                                    .a_type = CUDA_R_32F,
+                                    .lda = (int)K,
+                                    .B = A.data,
+                                    .b_type = CUDA_R_32F,
+                                    .ldb = (int)K,
+                                    .beta = &beta,
+                                    .C = C.data,
+                                    .c_type = CUDA_R_32F,
+                                    .ldc = (int)N,
+                                    .compute = lt_compute_32f(CUDA_R_32F),
+                                    .stream = stream});
     if (st != CUBLAS_STATUS_SUCCESS) {
         IMP_LOG_ERROR("imp::gemm: FP32 GEMM failed (status %d)", (int)st);
     }

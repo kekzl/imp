@@ -30,6 +30,7 @@
 #include "exec/sae.h"
 #include "exec/smallm_xq_tag.h"
 #include "exec/nvfp4_expert_offload.h"
+#include "exec/gemm_mode.h"
 #include "exec/inference_state.h"
 #include "exec/inkling_forward.h"
 #include "exec/moe_ffn_context.h"
@@ -334,7 +335,7 @@ public:
     // of a dequantable GGUF source. False when neither exists; prompt rows on
     // a GGUF source keep the full-precision dequant route. Single gate shared
     // by the dispatch block, sibling-pair dispatch and producer fusion.
-    [[nodiscard]] bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const;
+    [[nodiscard]] bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out, bool decode_rows) const;
     // Grow the small-M GEMM workspace to `need` bytes; a no-op while
     // `stream` is capturing (twin of ensure_smallm_xq_).
     void ensure_smallm_ws_(size_t need, cudaStream_t stream);
@@ -773,18 +774,14 @@ private:
     void run_ffn_phase_(int layer, cudaStream_t stream);
     int cur_layer_ = -1;           // set by forward_logits; keys calibration entries
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
-    bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
-    bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
-    bool cur_spec_verify_smallm_ = false;  // InferenceState::spec_verify_smallm
+    // Set once by forward_logits; GEMM dispatch reads ctx.mode, sites without a GemmContext read this.
+    GemmMode cur_mode_;
+    // Every GemmContext of this forward: cur_mode_ plus the model's force_mmvq (audit D-7).
+    [[nodiscard]] GemmContext gemm_ctx_(cudaStream_t stream, bool verify_small_m_routes = true) const;
     // Captured verify rows on the small-M block: only above kSpecVerifyA16MaxRows.
-    [[nodiscard]] bool verify_smallm_rows_(int M) const {
-        return cur_spec_verify_smallm_ && M > kSpecVerifyA16MaxRows;
+    [[nodiscard]] static bool verify_smallm_rows_(const GemmMode& mode, int M) {
+        return mode.verify_smallm && M > kSpecVerifyA16MaxRows;
     }
-    // Set by forward_logits: the forward's rows are generated tokens (batched
-    // decode or a spec-verify chunk), not prompt rows. Gates the GGUF NVFP4
-    // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode
-    // step from a short prefill.
-    bool cur_decode_rows_ = false;
     // Fewest rows on the FP8 x FP8 route: 1 on a one-row decode step under gemm.fp8_smallm_m1, else 2.
     int fp8x8_min_rows_ = 2;
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
@@ -1262,7 +1259,7 @@ private:
     // tile prefill block (which quantizes input into shared activation
     // scratch). Gates the act-quant-hint dedupe at QKV/gate-up call sites;
     // must be CONSERVATIVE: false negative just re-quantizes, false positive skips with stale scratch.
-    [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
+    [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M, const GemmMode& mode) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_();

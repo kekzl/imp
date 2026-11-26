@@ -783,9 +783,25 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     // per-call descriptor (lt_gemm_ex), not the bucketed-M cache below, which produced wrong
     // results for FP16->FP32 on sm_120.
     if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
-        cublasStatus_t st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha, B.data,
-                                       cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta, C.data,
-                                       cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F, stream, gemm_caller());
+        cublasStatus_t st = lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                        .transb = CUBLAS_OP_N,
+                                        .m = (int)N,
+                                        .n = (int)M,
+                                        .k = (int)K,
+                                        .alpha = &alpha,
+                                        .A = B.data,
+                                        .a_type = cuda_dtype_B,
+                                        .lda = (int)K,
+                                        .B = A.data,
+                                        .b_type = cuda_dtype_A,
+                                        .ldb = (int)K,
+                                        .beta = &beta,
+                                        .C = C.data,
+                                        .c_type = cuda_dtype_C,
+                                        .ldc = (int)N,
+                                        .compute = CUBLAS_COMPUTE_32F,
+                                        .stream = stream},
+                                       gemm_caller());
         if (st != CUBLAS_STATUS_SUCCESS) {
             IMP_LOG_WARN("gemm: FP16→FP32 failed status=%d M=%ld K=%ld N=%ld", (int)st, (long)M, (long)K,
                          (long)N);
@@ -838,10 +854,24 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 "gemm: cublasLtMatmul (INT) failed (status %d) M=%ld K=%ld N=%ld, "
                 "falling back to an exact-alignment descriptor",
                 (int)st, (long)M, (long)K, (long)N);
-            cublasStatus_t fb_st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha,
-                                              B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K,
-                                              &ibeta, C.data, cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32I,
-                                              stream);
+            cublasStatus_t fb_st = lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                               .transb = CUBLAS_OP_N,
+                                               .m = (int)N,
+                                               .n = (int)M,
+                                               .k = (int)K,
+                                               .alpha = &ialpha,
+                                               .A = B.data,
+                                               .a_type = cuda_dtype_B,
+                                               .lda = (int)K,
+                                               .B = A.data,
+                                               .b_type = cuda_dtype_A,
+                                               .ldb = (int)K,
+                                               .beta = &ibeta,
+                                               .C = C.data,
+                                               .c_type = cuda_dtype_C,
+                                               .ldc = (int)N,
+                                               .compute = CUBLAS_COMPUTE_32I,
+                                               .stream = stream});
             if (fb_st != CUBLAS_STATUS_SUCCESS) {
                 // Both the cached and the exact-alignment descriptor failed: C holds garbage. Continuing
                 // corrupts the forward pass silently (repeated-token gibberish + downstream IMA).
@@ -882,10 +912,24 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                         "after algo reselect, falling back to an exact-alignment descriptor",
                         (int)st, (long)M, (long)K, (long)N);
                 }
-                cublasStatus_t fb_st = lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha,
-                                                  B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K,
-                                                  &beta, C.data, cuda_dtype_C, (int)N,
-                                                  lt_compute_32f(cuda_dtype_A), stream);
+                cublasStatus_t fb_st = lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                                   .transb = CUBLAS_OP_N,
+                                                   .m = (int)N,
+                                                   .n = (int)M,
+                                                   .k = (int)K,
+                                                   .alpha = &alpha,
+                                                   .A = B.data,
+                                                   .a_type = cuda_dtype_B,
+                                                   .lda = (int)K,
+                                                   .B = A.data,
+                                                   .b_type = cuda_dtype_A,
+                                                   .ldb = (int)K,
+                                                   .beta = &beta,
+                                                   .C = C.data,
+                                                   .c_type = cuda_dtype_C,
+                                                   .ldc = (int)N,
+                                                   .compute = lt_compute_32f(cuda_dtype_A),
+                                                   .stream = stream});
                 if (fb_st != CUBLAS_STATUS_SUCCESS) {
                     // Both descriptors failed. Output buffer holds garbage; continuing
                     // corrupts the forward pass silently (repeated-token gibberish + downstream IMA). Fail

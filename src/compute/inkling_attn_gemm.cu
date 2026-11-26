@@ -210,10 +210,28 @@ bool attention_rows(const AttnArgs& a, cudaStream_t s) {
             if (n <= 0)
                 continue;
             // S[pair, key] = q . k: (keys x pairs) = K^T (hd x keys, one KV head per batch) x Q (hd x pairs).
-            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(CUBLAS_OP_T, CUBLAS_OP_N, n, per, a.hd, &one, kp,
-                                                         CUDA_R_16F, ld, a.hd, w.q, CUDA_R_16F, a.hd, sq,
-                                                         &zero, w.s + off, CUDA_R_32F, w.N, ss, a.n_kv,
-                                                         CUBLAS_COMPUTE_32F, s));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_T,
+                                                          .transb = CUBLAS_OP_N,
+                                                          .m = n,
+                                                          .n = per,
+                                                          .k = a.hd,
+                                                          .alpha = &one,
+                                                          .A = kp,
+                                                          .a_type = CUDA_R_16F,
+                                                          .lda = ld,
+                                                          .stride_a = a.hd,
+                                                          .B = w.q,
+                                                          .b_type = CUDA_R_16F,
+                                                          .ldb = a.hd,
+                                                          .stride_b = sq,
+                                                          .beta = &zero,
+                                                          .C = w.s + off,
+                                                          .c_type = CUDA_R_32F,
+                                                          .ldc = w.N,
+                                                          .stride_c = ss,
+                                                          .batch = a.n_kv,
+                                                          .compute = CUBLAS_COMPUTE_32F,
+                                                          .stream = s}));
         }
         rows_softmax_k<<<static_cast<unsigned>(pairs), kThreads, 0, s>>>(a, w);
         IMP_CUDA_CHECK_LAUNCH();
@@ -223,10 +241,28 @@ bool attention_rows(const AttnArgs& a, cudaStream_t s) {
             if (n <= 0)
                 continue;
             // O[pair, dim] = sum_key p * v: (hd x pairs) = V (hd x keys) x P (keys x pairs).
-            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched(CUBLAS_OP_N, CUBLAS_OP_N, a.hd, per, n, &one, vp,
-                                                         CUDA_R_16F, ld, a.hd, w.p + off, CUDA_R_16F, w.N, ss,
-                                                         part == 0 ? &zero : &one, w.o, CUDA_R_32F, a.hd, sq,
-                                                         a.n_kv, CUBLAS_COMPUTE_32F, s));
+            IMP_CUBLAS_CHECK_LOG(lt_gemm_strided_batched({.transa = CUBLAS_OP_N,
+                                                          .transb = CUBLAS_OP_N,
+                                                          .m = a.hd,
+                                                          .n = per,
+                                                          .k = n,
+                                                          .alpha = &one,
+                                                          .A = vp,
+                                                          .a_type = CUDA_R_16F,
+                                                          .lda = ld,
+                                                          .stride_a = a.hd,
+                                                          .B = w.p + off,
+                                                          .b_type = CUDA_R_16F,
+                                                          .ldb = w.N,
+                                                          .stride_b = ss,
+                                                          .beta = part == 0 ? &zero : &one,
+                                                          .C = w.o,
+                                                          .c_type = CUDA_R_32F,
+                                                          .ldc = a.hd,
+                                                          .stride_c = sq,
+                                                          .batch = a.n_kv,
+                                                          .compute = CUBLAS_COMPUTE_32F,
+                                                          .stream = s}));
         }
         rows_out_k<<<w.R * a.n_heads, a.hd, 0, s>>>(a, w);
         IMP_CUDA_CHECK_LAUNCH();

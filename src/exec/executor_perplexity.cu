@@ -119,7 +119,8 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     const int chunk_len = n_rows;
 
-    GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_);
+    GemmContext ctx = GemmContext::make(stream, wcache_, qscratch_, cur_mode_, /*force_mmvq=*/false,
+                                        /*verify_small_m_routes=*/false);
 
     // The Eval route of lm_head_route() (exec/lm_head_route.h): NVFP4 heads take the batched GEMV
     // (gemm_via_handle_ does not read the NVFP4 cache), GGUF heads the dp4a arm.

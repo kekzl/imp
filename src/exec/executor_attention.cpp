@@ -240,8 +240,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     Tensor q_target = has_attn_output_gate ? qv_full : qv;
 
     // GemmContext for all weight GEMM dispatches in this function.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     // QKV projections [n,d]@W^T -> [n,proj_dim]. Decode (n=1) with matching
     // quant types: fused RMSNorm->Q8_1->QKV GEMV, skipping the intermediate
@@ -679,7 +678,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         quantize_attn_out_q8_(ao, K_o, q8_epi.written, stream);
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, qscratch_.q8_1_buf.data(), qscratch_.d8_buf.data(),
                                static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
-    } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&
+    } else if (will_fuse_o_beta1 && !ctx.mode.force_fp16 && wo_tier == StorageTier::FP8 &&
                qscratch_.fp8_act.get() != nullptr && qscratch_.d_act_scale.data() != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden. The checkpoint's input scale or per-token
         // scales, as q/k/v and the FFN: a batch-wide absmax made a row depend on its neighbours.
