@@ -2,7 +2,7 @@
 
 // Why CUDA graphs are off for this engine (architecture audit, finding F-14).
 //
-// `config_.use_cuda_graphs` is a mutable bool that eight sites across four
+// `rt_.cuda_graphs` (EngineRuntimeState) is a mutable bool that eight sites across four
 // translation units can turn off; the decision sites stay where their inputs
 // are (two of the seven init-time ones do not exist at a common resolver
 // time: expert-offload is decided during weight upload, the pinned-buffer
@@ -29,7 +29,9 @@ enum class GraphDemotionReason {
     PinnedSampleBufUnavailable,  // pinned host buffer allocation failed at warmup
     MoeDecodeCacheIncomplete,    // a device-resident MoE layer has no NVFP4 decode cache (legacy path is not
                                  // graph-safe)
-    LayerOffload,                // --gpu-layers: per-layer event waits on the transfer stream are not capturable
+    LayerOffload,  // --gpu-layers: per-layer event waits on the transfer stream are not capturable
+    // INKLING2 runs its own forward (exec/inkling_forward.h): no captured decode lane.
+    InklingOwnForward,
 
     // ── mid-run ──────────────────────────────────────────────────────
     // A mid-run demotion, not an init property: kept distinct so it can't be
@@ -44,6 +46,17 @@ const char* graph_demotion_reason_name(GraphDemotionReason r);
 
 // True for the reasons that are decided while requests are already running.
 [[nodiscard]] bool graph_demotion_is_mid_run(GraphDemotionReason r);
+
+// State step of Engine::demote_graphs_: the first reason sticks (it describes the model,
+// a later one could not take effect). Returns false when graphs were already off.
+[[nodiscard]] inline bool demote_graphs_step(bool& graphs_on, GraphDemotionReason& recorded,
+                                             GraphDemotionReason reason) {
+    if (!graphs_on)
+        return false;
+    graphs_on = false;
+    recorded = reason;
+    return true;
+}
 
 // --gpu-layers N >= 0 creates the LayerOffloadManager, whose ensure_layer waits on transfer-stream
 // events and remaps pointers per forward: no capture may run (Reason LayerOffload).

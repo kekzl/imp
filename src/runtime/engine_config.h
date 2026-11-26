@@ -6,9 +6,15 @@
 #include "core/qtype.h"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 
 namespace imp {
+
+struct RuntimeConfig;
+
+// RuntimeConfig's server.prefix_pin_budget_pct default (test EngineConfigBridge pins the match).
+inline constexpr int kPrefixPinBudgetPctDefault = 25;
 
 // Auto max_seq_len ceiling (#1004: agent transcripts run 50-150K tokens); also what /v1/models
 // advertises for a model not loaded yet.
@@ -36,15 +42,17 @@ struct EngineConfig {
     // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
     QType ssm_state_dtype = QType::F32;
 
-    // VRAM budget: max GPU memory to use (MiB), 0 = use all available
-    size_t vram_budget_mb = 0;
+    // VRAM budget: max GPU memory to use (MiB), 0 = use all available. Unset = imp.conf
+    // runtime.vram_budget_mb (bridge_runtime_config); an explicit value, 0 included, wins.
+    std::optional<size_t> vram_budget_mb;
 
     // Budget-planner tuning (imp.conf [vram], see RuntimeConfig::Vram).
     // kv_fraction: KV pool share of post-reserve VRAM, clamped [0.05, 1.0].
     // vram_reserve_floor_pct: reserve floor % of total VRAM, clamped [0, 50]; the 4 % allocator headroom
     // always applies.
-    float kv_fraction = 1.0f;
-    int vram_reserve_floor_pct = 0;
+    // Unset = the imp.conf value; the planner reads unset as 1.0 / 0.
+    std::optional<float> kv_fraction;
+    std::optional<int> vram_reserve_floor_pct;
     // library_reserve_mb: cuBLAS/CUTLASS claim on the first forward pass
     // (MEMORY.md A1.5). -1 = measured default. Fixed charge: floors the
     // reserve above regardless of --vram-budget.
@@ -87,9 +95,9 @@ struct EngineConfig {
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
     std::string prefix_cache_path;  // path to persist prefix cache (empty = disabled)
-    // Cap on cache_control/cache_prompt-pinned blocks, percent of the KV
-    // pool (0 = pin requests are ignored).
-    int prefix_pin_budget_pct = 25;
+    // Cap on cache_control/cache_prompt-pinned blocks, percent of the KV pool (0 = pin requests
+    // are ignored). Unset = imp.conf server.prefix_pin_budget_pct.
+    std::optional<int> prefix_pin_budget_pct;
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
@@ -103,5 +111,17 @@ struct EngineConfig {
     int streaming_kv_window = 0;     // 0 = derive from ModelConfig::sliding_window
     int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2 * the resolved KV block size
 };
+
+// What the engine flips while serving (audit C-9), seeded from EngineConfig at init so config_
+// keeps what the operator set. Writers: demote_graphs_ / promote_graphs_, the KV-pressure valve.
+struct EngineRuntimeState {
+    bool cuda_graphs = true;
+    bool streaming_kv = false;
+    int streaming_kv_window = 0;  // 0 = derive from ModelConfig::sliding_window
+};
+
+// Engine::init's imp.conf bridge (audit C-9): fills every unset optional field and the sentinel
+// fields (mmproj_path empty, library_reserve_mb < 0, kv_cache_max_blocks / kv_block_size 0).
+void bridge_runtime_config(EngineConfig& ec, const RuntimeConfig& rc);
 
 }  // namespace imp

@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include "model/chat_template.h"
+#include "runtime/lane_needs.h"
 #include "runtime/tool_call_gate.h"
 #include "runtime/spec_request.h"
 #include "exec/sae_token.h"
@@ -363,8 +364,28 @@ struct Request {
     [[nodiscard]] bool host_logit_shaping() const {
         return !logit_bias.empty() || phrase != nullptr || cfg != nullptr;
     }
-    // Prefill samples the first token from explicit logits (logprobs, logit_bias, phrase rewind).
-    [[nodiscard]] bool needs_prefill_logits() const { return logprobs || host_logit_shaping(); }
+    // Logit lens or SAE readout (zeroed by Engine::add_request when the load cannot serve it).
+    [[nodiscard]] bool wants_readout() const { return logit_lens > 0 || sae_top > 0 || !sae_clamp.empty(); }
+    // Admission bits of runtime/lane_needs.h, from the fields; stored in lane_needs by add_request.
+    [[nodiscard]] LaneNeeds admission_lane_needs() const {
+        using namespace lane_need;
+        const bool penalties = repetition_penalty != 1.0f || frequency_penalty != 0.0f ||
+                               presence_penalty != 0.0f;
+        const bool fsm = json_mode || !json_schema.empty() || !regex_pattern.empty() || !grammar.empty();
+        return (logprobs ? kLogprobs : 0) | (wants_readout() ? kReadout : 0) | (fsm ? kGrammar : 0) |
+               (!tool_constraint_tools.empty() ? kToolConstraint : 0) | (mirostat != 0 ? kMirostat : 0) |
+               (dry_multiplier > 0.0f ? kDry : 0) | (min_p != 0.0f ? kMinP : 0) |
+               (typical_p < 1.0f ? kTypicalP : 0) | ((penalties && repeat_last_n != 0) ? kBoundedPenalty : 0);
+    }
+    LaneNeeds lane_needs = 0;
+    [[nodiscard]] LaneNeeds lane_needs_now() const {
+        return lane_needs | (host_logit_shaping() ? lane_need::kHostShaping : 0) |
+               (forcing() ? lane_need::kForcing : 0);
+    }
+    // Prefill samples the first token from explicit logits (logprobs, readout, logit_bias, phrase rewind).
+    [[nodiscard]] bool needs_prefill_logits() const {
+        return logprobs || wants_readout() || host_logit_shaping();
+    }
     [[nodiscard]] size_t deliverable_tokens() const;
 
     // Vision (multimodal), per-request binding. `images` carries CPU-preprocessed pixels in
@@ -459,7 +480,7 @@ struct Request {
     [[nodiscard]] bool ragged_prefill_allowed() const {
         const bool has_vision = !images.empty() || !audios.empty() || !qwen_patches.empty() || vision_emb ||
                                 n_vision_tokens > 0;
-        return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 &&
+        return !has_vision && !embedding_request && !logprobs && !wants_readout() && prompt_logprobs < 0 &&
                !wants_constraints() && !phrase && !cfg;
     }
 

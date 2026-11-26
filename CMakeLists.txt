@@ -444,6 +444,7 @@ list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
 set(IMP_RUNTIME_SOURCES
     src/runtime/process_diag_install.cpp
     src/runtime/config.cpp
+    src/runtime/engine_config.cpp
     src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
     src/runtime/scheduler.cpp
@@ -1060,6 +1061,8 @@ if(IMP_BUILD_TESTS)
         tests/test_vision_cache_keys.cpp
         tests/test_config.cpp
         tests/test_config_bindings.cpp
+        # C-9: an explicit EngineConfig value, default included, wins over imp.conf; unset falls through.
+        tests/test_engine_config_bridge.cpp
         tests/test_mtp_auto.cpp
         tests/test_mtp_draft_rows.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull
@@ -1198,6 +1201,8 @@ if(IMP_BUILD_TESTS)
         tests/test_recurrent_slot.cpp
         # One teardown list for finish and cancel: no id-keyed table keeps an entry (audit C-4).
         tests/test_request_tables.cpp
+        # C-8: the decode lanes test one need bitset; every field combination lands on the old lanes.
+        tests/test_lane_needs.cpp
         # C-6: what a request may ask of a load, a pure function of its forward (Inkling: no loop hooks).
         tests/test_engine_capabilities.cpp
         # The per-request speculation contract (depth + decline reason), the
