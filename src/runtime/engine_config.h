@@ -23,7 +23,8 @@ inline constexpr int kAutoMaxSeqLenCap = 131072;
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
     int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)
-    int kv_cache_max_blocks = 0;  // 0 = auto
+    // KV pool pin in blocks, 0 = auto. Unset = imp.conf kv_cache.max_blocks; an explicit 0 wins.
+    std::optional<int> kv_cache_max_blocks;
     int kv_ceiling_seqs = 0;      // KV pool ceiling in max_seq_len sequences, 0 = max_batch_size
     int swa_shared_tokens = 0;    // SWA group tokens charged once per pool (prefill chunk past the burst)
     bool use_cuda_graphs = true;
@@ -55,16 +56,16 @@ struct EngineConfig {
     std::optional<int> vram_reserve_floor_pct;
     // library_reserve_mb: cuBLAS/CUTLASS claim on the first forward pass
     // (MEMORY.md A1.5). -1 = measured default. Fixed charge: floors the
-    // reserve above regardless of --vram-budget.
-    int library_reserve_mb = -1;
+    // reserve above regardless of --vram-budget. Unset = imp.conf vram.library_reserve_mb.
+    std::optional<int> library_reserve_mb;
 
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
-    // KV cache block size (tokens per block). 0 = auto = 16, or imp.conf
+    // KV cache block size (tokens per block). 0 = auto = 16. Unset = imp.conf
     // kv_cache.block_size. Explicit values are checked by kv_block_size_error()
     // at init and refused, not rounded.
-    int kv_block_size = 0;
+    std::optional<int> kv_block_size;
 
     // Chunked prefill
     int prefill_chunk_size = -1;  // -1 = per-arch default (2048 if supported, 0 otherwise)
@@ -100,7 +101,8 @@ struct EngineConfig {
     std::optional<int> prefix_pin_budget_pct;
 
     // Vision (multimodal)
-    std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
+    // Path to the mmproj GGUF, empty = text-only. Unset = imp.conf paths.mmproj.
+    std::optional<std::string> mmproj_path;
 
     // StreamingLLM (Xiao et al., 2023): keep first N sink tokens + last W
     // tokens, drop the rest. FP16 GQA decode path only; quantized KV dtypes
@@ -120,8 +122,8 @@ struct EngineRuntimeState {
     int streaming_kv_window = 0;  // 0 = derive from ModelConfig::sliding_window
 };
 
-// Engine::init's imp.conf bridge (audit C-9): fills every unset optional field and the sentinel
-// fields (mmproj_path empty, library_reserve_mb < 0, kv_cache_max_blocks / kv_block_size 0).
+// Engine::init's imp.conf bridge (audit C-9): fills every unset optional field; a set one, its
+// "none" value included (empty mmproj_path, library_reserve_mb -1, 0 blocks), wins.
 void bridge_runtime_config(EngineConfig& ec, const RuntimeConfig& rc);
 
 }  // namespace imp
