@@ -1,5 +1,6 @@
 #include "exec/activation_calibrator.h"
 
+#include "core/fallback_site.h"
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
@@ -58,6 +59,8 @@ __global__ void accum_abs_cols_experts_kernel(const half* __restrict__ x, const 
     s[K + j] += accsq;
 }
 
+FallbackSite s_fb_calib_shape{"calib_shape_change"};
+
 }  // namespace
 
 ActivationCalibrator::~ActivationCalibrator() {
@@ -105,8 +108,11 @@ void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const 
             cudaMemsetAsync(e.d_rows.get(), 0, static_cast<size_t>(ne) * sizeof(uint64_t), stream));
         it = expert_entries_.emplace(key, std::move(e)).first;
     } else if (it->second.K != K || it->second.ne != ne) {
-        IMP_LOG_WARN("calibration: layer %d kind %s changed shape (K %lld, %d experts), ignoring", layer,
-                     tensor_kind_name(kind), static_cast<long long>(K), ne);
+        IMP_FALLBACK_WARN(
+            s_fb_calib_shape,
+            "calibration: layer %d kind %s changed shape (K %lld, %d experts): this batch is not "
+            "counted, the entry keeps the first shape's statistic",
+            layer, tensor_kind_name(kind), static_cast<long long>(K), ne);
         return;
     }
 
@@ -148,8 +154,11 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
     } else if (it->second.K != K) {
         // Same (layer, kind) arriving with a different inner dimension means the
         // key is not identifying what we think it is. Refuse rather than blend.
-        IMP_LOG_WARN("calibration: layer %d kind %s changed K %lld -> %lld, ignoring", layer,
-                     tensor_kind_name(kind), static_cast<long long>(it->second.K), static_cast<long long>(K));
+        IMP_FALLBACK_WARN(s_fb_calib_shape,
+                          "calibration: layer %d kind %s changed K %lld -> %lld: this batch is not counted, "
+                          "the entry keeps the first K's statistic",
+                          layer, tensor_kind_name(kind), static_cast<long long>(it->second.K),
+                          static_cast<long long>(K));
         return;
     }
 

@@ -167,6 +167,7 @@ set(IMP_CORE_SOURCES
     src/core/logging.cpp
     src/core/cuda_static_reset.cpp
     src/core/log_once.cpp
+    src/core/fallback_site.cpp
 )
 
 set(IMP_MEMORY_SOURCES

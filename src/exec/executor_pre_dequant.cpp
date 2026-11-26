@@ -12,6 +12,7 @@
 #include "core/kv_dtype.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "exec/storage_planner.h"
 
@@ -19,6 +20,8 @@
 #include <algorithm>
 
 namespace imp {
+
+static FallbackSite s_fb_expert_cache_grow{"expert_cache_grow"};
 
 // Delegates to QuantPipeline for the init-time quantization pipeline; the
 // engine call site (engine_kv_cache_init.cpp) is unchanged. The four
@@ -67,8 +70,12 @@ void GraphExecutor::regrow_expert_cache_() {
         return;
     }
     if (got != budget) {
-        IMP_LOG_ERROR("Expert LRU cache: re-init at %.0f MiB failed, kept the original %.0f MiB",
-                      budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0));
+        IMP_FALLBACK_WARN(
+            s_fb_expert_cache_grow,
+            "Expert LRU cache: growing to %.0f MiB failed, kept the original %.0f MiB: %.0f MiB "
+            "fewer expert slots, more host-expert cache misses",
+            budget / (1024.0 * 1024.0), expert_cache_budget_ / (1024.0 * 1024.0),
+            (budget - expert_cache_budget_) / (1024.0 * 1024.0));
         return;
     }
     expert_cache_budget_ = budget;

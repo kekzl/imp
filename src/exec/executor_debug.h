@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -16,6 +17,8 @@
 #include <utility>
 
 namespace imp {
+
+inline FallbackSite g_fb_debug_dump{"debug_dump"};  // diagnostics only: a skipped dump, never output
 
 [[nodiscard]] inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); }
 
@@ -57,7 +60,10 @@ inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(
 inline void write_npy_fp32(const std::string& path, const float* data, int rows, int cols) {
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
-        IMP_LOG_ERROR("[DUMP_NPY] open failed: %s", path.c_str());
+        IMP_FALLBACK_WARN(g_fb_debug_dump,
+                          "[DUMP_NPY] open failed: %s: this dump is skipped, the forward pass "
+                          "is unaffected",
+                          path.c_str());
         return;
     }
     // Build header. Total = 6(magic) + 2(version) + 2(hlen) + header.size
@@ -180,7 +186,10 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
         if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
             return;
     } else {
-        IMP_LOG_ERROR("[DEBUG_FWD] %s: unsupported dtype %d", name, std::to_underlying(t.qtype));
+        IMP_FALLBACK_WARN(g_fb_debug_dump,
+                          "[DEBUG_FWD] %s: unsupported dtype %d: no stats line, the forward "
+                          "pass is unaffected",
+                          name, std::to_underlying(t.qtype));
         return;
     }
 
@@ -265,7 +274,10 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
     if (t.qtype != QType::F16 && t.qtype != QType::F32) {
-        IMP_LOG_ERROR("[DEBUG_FWD_ALL] %s: unsupported dtype %d", name, std::to_underlying(t.qtype));
+        IMP_FALLBACK_WARN(g_fb_debug_dump,
+                          "[DEBUG_FWD_ALL] %s: unsupported dtype %d: no stats line, the forward "
+                          "pass is unaffected",
+                          name, std::to_underlying(t.qtype));
         return;
     }
     std::vector<float> host(n);
