@@ -203,7 +203,8 @@ bool GraphExecutor::layer_has_dense_ffn(int layer) const {
 
 Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
     // buf is always [max_tokens_, cols] from allocate_buffers.
-    // Return a [n_tokens, cols] view.
+    // Return a [n_tokens, cols] view. The view may be a writer: a small-M producer stamp on buf retires.
+    smallm_xq_tag_.touch(buf.data);
     return slice_rows(buf, n_tokens);
 }
 
