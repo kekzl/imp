@@ -10,6 +10,7 @@
 #include "model/tensor_kind_table.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -20,6 +21,8 @@ using imp::pre_dequant_internal::create_fused_weight_pair;
 using imp::pre_dequant_internal::deduct_budget;
 
 namespace imp {
+
+static FallbackSite s_fb_fp16_cache{"fp16_weight_cache"};
 
 void QuantPipeline::pre_dequant_phase1_fp16_cache_(
     const ModelConfig& cfg, const VRAMBudget& budget,
@@ -79,8 +82,11 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         void* fp16_buf = fp16_own.get();
         if (!fp16_buf) {
             budget_exhausted = true;
-            IMP_LOG_WARN("FP16 cache: allocation failed after %d tensors (%.1f MiB)", cached_count,
-                         total_cache_bytes / (1024.0 * 1024.0));
+            IMP_FALLBACK_WARN(
+                s_fb_fp16_cache,
+                "FP16 cache: %.1f MiB allocation failed after %d tensors (%.1f MiB): the remaining "
+                "weights dequantize on the fly per GEMM",
+                fp16_bytes / (1024.0 * 1024.0), cached_count, total_cache_bytes / (1024.0 * 1024.0));
             return;
         }
 

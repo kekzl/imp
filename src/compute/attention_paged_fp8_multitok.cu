@@ -184,12 +184,17 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 
 }  // namespace
 
-void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                               half* O, const int* block_tables, const int* context_lens,
-                                               int batch_size, int n_heads, int n_kv_heads, int block_size,
-                                               float scale, float kv_scale, int max_num_blocks,
-                                               int sliding_window, float softcap, const half* attn_sinks,
-                                               cudaStream_t stream) {
+void paged_attention_decode_fp8_multitok_hd128(const PagedDecodeArgs& a) {
+    const half* Q = a.Q;
+    const auto* K_cache = static_cast<const uint8_t*>(a.K_cache);
+    const auto* V_cache = static_cast<const uint8_t*>(a.V_cache);
+    half* O = a.O;
+    const int *block_tables = a.block_tables, *context_lens = a.context_lens;
+    const int batch_size = a.batch_size, n_heads = a.n_heads, n_kv_heads = a.n_kv_heads;
+    const int block_size = a.block_size, max_num_blocks = a.max_num_blocks, sliding_window = a.sliding_window;
+    const float scale = a.scale, kv_scale = a.kv_scale, softcap = a.softcap;
+    const half* attn_sinks = a.attn_sinks;
+    cudaStream_t stream = a.stream;
     const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
                               (static_cast<int64_t>(NUM_WARPS) * 128 * sizeof(float));
     dim3 grid(batch_size, n_heads);

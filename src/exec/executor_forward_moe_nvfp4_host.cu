@@ -15,6 +15,7 @@
 // updated whenever a slot's occupant changes.
 
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"

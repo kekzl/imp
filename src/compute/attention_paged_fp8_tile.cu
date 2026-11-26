@@ -512,12 +512,17 @@ bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size) {
     return head_dim == kTileHeadDim && block_size >= kTileTokens && block_size % kTileTokens == 0;
 }
 
-void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                            float* partial_out, const int* block_tables,
-                                            const int* context_lens, int batch_size, int n_heads,
-                                            int n_kv_heads, int block_size, float scale, float kv_scale,
-                                            int max_num_blocks, int num_splits, int sliding_window,
-                                            float softcap, cudaStream_t stream) {
+void paged_attention_splitk_fp8_tile_launch(const PagedDecodeArgs& a) {
+    const half* Q = a.Q;
+    const auto* K_cache = static_cast<const uint8_t*>(a.K_cache);
+    const auto* V_cache = static_cast<const uint8_t*>(a.V_cache);
+    float* partial_out = a.partial;
+    const int *block_tables = a.block_tables, *context_lens = a.context_lens;
+    const int batch_size = a.batch_size, n_heads = a.n_heads, n_kv_heads = a.n_kv_heads;
+    const int block_size = a.block_size, max_num_blocks = a.max_num_blocks, num_splits = a.num_splits;
+    const int sliding_window = a.sliding_window;
+    const float scale = a.scale, kv_scale = a.kv_scale, softcap = a.softcap;
+    cudaStream_t stream = a.stream;
     static bool smem_opted_in = [] {
         cudaError_t err = cudaFuncSetAttribute(paged_attention_splitk_fp8_tile_kernel<kTileHeadDim>,
                                                cudaFuncAttributeMaxDynamicSharedMemorySize, kBlockSmemBytes);
@@ -566,19 +571,16 @@ bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size,
     return g >= 2 && g <= NUM_WARPS;  // warp w = Q head w; one warp group per KV head
 }
 
-void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_cache,
-                                                const uint8_t* V_cache, float* partial_out,
-                                                const int* block_tables, const int* context_lens,
-                                                int batch_size, int n_heads, int n_kv_heads, int block_size,
-                                                float scale, float kv_scale, int max_num_blocks,
-                                                int num_splits, int sliding_window, float softcap,
-                                                cudaStream_t stream) {
-    const int g = n_heads / n_kv_heads;
-    dim3 grid(batch_size, n_kv_heads, num_splits);
+void paged_attention_splitk_fp8_tile_gqa_launch(const PagedDecodeArgs& a) {
+    const int g = a.n_heads / a.n_kv_heads;
+    dim3 grid(a.batch_size, a.n_kv_heads, a.num_splits);
     dim3 block(WARP_SIZE * g);  // static smem (9 KB) — no opt-in needed
-    paged_attention_splitk_fp8_tile_gqa_kernel<kTileHeadDim><<<grid, block, 0, stream>>>(
-        Q, K_cache, V_cache, partial_out, block_tables, context_lens, batch_size, n_heads, n_kv_heads,
-        block_size, scale, kv_scale, max_num_blocks, num_splits, sliding_window, softcap);
+    paged_attention_splitk_fp8_tile_gqa_kernel<kTileHeadDim>
+        <<<grid, block, 0, a.stream>>>(a.Q, static_cast<const uint8_t*>(a.K_cache),
+                                       static_cast<const uint8_t*>(a.V_cache), a.partial, a.block_tables,
+                                       a.context_lens, a.batch_size, a.n_heads, a.n_kv_heads, a.block_size,
+                                       a.scale, a.kv_scale, a.max_num_blocks, a.num_splits, a.sliding_window,
+                                       a.softcap);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

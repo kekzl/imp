@@ -167,6 +167,8 @@ set(IMP_CORE_SOURCES
     src/core/logging.cpp
     src/core/cuda_static_reset.cpp
     src/core/log_once.cpp
+    src/core/fallback_site.cpp
+    src/core/dispatch_policy.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -1249,6 +1251,7 @@ if(IMP_BUILD_TESTS)
         tests/test_library_reserve_measurement.cpp
         tests/test_inkling_slot_table.cpp
         tests/test_inkling_kv_layout.cpp
+        tests/test_inkling_slab_layout.cpp
         tests/test_weight_page_release.cpp
         tests/test_checkpoint_limits.cpp
         tests/test_exit_codes.cpp
