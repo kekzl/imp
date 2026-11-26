@@ -14,6 +14,7 @@
 #include "compute/gemm_lt_ex.h"
 #include "compute/lt_route_trace.h"
 #include "core/cublas_check.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
 #include "memory/engine_arena.h"
@@ -1035,9 +1036,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                                 C.data, entry->Cdesc, C.data, entry->Cdesc, nullptr, s_workspace.data(),
                                 entry->workspace_size, stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
-                static bool s_fp8_warned = false;
-                if (!s_fp8_warned) {
-                    s_fp8_warned = true;
+                static LogOnce s_fp8_warned;
+                if (s_fp8_warned.first()) {
                     IMP_LOG_WARN(
                         "gemm_cublaslt: FP8 GEMM unsupported by cuBLASLt on this GPU/driver. "
                         "Falling back to FP8->FP16 dequant + FP16 GEMM (slower but correct). "

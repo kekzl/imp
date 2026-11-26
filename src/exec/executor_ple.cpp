@@ -12,6 +12,7 @@
 #include "compute/gated_residual.h"
 #include "compute/gemm.h"
 #include "compute/ple.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/executor_helpers.h"
@@ -92,9 +93,8 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
                         (batched ? (n == n_seq && state.ple_host_ready)
                                  : (state.is_prefill || state.n_sequences == 1));
     if (!served) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static LogOnce warned;
+        if (warned.first()) {
             IMP_LOG_ERROR(
                 "PLE: forward shape not served (rows %d, sequences %d, slots %d, prefill %d, "
                 "staged %d, slab tail %d); PLE block skipped, output is wrong",
@@ -133,9 +133,8 @@ void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cuda
                                               state.ple_hist_out_n, pos0 + 1, 1, cfg.ple_eos_token_id,
                                               &at_pos0);
         if (!known || (in_hist && at_pos0 != rb[0])) {
-            static bool warned_ctx = false;
-            if (!warned_ctx) {
-                warned_ctx = true;
+            static LogOnce warned_ctx;
+            if (warned_ctx.first()) {
                 IMP_LOG_ERROR(
                     "PLE: token history does not cover position %d (history %d+%d, token %d vs %d); "
                     "n-gram context is wrong",

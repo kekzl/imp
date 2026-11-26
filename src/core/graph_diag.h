@@ -4,6 +4,7 @@
 // = true (post-launch error checks + logging), graph_dump_dir = "<path>"
 // (verbose DOT per graph). Off by default, zero overhead when unset.
 
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -70,13 +71,12 @@ inline void dump_graph(cudaGraph_t g, const char* label) {
     cudaError_t err = cudaGraphDebugDotPrint(g, path.c_str(), cudaGraphDebugDotFlagsVerbose);
     (void)cudaGetLastError();  // clear sticky state unconditionally
     if (err != cudaSuccess) {
-        static bool warned = false;
-        if (!warned) {
+        static LogOnce warned;
+        if (warned.first()) {
             IMP_LOG_WARN(
                 "[graph_diag:%s] cudaGraphDebugDotPrint(%s) failed: %s "
                 "(known WSL2 limitation; kernel-node summary is the fallback)",
                 label, path.c_str(), cudaGetErrorString(err));
-            warned = true;
         }
     } else {
         IMP_LOG_INFO("[graph_diag:%s] wrote %s", label, path.c_str());

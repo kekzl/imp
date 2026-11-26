@@ -82,13 +82,17 @@ public:
     // max_ctx positions; cap = most rows one on_rows call brings; back = how far before the highest
     // position seen a later on_rows may start again (InklingForward keeps kSeg + kSlack), < 0 = every
     // layer keeps one K/V row per position.
-    // growable: K/V kept per position commit their rows as the sequence grows (InklingForward::init).
+    // own_kv: the full-context layer keeps max_ctx + block rows here; false = a pool layer (bind_kv), the
+    // local layers then always keep a ring.
     [[nodiscard]] bool init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap,
-                            int back = InklingForward::kSeg + InklingForward::kSlack,
-                            Backend* growable = nullptr);
-    // The two halves of InklingSpecHooks, see there.
+                            int back = InklingForward::kSeg + InklingForward::kSlack, bool own_kv = true);
+    // The full-context layer in the engine's pool: k / v its bases, table the slot's block table
+    // (InklingForward::table()). False: not exactly one such layer, the draft stays off.
+    [[nodiscard]] bool bind_kv(half* k, half* v, const int* table);
+    // The parts of InklingSpecHooks, see there.
     void on_rows(const float* feat, int cap, int n, int pos0, cudaStream_t s);
     int propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s);
+    void restart(int keep);
     InklingSpecHooks hooks();
 
 private:
@@ -105,8 +109,10 @@ private:
     const InklingDraftWeights* w_ = nullptr;
     VRAMAllocator* va_ = nullptr;
     std::vector<VramOwned<std::byte>> owned_;
-    GrowRows ctx_;  // K/V of the layers that keep one row per position
-    [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
+    // The full-context layer's block table (pool K/V, null = own rows) and its index, -1 = none.
+    const int* table_ = nullptr;
+    int global_ = -1;
+    bool bound_ = false;  // every layer's K/V have memory
     bool ok_ = true;
     int max_ctx_ = 0, cap_ = 0;
     int ring_ = 0;  // rows of a local layer's K/V ring (kept twice), 0 = one row per position

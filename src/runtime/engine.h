@@ -1228,9 +1228,22 @@ private:
     void inkling_encode_images_(Request& req, int resume, cudaStream_t stream);
     std::unique_ptr<InklingVision> inkling_vision_;
     bool inkling_lookahead_ = true;
-    // Prefill offset of a request's first chunk: the reused prefix on Inkling2-Loop (-1 = no free
-    // slot), else offset.
+    // Rows a decode step writes past its position (Inkling2-Loop lookahead: kInklingKvAhead), 0 elsewhere:
+    // decode_prepare_kv_ holds the blocks for them.
+    int kv_ahead_tokens_ = 0;
+    // Prefill offset of a request chunk: on Inkling2-Loop the first chunk rewinds its slot to at most the
+    // offset the prefix cache gave (-1 = no free slot), else offset.
     int inkling_resume_(Request& req, int offset, cudaStream_t stream);
+    // Scheduler prefix-reuse cap on Inkling2-Loop: binds req's slot, returns the blocks it may reuse.
+    int inkling_prefix_reuse_limit_(Request& req);
+    // Unbinds slots whose request the engine no longer holds (a teardown that was skipped).
+    void inkling_unbind_stale_();
+    // init_kv_cache on Inkling2-Loop: pool layers (-1 = another arch), the block cap (INT_MAX = none), the
+    // blocks committed at start, and binding the built pool to the slots (throws when it does not fit).
+    [[nodiscard]] int inkling_kv_layers_() const;
+    [[nodiscard]] int inkling_pool_cap_(int kv_bs) const;
+    [[nodiscard]] int inkling_initial_blocks_(int max_blocks, int ceiling, int kv_bs) const;
+    void inkling_attach_pool_();
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has

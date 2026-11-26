@@ -1,14 +1,16 @@
 #pragma once
-// Inkling2-Loop text forward for one sequence: 48 layer applications per token, own K/V and conv state.
+// Inkling2-Loop text forward for one sequence: 48 layer applications per token, conv state and sliding K/V
+// of its own, the full-attention K/V in the engine's paged pool (or its own, standalone).
 
 #include "compute/inkling_ops.h"
 #include "core/cuda_raii.h"
+#include "exec/inkling_kv_layout.h"
 #include "exec/inkling_slot_table.h"
-#include "memory/grow_rows.h"
 #include "model/inkling_weights.h"
 
 #include <cuda_runtime.h>
 
+#include <climits>
 #include <functional>
 #include <memory>
 #include <span>
@@ -25,6 +27,8 @@ struct InklingSpecHooks {
     // Up to kGraphRows - 1 tokens expected after anchor (the token at pos, d_emb its embedding row,
     // device fp16 [hidden]); returns their count, 0 = no lookahead for this step.
     std::function<int(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s)> propose;
+    // The sequence goes on from position keep (0 = a new one): rows from there on are void. May be empty.
+    std::function<void(int keep)> restart;
 };
 
 class InklingForward {
@@ -38,20 +42,28 @@ public:
     // Allocates from va under the tag inkling_state.
     // scratch: a forward of the same sizes whose per-call buffers this one uses too (the slots of a
     // runtime run one after the other on one stream); it must outlive this one.
-    // growable: the K/V of the full-attention applications commit their rows as the sequence grows
-    // (kCtxStep rows at a time) instead of max_ctx rows here; null = all rows here.
+    // own_kv: the full-attention K/V live in max_ctx rows of this forward behind an identity block table
+    // (tests, tools); false = the engine's paged pool, bind_kv() and set_table() before run().
     [[nodiscard]] bool init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                            const InklingForward* scratch = nullptr, Backend* growable = nullptr);
-    static constexpr int kCtxStep = 2048;
-    // Context rows that hold memory right now.
-    [[nodiscard]] size_t context_rows() const { return ctx_.rows(); }
+                            const InklingForward* scratch = nullptr, bool own_kv = true);
+    // Pool K/V: k[l] / v[l] = base of pool layer l (inkling_kv_apps order, kKVBlockSize positions per
+    // block, [pos][n_kv][hd] within one). The regions must outlive this forward and never move.
+    [[nodiscard]] bool bind_kv(std::span<half* const> k, std::span<half* const> v);
+    // The sequence's block table for the next run(): n entries of d_table (device) copied on s. It must
+    // cover position() + T + kInklingKvAhead of that call.
+    void set_table(const int* d_table, int n, cudaStream_t s);
+    // The table the full-attention K/V are read through (device, table_cap() entries, never moves).
+    [[nodiscard]] const int* table() const { return blocks_; }
+    [[nodiscard]] int table_cap() const { return n_blocks_; }
+    [[nodiscard]] const InklingConfig& config() const { return w_->cfg; }
     // Forgets the sequence: position 0, zero conv state.
     void reset(cudaStream_t s);
     int position() const { return pos_; }
 
     // Prefix reuse: moves the sequence to the last conv-state checkpoint (kGrid positions apart) that
-    // tokens shares with it and returns that position, 0 = from scratch. The next run() starts there.
-    [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s);
+    // tokens shares with it, at most limit, and returns that position, 0 = from scratch. The next run()
+    // starts there; the K/V of the positions before it must be in the table set for that run.
+    [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s, int limit = INT_MAX);
     // True when a checkpoint exists: recycling the slot would lose a prefix another prompt could reuse.
     [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
     // Host bytes the conv-state checkpoints hold.
@@ -130,12 +142,10 @@ private:
     void lin_(const half* x, int T, int K, const half* w, int N, half* y, cudaStream_t s);
     [[nodiscard]] bool own_projections_(const InklingLayer& ly, int T) const;
     void* alloc_(size_t bytes);
-    // inkling_forward_attn.cu: the block table of ctx_ and the attention of application app over the q,
-    // rel, sink, gate rows in proj_h_ (q_stride halves apart) into ao_h_.
-    [[nodiscard]] bool init_ctx_blocks_(int max_ctx);
+    // inkling_forward_attn.cu: the block table and, own_kv, the full-attention K/V behind it; the
+    // attention of application app over the q, rel, sink, gate rows in proj_h_ (q_stride halves apart).
+    [[nodiscard]] bool init_kv_(bool own);
     void attend_(const InklingLayer& ly, size_t app, bool global, int T, int q_stride, cudaStream_t s);
-    // Memory for context rows [0, rows): false = the device refused, the call must not run.
-    [[nodiscard]] bool grow_ctx_(int rows, cudaStream_t s);
     cudaStream_t fork_(cudaStream_t s, int i);
     void join_(cudaStream_t side, cudaStream_t s, int i);
     // Host copy of the conv state when the sequence stands on the grid.
@@ -169,8 +179,12 @@ private:
     int max_tokens_ = 0, max_ctx_ = 0, seg_ = 0, ring_ = 0, pos_ = 0, nb_ = 0, app_seq_ = 0;
     bool ok_ = true;
     std::vector<VramOwned<std::byte>> owned_;
-    GrowRows ctx_;               // K/V of the full-attention applications
-    int* ctx_blocks_ = nullptr;  // identity block table over ctx_ rows, kKVBlockSize rows per entry
+    // Block table of the full-attention K/V, kKVBlockSize rows per entry: the pool's (set_table) or, own
+    // K/V, the identity over their rows; table_rows_: the positions its last set_table covers (a call and
+    // its lookahead rows stay below). kv_bound_: k_ / v_ of those applications point at memory.
+    int* blocks_ = nullptr;
+    int n_blocks_ = 0, table_rows_ = 0;
+    bool kv_bound_ = false;
     // Per-call buffers in allocation order: a forward given as scratch hands them out again.
     std::vector<void*> scratch_;
     const InklingForward* share_ = nullptr;
@@ -238,8 +252,11 @@ private:
     SpecStats stats_;
 };
 
+static_assert(kInklingKvAhead == InklingForward::kGraphRows - 1, "a lookahead call writes kGraphRows rows");
+
 // Weights and the forwards that point into them (destroyed first): one kept sequence per slot.
 class InklingDraft;
+class KVCache;
 struct InklingDraftWeights;
 struct InklingRuntime {
     InklingWeights w;
@@ -249,7 +266,11 @@ struct InklingRuntime {
     std::vector<std::shared_ptr<InklingDraft>> drafts;
     bool draft_tried = false;
     int max_ctx = 0, cap = 0;
-    Backend* growable = nullptr;
+    // The paged pool (InklingRuntime::bind_kv): base of every pool layer, the draft's among them
+    // (-1 = none); per slot the request its sequence was last rewound for (later prefill chunks go on).
+    std::vector<half*> kv_k, kv_v;
+    int draft_layer = -1;
+    std::vector<int> resumed;
     // I8B32 dense projections of the decode steps (before the slots that point at them); null when
     // the card has no room.
     std::unique_ptr<InklingDense8> dense8;
@@ -276,14 +297,26 @@ struct InklingRuntime {
     // without a checkpoint goes first, then one with the decode lookahead, then the oldest binding.
     // Returns the slot, -1 = every slot is bound.
     [[nodiscard]] int bind(int req, std::span<const int32_t> tokens);
+    // want slots of ctx positions over the weights wt (pool K/V, bind_kv later), the I8B32 dense projections
+    // when inkling_dense8_fits; false = not one slot. make_inkling_runtime and the serve-path test use it.
+    [[nodiscard]] bool init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
+                                  int want);
+    // bind, then what that slot can resume of tokens (InklingForward::match); -1 = every slot is bound.
+    [[nodiscard]] int bind_match(int req, std::span<const int32_t> tokens);
+    // A prefill chunk of req at offset. first: this chunk bound the slot (unless bound) and rewound it to at
+    // most offset, whose K/V the request's blocks hold. Returns where the prefill goes on, -1 = no slot.
+    [[nodiscard]] int resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s,
+                             bool& first);
+    // Every slot's full-attention K/V (and the draft's) in kv: inkling_kv_apps layers, fp16, 16-row blocks.
+    [[nodiscard]] bool bind_kv(KVCache& kv);
 };
 
 class Model;
 // Null for every other arch; throws when an Inkling2-Loop checkpoint cannot be loaded.
 // Up to slots (<= 0: two) sequences of max_ctx positions, max_tokens rows per call; fewer when the
-// card does not take them all, at least one.
-// growable: see InklingForward::init.
+// card does not take them all, at least one. Their full-attention K/V live in the engine's paged pool
+// (InklingRuntime::bind_kv before the first forward).
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots, Backend* growable = nullptr);
+                                                     int max_ctx, int slots);
 
 }  // namespace imp

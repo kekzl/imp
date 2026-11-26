@@ -150,7 +150,9 @@ void KVCache::grow_ahead_tick() {
         return;
     // A quarter of the pool, at most kGrowAheadStepBytes: the step is a buffer for the next request,
     // and the last admission's size keeps a large one from waiting for its mapping.
-    const int step = std::max({64, std::min(have / 4, grow_step_cap_blocks_()), last_admit_blocks_.load()});
+    const int step = grow_step_blocks_ > 0 ? grow_step_blocks_
+                                           : std::max({64, std::min(have / 4, grow_step_cap_blocks_()),
+                                                       last_admit_blocks_.load()});
     if (blocks_.free_count() >= step || grow_refused_recently_())
         return;
     {

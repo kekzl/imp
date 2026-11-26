@@ -29,6 +29,13 @@ CudaStaticResetRegistrar::CudaStaticResetRegistrar(void (*fn)()) {
 
 int cuda_static_reset_hook_count() { return static_cast<int>(hooks().size()); }
 
+bool cuda_static_reset_has_hook(void (*fn)()) {
+    for (auto* h : hooks())
+        if (h == fn)
+            return true;
+    return false;
+}
+
 void reset_static_cuda_state() {
     // Registration order is link order (arbitrary) but fine: every hook is
     // independent and idempotent by contract. A missing hook is the failure

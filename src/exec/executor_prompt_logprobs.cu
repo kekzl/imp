@@ -8,6 +8,7 @@
 #include "exec/lm_head_route.h"
 #include "compute/gemm.h"
 #include "compute/prompt_logprobs_rows.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "quant/dequant_gpu.h"
@@ -120,9 +121,8 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
         gemm(noc, wt, ct, 1.0f, 0.0f, stream);
     }
     slab_w = slab;
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;
+    if (logged.first()) {
         IMP_LOG_INFO("prompt_logprobs: one-GEMM LM head, %d-row chunk, %d-column vocab slabs (%s head)", csz,
                      slab, qtype_name(qt));
     }

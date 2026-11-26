@@ -42,6 +42,7 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/hadamard.h"
 #include "core/cuda_errors.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "exec/sparse_attn_select.h"
@@ -1072,12 +1073,11 @@ void GraphExecutor::finalize_logits_(Tensor& logits_out, int n, cudaStream_t str
         if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
             cap = cudaStreamCaptureStatusNone;
         if (cap != cudaStreamCaptureStatusNone) {
-            static bool warned = false;
-            if (!warned) {
+            static LogOnce warned;
+            if (warned.first()) {
                 IMP_LOG_INFO(
                     "[DUMP_LOGITS] skipping passes captured into a CUDA graph; the prefill pass "
                     "is dumped. Set runtime.cuda_graphs=never to capture decode steps too.");
-                warned = true;
             }
             return;
         }

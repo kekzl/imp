@@ -13,6 +13,7 @@
 
 #include "compute/inkling_ops.h"
 #include "exec/inkling_forward.h"
+#include "memory/leaked_static.h"
 #include "memory/vram_allocator.h"
 #include "model/inkling_weights.h"
 
@@ -37,9 +38,11 @@ struct Fixture {
     bool loaded = false;
     bool load(const char* dir) { return loaded = va.init() && load_inkling_weights(dir, w, va); }
 };
+// Never destroyed (memory/leaked_static.h): its exit-time teardown ended in "double free or
+// corruption" with rc 139 after every test passed (InklingRewind.ARequestBinds... alone, on main too).
 inline Fixture& fixture() {
-    static Fixture f;
-    return f;
+    static LeakedStatic<Fixture> f;
+    return *f;
 }
 
 // Final state of every row after run() over ids[from..) at position from.
