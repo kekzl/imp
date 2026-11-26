@@ -356,6 +356,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_dispatch.cpp
     src/compute/rope.cu
     src/compute/head_norm_rope.cu
+    src/compute/lora_rows.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
     src/compute/fp32_residual_norm.cu
@@ -588,6 +589,7 @@ set(IMP_EXEC_SOURCES
     src/exec/inkling_forward_snapshot.cpp
     src/exec/inkling_forward_moe.cu
     src/exec/inkling_forward_attn.cu
+    src/exec/inkling_registry.cpp
     src/exec/executor_gated_residual.cpp
     src/exec/executor_fp32_residual.cpp
     src/exec/executor_ple.cpp
@@ -1257,6 +1259,8 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_slot_table.cpp
         tests/test_inkling_kv_layout.cpp
         tests/test_inkling_slab_layout.cpp
+        # B-111 S5: Inkling projections in the WeightRegistry, its LoRA targets.
+        tests/test_inkling_registry.cpp
         tests/test_weight_page_release.cpp
         tests/test_checkpoint_limits.cpp
         tests/test_exit_codes.cpp
@@ -1451,6 +1455,7 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_cross_slot.cu
         tests/test_inkling_draft.cu
         tests/test_inkling_kernels.cu
+        tests/test_inkling_lora.cu
         tests/test_inkling_attn_paged.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu

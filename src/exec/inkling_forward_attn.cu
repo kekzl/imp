@@ -1,10 +1,11 @@
 // Inkling2-Loop attention of a layer application (inkling_forward.h): the full-attention applications
 // read and write their K/V through a block table (B-111: the engine's paged pool, or an identity table
-// over K/V of the forward's own), the sliding ones a ring.
+// over K/V of the forward's own), the sliding ones a ring; the LoRA deltas of its q / k / v / o.
 
 #include "exec/inkling_forward.h"
 
 #include "compute/inkling_ops.h"
+#include "compute/lora_rows.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 
@@ -91,6 +92,19 @@ void InklingForward::attend_(const InklingLayer& ly, size_t app, bool global, in
     a.scale = 1.0f / sqrtf(static_cast<float>(c.head_dim)), a.q_thr = c.qk_clip, a.rel_thr = c.rel_clip;
     a.log_alpha = global ? c.log_alpha : 0.0f, a.log_floor = c.log_floor;
     attention(a, s);
+}
+
+void InklingForward::delta_(int layer, LoraProj p, int plane, const half* x, int ldx, half* y, int ldy, int T,
+                            cudaStream_t s) {
+    const LoraWeights* lw = lora_ && lora_->a ? lora_->a->get(layer, p) : nullptr;
+    if (!lw)
+        return;
+    LoraRowsArgs a;
+    a.A = static_cast<const half*>(lw->A), a.B = static_cast<const half*>(lw->B);
+    a.r = lw->r, a.K = lw->K, a.N = lw->N, a.scale = lora_->a->scale();
+    a.x = x, a.ldx = ldx, a.y = y, a.ldy = ldy, a.rows = T;
+    a.t = lora_->t[plane];
+    lora_delta_rows(a, s);
 }
 
 }  // namespace imp
