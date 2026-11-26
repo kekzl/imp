@@ -1198,6 +1198,8 @@ if(IMP_BUILD_TESTS)
         tests/test_recurrent_slot.cpp
         # One teardown list for finish and cancel: no id-keyed table keeps an entry (audit C-4).
         tests/test_request_tables.cpp
+        # C-8: the decode lanes test one need bitset; every field combination lands on the old lanes.
+        tests/test_lane_needs.cpp
         # C-6: what a request may ask of a load, a pure function of its forward (Inkling: no loop hooks).
         tests/test_engine_capabilities.cpp
         # The per-request speculation contract (depth + decline reason), the

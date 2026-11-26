@@ -911,6 +911,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_
         req->logprobs = (params->logprobs != 0);
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
         req->json_mode = (params->json_mode != 0);
+        req->lane_needs = req->admission_lane_needs();  // the per-step params above re-admit the lanes
 
         // A step may legitimately yield zero new tokens (async graph-loop burst,
         // n-gram speculation miss path); its tokens arrive on the next drain.

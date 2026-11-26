@@ -173,13 +173,13 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // rep/freq/presence penalties are replicated in the verify
     // (greedy_argmax_all) for the unbounded window; a bounded repeat_last_n
     // window slides per chunk row and is not replicated: stay eager there.
-    const bool penalties = req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
-                           req.presence_penalty != 0.0f;
-    if (penalties && req.repeat_last_n != 0) return "bounded_repeat_window";
+    const LaneNeeds needs = req.lane_needs_now();
+    if ((needs & lane_refuses::kNgramWindow) != 0)
+        return "bounded_repeat_window";
     // Logit-shaping the verify chunk does not replicate disqualifies.
-    if (req.dry_multiplier != 0.0f || req.mirostat != 0 || req.host_logit_shaping())
+    if ((needs & lane_refuses::kNgramShaping) != 0)
         return "logit_shaping";
-    if (req.logprobs || spec_constrained_refused_(req))
+    if ((needs & lane_refuses::kNgramHostLogits) != 0 || spec_constrained_refused_(req))
         return "constrained_decode";  // greedy constrained rows are mask-checked
                                       // (engine_spec_constrained.cpp)
     // Think budget forces tokens INSIDE the think block (loop/host-side);
