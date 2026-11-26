@@ -148,7 +148,7 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     ctx.r  = view_tokens(residual_, ctx.n);
     // Retires the attention norm's small-M stamp on no: unconsumed when q/k/v took the NVFP4 tile in a
     // 2..32-row verify chunk, it let the shared expert read attention-normed rows.
-    ctx.no = view_tokens(norm_out_, ctx.n);
+    ctx.no = block_norm_view_(ctx.n);
 
     // Save residual (skipped if the decode fast path will handle it). Gemma 4:
     // parallel branches use rmsnorm(h, pre_ffw_norm_2) for MoE experts vs
@@ -225,14 +225,12 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
 }
 
 // Gemma-4 router input, FP16: rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d), from the FP32 residual
-// when there is one. fp32_post_attn_fused_ may have written it already (router_prenorm_).
+// when there is one. fp32_post_attn_fused_ may have written it already (ctx.router_prenormed).
 Tensor GraphExecutor::moe_router_in_fp16_(const TransformerLayer& ly, const MoeFfnContext& ctx,
                                           cudaStream_t stream) {
     int64_t ri_shape[2] = {static_cast<int64_t>(ctx.n), static_cast<int64_t>(ctx.d)};
     Tensor router_in(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
-    const bool done = router_prenorm_ == router_in.data && router_prenorm_n_ == ctx.n;
-    router_prenorm_ = nullptr;
-    if (done)
+    if (ctx.router_prenormed)
         return router_in;
     if (fp32_accum_buf_.get() != nullptr) {
         Tensor fp32_h = view_tokens(fp32_hidden_, ctx.n);

@@ -162,11 +162,11 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
                                         float weight_offset) {
     // The producer already wrote no + the NVFP4 activations for this (no, w, n) (#2414).
     if (prenorm_matches_(w, no, n)) {
-        prenorm_out_ = nullptr;
-        smallm_xq_tag_.adopt(no.data, prenorm_xq_gen_);
+        smallm_xq_tag_.adopt(no.data, prenorm_.payload.xq_gen);
+        prenorm_.clear();
         return;
     }
-    prenorm_out_ = nullptr;
+    prenorm_.clear();
     // No pre-norm weight: the block input is already normalised upstream (Qwen4Exp gated
     // residual hands the block a mixed, hc_norm'ed stream), so the norm is the identity.
     // Without this a null weight reaches the kernel and the process dies on an illegal access.
@@ -205,10 +205,7 @@ bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, 
         !add_rmsnorm_nvfp4(a, r, h, w, no, xq_packed, xq_scales, eps, stream, norm_w_off_, as))
         return false;
     smallm_xq_tag_.stamp_producer(no.data, n, K, as);
-    prenorm_out_ = no.data;
-    prenorm_w_ = w.data;
-    prenorm_n_ = n;
-    prenorm_xq_gen_ = smallm_xq_tag_.producer_gen;
+    prenorm_.stamp(no.data, w.data, n, {smallm_xq_tag_.producer_gen, nullptr});
     return true;
 }
 

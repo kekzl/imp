@@ -28,6 +28,7 @@
 #include "exec/ffn_graph_cache.h"
 #include "exec/gemma_pli_state.h"
 #include "exec/sae.h"
+#include "exec/buffer_stamp.h"
 #include "exec/smallm_xq_tag.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/gemm_mode.h"
@@ -351,8 +352,10 @@ public:
                                             Tensor& no, TensorID consumer_id, int n, float eps,
                                             cudaStream_t stream);
     [[nodiscard]] bool prenorm_matches_(const Tensor& w, const Tensor& no, int n) const {
-        return prenorm_out_ != nullptr && prenorm_out_ == no.data && prenorm_w_ == w.data && prenorm_n_ == n;
+        return prenorm_.matches(no.data, w.data, n);
     }
+    // A block's entry view of norm_out_: carries the prenorm and norm-fold stamps aimed at this block.
+    Tensor block_norm_view_(int n);
     // No other writer of h between producer and consumer: no LoRA, gated residual, parallel
     // block, FP32 residual or debug forward; small-M rows only.
     [[nodiscard]] bool residual_fusion_ok_(int n) const;
@@ -363,10 +366,8 @@ public:
     // that layer is plain attention and nothing scales h in between.
     void ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Tensor& h, Tensor& no, int n, float eps,
                            cudaStream_t stream);
-    const void* prenorm_out_ = nullptr;
-    const void* prenorm_w_ = nullptr;
-    int prenorm_n_ = 0;
-    uint64_t prenorm_xq_gen_ = 0;  // the producer's smallm_xq_tag_ stamp, 0 = it quantized nothing
+    // A producer (add_norm_for_smallm_, fp32_post_attn_fused_, fp32_tail_fused_) wrote no for (w, n).
+    BufferStamp<PrenormPayload> prenorm_;
     // FP32-residual sandwich-norm fusion (executor_fp32_residual.cpp, Gemma-4
     // decode): each replaces a chain of norm / add / copy / scale / quantize launches, same bits.
     [[nodiscard]] bool fp32_resid_fuse_ok_(int n) const;
@@ -382,10 +383,8 @@ public:
     // next layer's attention norm + quantize. Sets fp32_tail_layer_ so the forward skips the scale.
     [[nodiscard]] bool fp32_tail_ok_(int layer, int n) const;
     void fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, cudaStream_t stream);
+    // Not a BufferStamp: a retired tag would apply layer_out_scale twice, not re-run a launch.
     int fp32_tail_layer_ = -1;
-    // Router input written by fp32_post_attn_fused_ (buffer + rows), consumed by moe_router_in_fp16_.
-    const void* router_prenorm_ = nullptr;
-    int router_prenorm_n_ = 0;
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
     // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
     // run rmsnorm() as before.
@@ -449,9 +448,7 @@ public:
     StableSpan<unsigned long long> norm_fold_ssq_;  // fixed-point slots, engine arena, zeroed per M=1 forward
     int norm_fold_slot_ = 0;
     bool norm_fold_on_ = false;       // this forward: n == 1, flag on, not deterministic
-    const void* norm_fold_gamma_ = nullptr;
-    const void* norm_fold_out_ = nullptr;
-    unsigned long long* norm_fold_pending_ = nullptr;
+    BufferStamp<unsigned long long*> norm_fold_;  // armed: out = no, key = gamma, payload = ssq slot
     // Fused swiglu+quantize when the down projection takes the small-M
     // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
     // small-M rows only (K % 64: Gemma-4 shared down K 2112), else plain geglu().
@@ -1271,7 +1268,7 @@ private:
     void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Phase 2 on the FP32 residual: take fp32_post_attn_fused_'s r + no (true = done), and the
     // pre-norm from fp32_hidden_ (skipped when prenormed) + the n == 1 Q8_1 copy for dp4a.
-    [[nodiscard]] bool moe_take_prenorm_(const Tensor& norm_w, const MoeFfnContext& ctx);
+    [[nodiscard]] bool moe_take_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx);
     void moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, bool prenormed, cudaStream_t stream);
     // Gemma-4 FP16 router input (scatter_out scratch); skipped when fp32_post_attn_fused_ wrote it.
     Tensor moe_router_in_fp16_(const TransformerLayer& ly, const MoeFfnContext& ctx, cudaStream_t stream);

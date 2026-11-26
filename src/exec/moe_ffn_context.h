@@ -35,6 +35,7 @@ struct MoeFfnContext {
     bool moe_use_fp32_residual = false;
     bool moe_fused_norm_q8 = false;
     bool fp32_gate_logits_ready = false;
+    bool router_prenormed = false;  // fp32_post_attn_fused_ wrote the router input (moe_take_prenorm_)
     bool will_decode_fast = false;
     bool non_gated_experts = false;
     bool use_packed_dequant = false;

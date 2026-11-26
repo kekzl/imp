@@ -750,7 +750,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(no_last, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (route == LmHeadRoute::Nvfp4) {
-            Tensor no_last = view_tokens(norm_out_, 1);
+            Tensor no_last = block_norm_view_(1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_last, model_->output_norm(), no_last,
                                                                kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
@@ -837,7 +837,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
             gemm_cublaslt(no_final, fp8_w, lg, 1.0f, 0.0f, nullptr, fp8_it->second.d_scale, stream);
         } else if (n == 1 && route == LmHeadRoute::Nvfp4) {
-            Tensor no_final = view_tokens(norm_out_, 1);
+            Tensor no_final = block_norm_view_(1);
             const NvFP4NormFoldIn lm_fold = norm_fold_or_norm_(true, h_final, model_->output_norm(), no_final,
                                                                kInvalidTensorID, 1, cfg.rms_norm_eps, stream);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
