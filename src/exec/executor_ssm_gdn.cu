@@ -130,13 +130,12 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
     // tier); falls back to plain rmsnorm. n==1 packed-input path is unaffected (producer gate requires n>=2).
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, eps, stream, norm_w_off_);
 
-    // cur_spec_verify_ is load-bearing here (missing until 2026-08-18): without
+    // The verify mode in gemm_ctx_ is load-bearing here (missing until 2026-08-18): without
     // it ctx.spec_verify_small_m stays false, the M<=4 batched-GEMV branch
     // (#998/#1055) is unreachable, and every GDN projection in a speculative
     // verify chunk took the CUTLASS prefill path instead. FFN and attention
     // already threaded it; on a GDN hybrid this is 48 of 64 layers.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
@@ -324,8 +323,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     int n_heads = cfg.ssm_dt_rank;
     int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq, cur_spec_verify_);
+    auto ctx = gemm_ctx_(stream);
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
@@ -552,8 +550,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // scratch with no GEMM dispatches in between, so mark it shared (the
             // dispatch verifies against its scratch tag before skipping).
             GemmContext gate_ctx = q8_reuse_ctx;
-            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
-                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
+            if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n, ctx.mode) &&
+                prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n, ctx.mode))
                 gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
             gemm_via_handle_(ly.gdn_gate_id, no, gate_out, gate_ctx);
         }

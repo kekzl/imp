@@ -1131,8 +1131,7 @@ Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n,
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
     Tensor sh_down(down_buf, compute_dtype_, 2, sh_down_shape, true);
 
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq);
+    auto ctx = gemm_ctx_(stream, /*verify_small_m_routes=*/false);
     if (shared_gated) {
         Tensor sh_gate(gate_buf, compute_dtype_, 2, sh_shape, true);
         // Decode rows: gate|up as one small-M launch on one activation quantize; declines to two calls.

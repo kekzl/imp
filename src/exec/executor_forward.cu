@@ -253,12 +253,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         s_decode_step++;
     const int decode_step = (n == 1) ? s_decode_step : 0;
     cur_decode_step_ = decode_step;
-    cur_force_fp16_ = state.force_fp16_gemm;
-    cur_spec_verify_ = state.spec_verify_chunk;
-    cur_spec_verify_smallm_ = state.spec_verify_smallm;
-    // Verify chunks forward with is_prefill=true (KV-write semantics) but
-    // their rows are draft tokens, so they count as decode rows here.
-    cur_decode_rows_ = n > 1 && (!state.is_prefill || state.spec_verify_chunk);
+    cur_mode_ = GemmMode{.force_fp16 = state.force_fp16_gemm,
+                         .spec_verify = state.spec_verify_chunk,
+                         .verify_smallm = state.spec_verify_smallm,
+                         .decode_rows = gemm_decode_rows(n, state.is_prefill, state.spec_verify_chunk)};
     fp8x8_min_rows_ = 2 - static_cast<int>(n == 1 && !state.is_prefill &&
                                            dispatch_policy().gemm.fp8_smallm_m1 &&
                                            dispatch_policy().gemm.fp8_smallm_max_m >= 1);
@@ -683,8 +681,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     const LmHeadFacts lm_facts = lm_head_facts_();
 
     // GemmContext for LM head GEMM dispatches.
-    auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_,
-                                 model_->config().overrides.gemma4.force_mmvq);
+    auto ctx = gemm_ctx_(stream, /*verify_small_m_routes=*/false);
 
     // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).
     const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)

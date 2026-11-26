@@ -1,5 +1,6 @@
 #pragma once
 
+#include "exec/gemm_mode.h"
 #include "exec/quant_scratch.h"
 #include <cuda_runtime.h>
 
@@ -22,7 +23,9 @@ struct GemmContext {
 
     // Weight caches (non-owning)
     const WeightCaches* wcache = nullptr;
-    bool force_fp16 = false;
+
+    // This forward's mode (audit D-7): GEMM dispatch reads it here, not from executor members.
+    GemmMode mode;
 
     // Per-model override: when set, the GGUF small-M dispatch path prefers
     // the mmvq backend over dp4a for eligible qtypes. Sourced from
@@ -32,23 +35,25 @@ struct GemmContext {
 
     // Spec-verify chunk forward (#998): small-M GEMMs (M <= largest capture
     // bucket) prefer the NVFP4 decode overlay over the M>1 prefill dequant
-    // path. Set from InferenceState::spec_verify_chunk; never set for real
-    // prefills, so prompt processing quality is unaffected.
+    // path. mode.spec_verify of a site that opts in; the LM head and the MoE
+    // shared expert do not. Never set for real prefills.
     bool spec_verify_small_m = false;
 
     // Quantization scratch buffers (non-owning)
     const QuantScratch* qscratch = nullptr;
 
-    // Helper: create from executor state.
+    // Helper: create from executor state. verify_small_m_routes=false keeps a site off the
+    // spec-verify small-M routes while it still carries the forward's mode.
     static GemmContext make(cudaStream_t s, const WeightCaches& wc, const QuantScratch& qs,
-                            bool force_fp16 = false, bool force_mmvq = false, bool spec_verify = false) {
+                            const GemmMode& mode = {}, bool force_mmvq = false,
+                            bool verify_small_m_routes = true) {
         GemmContext ctx;
         ctx.stream = s;
         ctx.wcache = &wc;
         ctx.qscratch = &qs;
-        ctx.force_fp16 = force_fp16;
+        ctx.mode = mode;
         ctx.force_mmvq = force_mmvq;
-        ctx.spec_verify_small_m = spec_verify;
+        ctx.spec_verify_small_m = mode.spec_verify && verify_small_m_routes;
         return ctx;
     }
 

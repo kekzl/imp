@@ -327,15 +327,20 @@ static bool prompt_a16_view(const WeightHandle& h, int M, bool on, NvFP4QuantRes
     return true;
 }
 
+GemmContext GraphExecutor::gemm_ctx_(cudaStream_t stream, bool verify_small_m_routes) const {
+    return GemmContext::make(stream, wcache_, qscratch_, cur_mode_,
+                             model_->config().overrides.gemma4.force_mmvq, verify_small_m_routes);
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the NVFP4 tile prefill block
 // (which quantizes input into the shared activation scratch). Every
 // earlier-return route in gemm_via_handle_ must answer false here.
-bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
+bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M, const GemmMode& mode) const {
     if (id == kInvalidTensorID)
         return false;
     const auto& h = registry_.handle(id);
-    if (nvfp4_prefill_copy_routes(h, M, cur_spec_verify_, wcache_, qscratch_))
+    if (nvfp4_prefill_copy_routes(h, M, mode.spec_verify, wcache_, qscratch_))
         return true;
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4)
         return false;
@@ -343,7 +348,7 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
         return false;
     // #1055: small-M verify chunks divert to the batched NVFP4 GEMV overlay
     // (native branch in gemm_via_handle_) — no CUTLASS activation quant.
-    if (cur_spec_verify_ && M <= 4 && h.source_data != nullptr && h.source_scales != nullptr)
+    if (mode.spec_verify && M <= 4 && h.source_data != nullptr && h.source_scales != nullptr)
         return false;
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
@@ -414,7 +419,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
         const auto& qs = qscratch_;
         bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
-                      !cur_spec_verify_ && h.source_qtype == QType::F16 &&
+                      !ctx.mode.spec_verify && h.source_qtype == QType::F16 &&
                       (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
                       qs.mxfp8_act_data.get() != nullptr && qs.mxfp8_act_sf.get() != nullptr &&
                       static_cast<size_t>(Mp) * Kp <= qs.mxfp8_act_data_size &&
@@ -437,7 +442,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         const int Mp = static_cast<int>(input.shape[0]);
         auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
-                            nvfp4_prefill_copy_routes(h, Mp, cur_spec_verify_, wcache_, qscratch_) &&
+                            nvfp4_prefill_copy_routes(h, Mp, ctx.mode.spec_verify, wcache_, qscratch_) &&
                             dispatch_cutlass_nvfp4_prefill(it->second, input, output, ctx, Mp);
         log_nvfp4_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
@@ -462,7 +467,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         weight.kind = h.kind;
         weight.scales = h.source_scales;
         weight.tensor_scale = h.source_tensor_scale;
-        gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx, ctx.mode.decode_rows);
         return;
     }
 
@@ -548,7 +553,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             prefill = h.primary_tier;
         // Graph-captured verify steps above kSpecVerifyA16MaxRows rows take the small-M block; eager
         // verify keeps the batched GEMV (smallm there: 10.93 -> 15.02 ms per verify).
-        const bool verify_smallm = ctx.spec_verify_small_m && verify_smallm_rows_(M);
+        const bool verify_smallm = ctx.spec_verify_small_m && verify_smallm_rows_(ctx.mode, M);
 
         // Spec-verify chunk (#998): reads the NVFP4 decode overlay in one weight
         // pass per MR<=4 tile instead of dequantizing the source (GGUF K-quants
@@ -607,7 +612,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         NvFP4QuantResult nv;
         if ((!ctx.spec_verify_small_m || verify_smallm) && M <= 32 &&
             (ctx.beta == 0.0f || ctx.beta == 1.0f) && input.qtype == QType::F16 &&
-            output.qtype == QType::F16 && smallm_weight_(h, nv)) {
+            output.qtype == QType::F16 && smallm_weight_(h, nv, ctx.mode.decode_rows)) {
             const int N = static_cast<int>(nv.N);
             const int K = static_cast<int>(nv.K);
             // A16 (gemm.nvfp4_smallm_a4=false): FP16 activations into the
@@ -686,7 +691,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::FP16 && M <= 32 && (M >= 2 || k_quant) && h.source_data != nullptr &&
             !wcache_.q8_planes_only.contains(h.source_data)) {  // dropped Q8_0 source
             Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
-            if (gemm_uncached_in_place(input, w, output, ctx, cur_decode_rows_))
+            if (gemm_uncached_in_place(input, w, output, ctx, ctx.mode.decode_rows))
                 return;
         }
         if (prefill == StorageTier::FP16 && ctx.beta == 0.0f && M <= 64) {
@@ -732,7 +737,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 weight.kind = h.kind;
                 weight.scales = h.source_scales;
                 weight.tensor_scale = h.source_tensor_scale;
-                gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
+                gemm_dispatch_uncached_fallback(input, weight, output, ctx, ctx.mode.decode_rows);
                 return;
             }
         }
@@ -755,9 +760,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // tile path.
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
-        if (imma_source_prefill(h, input, output, ctx, M, cur_decode_rows_))
+        if (imma_source_prefill(h, input, output, ctx, M, ctx.mode.decode_rows))
             return;
-        gguf_source_fallback(h, input, output, ctx, cur_decode_rows_);
+        gguf_source_fallback(h, input, output, ctx, ctx.mode.decode_rows);
         return;
     }
 
@@ -821,7 +826,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         return;
     }
 
-    gemm_handle_last_route(h, input, output, ctx, cur_decode_rows_, ws_.shared(), ws_.shared_size());
+    gemm_handle_last_route(h, input, output, ctx, ctx.mode.decode_rows, ws_.shared(), ws_.shared_size());
 }
 
 // Producer-side NVFP4 quantize fusion (batched decode): the small-M block
@@ -912,7 +917,7 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
     const bool own_ok = out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() && a && w_scale;
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if ((cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
+    if ((cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
         gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
                         a.per_row)) {
         static LogOnce logged;  // activity proof, once
@@ -949,8 +954,8 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = (cur_decode_rows_ || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
-              count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = (cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m &&
+              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
