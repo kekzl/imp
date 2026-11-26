@@ -2,7 +2,7 @@
 
 // Why CUDA graphs are off for this engine (architecture audit, finding F-14).
 //
-// `config_.use_cuda_graphs` is a mutable bool that eight sites across four
+// `rt_.cuda_graphs` (EngineRuntimeState) is a mutable bool that eight sites across four
 // translation units can turn off; the decision sites stay where their inputs
 // are (two of the seven init-time ones do not exist at a common resolver
 // time: expert-offload is decided during weight upload, the pinned-buffer

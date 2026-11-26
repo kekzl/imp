@@ -377,7 +377,7 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
             return mode;
         if (ssm_state_->n_reserved() <= 0)
             return "no_spare_slots";
-        if (swa_sizing_active_ || config_.streaming_kv_enabled)
+        if (swa_sizing_active_ || rt_.streaming_kv)
             return "swa_or_streaming_kv";
         if (!d_ssm_seq_slots_)
             return "no_gdn_slot_table";

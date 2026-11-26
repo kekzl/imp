@@ -34,7 +34,7 @@ void Engine::init_inkling_limits_() {
     runtime_config_.runtime.max_batch_size = slots;
     if (scheduler_)
         scheduler_->clamp_max_batch_size(slots);
-    config_.use_cuda_graphs = false;
+    rt_.cuda_graphs = false;
     config_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
     // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
     // an explicit speculative.mtp_k = 0 turns it off.
