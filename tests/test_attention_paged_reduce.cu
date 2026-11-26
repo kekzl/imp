@@ -202,10 +202,11 @@ TEST(PagedAttentionReduce, Q8EpilogueMatchesSeparateQuantize) {
         ASSERT_EQ(cudaMemset(q8_epi, 0, nb * sizeof(block_q8_1)), cudaSuccess);
         ASSERT_EQ(cudaMemset(q8_ref, 0, nb * sizeof(block_q8_1)), cudaSuccess);
 
-        paged_attention_arm_q8_epilogue(true, q8_epi, d8_epi);
-        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr);
-        EXPECT_TRUE(paged_attention_take_q8_epilogue()) << "hd " << head_dim;
-        EXPECT_FALSE(paged_attention_take_q8_epilogue()) << "one-shot";
+        PagedQ8Epilogue epi;
+        epi.q8 = q8_epi;
+        epi.d8 = d8_epi;
+        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr, &epi);
+        EXPECT_TRUE(epi.written) << "hd " << head_dim;
         quantize_fp16_to_q8_1(d_out, q8_ref, d8_ref, K, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
@@ -224,11 +225,14 @@ TEST(PagedAttentionReduce, Q8EpilogueMatchesSeparateQuantize) {
         }
         EXPECT_GT(nonzero, nb / 2) << "fixture degenerate";
 
-        // Not armed: the reduce leaves the Q8_1 buffer alone.
+        // One-shot within a call, and a call without an epilogue leaves the Q8_1 buffer alone.
         ASSERT_EQ(cudaMemset(q8_epi, 0x5A, nb * sizeof(block_q8_1)), cudaSuccess);
-        paged_attention_arm_q8_epilogue(false, q8_epi, d8_epi);
+        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr, &epi);
         paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr);
-        EXPECT_FALSE(paged_attention_take_q8_epilogue());
+        PagedQ8Epilogue unarmed;
+        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr,
+                                      &unarmed);
+        EXPECT_FALSE(unarmed.written);
         ASSERT_EQ(cudaMemcpy(a.data(), q8_epi, nb * sizeof(block_q8_1), cudaMemcpyDeviceToHost), cudaSuccess);
         EXPECT_EQ(static_cast<uint8_t>(a[0].qs[0]), 0x5Au);
 
