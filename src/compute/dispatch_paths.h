@@ -63,6 +63,7 @@ enum class MoePrefillPath {
 
 // Exits of the dense GEMM ladder GraphExecutor::gemm_via_handle_ (exec/executor_gemm_dispatch.cpp),
 // in ladder order. The ladder returns one per exit, so a new rung must name its path to compile.
+// After GENERIC_DISPATCH: the fused / sibling projection routes that bypass the ladder.
 enum class DensePath : unsigned char {
     UNSET,
     MXFP8_PREFILL_COPY,     // MXFP8 copy of an F16 GDN projection, M > 32
@@ -93,6 +94,31 @@ enum class DensePath : unsigned char {
     MXFP4_PREFILL,          // mxfp4_prefill_gemm
     GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less CUTLASS_NVFP4 entry, gguf_source_fallback
     GENERIC_DISPATCH,       // last route: gemm_dispatch
+    // Fused / sibling exits outside the ladder, recorded per weight at their call site.
+    QKV_GEMV_MXFP4,           // gemv_mxfp4_qkv_fused, M=1
+    QKV_GEMV_NVFP4,           // gemv_nvfp4_qkv_fused, M=1 (ungated arm and try_attn_qkv_fused_m1_)
+    QKV_DP4A,                 // dp4a_qkv_: dispatch_gemv_qkv_fused (+ a dp4a GEMV for a v of another qtype)
+    DP4A_MULTI_M1,            // gemv_dp4a_multi, M=1 siblings of mixed qtypes
+    DP4A_GEMV,                // dispatch_dp4a_gemv, M=1, one weight
+    DP4A_RESIDUAL,            // dispatch_gemv_residual, M=1 with the residual add
+    GATE_UP_GEMV_MXFP4,       // gemv_mxfp4_gate_up_fused, M=1
+    GATE_UP_GEMV_NVFP4,       // gemv_nvfp4_gate_up_fused, M=1
+    GATE_UP_DP4A,             // gemv_gate_up_fused, M=1
+    FP16_PAIR_BATCHED,        // gemm_kv_batched / gemm_pair_batched on a fused FP16 copy, M > 1
+    SMALLM_MULTI_WS,          // gemm_nvfp4_smallm_ws_multi, sibling launch, M 2..32
+    SMALLM_MULTI_V2,          // gemm_nvfp4_smallm_v2_multi_a4, sibling launch, M 2..32
+    FP8_SMALLM_MULTI,         // gemm_fp8_smallm_multi, FP8 sibling launch
+    FP8_SMALLM,               // gemm_fp8x8_: gemm_fp8_smallm
+    FP8_TILE,                 // gemm_fp8x8_: gemm_fp8_tile
+    FP8_CUBLASLT,             // gemm_fp8x8_: gemm_cublaslt
+    NVFP4_TILE_SWIGLU_QUANT,  // gemm_nvfp4_tile_swiglu_quant: up GEMM + SwiGLU + down quantize epilogue
+    NVFP4_PREQUANT,           // gemm_nvfp4_prequant_: down GEMM on the epilogue's NVFP4 activation
+    GEMV_MXFP4_RESIDUAL,      // gemv_mxfp4_{,swiglu_,geglu_}residual, M=1
+    GEMV_NVFP4_RESIDUAL,      // gemv_nvfp4_{,swiglu_,geglu_}residual, M=1
+    GEMV_FP8_RESIDUAL,        // gemv_fp8_residual, M=1
+    GDN_INPUT_GEMV_NVFP4,     // gemv_nvfp4_gdn_input_fused, M=1
+    GDN_INPUT_GEMV_FP8,       // gemv_fp8_gdn_input, M=1
+    F16_NARROW,               // gemm_f16_narrow_{prefill,smallm}: GDN alpha + beta
     COUNT,
 };
 

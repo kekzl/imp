@@ -119,8 +119,47 @@ TEST(DispatchPaths, EveryDensePathHasADistinctName) {
             EXPECT_NE(s, name) << "duplicate dense path name: " << name;
         seen.emplace_back(name);
     }
-    EXPECT_EQ(seen.size(), 29u)
-        << "UNSET + 28 exits: DensePath gained or lost an exit, update the ladder and this count";
+    EXPECT_EQ(seen.size(), 53u) << "UNSET + 28 ladder exits + 24 fused / sibling exits: DensePath gained or "
+                                   "lost an exit, update its recording site and this count";
+}
+
+// The first line is logged after one prefill step; decode routes (and the graph capture that records
+// them) arrive later. Each step that adds an exit bit logs the summary once more, a step without one
+// logs nothing.
+TEST(DispatchRecord, DenseLogLineRepeatsOnlyWhenAnExitIsNew) {
+    dispatch_record::reset();
+    auto& r = dispatch_record::current();
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/true), "Resolved dense GEMM: none recorded");
+
+    // Prefill step: Q4_K source GEMMs without a tier entry.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::UNCACHED_FALLBACK);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::UNCACHED_FALLBACK);
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/true),
+              "Resolved dense GEMM: WQ=uncached_fallback W_DOWN=uncached_fallback");
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/false), "") << "no new exit, no line";
+
+    // First decode step: the fused q|k|v GEMV and the dp4a down with residual.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::QKV_DP4A);
+    dispatch_record::set_dense(TensorKind::W_DOWN, DensePath::DP4A_RESIDUAL);
+    EXPECT_EQ(
+        dispatch_record::dense_log_line(r, /*first=*/false),
+        "Resolved dense GEMM (+2 new): WQ=uncached_fallback+qkv_dp4a W_DOWN=uncached_fallback+dp4a_residual");
+
+    // Later decode steps replay the same exits: nothing new, nothing logged.
+    dispatch_record::set_dense(TensorKind::WQ, DensePath::QKV_DP4A);
+    EXPECT_EQ(dispatch_record::dense_log_line(r, /*first=*/false), "");
+    dispatch_record::reset();
+}
+
+// A sibling launch (q|k|v, gate|up, ssm_in|gdn_gate) is one exit for each weight in it: before the
+// fused routes recorded, Qwen3.8 showed no WQ / WK / WV / W_GATE / W_UP and Qwen3-8B-FP8 printed "none".
+TEST(DispatchRecord, SiblingLaunchRecordsEveryWeight) {
+    dispatch_record::reset();
+    const TensorKind qkv[3] = {TensorKind::WQ, TensorKind::WK, TensorKind::WV};
+    dispatch_record::set_dense_each(qkv, 3, DensePath::FP8_SMALLM_MULTI);
+    EXPECT_EQ(dispatch_record::dense_summary(dispatch_record::current()),
+              "WQ=fp8_smallm_multi WK=fp8_smallm_multi WV=fp8_smallm_multi");
+    dispatch_record::reset();
 }
 
 // set_dense keeps the last exit per kind and a bit per exit ever taken; a kind

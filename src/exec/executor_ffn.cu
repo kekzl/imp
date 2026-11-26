@@ -12,6 +12,7 @@
 #include "compute/gemv_dp4a_multi.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/activation.h"
+#include "compute/dispatch_record.h"
 #include "compute/hadamard.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -48,6 +49,8 @@ static bool ffn_gate_up_dp4a_multi(const Tensor& w_gate, const Tensor& w_up, con
                                   static_cast<int>(w_up.shape[0])}};
     if (!gemv_dp4a_multi(segs, 2, q8, d8, d, stream))
         return false;
+    const TensorKind kinds[2] = {TensorKind::W_GATE, TensorKind::W_UP};
+    dispatch_record::set_dense_each(kinds, 2, DensePath::DP4A_MULTI_M1);
     static LogOnce logged;  // activity proof, once
     if (logged.first()) {
         IMP_LOG_INFO("FFN M=1 mixed-type gate|up dp4a multi GEMV ACTIVE (%s + %s, K=%d)",
@@ -191,6 +194,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             gemv_mxfp4_gate_up_fused(mw_g, mw_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                      stream);
+            record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::GATE_UP_GEMV_MXFP4);
         } else if (nvfp4_ffn) {
             // NVFP4 gate+up: RMSNorm to FP16 (or folded into the producer), then NVFP4 fused GEMV
             const NvFP4NormFoldIn ffn_fold = norm_fold_or_norm_(true, h, ffn_norm_w, no, kInvalidTensorID, n, eps, stream);
@@ -213,6 +217,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                      stream, ffn_fold);
+            record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::GATE_UP_GEMV_NVFP4);
         } else if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ffn_norm_w.data),
@@ -225,6 +230,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                    ly.w_gate.qtype, stream);
+                record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::GATE_UP_DP4A);
             } else if (!ffn_gate_up_dp4a_multi(ly.w_gate, ly.w_up, q8, qscratch_.d8_buf.data(), go, uo, d,
                                                stream)) {
                 dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf.data(),
@@ -232,6 +238,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(uo.data), static_cast<int>(ly.w_up.shape[0]), d,
                                    stream);
+                record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::DP4A_GEMV);
             }
         } else {
             // Producer fusion: quantize into the small-M scratch inside the
@@ -256,7 +263,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 const Tensor w2[2] = {fp8_tg, fp8_tu};
                 Tensor* const o2[2] = {&go, &uo};
                 const float* const s2[2] = {hwg->payload.fp8.d_scale, hwu->payload.fp8.d_scale};
-                gemm_fp8x8_multi_(fp8_no, w2, o2, s2, 2, fp8_a_scale, stream);
+                const TensorID i2[2] = {ly.w_gate_id, ly.w_up_id};
+                gemm_fp8x8_multi_(i2, fp8_no, w2, o2, s2, 2, fp8_a_scale, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the
@@ -273,6 +281,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 if (n > 1 && fused_gu) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, *fused_gu, go, uo, stream);
+                    record_dense_({ly.w_gate_id, ly.w_up_id}, DensePath::FP16_PAIR_BATCHED);
                 } else if (try_smallm_pair_dispatch_(ly.w_gate_id, ly.w_up_id, no, go, uo, ctx)) {
                     // Batched-decode sibling pair: gate and up in ONE smallm
                     // v2 launch (same quantized activation, two weight sets).
@@ -332,6 +341,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           static_cast<const half*>(uo.data), static_cast<half*>(h.data),
                                           static_cast<const half*>(h.data), M_d, K_d, stream);
             }
+            record_dense_({ly.w_down_id}, DensePath::GEMV_MXFP4_RESIDUAL);
         } else if (will_fuse_down_nvfp4) {
             // Pick source: secondary NVFP4 cache (Q8_0/Q6_K/Q5_K decode path)
             // is already a populated struct; primary-tier handle needs reconstruction.
@@ -375,6 +385,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                     static_cast<const half*>(h.data), M_d, K_d, stream,
                                     norm_fold_arm_(layer, /*after_ffn=*/true, no));
             }
+            record_dense_({ly.w_down_id}, DensePath::GEMV_NVFP4_RESIDUAL);
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
@@ -393,6 +404,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             const half* residual_ptr = static_cast<const half*>(h.data);
             dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
+            record_dense_({ly.w_down_id}, DensePath::DP4A_RESIDUAL);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4 &&
                    h.qtype == QType::F16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
@@ -413,6 +425,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 geglu(go, uo, so, stream);
             gemv_nvfp4_kpar(wd_nvfp4, static_cast<const half*>(so.data), static_cast<half*>(fo.data), M_d,
                             K_d, stream);
+            record_dense_({ly.w_down_id}, DensePath::GEMV_NVFP4);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data), static_cast<const half*>(ly.post_ffn_norm.data),
@@ -433,6 +446,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             half* fo_ptr = static_cast<half*>(fo.data);
             dispatch_dp4a_gemv(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(), fo_ptr, M_d, K_d,
                                stream);
+            record_dense_({ly.w_down_id}, DensePath::DP4A_GEMV);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data), static_cast<const half*>(ly.post_ffn_norm.data),
@@ -461,7 +475,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_so(qscratch_.fp8_act.get(), QType::FP8_E4M3, so.ndim, so.shape, true);
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-                gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
+                record_dense_({ly.w_down_id}, gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale,
+                                                          hwd->payload.fp8.d_scale, stream));
             } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));

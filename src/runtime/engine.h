@@ -1258,7 +1258,8 @@ private:
     void init_apply_rope_override_();
     // One-shot "which kernels did this model actually resolve to" summary,
     // read back from compute/dispatch_record.h after the first step that has
-    // seen both a prefill and a decode (#1205).
+    // seen both a prefill and a decode (#1205); after it, one more dense GEMM line per step that
+    // recorded a new exit (decode routes, captured graphs).
     void log_resolved_dispatch_once_();
 
     void init_resolve_kv_dtype_policy_();

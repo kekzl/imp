@@ -37,6 +37,8 @@ struct Record {
     // Dense GEMM ladder per weight kind: the last exit taken and a bit per exit ever taken.
     DensePath dense_last[kDenseKinds] = {};
     uint64_t dense_seen[kDenseKinds] = {};
+    // dense_seen as of the last `Resolved dense GEMM` line (dense_log_line).
+    uint64_t dense_logged[kDenseKinds] = {};
 
     bool has_prefill() const { return attn_prefill_outer != AttnPrefillOuter::UNSET; }
     bool has_decode() const { return attn_decode != AttnDecodePath::UNSET; }
@@ -70,8 +72,19 @@ inline void set_dense(TensorKind kind, DensePath p) {
     g_record.dense_seen[k] |= uint64_t{1} << static_cast<unsigned>(p);
 }
 
+// One sibling launch (q|k|v, gate|up, ...) is one exit per weight: each kind gets the bit.
+inline void set_dense_each(const TensorKind* kinds, int n, DensePath p) {
+    for (int i = 0; i < n; ++i)
+        set_dense(kinds[i], p);
+}
+
 // "kind=path+path ..." over every kind with a recorded exit, paths in DensePath order; "" if none.
 std::string dense_summary(const Record& r);
+
+// The `Resolved dense GEMM` log line. first: always, "none recorded" when empty. Later calls: "" unless an
+// exit bit was set since the last line, then "(+N new)" and the full summary. Marks every seen bit logged,
+// so a process prints at most kinds x paths lines.
+std::string dense_log_line(Record& r, bool first);
 
 inline void reset() { g_record = Record{}; }
 

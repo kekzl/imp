@@ -1,5 +1,6 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
 #include "core/dispatch_policy.h"
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -187,6 +188,7 @@ void GraphExecutor::gemm_nvfp4_prequant_(TensorID id, const Tensor& input, const
                                                    act, act_sf);
     IMP_CHECK(ok, "gemm_nvfp4_prequant_: %s M=%d refused, no FP16 input to fall back on",
               tensor_kind_name(h.kind), M);
+    dispatch_record::set_dense(h.kind, DensePath::NVFP4_PREQUANT);
 }
 
 // gemm.nvfp4_gdn_proj_prefill: an FP16-primary handle with an NVFP4 prefill copy (phase 3d,
@@ -411,6 +413,22 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      Tensor& output, const GemmContext& ctx) {
     const auto& h = registry_.handle(id);
     dispatch_record::set_dense(h.kind, gemm_via_handle_(h, input, output, ctx));
+}
+
+void GraphExecutor::record_dense_(std::initializer_list<TensorID> ids, DensePath p) const {
+    (void)record_dense_if_(true, ids.begin(), static_cast<int>(ids.size()), p);
+}
+
+// The widest sibling launch is gemv_dp4a_multi (kDp4aMultiMaxSegs = 4 weights).
+bool GraphExecutor::record_dense_if_(bool ok, const TensorID* ids, int n, DensePath p) const {
+    TensorKind kinds[8];
+    int k = 0;
+    for (int i = 0; ok && i < n && k < static_cast<int>(std::size(kinds)); ++i) {
+        if (ids[i] >= 0 && ids[i] < static_cast<TensorID>(registry_.size()))
+            kinds[k++] = registry_.handle(ids[i]).kind;
+    }
+    dispatch_record::set_dense_each(kinds, k, p);
+    return ok;
 }
 
 DensePath GraphExecutor::gemm_via_handle_(const WeightHandle& h, const Tensor& input, Tensor& output,
@@ -905,8 +923,8 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
 }
 
-void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
-                                const float* w_scale, cudaStream_t stream) {
+DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
+                                     Fp8ActScale a, const float* w_scale, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
@@ -921,7 +939,7 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
             IMP_LOG_INFO("gemm.fp8_smallm_max_m: own FP8 small-M GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M,
                          N, K, beta);
         }
-        return;
+        return DensePath::FP8_SMALLM;
     }
     // imp::cfg::kFp8TileMinM: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own
     // -18
@@ -935,18 +953,19 @@ void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out,
         if (logged.first()) {
             IMP_LOG_INFO("fp8_tile: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N, K, beta);
         }
-        return;
+        return DensePath::FP8_TILE;
     }
     if (a.per_row)  // quantize_act_fp8_ checked K % 64 and N % 8: unreachable unless a sibling's N is odd
         throw_runtime_error(
             "gemm_fp8x8_: FP8 per-token activation scales, no own GEMM serves M=%d N=%d K=%d beta=%.0f", M, N,
             K, beta);
     gemm_cublaslt(a8, w8, out, 1.0f, beta, a.d, w_scale, stream);
+    return DensePath::FP8_CUBLASLT;
 }
 
-void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor* const* out,
-                                      const float* const* w_scale, int count, Fp8ActScale a,
-                                      cudaStream_t stream) {
+void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8,
+                                      Tensor* const* out, const float* const* w_scale, int count,
+                                      Fp8ActScale a, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
@@ -963,10 +982,11 @@ void GraphExecutor::gemm_fp8x8_multi_(const Tensor& a8, const Tensor* w8, Tensor
             IMP_LOG_INFO("fp8_smallm_multi: own FP8 small-M sibling GEMM ACTIVE (M=%d count=%d K=%d)", M,
                          count, K);
         }
+        (void)record_dense_if_(true, ids, count, DensePath::FP8_SMALLM_MULTI);
         return;
     }
     for (int i = 0; i < count; ++i)
-        gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream);
+        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream));
 }
 
 Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,
