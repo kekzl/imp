@@ -98,8 +98,8 @@ void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H,
 void gate_rms(const GateNormArgs& a, const GateOut& o, int T, int H, cudaStream_t s);
 
 // Key or value site: short conv over the projection x (static w [C, 4], or static_w [4, C] + per-head
-// taps dyn), L2 clip (key) or unit RMS (value) per head, fp16 write at slot (*d_pos + t) % ring, and
-// the conv state [3, C] advanced past the call.
+// taps dyn), L2 clip (key) or unit RMS (value) per head, fp16 write at the cache row of position
+// *d_pos + t (AttnArgs: ring, block table or the position itself), and the conv state [3, C] advanced.
 // Rows of a call of more than 8 rows whose conv state (the three inputs before the row) is wanted as
 // well: dst[i] [3, C] receives the state at row[i].
 struct ConvMarks {
@@ -118,6 +118,8 @@ struct KvSiteArgs {
     half* cache = nullptr;
     const int* d_pos = nullptr;  // device: position of row 0
     int T = 0, stride = 0, n_heads = 0, hd = 0, ring = 0;
+    const int* blocks = nullptr;  // ring 0: block table, kv_block rows per entry (null: row = position)
+    int kv_block = 16;
     bool is_key = true;
     float thr = 0.0f, eps = 1e-6f;
     ConvMarks marks;

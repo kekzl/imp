@@ -2,6 +2,7 @@
 #include "compute/shortconv.h"
 #include "core/cuda_errors.h"
 #include "core/dispatch_policy.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
@@ -44,9 +45,8 @@ void GraphExecutor::run_shortconv(int layer, const InferenceState& state, cudaSt
         throw std::runtime_error("run_shortconv: no conv window for this layer");
     Tensor y = view_tokens(ssm_y_buf_, n);  // [n, hidden]
     const bool batched = state.ssm_seq_slots != nullptr && !state.is_prefill;
-    static bool logged_batched = false;
-    if (batched && !logged_batched) {
-        logged_batched = true;
+    static LogOnce logged_batched;
+    if (batched && logged_batched.first()) {
         IMP_LOG_INFO("shortconv: batched decode over %d sequences (slot table)", n);
     }
     void* win = batched ? state.ssm_state->conv_state(0, ssm_idx)

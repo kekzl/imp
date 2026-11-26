@@ -86,14 +86,16 @@ __global__ void draft_norm_rope_k(half* x, int stride, int col0, int heads, cons
     v[i + kHd / 2] = __float2half(b * cs + a * sn);
 }
 
-// dst[row][c] = src[row][col0 + c] for n rows of width columns; d_row (optional, device): dst row 0 is
-// row *d_row of the array.
+// dst[row][c] = src[row][col0 + c] for n rows of width columns; dst row 0 is row row0 (+ *d_row, device,
+// when set) of the array, through blocks (16 rows per entry) when set: a pool layer.
 __global__ void draft_cols_k(const half* src, int stride, int col0, int width, half* dst, size_t n,
-                             const int* d_row) {
+                             const int* d_row, int row0 = 0, const int* blocks = nullptr) {
     const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n)
         return;
-    dst[(d_row ? static_cast<size_t>(*d_row) * width : 0) + i] = src[(i / width) * stride + col0 + i % width];
+    const int r = row0 + (d_row ? *d_row : 0) + static_cast<int>(i / width);
+    const int slot = blocks ? (blocks[r >> 4] << 4) | (r & 15) : r;
+    dst[static_cast<size_t>(slot) * width + i % width] = src[(i / width) * stride + col0 + i % width];
 }
 
 // draft_cols_k into a ring of M rows kept twice (rows r and r + M): row i goes to position pos0 + i, so
@@ -188,26 +190,17 @@ void InklingDraft::lin_(const half* x, int T, int K, const half* w, int N, half*
     gemm(A, B, C, 1.0f, 0.0f, s);
 }
 
-bool InklingDraft::grow_ctx_(int rows, cudaStream_t s) {
-    const size_t want = std::min(static_cast<size_t>(rows), static_cast<size_t>(max_ctx_ + w_->cfg.block));
-    if (want <= ctx_.rows())
-        return true;
-    // Queued launches hold pointers into the regions: let them end before the mapping changes.
-    if (cudaStreamSynchronize(s) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess)
-        return false;
-    return ctx_.ensure(want);
-}
-
 bool InklingDraft::init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap, int back,
-                        Backend* growable) {
+                        bool own_kv) {
     w_ = &w;
     va_ = &va;
     max_ctx_ = max_ctx;
     cap_ = cap;
     // A local layer reads window + block rows: its K/V live in a ring that also keeps the back positions a
-    // restart may return to and the cap rows of one call. Not worth it below twice the ring.
+    // restart may return to and the cap rows of one call. Not worth it below twice the ring, except that
+    // the pool holds one layer per position only.
     const int ring = w.cfg.window + w.cfg.block + cap + std::max(back, 0);
-    ring_ = back >= 0 && 2 * static_cast<long long>(ring) < max_ctx + w.cfg.block ? ring : 0;
+    ring_ = back >= 0 && (!own_kv || 2 * static_cast<long long>(ring) < max_ctx + w.cfg.block) ? ring : 0;
     const InklingDraftConfig& c = w.cfg;
     const size_t H = static_cast<size_t>(c.hidden), B = static_cast<size_t>(c.block), taps = c.taps.size();
     const size_t QD = static_cast<size_t>(c.heads) * kHd, KD = static_cast<size_t>(c.kv_heads) * kHd;
@@ -215,18 +208,15 @@ bool InklingDraft::init(const InklingDraftWeights& w, VRAMAllocator& va, int max
                  C = static_cast<size_t>(cap);
     const auto F = [&](size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); };
     const auto Hf = [&](size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); };
-    ctx_.init(va, growable, "inkling_draft_ctx", KD * sizeof(half), static_cast<size_t>(max_ctx) + B,
-              InklingForward::kCtxStep);
+    // Layers that keep one row per position: own rows here, or the pool's through bind_kv.
     for (int i = 0; i < c.layers; ++i) {
-        if (ring_ > 0 && c.local[static_cast<size_t>(i)]) {
-            k_.push_back(Hf(2 * static_cast<size_t>(ring_) * KD));
-            v_.push_back(Hf(2 * static_cast<size_t>(ring_) * KD));
-            continue;
-        }
-        k_.push_back(static_cast<half*>(ctx_.add()));
-        v_.push_back(static_cast<half*>(ctx_.add()));
-        ok_ = ok_ && k_.back() && v_.back();
+        const bool ringed = ring_ > 0 && c.local[static_cast<size_t>(i)];
+        const size_t rows = ringed ? 2 * static_cast<size_t>(ring_) : static_cast<size_t>(max_ctx) + B;
+        k_.push_back(ringed || own_kv ? Hf(rows * KD) : nullptr);
+        v_.push_back(ringed || own_kv ? Hf(rows * KD) : nullptr);
+        ok_ = ok_ && (!(ringed || own_kv) || (k_.back() && v_.back()));
     }
+    bound_ = own_kv;
     pend_ = F(taps * static_cast<size_t>(cap) * H), h_ = F(B * H), state_ = F(static_cast<size_t>(c.rank));
     work_ = F(dspark_attention_work_floats(c.block, c.heads, max_ctx + c.block));
     xc_ = Hf(C * H), kvc_ = Hf(C * 2 * KD), xn_ = Hf(B * H), qkv_ = Hf(B * (QD + 2 * KD)), q_ = Hf(B * QD);
@@ -252,7 +242,38 @@ InklingSpecHooks InklingDraft::hooks() {
     h.propose = [this](int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s) {
         return propose(anchor, d_emb, pos, out, s);
     };
+    h.restart = [this](int keep) { restart(keep); };
     return h;
+}
+
+bool InklingDraft::bind_kv(half* k, half* v, const int* table) {
+    const InklingDraftConfig& c = w_->cfg;
+    int open = 0;  // layers without memory: the one the pool layer serves
+    for (int i = 0; i < c.layers; ++i)
+        open += k_[static_cast<size_t>(i)] == nullptr ? 1 : 0;
+    if (bound_ || open != 1 || !k || !v || !table) {
+        IMP_LOG_WARN("inkling draft: %d full-context layers, the pool holds one: lookahead off", open);
+        return false;
+    }
+    for (int i = 0; i < c.layers; ++i)
+        if (!k_[static_cast<size_t>(i)]) {
+            k_[static_cast<size_t>(i)] = k;
+            v_[static_cast<size_t>(i)] = v;
+            global_ = i;
+        }
+    table_ = table;
+    bound_ = true;
+    return true;
+}
+
+void InklingDraft::restart(int keep) {
+    // Kept rows before keep belong to the same tokens: they get their K/V at the next flush.
+    if (keep <= kept_pos0_)
+        kept_pos0_ = std::max(keep, 0), kept_ = 0;
+    else if (keep < kept_pos0_ + kept_)
+        kept_ = keep - kept_pos0_;
+    done_ = std::min(done_, kept_);
+    drafted_pos_ = -1;
 }
 
 // Context K/V of n feature rows (planes of plane floats, rows from row0) at positions pos0...
@@ -260,10 +281,6 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
     const InklingDraftConfig& c = w_->cfg;
     const int H = c.hidden, KD = c.kv_heads * kHd, taps = static_cast<int>(c.taps.size());
     const float log2_theta = std::log2(c.theta);
-    if (!grow_ctx_(pos0 + n, s)) {
-        ok_ = false;  // no memory for these rows: the draft is off from here
-        return;
-    }
     for (int i = 0; i < c.layers; ++i) {
         const InklingDraftWeights::Layer& ly = w_->layers[static_cast<size_t>(i)];
         draft_mix_k<<<n, kT, 0, s>>>(feat, plane, row0, w_->alpha + static_cast<size_t>(i) * taps, taps,
@@ -273,7 +290,7 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
         draft_norm_rope_k<<<n * c.kv_heads, kHd / 2, 0, s>>>(kvc_, 2 * KD, 0, c.kv_heads, ly.k_norm_ctx, pos0,
                                                              log2_theta, c.eps, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
-        const size_t nk = static_cast<size_t>(n) * KD, at = static_cast<size_t>(pos0) * KD;
+        const size_t nk = static_cast<size_t>(n) * KD;
         if (ring_ > 0 && c.local[static_cast<size_t>(i)]) {
             draft_ring_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)], nk, pos0,
                                                    ring_);
@@ -283,11 +300,12 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
             IMP_CUDA_CHECK_LAUNCH();
             continue;
         }
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)] + at, nk,
-                                               nullptr);
+        const int* tbl = i == global_ ? table_ : nullptr;
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)], nk, nullptr,
+                                               pos0, tbl);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, KD, KD, v_[static_cast<size_t>(i)] + at, nk,
-                                               nullptr);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, KD, KD, v_[static_cast<size_t>(i)], nk, nullptr,
+                                               pos0, tbl);
         IMP_CUDA_CHECK_LAUNCH();
     }
 }
@@ -305,7 +323,7 @@ void InklingDraft::flush_(cudaStream_t s) {
 // rows a later call replaces are never projected.
 void InklingDraft::on_rows(const float* feat, int cap, int n, int pos0, cudaStream_t s) {
     const InklingDraftConfig& c = w_->cfg;
-    if (!ok_ || n < 1 || n > cap_ || pos0 < 0 || pos0 + n > max_ctx_)
+    if (!ok_ || !bound_ || n < 1 || n > cap_ || pos0 < 0 || pos0 + n > max_ctx_)
         return;
     const size_t H = static_cast<size_t>(c.hidden), plane = static_cast<size_t>(cap) * H;
     const int end = kept_pos0_ + kept_;
@@ -358,13 +376,14 @@ bool InklingDraft::block_(cudaStream_t s) {
         const size_t nq = static_cast<size_t>(B) * QD, nk = static_cast<size_t>(B) * KD;
         draft_cols_k<<<blocks(nq), kT, 0, s>>>(qkv_, QD + 2 * KD, 0, QD, q_, nq, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD, KD, kc, nk, d_row);
+        const int* tbl = i == global_ ? table_ : nullptr;
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD, KD, kc, nk, d_row, 0, tbl);
         IMP_CUDA_CHECK_LAUNCH();
-        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD + KD, KD, vc, nk, d_row);
+        draft_cols_k<<<blocks(nk), kT, 0, s>>>(qkv_, QD + 2 * KD, QD + KD, KD, vc, nk, d_row, 0, tbl);
         IMP_CUDA_CHECK_LAUNCH();
         if (dspark_attention_dev(q_, kc, vc, o_, work_, B, c.heads, c.kv_heads, local ? d_ctx_local : d_pos,
                                  (local ? std::min(c.window, max_ctx_) : max_ctx_) + B, scale, s,
-                                 local ? d_first_local : nullptr) != cudaSuccess)
+                                 local ? d_first_local : nullptr, tbl) != cudaSuccess)
             return false;
         lin8_(o_, B, QD, ly.wo8, ly.wo, H, y_, s);
         draft_add_k<<<blocks(bH), kT, 0, s>>>(h_, y_, bH);
@@ -433,7 +452,7 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
     kept_ = frow + 1;
     done_ = std::min(done_, kept_);
     flush_(s);
-    if (!ok_ || !grow_ctx_(pos + B, s))
+    if (!ok_)
         return 0;
     // What the block reads from the device: position, local context length and first key, feature row,
     // the block's row in a local layer's K/V (its ring row when there is a ring).

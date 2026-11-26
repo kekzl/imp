@@ -114,10 +114,9 @@
             // Proof-of-activity for A/B arms: the selection itself is decided
             // device-side, but max_context_len is a host value - once it
             // exceeds the budget, at least one sequence is actually sparse.
-            static bool logged_sparse_active = false;
-            if (!logged_sparse_active &&
-                sub_state.max_context_len > qscratch_.sparse_budget_blocks * kv_bs) {
-                logged_sparse_active = true;
+            static LogOnce logged_sparse_active;
+            if (sub_state.max_context_len > qscratch_.sparse_budget_blocks * kv_bs &&
+                logged_sparse_active.first()) {
                 IMP_LOG_INFO("sparse decode attention ACTIVE: ctx %d > budget %d tokens",
                              sub_state.max_context_len, qscratch_.sparse_budget_blocks * kv_bs);
             }
@@ -204,9 +203,8 @@
                                               attn_max_blocks, layer_n_sinks, attn_sinks, vhd);
         }
         if (attn_sinks && !paged_attention_applies_sinks(cache_dtype)) {
-            static bool warned_sinks_kv = false;
-            if (!warned_sinks_kv) {
-                warned_sinks_kv = true;
+            static LogOnce warned_sinks_kv;
+            if (warned_sinks_kv.first()) {
                 IMP_LOG_WARN("attention sinks: only the FP16 paged decode kernels apply sinks — "
                              "kv_cache.dtype=%d ignores them; use fp16 KV for this model.",
                              std::to_underlying(cache_dtype));

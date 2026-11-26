@@ -18,6 +18,7 @@
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -47,9 +48,8 @@ static bool ffn_gate_up_dp4a_multi(const Tensor& w_gate, const Tensor& w_up, con
                                   static_cast<int>(w_up.shape[0])}};
     if (!gemv_dp4a_multi(segs, 2, q8, d8, d, stream))
         return false;
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("FFN M=1 mixed-type gate|up dp4a multi GEMV ACTIVE (%s + %s, K=%d)",
                      qtype_name(w_gate.qtype), qtype_name(w_up.qtype), d);
     }
@@ -505,9 +505,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     swiglu(go, uo, so, stream);
                 lora_delta_(*w, so.data, h.data, n, stream);
             } else {
-                static bool warned = false;
-                if (!warned) {
-                    warned = true;
+                static LogOnce warned;
+                if (warned.first()) {
                     IMP_LOG_WARN("LoRA: down_proj adapter on a post-ffn-norm arch is unsupported (v1) — "
                                  "delta skipped");
                 }
