@@ -165,7 +165,7 @@ void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, c
                                        const int* context_lens, int block_size, float scale,
                                        int max_context_len, int sliding_window, float softcap,
                                        cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                       const void* attn_sinks, int v_head_dim) {
+                                       const void* attn_sinks, int v_head_dim, PagedQ8Epilogue* q8_epi) {
     const int64_t batch = Q.shape[0];
     const int64_t n_heads = Q.shape[2];
     const int64_t head_dim = Q.shape[3];
@@ -174,7 +174,7 @@ void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, c
     if (!padded) {
         paged_attention_decode(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale,
                                max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
-                               attn_sinks, v_head_dim);
+                               attn_sinks, v_head_dim, q8_epi);
         return;
     }
     int64_t fd[4] = {batch, 1, n_heads, head_dim};

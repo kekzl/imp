@@ -111,16 +111,9 @@ __global__ void paged_attention_reduce_kernel(
     }
 }
 
-// Armed Q8_1 epilogue (paged_attention_arm_q8_epilogue); consumed by the next eligible reduce.
-struct Q8Epilogue {
-    block_q8_1* q8;
-    float* d8;
-    bool written;
-};
-static Q8Epilogue g_q8_epi{nullptr, nullptr, false};
-
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
-                                   int num_splits, cudaStream_t stream, const half* attn_sinks) {
+                                   int num_splits, cudaStream_t stream, const half* attn_sinks,
+                                   PagedQ8Epilogue* q8_epi) {
     dim3 grid(batch_size, n_heads, (head_dim + 127) / 128);
     dim3 block(128);
     // The reduce kernel has always applied the sink term; this launcher used to
@@ -128,25 +121,14 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
     // (#1345). Callers that have no sinks still pass nullptr and are unchanged.
     block_q8_1* q8 = nullptr;
     float* d8 = nullptr;
-    if (g_q8_epi.q8 != nullptr && batch_size == 1 && head_dim % 32 == 0) {
-        q8 = g_q8_epi.q8;
-        d8 = g_q8_epi.d8;
-        g_q8_epi = {nullptr, nullptr, true};
+    if (paged_q8_epilogue_take(q8_epi, batch_size, head_dim)) {
+        q8 = static_cast<block_q8_1*>(q8_epi->q8);
+        d8 = q8_epi->d8;
     }
     pdl::enable_kernel(paged_attention_reduce_kernel);
     pdl::launch(paged_attention_reduce_kernel, grid, block, size_t(0), stream,
                 static_cast<const float*>(partial), O, n_heads, head_dim, num_splits, attn_sinks, q8, d8);
     IMP_CUDA_CHECK_LAUNCH();
-}
-
-void paged_attention_arm_q8_epilogue(bool arm, void* q8_1_out, float* d8_out) {
-    g_q8_epi = {arm ? static_cast<block_q8_1*>(q8_1_out) : nullptr, arm ? d8_out : nullptr, false};
-}
-
-bool paged_attention_take_q8_epilogue() {
-    const bool written = g_q8_epi.written;
-    g_q8_epi = {nullptr, nullptr, false};
-    return written;
 }
 
 }  // namespace imp

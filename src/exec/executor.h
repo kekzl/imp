@@ -432,7 +432,7 @@ public:
         return fuse_o_residual && !out_gate && !mla;
     }
     // Q8_1 of ao for the dp4a wo GEMV: taken from the reduce epilogue when it ran, else quantized here.
-    void quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream);
+    void quantize_attn_out_q8_(const Tensor& ao, int K, bool epilogue_written, cudaStream_t stream);
     // n == 1 dp4a QKV: q|k share a dp4a qtype, v any dp4a qtype (Q4_K_M: Q6_K attn_v on half the layers).
     [[nodiscard]] bool dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const;
     // MLA Q: wq(no), or with q_lora_rank > 0 (V3, GLM) wq(rmsnorm(q_a_proj(no), q_a_layernorm)).
