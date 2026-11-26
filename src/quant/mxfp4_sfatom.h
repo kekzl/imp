@@ -14,8 +14,6 @@ namespace imp {
 // SfAtom buffer size for MXFP4 (UE8M0, one per 32 K, rows padded to 128).
 size_t cutlass_mxfp4_sf_size(int rows, int K);
 
-void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w);
-
 // Unpack native MXFP4 GGUF blocks (17 bytes each: 16 data + 1 scale) in place into
 // separate data and SfAtom scale arrays.
 [[nodiscard]] bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4Weight& dst,
