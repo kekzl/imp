@@ -126,10 +126,9 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                                                        static_cast<const uint8_t*>(dn_s.data), ne, dn_rows,
                                                        dn_K, /*row_offset=*/0, /*row_stride=*/1, d,
                                                        /*extra_scale=*/0.0625f, &d_ts);
-            if (!ok) {
-                IMP_LOG_ERROR("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
-                return;
-            }
+            // Layers 0..i-1 are converted already: a return here served a half-converted model.
+            if (!ok)
+                throw_runtime_error("gpt-oss L%d: MXFP4→NVFP4 expert conversion failed (VRAM?)", i);
         } else if (L.expert_gate_packed.data && !L.expert_gate_packed.on_device &&
                    L.expert_gate_packed.qtype == QType::MXFP4) {
             // GGUF: separate ggml-MXFP4 gate/up/down expert tensors (host-mmap),
@@ -137,10 +136,8 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
             ne = static_cast<int>(L.expert_gate_packed.shape[0]);
             if (!gguf_convert(L.expert_gate_packed, 1.0f, g, g_ts) ||
                 !gguf_convert(L.expert_up_packed, 1.0f, u, u_ts) ||
-                !gguf_convert(L.expert_down_packed, 0.0625f, d, d_ts)) {
-                IMP_LOG_ERROR("gpt-oss L%d: GGUF MXFP4→NVFP4 expert conversion failed", i);
-                return;
-            }
+                !gguf_convert(L.expert_down_packed, 0.0625f, d, d_ts))
+                throw_runtime_error("gpt-oss L%d: GGUF MXFP4→NVFP4 expert conversion failed", i);
         } else {
             continue;  // no convertible expert source on this layer
         }

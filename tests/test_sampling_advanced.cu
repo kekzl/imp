@@ -110,7 +110,7 @@ TEST(SamplingAdvancedTest, LogitBiasFallbackReadsOnTheCallerStream) {
 // DRY: a token extending a repeated n-gram is penalised by multiplier*base^(match_len -
 // allowed_length); tokens not extending any repetition stay put.
 TEST(SamplingAdvancedTest, DryPenalisesTheTokenThatWouldExtendARepeat) {
-    sampling_preallocate_dry(64);
+    ASSERT_TRUE(sampling_preallocate_dry(64));
     // History "1 2 3 4 1 2 3": the suffix "1 2 3" already occurred, followed
     // by 4. DRY's scan finds match_len 3 for token 4 (the continuation) and
     // nothing else above allowed_length 2.
@@ -133,7 +133,7 @@ TEST(SamplingAdvancedTest, DryPenalisesTheTokenThatWouldExtendARepeat) {
 }
 
 TEST(SamplingAdvancedTest, DryLeavesShortMatchesAndDisabledMultiplierAlone) {
-    sampling_preallocate_dry(64);
+    ASSERT_TRUE(sampling_preallocate_dry(64));
     const std::vector<int32_t> history = {1, 2, 3, 4, 1, 2, 3};
     {
         // allowed_length 3: the match of exactly 3 is not above it.

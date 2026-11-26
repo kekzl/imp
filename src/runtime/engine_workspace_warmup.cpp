@@ -232,7 +232,8 @@ bool Engine::init_features() {
 
     // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
     // use during inference (the lazy-alloc path blocks the decode stream).
-    sampling_preallocate_dry(config_.max_seq_len, decode_stream());
+    if (!sampling_preallocate_dry(config_.max_seq_len, decode_stream()))
+        return false;
     // History-sized penalties (sampling_penalties.cu): per-row token counts,
     // sized like the sampling scratch (max_logit_tokens = max(batch, 8)).
     // false: WARN logged, penalties stay on the sweep kernels (sampling.h).
