@@ -191,7 +191,7 @@ void InklingDraft::lin_(const half* x, int T, int K, const half* w, int N, half*
 }
 
 bool InklingDraft::init(const InklingDraftWeights& w, VRAMAllocator& va, int max_ctx, int cap, int back,
-                        bool own_kv) {
+                        bool own_kv, const InklingLookRegion& look) {
     w_ = &w;
     va_ = &va;
     max_ctx_ = max_ctx;
@@ -199,21 +199,29 @@ bool InklingDraft::init(const InklingDraftWeights& w, VRAMAllocator& va, int max
     // A local layer reads window + block rows: its K/V live in a ring that also keeps the back positions a
     // restart may return to and the cap rows of one call. Not worth it below twice the ring, except that
     // the pool holds one layer per position only.
-    const int ring = w.cfg.window + w.cfg.block + cap + std::max(back, 0);
+    const int ring = inkling_draft_ring(w.cfg, cap, back);
     ring_ = back >= 0 && (!own_kv || 2 * static_cast<long long>(ring) < max_ctx + w.cfg.block) ? ring : 0;
     const InklingDraftConfig& c = w.cfg;
+    if (look && (look.l->draft_ring != ring_ || look.l->dk.size() != static_cast<size_t>(c.layers))) {
+        IMP_LOG_WARN("inkling draft: lookahead region planned for %d ring rows, not %d", look.l->draft_ring,
+                     ring_);
+        return false;
+    }
     const size_t H = static_cast<size_t>(c.hidden), B = static_cast<size_t>(c.block), taps = c.taps.size();
     const size_t QD = static_cast<size_t>(c.heads) * kHd, KD = static_cast<size_t>(c.kv_heads) * kHd;
     const size_t V = static_cast<size_t>(w.head.vocab), I = static_cast<size_t>(c.inter),
                  C = static_cast<size_t>(cap);
     const auto F = [&](size_t n) { return static_cast<float*>(alloc_(n * sizeof(float))); };
     const auto Hf = [&](size_t n) { return static_cast<half*>(alloc_(n * sizeof(half))); };
-    // Layers that keep one row per position: own rows here, or the pool's through bind_kv.
+    // Layers that keep one row per position: own rows here, or the pool's through bind_kv. Rings live in
+    // the slab's lookahead region when one is given.
     for (int i = 0; i < c.layers; ++i) {
-        const bool ringed = ring_ > 0 && c.local[static_cast<size_t>(i)];
+        const size_t li = static_cast<size_t>(i);
+        const bool ringed = ring_ > 0 && c.local[li];
         const size_t rows = ringed ? 2 * static_cast<size_t>(ring_) : static_cast<size_t>(max_ctx) + B;
-        k_.push_back(ringed || own_kv ? Hf(rows * KD) : nullptr);
-        v_.push_back(ringed || own_kv ? Hf(rows * KD) : nullptr);
+        const bool slab = ringed && look;
+        k_.push_back(slab ? look.at<half>(look.l->dk[li]) : ringed || own_kv ? Hf(rows * KD) : nullptr);
+        v_.push_back(slab ? look.at<half>(look.l->dv[li]) : ringed || own_kv ? Hf(rows * KD) : nullptr);
         ok_ = ok_ && (!(ringed || own_kv) || (k_.back() && v_.back()));
     }
     bound_ = own_kv;

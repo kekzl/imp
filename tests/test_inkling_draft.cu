@@ -11,6 +11,7 @@
 
 #include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
+#include "exec/inkling_slab.h"
 #include "inkling_fixture.h"
 #include "quant/fp8_quant.h"
 
@@ -222,6 +223,79 @@ TEST(InklingDraftModel, LocalLayerRingMatchesFullContext) {
                     same, 7 * drafts, drafts, pos);
         EXPECT_GT(pos, 3 * ring - cap - back);
         EXPECT_EQ(rows, 7 * drafts);
+        EXPECT_EQ(same, 7 * drafts);
+    }
+    cudaFree(d_feat);
+    cudaFree(d_w8);
+    cudaFree(d_sc);
+    cudaStreamDestroy(s);
+}
+
+// B-111 S3b: the engine's draft keeps its 2 local rings in the slot's lookahead region of the slab. Fed the
+// same rows past two ring lengths, it drafts the tokens of a draft that allocated its rings itself, and it
+// allocates the 4 rings (2 x 2 x 7432 rows x 2 KiB at 256 rows per call) less.
+TEST(InklingDraftModel, SlabRingsDraftAsOwnRings) {
+    const char* model = std::getenv("IMP_TEST_MODEL_INKLING");
+    if (!model)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INKLING not set";
+    Fixture& fx = fixture();
+    if (!fx.loaded)
+        ASSERT_TRUE(fx.load(model));
+    const int V = fx.w.cfg.vocab, H = fx.w.cfg.hidden, cap = InklingForward::kGrid, ctx = 16384;
+    const int back = InklingForward::kSeg + InklingForward::kSlack;
+    void* d_w8 = nullptr;
+    float *d_sc = nullptr, *d_feat = nullptr;
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w8, static_cast<size_t>(V) * H), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sc, static_cast<size_t>(V) * sizeof(float)), cudaSuccess);
+    quantize_fp8_rows_async(fx.w.unembed, d_w8, V, H, d_sc, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    {
+        InklingDraftWeights dw;
+        ASSERT_TRUE(dw.load(model, fx.va, fx.w.embed_norm, InklingHeadView{d_w8, d_sc, V}, s));
+        InklingSlab slab;
+        ASSERT_EQ(slab.allocate(fx.va, inkling_slab_layout(fx.w.cfg, cap, &dw.cfg, V), 1), 1);
+        ASSERT_EQ(slab.look_slots(), 1);
+        const InklingLookRegion look = slab.look(0);
+        const int ring = inkling_draft_ring(dw.cfg, cap, back);
+        ASSERT_EQ(look.l->draft_ring, ring);
+        ASSERT_LT(2 * ring, ctx);
+        const size_t taps = dw.cfg.taps.size(), plane = static_cast<size_t>(cap) * H;
+        ASSERT_EQ(cudaMalloc(&d_feat, taps * plane * sizeof(float)), cudaSuccess);
+        std::vector<float> host(taps * plane);
+        InklingDraft own, slabbed;
+        const size_t a0 = fx.va.allocated();
+        ASSERT_TRUE(own.init(dw, fx.va, ctx, cap, back));
+        const size_t a1 = fx.va.allocated();
+        ASSERT_TRUE(slabbed.init(dw, fx.va, ctx, cap, back, true, look));
+        const size_t a2 = fx.va.allocated();
+        const size_t rings = 4 * 2 * static_cast<size_t>(ring) * dw.cfg.kv_heads * dw.cfg.head_dim * 2;
+        EXPECT_GE((a1 - a0) - (a2 - a1), rings);
+        const int32_t anchor = 1000;
+        const half* emb = fx.w.embed + static_cast<size_t>(anchor) * H;
+        uint32_t seed = 11u;
+        int drafts = 0, same = 0;
+        for (int pos = 0; pos + cap + InklingForward::kGraphRows < 2 * ring + 2 * cap; pos += cap) {
+            for (size_t t = 0; t < taps; ++t)
+                for (size_t i = 0; i < plane; ++i) {
+                    seed = seed * 1664525u + 1013904223u;
+                    host[t * plane + i] = static_cast<float>(seed >> 8) / 8388608.0f - 1.0f;
+                }
+            ASSERT_EQ(cudaMemcpy(d_feat, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice),
+                      cudaSuccess);
+            own.on_rows(d_feat, cap, cap, pos, s);
+            slabbed.on_rows(d_feat, cap, cap, pos, s);
+            int32_t got[InklingForward::kGraphRows] = {}, want[InklingForward::kGraphRows] = {};
+            (void)slabbed.propose(anchor, emb, pos + cap, got, s);
+            (void)own.propose(anchor, emb, pos + cap, want, s);
+            ++drafts;
+            for (int i = 0; i < InklingForward::kGraphRows - 1; ++i)
+                same += got[i] == want[i] && want[i] >= 0 && want[i] < V;
+        }
+        std::printf("draft slab rings: %d of %d tokens of %d drafts equal the own rings'\n", same, 7 * drafts,
+                    drafts);
+        EXPECT_GE(drafts, 2 * ring / cap);
         EXPECT_EQ(same, 7 * drafts);
     }
     cudaFree(d_feat);

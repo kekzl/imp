@@ -140,6 +140,10 @@ std::vector<float> fuse_alpha(std::vector<float> fw, size_t taps) {
 
 }  // namespace
 
+bool parse_inkling_draft_config(const std::string& dir, InklingDraftConfig& c) {
+    return parse_draft_config(dir, c);
+}
+
 // The block projections as I8B32; an fp16 one is returned once its copy exists (no room: it stays).
 bool InklingDraftWeights::quantize_blocks_(cudaStream_t s) {
     const InklingDraftConfig& c = cfg;

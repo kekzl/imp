@@ -26,6 +26,15 @@ InklingConfig mini() {
 
 constexpr size_t kNone = InklingSlabLayout::kNone;
 
+// Inkling-2-Mini's mtp_config: 3 layers, 0 and 2 local, 4 taps.
+InklingDraftConfig mini_draft() {
+    InklingDraftConfig d;
+    d.taps = {5, 23, 41, 48};
+    d.local = {true, false, true};
+    return d;
+}
+constexpr int kVocab = 201024;
+
 // The bytes the forward allocated per slot before S3: one conv block and a ring of window + segment +
 // slack rows per sliding application, K and V. The slab holds exactly these, no padding.
 TEST(InklingSlabLayout, SlotHoldsTheConvStateAndFortySlidingRings) {
@@ -100,6 +109,85 @@ TEST(InklingSlabLayout, BoundRequestReachesItsSlotRegion) {
     t.release(9);  // the teardown row inkling_slot
     EXPECT_EQ(t.bind(11, any), 1);
     EXPECT_EQ(l.slot_offset(t.slot_of(11), kSlots), l.slot_bytes);
+}
+
+// S3b: the bytes the first forward allocated per lookahead slot before (InklingDraft::init's 2 local rings
+// of 2 x (window + block + cap + kSeg + kSlack) rows, enable_lookahead's 6 buffers, the runtime's
+// [kGraphRows][vocab] logits) sit in one region; 224 B of it pad the 32 B token ids to 256.
+TEST(InklingSlabLayout, LookRegionHoldsTheDraftRingsAndLookaheadPlanes) {
+    const InklingConfig c = mini();
+    const InklingDraftConfig d = mini_draft();
+    const InklingSlabLayout l = inkling_slab_layout(c, 8192, &d, kVocab);
+    const InklingLookLayout& k = l.look;
+    EXPECT_EQ(k.draft_ring, 1024 + 8 + 1024 + 1024 + 5120);
+    const size_t ring = 2 * 8200 * 1024 * 2, H = 2304, n = 48 * 19968, R = 8;
+    EXPECT_EQ(4 * ring, 134348800u);
+    const size_t before = 4 * ring + 4 * 1024 * H * 4 + 2 * n * 4 + n / 3 * R * 4 + H * R * 2 + R * 4 +
+                          R * kVocab * 4;
+    EXPECT_EQ(k.bytes, before + 224);
+    EXPECT_EQ(k.bytes, 196458752u);
+    EXPECT_EQ(l.look_slots(2), 2);
+    EXPECT_EQ(l.look_slots(4), kInklingLookaheadSlots);
+    EXPECT_EQ(l.total_bytes(2), 2356477952u);  // the slots alone: S3a's bytes
+    EXPECT_EQ(l.total_bytes(2, 2), 2356477952u + 2 * 196458752u);
+    std::printf("inkling slab: lookahead region %zu B (%.2f MiB), 2 slots + 2 regions %zu B\n", k.bytes,
+                k.bytes / 1048576.0, l.total_bytes(2, 2));
+    // No draft (speculative.mtp_k = 0, no mtp.safetensors): no region, S3a's slab.
+    const InklingSlabLayout off = inkling_slab_layout(c, 8192);
+    EXPECT_EQ(off.look.bytes, 0u);
+    EXPECT_EQ(off.look_slots(2), 0);
+    EXPECT_EQ(off.slot_bytes, l.slot_bytes);
+    // The draft ring follows the call's rows as InklingDraft's cap = min(max_tokens, kSeg) does.
+    EXPECT_EQ(inkling_slab_layout(c, 512, &d, kVocab).look.draft_ring, 1024 + 8 + 512 + 1024 + 5120);
+}
+
+// Every plane and ring of a region is aligned, inside it and disjoint from the others; the full-context
+// draft layer (the pool's) holds none.
+TEST(InklingSlabLayout, LookRegionPlanesAreAlignedAndDisjoint) {
+    const InklingDraftConfig d = mini_draft();
+    const InklingLookLayout k = inkling_slab_layout(mini(), 1024, &d, kVocab).look;
+    ASSERT_EQ(k.dk.size(), 3u);
+    EXPECT_EQ(k.dk[1], kNone);
+    EXPECT_EQ(k.dv[1], kNone);
+    const size_t ring = 2 * static_cast<size_t>(k.draft_ring) * 1024 * 2, H = 2304, n = 48 * 19968;
+    std::vector<std::pair<size_t, size_t>> regions = {
+        {k.feat, 4 * 1024 * H * 4},        {k.conv_pre, n * 4},   {k.conv_tmp, n * 4},
+        {k.conv_log, n / 3 * 32},          {k.look_h, H * 8 * 2}, {k.ids, 8 * 4},
+        {k.logits, 8 * size_t{kVocab} * 4}};
+    for (size_t i : {0u, 2u})
+        regions.insert(regions.end(), {{k.dk[i], ring}, {k.dv[i], ring}});
+    for (auto& [off, len] : regions) {
+        EXPECT_EQ(off % InklingSlabLayout::kAlign, 0u) << "at " << off;
+        EXPECT_LE(off + len, k.bytes) << "at " << off;
+        len += off;
+    }
+    EXPECT_EQ(k.bytes % InklingSlabLayout::kAlign, 0u);
+    std::sort(regions.begin(), regions.end());
+    for (size_t i = 1; i < regions.size(); ++i)
+        EXPECT_LE(regions[i - 1].second, regions[i].first) << "plane " << i << " overlaps";
+}
+
+// Slot s < kInklingLookaheadSlots has its region after every slot's stride, the others none; a slab
+// allocated without regions (the card took the slots only) has none at all.
+TEST(InklingSlabLayout, LookRegionsSitAfterEverySlot) {
+    const InklingDraftConfig d = mini_draft();
+    const InklingSlabLayout l = inkling_slab_layout(mini(), 1024, &d, kVocab);
+    for (int slots = 1; slots <= 4; ++slots) {
+        const int looks = l.look_slots(slots);
+        EXPECT_EQ(looks, std::min(slots, 2));
+        for (int s = 0; s < slots; ++s) {
+            const size_t off = l.look_offset(s, slots, looks);
+            if (s >= looks) {
+                EXPECT_EQ(off, kNone) << slots << " slots, slot " << s;
+                continue;
+            }
+            EXPECT_EQ(off, l.total_bytes(slots) + static_cast<size_t>(s) * l.look.bytes);
+            EXPECT_LE(off + l.look.bytes, l.total_bytes(slots, looks));
+            EXPECT_EQ(off % InklingSlabLayout::kAlign, 0u);
+        }
+        EXPECT_EQ(l.look_offset(0, slots, 0), kNone);
+        EXPECT_EQ(l.look_offset(-1, slots, looks), kNone);
+    }
 }
 
 }  // namespace
