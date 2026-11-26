@@ -813,15 +813,15 @@ void Engine::init_resolve_quant_flags_() {
 // init_kv_cache a reader.
 void Engine::init_resolve_kv_block_size_() {
     const auto& mcfg = model_->config();
-    if (config_.kv_block_size > 0) {
+    if (config_.kv_block_size.value_or(0) > 0) {
         // Explicit kv_cache.block_size (or EngineConfig from the C++ API).
         // Refused here, at load, rather than at dispatch: the FP8 tile kernel
         // silently falls back on a block it cannot tile, and a value the
         // kernels never see would otherwise measure the fallback.
-        if (const char* why = kv_block_size_error(config_.kv_block_size))
-            throw std::runtime_error("kv_cache.block_size=" + std::to_string(config_.kv_block_size) + " " +
+        if (const char* why = kv_block_size_error(*config_.kv_block_size))
+            throw std::runtime_error("kv_cache.block_size=" + std::to_string(*config_.kv_block_size) + " " +
                                      why);
-        IMP_LOG_INFO("KV block size: %d (kv_cache.block_size, n_kv_heads=%d)", config_.kv_block_size,
+        IMP_LOG_INFO("KV block size: %d (kv_cache.block_size, n_kv_heads=%d)", *config_.kv_block_size,
                      mcfg.n_kv_heads);
         return;
     }
@@ -829,7 +829,7 @@ void Engine::init_resolve_kv_block_size_() {
     // lost tg128 on the class it targeted (docs/audit/PERF_LOG.md,
     // tools/analysis/kv_block_size_ab.sh). kv_cache.block_size overrides.
     config_.kv_block_size = kKVBlockSize;
-    IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
+    IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", kKVBlockSize, mcfg.n_kv_heads);
 }
 
 // attention.sparse_topk_tokens / sparse_prefill_topk_tokens = -1 (auto): the per-arch budget,
@@ -993,10 +993,10 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
     PlanInput fit_in = shadow_plan_input(probe);
     // An operator KV pin owns the pool question; only the fixed charges decide
     // the batch then.
-    if (config_.kv_cache_max_blocks > 0)
+    if (config_.kv_cache_max_blocks.value_or(0) > 0)
         fit_in.limits.min_kv_tokens = 0;
     const int fit = plan_fitting_batch(fit_in, per_batch_slot,
-                                       hold_one_sequence && config_.kv_cache_max_blocks <= 0);
+                                       hold_one_sequence && config_.kv_cache_max_blocks.value_or(0) <= 0);
     if (fit < 1 || fit >= probe.max_batch_size)
         return;
     if (plan.ok)

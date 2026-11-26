@@ -255,9 +255,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // free_vram. The charge is fixed regardless of --vram-budget scaling, so the floor must be
     // fixed too (a 16 GiB budget request still let the library take its full ~3.9 GiB).
     {
-        const size_t lib_reserve = config.library_reserve_mb < 0
+        const size_t lib_reserve = config.library_reserve_mb.value_or(-1) < 0
                                        ? kMeasuredLibraryReserveBytes
-                                       : (static_cast<size_t>(config.library_reserve_mb) << 20);
+                                       : (static_cast<size_t>(*config.library_reserve_mb) << 20);
         budget.library_reserve_bytes = lib_reserve;
         if (lib_reserve > budget.reserve_bytes) {
             IMP_LOG_INFO("VRAM budget: reserve floored at the library charge %.0f -> %.0f MiB",
@@ -298,7 +298,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t overhead = budget.reserve_bytes + ssm_footprint + imma_plane_bytes;
     available = (available > overhead) ? (available - overhead) : 0;
 
-    int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
+    int bs = config.kv_block_size.value_or(0) > 0 ? *config.kv_block_size : kKVBlockSize;
     const size_t per_layer_block_bytes = kv_block_bytes_layer_mean(mcfg, config.kv_cache_dtype, bs, head_dim,
                                                                    std::min(swa_live_tokens, n_swa_layers) >
                                                                        0);
