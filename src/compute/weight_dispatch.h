@@ -8,10 +8,14 @@
 
 namespace imp {
 
+struct Nvfp4DequantWorkspace;  // quant/nvfp4_dequant_ws.h
+
 // Dense GEMM (prefill / multi-token path): y = alpha * W @ x + beta * y.
-// W is described by handle (rows, cols, primary_tier, payload).
+// W is described by handle (rows, cols, primary_tier, payload). nvfp4_ws: gemm_nvfp4's M>1
+// fallback workspace (null: its lazy buffer, refused under capture).
 void gemm_dispatch(cublasLtHandle_t lt, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
-                   float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream);
+                   float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream,
+                   Nvfp4DequantWorkspace* nvfp4_ws = nullptr);
 
 // Decode GEMV (single-token path). Same semantics, batch=1.
 void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream_t stream);

@@ -1063,6 +1063,8 @@ if(IMP_BUILD_TESTS)
         tests/test_config_bindings.cpp
         # C-9: an explicit EngineConfig value, default included, wins over imp.conf; unset falls through.
         tests/test_engine_config_bridge.cpp
+        # D-9: gemm_nvfp4's fallback workspace is a per-call argument, the deferred take runs once.
+        tests/test_nvfp4_dequant_ws.cpp
         tests/test_mtp_auto.cpp
         tests/test_mtp_draft_rows.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull
