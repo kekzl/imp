@@ -14,6 +14,7 @@
 #include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
+#include "core/dispatch_policy.h"
 #include "exec/executor_helpers.h"
 #include "memory/kv_cache.h"
 

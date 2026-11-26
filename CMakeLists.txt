@@ -168,6 +168,7 @@ set(IMP_CORE_SOURCES
     src/core/cuda_static_reset.cpp
     src/core/log_once.cpp
     src/core/fallback_site.cpp
+    src/core/dispatch_policy.cpp
 )
 
 set(IMP_MEMORY_SOURCES
