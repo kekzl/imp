@@ -1239,8 +1239,14 @@ private:
     // Prefill offset of a request chunk: on Inkling2-Loop the first chunk rewinds its slot to at most the
     // offset the prefix cache gave (-1 = no free slot), else offset.
     int inkling_resume_(Request& req, int offset, cudaStream_t stream);
-    // Scheduler prefix-reuse cap on Inkling2-Loop: binds req's slot, returns the blocks it may reuse.
+    // Scheduler prefix-reuse cap on Inkling2-Loop: binds req's slot, returns the blocks it may reuse; a
+    // snapshot of the store that reaches further than the slot goes to req.recurrent_restore (B-111 S4).
     int inkling_prefix_reuse_limit_(Request& req);
+    // Finish: the slot's state at its last checkpoint of tokens into recurrent_snapshots_, any slot resumes
+    // from it. The store itself: recurrent_snapshot_mb / _host_mb of inkling_snap_layout entries.
+    void inkling_save_snapshot_(const Request& req, std::span<const int32_t> tokens, cudaStream_t stream);
+    void inkling_init_snapshots_();
+    std::unordered_map<size_t, int> inkling_snap_origin_;  // snapshot key -> the slot that saved it (log)
     // Unbinds slots whose request the engine no longer holds (a teardown that was skipped).
     void inkling_unbind_stale_();
     // init_kv_cache on Inkling2-Loop: pool layers (-1 = another arch), the block cap (INT_MAX = none), the

@@ -91,6 +91,12 @@ public:
     void on_rows(const float* feat, int cap, int n, int pos0, cudaStream_t s);
     int propose(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s);
     void restart(int keep);
+    // Cross-slot snapshot (B-111 S4): K and V of the window before pos of every local layer, kept rows
+    // flushed first, as pieces from entry offset off (draft_window rows each, InklingSnapLayout); false when
+    // a row before pos was never fed or the ring overwrote it. load: those rows back (both ring copies), the
+    // sequence goes on at pos with nothing kept.
+    [[nodiscard]] bool snapshot_pieces(int pos, size_t off, std::vector<SnapshotPiece>& out, cudaStream_t s);
+    [[nodiscard]] bool load(int pos, const std::byte* entry, size_t off, cudaStream_t s);
     InklingSpecHooks hooks();
 
 private:
@@ -118,6 +124,7 @@ private:
     // first done_ of them already have context K/V. The Markov head reads the row before the anchor.
     int kept_pos0_ = 0, kept_ = 0, done_ = 0;
     int drafted_pos_ = -1;  // position of the last propose(): its call's rows get their K/V in on_rows
+    int hw_ = 0;            // highest local K/V row written + 1 since restart(0): what a ring overwrote
     std::vector<half*> k_, v_;  // per layer [max_ctx + block or 2 * ring_][kv_heads * head_dim]
     float *pend_ = nullptr, *h_ = nullptr, *state_ = nullptr, *work_ = nullptr;
     half *xc_ = nullptr, *kvc_ = nullptr, *xn_ = nullptr, *qkv_ = nullptr, *q_ = nullptr, *o_ = nullptr;

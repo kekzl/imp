@@ -533,8 +533,10 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             // Hybrid twin: the recurrent state over the same span, so the next
             // turn restores at the end of this reply instead of at the prompt boundary.
             maybe_save_transcript_snapshot_(*req, forwarded, stream_);
+            inkling_save_snapshot_(*req, forwarded, stream_);
         } else {
             kv_manager_->register_block_hashes(req->id, req->key_tokens(), req->prefix_salt);
+            inkling_save_snapshot_(*req, req->key_tokens(), stream_);
         }
         // cache_control / cache_prompt: protect the prompt's full blocks from
         // eviction (must run before free_sequence, pinning needs the live block

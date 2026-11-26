@@ -3,10 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <set>
 #include <vector>
 
 #include "exec/inkling_kv_layout.h"
+#include "memory/kv_cache.h"
+#include "memory/kv_cache_manager.h"
 
 using namespace imp;
 
@@ -93,6 +96,34 @@ TEST(InklingPrefixCap, PoolHoldsEverySlotAtMaxSeqLenPlusTheLookaheadRows) {
     EXPECT_EQ(inkling_pool_blocks(1, 9, 16), 1);
     EXPECT_EQ(inkling_pool_blocks(1, 10, 16), 2);
     EXPECT_EQ(inkling_pool_blocks(3, 100, 0), 0);
+}
+
+// A snapshot saved at pos finds the request whose prefix cache probe hashes the same blocks (B-111 S4): its
+// key is the chain hash of block pos / 16 - 1 under the request's salt, blind to the tokens after pos.
+TEST(InklingKvLayout, SnapshotKeyIsThePrefixCacheHashOfItsLastBlock) {
+    auto kvm = std::make_unique<KVCacheManager>(KVCache::for_accounting(9, 8, 128, QType::F16, 64));
+    std::vector<int32_t> t(600);
+    for (size_t i = 0; i < t.size(); ++i)
+        t[i] = static_cast<int32_t>(i * 31 % 997);
+    const size_t salt = 0x5eedu;
+    const InklingBlockHash h = &KVCacheManager::compute_block_hash;
+    for (size_t s : {size_t{0}, salt}) {
+        std::vector<size_t> hashes;
+        (void)kvm->longest_cached_prefix_blocks(t, hashes, s);
+        ASSERT_EQ(hashes.size(), 37u);
+        EXPECT_EQ(inkling_snapshot_key(t, 512, 16, s, h), hashes[31]) << "salt " << s;
+        EXPECT_EQ(inkling_snapshot_key(t, 256, 16, s, h), hashes[15]) << "salt " << s;
+    }
+    const size_t k = inkling_snapshot_key(t, 512, 16, salt, h);
+    EXPECT_NE(k, inkling_snapshot_key(t, 512, 16, 0, h));
+    std::vector<int32_t> u = t;
+    u[600 - 1] += 1;  // after pos: the same prefix
+    EXPECT_EQ(inkling_snapshot_key(u, 512, 16, salt, h), k);
+    u[3] += 1;  // inside the first block
+    EXPECT_NE(inkling_snapshot_key(u, 512, 16, salt, h), k);
+    EXPECT_EQ(inkling_snapshot_key(t, 500, 16, salt, h), 0u);  // off the block grid
+    EXPECT_EQ(inkling_snapshot_key(t, 608, 16, salt, h), 0u);  // past the tokens
+    EXPECT_EQ(inkling_snapshot_key(t, 0, 16, salt, h), 0u);
 }
 
 }  // namespace

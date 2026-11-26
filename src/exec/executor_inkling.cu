@@ -62,6 +62,7 @@ bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, 
             break;  // fewer slots than asked for: the engine lowers its batch size
         }
         f->set_lora(&lora);
+        f->set_snapshot_draft(draft);  // every slot's entries hold the draft part: any slot restores them
         slots.push_back(std::move(f));
     }
     if (slots.empty())
@@ -220,8 +221,8 @@ int InklingRuntime::bind_match(int req, std::span<const int32_t> tokens) {
 }
 
 // No bound slot is taken from its request: -1 fails the request.
-int InklingRuntime::resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s,
-                           bool& first) {
+int InklingRuntime::resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s, bool& first,
+                           const void* snap, bool snap_draft, bool* restored) {
     int slot = table.find(req);
     first = slot < 0 || resumed[static_cast<size_t>(slot)] != req;
     if (!first)
@@ -231,7 +232,14 @@ int InklingRuntime::resume(int req, std::span<const int32_t> tokens, int offset,
     if (slot < 0)
         return -1;
     resumed[static_cast<size_t>(slot)] = req;
-    return slots[static_cast<size_t>(slot)]->rewind(tokens, s, offset);
+    InklingForward& f = *slots[static_cast<size_t>(slot)];
+    const bool from_snap = snap && offset > 0 && f.match(tokens) < offset &&
+                           f.restore(tokens, snap, offset, s, snap_draft);
+    if (restored)
+        *restored = from_snap;
+    if (from_snap)
+        return offset;
+    return f.rewind(tokens, s, offset);
 }
 
 bool InklingRuntime::bind_kv(KVCache& kv) {
