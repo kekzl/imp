@@ -11,6 +11,7 @@
 #include "model/inkling_weights.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <tuple>
 
@@ -31,8 +32,6 @@ __global__ void inkling_pack_rows_k(const int* pos, const int32_t* ids, int n, i
 InklingRuntime::~InklingRuntime() {
     // I5: before the slots, drafts and weights go (the order the hand frees had).
     d_rows.reset();
-    for (auto& p : look_logits)
-        p.reset();
 }
 
 int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
@@ -44,12 +43,16 @@ int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
 }
 
 bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
-                                int want, InklingSlab& slab) {
-    // Conv state and sliding rings of every slot: one allocation (2 x 81920: 2 x 1124 MiB).
-    const int fit = slab.allocate(alloc, inkling_slab_layout(wt.cfg, max_tokens), want);
+                                int want, InklingSlab& slab, const InklingDraftConfig* draft, int vocab) {
+    // Conv state and sliding rings of every slot, lookahead regions of the first two: one allocation
+    // (2 x 81920: 2 x 1124 + 2 x 187 MiB).
+    const int fit = slab.allocate(alloc, inkling_slab_layout(wt.cfg, max_tokens, draft, vocab), want);
     if (fit < want)
         IMP_LOG_WARN("inkling2_loop: the recurrent slab takes %d of %d sequence slots (%.0f MiB each)", fit,
                      want, slab.layout().slot_bytes / 1048576.0);
+    if (slab.layout().look.bytes > 0)
+        IMP_LOG_INFO("inkling2_loop: %d lookahead regions of %.1f MiB in the slab (draft rings, planes)",
+                     slab.look_slots(), slab.layout().look.bytes / 1048576.0);
     for (int i = 0; i < fit; ++i) {
         auto f = std::make_unique<InklingForward>();
         // The first slot's per-call buffers serve every slot: they run one after the other.
@@ -94,14 +97,20 @@ bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, 
 }
 
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots, InklingSlab* slab) {
+                                                     int max_ctx, int slots, InklingSlab* slab,
+                                                     bool lookahead) {
     const std::string& dir = model.inkling_dir;
     if (dir.empty())
         return nullptr;
+    // The engine's KV plan holds the draft's pool layer on the same condition (Engine::inkling_kv_layers_).
+    InklingDraftConfig dc;
+    const bool look = lookahead && std::filesystem::exists(dir + "/mtp.safetensors") &&
+                      parse_inkling_draft_config(dir, dc);
     auto rt = std::make_unique<InklingRuntime>();
     const bool ok = va && slab && model.token_embedding().data && model.output_proj().data &&
                     model.output_norm().data && load_inkling_weights(dir, rt->w, *va, /*with_vocab=*/false) &&
-                    rt->init_slots(rt->w, *va, max_tokens, max_ctx, slots > 0 ? slots : 2, *slab);
+                    rt->init_slots(rt->w, *va, max_tokens, max_ctx, slots > 0 ? slots : 2, *slab,
+                                   look ? &dc : nullptr, model.config().vocab_size);
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
     return rt;
@@ -172,7 +181,7 @@ void GraphExecutor::inkling_look_logits_(int slot, cudaStream_t stream) {
     InklingRuntime& rt = *inkling_;
     const InklingForward& f = *rt.slots[static_cast<size_t>(slot)];
     float* stash = static_cast<size_t>(slot) < rt.look_logits.size()
-                       ? rt.look_logits[static_cast<size_t>(slot)].get()
+                       ? rt.look_logits[static_cast<size_t>(slot)]
                        : nullptr;
     const int row = f.look_row();
     if (!stash || row < 0)
@@ -260,11 +269,13 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
     const Tensor& emb = model_->token_embedding();
     InklingHeadView head;
     head.vocab = model_->config().vocab_size;
-    if (!inkling_lookahead_ || rt.draft_layer < 0 || emb.qtype != QType::F16 || !emb.data ||
+    const bool region = inkling_slab_ && inkling_slab_->look_slots() > 0;
+    if (!inkling_lookahead_ || rt.draft_layer < 0 || !region || emb.qtype != QType::F16 || !emb.data ||
         !lm_head_fp8_view(head.w8, head.row_scales)) {
         IMP_LOG_INFO("inkling2_loop: decode lookahead off (%s)",
                      !inkling_lookahead_  ? "speculative.mtp_k = 0"
                      : rt.draft_layer < 0 ? "no draft layer in the KV pool"
+                     : !region            ? "no lookahead region in the slab"
                                           : "needs an fp16 embedding table and the FP8 LM head");
         return;
     }
@@ -272,24 +283,23 @@ void GraphExecutor::inkling_attach_draft_(cudaStream_t stream) {
     if (!w->load(model_->inkling_dir, *vram_alloc_, rt.w.embed_norm, head, stream))
         return;
     rt.draft_w = w;
-    // Two slots get a draft context (its full-context layer in the pool, two local rings here; 4 slots with
-    // a context each reached 31983 MiB on the 32 GB card when it was 397 MiB at 32768 positions).
-    constexpr size_t kLookaheadSlots = 2;
+    // The first kInklingLookaheadSlots slots get a draft context: its full-context layer in the pool, its
+    // local rings, the slot's lookahead planes and logits in the slot's lookahead region of the slab.
     const size_t dl = static_cast<size_t>(rt.draft_layer);
     int on = 0;
-    for (auto& slot : rt.slots) {
-        if (rt.drafts.size() >= kLookaheadSlots)
+    for (size_t i = 0; i < rt.slots.size(); ++i) {
+        const InklingLookRegion look = inkling_slab_->look(static_cast<int>(i));
+        if (!look || look.l->vocab != head.vocab)
             break;
+        InklingForward& slot = *rt.slots[i];
         auto d = std::make_shared<InklingDraft>();
         if (!d->init(*w, *vram_alloc_, rt.max_ctx, rt.cap, InklingForward::kSeg + InklingForward::kSlack,
-                     /*own_kv=*/false) ||
-            !d->bind_kv(rt.kv_k[dl], rt.kv_v[dl], slot->table()) ||
-            !slot->enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data)))
+                     /*own_kv=*/false, look) ||
+            !d->bind_kv(rt.kv_k[dl], rt.kv_v[dl], slot.table()) ||
+            !slot.enable_lookahead(d->hooks(), w->cfg.taps, static_cast<const half*>(emb.data), look))
             break;
         rt.drafts.push_back(std::move(d));
-        rt.look_logits.emplace_back(*vram_alloc_,
-                                    InklingForward::kGraphRows * static_cast<size_t>(head.vocab),
-                                    "inkling_state");
+        rt.look_logits.push_back(look.at<float>(look.l->logits));
         rt.look_serial.push_back(-1);
         ++on;
     }

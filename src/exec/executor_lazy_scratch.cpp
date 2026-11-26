@@ -16,7 +16,10 @@ bool GraphExecutor::acquire_nvfp4_dequant_ws_(size_t covered_bytes) {
     nvfp4_dequant_ws_size_ = covered_bytes;
     if (engine_arena().lazy() && engine_arena().remaining() >= covered_bytes) {
         nvfp4_dequant_ws_deferred_ = true;
-        set_nvfp4_dequant_workspace_provider(&GraphExecutor::provide_nvfp4_dequant_ws_, this, covered_bytes);
+        nvfp4_dequant_ws_ = {.size = covered_bytes,
+                             .provide = &GraphExecutor::provide_nvfp4_dequant_ws_,
+                             .ctx = this};
+        qscratch_.nvfp4_dequant = &nvfp4_dequant_ws_;
         IMP_LOG_INFO(
             "gemm_nvfp4 dequant workspace: %.2f MiB reserved in the engine arena, taken at the "
             "first M>1 fallback",
@@ -36,14 +39,16 @@ bool GraphExecutor::acquire_nvfp4_dequant_ws_(size_t covered_bytes) {
     }
     if (!nvfp4_dequant_ws_buf_)
         return false;
-    set_nvfp4_dequant_workspace(nvfp4_dequant_ws_buf_.get(), covered_bytes);
+    nvfp4_dequant_ws_ = {.buf = nvfp4_dequant_ws_buf_.get(), .size = covered_bytes};
+    qscratch_.nvfp4_dequant = &nvfp4_dequant_ws_;
     return true;
 }
 
 void GraphExecutor::release_nvfp4_dequant_ws_() {
     if (!nvfp4_dequant_ws_buf_ && !nvfp4_dequant_ws_deferred_)
         return;
-    set_nvfp4_dequant_workspace(nullptr, 0);  // clears a provider still pointing at this executor
+    nvfp4_dequant_ws_ = {};  // drops a provider still pointing at this executor
+    qscratch_.nvfp4_dequant = nullptr;
     // I5: releases a private allocation, drops an arena view.
     (void)nvfp4_dequant_ws_buf_.reset();
     nvfp4_dequant_ws_size_ = 0;

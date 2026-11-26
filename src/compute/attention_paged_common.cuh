@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/attention_paged.h"
 #include "compute/warp_reduce.cuh"
 #include "core/device_info.h"
 #include <cuda_runtime.h>
@@ -215,20 +216,18 @@ __device__ __forceinline__ void write_empty_split_sentinel(float* partial_out, i
 }
 
 // Split-K decision logic shared by all paged attention host launchers. Returns split count
-// (1 = no split-K), checked against the scratch buffer size.
-void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
-
+// (1 = no split-K: null `splitk`, or splits that do not fit it); *out_scratch_ptr = splitk.ptr.
 // split_units: CTAs per split when a kernel groups heads (0 = batch x n_heads); max_splits caps the
 // count, min_split_tokens the context share of one split (0 = none).
 static inline int compute_splitk_splits(int batch_size, int n_heads, int head_dim, int max_context_len,
-                                        int block_size, void** out_scratch_ptr, int split_units = 0,
-                                        int max_splits = 32, int min_split_tokens = 0) {
+                                        int block_size, const PagedSplitKScratch& splitk,
+                                        void** out_scratch_ptr, int split_units = 0, int max_splits = 32,
+                                        int min_split_tokens = 0) {
     int total_blocks_nosplit = split_units > 0 ? split_units : batch_size * n_heads;
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
 
-    void* scratch_ptr = nullptr;
-    size_t scratch_size = 0;
-    paged_attention_get_splitk_scratch(&scratch_ptr, &scratch_size);
+    void* scratch_ptr = splitk.ptr;
+    size_t scratch_size = splitk.size;
 
     int num_splits = 1;
     static int num_sms_cached = kpar_n_sms();

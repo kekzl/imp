@@ -386,12 +386,27 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
 // Host launcher
 // ---------------------------------------------------------------------------
 
-void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                  const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
-                                  const int* context_lens, int block_size, float scale, int max_context_len,
-                                  int sliding_window, float softcap, cudaStream_t stream,
-                                  int max_blocks_per_seq, int n_sinks, const void* attn_sinks,
-                                  PagedQ8Epilogue* q8_epi) {
+void paged_attention_decode_nvfp4(const PagedDecodeTensorArgs& a) {
+    const Tensor& Q = *a.Q;
+    const Tensor& K_cache = *a.K_cache;
+    const Tensor& V_cache = *a.V_cache;
+    Tensor& O = *a.O;
+    const auto* K_scales = static_cast<const uint8_t*>(a.K_scales);
+    const auto* V_scales = static_cast<const uint8_t*>(a.V_scales);
+    const int* block_tables = a.block_tables;
+    const int* context_lens = a.context_lens;
+    const int block_size = a.block_size;
+    const float scale = a.scale;
+    const int max_context_len = a.max_context_len;
+    int sliding_window = a.sliding_window;
+    const float softcap = a.softcap;
+    cudaStream_t stream = a.stream;
+    const int max_blocks_per_seq = a.max_blocks_per_seq;
+    const int n_sinks = a.n_sinks;
+    const void* attn_sinks = a.attn_sinks;
+    PagedQ8Epilogue* q8_epi = a.q8_epi;
+    const PagedSplitKScratch& splitk = a.splitk;
+
     // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
     // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
     if (n_sinks > 0)
@@ -424,8 +439,8 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     void* scratch_ptr = nullptr;
     if (const int mma_max_splits = process_diag_paged_nvfp4_mma(); mma_max_splits > 1 && n_kv_heads > 0) {
         const int mma_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len,
-                                                     block_size, &scratch_ptr, batch_size * n_kv_heads,
-                                                     mma_max_splits, 64);
+                                                     block_size, splitk, &scratch_ptr,
+                                                     batch_size * n_kv_heads, mma_max_splits, 64);
         if (paged_attention_nvfp4_mma_launch({.Q = reinterpret_cast<const half*>(Q.data),
                                               .K_cache = K_cache.data,
                                               .V_cache = V_cache.data,
@@ -450,7 +465,7 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
             return;
         }
     }
-    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size, splitk,
                                            &scratch_ptr, split_units, max_splits, split_units > 0 ? 128 : 0);
 
     // process_diag_paged_nvfp4_multitok: four tokens per warp iteration for
@@ -553,12 +568,27 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
 // MXFP4-KV launcher: same kernel as NVFP4 but with UE8M0 scale decode. Pool layout and scale
 // grouping match NVFP4 (design memo 3.1.2); only the scale byte semantics differ.
 
-void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                     const uint8_t* K_scales, const uint8_t* V_scales,
-                                     const int* block_tables, const int* context_lens, int block_size,
-                                     float scale, int max_context_len, int sliding_window, float softcap,
-                                     cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
-                                     const void* attn_sinks, PagedQ8Epilogue* q8_epi) {
+void paged_attention_decode_mxfp4_kv(const PagedDecodeTensorArgs& a) {
+    const Tensor& Q = *a.Q;
+    const Tensor& K_cache = *a.K_cache;
+    const Tensor& V_cache = *a.V_cache;
+    Tensor& O = *a.O;
+    const auto* K_scales = static_cast<const uint8_t*>(a.K_scales);
+    const auto* V_scales = static_cast<const uint8_t*>(a.V_scales);
+    const int* block_tables = a.block_tables;
+    const int* context_lens = a.context_lens;
+    const int block_size = a.block_size;
+    const float scale = a.scale;
+    const int max_context_len = a.max_context_len;
+    int sliding_window = a.sliding_window;
+    const float softcap = a.softcap;
+    cudaStream_t stream = a.stream;
+    const int max_blocks_per_seq = a.max_blocks_per_seq;
+    const int n_sinks = a.n_sinks;
+    const void* attn_sinks = a.attn_sinks;
+    PagedQ8Epilogue* q8_epi = a.q8_epi;
+    const PagedSplitKScratch& splitk = a.splitk;
+
     // StreamingLLM (n_sinks > 0): no sink range here, attend every live block and let the -1 sentinels
     // of evict_middle_blocks define sinks + window. LEARNED sinks are wired (#1345).
     if (n_sinks > 0)
@@ -576,7 +606,7 @@ void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, con
                         (static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float));
 
     void* scratch_ptr = nullptr;
-    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size, splitk,
                                            &scratch_ptr);
 
     if (num_splits > 1) {

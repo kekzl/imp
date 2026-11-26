@@ -181,13 +181,24 @@ void GraphExecutor::qsa_attend_rows_(int layer, const InferenceState& state, con
     // Split-K scratch as the dense decode uses it (the kernel re-checks the size against
     // rows x heads x splits and drops to fewer splits or none): without it one CTA per head
     // walks the 2051 tokens serially, 31.7 vs 54.1 tok/s at 4.5k context (2026-09-20).
-    paged_attention_set_splitk_scratch(qscratch_.splitk.data(), qscratch_.splitk_size);
     // The selection holds at most cap tokens, and below cap it is every token in order:
     // the dense path splits on the real context, so this must too or the same bytes
     // reduce in a different order.
     const int max_ctx = std::max(1, std::min(cap, ctx_hint > 0 ? ctx_hint : cap));
-    paged_attention_decode(Q, Ks, Vs, O, qsa_scratch_bt_, qsa_scratch_ctx_, bs, scale, max_ctx, 0,
-                           cfg.attn_logit_softcap, stream, qsa_blocks_per_row_, 0, nullptr, hd);
+    paged_attention_decode({.Q = &Q,
+                            .K_cache = &Ks,
+                            .V_cache = &Vs,
+                            .O = &O,
+                            .block_tables = qsa_scratch_bt_,
+                            .context_lens = qsa_scratch_ctx_,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = max_ctx,
+                            .softcap = cfg.attn_logit_softcap,
+                            .stream = stream,
+                            .max_blocks_per_seq = qsa_blocks_per_row_,
+                            .v_head_dim = hd,
+                            .splitk = {.ptr = qscratch_.splitk.data(), .size = qscratch_.splitk_size}});
 }
 
 bool GraphExecutor::qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv,
@@ -319,9 +330,19 @@ void GraphExecutor::qsa_debug_rows_(int layer, const InferenceState& state, cons
     Tensor O(d_o, QType::F16, 4, qd, true);
     Tensor Kc(cache->k_ptr(kv_layer, 0), QType::F16, 4, cs, true);
     Tensor Vc(cache->v_ptr(kv_layer, 0), QType::F16, 4, cs, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode(Q, Kc, Vc, O, d_bt, d_ctx, bs, scale, p0 + rows, 0, cfg.attn_logit_softcap, stream,
-                           mb, 0, nullptr, hd);
+    paged_attention_decode({.Q = &Q,
+                            .K_cache = &Kc,
+                            .V_cache = &Vc,
+                            .O = &O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = bs,
+                            .scale = scale,
+                            .max_context_len = p0 + rows,
+                            .softcap = cfg.attn_logit_softcap,
+                            .stream = stream,
+                            .max_blocks_per_seq = mb,
+                            .v_head_dim = hd});  // no split-K scratch
     // Selected path into a private output so ao stays FA2's for the comparison.
     qsa_attend_rows_(layer, state, q_rows, d_o2, rows, bt, scale, p0 + rows, stream);
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));

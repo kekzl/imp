@@ -206,7 +206,7 @@ SwaGate resolve_swa_sizing(const KvInitCtx& c, const std::vector<int>& kv_layer_
 // explicit config wins. key_out/path_out name the entry the first forward records.
 void load_library_reserve(const KvInitCtx& c, const std::function<uint64_t()>& fingerprint,
                           LibraryReserveKey& key_out, std::string& path_out) {
-    if (c.ec.library_reserve_mb >= 0 || c.rc.vram.library_reserve_cache == "off")
+    if (c.ec.library_reserve_mb.value_or(-1) >= 0 || c.rc.vram.library_reserve_cache == "off")
         return;
     const std::string path = c.rc.vram.library_reserve_cache.empty() ? library_reserve_cache_default_path()
                                                                      : c.rc.vram.library_reserve_cache;
@@ -227,7 +227,7 @@ void load_library_reserve(const KvInitCtx& c, const std::function<uint64_t()>& f
         IMP_LOG_INFO(
             "library reserve: %d MiB from the measurement cache (%s) — the default "
             "constant is %zu MiB",
-            c.ec.library_reserve_mb, path.c_str(), kMeasuredLibraryReserveBytes >> 20);
+            *c.ec.library_reserve_mb, path.c_str(), kMeasuredLibraryReserveBytes >> 20);
     } else if (!path.empty()) {
         // No entry: log the constant charge HERE, before pools are sized -
         // reporting only after the first forward would be too late, the KV
@@ -303,13 +303,13 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
         probe.workspace_estimate_available = true;
     }
     probe.kv_growable_ceiling_blocks = c.rc.kv_cache.growable ? vb.kv_max_blocks : 0;
-    probe.vision_tower_unmodelled = !c.ec.mmproj_path.empty();
+    probe.vision_tower_unmodelled = !c.ec.mmproj_path.value_or("").empty();
     // Use config_.library_reserve_mb, NOT the runtime-config field: the
     // loader above writes the remembered measurement into the former only
     // (AUDIT B70).
-    probe.library_reserve_bytes = c.ec.library_reserve_mb < 0
+    probe.library_reserve_bytes = c.ec.library_reserve_mb.value_or(-1) < 0
                                       ? kMeasuredLibraryReserveBytes
-                                      : static_cast<size_t>(c.ec.library_reserve_mb) << 20;
+                                      : static_cast<size_t>(*c.ec.library_reserve_mb) << 20;
     probe.n_kv_layers = kv.n_kv_layers;
     probe.n_swa_layers = kv.n_swa_layers;
     probe.swa_live_tokens = kv.swa_live_tokens;
@@ -328,8 +328,8 @@ ShadowPlanProbe build_shadow_probe(const KvInitCtx& c, const VRAMBudget& vb, con
 // (B62/B65/B66). The residual clamp below can only shrink it further, never
 // grow it, so a plan wrong about the device cannot overcommit.
 int kv_blocks_from_plan(const EngineConfig& ec, const PlanResult& plan, const VRAMBudget& vb) {
-    if (ec.kv_cache_max_blocks > 0)
-        return ec.kv_cache_max_blocks;  // operator pin wins over both
+    if (ec.kv_cache_max_blocks.value_or(0) > 0)
+        return *ec.kv_cache_max_blocks;  // operator pin wins over both
     if (plan.ok) {
         const int max_blocks = plan.plan.kv.blocks;
         if (max_blocks != vb.kv_max_blocks) {
@@ -363,7 +363,7 @@ void log_sparse_minmax_pool(const EngineConfig& ec, const KvShape& kv, int max_b
         return;
     const double mm_mib = static_cast<double>(kv.minmax_bytes_per_layer) * kv.n_kv_layers * max_blocks /
                           (1024.0 * 1024.0);
-    if (ec.kv_cache_max_blocks > 0) {
+    if (ec.kv_cache_max_blocks.value_or(0) > 0) {
         IMP_LOG_WARN(
             "attention.sparse_topk_tokens: the key min/max pool adds %.1f MiB ON TOP "
             "of the pinned kv_cache.max_blocks pool - pin with that headroom or "
@@ -892,9 +892,9 @@ bool Engine::init_kv_cache() {
     // Resolved in init_resolve_kv_block_size_() before the executor sizes its
     // workspaces - anything sized there needs the real value, not kKVBlockSize.
     // Fallback keeps this function correct if that resolver was skipped.
-    if (config_.kv_block_size <= 0)
+    if (config_.kv_block_size.value_or(0) <= 0)
         config_.kv_block_size = kKVBlockSize;
-    const int kv_bs = config_.kv_block_size;
+    const int kv_bs = *config_.kv_block_size;
     kv.kv_bs = kv_bs;
     // A decode step's table holds kv_ahead_tokens_ more rows (Inkling lookahead).
     int blocks_per_seq = (config_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs;
@@ -958,7 +958,8 @@ bool Engine::init_kv_cache() {
     const int ink_cap = inkling_pool_cap_(kv_bs);
     int max_blocks = std::min(kv_blocks_from_plan(config_, plan, vram_budget), ink_cap);
     kv_replan_arm(kv_replan_, probe, vram_budget, max_blocks, plan.ok,
-                  config_.library_reserve_mb < 0 && config_.kv_cache_max_blocks <= 0);
+                  config_.library_reserve_mb.value_or(-1) < 0 &&
+                      config_.kv_cache_max_blocks.value_or(0) <= 0);
     log_sparse_minmax_pool(config_, kv, max_blocks);
 
     // Weight caches build BEFORE the KV pool (A7 step 6.4): caches have bounded
@@ -997,7 +998,7 @@ bool Engine::init_kv_cache() {
     // was a no-op on planned loads.
     // kv_cache.max_blocks is a ceiling, not a floor: with growable on by default,
     // a pinned pool must never grow past the pin.
-    const int kv_blocks_planned = config_.kv_cache_max_blocks > 0
+    const int kv_blocks_planned = config_.kv_cache_max_blocks.value_or(0) > 0
                                       ? max_blocks
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
     max_blocks = size_kv_from_residual(vram_budget, config_, kv, per_block_total_bytes, swa_fixed_bytes,

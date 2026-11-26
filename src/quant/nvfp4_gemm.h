@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "quant/nvfp4_dequant_ws.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -33,9 +34,10 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y, cudaStrea
 
 // NVFP4 GEMM via cuBLASLt (M>1, e.g. prefill); falls back to dequant+standard GEMM if
 // cuBLASLt NVFP4 is unavailable. beta: output accumulation factor (default 0=overwrite);
-// beta=1 enables residual-fused GEMM: y = dequant(A)@B + y.
+// beta=1 enables residual-fused GEMM: y = dequant(A)@B + y. ws: the caller's dequant workspace
+// (null: the lazy cudaMalloc buffer, refused under capture).
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream = nullptr,
-                float beta = 0.0f);
+                float beta = 0.0f, Nvfp4DequantWorkspace* ws = nullptr);
 
 // K-parallel NVFP4 GEMV host launchers for decode (M=1): raw NvFP4QuantResult+FP16
 // pointers, no Tensor overhead. 128 threads (4 warps), 1 row/block, M blocks.
@@ -181,23 +183,9 @@ void nvfp4_gemv_pdl_register();
 // nvfp4_gemv_pdl_register().
 void nvfp4_gemv_batched_pdl_register();
 
-// Sets the pre-allocated dequant scratch buffer for gemm_nvfp4's M>1 fallback
-// (dequant->FP16->cuBLAS): when set and large enough, reused instead of a cudaMalloc, which
-// would fail inside CUDA stream capture. nullptr/0 clears it (e.g. engine destroy). Sized
-// for the FP16 dequant of the LARGEST NVFP4 weight in the model (N*K*2 bytes); caller owns
-// the buffer's lifetime, this only stores pointer+size.
-void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes);
-
-// The same workspace, taken at the first fallback that needs it: provide(ctx) returns the buffer
-// of size_bytes (null: none, the fallback then behaves as without a workspace). It runs once, on
-// the host, before the kernel that reads the buffer is launched or captured.
-// set_nvfp4_dequant_workspace(nullptr, 0) clears the provider too.
-using Nvfp4WorkspaceProvider = void* (*)(void* ctx);
-void set_nvfp4_dequant_workspace_provider(Nvfp4WorkspaceProvider provide, void* ctx, size_t size_bytes);
-
 // Test probe: current size of the lazy cudaMalloc'd dequant buffer (the legacy
-// non-graph-safe path). After set_nvfp4_dequant_workspace() is set, subsequent gemm_nvfp4
-// calls should not grow this. Exposed for tests to assert workspace-vs-lazy choice.
+// non-graph-safe path). A gemm_nvfp4 call whose workspace covers the weight does not grow
+// this. Exposed for tests to assert workspace-vs-lazy choice.
 size_t nvfp4_lazy_dequant_buf_size_for_testing();
 
 }  // namespace imp

@@ -488,16 +488,17 @@ TEST(MLAAttnOutput, VHeadDimWidth) {
     float scale = 1.0f / sqrtf((float)qk_hd);
 
     // Call paged_attention_decode with v_head_dim=v_hd
-    paged_attention_decode(Q_t, K_c, V_c, O_t,
-                           d_bt, d_cl,
-                           block_size, scale,
-                           /*max_context_len=*/n_ctx,
-                           /*sliding_window=*/0, /*softcap=*/0.0f,
-                           /*stream=*/nullptr,
-                           /*max_blocks_per_seq=*/1,
-                           /*n_sinks=*/0,
-                           /*attn_sinks=*/nullptr,
-                           /*v_head_dim=*/v_hd);
+    paged_attention_decode({.Q = &Q_t,
+                            .K_cache = &K_c,
+                            .V_cache = &V_c,
+                            .O = &O_t,
+                            .block_tables = d_bt,
+                            .context_lens = d_cl,
+                            .block_size = block_size,
+                            .scale = scale,
+                            .max_context_len = n_ctx,
+                            .max_blocks_per_seq = 1,
+                            .v_head_dim = v_hd});
     cudaDeviceSynchronize();
 
     // Read output — should be [batch=1, n_heads=2, v_hd=8] = 16 floats
@@ -796,16 +797,17 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
     Tensor O_dec(d_o_dec, QType::F16, 4, o_shape, true);
 
     float scale = 1.0f / sqrtf((float)head_dim);
-    paged_attention_decode(Q_dec, K_c, V_c, O_dec,
-                           d_bt, d_cl,
-                           block_size, scale,
-                           /*max_context_len=*/n_ctx,
-                           /*sliding_window=*/0, /*softcap=*/0.0f,
-                           /*stream=*/nullptr,
-                           /*max_blocks_per_seq=*/1,
-                           /*n_sinks=*/0,
-                           /*attn_sinks=*/nullptr,
-                           /*v_head_dim=*/v_head_dim);
+    paged_attention_decode({.Q = &Q_dec,
+                            .K_cache = &K_c,
+                            .V_cache = &V_c,
+                            .O = &O_dec,
+                            .block_tables = d_bt,
+                            .context_lens = d_cl,
+                            .block_size = block_size,
+                            .scale = scale,
+                            .max_context_len = n_ctx,
+                            .max_blocks_per_seq = 1,
+                            .v_head_dim = v_head_dim});
     cudaDeviceSynchronize();
 
     // Verify decode output dimensions and values
@@ -911,20 +913,27 @@ TEST(MLAAttnOutput, PaddedSymmetricSplitKMatchesGeneric) {
     const int max_ctx = ctx[0];
 
     // Reference: asymmetric call, the generic kernel (split-K is off for vhd != hd).
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode(Q, K_c, V_c, O_ref, d_bt, d_cl, bs, scale, max_ctx, 0, 0.0f, nullptr,
-                           blocks_per_seq, 0, nullptr, vhd);
+    PagedDecodeTensorArgs args{.Q = &Q,
+                               .K_cache = &K_c,
+                               .V_cache = &V_c,
+                               .O = &O_ref,
+                               .block_tables = d_bt,
+                               .context_lens = d_cl,
+                               .block_size = bs,
+                               .scale = scale,
+                               .max_context_len = max_ctx,
+                               .max_blocks_per_seq = blocks_per_seq,
+                               .v_head_dim = vhd};
+    paged_attention_decode(args);
 
     // Fast path: symmetric HD 192 with split-K scratch for up to 64 splits.
     void* d_splitk = nullptr;
     const size_t splitk_bytes = static_cast<size_t>(batch) * nh * 64 * (2 + hd) * sizeof(float);
     cudaMalloc(&d_splitk, splitk_bytes);
-    paged_attention_set_splitk_scratch(d_splitk, splitk_bytes);
-    paged_attention_decode_mla_padded(Q, K_c, V_c, O_fast, static_cast<half*>(O_full.data), O_full.numel(),
-                                      d_bt, d_cl, bs, scale, max_ctx, 0, 0.0f, nullptr, blocks_per_seq, 0,
-                                      nullptr, vhd);
+    args.O = &O_fast;  // the same fields through the padded route, split-K on
+    args.splitk = {.ptr = d_splitk, .size = splitk_bytes};
+    paged_attention_decode_mla_padded(args, static_cast<half*>(O_full.data), O_full.numel());
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    paged_attention_set_splitk_scratch(nullptr, 0);
 
     auto ref = read_gpu_fp16(O_ref);
     auto fast = read_gpu_fp16(O_fast);

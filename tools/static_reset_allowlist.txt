@@ -12,9 +12,6 @@
 
 src/compute/mmq_q8_imma_scratch.cu::g_imma_weights  reset-by=mmq_q8_imma_release_all  src/compute/mmq_q8_imma.cu frees every plane and clears the map; its registered hook mmq_q8_imma_reset_static_cuda_state calls it
 src/compute/mmq_q8_imma_scratch.cu::g_last_quant  reset-by=mmq_q8_imma_release_all  it calls imma_act_forget(); the memo also compares g_imma_act.gen before it is trusted
-src/quant/nvfp4_gemm.cu::s_nvfp4_dequant_ws_buf  reset-by=release_nvfp4_dequant_ws_  caller-owned executor workspace: src/exec/executor_lazy_scratch.cpp calls set_nvfp4_dequant_workspace(nullptr, 0) before it frees the buffer
-src/quant/nvfp4_gemm.cu::s_nvfp4_dequant_ws_provide  reset-by=release_nvfp4_dequant_ws_  provider callback into the executor, cleared by the same set_nvfp4_dequant_workspace(nullptr, 0)
-src/quant/nvfp4_gemm.cu::s_nvfp4_dequant_ws_ctx  reset-by=release_nvfp4_dequant_ws_  the executor pointer handed to the provider, cleared by the same set_nvfp4_dequant_workspace(nullptr, 0)
 src/runtime/engine_scheduler.cpp::g_ot  host timing sums (diagnostics.step_timing), holds no device resource
 src/runtime/engine_scheduler.cpp::g_step_timing  host timing sums (diagnostics.step_timing), holds no device resource
 

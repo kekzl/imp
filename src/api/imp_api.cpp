@@ -409,7 +409,9 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         imp::EngineConfig ecfg;
         ecfg.max_batch_size = config->max_batch_size;
         ecfg.max_seq_len = config->max_seq_len;
-        ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
+        // ImpConfig has no "unset" (ABI): kv_cache_max_blocks 0 and mmproj_path null take imp.conf.
+        if (config->kv_cache_max_blocks > 0)
+            ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
         ecfg.compute_dtype = map_dtype(config->compute_dtype);
         ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
         ecfg.use_pdl = (config->enable_pdl != 0);

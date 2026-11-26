@@ -29,4 +29,13 @@ struct InklingConfig {
     bool is_loop(int layer) const { return layer >= loop_start && layer < loop_end; }
 };
 
+// The DSpark draft's shape (config.json mtp_config, exec/inkling_draft.h): the slab plans its rings.
+struct InklingDraftConfig {
+    int hidden = 2304, layers = 3, heads = 24, kv_heads = 8, head_dim = 128, inter = 9216;
+    int block = 8, rank = 256, window = 1024, vocab_padded = 201024;
+    float eps = 1e-6f, theta = 1e6f;
+    std::vector<int> taps;    // target visits whose input stream is a feature; the last = final state
+    std::vector<bool> local;  // per layer: attends the last window positions before the block only
+};
+
 }  // namespace imp

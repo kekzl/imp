@@ -47,17 +47,26 @@ bool InklingForward::draft_due_() {
     return due;
 }
 
-bool InklingForward::enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed) {
+bool InklingForward::enable_lookahead(InklingSpecHooks hooks, std::vector<int> taps, const half* embed,
+                                      const InklingLookRegion& look) {
     const InklingConfig& c = w_->cfg;
     const size_t H = static_cast<size_t>(c.hidden), n = conv_state_floats_ * conv_state_.size();
     if (taps.size() < 2 || !embed || !ok_)
         return false;
-    feat_ = F_(taps.size() * static_cast<size_t>(seg_) * H);
-    conv_pre_ = F_(n);
-    conv_tmp_ = F_(n);
-    conv_log_ = F_(n / 3 * kGraphRows);
-    look_h_ = Hf_(H * kGraphRows);
-    d_look_ids_ = static_cast<int32_t*>(alloc_(kGraphRows * sizeof(int32_t)));
+    if (look && (look.l->taps != static_cast<int>(taps.size()) || look.l->seg != seg_)) {
+        IMP_LOG_WARN("inkling: lookahead region planned for %d taps x %d rows, not %zu x %d", look.l->taps,
+                     look.l->seg, taps.size(), seg_);
+        return false;
+    }
+    // Planes in the slab's region (inkling_look_layout), or allocated here (a standalone forward).
+    const InklingLookLayout* l = look.l;
+    feat_ = look ? look.at<float>(l->feat) : F_(taps.size() * static_cast<size_t>(seg_) * H);
+    conv_pre_ = look ? look.at<float>(l->conv_pre) : F_(n);
+    conv_tmp_ = look ? look.at<float>(l->conv_tmp) : F_(n);
+    conv_log_ = look ? look.at<float>(l->conv_log) : F_(n / 3 * kGraphRows);
+    look_h_ = look ? look.at<half>(l->look_h) : Hf_(H * kGraphRows);
+    d_look_ids_ = look ? look.at<int32_t>(l->ids)
+                       : static_cast<int32_t*>(alloc_(kGraphRows * sizeof(int32_t)));
     if (!ok_)
         return false;
     taps_ = std::move(taps);

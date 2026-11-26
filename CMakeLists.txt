@@ -1067,6 +1067,8 @@ if(IMP_BUILD_TESTS)
         tests/test_engine_config_bridge.cpp
         # C-11: Engine::init refuses a failed stream create (no device in the CPU lane).
         tests/test_engine_stream_open.cpp
+        # D-9: gemm_nvfp4's fallback workspace is a per-call argument, the deferred take runs once.
+        tests/test_nvfp4_dequant_ws.cpp
         tests/test_mtp_auto.cpp
         tests/test_mtp_draft_rows.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull

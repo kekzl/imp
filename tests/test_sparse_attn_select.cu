@@ -732,7 +732,17 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     Tensor O2(d_o2, QType::F16, 4, qd, true);
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
 
-    paged_attention_decode(Q, K, V, O1, d_bt, d_ctx, kBS, scale, ctx_len, 0, 0.0f, nullptr, 6);
+    PagedDecodeTensorArgs args{.Q = &Q,
+                               .K_cache = &K,
+                               .V_cache = &V,
+                               .O = &O1,
+                               .block_tables = d_bt,
+                               .context_lens = d_ctx,
+                               .block_size = kBS,
+                               .scale = scale,
+                               .max_context_len = ctx_len,
+                               .max_blocks_per_seq = 6};
+    paged_attention_decode(args);
 
     // Identity compaction through the real selection kernel (budget >= blocks).
     __half2* d_mm = dmalloc<__half2>(static_cast<size_t>(pool_blocks) * nkv * hd);
@@ -743,7 +753,11 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, 6, /*budget=*/8, 1, 1,
                          /*engage=*/8, /*table=*/8, d_scores, d_sbt, d_sctx,
                          /*std_coef=*/1.0f, nullptr);
-    paged_attention_decode(Q, K, V, O2, d_sbt, d_sctx, kBS, scale, ctx_len, 0, 0.0f, nullptr, 8);
+    args.O = &O2;
+    args.block_tables = d_sbt;
+    args.context_lens = d_sctx;
+    args.max_blocks_per_seq = 8;
+    paged_attention_decode(args);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     auto o1 = dread(d_o1, static_cast<size_t>(nh) * hd);
@@ -843,8 +857,17 @@ TEST(SparseAttnE2E, MlaGeometryFullBudgetBitIdentical) {
     Tensor O1(d_o1, QType::F16, 4, qd, true);
     Tensor O2(d_o2, QType::F16, 4, qd, true);
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    paged_attention_decode(Q, K, V, O1, f.d_bt, f.d_ctx, kBS, scale, MlaSparseFixture::ctx_len, 0, 0.0f,
-                           nullptr, MlaSparseFixture::n_blocks);
+    PagedDecodeTensorArgs args{.Q = &Q,
+                               .K_cache = &K,
+                               .V_cache = &V,
+                               .O = &O1,
+                               .block_tables = f.d_bt,
+                               .context_lens = f.d_ctx,
+                               .block_size = kBS,
+                               .scale = scale,
+                               .max_context_len = MlaSparseFixture::ctx_len,
+                               .max_blocks_per_seq = MlaSparseFixture::n_blocks};
+    paged_attention_decode(args);
 
     int* d_sbt = dmalloc<int>(32);
     int* d_sctx = dmalloc<int>(1);
@@ -852,8 +875,11 @@ TEST(SparseAttnE2E, MlaGeometryFullBudgetBitIdentical) {
     int ctx = 0;
     f.select(/*budget=*/32, table, ctx, d_sbt, d_sctx);
     EXPECT_EQ(ctx, MlaSparseFixture::ctx_len);
-    paged_attention_decode(Q, K, V, O2, d_sbt, d_sctx, kBS, scale, MlaSparseFixture::ctx_len, 0, 0.0f,
-                           nullptr, 32);
+    args.O = &O2;
+    args.block_tables = d_sbt;
+    args.context_lens = d_sctx;
+    args.max_blocks_per_seq = 32;
+    paged_attention_decode(args);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto o1 = dread(d_o1, static_cast<size_t>(nh) * hd);
     auto o2 = dread(d_o2, static_cast<size_t>(nh) * hd);

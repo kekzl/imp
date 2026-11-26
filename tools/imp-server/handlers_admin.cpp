@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "sampling_fields.h"
 #include "utils.h"
+#include "runtime/config.h"
 
 #include <chrono>
 #include <cstdio>

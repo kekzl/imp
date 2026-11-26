@@ -471,12 +471,27 @@ __global__ void paged_attention_decode_int8_kernel(
 // INT8 dp4a Paged Attention — Host launcher
 // ===========================================================================
 
-void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                 const half* K_scales, const half* V_scales, const int* block_tables,
-                                 const int* context_lens, int block_size, float scale, int max_context_len,
-                                 int sliding_window, float softcap, cudaStream_t stream,
-                                 int max_blocks_per_seq, int n_sinks, const void* attn_sinks,
-                                 PagedQ8Epilogue* q8_epi) {
+void paged_attention_decode_int8(const PagedDecodeTensorArgs& a) {
+    const Tensor& Q = *a.Q;
+    const Tensor& K_cache = *a.K_cache;
+    const Tensor& V_cache = *a.V_cache;
+    Tensor& O = *a.O;
+    const auto* K_scales = static_cast<const half*>(a.K_scales);
+    const auto* V_scales = static_cast<const half*>(a.V_scales);
+    const int* block_tables = a.block_tables;
+    const int* context_lens = a.context_lens;
+    const int block_size = a.block_size;
+    const float scale = a.scale;
+    const int max_context_len = a.max_context_len;
+    int sliding_window = a.sliding_window;
+    const float softcap = a.softcap;
+    cudaStream_t stream = a.stream;
+    const int max_blocks_per_seq = a.max_blocks_per_seq;
+    const int n_sinks = a.n_sinks;
+    const void* attn_sinks = a.attn_sinks;
+    PagedQ8Epilogue* q8_epi = a.q8_epi;
+    const PagedSplitKScratch& splitk = a.splitk;
+
     // StreamingLLM (n_sinks > 0): these kernels have no sink range, so attend every live block and let
     // the -1 sentinels of evict_middle_blocks define sinks + window. Learned sinks (attn_sinks,
     // gpt-oss) wired since #1345 (same as FP8, #1346).
@@ -496,7 +511,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
 
     // ---- Split-K decision ----
     void* scratch_ptr = nullptr;
-    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size, splitk,
                                            &scratch_ptr);
 
     if (num_splits > 1) {

@@ -416,7 +416,6 @@ TEST(GptOssSinkRef, PagedDecodeHd64SinkMatchesReference) {
     void* d_scratch = nullptr;
     const size_t scratch_bytes = size_t{16} << 20;
     CUDA_CHECK(cudaMalloc(&d_scratch, scratch_bytes));
-    paged_attention_set_splitk_scratch(d_scratch, scratch_bytes);
     std::vector<double> sink(n_heads);
     std::vector<half> sink_h(n_heads);
     for (int h = 0; h < n_heads; h++) {
@@ -471,8 +470,18 @@ TEST(GptOssSinkRef, PagedDecodeHd64SinkMatchesReference) {
             for (bool single_split : {false, true}) {
                 process_diag_set_force_splitk_fallback(single_split);
                 cudaMemset(d_o, 0, Q.size() * sizeof(half));
-                paged_attention_decode(tq, tk, tv, to, d_bt, d_ctx, kBs, scale, kv_len, 0, 0.0f, nullptr, nb,
-                                       0, d_s);
+                paged_attention_decode({.Q = &tq,
+                                        .K_cache = &tk,
+                                        .V_cache = &tv,
+                                        .O = &to,
+                                        .block_tables = d_bt,
+                                        .context_lens = d_ctx,
+                                        .block_size = kBs,
+                                        .scale = scale,
+                                        .max_context_len = kv_len,
+                                        .max_blocks_per_seq = nb,
+                                        .attn_sinks = d_s,
+                                        .splitk = {.ptr = d_scratch, .size = scratch_bytes}});
                 CUDA_CHECK(cudaDeviceSynchronize());
                 std::vector<half> oh(Q.size());
                 cudaMemcpy(oh.data(), d_o, oh.size() * sizeof(half), cudaMemcpyDeviceToHost);
@@ -493,7 +502,6 @@ TEST(GptOssSinkRef, PagedDecodeHd64SinkMatchesReference) {
                         static_cast<void*>(d_ctx)})
             cudaFree(p);
     }
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
 }
 

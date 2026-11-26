@@ -127,7 +127,8 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
         gguf_source_fallback(h, input, output, ctx, decode_rows);
         return;
     }
-    imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream);
+    imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream,
+                       ctx.nvfp4_dequant_ws());
 }
 
 // One NVFP4 prefill GEMM (own tile, cuBLASLt on refusal) via the kernel registry: quantizes `input`
@@ -806,7 +807,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         nv.N = h.shape[0];
         nv.K = h.shape[1] * 2;  // packed K/2 → logical K
         nv.owned = false;       // borrows resident weight storage
-        gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta);
+        gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta, ctx.nvfp4_dequant_ws());
         return;
     }
 

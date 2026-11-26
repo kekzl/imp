@@ -6,6 +6,7 @@
 #include "handlers_internal.h"
 
 #include "model/tokenizer.h"
+#include "runtime/config.h"
 
 #include <gtest/gtest.h>
 #include <httplib.h>

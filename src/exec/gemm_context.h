@@ -52,6 +52,9 @@ struct GemmContext {
         return ctx;
     }
 
+    // gemm_nvfp4's M>1 fallback workspace of this call (audit D-9); null without a qscratch.
+    Nvfp4DequantWorkspace* nvfp4_dequant_ws() const { return qscratch ? qscratch->nvfp4_dequant : nullptr; }
+
     // Convenience: set beta for residual-add pattern
     GemmContext with_beta(float b) const {
         GemmContext c = *this;

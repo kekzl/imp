@@ -1,6 +1,7 @@
 #include "mtp_auto.h"
 
 #include "core/logging.h"
+#include "runtime/config.h"
 #include "model/mtp_head.h"
 #include "model/safetensors_loader.h"
 #include "runtime/spec_batch_verify_state.h"
@@ -9,11 +10,11 @@
 
 namespace imp::tools {
 
-void mtp_auto_restore_startup(RuntimeConfig& cfg, std::optional<RuntimeConfig>& startup) {
+void mtp_auto_restore_startup(RuntimeConfig& cfg, std::unique_ptr<RuntimeConfig>& startup) {
     if (startup)
         cfg = *startup;
     else
-        startup = cfg;
+        startup = std::make_unique<RuntimeConfig>(cfg);
 }
 
 int mtp_auto_request_k(const RuntimeConfig& cfg) {

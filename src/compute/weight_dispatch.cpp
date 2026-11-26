@@ -78,7 +78,8 @@ static void mxfp4_prefill_gemm(const CutlassMxFP4Weight& mw, const Tensor& x, Te
 }
 
 void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
-                   float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream) {
+                   float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream,
+                   Nvfp4DequantWorkspace* nvfp4_ws) {
     switch (w.primary_tier) {
         // ---- FP16 -------------------------------------------------------
         case StorageTier::FP16: {
@@ -133,7 +134,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                                 static_cast<int>(tmp.N), static_cast<int>(tmp.K), stream);
             } else {
                 // Prefill or beta!=0: dequant + FP16 GEMM.
-                gemm_nvfp4(tmp, x, y, stream, beta);
+                gemm_nvfp4(tmp, x, y, stream, beta, nvfp4_ws);
             }
             return;
         }

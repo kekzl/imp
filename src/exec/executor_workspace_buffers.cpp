@@ -387,7 +387,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
         // T2 (A7 step 4b.2), charged as splitk_scratch: engine-persistent, sized from shape +
-        // batch + context. paged_attention_set_splitk_scratch treats null as "no split-K"; the
+        // batch + context. PagedDecodeTensorArgs::splitk null means "no split-K"; the
         // kernel re-checks size before use, so a closed arena only costs the split path.
         StableSpan<std::byte> slab = engine_arena().take_bytes(sz);
         if (slab.empty()) {
@@ -1417,7 +1417,7 @@ void GraphExecutor::free_buffers() {
     dev_expert_cache_.destroy();
     expert_cache_.destroy();
 
-    // Free gemm_nvfp4 dequant workspace and unregister from the free function.
+    // Free gemm_nvfp4 dequant workspace.
     release_nvfp4_dequant_ws_();
     // Releases only SfAtom scales it built itself; .data and a borrowed SfAtom are cache views.
     lm_head_cutlass_ = CutlassNvFP4CacheEntry{};

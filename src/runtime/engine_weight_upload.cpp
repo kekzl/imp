@@ -142,7 +142,7 @@ UploadReserve upload_reserve_for(const Model& model, const EngineConfig& cfg, co
     UploadReserve r;
     r.fixed_bytes = workspace_bytes + (256ULL << 20);
     int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-    int est_bs = cfg.kv_block_size > 0 ? cfg.kv_block_size : kKVBlockSize;
+    int est_bs = cfg.kv_block_size.value_or(0) > 0 ? *cfg.kv_block_size : kKVBlockSize;
     int blocks_per_seq = (cfg.max_seq_len + est_bs - 1) / est_bs;
     int n_attn = 0;
     for (int i = 0; i < mcfg.n_layers; i++)
@@ -225,7 +225,7 @@ bool Engine::init_weights() {
     executor_->set_dispatch_policy(dispatch_policy_);
     // Before init(): allocate_workspaces() sizes the sparse decode budget in
     // BLOCKS, and the conversion from a token count needs the real block size.
-    executor_->set_kv_block_size(config_.kv_block_size);
+    executor_->set_kv_block_size(config_.kv_block_size.value_or(0));
     executor_->set_kv_cache_dtype(config_.kv_cache_dtype);
     executor_->set_prefill_chunk(resolve_prefill_chunk_size_());
     {
