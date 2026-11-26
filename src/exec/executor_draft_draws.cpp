@@ -5,6 +5,7 @@
 #include "compute/sampling.h"
 #include "exec/executor.h"
 #include "exec/executor_sampling_internal.h"
+#include "exec/lm_head_route.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
@@ -31,7 +32,9 @@ int GraphExecutor::draft_rows_vocab_(const NvFP4QuantResult* draft_nvfp4, int dr
     const void* w8 = nullptr;
     const float* s8 = nullptr;
     const bool w4a16 = draft_nvfp4 != nullptr && draft_nvfp4->packed_data != nullptr;
-    const bool fp8 = !w4a16 && !lm_head_cutlass_ready_ && lm_head_fp8_view(w8, s8);
+    // Same route as lm_head_rows_argmax; the FP8 arm does not depend on the tile scratch.
+    const bool fp8 = draft_head_route(w4a16, lm_head_fp8_view(w8, s8), lm_head_cutlass_ready_,
+                                      /*tile_scratch=*/true) == DraftHeadRoute::Fp8Head;
     // A draft copy over a head prefix (QuantPipeline::mtp_draft_lm_head_nvfp4_) holds N < vocab rows.
     return mtp_draft_pass_rows(model_->config().vocab_size, w4a16 ? draft_nvfp4->N : 0, fp8, draft_vocab);
 }

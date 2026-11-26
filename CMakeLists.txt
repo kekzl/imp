@@ -1291,6 +1291,8 @@ if(IMP_BUILD_TESTS)
         # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
         # (no kernel launches on these arms, so the CPU lane holds it).
         tests/test_gemm_fallback_fails_loud.cpp
+        # B-112: one LM-head route for serving, perplexity, prompt logprobs and the draft argmax head.
+        tests/test_lm_head_route.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
         tests/test_fmha_sm120_tile_select.cpp

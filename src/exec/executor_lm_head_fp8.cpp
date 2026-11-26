@@ -2,6 +2,8 @@
 // family for n==1 decode, batched decode, ragged prefill and --perplexity: row bits never depend on n.
 
 #include "exec/executor.h"
+#include "exec/executor_kernels.h"
+#include "exec/lm_head_route.h"
 #include "compute/gemm.h"
 #include "compute/layernorm.h"
 #include "core/logging.h"
@@ -57,6 +59,35 @@ bool GraphExecutor::lm_head_fp8_tier_(const WeightHandle& lm_h, const Tensor& no
     scale_rows_f32(static_cast<float*>(lg.data), qscratch_.d_act_row_scales.data(), n,
                    static_cast<int>(lg.shape[lg.ndim - 1]), stream);
     return true;
+}
+
+LmHeadFacts GraphExecutor::lm_head_facts_() const {
+    const void* w = model_->output_proj().data;
+    const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
+                                   ? &registry_.handle(model_->out_proj_id)
+                                   : nullptr;
+    LmHeadFacts f;
+    f.tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
+    f.fp8_cache = wcache_.fp8.contains(w);
+    f.nvfp4_cache = wcache_.nvfp4.contains(w);
+    f.mxfp4_linear = f.tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales != nullptr;
+    f.dp4a_ready = qscratch_.q8_1_buf.data() != nullptr && compute_dtype_ == QType::F16 &&
+                   is_dp4a_qtype(model_->out_proj_.qtype);
+    return f;
+}
+
+NvFP4QuantResult GraphExecutor::lm_head_nvfp4_() const {
+    if (auto it = wcache_.nvfp4.find(model_->output_proj().data); it != wcache_.nvfp4.end())
+        return it->second;
+    const auto& cfg = model_->config();
+    const WeightHandle& h = registry_.handle(model_->out_proj_id);
+    NvFP4QuantResult r;
+    r.packed_data = h.payload.nvfp4.data;
+    r.micro_scales = h.payload.nvfp4.block_scales;
+    r.tensor_scale = (h.payload.nvfp4.tensor_scale != nullptr) ? *h.payload.nvfp4.tensor_scale : 1.0f;
+    r.N = cfg.vocab_size;
+    r.K = cfg.d_model;
+    return r;
 }
 
 }  // namespace imp

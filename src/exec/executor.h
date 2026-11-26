@@ -76,6 +76,7 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
 // standard forward pass for efficiency. No graph walking at runtime.
 struct GemmContext;  // defined in gemm_context.h
 struct KdaScanArgs;  // defined in compute/kda.h; only executor_kda.cu builds one
+struct LmHeadFacts;  // defined in exec/lm_head_route.h
 struct VRAMBudget;   // defined in runtime/vram_budget.h; only pre_dequant_weights() names it
 class GraphExecutor {
 public:
@@ -713,6 +714,10 @@ private:
     // FP8-tier head on normed rows `no` -> FP32 lg, per-token activation scales. False: not served.
     [[nodiscard]] bool lm_head_fp8_tier_(const WeightHandle& lm_h, const Tensor& no, Tensor& lg,
                                          cudaStream_t stream);
+    // Inputs of lm_head_route() (exec/lm_head_route.h) for the loaded head.
+    [[nodiscard]] LmHeadFacts lm_head_facts_() const;
+    // The NVFP4 head the GEMVs read: the Phase-3 secondary cache entry, else the registry payload.
+    [[nodiscard]] NvFP4QuantResult lm_head_nvfp4_() const;
     void finalize_logits_(Tensor& logits_out, int n, cudaStream_t stream);  // soft-cap + final-logit dump
     // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
     // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
