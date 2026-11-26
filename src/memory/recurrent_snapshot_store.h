@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "memory/kv_chain_link.h"
+#include "memory/snapshot_piece.h"
 
 namespace imp {
 
@@ -102,6 +103,10 @@ public:
     // With a sidecar, `sidecar_src` (device, sidecar_bytes) lands at data + entry_bytes.
     [[nodiscard]] bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream,
                             const void* sidecar_src = nullptr, std::vector<KvChainLink> kv_chain = {});
+    // save() from several sources (device or pinned host), each piece at its offset of the entry: Inkling's
+    // conv checkpoint and 80 sliding K/V windows (B-111 S4). Same tiers and eviction as save().
+    [[nodiscard]] bool save_gather(size_t key, int n_tokens, std::span<const SnapshotPiece> pieces,
+                                   cudaStream_t stream, std::vector<KvChainLink> kv_chain = {});
     // Drop one entry (both tiers); a request holding it keeps it until release.
     void erase(size_t key);
     // Saves that landed in the host tier because no device slab was free, and

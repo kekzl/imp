@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace imp {
@@ -46,6 +47,20 @@ inline int inkling_prefix_cap_blocks(int slot_match, int cached_blocks, int cap_
                                      static_cast<int64_t>(cached_blocks) * bs,
                                      static_cast<int64_t>(cap_blocks) * bs});
     return tokens <= 0 ? 0 : static_cast<int>(tokens / grid * grid / bs);
+}
+
+// Snapshot key of the first pos tokens (B-111 S4): the chain hash of their blocks seeded with salt, the hash
+// the prefix cache files block pos / bs - 1 under. 0 = pos off the block grid. hash:
+// KVCacheManager::compute_block_hash.
+using InklingBlockHash = size_t (*)(std::span<const int32_t>, size_t);
+[[nodiscard]] inline size_t inkling_snapshot_key(std::span<const int32_t> tokens, int pos, int bs,
+                                                 size_t salt, InklingBlockHash hash) {
+    if (bs <= 0 || pos <= 0 || pos % bs != 0 || static_cast<size_t>(pos) > tokens.size() || !hash)
+        return 0;
+    size_t key = salt;
+    for (int b = 0; b < pos / bs; ++b)
+        key = hash(tokens.subspan(static_cast<size_t>(b) * bs, static_cast<size_t>(bs)), key);
+    return key;
 }
 
 // The decode steps' I8B32 dense projections fit when free_bytes keeps kInklingDense8Spare behind them. The

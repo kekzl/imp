@@ -118,6 +118,18 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     conv_state_floats_ = sl.conv_app_floats;
     ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     scratch_on_ = false;
+    layout_ = sl;
+    snap_ = inkling_snap_layout(sl, c.window);
+    // 30 checkpoints of 3.66 MiB at a 1024-row segment: 109.7 MiB pinned per slot, none taken later.
+    ckpt_n_ = inkling_checkpoint_slots(sl, c.window, seg_, kGrid);
+    const size_t ckpt_bytes = static_cast<size_t>(ckpt_n_) * sl.conv_app_floats *
+                              static_cast<size_t>(c.n_apps()) * sizeof(float);
+    ckpt_host_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), ckpt_bytes);
+    if (!ckpt_host_) {
+        IMP_LOG_WARN("inkling: %d conv-state checkpoints (%.1f MiB pinned) not allocated, no prefix reuse",
+                     ckpt_n_, static_cast<double>(ckpt_bytes) / 1048576.0);
+        ckpt_n_ = 0;
+    }
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
     dec_h_ = Hf_(H * kGraphRows);
     // Conv state and sliding rings in the slot's slab region; the full-attention applications read the
@@ -140,8 +152,8 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
 }
 
 void InklingForward::reset(cudaStream_t s) {
-    pos_ = hw_ = ckpt_valid_ = ckpt_free_ = 0;
-    std::vector<std::vector<float>>().swap(ckpt_);  // none is valid any more
+    pos_ = hw_ = ckpt_valid_ = ckpt_free_ = 0;  // no checkpoint is valid any more
+    ckpt_lo_ = 1;
     look_pos0_ = -1;
     reset_draft_policy_();
     if (spec_.restart)
@@ -154,10 +166,6 @@ void InklingForward::reset(cudaStream_t s) {
             cudaMemsetAsync(conv_all_, 0, conv_state_floats_ * conv_state_.size() * sizeof(float), s));
 }
 
-void InklingForward::checkpoint_(cudaStream_t s, const float* state) {
-    checkpoint_at_(pos_ / kGrid, s, state);
-}
-
 inkling::ConvMarks InklingForward::marks_(size_t app, size_t off) const {
     ConvMarks m;
     m.n = marks_n_;
@@ -167,63 +175,6 @@ inkling::ConvMarks InklingForward::marks_(size_t app, size_t off) const {
                    off;
     }
     return m;
-}
-
-void InklingForward::checkpoint_at_(int grid, cudaStream_t s, const float* state) {
-    const size_t g = static_cast<size_t>(grid), n = conv_state_floats_ * conv_state_.size();
-    if (ckpt_.size() < g)
-        ckpt_.resize(g);
-    ckpt_[g - 1].resize(n);
-    const bool ok = cudaMemcpyAsync(ckpt_[g - 1].data(), state, n * sizeof(float), cudaMemcpyDeviceToHost,
-                                    s) == cudaSuccess &&
-                    cudaStreamSynchronize(s) == cudaSuccess;
-    ckpt_valid_ = ok ? static_cast<int>(g) : std::min(ckpt_valid_, static_cast<int>(g) - 1);
-    // match() resumes at checkpoint c only while hw_ - c * kGrid <= ring_ - window, and hw_ never falls
-    // within a sequence: older checkpoints are dead (3.8 MB each, one per 256 positions). A segment
-    // stores its checkpoints before hw_ moves, hence the seg_ of margin.
-    const int dead_below = std::max(hw_, grid * kGrid) - (ring_ - w_->cfg.window) - seg_;
-    for (; (ckpt_free_ + 1) * kGrid < dead_below; ++ckpt_free_)
-        std::vector<float>().swap(ckpt_[static_cast<size_t>(ckpt_free_)]);
-}
-
-size_t InklingForward::checkpoint_bytes() const {
-    size_t n = 0;
-    for (const std::vector<float>& c : ckpt_)
-        n += c.capacity() * sizeof(float);
-    return n;
-}
-
-int InklingForward::match(std::span<const int32_t> tokens) const {
-    // The last row is always computed: its logits start the reply.
-    const size_t lim = std::min(
-        {hist_.size(), static_cast<size_t>(pos_), tokens.empty() ? 0 : tokens.size() - 1});
-    size_t d = 0;
-    while (d < lim && hist_[d] == tokens[d])
-        ++d;
-    const int g = std::min(static_cast<int>(d) / kGrid, ckpt_valid_);
-    // Sliding K/V of [R - window, R) must not have been overwritten by positions up to hw_.
-    return hw_ - (g * kGrid) > ring_ - w_->cfg.window ? 0 : g * kGrid;
-}
-
-int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s, int limit) {
-    int g = std::min(match(tokens), std::max(limit, 0)) / kGrid;
-    const size_t n = conv_state_floats_ * conv_state_.size();
-    if (g > 0 && (ckpt_[static_cast<size_t>(g) - 1].size() != n ||
-                  cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
-                                  cudaMemcpyHostToDevice, s) != cudaSuccess))
-        g = 0;
-    hist_.assign(tokens.begin(), tokens.end());
-    armed_ = true;
-    look_pos0_ = -1;  // the restored (or reset) conv state replaces a lookahead call's
-    reset_draft_policy_();
-    if (g == 0)
-        return 0;  // run() at position 0 resets
-    armed_ = false;
-    pos_ = g * kGrid;
-    ckpt_valid_ = g;
-    if (spec_.restart)
-        spec_.restart(pos_);
-    return pos_;
 }
 
 // True when lin_ serves the q, k and v projections of a T-row call without cuBLAS.

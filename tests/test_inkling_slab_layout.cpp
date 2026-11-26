@@ -1,10 +1,13 @@
 // Inkling2-Loop per-slot recurrent slab (exec/inkling_slab_layout.h, B-111 S3): what one slot holds, where
-// each application's conv state and K/V ring sit in it, and which slot a request's rows reach.
+// each application's conv state and K/V ring sit in it, and which slot a request's rows reach; the
+// cross-slot snapshot entry a slot resumes another slot's prefix from (S4).
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -188,6 +191,131 @@ TEST(InklingSlabLayout, LookRegionsSitAfterEverySlot) {
         EXPECT_EQ(l.look_offset(0, slots, 0), kNone);
         EXPECT_EQ(l.look_offset(-1, slots, looks), kNone);
     }
+}
+
+// Cross-slot snapshot (B-111 S4): the conv state and 1024 rows of K and V of the 40 sliding applications,
+// 171606016 B whatever the context or the call size; the server's 256 MiB device budget buys one entry,
+// its 2048 MiB host default 12. Each slot plans 30 conv checkpoints at a 1024-row segment (26 at 512).
+TEST(InklingSnapLayout, EntryIsTheConvStateAndTheWindowOfEverySlidingRing) {
+    const InklingConfig c = mini();
+    const InklingSlabLayout l = inkling_slab_layout(c, 8192);
+    const InklingSnapLayout s = inkling_snap_layout(l, c.window);
+    EXPECT_EQ(s.conv_bytes, 3833856u);
+    EXPECT_EQ(s.window, 1024);
+    EXPECT_EQ(s.sliding, 40);
+    EXPECT_EQ(s.app_bytes, 2u * 1024 * 1024 * 2);
+    EXPECT_EQ(s.bytes, 171606016u);
+    EXPECT_EQ(inkling_snap_layout(inkling_slab_layout(c, 512), c.window).bytes, s.bytes);
+    EXPECT_EQ((size_t{256} << 20) / s.bytes, 1u);
+    EXPECT_EQ((size_t{2048} << 20) / s.bytes, 12u);
+    EXPECT_EQ(inkling_checkpoint_slots(l, c.window, 1024, 256), 30);
+    EXPECT_EQ(inkling_checkpoint_slots(inkling_slab_layout(c, 512), c.window, 512, 256), 26);
+    // With the lookahead draft: 1024 rows of K and V of its 2 local layers after the target's part.
+    const InklingDraftConfig dc = mini_draft();
+    const InklingSnapLayout d = inkling_snap_layout(l, c.window, &dc);
+    EXPECT_EQ(d.draft_off, s.bytes);
+    EXPECT_EQ(d.draft_local, 2);
+    EXPECT_EQ(d.draft_window, 1024);
+    EXPECT_EQ(d.draft_row, 2048u);
+    EXPECT_EQ(d.draft_bytes, 2u * 2 * 1024 * 2048);
+    EXPECT_EQ(d.bytes, 179994624u);
+    EXPECT_EQ((size_t{256} << 20) / d.bytes, 1u);
+    EXPECT_EQ((size_t{2048} << 20) / d.bytes, 11u);
+    std::printf(
+        "inkling snapshot: %zu B (%.2f MiB) with the draft's rows, %zu B without; checkpoints %zu B per "
+        "slot\n",
+        d.bytes, d.bytes / 1048576.0, s.bytes, 30 * l.conv_bytes);
+}
+
+// One ring's window rows before pos in entry order: a ring wraps at its end (the draft keeps each row twice,
+// its load writes both), ring 0 keeps one row per position.
+TEST(InklingSnapLayout, RingWindowCopiesFollowThePositions) {
+    std::vector<InklingSnapCopy> cp;
+    const size_t row = 8;
+    inkling_ring_window_copies(100, 20, row, 8, 23, 1000, cp);  // positions 15..22: ring rows 15..19, 0..2
+    ASSERT_EQ(cp.size(), 2u);
+    EXPECT_EQ(cp[0].slot_off, 100 + 15 * row);
+    EXPECT_EQ(cp[0].entry_off, 1000u);
+    EXPECT_EQ(cp[0].bytes, 5 * row);
+    EXPECT_EQ(cp[1].slot_off, 100u);
+    EXPECT_EQ(cp[1].entry_off, 1000 + 5 * row);
+    EXPECT_EQ(cp[1].bytes, 3 * row);
+    cp.clear();
+    inkling_ring_window_copies(100, 0, row, 8, 23, 1000, cp);  // no ring: rows 15..22
+    ASSERT_EQ(cp.size(), 1u);
+    EXPECT_EQ(cp[0].slot_off, 100 + 15 * row);
+    EXPECT_EQ(cp[0].bytes, 8 * row);
+    cp.clear();
+    inkling_ring_window_copies(100, 20, row, 8, 5, 1000, cp);  // positions 0..4 at entry rows 3..7
+    ASSERT_EQ(cp.size(), 1u);
+    EXPECT_EQ(cp[0].slot_off, 100u);
+    EXPECT_EQ(cp[0].entry_off, 1000 + 3 * row);
+    EXPECT_EQ(cp[0].bytes, 5 * row);
+}
+
+// Save on slot A, restore on slot B through one entry: B's ring rows of the window before pos hold A's, row j
+// of the entry is position pos - window + j, nothing else of B changes. The window wraps the ring here.
+TEST(InklingSnapLayout, RestoreOnAnotherSlotGivesTheSavingSlotsWindow) {
+    InklingConfig c;
+    c.n_layers = 4, c.loop_start = 1, c.loop_end = 3, c.passes = 2;
+    c.hidden = 8, c.n_kv_heads = 1, c.head_dim = 4, c.window = 8;
+    c.global = {false, true, false, false};  // apps 1 and 4 global, 0, 2, 3, 5 sliding
+    const InklingSlabLayout l = inkling_slab_layout(c, 4);
+    const InklingSnapLayout s = inkling_snap_layout(l, c.window);
+    ASSERT_EQ(s.sliding, 4);
+    const size_t row = l.kv_row_halves * 2;
+    const auto tag = [](size_t app, size_t kv, int q) {
+        return static_cast<uint16_t>((app * 2 + kv) * 9973 + static_cast<size_t>(q) * 7 + 1);
+    };
+    std::vector<uint16_t> a(l.slot_bytes / 2), b(l.slot_bytes / 2, 0xBEEF), entry(s.bytes / 2, 0);
+    const int pos = l.ring + 3;  // positions pos - 8 .. pos - 1 sit at ring rows ring - 5 .. 2
+    for (size_t app = 0; app < l.k_off.size(); ++app)
+        for (size_t kv = 0; kv < 2 && l.k_off[app] != kNone; ++kv)
+            for (int q = pos - l.ring; q < pos; ++q)
+                for (size_t h = 0; h < l.kv_row_halves; ++h)
+                    a[((kv ? l.v_off[app] : l.k_off[app]) + static_cast<size_t>(q % l.ring) * row) / 2 + h] =
+                        tag(app, kv, q);
+    std::vector<InklingSnapCopy> cp;
+    inkling_snap_ring_copies(l, c.window, pos, cp);
+    EXPECT_EQ(cp.size(), 4u * 2 * 2);  // every K and V window in two pieces across the ring end
+    const std::vector<uint16_t> b0 = b;
+    for (const InklingSnapCopy& x : cp) {
+        ASSERT_LE(x.entry_off + x.bytes, s.bytes);
+        ASSERT_LE(x.slot_off + x.bytes, l.slot_bytes);
+        ASSERT_GE(x.entry_off, s.conv_bytes);
+        std::memcpy(reinterpret_cast<char*>(entry.data()) + x.entry_off,
+                    reinterpret_cast<const char*>(a.data()) + x.slot_off, x.bytes);
+    }
+    for (const InklingSnapCopy& x : cp)
+        std::memcpy(reinterpret_cast<char*>(b.data()) + x.slot_off,
+                    reinterpret_cast<const char*>(entry.data()) + x.entry_off, x.bytes);
+    size_t i = 0, changed = 0;
+    for (size_t app = 0; app < l.k_off.size(); ++app) {
+        if (l.k_off[app] == kNone)
+            continue;
+        for (size_t kv = 0; kv < 2; ++kv) {
+            const size_t ring = kv ? l.v_off[app] : l.k_off[app];
+            for (int j = 0; j < c.window; ++j) {
+                const int q = pos - c.window + j;
+                const size_t e = (s.conv_bytes + i * s.app_bytes + kv * c.window * row + j * row) / 2;
+                EXPECT_EQ(entry[e], tag(app, kv, q)) << "entry app " << app << " kv " << kv << " row " << j;
+                EXPECT_EQ(b[(ring + static_cast<size_t>(q % l.ring) * row) / 2], tag(app, kv, q))
+                    << "slot B app " << app << " kv " << kv << " position " << q;
+            }
+        }
+        ++i;
+    }
+    for (size_t h = 0; h < b.size(); ++h)
+        changed += b[h] != b0[h] ? 1 : 0;
+    EXPECT_EQ(changed, 4u * 2 * 8 * l.kv_row_halves);  // the windows, nothing else
+    // A position inside the first window: only the rows that exist.
+    inkling_snap_ring_copies(l, c.window, 5, cp);
+    size_t bytes = 0;
+    for (const InklingSnapCopy& x : cp)
+        bytes += x.bytes;
+    EXPECT_EQ(bytes, 4u * 2 * 5 * row);
+    inkling_snap_ring_copies(l, c.window, 0, cp);
+    EXPECT_TRUE(cp.empty());
 }
 
 }  // namespace

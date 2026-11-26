@@ -251,6 +251,12 @@ InklingSpecHooks InklingDraft::hooks() {
         return propose(anchor, d_emb, pos, out, s);
     };
     h.restart = [this](int keep) { restart(keep); };
+    h.save = [this](int pos, size_t off, std::vector<SnapshotPiece>& out, cudaStream_t s) {
+        return snapshot_pieces(pos, off, out, s);
+    };
+    h.load = [this](int pos, const std::byte* entry, size_t off, cudaStream_t s) {
+        return load(pos, entry, off, s);
+    };
     return h;
 }
 
@@ -282,6 +288,7 @@ void InklingDraft::restart(int keep) {
         kept_ = keep - kept_pos0_;
     done_ = std::min(done_, kept_);
     drafted_pos_ = -1;
+    hw_ = keep > 0 ? hw_ : 0;
 }
 
 // Context K/V of n feature rows (planes of plane floats, rows from row0) at positions pos0...
@@ -299,6 +306,7 @@ void InklingDraft::convert_(const float* feat, size_t plane, int row0, int n, in
                                                              log2_theta, c.eps, nullptr);
         IMP_CUDA_CHECK_LAUNCH();
         const size_t nk = static_cast<size_t>(n) * KD;
+        hw_ = std::max(hw_, pos0 + n);
         if (ring_ > 0 && c.local[static_cast<size_t>(i)]) {
             draft_ring_k<<<blocks(nk), kT, 0, s>>>(kvc_, 2 * KD, 0, KD, k_[static_cast<size_t>(i)], nk, pos0,
                                                    ring_);
@@ -483,6 +491,7 @@ int InklingDraft::propose(int32_t anchor, const half* d_emb, int pos, int32_t* o
     if (exec_.get() ? cudaGraphLaunch(exec_.get(), s) != cudaSuccess : !block_(s))
         return 0;
     drafted_pos_ = pos;
+    hw_ = std::max(hw_, pos + c.block);  // the block's own rows
     float conf[InklingForward::kGraphRows] = {};
     if (cudaMemcpyAsync(out, d_tok_ + 1, static_cast<size_t>(n_out) * sizeof(int32_t), cudaMemcpyDeviceToHost,
                         s) != cudaSuccess ||

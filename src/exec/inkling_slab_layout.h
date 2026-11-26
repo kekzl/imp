@@ -85,6 +85,82 @@ struct InklingSlabLayout {
     return (b + InklingSlabLayout::kAlign - 1) / InklingSlabLayout::kAlign * InklingSlabLayout::kAlign;
 }
 
+// Cross-slot prefix snapshot (B-111 S4): conv state at a checkpoint position pos, then per sliding
+// application window rows of K and window rows of V, row j = position pos - window + j (a row reads keys back
+// to pos - window + 1), then the same for every local layer of the lookahead draft (its window). The same
+// bytes for every slot: a slot resumes another slot's sequence, target and draft, from it.
+struct InklingSnapLayout {
+    size_t conv_bytes = 0;  // InklingSlabLayout::conv_bytes
+    size_t app_bytes = 0;   // K and V rows of one sliding application
+    int window = 0, sliding = 0;
+    size_t draft_off = 0, draft_row = 0, draft_bytes = 0;  // draft part: draft_local layers, 0 = none
+    int draft_window = 0, draft_local = 0;
+    size_t bytes = 0;  // one entry
+};
+
+[[nodiscard]] inline InklingSnapLayout inkling_snap_layout(const InklingSlabLayout& sl, int window,
+                                                           const InklingDraftConfig* d = nullptr) {
+    InklingSnapLayout s;
+    s.window = std::clamp(window, 0, std::max(sl.ring, 0));
+    s.conv_bytes = sl.conv_bytes;
+    s.app_bytes = 2 * static_cast<size_t>(s.window) * sl.kv_row_halves * 2;
+    for (size_t k : sl.k_off)
+        s.sliding += k != InklingSlabLayout::kNone ? 1 : 0;
+    s.draft_off = s.conv_bytes + s.app_bytes * static_cast<size_t>(s.sliding);
+    if (d) {
+        for (bool local : d->local)
+            s.draft_local += local ? 1 : 0;
+        s.draft_window = std::max(d->window, 0);
+        s.draft_row = static_cast<size_t>(d->kv_heads) * d->head_dim * 2;
+        s.draft_bytes = 2 * static_cast<size_t>(s.draft_local) * static_cast<size_t>(s.draft_window) *
+                        s.draft_row;
+    }
+    s.bytes = s.draft_off + s.draft_bytes;
+    return s;
+}
+
+// One copy between a slot (byte offset from its base) and a snapshot entry.
+struct InklingSnapCopy {
+    size_t slot_off = 0, entry_off = 0, bytes = 0;
+};
+
+// Rows of positions max(0, pos - window) .. pos - 1 of one ring at ring_off (rows of row bytes, position q at
+// row q % ring; ring 0 = row q), entry row j = position pos - window + j from entry_off: two copies where the
+// window wraps the ring. Appends to out.
+inline void inkling_ring_window_copies(size_t ring_off, int ring, size_t row, int window, int pos,
+                                       size_t entry_off, std::vector<InklingSnapCopy>& out) {
+    for (int q = std::max(pos - window, 0); q < pos && window > 0;) {
+        const int r = ring > 0 ? q % ring : q, n = ring > 0 ? std::min(pos - q, ring - r) : pos - q;
+        out.push_back({ring_off + static_cast<size_t>(r) * row,
+                       entry_off + static_cast<size_t>(q - (pos - window)) * row,
+                       static_cast<size_t>(n) * row});
+        q += n;
+    }
+}
+
+// The target's ring copies of the window before pos: K, then V of every sliding application.
+inline void inkling_snap_ring_copies(const InklingSlabLayout& sl, int window, int pos,
+                                     std::vector<InklingSnapCopy>& out) {
+    out.clear();
+    const InklingSnapLayout s = inkling_snap_layout(sl, window);
+    const size_t row = sl.kv_row_halves * 2;
+    size_t app = s.conv_bytes;
+    for (size_t a = 0; a < sl.k_off.size() && pos > 0; ++a) {
+        if (sl.k_off[a] == InklingSlabLayout::kNone)
+            continue;
+        inkling_ring_window_copies(sl.k_off[a], sl.ring, row, s.window, pos, app, out);
+        inkling_ring_window_copies(sl.v_off[a], sl.ring, row, s.window, pos, app + s.app_bytes / 2, out);
+        app += s.app_bytes;
+    }
+}
+
+// Conv-state checkpoints a slot keeps (kGrid apart): a rewind reaches back ring - window positions and a
+// segment stores its checkpoints before the high-water mark moves (seg of margin), plus one either end.
+[[nodiscard]] inline int inkling_checkpoint_slots(const InklingSlabLayout& sl, int window, int seg,
+                                                  int grid) {
+    return grid > 0 ? (std::max(sl.ring - window, 0) + std::max(seg, 0)) / grid + 2 : 0;
+}
+
 // The lookahead region of the target c (conv_app_floats per application) with draft d: feature planes
 // [taps][seg][H] fp32, conv state before the call, a scratch copy, the per-row conv log, the call's states,
 // token ids, logits [kInklingGraphRows][vocab] fp32, then K and V of every local draft layer.
