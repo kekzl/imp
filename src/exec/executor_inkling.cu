@@ -7,6 +7,7 @@
 #include "core/logging.h"
 #include "exec/inkling_draft.h"
 #include "exec/inkling_forward.h"
+#include "exec/inkling_slab.h"
 #include "model/inkling_weights.h"
 
 #include <algorithm>
@@ -43,12 +44,17 @@ int InklingRuntime::bind(int req, std::span<const int32_t> tokens) {
 }
 
 bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, int max_tokens, int ctx,
-                                int want) {
-    for (int i = 0; i < want; ++i) {
+                                int want, InklingSlab& slab) {
+    // Conv state and sliding rings of every slot: one allocation (2 x 81920: 2 x 1124 MiB).
+    const int fit = slab.allocate(alloc, inkling_slab_layout(wt.cfg, max_tokens), want);
+    if (fit < want)
+        IMP_LOG_WARN("inkling2_loop: the recurrent slab takes %d of %d sequence slots (%.0f MiB each)", fit,
+                     want, slab.layout().slot_bytes / 1048576.0);
+    for (int i = 0; i < fit; ++i) {
         auto f = std::make_unique<InklingForward>();
         // The first slot's per-call buffers serve every slot: they run one after the other.
         if (!f->init(wt, alloc, max_tokens, ctx, slots.empty() ? nullptr : slots[0].get(),
-                     /*own_kv=*/false)) {
+                     /*own_kv=*/false, slab.slot(i))) {
             IMP_LOG_WARN("inkling2_loop: sequence slot %d of %d does not fit", i + 1, want);
             break;  // fewer slots than asked for: the engine lowers its batch size
         }
@@ -88,14 +94,14 @@ bool InklingRuntime::init_slots(const InklingWeights& wt, VRAMAllocator& alloc, 
 }
 
 std::unique_ptr<InklingRuntime> make_inkling_runtime(const Model& model, VRAMAllocator* va, int max_tokens,
-                                                     int max_ctx, int slots) {
+                                                     int max_ctx, int slots, InklingSlab* slab) {
     const std::string& dir = model.inkling_dir;
     if (dir.empty())
         return nullptr;
     auto rt = std::make_unique<InklingRuntime>();
-    const bool ok = va && model.token_embedding().data && model.output_proj().data &&
+    const bool ok = va && slab && model.token_embedding().data && model.output_proj().data &&
                     model.output_norm().data && load_inkling_weights(dir, rt->w, *va, /*with_vocab=*/false) &&
-                    rt->init_slots(rt->w, *va, max_tokens, max_ctx, slots > 0 ? slots : 2);
+                    rt->init_slots(rt->w, *va, max_tokens, max_ctx, slots > 0 ? slots : 2, *slab);
     if (!ok)
         throw std::runtime_error("inkling2_loop: " + dir + " could not be loaded (see the error above)");
     return rt;
