@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <span>
@@ -74,6 +75,10 @@ public:
     // Pinned host slabs kept ready ahead of demand by the refill worker, so a demotion on the
     // request path takes one instead of pinning (79.5 MiB per slab on Qwen3.8-27B). Before init().
     void set_host_spare(int n) { host_spare_ = n; }
+    // Runs on the refill worker between a slab's pin and its publish. Before init().
+    void set_refill_publish_hook_for_test(std::function<void()> f) {
+        refill_publish_hook_for_test_ = std::move(f);
+    }
     // Free pinned slabs right now, and slabs a demotion had to pin itself (the worker was outrun).
     [[nodiscard]] int host_slabs_ready() const;
     [[nodiscard]] uint64_t host_inline_pins() const {
@@ -154,6 +159,7 @@ private:
     std::mutex pin_mu_;
     int host_spare_ = 4;
     int refill_device_ = 0;
+    std::function<void()> refill_publish_hook_for_test_;
     std::atomic<uint64_t> host_inline_pins_{0};
     void evict_device_lru_(cudaStream_t stream);
     [[nodiscard]] bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src,

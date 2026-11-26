@@ -746,10 +746,31 @@ TYPED_TEST(PagedOracle, SinksAndWindowAcrossEvictedBlocks) {
     this->run_holey_window("gqa24x4", 24, 4, 256);
 }
 
+// Split-K scratch set to 0xFF before each launch; written() = the launch stored a partial in it,
+// i.e. it took a split-K route (num_splits > 1). Without a scratch every route runs unsplit.
+struct SentinelScratch {
+    void* d = nullptr;
+    size_t bytes = 0;
+    explicit SentinelScratch(size_t b) : bytes(b) { cudaMalloc(&d, b); }
+    ~SentinelScratch() { cudaFree(d); }
+    SentinelScratch(const SentinelScratch&) = delete;
+    SentinelScratch& operator=(const SentinelScratch&) = delete;
+    PagedSplitKScratch arm() const {
+        cudaMemset(d, 0xFF, bytes);
+        return {.ptr = d, .size = bytes};
+    }
+    bool written() const {
+        std::vector<uint32_t> h(bytes / sizeof(uint32_t));
+        cudaMemcpy(h.data(), d, h.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        return std::any_of(h.begin(), h.end(), [](uint32_t w) { return w != 0xFFFFFFFFu; });
+    }
+};
+
 // F1 robustness: when the split-K Phase-1 launch fails (smem > 48KiB default without opt-in,
 // or stale device state from another in-process model), decode must fall back to
 // single-split, not run the reduce over never-written partials. The forced-fallback path
 // must match both the fp64 reference and the normal split-K result at a long context.
+// Both arms get a scratch: without one num_splits is 1 and the forced fallback never triggers.
 TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -784,16 +805,23 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
               scale,  q_elems, &Kh,     &Vh,        &ref,
               f16_tensor(d_q, {1, 1, n_heads, head_dim}), d_o, d_bt, d_ctx};
 
+    const SentinelScratch sk(paged_splitk_bytes(1, n_heads, head_dim, 64));
+
     // 1. Normal split-K path.
     process_diag_set_force_splitk_fallback(false);
+    c.splitk = sk.arm();
     ErrStats e_splitk = PathF16::run(c);
+    EXPECT_TRUE(sk.written()) << "split-K arm ran unsplit";
     EXPECT_EQ(e_splitk.nan_count, 0);
     EXPECT_LT(e_splitk.max_rel, 1e-2f) << "split-K vs fp64: " << e_splitk.str();
 
-    // 2. Forced single-split fallback — must also match the fp64 reference.
+    // 2. Forced single-split fallback — must also match the fp64 reference. Phase 1 still
+    // writes the partials before the fallback re-dispatches, so the scratch shows the split.
     process_diag_set_force_splitk_fallback(true);
+    c.splitk = sk.arm();
     ErrStats e_fb = PathF16::run(c);
     process_diag_set_force_splitk_fallback(false);
+    EXPECT_TRUE(sk.written()) << "fallback arm never selected split-K, the fallback did not run";
     EXPECT_EQ(e_fb.nan_count, 0) << "fallback produced non-finite output";
     EXPECT_LT(e_fb.max_rel, 1e-2f) << "split-K fallback vs fp64: " << e_fb.str();
 
@@ -810,15 +838,19 @@ TEST(PagedSplitKFallback, MatchesSplitKAndReferenceAtLongContext) {
 }
 
 }  // namespace
-// Multitok FP8 decode (process_diag_paged_fp8_multitok=4) vs the FP8 oracle's fp64 reference;
-// the oracle's batch-1 shapes take split-K (32 CTAs) so single-split only runs with fallback
-// forced. Covers the non-block-aligned 333 (partial tail of 1 token).
+// Multitok FP8 decode (process_diag_paged_fp8_multitok=4) vs the FP8 oracle's fp64 reference.
+// No scratch = single split (the FP8 launcher ignores force_splitk_fallback); the grouped arms
+// also run with a scratch, where the one-wave rule picks the grouped split-K instance.
+// Covers the non-block-aligned 333 (partial tail of 1 token).
 TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
     const int head_dim = 128;
     const float scale = 1.0f / std::sqrt((float)head_dim);
-    process_diag_set_force_splitk_fallback(true);
+    int n_sms = 0;
+    cudaDeviceGetAttribute(&n_sms, cudaDevAttrMultiProcessorCount, 0);
+    const SentinelScratch sk(paged_splitk_bytes(1, 40, head_dim, 64));
+    int split_runs = 0;
     // 32/8 (ratio 4: Qwen3-8B, Llama) and 40/8 (ratio 5: Qwen3-14B). hpc -1 is
     // the per-head four-token kernel; every hpc 1..5 that divides the ratio
     // runs the grouped kernel (attention_paged_fp8_multitok_gqa.cu).
@@ -871,6 +903,20 @@ TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
                     << "grouped " << n_heads << "/8 hpc " << hpc << " kv_len " << kv_len << ": " << e_g.str();
                 printf("PagedFp8Multitok %d/8 kv_len=%d: grouped hpc=%d %s\n", n_heads, kv_len, hpc,
                        e_g.str().c_str());
+                // Same arm with a scratch: the grouped split-K instance where fp8_gqa_decode's rule
+                // splits (2 CTAs per SM, >= 8 KV blocks per split), else the tile split-K or unsplit.
+                const int s = paged_attention_f16_multitok_split_count(n_heads / hpc, 2, n_sms, num_blocks);
+                const bool want_split = s > 1 && (num_blocks + s - 1) / s >= 8;
+                c.splitk = sk.arm();
+                ErrStats e_s = PathFP8::run(c);
+                c.splitk = {};
+                if (want_split) {
+                    EXPECT_TRUE(sk.written()) << "hpc " << hpc << " kv_len " << kv_len << " s " << s;
+                }
+                split_runs += want_split ? 1 : 0;
+                EXPECT_EQ(e_s.nan_count, 0) << "split hpc " << hpc << " kv_len " << kv_len;
+                EXPECT_LT(e_s.max_rel, PathFP8::envelope())
+                    << "split " << n_heads << "/8 hpc " << hpc << " kv_len " << kv_len << ": " << e_s.str();
             }
             process_diag_set_paged_fp8_hpc(0);
             cudaFree(d_q);
@@ -879,7 +925,7 @@ TEST(PagedFp8Multitok, MatchesReferenceAtSingleSplit) {
             cudaFree(d_ctx);
         }
     }
-    process_diag_set_force_splitk_fallback(false);
+    EXPECT_GT(split_runs, 0) << n_sms << " SMs: no grouped arm split, the split-K instance went untested";
     process_diag_set_paged_fp8_multitok(4);
     cudaStreamDestroy(stream);
 }
