@@ -27,6 +27,7 @@
 #include "memory/library_reserve_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
+#include "exec/inkling_slab.h"
 #include <span>
 #include "memory/touch_audit.h"
 #include "memory/vram_allocator.h"
@@ -386,6 +387,9 @@ private:
     std::atomic<uint64_t> streaming_kv_auto_enables_{0};
     std::atomic<uint64_t> streaming_kv_evicted_blocks_{0};
     std::atomic<uint64_t> graph_repromotions_{0};
+    // Inkling2-Loop per-slot conv state and sliding K/V rings (exec/inkling_slab.h): before executor_, whose
+    // forwards view it, so it is freed after them.
+    InklingSlab inkling_slab_;
     std::unique_ptr<GraphExecutor> executor_;
     CudaStream stream_;
     CudaEvent prefill_done_;
