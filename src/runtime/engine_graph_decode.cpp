@@ -286,7 +286,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                                            cudaMemcpyHostToDevice, stream));
     }
 
-    (void)executor_->resize_workspace(1, stream);
+    executor_->resize_workspace(1, stream);
 
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
@@ -413,7 +413,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     p.d_banned = const_cast<int32_t*>(banned_tokens_device_(stream));
 
     // Decode workspace (mirrors step_decode_forward).
-    (void)executor_->resize_workspace(1, stream);
+    executor_->resize_workspace(1, stream);
 
     InferenceState& st = p.state;
     st = InferenceState{};

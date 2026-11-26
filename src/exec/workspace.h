@@ -14,6 +14,20 @@ class Model;
 class VRAMAllocator;
 struct MoEWorkspace;
 
+// Grows `buf` (holding `held` bytes) to `bytes` through `take(bytes)`. Strong guarantee:
+// the new buffer is taken before the old one is released, so a failed take changes nothing.
+template <class Take>
+[[nodiscard]] bool grow_keeping_old(DeviceOwned<void>& buf, size_t& held, size_t bytes, Take&& take) {
+    if (bytes <= held && buf.get() != nullptr)
+        return true;
+    DeviceOwned<void> fresh = take(bytes);
+    if (fresh.get() == nullptr)
+        return false;
+    buf = std::move(fresh);  // releases the old buffer
+    held = bytes;
+    return true;
+}
+
 // Shared/persistent scratch arena, extracted from GraphExecutor (D2, component
 // 3): owns the forward-pass scratch arena (buffers + sizes).
 // The cross-cutting auxiliary-buffer hub (qscratch/moe/attn) stays on GraphExecutor.
@@ -73,7 +87,10 @@ public:
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
     [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
-    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
+    // False when the grow allocation fails; the workspace then keeps its old buffer and rows.
+    [[nodiscard]] bool try_resize_workspace(int new_max_tokens, cudaStream_t stream);
+    // try_resize_workspace for callers with no fallback: throws instead of returning false.
+    void resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);
     // include_attn_scores: charge the cuBLAS S-matrix term (capped 256 MiB, non-MoE only).
     // Pass false when FA2 serves all prefill: the allocator skips the buffer there (#932),

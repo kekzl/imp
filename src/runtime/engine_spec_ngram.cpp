@@ -1078,7 +1078,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // Capture mode pins the workspace layout to the largest bucket so every
     // bucket's graph bakes the same activation-tensor carve.
     const int ws_rows = ch.capture_on ? std::max(ch.chunk_pad, spec_capture_bucket_max_()) : ch.chunk_len;
-    if (!executor_->resize_workspace(ws_rows, stream)) {
+    if (!executor_->try_resize_workspace(ws_rows, stream)) {
         spec_stats_.miss_steps++;
         return false;
     }
