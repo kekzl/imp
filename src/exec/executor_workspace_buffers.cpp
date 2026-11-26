@@ -387,7 +387,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
         // T2 (A7 step 4b.2), charged as splitk_scratch: engine-persistent, sized from shape +
-        // batch + context. paged_attention_set_splitk_scratch treats null as "no split-K"; the
+        // batch + context. PagedDecodeTensorArgs::splitk null means "no split-K"; the
         // kernel re-checks size before use, so a closed arena only costs the split path.
         StableSpan<std::byte> slab = engine_arena().take_bytes(sz);
         if (slab.empty()) {

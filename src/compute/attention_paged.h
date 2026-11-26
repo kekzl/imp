@@ -55,24 +55,64 @@ struct PagedDecodeArgs {
     cudaStream_t stream = nullptr;
 };
 
-// Paged attention decode (single query/sequence). Q:[batch,1,n_heads,hd]. block_tables:
-// [batch,max_blocks] int32. context_lens:[batch] int32. sliding_window: 0=off, >0=last N KV.
-// n_sinks (StreamingLLM): >0 also attends [0,n_sinks); needs sliding_window>0 and
-// ctx_len>n_sinks+sliding_window, else behaves as plain sliding-window/full attention.
-// softcap: 0=off, >0 applies tanh(score/cap)*cap. attn_sinks (gpt-oss #547): per-head learned
-// logits [n_heads] FP16, virtual softmax column (unrelated to n_sinks above).
-// v_head_dim: 0=same as head_dim. MLA asymmetric QK/V: pass v_head_dim to read only that many
-// V elements per slot (V allocated at head_dim stride) and write O at v_head_dim width.
-void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                            const int* block_tables, const int* context_lens, int block_size, float scale,
-                            int max_context_len, int sliding_window = 0, float softcap = 0.0f,
-                            cudaStream_t stream = nullptr, int max_blocks_per_seq = 0, int n_sinks = 0,
-                            const void* attn_sinks = nullptr, int v_head_dim = 0,
-                            PagedQ8Epilogue* q8_epi = nullptr);
+// Split-K partial scratch of one paged decode call (audit D-9), a per-call field: null = no split-K.
+// A split holds batch * n_heads * (2 + head_dim) floats; launchers cap num_splits to the size.
+struct PagedSplitKScratch {
+    void* ptr = nullptr;
+    size_t size = 0;
+};
 
-// Sets the split-K scratch buffer; must be called before paged_attention_decode if split-K is
-// wanted. Size = batch * n_heads * num_splits * (2 + head_dim) * sizeof(float). nullptr disables it.
-void paged_attention_set_splitk_scratch(void* ptr, size_t size);
+// Bytes of num_splits (m, l, o[head_dim]) partials per (batch, head).
+constexpr size_t paged_splitk_bytes(int batch_size, int n_heads, int head_dim, int num_splits) {
+    return static_cast<size_t>(batch_size) * n_heads * num_splits * (2 + head_dim) * sizeof(float);
+}
+
+// F16 decode rule: num_splits when it fits, else the most splits that fit, at least 1; null = 1.
+[[nodiscard]] inline int paged_splitk_cap(const PagedSplitKScratch& s, int batch_size, int n_heads,
+                                          int head_dim, int num_splits) {
+    if (s.ptr == nullptr)
+        return 1;
+    if (paged_splitk_bytes(batch_size, n_heads, head_dim, num_splits) <= s.size)
+        return num_splits;
+    const int max_splits = static_cast<int>(s.size / paged_splitk_bytes(batch_size, n_heads, head_dim, 1));
+    return std::max(std::min(num_splits, std::max(max_splits, 1)), 1);
+}
+
+// Arguments of the 6 Tensor-level paged decode entry points below (audit D-11), built with
+// designated initializers. An entry point ignores the fields its KV dtype has no use for.
+// block_tables: [batch,max_blocks] int32. context_lens: [batch] int32. sliding_window: 0=off,
+// >0=last N KV. n_sinks (StreamingLLM): >0 also attends [0,n_sinks); needs sliding_window>0 and
+// ctx_len>n_sinks+sliding_window, else plain sliding-window/full attention. softcap: 0=off,
+// >0 applies tanh(score/cap)*cap. attn_sinks (gpt-oss #547): per-head learned logits [n_heads]
+// FP16, a virtual softmax column (unrelated to n_sinks). max_blocks_per_seq: 0 = from max_context_len.
+struct PagedDecodeTensorArgs {
+    const Tensor* Q = nullptr;  // [batch, 1, n_heads, head_dim] FP16
+    const Tensor* K_cache = nullptr;
+    const Tensor* V_cache = nullptr;
+    Tensor* O = nullptr;
+    const void* K_scales = nullptr;  // INT8/INT4: half per head; NVFP4 / MXFP4-KV: E4M3 / UE8M0 bytes
+    const void* V_scales = nullptr;
+    const int* block_tables = nullptr;
+    const int* context_lens = nullptr;
+    int block_size = 0;
+    float scale = 0.0f;
+    float kv_scale = 1.0f;  // FP8 per-tensor KV scale
+    int max_context_len = 0;
+    int sliding_window = 0;
+    float softcap = 0.0f;
+    cudaStream_t stream = nullptr;
+    int max_blocks_per_seq = 0;
+    int n_sinks = 0;
+    const void* attn_sinks = nullptr;
+    int v_head_dim = 0;  // F16 only; see paged_attention_decode
+    PagedQ8Epilogue* q8_epi = nullptr;
+    PagedSplitKScratch splitk;
+};
+
+// Paged attention decode (single query/sequence), F16 KV. v_head_dim: 0=same as head_dim. MLA
+// asymmetric QK/V: pass v_head_dim to read only that many V elements per slot (V allocated at
+// head_dim stride) and write O at v_head_dim width.
+void paged_attention_decode(const PagedDecodeTensorArgs& a);
 
 // Token-tiled FP8 split-K kernel (attention_paged_fp8_tile.cu). Dispatched from
 // paged_attention_decode_fp8 for head_dim=128 / block_size % 16 == 0; writes the same
@@ -86,7 +126,8 @@ void paged_attention_splitk_fp8_tile_launch(const PagedDecodeArgs& a);
 [[nodiscard]] bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size, int n_heads,
                                                    int n_kv_heads);
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                               int block_size, int max_context_len);
+                                               int block_size, int max_context_len,
+                                               const PagedSplitKScratch& splitk);
 void paged_attention_splitk_fp8_tile_gqa_launch(const PagedDecodeArgs& a);
 
 // FP8 E4M3 paged attention decode, on-the-fly dequant. Q:[batch,1,n_heads,hd] FP16.
@@ -156,55 +197,27 @@ inline int paged_attention_f16_multitok_split_count(int n_ctas, int ctas_per_sm,
     return best_s;
 }
 
-void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                const int* block_tables, const int* context_lens, int block_size, float scale,
-                                float kv_scale, int max_context_len, int sliding_window = 0,
-                                float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                int max_blocks_per_seq = 0, int n_sinks = 0, const void* attn_sinks = nullptr,
-                                PagedQ8Epilogue* q8_epi = nullptr);
+// FP8 E4M3 paged attention decode, on-the-fly dequant. K/V_cache:[num_blocks,n_kv_heads,block_size,hd]
+// FP8_E4M3, kv_scale per tensor (val = fp8_val * kv_scale).
+void paged_attention_decode_fp8(const PagedDecodeTensorArgs& a);
 
 // INT8 dp4a paged attention decode, per-head scales. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,block_size,n_kv_heads,hd] INT8. K/V_scales:[...,n_kv_heads] FP16.
-void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                 const half* K_scales, const half* V_scales, const int* block_tables,
-                                 const int* context_lens, int block_size, float scale, int max_context_len,
-                                 int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                 int max_blocks_per_seq = 0, int n_sinks = 0,
-                                 const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
+void paged_attention_decode_int8(const PagedDecodeTensorArgs& a);
 
 // INT4 paged attention decode, packed 2/byte, per-head scales. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,block_size,n_kv_heads,hd/2] packed uint8. K/V_scales FP16.
-void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                 const half* K_scales, const half* V_scales, const int* block_tables,
-                                 const int* context_lens, int block_size, float scale, int max_context_len,
-                                 int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                 int max_blocks_per_seq = 0, int n_sinks = 0,
-                                 const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
+void paged_attention_decode_int4(const PagedDecodeTensorArgs& a);
 
 // NVFP4 paged attention decode: packed FP4 (E2M1), per-token-head-group_of_16 UE4M3 scales.
 // Q:[batch,1,n_heads,hd] FP16. K/V_cache:[num_blocks,block_size,n_kv_heads,hd/2] packed uint8.
 // K/V_scales:[...,hd/16] UE4M3 bytes.
-void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                  const uint8_t* K_scales, const uint8_t* V_scales, const int* block_tables,
-                                  const int* context_lens, int block_size, float scale, int max_context_len,
-                                  int sliding_window = 0, float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                  int max_blocks_per_seq = 0, int n_sinks = 0,
-                                  const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
+void paged_attention_decode_nvfp4(const PagedDecodeTensorArgs& a);
 
 // MXFP4-KV paged attention decode: same layout as NVFP4 but scales are UE8M0 instead of E4M3
 // (design memo 3.1.2). Q:[batch,1,n_heads,hd] FP16. K/V_cache packed uint8 [.../hd/2].
 // K/V_scales:[...,hd/16] UE8M0 bytes.
-void paged_attention_decode_mxfp4_kv(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
-                                     const uint8_t* K_scales, const uint8_t* V_scales,
-                                     const int* block_tables, const int* context_lens, int block_size,
-                                     float scale, int max_context_len, int sliding_window = 0,
-                                     float softcap = 0.0f, cudaStream_t stream = nullptr,
-                                     int max_blocks_per_seq = 0, int n_sinks = 0,
-                                     const void* attn_sinks = nullptr, PagedQ8Epilogue* q8_epi = nullptr);
-
-// Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
-// Returns pointer + size. Either can be nullptr/0 if unset.
-void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
+void paged_attention_decode_mxfp4_kv(const PagedDecodeTensorArgs& a);
 
 // Single source of truth for whether paged DECODE applies attn sinks (gpt-oss #547) for a KV
 // dtype - a property of the kernels, not the model. Wire a new dtype here too, or the fallback

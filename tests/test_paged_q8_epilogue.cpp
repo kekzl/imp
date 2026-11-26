@@ -118,4 +118,46 @@ TEST(PagedDecodeArgs, OmittedFieldsTakeTheOldDefaults) {
     EXPECT_EQ(a.partial, nullptr);
 }
 
+// PagedDecodeTensorArgs (audit D-11, D-9): the 6 Tensor-level entry points take one aggregate whose
+// split-K scratch is a per-call field; omitted = null = no split-K, as the old global's (nullptr, 0).
+using imp::paged_splitk_bytes;
+using imp::paged_splitk_cap;
+using imp::PagedDecodeTensorArgs;
+using imp::PagedSplitKScratch;
+static_assert(std::is_aggregate_v<PagedDecodeTensorArgs>);
+
+TEST(PagedDecodeTensorArgs, OmittedFieldsTakeTheOldDefaults) {
+    const PagedDecodeTensorArgs a{.block_size = 16};
+    EXPECT_EQ(a.splitk.ptr, nullptr);
+    EXPECT_EQ(a.splitk.size, 0u);
+    EXPECT_EQ(a.kv_scale, 1.0f);
+    EXPECT_EQ((std::array{a.sliding_window, a.max_blocks_per_seq, a.n_sinks, a.v_head_dim}),
+              (std::array{0, 0, 0, 0}));
+    EXPECT_EQ(a.softcap, 0.0f);
+    EXPECT_EQ(a.stream, nullptr);
+    EXPECT_EQ(a.attn_sinks, nullptr);
+    EXPECT_EQ(a.q8_epi, nullptr);
+}
+
+// 2 x 4 heads x (2 + 128) floats = 4160 bytes per split.
+TEST(PagedSplitKScratch, BytesPerSplitAreBatchHeadsTimesMlO) {
+    EXPECT_EQ(paged_splitk_bytes(2, 4, 128, 1), 4160u);
+    EXPECT_EQ(paged_splitk_bytes(2, 4, 128, 8), 8u * 4160u);
+}
+
+TEST(PagedSplitKScratch, NullScratchNeverSplits) {
+    EXPECT_EQ(paged_splitk_cap(PagedSplitKScratch{}, 2, 4, 128, 8), 1);
+    EXPECT_EQ(paged_splitk_cap(PagedSplitKScratch{.ptr = nullptr, .size = 1u << 20}, 2, 4, 128, 8), 1);
+}
+
+// A scratch too small for the wanted splits caps them to what fits, never below one split.
+TEST(PagedSplitKScratch, SmallScratchCapsTheSplits) {
+    static float slab[1];
+    const auto fits = [](size_t bytes) { return PagedSplitKScratch{.ptr = slab, .size = bytes}; };
+    EXPECT_EQ(paged_splitk_cap(fits(8 * 4160), 2, 4, 128, 8), 8);  // exactly fits
+    EXPECT_EQ(paged_splitk_cap(fits(64 * 4160), 2, 4, 128, 8), 8);
+    EXPECT_EQ(paged_splitk_cap(fits((3 * 4160) + 4159), 2, 4, 128, 8), 3);
+    EXPECT_EQ(paged_splitk_cap(fits(4159), 2, 4, 128, 8), 1);  // less than one split
+}
+
 }  // namespace

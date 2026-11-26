@@ -58,7 +58,7 @@ struct InklingSlabLayout {
     size_t conv_bytes = 0;  // the n_apps conv states, contiguous at offset 0
     // Per application: byte offset of its K / V ring, kNone = full attention.
     std::vector<size_t> k_off, v_off;
-    size_t slot_bytes = 0;  // one slot, a multiple of kAlign: the stride between slots
+    size_t slot_bytes = 0;   // one slot, a multiple of kAlign: the stride between slots
     InklingLookLayout look;  // bytes 0 = no lookahead planned
 
     [[nodiscard]] size_t ring_bytes() const { return static_cast<size_t>(ring) * kv_row_halves * 2; }

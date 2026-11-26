@@ -168,7 +168,15 @@ TEST(PagedAttentionTest, SingleHeadShortContext) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -229,7 +237,15 @@ TEST(PagedAttentionTest, MultiBlock) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -317,7 +333,15 @@ TEST(PagedAttentionTest, MultiHead) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -406,7 +430,15 @@ TEST(PagedAttentionTest, GQA) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -501,7 +533,15 @@ TEST(PagedAttentionTest, BatchDifferentLengths) {
     int ctx_lens[2] = {seq0, seq1};
     cudaMemcpy(d_ctx, ctx_lens, batch * sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, max_ctx);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = max_ctx});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -563,7 +603,15 @@ TEST(PagedAttentionTest, SingleTokenContext) {
     cudaMemcpy(d_bt, &bt_val, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, 1);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = 1});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -649,7 +697,15 @@ TEST(PagedAttentionTest, GQALongContext) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -759,12 +815,9 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
     constexpr int kMaxSplits = 64;
     size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
-    if (with_scratch) {
+    if (with_scratch)
         cudaMalloc(&d_scratch, scratch_size);
-        paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    } else {
-        paged_attention_set_splitk_scratch(nullptr, 0);
-    }
+    const PagedSplitKScratch splitk{.ptr = d_scratch, .size = with_scratch ? scratch_size : 0};
 
     half* d_sinks = nullptr;
     if (with_sinks) {
@@ -775,9 +828,18 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
         cudaMemcpy(d_sinks, hs.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     }
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
-                           /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
-                           /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len,
+                            .max_blocks_per_seq = max_blocks,
+                            .attn_sinks = d_sinks,
+                            .splitk = splitk});
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
@@ -797,7 +859,6 @@ void run_gptoss_shape_splitk_case(bool with_sinks, int seq_len = 256, bool with_
         }
     }
 
-    paged_attention_set_splitk_scratch(nullptr, 0);
     if (d_scratch)
         cudaFree(d_scratch);
     if (d_sinks)
@@ -986,12 +1047,9 @@ void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_s
     constexpr int kMaxSplits = 64;
     size_t scratch_size = static_cast<size_t>(batch) * n_heads * kMaxSplits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
-    if (with_scratch) {
+    if (with_scratch)
         cudaMalloc(&d_scratch, scratch_size);
-        paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    } else {
-        paged_attention_set_splitk_scratch(nullptr, 0);
-    }
+    const PagedSplitKScratch splitk{.ptr = d_scratch, .size = with_scratch ? scratch_size : 0};
 
     half* d_sinks = nullptr;
     if (with_sinks) {
@@ -1002,15 +1060,24 @@ void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_s
         cudaMemcpy(d_sinks, hs.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     }
 
-    if (is_int4) {
-        paged_attention_decode_int4(d_Q, d_K, d_V, d_O, d_ks, d_vs, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
-                                    /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
-                                    /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
-    } else {
-        paged_attention_decode_int8(d_Q, d_K, d_V, d_O, d_ks, d_vs, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len,
-                                    /*sliding_window=*/0, /*softcap=*/0.0f, /*stream=*/nullptr,
-                                    /*max_blocks_per_seq=*/max_blocks, /*n_sinks=*/0, d_sinks);
-    }
+    const PagedDecodeTensorArgs args{.Q = &d_Q,
+                                     .K_cache = &d_K,
+                                     .V_cache = &d_V,
+                                     .O = &d_O,
+                                     .K_scales = d_ks,
+                                     .V_scales = d_vs,
+                                     .block_tables = d_bt,
+                                     .context_lens = d_ctx,
+                                     .block_size = BLOCK_SIZE,
+                                     .scale = scale,
+                                     .max_context_len = seq_len,
+                                     .max_blocks_per_seq = max_blocks,
+                                     .attn_sinks = d_sinks,
+                                     .splitk = splitk};
+    if (is_int4)
+        paged_attention_decode_int4(args);
+    else
+        paged_attention_decode_int8(args);
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
@@ -1035,7 +1102,6 @@ void run_quant_sink_case(QuantKV kind, bool with_sinks, int seq_len, bool with_s
         << (is_int4 ? "INT4" : "INT8") << " decode is not closer to its own reference than to the other one "
         << "(err_want=" << err_want << ", err_other=" << err_other << ", with_sinks=" << with_sinks << ")";
 
-    paged_attention_set_splitk_scratch(nullptr, 0);
     if (d_scratch)
         cudaFree(d_scratch);
     if (d_sinks)
@@ -1149,7 +1215,15 @@ TEST(PagedAttentionTest, GQA_HD256) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     cudaError_t err = cudaGetLastError();
@@ -1241,7 +1315,15 @@ TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
 
     cudaError_t err = cudaGetLastError();
@@ -1337,7 +1419,15 @@ TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode({.Q = &d_Q,
+                            .K_cache = &d_K,
+                            .V_cache = &d_V,
+                            .O = &d_O,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = BLOCK_SIZE,
+                            .scale = scale,
+                            .max_context_len = seq_len});
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
@@ -1502,8 +1592,17 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     cudaMemcpy(d_bt, &bt_val, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode_int4(d_Q, d_K_cache, d_V_cache, d_O, d_k_scales, d_v_scales, d_bt, d_ctx,
-                                BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode_int4({.Q = &d_Q,
+                                 .K_cache = &d_K_cache,
+                                 .V_cache = &d_V_cache,
+                                 .O = &d_O,
+                                 .K_scales = d_k_scales,
+                                 .V_scales = d_v_scales,
+                                 .block_tables = d_bt,
+                                 .context_lens = d_ctx,
+                                 .block_size = BLOCK_SIZE,
+                                 .scale = scale,
+                                 .max_context_len = seq_len});
     cudaDeviceSynchronize();
     EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged attention kernel failed";
 

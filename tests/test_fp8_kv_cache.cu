@@ -234,9 +234,18 @@ TEST(FP8KVCache, SplitKConsistency) {
 
     // ---- Run FP8 decode WITHOUT Split-K (reference) ----
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);  // force non-split-K
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit, d_bt, d_ctx, block_size, scale, kv_scale,
-                               ctx_len, 0, 0.0f, nullptr);
+    // No split-K scratch: the non-split-K reference.
+    PagedDecodeTensorArgs args{.Q = &t_q,
+                               .K_cache = &t_k8,
+                               .V_cache = &t_v8,
+                               .O = &t_o_nosplit,
+                               .block_tables = d_bt,
+                               .context_lens = d_ctx,
+                               .block_size = block_size,
+                               .scale = scale,
+                               .kv_scale = kv_scale,
+                               .max_context_len = ctx_len};
+    paged_attention_decode_fp8(args);
     cudaDeviceSynchronize();
 
     // ---- Run FP8 decode WITH Split-K ----
@@ -246,9 +255,9 @@ TEST(FP8KVCache, SplitKConsistency) {
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len,
-                               0, 0.0f, nullptr);
+    args.O = &t_o_splitk;
+    args.splitk = {.ptr = d_scratch, .size = scratch_size};
+    paged_attention_decode_fp8(args);
     cudaDeviceSynchronize();
 
     // ---- Compare Split-K vs non-Split-K (same FP8 data, should match closely) ----
@@ -277,7 +286,6 @@ TEST(FP8KVCache, SplitKConsistency) {
                                << ", max_abs_ref=" << max_abs_ref << ")";
 
     // ---- Cleanup ----
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_q);
     cudaFree(d_k_fp16);
     cudaFree(d_v_fp16);
@@ -368,9 +376,16 @@ TEST(FP8KVCache, SplitKGqaTileConsistency) {
     void* d_o_ref = nullptr;
     cudaMalloc(&d_o_ref, q_elems * sizeof(half));
     Tensor t_o_ref(d_o_ref, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_ref, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len, 0,
-                               0.0f, nullptr);
+    paged_attention_decode_fp8({.Q = &t_q,
+                                .K_cache = &t_k8,
+                                .V_cache = &t_v8,
+                                .O = &t_o_ref,
+                                .block_tables = d_bt,
+                                .context_lens = d_ctx,
+                                .block_size = block_size,
+                                .scale = scale,
+                                .kv_scale = kv_scale,
+                                .max_context_len = ctx_len});
     cudaDeviceSynchronize();
 
     // ---- 2./3. Direct tile / GQA-tile launches with a shared reduce ----
@@ -436,7 +451,6 @@ TEST(FP8KVCache, SplitKGqaTileConsistency) {
     EXPECT_LT(rel_rmse(h_ref, h_gqa), 0.02f) << "GQA tile vs non-split reference";
     EXPECT_LT(rel_rmse(h_tile, h_gqa), 0.01f) << "GQA tile vs per-head tile";
 
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_q);
     cudaFree(d_k_fp16);
     cudaFree(d_v_fp16);
@@ -619,10 +633,18 @@ TEST(INT8KVCache, SplitKConsistency) {
 
     // ---- Run INT8 decode WITHOUT Split-K ----
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_nosplit, static_cast<const half*>(d_k_scales),
-                                static_cast<const half*>(d_v_scales), d_bt, d_ctx, block_size, scale, ctx_len,
-                                0, 0.0f, nullptr);
+    PagedDecodeTensorArgs args{.Q = &t_q,
+                               .K_cache = &t_k_i8,
+                               .V_cache = &t_v_i8,
+                               .O = &t_o_nosplit,
+                               .K_scales = static_cast<const half*>(d_k_scales),
+                               .V_scales = static_cast<const half*>(d_v_scales),
+                               .block_tables = d_bt,
+                               .context_lens = d_ctx,
+                               .block_size = block_size,
+                               .scale = scale,
+                               .max_context_len = ctx_len};
+    paged_attention_decode_int8(args);
     cudaDeviceSynchronize();
 
     // ---- Run INT8 decode WITH Split-K ----
@@ -632,10 +654,9 @@ TEST(INT8KVCache, SplitKConsistency) {
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_splitk, static_cast<const half*>(d_k_scales),
-                                static_cast<const half*>(d_v_scales), d_bt, d_ctx, block_size, scale, ctx_len,
-                                0, 0.0f, nullptr);
+    args.O = &t_o_splitk;
+    args.splitk = {.ptr = d_scratch, .size = scratch_size};
+    paged_attention_decode_int8(args);
     cudaDeviceSynchronize();
 
     // ---- Compare Split-K vs non-Split-K ----
@@ -663,7 +684,6 @@ TEST(INT8KVCache, SplitKConsistency) {
                                << ", max_abs_ref=" << max_abs_ref << ")";
 
     // ---- Cleanup ----
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_q);
     cudaFree(d_k_int8);
     cudaFree(d_v_int8);
@@ -831,9 +851,15 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaMalloc(&d_o_fp16, q_elems * sizeof(half));
     cudaMemset(d_o_fp16, 0, q_elems * sizeof(half));
     Tensor t_o_fp16(d_o_fp16, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode(t_q, t_k16, t_v16, t_o_fp16, d_bt, d_ctx, block_size, scale, ctx_len, 0, 0.0f,
-                           nullptr);
+    paged_attention_decode({.Q = &t_q,
+                            .K_cache = &t_k16,
+                            .V_cache = &t_v16,
+                            .O = &t_o_fp16,
+                            .block_tables = d_bt,
+                            .context_lens = d_ctx,
+                            .block_size = block_size,
+                            .scale = scale,
+                            .max_context_len = ctx_len});
     cudaDeviceSynchronize();
 
     // ---- Run FP8 decode ----
@@ -841,8 +867,16 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaMalloc(&d_o_fp8, q_elems * sizeof(half));
     cudaMemset(d_o_fp8, 0, q_elems * sizeof(half));
     Tensor t_o_fp8(d_o_fp8, QType::F16, 4, q_shape, true);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_fp8, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len, 0,
-                               0.0f, nullptr);
+    paged_attention_decode_fp8({.Q = &t_q,
+                                .K_cache = &t_k8,
+                                .V_cache = &t_v8,
+                                .O = &t_o_fp8,
+                                .block_tables = d_bt,
+                                .context_lens = d_ctx,
+                                .block_size = block_size,
+                                .scale = scale,
+                                .kv_scale = kv_scale,
+                                .max_context_len = ctx_len});
     cudaDeviceSynchronize();
 
     // ---- Compare outputs ----
@@ -975,9 +1009,17 @@ TEST(FP8KVCache, SplitKHD256) {
 
     // Run FP8 decode WITHOUT Split-K (reference — uses non-pipelined kernel)
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit, d_bt, d_ctx, block_size, scale, kv_scale,
-                               ctx_len, 0, 0.0f, nullptr);
+    PagedDecodeTensorArgs args{.Q = &t_q,
+                               .K_cache = &t_k8,
+                               .V_cache = &t_v8,
+                               .O = &t_o_nosplit,
+                               .block_tables = d_bt,
+                               .context_lens = d_ctx,
+                               .block_size = block_size,
+                               .scale = scale,
+                               .kv_scale = kv_scale,
+                               .max_context_len = ctx_len};
+    paged_attention_decode_fp8(args);
     cudaDeviceSynchronize();
 
     // Run FP8 decode WITH Split-K (exercises pipelined kernel on sm_90+)
@@ -987,9 +1029,9 @@ TEST(FP8KVCache, SplitKHD256) {
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
-    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len,
-                               0, 0.0f, nullptr);
+    args.O = &t_o_splitk;
+    args.splitk = {.ptr = d_scratch, .size = scratch_size};
+    paged_attention_decode_fp8(args);
     cudaDeviceSynchronize();
 
     // Check for CUDA errors (would catch invalid argument from bad kernel launch)
@@ -1017,7 +1059,6 @@ TEST(FP8KVCache, SplitKHD256) {
                              << " mismatches, max_rel_err=" << max_rel_err;
 
     // Cleanup
-    paged_attention_set_splitk_scratch(nullptr, 0);
     cudaFree(d_scratch);
     cudaFree(d_q);
     cudaFree(d_k_fp16);

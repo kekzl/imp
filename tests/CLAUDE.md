@@ -34,7 +34,7 @@ make test-gpu        # GPU suite; started wrong it silently skips most
 - `--gtest_filter` on `TEST_P`/`TYPED_TEST` without wildcards matches 0 tests and reports `PASSED`: `*DetEvalE2ETest*`, not `DetEvalE2ETest.*` (CPU-lane guard).
 - A timed-out mutation run leaves the mutation in the tree: back the file up to scratchpad first, never `git checkout` to undo.
 - Wrong test-model env paths skip whole batteries silently.
-- `paged_attention_set_splitk_scratch` is process-global: reset to `(nullptr, 0)` after use (#2072).
+- Split-K scratch is a per-call field, `PagedDecodeTensorArgs::splitk`: a call without it never splits, so a split-K test passes it on each call (B-133).
 - Dispatch tests prove the path ran: `QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel` asserts the two kernels are NOT bit-identical.
 - Chat-template tests compare the whole rendered prompt (goldens), not a marker (#1572).
 - Template family = `ChatTemplate::detect_family()`, not model name: Nemotron-3-Nano and Phi-4-reasoning ship ChatML.
