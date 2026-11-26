@@ -1065,6 +1065,8 @@ if(IMP_BUILD_TESTS)
         tests/test_config_bindings.cpp
         # C-9: an explicit EngineConfig value, default included, wins over imp.conf; unset falls through.
         tests/test_engine_config_bridge.cpp
+        # C-11: Engine::init refuses a failed stream create (no device in the CPU lane).
+        tests/test_engine_stream_open.cpp
         # D-9: gemm_nvfp4's fallback workspace is a per-call argument, the deferred take runs once.
         tests/test_nvfp4_dequant_ws.cpp
         tests/test_mtp_auto.cpp

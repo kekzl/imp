@@ -1311,7 +1311,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing.outside +=
                 std::chrono::duration<double, std::micro>(tp0 - g_step_timing.last_end).count();
     }
-    (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+    executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
 
     // Build batched decode
     decode_builder_.reset();

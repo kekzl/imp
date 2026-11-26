@@ -230,4 +230,13 @@ inline cudaError_t copy_d2h_sync(void* dst, const void* src, size_t bytes, cudaS
     return err != cudaSuccess ? err : cudaStreamSynchronize(stream);
 }
 
+// Engine::init fails when its stream cannot be created: a null stream_ would serve every
+// launch on the legacy default stream (audit C-11). Returns false and logs the CUDA error.
+[[nodiscard]] inline bool open_engine_stream(CudaStream& stream) {
+    const cudaError_t err = stream.try_create(cudaStreamNonBlocking);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("engine stream create failed: %s, refusing to load", cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
 }  // namespace imp::engine_internal
