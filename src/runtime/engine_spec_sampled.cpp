@@ -6,6 +6,7 @@
 // from p without d (Leviathan et al. 2023, q = one-hot). Row seeds follow the eager sampler's
 // per-output-index seed (compute_step_seed), so a seeded request draws what it would without speculation.
 
+#include "core/log_once.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 
@@ -62,9 +63,8 @@ std::vector<VerifySampling> verify_row_draws(const std::vector<std::shared_ptr<R
                                        0x7fffffffu);
         }
     }
-    static bool logged = false;
-    if (!rows.empty() && !logged) {
-        logged = true;
+    static LogOnce logged;
+    if (!rows.empty() && logged.first()) {
         IMP_LOG_INFO("spec-batch: first sampled batched verify n=%zu rows=%zu", reqs.size(), rows.size());
     }
     return rows;

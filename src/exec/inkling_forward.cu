@@ -10,6 +10,7 @@
 #include "core/cuda_raii.h"
 #include "core/graph_epoch.h"
 #include "core/tensor.h"
+#include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
 #include "quant/nvfp4_gemm.h"
 
@@ -20,7 +21,7 @@ namespace imp {
 using namespace inkling;
 
 InklingForward::~InklingForward() {
-    owned_.clear();  // I5: before the graphs and GrowRows members go, front to back in libstdc++
+    owned_.clear();  // I5: before the graphs go, front to back in libstdc++
 }
 
 // Side stream i, started behind everything queued on s so far; s itself for the default stream (tests).
@@ -59,18 +60,8 @@ void* InklingForward::alloc_(size_t bytes) {
     return p;
 }
 
-bool InklingForward::grow_ctx_(int rows, cudaStream_t s) {
-    const size_t want = std::min(static_cast<size_t>(rows), static_cast<size_t>(max_ctx_));
-    if (want <= ctx_.rows())
-        return true;
-    // Queued launches hold pointers into the regions: let them end before the mapping changes.
-    if (cudaStreamSynchronize(s) != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess)
-        return false;
-    return ctx_.ensure(want);
-}
-
 bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_tokens, int max_ctx,
-                          const InklingForward* scratch, Backend* growable) {
+                          const InklingForward* scratch, bool own_kv) {
     w_ = &w;
     va_ = &va;
     share_ = scratch && scratch->max_tokens_ == max_tokens && scratch->max_ctx_ == max_ctx ? scratch
@@ -127,26 +118,16 @@ bool InklingForward::init(const InklingWeights& w, VRAMAllocator& va, int max_to
     ckpt_stage_ = F_(3 * conv_state_floats_ * static_cast<size_t>(c.n_apps()));
     scratch_on_ = false;
     d_pos_ = static_cast<int*>(alloc_(sizeof(int)));
-    ok_ = ok_ && init_ctx_blocks_(max_ctx);
     dec_h_ = Hf_(H * kGraphRows);
     conv_all_ = F_(conv_state_floats_ * static_cast<size_t>(c.n_apps()));
-    ctx_.init(va, growable, "inkling_state", KD * sizeof(half), static_cast<size_t>(max_ctx), kCtxStep);
+    // Sliding applications keep a ring here; the full-attention ones read the K/V init_kv_ binds.
     for (int a = 0; a < c.n_apps() && ok_; ++a) {
-        // Application index -> weight layer.
-        const int layer = a < c.n_layers ? a : c.loop_start + (a - c.n_layers) % (c.loop_end - c.loop_start);
-        if (c.global[static_cast<size_t>(layer)]) {
-            k_.push_back(static_cast<half*>(ctx_.add()));
-            v_.push_back(static_cast<half*>(ctx_.add()));
-            if (!k_.back() || !v_.back()) {
-                IMP_LOG_ERROR("inkling: no room for the context K/V of %d positions", max_ctx);
-                ok_ = false;
-            }
-        } else {
-            k_.push_back(Hf_(static_cast<size_t>(ring_) * KD));
-            v_.push_back(Hf_(static_cast<size_t>(ring_) * KD));
-        }
+        const bool global = c.global[static_cast<size_t>(c.app_layer(a))];
+        k_.push_back(global ? nullptr : Hf_(static_cast<size_t>(ring_) * KD));
+        v_.push_back(global ? nullptr : Hf_(static_cast<size_t>(ring_) * KD));
         conv_state_.push_back(conv_all_ + conv_state_floats_ * static_cast<size_t>(a));
     }
+    ok_ = ok_ && init_kv_(own_kv);
     if (ok_)
         reset(nullptr);
     return ok_;
@@ -157,6 +138,8 @@ void InklingForward::reset(cudaStream_t s) {
     std::vector<std::vector<float>>().swap(ckpt_);  // none is valid any more
     look_pos0_ = -1;
     reset_draft_policy_();
+    if (spec_.restart)
+        spec_.restart(0);
     if (!armed_)
         hist_.clear();
     armed_ = false;
@@ -216,8 +199,8 @@ int InklingForward::match(std::span<const int32_t> tokens) const {
     return hw_ - (g * kGrid) > ring_ - w_->cfg.window ? 0 : g * kGrid;
 }
 
-int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
-    int g = match(tokens) / kGrid;
+int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s, int limit) {
+    int g = std::min(match(tokens), std::max(limit, 0)) / kGrid;
     const size_t n = conv_state_floats_ * conv_state_.size();
     if (g > 0 && (ckpt_[static_cast<size_t>(g) - 1].size() != n ||
                   cudaMemcpyAsync(conv_all_, ckpt_[static_cast<size_t>(g) - 1].data(), n * sizeof(float),
@@ -232,6 +215,8 @@ int InklingForward::rewind(std::span<const int32_t> tokens, cudaStream_t s) {
     armed_ = false;
     pos_ = g * kGrid;
     ckpt_valid_ = g;
+    if (spec_.restart)
+        spec_.restart(pos_);
     return pos_;
 }
 
@@ -372,6 +357,7 @@ void InklingForward::apply_(int layer, int pass, int T, cudaStream_t s) {
     ka.state = cs, ka.cache = k_[app], ka.d_pos = d_pos_;
     ka.T = T, ka.stride = kv_stride, ka.n_heads = c.n_kv_heads, ka.hd = c.head_dim,
     ka.ring = global ? 0 : ring_;
+    ka.blocks = global ? blocks_ : nullptr, ka.kv_block = kKVBlockSize;
     ka.is_key = true, ka.thr = c.qk_clip, ka.eps = c.eps;
     const ConvLog lg = conv_log_at_(app, T);
     ka.log = lg.k;
@@ -540,14 +526,16 @@ bool InklingForward::run(half* h, int T, int pos0, cudaStream_t s, const int32_t
         reset(s);
     armed_ = false;
     look_row_ = -1;
-    if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_) {
+    if (pos0 != pos_ || T < 1 || T > max_tokens_ || pos_ + T > max_ctx_ || !kv_bound_ ||
+        pos_ + T > table_rows_) {
         IMP_LOG_ERROR(
-            "inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context)", T,
-            pos0, pos_, max_tokens_, max_ctx_);
+            "inkling: %d rows at position %d do not continue the sequence at %d (%d per call, %d context%s)",
+            T, pos0, pos_, max_tokens_, max_ctx_,
+            !kv_bound_               ? ", no K/V bound"
+            : pos_ + T > table_rows_ ? ", past the block table"
+                                     : "");
         return false;
     }
-    if (!grow_ctx_(pos_ + T + kGraphRows, s))
-        return false;
     // Tokens past the prompt rewind() recorded (the decode steps) join the history.
     for (int i = 0; i < T; ++i)
         if (static_cast<size_t>(pos0) + static_cast<size_t>(i) >= hist_.size())
@@ -632,13 +620,11 @@ void InklingForward::tap_features_(int T, cudaStream_t s) {
 
 bool InklingForward::forward(const int32_t* d_ids, int T, float* d_logits, cudaStream_t s) {
     const InklingConfig& c = w_->cfg;
-    if (T < 1 || T > seg_ || pos_ + T > max_ctx_ || !w_->embed) {
+    if (T < 1 || T > seg_ || pos_ + T > max_ctx_ || !w_->embed || !kv_bound_ || pos_ + T > table_rows_) {
         IMP_LOG_ERROR("inkling: %d tokens at position %d exceed the workspace (%d per call, %d context)", T,
                       pos_, seg_, max_ctx_);
         return false;
     }
-    if (!grow_ctx_(pos_ + T, s))
-        return false;
     const int H = c.hidden;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_pos_, &pos_, sizeof(int), cudaMemcpyHostToDevice, s));
     embed_rows(w_->embed, d_ids, h_, T, H, s);

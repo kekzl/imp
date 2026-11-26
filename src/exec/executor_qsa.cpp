@@ -10,6 +10,7 @@
 #include "compute/attention_paged.h"
 #include "compute/gemm.h"
 #include "compute/qsa_indexer.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "exec/executor.h"
 #include "exec/executor_helpers.h"
@@ -192,9 +193,8 @@ bool GraphExecutor::qsa_decode_(int layer, const InferenceState& state, const Te
         return false;
     // Proof-of-activity for A/B arms: below budget + ratio - 1 the selection is every
     // token in order, so an arm that never logs this ran bit-identically to dense.
-    static bool logged_qsa_active = false;
-    if (!logged_qsa_active && state.max_context_len > model_->config().qsa_budget) {
-        logged_qsa_active = true;
+    static LogOnce logged_qsa_active;
+    if (state.max_context_len > model_->config().qsa_budget && logged_qsa_active.first()) {
         IMP_LOG_INFO("QSA indexer ACTIVE: ctx %d > budget %d tokens", state.max_context_len,
                      model_->config().qsa_budget);
     }
@@ -229,9 +229,8 @@ void GraphExecutor::qsa_prefill_(int layer, const InferenceState& state, int n, 
         return;
     }
     if (pos0 > qsa_valid_ || pos0 + n > qsa_max_ctx_) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static LogOnce warned;
+        if (warned.first()) {
             IMP_LOG_WARN("QSA indexer: chunk at %d with keys valid to %d (context %d): a resumed prefix has "
                          "no indexer keys; attention stays dense for this sequence",
                          pos0, qsa_valid_, qsa_max_ctx_);

@@ -11,6 +11,7 @@
 #include "compute/gemv_dp4a_multi.h"
 #include "compute/layernorm.h"
 #include "core/dispatch_policy.h"
+#include "core/log_once.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "compute/mmq_q8_imma.h"
@@ -279,9 +280,8 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
                           static_cast<int>(K), stream);
     if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf.data(), static_cast<int>(K), stream))
         throw std::runtime_error("try_gdn_input_dp4a_m1_: gemv_dp4a_multi refused vetted segments");
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("gdn M=1 dp4a multi input GEMV ACTIVE (K=%lld, %d weights, mask %d)", (long long)K, n,
                      done);
     }
@@ -311,9 +311,8 @@ bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int
                           static_cast<int>(K), stream);
     if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf.data(), static_cast<int>(K), stream))
         throw std::runtime_error("dp4a_multi_m1_: gemv_dp4a_multi refused vetted segments");
-    static bool logged = false;  // activity proof, once
-    if (!logged) {
-        logged = true;
+    static LogOnce logged;  // activity proof, once
+    if (logged.first()) {
         IMP_LOG_INFO("M=1 dp4a multi GEMV ACTIVE (K=%lld, %d weights, rows %d + %d)", (long long)K, n,
                      segs[0].rows, segs[1].rows);
     }
