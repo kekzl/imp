@@ -3,6 +3,7 @@
 #include "memory/device_owned.h"
 #include "compute/sampling_internal.cuh"
 #include "compute/warp_reduce.cuh"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
@@ -544,6 +545,7 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
 static StableSpan<int32_t> s_bias_tokens_buf;  // engine arena slice
 static StableSpan<float> s_bias_values_buf;
 static size_t s_bias_buf_cap = 0;
+static FallbackSite s_fb_logit_bias{"logit_bias_prealloc"};
 
 __global__ void apply_logit_bias_kernel(float* __restrict__ logits, const int32_t* __restrict__ tokens,
                                         const float* __restrict__ biases, int n) {
@@ -569,10 +571,10 @@ void sampling_preallocate_logit_bias(int max_entries) {
     StableSpan<std::byte> tokens = engine_arena().take_bytes(cap * sizeof(int32_t));
     StableSpan<std::byte> values = engine_arena().take_bytes(cap * sizeof(float));
     if (tokens.empty() || values.empty()) {
-        IMP_LOG_WARN(
-            "sampling_preallocate_logit_bias: %zu slots unavailable from the T2 arena — "
-            "logit_bias falls back to per-entry copies",
-            cap);
+        IMP_FALLBACK_WARN(s_fb_logit_bias,
+                          "logit_bias: %zu device slots (%zu B) not taken (T2 arena short): one blocking "
+                          "D2H + H2D copy pair per biased token instead of one kernel",
+                          cap, cap * (sizeof(int32_t) + sizeof(float)));
         return;
     }
     s_bias_tokens_buf = tokens.as<int32_t>();

@@ -6,6 +6,7 @@
 #include "handlers_internal.h"
 
 #include "api/imp_internal.h"
+#include "core/fallback_site.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/mem_account.h"
@@ -244,4 +245,13 @@ void append_memory_metrics(std::string& out, imp::Engine* engine, const imp::Eng
         out += "imp_vram_own_peak_bytes " + std::to_string(b.own_peak_bytes) + "\n";
         append_allocator_tags(out, engine, b.own_bytes);
     }
+}
+
+void append_fallback_metrics(std::string& out) {
+    out +=
+        "# HELP imp_fallback_total Hits of a designed fallback (the request survives on a slower or "
+        "reduced path)\n";
+    out += "# TYPE imp_fallback_total counter\n";
+    for (const auto& c : imp::fallback_counts())
+        out += "imp_fallback_total{site=\"" + c.site + "\"} " + std::to_string(c.count) + "\n";
 }

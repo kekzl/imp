@@ -14,6 +14,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "core/fallback_site.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 
@@ -34,6 +35,8 @@ using imp::pre_dequant_internal::deduct_budget;
 using imp::pre_dequant_internal::model_has_dense_mxfp4;
 
 namespace {
+
+FallbackSite s_fb_nvfp4_sf_slab{"nvfp4_sf_slab"};
 
 enum class G3 { SfAtom, SkipQ8, SfLess };
 
@@ -211,9 +214,11 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             IMP_CUDA_CHECK_LOG(cudaGetLastError());
             // Defensive (floor over-commit or genuine exhaustion): a null
             // slab must not be offset into by the convert passes below.
-            IMP_LOG_WARN("CUTLASS NVFP4 cache: slab cudaMalloc(%.1f MiB) failed — "
-                         "cache skipped (decode falls back; expect degraded perf)",
-                         ct_total / (1024.0 * 1024.0));
+            IMP_FALLBACK_WARN(
+                s_fb_nvfp4_sf_slab,
+                "NVFP4 SfAtom cache: slab cudaMalloc(%.1f MiB) failed: cache skipped, the weights "
+                "keep their source tier and route (slower GEMMs)",
+                ct_total / (1024.0 * 1024.0));
             return;
         }
         // Zero every entry's SfAtom padding rows at once (convert kernels write
