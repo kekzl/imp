@@ -28,6 +28,7 @@
 #include "exec/ffn_graph_cache.h"
 #include "exec/gemma_pli_state.h"
 #include "exec/sae.h"
+#include "exec/smallm_xq_tag.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/inkling_forward.h"
@@ -312,19 +313,10 @@ public:
     size_t smallm_ws_bytes_ = 0;
     ViewOrOwned<void> smallm_xq_;  // A4 activation quantize scratch [32, Kmax]
     size_t smallm_xq_bytes_ = 0;
-    // What smallm_xq_ currently holds (source pointer + shape of the last
-    // activation quantize). Lets a dispatch with a matching hint skip
-    // re-quantizing when two GEMMs share one normed input (gate/up, q/k/v, GDN
-    // in/z). Self-invalidates on every fresh quantize.
-    const void* smallm_xq_src_ = nullptr;
-    int smallm_xq_src_m_ = 0;
-    int smallm_xq_src_k_ = 0;
-    float smallm_xq_src_scale_ = 1.0f;  // act tensor scale of that quantize
-    // True when the scratch was filled by a PRODUCER fusion (fused
-    // rmsnorm/swiglu + quantize), not the dispatch's own quantize: the
-    // small-M block then accepts a matching tag without an act-quant hint,
-    // since the producer updated the tag on the same write. Never read by the CUTLASS prefill consumer.
-    bool smallm_xq_from_producer_ = false;
+    // What smallm_xq_ holds: a matching tag skips the re-quantize with an act-quant hint (gate/up,
+    // q/k/v, GDN in/z) or while a producer stamp is live (view_tokens retires it). Never read by
+    // the CUTLASS prefill consumer.
+    SmallMXqTag smallm_xq_tag_;
 
     // Grow the small-M xq scratch (no-op while capturing; resize
     // invalidates the shared-activation tag).
@@ -336,11 +328,7 @@ public:
     // k_align: K multiple the producer accepts (256 for the norm producers, 64 for GeGLU).
     uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                  uint8_t** scales_out, float* act_scale_out, int k_align = 256);
-    // Tag the scratch as holding quantize(out[0..M,0..K), act_scale) written by a fused
-    // producer kernel.
-    void smallm_producer_tag_(const void* out_data, int M, int K, float act_scale);
     [[nodiscard]] float act_scale_of_(TensorID id) const;  // WeightHandle::act_scale, 1.0 for an invalid id
-    [[nodiscard]] bool smallm_xq_holds_(const void* data, int M, int K, float act_scale) const;
     // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
     // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode overlay
     // of a dequantable GGUF source. False when neither exists; prompt rows on
@@ -377,6 +365,7 @@ public:
     const void* prenorm_out_ = nullptr;
     const void* prenorm_w_ = nullptr;
     int prenorm_n_ = 0;
+    uint64_t prenorm_xq_gen_ = 0;  // the producer's smallm_xq_tag_ stamp, 0 = it quantized nothing
     // FP32-residual sandwich-norm fusion (executor_fp32_residual.cpp, Gemma-4
     // decode): each replaces a chain of norm / add / copy / scale / quantize launches, same bits.
     [[nodiscard]] bool fp32_resid_fuse_ok_(int n) const;
@@ -396,11 +385,6 @@ public:
     // Router input written by fp32_post_attn_fused_ (buffer + rows), consumed by moe_router_in_fp16_.
     const void* router_prenorm_ = nullptr;
     int router_prenorm_n_ = 0;
-    // A non-producer write to `p`: a stale producer tag must not let a GEMM skip its quantize.
-    void smallm_xq_forget_(const void* p) {
-        if (smallm_xq_src_ == p)
-            smallm_xq_from_producer_ = false;
-    }
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
     // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
     // run rmsnorm() as before.
