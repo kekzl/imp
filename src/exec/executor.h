@@ -972,14 +972,14 @@ private:
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only): a view of the
     // engine-persistent arena (freed wholesale) or a private allocation (arena closed or short).
-    // Set up by allocate_nvfp4_dequant_workspace() and registered with the
-    // free function via set_nvfp4_dequant_workspace(). Allows the fallback
-    // path to run inside CUDA stream capture without crashing on cudaMalloc.
+    // Set up by allocate_nvfp4_dequant_workspace(); nvfp4_dequant_ws_ hands it to gemm_nvfp4 per
+    // call (qscratch_.nvfp4_dequant, audit D-9). Lets the fallback run inside CUDA stream capture.
     ViewOrOwned<void> nvfp4_dequant_ws_buf_;
     size_t nvfp4_dequant_ws_size_ = 0;
     // Lazy engine arena: the workspace is taken at the first fallback that needs it
-    // (set_nvfp4_dequant_workspace_provider); until then the buffer is null and the size is set.
+    // (nvfp4_dequant_ws_.provide); until then the buffer is null and the size is set.
     bool nvfp4_dequant_ws_deferred_ = false;
+    Nvfp4DequantWorkspace nvfp4_dequant_ws_;
     static void* provide_nvfp4_dequant_ws_(void* self);
     [[nodiscard]] bool acquire_nvfp4_dequant_ws_(size_t covered_bytes);
     void release_nvfp4_dequant_ws_();

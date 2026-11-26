@@ -111,7 +111,7 @@ static size_t s_nvfp4_dequant_buf_size = 0;
 static std::mutex s_nvfp4_dequant_mtx;
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h). Only the lazily
-// cudaMalloc'd buffer is freed here — s_nvfp4_dequant_ws_buf is caller-owned.
+// cudaMalloc'd buffer is freed here — the Nvfp4DequantWorkspace is caller-owned.
 void nvfp4_gemm_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
     s_nvfp4_dequant_buf.reset();
@@ -132,48 +132,15 @@ __global__ void nvfp4_fp32_to_fp16_kernel(const float* __restrict__ in, __half* 
         out[i] = __float2half(in[i]);
 }
 
-// Pre-allocated workspace from the executor. When set, ensure_dequant_buffer
-// uses this instead of the lazy cudaMalloc path — which would fail inside
-// CUDA stream capture. Lifetime owned by caller of set_nvfp4_dequant_workspace.
-static void* s_nvfp4_dequant_ws_buf = nullptr;
-static size_t s_nvfp4_dequant_ws_size = 0;
-
-static Nvfp4WorkspaceProvider s_nvfp4_dequant_ws_provide = nullptr;
-static void* s_nvfp4_dequant_ws_ctx = nullptr;
-
-void set_nvfp4_dequant_workspace(void* buf, size_t size_bytes) {
-    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
-    s_nvfp4_dequant_ws_buf = buf;
-    s_nvfp4_dequant_ws_size = size_bytes;
-    s_nvfp4_dequant_ws_provide = nullptr;
-    s_nvfp4_dequant_ws_ctx = nullptr;
-}
-
-void set_nvfp4_dequant_workspace_provider(Nvfp4WorkspaceProvider provide, void* ctx, size_t size_bytes) {
-    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
-    s_nvfp4_dequant_ws_buf = nullptr;
-    s_nvfp4_dequant_ws_size = provide ? size_bytes : 0;
-    s_nvfp4_dequant_ws_provide = provide;
-    s_nvfp4_dequant_ws_ctx = ctx;
-}
-
 size_t nvfp4_lazy_dequant_buf_size_for_testing() {
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
     return s_nvfp4_dequant_buf_size;
 }
 
-// Must be called with s_nvfp4_dequant_mtx held.
-static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
-    // A deferred workspace is taken now, once (a provider that has none leaves no workspace).
-    if (s_nvfp4_dequant_ws_provide && needed <= s_nvfp4_dequant_ws_size) {
-        s_nvfp4_dequant_ws_buf = s_nvfp4_dequant_ws_provide(s_nvfp4_dequant_ws_ctx);
-        s_nvfp4_dequant_ws_provide = nullptr;
-        if (!s_nvfp4_dequant_ws_buf)
-            s_nvfp4_dequant_ws_size = 0;
-    }
-    // Prefer the pre-allocated workspace (graph-safe path).
-    if (s_nvfp4_dequant_ws_buf && needed <= s_nvfp4_dequant_ws_size)
-        return s_nvfp4_dequant_ws_buf;
+// Must be called with s_nvfp4_dequant_mtx held. The caller's workspace first (graph-safe path).
+static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream, Nvfp4DequantWorkspace* ws) {
+    if (void* buf = nvfp4_dequant_ws_take(ws, needed))
+        return buf;
 
     // If the stream is in capture mode, cudaMalloc would fail with "operation
     // not permitted when stream is capturing". Refuse cleanly with a clear
@@ -184,9 +151,9 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
         IMP_LOG_ERROR(
             "gemm_nvfp4: dequant fallback called inside CUDA stream capture but no "
             "pre-allocated workspace covers %zu bytes (have %zu). cudaMalloc inside "
-            "capture would fail. Pre-allocate via set_nvfp4_dequant_workspace() "
-            "before capture begins.",
-            needed, s_nvfp4_dequant_ws_size);
+            "capture would fail. Pass the caller's Nvfp4DequantWorkspace, "
+            "sized before capture begins.",
+            needed, ws != nullptr ? ws->size : 0);
         return nullptr;
     }
 
@@ -209,7 +176,8 @@ static void* ensure_dequant_buffer(size_t needed, cudaStream_t stream) {
     return s_nvfp4_dequant_buf.get();
 }
 
-void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream, float beta) {
+void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStream_t stream, float beta,
+                Nvfp4DequantWorkspace* ws) {
     IMP_CHECK(A.packed_data != nullptr, "gemm_nvfp4: A.packed_data is null");
     IMP_CHECK(B.on_device, "gemm_nvfp4: B (input) must be on device");
     IMP_CHECK(C.on_device, "gemm_nvfp4: C (output) must be on device");
@@ -241,7 +209,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     if (M <= kSmallMBatchedGemv && beta == 0.0f && B.qtype == QType::F16 && C.qtype == QType::F16) {
         std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
         const size_t y32_bytes = static_cast<size_t>(M * N) * sizeof(float);
-        void* y32 = ensure_dequant_buffer(y32_bytes, stream);
+        void* y32 = ensure_dequant_buffer(y32_bytes, stream, ws);
         if (y32 != nullptr) {
             gemv_nvfp4_kpar_batched_fp32(A, reinterpret_cast<const half*>(B.data),
                                          static_cast<float*>(y32), static_cast<int>(N),
@@ -273,7 +241,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
     std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
 
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
-    void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes, stream);
+    void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes, stream, ws);
     if (!dequant_buf) {
         // A silent return here corrupts whatever runs next: the output tensor keeps garbage, and
         // under stream capture the recorded graph simply LACKS this GEMM (#855 "hybrid crash":

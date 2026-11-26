@@ -9,7 +9,8 @@
 
 namespace imp {
 
-struct block_q8_1;  // compute/gemm.h
+struct block_q8_1;             // compute/gemm.h
+struct Nvfp4DequantWorkspace;  // quant/nvfp4_dequant_ws.h
 
 // Activation scale of an FP8 x FP8 GEMM: one device scalar (checkpoint input_scale), or per_row: one
 // scale per activation row (per-token dynamic, quantize_fp8_act_rows). Null d = not quantized.
@@ -79,6 +80,10 @@ struct QuantScratch {
     StableSpan<float> d8_prefill_buf;
     size_t q8_1_prefill_bytes = 0;
     size_t d8_prefill_bytes = 0;
+
+    // gemm_nvfp4's M>1 fallback workspace, the executor's nvfp4_dequant_ws_ (null: none). Reaches
+    // gemm_dispatch through GemmContext::qscratch, per call (audit D-9).
+    Nvfp4DequantWorkspace* nvfp4_dequant = nullptr;
 
     // --- Split-K paged attention scratch ---
     StableSpan<std::byte> splitk;
