@@ -142,14 +142,17 @@ void RecurrentSnapshotStore::host_refill_loop_() {
             if (pool_->refill_stop)
                 return;
         }
+        std::lock_guard<std::mutex> pl(pin_mu_);
         void* p = nullptr;
         {
             PlannedHostAllocScope planned;
-            std::lock_guard<std::mutex> pl(pin_mu_);
             p = pin_host_slab_();
         }
         if (!p)
             continue;  // at the ceiling now: the predicate holds the worker until a slab is released
+        if (refill_publish_hook_for_test_)
+            refill_publish_hook_for_test_();
+        // Publish before pin_mu_ drops: a demotion waiting on it otherwise met the ceiling, no slab.
         std::lock_guard<std::mutex> lk(pool_->mu);
         pool_->free_host_bufs.push_back(p);
     }

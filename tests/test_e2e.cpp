@@ -234,12 +234,16 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
     params.max_tokens = 8;
     params.temperature = 0.0f;
 
+    // Id 0 is a real token (Qwen3: "!"), so a valid id is 0 <= token < vocab size.
+    const int vocab = imp_model_vocab_size(model);
+    ASSERT_GT(vocab, 0);
     for (int i = 0; i < 4; i++) {
-        int32_t token = 0;
+        int32_t token = -1;
         ImpError err = imp_decode_step(ctx, &params, &token);
         if (err != IMP_SUCCESS)
             break;  // Request may finish early (EOS)
-        EXPECT_GT(token, 0);
+        EXPECT_GE(token, 0);
+        EXPECT_LT(token, vocab);
     }
 
     // Reset and verify we can reuse the context

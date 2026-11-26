@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -370,6 +372,47 @@ TEST(RecurrentSnapshotStoreTest, CountersSplitDemotionsFromEvictions) {
     EXPECT_EQ(device_only.saves(), 2u);
     EXPECT_EQ(device_only.demotions(), 0u);
     EXPECT_EQ(device_only.evictions(), 1u);
+}
+
+// A demotion that waits on the worker's in-flight pin gets that slab. The worker published it
+// after dropping pin_mu_, so the waiter saw 1 of 1 slabs pinned, none free, and dropped the entry
+// (CountersSplitDemotionsFromEvictions read demotions 1 of 2 once in the full test-kv binary).
+TEST(RecurrentSnapshotStoreTest, DemotionWaitingOnTheWorkersPinTakesThatSlab) {
+    SKIP_IF_NO_CUDA();
+    std::mutex mu;
+    std::condition_variable cv;
+    bool pinned = false, demoted = false;
+    RecurrentSnapshotStore store;
+    store.set_host_spare(1);
+    // Holds the worker between pin and publish until the demotion returned, at most 300 ms.
+    store.set_refill_publish_hook_for_test([&] {
+        std::unique_lock<std::mutex> lk(mu);
+        pinned = true;
+        cv.notify_all();
+        cv.wait_for(lk, std::chrono::milliseconds(300), [&] { return demoted; });
+    });
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/1 * kEntryBytes);
+    ASSERT_EQ(store.host_capacity(), 1);
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(5), [&] { return pinned; }));
+    }
+    DeviceSrc a(0x11), b(0x22);
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));  // 1 -> host, on the worker's slab
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        demoted = true;
+    }
+    cv.notify_all();
+    cudaStreamSynchronize(nullptr);
+    EXPECT_EQ(store.demotions(), 1u);
+    EXPECT_EQ(store.evictions(), 0u);
+    EXPECT_EQ(store.host_inline_pins(), 0u);
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_TRUE(e1->on_host);
+    EXPECT_EQ(ReadEntry(*e1), std::vector<uint8_t>(kEntryBytes, 0x11));
 }
 
 // A running request's snapshot survives host-tier pressure; unprotect makes it MRU, so the next
