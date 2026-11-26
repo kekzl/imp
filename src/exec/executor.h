@@ -330,8 +330,9 @@ public:
     // [M,K] F16 activations and the scratch fits; nullptr otherwise (caller
     // runs unfused kernels). Never allocates while `stream` is capturing. *act_scale_out: quantize with it.
     // k_align: K multiple the producer accepts (256 for the norm producers, 64 for GeGLU).
-    uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
-                                 uint8_t** scales_out, float* act_scale_out, int k_align = 256);
+    uint8_t* smallm_producer_xq_(TensorID consumer_id, int M, int K, const GemmMode& mode,
+                                 cudaStream_t stream, uint8_t** scales_out, float* act_scale_out,
+                                 int k_align = 256);
     [[nodiscard]] float act_scale_of_(TensorID id) const;  // WeightHandle::act_scale, 1.0 for an invalid id
     // The plain-NVFP4 weight the small-M GEMM reads for `h`: the native
     // CUTLASS_NVFP4 source, or on decode rows (#1897) the NVFP4 decode overlay
@@ -345,14 +346,14 @@ public:
     // Fused rmsnorm+quantize when the consumer takes the small-M route; falls
     // back to plain rmsnorm() internally. `consumer_id` is the FIRST GEMM
     // reading `no` (q/gate/GDN in); further readers skip via the act-quant hint.
-    void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id,
-                             int n, float eps, cudaStream_t stream, float weight_offset);
+    void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id, int n,
+                             float eps, const GemmMode& mode, cudaStream_t stream, float weight_offset);
     // Producer-side residual fusion (#2414): h = a + r, r = h and the NEXT block's
     // rmsnorm_for_smallm_(h, w, no) in one launch. The consumer then skips its residual copy and
     // its norm (prenorm_matches_). False = caller runs elementwise_add_store as before.
     [[nodiscard]] bool add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, const Tensor& w,
                                             Tensor& no, TensorID consumer_id, int n, float eps,
-                                            cudaStream_t stream);
+                                            const GemmMode& mode, cudaStream_t stream);
     [[nodiscard]] bool prenorm_matches_(const Tensor& w, const Tensor& no, int n) const {
         return prenorm_.matches(no.data, w.data, n);
     }
@@ -367,24 +368,26 @@ public:
     // FFN end, no post-norm: h = fo + r, fused with the next layer's residual save + attn norm when
     // that layer is plain attention and nothing scales h in between.
     void ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Tensor& h, Tensor& no, int n, float eps,
-                           cudaStream_t stream);
+                           const GemmMode& mode, cudaStream_t stream);
     // A producer (add_norm_for_smallm_, fp32_post_attn_fused_, fp32_tail_fused_) wrote no for (w, n).
     BufferStamp<PrenormPayload> prenorm_;
     // FP32-residual sandwich-norm fusion (executor_fp32_residual.cpp, Gemma-4
     // decode): each replaces a chain of norm / add / copy / scale / quantize launches, same bits.
-    [[nodiscard]] bool fp32_resid_fuse_ok_(int n) const;
+    [[nodiscard]] bool fp32_resid_fuse_ok_(int n, const GemmMode& mode) const;
     // Q/K/V input from fp32_hidden_: skipped when the previous layer's tail wrote it, else one launch
     // with the small-M NVFP4 quantize of the Q GEMM.
-    void fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cudaStream_t stream);
+    void fp32_attn_norm_(int layer, Tensor& no, int n, float eps, const GemmMode& mode, cudaStream_t stream);
     // Post-attention accumulate + residual save + the MoE pre-norm (phase 2 then skips both).
-    [[nodiscard]] bool fp32_post_attn_fused_(int layer, const Tensor& po, int n, cudaStream_t stream);
+    [[nodiscard]] bool fp32_post_attn_fused_(int layer, const Tensor& po, int n, const GemmMode& mode,
+                                             cudaStream_t stream);
     // The post-attention FP32 accumulate: fused as above, else rmsnorm_fp32_accum_to_fp16.
     void fp32_post_attn_(int layer, const Tensor& po, Tensor& h, Tensor& fp32_h, int n, float eps,
-                         cudaStream_t stream);
+                         const GemmMode& mode, cudaStream_t stream);
     // Phase-8 tail: both branch post-norms, add, post_ffn_norm accumulate, layer_out_scale and the
     // next layer's attention norm + quantize. Sets fp32_tail_layer_ so the forward skips the scale.
-    [[nodiscard]] bool fp32_tail_ok_(int layer, int n) const;
-    void fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, cudaStream_t stream);
+    [[nodiscard]] bool fp32_tail_ok_(int layer, int n, const GemmMode& mode) const;
+    void fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, const GemmMode& mode,
+                          cudaStream_t stream);
     // Not a BufferStamp: a retired tag would apply layer_out_scale twice, not re-run a launch.
     int fp32_tail_layer_ = -1;
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
@@ -446,7 +449,8 @@ public:
     NvFP4NormFoldIn norm_fold_take_(const Tensor& norm_w, const Tensor& no, const Tensor& h, float eps);
     // take (when allow), else rmsnorm_for_smallm_() into no.
     NvFP4NormFoldIn norm_fold_or_norm_(bool allow, const Tensor& h, const Tensor& w, Tensor& no,
-                                       TensorID consumer_id, int n, float eps, cudaStream_t stream);
+                                       TensorID consumer_id, int n, float eps, const GemmMode& mode,
+                                       cudaStream_t stream);
     StableSpan<unsigned long long> norm_fold_ssq_;  // fixed-point slots, engine arena, zeroed per M=1 forward
     int norm_fold_slot_ = 0;
     bool norm_fold_on_ = false;       // this forward: n == 1, flag on, not deterministic
@@ -455,14 +459,14 @@ public:
     // route (true: CUTLASS act scratch holds quantize(so), M > 32); else plain swiglu(). gelu: GeGLU,
     // small-M rows only (K % 64: Gemma-4 shared down K 2112), else plain geglu().
     [[nodiscard]] bool swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
-                                          TensorID consumer_id, int n, cudaStream_t stream,
-                                          bool gelu = false);
+                                          TensorID consumer_id, int n, const GemmMode& mode,
+                                          cudaStream_t stream, bool gelu = false);
     // Gate + up GEMMs (NVFP4 act-quant dedupe). SwiGLU quant epilogue: the up epilogue writes the down
     // input (packed + SfAtom in uo's buffer) into swiglu_epi_, uo / so stay unwritten; reset per run_ffn.
     void gate_up_prefill_(const TransformerLayer& ly, const Tensor& no, Tensor& go, Tensor& uo, int n,
                           const GemmContext& ctx);
     [[nodiscard]] bool swiglu_epi_eligible_(const TransformerLayer& ly, const Tensor& no, const Tensor& go,
-                                            const Tensor& uo, int n) const;
+                                            const Tensor& uo, int n, const GemmMode& mode) const;
     struct SwigluEpi {
         const void* act = nullptr;
         const void* sf = nullptr;
@@ -776,7 +780,7 @@ private:
     void run_ffn_phase_(int layer, cudaStream_t stream);
     int cur_layer_ = -1;           // set by forward_logits; keys calibration entries
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
-    // Set once by forward_logits; GEMM dispatch reads ctx.mode, sites without a GemmContext read this.
+    // Set once by forward_logits; read only where a GemmContext is built, every helper takes ctx.mode.
     GemmMode cur_mode_;
     // Every GemmContext of this forward: cur_mode_ plus the model's force_mmvq (audit D-7).
     [[nodiscard]] GemmContext gemm_ctx_(cudaStream_t stream, bool verify_small_m_routes = true) const;
@@ -1190,11 +1194,12 @@ private:
     // out = as * *w_scale * a8 w8^T + beta out, E4M3 operands: own small-M / tile, else cuBLASLt (scalar a
     // only). Returns the exit it took.
     DensePath gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, Fp8ActScale a,
-                          const float* w_scale, cudaStream_t stream);
+                          const float* w_scale, const GemmMode& mode, cudaStream_t stream);
     // 2-3 FP8 weights on one FP8 activation, beta 0 (q|k|v, gate|up): one small-M launch on decode rows,
     // else gemm_fp8x8_ per weight. ids/w8/out/w_scale arrays of `count`; records each id's exit.
     void gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8, Tensor* const* out,
-                           const float* const* w_scale, int count, Fp8ActScale a, cudaStream_t stream);
+                           const float* const* w_scale, int count, Fp8ActScale a, const GemmMode& mode,
+                           cudaStream_t stream);
     // dispatch_record::set_dense_each under each weight's own kind; an invalid id records nothing.
     void record_dense_(std::initializer_list<TensorID> ids, DensePath p) const;
     // Records `ids` under `p` when ok; returns ok (a sibling launch that may decline).
@@ -1228,13 +1233,15 @@ private:
     // no rmsnorm). Same decline contract and output layout as try_gdn_input_fused_m1_.
     [[nodiscard]] bool try_gdn_input_fp8_fold_m1_(const TransformerLayer& ly, const Tensor& input,
                                                   Tensor& proj, Tensor& gate_out, int n_heads,
-                                                  cudaStream_t stream, const NvFP4NormFoldIn& fold);
+                                                  const GemmMode& mode, cudaStream_t stream,
+                                                  const NvFP4NormFoldIn& fold);
     // M=1 GDN launch fusion : in_proj+gate+alpha+beta in one
     // GEMV; out-proj adds the residual in its epilogue. False and no-op when a
     // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,
     // beta at the 256-byte-aligned offset) for the scan to read.
-    [[nodiscard]] bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
-                                 int n_heads, cudaStream_t stream, const NvFP4NormFoldIn& fold);
+    [[nodiscard]] bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
+                                               Tensor& gate_out, int n_heads, const GemmMode& mode,
+                                               cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // M=1 GGUF twin: the dp4a-routed ones of in_proj / gate / alpha+beta in one gemv_dp4a_multi
     // launch on one q8_1 quantize. Returns the kGdnDp4a* bits written (alpha/beta as above); 0 = no launch.
     enum : int { kGdnDp4aIn = 1, kGdnDp4aGate = 2, kGdnDp4aAb = 4, kGdnGateDone = 8, kGdnM1Fused = 16 };
@@ -1253,12 +1260,14 @@ private:
     // launched.
     [[nodiscard]] bool dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
                                       const GemmContext& ctx, cudaStream_t stream);
-    [[nodiscard]] bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
+    [[nodiscard]] bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h,
+                                               const GemmMode& mode) const;
     void gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
     // M=1 attention q|k|v in one NVFP4 GEMV launch on gated-attention models
     // (the ungated nvfp4_qkv path already does this). Same decline contract.
-    [[nodiscard]] bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out, Tensor& k_out,
-                                Tensor& v_out, cudaStream_t stream, const NvFP4NormFoldIn& fold);
+    [[nodiscard]] bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out,
+                                              Tensor& k_out, Tensor& v_out, const GemmMode& mode,
+                                              cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // General form: 2..3 weights on one input (attention q|k|v adds the
     // striped k/v shapes to q's single-stripe wave). Outputs must have row
     // stride N.

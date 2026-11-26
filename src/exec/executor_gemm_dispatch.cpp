@@ -902,7 +902,7 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     if (input.qtype == QType::F16 && e.d_scale) {
         if (const Fp8ActScale a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
             Tensor fp8_in(qscratch_.fp8_act.get(), QType::FP8_E4M3, input.ndim, input.shape, true);
-            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
+            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.mode, ctx.stream);
             return;
         }
     }
@@ -924,14 +924,15 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
 }
 
 DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
-                                     Fp8ActScale a, const float* w_scale, cudaStream_t stream) {
+                                     Fp8ActScale a, const float* w_scale, const GemmMode& mode,
+                                     cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const int N = static_cast<int>(w8.shape[0]);
     const bool own_ok = out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() && a && w_scale;
     // gemm.fp8_smallm_max_m: decode rows only (prompt rows stay on the M-invariant Lt pin, #2152).
     const int smallm_max = dispatch_policy().gemm.fp8_smallm_max_m;
-    if ((cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= smallm_max && own_ok &&
+    if (fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= smallm_max && own_ok &&
         gemm_fp8_smallm(a8.data, w8.data, a.d, w_scale, beta, static_cast<half*>(out.data), M, N, K, stream,
                         a.per_row)) {
         static LogOnce logged;  // activity proof, once
@@ -965,12 +966,12 @@ DensePath GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor&
 
 void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, const Tensor* w8,
                                       Tensor* const* out, const float* const* w_scale, int count,
-                                      Fp8ActScale a, cudaStream_t stream) {
+                                      Fp8ActScale a, const GemmMode& mode, cudaStream_t stream) {
     const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
     const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
     const auto& g = dispatch_policy().gemm;
-    bool ok = (cur_mode_.decode_rows || fp8x8_min_rows_ == 1) && M <= g.fp8_smallm_max_m &&
-              a8.is_contiguous() && count >= 2 && count <= kFp8SmallMMaxSiblings;
+    bool ok = fp8_smallm_mode_rows(mode, fp8x8_min_rows_) && M <= g.fp8_smallm_max_m && a8.is_contiguous() &&
+              count >= 2 && count <= kFp8SmallMMaxSiblings;
     Fp8SmallMSibling t[kFp8SmallMMaxSiblings] = {};
     for (int i = 0; ok && i < count; ++i) {
         ok = out[i]->qtype == QType::F16 && out[i]->is_contiguous();
@@ -986,7 +987,7 @@ void GraphExecutor::gemm_fp8x8_multi_(const TensorID* ids, const Tensor& a8, con
         return;
     }
     for (int i = 0; i < count; ++i)
-        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], stream));
+        record_dense_({ids[i]}, gemm_fp8x8_(a8, w8[i], *out[i], 0.0f, a, w_scale[i], mode, stream));
 }
 
 Fp8ActScale GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,

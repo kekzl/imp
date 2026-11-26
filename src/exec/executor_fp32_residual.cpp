@@ -23,15 +23,16 @@ namespace {
 bool f16_weight(const Tensor& t) { return t.data != nullptr && t.qtype == QType::F16; }
 }  // namespace
 
-bool GraphExecutor::fp32_resid_fuse_ok_(int n) const {
+bool GraphExecutor::fp32_resid_fuse_ok_(int n, const GemmMode& mode) const {
     // Decode rows only (n == 1 or batched decode / verify); prefill keeps the unfused chain.
-    return n >= 1 && (n == 1 || cur_mode_.decode_rows) && fp32_accum_buf_.get() != nullptr &&
+    return fp32_resid_mode_rows(mode, n) && fp32_accum_buf_.get() != nullptr &&
            model_->profile().fp32_residual_norms && compute_dtype_ == QType::F16 && !calib_ &&
            lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() && !debug_forward_enabled() &&
            !model_->config().parallel_block && !model_->profile().gated_residual;
 }
 
-void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cudaStream_t stream) {
+void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, const GemmMode& mode,
+                                    cudaStream_t stream) {
     const auto& ly = model_->layer(layer);
     // The previous layer's tail already wrote no (and the Q GEMM's quantize) for this norm.
     const bool pre = prenorm_matches_(ly.attn_norm, no, n);
@@ -42,11 +43,11 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
         return;
     Tensor fp32_h = view_tokens(fp32_hidden_, n);
     const int d = model_->config().d_model;
-    if (fp32_resid_fuse_ok_(n) && f16_weight(ly.attn_norm) &&
+    if (fp32_resid_fuse_ok_(n, mode) && f16_weight(ly.attn_norm) &&
         fp32_residual_norm_fits(Fp32ResidMode::kNorm, d)) {
         uint8_t* xs = nullptr;
         float as = 1.0f;
-        uint8_t* xp = smallm_producer_xq_(ly.wq_id, n, d, stream, &xs, &as);
+        uint8_t* xp = smallm_producer_xq_(ly.wq_id, n, d, mode, stream, &xs, &as);
         Fp32ResidArgs a;
         a.d_model = d;
         a.eps = eps;
@@ -66,11 +67,12 @@ void GraphExecutor::fp32_attn_norm_(int layer, Tensor& no, int n, float eps, cud
     rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
 }
 
-bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cudaStream_t stream) {
+bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, const GemmMode& mode,
+                                          cudaStream_t stream) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
     // The MoE phase-2 norm this launch takes over: sandwich models read ffn_pre_norm_2 (Gemma-4).
-    if (!fp32_resid_fuse_ok_(n) || !layer_has_moe(layer) || dispatch_policy().moe.skip ||
+    if (!fp32_resid_fuse_ok_(n, mode) || !layer_has_moe(layer) || dispatch_policy().moe.skip ||
         !model_->profile().sandwich_norms || !f16_weight(ly.ffn_pre_norm_2) ||
         !f16_weight(ly.post_attn_norm) || po.qtype != QType::F16 ||
         !fp32_residual_norm_fits(Fp32ResidMode::kPostAttn, cfg.d_model))
@@ -107,8 +109,8 @@ bool GraphExecutor::fp32_post_attn_fused_(int layer, const Tensor& po, int n, cu
 }
 
 void GraphExecutor::fp32_post_attn_(int layer, const Tensor& po, Tensor& h, Tensor& fp32_h, int n, float eps,
-                                    cudaStream_t stream) {
-    if (fp32_post_attn_fused_(layer, po, n, stream))
+                                    const GemmMode& mode, cudaStream_t stream) {
+    if (fp32_post_attn_fused_(layer, po, n, mode, stream))
         return;
     // FP32 residual += post_attn_norm(po), h = FP16 view of it.
     rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(po.data),
@@ -141,10 +143,10 @@ void GraphExecutor::moe_fp32_prenorm_(const Tensor& norm_w, MoeFfnContext& ctx, 
     }
 }
 
-bool GraphExecutor::fp32_tail_ok_(int layer, int n) const {
+bool GraphExecutor::fp32_tail_ok_(int layer, int n, const GemmMode& mode) const {
     const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
-    return fp32_resid_fuse_ok_(n) && prof.sandwich_norms && prof.sanitize_ffn_fp16 &&
+    return fp32_resid_fuse_ok_(n, mode) && prof.sandwich_norms && prof.sanitize_ffn_fp16 &&
            f16_weight(ly.ffn_post_norm_2) && f16_weight(ly.ffn_post_norm_1) && f16_weight(ly.post_ffn_norm) &&
            f16_weight(ly.ffn_pre_norm_2) && f16_weight(ly.ffn_norm) && ly.w_up_shared.data != nullptr &&
            ly.shared_expert_gate_inp.data == nullptr && !shexp_overlap_.pending &&
@@ -152,7 +154,8 @@ bool GraphExecutor::fp32_tail_ok_(int layer, int n) const {
            fp32_residual_norm_fits(Fp32ResidMode::kTail, model_->config().d_model);
 }
 
-void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, cudaStream_t stream) {
+void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int n, const GemmMode& mode,
+                                     cudaStream_t stream) {
     const auto& cfg = model_->config();
     const auto& prof = model_->profile();
     const auto& ly = model_->layer(layer);
@@ -185,7 +188,7 @@ void GraphExecutor::fp32_tail_fused_(int layer, Tensor& h, const Tensor& sd, int
         a.w_norm = static_cast<const half*>(model_->layer(nl).attn_norm.data);
         a.no_out = static_cast<half*>(no.data);
         float as = 1.0f;
-        xp = smallm_producer_xq_(model_->layer(nl).wq_id, n, d, stream, &xs, &as);
+        xp = smallm_producer_xq_(model_->layer(nl).wq_id, n, d, mode, stream, &xs, &as);
         a.xq_packed = xp;
         a.xq_scales = xs;
         a.act_scale = as;
