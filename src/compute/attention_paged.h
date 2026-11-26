@@ -5,6 +5,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <cstdint>
 
 namespace imp {
 
@@ -24,6 +25,35 @@ struct PagedQ8Epilogue {
     e->written = true;
     return true;
 }
+
+// Arguments of the raw-pointer paged decode launchers below (audit D-11): built with designated
+// initializers, so a swapped n_heads / n_kv_heads / head_dim / block_size reads wrong at the call
+// site instead of compiling silently. A launcher ignores the fields its kernel has no use for.
+struct PagedDecodeArgs {
+    const half* Q = nullptr;        // [batch, 1, n_heads, head_dim]
+    const void* K_cache = nullptr;  // half (F16 KV) or uint8_t (FP8, NVFP4) blocks
+    const void* V_cache = nullptr;
+    const uint8_t* K_scales = nullptr;  // NVFP4 E4M3 group scales
+    const uint8_t* V_scales = nullptr;
+    half* O = nullptr;                  // unsplit output
+    float* partial = nullptr;           // split-K (m, l, o) partials for paged_attention_launch_reduce
+    const int* block_tables = nullptr;  // [batch, max_num_blocks]
+    const int* context_lens = nullptr;  // [batch]
+    int batch_size = 0;
+    int n_heads = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;  // the FP8 tile / four-token launchers are HD=128 only and do not read it
+    int block_size = 0;
+    float scale = 0.0f;
+    float kv_scale = 1.0f;  // FP8 per-tensor KV scale
+    int max_num_blocks = 0;
+    int num_splits = 1;
+    int sliding_window = 0;
+    float softcap = 0.0f;
+    const half* attn_sinks = nullptr;
+    int heads_per_cta = 0;  // 0 = auto
+    cudaStream_t stream = nullptr;
+};
 
 // Paged attention decode (single query/sequence). Q:[batch,1,n_heads,hd]. block_tables:
 // [batch,max_blocks] int32. context_lens:[batch] int32. sliding_window: 0=off, >0=last N KV.
@@ -48,12 +78,7 @@ void paged_attention_set_splitk_scratch(void* ptr, size_t size);
 // paged_attention_decode_fp8 for head_dim=128 / block_size % 16 == 0; writes the same
 // partial_out layout as the pipeline kernel (reduce kernel shared).
 [[nodiscard]] bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size);
-void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                            float* partial_out, const int* block_tables,
-                                            const int* context_lens, int batch_size, int n_heads,
-                                            int n_kv_heads, int block_size, float scale, float kv_scale,
-                                            int max_num_blocks, int num_splits, int sliding_window,
-                                            float softcap, cudaStream_t stream);
+void paged_attention_splitk_fp8_tile_launch(const PagedDecodeArgs& a);
 
 // GQA-batched tile variant: one block per KV head computes all G Q heads from a
 // shared smem tile (L2 KV traffic /G). Grid.y = n_kv_heads; the launcher's split
@@ -62,95 +87,47 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
                                                    int n_kv_heads);
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                                int block_size, int max_context_len);
-void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_cache,
-                                                const uint8_t* V_cache, float* partial_out,
-                                                const int* block_tables, const int* context_lens,
-                                                int batch_size, int n_heads, int n_kv_heads, int block_size,
-                                                float scale, float kv_scale, int max_num_blocks,
-                                                int num_splits, int sliding_window, float softcap,
-                                                cudaStream_t stream);
+void paged_attention_splitk_fp8_tile_gqa_launch(const PagedDecodeArgs& a);
 
 // FP8 E4M3 paged attention decode, on-the-fly dequant. Q:[batch,1,n_heads,hd] FP16.
 // K/V_cache:[num_blocks,n_kv_heads,block_size,hd] FP8_E4M3. kv_scale: per-tensor FP32
 // (val = fp8_val * kv_scale). NVFP4 4-token variant (process_diag_paged_nvfp4_multitok), HD=128/256,
 // E4M3 scales; num_splits>1 fills `partial` for the reduce. Returns false for unsupported shapes.
-[[nodiscard]] bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* K_cache,
-                                                  const uint8_t* V_cache, const uint8_t* K_scales,
-                                                  const uint8_t* V_scales, half* O, float* partial,
-                                                  const int* block_tables, const int* context_lens,
-                                                  int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                  int block_size, float scale, int max_num_blocks,
-                                                  int num_splits, int sliding_window, float softcap,
-                                                  const half* attn_sinks, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_decode_nvfp4_multitok_launch(const PagedDecodeArgs& a);
 
 // NVFP4 multitok with Q-head grouping: a CTA converts each K/V row once for heads_per_cta Q
 // heads of one KV head. HD=128/256. heads_per_cta 0=auto (largest of 4/3/2 dividing GQA ratio),
 // 1=not served. Returns false when the shape is not served.
-[[nodiscard]] bool paged_attention_nvfp4_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                               const uint8_t* K_scales, const uint8_t* V_scales, half* O,
-                                               float* partial, const int* block_tables,
-                                               const int* context_lens, int batch_size, int n_heads,
-                                               int n_kv_heads, int head_dim, int block_size, float scale,
-                                               int max_num_blocks, int num_splits, int sliding_window,
-                                               float softcap, const half* attn_sinks, int heads_per_cta,
-                                               cudaStream_t stream);
+[[nodiscard]] bool paged_attention_nvfp4_multitok_gqa_launch(const PagedDecodeArgs& a);
 int paged_attention_nvfp4_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested);
 
 // NVFP4 split-K decode on m16n8k16 tensor cores, one CTA per (batch, KV head, split), all Q heads
 // of the KV head (GQA ratio 2..8). HD=128/256, block_size 16, num_splits >= 2 into `partial`.
-[[nodiscard]] bool paged_attention_nvfp4_mma_launch(
-    const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, const uint8_t* K_scales,
-    const uint8_t* V_scales, float* partial, const int* block_tables, const int* context_lens, int batch_size,
-    int n_heads, int n_kv_heads, int head_dim, int block_size, float scale, int max_num_blocks,
-    int num_splits, int sliding_window, float softcap, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_nvfp4_mma_launch(const PagedDecodeArgs& a);
 
 // HD=128 FP8 decode with four tokens per warp iteration
 // (process_diag_paged_fp8_multitok, attention_paged_fp8_multitok.cu). Called by
 // paged_attention_decode_fp8 when the knob is on and split-K is off.
-void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                               half* O, const int* block_tables, const int* context_lens,
-                                               int batch_size, int n_heads, int n_kv_heads, int block_size,
-                                               float scale, float kv_scale, int max_num_blocks,
-                                               int sliding_window, float softcap, const half* attn_sinks,
-                                               cudaStream_t stream);
+void paged_attention_decode_fp8_multitok_hd128(const PagedDecodeArgs& a);
 
 // HD=128 FP8 decode, 16 lanes/KV row, heads_per_cta Q heads/CTA sharing KV loads. GQA: called by
 // paged_attention_decode_fp8 at one split; MHA: before the four-token kernel when split-K is off.
 // heads_per_cta 0=auto (largest of 5/4/3/2/1 dividing the ratio). False for HD!=128, ratio>16.
-[[nodiscard]] bool paged_attention_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
-                                             half* O, const int* block_tables, const int* context_lens,
-                                             int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                             int block_size, float scale, float kv_scale, int max_num_blocks,
-                                             int sliding_window, float softcap, const half* attn_sinks,
-                                             int heads_per_cta, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_fp8_multitok_gqa_launch(const PagedDecodeArgs& a);
 // Split-K instance of the FP8 grouped kernel: grid (batch, n_kv_heads x groups, num_splits), one
 // (m, l, o) partial per head in the shared reduce layout; num_splits from the caller.
-[[nodiscard]] bool paged_attention_splitk_fp8_multitok_gqa_launch(
-    const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, float* partial, const int* block_tables,
-    const int* context_lens, int batch_size, int n_heads, int n_kv_heads, int head_dim, int block_size,
-    float scale, float kv_scale, int max_num_blocks, int num_splits, int sliding_window, float softcap,
-    int heads_per_cta, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_splitk_fp8_multitok_gqa_launch(const PagedDecodeArgs& a);
 int paged_attention_fp8_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested);
 
 // F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
 // GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta
 // 0=auto (largest of 4/2/1 dividing the ratio, HD=256 caps at 2). Returns false otherwise.
-[[nodiscard]] bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
-                                                half* O, const int* block_tables, const int* context_lens,
-                                                int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                int block_size, float scale, int max_num_blocks,
-                                                int sliding_window, float softcap, const half* attn_sinks,
-                                                int heads_per_cta, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_decode_f16_multitok_launch(const PagedDecodeArgs& a);
 
 // Split-K instance of the F16 multitok kernel: grid (batch, n_kv_heads x
 // groups, num_splits), one (m, l, o) partial per head in the shared reduce
 // layout. Same shape rules as the plain launch; num_splits from the caller.
-[[nodiscard]] bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
-                                                float* partial, const int* block_tables,
-                                                const int* context_lens, int batch_size, int n_heads,
-                                                int n_kv_heads, int head_dim, int block_size, float scale,
-                                                int max_num_blocks, int num_splits, int sliding_window,
-                                                float softcap, int heads_per_cta, cudaStream_t stream);
+[[nodiscard]] bool paged_attention_splitk_f16_multitok_launch(const PagedDecodeArgs& a);
 
 // Q heads per CTA the F16 multitok kernels will use for this shape (0 =
 // shape not served): the largest of 4 / 2 / 1 dividing the GQA ratio, HD=256/512
@@ -178,16 +155,6 @@ inline int paged_attention_f16_multitok_split_count(int n_ctas, int ctas_per_sm,
             best_s = s;
     return best_s;
 }
-
-// F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
-// GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta
-// 0=auto (largest of 4/2/1 dividing the ratio, HD=256 caps at 2). Returns false otherwise.
-[[nodiscard]] bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
-                                                half* O, const int* block_tables, const int* context_lens,
-                                                int batch_size, int n_heads, int n_kv_heads, int head_dim,
-                                                int block_size, float scale, int max_num_blocks,
-                                                int sliding_window, float softcap, const half* attn_sinks,
-                                                int heads_per_cta, cudaStream_t stream);
 
 void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
                                 const int* block_tables, const int* context_lens, int block_size, float scale,
