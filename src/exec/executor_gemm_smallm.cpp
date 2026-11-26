@@ -61,10 +61,9 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out)
         const StorageTier decode = (h.decode_tier != StorageTier::Undefined) ? h.decode_tier : h.primary_tier;
         if (decode != StorageTier::NVFP4)
             return false;
-        auto it = wcache_.nvfp4.find(h.source_data);
-        if (it == wcache_.nvfp4.end() || (it->second.K % 64) != 0)
+        if (h.entries.nvfp4 == nullptr || (h.entries.nvfp4->K % 64) != 0)
             return false;
-        out = it->second;
+        out = *h.entries.nvfp4;
         return true;
     }
     if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_scales == nullptr ||

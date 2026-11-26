@@ -15,6 +15,18 @@
 
 namespace imp {
 
+struct Fp16CacheEntry;   // exec/weight_cache_entries.h
+struct FP8CacheEntry;    // exec/weight_caches.h
+struct NvFP4CacheEntry;  // exec/weight_cache_entries.h
+
+// The WeightCaches entries keyed by a handle's source_data (audit D-3), bound by
+// bind_cache_entries (exec/weight_tier_entries.h); null = that map holds none.
+struct WeightCacheRefs {
+    const Fp16CacheEntry* fp16 = nullptr;
+    const FP8CacheEntry* fp8 = nullptr;
+    const NvFP4CacheEntry* nvfp4 = nullptr;
+};
+
 struct WeightHandle {
     TensorID id = kInvalidTensorID;
     TensorKind kind = TensorKind::UNKNOWN;
@@ -42,6 +54,8 @@ struct WeightHandle {
     // Phase 4b freed the source bytes (source_data stays as the cache key): paths not covered
     // by a copy rebuild the F16 weight from wcache (released_source_gemm_), never read source_data.
     bool source_released = false;
+    // Phase 4 binds them, rebinding source_data rebinds them; dispatch reads them, not the maps.
+    WeightCacheRefs entries;
 
     union {
         struct {

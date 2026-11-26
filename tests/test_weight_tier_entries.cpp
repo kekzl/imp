@@ -1,0 +1,84 @@
+// WeightHandle::entries (audit D-3): the cache entries a handle's tiers read are bound once from
+// the maps, and Phase 4 refuses a decode / prefill tier whose entry is missing. CPU lane.
+
+#include <gtest/gtest.h>
+
+#include "core/weight_handle.h"
+#include "exec/weight_caches.h"
+#include "exec/weight_tier_entries.h"
+
+namespace {
+
+using imp::StorageTier;
+using imp::WeightCaches;
+using imp::WeightHandle;
+
+int g_src_a = 0, g_src_b = 0, g_src_none = 0;
+
+WeightCaches caches() {
+    WeightCaches wc;
+    wc.fp16.emplace(&g_src_a, imp::Fp16CacheEntry{});
+    wc.fp8.emplace(&g_src_a, imp::FP8CacheEntry{});
+    wc.nvfp4.emplace(&g_src_a, imp::NvFP4CacheEntry{});
+    wc.nvfp4.emplace(&g_src_b, imp::NvFP4CacheEntry{});
+    return wc;
+}
+
+WeightHandle handle(const void* src, StorageTier primary, StorageTier decode, StorageTier prefill) {
+    WeightHandle h;
+    h.source_data = src;
+    h.primary_tier = primary;
+    h.decode_tier = decode;
+    h.prefill_tier = prefill;
+    return h;
+}
+
+TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
+    const WeightCaches wc = caches();
+    WeightHandle h = handle(&g_src_a, StorageTier::FP16, StorageTier::FP8, StorageTier::FP16);
+    imp::bind_cache_entries(h, wc);
+    EXPECT_EQ(h.entries.fp16, &wc.fp16.at(&g_src_a));
+    EXPECT_EQ(h.entries.fp8, &wc.fp8.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4, &wc.nvfp4.at(&g_src_a));
+
+    // A rebound source (layer offload) drops the entries the new pointer has none of.
+    h.source_data = &g_src_b;
+    imp::bind_cache_entries(h, wc);
+    EXPECT_EQ(h.entries.fp16, nullptr);
+    EXPECT_EQ(h.entries.fp8, nullptr);
+    EXPECT_EQ(h.entries.nvfp4, &wc.nvfp4.at(&g_src_b));
+
+    h.source_data = nullptr;
+    imp::bind_cache_entries(h, wc);
+    EXPECT_EQ(h.entries.nvfp4, nullptr);
+}
+
+TEST(WeightTierEntries, EveryReadTierNeedsItsEntry) {
+    const WeightCaches wc = caches();
+    auto bound = [&](const void* src, StorageTier p, StorageTier d, StorageTier f) {
+        WeightHandle h = handle(src, p, d, f);
+        imp::bind_cache_entries(h, wc);
+        return h;
+    };
+    constexpr auto U = StorageTier::Undefined;
+    // All entries present.
+    EXPECT_EQ(imp::missing_tier_entry(
+                  bound(&g_src_a, StorageTier::CUTLASS_NVFP4, StorageTier::FP8, StorageTier::FP8)),
+              nullptr);
+    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::NVFP4, U, U)), nullptr);
+    // NVFP4 decode (explicit or through the primary tier) without an nvfp4 entry.
+    EXPECT_STREQ(imp::missing_tier_entry(
+                     bound(&g_src_none, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, U)),
+                 "nvfp4");
+    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::NVFP4, U, U)), "nvfp4");
+    // FP8 decode or FP8 prefill without an fp8 entry.
+    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::FP16, StorageTier::FP8, U)), "fp8");
+    EXPECT_STREQ(imp::missing_tier_entry(
+                     bound(&g_src_b, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, StorageTier::FP8)),
+                 "fp8");
+    // FP16 prefill without an fp16 entry: the source is the weight, a designed state.
+    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::FP16, U, U)), nullptr);
+    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::Undefined, U, U)), nullptr);
+}
+
+}  // namespace

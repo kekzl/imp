@@ -13,6 +13,7 @@
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/gemm_kernel_registry.h"
 #include "exec/weight_dequant.h"
+#include "exec/weight_tier_entries.h"
 #include "exec/executor.h"
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
@@ -348,9 +349,9 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
     // FP16 / FP8 prefill-cache hits intercept before the NVFP4 tile block.
-    if (prefill == StorageTier::FP16 && wcache_.fp16.contains(h.source_data))
+    if (prefill == StorageTier::FP16 && h.entries.fp16 != nullptr)
         return false;
-    if (prefill == StorageTier::FP8 && wcache_.fp8.contains(h.source_data))
+    if (prefill == StorageTier::FP8 && h.entries.fp8 != nullptr)
         return false;
     // GGUF source with NVFP4 decode overlay: prefill dequants the original
     // quant, never reaches the NVFP4 tile block.
@@ -390,9 +391,13 @@ void GraphExecutor::rebind_streamed_sources_(int layer) {
         {&L.wq, L.wq_id},         {&L.wk, L.wk_id},     {&L.wv, L.wv_id},        {&L.wo, L.wo_id},
         {&L.w_gate, L.w_gate_id}, {&L.w_up, L.w_up_id}, {&L.w_down, L.w_down_id},
     };
-    for (const auto& [w, id] : streamed)
-        if (id != kInvalidTensorID)
-            registry_.handle(id).source_data = w->data;
+    for (const auto& [w, id] : streamed) {
+        if (id == kInvalidTensorID)
+            continue;
+        WeightHandle& h = registry_.handle(id);
+        h.source_data = w->data;
+        bind_cache_entries(h, wcache_);  // the entries the maps hold under the new pointer
+    }
 }
 
 void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
@@ -476,30 +481,26 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
 
         switch (decode) {
             case StorageTier::NVFP4: {
-                auto it = wcache_.nvfp4.find(h.source_data);
-                if (it != wcache_.nvfp4.end()) {
-                    gemv_nvfp4_kpar(it->second,
-                                    reinterpret_cast<const half*>(input.data),
-                                    reinterpret_cast<half*>(output.data),
-                                    static_cast<int>(it->second.N),
-                                    static_cast<int>(it->second.K), ctx.stream);
+                if (const NvFP4CacheEntry* nv = h.entries.nvfp4) {
+                    gemv_nvfp4_kpar(*nv, reinterpret_cast<const half*>(input.data),
+                                    reinterpret_cast<half*>(output.data), static_cast<int>(nv->N),
+                                    static_cast<int>(nv->K), ctx.stream);
                     return;
                 }
                 break;
             }
             case StorageTier::FP8: {
-                auto fp8_it = wcache_.fp8.find(h.source_data);
+                const FP8CacheEntry* fp8 = h.entries.fp8;
                 // gemv_fp8 writes half — decline non-F16 outputs (falls back
                 // to the source-tier GEMV below, matching the FP16 case).
-                if (fp8_it != wcache_.fp8.end() && output.qtype == QType::F16) {
+                if (fp8 != nullptr && output.qtype == QType::F16) {
                     int64_t wshape[2] = {h.shape[0],
                         (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
-                    Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-                    if (fp8_it->second.d_row_scales)
-                        gemv_fp8_rowscale(fp8_w, input, output, fp8_it->second.d_row_scales,
-                                          ctx.stream);
+                    Tensor fp8_w(fp8->weight.data, QType::FP8_E4M3, 2, wshape, true);
+                    if (fp8->d_row_scales)
+                        gemv_fp8_rowscale(fp8_w, input, output, fp8->d_row_scales, ctx.stream);
                     else
-                        gemv_fp8(fp8_w, input, output, fp8_it->second.host_scale, ctx.stream);
+                        gemv_fp8(fp8_w, input, output, fp8->host_scale, ctx.stream);
                     return;
                 }
                 break;
@@ -561,15 +562,13 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && h.source_data != nullptr &&
             dequant_gpu_supported(h.source_qtype)) {
-            auto it = ctx.wcache->nvfp4.find(h.source_data);
-            if (it != ctx.wcache->nvfp4.end()) {
+            if (const NvFP4CacheEntry* nv = h.entries.nvfp4) {
                 // beta=1 (o/down residual add, #1055): accumulate variant —
                 // previously these two fell through to the per-chunk dequant
                 // path the overlay exists to avoid.
                 auto& fn = (ctx.beta == 1.0f) ? gemm_nvfp4_batched_acc : gemm_nvfp4_batched;
-                fn(it->second, reinterpret_cast<const half*>(input.data),
-                   reinterpret_cast<half*>(output.data), static_cast<int>(h.shape[0]),
-                   static_cast<int>(h.shape[1]), M, ctx.stream);
+                fn(*nv, reinterpret_cast<const half*>(input.data), reinterpret_cast<half*>(output.data),
+                   static_cast<int>(h.shape[0]), static_cast<int>(h.shape[1]), M, ctx.stream);
                 return;
             }
         }
@@ -716,9 +715,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         }
 
         if (prefill == StorageTier::FP16) {
-            auto fp16_it = wcache_.fp16.find(h.source_data);
-            if (fp16_it != wcache_.fp16.end()) {
-                gemm(input, fp16_it->second, output, 1.0f, ctx.beta, ctx.stream);
+            if (const Fp16CacheEntry* fp16 = h.entries.fp16) {
+                gemm(input, *fp16, output, 1.0f, ctx.beta, ctx.stream);
                 return;
             }
             // FP16-resident or dequantable source with no cache entry: the source IS
@@ -737,9 +735,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             }
         }
         if (prefill == StorageTier::FP8) {
-            auto fp8_it = wcache_.fp8.find(h.source_data);
-            if (fp8_it != wcache_.fp8.end()) {
-                gemm_fp8_prefill_(h, fp8_it->second, input, output, ctx);
+            if (const FP8CacheEntry* fp8 = h.entries.fp8) {
+                gemm_fp8_prefill_(h, *fp8, input, output, ctx);
                 return;
             }
         }
@@ -784,12 +781,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (dispatch_cutlass_nvfp4_prefill(cutlass_weight_of(h), input, output, ctx, M, h.act_scale))
             return;
         // FP8 fallback for CUTLASS_NVFP4 (legacy path)
-        auto fp8_it = wcache_.fp8.find(h.source_data);
-        if (fp8_it != wcache_.fp8.end()) {
+        if (const FP8CacheEntry* fp8 = h.entries.fp8) {
             int64_t wshape[2] = {h.shape[0], h.shape[1] * 2};
-            Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-            gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
-                          nullptr, fp8_it->second.d_scale, ctx.stream);
+            Tensor fp8_w(fp8->weight.data, QType::FP8_E4M3, 2, wshape, true);
+            gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, fp8->d_scale, ctx.stream);
             return;
         }
     }
