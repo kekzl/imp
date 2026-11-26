@@ -3,6 +3,7 @@
 // loop IS mathematically equivalent to gemm_nvfp4 at these dims in isolation, so the real bug
 // needs launch-queue/PDL context this synthetic case can't reproduce; it stays open.
 
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
@@ -52,7 +53,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, /*on_device=*/true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -117,7 +118,6 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
                                   << "  ||y_loop||^2=" << sum_sq_loop << "\n"
                                   << "  ||y_single||^2=" << sum_sq_single;
 
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_a);
     cudaFree(d_y_loop);
@@ -152,7 +152,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
     int64_t wshape[2] = {N, K};
     Tensor w_t(d_w, QType::F16, 2, wshape, /*on_device=*/true);
 
-    NvFP4QuantResult qr;
+    NvFP4Owned qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -197,7 +197,6 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
                                   << "  n_large_diff=" << n_large_diff << " / " << (M * N) << "\n"
                                   << "  max_abs_diff=" << max_abs_diff;
 
-    free_nvfp4_result(qr);
     cudaFree(d_w);
     cudaFree(d_a);
     cudaFree(d_y_loop);

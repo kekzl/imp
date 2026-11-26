@@ -7,6 +7,8 @@
 #include "core/tensor.h"
 #include "exec/gemm_kernel_registry.h"
 #include "quant/nvfp4_gemm_tile.h"  // gemm_nvfp4_tile, gemm_tile_streamk_workspace_bytes
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -31,8 +33,8 @@ struct PromptRowsRig {
     __half *d_x = nullptr, *d_w = nullptr;
     void *d_act = nullptr, *d_act_sf = nullptr, *d_ws = nullptr;
     size_t sf_bytes = 0, ws_bytes = gemm_tile_streamk_workspace_bytes();
-    NvFP4QuantResult nv4{};
-    CutlassNvFP4Weight cw{};
+    NvFP4Owned nv4{};
+    CutlassNvFP4Owned cw{};
 
     PromptRowsRig(int n, int k, int m_big, int m_small, uint32_t seed)
         : N(n), K(k), big(m_big), small(m_small) {
@@ -64,8 +66,6 @@ struct PromptRowsRig {
         cudaMalloc(&d_ws, ws_bytes);
     }
     ~PromptRowsRig() {
-        free_cutlass_nvfp4_weight(cw);
-        free_nvfp4_result(nv4);
         cudaFree(d_act);
         cudaFree(d_act_sf);
         cudaFree(d_ws);

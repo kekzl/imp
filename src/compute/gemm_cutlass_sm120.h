@@ -22,24 +22,20 @@ struct CutlassNvFP4Weight {
     int64_t N = 0;
     int64_t K = 0;
     size_t sf_bytes = 0;  // total bytes for scale_factors buffer
-    // When true, `scale_factors` points into a shared buffer owned elsewhere (e.g. MoE
-    // per-projection SfAtom buffer): lets 128 experts of one projection share one allocation.
-    // Cleanup must skip cudaFree on these entries.
-    bool sf_borrowed = false;
 };
+
+struct CutlassNvFP4Owned;  // compute/cutlass_nvfp4_owned.h: owns the SfAtom buffer (I5)
 
 // Convert imp NvFP4QuantResult to CUTLASS block-scaled format.
 // Borrows packed_data pointer (RowMajor). tensor_scale is stored for GEMM alpha.
-void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, cudaStream_t stream);
+void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Owned& dst, cudaStream_t stream);
 
 // Same conversion but writes SfAtom scales into a caller-provided, pre-zeroed buffer `sf_dst`
-// (a sub-region of a shared slab) instead of a per-tensor cudaMalloc+cudaMemset. Sets
-// dst.sf_borrowed=true; caller owns and frees the slab. sf_dst must be >=
+// (a sub-region of a shared slab) instead of a per-tensor cudaMalloc+cudaMemset. `dst` is a
+// view; the caller owns the slab. sf_dst must be >=
 // cutlass_nvfp4_sf_size(src.N, src.K) bytes and pre-zeroed.
 void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, void* sf_dst,
                                        cudaStream_t stream);
-
-void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w);
 
 // Compute SfAtom buffer size for given dimensions (rows x K).
 // Returns number of bytes (one UE4M3 per scale factor, plus alignment padding).

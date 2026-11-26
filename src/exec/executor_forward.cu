@@ -22,6 +22,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
+#include "compute/cutlass_nvfp4_owned.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/process_diag.h"
 #include "quant/nvfp4_gemm_tile.h"
@@ -186,7 +187,7 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
     // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
     if (const auto ct = wcache_.cutlass_nvfp4.find(model_->output_proj().data);
         ct != wcache_.cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) {
-        CutlassNvFP4Weight view = ct->second;  // sf_borrowed inside an entry: a view, no owner
+        CutlassNvFP4Weight view = ct->second;  // a sliced copy of an entry is a view
         lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(view));
         lm_head_cutlass_ready_ = lm_head_cutlass_.data != nullptr;
         IMP_LOG_INFO(
@@ -195,7 +196,7 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;
     }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
-    CutlassNvFP4Weight built;
+    CutlassNvFP4Owned built;
     convert_nvfp4_to_cutlass(it->second, built, stream);
     lm_head_cutlass_ = CutlassNvFP4CacheEntry(std::move(built));  // owns the SfAtom scales
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {

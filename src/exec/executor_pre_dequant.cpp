@@ -305,7 +305,6 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
         return false;
     if (wcache_.mtp_lm_head_nvfp4.packed_data != nullptr) {
         out = wcache_.mtp_lm_head_nvfp4;
-        out.owned = false;  // borrows wcache_ storage
         return true;
     }
     const Tensor& lm = model_->output_proj();
@@ -316,7 +315,6 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     auto it = wcache_.nvfp4.find(lm.data);
     if (it != wcache_.nvfp4.end()) {
         out = it->second;
-        out.owned = false;  // borrows the decode-cache storage
         return true;
     }
     if (model_->out_proj_id == kInvalidTensorID)
@@ -331,7 +329,6 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
                            : 1.0f;
     out.N = model_->config().vocab_size;
     out.K = model_->config().d_model;
-    out.owned = false;
     return true;
 }
 

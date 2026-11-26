@@ -15,6 +15,7 @@
 
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 namespace {
@@ -44,7 +45,7 @@ float host_dequant_spec(const std::vector<uint8_t>& packed, const std::vector<ui
 // imp's own quantizer produces the packed pair plus the per-tensor scale; the
 // spread comes from the SOURCE amax, exactly as it does in a checkpoint.
 struct DeviceQuant {
-    imp::NvFP4QuantResult q{};
+    imp::NvFP4Owned q{};
     std::vector<uint8_t> packed_h, scales_h;
     void quantize(const std::vector<__half>& src, int rows, int K) {
         void* d = nullptr;

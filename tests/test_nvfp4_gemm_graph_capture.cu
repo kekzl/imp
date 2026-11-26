@@ -3,6 +3,7 @@
 // the caller's Nvfp4DequantWorkspace, passed per call; missing workspace + capture mode
 // now fails loud instead of crashing. Does NOT cover cuBLASLt's own graph-safety (algo reselect).
 
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/tensor.h"
@@ -36,7 +37,7 @@ protected:
 // comfortably (well below typical sanity caps). N×K=64×64 FP16 = 8 KiB.
 struct TinyNvFP4 {
     half *d_w = nullptr, *d_a = nullptr, *d_c = nullptr;
-    NvFP4QuantResult qr{};
+    NvFP4Owned qr{};
     int N = 64, K = 64, M = 4;
 
     void create(cudaStream_t stream) {
@@ -60,7 +61,7 @@ struct TinyNvFP4 {
     }
 
     void destroy() {
-        free_nvfp4_result(qr);
+        qr = NvFP4Owned{};
         if (d_w)
             cudaFree(d_w);
         if (d_a)

@@ -5,6 +5,7 @@
 // call: FP16 [M,K] -> NVFP4 packed [M,K/2] + SfAtom UE4M3 scales. No CUTLASS include.
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/cutlass_nvfp4_owned.h"
 #include "memory/device_alloc_all.h"
 #include "compute/gpt_oss_glu.cuh"
 #include "model/model_config.h"
@@ -225,7 +226,7 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
 // Host-callable functions
 // ---------------------------------------------------------------------------
 
-void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& dst, cudaStream_t stream) {
+void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Owned& dst, cudaStream_t stream) {
     IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_cutlass: src.packed_data is null");
     int64_t N = src.N;
     int64_t K = src.K;
@@ -237,6 +238,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
     size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
     cuda_alloc_or_throw(device_alloc_all(dev_req(d_sf, sf_bytes)), "convert_nvfp4_to_cutlass scales");
+    dst.sf_owned.adopt(d_sf, sf_bytes, nullptr);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
     // Convert scales to SfAtom layout (micro_scale only, tensor_scale deferred to GEMM alpha)
@@ -289,19 +291,6 @@ void convert_nvfp4_to_cutlass_borrowed(const NvFP4QuantResult& src, CutlassNvFP4
     dst.N = N;
     dst.K = K;
     dst.sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
-    dst.sf_borrowed = true;  // slab owns the memory; skip per-tensor cudaFree
-}
-
-void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
-    // data is borrowed from NvFP4QuantResult — do NOT free it
-    w.data = nullptr;
-    if (w.scale_factors && !w.sf_borrowed) {
-        device_free_all(w.scale_factors);
-    }
-    w.scale_factors = nullptr;
-    w.sf_borrowed = false;
-    w.N = w.K = 0;
-    w.sf_bytes = 0;
 }
 
 void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N, int K,

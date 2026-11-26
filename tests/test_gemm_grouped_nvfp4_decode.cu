@@ -10,6 +10,8 @@
 #include "core/tensor.h"
 #include "model/model_config.h"
 #include "nvfp4_fp64_ref.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -62,17 +64,15 @@ struct Weights {
                                             amp * static_cast<float>(1 + (e % 4)));
             int64_t ws[2] = {N, K};
             Tensor wt(w, QType::F16, 2, ws, true);
-            NvFP4QuantResult q;
+            NvFP4Owned q;
             quantize_fp16_to_nvfp4(wt, q, s);
-            CutlassNvFP4Weight cw;
+            CutlassNvFP4Owned cw;
             convert_nvfp4_to_cutlass(q, cw, s);
             cudaMemcpyAsync(static_cast<char*>(b) + e * stride, cw.data, stride, cudaMemcpyDeviceToDevice, s);
             cudaMemcpyAsync(static_cast<char*>(sf) + e * sf_stride, cw.scale_factors, sf_stride,
                             cudaMemcpyDeviceToDevice, s);
             alpha[e] = cw.tensor_scale;
             cudaStreamSynchronize(s);
-            free_cutlass_nvfp4_weight(cw);
-            free_nvfp4_result(q);
         }
         cudaFree(w);
         set_ptrs(b, sf);

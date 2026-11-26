@@ -7,6 +7,8 @@
 #include "core/tensor.h"
 #include "nvfp4_ref_gemm.cuh"
 #include "quant/nvfp4_gemm_tile.h"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
 #include <gtest/gtest.h>
@@ -25,8 +27,8 @@ namespace {
 
 struct Operands {
     int M = 0, N = 0, K = 0;
-    NvFP4QuantResult qr;
-    CutlassNvFP4Weight cw;
+    NvFP4Owned qr;
+    CutlassNvFP4Owned cw;
     void* act = nullptr;
     void* act_sf = nullptr;
     void* ws = nullptr;
@@ -87,9 +89,8 @@ void make_operands(Operands& o, int M, int N, int K, cudaStream_t s) {
 }
 
 void free_operands(Operands& o) {
-    free_cutlass_nvfp4_weight(o.cw);
-    cudaFree(o.qr.packed_data);
-    cudaFree(o.qr.micro_scales);
+    o.cw = CutlassNvFP4Owned{};
+    o.qr = NvFP4Owned{};
     cudaFree(o.act);
     cudaFree(o.act_sf);
     cudaFree(o.ws);

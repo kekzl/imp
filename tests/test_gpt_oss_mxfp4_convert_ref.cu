@@ -21,8 +21,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 #include <vector>
 
+#include "exec/weight_cache_entries.h"
 #include "quant/gpt_oss_mxfp4_convert.h"
 #include "quant/nvfp4_quant.h"
 
@@ -266,7 +268,7 @@ void run_case(const char* name, int ne, int64_t n_rows_total, int64_t K, int row
 
     EXPECT_LT(s.max_rel, rel_tol) << name << ": MXFP4->NVFP4 dequant rel error too large";
 
-    free_nvfp4_moe_result(res);
+    { NvFP4MoECacheEntry own(std::move(res)); }  // the entry adopts the converter's 3 buffers
     cudaFree(d_out);
 }
 
@@ -343,7 +345,7 @@ TEST(GptOssMxfp4ConvertRef, AllZeroNibbles) {
     cudaMemcpy(hOut.data(), d_out, elems * sizeof(half), cudaMemcpyDeviceToHost);
     for (half h : hOut)
         EXPECT_EQ(__half2float(h), 0.0f) << "all-zero MXFP4 must dequantize to exact zero";
-    free_nvfp4_moe_result(res);
+    { NvFP4MoECacheEntry own(std::move(res)); }  // the entry adopts the converter's 3 buffers
     cudaFree(d_out);
 }
 

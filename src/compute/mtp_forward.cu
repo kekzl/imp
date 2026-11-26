@@ -725,7 +725,6 @@ static void mtp_body_proj(const MtpDraftWorkspace& ws, int w, const Tensor& in, 
         nv.tensor_scale = ws.nv_ts[w];
         nv.N = W.shape[0];
         nv.K = W.shape[1];
-        nv.owned = false;
         const auto* x = static_cast<const half*>(in.data);
         auto* y = static_cast<half*>(out.data);
         if (rows == 1) {

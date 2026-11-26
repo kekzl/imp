@@ -8,6 +8,8 @@
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
 #include "nvfp4_ref_gemm.cuh"
+#include "compute/cutlass_nvfp4_owned.h"
+#include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "scoped_engine_arena.h"
 #include <cuda_runtime.h>
@@ -46,8 +48,8 @@ protected:
 };
 
 struct SyntheticExpert {
-    NvFP4QuantResult nvfp4{};
-    CutlassNvFP4Weight cutlass_w{};
+    NvFP4Owned nvfp4{};
+    CutlassNvFP4Owned cutlass_w{};
 };
 
 static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t seed, cudaStream_t stream) {
@@ -68,8 +70,8 @@ static void make_expert(SyntheticExpert& e, int N, int K, float wscale, uint64_t
 }
 
 static void free_expert(SyntheticExpert& e) {
-    free_cutlass_nvfp4_weight(e.cutlass_w);
-    free_nvfp4_result(e.nvfp4);
+    e.cutlass_w = CutlassNvFP4Owned{};
+    e.nvfp4 = NvFP4Owned{};  // releases at the old free point
 }
 
 // Expert-sorted operands as the MoE prefill builds them: contiguous A / SFA / D slabs, B / SFB in one

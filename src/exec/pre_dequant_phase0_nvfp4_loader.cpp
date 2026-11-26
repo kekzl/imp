@@ -547,7 +547,6 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 q.tensor_scale = w->tensor_scale;
                 q.N = N;
                 q.K = K;
-                q.owned = false;
                 void* fp16buf = nullptr;
                 if (device_alloc_all_async(stream, dev_req(fp16buf, static_cast<size_t>(N) * K * 2)) !=
                     cudaSuccess) {
@@ -656,7 +655,6 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
         NvFP4QuantResult tmp;
         tmp.packed_data = w.data;
         tmp.micro_scales = w.scales;
-        tmp.owned = false;  // borrows resident model weight storage — don't cudaFree on teardown
         tmp.tensor_scale = w.tensor_scale;
         tmp.N = w.shape[0];
         tmp.K = w.shape[1] * 2;  // packed K/2 → logical K
