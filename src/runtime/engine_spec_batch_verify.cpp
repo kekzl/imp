@@ -41,15 +41,8 @@ namespace {
 // penalties over the unbounded window (per-row device histories), no logit
 // shaping, no constraint FSM, no logprobs. Sampling: spec_sampling_refusal_.
 bool batch_verify_row_ok(const Request& r) {
-    const bool penalties = r.repetition_penalty != 1.0f || r.frequency_penalty != 0.0f ||
-                           r.presence_penalty != 0.0f;
-    if (penalties && r.repeat_last_n != 0)
-        return false;  // a bounded window slides per chunk row; not replicated
-    if (r.dry_multiplier != 0.0f || r.mirostat != 0 || r.host_logit_shaping())
-        return false;
-    if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
-        !r.grammar.empty() || !r.tool_constraint_tools.empty())
-        return false;
+    if ((r.lane_needs_now() & lane_refuses::kBatchVerifyRow) != 0)
+        return false;  // a bounded penalty window slides per chunk row; not replicated either
     return r.status == RequestStatus::DECODING && !r.output_tokens.empty();
 }
 
