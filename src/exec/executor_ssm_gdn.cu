@@ -122,7 +122,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
 
     // 1. Save residual + RMSNorm
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
@@ -345,7 +345,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
     const GemmContext q8_reuse_ctx = gdn_q8_reuse_ctx_(layer, no, ctx);
 
     // Save residual + RMSNorm; the M=1 out-projection with the residual in its epilogue

@@ -73,7 +73,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
     Tensor go = view_tokens(gate_out_, n);
     Tensor uo = view_tokens(up_out_, n);
     Tensor so = view_tokens(swiglu_out_, n);

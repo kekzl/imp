@@ -170,7 +170,7 @@ void GraphExecutor::run_kda(int layer, const InferenceState& state, cudaStream_t
 
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
-    Tensor no = view_tokens(norm_out_, n);
+    Tensor no = block_norm_view_(n);
     device_copy_async(r.data, h.data, h.nbytes(), stream);
     rmsnorm_for_smallm_(h, ly.attn_norm, no, ly.ssm_in_id, n, cfg.rms_norm_eps, stream, norm_w_off_);
 
