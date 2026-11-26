@@ -357,9 +357,10 @@ struct InklingRuntime {
     // most offset, whose K/V the request's blocks hold. Returns where the prefill goes on, -1 = no slot.
     // snap: a snapshot entry saved at offset on any slot (InklingForward::restore), restored when the slot's
     // own checkpoints reach less; null = none. snap_draft: it holds the draft's rows
-    // (InklingForward::restore).
+    // (InklingForward::restore). restored: set when this call restored snap.
     [[nodiscard]] int resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s,
-                             bool& first, const void* snap = nullptr, bool snap_draft = true);
+                             bool& first, const void* snap = nullptr, bool snap_draft = true,
+                             bool* restored = nullptr);
     // Every slot's full-attention K/V (and the draft's) in kv: inkling_kv_apps layers, fp16, 16-row blocks.
     [[nodiscard]] bool bind_kv(KVCache& kv);
 };

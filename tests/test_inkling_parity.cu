@@ -488,7 +488,7 @@ TEST(InklingLookahead, CheckpointInsideACallIsTheRowsState) {
 }
 
 // Conv-state checkpoints further back than a resume can reach are dead (3.8 MB each, one per 256
-// positions): after 9000 positions the forward holds the last 24, a prompt that diverges 2000 positions
+// positions): after 9000 positions the forward holds the last 25, a prompt that diverges 2000 positions
 // before the end still resumes at its checkpoint with the rows of a fresh run (calls of 256 rows in
 // both, so the shapes match and the rows are bit-equal), one that diverges 6000 before the end starts
 // over as before.
@@ -515,9 +515,10 @@ TEST(InklingRewind, CheckpointsBehindTheResumeWindowAreFreed) {
     ASSERT_TRUE(kept.init(fx.w, fx.va, 512, 16384));
     ASSERT_TRUE(fresh.init(fx.w, fx.va, 512, 16384));
     ASSERT_FALSE(run_rows(kept, fx.w, a, 0, cuts).empty());
-    // 35 checkpoints taken; resumable are those within 5632 positions of 9000, kept with 512 of margin, in
-    // the pinned ring of 26 planned at init (inkling_checkpoint_slots, B-111 S4).
-    EXPECT_EQ(kept.checkpoints_held(), 24);
+    // 35 taken; the last (8960) frees those below 8960 - 5632 - 512 = 2816 (checkpoint 11): 11..35 = 25 held,
+    // 14..35 resumable at hw 9000, the 512 of margin a segment's checkpoints before hw_ moves. The pinned
+    // ring planned at init holds 26 (inkling_checkpoint_slots, B-111 S4).
+    EXPECT_EQ(kept.checkpoints_held(), 25);
     const size_t one = kept.checkpoint_bytes() / 26;
     EXPECT_EQ(kept.checkpoint_bytes(), 26 * one);
     EXPECT_GT(one, size_t{3} << 20);

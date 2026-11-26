@@ -1246,6 +1246,7 @@ private:
     // from it. The store itself: recurrent_snapshot_mb / _host_mb of inkling_snap_layout entries.
     void inkling_save_snapshot_(const Request& req, std::span<const int32_t> tokens, cudaStream_t stream);
     void inkling_init_snapshots_();
+    std::unordered_map<size_t, int> inkling_snap_origin_;  // snapshot key -> the slot that saved it (log)
     // Unbinds slots whose request the engine no longer holds (a teardown that was skipped).
     void inkling_unbind_stale_();
     // init_kv_cache on Inkling2-Loop: pool layers (-1 = another arch), the block cap (INT_MAX = none), the

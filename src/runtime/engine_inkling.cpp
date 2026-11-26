@@ -5,10 +5,10 @@
 #include "exec/executor.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/recurrent_snapshot_store.h"
+#include "runtime/config.h"
 #include "runtime/engine.h"
 #include "runtime/prompt_tail.h"
 #include "runtime/request.h"
-#include "runtime/snapshot_host_default.h"
 #include "vision/image_decode.h"
 #include "vision/image_processor.h"
 #include "vision/vision_family.h"
@@ -134,8 +134,9 @@ int Engine::inkling_prefix_reuse_limit_(Request& req) {
         if (!e && either)
             e = recurrent_snapshots_->find(h ^ kInklingNoDraftKey);
         if (e && e->n_tokens == b * bs && kv_manager_->chain_intact(e->kv_chain)) {
-            IMP_LOG_INFO("inkling2_loop: seq %d restores %d tokens from a snapshot (%s), its slot reaches %d",
-                         req.id, b * bs, e->on_host ? "host tier" : "device", own * bs);
+            IMP_LOG_DEBUG(
+                "inkling2_loop: seq %d may restore %d tokens from a snapshot (%s), its slot reaches %d",
+                req.id, b * bs, e->on_host ? "host tier" : "device", own * bs);
             req.recurrent_restore = std::move(e);
             return b;
         }
@@ -149,10 +150,14 @@ void Engine::inkling_init_snapshots_() {
     if (!rt || rt->slots.empty() || ssm_state_ || recurrent_snapshots_ || mb <= 0)
         return;
     // 179994624 B per entry (conv state, 40 x 2 x 1024 sliding rows, the draft's 2 x 2 x 1024): 256 MiB buys
-    // 1 device slot, the 2048 MiB host default 11.
+    // 1 device slot. No host tier unless server.recurrent_snapshot_host_mb is set: each finish demoted the
+    // last entry and the refill worker pinned 171.7 MiB beside the next decode (mix10: 236.7 -> 219.8 tok/s).
+    const size_t host =
+        runtime_config_.was_set("server.recurrent_snapshot_host_mb")
+            ? static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0)) << 20
+            : 0;
     auto store = std::make_unique<RecurrentSnapshotStore>();
-    store->init(rt->slots[0]->snapshot_bytes(), static_cast<size_t>(mb) << 20,
-                snapshot_host_budget_bytes(runtime_config_));
+    store->init(rt->slots[0]->snapshot_bytes(), static_cast<size_t>(mb) << 20, host);
     if (!store->enabled()) {
         IMP_LOG_INFO("inkling2_loop: snapshot store off, prefix reuse stays on the slot that ran the prefix");
         return;
@@ -191,6 +196,11 @@ void Engine::inkling_save_snapshot_(const Request& req, std::span<const int32_t>
     recurrent_snapshots_->erase(key);
     if (!recurrent_snapshots_->save_gather(key, pos, pieces, stream, std::move(chain)))
         return;
+    // The restore log names the saving slot; keys the store dropped go once the map outgrows it.
+    if (inkling_snap_origin_.size() > 64)
+        std::erase_if(inkling_snap_origin_,
+                      [this](const auto& kv) { return !recurrent_snapshots_->contains(kv.first); });
+    inkling_snap_origin_[key] = slot;
     // The slot is unbound right after; the next tenant's prefill writes its rings.
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     IMP_LOG_DEBUG("inkling2_loop: seq %d saved its state at %d of %zu tokens (%d/%d device, %d host)", req.id,
@@ -215,11 +225,11 @@ int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const bool snap_draft = snap && e->key == inkling_snapshot_key(key, offset, bs, req.prefix_salt,
                                                                    &KVCacheManager::compute_block_hash);
-    bool first = false;
-    int r = rt->resume(req.id, key, offset, stream, first, snap, snap_draft);
+    bool first = false, restored = false;
+    int r = rt->resume(req.id, key, offset, stream, first, snap, snap_draft, &restored);
     if (r < 0) {
         inkling_unbind_stale_();
-        r = rt->resume(req.id, key, offset, stream, first, snap, snap_draft);
+        r = rt->resume(req.id, key, offset, stream, first, snap, snap_draft, &restored);
     }
     if (r < 0) {
         IMP_LOG_ERROR("inkling2_loop: no free sequence slot for request %d, cancelled", req.id);
@@ -227,6 +237,19 @@ int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
     }
     if (!first)
         return offset;
+    const int slot = rt->table.find(req.id);
+    if (restored) {
+        const auto o = inkling_snap_origin_.find(e->key);
+        IMP_LOG_INFO(
+            "inkling2_loop: seq %d restores %d of %zu prompt tokens on slot %d from a snapshot saved on "
+            "slot %d (%s tier, %s)",
+            req.id, r, req.input_tokens.size(), slot, o != inkling_snap_origin_.end() ? o->second : -1,
+            e->on_host ? "host" : "device", snap_draft ? "target and draft" : "target");
+    } else if (r > 0) {
+        IMP_LOG_INFO(
+            "inkling2_loop: seq %d resumes at %d of %zu prompt tokens on slot %d, its own checkpoint", req.id,
+            r, req.input_tokens.size(), slot);
+    }
     req.recurrent_restore.reset();  // InklingForward::restore synchronized the stream behind its copies
     if (r < offset) {
         // The cached blocks below offset get rewritten with the same tokens' K/V (scheduler.cpp F-A10).
@@ -234,9 +257,6 @@ int Engine::inkling_resume_(Request& req, int offset, cudaStream_t stream) {
                      offset);
         req.prefill_offset = req.cached_tokens = r;
     }
-    if (r > 0)
-        IMP_LOG_INFO("inkling2_loop: seq %d resumes at %d of %zu prompt tokens", req.id, r,
-                     req.input_tokens.size());
     inkling_encode_images_(req, r, stream);
     return r;
 }
