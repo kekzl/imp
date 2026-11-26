@@ -76,18 +76,33 @@ void scan_batched(const float* conv, int conv_channels, const half* alpha, const
                   const float* A_log, const float* dt_bias, StateT* pool, const int* seq_slots,
                   int64_t slot_stride, half* y, const ScanShape& s, const int* rows_n, const int* snap_n,
                   const int* outs, const int* snaps, float* fac_out, int fac_stride) {
+    const GdnScanBatchedArgs<StateT> a{.conv_f32 = conv,
+                                       .conv_channels = conv_channels,
+                                       .alpha = alpha,
+                                       .beta = beta,
+                                       .A_log = A_log,
+                                       .dt_bias = dt_bias,
+                                       .h_state_pool = pool,
+                                       .seq_slots = seq_slots,
+                                       .h_state_seq_stride = slot_stride,
+                                       .y = y,
+                                       .n_seq = s.n_seq,
+                                       .n_tokens = s.n_tokens,
+                                       .n_heads = s.n_heads,
+                                       .head_dim_ssm = s.head_dim,
+                                       .state_size = s.state_size,
+                                       .n_groups = s.n_groups,
+                                       .grouped_layout = 1,
+                                       .d_real_n = rows_n,
+                                       .d_snap_n = snap_n,
+                                       .out_slots = outs,
+                                       .snap_slots = snaps,
+                                       .fac_out = fac_out,
+                                       .fac_stride = fac_stride};
     if constexpr (std::is_same_v<StateT, float>)
-        gdn_scan_fused_f32_batched(conv, conv_channels, alpha, beta, A_log, dt_bias, pool, seq_slots,
-                                   slot_stride, y, s.n_seq, s.n_tokens, s.n_heads, s.head_dim, s.state_size,
-                                   s.n_groups, nullptr, /*grouped_layout=*/1, rows_n,
-                                   /*seq_row_offsets=*/nullptr, /*h_snap=*/nullptr, snap_n, outs, snaps,
-                                   fac_out, fac_stride);
+        gdn_scan_fused_f32_batched(a);
     else
-        gdn_scan_fused_bf16_batched(conv, conv_channels, alpha, beta, A_log, dt_bias, pool, seq_slots,
-                                    slot_stride, y, s.n_seq, s.n_tokens, s.n_heads, s.head_dim, s.state_size,
-                                    s.n_groups, nullptr, /*grouped_layout=*/1, rows_n,
-                                    /*seq_row_offsets=*/nullptr, /*h_snap=*/nullptr, snap_n, outs, snaps,
-                                    fac_out, fac_stride);
+        gdn_scan_fused_bf16_batched(a);
 }
 
 // As run_gdn stages the factor rows at D drafts: ONE pass (1 row in place into L_z, D + 1 rows into the spare

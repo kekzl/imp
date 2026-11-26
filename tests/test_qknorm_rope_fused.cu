@@ -129,13 +129,19 @@ TEST_P(QkNormRopeFusedTest, MatchesNormThenStandaloneRope) {
     ASSERT_NE(d_kw, nullptr);
     ASSERT_NE(d_pos, nullptr);
 
-    qknorm_rope_fused(static_cast<half*>(d_q_fused), static_cast<half*>(d_k_fused),
-                      static_cast<const half*>(d_qw), static_cast<const half*>(d_kw), n_heads,
-                      n_kv_heads, head_dim, eps, static_cast<const int*>(d_pos), theta,
-                      /*scaling=*/1.0f, rope_dim, /*neox=*/true, /*stream=*/nullptr,
-                      /*weight_offset=*/0.0f, /*ext_factor=*/0.0f, /*attn_factor=*/1.0f,
-                      /*corr_dims=*/nullptr, /*longrope_inv_freqs=*/nullptr, MRopeParams{},
-                      n_tokens);
+    qknorm_rope_fused({.Q = static_cast<half*>(d_q_fused),
+                       .K = static_cast<half*>(d_k_fused),
+                       .q_norm_weight = static_cast<const half*>(d_qw),
+                       .k_norm_weight = static_cast<const half*>(d_kw),
+                       .n_heads = n_heads,
+                       .n_kv_heads = n_kv_heads,
+                       .head_dim = head_dim,
+                       .eps = eps,
+                       .positions = static_cast<const int*>(d_pos),
+                       .theta = theta,
+                       .rope_dim = rope_dim,
+                       .neox = true,
+                       .n_tokens = n_tokens});
     QK_CUDA_CHECK(cudaDeviceSynchronize());
 
     // ---- arm B: host RMSNorm, then the standalone RoPE kernel
@@ -251,12 +257,25 @@ TEST_P(QkNormRopeWarpTest, BitIdenticalToCtaKernel) {
     using Fn = decltype(&qknorm_rope_fused);
     const Fn fns[2] = {&qknorm_rope_fused_cta, &qknorm_rope_fused};
     for (int a = 0; a < 2; ++a)
-        fns[a](static_cast<half*>(d_q[a]), static_cast<half*>(d_k[a]), static_cast<const half*>(d_qw),
-               static_cast<const half*>(d_kw), c.n_heads, c.n_kv_heads, c.head_dim, 1e-6f,
-               static_cast<const int*>(d_pos), 1e6f, /*scaling=*/c.ext_factor > 0.0f ? 4.0f : 1.0f,
-               c.rope_dim, c.neox, nullptr, c.weight_offset, c.ext_factor, /*attn_factor=*/1.1f,
-               c.ext_factor > 0.0f ? corr_dims : nullptr,
-               c.longrope ? static_cast<const float*>(d_freqs) : nullptr, MRopeParams{}, c.n_tokens);
+        fns[a]({.Q = static_cast<half*>(d_q[a]),
+                .K = static_cast<half*>(d_k[a]),
+                .q_norm_weight = static_cast<const half*>(d_qw),
+                .k_norm_weight = static_cast<const half*>(d_kw),
+                .n_heads = c.n_heads,
+                .n_kv_heads = c.n_kv_heads,
+                .head_dim = c.head_dim,
+                .eps = 1e-6f,
+                .positions = static_cast<const int*>(d_pos),
+                .theta = 1e6f,
+                .scaling = c.ext_factor > 0.0f ? 4.0f : 1.0f,
+                .rope_dim = c.rope_dim,
+                .neox = c.neox,
+                .weight_offset = c.weight_offset,
+                .ext_factor = c.ext_factor,
+                .attn_factor = 1.1f,
+                .corr_dims = c.ext_factor > 0.0f ? corr_dims : nullptr,
+                .longrope_inv_freqs = c.longrope ? static_cast<const float*>(d_freqs) : nullptr,
+                .n_tokens = c.n_tokens});
     QK_CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<uint16_t> out[2][2];

@@ -48,14 +48,28 @@
             // shared workspaces (the whole batch, or a mixed step's riders).
             Tensor kv_view = sub_k;
             Tensor vv_view = sub_v;
-            dim3 fused_grid(sub_n, 2);
-            write_kv_cache_rope_fused(
-                fused_grid, threads, stream, static_cast<const half*>(kv_view.data),
-                static_cast<const half*>(vv_view.data),
-                sub_state.positions, sub_block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size_d, sub_n,
-                sub_state.max_blocks_per_seq, sub_state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
-                cfg.rope_neox, longrope_freqs);
+            write_kv_cache_rope_fused({.grid = dim3(sub_n, 2),
+                                       .threads = threads,
+                                       .stream = stream,
+                                       .k_in = static_cast<const half*>(kv_view.data),
+                                       .v_in = static_cast<const half*>(vv_view.data),
+                                       .positions = sub_state.positions,
+                                       .block_tables = sub_block_tables,
+                                       .k_cache_base = static_cast<half*>(cache->k_ptr(kv_layer, 0)),
+                                       .v_cache_base = static_cast<half*>(cache->v_ptr(kv_layer, 0)),
+                                       .block_stride = block_stride,
+                                       .row_elems = row_elems,
+                                       .block_size = kv_block_size_d,
+                                       .n_tokens = sub_n,
+                                       .max_blocks_per_seq = sub_state.max_blocks_per_seq,
+                                       .n_sequences = sub_state.n_sequences,
+                                       .n_kv_heads = nkv,
+                                       .head_dim = hd,
+                                       .theta = layer_rope_theta,
+                                       .inv_scaling = inv_scaling,
+                                       .rope_pairs = pairs,
+                                       .neox = cfg.rope_neox,
+                                       .longrope_inv_freqs = longrope_freqs});
             // Sparse decode attention metadata is updated for ALL layers in one
             // batched launch at the end of the forward: selection force-includes the
             // recent blocks, so the one-step lag is harmless.

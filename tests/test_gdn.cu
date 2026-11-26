@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <cmath>
+#include <type_traits>
 
 namespace imp {
 namespace {
@@ -1126,20 +1127,33 @@ TEST(GDNScanTest, BatchedDecodeScanMicrobench) {
     cudaEventCreate(&e0);
     cudaEventCreate(&e1);
     constexpr int reps = 480;  // 60 "steps" of 8 slabs
-    for (int r = 0; r < 48; r++) {  // warmup one slab cycle x6
-        gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
-                                   d_state + (r % n_slabs) * slab_floats, d_slots,
-                                   (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
-                                   state_size, n_groups, nullptr, /*grouped_layout=*/1);
-    }
+    // One argument set per state slab (float or BF16 pool).
+    auto bench = [&](auto* pool) {
+        using S = std::remove_pointer_t<decltype(pool)>;
+        return GdnScanBatchedArgs<S>{.conv_f32 = d_conv,
+                                     .conv_channels = conv_channels,
+                                     .alpha = d_alpha,
+                                     .beta = d_beta,
+                                     .A_log = d_A,
+                                     .dt_bias = d_dt,
+                                     .h_state_pool = pool,
+                                     .seq_slots = d_slots,
+                                     .h_state_seq_stride = (int64_t)state_floats_per_seq,
+                                     .y = d_y,
+                                     .n_seq = n_seq,
+                                     .n_tokens = n_tok,
+                                     .n_heads = n_heads,
+                                     .head_dim_ssm = head_dim,
+                                     .state_size = state_size,
+                                     .n_groups = n_groups,
+                                     .grouped_layout = 1};
+    };
+    for (int r = 0; r < 48; r++)  // warmup one slab cycle x6
+        gdn_scan_fused_f32_batched(bench(d_state + (r % n_slabs) * slab_floats));
     cudaDeviceSynchronize();
     cudaEventRecord(e0);
-    for (int r = 0; r < reps; r++) {
-        gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
-                                   d_state + (r % n_slabs) * slab_floats, d_slots,
-                                   (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
-                                   state_size, n_groups, nullptr, /*grouped_layout=*/1);
-    }
+    for (int r = 0; r < reps; r++)
+        gdn_scan_fused_f32_batched(bench(d_state + (r % n_slabs) * slab_floats));
     cudaEventRecord(e1);
     cudaEventSynchronize(e1);
     float ms = 0;
@@ -1157,20 +1171,12 @@ TEST(GDNScanTest, BatchedDecodeScanMicrobench) {
     ASSERT_EQ(cudaMalloc(&d_state_bf16, (size_t)n_slabs * slab_floats * sizeof(__nv_bfloat16)),
               cudaSuccess);
     cudaMemset(d_state_bf16, 0, (size_t)n_slabs * slab_floats * sizeof(__nv_bfloat16));
-    for (int r = 0; r < 48; r++) {
-        gdn_scan_fused_bf16_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
-                                    d_state_bf16 + (r % n_slabs) * slab_floats, d_slots,
-                                    (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
-                                    state_size, n_groups, nullptr, /*grouped_layout=*/1);
-    }
+    for (int r = 0; r < 48; r++)
+        gdn_scan_fused_bf16_batched(bench(d_state_bf16 + (r % n_slabs) * slab_floats));
     cudaDeviceSynchronize();
     cudaEventRecord(e0);
-    for (int r = 0; r < reps; r++) {
-        gdn_scan_fused_bf16_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
-                                    d_state_bf16 + (r % n_slabs) * slab_floats, d_slots,
-                                    (int64_t)state_floats_per_seq, d_y, n_seq, n_tok, n_heads, head_dim,
-                                    state_size, n_groups, nullptr, /*grouped_layout=*/1);
-    }
+    for (int r = 0; r < reps; r++)
+        gdn_scan_fused_bf16_batched(bench(d_state_bf16 + (r % n_slabs) * slab_floats));
     cudaEventRecord(e1);
     cudaEventSynchronize(e1);
     float ms_bf = 0;
@@ -1333,18 +1339,37 @@ TEST(GDNScanTest, RaggedBatchedScanMatchesSequential) {
     // Reference: three sequential BATCHED calls with n_seq=1 on row
     // sub-ranges - same SPLIT=2 instantiation as the ragged call (the
     // single-sequence entry runs SPLIT=1, whose reduce order differs).
+    GdnScanBatchedArgs<float> rag{.conv_f32 = d_conv,
+                                  .conv_channels = conv_channels,
+                                  .alpha = d_alpha,
+                                  .beta = d_beta,
+                                  .A_log = d_A,
+                                  .dt_bias = d_dt,
+                                  .h_state_pool = d_state_rag,
+                                  .seq_slots = d_slots,
+                                  .h_state_seq_stride = (int64_t)state_elems,
+                                  .y = d_y_rag,
+                                  .n_seq = n_seq,
+                                  .n_heads = n_heads,
+                                  .head_dim_ssm = head_dim,
+                                  .state_size = state_size,
+                                  .n_groups = n_groups,
+                                  .grouped_layout = 1,
+                                  .seq_row_offsets = d_off};
     for (int i = 0; i < n_seq; i++) {
-        gdn_scan_fused_f32_batched(d_conv + (size_t)h_off[i] * conv_channels, conv_channels,
-                                   d_alpha + h_off[i] * n_heads, d_beta + h_off[i] * n_heads, d_A, d_dt,
-                                   d_state_seq + (size_t)i * state_elems, d_slots, /*stride=*/0,
-                                   d_y_seq + (size_t)h_off[i] * inner, /*n_seq=*/1, lens[i], n_heads,
-                                   head_dim, state_size, n_groups, nullptr, /*grouped_layout=*/1);
+        GdnScanBatchedArgs<float> one = rag;  // stride 0, n_seq 1, no row offsets
+        one.conv_f32 = d_conv + (size_t)h_off[i] * conv_channels;
+        one.alpha = d_alpha + h_off[i] * n_heads;
+        one.beta = d_beta + h_off[i] * n_heads;
+        one.h_state_pool = d_state_seq + (size_t)i * state_elems;
+        one.h_state_seq_stride = 0;
+        one.y = d_y_seq + (size_t)h_off[i] * inner;
+        one.n_seq = 1;
+        one.n_tokens = lens[i];
+        one.seq_row_offsets = nullptr;
+        gdn_scan_fused_f32_batched(one);
     }
-    // Ragged batched call.
-    gdn_scan_fused_f32_batched(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state_rag, d_slots,
-                               (int64_t)state_elems, d_y_rag, n_seq, /*n_tokens=*/0, n_heads, head_dim,
-                               state_size, n_groups, nullptr, /*grouped_layout=*/1,
-                               /*d_real_n=*/nullptr, d_off);
+    gdn_scan_fused_f32_batched(rag);  // ragged batched call, n_tokens 0
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<uint8_t> a((size_t)total_rows * inner * sizeof(half)), b(a.size());

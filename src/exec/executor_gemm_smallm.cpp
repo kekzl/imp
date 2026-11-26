@@ -127,8 +127,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
         ws_.bump_generation();
     smallm_ws_bytes_ = ws_need;
     smallm_xq_bytes_ = xq_need;
-    smallm_xq_src_ = nullptr;
-    smallm_xq_from_producer_ = false;
+    smallm_xq_tag_.clear();
     IMP_LOG_INFO(
         "small-M NVFP4 scratch: %d weights, workspace %zu KiB + activation %zu KiB from the T2 arena",
         n_weights, ws_need / 1024, xq_need / 1024);
@@ -161,25 +160,13 @@ float GraphExecutor::act_scale_of_(TensorID id) const {
     return id == kInvalidTensorID ? 1.0f : registry_.handle(id).act_scale;
 }
 
-bool GraphExecutor::smallm_xq_holds_(const void* data, int M, int K, float act_scale) const {
-    return smallm_xq_src_ == data && smallm_xq_src_m_ == M && smallm_xq_src_k_ == K &&
-           smallm_xq_src_scale_ == act_scale;
-}
-
-void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K, float act_scale) {
-    smallm_xq_src_ = out_data;
-    smallm_xq_src_m_ = M;
-    smallm_xq_src_k_ = K;
-    smallm_xq_src_scale_ = act_scale;
-    smallm_xq_from_producer_ = true;
-}
-
 void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no,
                                         TensorID consumer_id, int n, float eps, cudaStream_t stream,
                                         float weight_offset) {
     // The producer already wrote no + the NVFP4 activations for this (no, w, n) (#2414).
     if (prenorm_matches_(w, no, n)) {
         prenorm_out_ = nullptr;
+        smallm_xq_tag_.adopt(no.data, prenorm_xq_gen_);
         return;
     }
     prenorm_out_ = nullptr;
@@ -196,14 +183,11 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
     uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales, &as);
     if (xq_packed != nullptr &&
         rmsnorm_nvfp4(h, w, no, xq_packed, xq_scales, eps, stream, weight_offset, as)) {
-        smallm_producer_tag_(no.data, n, K, as);
+        smallm_xq_tag_.stamp_producer(no.data, n, K, as);
         return;
     }
     rmsnorm(h, w, no, eps, stream, weight_offset);
-    // The unfused write may have replaced the content behind a still-matching
-    // tag (same buffer, same shape, new values) — invalidate it.
-    if (smallm_xq_src_ == no.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
-        smallm_xq_from_producer_ = false;
+    smallm_xq_tag_.touch(no.data);  // new values behind a stamp taken after this op's view
 }
 
 bool GraphExecutor::residual_fusion_ok_(int n) const {
@@ -223,10 +207,11 @@ bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, 
     if (xq_packed == nullptr ||
         !add_rmsnorm_nvfp4(a, r, h, w, no, xq_packed, xq_scales, eps, stream, norm_w_off_, as))
         return false;
-    smallm_producer_tag_(no.data, n, K, as);
+    smallm_xq_tag_.stamp_producer(no.data, n, K, as);
     prenorm_out_ = no.data;
     prenorm_w_ = w.data;
     prenorm_n_ = n;
+    prenorm_xq_gen_ = smallm_xq_tag_.producer_gen;
     return true;
 }
 
@@ -268,15 +253,14 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     if (xq_packed != nullptr &&
         (gelu ? geglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as)
               : swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream, as))) {
-        smallm_producer_tag_(so.data, n, K, as);
+        smallm_xq_tag_.stamp_producer(so.data, n, K, as);
         return false;
     }
     if (gelu)
         geglu(go, uo, so, stream);
     else
         swiglu(go, uo, so, stream);
-    if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
-        smallm_xq_from_producer_ = false;
+    smallm_xq_tag_.touch(so.data);
     return false;
 }
 
@@ -408,16 +392,12 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     // Quantize dedupe — identical contract to the single-tensor block: a
     // matching scratch tag plus either the caller's act-quant hint or a
     // producer-side tag skips the re-quantize.
-    const bool tag_match = smallm_xq_holds_(input.data, M, K, as);
+    const bool tag_match = smallm_xq_tag_.holds(input.data, M, K, as);
     const bool hint_match = ctx.act_quant_hint_data != nullptr && ctx.act_quant_hint_data == input.data &&
                             ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
-    if (!(tag_match && (hint_match || smallm_xq_from_producer_))) {
+    if (!(tag_match && (hint_match || smallm_xq_tag_.producer_live()))) {
         quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales, /*tensor_scale=*/as, ctx.stream);
-        smallm_xq_src_ = input.data;
-        smallm_xq_src_m_ = M;
-        smallm_xq_src_k_ = K;
-        smallm_xq_src_scale_ = as;
-        smallm_xq_from_producer_ = false;
+        smallm_xq_tag_.stamp_quantize(input.data, M, K, as);
     }
     NvFP4QuantResult xq;
     xq.packed_data = xq_packed;

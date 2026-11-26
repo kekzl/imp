@@ -41,18 +41,34 @@ void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, floa
 // Fused QK-norm + RoPE (FP16, prefill and decode rows): per-head RMSNorm on Q/K then RoPE, one warp
 // per (token, head) for head_dim 64/128/256/512, else one CTA per (head, token).
 // Q:[n_tokens,n_heads*head_dim], K:[n_tokens,n_kv_heads*head_dim]; norm weights:[head_dim].
-void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight, int n_heads,
-                       int n_kv_heads, int head_dim, float eps, const int* positions, float theta = 10000.0f,
-                       float scaling = 1.0f, int rope_dim = 0, bool neox = false,
-                       cudaStream_t stream = nullptr, float weight_offset = 0.0f, float ext_factor = 0.0f,
-                       float attn_factor = 1.0f, const float* corr_dims = nullptr,
-                       const float* longrope_inv_freqs = nullptr, MRopeParams mrope = {}, int n_tokens = 1);
+// Built with designated initializers (audit D-11): a swapped n_heads / n_kv_heads / head_dim
+// reads wrong at the call site. Defaults are the old trailing parameter defaults.
+struct QknormRopeArgs {
+    half* Q = nullptr;
+    half* K = nullptr;
+    const half* q_norm_weight = nullptr;
+    const half* k_norm_weight = nullptr;
+    int n_heads = 0;
+    int n_kv_heads = 0;  // 0 = Q only
+    int head_dim = 0;
+    float eps = 0.0f;
+    const int* positions = nullptr;
+    float theta = 10000.0f;
+    float scaling = 1.0f;
+    int rope_dim = 0;
+    bool neox = false;
+    cudaStream_t stream = nullptr;
+    float weight_offset = 0.0f;
+    float ext_factor = 0.0f;
+    float attn_factor = 1.0f;
+    const float* corr_dims = nullptr;
+    const float* longrope_inv_freqs = nullptr;
+    MRopeParams mrope = {};
+    int n_tokens = 1;
+};
+void qknorm_rope_fused(const QknormRopeArgs& a);
 // Same, always the one-CTA-per-(head, token) kernel: the bit-identity reference in tests.
-void qknorm_rope_fused_cta(half* Q, half* K, const half* q_norm_weight, const half* k_norm_weight,
-                           int n_heads, int n_kv_heads, int head_dim, float eps, const int* positions,
-                           float theta, float scaling, int rope_dim, bool neox, cudaStream_t stream,
-                           float weight_offset, float ext_factor, float attn_factor, const float* corr_dims,
-                           const float* longrope_inv_freqs, MRopeParams mrope, int n_tokens);
+void qknorm_rope_fused_cta(const QknormRopeArgs& a);
 
 // Llama-4 query temperature (Ministral 3 / Devstral-Small-2 llama_4_scaling_beta), after RoPE:
 // q *= 1 + scale * ln(1 + floor(pos / floor_len)). Q: [n_tokens, n_heads*head_dim] FP16, in place.
