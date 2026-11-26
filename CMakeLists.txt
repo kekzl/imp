@@ -356,6 +356,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_dispatch.cpp
     src/compute/rope.cu
     src/compute/head_norm_rope.cu
+    src/compute/rms_norm_rows.cu
     src/compute/lora_rows.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
@@ -1459,6 +1460,8 @@ if(IMP_BUILD_TESTS)
         tests/test_inkling_kernels.cu
         tests/test_inkling_lora.cu
         tests/test_inkling_attn_paged.cu
+        # D-14: the drafters' norm + RoPE and fp32-in RMSNorm are one kernel each (equal bits per arm).
+        tests/test_drafter_norm_primitives.cu
         tests/test_gemv_hot_cold_bench.cu
         tests/test_inkling_quality.cu
         tests/test_swiglu_quantize_cutlass.cu

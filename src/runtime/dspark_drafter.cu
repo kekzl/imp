@@ -5,6 +5,7 @@
 #include "compute/gemm.h"
 #include "compute/head_norm_rope.h"
 #include "compute/layernorm.h"
+#include "compute/rms_norm_rows.h"
 #include "core/graph_epoch.h"
 #include "core/log_once.h"
 #include "core/logging.h"
@@ -55,28 +56,6 @@ __global__ void dspark_add_kernel(half* __restrict__ h, const half* __restrict__
     const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (i < n)
         h[i] = __hadd(h[i], t[i]);
-}
-
-// One block per row: out = RMSNorm(x) * w, FP32 in (the fc output), FP16 out; blockDim 256.
-__global__ void dspark_rmsnorm_f32_in_kernel(const float* __restrict__ x, const half* __restrict__ w,
-                                             half* __restrict__ out, int d, float eps) {
-    const float* xr = x + (static_cast<size_t>(blockIdx.x) * d);
-    float ss = 0.0f;
-    for (int j = threadIdx.x; j < d; j += blockDim.x)
-        ss += xr[j] * xr[j];
-    for (int o = 16; o > 0; o >>= 1)
-        ss += __shfl_xor_sync(0xffffffffu, ss, o);
-    __shared__ float part[8];
-    if ((threadIdx.x & 31) == 0)
-        part[threadIdx.x >> 5] = ss;
-    __syncthreads();
-    float tot = 0.0f;
-    for (int k = 0; k < static_cast<int>(blockDim.x >> 5); ++k)
-        tot += part[k];
-    const float inv = rsqrtf((tot / static_cast<float>(d)) + eps);
-    half* orow = out + (static_cast<size_t>(blockIdx.x) * d);
-    for (int j = threadIdx.x; j < d; j += blockDim.x)
-        orow[j] = __float2half(xr[j] * inv * __half2float(w[j]));
 }
 
 // One block per row: index of the largest logit (lowest index on ties).
@@ -560,8 +539,8 @@ void DSparkDrafter::append_ctx(const half* feat, int ld, int n, int pos0, cudaSt
     Tensor tt = t2(P.t32, n, P.d, QType::F32);
     gemm(t2(const_cast<half*>(feat), n, ld), t2(P.fc, P.d, ld), tt, 1.0f, 0.0f, stream);
     Tensor tn = t2(P.tn, n, P.d);
-    dspark_rmsnorm_f32_in_kernel<<<n, 256, 0, stream>>>(P.t32, P.hidden_norm, P.tn, P.d, P.eps);
-    IMP_CUDA_CHECK_LAUNCH();
+    rms_norm_rows(P.t32, P.hidden_norm, nullptr, P.tn, n, P.d, P.eps,
+                  stream);  // compute/rms_norm_rows.h (D-14)
     for (auto& L : P.layers) {
         half* k = L.k_cache + (static_cast<size_t>(row0) * kvd);
         half* v = L.v_cache + (static_cast<size_t>(row0) * kvd);
