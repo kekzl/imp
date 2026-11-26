@@ -32,6 +32,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         return;
     quant_pipeline_.build(*model_, dispatch_policy(), *vram_alloc_, budget, stream,
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
+    // Phase 4 rebuilt the registry from the Model's tensors; Inkling's own weights follow (B-111 S5).
+    if (inkling_) {
+        const size_t before = registry_.size();
+        inkling_->proj_ids = register_inkling_weights(inkling_->w, registry_);
+        IMP_LOG_INFO(
+            "inkling2_loop: %zu projection handles in the WeightRegistry (%zu layers, fp16, borrowed)",
+            registry_.size() - before, inkling_->proj_ids.size());
+    }
     ssm_pool_bytes_ = budget.ssm_footprint_bytes;
     library_reserve_pending_ = budget.library_reserve_bytes;
     regrow_expert_cache_();

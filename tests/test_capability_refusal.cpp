@@ -22,7 +22,7 @@ namespace {
 
 const imp::EngineCapabilities kGeneric = imp::derive_capabilities({.model_loaded = true});
 const imp::EngineCapabilities kInkling = imp::derive_capabilities(
-    {.model_loaded = true, .layer_loop_replaced = true});
+    {.model_loaded = true, .layer_loop_replaced = true, .own_forward_lora = true});
 
 ChatRequestContext ctx_for(const imp::EngineCapabilities& caps) {
     ChatRequestContext ctx;
@@ -50,12 +50,13 @@ const Ask kAsks[] = {
 
 }  // namespace
 
-TEST(CapabilityRefusal, InklingRefusesEveryLoopFeatureButGuidance) {
+TEST(CapabilityRefusal, InklingRefusesEveryLoopFeatureButGuidanceAndLora) {
     for (const Ask& a : kAsks) {
         ChatRequestContext ctx = ctx_for(kInkling);
         a.set(ctx.params);
         const ExtensionError e = extension_error(ctx);
-        if (std::string(a.field) == "cfg_scale") {
+        // Guidance pairs run on two slots; LoRA deltas run in its own forward (B-111 S5).
+        if (std::string(a.field) == "cfg_scale" || std::string(a.field) == "lora") {
             EXPECT_TRUE(e.message.empty()) << e.message;
             continue;
         }

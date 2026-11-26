@@ -242,6 +242,7 @@ One adapter is active at a time: a request naming a different one waits for in-f
 
 - The prefix cache is keyed by adapter.
 - v1 scope: per-layer `q/k/v/o/gate/up/down_proj` adapters on standard pre-norm archs.
+- Inkling-2-Mini: `attn.wq_du`, `wk_dv`, `wv_dv`, `wo_ud` (its q/k/v/o, every loop pass); an adapter with any other lora tensor fails to load.
 - Sandwich-norm o/down (Gemma) and MoE-expert targets are declined with a log.
 - C API: `imp_lora_load()` / `imp_lora_set()`.
 
