@@ -75,3 +75,39 @@ TEST(EngineConfigBridge, UnsetWithDefaultConfKeepsTheOldDefaults) {
     EXPECT_EQ(ec.kv_cache_max_blocks, 0);
     EXPECT_EQ(ec.kv_block_size, 0);
 }
+
+// Batch, context, KV dtype and StreamingLLM auto resolve into EngineRuntimeState (C-9, Inkling's
+// limits among the writers): the seed copies the operator's values, the sizing view carries the
+// resolved ones and every other field of the operator's config.
+TEST(EngineConfigBridge, ResolvedFieldsLiveInTheRuntimeState) {
+    EngineConfig ec;
+    ec.max_batch_size = 0;  // auto
+    ec.max_seq_len = 0;
+    ec.kv_cache_dtype = imp::QType::FP8_E4M3;
+    ec.streaming_kv_auto = true;
+    ec.use_cuda_graphs = false;
+    ec.prefill_chunk_size = 777;
+    imp::EngineRuntimeState rt = imp::seed_runtime_state(ec);
+    EXPECT_EQ(rt.max_batch_size, 0);
+    EXPECT_EQ(rt.max_seq_len, 0);
+    EXPECT_EQ(rt.kv_cache_dtype, imp::QType::FP8_E4M3);
+    EXPECT_TRUE(rt.streaming_kv_auto);
+    EXPECT_FALSE(rt.cuda_graphs);
+    // What init_inkling_limits_ writes: 2 slots, 81920 positions, fp16 K/V, no StreamingLLM auto.
+    rt.max_batch_size = 2;
+    rt.max_seq_len = 81920;
+    rt.kv_cache_dtype = imp::QType::F16;
+    rt.streaming_kv_auto = false;
+    const EngineConfig sized = imp::resolved_engine_config(ec, rt);
+    EXPECT_EQ(sized.max_batch_size, 2);
+    EXPECT_EQ(sized.max_seq_len, 81920);
+    EXPECT_EQ(sized.kv_cache_dtype, imp::QType::F16);
+    EXPECT_FALSE(sized.streaming_kv_auto);
+    EXPECT_EQ(sized.prefill_chunk_size, 777);
+    EXPECT_FALSE(sized.use_cuda_graphs);
+    // The operator's config is untouched.
+    EXPECT_EQ(ec.max_batch_size, 0);
+    EXPECT_EQ(ec.max_seq_len, 0);
+    EXPECT_EQ(ec.kv_cache_dtype, imp::QType::FP8_E4M3);
+    EXPECT_TRUE(ec.streaming_kv_auto);
+}

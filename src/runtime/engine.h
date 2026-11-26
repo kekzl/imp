@@ -329,7 +329,7 @@ public:
     // in init_compute_max_seq_len_), may be < the model's declared max context.
     // Callers MUST gate prompt length on this, not model().config().max_seq_len,
     // or an over-long prompt overruns the KV/position buffers (SIGSEGV).
-    int max_seq_len() const noexcept { return config_.max_seq_len; }
+    int max_seq_len() const noexcept { return rt_.max_seq_len; }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
@@ -364,8 +364,8 @@ private:
     // which is what lets it stop including runtime/config.h.
     DispatchPolicy dispatch_policy_;
     std::shared_ptr<Model> model_;
-    EngineConfig config_;    // what the operator set, plus init-time resolution
-    EngineRuntimeState rt_;  // graph and StreamingLLM flags flipped while serving
+    EngineConfig config_;  // what the operator set, plus init-time resolution of the fields rt_ does not hold
+    EngineRuntimeState rt_;  // batch, context, KV dtype resolved at init; graph and StreamingLLM flags (C-9)
 
     // compute_native_cache_demand(*model_) is a pure function of the
     // checkpoint's tensor shapes (stable pre- and post-upload by contract).

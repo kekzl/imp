@@ -178,24 +178,24 @@ void Engine::init_resolve_kv_dtype_policy_() {
     const auto& mcfg = model_->config();
 
     // Resolve the config-file KV dtype string into the engine enum. CLI flags
-    // (--kv-fp8 / --kv-int4 / ...) set config_.kv_cache_dtype directly and win;
+    // (--kv-fp8 / --kv-int4 / ...) set rt_.kv_cache_dtype directly and win;
     // this only resolves when the CLI left it at the F16 default. "auto" honors
     // kv_cache_quant_algo=FP8 only for archs verified safe
     // (kv_fp8_hint_default_safe); explicit fp16 opts out, explicit
     // fp8/int8/int4/nvfp4/mxfp4 force that dtype.
-    const QType kv_cli_pin = config_.kv_cache_dtype;
-    if (config_.kv_cache_dtype == QType::F16) {
+    const QType kv_cli_pin = rt_.kv_cache_dtype;
+    if (rt_.kv_cache_dtype == QType::F16) {
         const std::string& kv_str = runtime_config_.kv_cache.dtype;
         if (kv_str == "fp8") {
-            config_.kv_cache_dtype = QType::FP8_E4M3;
+            rt_.kv_cache_dtype = QType::FP8_E4M3;
         } else if (kv_str == "int8") {
-            config_.kv_cache_dtype = QType::INT8;
+            rt_.kv_cache_dtype = QType::INT8;
         } else if (kv_str == "int4") {
-            config_.kv_cache_dtype = QType::INT4;
+            rt_.kv_cache_dtype = QType::INT4;
         } else if (kv_str == "nvfp4") {
-            config_.kv_cache_dtype = QType::NVFP4;
+            rt_.kv_cache_dtype = QType::NVFP4;
         } else if (kv_str == "mxfp4") {
-            config_.kv_cache_dtype = QType::MXFP4_KV;
+            rt_.kv_cache_dtype = QType::MXFP4_KV;
         } else if (kv_str != "auto" && kv_str != "fp16" && !kv_str.empty()) {
             // Unrecognised value: warn rather than silently keep FP16 (the
             // config key spelling differs from the QType name, e.g. "mxfp4"
@@ -210,14 +210,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // for 2.7x the context on this family. Checked before the FP8
             // arms so a family on both lists gets the capacity trade;
             // head_dim/sink fallbacks below can still revert to FP16.
-            config_.kv_cache_dtype = QType::NVFP4;
+            rt_.kv_cache_dtype = QType::NVFP4;
             IMP_LOG_INFO(
                 "KV cache dtype: NVFP4 (auto: %s measured at <= +0.35%% PPL for 2.7-3.2x the "
                 "context; set kv_cache.dtype=fp16 to opt out)",
                 model_arch_name(mcfg.arch));
         } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
                    kv_fp8_hint_default_safe(mcfg.arch)) {
-            config_.kv_cache_dtype = QType::FP8_E4M3;
+            rt_.kv_cache_dtype = QType::FP8_E4M3;
             IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — honoring model author's "
                          "kv_cache_quant_algo=FP8; %s verified safe for long-context FP8 KV; "
                          "set kv_cache.dtype=fp16 to opt out)",
@@ -226,7 +226,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // No checkpoint hint (GGUF exports never carry one): upgrade on
             // the stricter arch-measured no-hint gate, since long-context
             // GGUF decode was leaving up to 39% on the table under the hint-only policy.
-            config_.kv_cache_dtype = QType::FP8_E4M3;
+            rt_.kv_cache_dtype = QType::FP8_E4M3;
             IMP_LOG_INFO("KV cache dtype: FP8_E4M3 (auto — %s measured PPL-neutral for "
                          "long-context FP8 KV without a checkpoint hint; "
                          "set kv_cache.dtype=fp16 to opt out)",
@@ -241,13 +241,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // choice, not a fallback's.
     const bool kv_dtype_pinned = kv_dtype_is_explicit_pin(kv_cli_pin, runtime_config_.kv_cache.dtype);
     if (kv_dtype_pinned) {
-        const int factor = kv_pin_context_cost_factor(mcfg.arch, config_.kv_cache_dtype);
+        const int factor = kv_pin_context_cost_factor(mcfg.arch, rt_.kv_cache_dtype);
         if (factor > 1) {
             IMP_LOG_WARN(
                 "KV cache dtype pinned to %s on %s: %dx the bytes per token of this "
                 "family's auto default (NVFP4), so roughly %dx less context fits. "
                 "Drop the pin (kv_cache.dtype=auto) to get it back.",
-                qtype_name(config_.kv_cache_dtype), model_arch_name(mcfg.arch), factor, factor);
+                qtype_name(rt_.kv_cache_dtype), model_arch_name(mcfg.arch), factor, factor);
         }
     }
 
@@ -260,15 +260,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // result usable on a sink model (measured per dtype). INT4 answers yes
     // to (1) (#1345) but no to (2): gpt-oss returns empty completions on
     // INT4 KV, so it keeps the fallback despite passing (1).
-    const bool sink_dtype_ok = paged_attention_applies_sinks(config_.kv_cache_dtype) &&
-                               config_.kv_cache_dtype != QType::INT4;
+    const bool sink_dtype_ok = paged_attention_applies_sinks(rt_.kv_cache_dtype) &&
+                               rt_.kv_cache_dtype != QType::INT4;
     if (!sink_dtype_ok && model_->profile().learned_attn_sinks) {
         IMP_LOG_WARN(
             "KV cache dtype: %s requested, but this architecture carries learned attention "
             "sinks and this dtype cannot serve them (#1345) — falling back to FP16 KV "
             "rather than serving a wrong softmax denominator.",
-            qtype_name(config_.kv_cache_dtype));
-        config_.kv_cache_dtype = QType::F16;
+            qtype_name(rt_.kv_cache_dtype));
+        rt_.kv_cache_dtype = QType::F16;
     }
 
     // #1674: the sink guard above doesn't ask whether a decode kernel exists
@@ -280,15 +280,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
     for (int d : mcfg.head_dim_per_layer)
         if (d > 0)
             dims.insert(d);
-    if (config_.kv_cache_dtype != QType::F16) {
+    if (rt_.kv_cache_dtype != QType::F16) {
         for (int d : dims) {
-            if (!paged_attention_serves_head_dim(config_.kv_cache_dtype, d)) {
+            if (!paged_attention_serves_head_dim(rt_.kv_cache_dtype, d)) {
                 IMP_LOG_WARN(
                     "KV cache dtype: %s requested, but its paged decode kernels have no template "
                     "for head_dim %d (#1674) — falling back to FP16 KV rather than leaving the "
                     "attention output unwritten.",
-                    qtype_name(config_.kv_cache_dtype), d);
-                config_.kv_cache_dtype = QType::F16;
+                    qtype_name(rt_.kv_cache_dtype), d);
+                rt_.kv_cache_dtype = QType::F16;
                 break;
             }
         }
@@ -299,7 +299,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // silently losing the FP8 decode speedup. Warned only for an explicit
     // pin: auto-resolved FP8 is already gated to head_dim-128 families, so
     // warning there would report a decision the engine made itself.
-    if (config_.kv_cache_dtype == QType::FP8_E4M3 && kv_dtype_pinned) {
+    if (rt_.kv_cache_dtype == QType::FP8_E4M3 && kv_dtype_pinned) {
         for (int d : dims) {
             if (paged_fp8_decode_has_fast_kernel(d))
                 continue;
@@ -313,15 +313,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
     }
 
-    if (config_.kv_cache_dtype == QType::F16) {
+    if (rt_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
-    } else if (config_.kv_cache_dtype == QType::NVFP4) {
+    } else if (rt_.kv_cache_dtype == QType::NVFP4) {
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
             config_.use_fp8_prefill = false;
         }
-    } else if (config_.kv_cache_dtype == QType::MXFP4_KV) {
+    } else if (rt_.kv_cache_dtype == QType::MXFP4_KV) {
         IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
@@ -336,13 +336,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // heterogeneous per-layer shapes like gemma-4) still need it.
     const bool fa2_hd_ok = mcfg.head_dim == 128 || mcfg.head_dim == 256;
     const bool fa2_serves_attention = fa2_hd_ok && runtime_config_.attention.fmha_fa2 != "never";
-    if (config_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
+    if (rt_.kv_cache_dtype == QType::FP8_E4M3 && fa2_serves_attention &&
         !runtime_config_.runtime.deterministic_gemm) {
         IMP_LOG_INFO("FP8 KV cache: FA2 serves all attention (hd=128/256) — skipping the legacy "
                      "deterministic-cuBLAS forcing (non-FA2 configs — learned sinks, heterogeneous "
                      "per-layer shapes — keep it; set runtime.deterministic_gemm=true to force)");
     }
-    if (config_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
+    if (rt_.kv_cache_dtype == QType::FP8_E4M3 && !fa2_serves_attention &&
         !runtime_config_.runtime.deterministic_gemm) {
         // Mutates the per-Engine RuntimeConfig in place; also updates the
         // process_diag cache since free-function readers (gemm.cu's
@@ -356,7 +356,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             "(non-deterministic cuBLAS + FP8 round-trip → NaN).");
     }
 
-    if (config_.max_batch_size <= 0) {
+    if (rt_.max_batch_size <= 0) {
         // Nothing of imp's is on the card yet: the capacity is the install snapshot.
         const size_t free_vram_now = vram_free_at_install_bytes();
         size_t approx_weight_bytes = approx_weight_footprint_bytes(
@@ -440,8 +440,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 swa_layers = 0;
             const int swa_slot_tokens = std::min(kRefCtxTokens, 2 * swa_window);
             size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * (kv_layers - swa_layers);
-            size_t per_tok_kv = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
-            const size_t swa_slot_bytes = kv_data_bytes(config_.kv_cache_dtype,
+            size_t per_tok_kv = kv_data_bytes(rt_.kv_cache_dtype, per_tok_elems);
+            const size_t swa_slot_bytes = kv_data_bytes(rt_.kv_cache_dtype,
                                                         static_cast<size_t>(nkv) * hd * 2 * swa_layers) *
                                           static_cast<size_t>(swa_slot_tokens);
             // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
@@ -487,24 +487,25 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 host_pins ? "device expert cache batches the decode rows" : "host expert tier", auto_batch);
             auto_batch = b;
         }
-        config_.max_batch_size = auto_batch;
-        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
-                     "tier-floor=%d, VRAM-aware)",
-                     config_.max_batch_size, approx_weight_bytes / (1024.0 * 1024.0 * 1024.0),
-                     headroom / (1024.0 * 1024.0 * 1024.0), tier);
+        rt_.max_batch_size = auto_batch;
+        IMP_LOG_INFO(
+            "max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
+            "tier-floor=%d, VRAM-aware)",
+            rt_.max_batch_size, approx_weight_bytes / (1024.0 * 1024.0 * 1024.0),
+            headroom / (1024.0 * 1024.0 * 1024.0), tier);
     } else {
-        IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
+        IMP_LOG_INFO("max_batch_size: %d (configured)", rt_.max_batch_size);
     }
 
     // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cpp): with attention.qsa a
     // second sequence would select blocks from the first one's keys. PLE state is per slot.
     if (model_ && model_->ngram_table() != nullptr && runtime_config_.attention.qsa &&
-        config_.max_batch_size > 1) {
+        rt_.max_batch_size > 1) {
         IMP_LOG_WARN(
             "max_batch_size %d -> 1: attention.qsa holds one sequence's indexer keys. "
             "Concurrent requests are served one decode step at a time.",
-            config_.max_batch_size);
-        config_.max_batch_size = 1;
+            rt_.max_batch_size);
+        rt_.max_batch_size = 1;
         runtime_config_.runtime.max_batch_size = std::min(runtime_config_.runtime.max_batch_size, 1);
         if (scheduler_)
             scheduler_->clamp_max_batch_size(1);
@@ -515,12 +516,12 @@ void Engine::init_resolve_kv_dtype_policy_() {
     // (#1646). Not clamped here: the value also bounds admission and KV
     // sizing, and silently serving fewer requests than asked is its own
     // defect. Warned once instead, at the point the number is resolved.
-    if (rt_.cuda_graphs && config_.max_batch_size > Engine::kMaxGraphPoolSize) {
+    if (rt_.cuda_graphs && rt_.max_batch_size > Engine::kMaxGraphPoolSize) {
         IMP_LOG_WARN(
             "max_batch_size %d exceeds the decode-graph pool (%d): any step with more than "
             "%d sequences runs eager, which measured 2.4x slower decode on this box. "
             "Lower max_batch_size, or accept eager decode above that width.",
-            config_.max_batch_size, Engine::kMaxGraphPoolSize, Engine::kMaxGraphPoolSize);
+            rt_.max_batch_size, Engine::kMaxGraphPoolSize, Engine::kMaxGraphPoolSize);
     }
 }
 
@@ -530,14 +531,14 @@ void Engine::init_resolve_kv_dtype_policy_() {
 // after the KV dtype is final.
 void Engine::init_resolve_prefill_graph_() {
     // FP8 KV captures once its per-layer scales are calibrated (engine_prefill.cpp gates on that).
-    if (!runtime_config_.runtime.prefill_graph || config_.kv_cache_dtype == QType::F16 ||
-        config_.kv_cache_dtype == QType::FP8_E4M3)
+    if (!runtime_config_.runtime.prefill_graph || rt_.kv_cache_dtype == QType::F16 ||
+        rt_.kv_cache_dtype == QType::FP8_E4M3)
         return;
     runtime_config_.runtime.prefill_graph = false;
     IMP_LOG_INFO(
         "prefill graph: off, the %s KV append syncs its scale to the host per chunk and cannot "
         "be captured (F16 KV captures; runtime.prefill_graph resolved to false)",
-        qtype_name(config_.kv_cache_dtype));
+        qtype_name(rt_.kv_cache_dtype));
 }
 
 // Auto-detect SSM state dtype for hybrid models. Nemotron-H/Mamba: FP16
@@ -839,7 +840,7 @@ void Engine::init_resolve_sparse_attention_() {
     apply_offload_recycling_default(runtime_config_, config_.gpu_layers);
     const auto& mcfg = model_->config();
     auto& acfg = runtime_config_.attention;
-    const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla() && acfg.mla_absorb,
+    const char* refuse = sparse_minmax_refusal(rt_.kv_cache_dtype, mcfg.is_mla() && acfg.mla_absorb,
                                                runtime_config_.speculative.token_recycling,
                                                !config_.prefix_cache_path.empty());
     if (!refuse && !mcfg.head_dim_per_layer.empty())
@@ -872,11 +873,11 @@ void Engine::init_compute_max_seq_len_() {
     }
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
         // config.h: a CLI value wins over the file. --max-seq-len / a C-API
-        // value is already in config_.max_seq_len; the key fills only an
+        // value is already in rt_.max_seq_len; the key fills only an
         // unset one (AUDIT_ARCH_2026 G-5).
-        const int preset = config_.max_seq_len;
-        config_.max_seq_len = max_seq_len_operator_value(preset, v);
-        if (config_.max_seq_len == v)
+        const int preset = rt_.max_seq_len;
+        rt_.max_seq_len = max_seq_len_operator_value(preset, v);
+        if (rt_.max_seq_len == v)
             IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
         else
             IMP_LOG_INFO("max_seq_len: --max-seq-len / C-API value %d wins over runtime.max_seq_len=%d",
@@ -886,8 +887,8 @@ void Engine::init_compute_max_seq_len_() {
     // flag, runtime.max_seq_len, or a C-API embedding. Recorded here because
     // the value itself no longer says where it came from once auto has filled
     // it in, and the KV pool check downstream turns on exactly that.
-    max_seq_len_explicit_ = config_.max_seq_len > 0;
-    if (config_.max_seq_len <= 0) {
+    max_seq_len_explicit_ = rt_.max_seq_len > 0;
+    if (rt_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         // Pre-upload: the capacity is the install snapshot (0 if the query failed: sized as none).
         const size_t free_vram = vram_free_at_install_bytes();
@@ -928,7 +929,7 @@ void Engine::init_compute_max_seq_len_() {
         // max_by_vram fall through to the cap.
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
-        size_t kv_bytes_per_token = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
+        size_t kv_bytes_per_token = kv_data_bytes(rt_.kv_cache_dtype, per_tok_elems);
         // The budget planner downstream targets kv_fraction (default 1.0) of
         // free VRAM for KV. Cap the auto-detect at 0.75x that so it doesn't
         // undershoot what the planner can afford and stays tracking a tuned
@@ -966,11 +967,11 @@ void Engine::init_compute_max_seq_len_() {
         // transcripts run 50-150K tokens). max_by_vram and model_ctx still
         // bound it, so this only raises the ceiling for models that declare
         // (and can hold) more than 64K.
-        config_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
+        rt_.max_seq_len = std::min({model_ctx, std::max(max_by_vram, 4096), kAutoMaxSeqLenCap});
         IMP_LOG_INFO(
             "max_seq_len: auto → %d (model=%d, vram_cap=%d, auto_cap=%d, kv=%zu B/tok, attn_layers=%d/%d)",
-            config_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token,
-            kv_layer_count, mcfg.n_layers);
+            rt_.max_seq_len, model_ctx, max_by_vram, kAutoMaxSeqLenCap, kv_bytes_per_token, kv_layer_count,
+            mcfg.n_layers);
     }
 }
 
@@ -979,7 +980,7 @@ void Engine::init_compute_max_seq_len_() {
 // device (bandwidth reads spilled, not resident). Clamps the batch to what
 // the plan fits instead: capacity is planned, not discovered (MEMORY.md I4,
 // D14). An auto batch also yields to one max_seq_len sequence (Flint: 32 slots cut 131072 -> 107104,
-// 16 hold it). Mutates probe/plan (re-planned at the clamped batch), config_, the runtime config,
+// 16 hold it). Mutates probe/plan (re-planned at the clamped batch), rt_, the runtime config,
 // the scheduler's admission cap, the spare slots and the SWA group.
 void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int& ssm_reserved_slots,
                                       VRAMBudget& vram_budget) {
@@ -1003,7 +1004,7 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
         IMP_LOG_INFO(
             "max_batch_size: auto %d -> %d so the KV pool holds one max_seq_len=%d sequence "
             "(set runtime.max_batch_size for more slots at a shorter context)",
-            probe.max_batch_size, fit, config_.max_seq_len);
+            probe.max_batch_size, fit, rt_.max_seq_len);
     else
         IMP_LOG_WARN(
             "max_batch_size clamped %d -> %d: the memory plan cannot fit the SSM/GDN state "
@@ -1013,13 +1014,13 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
             plan.failure.over_by / (1024.0 * 1024.0), fit);
     probe.ssm_state_bytes -= per_batch_slot * static_cast<size_t>(probe.max_batch_size - fit);
     probe.max_batch_size = fit;
-    config_.max_batch_size = fit;
+    rt_.max_batch_size = fit;
     runtime_config_.runtime.max_batch_size = std::min(runtime_config_.runtime.max_batch_size, fit);
     if (scheduler_)
         scheduler_->clamp_max_batch_size(fit);
     plan = plan_memory(shadow_plan_input(probe));
     IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
-    ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    ssm_reserved_slots = batch_verify_spare_slots(runtime_config_, model_.get(), rt_.max_batch_size);
     if (vram_budget.swa_max_blocks > 0 && plan.plan.kv.swa_blocks > 0)
         vram_budget.swa_max_blocks = plan.plan.kv.swa_blocks;  // the SWA group follows the clamped batch
 }

@@ -44,10 +44,10 @@ void Engine::init_inkling_limits_() {
     const int model_ctx = model_->config().max_seq_len > 0 ? model_->config().max_seq_len
                                                            : kInklingDefaultCtx;
     const int slots = config_.max_batch_size > 0 ? std::min(config_.max_batch_size, kInklingMaxSlots) : 2;
-    config_.max_batch_size = slots;
+    rt_.max_batch_size = slots;
     runtime_config_.runtime.max_batch_size = slots;  // runs before Engine::init creates the scheduler
     demote_graphs_(GraphDemotionReason::InklingOwnForward);
-    config_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
+    rt_.streaming_kv_auto = false;  // dropping middle blocks would cut the forward's context
     // The checkpoint's draft runs inside the forward (exec/inkling_draft.h), not as engine speculation;
     // an explicit speculative.mtp_k = 0 turns it off.
     inkling_lookahead_ = !(runtime_config_.was_set("speculative.mtp_k") &&
@@ -62,27 +62,30 @@ void Engine::init_inkling_limits_() {
     runtime_config_.runtime.prefill_chunk_decode_cap =
         std::min(std::max(runtime_config_.runtime.prefill_chunk_decode_cap, 1), 8);
     const int asked = config_.max_seq_len > 0 ? config_.max_seq_len : runtime_config_.runtime.max_seq_len;
-    config_.max_seq_len = std::min(asked > 0 ? asked : kInklingDefaultCtx, model_ctx);
-    runtime_config_.runtime.max_seq_len = config_.max_seq_len;
+    rt_.max_seq_len = std::min(asked > 0 ? asked : kInklingDefaultCtx, model_ctx);
+    runtime_config_.runtime.max_seq_len = rt_.max_seq_len;
     kv_ahead_tokens_ = kInklingKvAhead;
     // The forward writes its pool K/V as fp16: no other dtype (before the dtype resolver reads either).
     const std::string& kv_dt = runtime_config_.kv_cache.dtype;
     if (config_.kv_cache_dtype != QType::F16 || (kv_dt != "auto" && kv_dt != "fp16" && !kv_dt.empty()))
         IMP_LOG_WARN("inkling2_loop: KV cache fp16, kv_cache.dtype %s ignored", kv_dt.c_str());
-    config_.kv_cache_dtype = QType::F16;
+    rt_.kv_cache_dtype = QType::F16;
     runtime_config_.kv_cache.dtype = "fp16";
-    IMP_LOG_INFO("inkling2_loop: up to %d sequences, K/V in the paged pool, no speculation, context %d",
-                 slots, config_.max_seq_len);
+    // What Inkling forces over the operator's EngineConfig (config_ keeps it, C-9).
+    IMP_LOG_INFO(
+        "inkling2_loop: up to %d sequences (asked %d), context %d (asked %d), K/V fp16 in the paged pool "
+        "(asked %s), StreamingLLM auto off (asked %s), no speculation",
+        slots, config_.max_batch_size, rt_.max_seq_len, asked, qtype_name(config_.kv_cache_dtype),
+        config_.streaming_kv_auto ? "on" : "off");
 }
 
 void Engine::inkling_fit_slots_() {
     const InklingSlotTable* t = executor_ ? executor_->inkling_slots() : nullptr;
     const int got = t ? static_cast<int>(t->size()) : 0;
-    if (got == 0 || got >= config_.max_batch_size)
+    if (got == 0 || got >= rt_.max_batch_size)
         return;
-    IMP_LOG_WARN("inkling2_loop: %d of %d sequence slots fit, batch size lowered", got,
-                 config_.max_batch_size);
-    config_.max_batch_size = got;
+    IMP_LOG_WARN("inkling2_loop: %d of %d sequence slots fit, batch size lowered", got, rt_.max_batch_size);
+    rt_.max_batch_size = got;
     runtime_config_.runtime.max_batch_size = got;
     if (scheduler_)
         scheduler_->clamp_max_batch_size(got);
@@ -273,7 +276,7 @@ int Engine::inkling_kv_layers_() const {
 
 int Engine::inkling_pool_cap_(int kv_bs) const {
     return executor_ && executor_->inkling_runtime()
-               ? inkling_pool_blocks(config_.max_batch_size, config_.max_seq_len, kv_bs)
+               ? inkling_pool_blocks(rt_.max_batch_size, rt_.max_seq_len, kv_bs)
                : INT_MAX;
 }
 
@@ -281,7 +284,7 @@ int Engine::inkling_initial_blocks_(int max_blocks, int ceiling, int kv_bs) cons
     // What the slots committed before the pool held their K/V: one growth step each; the pool grows.
     if (!executor_ || !executor_->inkling_runtime() || ceiling <= 0)
         return max_blocks;
-    return std::min(max_blocks, std::max(16, config_.max_batch_size * kInklingKvGrowTokens / kv_bs));
+    return std::min(max_blocks, std::max(16, rt_.max_batch_size * kInklingKvGrowTokens / kv_bs));
 }
 
 void Engine::inkling_attach_pool_() {

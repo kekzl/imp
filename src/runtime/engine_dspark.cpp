@@ -27,7 +27,7 @@ bool Engine::init_dspark_() {
         return false;
     }
     auto dr = std::make_unique<DSparkDrafter>();
-    const int max_ctx = config_.max_seq_len > 0 ? config_.max_seq_len : mc.max_seq_len;
+    const int max_ctx = rt_.max_seq_len > 0 ? rt_.max_seq_len : mc.max_seq_len;
     const DSparkOptions opt{.graph = rt_.cuda_graphs, .target_path = model_->source_path()};
     if (std::string err = dr->load(vram_alloc_, dir, mc.d_model, mc.n_layers, max_ctx, stream_, opt);
         !err.empty()) {
@@ -47,10 +47,10 @@ bool Engine::init_dspark_() {
     feature_tap_configure(executor_->feature_tap, dr->target_layer_ids(), mc.n_layers, mc.d_model,
                           dspark_feat_.get(), rows);
     // One sequence's context; before the KV pool and the decode graphs are sized.
-    if (config_.max_batch_size != 1) {
+    if (rt_.max_batch_size != 1) {
         IMP_LOG_INFO("max_batch_size %d -> 1: speculative.dspark_model drafts for one sequence",
-                     config_.max_batch_size);
-        config_.max_batch_size = 1;
+                     rt_.max_batch_size);
+        rt_.max_batch_size = 1;
         runtime_config_.runtime.max_batch_size = 1;
         if (scheduler_)
             scheduler_->clamp_max_batch_size(1);

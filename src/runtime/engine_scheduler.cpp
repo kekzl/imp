@@ -428,7 +428,7 @@ bool Engine::supports_chunked_prefill_() const {
     // INT4, INT8. TurboQuant variants would need their own gather kernels.
     // Before the pool exists (executor init sizes its workspaces from the chunk), the configured dtype.
     {
-        QType kvt = kv_cache_raw_ ? kv_cache_raw_->qtype() : config_.kv_cache_dtype;
+        QType kvt = kv_cache_raw_ ? kv_cache_raw_->qtype() : rt_.kv_cache_dtype;
         if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4 && kvt != QType::MXFP4_KV &&
             kvt != QType::INT4 && kvt != QType::INT8)
             return false;
@@ -655,7 +655,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
     // Only fires once (guards on !streaming_kv_enabled). Every KV dtype's
     // decode kernels skip the -1 sentinels (#1704), so every pool has the valve.
     // Never under SWA sizing (streaming_kv_auto is cleared at init there).
-    if (!rt_.streaming_kv && config_.streaming_kv_auto) {
+    if (!rt_.streaming_kv && rt_.streaming_kv_auto) {
         // Reclaimable prefix-cache blocks are free for this purpose: the
         // allocator takes them before it fails. Counting only the free list
         // against blocks LIVE sequences hold fires falsely on a pool that is

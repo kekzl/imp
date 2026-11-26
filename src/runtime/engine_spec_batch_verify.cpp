@@ -187,7 +187,7 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 }
 
 bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
-    const int cap_seq = mtp_bound_verify_rows(runtime_config_, model_.get(), config_.max_batch_size);
+    const int cap_seq = mtp_bound_verify_rows(runtime_config_, model_.get(), rt_.max_batch_size);
     if (cap_seq <= 0)
         return true;  // nothing to stage, and that is not a failure
     if (bv_.d_stage)
@@ -242,7 +242,7 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
         "each, %d after a full accept, %d from %d requests up "
         "(%d spare recurrent slots%s)",
         cap_seq, depth, streak_depth, bv_.wide_depth, kMtpBoundVerifyWideRows,
-        batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size),
+        batch_verify_spare_slots(runtime_config_, model_.get(), rt_.max_batch_size),
         bv_.factor_row ? ", the drafts before the last also as factor rows" : "");
     return true;
 }
@@ -426,7 +426,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     if (!ensure_batch_verify_bufs_(stream))
         return false;
     // The resolved batch: runtime.max_batch_size 0 = auto (a default server) took no row at all.
-    const int max_bs = std::min(config_.max_batch_size, bv_.cap_seq);
+    const int max_bs = std::min(rt_.max_batch_size, bv_.cap_seq);
     std::vector<std::shared_ptr<Request>> reqs;
     for (auto& r : batch) {
         if (static_cast<int>(reqs.size()) >= max_bs)

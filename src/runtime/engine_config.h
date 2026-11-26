@@ -114,13 +114,24 @@ struct EngineConfig {
     int streaming_kv_threshold = 0;  // 0 = auto: n_sinks + window + 2 * the resolved KV block size
 };
 
-// What the engine flips while serving (audit C-9), seeded from EngineConfig at init so config_
-// keeps what the operator set. Writers: demote_graphs_ / promote_graphs_, the KV-pressure valve.
+// What the engine resolves at init and flips while serving (audit C-9), seeded from EngineConfig at
+// init so config_ keeps what the operator set. Writers: the init resolvers, Inkling's limits, the KV
+// fit; demote_graphs_ / promote_graphs_, the KV-pressure valve.
 struct EngineRuntimeState {
     bool cuda_graphs = true;
     bool streaming_kv = false;
     int streaming_kv_window = 0;  // 0 = derive from ModelConfig::sliding_window
+    // The resolved values of the same-named EngineConfig fields (0 there = auto).
+    int max_batch_size = 0;
+    int max_seq_len = 0;
+    QType kv_cache_dtype = QType::F16;
+    bool streaming_kv_auto = true;
 };
+
+// Engine::init's seed: every field from the operator's EngineConfig.
+[[nodiscard]] EngineRuntimeState seed_runtime_state(const EngineConfig& ec);
+// config with rt's resolved fields: what a sizing helper that takes an EngineConfig prices.
+[[nodiscard]] EngineConfig resolved_engine_config(const EngineConfig& config, const EngineRuntimeState& rt);
 
 // Engine::init's imp.conf bridge (audit C-9): fills every unset optional field; a set one, its
 // "none" value included (empty mmproj_path, library_reserve_mb -1, 0 blocks), wins.

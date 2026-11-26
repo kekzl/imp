@@ -232,12 +232,12 @@ bool Engine::init_features() {
 
     // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
     // use during inference (the lazy-alloc path blocks the decode stream).
-    if (!sampling_preallocate_dry(config_.max_seq_len, decode_stream()))
+    if (!sampling_preallocate_dry(rt_.max_seq_len, decode_stream()))
         return false;
     // History-sized penalties (sampling_penalties.cu): per-row token counts,
     // sized like the sampling scratch (max_logit_tokens = max(batch, 8)).
     // false: WARN logged, penalties stay on the sweep kernels (sampling.h).
-    (void)sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
+    (void)sampling_preallocate_penalty_counts(std::max(rt_.max_batch_size, 8), model_->config().vocab_size);
     // 4096 slots is 32 KiB and four times the server's own --max-logit-bias
     // default, so the fallback path in apply_logit_bias stays unreachable for
     // any request the server accepts (#1617).
@@ -522,7 +522,7 @@ void Engine::warmup() {
     apply_measured_library_reserve_();
     // After the forward-window measurement (its first forward claims the libraries), before the
     // invalidation below: every decode graph captured from here on bakes the static scale in.
-    calibrate_fp8_kv_scales(*this, config_.kv_cache_dtype, config_.prefill_chunk_size, true);
+    calibrate_fp8_kv_scales(*this, rt_.kv_cache_dtype, config_.prefill_chunk_size, true);
 
     // Runners stay cold through the prewarm ladder: each size runs one eager step (cuBLASLt probe at
     // that M) before its capture, so no algo probe runs inside a capture (#2396). Marked warm below.
@@ -556,7 +556,7 @@ void Engine::warmup() {
     // Each prewarm row holds its own recurrent slot. On a lazy slab the rows beyond what the card
     // can commit threw out of context create (Qwen3.6-35B-A3B at defaults: slot 1 of 26), where
     // serving would have admitted them one by one; prewarm only the sizes whose slots commit.
-    int prewarm_n = std::min(config_.max_batch_size, (int)kMaxGraphPoolSize);
+    int prewarm_n = std::min(rt_.max_batch_size, (int)kMaxGraphPoolSize);
     if (ssm_state_ && ssm_state_->lazy()) {
         int committed = 0;
         while (committed < prewarm_n && ssm_state_->ensure_slot(committed))
@@ -571,7 +571,7 @@ void Engine::warmup() {
         const auto t0 = std::chrono::steady_clock::now();
         const int n = prewarm_n;
         const int anchor_budget = (3 * n) + 8;
-        const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - std::max(64, anchor_budget)));
+        const int anchor_len = std::min(1000, std::max(16, rt_.max_seq_len - std::max(64, anchor_budget)));
         std::vector<std::shared_ptr<Request>> reqs;
         reqs.reserve(n);
         for (int i = 0; i < n; i++) {
@@ -653,11 +653,11 @@ void Engine::warmup() {
 // Each length runs twice: eager (cuBLASLt probes that M outside any capture), then captured. The
 // two prompts differ in their token so the second cannot reuse the first's prefix-cache blocks.
 void Engine::prewarm_prefill_graphs_(int32_t token_id) {
-    const int n_max = std::min({runtime_config_.runtime.prefill_graph_prewarm, prefill_graphs_.short_max(),
-                                config_.max_seq_len - 2});
+    const int n_max = std::min(
+        {runtime_config_.runtime.prefill_graph_prewarm, prefill_graphs_.short_max(), rt_.max_seq_len - 2});
     // F16 KV only: an FP8 pool captures once calibrated, and these synthetic prompts must not calibrate it.
     if (n_max <= 0 || !runtime_config_.runtime.prefill_graph || !rt_.cuda_graphs ||
-        config_.kv_cache_dtype != QType::F16)
+        rt_.kv_cache_dtype != QType::F16)
         return;
     const auto t0 = std::chrono::steady_clock::now();
     const int captures0 = prefill_graphs_.captures();

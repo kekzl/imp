@@ -301,7 +301,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
         return err == cudaSuccess;
     };
 
-    if (prefill_pool_ && chunk_len <= config_.max_seq_len) {
+    if (prefill_pool_ && chunk_len <= rt_.max_seq_len) {
         d_token_ids = d_pf_token_ids_;
         d_positions = d_pf_positions_;
         d_block_tables = d_pf_block_tables_;
@@ -331,9 +331,9 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
     // fully-async chunks ahead uploads chunk c+N's data for chunk c (#548).
     // Pageable sources below (block_table, ctx_len) are safe by CUDA semantics.
     if (pf_staging_evt_ && (h_pf_token_ids_.as<int32_t>() || h_pf_positions_.as<int>()) &&
-        chunk_len <= config_.max_seq_len)
+        chunk_len <= rt_.max_seq_len)
         IMP_CUDA_CHECK_LOG(cudaEventSynchronize(pf_staging_evt_));
-    if (h_pf_token_ids_.as<int32_t>() && chunk_len <= config_.max_seq_len) {
+    if (h_pf_token_ids_.as<int32_t>() && chunk_len <= rt_.max_seq_len) {
         memcpy(h_pf_token_ids_.as<int32_t>(), req->input_tokens.data() + offset, chunk_len * sizeof(int32_t));
         check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_.as<int32_t>(), chunk_len * sizeof(int32_t),
                               cudaMemcpyHostToDevice, pf_stream),
@@ -344,7 +344,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
               "memcpy token_ids");
     }
 
-    if (int* h_pos = h_pf_positions_.as<int>(); h_pos && chunk_len <= config_.max_seq_len) {
+    if (int* h_pos = h_pf_positions_.as<int>(); h_pos && chunk_len <= rt_.max_seq_len) {
         for (int i = 0; i < chunk_len; i++)
             h_pos[i] = offset + i;
         check(cudaMemcpyAsync(d_positions, h_pos, chunk_len * sizeof(int), cudaMemcpyHostToDevice, pf_stream),
@@ -359,7 +359,7 @@ bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::
     }
 
     if (pf_staging_evt_ && (h_pf_token_ids_.as<int32_t>() || h_pf_positions_.as<int>()) &&
-        chunk_len <= config_.max_seq_len)
+        chunk_len <= rt_.max_seq_len)
         IMP_CUDA_CHECK_LOG(cudaEventRecord(pf_staging_evt_, pf_stream));
 
     check(cudaMemcpyAsync(d_block_tables, block_table.data(), block_table.size() * sizeof(int),
@@ -641,8 +641,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // MoE) reads routing on the host - its capture guard throws, wasting a forward per chunk. Run eager
         // (#874). FP8 KV calibrates its scale (a D2H absmax) on the first prefill after warmup only; once
         // every layer holds its scale, the append is a plain kernel with inv_scale baked in.
-        const bool kv_append_capturable = config_.kv_cache_dtype == QType::F16 ||
-                                          (config_.kv_cache_dtype == QType::FP8_E4M3 &&
+        const bool kv_append_capturable = rt_.kv_cache_dtype == QType::F16 ||
+                                          (rt_.kv_cache_dtype == QType::FP8_E4M3 &&
                                            executor_->kv_scales_calibrated());
         // Continuation chunks (offset > 0) bake ctx_len/q_offset as host args
         // into attention launches, so a replay only fits that exact offset,
