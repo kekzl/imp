@@ -444,11 +444,10 @@ void mix(const MixArgs& a, int T, int H, cudaStream_t s) {
     const MixPre& p = a.pre;
     const bool pre_ok = p.kind == 0 || (T == 1 && a.st.n >= (p.copy ? 2 : 1) && p.out == a.st.s[a.st.n - 1] &&
                                         (!p.copy || p.copy == a.st.s[a.st.n - 2]));
-    if (a.st.n < 1 || a.st.n > 5 || a.nq < 1 || a.nq > 4 || !a.partial || !pre_ok) {
-        IMP_LOG_ERROR("inkling mix: %d states or %d queries out of range, or a conv site that does not fit",
-                      a.st.n, a.nq);
-        return;
-    }
+    if (a.st.n < 1 || a.st.n > 5 || a.nq < 1 || a.nq > 4 || !a.partial || !pre_ok)
+        throw_runtime_error(
+            "inkling mix: %d states or %d queries out of range, or a conv site that does not fit", a.st.n,
+            a.nq);
     const int slices = (H + kMixSlice - 1) / kMixSlice;
     const bool rows = T > kRowLoopMaxT && p.kind == 0;
     if (rows)
@@ -470,10 +469,8 @@ void gate_rms(const GateNormArgs& a, const GateOut& o, int T, int H, cudaStream_
 
 void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H, cudaStream_t s,
                const GateWork* w) {
-    if (a.rank > kGateMaxRank || a.n < 1 || a.n > 3) {
-        IMP_LOG_ERROR("inkling gate_norm: rank %d or %d gates out of range", a.rank, a.n);
-        return;
-    }
+    if (a.rank > kGateMaxRank || a.n < 1 || a.n > 3)
+        throw_runtime_error("inkling gate_norm: rank %d or %d gates out of range", a.rank, a.n);
     if (w && T > kRowLoopMaxT && gate_norm_rows(a, o, *w, T, H, s))
         return;
     const int col_blocks = (H + 31) / 32;
@@ -487,10 +484,8 @@ void gate_norm(const GateNormArgs& a, const GateOut& o, float* gd, int T, int H,
 }
 
 void kv_site(const KvSiteArgs& a, cudaStream_t s) {
-    if (a.hd > 128 || a.hd % 32 != 0) {
-        IMP_LOG_ERROR("inkling kv_site: head_dim %d out of range", a.hd);
-        return;
-    }
+    if (a.hd > 128 || a.hd % 32 != 0)
+        throw_runtime_error("inkling kv_site: head_dim %d out of range", a.hd);
     if (a.T > kRowLoopMaxT) {
         kv_site_rows_k<<<a.T * a.n_heads, a.hd, 0, s>>>(a);
         IMP_CUDA_CHECK_LAUNCH();

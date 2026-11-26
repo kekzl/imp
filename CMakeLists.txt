@@ -1310,6 +1310,8 @@ if(IMP_BUILD_TESTS)
         # B-108: the uncached GEMM fallback throws at each exit that cannot write the output
         # (no kernel launches on these arms, so the CPU lane holds it).
         tests/test_gemm_fallback_fails_loud.cpp
+        # B-108: the 5 Inkling kernel shape guards throw before any launch.
+        tests/test_inkling_guards_fail_loud.cpp
         # B-114: the per-forward GEMM mode travels in GemmContext, not in executor members.
         tests/test_gemm_mode.cpp
         # B-112: one LM-head route for serving, perplexity, prompt logprobs and the draft argmax head.

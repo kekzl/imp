@@ -446,7 +446,17 @@ void InklingDraft::capture_(cudaStream_t s) {
     exec_epoch_ = graph_epoch();
     graph_ok_ = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) == cudaSuccess;
     if (graph_ok_) {
-        const bool body = block_(s);
+        bool body = false;
+        try {
+            body = block_(s);
+        } catch (...) {
+            // A kernel guard refused (B-108): end the capture so s takes work again, then fail the call.
+            (void)cudaStreamEndCapture(s, &g);
+            if (g)
+                (void)cudaGraphDestroy(g);
+            graph_ok_ = false;
+            throw;
+        }
         graph_ok_ = cudaStreamEndCapture(s, &g) == cudaSuccess && body &&
                     cudaGraphInstantiate(&ex, g, 0) == cudaSuccess;
     }

@@ -246,10 +246,8 @@ void rms_norm(const float* x, const float* w, float* out_f, half* out_h, int T, 
 }
 void route_topk(const half* x, const float* w, const float* bias, float* logits, int32_t* idx, float* weights,
                 int T, int H, int n_experts, int top_k, float route_scale, cudaStream_t s) {
-    if (n_experts > 128 || top_k > 16) {
-        IMP_LOG_ERROR("inkling router: %d experts / top %d out of range", n_experts, top_k);
-        return;
-    }
+    if (n_experts > 128 || top_k > 16)
+        throw_runtime_error("inkling router: %d experts / top %d out of range", n_experts, top_k);
     const int bpt = (n_experts + kRouteWarps - 1) / kRouteWarps;
     if (H == kRouteFixH && detail::fixed_shape_kernels()) {
         route_scores_fixed_k<<<T * bpt, kRouteWarps * 32, 0, s>>>(x, w, logits, n_experts, bpt);
