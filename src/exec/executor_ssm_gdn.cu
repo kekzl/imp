@@ -19,6 +19,7 @@
 #include <cuda_fp16.h>
 
 #include <stdexcept>
+#include <type_traits>
 
 namespace imp {
 
@@ -682,28 +683,42 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             }
             auto scan = [&](const int* rows_n, void* snap_p, const int* snap_p_n, const int* outs,
                             const int* snaps) {
-                if (state_bf16) {
-                    gdn_scan_fused_bf16_batched(
-                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                        static_cast<const half*>(beta_proj_out.data),
-                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
-                        static_cast<__nv_bfloat16*>(state.ssm_state->h_state(0, ssm_idx)),
-                        state.ssm_seq_slots,
-                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(__nv_bfloat16)),
-                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<__nv_bfloat16*>(snap_p),
-                        snap_p_n, outs, snaps, fac_out, state.ssm_fac_stride);
-                } else {
-                    gdn_scan_fused_f32_batched(
-                        conv_f32, conv_channels, static_cast<const half*>(alpha_proj_out.data),
-                        static_cast<const half*>(beta_proj_out.data),
-                        static_cast<const float*>(ly.ssm_a.data), static_cast<const float*>(ly.ssm_dt_b.data),
-                        static_cast<float*>(state.ssm_state->h_state(0, ssm_idx)), state.ssm_seq_slots,
-                        static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
-                        static_cast<half*>(y_buf.data), state.ssm_n_seq, scan_n_tokens, n_heads, head_dim_ssm,
-                        ssize, n_groups, stream, gl, rows_n, row_offs, static_cast<float*>(snap_p), snap_p_n,
-                        outs, snaps, fac_out, state.ssm_fac_stride);
-                }
+                // tag: a null StateT* picking the state element type (float or BF16).
+                auto args = [&](auto* tag) {
+                    using S = std::remove_pointer_t<decltype(tag)>;
+                    return GdnScanBatchedArgs<S>{.conv_f32 = conv_f32,
+                                                 .conv_channels = conv_channels,
+                                                 .alpha = static_cast<const half*>(alpha_proj_out.data),
+                                                 .beta = static_cast<const half*>(beta_proj_out.data),
+                                                 .A_log = static_cast<const float*>(ly.ssm_a.data),
+                                                 .dt_bias = static_cast<const float*>(ly.ssm_dt_b.data),
+                                                 .h_state_pool = static_cast<S*>(
+                                                     state.ssm_state->h_state(0, ssm_idx)),
+                                                 .seq_slots = state.ssm_seq_slots,
+                                                 .h_state_seq_stride = static_cast<int64_t>(
+                                                     state.ssm_state->slot_stride_bytes() / sizeof(S)),
+                                                 .y = static_cast<half*>(y_buf.data),
+                                                 .n_seq = state.ssm_n_seq,
+                                                 .n_tokens = scan_n_tokens,
+                                                 .n_heads = n_heads,
+                                                 .head_dim_ssm = head_dim_ssm,
+                                                 .state_size = ssize,
+                                                 .n_groups = n_groups,
+                                                 .stream = stream,
+                                                 .grouped_layout = gl,
+                                                 .d_real_n = rows_n,
+                                                 .seq_row_offsets = row_offs,
+                                                 .h_snap = static_cast<S*>(snap_p),
+                                                 .d_snap_n = snap_p_n,
+                                                 .out_slots = outs,
+                                                 .snap_slots = snaps,
+                                                 .fac_out = fac_out,
+                                                 .fac_stride = state.ssm_fac_stride};
+                };
+                if (state_bf16)
+                    gdn_scan_fused_bf16_batched(args(static_cast<__nv_bfloat16*>(nullptr)));
+                else
+                    gdn_scan_fused_f32_batched(args(static_cast<float*>(nullptr)));
             };
             if (!ragged_split)
                 scan(real_n, snap, snap_n, grouped ? state.ssm_out_slots : nullptr,

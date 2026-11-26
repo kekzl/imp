@@ -4,6 +4,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
+#include <cstdint>
+
 namespace imp {
 
 // Fused multi-token GDN scan: all tokens in one launch, register-cached state. conv_f32:
@@ -21,17 +23,41 @@ namespace imp {
 // per-sequence slot ids into h_state_pool; out_slots[i] at d_real_n rows (nullptr=in place),
 // snap_slots[i] at d_snap_n rows for every sequence (nullptr=h_snap contract). In-place snapshot
 // (snap_slots[i]==seq_slots[i]) is allowed.
-void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
-                                const float* A_log, const float* dt_bias, float* h_state_pool,
-                                const int* seq_slots, int64_t h_state_seq_stride, half* y, int n_seq,
-                                int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                                cudaStream_t stream, int grouped_layout = 0, const int* d_real_n = nullptr,
-                                const int* seq_row_offsets = nullptr, float* h_snap = nullptr,
-                                const int* d_snap_n = nullptr, const int* out_slots = nullptr,
-                                const int* snap_slots = nullptr,
-                                // Factor rows (compute/gdn_factor.cuh), with out_slots only: rows
-                                // d_snap_n + 1 .. real_n - 1 beside the commit.
-                                float* fac_out = nullptr, int fac_stride = 0);
+// Arguments of the batched fused scans (audit D-11): built with designated initializers, so a
+// swapped n_heads / head_dim_ssm / state_size / n_groups reads wrong at the call site.
+// StateT float (gdn_scan_fused_f32_batched) or __nv_bfloat16 (the BF16-state twin below).
+template <typename StateT>
+struct GdnScanBatchedArgs {
+    const float* conv_f32 = nullptr;
+    int conv_channels = 0;
+    const half* alpha = nullptr;
+    const half* beta = nullptr;
+    const float* A_log = nullptr;
+    const float* dt_bias = nullptr;
+    StateT* h_state_pool = nullptr;
+    const int* seq_slots = nullptr;
+    int64_t h_state_seq_stride = 0;  // in StateT elements
+    half* y = nullptr;
+    int n_seq = 0;
+    int n_tokens = 0;
+    int n_heads = 0;
+    int head_dim_ssm = 0;
+    int state_size = 0;
+    int n_groups = 0;
+    cudaStream_t stream = nullptr;
+    int grouped_layout = 0;
+    const int* d_real_n = nullptr;
+    const int* seq_row_offsets = nullptr;
+    StateT* h_snap = nullptr;
+    const int* d_snap_n = nullptr;
+    const int* out_slots = nullptr;
+    const int* snap_slots = nullptr;
+    // Factor rows (compute/gdn_factor.cuh), with out_slots only: rows d_snap_n + 1 .. real_n - 1.
+    float* fac_out = nullptr;
+    int fac_stride = 0;
+};
+
+void gdn_scan_fused_f32_batched(const GdnScanBatchedArgs<float>& a);
 
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                         const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -44,16 +70,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
 // BF16-state twins (gdn.state_bf16): h_state as __nv_bfloat16, all arithmetic FP32 in
 // registers, halves the state traffic dominating batched decode. HD=SS=128 only; init
 // resolver refuses BF16 state elsewhere and for ref/chunkwise routes. Stride in BF16 elements.
-void gdn_scan_fused_bf16_batched(const float* conv_f32, int conv_channels, const half* alpha,
-                                 const half* beta, const float* A_log, const float* dt_bias,
-                                 __nv_bfloat16* h_state_pool, const int* seq_slots,
-                                 int64_t h_state_seq_stride, half* y, int n_seq, int n_tokens, int n_heads,
-                                 int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
-                                 int grouped_layout = 0, const int* d_real_n = nullptr,
-                                 const int* seq_row_offsets = nullptr, __nv_bfloat16* h_snap = nullptr,
-                                 const int* d_snap_n = nullptr, const int* out_slots = nullptr,
-                                 const int* snap_slots = nullptr, float* fac_out = nullptr,
-                                 int fac_stride = 0);
+void gdn_scan_fused_bf16_batched(const GdnScanBatchedArgs<__nv_bfloat16>& a);
 void gdn_scan_fused_bf16(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, __nv_bfloat16* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,

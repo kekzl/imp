@@ -651,22 +651,17 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 // confirms it still holds exactly that quantize. Saves one quantize launch
                 // + a [M,K] FP16 read per second member of a gate/up, q/k/v or GDN in/z pair.
                 const float as = h.act_scale;
-                const bool tag_match = smallm_xq_holds_(input.data, M, K, as);
+                const bool tag_match = smallm_xq_tag_.holds(input.data, M, K, as);
                 const bool hint_match = ctx.act_quant_hint_data != nullptr &&
                                         ctx.act_quant_hint_data == input.data &&
                                         ctx.act_quant_hint_m == M && ctx.act_quant_hint_k == K;
                 // Producer fusion (fused rmsnorm/swiglu+quantize) accepts a matching tag
-                // without a hint: the producer re-tags on the very write that produced the
-                // FP16 buffer, so the pointer cannot hold newer content than the scratch.
-                const bool prequant = tag_match && (hint_match || smallm_xq_from_producer_);
+                // without a hint while its stamp is live: no view of the buffer handed out since.
+                const bool prequant = tag_match && (hint_match || smallm_xq_tag_.producer_live());
                 if (!prequant) {
                     quantize_fp16_to_nvfp4_into(input.data, M, K, xq_packed, xq_scales,
                                                 /*tensor_scale=*/as, ctx.stream);
-                    smallm_xq_src_ = input.data;
-                    smallm_xq_src_m_ = M;
-                    smallm_xq_src_k_ = K;
-                    smallm_xq_src_scale_ = as;
-                    smallm_xq_from_producer_ = false;
+                    smallm_xq_tag_.stamp_quantize(input.data, M, K, as);
                 }
                 NvFP4QuantResult xq;
                 xq.packed_data = xq_packed;
@@ -871,8 +866,7 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
     (void)smallm_xq_.set_owned(
         DeviceOwned<void>::allocate(vram_alloc_, xq_need, "smallm_xq_grown", /*force=*/true));
     smallm_xq_bytes_ = smallm_xq_ ? xq_need : 0;
-    smallm_xq_src_ = nullptr;  // fresh scratch holds nothing
-    smallm_xq_from_producer_ = false;
+    smallm_xq_tag_.clear();  // fresh scratch holds nothing
 }
 
 // smallm_producer_xq_/tag_, rmsnorm/swiglu_for_smallm_ and
