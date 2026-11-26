@@ -8,11 +8,14 @@
 #include "exec/inkling_kv_layout.h"
 #include "exec/inkling_slab_layout.h"
 #include "exec/inkling_slot_table.h"
+#include "memory/host_pinned.h"
+#include "memory/snapshot_piece.h"
 #include "model/inkling_weights.h"
 
 #include <cuda_runtime.h>
 
 #include <climits>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <span>
@@ -31,6 +34,11 @@ struct InklingSpecHooks {
     std::function<int(int32_t anchor, const half* d_emb, int pos, int32_t* out, cudaStream_t s)> propose;
     // The sequence goes on from position keep (0 = a new one): rows from there on are void. May be empty.
     std::function<void(int keep)> restart;
+    // Cross-slot snapshot (B-111 S4, InklingSnapLayout draft part at entry offset off): the draft's rows of
+    // the window before pos as pieces, and back from an entry as a sequence that goes on at pos. May be
+    // empty.
+    std::function<bool(int pos, size_t off, std::vector<SnapshotPiece>& out, cudaStream_t s)> save;
+    std::function<bool(int pos, const std::byte* entry, size_t off, cudaStream_t s)> load;
 };
 
 class InklingForward {
@@ -71,8 +79,27 @@ public:
     [[nodiscard]] int rewind(std::span<const int32_t> tokens, cudaStream_t s, int limit = INT_MAX);
     // True when a checkpoint exists: recycling the slot would lose a prefix another prompt could reuse.
     [[nodiscard]] bool reusable() const { return ckpt_valid_ > 0; }
-    // Host bytes the conv-state checkpoints hold.
-    [[nodiscard]] size_t checkpoint_bytes() const;
+    // Pinned host bytes planned at init for the conv-state checkpoints (inkling_checkpoint_slots of them),
+    // and the checkpoints a rewind can still reach.
+    [[nodiscard]] size_t checkpoint_bytes() const { return ckpt_host_.bytes(); }
+    [[nodiscard]] int checkpoints_held() const;
+
+    // Cross-slot prefix reuse (B-111 S4) through RecurrentSnapshotStore entries of snapshot_bytes()
+    // (inkling_snap_layout): the highest checkpoint position whose state this slot can still give for tokens
+    // (its history up to there), 0 = none; that state as pieces of one entry, the lookahead draft's rows too
+    // (flushed on s), sources valid until the next run(); and restore, which continues tokens on this slot
+    // from an entry saved on any slot at pos. with_draft: the entry holds draft rows; a slot with a draft
+    // takes no entry without. set_snapshot_draft: entries hold a draft part (every slot of a runtime alike).
+    void set_snapshot_draft(const InklingDraftConfig* d);
+    [[nodiscard]] size_t snapshot_bytes() const { return snap_.bytes; }
+    [[nodiscard]] bool snapshot_has_draft() const {
+        return snap_.draft_bytes > 0 && static_cast<bool>(spec_.save);
+    }
+    [[nodiscard]] bool snapshot_plans_draft() const { return snap_.draft_bytes > 0; }
+    [[nodiscard]] int snapshot_pos(std::span<const int32_t> tokens) const;
+    [[nodiscard]] bool snapshot_pieces(int pos, std::vector<SnapshotPiece>& out, cudaStream_t s);
+    [[nodiscard]] bool restore(std::span<const int32_t> tokens, const void* entry, int pos, cudaStream_t s,
+                               bool with_draft = true);
     [[nodiscard]] bool has_lookahead() const { return static_cast<bool>(spec_.propose); }
     // The position rewind(tokens) would return; changes nothing.
     [[nodiscard]] int match(std::span<const int32_t> tokens) const;
@@ -158,6 +185,11 @@ private:
     // Host copy of the conv state when the sequence stands on the grid.
     void checkpoint_(cudaStream_t s, const float* state);
     void checkpoint_at_(int grid, cudaStream_t s, const float* state);
+    // Checkpoint g's conv state in the planned host ring; held_: g is this sequence's and not overwritten.
+    [[nodiscard]] float* ckpt_at_(int g) const;
+    [[nodiscard]] bool held_(int g) const;
+    // Positions of tokens that agree with the history, up to lim.
+    [[nodiscard]] int agree_(std::span<const int32_t> tokens, size_t lim) const;
     // Grid rows inside the running many-row segment, for the conv site at off floats into app's state.
     [[nodiscard]] inkling::ConvMarks marks_(size_t app, size_t off) const;
     // run() for one row with the lookahead on; settle_ makes the conv state the confirmed one.
@@ -202,10 +234,15 @@ private:
     std::vector<half*> k_, v_;        // per application, views of the slot's rings (null: full attention)
     std::vector<float*> conv_state_;  // per application: k [3, KD], v [3, KD], attn [3, H], mlp [3, H]
     size_t conv_state_floats_ = 0;
-    float* conv_all_ = nullptr;             // the n_apps conv states, contiguous at the slot's offset 0
-    std::vector<std::vector<float>> ckpt_;  // [g - 1] = conv state at position g * kGrid
-    int ckpt_valid_ = 0;                    // checkpoints 1..ckpt_valid_ belong to this sequence
-    int ckpt_free_ = 0;                     // checkpoints 1..ckpt_free_ are freed: too far back to resume
+    float* conv_all_ = nullptr;  // the n_apps conv states, contiguous at the slot's offset 0
+    InklingSlabLayout layout_;   // of the slot conv_all_ starts
+    InklingSnapLayout snap_;     // a snapshot entry (set_snapshot_draft adds the draft part)
+    // Conv state at position g * kGrid in slot (g - 1) % ckpt_n_ of a pinned ring planned at init (I2, I5).
+    PinnedBuffer ckpt_host_;
+    int ckpt_n_ = 0;
+    int ckpt_valid_ = 0;  // checkpoints ckpt_lo_..ckpt_valid_ belong to this sequence
+    int ckpt_free_ = 0;   // checkpoints 1..ckpt_free_ are dead: too far back to resume, or overwritten
+    int ckpt_lo_ = 1;     // a restore at checkpoint g: the ones before it are another sequence's
     int hw_ = 0;                            // highest position written since the last start at 0
     std::vector<int32_t> hist_;             // tokens of the sequence; rows [0, pos_) are computed
     bool armed_ = false;                    // rewind() set hist_ for the run that follows
@@ -318,8 +355,11 @@ struct InklingRuntime {
     [[nodiscard]] int bind_match(int req, std::span<const int32_t> tokens);
     // A prefill chunk of req at offset. first: this chunk bound the slot (unless bound) and rewound it to at
     // most offset, whose K/V the request's blocks hold. Returns where the prefill goes on, -1 = no slot.
+    // snap: a snapshot entry saved at offset on any slot (InklingForward::restore), restored when the slot's
+    // own checkpoints reach less; null = none. snap_draft: it holds the draft's rows
+    // (InklingForward::restore).
     [[nodiscard]] int resume(int req, std::span<const int32_t> tokens, int offset, cudaStream_t s,
-                             bool& first);
+                             bool& first, const void* snap = nullptr, bool snap_draft = true);
     // Every slot's full-attention K/V (and the draft's) in kv: inkling_kv_apps layers, fp16, 16-row blocks.
     [[nodiscard]] bool bind_kv(KVCache& kv);
 };
