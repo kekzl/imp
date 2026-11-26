@@ -167,13 +167,15 @@ cublasStatus_t run(const Key& key, const void* alpha, const void* A, const void*
 
 }  // namespace
 
-cublasStatus_t lt_gemm_strided_batched(cublasOperation_t transa, cublasOperation_t transb, int m, int n,
-                                       int k, const void* alpha, const void* A, cudaDataType_t a_type,
-                                       int lda, long long stride_a, const void* B, cudaDataType_t b_type,
-                                       int ldb, long long stride_b, const void* beta, void* C,
-                                       cudaDataType_t c_type, int ldc, long long stride_c, int batch,
-                                       cublasComputeType_t compute, cudaStream_t stream,
-                                       const std::source_location& loc) {
+cublasStatus_t lt_gemm_strided_batched(const LtGemmArgs& a, const std::source_location& loc) {
+    const cublasOperation_t transa = a.transa, transb = a.transb;
+    const int m = a.m, n = a.n, k = a.k, lda = a.lda, ldb = a.ldb, ldc = a.ldc, batch = a.batch;
+    const void *alpha = a.alpha, *A = a.A, *B = a.B, *beta = a.beta;
+    void* C = a.C;
+    const cudaDataType_t a_type = a.a_type, b_type = a.b_type, c_type = a.c_type;
+    const long long stride_a = a.stride_a, stride_b = a.stride_b, stride_c = a.stride_c;
+    const cublasComputeType_t compute = a.compute;
+    cudaStream_t stream = a.stream;
     if (m == 0 || n == 0 || batch == 0)
         return CUBLAS_STATUS_SUCCESS;
     lt_route_note("lt_ex", m, n, k, batch, loc);
@@ -201,12 +203,17 @@ cublasStatus_t lt_gemm_strided_batched(cublasOperation_t transa, cublasOperation
     return run(key, alpha, A, B, beta, C, stream);
 }
 
-cublasStatus_t lt_gemm_batched(cublasOperation_t transa, cublasOperation_t transb, int m, int n, int k,
-                               const void* alpha, const void* const* a, cudaDataType_t a_type, int lda,
-                               const void* const* b, cudaDataType_t b_type, int ldb, const void* beta,
-                               void* const* c, cudaDataType_t c_type, int ldc, int batch,
-                               cublasComputeType_t compute, cudaStream_t stream,
-                               const std::source_location& loc) {
+cublasStatus_t lt_gemm_batched(const LtGemmBatchedArgs& args, const std::source_location& loc) {
+    const cublasOperation_t transa = args.transa, transb = args.transb;
+    const int m = args.m, n = args.n, k = args.k, lda = args.lda, ldb = args.ldb, ldc = args.ldc;
+    const int batch = args.batch;
+    const void *alpha = args.alpha, *beta = args.beta;
+    const void* const* a = args.a;
+    const void* const* b = args.b;
+    void* const* c = args.c;
+    const cudaDataType_t a_type = args.a_type, b_type = args.b_type, c_type = args.c_type;
+    const cublasComputeType_t compute = args.compute;
+    cudaStream_t stream = args.stream;
     if (m == 0 || n == 0 || batch == 0)
         return CUBLAS_STATUS_SUCCESS;
     lt_route_note("lt_ptr_batched", m, n, k, batch, loc);

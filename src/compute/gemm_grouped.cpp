@@ -229,14 +229,43 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     // docs/internals/SM120.md); a single expert takes its host pointers and exact alignment.
     for (const auto& g : groups) {
         float g_alpha = g.alpha;
-        cublasStatus_t st = g.count == 1
-                                ? lt_gemm_ex(CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha, h_B[g.start],
-                                             cuda_dt_ab, K, h_A[g.start], cuda_dt_ab, K, &beta, h_C[g.start],
-                                             cuda_dt_c, N, compute_type, stream)
-                                : lt_gemm_batched(CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha,
-                                                  d_B_ptrs + g.start, cuda_dt_ab, K, d_A_ptrs + g.start,
-                                                  cuda_dt_ab, K, &beta, d_C_ptrs + g.start, cuda_dt_c, N,
-                                                  g.count, compute_type, stream);
+        cublasStatus_t st = g.count == 1 ? lt_gemm_ex({.transa = CUBLAS_OP_T,
+                                                       .transb = CUBLAS_OP_N,
+                                                       .m = N,
+                                                       .n = g.M,
+                                                       .k = K,
+                                                       .alpha = &g_alpha,
+                                                       .A = h_B[g.start],
+                                                       .a_type = cuda_dt_ab,
+                                                       .lda = K,
+                                                       .B = h_A[g.start],
+                                                       .b_type = cuda_dt_ab,
+                                                       .ldb = K,
+                                                       .beta = &beta,
+                                                       .C = h_C[g.start],
+                                                       .c_type = cuda_dt_c,
+                                                       .ldc = N,
+                                                       .compute = compute_type,
+                                                       .stream = stream})
+                                         : lt_gemm_batched({.transa = CUBLAS_OP_T,
+                                                            .transb = CUBLAS_OP_N,
+                                                            .m = N,
+                                                            .n = g.M,
+                                                            .k = K,
+                                                            .alpha = &g_alpha,
+                                                            .a = d_B_ptrs + g.start,
+                                                            .a_type = cuda_dt_ab,
+                                                            .lda = K,
+                                                            .b = d_A_ptrs + g.start,
+                                                            .b_type = cuda_dt_ab,
+                                                            .ldb = K,
+                                                            .beta = &beta,
+                                                            .c = d_C_ptrs + g.start,
+                                                            .c_type = cuda_dt_c,
+                                                            .ldc = N,
+                                                            .batch = g.count,
+                                                            .compute = compute_type,
+                                                            .stream = stream});
         if (st != CUBLAS_STATUS_SUCCESS)
             IMP_LOG_ERROR("imp::gemm_moe_batched: cuBLASLt failed (M=%d, experts=%d, K=%d, N=%d, status %d)",
                           g.M, g.count, K, N, (int)st);
