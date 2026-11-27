@@ -16,7 +16,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace imp;
@@ -109,8 +113,20 @@ TEST_P(Nvfp4TileSwigluQuant, BytesEqualUnfusedPath) {
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
             const auto pr = pk_ref.host(), po = pk_own.host(), sr = sf_ref.host(), so_ = sf_own.host();
             size_t bad_pk = 0, bad_sf = 0;
-            for (size_t i = 0; i < pr.size(); ++i)
-                bad_pk += pr[i] != po[i];
+            std::map<std::pair<int, int>, int> bad_at;  // (row / 128, col / 64) -> mismatched packed bytes
+            int r_lo = M, r_hi = -1;
+            for (size_t i = 0; i < pr.size(); ++i) {
+                if (pr[i] == po[i])
+                    continue;
+                ++bad_pk;
+                const int r = static_cast<int>(i / (N / 2)), c = static_cast<int>(i % (N / 2)) * 2;
+                ++bad_at[{r / 128, c / 64}];
+                r_lo = std::min(r_lo, r);
+                r_hi = std::max(r_hi, r);
+            }
+            for (const auto& [t, n] : bad_at)  // B-136: which tile the mismatches sit in
+                std::printf("B-136 mismatch ws=%d as=%.2f tile m=%d box n=%d bytes=%d rows %d..%d\n", with_ws,
+                            as, t.first, t.second, n, r_lo, r_hi);
             for (size_t i = 0; i < sr.size(); ++i) {
                 bad_sf += sr[i] != so_[i];
                 clamp_blocks += sr[i] == 0x01;  // UE4M3 2^-9
@@ -136,5 +152,88 @@ INSTANTIATE_TEST_SUITE_P(Shapes, Nvfp4TileSwigluQuant,
                                            std::make_tuple(512, 12288, 1024),
                                            std::make_tuple(1000, 6144, 512),
                                            std::make_tuple(2048, 12288, 1024)));
+
+__global__ void count_ne(const uint32_t* a, const uint32_t* b, size_t n, unsigned int* bad) {
+    unsigned int c = 0;
+    for (size_t i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n; i += size_t(gridDim.x) * blockDim.x)
+        c += a[i] != b[i];
+    if (c)
+        atomicAdd(bad, c);
+}
+
+// B-136: the plans of BytesEqualUnfusedPath/5 (1000x6144x512) relaunched on the same inputs, bytes against
+// the first launch. Arms: tile GEMM D with the workspace (uniform stream-K) / without (data-parallel), fused
+// packed output with / without. Without the proxy fence before a stream-K stage release, 18-65 of 20000 fused
+// relaunches differed in one split tile. IMP_B136_REPS relaunches per arm.
+TEST(Nvfp4TileRepeat, RelaunchesAreByteIdentical) {
+    const int M = 1000, N = 6144, K = 512;
+    const char* env = std::getenv("IMP_B136_REPS");
+    const int reps = env ? std::atoi(env) : 20000;
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreate(&s), cudaSuccess);
+    Dev<half> w(size_t(N) * K * 2), x(size_t(M) * K * 2), gate(size_t(M) * N * 2);
+    fill_rows<<<1024, 256, 0, s>>>(w.p, N, K, 0x1234u, 0.08f, 0.08f);
+    fill_rows<<<1024, 256, 0, s>>>(x.p, M, K, 0x9876u, 2.0f, 2.0f);
+    fill_rows<<<1024, 256, 0, s>>>(gate.p, M, N, 0x5151u, 4.0f, 2e-3f);
+    int64_t wshape[2] = {N, K};
+    Tensor wt(w.p, QType::F16, 2, wshape, true);
+    NvFP4Owned qr;
+    CutlassNvFP4Owned cw;
+    quantize_fp16_to_nvfp4(wt, qr, s);
+    convert_nvfp4_to_cutlass(qr, cw, s);
+    Dev<uint8_t> act(size_t(M) * K / 2), act_sf(cutlass_nvfp4_sf_size(M, K));
+    cudaMemsetAsync(act_sf.p, 0, act_sf.bytes, s);
+    quantize_fp16_to_nvfp4_cutlass(x.p, act.p, act_sf.p, M, K, s);
+    const size_t ws_bytes = std::max<size_t>(gemm_tile_streamk_workspace_bytes(), 4096 + (size_t(170) << 16));
+    Dev<uint8_t> ws(ws_bytes), ref(size_t(M) * N * 2), cur(size_t(M) * N * 2),
+        sf(cutlass_nvfp4_sf_size(M, N));
+    Dev<unsigned int> bad(sizeof(unsigned int) * 4 * reps);
+    cudaMemsetAsync(bad.p, 0, bad.bytes, s);
+    const auto launch = [&](int arm, uint8_t* out) {
+        void* wsp = arm == 0 || arm == 2 ? ws.p : nullptr;
+        const size_t wsb = wsp != nullptr ? ws_bytes : 0;
+        if (arm >= 2)
+            return gemm_nvfp4_tile_swiglu_quant({.a_data = act.p,
+                                                 .a_sf = act_sf.p,
+                                                 .w_data = cw.data,
+                                                 .w_sf = cw.scale_factors,
+                                                 .alpha = cw.tensor_scale,
+                                                 .gate_fp16 = gate.p,
+                                                 .q_packed = out,
+                                                 .q_sf = sf.p,
+                                                 .q_act_scale = 1.0f,
+                                                 .M = M,
+                                                 .N = N,
+                                                 .K = K,
+                                                 .stream = s,
+                                                 .workspace = wsp,
+                                                 .workspace_bytes = wsb});
+        return gemm_nvfp4_tile(act.p, act_sf.p, cw.data, cw.scale_factors, cw.tensor_scale, out, M, N, K, s,
+                               -1, wsp, wsb);
+    };
+    for (int arm = 0; arm < 4; ++arm) {
+        const size_t words = (arm >= 2 ? size_t(M) * N / 2 : size_t(M) * N * 2) / 4;
+        ASSERT_TRUE(launch(arm, ref.p));
+        for (int i = 0; i < reps; ++i) {
+            ASSERT_TRUE(launch(arm, cur.p));
+            count_ne<<<256, 256, 0, s>>>(reinterpret_cast<const uint32_t*>(ref.p),
+                                         reinterpret_cast<const uint32_t*>(cur.p), words,
+                                         bad.p + (arm * reps) + i);
+        }
+    }
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    std::vector<unsigned int> h(size_t(4) * reps);
+    ASSERT_EQ(cudaMemcpy(h.data(), bad.p, bad.bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+    for (int arm = 0; arm < 4; ++arm) {
+        int launches = 0;
+        for (int i = 0; i < reps; ++i)
+            launches += h[(arm * reps) + i] != 0;
+        std::printf("B-136 arm %d: %d of %d relaunches differ\n", arm, launches, reps);
+        EXPECT_EQ(launches, 0) << "arm " << arm;
+    }
+    cw = CutlassNvFP4Owned{};
+    qr = NvFP4Owned{};
+    cudaStreamDestroy(s);
+}
 
 }  // namespace

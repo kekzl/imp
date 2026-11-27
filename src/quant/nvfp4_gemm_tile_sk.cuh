@@ -149,6 +149,9 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
             mbar_wait_sleep(g.bars + s * 8, (ring / C::kStages) & 1);
             mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane,
                          C::sf_g0(kt), n0 & 127);
+            // The ring is read by the generic proxy and refilled by TMA (async proxy): without this fence
+            // 18-65 of 20000 fused SwiGLU-quant relaunches read a refilled stage (B-136, Nvfp4TileRepeat).
+            fence_async_smem();
             __syncwarp();
             if (g.lane == 0)
                 mbar_arrive(g.bars + (C::kStages + s) * 8);
