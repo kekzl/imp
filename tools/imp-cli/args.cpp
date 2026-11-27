@@ -127,7 +127,7 @@ CliArgs parse_args(int argc, char** argv) {
 
         if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
             print_usage(argv[0]);
-            std::exit(0);
+            cli_exit(0);
         } else if (std::strcmp(arg, "--perplexity") == 0 && i + 1 < argc) {
             args.perplexity_file = argv[++i];
         } else if (std::strcmp(arg, "--perplexity-decode") == 0 && i + 1 < argc) {
@@ -240,7 +240,7 @@ CliArgs parse_args(int argc, char** argv) {
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);
-            std::exit(1);
+            cli_exit(1);
         }
     }
 
@@ -250,12 +250,12 @@ CliArgs parse_args(int argc, char** argv) {
     if (!args.prompt_file.empty()) {
         if (!args.prompt.empty()) {
             fprintf(stderr, "--prompt and --prompt-file are mutually exclusive\n");
-            std::exit(1);
+            cli_exit(1);
         }
         FILE* f = std::fopen(args.prompt_file.c_str(), "rb");
         if (!f) {
             fprintf(stderr, "--prompt-file: cannot open '%s'\n", args.prompt_file.c_str());
-            std::exit(1);
+            cli_exit(1);
         }
         std::fseek(f, 0, SEEK_END);
         const long sz = std::ftell(f);
@@ -263,7 +263,7 @@ CliArgs parse_args(int argc, char** argv) {
         if (sz < 0) {
             fprintf(stderr, "--prompt-file: cannot size '%s'\n", args.prompt_file.c_str());
             std::fclose(f);
-            std::exit(1);
+            cli_exit(1);
         }
         args.prompt.resize(static_cast<size_t>(sz));
         const size_t got = sz > 0 ? std::fread(args.prompt.data(), 1, static_cast<size_t>(sz), f) : 0;
@@ -271,11 +271,11 @@ CliArgs parse_args(int argc, char** argv) {
         if (got != static_cast<size_t>(sz)) {
             fprintf(stderr, "--prompt-file: short read on '%s' (%zu of %ld bytes)\n",
                     args.prompt_file.c_str(), got, sz);
-            std::exit(1);
+            cli_exit(1);
         }
         if (args.prompt.empty()) {
             fprintf(stderr, "--prompt-file: '%s' is empty\n", args.prompt_file.c_str());
-            std::exit(1);
+            cli_exit(1);
         }
     }
 

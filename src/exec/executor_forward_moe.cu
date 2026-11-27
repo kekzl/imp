@@ -23,7 +23,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -347,7 +347,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 }
 
 // Cheap precondition mirror for the grouped NVFP4 device-args fast
-// path inside try_run_moe_cutlass3x_nvfp4_prefill_. Keep the two
+// path inside try_run_moe_grouped_nvfp4_prefill_. Keep the two
 // predicates in sync: if the real gate flips false at runtime while this
 // returns true, the legacy fallback gathers lazily, so output stays
 // correct. Path-selection order + gates are also mirrored as
@@ -355,14 +355,14 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 bool GraphExecutor::moe_prefill_uncapturable() const {
     if (!has_moe_)
         return false;
-    // Mirrors try_run_moe_cutlass3x_nvfp4_prefill_'s entry gate: without the
+    // Mirrors try_run_moe_grouped_nvfp4_prefill_'s entry gate: without the
     // grouped NVFP4 path + packed/scale workspace, every MoE prefill
     // lands in run_moe_legacy_fallback_, whose host-args guard throws under
     // capture (moe_host_args_capture_guard).
     if (!gemm_grouped_nvfp4_moe_supports(model_->config().n_experts, model_->config().d_model,
                                          max_expert_eff_))
         return true;
-    if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get())
+    if (!moe_.grouped_packed.get() || !moe_.grouped_sf.get())
         return true;
     // Host-resident NVFP4 experts stage per chunk from host memory: a captured M=512 prefill
     // faulted on replay (IMA / SIGSEGV, Qwen3-Coder-Next, Qwen3.6-35B force_host_experts, #2574).
@@ -376,27 +376,26 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
 
 // [calibration] keeps the gather: the per-expert statistics read moe_.gathered.
 bool GraphExecutor::moe_skip_gather_(int layer, const MoeFfnContext& ctx) const {
-    return !calib_ && moe_cutlass3x_will_use_device_args_(layer, ctx);
+    return !calib_ && moe_grouped_will_use_device_args_(layer, ctx);
 }
 
-bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
-                                                        const MoeFfnContext& ctx) const {
+bool GraphExecutor::moe_grouped_will_use_device_args_(int layer, const MoeFfnContext& ctx) const {
     // gpt-oss: only the unstaged device-args path carries its bias + GLU seam (mirror of the
-    // use_device_args gate in executor_forward_moe_cutlass.cpp).
+    // use_device_args gate in executor_forward_moe_grouped.cpp).
     if (model_->profile().moe_expert_bias_glu && ctx.staged_blocks)
         return false;
     if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))
         return false;
-    if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get())
+    if (!moe_.grouped_packed.get() || !moe_.grouped_sf.get())
         return false;
     if (!moe_.d_M_per.data() || moe_.d_M_per_count < ctx.ne)
         return false;
     if (!moe_.d_sfa_offsets.data() || !moe_.d_B_ptrs_cache.data() || !moe_.d_SFB_ptrs_cache.data() ||
         !moe_.d_alpha_full.data())
         return false;
-    if (!moe_.cutlass3x_sfa_ptrs.data() || moe_.cutlass3x_sfa_ptrs_count < ctx.ne)
+    if (!moe_.grouped_sfa_ptrs.data() || moe_.grouped_sfa_ptrs_count < ctx.ne)
         return false;
-    // All expert tensors must be CUTLASS_NVFP4 — covers_ids() in the inner
+    // All expert tensors must be NVFP4_SFATOM — covers_ids() in the inner
     // function. Mirrored here to avoid the upstream skip-gather firing when
     // the inner path would refuse to take this layer.
     const auto& ly = model_->layer(layer);
@@ -406,7 +405,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
         for (int e = 0; e < ctx.ne; ++e) {
             if (ids[e] == kInvalidTensorID)
                 return false;
-            if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+            if (registry_.handle(ids[e]).primary_tier != StorageTier::NVFP4_SFATOM)
                 return false;
         }
         return true;
@@ -585,8 +584,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
                     // Falls through to scatter (step 7)
 
-                } else if (try_run_moe_cutlass3x_nvfp4_prefill_(layer, stream, ctx)) {
-                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::CUTLASS3X);
+                } else if (try_run_moe_grouped_nvfp4_prefill_(layer, stream, ctx)) {
+                    dispatch_record::set_moe_prefill_outer(MoePrefillOuter::GROUPED_NVFP4);
                     ctx.experts_sorted_fp16 = true;
                     // Falls through to scatter (step 7)
 
@@ -612,7 +611,7 @@ moe_after_experts:
 
 // Reads the expert-sorted buffers after the expert GEMMs and before the shared MLP reuses
 // moe_.expert_gate as scratch. The down input is recomputed into moe_.expert_swiglu (dead after
-// the down GEMM) because the fused CUTLASS act+quantize never materializes it.
+// the down GEMM) because the fused SfAtom act+quantize never materializes it.
 void GraphExecutor::calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx) {
     if (!calib_)
         return;

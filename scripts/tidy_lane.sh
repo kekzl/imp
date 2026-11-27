@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# clang-tidy lane (#2210): host .cpp TUs + the host side of src/ .cu TUs, one process per
+# clang-tidy lane (#2210): host .cpp TUs + the host side of src/ and tests/ .cu TUs, one process per
 # file, nproc in parallel, then two hard checks:
 #   1. every .cu TU parsed (a clang error yields no findings; #2219's first CI run: 89 of 89)
 #   2. tools/check_tidy_findings.py: WarningsAsErrors checks of .clang-tidy over their pins
 # Other checks print, never fail.
 #
-# Usage: scripts/tidy_lane.sh --all          # src/tools .cpp + every src .cu TU (make tidy)
+# Usage: scripts/tidy_lane.sh --all          # src/tools/tests .cpp + every src, tests .cu TU (make tidy)
 #        scripts/tidy_lane.sh FILE...        # these files; a .cu fragment lints its includer
 # Needs $TIDY_BUILD/compile_commands.json (cmake configure) and clang-tidy on PATH.
 # Env: TIDY_BUILD (default build), TIDY_LOGS (default $TIDY_BUILD/tidy-logs), TIDY_JOBS (default nproc).
@@ -25,8 +25,8 @@ includer_of() { grep -rlF --include='*.cu' --include='*.cpp' "#include \"${1#src
 
 cpp=(); cu=()
 if [ "${1:-}" = "--all" ]; then
-    mapfile -t cpp < <(find src tools -name '*.cpp' | sort | while read -r f; do includer_of "$f" >/dev/null || echo "$f"; done)
-    mapfile -t cu < <(cu_db_files | grep '^src/' | sort -u)
+    mapfile -t cpp < <(find src tools tests -name '*.cpp' | sort | while read -r f; do includer_of "$f" >/dev/null || echo "$f"; done)
+    mapfile -t cu < <(cu_db_files | grep -E '^(src|tests)/' | sort -u)
 else
     for f in "$@"; do
         case "$f" in
@@ -44,13 +44,14 @@ else
                 else
                     cu+=("$f")
                 fi ;;
+            tests/*.cu) cu+=("$f") ;;  # tests/ includes no .cu fragment
         esac
     done
     [ "${#cpp[@]}" -gt 0 ] && mapfile -t cpp < <(printf '%s\n' "${cpp[@]}" | sort -u)
     [ "${#cu[@]}" -gt 0 ] && mapfile -t cu < <(printf '%s\n' "${cu[@]}" | sort -u)
 fi
 n=$(( ${#cpp[@]} + ${#cu[@]} ))
-[ "$n" -eq 0 ] && { echo "tidy_lane: no .cpp or src .cu to lint"; exit 0; }
+[ "$n" -eq 0 ] && { echo "tidy_lane: no .cpp or src/tests .cu to lint"; exit 0; }
 
 # A .cu that is not in the database would lint nothing.
 dbset="$(cu_db_files)"

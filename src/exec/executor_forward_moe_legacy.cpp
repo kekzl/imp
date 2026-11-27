@@ -18,7 +18,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -108,8 +108,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // expert per projection. Only the experts the routing touched move (the gather
         // kernel reads expert_offsets); the whole-layer memcpy is the fallback.
         // Decode is excluded: it wants only top_k experts, and staging all of them
-        // would be strictly more traffic than the slot cache it already uses. Reuses a CUTLASS-staged layer
-        // rather than transferring twice.
+        // would be strictly more traffic than the slot cache it already uses. Reuses a grouped-NVFP4-staged
+        // layer rather than transferring twice.
         if (!ctx.staged_done && n > 1)
             ctx.staged_done = stage_nvfp4_layer_(
                 layer, stream, static_cast<const int32_t*>(routing.expert_offsets.data),
@@ -355,7 +355,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                                        static_cast<size_t>(eidx) < fallback_ids.size() &&
                                        fallback_ids[eidx] != kInvalidTensorID &&
                                        registry_.handle(fallback_ids[eidx]).primary_tier ==
-                                           StorageTier::NVFP4);
+                                           StorageTier::NVFP4_LINEAR);
             if (has_nvfp4_id) {
                 const auto& wh = registry_.handle(fallback_ids[eidx]);
                 NvFP4QuantResult nw;

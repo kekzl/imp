@@ -653,7 +653,7 @@ private:
     // graph-eligible in the first place, and that is the answer worth keeping.
     GraphDemotionReason graph_demotion_ = GraphDemotionReason::None;
     // Balloon reservation for the mandatory native-NVFP4 decode caches
-    // (CUTLASS SfAtom slab + nvfp4_moe): held after weight upload until
+    // (SfAtom slab + nvfp4_moe): held after weight upload until
     // pre_dequant_weights builds the caches. Plain cudaMalloc (not the async
     // pool) so the release is immediately visible to cudaMemGetInfo readers.
     // The banned-token list is built once at warmup; one engine-owned copy,

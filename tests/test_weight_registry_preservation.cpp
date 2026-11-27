@@ -38,11 +38,11 @@ TEST(WeightRegistryPreservation, NVFP4ModeDoesNotDowngradeSSMInOut) {
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
         // WQ is ALL_QUANT / required_floor=NVFP4 → should be assigned NVFP4
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         // SSM_IN is FP16_ONLY / required_floor=FP16 → must stay FP16
-        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 4096, 4096, static_cast<uintptr_t>(i * 100 + 2));
+        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2);
         // SSM_OUT is FP16_ONLY / required_floor=FP16 → must stay FP16
-        L.ssm_out = make_tensor_stub(TensorKind::SSM_OUT, 4096, 4096, static_cast<uintptr_t>(i * 100 + 3));
+        L.ssm_out = make_tensor_stub(TensorKind::SSM_OUT, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 3);
         m.layers_.push_back(std::move(L));
     }
 
@@ -56,7 +56,7 @@ TEST(WeightRegistryPreservation, NVFP4ModeDoesNotDowngradeSSMInOut) {
     int wq_count = 0, ssm_count = 0;
     for (const auto& e : plan.entries) {
         if (e.kind == TensorKind::WQ) {
-            EXPECT_EQ(e.tier, StorageTier::NVFP4) << "WQ should be NVFP4 under prefer_nvfp4_decode";
+            EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR) << "WQ should be NVFP4 under prefer_nvfp4_decode";
             wq_count++;
         } else if (e.kind == TensorKind::SSM_IN || e.kind == TensorKind::SSM_OUT) {
             EXPECT_EQ(e.tier, StorageTier::FP16) << "SSM_IN/OUT must remain FP16 even in NVFP4 mode "
@@ -81,9 +81,9 @@ TEST(StoragePlanner, TinyBudgetReturnsFailure) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         // Add an FFN weight as well so there's more to compress
-        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i * 100 + 2));
+        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2);
         m.layers_.push_back(std::move(L));
     }
 
@@ -107,10 +107,10 @@ TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1),
+        L.wq = make_tensor_stub(TensorKind::WQ, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1,
                                 QType::NVFP4);
-        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096,
-                                    static_cast<uintptr_t>(i * 100 + 2), QType::NVFP4);
+        L.w_down = make_tensor_stub(TensorKind::W_DOWN, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 2,
+                                    QType::NVFP4);
         m.layers_.push_back(std::move(L));
     }
     // The F16 token embedding is the resident upload itself (Phase 1 builds
@@ -134,7 +134,7 @@ TEST(StoragePlanner, NativeNvfp4SourcesCostNothingAtNvfp4Tier) {
             EXPECT_EQ(e.bytes, 0) << "F16-source embedding at FP16 tier is the resident upload";
             continue;
         }
-        EXPECT_EQ(e.tier, StorageTier::NVFP4);
+        EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR);
         EXPECT_EQ(e.bytes, 0) << "NVFP4-source entry at NVFP4 tier must be zero-copy";
     }
     EXPECT_EQ(plan.projected_vram_bytes, 0u);
@@ -167,11 +167,11 @@ TEST(StoragePlanner, GenerousBudgetPreservesInitialTiers) {
 
     for (const auto& e : plan.entries) {
         if (e.kind == TensorKind::WQ) {
-            EXPECT_EQ(e.tier, StorageTier::NVFP4) << "WQ required_floor is NVFP4";
+            EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR) << "WQ required_floor is NVFP4";
         } else if (e.kind == TensorKind::SSM_IN) {
             EXPECT_EQ(e.tier, StorageTier::FP16) << "SSM_IN required_floor is FP16";
         } else if (e.kind == TensorKind::W_GATE) {
-            EXPECT_EQ(e.tier, StorageTier::NVFP4) << "W_GATE required_floor is NVFP4";
+            EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR) << "W_GATE required_floor is NVFP4";
         }
     }
     EXPECT_EQ(static_cast<int>(plan.entries.size()), 3);
@@ -210,7 +210,7 @@ TEST(StoragePlanner, DualPathHintRoutesCorrectly) {
             case TensorKind::W_GATE:
             case TensorKind::W_UP:
             case TensorKind::W_DOWN:
-                EXPECT_EQ(e.tier, StorageTier::NVFP4)
+                EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR)
                     << "FFN projections should be NVFP4 under dual_path hint";
                 break;
             default:
@@ -230,7 +230,7 @@ TEST(StoragePlanner, GDNGateIsNotEnumeratedForOverlay) {
 
     for (int i = 0; i < 2; ++i) {
         TransformerLayer L;
-        L.gdn_gate = make_tensor_stub(TensorKind::GDN_GATE, 4096, 4096, static_cast<uintptr_t>(i * 100 + 1));
+        L.gdn_gate = make_tensor_stub(TensorKind::GDN_GATE, 4096, 4096, static_cast<uintptr_t>(i) * 100 + 1);
         m.layers_.push_back(std::move(L));
     }
 
@@ -323,8 +323,8 @@ TEST(StoragePlanner, ProjectedVRAMMatchesEntrySum) {
 
     for (int i = 0; i < 3; ++i) {
         TransformerLayer L;
-        L.wq = make_tensor_stub(TensorKind::WQ, 512, 512, static_cast<uintptr_t>(0x1000 + i));
-        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 512, 512, static_cast<uintptr_t>(0x2000 + i));
+        L.wq = make_tensor_stub(TensorKind::WQ, 512, 512, 0x1000 + static_cast<uintptr_t>(i));
+        L.ssm_in = make_tensor_stub(TensorKind::SSM_IN, 512, 512, 0x2000 + static_cast<uintptr_t>(i));
         m.layers_.push_back(std::move(L));
     }
 
@@ -406,7 +406,7 @@ TEST(StoragePlanner, Q4KInPlaceHintKeepsDenseProjectionsUncopied) {
             EXPECT_EQ(e.bytes, 0);
             in_place++;
         } else if (e.kind == TensorKind::W_DOWN) {
-            EXPECT_EQ(e.tier, StorageTier::NVFP4);
+            EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR);
         }
     }
     EXPECT_EQ(in_place, 3);
@@ -448,7 +448,7 @@ TEST(StoragePlanner, Q6KSourcePreservesNVFP4UnderPreferHint) {
     bool found_wq = false;
     for (const auto& e : plan.entries) {
         if (e.kind == TensorKind::WQ) {
-            EXPECT_EQ(e.tier, StorageTier::NVFP4)
+            EXPECT_EQ(e.tier, StorageTier::NVFP4_LINEAR)
                 << "Q6_K-source WQ should land on NVFP4 under prefer_nvfp4_decode";
             found_wq = true;
         }
@@ -475,7 +475,7 @@ TEST(StoragePlanner, F16SourceDoesNotPickNVFP4) {
 
     for (const auto& e : plan.entries) {
         if (e.kind == TensorKind::WQ) {
-            EXPECT_NE(e.tier, StorageTier::NVFP4)
+            EXPECT_NE(e.tier, StorageTier::NVFP4_LINEAR)
                 << "F16-source WQ must NOT pick NVFP4 — runtime has no FP16→NVFP4 quant path";
         }
     }
@@ -483,7 +483,7 @@ TEST(StoragePlanner, F16SourceDoesNotPickNVFP4) {
 
 TEST(StoragePlanner, NativeNVFP4SourceMandatesNVFP4Tier) {
     // Native NVFP4 weight: the "overlay" IS the source storage. Tier must
-    // be NVFP4 (or CUTLASS_NVFP4); no other tier is valid.
+    // be NVFP4 (or NVFP4_SFATOM); no other tier is valid.
     Model m;
     m.config_.n_layers = 1;
 
@@ -499,8 +499,8 @@ TEST(StoragePlanner, NativeNVFP4SourceMandatesNVFP4Tier) {
 
     for (const auto& e : plan.entries) {
         if (e.kind == TensorKind::WQ) {
-            EXPECT_TRUE(e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4)
-                << "NVFP4-source WQ must stay NVFP4 (or CUTLASS_NVFP4 layout)";
+            EXPECT_TRUE(e.tier == StorageTier::NVFP4_LINEAR || e.tier == StorageTier::NVFP4_SFATOM)
+                << "NVFP4-source WQ must stay NVFP4 (or NVFP4_SFATOM layout)";
             EXPECT_EQ(e.source_qtype, QType::NVFP4) << "source_qtype must be propagated to Entry";
         }
     }

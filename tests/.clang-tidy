@@ -1,0 +1,38 @@
+# clang-tidy for tests/ (incl. tests/bench): the root .clang-tidy, minus the test idioms below.
+#
+# Error checks stay the root WarningsAsErrors (tools/check_tidy_findings.py reads only that file):
+# clang-analyzer-* and every bugprone-* check with 0 test findings keep failing the lane.
+# Calibration (2026-11-27): unique findings over the 515 tests/ TUs (481 tests/, 34 tests/bench),
+# a check is off when every finding is a test idiom:
+#   bugprone-implicit-widening-of-multiplication-result  1022  int index math on small fixed shapes
+#   bugprone-argument-comment                             130  /*name=*/ comments on gtest helper args
+#   concurrency-mt-unsafe                                 221  getenv 138 (model paths), rand 69,
+#                                                              setenv/unsetenv 14 in single-threaded setup
+#   misc-predictable-rand                                  69  fixed seeds keep inputs reproducible
+#   bugprone-multi-level-implicit-pointer-conversion       22  cudaMemcpy/cudaMalloc of pointer tables
+#   bugprone-suspicious-memory-comparison                  17  bit-exact memcmp of float/struct output
+#   bugprone-use-after-move                                 6  tests of the moved-from state
+#   bugprone-suspicious-missing-comma                       2  intended literal concatenation
+#   clang-analyzer-cplusplus.Move                          10  tests of the moved-from state (as use-after-move)
+# On (findings fixed or NOLINT with reason): bugprone-misplaced-widening-cast (15),
+# bugprone-integer-division (5), bugprone-macro-parentheses (2), bugprone-reserved-identifier (1),
+# bugprone-unused-local-non-trivial-variable (1), bugprone-empty-catch (1),
+# bugprone-switch-missing-default-case (1), cppcoreguidelines-slicing (8),
+# cppcoreguidelines-missing-std-forward (3), clang-diagnostic-unused-const-variable (1: a clang error),
+# clang-analyzer: cplusplus.StringChecker (3), unix.Stream (2), security.cert.env.InvalidPtr (2),
+# core.DivideZero (1), unix.StdCLibraryFunctions (1).
+InheritParentConfig: true
+
+Checks: >
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-argument-comment,
+  -concurrency-mt-unsafe,
+  -misc-predictable-rand,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-suspicious-memory-comparison,
+  -bugprone-use-after-move,
+  -bugprone-suspicious-missing-comma,
+  -clang-analyzer-cplusplus.Move
+
+# The root filter plus the tests' own headers (*.h, *.cuh helpers shared by test TUs).
+HeaderFilterRegex: '((src|include/imp)/.*\.(h|hpp)|tests/.*\.(h|hpp|cuh))$'

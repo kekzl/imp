@@ -307,7 +307,7 @@ bool with_engine_parked(ServerState& state, httplib::Response& res, Fn&& fn) {
                         "LoRA change aborted: in-flight requests did not drain, retry shortly");
         return false;
     }
-    fn();
+    std::forward<Fn>(fn)();
     if (state.batching)
         state.batching->resume();
     return true;

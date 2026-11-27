@@ -85,7 +85,7 @@ std::string render(VisionFamily family, const Case& c) {
             image_tokens.push_back(c.image_tokens[ni++]);
         } else if (!layout.frame_label.empty()) {
             frame_counts.push_back(2 * c.video_groups);
-            image_tokens.insert(image_tokens.end(), static_cast<size_t>(2 * c.video_groups), 4);
+            image_tokens.insert(image_tokens.end(), 2 * static_cast<size_t>(c.video_groups), 4);
         } else {
             std::vector<double> seconds;
             for (int f = 0; f < 2 * c.video_groups; ++f)

@@ -172,7 +172,7 @@ uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
 // x the low bits {0, 1, tie - 1, tie, tie + 1, all ones}: 393228 floats (was 43 * 2^24 = 1.44e9, 2.4 s).
 // Then every 251st pattern outside the window and the 0/Inf/NaN bit patterns.
 template <class Fn>
-uint64_t for_each_float(Fn&& fn) {
+uint64_t for_each_float(const Fn& fn) {
     uint64_t n = 0;
     for (uint32_t sign : {0u, 0x80000000u}) {
         for (uint32_t ue = 101; ue <= 143; ++ue) {

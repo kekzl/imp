@@ -200,6 +200,20 @@ TEST(UploadExceedsCheckpoint, TheQuarterIsInclusiveOfItsBoundary) {
     EXPECT_TRUE(upload_exceeds_checkpoint(1251 * kMiB, 1000 * kMiB));
 }
 
+// B-138, Qwen3.8-27B-Q8_0 at max_seq_len 131072: one sequence + allocator headroom = 3607 MiB.
+// The old arithmetic gave back only `need` when the residual sat below the outstanding planes:
+// 16448 MiB outstanding, 267 MiB free -> 12841 MiB held, the pool floored at 16 blocks.
+TEST(ImmaPlanesKept, AResidualBelowOneSequenceKeepsNoPlanes) {
+    EXPECT_EQ(imma_planes_kept(16448 * kMiB, 267 * kMiB, 3607 * kMiB), 0u);
+    EXPECT_EQ(imma_planes_kept(20160 * kMiB, 2848 * kMiB, 3607 * kMiB), 0u);
+}
+
+TEST(ImmaPlanesKept, PlanesTakeOnlyWhatIsLeftAfterTheSequence) {
+    EXPECT_EQ(imma_planes_kept(16448 * kMiB, 5000 * kMiB, 3607 * kMiB), 1393 * kMiB);
+    EXPECT_EQ(imma_planes_kept(100 * kMiB, 5000 * kMiB, 3607 * kMiB), 100 * kMiB);
+    EXPECT_EQ(imma_planes_kept(0, 5000 * kMiB, 3607 * kMiB), 0u);
+}
+
 TEST(UploadExceedsCheckpoint, UnknownCheckpointSizeIsNotAFault) {
     // 0 = the checkpoint could not be sized (unreadable path, an unrecognised
     // layout). There is no reference to compare against, and inventing one

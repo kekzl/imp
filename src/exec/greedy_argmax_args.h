@@ -23,7 +23,7 @@ struct GreedyArgmaxArgs {
     int topm = 0;
     const int32_t* d_banned = nullptr;
     int n_banned = 0;
-    bool allow_cutlass = false;
+    bool allow_w4a4_head = false;
     const int32_t* d_banned_alt = nullptr;
     int n_banned_alt = 0;
     const uint8_t* h_row_alt = nullptr;

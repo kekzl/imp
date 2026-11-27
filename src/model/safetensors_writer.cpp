@@ -1,9 +1,10 @@
 #include "model/safetensors_writer.h"
 
+#include <cerrno>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <string>
+#include <system_error>
 
 namespace imp {
 
@@ -133,7 +134,7 @@ std::string write_safetensors(const std::string& path, const std::vector<SafeTen
     std::error_code ec;
     FILE* f = fopen(tmp.c_str(), "wb");
     if (!f)
-        return "cannot open '" + tmp + "' for writing: " + std::strerror(errno);
+        return "cannot open '" + tmp + "' for writing: " + std::generic_category().message(errno);
 
     auto fail = [&](const std::string& why) {
         fclose(f);
@@ -156,10 +157,10 @@ std::string write_safetensors(const std::string& path, const std::vector<SafeTen
             return fail("short write on tensor '" + t.name + "' (disk full?)");
     }
     if (fflush(f) != 0)
-        return fail("flush failed: " + std::string(std::strerror(errno)));
+        return fail("flush failed: " + std::generic_category().message(errno));
     if (fclose(f) != 0) {
         std::filesystem::remove(tmp, ec);
-        return "close failed: " + std::string(std::strerror(errno));
+        return "close failed: " + std::generic_category().message(errno);
     }
 
     std::filesystem::rename(tmp, path, ec);

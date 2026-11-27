@@ -154,6 +154,8 @@ TEST(Mxf4nvf4QkTest, RowIndicator) {
             case 15:
                 v = 2.0f;
                 break;  // reuse
+            default:    // m < M = 16
+                break;
         }
         for (int k = 0; k < K; ++k)
             h_Q[m * K + k] = __float2half(v);

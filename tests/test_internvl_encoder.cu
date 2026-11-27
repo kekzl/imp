@@ -150,9 +150,8 @@ TEST(InternVLEncoder, RealTowerCatMatchesHfFp32) {
         GTEST_SKIP() << "IMP_TEST_MODEL_INTERNVL / IMP_TEST_IMAGE_CAT not set";
     // Reference files tests/fixtures/internvl/<stem>_*, default test_cat_pil (run_real_ref.sh names them by
     // stem).
-    const std::string ref_stem = std::getenv("IMP_TEST_INTERNVL_REF_STEM")
-                                     ? std::getenv("IMP_TEST_INTERNVL_REF_STEM")
-                                     : "test_cat_pil";
+    const char* stem_env = std::getenv("IMP_TEST_INTERNVL_REF_STEM");
+    const std::string ref_stem = stem_env ? stem_env : "test_cat_pil";
     auto model = load_safetensors(dir, /*load_mtp_head=*/false);
     ASSERT_NE(model, nullptr);
     ASSERT_NE(model->vision_tower, nullptr);

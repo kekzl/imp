@@ -476,6 +476,7 @@ static bool upload_qtype_q6_k_(Tensor& weight, QType qtype, QType compute_dtype,
                 uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xF) : (ql_byte & 0xF);
                 uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3;
                 int q6 = static_cast<int>((high2 << 4) | low4) - 32;
+                // NOLINTNEXTLINE(bugprone-integer-division): i / 16 is the scale index
                 float val = d * static_cast<float>(scales[i / 16]) * static_cast<float>(q6);
                 h_fp16[n * K + b * 256 + i] = float_to_fp16(val);
             }
@@ -770,7 +771,7 @@ Outcome run(const Case& c, Run&& fn) {
     dev.fail_alloc_at = c.fail_alloc_at;
     dev.fail_copy_at = c.fail_copy_at;
     Outcome o;
-    o.ok = fn(w, dev);
+    o.ok = std::forward<Run>(fn)(w, dev);
     o.ev = dev.ev;
     for (void* p : dev.tracked)
         o.tracked.push_back(dev.index_of(p));

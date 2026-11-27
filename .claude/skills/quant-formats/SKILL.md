@@ -15,7 +15,7 @@ GGUF is legacy (`docs/DESIGN_DECISIONS.md`, 2026-10-30): fix load blockers and w
 |---|---|---|
 | Formats | Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q4_0, IQ4_NL/XS, MXFP4 | per-tensor scale (FP32) + per-16 FP8-E4M3 micro-scales |
 | Decode | dp4a GEMV per qtype + NVFP4 decode cache built at init | native NVFP4 GEMV / smallm v2 |
-| Prefill | cuBLAS on dequanted source | CUTLASS NVFP4 GEMM (+ stream-K, #1841) |
+| Prefill | cuBLAS on dequanted source | own NVFP4 tile GEMM on the SfAtom tier (+ stream-K, #2934) |
 | Priority | legacy; community MXFP4 quality bugs: do not sink time | the strategic path |
 
 - GGUF -> NVFP4 decode cache at init; `nvfp4_beneficial` weights skip the FP16 cache; GDN/SSM projections excluded (quality lock) and served by the FP8 GDN projection sidecar (always on, native F16 only); GGUF Q8_0 projections decode in place via `gemm_q8_0_dp4a_dense` at every M (#2688: the FP8 copy cost 5280 MiB = 66 recurrent slots on Qwen3.8-27B Q4_K_M).
@@ -24,10 +24,10 @@ GGUF is legacy (`docs/DESIGN_DECISIONS.md`, 2026-10-30): fix load blockers and w
 
 ## StorageTier is the dispatch contract (`src/core/storage_tier.h`)
 
-`Undefined` (FATAL if dispatched), `FP32`, `FP16`, `FP8` (E4M3 + per-tensor scale), `NVFP4` (two-level micro-scale, decode-GEMV), `CUTLASS_NVFP4` (block-scaled, CUTLASS sm_120 fast path), `MXFP4` (CUTLASS FMHA).
+`Undefined` (FATAL if dispatched), `FP32`, `FP16`, `FP8` (E4M3 + per-tensor scale), `NVFP4_LINEAR` (row-major micro-scales + tensor scale, decode GEMV), `NVFP4_SFATOM` (SfAtom block scales, own tile GEMM), `MXFP4` (`gemv_mxfp4_kpar` decode, `gemm_mxfp4_tile` prefill). Both NVFP4 tiers serve SafeTensors and GGUF-requantized weights; the name says the scale layout (D-12, the CUTLASS names left 2026-11-27).
 
 - ONE decision point since #621: `plan_storage()` in `src/runtime/storage_planner.h`; caches are RAII-owned by the executor. Extend the planner's rules, never add downstream overrides.
-- `NVFP4` != `CUTLASS_NVFP4` at large M: plain NVFP4 falls to `gemm_nvfp4` (dequant -> cuBLAS). SfAtom scales are built at load (`src/exec/pre_dequant_*.cu`); `convert_scales_sfatom` is a load-time artifact.
+- `NVFP4_LINEAR` != `NVFP4_SFATOM` at large M: NVFP4_LINEAR falls to `gemm_nvfp4` (dequant -> cuBLAS). SfAtom scales are built at load (`src/exec/pre_dequant_*.cu`); `convert_scales_sfatom` is a load-time artifact.
 - M<=32 since #1766: the small-M kernel (#1788, always on) runs `mma.sync.kind::mxf4nvf4` on the PLAIN packed layout (`src/quant/nvfp4_gemm_smallm_v2.cu`, zero extra VRAM; the CUTLASS SF atom static-asserts 128 rows, so no CTA_M<128 tile exists). +16.0% at 32 streams, +36.0% at 8. At M=1 the GEMV family stays (#1789).
 - StoragePlanner prices zero-copy native-NVFP4 entries at incremental cost since #1795 (a ~15 GiB phantom demand printed "plan failed" before).
 

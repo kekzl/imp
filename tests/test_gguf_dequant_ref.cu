@@ -100,7 +100,7 @@ void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, dou
         double g16 = static_cast<double>(__half2float(hOut[i]));
         // Round the fp64 reference to f16 the same way the kernel rounds, so we
         // only measure arithmetic divergence, not the unavoidable f16 step.
-        float r16f = __float2half_then_float(static_cast<float>(r));
+        float r16f = float2half_then_float(static_cast<float>(r));
         double r16 = static_cast<double>(r16f);
         bool g_fin = std::isfinite(g16);
         bool r_fin = std::isfinite(r16);

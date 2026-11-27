@@ -1,5 +1,5 @@
 // Weight forms no default path reads stay out of VRAM on GGUF models:
-// - a dense GGUF weight keeps its CUTLASS_NVFP4 tier without an SfAtom (its M>1 GEMM reads the source);
+// - a dense GGUF weight keeps its NVFP4_SFATOM tier without an SfAtom (its M>1 GEMM reads the source);
 // - an LM head served by the NVFP4 decode cache frees its GGUF source.
 // Each test checks the load log, then that greedy decode still answers. GTEST_SKIPs without the model.
 

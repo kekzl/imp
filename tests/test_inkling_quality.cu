@@ -186,7 +186,7 @@ TEST(InklingQuality, KldAgainstTheReference) {
             }
             std::vector<int32_t> next(static_cast<size_t>(keep), -1);
             for (int r = 0; r + 1 < keep; ++r)
-                next[static_cast<size_t>(r)] = ids[static_cast<size_t>(from + r + 1)];
+                next[static_cast<size_t>(r)] = ids[static_cast<size_t>(from) + r + 1];
             std::vector<float> got(static_cast<size_t>(keep) * V);
             for (int form = 0; form < 3; ++form) {
                 cudaMemcpy(d_ids, ids.data(), static_cast<size_t>(T) * sizeof(int32_t),

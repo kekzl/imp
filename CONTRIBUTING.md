@@ -68,7 +68,7 @@ CPU only, in the `imp:lint` image, from the main checkout or a linked worktree (
 | Row | Same check as CI | Runs when |
 |---|---|---|
 | `static gates` / `static: <gate>` | `scripts/ci_static_gates.sh` (first step of `Build`, plus `File size`, `Test lanes`, `Docs`) | always |
-| `clang-tidy` | `clang-tidy` job: `scripts/tidy_lane.sh` on changed `src`/`tools` `.cpp` and `src` `.cu`, `cmake --preset ci` database in `build-preflight/build` | a TU changed |
+| `clang-tidy` | `clang-tidy` job: `scripts/tidy_lane.sh` on changed `src`/`tools`/`tests` `.cpp` and `src`/`tests` `.cu`, `cmake --preset ci` database in `build-preflight/build` | a TU changed |
 | `clang-format` | `Lint` job: `git clang-format --diff <base>` (advisory in CI, a failure here) | always |
 | `actionlint` | workflow syntax, `rhysd/actionlint:1.7.12` | `.github/` changed |
 

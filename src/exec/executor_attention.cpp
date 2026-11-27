@@ -18,7 +18,7 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -221,7 +221,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                     : nullptr;
     const bool wo_nvfp4_secondary = (wo_nv_e != nullptr);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
-                              (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
+                              (wo_tier == StorageTier::NVFP4_LINEAR || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
                                  qscratch_.q8_1_buf.data() != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
@@ -678,6 +678,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // primary-tier handle needs reconstruction.
         NvFP4QuantResult wo_nvfp4;
         if (wo_nvfp4_secondary) {
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             wo_nvfp4 = *wo_nv_e;
         } else {
             const WeightHandle& wo_h = registry_.handle(ly.wo_id);

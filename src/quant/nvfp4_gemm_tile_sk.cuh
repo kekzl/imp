@@ -83,7 +83,7 @@ __device__ __forceinline__ float4* sk_slot(const TileArgs& p, int b) {
 // Calls f(t, kb, ke, last) for every segment (tile t, k-steps [kb, ke)) of CTA b in order; last: the highest
 // CTA holding a later piece of t (read by the finisher, the segment with kb == 0 and ke < KT).
 template <class F>
-__device__ __forceinline__ void sk_walk(const TileArgs& p, int KT, int units, int b, F&& f) {
+__device__ __forceinline__ void sk_walk(const TileArgs& p, int KT, int units, int b, const F& f) {
     if (p.sk_split > 0) {  // hybrid: whole tiles b, b + grid, ..., then one piece of a tail tile
         for (int t = b; t < p.sk_dp; t += static_cast<int>(gridDim.x))
             f(t, 0, KT, b);

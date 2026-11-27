@@ -1,8 +1,8 @@
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/quant_gemm.h"
 #include "quant/nvfp4_gemm_tile.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 #include "core/logging.h"
@@ -218,8 +218,8 @@ static float bench_nvfp4_tile_gemm(const GemmSize& sz) {
     void* a_data = nullptr;  // [M, K/2] packed FP4
     void* a_sf = nullptr;    // SfAtom UE4M3 scales
     IMP_CUDA_CHECK_LOG(cudaMalloc(&a_data, static_cast<size_t>(M) * (K / 2)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&a_sf, cutlass_nvfp4_sf_size(static_cast<int>(M), static_cast<int>(K))));
-    quantize_fp16_to_nvfp4_cutlass(d_A_fp16, a_data, a_sf, static_cast<int>(M), static_cast<int>(K), nullptr);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&a_sf, nvfp4_sfatom_size(static_cast<int>(M), static_cast<int>(K))));
+    quantize_fp16_to_nvfp4_sfatom(d_A_fp16, a_data, a_sf, static_cast<int>(M), static_cast<int>(K), nullptr);
 
     // --- Weight B [N,K] FP16 -> NvFP4QuantResult -> SfAtom block-scaled ---
     std::vector<half> h_B(static_cast<size_t>(N) * K);
@@ -231,8 +231,8 @@ static float bench_nvfp4_tile_gemm(const GemmSize& sz) {
     Tensor b_t(d_B_fp16, QType::F16, 2, bshape, /*on_device=*/true);
     NvFP4Owned qr{};
     quantize_fp16_to_nvfp4(b_t, qr, nullptr);
-    CutlassNvFP4Owned cw{};
-    convert_nvfp4_to_cutlass(qr, cw, nullptr);
+    NvFP4SfAtomOwned cw{};
+    convert_nvfp4_to_sfatom(qr, cw, nullptr);
 
     // --- Output + workspace ---
     void* d_D = nullptr;
@@ -297,10 +297,10 @@ static const GemmSize kNvfp4Sizes[] = {
 };
 static constexpr int kNumNvfp4Sizes = sizeof(kNvfp4Sizes) / sizeof(kNvfp4Sizes[0]);
 
-bool bench_gemm_nvfp4_cutlass() {
+bool bench_gemm_nvfp4_sfatom() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
-        printf("bench_gemm_nvfp4_cutlass: no CUDA device available, skipping.\n");
+        printf("bench_gemm_nvfp4_sfatom: no CUDA device available, skipping.\n");
         return false;  // measured nothing (#1584)
     }
     printf("=== Production NVFP4 dense GEMM (own tile, gemm_nvfp4_tile) ===\n");

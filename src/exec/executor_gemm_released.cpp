@@ -43,8 +43,8 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
               "released_source_gemm_: no rebuild scratch for a %lld x %lld weight",
               static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
     void* w16 = wcache_.released_f16_scratch.get();
-    if (const CutlassMxFP8CacheEntry* mx = h.entries.mxfp8_prefill; mx != nullptr) {
-        dequantize_mxfp8_cutlass_to_fp16(*mx, w16, ctx.stream);
+    if (const MxFP8SfAtomCacheEntry* mx = h.entries.mxfp8_prefill; mx != nullptr) {
+        dequantize_mxfp8_sfatom_to_fp16(*mx, w16, ctx.stream);
     } else {
         const FP8CacheEntry* v = h.entries.released_fp8;
         IMP_CHECK(v != nullptr, "released_source_gemm_: no copy for a released %lld x %lld weight",

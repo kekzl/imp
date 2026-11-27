@@ -176,7 +176,8 @@ TEST(LmHeadDraftRows, Nvfp4MultiRowIsRowCountInvariantAndPriced) {
         return 1000.0 * ms / kIters;
     };
     const double fp8_mib = static_cast<double>(n_w) / (1024.0 * 1024.0);
-    const double nv4_mib = static_cast<double>(n_w / 2 + n_w / 16) / (1024.0 * 1024.0);
+    const auto nv4_bytes = (n_w / 2) + (n_w / 16);  // packed FP4 + one E4M3 scale byte per 16
+    const double nv4_mib = static_cast<double>(nv4_bytes) / (1024.0 * 1024.0);
     for (int rows = 1; rows <= kMaxRows; ++rows) {
         bool ok = true;
         const double t8 = time_us(

@@ -15,7 +15,7 @@
 #include "exec/executor_debug.h"
 #include "exec/executor_kernels.h"
 #include "compute/activation.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/dequant_gpu.h"
 #include "core/log_once.h"
 #include "core/logging.h"
@@ -59,14 +59,15 @@ bool GraphExecutor::smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out,
         if (!decode_rows)
             return false;
         const StorageTier decode = (h.decode_tier != StorageTier::Undefined) ? h.decode_tier : h.primary_tier;
-        if (decode != StorageTier::NVFP4)
+        if (decode != StorageTier::NVFP4_LINEAR)
             return false;
         if (h.entries.nvfp4 == nullptr || (h.entries.nvfp4->K % 64) != 0)
             return false;
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         out = *h.entries.nvfp4;
         return true;
     }
-    if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.source_scales == nullptr ||
+    if (h.primary_tier != StorageTier::NVFP4_SFATOM || h.source_scales == nullptr ||
         ((h.shape[1] * 2) % 64) != 0)
         return false;
     out.packed_data = const_cast<void*>(h.source_data);
@@ -231,14 +232,14 @@ bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tenso
     if (swiglu_epi_.act != nullptr)  // the up GEMM's epilogue did it (swiglu_epi_eligible_)
         return false;
     const int K = static_cast<int>(so.shape[1]);
-    // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
+    // Prefill (#2470): the SfAtom down GEMM's activation quantize rides in the SwiGLU kernel;
     // so is still written, so a declining dispatch falls back on the same bytes.
     if (!gelu && n > 32 && K % 16 == 0 && so.qtype == QType::F16 &&
-        prefill_routes_cutlass_nvfp4_(consumer_id, n, mode)) {
+        prefill_routes_nvfp4_sfatom_(consumer_id, n, mode)) {
         const float as = act_scale_of_(consumer_id);
-        swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data.get(),
-                                              qscratch_.cutlass_act_sf.get(), n, K, stream, as);
-        qscratch_.cutlass_act_scale = as;
+        swiglu_quantize_fp16_to_nvfp4_sfatom(go.data, uo.data, so.data, qscratch_.tile_act_data.get(),
+                                             qscratch_.tile_act_sf.get(), n, K, stream, as);
+        qscratch_.tile_act_scale = as;
         return true;
     }
     uint8_t* xq_scales = nullptr;
@@ -265,7 +266,7 @@ static size_t swiglu_epi_sf_offset(int n, int N) {
     return ((static_cast<size_t>(n) * (N / 2)) + 127) & ~size_t(127);
 }
 
-// Eligible: SwiGLU prompt rows, gate / up / down on the CUTLASS_NVFP4 tile (not cuBLASLt) at this M (so the
+// Eligible: SwiGLU prompt rows, gate / up / down on the NVFP4_SFATOM tile (not cuBLASLt) at this M (so the
 // down takes run_ffn's plain branch), one act scale for gate and up, the down input fits uo's buffer, and
 // nothing reads uo / so after the activation (LoRA, calibration, debug dumps).
 bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tensor& no, const Tensor& go,
@@ -275,10 +276,10 @@ bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tenso
         uo.qtype != QType::F16 || dequant_gpu_supported(ly.w_down.qtype))
         return false;
     for (const TensorID id : {ly.w_gate_id, ly.w_up_id, ly.w_down_id}) {
-        if (id == kInvalidTensorID || !prefill_routes_cutlass_nvfp4_(id, n, mode))
+        if (id == kInvalidTensorID || !prefill_routes_nvfp4_sfatom_(id, n, mode))
             return false;
         const auto& h = registry_.handle(id);
-        if (h.primary_tier != StorageTier::CUTLASS_NVFP4 || h.payload.cutlass_nvfp4.sf == nullptr ||
+        if (h.primary_tier != StorageTier::NVFP4_SFATOM || h.payload.nvfp4_sfatom.sf == nullptr ||
             h.entries.mxfp8_prefill != nullptr)
             return false;
     }
@@ -286,7 +287,7 @@ bool GraphExecutor::swiglu_epi_eligible_(const TransformerLayer& ly, const Tenso
     const int N = static_cast<int>(hu.shape[0]);
     return act_scale_of_(ly.w_gate_id) == act_scale_of_(ly.w_up_id) && N % 16 == 0 && uo.shape[1] == N &&
            no.shape[1] == hu.shape[1] * 2 &&
-           swiglu_epi_sf_offset(n, N) + cutlass_nvfp4_sf_size(n, N) <= uo.nbytes();
+           swiglu_epi_sf_offset(n, N) + nvfp4_sfatom_size(n, N) <= uo.nbytes();
 }
 
 void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& no, Tensor& go, Tensor& uo,
@@ -294,22 +295,22 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
     const int K = static_cast<int>(no.shape[1]);
     // NVFP4 prefill gate / up share the normed input: gate's dispatch quantizes it into the activation
     // scratch, up skips the re-quantize (act-quant hint).
-    const bool hint = n > 1 && prefill_routes_cutlass_nvfp4_(ly.w_gate_id, n, ctx.mode) &&
-                      prefill_routes_cutlass_nvfp4_(ly.w_up_id, n, ctx.mode);
+    const bool hint = n > 1 && prefill_routes_nvfp4_sfatom_(ly.w_gate_id, n, ctx.mode) &&
+                      prefill_routes_nvfp4_sfatom_(ly.w_up_id, n, ctx.mode);
     const bool epi = swiglu_epi_eligible_(ly, no, go, uo, n, ctx.mode);
     gemm_via_handle_(ly.w_gate_id, no, go, ctx);
     if (epi) {
-        // The registry route's alpha and workspace rule (gemm_kernel_cutlass_nvfp4.cpp): same plan, same
+        // The registry route's alpha and workspace rule (gemm_kernel_nvfp4_sfatom.cpp): same plan, same
         // bits.
         const auto& hu = registry_.handle(ly.w_up_id);
-        const auto& cu = hu.payload.cutlass_nvfp4;
+        const auto& cu = hu.payload.nvfp4_sfatom;
         const int N = static_cast<int>(hu.shape[0]);
         const float alpha = (cu.global_scale ? *cu.global_scale : 1.0f) * hu.act_scale;
         const bool no_ws = process_diag_deterministic() || !process_diag_nvfp4_prompt_streamk();
         auto* q = static_cast<uint8_t*>(uo.data);
         uint8_t* sf = q + swiglu_epi_sf_offset(n, N);
-        if (gemm_nvfp4_tile_swiglu_quant({.a_data = qscratch_.cutlass_act_data.get(),
-                                          .a_sf = qscratch_.cutlass_act_sf.get(),
+        if (gemm_nvfp4_tile_swiglu_quant({.a_data = qscratch_.tile_act_data.get(),
+                                          .a_sf = qscratch_.tile_act_sf.get(),
                                           .w_data = cu.weight,
                                           .w_sf = cu.sf,
                                           .alpha = alpha,
@@ -321,8 +322,8 @@ void GraphExecutor::gate_up_prefill_(const TransformerLayer& ly, const Tensor& n
                                           .N = N,
                                           .K = K,
                                           .stream = ctx.stream,
-                                          .workspace = no_ws ? nullptr : qscratch_.cutlass_workspace.get(),
-                                          .workspace_bytes = qscratch_.cutlass_workspace_size})) {
+                                          .workspace = no_ws ? nullptr : qscratch_.tile_workspace.get(),
+                                          .workspace_bytes = qscratch_.tile_workspace_size})) {
             static LogOnce logged;  // activity proof, once
             if (logged.first()) {
                 IMP_LOG_INFO(

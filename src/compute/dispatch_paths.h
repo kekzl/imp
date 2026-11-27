@@ -46,15 +46,15 @@ enum class MoePrefillOuter {
     NONE,            // dense model — no MoE layers
     FP16_BATCH,      // try_run_moe_fp16_batch_prefill
     FP8_BATCH,       // try_run_moe_fp8_batch_prefill
-    CUTLASS3X,       // try_run_moe_cutlass3x_nvfp4_prefill_ → MoePrefillPath (own grouped GEMM)
+    GROUPED_NVFP4,   // try_run_moe_grouped_nvfp4_prefill_ → MoePrefillPath (own grouped GEMM)
     NVFP4_DEQUANT,   // try_run_moe_nvfp4_dequant_batch_prefill_
     LEGACY,          // run_moe_legacy_fallback_
     FUSED_Q6K,       // try_run_moe_q6k_prefill (gemm.moe_imma_prefill=false only)
     FUSED_Q4K_DP4A,  // try_run_moe_q4k_prefill (gemm.moe_imma_prefill=false, eff <= 640)
 };
 
-// Tiers inside try_run_moe_cutlass3x_nvfp4_prefill_
-// (exec/executor_forward_moe_cutlass.cpp).
+// Tiers inside try_run_moe_grouped_nvfp4_prefill_
+// (exec/executor_forward_moe_grouped.cpp).
 enum class MoePrefillPath {
     DEVICE_ARGS,  // gemm_grouped_nvfp4_dispatch, device-args full path (fast)
     GROUPED,      // gemm_grouped_nvfp4_host_args (+ gpt-oss bias seams)
@@ -88,11 +88,11 @@ enum class DensePath : unsigned char {
     IMMA_SOURCE,            // imma_source_prefill on a GGUF source with an NVFP4 overlay
     GGUF_SOURCE_DEQUANT,    // gguf_source_fallback on a GGUF source with an NVFP4 overlay
     NVFP4_PROMPT_A16,       // gemm_nvfp4_f16_tile (gemm.nvfp4_prompt_a16_attn)
-    NVFP4_TILE,             // CUTLASS_NVFP4 tier own tile GEMM via the kernel registry
-    NVFP4_TIER_FP8,         // CUTLASS_NVFP4 tier FP8 cache entry via gemm_cublaslt
+    NVFP4_TILE,             // NVFP4_SFATOM tier own tile GEMM via the kernel registry
+    NVFP4_TIER_FP8,         // NVFP4_SFATOM tier FP8 cache entry via gemm_cublaslt
     NVFP4_DEQUANT,          // gemm_nvfp4 dequant safety net (native NVFP4 source)
     MXFP4_PREFILL,          // mxfp4_prefill_gemm
-    GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less CUTLASS_NVFP4 entry, gguf_source_fallback
+    GGUF_SOURCE_NO_SFATOM,  // last route: SfAtom-less NVFP4_SFATOM entry, gguf_source_fallback
     GENERIC_DISPATCH,       // last route: gemm_dispatch
     // Fused / sibling exits outside the ladder, recorded per weight at their call site.
     QKV_GEMV_MXFP4,           // gemv_mxfp4_qkv_fused, M=1

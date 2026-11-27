@@ -15,11 +15,11 @@ namespace imp {
 class Model;
 
 // Which prefill path serves every on-device expert without batch_dequant_buf.
-// cutlass_fp4 (name historical): NVFP4/MXFP4 experts (grouped NVFP4 GEMM); imma_all: K-quant experts
+// grouped_fp4 (name historical): NVFP4/MXFP4 experts (grouped NVFP4 GEMM); imma_all: K-quant experts
 // the MoE IMMA kernel takes (Q8_0 excluded: its planes can hit the plane budget at runtime).
 // f16_all: every packed expert tensor is device F16 (nothing to dequant; Ling-3.0 BF16: 192 MiB).
 struct MoeExpertServe {
-    bool cutlass_fp4 = false;
+    bool grouped_fp4 = false;
     bool imma_all = false;
     bool f16_all = false;
 };
@@ -112,7 +112,7 @@ struct MoEWorkspace {
     StableSpan<int32_t> d_na;
 
     // Per-expert SFA byte-offsets into the SfAtom-padded grouped-GEMM staging buffer.
-    // Exclusive prefix sum of cutlass_nvfp4_sf_size(M_per[e], K), populated each forward by
+    // Exclusive prefix sum of nvfp4_sfatom_size(M_per[e], K), populated each forward by
     // compute_sfa_offsets_device. [n_experts+1] int64.
     StableSpan<int64_t> d_sfa_offsets;
 
@@ -217,16 +217,16 @@ struct MoEWorkspace {
     // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
     PinnedBuffer h_routing_readback;
 
-    // Grouped NVFP4 GEMM staging (cutlass3x_* names historical):
+    // Grouped NVFP4 GEMM staging:
     //   packed: [max_expanded, max_K/2] contiguous FP4 activations
     //   sf: per-expert SfAtom slabs, worst-case padded to 128 rows per expert
     //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)
-    DeviceOwned<void> cutlass3x_packed;
-    size_t cutlass3x_packed_size = 0;
-    DeviceOwned<void> cutlass3x_sf;
-    size_t cutlass3x_sf_size = 0;
-    StableSpan<uint8_t*> cutlass3x_sfa_ptrs;  // device [ne] uint8_t* array
-    int cutlass3x_sfa_ptrs_count = 0;
+    DeviceOwned<void> grouped_packed;
+    size_t grouped_packed_size = 0;
+    DeviceOwned<void> grouped_sf;
+    size_t grouped_sf_size = 0;
+    StableSpan<uint8_t*> grouped_sfa_ptrs;  // device [ne] uint8_t* array
+    int grouped_sfa_ptrs_count = 0;
 
     // Releases every owned buffer and returns the struct to its initial state. Kept: the
     // process-wide diagnostics (hist, imbalance, trace: released by ~GraphExecutor after

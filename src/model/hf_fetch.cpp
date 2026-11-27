@@ -509,8 +509,10 @@ std::string fetch_model(const std::string& uri_str, const std::string& revision)
     opt.cache_dir = hf_cache_dir();
     if (!revision.empty())
         opt.revision = revision;
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): huggingface_hub env name, read once per fetch
     if (const char* t = std::getenv("HF_TOKEN"); t && *t)
         opt.token = t;
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): huggingface_hub env name, read once per fetch
     if (const char* e = std::getenv("HF_ENDPOINT"); e && *e) {
         opt.endpoint = e;
         while (!opt.endpoint.empty() && opt.endpoint.back() == '/')

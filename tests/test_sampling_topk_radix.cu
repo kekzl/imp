@@ -49,6 +49,7 @@ std::vector<float> make_logits(Gen g, int vocab, std::mt19937& rng) {
                 h[i] = nd(rng);
                 break;
             case Gen::Masked:
+                // NOLINTNEXTLINE(bugprone-integer-division): integer bins -2..2, the survivors tie on purpose
                 h[i] = (u01(rng) < 0.998f) ? ninf : static_cast<float>(small(rng) / 3);
                 break;
             case Gen::Extremes:

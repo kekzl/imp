@@ -91,7 +91,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
 
         if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
             print_server_usage(argv[0]);
-            std::exit(0);
+            cli_exit(0);
         } else if (std::strcmp(arg, "--host") == 0 && i + 1 < argc) {
             args.host = argv[++i];
         } else if (std::strcmp(arg, "--port") == 0 && i + 1 < argc) {
@@ -103,7 +103,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             size_t eq = spec.find('=');
             if (eq == std::string::npos || eq == 0 || eq + 1 >= spec.size()) {
                 fprintf(stderr, "--lora expects NAME=PATH, got '%s'\n", spec.c_str());
-                exit(1);
+                cli_exit(1);
             }
             args.loras.emplace_back(spec.substr(0, eq), spec.substr(eq + 1));
         } else if (std::strcmp(arg, "--control-vector") == 0 && i + 1 < argc) {
@@ -111,7 +111,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             size_t eq = spec.find('=');
             if (eq == std::string::npos || eq == 0 || eq + 1 >= spec.size()) {
                 fprintf(stderr, "--control-vector expects NAME=PATH, got '%s'\n", spec.c_str());
-                exit(1);
+                cli_exit(1);
             }
             args.control_vectors.emplace_back(spec.substr(0, eq), spec.substr(eq + 1));
         } else if (std::strcmp(arg, "--sae") == 0 && i + 1 < argc) {
@@ -143,7 +143,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             const long long n = std::strtoll(v, &end, 10);
             if (end == v || *end != '\0' || n < 0) {
                 fprintf(stderr, "--max-queued-tokens expects an integer >= 0, got '%s'\n", v);
-                std::exit(1);
+                cli_exit(1);
             }
             args.max_queued_tokens = n;
         } else if (std::strcmp(arg, "--trusted-proxy") == 0 && i + 1 < argc) {
@@ -173,7 +173,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             const long n = std::strtol(v, &end, 10);
             if (end == v || *end != '\0' || n < 0 || n > 86400L * 365) {
                 fprintf(stderr, "--idle-unload-seconds expects an integer >= 0, got '%s'\n", v);
-                std::exit(1);
+                cli_exit(1);
             }
             args.idle_unload_seconds = static_cast<int>(n);
         } else if ((std::strcmp(arg, "--responses-store-ttl") == 0 ||
@@ -186,7 +186,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
             const long n = std::strtol(v, &end, 10);
             if (end == v || *end != '\0' || n < 0 || n > 1000000000L) {
                 fprintf(stderr, "%s expects an integer >= 0, got '%s'\n", arg, v);
-                std::exit(1);
+                cli_exit(1);
             }
             if (std::strcmp(arg, "--responses-store-ttl") == 0)
                 args.responses_store_ttl = static_cast<int>(n);
@@ -199,7 +199,7 @@ ServerArgs parse_server_args(int argc, char** argv) {
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);
-            std::exit(1);
+            cli_exit(1);
         }
     }
 
