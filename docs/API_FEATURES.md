@@ -53,7 +53,7 @@ only where the loaded model's chat template has a grammar for it:
 
 | `tool_choice` | enforced on |
 |---|---|
-| `"required"` | `chatml` |
+| `"required"` | `chatml`; Gemma-4 serves it unconstrained and parses it as `"auto"`, as vLLM's `gemma4` parser does (B-143) |
 | a named function | `chatml`, `llama3`, `harmony` (gpt-oss), `gemma` with the `<\|tool_call>` token (Gemma-4) |
 | `"auto"` / `"none"` / absent | nothing to enforce, every family |
 
@@ -72,11 +72,11 @@ On every other family (measurement: 10 requests @ temperature 0.7 with one `get_
 | model | family | `tool_choice` | tool calls |
 |---|---|---|---|
 | gemma-3-12b Q4_K_M | `gemma` | `required` / named | **0 / 10** each |
-| gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** |
+| gemma-4-26B Q4_K_M | `gemma` | `required` | **0 / 10** (before B-143: now runs as `auto`) |
 | gpt-oss-20b MXFP4 | `harmony` | `required` / named | **0 / 10** each |
 | Qwen3-4B Q8_0 | `chatml` | `required` / named | 10 / 10 each |
 
-`"auto"` is not enforced: a best-effort call is what `auto` asks for (Gemma-4: 1 of 10).
+`"auto"` is not enforced: a best-effort call is what `auto` asks for. Gemma-4 (26B-A4B NVFP4, E4B BF16): 20 of 20 since B-143, 0 of 20 while the engine banned `<|tool_call>`.
 
 **gpt-oss calls tools** (#1716). Envelope: channel with recipient, not tag:
 

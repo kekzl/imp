@@ -117,6 +117,12 @@ bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool
     return true;
 }
 
+bool tool_choice_required_runs_as_auto(imp::ChatTemplateFamily family, const json& tool_choice,
+                                       bool gemma_native_tool_call) {
+    return family == imp::ChatTemplateFamily::GEMMA && gemma_native_tool_call && tool_choice.is_string() &&
+           tool_choice.get<std::string>() == "required";
+}
+
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
                                                                          const json& tool_choice) {

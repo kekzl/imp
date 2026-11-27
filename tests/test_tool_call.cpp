@@ -163,6 +163,20 @@ TEST(ToolChoiceEnforcement, NamedFunctionIsEnforceableOnGemmaOnlyWithTheNativeTo
                     .name.empty());
 }
 
+// vLLM gemma4 parser: supports_required_and_named = False, "required" is parsed as "auto" (B-143).
+// Only Gemma-4 (native token) and only "required"; a named function still forces the envelope.
+TEST(ToolChoiceEnforcement, RequiredRunsAsAutoOnlyOnGemma4) {
+    for (ChatTemplateFamily f : kAllFamilies) {
+        for (const bool native : {false, true}) {
+            EXPECT_EQ(tool_choice_required_runs_as_auto(f, json("required"), native),
+                      f == ChatTemplateFamily::GEMMA && native)
+                << imp::chat_template_family_name(f) << " native " << native;
+            EXPECT_FALSE(tool_choice_required_runs_as_auto(f, named_choice("get_weather"), native));
+            EXPECT_FALSE(tool_choice_required_runs_as_auto(f, json("auto"), native));
+        }
+    }
+}
+
 // Envelope literals as each model's own output format spells a call.
 TEST(ForcedToolEnvelope, LiteralsPerFamily) {
     const json choice = named_choice("get_weather");

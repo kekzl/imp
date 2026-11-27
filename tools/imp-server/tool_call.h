@@ -54,6 +54,11 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
 bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice,
                                 bool gemma_native_tool_call = false);
 
+// "required" on Gemma-4 (native <|tool_call> token) is served unconstrained and parsed as "auto", as
+// vLLM's gemma4 parser does (supports_required_and_named = False), instead of the #1592 400 (B-143).
+bool tool_choice_required_runs_as_auto(imp::ChatTemplateFamily family, const json& tool_choice,
+                                       bool gemma_native_tool_call);
+
 std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::ChatTemplateFamily family,
                                                                          const json& tools,
                                                                          const json& tool_choice);
