@@ -114,13 +114,11 @@ void emit_pool_lines(Emit& emit) {
 }
 }  // namespace
 
+// Leaked on purpose: VRAMAllocator::free() notes here, also from a static owner destroyed at exit; a
+// Meyers instance died first and its freed pools_ ended test-compute in a double free, rc 139.
 MemAccount& MemAccount::instance() {
-    static MemAccount inst;
-    return inst;
-}
-
-MemAccount::~MemAccount() {
-    sampler_stop();
+    static MemAccount* const inst = new MemAccount;
+    return *inst;
 }
 
 void MemAccount::set_dump_path(std::string path) {
