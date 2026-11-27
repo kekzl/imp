@@ -178,15 +178,14 @@ TEST(Nvfp4TileRepeat, RelaunchesAreByteIdentical) {
     int64_t wshape[2] = {N, K};
     Tensor wt(w.p, QType::F16, 2, wshape, true);
     NvFP4Owned qr;
-    CutlassNvFP4Owned cw;
+    NvFP4SfAtomOwned cw;
     quantize_fp16_to_nvfp4(wt, qr, s);
-    convert_nvfp4_to_cutlass(qr, cw, s);
-    Dev<uint8_t> act(size_t(M) * K / 2), act_sf(cutlass_nvfp4_sf_size(M, K));
+    convert_nvfp4_to_sfatom(qr, cw, s);
+    Dev<uint8_t> act(size_t(M) * K / 2), act_sf(nvfp4_sfatom_size(M, K));
     cudaMemsetAsync(act_sf.p, 0, act_sf.bytes, s);
-    quantize_fp16_to_nvfp4_cutlass(x.p, act.p, act_sf.p, M, K, s);
+    quantize_fp16_to_nvfp4_sfatom(x.p, act.p, act_sf.p, M, K, s);
     const size_t ws_bytes = std::max<size_t>(gemm_tile_streamk_workspace_bytes(), 4096 + (size_t(170) << 16));
-    Dev<uint8_t> ws(ws_bytes), ref(size_t(M) * N * 2), cur(size_t(M) * N * 2),
-        sf(cutlass_nvfp4_sf_size(M, N));
+    Dev<uint8_t> ws(ws_bytes), ref(size_t(M) * N * 2), cur(size_t(M) * N * 2), sf(nvfp4_sfatom_size(M, N));
     Dev<unsigned int> bad(sizeof(unsigned int) * 4 * reps);
     cudaMemsetAsync(bad.p, 0, bad.bytes, s);
     const auto launch = [&](int arm, uint8_t* out) {
@@ -231,7 +230,7 @@ TEST(Nvfp4TileRepeat, RelaunchesAreByteIdentical) {
         std::printf("B-136 arm %d: %d of %d relaunches differ\n", arm, launches, reps);
         EXPECT_EQ(launches, 0) << "arm " << arm;
     }
-    cw = CutlassNvFP4Owned{};
+    cw = NvFP4SfAtomOwned{};
     qr = NvFP4Owned{};
     cudaStreamDestroy(s);
 }
