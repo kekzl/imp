@@ -184,8 +184,9 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
         // GDN/SSM hybrids defer to the gdn_head_ok gate above instead of the
         // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
-        const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true, head_qtype,
-                                                   prof.is_dense, cfg.d_model,
+        const bool head_on = nvfp4_lm_head_enabled(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head),
+                                                   /*quantized_source=*/true, head_qtype, prof.is_dense,
+                                                   cfg.d_model,
                                                    /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm,
                                                    wcache_->lm_head_fp8.weight.data != nullptr);
         if (quantized_head) {
@@ -206,9 +207,9 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
 
 void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
     // Native-precision head (checked below): auto → ON per the #982 net rule.
-    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
-                               model_->profile().is_dense, cfg.d_model, /*is_gdn_hybrid=*/false,
-                               wcache_->lm_head_fp8.weight.data != nullptr))
+    if (!nvfp4_lm_head_enabled(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head), /*quantized_source=*/false,
+                               model_->output_proj().qtype, model_->profile().is_dense, cfg.d_model,
+                               /*is_gdn_hybrid=*/false, wcache_->lm_head_fp8.weight.data != nullptr))
         return;
 
     const Tensor& lm = model_->output_proj();

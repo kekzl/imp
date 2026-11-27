@@ -3,6 +3,8 @@
 // per-layer NVFP4 device-args caches for the MoE prefill fast path.
 
 #include "exec/executor.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/speculative.h"
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
@@ -801,7 +803,8 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     }
     const auto ct = wcache_->nvfp4_sfatom.find(head.data);
     // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
-    const bool mtp_reads_source = nvfp4_head && model_->mtp_ && !dispatch_policy().speculative.mtp_nvfp4_head;
+    const bool mtp_reads_source = nvfp4_head && model_->mtp_ &&
+                                  !speculative_section(dispatch_policy()).mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
         (fp8_head && wcache_->nvfp4.contains(head.data)) || mtp_reads_source ||
         (ct != wcache_->nvfp4_sfatom.end() && ct->second.scale_factors != nullptr) ||

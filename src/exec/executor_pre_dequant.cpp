@@ -11,6 +11,7 @@
 #include "memory/vram_allocator.h"
 #include "core/kv_dtype.h"
 #include "exec/pre_dequant_internal.h"
+#include "core/dispatch_policy.h"
 #include "exec/quant_pipeline.h"
 #include "core/fallback_site.h"
 #include "core/logging.h"
@@ -360,9 +361,11 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
     // heads; quantized GGUF heads route through the phase-3 collector's
     // size/arch-gated auto rule. GDN/SSM hybrids keep FP16 unless nvfp4_lm_head_gdn.
     if (pre_dequant_internal::nvfp4_lm_head_enabled(
-            dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
-            model_->profile().is_dense, cfg.d_model,
-            /*is_gdn_hybrid=*/false, pre_dequant_internal::fp8_lm_head_wanted(dispatch_policy(), *model_))) {
+            lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head), /*quantized_source=*/false,
+            model_->output_proj().qtype, model_->profile().is_dense, cfg.d_model,
+            /*is_gdn_hybrid=*/false,
+            pre_dequant_internal::fp8_lm_head_wanted(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head),
+                                                     *model_))) {
         bool is_gdn = false;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);

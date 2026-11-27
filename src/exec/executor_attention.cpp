@@ -1,4 +1,5 @@
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 #include "memory/device_alloc_all.h"
 #include "exec/executor.h"
 #include <stdexcept>
@@ -517,7 +518,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // MLA absorbed-decode (opt-in): populates the per-layer latent cache with
     // this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH prefill
     // and decode, so the cache is warm before the first decode step. Single-sequence only.
-    const bool mla_absorb_active = dispatch_policy().attention.mla_absorb && cfg.is_mla() &&
+    const bool mla_absorb_active = attention_section(dispatch_policy()).mla_absorb && cfg.is_mla() &&
                                    mla_absorb_cache_.data() != nullptr && state.n_sequences == 1;
     if (mla_absorb_active) {
         half* cache_layer = mla_absorb_cache_.data() +

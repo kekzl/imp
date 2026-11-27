@@ -2,7 +2,6 @@
 // sidecars (scales, codebooks) to device tensors; Phase 0b registers prequant NVFP4 weights in
 // wcache_->nvfp4, from which Phase 3b builds the prefill SfAtom. Colocated as both are loader-side concerns.
 
-#include "core/dispatch_policy.h"
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"

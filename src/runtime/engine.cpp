@@ -83,7 +83,10 @@ void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept 
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
 Engine::Engine()
-    : runtime_config_owner_(std::make_unique<RuntimeConfig>()), runtime_config_(*runtime_config_owner_) {}
+    : runtime_config_owner_(std::make_unique<RuntimeConfig>()),
+      runtime_config_(*runtime_config_owner_),
+      dispatch_policy_owner_(std::make_unique<DispatchPolicy>()),
+      dispatch_policy_(*dispatch_policy_owner_) {}
 
 Engine::~Engine() {
     // The last step's work can still be queued (a pipelined decode step), and VMM-backed
@@ -698,7 +701,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     model_ = std::move(model);
     config_ = config;
-    rt_ = seed_runtime_state(config_);  // what init resolves goes here, config_ keeps the operator's (C-9)
 
     // Takes the pending RuntimeConfig stashed by tool main (imp-cli/imp-server)
     // via set_pending_runtime_config(), or a freshly loaded env-seeded default
@@ -716,6 +718,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // `use_prefix_caching=0` embedder choice. Both shipped tools already pass
     // their own resolved value, so nothing that ships loses caching (#1299/#1314).
     bridge_runtime_config(config_, runtime_config_);
+    rt_ = seed_runtime_state(config_);  // what init resolves goes here, config_ keeps the operator's (C-9)
 
     // Install the process-wide VRAM budget view BEFORE any sizing runs: every
     // cudaMemGetInfo-based decision below (weight upload gates, cache budgets,
@@ -797,12 +800,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                            ? std::min(cfg::kSpecCaptureCtxCap, rt_.max_seq_len)
                                            : cfg::kSpecCaptureCtxCap)
                                     : 0;
-        const auto d = exec_t2_demand(
-            *model_, rt_.max_seq_len, rt_.max_batch_size,
-            fp8_act_scratch_needed(*model_, config_.use_fp8_prefill), runtime_config_.attention.mla_absorb,
-            capture_cap, config_.kv_block_size.value_or(0), runtime_config_.attention.ra2_prefill,
-            engine_internal::apa_eps_for(*model_, runtime_config_.attention.apa_eps) > 0.0f,
-            runtime_config_.attention.apa_tile_cache);
+        const auto d = exec_t2_demand(*model_, rt_.max_seq_len, rt_.max_batch_size,
+                                      fp8_act_scratch_needed(*model_, rt_.use_fp8_prefill),
+                                      runtime_config_.attention.mla_absorb, capture_cap, rt_.kv_block_size,
+                                      runtime_config_.attention.ra2_prefill,
+                                      engine_internal::apa_eps_for(*model_,
+                                                                   runtime_config_.attention.apa_eps) > 0.0f,
+                                      runtime_config_.attention.apa_tile_cache);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant but uploads
         // during warmup, so its demand must be read off the model's shapes here.
         // Gemma's mmproj tower stays outside the arena for now (docs/audit/SETTLED.md F-12).
@@ -817,7 +821,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // The decode batch pool is engine-lifetime and config-sized but
         // allocated after KV sizing, so reserve for it here. with_swa_tables is
         // unknown yet; assume true, guessing high costs nothing, low exhausts the arena.
-        const int kv_bs = config_.kv_block_size.value_or(0) > 0 ? *config_.kv_block_size : 16;
+        const int kv_bs = rt_.kv_block_size > 0 ? rt_.kv_block_size : 16;
         const size_t batch_pool_bytes = GPUBatchPool::demand_bytes(
             rt_.max_batch_size, (rt_.max_seq_len + kv_ahead_tokens_ + kv_bs - 1) / kv_bs,
             /*with_swa_tables=*/true);
@@ -929,7 +933,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
     MemAccount::instance().checkpoint("02_weights+decode_cache");
     // Before the KV init: the recurrent snapshot host tier follows the spill budget.
-    const bool spill_auto = apply_host_spill_auto(runtime_config_, config_.use_prefix_caching,
+    const bool spill_auto = apply_host_spill_auto(runtime_config_, rt_.use_prefix_caching,
                                                   host_mem_available_bytes(), host_ram_headroom_bytes());
     if (!init_kv_cache()) {
         return false;

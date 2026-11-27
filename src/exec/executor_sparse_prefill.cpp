@@ -1,7 +1,8 @@
 // Sparse prefill attention (attention.sparse_prefill_topk_tokens): scratch at init and the
 // per-chunk past-page pick the chunked prefill path calls. Kernels: sparse_attn_select.cu.
 
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 #include "core/fallback_site.h"
 #include "core/log_once.h"
 #include "core/logging.h"
@@ -19,7 +20,7 @@ FallbackSite s_fb_sparse_prefill{"sparse_prefill_scratch"};
 }  // namespace
 
 void GraphExecutor::allocate_sparse_prefill_scratch_() {
-    const auto& acfg = dispatch_policy().attention;
+    const auto& acfg = attention_section(dispatch_policy());
     if (acfg.sparse_prefill_topk_tokens <= 0)
         return;
     const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;

@@ -1,7 +1,6 @@
 // Legacy MoE prefill fallback: D2H sync + serial/batch dequant + cuBLAS.
 // Extracted from executor_forward_moe.cu for maintainability.
 
-#include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/nvfp4_expert_offload.h"

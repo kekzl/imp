@@ -15,7 +15,8 @@
 // updated whenever a slot's occupant changes.
 
 #include "exec/executor.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/moe.h"
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
@@ -117,7 +118,7 @@ bool GraphExecutor::init_device_expert_cache() {
         return device_expert_cache_covers_host_layers();
     }
     const int top_k = std::max(1, model_->config().n_experts_active);
-    dev_expert_cache_.set_host_pool_mib(dispatch_policy().moe.host_expert_pool_mib);
+    dev_expert_cache_.set_host_pool_mib(moe_section(dispatch_policy()).host_expert_pool_mib);
     if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
         IMP_LOG_INFO(
             "Device expert cache: not built (no host-resident NVFP4 / GGUF layer in a mapped "

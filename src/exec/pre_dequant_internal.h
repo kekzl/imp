@@ -17,7 +17,7 @@
 #include "model/model.h"
 #include "model/layer_host_keep.h"
 #include "model/model_config.h"
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
 #include "core/config/lm_head_mode.h"
 #include "quant/dequant_gpu.h"
 
@@ -94,9 +94,8 @@ struct Fp8CacheBuffers {
 }
 
 // This load builds the FP8 head: fp8, or auto with a 16-bit source (#2224), and the head is eligible.
-[[nodiscard]] inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
-    return lm_head_mode_fp8(lm_head_mode(rc.gemm.nvfp4_lm_head), m.output_proj().qtype) &&
-           fp8_lm_head_eligible(m);
+[[nodiscard]] inline bool fp8_lm_head_wanted(LmHeadMode mode, const Model& m) {
+    return lm_head_mode_fp8(mode, m.output_proj().qtype) && fp8_lm_head_eligible(m);
 }
 
 // #982 net rule for the NVFP4 LM-head decode cache (gemm.nvfp4_lm_head: auto/on/off/fp8,
@@ -109,9 +108,10 @@ struct Fp8CacheBuffers {
 // quantized hybrids, so auto defers to nvfp4_lm_head_gdn via is_gdn_hybrid.
 // NATIVE (F16/BF16) heads: auto -> ON unconditionally (cuBLAS GEMV alternative, NVFP4
 // cache wins on bytes; GOAL-listed).
-[[nodiscard]] inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, QType head_qtype,
-                                  bool is_dense, int d_model, bool is_gdn_hybrid, bool fp8_head) {
-    const LmHeadMode mode = lm_head_mode(rc.gemm.nvfp4_lm_head);
+// `mode`: lm_head_mode(gemm.nvfp4_lm_head), so this header needs no core/config/gemm.h (B-123).
+[[nodiscard]] inline bool nvfp4_lm_head_enabled(LmHeadMode mode, bool quantized_source, QType head_qtype,
+                                                bool is_dense, int d_model, bool is_gdn_hybrid,
+                                                bool fp8_head) {
     if (mode == LmHeadMode::Nvfp4)
         return true;
     if (mode == LmHeadMode::Source || mode == LmHeadMode::Fp8 || fp8_head ||
