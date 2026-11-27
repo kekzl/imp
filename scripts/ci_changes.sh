@@ -20,7 +20,7 @@ if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
 elif files="$(git diff --name-only "$base" HEAD)"; then
     # code stays true unless EVERY changed file is markdown, docs/, .claude/ or a workflow other
     # than ci.yml: none is a build input; 4/69 PR runs compiled 91-739 s for them.
-    if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(\.md$|^docs/|^\.claude/|^\.github/workflows/(codeql|auto-merge|roofline|release-docker|nightly)\.yml$)'; then
+    if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(^\.github/|^scripts/|\.md$|^docs/|^\.claude/|^\.github/workflows/(codeql|auto-merge|roofline|release-docker|nightly)\.yml$)'; then
         code=false
     fi
     # `grep -c`, not `grep -q` (#1499: -q exits at the first match, the producer takes EPIPE and
