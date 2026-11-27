@@ -2,6 +2,8 @@
 
 #include "utils.h"
 
+#include <httplib.h>
+
 #include <algorithm>
 #include <iterator>
 

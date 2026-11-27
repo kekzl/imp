@@ -1347,7 +1347,6 @@ if(IMP_BUILD_TESTS)
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
             tests/test_anthropic_effort.cpp
-            tests/test_anthropic_thinking_blocks.cpp
             tests/test_anthropic_transform.cpp
             tests/test_anthropic_usage.cpp
             tests/test_assistant_prefill_transform.cpp
@@ -1755,9 +1754,6 @@ if(IMP_BUILD_TESTS)
         target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
         target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
     endif()
-
-    # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
-    imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention

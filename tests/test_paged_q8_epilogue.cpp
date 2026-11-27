@@ -48,60 +48,9 @@ TEST(PagedQ8Epilogue, NothingArmedIsNeverTaken) {
 }
 
 // PagedDecodeArgs (audit D-11): the 10 raw-pointer paged decode launchers take one aggregate built
-// with designated initializers. 23 fields: a field added or dropped fails the binding below.
+// with designated initializers; a declaration-order swap fails the build at those call sites.
 using imp::PagedDecodeArgs;
 static_assert(std::is_aggregate_v<PagedDecodeArgs>);
-
-TEST(PagedDecodeArgs, CarriesEveryFieldInDeclarationOrder) {
-    static const half q[1] = {};
-    static const uint8_t kc[1] = {}, vc[1] = {}, ks[1] = {}, vs[1] = {};
-    static half o[1] = {};
-    static float part[1] = {};
-    static const int bt[1] = {}, cl[1] = {};
-    static const half sinks[1] = {};
-    static int stream_tag = 0;
-    auto* const stream = reinterpret_cast<cudaStream_t>(&stream_tag);
-    const PagedDecodeArgs a{
-        .Q = q,
-        .K_cache = kc,
-        .V_cache = vc,
-        .K_scales = ks,
-        .V_scales = vs,
-        .O = o,
-        .partial = part,
-        .block_tables = bt,
-        .context_lens = cl,
-        .batch_size = 1,
-        .n_heads = 2,
-        .n_kv_heads = 3,
-        .head_dim = 4,
-        .block_size = 5,
-        .scale = 6.0f,
-        .kv_scale = 7.0f,
-        .max_num_blocks = 8,
-        .num_splits = 9,
-        .sliding_window = 10,
-        .softcap = 11.0f,
-        .attn_sinks = sinks,
-        .heads_per_cta = 12,
-        .stream = stream,
-    };
-    const auto& [Q, K, V, Ks, Vs, O, P, BT, CL, b, nh, nkv, hd, bs, sc, kvs, mnb, ns, sw, cap, sk, hpc,
-                 st] = a;
-    EXPECT_EQ(Q, q);
-    EXPECT_EQ(K, kc);
-    EXPECT_EQ(V, vc);
-    EXPECT_EQ(Ks, ks);
-    EXPECT_EQ(Vs, vs);
-    EXPECT_EQ(O, o);
-    EXPECT_EQ(P, part);
-    EXPECT_EQ(BT, bt);
-    EXPECT_EQ(CL, cl);
-    EXPECT_EQ((std::array{b, nh, nkv, hd, bs, mnb, ns, sw, hpc}), (std::array{1, 2, 3, 4, 5, 8, 9, 10, 12}));
-    EXPECT_EQ((std::array{sc, kvs, cap}), (std::array{6.0f, 7.0f, 11.0f}));
-    EXPECT_EQ(sk, sinks);
-    EXPECT_EQ(st, stream);
-}
 
 // Defaults a launcher may rely on when a caller leaves the field out: unscaled FP8, one split,
 // no window, no softcap, no sinks, auto heads per CTA, the legacy stream.

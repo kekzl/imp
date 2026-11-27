@@ -25,10 +25,15 @@ if [ -z "$FILTER" ]; then
     exit 1
 fi
 
+. "$(dirname "$0")/gtest_names_lib.sh"
+NAMES=$(mktemp)
+trap 'rm -f "$NAMES"' EXIT
+# One listing of all modules (450 ms); each pattern matches the cached names, no GPU needed.
+gtest_names "$BIN" "$NAMES"
+
 # On a host without the CUDA runtime, the binary exits before main and prints nothing, making
 # every pattern look empty; report that as "could not measure", not "twelve findings".
-TOTAL=$("$BIN" --gtest_list_tests 2>/dev/null | grep -c '^  ' || true)
-if [ "$TOTAL" -eq 0 ]; then
+if [ ! -s "$NAMES" ]; then
     echo "check_verify_filter: SKIP ($BIN lists no tests at all — no CUDA runtime here?)"
     exit 0
 fi
@@ -37,9 +42,7 @@ EMPTY=""
 PATTERNS=$(printf '%s' "$FILTER" | tr ':' '\n')
 for pat in $PATTERNS; do
     [ -z "$pat" ] && continue
-    # --gtest_list_tests runs no test body, so this needs no GPU.
-    COUNT=$("$BIN" --gtest_list_tests --gtest_filter="$pat" 2>/dev/null |
-            grep -c '^  ' || true)
+    COUNT=$(gtest_count "$NAMES" "$BIN" "$pat")
     if [ "$COUNT" -eq 0 ]; then
         EMPTY="$EMPTY $pat"
     fi

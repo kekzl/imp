@@ -1,6 +1,5 @@
 #pragma once
 
-#include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include "runtime/request.h"
@@ -14,6 +13,14 @@
 #include <cstdint>
 
 using json = nlohmann::ordered_json;
+
+// httplib types by reference only: a TU that calls into httplib includes <httplib.h> itself
+// (9 s of -O3 per TU, 79 % of it code generation, so a precompiled header does not help).
+namespace httplib {
+struct Request;
+struct Response;
+class DataSink;
+}  // namespace httplib
 
 // dump_safe: serializes without throwing on invalid UTF-8 (nlohmann's dump() throws
 // type_error.316 on ill-formed bytes, which client/model text routinely contains). Invalid bytes
@@ -359,7 +366,8 @@ struct SSEChunkWriter {
         buf_.reserve(512);
     }
 
-    bool write_content(const char* text, size_t len, httplib::DataSink& sink) {
+    template <class Sink>  // httplib::DataSink; a template so this header needs no <httplib.h>
+    bool write_content(const char* text, size_t len, Sink& sink) {
         buf_.clear();
         buf_ += content_prefix;
         json_escape_into(buf_, text, len);
@@ -367,11 +375,13 @@ struct SSEChunkWriter {
         return sink.write(buf_.data(), buf_.size());
     }
 
-    bool write_content(const std::string& text, httplib::DataSink& sink) {
+    template <class Sink>
+    bool write_content(const std::string& text, Sink& sink) {
         return write_content(text.data(), text.size(), sink);
     }
 
-    bool write_reasoning(const char* text, size_t len, httplib::DataSink& sink) {
+    template <class Sink>
+    bool write_reasoning(const char* text, size_t len, Sink& sink) {
         buf_.clear();
         buf_ += reasoning_prefix;
         json_escape_into(buf_, text, len);
@@ -379,7 +389,8 @@ struct SSEChunkWriter {
         return sink.write(buf_.data(), buf_.size());
     }
 
-    bool write_reasoning(const std::string& text, httplib::DataSink& sink) {
+    template <class Sink>
+    bool write_reasoning(const std::string& text, Sink& sink) {
         return write_reasoning(text.data(), text.size(), sink);
     }
 };

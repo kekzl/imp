@@ -45,9 +45,7 @@ import io
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Test modules with no ctest entry on purpose: module -> reason. Anything else without one fails.
-NO_CTEST = {
-    "test-hf-network": "opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); CI has no network",
-}
+NO_CTEST: dict[str, str] = {}
 
 TEST_RE = re.compile(r"^\s*(TEST|TEST_F|TEST_P)\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)", re.M)
 SRC_RE = re.compile(r"tests/([A-Za-z0-9_/]+\.(?:cpp|cu))")

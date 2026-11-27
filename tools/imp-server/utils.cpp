@@ -1,4 +1,6 @@
 #include "utils.h"
+
+#include <httplib.h>
 #include "imp/imp.h"
 #include "stream_pipeline.h"
 #include "core/logging.h"
