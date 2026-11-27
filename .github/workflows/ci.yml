@@ -36,6 +36,9 @@ concurrency:
 permissions:
   contents: read
 
+# A main push runs Changes, Build (saves the ccache every PR restores) and the path-driven PTX and
+# Sanitizers lanes. The gate, lint and API jobs run on PRs and dispatch only: a push re-checked the
+# tree its PR run had passed, and `Build` still runs every static gate itself.
 jobs:
   # Picks `Build`'s container: a docs-only diff runs `Build` on the runner without the CI image
   # (1.1 GB pull, median 32 s of a 94 s docs-only Build). Same script as Build's own detection.
@@ -389,6 +392,7 @@ jobs:
   # requires that exact check name.
   mock-api:
     name: Mock API contract
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -421,7 +425,7 @@ jobs:
   real-api:
     name: Real API contract (model-less)
     needs: build
-    if: needs.build.outputs.code == 'true'
+    if: github.event_name != 'push' && needs.build.outputs.code == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     container:
@@ -500,6 +504,7 @@ jobs:
   # for the same reason.
   lint:
     name: Lint
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -541,6 +546,7 @@ jobs:
   # is documented in docs/audit/AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
   filesize:
     name: File size
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -565,6 +571,7 @@ jobs:
   # demoted vs the merge-base. Own check name: inside "File size" its reds misread (2026-08-25).
   testlanes:
     name: Test lanes
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -584,6 +591,7 @@ jobs:
   # to mirror. Ubuntu job, no toolchain, seconds.
   docs:
     name: Docs
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -598,6 +606,7 @@ jobs:
 
   hygiene:
     name: Release hygiene
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -607,6 +616,7 @@ jobs:
 
   alloc-sites:
     name: Alloc sites
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -619,6 +629,7 @@ jobs:
 
   launchguards:
     name: Launch guards
+    if: github.event_name != 'push'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
