@@ -53,20 +53,20 @@ TEST(WeightTierEntries, BindTakesTheMapNodesOfTheSource) {
     EXPECT_EQ(h.entries.nvfp4, nullptr);
 }
 
-// Slice 2: the CUTLASS / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
+// Slice 2: the SfAtom / prefill-copy maps and the Phase 4b / 4c release maps bind too; a bind
 // taken before 4b / 4c keyed the released source sees none of them until the rebind.
 TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     WeightCaches wc;
-    wc.cutlass_nvfp4.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
-    wc.cutlass_nvfp4_prefill.emplace(&g_src_a, imp::CutlassNvFP4CacheEntry{});
-    wc.cutlass_mxfp8_prefill.emplace(&g_src_a, imp::CutlassMxFP8CacheEntry{});
-    wc.cutlass_mxfp4.emplace(&g_src_a, imp::CutlassMxFP4CacheEntry{});
+    wc.nvfp4_sfatom.emplace(&g_src_a, imp::NvFP4SfAtomCacheEntry{});
+    wc.nvfp4_sfatom_prefill.emplace(&g_src_a, imp::NvFP4SfAtomCacheEntry{});
+    wc.mxfp8_sfatom_prefill.emplace(&g_src_a, imp::MxFP8SfAtomCacheEntry{});
+    wc.mxfp4_sfatom.emplace(&g_src_a, imp::MxFP4SfAtomCacheEntry{});
     WeightHandle h = handle(&g_src_a, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
     imp::bind_cache_entries(h, wc);
-    EXPECT_EQ(h.entries.cutlass_nvfp4, &wc.cutlass_nvfp4.at(&g_src_a));
-    EXPECT_EQ(h.entries.nvfp4_prefill, &wc.cutlass_nvfp4_prefill.at(&g_src_a));
-    EXPECT_EQ(h.entries.mxfp8_prefill, &wc.cutlass_mxfp8_prefill.at(&g_src_a));
-    EXPECT_EQ(h.entries.cutlass_mxfp4, &wc.cutlass_mxfp4.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4_sfatom, &wc.nvfp4_sfatom.at(&g_src_a));
+    EXPECT_EQ(h.entries.nvfp4_prefill, &wc.nvfp4_sfatom_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.mxfp8_prefill, &wc.mxfp8_sfatom_prefill.at(&g_src_a));
+    EXPECT_EQ(h.entries.mxfp4_sfatom, &wc.mxfp4_sfatom.at(&g_src_a));
     EXPECT_EQ(h.entries.released_fp8, nullptr);
     EXPECT_FALSE(h.entries.q8_planes_only);
 
@@ -80,7 +80,7 @@ TEST(WeightTierEntries, BindTakesTheCopyAndReleaseMaps) {
     // Another source sees none of them.
     WeightHandle other = handle(&g_src_b, StorageTier::FP16, StorageTier::Undefined, StorageTier::Undefined);
     imp::bind_cache_entries(other, wc);
-    EXPECT_EQ(other.entries.cutlass_nvfp4, nullptr);
+    EXPECT_EQ(other.entries.nvfp4_sfatom, nullptr);
     EXPECT_EQ(other.entries.mxfp8_prefill, nullptr);
     EXPECT_EQ(other.entries.released_fp8, nullptr);
     EXPECT_FALSE(other.entries.q8_planes_only);
@@ -103,18 +103,18 @@ TEST(WeightTierEntries, EveryReadTierNeedsItsEntry) {
     constexpr auto U = StorageTier::Undefined;
     // All entries present.
     EXPECT_EQ(imp::missing_tier_entry(
-                  bound(&g_src_a, StorageTier::CUTLASS_NVFP4, StorageTier::FP8, StorageTier::FP8)),
+                  bound(&g_src_a, StorageTier::NVFP4_SFATOM, StorageTier::FP8, StorageTier::FP8)),
               nullptr);
-    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::NVFP4, U, U)), nullptr);
+    EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::NVFP4_LINEAR, U, U)), nullptr);
     // NVFP4 decode (explicit or through the primary tier) without an nvfp4 entry.
     EXPECT_STREQ(imp::missing_tier_entry(
-                     bound(&g_src_none, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, U)),
+                     bound(&g_src_none, StorageTier::NVFP4_SFATOM, StorageTier::NVFP4_LINEAR, U)),
                  "nvfp4");
-    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::NVFP4, U, U)), "nvfp4");
+    EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::NVFP4_LINEAR, U, U)), "nvfp4");
     // FP8 decode or FP8 prefill without an fp8 entry.
     EXPECT_STREQ(imp::missing_tier_entry(bound(&g_src_b, StorageTier::FP16, StorageTier::FP8, U)), "fp8");
     EXPECT_STREQ(imp::missing_tier_entry(
-                     bound(&g_src_b, StorageTier::CUTLASS_NVFP4, StorageTier::NVFP4, StorageTier::FP8)),
+                     bound(&g_src_b, StorageTier::NVFP4_SFATOM, StorageTier::NVFP4_LINEAR, StorageTier::FP8)),
                  "fp8");
     // FP16 prefill without an fp16 entry: the source is the weight, a designed state.
     EXPECT_EQ(imp::missing_tier_entry(bound(&g_src_none, StorageTier::FP16, U, U)), nullptr);

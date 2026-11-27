@@ -33,7 +33,7 @@ inline double ue4m3(uint8_t b) {
     return std::ldexp(1.0 + (static_cast<double>(m) / 8.0), e - 7);
 }
 
-// CUTLASS SfAtom byte offset of (row, 16-element k group): 128 rows x 4 k groups = 512 B atoms, K tiles
+// SfAtom byte offset of (row, 16-element k group): 128 rows x 4 k groups = 512 B atoms, K tiles
 // inner. Mirrors sfatom_offset() in nvfp4_sfatom_quant.cu (a layout permutation, not GEMM math).
 inline size_t sfatom_offset(int row, int k_group, int n_k_tiles) {
     const int tile_row = row / 128;

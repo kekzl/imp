@@ -83,7 +83,7 @@ int capture(MtpHeadGraphs& G, const MtpHeadGraphKey& key, int rows, const void* 
     gemm_set_lt_capture_allowed(true);
     int n_out = -1;
     try {
-        n_out = run(rows - 1);
+        n_out = std::forward<Run>(run)(rows - 1);
     } catch (const std::exception& e) {
         IMP_LOG_WARN("[mtp-head-graph] pass threw inside the capture: %s", e.what());
     }

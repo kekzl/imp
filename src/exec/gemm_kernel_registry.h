@@ -3,7 +3,7 @@
 // GemmKernel registry, the (Strategy -> handler) table behind the 3 dispatch sites:
 //   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
 //   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq/dp4a/fused gemv), 8 qtypes
-//   {CUTLASS_NVFP4, F16, false}  NVFP4 prefill GEMM (own tile, cuBLASLt on refusal)
+//   {NVFP4_SFATOM, F16, false}  NVFP4 prefill GEMM (own tile, cuBLASLt on refusal)
 // Every key has one producer and vice versa; GemmKernelRegistryLink.HoldsExactlyTheProducedKeys
 // (test-core) pins the 10 keys. A new tier registers here only together with its dispatch site.
 // Registration is explicit: instance() calls the register_*_gemm_kernels functions below once.
@@ -20,8 +20,8 @@
 namespace imp {
 
 // Forward-declared payload structs (defined in their owning TUs).
-struct CutlassNvFP4Weight;
-struct CutlassMxFP4Weight;
+struct NvFP4SfAtomWeight;
+struct MxFP4SfAtomWeight;
 
 // Strategy key: fully describes which kernel handles a dispatch request. qtype is the
 // WEIGHT qtype (input is always FP16 on the hot path today). m_is_one separates GEMV
@@ -49,7 +49,7 @@ struct GemmKernelArgs {
 
     // Tier-specific weight handle. Casts:
     //   FP16            -> const Tensor* (F16 weight or GGUF source tensor)
-    //   CUTLASS_NVFP4   -> const CutlassNvFP4Weight*
+    //   NVFP4_SFATOM   -> const NvFP4SfAtomWeight*
     const void* weight_payload = nullptr;
 
     // Workspace pointers — only some tiers consume them. nullptr means the
@@ -59,10 +59,10 @@ struct GemmKernelArgs {
     // Bytes behind dequant_scratch; 0 = unknown. A whole-weight dequant larger than this is
     // refused (PreconditionFail) instead of written past the buffer (#2046).
     size_t dequant_scratch_size = 0;
-    void* cutlass_act_data = nullptr;
-    void* cutlass_act_sf = nullptr;
-    void* cutlass_workspace = nullptr;
-    size_t cutlass_workspace_size = 0;
+    void* tile_act_data = nullptr;
+    void* tile_act_sf = nullptr;
+    void* tile_workspace = nullptr;
+    size_t tile_workspace_size = 0;
 
     // dp4a/Q8_1 activation quantization scratch (GGUF dp4a tier): per-call scratch pre-sized
     // by engine init (QuantScratch::q8_1_buf/d8_buf). nullptr means no scratch supplied; the
@@ -70,9 +70,9 @@ struct GemmKernelArgs {
     void* q8_1_buf = nullptr;
     float* d8_buf = nullptr;
 
-    // Act-quant dedupe (CUTLASS_NVFP4 prefill): cutlass_act_data/_sf already hold the
+    // Act-quant dedupe (NVFP4_SFATOM prefill): tile_act_data/_sf already hold the
     // quantized form of input (a prior dispatch on the same input quantized it); the handler
-    // skips quantize_fp16_to_nvfp4_cutlass. Set when the GemmContext act-quant hint matches
+    // skips quantize_fp16_to_nvfp4_sfatom. Set when the GemmContext act-quant hint matches
     // (input.data, M, K).
     bool act_prequantized = false;
     // Static NVFP4 activation tensor scale (WeightHandle::act_scale): quantize with it, alpha x it.
@@ -140,6 +140,6 @@ private:
 // link-time reference that keeps each kernel TU in every binary linking libimp.a.
 void register_generic_dequant_gemm_kernels(GemmKernelRegistry& reg);  // 1 key
 void register_gguf_gemm_kernels(GemmKernelRegistry& reg);             // 11 keys
-void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg);    // 1 key
+void register_nvfp4_sfatom_gemm_kernels(GemmKernelRegistry& reg);     // 1 key
 
 }  // namespace imp

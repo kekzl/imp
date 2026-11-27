@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """clang-tidy findings gate for imp (#2210).
 
-Error checks: the `WarningsAsErrors` globs of .clang-tidy (bugprone-*, clang-analyzer-*).
+Error checks: the `WarningsAsErrors` globs of .clang-tidy (bugprone-*, clang-analyzer-*,
+four cppcoreguidelines-* / concurrency-* checks).
 A finding of an error check in a file fails unless tools/tidy_baseline.toml pins that
 (file, check) at >= the count found. Other checks stay advisory.
 

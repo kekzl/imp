@@ -27,7 +27,7 @@ __global__ void fill_kernel(half* p, size_t n, uint32_t seed, float amp) {
 
 struct Operands {
     int M = 0, N = 0, K = 0;
-    CutlassMxFP8Weight cw;
+    MxFP8SfAtomWeight cw;
     void* act = nullptr;
     void* act_sf = nullptr;
     float* row_scales = nullptr;
@@ -50,7 +50,7 @@ void make_operands(Operands& o, int M, int N, int K, bool rows, cudaStream_t s) 
     o.cw.N = N;
     o.cw.K = K;
     o.cw.data_bytes = size_t(N) * K;
-    o.cw.sf_bytes = cutlass_mxfp8_sf_size(N, K);
+    o.cw.sf_bytes = mxfp8_sfatom_size(N, K);
     ASSERT_EQ(cudaMalloc(&o.cw.data, o.cw.data_bytes), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.cw.scale_factors, o.cw.sf_bytes), cudaSuccess);
     if (rows) {
@@ -61,11 +61,11 @@ void make_operands(Operands& o, int M, int N, int K, bool rows, cudaStream_t s) 
         mxfp8_sf_from_row_scales(o.row_scales, o.cw.scale_factors, col, N, K, s);
         o.cw.col_scale = col;
     } else {
-        quantize_fp16_to_mxfp8_cutlass(w, o.cw.data, o.cw.scale_factors, N, K, s);
+        quantize_fp16_to_mxfp8_sfatom(w, o.cw.data, o.cw.scale_factors, N, K, s);
     }
     ASSERT_EQ(cudaMalloc(&o.act, size_t(M) * K), cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&o.act_sf, cutlass_mxfp8_sf_size(M, K)), cudaSuccess);
-    quantize_fp16_to_mxfp8_cutlass(x, o.act, o.act_sf, M, K, s);
+    ASSERT_EQ(cudaMalloc(&o.act_sf, mxfp8_sfatom_size(M, K)), cudaSuccess);
+    quantize_fp16_to_mxfp8_sfatom(x, o.act, o.act_sf, M, K, s);
     o.ws_bytes = gemm_tile_streamk_workspace_bytes();
     ASSERT_EQ(cudaMalloc(&o.ws, o.ws_bytes), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.y_own, size_t(M) * N * sizeof(half)), cudaSuccess);

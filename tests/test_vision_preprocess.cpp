@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -148,10 +149,11 @@ TEST(VisionPreprocess, FileEntryPointMatchesMemoryPath) {
     const float stdv[3] = {0.5f, 0.5f, 0.5f};
 
     std::string path = testing::TempDir() + "imp_vision_preprocess_probe.png";
-    FILE* f = fopen(path.c_str(), "wb");
-    ASSERT_NE(f, nullptr);
-    fwrite(png.data(), 1, png.size(), f);
-    fclose(f);
+    {
+        std::ofstream f(path, std::ios::binary);
+        ASSERT_TRUE(f.good());
+        f.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+    }
 
     ImageData from_file, from_mem;
     ASSERT_TRUE(load_and_preprocess_image(path, 2, mean, stdv, from_file));

@@ -1,8 +1,8 @@
 // diagnostics.no_nvfp4_decode_cache is a decode-only bisection knob but used to return early
-// before nvfp4_decode_convert_cutlass_ populated the PREFILL cache infer_tier_from_wcache
+// before nvfp4_decode_convert_sfatom_ populated the PREFILL cache infer_tier_from_wcache
 // reads, silently moving native-NVFP4 prefill W4A4->W4A16 (PPL on
 // Nemotron-3.5-Lightning-30B-A3B-NVFP4: 9.165 -> 9.051). Runs on the smallest
-// CUTLASS-converting checkpoint on the box; GTEST_SKIPs if absent.
+// SfAtom-converting checkpoint on the box; GTEST_SKIPs if absent.
 
 #include "model/model.h"
 #include "model/safetensors_loader.h"
@@ -54,7 +54,7 @@ imp::EngineConfig knob_engine_config() {
 
 }  // namespace
 
-TEST(Nvfp4PrefillCacheKnobTest, DecodeKnobKeepsTheCutlassPrefillCache) {
+TEST(Nvfp4PrefillCacheKnobTest, DecodeKnobKeepsTheSfAtomPrefillCache) {
     if (!fs::exists(std::string(kNvfp4ModelDir) + "/config.json"))
         GTEST_SKIP() << "native-NVFP4 checkpoint not present at " << kNvfp4ModelDir;
     const size_t free_mib = device_free_mib();
@@ -77,8 +77,8 @@ TEST(Nvfp4PrefillCacheKnobTest, DecodeKnobKeepsTheCutlassPrefillCache) {
     ASSERT_TRUE(ok);
 
     EXPECT_NE(log.find("CUTLASS sm_120 NVFP4 weight cache:"), std::string::npos)
-        << "diagnostics.no_nvfp4_decode_cache skipped the CUTLASS *prefill* conversion. "
-           "It is declared decode-only, and infer_tier_from_wcache reads cutlass_nvfp4 to "
+        << "diagnostics.no_nvfp4_decode_cache skipped the SfAtom *prefill* conversion. "
+           "It is declared decode-only, and infer_tier_from_wcache reads nvfp4_sfatom to "
            "set prefill_tier, so this silently changes prefill numerics. Captured log:\n"
         << log;
 

@@ -1,7 +1,7 @@
 // Pre-dequant Phase 3: NVFP4 decode-cache quantization. Multi-step quantization of
 // decode-side weights: candidate collection, two-pass mode-1/2 quantize, FP8 migration
-// of failed candidates, CUTLASS conversion, MXFP4-source conversion, MoE expert caching.
-// This file keeps the entry point + NVFP4 quantize helpers; FP8/CUTLASS/MXFP4/MoE live
+// of failed candidates, SfAtom conversion, MXFP4-source conversion, MoE expert caching.
+// This file keeps the entry point + NVFP4 quantize helpers; FP8/SfAtom/MXFP4/MoE live
 // in the sibling pre_dequant_phase3_*.cu files.
 
 #include "core/dispatch_policy.h"
@@ -296,16 +296,16 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     if (wcache_->nvfp4_decode_mode <= 0)
         return;
     // diagnostics.no_nvfp4_decode_cache skips steps that BUILD decode-cache entries. It must
-    // NOT skip the CUTLASS/MXFP4 conversions further down: those only re-lay-out weights
-    // phase 0 already registered, populating wcache_->cutlass_nvfp4, which
+    // NOT skip the SfAtom/MXFP4 conversions further down: those only re-lay-out weights
+    // phase 0 already registered, populating wcache_->nvfp4_sfatom, which
     // infer_tier_from_wcache reads to set prefill_tier. Returning early here took the whole
-    // CUTLASS prefill cache with it, silently moving dense FFN prefill from W4A4 to the
+    // SfAtom prefill cache with it, silently moving dense FFN prefill from W4A4 to the
     // gemm_nvfp4 W4A16 safety net.
     const bool skip_decode_cache = dispatch_policy().diagnostics.no_nvfp4_decode_cache;
     if (skip_decode_cache) {
         IMP_LOG_INFO(
             "NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "
-            "decode runs on source-precision paths; the CUTLASS/MXFP4 prefill "
+            "decode runs on source-precision paths; the SfAtom/MXFP4 prefill "
             "conversions still run");
     }
 
@@ -367,13 +367,13 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
 
     // Native-NVFP4 models store the LM head in FP16/BF16: quantize it to an NVFP4
     // decode-cache entry so decode uses the fast GEMV instead of a cuBLAS FP16 GEMV over
-    // vocab x d_model. Run after dense quantize so the entry is committed before CUTLASS
+    // vocab x d_model. Run after dense quantize so the entry is committed before the SfAtom
     // convert.
     if (!skip_decode_cache)
         nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
 
     if (!wcache_->nvfp4.empty()) {
-        nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
+        nvfp4_decode_convert_sfatom_(cfg, budget, remaining_budget, stream);
     }
 
     alloc_mxfp4_gemm_scratch_(cfg);
@@ -649,6 +649,9 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
         // A failed query stops the loop (vram_query.h): never over.
         if (!vram_fits(nvfp4_bytes, vram_reserve_floor(vram_budget_total_bytes())))
             break;
+        // The plan grant covers both passes (B-138: 79 tensors, 1617 MiB past a 0 grant).
+        if (dctx.nvfp4_dense_bytes + second_bytes + nvfp4_bytes > dctx.cache_grant)
+            break;
 
         // Dequant from quantized weights via scratch buffer
         size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -684,6 +687,7 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 
     if (second_count > 0) {
         wcache_->nvfp4_bytes += second_bytes;
+        dctx.nvfp4_dense_bytes += second_bytes;
         IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB", second_count,
                      second_bytes / (1024.0 * 1024.0));
     }

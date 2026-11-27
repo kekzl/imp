@@ -30,7 +30,7 @@ struct Record {
     AttnDecodePath attn_decode = AttnDecodePath::UNSET;
 
     MoePrefillOuter moe_prefill_outer = MoePrefillOuter::UNSET;
-    // Only meaningful when moe_prefill_outer == CUTLASS3X.
+    // Only meaningful when moe_prefill_outer == GROUPED_NVFP4.
     MoePrefillPath moe_prefill_tier = MoePrefillPath::LEGACY;
     bool moe_prefill_tier_set = false;
 

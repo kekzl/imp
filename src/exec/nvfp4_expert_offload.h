@@ -83,8 +83,8 @@ struct StagedProj {
     size_t ms_stride = 0;
     int n_experts = 0;
     // SfAtom scales + per-expert pointer arrays were built for this
-    // projection, so it can take the CUTLASS device-args prefill.
-    bool cutlass_ready = false;
+    // projection, so it can take the grouped NVFP4 device-args prefill.
+    bool sfatom_ready = false;
 
     bool valid() const { return packed != nullptr && ms != nullptr && n_experts > 0; }
     [[nodiscard]] bool covers(int expert) const { return valid() && expert >= 0 && expert < n_experts; }

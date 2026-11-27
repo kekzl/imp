@@ -71,7 +71,7 @@ const char* moe_prefill_outer_name(MoePrefillOuter p) {
             return "fp16_batch";
         case MoePrefillOuter::FP8_BATCH:
             return "fp8_batch";
-        case MoePrefillOuter::CUTLASS3X:
+        case MoePrefillOuter::GROUPED_NVFP4:
             return "cutlass3x";
         case MoePrefillOuter::NVFP4_DEQUANT:
             return "nvfp4_dequant_batch";

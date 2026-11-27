@@ -28,7 +28,7 @@ float e4m3_to_float(uint8_t b) {
 
 // E4M3 [rows, K] + SfAtom UE8M0 (128 rows x 4 K-groups per 512-byte atom) -> float rows on the host.
 std::vector<float> decode_mx8(const void* data, const void* sf, int rows, int K) {
-    std::vector<uint8_t> q(size_t(rows) * K), e(cutlass_mxfp8_sf_size(rows, K));
+    std::vector<uint8_t> q(size_t(rows) * K), e(mxfp8_sfatom_size(rows, K));
     cudaMemcpy(q.data(), data, q.size(), cudaMemcpyDeviceToHost);
     cudaMemcpy(e.data(), sf, e.size(), cudaMemcpyDeviceToHost);
     const int n_k_tiles = (K + 127) / 128;

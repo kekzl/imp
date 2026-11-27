@@ -10,7 +10,7 @@
 namespace imp_test {
 
 template <class Fn>
-void parallel_for(int n, Fn&& fn) {
+void parallel_for(int n, const Fn& fn) {
     const int hw = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     const int nt = std::min(n, hw);
     if (nt <= 1) {

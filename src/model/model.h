@@ -48,7 +48,7 @@ public:
     const GenerationConfig& generation_config() const { return generation_config_; }
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
-    auto&& layer(this Self&& self, int i) {
+    auto&& layer(this Self& self, int i) {
         return self.layers_[i];
     }
     const Tensor& token_embedding() const { return tok_emb_; }

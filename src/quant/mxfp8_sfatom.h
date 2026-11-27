@@ -14,7 +14,7 @@ namespace imp {
 
 // Buffers are the caller's (VRAMAllocator in src/exec, cudaMalloc in tests): this TU never
 // allocates (docs/internals/MEMORY.md A3).
-struct CutlassMxFP8Weight {
+struct MxFP8SfAtomWeight {
     void* data = nullptr;           // [N, K] E4M3
     void* scale_factors = nullptr;  // SfAtom UE8M0
     int64_t N = 0;
@@ -28,17 +28,17 @@ struct CutlassMxFP8Weight {
 };
 
 // SfAtom UE8M0 [rows, K] + col_scale[rows] for E4M3 rows quantized with one FP32 scale per row:
-// SFB = 2^floor(log2 row_scale), col_scale = row_scale / SFB. dst_sf holds cutlass_mxfp8_sf_size.
+// SFB = 2^floor(log2 row_scale), col_scale = row_scale / SFB. dst_sf holds mxfp8_sfatom_size.
 void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_col_scale, int rows, int K,
                               cudaStream_t stream);
 
 // SfAtom buffer size for (rows x K) at SFVecSize 32 (128-row x 4-group atoms).
-size_t cutlass_mxfp8_sf_size(int rows, int K);
+size_t mxfp8_sfatom_size(int rows, int K);
 
 // FP16 [M,K] -> E4M3 [M,K] + SfAtom UE8M0. K % 32 == 0; dst_sf is cleared first (atom padding).
-void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
-                                    cudaStream_t stream);
+void quantize_fp16_to_mxfp8_sfatom(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                   cudaStream_t stream);
 // Inverse: the [N, K] copy back to FP16 rows (serves small-M GEMMs once the F16 source is freed).
-void dequantize_mxfp8_cutlass_to_fp16(const CutlassMxFP8Weight& w, void* dst_fp16, cudaStream_t stream);
+void dequantize_mxfp8_sfatom_to_fp16(const MxFP8SfAtomWeight& w, void* dst_fp16, cudaStream_t stream);
 
 }  // namespace imp

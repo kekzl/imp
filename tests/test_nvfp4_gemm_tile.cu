@@ -3,11 +3,11 @@
 // (informational). Timing cases: tests/bench/test_nvfp4_gemm_tile_bench.cu.
 
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include "nvfp4_ref_gemm.cuh"
 #include "quant/nvfp4_gemm_tile.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -163,16 +163,16 @@ TEST(Nvfp4GemmTile, DataParallelRowsInvariantToM) {
             half* x = nullptr;
             ASSERT_EQ(cudaMalloc(&x, size_t(big_m) * K * sizeof(half)), cudaSuccess);
             fill_wide_kernel<<<1024, 256, 0, s>>>(x, size_t(big_m) * K, 0x5151u);
-            quantize_fp16_to_nvfp4_cutlass(x, big.act, big.act_sf, big_m, K, s);
+            quantize_fp16_to_nvfp4_sfatom(x, big.act, big.act_sf, big_m, K, s);
             const size_t tail = size_t(big_m - small_m);
             void* small_act = nullptr;
             void* small_sf = nullptr;
             half* y_small = nullptr;
             ASSERT_EQ(cudaMalloc(&small_act, size_t(small_m) * K / 2), cudaSuccess);
-            ASSERT_EQ(cudaMalloc(&small_sf, cutlass_nvfp4_sf_size(small_m, K)), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&small_sf, nvfp4_sfatom_size(small_m, K)), cudaSuccess);
             ASSERT_EQ(cudaMalloc(&y_small, size_t(small_m) * N * sizeof(half)), cudaSuccess);
-            cudaMemsetAsync(small_sf, 0, cutlass_nvfp4_sf_size(small_m, K), s);
-            quantize_fp16_to_nvfp4_cutlass(x + tail * K, small_act, small_sf, small_m, K, s);
+            cudaMemsetAsync(small_sf, 0, nvfp4_sfatom_size(small_m, K), s);
+            quantize_fp16_to_nvfp4_sfatom(x + tail * K, small_act, small_sf, small_m, K, s);
             std::vector<half> h_small(size_t(small_m) * N), h_big(size_t(big_m) * N), h_dp0(h_big.size());
             auto run = [&](int v, half* y, const void* a, const void* a_sf, int m, std::vector<half>& out) {
                 EXPECT_TRUE(gemm_nvfp4_tile(a, a_sf, big.cw.data, big.cw.scale_factors, big.cw.tensor_scale,

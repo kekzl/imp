@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_fmha_sm120.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -115,7 +115,7 @@ MoeQuantOut quantize_moe_probe(const std::vector<half>& rows, const std::vector<
     std::vector<uint8_t*> bases(ne);
     std::vector<uint8_t*> owned;
     for (int e = 0; e < ne; ++e) {
-        const size_t sz = cutlass_nvfp4_sf_size(offsets[e + 1] - offsets[e], K);
+        const size_t sz = nvfp4_sfatom_size(offsets[e + 1] - offsets[e], K);
         uint8_t* p = nullptr;
         cudaMalloc(&p, sz > 0 ? sz : 1);
         cudaMemset(p, 0, sz > 0 ? sz : 1);
@@ -123,7 +123,7 @@ MoeQuantOut quantize_moe_probe(const std::vector<half>& rows, const std::vector<
         owned.push_back(p);
     }
     uint8_t** d_bases = to_dev(bases);
-    quantize_fp16_to_nvfp4_cutlass_moe(d_src, d_packed, d_bases, d_off, expanded, K, ne, nullptr);
+    quantize_fp16_to_nvfp4_sfatom_moe(d_src, d_packed, d_bases, d_off, expanded, K, ne, nullptr);
     cudaDeviceSynchronize();
 
     MoeQuantOut out;
@@ -134,7 +134,7 @@ MoeQuantOut quantize_moe_probe(const std::vector<half>& rows, const std::vector<
     while (offsets[e + 1] <= probe_row)
         ++e;
     const int local = probe_row - offsets[e];
-    const size_t sz = cutlass_nvfp4_sf_size(offsets[e + 1] - offsets[e], K);
+    const size_t sz = nvfp4_sfatom_size(offsets[e + 1] - offsets[e], K);
     const auto slab = to_host(bases[e], sz);
     for (int kg = 0; kg < K / 16; ++kg)
         out.sf.push_back(slab[static_cast<size_t>(sfatom_off(local, kg, n_k_tiles))]);

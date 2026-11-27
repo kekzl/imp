@@ -50,7 +50,7 @@ size_t part_bytes(KVCache& c, Part p, int layer) {
 // layers share one size and a constant device stride (rows = layers); anything else goes to copy1d
 // one layer at a time.
 template <typename F2D, typename F1D>
-size_t for_each_part(KVCache& c, int block_id, F2D&& copy2d, F1D&& copy1d) {
+size_t for_each_part(KVCache& c, int block_id, const F2D& copy2d, const F1D& copy1d) {
     const int n = c.n_layers();
     size_t host_off = 0;
     for (Part p : {Part::K, Part::V, Part::KScale, Part::VScale, Part::KeyMinMax}) {

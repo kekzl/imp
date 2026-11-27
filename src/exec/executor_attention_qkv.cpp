@@ -125,11 +125,11 @@
         const bool nv_q_secondary = (nv_q_e != nullptr);
         const bool nv_k_secondary = (nv_k_e != nullptr);
         const bool nv_v_secondary = (nv_v_e != nullptr);
-        const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4) ||
+        const bool wq_is_nvfp4 = (mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_q_secondary;
-        const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4) ||
+        const bool wk_is_nvfp4 = (mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_k_secondary;
-        const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4) ||
+        const bool wv_is_nvfp4 = (mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4_LINEAR) ||
                                  nv_v_secondary;
         bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && wq_is_nvfp4 && wk_is_nvfp4 && wv_is_nvfp4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
@@ -147,9 +147,9 @@
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data), static_cast<half*>(no.data), 1, K,
                                         hbs, stream);
-            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            // Reconstruct MxFP4SfAtomWeight structs from handle payloads.
             auto make_mxfp4 = [](const WeightHandle* wh) {
-                CutlassMxFP4Weight mw;
+                MxFP4SfAtomWeight mw;
                 mw.data = wh->payload.mxfp4.weight;
                 mw.scale_factors = wh->payload.mxfp4.scales;
                 mw.linear_scales = wh->payload.mxfp4.linear_scales;
@@ -157,7 +157,7 @@
                 mw.tensor_scale = 1.0f;
                 mw.N = static_cast<int>(wh->shape[0]);
                 mw.K = static_cast<int>(wh->shape[1]);
-                mw.sf_bytes = cutlass_mxfp4_sf_size(mw.N, mw.K);
+                mw.sf_bytes = mxfp4_sfatom_size(mw.N, mw.K);
                 return mw;
             };
             auto mw_q = make_mxfp4(mxfp4_hwq);
@@ -224,7 +224,7 @@
             } else {
                 // Producer fusion: quantize into the small-M scratch inside
                 // the norm kernel when Q will take that route (batched
-                // decode, CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+                // decode, NVFP4_SFATOM tier); falls back to plain rmsnorm.
                 m1_fold = norm_fold_or_norm_(attn_norm_fold_rows(n, fp8_qkv_rows) && !qsa_layer_(layer) &&
                                                  ly.wv.data != nullptr,
                                              h, ly.attn_norm, no, ly.wq_id, n, eps, ctx.mode, stream);
@@ -270,13 +270,13 @@
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                     record_dense_({ly.wk_id, ly.wv_id}, DensePath::FP16_PAIR_BATCHED);
                 } else {
-                    // NVFP4-CUTLASS prefill QKV reads the SAME normed input three times:
+                    // NVFP4 SfAtom prefill QKV reads the SAME normed input three times:
                     // quantize once (Q's dispatch) into the activation scratch, K/V skip the
                     // re-quantize via the act-quant hint. Bit-identical reuse.
                     GemmContext kv_ctx = ctx;
-                    if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.wq_id, n, ctx.mode) &&
-                        prefill_routes_cutlass_nvfp4_(ly.wk_id, n, ctx.mode) &&
-                        (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n, ctx.mode))) {
+                    if (n > 1 && prefill_routes_nvfp4_sfatom_(ly.wq_id, n, ctx.mode) &&
+                        prefill_routes_nvfp4_sfatom_(ly.wk_id, n, ctx.mode) &&
+                        (ly.wv.data == nullptr || prefill_routes_nvfp4_sfatom_(ly.wv_id, n, ctx.mode))) {
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
                     } else if (n > 32 && ly.wv.data != nullptr &&

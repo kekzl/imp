@@ -47,7 +47,7 @@ Dims weight_dims(const Tensor& t) {
 // list compute_native_cache_demand() scans (runtime/vram_budget.cpp), so the
 // two cannot drift apart on a model where one of them matters.
 template <class F>
-void for_each_weight(const Model& model, F&& f) {
+void for_each_weight(const Model& model, const F& f) {
     f(model.output_proj());
     const int n = model.n_layers();
     for (int i = 0; i < n; ++i) {
@@ -450,7 +450,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + (2 * ne * sizeof(void*))      // d_B_ptrs_cache, d_SFB_ptrs_cache
                          + (ne * sizeof(float))          // d_alpha_full
                          + (ne * sizeof(void*))          // d_weight_ptrs
-                         + (ne * sizeof(void*))          // cutlass3x_sfa_ptrs
+                         + (ne * sizeof(void*))          // grouped_sfa_ptrs
                          + (11 * kTakeAlign);            // per-take 256 B alignment
     }
 

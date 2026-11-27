@@ -229,6 +229,14 @@ inline KvPoolVerdict kv_pool_verdict(const KvResidualSizing& sizing, int max_seq
     return KvPoolVerdict::Sufficient;
 }
 
+// IMMA prefill plane bytes still to take once one max_seq_len sequence (KV + allocator headroom, `need`)
+// is carved out of `free_bytes`: the planes are optional, that sequence is not. B-138: 16353 MiB
+// outstanding against a residual below `need` kept 12745 MiB and floored the pool at 16 blocks.
+inline size_t imma_planes_kept(size_t outstanding, size_t free_bytes, size_t need) {
+    const size_t room = free_bytes > need ? free_bytes - need : 0;
+    return outstanding < room ? outstanding : room;
+}
+
 inline KvResidualSizing kv_blocks_from_residual(size_t free_bytes, size_t headroom_bytes,
                                                 size_t per_block_bytes, int planned_blocks,
                                                 int floor_blocks) {

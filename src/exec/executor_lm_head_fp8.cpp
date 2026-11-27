@@ -79,6 +79,7 @@ LmHeadFacts GraphExecutor::lm_head_facts_() const {
 NvFP4QuantResult GraphExecutor::lm_head_nvfp4_() const {
     const WeightHandle& h = registry_.handle(model_->out_proj_id);
     if (h.entries.nvfp4 != nullptr)
+        // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
         return *h.entries.nvfp4;
     const auto& cfg = model_->config();
     NvFP4QuantResult r;

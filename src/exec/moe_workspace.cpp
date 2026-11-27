@@ -33,13 +33,13 @@ MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill, Q
         return qkind != 0 &&
                mmq_imma_moe_shape_ok(qkind, static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]));
     };
-    for (int i = 0; i < model.config().n_layers && (s.cutlass_fp4 || s.imma_all); i++) {
+    for (int i = 0; i < model.config().n_layers && (s.grouped_fp4 || s.imma_all); i++) {
         const auto& L = model.layer(i);
-        s.cutlass_fp4 = s.cutlass_fp4 && fp4(L.expert_up_packed) && fp4(L.expert_down_packed);
+        s.grouped_fp4 = s.grouped_fp4 && fp4(L.expert_up_packed) && fp4(L.expert_down_packed);
         s.imma_all = s.imma_all && imma(L.expert_gate_packed) && imma(L.expert_up_packed) &&
                      imma(L.expert_down_packed);
     }
-    s.imma_all = s.imma_all && !s.cutlass_fp4;
+    s.imma_all = s.imma_all && !s.grouped_fp4;
     return s;
 }
 

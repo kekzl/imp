@@ -48,7 +48,7 @@ affected one:
 | `test-text` | tokenizers, chat templates, jinja | no |
 | `test-compute` | rope, norm, activation, embedding, GEMM/GEMV, softmax, sampling, reduce, **fp8 gemm/gemv** | yes |
 | `test-attention` | FA2 / paged / chunked / fp8 / mxfp4 attention, **crosspath parity** | yes |
-| `test-quant` | quant round-trip + **dequant/GEMV vs fp64 reference**, CUTLASS grouped GEMM | yes |
+| `test-quant` | quant round-trip + **dequant/GEMV vs fp64 reference**, grouped NVFP4 GEMM | yes |
 | `test-kv` | KV-cache write/gather, FP8 KV, prefix cache, VRAM query/accounting | yes |
 | `test-moe-gdn` | MoE routing, GDN/SSM, json-schema FSM | yes |
 | `test-e2e` | forward pass, batching, determinism, greedy locks, vision golden, VRAM budget reserve | yes (some CPU-stub) |

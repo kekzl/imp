@@ -528,7 +528,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
     src/exec/pre_dequant_phase3_fp8.cpp
-    src/exec/pre_dequant_phase3_cutlass.cpp
+    src/exec/pre_dequant_phase3_sfatom.cpp
     src/exec/pre_dequant_phase3_gdn_prefill.cpp
     src/exec/pre_dequant_phase3_moe.cpp
     src/exec/executor_gemm_dispatch.cpp
@@ -537,7 +537,7 @@ set(IMP_EXEC_SOURCES
     src/exec/activation_calibrator.cu
     src/exec/activation_calibrator_hessian.cu
     src/exec/gemm_kernel_registry.cpp
-    src/exec/gemm_kernel_cutlass_nvfp4.cpp
+    src/exec/gemm_kernel_nvfp4_sfatom.cpp
     src/exec/gemm_kernel_gguf.cpp
     src/exec/gemm_kernel_generic_dequant.cpp
     src/exec/gemm_scratch.cpp
@@ -595,7 +595,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemma_pli.cpp
     src/exec/executor_gdn_alpha_beta.cpp
     src/exec/executor_forward_moe.cu
-    src/exec/executor_forward_moe_cutlass.cpp
+    src/exec/executor_forward_moe_grouped.cpp
     src/exec/executor_forward_moe_batch.cu
     src/exec/moe_router_route.cpp
     src/exec/executor_forward_moe_nvfp4_host.cu
@@ -1474,7 +1474,7 @@ if(IMP_BUILD_TESTS)
         # D-14: the drafters' norm + RoPE and fp32-in RMSNorm are one kernel each (equal bits per arm).
         tests/test_drafter_norm_primitives.cu
         tests/test_inkling_quality.cu
-        tests/test_swiglu_quantize_cutlass.cu
+        tests/test_swiglu_quantize_sfatom.cu
         tests/test_nvfp4_tile_swiglu_quant.cu
         tests/test_ffn_graph_cache_gpu.cu
         tests/test_rope.cu

@@ -23,6 +23,10 @@ struct HessianIndexEntry {
 // Streams entries into one file; "" on success, else the reason (the file is then incomplete).
 class HessianWriter {
 public:
+    HessianWriter() = default;
+    // Owns f_: a copy would fclose it twice.
+    HessianWriter(const HessianWriter&) = delete;
+    HessianWriter& operator=(const HessianWriter&) = delete;
     ~HessianWriter();
     std::string open(const std::string& path, uint32_t count);
     std::string add(int layer, const std::string& kind, int64_t K, uint64_t rows, const float* mean_xxt);

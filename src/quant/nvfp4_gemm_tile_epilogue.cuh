@@ -99,7 +99,7 @@ __device__ __forceinline__ void sq_prefetch(const TileArgs& p, const CUtensorMap
 }
 
 // Cfg::kSq epilogue on the fp16 tile staged by store_tma (boxes of 64 columns, 128B swizzle at g.s0): one
-// item per (row, 16 columns), all gate loads first; bytes of swiglu_quantize_fp16_nvfp4_cutlass_kernel.
+// item per (row, 16 columns), all gate loads first; bytes of swiglu_quantize_fp16_nvfp4_sfatom_kernel.
 template <class C>
 __device__ __forceinline__ void store_swiglu_quant(const Ring& g, const TileArgs& p, const SqArgs& sq) {
     constexpr int kMb = C::kBN / 16;

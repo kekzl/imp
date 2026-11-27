@@ -16,7 +16,7 @@ namespace imp {
 struct GroupedNvfp4DeviceArgs {
     const int32_t* d_M_per;           // [n_experts]   per-expert token count
     const int32_t* d_expert_offsets;  // [n_experts+1] exclusive prefix sum of M_per
-    const int64_t* d_sfa_offsets;  // [n_experts] exclusive prefix sum of cutlass_nvfp4_sf_size ([ne] unread)
+    const int64_t* d_sfa_offsets;     // [n_experts] exclusive prefix sum of nvfp4_sfatom_size ([ne] unread)
     const float* d_alpha;          // [n_experts]   per-expert alpha (act_ts * weight_ts)
 
     const void* base_A_packed;  // contiguous activation packed FP4 base

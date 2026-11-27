@@ -1,10 +1,10 @@
 #pragma once
 // Shared by tests/test_gemm_grouped_nvfp4_tile.cu and tests/bench/test_gemm_grouped_nvfp4_tile_bench.cu.
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
 #include "nvfp4_fp64_ref.h"
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -56,11 +56,11 @@ struct Grouped {
         sfa_off.assign(ne + 1, 0);
         for (int e = 0; e < ne; ++e) {
             off[e + 1] = off[e] + M_per[e];
-            sfa_off[e + 1] = sfa_off[e] + static_cast<int64_t>(cutlass_nvfp4_sf_size(M_per[e], K));
+            sfa_off[e + 1] = sfa_off[e] + static_cast<int64_t>(nvfp4_sfatom_size(M_per[e], K));
         }
         M_total = off[ne];
         b_stride = size_t(N) * K / 2;
-        sfb_stride = cutlass_nvfp4_sf_size(N, K);
+        sfb_stride = nvfp4_sfatom_size(N, K);
         cudaMalloc(&b, b_stride * ne);
         cudaMalloc(&b_sf, sfb_stride * ne);
         half* w = nullptr;
@@ -74,8 +74,8 @@ struct Grouped {
             Tensor wt(w, QType::F16, 2, ws, true);
             NvFP4Owned q;
             quantize_fp16_to_nvfp4(wt, q, s);
-            CutlassNvFP4Owned cw;
-            convert_nvfp4_to_cutlass(q, cw, s);
+            NvFP4SfAtomOwned cw;
+            convert_nvfp4_to_sfatom(q, cw, s);
             cudaMemcpyAsync(static_cast<char*>(b) + e * b_stride, cw.data, b_stride, cudaMemcpyDeviceToDevice,
                             s);
             cudaMemcpyAsync(static_cast<char*>(b_sf) + e * sfb_stride, cw.scale_factors, sfb_stride,
@@ -91,9 +91,9 @@ struct Grouped {
         cudaMemsetAsync(a_sf, 0, sfa_off[ne] + 16, s);
         for (int e = 0; e < ne; ++e)
             if (M_per[e] > 0)
-                quantize_fp16_to_nvfp4_cutlass(x + size_t(off[e]) * K,
-                                               static_cast<char*>(a) + size_t(off[e]) * K / 2,
-                                               static_cast<char*>(a_sf) + sfa_off[e], M_per[e], K, s);
+                quantize_fp16_to_nvfp4_sfatom(x + size_t(off[e]) * K,
+                                              static_cast<char*>(a) + size_t(off[e]) * K / 2,
+                                              static_cast<char*>(a_sf) + sfa_off[e], M_per[e], K, s);
         cudaMalloc(&d_M, ne * sizeof(int32_t));
         cudaMalloc(&d_off, (ne + 1) * sizeof(int32_t));
         cudaMalloc(&d_sfa_off, (ne + 1) * sizeof(int64_t));

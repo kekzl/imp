@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 namespace imp {
 
@@ -20,7 +21,7 @@ template <class Take>
 [[nodiscard]] bool grow_keeping_old(DeviceOwned<void>& buf, size_t& held, size_t bytes, Take&& take) {
     if (bytes <= held && buf.get() != nullptr)
         return true;
-    DeviceOwned<void> fresh = take(bytes);
+    DeviceOwned<void> fresh = std::forward<Take>(take)(bytes);
     if (fresh.get() == nullptr)
         return false;
     buf = std::move(fresh);  // releases the old buffer

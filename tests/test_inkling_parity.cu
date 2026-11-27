@@ -118,7 +118,7 @@ TEST_P(InklingParity, ResidualStreamAndLogitsMatchTheReference) {
             host.resize(static_cast<size_t>(n_tok) * H);
             cudaMemcpy(host.data(), h, host.size() * sizeof(float), cudaMemcpyDeviceToHost);
             const float* r = ref.data() + (static_cast<size_t>(app + 1) * T + row0) * H;
-            errs[static_cast<size_t>(app + 1)].add(host.data(), r, host.size());
+            errs[static_cast<size_t>(app) + 1].add(host.data(), r, host.size());
         };
         if (mode == 0) {
             ASSERT_TRUE(fwd.forward(d_ids, T, d_logits, nullptr));

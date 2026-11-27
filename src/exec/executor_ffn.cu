@@ -11,7 +11,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemv_dp4a_multi.h"
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/activation.h"
 #include "compute/dispatch_record.h"
 #include "compute/hadamard.h"
@@ -126,7 +126,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     const bool wd_nvfp4_secondary = (wd_nv_e != nullptr);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 && n == 1 &&
                                  h.qtype == QType::F16 &&
-                                 (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));
+                                 (wd_tier == StorageTier::NVFP4_LINEAR || wd_nvfp4_secondary));
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 && n == 1 &&
                                     qscratch_.q8_1_buf.data() != nullptr &&
                                     qscratch_.d8_buf.data() != nullptr && h.qtype == QType::F16 &&
@@ -167,8 +167,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         const NvFP4CacheEntry* nv_u_e = nvfp4_entry_of(hwu);
         const bool nv_g_secondary = (nv_g_e != nullptr);
         const bool nv_u_secondary = (nv_u_e != nullptr);
-        const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4) || nv_g_secondary;
-        const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
+        const bool wg_is_nvfp4 = (hwg && hwg->primary_tier == StorageTier::NVFP4_LINEAR) || nv_g_secondary;
+        const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4_LINEAR) || nv_u_secondary;
         bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf.data() != nullptr &&
                                h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype) &&
@@ -182,9 +182,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data), static_cast<half*>(no.data), 1, d,
                                         hbs, stream);
-            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            // Reconstruct MxFP4SfAtomWeight structs from handle payloads.
             auto make_mxfp4 = [](const WeightHandle* hw) {
-                CutlassMxFP4Weight mw{};
+                MxFP4SfAtomWeight mw{};
                 mw.data = hw->payload.mxfp4.weight;
                 mw.scale_factors = hw->payload.mxfp4.scales;
                 mw.linear_scales = hw->payload.mxfp4.linear_scales;
@@ -215,7 +215,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 tmp.K = static_cast<int64_t>(static_cast<int>(hw->shape[1])) * 2;
                 return tmp;
             };
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_g = nv_g_secondary ? NvFP4QuantResult(*nv_g_e) : from_handle(hwg);
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
             NvFP4QuantResult nv_u = nv_u_secondary ? NvFP4QuantResult(*nv_u_e) : from_handle(hwu);
             gemv_nvfp4_gate_up_fused(nv_g, nv_u, static_cast<const half*>(no.data),
                                      static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
@@ -246,7 +248,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         } else {
             // Producer fusion: quantize into the small-M scratch inside the
             // norm kernel when gate will take that route (batched decode,
-            // CUTLASS_NVFP4 tier); falls back to plain rmsnorm.
+            // NVFP4_SFATOM tier); falls back to plain rmsnorm.
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, ctx.mode, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
@@ -316,8 +318,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         if (will_fuse_down_mxfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            // Reconstruct CutlassMxFP4Weight from handle payload.
-            CutlassMxFP4Weight wd_mxfp4{};
+            // Reconstruct MxFP4SfAtomWeight from handle payload.
+            MxFP4SfAtomWeight wd_mxfp4{};
             wd_mxfp4.data = hwd->payload.mxfp4.weight;
             wd_mxfp4.scale_factors = hwd->payload.mxfp4.scales;
             wd_mxfp4.linear_scales = hwd->payload.mxfp4.linear_scales;
@@ -350,6 +352,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // is already a populated struct; primary-tier handle needs reconstruction.
             NvFP4QuantResult wd_nvfp4;
             if (wd_nvfp4_secondary) {
+                // NOLINTNEXTLINE(cppcoreguidelines-slicing): the base is the view (weight_cache_entries.h)
                 wd_nvfp4 = *wd_nv_e;
             } else {
                 wd_nvfp4.packed_data = hwd->payload.nvfp4.data;
@@ -408,7 +411,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf.data(),
                                    static_cast<half*>(h.data), residual_ptr, M_d, K_d, stream);
             record_dense_({ly.w_down_id}, DensePath::DP4A_RESIDUAL);
-        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4 &&
+        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 && wd_tier == StorageTier::NVFP4_LINEAR &&
                    h.qtype == QType::F16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
             // ~40% less weight traffic than dp4a Q8_0 path.
@@ -457,7 +460,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             // Non-dp4a paths: activation must produce FP16 intermediate in so.
-            bool down_prequant = false;  // scratch holds quantize(so) for the CUTLASS down (#2470)
+            bool down_prequant = false;  // scratch holds quantize(so) for the SfAtom down (#2470)
             switch (cfg.ffn_activation) {
                 case FFNActivation::GEGLU:
                     geglu(go, uo, so, stream);

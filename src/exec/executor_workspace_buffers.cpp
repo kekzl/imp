@@ -16,7 +16,7 @@
 #include "compute/gdn.h"        // gdn_scan_chunkpar_workspace_bytes
 #include "compute/gemm_f16_narrow_smallm.h"  // gemm_f16_narrow_smallm_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
@@ -634,7 +634,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 has_host_experts = has_host_experts || nvfp4_host_experts;
             }
             // Whole-layer staging for host NVFP4 prefill (allocated below, after the cache): packed
-            // bytes plus the CUTLASS SfAtom view per projection. The automatic cache share pays for
+            // bytes plus the SfAtom view per projection. The automatic cache share pays for
             // it, not the KV pool that plans after both (Qwen3.8-Flash-Next: 1500 MiB, KV ceiling
             // 8192 -> 4471 blocks when it came out of the residual).
             const auto& stage_cfg = model_->config();
@@ -645,10 +645,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             if (want_layer_stage) {
                 const int64_t d_model = stage_cfg.d_model;
                 const int64_t eff_ff = stage_cfg.expert_d_ff > 0 ? stage_cfg.expert_d_ff : stage_cfg.d_ff;
-                const size_t sf_gate = cutlass_nvfp4_sf_size(static_cast<int>(eff_ff),
-                                                             static_cast<int>(d_model));
-                const size_t sf_down = cutlass_nvfp4_sf_size(static_cast<int>(d_model),
-                                                             static_cast<int>(eff_ff));
+                const size_t sf_gate = nvfp4_sfatom_size(static_cast<int>(eff_ff), static_cast<int>(d_model));
+                const size_t sf_down = nvfp4_sfatom_size(static_cast<int>(d_model), static_cast<int>(eff_ff));
                 stage_proj_bytes = static_cast<size_t>(stage_experts) * max_expert_raw;
                 stage_sf_proj = static_cast<size_t>(stage_experts) * std::max(sf_gate, sf_down);
             }
@@ -762,7 +760,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             moe_.layer_stage_sf_proj_bytes = sf_proj;
                             moe_.layer_stage_sf_size = sf_total;
                             IMP_LOG_INFO(
-                                "MoE layer staging: CUTLASS device-args view enabled "
+                                "MoE layer staging: grouped NVFP4 device-args view enabled "
                                 "(+%.2f MiB SfAtom)",
                                 sf_total / (1024.0 * 1024.0));
                         } else {
@@ -790,10 +788,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         const MoeExpertServe serve = classify_moe_experts(*model_, dispatch_policy().gemm.moe_imma_prefill,
                                                           compute_dtype_);
         moe_.imma_serves_all = serve.imma_all;
-        if (serve.cutlass_fp4 || serve.imma_all || serve.f16_all) {
+        if (serve.grouped_fp4 || serve.imma_all || serve.f16_all) {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (%s)",
                          serve.f16_all       ? "F16 experts need no dequant"
-                         : serve.cutlass_fp4 ? "grouped NVFP4 GEMM serves every expert tensor"
+                         : serve.grouped_fp4 ? "grouped NVFP4 GEMM serves every expert tensor"
                                              : "MoE IMMA prefill serves every expert tensor");
             moe_.batch_dequant_buf = {};  // no buffer on this route (none held at init)
             moe_.batch_dequant_buf_size = 0;
@@ -854,32 +852,32 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Packed FP4: 1 byte per 2 values
             size_t packed_sz = static_cast<size_t>(max_expanded) * max_K / 2;
             // SFA worst-case: each expert's rows pad to SfAtom row tile (128),
-            // so sum over ne of cutlass_nvfp4_sf_size(M_i, max_K) ≤
-            // cutlass_nvfp4_sf_size(max_expanded + 128*ne, max_K).
-            size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + (128 * cfg.n_experts), max_K);
-            moe_.cutlass3x_packed = DeviceOwned<void>::allocate(vram_alloc_, packed_sz, "moe_3x_packed");
-            moe_.cutlass3x_sf = DeviceOwned<void>::allocate(vram_alloc_, sf_sz, "moe_3x_sf");
-            if (moe_.cutlass3x_packed.get() && moe_.cutlass3x_sf.get()) {
-                moe_.cutlass3x_packed_size = packed_sz;
-                moe_.cutlass3x_sf_size = sf_sz;
+            // so sum over ne of nvfp4_sfatom_size(M_i, max_K) ≤
+            // nvfp4_sfatom_size(max_expanded + 128*ne, max_K).
+            size_t sf_sz = nvfp4_sfatom_size(max_expanded + (128 * cfg.n_experts), max_K);
+            moe_.grouped_packed = DeviceOwned<void>::allocate(vram_alloc_, packed_sz, "moe_3x_packed");
+            moe_.grouped_sf = DeviceOwned<void>::allocate(vram_alloc_, sf_sz, "moe_3x_sf");
+            if (moe_.grouped_packed.get() && moe_.grouped_sf.get()) {
+                moe_.grouped_packed_size = packed_sz;
+                moe_.grouped_sf_size = sf_sz;
                 // Device array of per-expert SFA base pointers for the fused quantize kernel. Last of the
                 // n_experts-sized MoE pointer arrays to move; same tier, same moe_arrays charge. The
                 // fused quantize kernel treats null as "per-expert SFA bases unavailable".
                 size_t sfa_ptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(uint8_t*);
                 if (StableSpan<std::byte> sl = engine_arena().take_bytes(sfa_ptr_bytes); !sl.empty()) {
-                    moe_.cutlass3x_sfa_ptrs = sl.as<uint8_t*>();
-                    moe_.cutlass3x_sfa_ptrs_count = cfg.n_experts;
+                    moe_.grouped_sfa_ptrs = sl.as<uint8_t*>();
+                    moe_.grouped_sfa_ptrs_count = cfg.n_experts;
                 } else {
-                    IMP_LOG_WARN("CUTLASS 3.x SFA pointer array unavailable from the T2 arena");
-                    moe_.cutlass3x_sfa_ptrs = {};
+                    IMP_LOG_WARN("grouped NVFP4 SFA pointer array unavailable from the T2 arena");
+                    moe_.grouped_sfa_ptrs = {};
                 }
-                IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
+                IMP_LOG_INFO("grouped NVFP4 MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
                              (packed_sz + sf_sz) / (1024.0 * 1024.0), packed_sz / (1024.0 * 1024.0),
                              sf_sz / (1024.0 * 1024.0), max_expanded);
             } else {
-                IMP_LOG_WARN("CUTLASS 3.x MoE staging: allocation failed, path disabled");
-                moe_.cutlass3x_packed.reset();
-                moe_.cutlass3x_sf.reset();
+                IMP_LOG_WARN("grouped NVFP4 MoE staging: allocation failed, path disabled");
+                moe_.grouped_packed.reset();
+                moe_.grouped_sf.reset();
             }
         }
 
@@ -1111,7 +1109,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // NVFP4 tile-GEMM activation buffers (qscratch_.cutlass_*): pre-allocate for max prefill dimensions.
+    // NVFP4 tile-GEMM activation buffers (qscratch_.tile_*): pre-allocate for max prefill dimensions.
     // Only needed when NVFP4 decode is active and sm_120 is available.
     if (wcache_.nvfp4_decode_mode > 0) {
         int max_k = 0;
@@ -1161,44 +1159,41 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         if (max_k > 0) {
             // Activation packed data: [max_tokens, max_K/2]
-            qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * max_k / 2;
+            qscratch_.tile_act_data_size = static_cast<size_t>(max_tokens_) * max_k / 2;
             // SfAtom scale factors for activation
-            qscratch_.cutlass_act_sf_size = cutlass_nvfp4_sf_size(max_tokens_, max_k);
+            qscratch_.tile_act_sf_size = nvfp4_sfatom_size(max_tokens_, max_k);
             // Stream-K workspace of the own tile GEMMs (SMs x 64 KiB)
-            qscratch_.cutlass_workspace_size = gemm_tile_streamk_workspace_bytes();  // tile stream-K partials
+            qscratch_.tile_workspace_size = gemm_tile_streamk_workspace_bytes();  // tile stream-K partials
 
-            qscratch_.cutlass_act_data = DeviceOwned<void>::allocate(vram_alloc_,
-                                                                     qscratch_.cutlass_act_data_size,
-                                                                     "cutlass_act_data");
-            qscratch_.cutlass_act_sf = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.cutlass_act_sf_size,
-                                                                   "cutlass_act_sf");
-            qscratch_.cutlass_workspace = DeviceOwned<void>::allocate(vram_alloc_,
-                                                                      qscratch_.cutlass_workspace_size,
-                                                                      "cutlass_workspace");  // 0 bytes: empty
-            if (!qscratch_.cutlass_act_data.get() || !qscratch_.cutlass_act_sf.get() ||
-                (qscratch_.cutlass_workspace_size > 0 && !qscratch_.cutlass_workspace.get())) {
+            qscratch_.tile_act_data = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.tile_act_data_size,
+                                                                  "tile_act_data");
+            qscratch_.tile_act_sf = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.tile_act_sf_size,
+                                                                "tile_act_sf");
+            qscratch_.tile_workspace = DeviceOwned<void>::allocate(vram_alloc_, qscratch_.tile_workspace_size,
+                                                                   "tile_workspace");  // 0 bytes: empty
+            if (!qscratch_.tile_act_data.get() || !qscratch_.tile_act_sf.get() ||
+                (qscratch_.tile_workspace_size > 0 && !qscratch_.tile_workspace.get())) {
                 IMP_LOG_WARN(
-                    "Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
-                qscratch_.cutlass_act_data.reset();
-                qscratch_.cutlass_act_sf.reset();
-                qscratch_.cutlass_workspace.reset();
-                qscratch_.cutlass_act_data_size = 0;
-                qscratch_.cutlass_act_sf_size = 0;
-                qscratch_.cutlass_workspace_size = 0;
+                    "Failed to allocate NVFP4 tile-GEMM activation buffers, native FP4 prefill disabled");
+                qscratch_.tile_act_data.reset();
+                qscratch_.tile_act_sf.reset();
+                qscratch_.tile_workspace.reset();
+                qscratch_.tile_act_data_size = 0;
+                qscratch_.tile_act_sf_size = 0;
+                qscratch_.tile_workspace_size = 0;
             } else {
-                // Pre-zero the SfAtom scale workspace once: quantize_fp16_nvfp4_cutlass_kernel only
+                // Pre-zero the SfAtom scale workspace once: quantize_fp16_nvfp4_sfatom_kernel only
                 // writes the M x K_groups valid SF cells, leaving padding as whatever was there before.
                 // Zeroing once here lets the per-call path skip its own cudaMemsetAsync. Sync because
                 // executor init may finish before the first stream-bound call uses this buffer.
-                IMP_CUDA_CHECK_LOG(
-                    cudaMemset(qscratch_.cutlass_act_sf.get(), 0, qscratch_.cutlass_act_sf_size));
-                IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
-                             (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size +
-                              qscratch_.cutlass_workspace_size) /
+                IMP_CUDA_CHECK_LOG(cudaMemset(qscratch_.tile_act_sf.get(), 0, qscratch_.tile_act_sf_size));
+                IMP_LOG_INFO("NVFP4 tile-GEMM activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
+                             (qscratch_.tile_act_data_size + qscratch_.tile_act_sf_size +
+                              qscratch_.tile_workspace_size) /
                                  (1024.0 * 1024.0),
-                             qscratch_.cutlass_act_data_size / (1024.0 * 1024.0),
-                             qscratch_.cutlass_act_sf_size / (1024.0 * 1024.0),
-                             qscratch_.cutlass_workspace_size / (1024.0 * 1024.0));
+                             qscratch_.tile_act_data_size / (1024.0 * 1024.0),
+                             qscratch_.tile_act_sf_size / (1024.0 * 1024.0),
+                             qscratch_.tile_workspace_size / (1024.0 * 1024.0));
             }
         }
     }
@@ -1237,7 +1232,7 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
         consider_plane(ptr, qr.N, qr.K);
     for (const auto& [ptr, moe] : wcache_.nvfp4_moe)
         consider_plane(ptr, moe.N, moe.K);  // single-expert dequant slice
-    for (const auto& [ptr, cw] : wcache_.cutlass_nvfp4)
+    for (const auto& [ptr, cw] : wcache_.nvfp4_sfatom)
         consider_plane(ptr, cw.N, cw.K);
     // SafeTensors NVFP4 prequant: per-tensor/per-expert NVFP4 storage lives on the Layer
     // struct (qtype=NVFP4 with scales sidecar), not in wcache_. gemm_nvfp4 fallback
@@ -1319,10 +1314,10 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     }
     IMP_LOG_INFO(
         "gemm_nvfp4 dequant workspace: %.2f MiB (graph-safe M>1 fallback; "
-        "covers dense=%zu, moe=%zu, cutlass=%zu cache entries + per-layer "
+        "covers dense=%zu, moe=%zu, sfatom=%zu cache entries + per-layer "
         "SafeTensors NVFP4 expert tensors)",
         covered_bytes / (1024.0 * 1024.0), wcache_.nvfp4.size(), wcache_.nvfp4_moe.size(),
-        wcache_.cutlass_nvfp4.size());
+        wcache_.nvfp4_sfatom.size());
     return !nvfp4_dequant_uncapturable_;
 }
 
@@ -1365,7 +1360,7 @@ void GraphExecutor::free_buffers() {
 
     // Weight caches: every entry and slab releases its own buffers (weight_cache_entries.h), so
     // this is the release ORDER only, unchanged. A map is cleared before the slab its entries
-    // slice. One view outlives its buffer for 6 lines, as before: cutlass_nvfp4 data points at
+    // slice. One view outlives its buffer for 6 lines, as before: nvfp4_sfatom data points at
     // nvfp4 packed data; nothing reads it here.
     {
         registry_.free_owned_storage();  // fused KV / gate+up overlays (owners moved in Phase 4)
@@ -1380,20 +1375,20 @@ void GraphExecutor::free_buffers() {
         wcache_.nvfp4_moe.clear();
         wcache_.nvfp4_moe_bytes = 0;
         wcache_.nvfp4_moe_noted_bytes = 0;
-        wcache_.cutlass_nvfp4.clear();          // SfAtom slices of the two slab kinds below, or own buffer
-        wcache_.cutlass_nvfp4_prefill.clear();  // data views into cutlass_nvfp4_prefill_src
-        wcache_.cutlass_nvfp4_prefill_src.clear();
-        wcache_.cutlass_nvfp4_prefill_bytes = 0;
-        wcache_.cutlass_mxfp8_prefill.clear();  // fp8rows views slice fp8_ssm_sidecar_data
-        wcache_.cutlass_mxfp8_prefill_bytes = 0;
-        wcache_.cutlass_nvfp4_bytes = 0;
-        wcache_.cutlass_nvfp4_noted_bytes = 0;
-        wcache_.cutlass_sf_slab.reset();
+        wcache_.nvfp4_sfatom.clear();          // SfAtom slices of the two slab kinds below, or own buffer
+        wcache_.nvfp4_sfatom_prefill.clear();  // data views into nvfp4_sfatom_prefill_src
+        wcache_.nvfp4_sfatom_prefill_src.clear();
+        wcache_.nvfp4_sfatom_prefill_bytes = 0;
+        wcache_.mxfp8_sfatom_prefill.clear();  // fp8rows views slice fp8_ssm_sidecar_data
+        wcache_.mxfp8_sfatom_prefill_bytes = 0;
+        wcache_.nvfp4_sfatom_bytes = 0;
+        wcache_.nvfp4_sfatom_noted_bytes = 0;
+        wcache_.nvfp4_sfatom_slab.reset();
         for (auto& slab : wcache_.owned_sf_slabs)
             slab.reset();  // front to back, as the hand loop
         wcache_.owned_sf_slabs.clear();
-        wcache_.cutlass_mxfp4.clear();
-        wcache_.cutlass_mxfp4_bytes = 0;
+        wcache_.mxfp4_sfatom.clear();
+        wcache_.mxfp4_sfatom_bytes = 0;
         // FP8: the entries are views of the slabs below (and of the checkpoint's bytes).
         wcache_.fp8.clear();
         wcache_.released_fp8_view.clear();
@@ -1420,8 +1415,8 @@ void GraphExecutor::free_buffers() {
     // Free gemm_nvfp4 dequant workspace.
     release_nvfp4_dequant_ws_();
     // Releases only SfAtom scales it built itself; .data and a borrowed SfAtom are cache views.
-    lm_head_cutlass_ = CutlassNvFP4CacheEntry{};
-    lm_head_cutlass_ready_ = false;
+    lm_head_sfatom_ = NvFP4SfAtomCacheEntry{};
+    lm_head_sfatom_ready_ = false;
     // MLA quartet and absorbed cache are arena-owned since A7 step 4b.2: no frees here;
     // ~Engine closes the arena after every executor teardown.
     mla_kv_a_buf_ = {};
@@ -1614,7 +1609,7 @@ bool GraphExecutor::chunk_capture_supported() const {
     // MoE: only the grouped NVFP4 device-args path records into a graph without
     // host-side routing reads; every other MoE prefill path does a D2H+sync per layer to size
     // expert GEMMs (capture-illegal, guarded by moe_host_args_capture_guard). Require static
-    // device-args conditions for every MoE layer; models with experts outside the CUTLASS
+    // device-args conditions for every MoE layer; models with experts outside the NVFP4_SFATOM
     // tier fall out here until a device-args grouped GEMM exists for that layout (#847).
     bool any_moe = false;
     for (int i = 0; i < cfg.n_layers && !any_moe; ++i)
@@ -1627,10 +1622,10 @@ bool GraphExecutor::chunk_capture_supported() const {
         if (!gemm_grouped_nvfp4_moe_supports(cfg.n_experts, cfg.d_model, max_expert_eff_))
             return false;
         const int ne = cfg.n_experts;
-        if (!moe_.cutlass3x_packed.get() || !moe_.cutlass3x_sf.get() || !moe_.d_M_per ||
+        if (!moe_.grouped_packed.get() || !moe_.grouped_sf.get() || !moe_.d_M_per ||
             moe_.d_M_per_count < ne || !moe_.d_sfa_offsets || !moe_.d_B_ptrs_cache ||
-            !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full || !moe_.cutlass3x_sfa_ptrs ||
-            moe_.cutlass3x_sfa_ptrs_count < ne)
+            !moe_.d_SFB_ptrs_cache || !moe_.d_alpha_full || !moe_.grouped_sfa_ptrs ||
+            moe_.grouped_sfa_ptrs_count < ne)
             return false;
         auto covers = [&](const std::vector<TensorID>& ids) {
             if (static_cast<int>(ids.size()) < ne)
@@ -1638,7 +1633,7 @@ bool GraphExecutor::chunk_capture_supported() const {
             for (int e = 0; e < ne; ++e) {
                 if (ids[e] == kInvalidTensorID)
                     return false;
-                if (registry_.handle(ids[e]).primary_tier != StorageTier::CUTLASS_NVFP4)
+                if (registry_.handle(ids[e]).primary_tier != StorageTier::NVFP4_SFATOM)
                     return false;
             }
             return true;

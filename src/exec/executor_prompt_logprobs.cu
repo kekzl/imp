@@ -160,12 +160,13 @@ void GraphExecutor::prompt_logprobs_partial(const int32_t* d_targets, int n_rows
         if (row0 + csz >= n_rows)
             return;
     }
-    // allow_cutlass: same LM head as perplexity_nll_partial, so PPL from these rows matches the tool.
-    for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/true, [&](const Tensor& lg, int row0, int csz) {
-        prompt_logprobs_rows(static_cast<const float*>(lg.data), csz, V, V, d_targets + row0, top_n,
-                             d_lp + row0, d_rank + row0, top_at(d_top_ids, row0), top_at(d_top_lp, row0),
-                             stream);
-    });
+    // allow_w4a4_head: same LM head as perplexity_nll_partial, so PPL from these rows matches the tool.
+    for_each_lm_head_batch_(n_rows, stream, /*allow_w4a4_head=*/true,
+                            [&](const Tensor& lg, int row0, int csz) {
+                                prompt_logprobs_rows(static_cast<const float*>(lg.data), csz, V, V,
+                                                     d_targets + row0, top_n, d_lp + row0, d_rank + row0,
+                                                     top_at(d_top_ids, row0), top_at(d_top_lp, row0), stream);
+                            });
 }
 
 }  // namespace imp

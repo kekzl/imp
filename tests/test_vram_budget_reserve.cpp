@@ -6,7 +6,7 @@
 
 #include <gtest/gtest.h>
 
-#include "compute/gemm_cutlass_sm120.h"
+#include "compute/nvfp4_sfatom_quant.h"
 #include "compute/mmq_q8_imma.h"
 #include "memory/plan.h"  // kMeasuredLibraryReserveBytes, plan_memory
 #include "runtime/plan_shadow.h"

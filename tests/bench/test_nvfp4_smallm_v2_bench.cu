@@ -188,6 +188,7 @@ TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
             ASSERT_EQ(cudaMalloc(&s1, sf1), cudaSuccess);
             ASSERT_EQ(cudaMemcpy(p1, W.q.packed_data, nib1, cudaMemcpyDeviceToDevice), cudaSuccess);
             ASSERT_EQ(cudaMemcpy(s1, W.q.micro_scales, sf1, cudaMemcpyDeviceToDevice), cudaSuccess);
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the layout of W.q, own buffers below
             ring1[c] = W.q;
             ring1[c].packed_data = p1;
             ring1[c].micro_scales = s1;
@@ -198,6 +199,7 @@ TEST_F(NvFP4SmallMV2Test, ShapeBandwidthSurvey) {
                 ASSERT_EQ(cudaMalloc(&s2, sf2), cudaSuccess);
                 ASSERT_EQ(cudaMemcpy(p2, W.q.packed_data, nib2, cudaMemcpyDeviceToDevice), cudaSuccess);
                 ASSERT_EQ(cudaMemcpy(s2, W.q.micro_scales, sf2, cudaMemcpyDeviceToDevice), cudaSuccess);
+                // NOLINTNEXTLINE(cppcoreguidelines-slicing): the layout of W.q, own buffers below
                 ring2[c] = W.q;
                 ring2[c].packed_data = p2;
                 ring2[c].micro_scales = s2;
@@ -352,6 +354,7 @@ TEST_F(NvFP4SmallMV2Test, RingSweepQwen3_14B) {
         const size_t pb = (size_t)sh.N * sh.K / 2, sb = (size_t)sh.N * sh.K / 16;
         imp::NvFP4QuantResult ring[kRing];
         for (auto& r : ring) {
+            // NOLINTNEXTLINE(cppcoreguidelines-slicing): the layout of W.q, own buffers below
             r = W.q;
             ASSERT_EQ(cudaMalloc(&r.packed_data, pb), cudaSuccess);
             ASSERT_EQ(cudaMalloc(&r.micro_scales, sb), cudaSuccess);

@@ -23,7 +23,7 @@ SCOPE
 -----
 All of `src/`, comments stripped, minus the accessor's own definition. It used
 to scan `src/compute/` only, which left the gate blind exactly where its
-founding defect lived: the MoE CUTLASS dispatch is `src/exec/`, so a new reader
+founding defect lived: the MoE grouped NVFP4 dispatch is `src/exec/`, so a new reader
 there passed unnoticed (verified 2026-09-02 by planting one). Comments are
 stripped because two prose mentions in `src/runtime/` would otherwise count as
 sites.
@@ -138,7 +138,7 @@ def selftest():
 
     The gate scanned src/compute/ only until 2026-09-02 and pinned files rather
     than read counts, so two of the four cases below passed silently: a reader
-    in src/exec (where the MoE CUTLASS dispatch lives, the founding defect's own
+    in src/exec (where the MoE grouped NVFP4 dispatch lives, the founding defect's own
     neighbourhood) and a branch inside gemm.cpp that stopped reading the flag.
     """
     import tempfile
@@ -164,7 +164,7 @@ def selftest():
 
     cases = [
         ("clean tree", (), None, 0),
-        ("reader in src/exec", (("src/exec/executor_forward_moe_cutlass.cu",
+        ("reader in src/exec", (("src/exec/executor_forward_moe_grouped.cu",
                                  f"bool m() {{ {call} }}\n"),), None, 1),
         ("reader in src/quant", (("src/quant/nvfp4_quant.cu",
                                   f"bool m() {{ {call} }}\n"),), None, 1),

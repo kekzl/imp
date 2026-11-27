@@ -1,12 +1,12 @@
 #include "exec/gemm_kernel_registry.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass
+#include "compute/nvfp4_sfatom_quant.h"  // NvFP4SfAtomWeight, convert_nvfp4_to_sfatom
 #include "core/tensor.h"
 #include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
 #include "exec/gemm_scratch.h"      // prewarm_mmvq_scratch
 #include "quant/dequant_gpu.h"      // generic-dequant parity test
 #include "quant/nvfp4_gemm_tile.h"  // gemm_tile_streamk_workspace_bytes
-#include "compute/cutlass_nvfp4_owned.h"
+#include "compute/nvfp4_sfatom_owned.h"
 #include "quant/nvfp4_owned.h"
 #include "quant/nvfp4_quant.h"
 
@@ -21,7 +21,7 @@
 using namespace imp;
 
 // GemmKernel registry: the three live producers (generic dequant catch-all, GGUF small-M,
-// CUTLASS_NVFP4 prefill) against their direct paths, plus the pin that the table holds
+// NVFP4_SFATOM prefill) against their direct paths, plus the pin that the table holds
 // exactly the produced keys (AUDIT_ARCH_2026 A1-1, dispatch #8).
 
 namespace {
@@ -56,15 +56,15 @@ TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
 // is dead code, a producer without a registration falls through to gemm_via_handle_ silently.
 TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
     const auto& reg = GemmKernelRegistry::instance();
-    EXPECT_EQ(reg.size(), 13u) << "1 generic dequant + 11 GGUF small-M qtypes + 1 CUTLASS_NVFP4";
+    EXPECT_EQ(reg.size(), 13u) << "1 generic dequant + 11 GGUF small-M qtypes + 1 NVFP4_SFATOM";
     GemmKernelArgs args{};
     args.stream = stream_;
     // The 9 keys retired with the stalled R5 migration stay unreachable.
     const GemmStrategy retired[] = {
-        {StorageTier::FP16, QType::F16, false},  {StorageTier::FP16, QType::F16, true},
-        {StorageTier::FP16, QType::Q4_K, false}, {StorageTier::FP8, QType::F16, false},
-        {StorageTier::FP8, QType::NONE, false},  {StorageTier::NVFP4, QType::F16, false},
-        {StorageTier::NVFP4, QType::F16, true},  {StorageTier::MXFP4, QType::F16, false},
+        {StorageTier::FP16, QType::F16, false},        {StorageTier::FP16, QType::F16, true},
+        {StorageTier::FP16, QType::Q4_K, false},       {StorageTier::FP8, QType::F16, false},
+        {StorageTier::FP8, QType::NONE, false},        {StorageTier::NVFP4_LINEAR, QType::F16, false},
+        {StorageTier::NVFP4_LINEAR, QType::F16, true}, {StorageTier::MXFP4, QType::F16, false},
         {StorageTier::MXFP4, QType::F16, true},
     };
     for (const auto& s : retired)
@@ -73,12 +73,12 @@ TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {
             << " m_is_one=" << s.m_is_one;
 }
 
-// CUTLASS_NVFP4 adapter must refuse loud (PreconditionFail) when activation scratch is
+// NVFP4_SFATOM adapter must refuse loud (PreconditionFail) when activation scratch is
 // missing, not fall through to legacy silently (mirrors the FP8 missing-scratch test, Slice
 // 2 pattern). Note: the GEMM workspace is NOT a precondition since
 // gemm_nvfp4_tile runs data-parallel without one - this exercises only the
 // act_data null path.
-TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
+TEST_F(GemmKernelRegistryTest, NvFP4SfAtomKernelRejectsMissingActScratch) {
     constexpr int M = 4;
     constexpr int N = 16;
     constexpr int K = 64;
@@ -93,10 +93,10 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
     Tensor output(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
 
-    // Dummy CutlassNvFP4Weight payload pointer is non-null but the kernel returns
+    // Dummy NvFP4SfAtomWeight payload pointer is non-null but the kernel returns
     // PreconditionFail before dereferencing it (workspace check fires first), so the dummy is
     // safe without ever invoking gemm_nvfp4_tile.
-    CutlassNvFP4Weight dummy{};
+    NvFP4SfAtomWeight dummy{};
     dummy.N = N;
     dummy.K = K;
 
@@ -105,21 +105,21 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4KernelRejectsMissingActScratch) {
     args.output = &output;
     args.stream = stream_;
     args.weight_payload = &dummy;
-    // Intentionally leave cutlass_act_data / cutlass_act_sf / cutlass_workspace
+    // Intentionally leave tile_act_data / tile_act_sf / tile_workspace
     // null. Kernel must return PreconditionFail.
 
-    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::PreconditionFail);
 
     cudaFree(d_input);
     cudaFree(d_out);
 }
 
-// End-to-end smoke: registry CUTLASS_NVFP4 dispatch runs Ok with non-zero output. The adapter
-// wraps quantize_fp16_to_nvfp4_cutlass + gemm_nvfp4_tile (cuBLASLt on refusal); bitwise
-// direct-vs-dispatch parity lives in test_weight_dispatch.cu (CUTLASS_NVFP4_GemmMatchesDirect),
+// End-to-end smoke: registry NVFP4_SFATOM dispatch runs Ok with non-zero output. The adapter
+// wraps quantize_fp16_to_nvfp4_sfatom + gemm_nvfp4_tile (cuBLASLt on refusal); bitwise
+// direct-vs-dispatch parity lives in test_weight_dispatch.cu (NVFP4_SFATOM_GemmMatchesDirect),
 // dispatch-site coverage in verify-fast's engine smoke tests.
-TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
+TEST_F(GemmKernelRegistryTest, NvFP4SfAtomRegistryDispatchRunsToCompletion) {
     constexpr int M = 128;
     constexpr int N = 128;
     constexpr int K = 128;  // one 128x128 tile, two 64-wide k-stages
@@ -141,15 +141,15 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
     Tensor weight_fp16(d_weight_fp16, QType::F16, 2, w_shape, /*on_device=*/true);
 
-    // Quantize weight to NVFP4, then convert to CUTLASS block-scaled layout
-    // (SfAtom). The adapter consumes the CutlassNvFP4Weight verbatim.
+    // Quantize weight to NVFP4, then convert to the SfAtom block-scaled layout
+    // (SfAtom). The adapter consumes the NvFP4SfAtomWeight verbatim.
     NvFP4Owned nv4{};
     quantize_fp16_to_nvfp4(weight_fp16, nv4, stream_);
-    CutlassNvFP4Owned cw{};
-    convert_nvfp4_to_cutlass(nv4, cw, stream_);
+    NvFP4SfAtomOwned cw{};
+    convert_nvfp4_to_sfatom(nv4, cw, stream_);
 
     // Allocate activation quantization scratch + GEMM workspace.
-    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t act_sf_bytes = nvfp4_sfatom_size(M, K);
     size_t ws_bytes = gemm_tile_streamk_workspace_bytes();
     void *d_act_data = nullptr, *d_act_sf = nullptr, *d_ws = nullptr;
     cudaMalloc(&d_act_data, static_cast<size_t>(M) * K / 2);  // packed FP4 [M, K/2]
@@ -174,11 +174,11 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     args.stream = stream_;
     args.beta = 0.0f;
     args.weight_payload = &cw;
-    args.cutlass_act_data = d_act_data;
-    args.cutlass_act_sf = d_act_sf;
-    args.cutlass_workspace = d_ws;
-    args.cutlass_workspace_size = ws_bytes;
-    GemmStrategy strat{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false};
+    args.tile_act_data = d_act_data;
+    args.tile_act_sf = d_act_sf;
+    args.tile_workspace = d_ws;
+    args.tile_workspace_size = ws_bytes;
+    GemmStrategy strat{StorageTier::NVFP4_SFATOM, QType::F16, /*m_is_one=*/false};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
 
     cudaStreamSynchronize(stream_);
@@ -192,7 +192,7 @@ TEST_F(GemmKernelRegistryTest, CutlassNvfp4RegistryDispatchRunsToCompletion) {
     for (int i = 0; i < M * N; ++i) {
         if (__half_as_ushort(h_out[i]) != 0) ++nonzero_count;
     }
-    EXPECT_GT(nonzero_count, 0) << "Registry CUTLASS_NVFP4 dispatch wrote all-zero output";
+    EXPECT_GT(nonzero_count, 0) << "Registry NVFP4_SFATOM dispatch wrote all-zero output";
 
     cudaFree(d_act_data);
     cudaFree(d_act_sf);

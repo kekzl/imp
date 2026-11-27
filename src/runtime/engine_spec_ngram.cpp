@@ -642,7 +642,7 @@ template <class CapturedFwd>
 void forward_verify_chunk(GraphExecutor& ex, InferenceState& state, Tensor& logits_out, bool capture_on,
                           const bool& capture_doomed, CapturedFwd&& captured, cudaStream_t stream) {
     if (capture_on) {
-        if (!captured(state, logits_out)) {
+        if (!std::forward<CapturedFwd>(captured)(state, logits_out)) {
             // Warmup use, or capture/launch failed (nothing executed): run
             // eagerly. A doomed capture means the capture-mode path itself
             // threw; strip the capture fields so the eager forward takes the
@@ -829,7 +829,7 @@ void restore_hybrid_after_accept(bool hybrid, SSMState* ssm, int rec_slot, void*
             if (cuda_ok(cudaMemcpyAsync(d_chunk_len, &real_rows, sizeof(int), cudaMemcpyHostToDevice, stream),
                         "replay chunk len H2D")) {
                 state.n_tokens = ch.chunk_pad;
-                replayed = captured(state, replay_logits);
+                replayed = std::forward<CapturedFwd>(captured)(state, replay_logits);
             }
         }
         if (!replayed) {
@@ -877,11 +877,11 @@ void mtp_verify_econ(MtpBind& b, const cfg::Speculative& scfg, int emitted, int 
     // deep-chunk cost at low accept; draft-rich prompts climb back.
     // Ceiling is the depth THIS request resolved to, not the process-wide
     // one: a caller that asked for mtp_k=1 must not ride the ladder back up.
-    const int req_ceiling = request_k();
+    const int req_ceiling = std::forward<ReqCeiling>(request_k)();
     if (matched >= K)
-        b.k_live = std::min(req_ceiling, chain_k() + 1);
+        b.k_live = std::min(req_ceiling, std::forward<ChainK>(chain_k)() + 1);
     else
-        b.k_live = std::max(1, chain_k() - 1);
+        b.k_live = std::max(1, std::forward<ChainK>(chain_k)() - 1);
     // Break-even avg emitted/verify is configurable (0 disables): the
     // right value depends on the chain lm_head cost (NVFP4 vs FP16) and
     // the verify-chunk cost, both of which have moved since #852.
@@ -897,7 +897,7 @@ void mtp_verify_econ(MtpBind& b, const cfg::Speculative& scfg, int emitted, int 
             "this_emitted=%d matched=%d",
             b.econ_verifies, b.econ_batched, b.econ_emitted, b.econ_rows,
             mtp_econ_min_emit(b.econ_verifies, b.econ_rows, cfg_min), emitted, matched);
-        unbind("uneconomic: avg emitted/verify below break-even");
+        std::forward<Unbind>(unbind)("uneconomic: avg emitted/verify below break-even");
     }
 }
 

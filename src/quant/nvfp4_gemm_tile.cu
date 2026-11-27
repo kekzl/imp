@@ -1,5 +1,5 @@
 // Own NVFP4 prefill GEMM (ROADMAP row 123): CTA tile 128 x BN, ring of BK-element stages,
-// 8 MMA warps of 64 x BN/4, ldmatrix fragments, native mma.sync kind::mxf4nvf4 on the CUTLASS
+// 8 MMA warps of 64 x BN/4, ldmatrix fragments, native mma.sync kind::mxf4nvf4 on the SfAtom
 // bytes. Fragment and SF lane mappings: nvfp4_gemm_smallm_v2.cu (CUTLASS SM120_16x8x64_TN_VS).
 // SfAtom: 128 rows x 4 K-groups = 512 B, row r at (r%32)*16 + (r/32)*4; atoms K-major per
 // 128-row tile, so a 128-row slab reads BK/64 contiguous atoms per stage.

@@ -542,8 +542,7 @@ namespace {
 
 template <typename OnToken>
 static ImpError generate_via_prefill_decode_loop(ImpContext ctx, const char* prompt,
-                                                 const ImpGenerateParams* params,
-                                                 OnToken&& on_token) {
+                                                 const ImpGenerateParams* params, const OnToken& on_token) {
     auto* tok = ctx->model_handle->model->tokenizer();
     if (!tok)
         return IMP_ERROR_INVALID_MODEL;
