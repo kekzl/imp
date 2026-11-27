@@ -2132,3 +2132,19 @@ Expected savings (no overlap counted twice: P4 lands in the model battery becaus
 Coverage moves the other way on purpose: P6 puts 69 host cases (4 REGRESSION-ORIGIN suites) into the CI lane, P11 makes 5 REGRESSION-ORIGIN suites run at all. Verdicts after Phase 2: 753 KEEP, 32 SHRINK, 13 MERGE, 51 MOVE, 10 DELETE over 859 suites; DELETE = 21 cases, each with a red mutant on its remaining catcher or a dead-code / build proof.
 
 Owner decisions needed before Phase 4: MmqQ4kImmaBench with the deleted Phase 2C code (R5); VramLedgerE2E, VisionGolden, EncoderEmbedTest re-point or delete; QuantPipelineTest / Q8DropSourceE2E re-point target (Qwen3.8-27B-Q8_0.gguf fit on 32 GB unverified).
+
+## Phase 4: execution
+
+Owner Go 2026-11-27 (goal: finish the audit findings). Part A (CPU lane) below; part B (GPU lanes, P1-P6, P10, P11, P14, part B of P7-P9) follows in its own section.
+
+### Part A: CPU lane
+
+| cut | row | change | result |
+|---|---|---|---|
+| DELETE | P7 (A) | target `test-hf-network` with HfFetchNetwork (3 cases, skipped in every lane), ToolCallDispatch.RoutesByFamily, the GdnChunkparArgs / SsmScanPrefillArgs field-order cases | test-core 2513 -> 2510; HF-1..3 red by HfFetchMock, TD-1..2 red by the tool-call golden / registry suites, LA-3..4 fail the build |
+| SHRINK | P8 (A) | `FpBitsLegacyParity.Fp16EncodeFloatSweep` 1.44e9 -> 14.6M floats, every rounding tie kept; 7 more field-order cases dropped, their defaults kept as `static_assert` | 2.4 s -> 34 ms; FP-1 red on the shrunk sweep; LA-1, LA-1b, LA-2, LA-5..8 fail the build; test-core 2510 -> 2503 |
+| MERGE | P9 (A) | 5 suites split over 2 files each into one file each, `test_anthropic_thinking_blocks.cpp` folded in | 67 cases, 0 removed, sorted case list identical |
+| guards | P12 | `scripts/check_makefile_filters.sh`, `scripts/check_verify_filter.sh`: list each binary once, match the 73 patterns on the cached names (`scripts/gtest_names_lib.sh`); cause was one `--gtest_list_tests` run (450 ms) per pattern | 11.89 -> 0.74 s and 8.48 -> 0.50 s (median of 3); 73 of 73 pattern counts equal old vs new; one broken pattern: rc 1 |
+| compile | P13 | `tools/imp-server/utils.h` forward-declares the 3 httplib types | TUs parsing `httplib.h`: test-core 13 -> 9, imp_server_core 26 -> 17; clean test-core 931.4 -> 882.1 CPU-s, 73.4 -> 70.6 s wall (ccache off, -j16, median of 3 pairs); PCH measured and dropped: 977.5 -> 956.3 CPU-s, inside the run spread |
+
+Phase 5, part A: `make dev-test` 3 of 3 green, no flake; `ctest -L unit -j4` wall 12.02 -> 2.37 s (median of 3); 16 of 16 part A mutants red on the final tree; cases 2829 -> 2816 (13 removed, each listed above). The 7 field-order cases that D-11 slice 6 added after the audit tree stay until their swaps are proven build-red. Raw data: `/mnt/data/scratch/tsa/phase4_A.md`, `p4a/`.
