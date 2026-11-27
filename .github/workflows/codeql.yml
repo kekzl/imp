@@ -12,8 +12,9 @@ on:
     - cron: "41 4 * * 1"
   workflow_dispatch:
 
+# Push: one group per commit (a shared one queued 63 main push jobs > 60 s, max 723 s).
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

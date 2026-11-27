@@ -25,9 +25,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
-# A new push to a PR cancels its older run; main and schedule runs never cancel.
+# A new push to a PR cancels its older run. A main push gets its own group per commit: one shared
+# group queued 20 of 60 main Builds > 60 s (max 1843 s) and replaced 6 pending main runs, since
+# GitHub keeps one pending run per group.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # No job writes to the repo; artifacts and caches need no token scope.
@@ -84,8 +86,8 @@ jobs:
       # Docs-only changes (only **/*.md or docs/** touched) skip the expensive
       # CUDA build/test below but still report the required `Build` check as
       # success — every heavy step is gated on steps.changes.outputs.code, so the
-      # job goes green in seconds instead of pulling the multi-GB CUDA image,
-      # configuring CUTLASS and linking. Plain `git diff` (no third-party action,
+      # job goes green in seconds instead of compiling
+      # and linking. Plain `git diff` (no third-party action,
       # so no Node-deprecation churn). FAIL-OPEN: any uncertainty (no base SHA,
       # git error, empty diff) → code=true, so detection can never wrongly skip a
       # code change or leave the required check unreported.
@@ -146,7 +148,7 @@ jobs:
       #
       # Started in the background, joined by "Static gates (result)" below: same
       # script, same exit code, still fails `Build`. Serial they cost a median
-      # 26 s of the required check; next to a -j2 compile on 4 vCPU they are free.
+      # 26 s of the required check; next to the compile on 4 vCPU they are free.
       # The named gate jobs below still report a red gate within ~30 s.
       - name: Static gates (blocking, started in the background)
         id: gates
@@ -246,9 +248,9 @@ jobs:
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) keeps the five
-        # 5-8.6 GB CUTLASS TUs to <= 2 at once (12.7 GB worst pair); build_jobs.sh caps
-        # the runner at -j2. memory.peak is the container cgroup high-water mark.
+        # -j$(nproc) = 4: the CUTLASS TUs are gone since 2026-10-31, every TU stays <= 1.27 GB,
+        # scripts/ci_compile_slot.sh only passes the command through. memory.peak is the
+        # container cgroup high-water mark (7.81 GB in run 46064840098).
         run: |
           cmake --build build -j"$(nproc)"
           echo "nproc=$(nproc) cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
