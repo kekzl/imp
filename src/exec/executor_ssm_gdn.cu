@@ -1,4 +1,5 @@
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/gdn.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_kernels.cuh"
@@ -323,7 +324,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                                   .d_real_n = state.d_chunk_len,
                                   .h_snap = h_snap,
                                   .d_snap_n = h_snap ? state.d_snap_n : nullptr,
-                                  .ssd = dispatch_policy().gdn.ssd_scan});
+                                  .ssd = gdn_section(dispatch_policy()).ssd_scan});
         }
     }
 
@@ -663,12 +664,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // register-cached state (n*32 fewer launches, far less state traffic).
         // gdn.ref_kernel: reference kernel with shared-memory state, no fusion
         // (use when debugging new architectures to isolate fused-kernel bugs).
-        const bool use_ref = dispatch_policy().gdn.ref_kernel;
+        const bool use_ref = gdn_section(dispatch_policy()).ref_kernel;
         // BF16 recurrent state (gdn.state_bf16): only the fused scan has a
         // BF16-state kernel — the chunkwise route stays FP32-only, so a BF16
         // pool drops it here (the init resolver already refused ref_kernel).
         const bool state_bf16 = (state.ssm_state && state.ssm_state->h_dtype() == QType::BF16);
-        const bool use_chunkwise = dispatch_policy().gdn.chunkwise_scan && !use_ref && !state_bf16;
+        const bool use_chunkwise = gdn_section(dispatch_policy()).chunkwise_scan && !use_ref && !state_bf16;
         // Ragged prefill only exists for the fused batched scan (half y);
         // the ref route has no ragged entry and the engine's
         // assembly gate refuses those configs — defense in depth here.
@@ -726,7 +727,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // (gdn.chunkpar_scan): the fused batched kernel walks every token of every
             // member serially on n_heads x n_seq CTAs. Riders share one batched decode launch.
             bool ragged_split = false;
-            if (ragged && !grouped && dispatch_policy().gdn.chunkpar_scan) {
+            if (ragged && !grouped && gdn_section(dispatch_policy()).chunkpar_scan) {
                 GdnRaggedScanIo io;
                 io.conv_f32 = conv_f32;
                 io.conv_channels = conv_channels;
@@ -794,7 +795,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // grid (chunks x heads) plus a cheap sequential state pass, instead of 32
             // CTAs walking every token. Single-sequence prefill only (n>=128); padded
             // verify chunks and short inputs stay on the routes below. Works for both state dtypes.
-            const bool use_chunkpar = dispatch_policy().gdn.chunkpar_scan && !use_ref && n >= 128 &&
+            const bool use_chunkpar = gdn_section(dispatch_policy()).chunkpar_scan && !use_ref && n >= 128 &&
                                       state.d_chunk_len == nullptr && gdn_ws_.chunkpar.get() != nullptr &&
                                       head_dim_ssm == 128 && ssize == 128 && h_snap == nullptr;
             // The fields every route below passes; StateT follows the state pointer (FP32 or BF16 state).

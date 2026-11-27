@@ -1,7 +1,6 @@
 // Pre-dequant Phase 3 (FP8): mode-2 FP16-cache release with FP8 migration. Split out to
 // keep each .cu under the kernel file-size threshold.
 
-#include "core/dispatch_policy.h"
 #include "memory/device_alloc_all.h"
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"

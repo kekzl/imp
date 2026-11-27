@@ -4,6 +4,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "core/dispatch_policy.h"
 #include "core/config/lm_head_mode.h"
 #include "core/fallback_site.h"
 #include "core/logging.h"

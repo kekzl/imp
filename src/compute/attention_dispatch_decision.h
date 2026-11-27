@@ -1,7 +1,8 @@
 #pragma once
 
 #include "compute/dispatch_paths.h"  // AttnPrefillPath
-#include "core/dispatch_policy.h"
+#include "core/dispatch_policy_fwd.h"
+#include "core/config/attention.h"
 
 // Pure host-side model of attention_dispatch.cpp's prefill routing order, covered by a cheap CPU
 // unit test (test_routing_decision.cpp) so a routing-order regression like #493 is caught there.
@@ -32,7 +33,7 @@ inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, cons
                                                 bool has_sinks = false) {
     // 0. Learned sinks (#992): FA2, FP16 WMMA FMHA, or nothing.
     if (has_sinks) {
-        if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)
+        if (attention_section(rcfg).fmha_fa2 == "on" && sup.fa2_accepts)
             return AttnPrefillPath::FA2;
         if (sup.fmha_sm120_accepts)
             return AttnPrefillPath::FMHA_SM120;
@@ -40,7 +41,7 @@ inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, cons
     }
 
     // 2. Register-resident FA2 — only when [attention] fmha_fa2 == "on".
-    if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)
+    if (attention_section(rcfg).fmha_fa2 == "on" && sup.fa2_accepts)
         return AttnPrefillPath::FA2;
 
     // 4. Native FP16 WMMA FMHA (always tried; declines unsupported configs).

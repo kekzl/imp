@@ -111,3 +111,66 @@ TEST(EngineConfigBridge, ResolvedFieldsLiveInTheRuntimeState) {
     EXPECT_EQ(ec.kv_cache_dtype, imp::QType::FP8_E4M3);
     EXPECT_TRUE(ec.streaming_kv_auto);
 }
+
+// B-129 rest: the quant stack, SSM state dtype, KV block size, library reserve, prefix caching and
+// the planner inputs init derives resolve into EngineRuntimeState too (27 writes left config_).
+TEST(EngineConfigBridge, QuantAndPlannerFieldsLiveInTheRuntimeState) {
+    EngineConfig ec;
+    ec.use_fp8_prefill = true;
+    ec.use_nvfp4_decode = -1;  // auto
+    ec.dual_path_quant = true;
+    ec.use_prefix_caching = true;
+    imp::bridge_runtime_config(ec, RuntimeConfig{});  // kv_block_size 0, library_reserve_mb -1
+    imp::EngineRuntimeState rt = imp::seed_runtime_state(ec);
+    EXPECT_TRUE(rt.use_fp8_prefill);
+    EXPECT_EQ(rt.use_nvfp4_decode, -1);
+    EXPECT_TRUE(rt.dual_path_quant);
+    EXPECT_EQ(rt.ssm_state_dtype, imp::QType::F32);
+    EXPECT_EQ(rt.kv_block_size, 0);
+    EXPECT_EQ(rt.library_reserve_mb, -1);
+    EXPECT_TRUE(rt.use_prefix_caching);
+    EXPECT_FALSE(rt.q8_drop_source);
+    // What the init resolvers and init_kv_cache write: GDN drops FP8 prefill, auto picks NVFP4
+    // mode 2, Gemma-4 drops dual-path, BF16 GDN state, block 16, a remembered 900 MiB reserve,
+    // no SWA snapshot store, the planner flags.
+    rt.use_fp8_prefill = false;
+    rt.use_nvfp4_decode = 2;
+    rt.dual_path_quant = false;
+    rt.ssm_state_dtype = imp::QType::BF16;
+    rt.kv_block_size = 16;
+    rt.library_reserve_mb = 900;
+    rt.use_prefix_caching = false;
+    rt.swa_shared_tokens = 2048;
+    rt.kv_ceiling_seqs = 3;
+    rt.nvfp4_decode_all = true;
+    rt.fp8_lm_head = true;
+    rt.lm_head_source_only = true;
+    rt.q8_drop_source = true;
+    rt.q4k_in_place = true;
+    const EngineConfig sized = imp::resolved_engine_config(ec, rt);
+    EXPECT_FALSE(sized.use_fp8_prefill);
+    EXPECT_EQ(sized.use_nvfp4_decode, 2);
+    EXPECT_FALSE(sized.dual_path_quant);
+    EXPECT_EQ(sized.ssm_state_dtype, imp::QType::BF16);
+    EXPECT_EQ(sized.kv_block_size, 16);
+    EXPECT_EQ(sized.library_reserve_mb, 900);
+    EXPECT_FALSE(sized.use_prefix_caching);
+    EXPECT_EQ(sized.swa_shared_tokens, 2048);
+    EXPECT_EQ(sized.kv_ceiling_seqs, 3);
+    EXPECT_TRUE(sized.nvfp4_decode_all);
+    EXPECT_TRUE(sized.fp8_lm_head);
+    EXPECT_TRUE(sized.lm_head_source_only);
+    EXPECT_TRUE(sized.q8_drop_source);
+    EXPECT_TRUE(sized.q4k_in_place);
+    // The operator's config is untouched.
+    EXPECT_TRUE(ec.use_fp8_prefill);
+    EXPECT_EQ(ec.use_nvfp4_decode, -1);
+    EXPECT_TRUE(ec.dual_path_quant);
+    EXPECT_EQ(ec.ssm_state_dtype, imp::QType::F32);
+    EXPECT_EQ(ec.kv_block_size, 0);
+    EXPECT_EQ(ec.library_reserve_mb, -1);
+    EXPECT_TRUE(ec.use_prefix_caching);
+    EXPECT_EQ(ec.swa_shared_tokens, 0);
+    EXPECT_EQ(ec.kv_ceiling_seqs, 0);
+    EXPECT_FALSE(ec.q8_drop_source);
+}

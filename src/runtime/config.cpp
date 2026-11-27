@@ -262,6 +262,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     S("gemm.nvfp4_gdn_proj_prefill", cfg.gemm.nvfp4_gdn_proj_prefill);
     S("gemm.mxfp8_gdn_proj_prefill", cfg.gemm.mxfp8_gdn_proj_prefill);
     S("gemm.fp8_attn_proj", cfg.gemm.fp8_attn_proj);
+    B("gemm.fp8_ffn_proj", cfg.gemm.fp8_ffn_proj);
 
     // [gemma4] section: per-model knobs live in ModelConfig::Overrides::Gemma4,
     // populated by the GGUF/SafeTensors loader or the engine init resolver.

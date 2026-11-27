@@ -496,6 +496,12 @@ mxfp8_gdn_proj_prefill = "auto"
 # the q/o projections (~76% of the bytes, conservative middle mode), "on" =
 # full q/k/v/o for any full-precision attention weights, "off" disables.
 fp8_attn_proj        = "auto"
+# The same FP8 E4M3 per-row-scale decode sidecar for the dense full-precision
+# FFN weights (w_gate / w_up / w_down, and the shared-expert slots that hold the
+# Gemma-4 MoE dense MLP), M=1 decode only; prefill keeps the 16-bit source.
+# Gemma-4-26B-A4B: decode 212.7 -> 225.8 tok/s, +514 MiB after start, decode
+# top-1 agreement 99.06 % (docs/ROADMAP.md B-141). Off by default.
+fp8_ffn_proj         = false
 # FP16-accumulate cuBLAS prefill GEMMs (CUBLAS_COMPUTE_16F). GeForce sm_120
 # runs FP32-accumulate tensor cores at 1/4 rate, so 32F caps prefill at
 # ~225 TFLOPS; 16F roughly doubles GEMM throughput (Qwen3-8B Q8_0 pp512
